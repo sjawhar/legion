@@ -1217,9 +1217,9 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 // them as VmRSS alone, which on this sandbox counts the pages the runtime has released as well
 // (peakResident). The same drive against the real 2 GiB budget is 39 rooms: it passed in 2,511 s on
 // this sandbox on 2026-10-29, 41 m 2 s of that from its first admission
-// to the refusal, where CI runs the whole memory suite under one 60-minute deadline
-// (.github/workflows/envoy-and-contracts.yaml:1017). What the full budget costs in memory is not
-// this drive's to prove: the bursts that fill it,
+// to the refusal, where CI runs each shard of the memory suite under a 40-minute deadline
+// (.github/workflows/ci.yaml, the dispatch-memory job). What the full budget costs in memory is
+// not this drive's to prove: the bursts that fill it,
 // TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays
 // and TestABurstOfStructDenseDocumentsStaysUnderThePodsMemory, hold what a pod's kernel would
 // charge under the pod's 4 GiB and what the Go limit bounds within it, and this drive holds those

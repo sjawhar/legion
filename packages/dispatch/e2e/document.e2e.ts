@@ -111,7 +111,7 @@ test("picking a file on the Documents tab uploads it at once and lists it", asyn
   }
 });
 
-test("comment, suggest, and ask anchor marks on a project document; accept edits the text; the ask flows through the Inbox", async ({
+test("comment, suggest, and ask anchor marks on a project document; accept edits the text; the ask flows through the Inbox @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -234,7 +234,7 @@ async function expectDotBeside(page: Page, neighbour: string): Promise<void> {
   expect(dotBox.x + dotBox.width).toBeLessThanOrEqual(card.x + card.width);
 }
 
-test("a document's connection dot stays on the line with its version actions", async ({
+test("a document's connection dot stays on the line with its version actions @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -263,7 +263,7 @@ test("a document's connection dot stays on the line with its version actions", a
   }
 });
 
-test("a document's whole title wraps at every width, whether prose or one unbroken word", async ({
+test("a document's whole title wraps at every width, whether prose or one unbroken word @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });

@@ -4,8 +4,8 @@ import { useSearchParams } from "react-router-dom";
 import type { IssueSummary } from "../../api/types";
 import { useCappedSearchParam } from "../../lib/query-param";
 import { useRepeatableSearchParams, useSearchParamsUpdate } from "../../lib/url-array-params";
-import { useAgents } from "../conversation/useAgents";
 import { claimHasLapsed } from "../issue/ClaimChip";
+import { useAgentRegistry } from "../refs/agent-registry";
 import { issueIsUnread } from "./UnreadDot";
 
 /** One removable chip in the filter strip. */
@@ -67,9 +67,9 @@ export function useIssueFilters(): IssueFiltersState {
   const needsYou = searchParams.get("needs-you") === "1";
   const unread = searchParams.get("unread") === "1";
   const unclaimed = searchParams.get("unclaimed") === "1";
-  // The one deduped ["agents"] query every claim chip on the page already shares, fetched only
+  // The one ["agents"] registry read every claim chip on the page already shares, fetched only
   // while the filter that needs it is on.
-  const registry = useAgents(unclaimed);
+  const registry = useAgentRegistry(unclaimed);
   const update = useSearchParamsUpdate();
   const setAll = useCallback(
     (name: "label" | "status", next: string[]) =>

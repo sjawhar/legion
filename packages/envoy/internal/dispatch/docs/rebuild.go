@@ -15,8 +15,9 @@ import (
 // version the fresh document state was built from - the latest saved one, or the one a rebuild
 // from supplied markdown that changed the document wrote; a rebuild of a history that loads,
 // which is built from that history's own text, can hold edits newer than it that settlement has
-// not yet written. Head is the new monotonic update version. ValidationError says why the history
-// was rebuilt: ygo's refusal of it, or how near a cap it stood.
+// not yet written, and a closed issue's rebuild holds the close's ask states (RebuildDocument).
+// Head is the new monotonic update version. ValidationError says why the history was rebuilt:
+// ygo's refusal of it, or how near a cap it stood.
 type RebuildReport struct {
 	Head               int64  `json:"head"`
 	RemovedCheckpoints int64  `json:"removed_checkpoints"`
@@ -116,6 +117,14 @@ func nearACap(doc *crdt.Doc) (why string, near bool) {
 // list a rebuild of a history that cannot load had no such guard: the hook took the old history
 // back unless the struct total refused it, which a browser's own copy, whose deleted runs Yjs
 // merges, need not pass.
+//
+// A rebuild of a closed issue's document writes the close's ask states into the tree it seeds, as
+// the close's final sweep writes them into the issue's other documents (closedIssueAskState), and
+// marks the document owing the settlement those writes leave owed, so no ask block the close
+// withdrew reads open again once the rebuild commits. That is also why the close's states go into
+// the seed rather than through a live write after it (WriteIssueAskStates): such a write's fork is
+// refused while the rebuild holds the room, and would read the old history through the pool that
+// owns loads.
 func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdown *string, actor model.Actor) (RebuildReport, VersionResult, error) {
 	tx, joined := txFromContext(ctx)
 	if !joined {
@@ -156,7 +165,7 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	// The owner row before the room lock the write below takes, as every writer that takes both
 	// does (lockDocumentRoom). Held, it also keeps the open asks the replacement must keep, and
 	// the approval request the version moves, from changing under this transaction.
-	_, open, err := lockArtifactOwner(ctx, tx, artifactID)
+	owner, open, err := lockArtifactOwner(ctx, tx, artifactID)
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}
@@ -188,6 +197,27 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	if err := s.refuseDroppedAskBlocks(ctx, artifactID, tree); err != nil {
 		return RebuildReport{}, VersionResult{}, &ErrInvalidAskBlock{Reason: err}
 	}
+	// A closed issue's document shows its asks as the close left them, and the tree this rebuild
+	// was built from - the history's own, or the latest version's - need not: settlement, which
+	// versions a document, runs on no closed issue, so that version can predate the close, and the
+	// close's live writes to the document either never reached it, its history not loading or
+	// standing at a cap then, or are in the history this replaces. So the close's final sweep is
+	// written into the tree here (closedIssueAskState): every resolved ask's block and copy, and
+	// every answered ask's copy, from the rows as they stand under the issue's row this
+	// transaction holds, and every readable ask block with no ask row marked resolved. The
+	// ask rows are taken before RebuildTx takes the document's advisory lock, the order the close's
+	// own write takes them in (WriteIssueAskStates). Once this transaction commits, the rebuilt
+	// document reads as the issue's other documents do.
+	var closedStates *issueAskStateWrites
+	if !open {
+		closedStates, err = readIssueAskStateWrites(ctx, tx, artifactID, owner, tree, closedIssueAskState, true)
+		if err != nil {
+			return RebuildReport{}, VersionResult{}, err
+		}
+		if !closedStates.apply(tree) {
+			closedStates = nil
+		}
+	}
 	canonical, offsets, err := renderTreeWithOffsets(tree)
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
@@ -208,6 +238,20 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	}
 	report.SourceVersion = latest.Number
 	report.ValidationError = why
+	if closedStates != nil {
+		// markdown is nil here: a closed issue refuses supplied markdown above. The seed differs
+		// from the tree it was built from by the close's states, as each of the issue's documents
+		// the close wrote differs from its own, so it owes the settlement those writes leave owed
+		// (markUpdateOwed): none runs while the issue is closed, and the one its reopen runs
+		// versions the document and indexes, as new open asks, the blocks marked resolved here
+		// with no ask row. RebuildTx holds the document's advisory lock, which the mark is ordered
+		// by. The writes credit no one, as the close's do: no pending author is added, and the
+		// latest edit source the row names is kept.
+		if err := markUpdateOwed(ctx, tx, artifactID); err != nil {
+			return RebuildReport{}, VersionResult{}, err
+		}
+		logUnindexedAskBlocks(*owner.IssueKey, closedStates.marked)
+	}
 	if markdown == nil || canonical == latest.markdown {
 		return report, VersionResult{Version: latest.Version}, nil
 	}
@@ -222,6 +266,16 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 		capture: &capture,
 	})
 	if err != nil {
+		return RebuildReport{}, VersionResult{}, err
+	}
+	// A rebuild replaces the document's content with markdown its own actor wrote, so that actor
+	// made the document's latest change, whatever edit the broken history still had pending. It is
+	// recorded as the latest edit source for the versions that follow, and names this version's
+	// edit notice (recordEditNotice), which goes when that actor is a person.
+	if err := recordLatestEditSource(ctx, tx, artifactID, &actor); err != nil {
+		return RebuildReport{}, VersionResult{}, err
+	}
+	if err := s.recordEditNotice(ctx, tx, artifactID, written.version.Number, actorSlice(capture.authors), &actor); err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}
 	report.SourceVersion = written.version.Number

@@ -2,19 +2,24 @@ import { expect, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import type { ComponentProps } from "react";
+import { MemoryRouter } from "react-router-dom";
 
 import type { DeliveryTimelineResponse } from "../../api/types";
 import { FacetPanel } from "./FacetPanel";
 import type { Filters } from "./lib/facets";
 
-/** The panel as the page renders it, under a query client: Edit groups opens an editor that
- *  saves through it. */
+/** The panel as the page renders it, under a router and a query client: Edit groups opens an
+ *  editor that names each session with its live link and saves through the client. The agent
+ *  registry is seeded empty, as the shell's poller last read it. */
 function renderPanel(props: ComponentProps<typeof FacetPanel>) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  queryClient.setQueryData(["agents"], []);
   return render(
-    <QueryClientProvider client={queryClient}>
-      <FacetPanel {...props} />
-    </QueryClientProvider>
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <FacetPanel {...props} />
+      </QueryClientProvider>
+    </MemoryRouter>
   );
 }
 

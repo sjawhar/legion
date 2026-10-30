@@ -10,7 +10,7 @@ import {
 import { createDecoder, readVarUint } from "lib0/decoding";
 
 import { readField } from "../web/src/features/doc/sync-frame";
-import { createIssue, createProject, getArtifactText } from "./api";
+import { createIssue, createProject, getArtifactBlocks, getArtifactText, getIssue } from "./api";
 import { asUser } from "./users";
 
 export function documentEditor(page: Page): Locator {
@@ -105,10 +105,24 @@ export async function selectEditorText(page: Page, quote: string): Promise<void>
   await actionBar(page).waitFor({ state: "visible" });
 }
 
-/** Puts the caret directly before or after the first occurrence of `quote`, the way a click
- * there does. */
-export function placeCaret(page: Page, edge: "before" | "after", quote: string): Promise<void> {
-  return setEditorRange(page, { extent: edge, quote });
+/** Puts the caret directly before or after the first occurrence of `quote` among the text a caret
+ * can enter, the way a click there does: a quote that also stands in `contenteditable="false"`
+ * chrome, such as a block's banner, or that a collaborator's cursor label splits, is found where
+ * the caret can go. `scope`, an element inside the editor, limits the search to the text in it. */
+export function placeCaret(
+  page: Page,
+  edge: "before" | "after",
+  quote: string,
+  scope?: Locator
+): Promise<void> {
+  return setEditorRange(page, { extent: edge, quote }, scope);
+}
+
+/** Selects the first occurrence of `quote` among the text a caret can enter inside `scope`, an
+ * element inside the editor, as `selectEditorText` does but without waiting for the selection bar.
+ * Its text nodes read as one text, so a quote may run from one paragraph into the next. */
+export function selectTextIn(page: Page, scope: Locator, quote: string): Promise<void> {
+  return setEditorRange(page, { extent: "whole", quote }, scope);
 }
 
 /** Over, before or after the first occurrence of `quote`, or the end of the last text a caret can
@@ -116,14 +130,15 @@ export function placeCaret(page: Page, edge: "before" | "after", quote: string):
 type EditorRange = { extent: "whole" | "before" | "after"; quote: string } | { extent: "end" };
 
 /** Sets the page's selection and dispatches the selectionchange ProseMirror's DOMObserver reads, so
- * the editor takes the selection before this returns. Without that read, ProseMirror's focus
- * handler (prosemirror-view `handlers.focus`) writes the editor's own selection back to the page
- * 20 ms after focus and undoes a caret placed in between. */
-async function setEditorRange(page: Page, target: EditorRange): Promise<void> {
+ * the editor takes the selection before this returns. Every target is found only in the text a
+ * caret can enter, inside `scope` when one is given, else the whole editor. Without that read,
+ * ProseMirror's focus handler (prosemirror-view `handlers.focus`) writes the editor's own selection
+ * back to the page 20 ms after focus and undoes a caret placed in between. */
+async function setEditorRange(page: Page, target: EditorRange, scope?: Locator): Promise<void> {
   const editor = documentEditor(page);
   await editor.waitFor();
   await editor.focus();
-  await editor.evaluate((root, target) => {
+  await (scope ?? editor).evaluate((root, target) => {
     const range = document.createRange();
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     if (target.extent === "end") {
@@ -140,6 +155,7 @@ async function setEditorRange(page: Page, target: EditorRange): Promise<void> {
       const runs: { node: Node; start: number; end: number }[] = [];
       let text = "";
       for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+        if (node.parentElement?.isContentEditable !== true) continue;
         const start = text.length;
         text += node.textContent ?? "";
         runs.push({ end: text.length, node, start });
@@ -212,6 +228,68 @@ export async function setSheet(page: Page, project: string, open: boolean): Prom
  *  its own card, so a bare `[data-margin-item]` lookup would match both). */
 export function threadCard(page: Page, rootId: string): Locator {
   return page.locator(`[data-turn="comment:${rootId}"]`).locator(`[data-margin-item="${rootId}"]`);
+}
+
+/** Where a Conversation turn's thread shows once the reader expands it: in place, in the turn,
+ *  above the phone breakpoint; in the full-screen Thread dialog on the phone layout. */
+export function conversationThreadScope(page: Page, project: string, turn: Locator): Locator {
+  return project === "iphone" ? page.getByRole("dialog", { name: "Thread" }) : turn;
+}
+
+/** One paragraph of a reading: its whole text, with runs of whitespace collapsed, and the text of
+ *  each `<em>`, `<strong>` and `<del>` in it, in document order. */
+export interface ParagraphReading {
+  emphasized: string[];
+  strong: string[];
+  struck: string[];
+  text: string;
+}
+
+/** Asserts the paragraphs `view` draws read as `reading`, the whole table at once, so a failure
+ *  reports every row's reading. */
+export async function expectParagraphReadings(
+  view: Locator,
+  reading: ParagraphReading[]
+): Promise<void> {
+  const rows = view.locator("p");
+  await expect(rows).toHaveCount(reading.length);
+  await expect
+    .poll(() =>
+      rows.evaluateAll((paragraphs) =>
+        paragraphs.map((paragraph) => {
+          const texts = (selector: string) =>
+            [...paragraph.querySelectorAll(selector)].map((element) => element.textContent);
+          return {
+            emphasized: texts("em"),
+            strong: texts("strong"),
+            struck: texts("del"),
+            text: paragraph.textContent?.replace(/\s+/g, " ").trim(),
+          };
+        })
+      )
+    )
+    .toEqual(reading);
+}
+
+/** Opens the comment's thread in the Conversation and asserts the engine drew its body as
+ *  `reading`. */
+export async function expectCommentReading(
+  page: Page,
+  issueKey: string,
+  commentId: string,
+  project: string,
+  reading: ParagraphReading[]
+): Promise<void> {
+  await page.goto(`/issues/${issueKey}/conversation`);
+  // A collapsed card previews the body inline; the expanded thread draws its paragraphs, in
+  // place on a wide screen and in the Thread sheet on a phone.
+  const turn = page.locator(`[data-turn="comment:${commentId}"]`);
+  await turn.getByRole("button", { name: "Expand thread" }).click();
+  const thread = conversationThreadScope(page, project, turn);
+  await expectParagraphReadings(thread.locator(".dispatch-markdown"), reading);
+  // The engine drew the body: no literal-text fallback stands in for it.
+  await expect(turn.locator("[data-markdown-fallback]")).toHaveCount(0);
+  await expect(thread.locator("[data-markdown-fallback]")).toHaveCount(0);
 }
 
 /** The Conversation's All / Open / Closed control, the one filter over its cards. It starts on
@@ -431,6 +509,35 @@ export async function openIssue(browser: Browser, title: string, spec: string) {
   const page = await alice.newPage();
   await page.goto(`/issues/${issue.key}`);
   return { alice, issue, page };
+}
+
+/** The id of the block of `artifactId` whose markdown is exactly `text`. A paragraph's id is a
+ *  minted UUID, which `encodeBlockId` writes unchanged, so the id is also its `#b-` fragment. */
+export async function blockId(artifactId: string, text: string): Promise<string> {
+  const { markdown } = await getArtifactText(artifactId);
+  const blocks = await getArtifactBlocks(artifactId);
+  const block = blocks.find((candidate) => markdown.slice(candidate.from, candidate.to) === text);
+  if (block === undefined) {
+    throw new Error(`no block of ${artifactId} reads ${JSON.stringify(text)}: ${markdown}`);
+  }
+  expect(block.id).toMatch(/^[A-Za-z0-9-]+$/);
+  return block.id;
+}
+
+/** Waits until the issue's spec block has been indexed into an open ask and returns it. */
+export async function indexedBlockAsk(issueKey: string, block: string) {
+  await expect
+    .poll(async () =>
+      (await getIssue(issueKey)).open_asks.some((candidate) => candidate.block_id === block)
+    )
+    .toBe(true);
+  const blockAsk = (await getIssue(issueKey)).open_asks.find(
+    (candidate) => candidate.block_id === block
+  );
+  if (blockAsk === undefined) {
+    throw new Error(`the ${block} decision was not indexed`);
+  }
+  return blockAsk;
 }
 
 /** Opens `spec` as alice, with the caret collapsed at the start or the end of the text `quote`:

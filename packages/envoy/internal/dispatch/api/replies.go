@@ -23,8 +23,9 @@ import (
 // myRepliesUnread is the filter both reads share: the caller's ($1) unread rows, narrowed to one
 // issue ($2, empty for any) or one project document ($3, null for any), less an open ask the Inbox
 // lists, whose row in Waiting on you already shows its reply (api/inbox.go: an open ask on an issue
-// that is not closed, or on a project document). An open ask on a closed issue stays, since the
-// Inbox hides it and nothing else would show its reply.
+// that is not closed, or on a project document). A close withdraws its issue's open asks, so an
+// open ask on a closed issue is one a close by an older release left during a roll; it stays, since
+// the Inbox hides it and nothing else would show its reply.
 const myRepliesUnread = `
 	from user_threads u
 	left join asks a on u.kind = 'ask' and a.id = u.thread_id

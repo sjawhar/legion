@@ -1,0 +1,8 @@
+{
+  "name": "legion-worker-claude-code",
+  "private": true,
+  "description": "Claude Code, the harness a Legion phase worker on the `claude` backend runs (packages/daemon/internal/claudelaunch). Pinned exactly, the way the language servers beside it are: the worker image installs it from this lockfile with `npm ci --ignore-scripts`, whose integrity hashes are the verification, and the version moves only by regenerating that lockfile.",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.310"
+  }
+}

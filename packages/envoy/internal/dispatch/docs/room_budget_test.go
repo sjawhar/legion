@@ -541,7 +541,7 @@ func TestTheDocumentSocketReturnsItsReservationOnEveryWayOut(t *testing.T) {
 	t.Cleanup(httpServer.Close)
 	ids := createDocuments(t, database, 4)
 	outside, failing, refused, joined := ids[0], ids[1], ids[2], ids[3]
-	stored := latestVersionMarkdown(t, database, joined)
+	stored := latestVersionMarkdown(t, service, joined)
 	reserved := roomWeight(copyHeap(int64(len(stored)), countElements(stored), storedHistoryStructs(t, database, joined)), 0, 0)
 	if reserved <= 0 {
 		t.Fatalf("the stored document reserves %d bytes, want some", reserved)
@@ -623,7 +623,7 @@ func TestAnAdmissionReservesTheCountOfItsStoredVersion(t *testing.T) {
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 	t.Cleanup(httpServer.Close)
 	room := createDocumentsHolding(t, database, 1, residentRoomMarkdown(t, pmdoc.MaxDocumentBytes))[0]
-	stored := latestVersionMarkdown(t, database, room)
+	stored := latestVersionMarkdown(t, service, room)
 	started := time.Now()
 	elements := countElements(stored)
 	t.Logf("the stored version is %d bytes of prose making %d elements, counted in %s", len(stored), elements, time.Since(started))
@@ -709,7 +709,7 @@ func TestTwoAdmissionsAtOnceCountTheStoredVersionOnce(t *testing.T) {
 	database := storetest.Open(t)
 	service := newRoomBudgetService(t, database, NewPgVersioned(database))
 	room := createDocuments(t, database, 1)[0]
-	stored := latestVersionMarkdown(t, database, room)
+	stored := latestVersionMarkdown(t, service, room)
 	var parses atomic.Int64
 	counting, release := make(chan struct{}, 2), make(chan struct{})
 	service.budget.stored.beforeCount = func(string, int64) {
@@ -931,7 +931,7 @@ func TestAnAdmissionWhoseRequestEndsWhileItsCountWaitsForItsGrantLeavesTheCountT
 		}
 		defer service.budget.release(got.reservation)
 	}
-	stored := latestVersionMarkdown(t, database, shared)
+	stored := latestVersionMarkdown(t, service, shared)
 	if want := roomWeight(copyHeap(int64(len(stored)), countElements(stored), storedHistoryStructs(t, database, shared)), 0, 0); budgetUsed(service) != 2*want {
 		t.Fatalf("the budget holds %d bytes, want the two admissions' %d each", budgetUsed(service), want)
 	}
@@ -1044,7 +1044,7 @@ func TestAStructDenseDocumentReservesAndIsChargedItsStructs(t *testing.T) {
 	t.Cleanup(httpServer.Close)
 	room := createDocumentsHolding(t, database, 1, "# Title\n\nOne paragraph of ordinary prose.\n")[0]
 	storeHistory(t, service, room, typedBeforeState(t, 100_000))
-	stored := latestVersionMarkdown(t, database, room)
+	stored := latestVersionMarkdown(t, service, room)
 	structs := storedHistoryStructs(t, database, room)
 	elements := countElements(stored)
 	if structs < 100_000 || structs*bytesOfHeapAStructHeld <= elements*bytesOfHeapAnElement {
@@ -1099,7 +1099,7 @@ func TestAParagraphOfAMebibyteReservesAndIsChargedItsRenderedBytes(t *testing.T)
 	const words = "words of one long paragraph "
 	paragraph := strings.Repeat(words, (pmdoc.MaxDocumentBytes-4<<10)/len(words)) + "end"
 	room := createDocumentsHolding(t, database, 1, "# Title\n\n"+paragraph+"\n")[0]
-	stored := latestVersionMarkdown(t, database, room)
+	stored := latestVersionMarkdown(t, service, room)
 	structs := storedHistoryStructs(t, database, room)
 	bytes, elements := int64(len(stored)), countElements(stored)
 	byElements, byStructs := elements*bytesOfHeapAnElement, structs*bytesOfHeapAStructHeld
@@ -1368,17 +1368,6 @@ func roomUnused(service *Service, room string) bool {
 	}
 	defer service.unlockState(room, state)
 	return service.unusedLocked(state)
-}
-
-func latestVersionMarkdown(t *testing.T, database *store.Store, room string) string {
-	t.Helper()
-	var markdown string
-	if err := database.Pool.QueryRow(context.Background(), `
-		select markdown from artifact_versions where artifact_id = $1 order by number desc limit 1
-	`, room).Scan(&markdown); err != nil {
-		t.Fatalf("read the latest version: %v", err)
-	}
-	return markdown
 }
 
 // renderedLive is the rendering of room's resident document, which its load counted.

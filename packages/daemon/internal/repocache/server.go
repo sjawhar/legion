@@ -64,14 +64,17 @@ type Options struct {
 }
 
 // Health is what GET /healthz answers: whether the cache has a clone to serve, its repository, the
-// default branch's head, when its last fetch in this process succeeded (zero before one has), and
-// how many bytes /tar streams.
+// default branch's head, when its last fetch in this process succeeded (zero before one has), how
+// many bytes /tar streams, and how many /tar requests it is sending or holding in its queue at the
+// answer (Streams), which the daemon waits to reach zero before it replaces a live cache pod. A
+// cache of an earlier release answers no streams, so Streams is nil there.
 type Health struct {
 	Ready       bool      `json:"ready"`
 	Repo        string    `json:"repo"`
 	Head        string    `json:"head,omitempty"`
 	LastFetchAt time.Time `json:"lastFetchAt,omitzero"`
 	Bytes       int64     `json:"bytes"`
+	Streams     *int      `json:"streams,omitempty"`
 }
 
 // repackEvery is how long after the clone, or its last repack, a fetch repacks it.
@@ -85,16 +88,28 @@ var repackEvery = 24 * time.Hour
 // the clone's write lock, so a tar is served throughout.
 var repackTimeout = 2 * time.Hour
 
+// maxStreams is how many /tar streams the cache sends at once; a request past it waits for a stream
+// to end, first come first served, within its own deadline. The streams share the pod's sending
+// rate evenly, so with no bound every stream slows as the next pod launches, and a large launch
+// leaves none of them done: on 2026-10-26 a 4.0 GB clone's cache sent about 400 MB/s in all over
+// 290 streams at once, about 48 minutes before any reached its last byte, past the 30 minutes an
+// issue pod's fetch gives the stream and its verification (workspace.FetchTimeout), so every fetch
+// failed and started over. Bounded, a stream takes its share of the rate among maxStreams, and the
+// queue drains at the same total rate.
+var maxStreams = 32
+
 // Serve listens, then clones the repository onto the volume — or, when the volume holds it, fetches
 // into it — then serves until ctx ends:
 //
 //	GET /readyz   the kubelet's readiness probe, which carries no token: 200 once the clone is
 //	              there to serve, 503 before, and nothing else.
-//	GET /healthz  200 {"ready":true,"repo":"acme/widgets","head":"<default branch sha>","lastFetchAt":"…","bytes":N}
-//	              once the clone is there to serve; 503 {"ready":false,…} before.
+//	GET /healthz  200 {"ready":true,"repo":"acme/widgets","head":"<default branch sha>","lastFetchAt":"…","bytes":N,"streams":S}
+//	              once the clone is there to serve; 503 {"ready":false,…} before. streams is the
+//	              /tar requests being sent or waiting at the answer.
 //	GET /tar      a tar stream of the bare clone's refs and packs (workspace.FeedEntry), taken under
-//	              the read lock, so no fetch moves refs or packs while it streams; 503 before the
-//	              clone is there.
+//	              the read lock, so no fetch moves refs or packs while it streams, at most
+//	              maxStreams at once, a request past them waiting its turn; 503 before the clone
+//	              is there.
 //
 // /tar answers only a request whose `Authorization: Bearer` is the token CacheTokenFile holds now,
 // compared in constant time; any other is 401 and names nothing. /healthz answers any request: its
@@ -129,7 +144,7 @@ func Serve(ctx context.Context, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", opts.Listen, err)
 	}
-	c := &cache{opts: opts, dir: dir}
+	c := newCache(opts, dir)
 	c.health.Store(&Health{Repo: opts.Repo.String()})
 	server := &http.Server{Handler: c.handler(), ReadHeaderTimeout: 10 * time.Second}
 	served := make(chan error, 1)
@@ -202,7 +217,9 @@ func (opts Options) check() error {
 
 // cache is Serve's state: lock is the clone's refs and packs as a tar reads them, written by every
 // fetch and read by every tar; maint keeps a fetch and a repack from running at once, and is held
-// by refresh alone; health is what /healthz answers, swapped whole after each fetch and repack.
+// by refresh alone; health is what /healthz answers, swapped whole after each fetch and repack;
+// streams holds one token per /tar stream being sent, maxStreams at most; inFlight counts the /tar
+// requests being sent or waiting for a token, which /healthz reports as Health.Streams.
 type cache struct {
 	opts       Options
 	dir        string
@@ -210,6 +227,13 @@ type cache struct {
 	maint      sync.Mutex
 	health     atomic.Pointer[Health]
 	lastRepack time.Time
+	streams    chan struct{}
+	inFlight   atomic.Int64
+}
+
+// newCache is the state Serve keeps for opts' clone at dir.
+func newCache(opts Options, dir string) *cache {
+	return &cache{opts: opts, dir: dir, streams: make(chan struct{}, maxStreams)}
 }
 
 // refresh fetches the clone from GitHub under the write lock (cloning it the first time) and
@@ -470,7 +494,10 @@ func (c *cache) handler() http.Handler {
 		}
 	})
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		health := c.health.Load()
+		answer := *c.health.Load()
+		streams := int(c.inFlight.Load())
+		answer.Streams = &streams
+		health := &answer
 		w.Header().Set(workspace.CacheRepositoryHeader, c.opts.Repo.String())
 		w.Header().Set("Content-Type", "application/json")
 		if !health.Ready {
@@ -503,14 +530,24 @@ func (c *cache) authorized(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// serveTar streams the clone as it stood when the request came: its refs and packs taken under the
+// serveTar streams the clone as it stood when the stream began: its refs and packs taken under the
 // read lock (snapshot), then sent with no lock held, so a slow or stalled reader holds nothing a
 // refresh waits on. Before the first clone is there it answers 503 at once, without waiting on the
-// lock the clone holds. A failure once the stream has begun aborts the connection, so the reader
+// lock the clone holds. Once maxStreams streams are being sent it waits, holding no lock and no
+// open pack, for one of them to end, first come first served, and gives up with nothing sent when
+// its request ends first. A failure once the stream has begun aborts the connection, so the reader
 // sees a broken transfer rather than a tar that merely ends early.
 func (c *cache) serveTar(w http.ResponseWriter, r *http.Request) {
 	if !c.health.Load().Ready {
 		http.Error(w, "the repository cache holds no clone yet", http.StatusServiceUnavailable)
+		return
+	}
+	c.inFlight.Add(1)
+	defer c.inFlight.Add(-1)
+	select {
+	case c.streams <- struct{}{}:
+		defer func() { <-c.streams }()
+	case <-r.Context().Done():
 		return
 	}
 	entries, err := c.snapshot()

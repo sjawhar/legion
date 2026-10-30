@@ -72,7 +72,7 @@
 #   listener's API token. The repository carries neither credential.
 # - LEGION_E2E_IMPLEMENT_APP_ID, LEGION_E2E_IMPLEMENT_APP_KEY_NAME, LEGION_E2E_REVIEW_APP_ID and
 #   LEGION_E2E_REVIEW_APP_KEY_NAME name another deployment's two role Apps: each App's numeric id
-#   and the secret-store key the `secrets` CLI resolves to its private key (lib/github-apps.sh).
+#   and the secrets broker key the `agent-secrets` client resolves to its private key (lib/github-apps.sh).
 #   Each defaults to this deployment's own, so a run here sets none. prerequisites proves each key
 #   is its id's App against GitHub's GET /app before the run's first write anywhere; the daemon's
 #   github_apps is the block proved.
@@ -211,7 +211,7 @@ port_worker_stream=${LEGION_E2E_WORKER_STREAM_PORT:-13373}
 port_session_db=${LEGION_E2E_SESSION_DB_PORT:-}
 # The session database's image, the pinned Postgres the repository's CI tests against, and the
 # providers Secret key its URL reaches every pod under (runtime.kubernetes.session_dsn_secret).
-session_db_image=pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+session_db_image=mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
 session_dsn_key=SESSION_DSN
 # The sessions directory of a pod's Oh My Pi profile (the runtime's ompSessionsDir). No pod keeps a
 # file there: a session's key in the session database is the path its file would have had, so this
@@ -395,6 +395,8 @@ blocked() {
 . "$root/scripts/e2e/lib/namespace-rig.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
 . "$root/scripts/e2e/lib/leftovers.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/session-db.sh
+. "$root/scripts/e2e/lib/session-db.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/role-namespaces.sh
 . "$root/scripts/e2e/lib/role-namespaces.sh"
 
@@ -953,37 +955,11 @@ bash_legion_commands() {
 # keys a session by the path its file would have had (internal/ompsessions): the session file a
 # claim records is that key, and so is a subagent's <parent's stem>/<id>.jsonl beside it. No pod
 # holds a file at either, so every read of a pod's session goes to the table, through the database
-# container the run started (session_db_container), with no client on the devbox and no input
-# beyond the ones that start it. The operator's controller runs on this machine, outside the sandbox
-# runtime, and keeps its sessions as files in the run's profile, which are read as files.
+# container the run started (session_db_container) with lib/session-db.sh's readers, with no client
+# on the devbox and no input beyond the ones that start it. The operator's controller runs on this
+# machine, outside the sandbox runtime, and keeps its sessions as files in the run's profile, which
+# are read as files.
 
-# session_psql NAME VALUE runs the SQL on stdin in the session database as its owner, legion, with
-# VALUE the psql variable NAME, which the SQL quotes as a literal (:'NAME'), so no value is ever
-# spliced into it; the SQL comes on stdin because psql interpolates no variable into a -c command.
-# The output is unaligned and tuples-only (-A -t): each value exactly as the server sent it, with no
-# padding, wrapping, quoting, escaping, header or row count, so a transcript's quotes, backslashes
-# and newlines arrive as Oh My Pi wrote them, and psql ends the last row with one newline of its own.
-# The aligned default pads and wraps a value of many lines, and COPY's text and CSV formats escape
-# or quote one, so each would corrupt the JSONL. ON_ERROR_STOP makes an SQL error psql's exit status.
-session_psql() {
-  docker exec -i -e PGCLIENTENCODING=UTF8 "$session_db_container" \
-    psql -X -q -A -t -v ON_ERROR_STOP=1 -U legion -d sessions -v "$1=$2"
-}
-# session_text PATH prints the session the table holds at PATH whole, as Oh My Pi reads it and
-# ompsessions.Read does: the row's content, then each of its parts in start_offset order, in one
-# statement so both come from one snapshot. The statement answers one row for a session the table
-# holds and none otherwise, so psql's closing newline is what tells a held session, however short,
-# from none: it is taken off, and none fails naming PATH, as the `cat` of a missing file did. The x
-# after psql's output keeps the substitution from stripping the session's own trailing newlines.
-session_text() {
-  local out
-  out=$(session_psql path "$1" <<<"SELECT f.content || coalesce((SELECT string_agg(p.content, '' ORDER BY p.start_offset)
-    FROM omp_session_files_parts p WHERE p.path = f.path), '') FROM omp_session_files f WHERE f.path = :'path';" && printf x) ||
-    { echo "the session database $session_db_container could not be read for the session $1" >&2; return 1; }
-  out=${out%x}
-  [ -n "$out" ] || { echo "the session database $session_db_container holds no session $1" >&2; return 1; }
-  printf '%s' "${out%$'\n'}"
-}
 # session_copy PREFIX AREA STEM copies every session the table holds under the key prefix PREFIX into
 # the directory STEM of AREA, one of the evidence directories this function names for itself:
 # `transcripts`, `daemon-controller` (transcripts/daemon-controller) or `review-pair`, under
@@ -1045,6 +1021,7 @@ session_copy() {
   # Every name is derived before any is written, so a key whose name a later key also derives is
   # known to collide before either is copied. An empty name is no array subscript, and it, `.` and
   # `..` are refused below whatever else derives them.
+  # shellcheck disable=SC2001 # sed pairs hex digits per line; ${hex//??/…} would pair across newlines
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     printf -v path '%b' "$line"
@@ -1468,11 +1445,12 @@ create_providers_secret() {
   rm -f "$seed_file"
   note "[operator] Secret $providers_secret: $session_dsn_key (the scratch session database's URL, not printed), $seed_note, label legion.dev/project=$run_label"
 }
-# ports_free fails naming the holder when anything listens on the daemon's API port, its
-# worker-stream port, or the session database's.
+# ports_free PORT... fails naming the holder when anything listens on a port that must be free.
+# Prerequisites pass the daemon's API, worker-stream, and session-database ports before the
+# database starts; later daemon boots pass only the first two.
 ports_free() {
   local port
-  for port in "$port_daemon" "$port_worker_stream" "$port_session_db"; do
+  for port; do
     [ -z "$(ss -Hltn "sport = :$port")" ] || fail "port $port is taken on the devbox: $(ss -Hltnp "sport = :$port")"
   done
 }
@@ -1501,9 +1479,14 @@ record_stream() {
   jq -nc --arg since "$(date -u +%FT%TZ)" --arg stream "$stream" '{since: $since, stream: $stream}' >>"$evidence/worker-streams.jsonl"
 }
 start_daemon() {
-  # Prerequisites found both ports free, minutes before this boot; a process that took one since
-  # would answer /healthz in the run's daemon's place.
-  ports_free
+  local session_db_binding
+  # Prerequisites found all three ports free before the session database bound its port. At each
+  # boot only the daemon's API and worker stream must remain free; the database's Docker binding
+  # must still be the one this run started.
+  ports_free "$port_daemon" "$port_worker_stream"
+  session_db_binding=$(docker port "$session_db_container" 5432/tcp 2>/dev/null) || session_db_binding=
+  [ "$session_db_binding" = "$host:$port_session_db" ] ||
+    fail "port $port_session_db is held by another process, not the run's session database $session_db_container (docker port ${session_db_binding:-is unpublished}, expected $host:$port_session_db): $(ss -Hltnp "sport = :$port_session_db")"
   record_stream
   env -u GH_PUBLIC_REPO_PAT "${app_key_unsets[@]}" \
     "$work/legion" start --config "$work/legion.yaml" >>"$daemon_log" 2>&1 9>&- 7>&- &
@@ -2425,11 +2408,13 @@ jq_modules_compile() {
 # tool ran and answered, where assistant_said only proves the model said so. An error result never
 # counts, and a result is the tool's by the call it answers, not by the toolName it records: a write
 # to xd://<name> records write (lib/stage4b-tools.jq).
+# shellcheck disable=SC2016 # $tool and $want are jq's own variables
 tool_result_said() {
   session_jq "$1" -e --arg tool "$2" --arg want "$3" 'include "stage4b-tools"; tool_result_said($tool; $want)' >/dev/null
 }
 # tool_ran SESSION TOOL: one call of TOOL in the session returned without error
 # (lib/stage4b-tools.jq).
+# shellcheck disable=SC2016 # $tool is jq's own variable
 tool_ran() {
   session_jq "$1" -e --arg tool "$2" 'include "stage4b-tools"; tool_ran($tool)' >/dev/null
 }
@@ -2443,6 +2428,7 @@ tool_ran() {
 # dispatched through eval, or through a write to xd://bash whose content is no JSON object, has no
 # command, so a bound bash assertion does not see it, while `tool_result_said SESSION bash TEXT`
 # still counts it.
+# shellcheck disable=SC2016 # $tool, $args and $want are jq's own variables
 tool_result_answered() {
   session_jq "$1" -e --arg tool "$2" --arg args "$3" --arg want "$4" 'include "stage4b-tools"; tool_result_answered($tool; $args; $want)' >/dev/null
 }
@@ -2451,6 +2437,7 @@ tool_result_answered() {
 # arguments without the intent otherwise) on one line, each with its call's arguments, an error
 # marked and its text trimmed: what the tool did return, for the fail line of an expectation it did
 # not meet.
+# shellcheck disable=SC2016 # $tool and $args are jq's own variables
 tool_result_quotes() {
   session_jq "$1" -r --arg tool "$2" --arg args "${3:-}" 'include "stage4b-tools";
     [tool_results($tool)[] | select(arguments_carry($tool; $args)) | tool_result_quote(.arguments[0:160] + " => "; 400)]
@@ -2499,6 +2486,7 @@ full_agent_merger_message() {
 # of the session that returned without error, whose text carries LOGIN; nothing when none does.
 # The id is the task's name, and the subagent's own session is keyed beside its parent's in the
 # session database, at <session stem>/<id>.jsonl, where review-pair reads the pair's.
+# shellcheck disable=SC2016 # $want is jq's own variable
 full_agent_task_id() {
   session_jq "$1" -r --arg want "$2" 'include "stage4b-tools";
     [tool_result_texts("task")[] | select(contains($want)) | capture("<task-result id=\"(?<id>[^\"]+)\"") | .id] | first // ""'
@@ -2507,6 +2495,7 @@ full_agent_task_id() {
 # its own bash calls returned APP (login), whether its yield was accepted (yield: an accepted yield
 # ends a subagent, as review-pair reads it), whether any bash returned OTHER (other, the other App,
 # which must be false), and its bash results trimmed.
+# shellcheck disable=SC2016 # $app, $other and $bash are jq's own variables
 full_agent_subagent_verdict() {
   session_jq "$1" -c --arg app "$2" --arg other "$3" 'include "stage4b-tools";
     tool_results("bash") as $bash
@@ -2516,6 +2505,7 @@ full_agent_subagent_verdict() {
 }
 # full_agent_summary SESSION APP prints one line of what the session's tools returned: the login,
 # the browser's title line, the toolchain's versions and the first search hit, each trimmed.
+# shellcheck disable=SC2016 # $app, $texts and $text are jq's own variables
 full_agent_summary() {
   session_jq "$1" -r --arg app "$2" 'include "stage4b-tools";
     def said($texts; $text): [$texts[] | select(contains($text))] | first // "none";
@@ -2580,11 +2570,13 @@ fixture_markers() {
 # assignment (the daemon's task, a user message) its worker answered with the legion tool's
 # handoff_complete, the calls that got no result, how many results succeeded, and whether the phase
 # stall recorded `closed` after the call that succeeded (the extension records it inside the call,
-# before Oh My Pi writes the result); and how many phase-stall follow-ups came after the session's
+# before Oh My Pi writes the result); and how many phase reminders came after the session's
 # last successful completion. It is the 4b.13b acceptance's stall check
 # (stage3-4b13b-acceptance.sh, phase-stall-follow-up) for a pod's session: a worker
 # stopped while its handoff_complete call runs leaves that call with no result and no `closed`
-# (LEGION-283), and a worker resumed from such a session may report the phase again.
+# (LEGION-283), and a worker resumed from such a session may report the phase again. The reminder
+# comes at the end of every turn a phase stays open through, and none at all once it is closed,
+# which is what the count after the last success reads.
 completion_verdict() {
   jq -R -s -c --arg followup "Your turn ended with your Legion phase still open" '
     [split("\n")[] | fromjson?] | to_entries
@@ -2616,7 +2608,7 @@ completion_verdict() {
 }
 # completions_answered FILE: every assignment its worker answered with handoff_complete got a
 # result for each call, exactly one success (the report, made once), and `closed` after the call
-# that succeeded, and no phase-stall follow-up came after the last success.
+# that succeeded, and no phase reminder came after the last success.
 completions_answered() {
   completion_verdict <"$1" | jq -e '(.segments | length) > 0
     and all(.segments[]; (.unanswered | length) == 0 and .succeeded == 1 and .closed)
@@ -2755,7 +2747,7 @@ cleanup() {
     fi
   fi
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null; done
-  docker rm -f "$pg_container" "$session_db_container" >/dev/null 2>&1
+  docker rm -f -v "$pg_container" "$session_db_container" >/dev/null 2>&1
   rm -rf "$work"
   # The notes are for a checkpoint that failed itself: none once ok is set, after a blocked
   # checkpoint, or after a signal (129, 130, 143, as trapped below). Otherwise a failed teardown
@@ -3005,7 +2997,7 @@ audit_failure() { echo "the run wrote outside $project or subscribed outside it:
 # ==== checkpoints ===================================================================================
 
 begin prerequisites
-for tool in go docker jq curl ss kubectl aws gh bun jj mise shellcheck secrets setpriv pgrep npm; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go docker jq curl ss kubectl aws gh bun jj mise shellcheck secrets agent-secrets setpriv pgrep npm; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 require_app_inputs implement review
 # The host's jq compiles every lib/*.jq module this script includes, read from the script itself: a
 # jq that cannot parse one would otherwise fail the run at the first checkpoint to include it, hours
@@ -3105,7 +3097,7 @@ mkdir -p "$(dirname "$lock")"
 exec 9>"$lock"
 flock -n 9 || fail "another Stage 4b run holds $lock: one run at a time"
 refuse_leftovers legion-e2e4b
-ports_free
+ports_free "$port_daemon" "$port_worker_stream" "$port_session_db"
 imds=$(curl -sf -m 5 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60') ||
   fail "instance metadata is unreachable; the daemon binds the devbox's private address, read from it"
 host=$(curl -sf -m 5 -H "X-aws-ec2-metadata-token: $imds" http://169.254.169.254/latest/meta-data/local-ipv4) || fail "instance metadata has no local-ipv4"
@@ -3301,30 +3293,17 @@ while IFS= read -r line; do note "$line"; done <<<"$built"
 # The build's source is the run's recorded source, or the tree changed between the two.
 [ "$(sed -n 's/^source: //p' <<<"$built")" = "$(jq -r .revision "$evidence/run.json")" ] ||
   fail "the tree changed between prerequisites ($(jq -r .revision "$evidence/run.json")) and the build ($(sed -n 's/^source: //p' <<<"$built"))"
-docker run -d --name "$pg_container" --mount type=tmpfs,destination=/var/lib/postgresql/data \
+docker run -d --name "$pg_container" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
   -e POSTGRES_USER=legion -e POSTGRES_PASSWORD="$(cat "$work/postgres-password")" -e POSTGRES_DB=legion \
-  -p "127.0.0.1::5432" postgres:16 >/dev/null
+  -p "127.0.0.1::5432" mirror.gcr.io/library/postgres@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4 >/dev/null
 port_pg=$(docker port "$pg_container" 5432/tcp | sed -n '1s/.*://p')
 until_true 60 "Postgres to accept TCP connections" docker exec "$pg_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d legion
-# The run's session database, a second throwaway Postgres: every pod's Oh My Pi keeps its session
-# in it (session_store postgres: the daemon requires a store that keeps sessions in a database), so
-# a role's conversation outlives the issue pod whose disk dies with it. It is its own container and
-# its own credential, never the daemon's own database above: that one holds the daemon's state, and
-# its URL reaches every pod through the providers Secret, which no pod may be given a way into. It
-# binds the devbox's private address, not loopback, since the pods dial it as they dial the worker
-# stream; its password reaches docker through an owner-only env file, never an argument, and its URL
-# is written only to an owner-only file the providers Secret reads, and is never printed.
-session_db_password=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
-(
-  umask 077
-  printf 'POSTGRES_USER=legion\nPOSTGRES_DB=sessions\nPOSTGRES_PASSWORD=%s\n' "$session_db_password" >"$work/session-db.env"
-  printf 'postgres://legion:%s@%s:%s/sessions?sslmode=disable\n' "$session_db_password" "$host" "$port_session_db" >"$work/session-dsn"
-)
-unset session_db_password
-docker run -d --name "$session_db_container" --cpus 1 --mount type=tmpfs,destination=/var/lib/postgresql/data \
-  --env-file "$work/session-db.env" -p "$host:$port_session_db:5432" "$session_db_image" >/dev/null ||
-  fail "docker could not start the scratch session database $session_db_container on $host:$port_session_db"
-until_true 60 "the session database to accept TCP connections" docker exec "$session_db_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d sessions
+# The run's session database (lib/session-db.sh's session_db_start), a second throwaway Postgres:
+# every pod's Oh My Pi keeps its session in it (session_store postgres: the daemon requires a store
+# that keeps sessions in a database), so a role's conversation outlives the issue pod whose disk
+# dies with it. It binds the devbox's private address, not loopback, since the pods dial it as they
+# dial the worker stream.
+session_db_start "$host" --cpus 2 --memory 4g
 note "container $session_db_container: database sessions on $host:$port_session_db ($session_db_image), which every pod reads through the providers Secret's $session_dsn_key (the URL is in an owner-only file, not printed)"
 mkdir -p "$state"
 cat >"$work/instructions.md" <<'EOF'
@@ -3542,14 +3521,20 @@ gate_open() {
 # (lib/design-gate-verdict.jq): its approval request at the approved version carries a summary after
 # "Approve <name> (version N)?", a human answered at least one of the spec's decision blocks, and no
 # approval request it made on the spec named a version holding one open or came before a human
-# answered one raised before the human's turn on that request.
+# answered one raised before the human's turn on that request. While the root waits on the human (a
+# question, or a closed gate it registered) it is in awaiting_person without a slot while its
+# architect stays live; the approval answers it, and nothing of its tree advances until it holds a
+# slot again. Tree 1 is the run's one root under admission_cap 2, so a slot stands free for it.
 drive_gated_spec() {
-  local issue=$1 artifact approved asks events version verdict request early blocks requested_versions
+  local issue=$1 artifact approved asks events version verdict request early blocks requested_versions waits
   local -a requested=()
   artifact=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
-  wait_for_worker "$issue" architect
+  wait_for_architect "$issue"
   until_true 300 "the $issue architect to be given its catch-up notice" notice_delivered "$issue" architect "$(notice_needle catch-up "$issue")"
   until_true 43200 "a human to approve the $issue spec in Dispatch, opening its design gate" gate_open "$issue" "$artifact"
+  await_root_slot "$issue" "the $issue"
+  waits=$(jq -R -s --arg issue "$issue" '[split("\n")[] | fromjson? | select(.msg == "workflow: root waits on a person and returns its admission slot" and .issue == $issue)] | length' "$daemon_log")
+  note "$issue: it waited on the human without a slot $waits times before the approval, and holds a slot again"
   approved=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.approvedVersion')
   asks=$(dispatch_get "issues/$issue/asks")
   events=$(dispatch_events "$issue")
@@ -3788,7 +3773,7 @@ deleted_lines() { log_lines "$deleted_msg" | jq -c --arg issue "$1" 'select(.iss
 # grep -c exits 1 on a count of 0, which errexit would take as a failure; `|| true` keeps the count.
 deleted=$(deleted_lines "$child1" | grep -c . || true)
 [ "$deleted" = 0 ] || fail "the daemon deleted $child1's Sandbox before its done: $(deleted_lines "$child1" | head -1)"
-set_status "$child1" done
+set_status "$child1" "done"
 # A gone-wait holds the read to its exit status: `[ -z "$(...)" ]` would take a failed read (an API
 # refusal, a throttle, op's timeout) for an empty answer and pass at once.
 child1_released() {
@@ -5026,9 +5011,9 @@ if [ "$now_s" -lt $((before_expiry_s + 60)) ]; then
   note "waiting $((before_expiry_s + 60 - now_s)) s for the lease read at issue-independence to expire"
   sleep $((before_expiry_s + 60 - now_s))
 fi
-old_answer=$(GH_TOKEN="$gh_before_token" GITHUB_TOKEN= GH_HOST= GH_CONFIG_DIR="$work/no-gh" "$real_gh" api graphql -f query='{viewer{login}}' 2>&1 | scrub) && fail "the architect's token read at issue-independence still answers GitHub after its lease's expiry $before_expiry: $old_answer"
+old_answer=$(GH_TOKEN="$gh_before_token" GITHUB_TOKEN='' GH_HOST='' GH_CONFIG_DIR="$work/no-gh" "$real_gh" api graphql -f query='{viewer{login}}' 2>&1 | scrub) && fail "the architect's token read at issue-independence still answers GitHub after its lease's expiry $before_expiry: $old_answer"
 grep -qi "bad credentials\|401" <<<"$old_answer" || fail "the architect's token read at issue-independence was refused for another reason than its expiry: $old_answer"
-new_answer=$(GH_TOKEN="$gh_after_token" GITHUB_TOKEN= GH_HOST= GH_CONFIG_DIR="$work/no-gh" "$real_gh" api graphql -f query='{viewer{login}}' --jq .data.viewer.login 2>&1 | scrub) || fail "the architect's refreshed token does not answer GitHub: $new_answer"
+new_answer=$(GH_TOKEN="$gh_after_token" GITHUB_TOKEN='' GH_HOST='' GH_CONFIG_DIR="$work/no-gh" "$real_gh" api graphql -f query='{viewer{login}}' --jq .data.viewer.login 2>&1 | scrub) || fail "the architect's refreshed token does not answer GitHub: $new_answer"
 [ "$new_answer" = "$(role_app architect)" ] || fail "the architect's refreshed token answers as $new_answer, want $(role_app architect)"
 unset gh_before_token gh_after_token
 note "after $before_expiry the token read at issue-independence answers 401 and the refreshed one $new_answer"
@@ -5428,9 +5413,12 @@ grep -qF "[legion] the controller's gh acts as the review App for owners ${gh_co
 note "the operator-launched controller's gh: pull request state $state, viewer $viewer from $controller_gh; GH_CONFIG_DIR=/nonexistent failed; controller.stderr names the review App and its owners; github-credential.log exists"
 # The controller's first turn starts itself (LEGION-392): nothing is ever typed into its pane, so
 # its session's first user message is the start message `legion controller start` carries as
-# LEGION_CONTROLLER_START_MESSAGE (daemon.ControllerStartMessage, internal/daemon/controller.go) and
-# the pi-legion extension sends right after its role claim, before it opens the live wake
-# subscription a tick could race it on (controller-session.ts `claim`); the model answers it.
+# LEGION_CONTROLLER_START_MESSAGE (daemon.ControllerStartMessage, internal/daemon/controller.go),
+# which pi-legion's `/legion-controller-start` (daemon.ControllerStartCommand, the word the command
+# puts on Oh My Pi's command line) sends once Oh My Pi's startup is over: that command claims the
+# controller and sends it once registered, right before the role claim and the live wake
+# subscription a tick could race it on (controller-session.ts `claim`, `startCommand`); the model
+# answers it.
 controller_started_itself() {
   local file
   for file in "$profile_agent/sessions"/*/*.jsonl; do
@@ -6518,7 +6506,7 @@ expect_failure pod-shape-wrong-runtime test -z "$(pod_shape_verdict "$evidence/c
 jq -c '.object.spec.containers |= map(if .name == "roles" then .resources.limits.cpu = "4" else . end) | .object.status.qosClass = "Burstable"' "$work/last-ready-pod.json" >"$work/bursting-shape.json"
 cat "$evidence/pod-watch.json" "$work/bursting-shape.json" >"$evidence/controls/pod-watch-bursting.json"
 bursting=$(pod_shape_verdict "$evidence/controls/pod-watch-bursting.json")
-grep -qF "container roles requests" <<<"$bursting" && grep -qF "qosClass Burstable" <<<"$bursting" ||
+{ grep -qF "container roles requests" <<<"$bursting" && grep -qF "qosClass Burstable" <<<"$bursting"; } ||
   fail "the pod shape did not refuse a recorded pod whose roles container is limited past its request and that is Burstable: ${bursting:-no departure}"
 note "negative control: a recorded pod whose roles container bursts past its request departs from the pod shape: $(tr '\n' ' ' <<<"$bursting" | cut -c1-300)"
 jq -c '.object.spec.affinity = {podAffinity: {requiredDuringSchedulingIgnoredDuringExecution: [{topologyKey: "kubernetes.io/hostname", labelSelector: {matchLabels: {"legion.dev/tree": .object.metadata.labels["legion.dev/tree"]}}}]}}' "$work/last-ready-pod.json" >"$work/pinned-shape.json"

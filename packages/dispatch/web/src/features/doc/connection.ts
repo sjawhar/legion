@@ -9,6 +9,7 @@ import {
 import type { Awareness } from "y-protocols/awareness";
 import type { Doc } from "yjs";
 
+import { reconnectDelayMs } from "../../api/live-socket";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 import type { PendingState, PendingSync } from "./pending-sync";
 
@@ -161,8 +162,8 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
   return (artifactId, callbacks) => {
     const doc = new Doc();
     let destroyed = false;
-    let synced = false;
-    let authenticated = false;
+    // Whether any admission has been handed to the pending sync: the first one's restore ends in
+    // the host's `onSynced`.
     let announced = false;
     // This admission's restore of the browser's saved rows; a refused edit is dropped after it.
     let restored: Promise<void> = Promise.resolve();
@@ -176,7 +177,17 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
     const WebSocketPolyfill = class extends globalThis.WebSocket {
       constructor(url: string, protocols?: string | string[]) {
         super(url, protocols);
-        this.addEventListener("open", () => sync?.socketOpened());
+        this.addEventListener("open", () => {
+          // The provider waits `initialDelay` before the first try of every `connect()`, and
+          // calls `connect()` again whenever a socket the server had answered closes: the
+          // server's close (a restart or roll closes every tab's socket at the same moment) and
+          // the provider's own silent-socket check alike. So the page's first connect waits
+          // nothing, and once a socket has opened, the reconnect after it waits a fresh draw of
+          // the spread. The provider refuses a fractional delay. Tries that fail inside one
+          // `connect()` keep the provider's own jittered backoff.
+          websocket.setConfiguration({ initialDelay: Math.floor(reconnectDelayMs(0)) });
+          sync?.socketOpened();
+        });
       }
 
       override send(data: Parameters<WebSocket["send"]>[0]): void {
@@ -199,28 +210,45 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
       parameters: { schema_version: callbacks.schemaVersion },
       url: wsUrl(artifactId),
     });
-    const notifySynced = () => {
-      if (synced && authenticated && !announced) {
-        announced = true;
-        restored = Promise.resolve(
-          sync?.firstSync(isSchemaReadOnly(provider.authorizedScope))
-        ).catch((error: unknown) => {
-          console.error("Could not restore this document's pending browser edits", error);
-        });
-        void restored.then(() => {
-          if (!destroyed) {
-            callbacks.onSynced();
-          }
-        });
+    // Every admission's restore waits for its own socket's authentication and SyncStep2 alike,
+    // whichever comes last; Dispatch's server queues its SyncStep2 before it reads the socket's
+    // token, so the authentication does. A writable admission restores the rows other tabs stored,
+    // judging each against this document; before the reconnect's sync applies, the document lacks
+    // what the server took meanwhile, so a row that builds on it would look as if it were typed
+    // against a rebuilt history and be dropped. The provider reports each once per socket: `synced`
+    // only as `isSynced` changes, which a close resets, and `authenticated` once per Authenticated
+    // frame, which the server sends once in answer to the one token each socket sends. So this
+    // hands the pending sync one admission per socket, and `synced()` takes a repeated one as a
+    // no-op all the same. Each admission's restore is kept as `restored`, which a refusal of this
+    // browser's edit waits for before it drops the refused row (`dropRefused`).
+    const notifyAdmitted = () => {
+      if (!provider.isSynced || !provider.isAuthenticated) {
+        return;
       }
+      const restoring = Promise.resolve(sync?.synced()).catch((error: unknown) => {
+        console.error("Could not restore this document's pending browser edits", error);
+      });
+      restored = restoring;
+      if (announced) {
+        return;
+      }
+      announced = true;
+      void restoring.then(() => {
+        if (!destroyed) {
+          callbacks.onSynced();
+        }
+      });
     };
     provider = new HocuspocusProvider({
       document: doc,
       name: artifactId,
       onAuthenticated: () => {
-        authenticated = true;
-        callbacks.onAdmission(isSchemaReadOnly(provider.authorizedScope));
-        notifySynced();
+        const readOnly = isSchemaReadOnly(provider.authorizedScope);
+        // Whether the admission is read-only decides from here on whether the editor takes typing
+        // and whether the pending sync stores a local update as a person's edit.
+        sync?.authenticated(readOnly);
+        callbacks.onAdmission(readOnly);
+        notifyAdmitted();
       },
       onClose: ({ event }) => {
         // Hocuspocus answers every other close by reconnecting, which is what the transient
@@ -274,12 +302,9 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
         void sync?.frameReceived(frame);
       },
       onStatus: ({ status }) => callbacks.onStatus(status === "disconnected" ? "offline" : status),
-      onSynced: ({ state }) => {
-        if (state) {
-          synced = true;
-          notifySynced();
-        }
-      },
+      // The provider sets `isSynced` before it reports a change: `true` once the socket's
+      // SyncStep2 has been applied, `false` as the socket closes, before `onClose` above runs.
+      onSynced: notifyAdmitted,
       // Each document owns its socket. A transport's destroy closes this provider and then the
       // websocket itself, so its connection checker and reconnect attempt cannot outlive it.
       preserveConnection: false,

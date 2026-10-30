@@ -8,6 +8,10 @@ import {
   installIntersectionObserver,
   type Placement,
 } from "../../__tests__/intersection-observer";
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerIssueStates, answerThreadReads } from "../../__tests__/send-answers";
+import { wholeText } from "../../__tests__/whole-text";
+import type { WriteBounds } from "../../api/client";
 import { ApiError, api } from "../../api/client";
 import type {
   Actor,
@@ -27,6 +31,7 @@ import type {
 import { stubMatchMedia } from "../margin/margin-fixture";
 import { seedUnread } from "../replies/replies-fixture";
 import { KeymapProvider } from "../shell/KeymapProvider";
+import { writesOf } from "../writes/write-store";
 import { ConversationTab } from "./ConversationTab";
 import { answeredWithErrorGuidance, safeRetryGuidance } from "./delivery";
 
@@ -135,7 +140,16 @@ function askRow(overrides: Partial<Ask> = {}, replies: Comment[] = []): IssueAsk
     ...baseAsk,
     ...overrides,
     last_reply: null,
-    thread: { answers: [], edits: [], followers: [], replies },
+    thread: {
+      answers: [],
+      claimant: null,
+      edits: [],
+      followers: [],
+      replies,
+      route: null,
+      route_status: null,
+      route_holder: null,
+    },
   };
 }
 
@@ -364,7 +378,11 @@ test("Conversation holds Reply while its composer sends", async () => {
 
     sent.reject(new Error("the server is down"));
     await screen.findByText("Couldn't send — network error");
-    expect(createComment.mock.calls[0]).toEqual(["CORE-1", { body: "Status please" }]);
+    expect(createComment.mock.calls[0]).toEqual([
+      "CORE-1",
+      { body: "Status please" },
+      keyedAttempt,
+    ]);
   } finally {
     view.unmount();
     createComment.mockRestore();
@@ -372,7 +390,49 @@ test("Conversation holds Reply while its composer sends", async () => {
   }
 });
 
-test("retry replays every pin operation rejected by the state-write queue", async () => {
+test("a message reply that names a passage quotes it, and says so once the passage is removed", async () => {
+  const passage = {
+    block_id: "b2",
+    node: "message/message-1#b2",
+    ref: "dispatch://CORE-1/message/message-1#b-b2",
+    removed: false,
+    text: "Beta.",
+  };
+  const reply = (id: string, overrides: Partial<Message>) =>
+    message(id, { created_at: "2026-09-09T00:01:00Z", in_reply_to: "message-1", ...overrides });
+  const stub = stubLists({
+    messages: [
+      thread(message("message-1", { body: "Alpha.\n\nBeta." }), [
+        reply("message-2", { body: "Agreed.", reply_block: passage }),
+        reply("message-3", { body: "Still?", reply_block: { ...passage, removed: true } }),
+        reply("message-4", { body: "All of it.", reply_block: null }),
+      ]),
+    ],
+  });
+  const view = render(tab({ "CORE-1": issueState() }, true, newQueryClient()));
+  const turn = (id: string) => view.container.querySelector(`[data-turn="message:${id}"]`);
+
+  try {
+    await screen.findByText("Agreed.");
+    await waitFor(() =>
+      expect(turn("message-2")?.textContent).toContain("Replying to alice's passage — Beta.")
+    );
+    expect(turn("message-3")?.textContent).toContain(
+      "Replying to alice's passage — This passage was removed."
+    );
+    expect(turn("message-3")?.textContent).not.toContain("Beta.");
+    // A reply that names no block quotes the whole parent, as before.
+    expect(turn("message-4")?.textContent).toContain("Replying to alice — Alpha.");
+  } finally {
+    view.unmount();
+    stub.restore();
+  }
+});
+
+// W22. Each pin is a write of the one store, in press order on its issue: the ones Dispatch refuses
+// stay refused in the shell's indicator, the Pin buttons stay live, and each Retry re-sends its own
+// pin over the state Dispatch holds then, so after both land the issue holds both.
+test("each refused pin is retried on its own, over the state Dispatch holds", async () => {
   const originalGetMyState = api.getMyState;
   const originalPutIssueState = api.putIssueState;
   const stub = stubLists({
@@ -382,20 +442,20 @@ test("retry replays every pin operation rejected by the state-write queue", asyn
     ],
   });
   const queryClient = newQueryClient();
-  const writes: string[][] = [];
+  queryClient.setQueryData(["whoami"], { event_head: "0", kind: "user", login: "alice" });
+  let saved: string[] = [];
   let failures = 2;
   let unmount: (() => void) | undefined;
 
   try {
-    api.getMyState = async () => ({ "CORE-1": issueState() });
+    api.getMyState = async () => ({ "CORE-1": issueState(saved) });
     api.putIssueState = async (_issueKey, input) => {
-      const dismissed = input.dismissed ?? [];
-      writes.push(dismissed);
       if (failures > 0) {
         failures -= 1;
-        throw new Error("offline");
+        throw new ApiError(409, { code: "PIN_REFUSED", error: "refused" });
       }
-      return issueState(dismissed);
+      saved = input.dismissed ?? [];
+      return issueState(saved);
     };
 
     unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
@@ -406,18 +466,22 @@ test("retry replays every pin operation rejected by the state-write queue", asyn
       fireEvent.click(button);
     }
 
+    const writes = writesOf(queryClient);
     await waitFor(() =>
-      expect(screen.getByRole("alert").textContent).toContain("Couldn't save pin — retry")
+      expect(writes.rows().map((write) => write.status)).toEqual(["refused", "refused"])
     );
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-
+    expect(
+      screen
+        .getAllByRole("button", { name: /Pin|Unpin/ })
+        .every((button) => !button.hasAttribute("disabled"))
+    ).toBe(true);
+    for (const write of writes.rows()) act(() => writes.retry(write.id));
+    await waitFor(() => expect(writes.rows()).toEqual([]));
     // A card built from `/messages` has no event id at all: it pins under its own id.
-    await waitFor(() =>
-      expect(writes.at(-1)).toEqual([
-        "pinned_items:message:message-2",
-        "pinned_items:message:message-1",
-      ])
-    );
+    expect([...saved].sort()).toEqual([
+      "pinned_items:message:message-1",
+      "pinned_items:message:message-2",
+    ]);
   } finally {
     unmount?.();
     api.getMyState = originalGetMyState;
@@ -593,11 +657,18 @@ test("a mention its session answered with an error is pointed at a new comment, 
   let view = render(tab({ "CORE-1": issueState() }, true, queryClient));
 
   try {
+    // The recipient is the session the attempt recorded, drawn by `AgentName` (an unlisted
+    // session reads by its short id) with its live link.
     await screen.findByText(
-      `session:worker · failed · worker failed. ${answeredWithErrorGuidance("mention")}`
+      wholeText(`session:worker… · failed · worker failed. ${answeredWithErrorGuidance("mention")}`)
+    );
+    expect(document.querySelector('[data-agent-name="worker"] a')?.getAttribute("href")).toBe(
+      "/agents/worker/live"
     );
     screen.getByText(
-      `session:reviewer · failed · reviewer failed. ${safeRetryGuidance("mention", "reviewer failed")}`
+      wholeText(
+        `session:reviewer… · failed · reviewer failed. ${safeRetryGuidance("mention", "reviewer failed")}`
+      )
     );
     expect(screen.getAllByRole("button", { name: "Retry" })).toHaveLength(1);
     view.unmount();
@@ -605,8 +676,8 @@ test("a mention its session answered with an error is pointed at a new comment, 
     // A closed issue shows no Retry and takes no new comment, so neither sentence is said: the
     // same rule the card follows, where each sentence names a control in the retry row.
     view = render(tab({ "CORE-1": issueState() }, true, queryClient, true));
-    await screen.findByText("session:worker · failed · worker failed");
-    screen.getByText("session:reviewer · failed · reviewer failed");
+    await screen.findByText(wholeText("session:worker… · failed · worker failed"));
+    screen.getByText(wholeText("session:reviewer… · failed · reviewer failed"));
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   } finally {
     view.unmount();
@@ -633,8 +704,14 @@ test("a targeted message asked by a session names that session as the asker", as
   const view = render(tab({ "CORE-1": issueState() }, true, queryClient));
 
   try {
-    await screen.findByText("Asking planner (BTW) ·");
-    expect(screen.getByText("reviewer")).toBeTruthy();
+    // The recipient is the session the attempt reached, by its registry title, and links to it.
+    // The headline comes first; the retry row's sentences name the same session.
+    const [recipient] = await screen.findAllByRole("link", { name: "planner" });
+    expect(recipient?.getAttribute("href")).toBe("/agents/s1/live");
+    expect(recipient?.closest("p")?.textContent?.startsWith("Asking planner (BTW) ·")).toBe(true);
+    expect(screen.getByRole("link", { name: "reviewer" }).getAttribute("href")).toBe(
+      "/agents/s2/live"
+    );
     expect(screen.queryByText("alice")).toBeNull();
   } finally {
     view.unmount();
@@ -917,7 +994,7 @@ test("a refused Resolve keeps the thread and its reply, and the one that lands c
   const resolves: string[] = [];
   const resolveComment = spyOn(api, "resolveComment").mockImplementation(async (id) => {
     resolves.push(id);
-    if (refuse) throw new ApiError(503, { error: "the server is down" });
+    if (refuse) throw new ApiError(409, { error: "the server is down" });
     return { ...root, resolved: true };
   });
   const view = render(tab({ "CORE-1": issueState() }, true, queryClient));
@@ -974,7 +1051,7 @@ function ownResolveOverAReply() {
     },
     refuse: async () => {
       await act(async () => {
-        reply.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+        reply.reject(new ApiError(409, { code: "UNAVAILABLE", error: "the server is down" }));
         await reply.promise.catch(() => {});
       });
     },
@@ -1125,13 +1202,13 @@ test("on a phone, another comment's Reply opens the thread whose reply was refus
     fireEvent.click(within(dialog).getByRole("button", { name: "Back" }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Thread" })).toBeNull());
     await act(async () => {
-      reply.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+      reply.reject(new ApiError(409, { code: "UNAVAILABLE", error: "the server is down" }));
       await reply.promise.catch(() => {});
     });
 
     fireEvent.click(within(turn("comment-b")).getByRole("button", { name: "Reply" }));
     dialog = await screen.findByRole("dialog", { name: "Thread" });
-    expect(within(dialog).getByText("Comment A")).toBeTruthy();
+    expect(dialog.querySelector('[data-turn="comment:comment-a"]')).not.toBeNull();
     expect(within(dialog).queryByText("Comment B")).toBeNull();
     expect(within(dialog).getByText(refusedText)).toBeTruthy();
     expect(
@@ -1176,7 +1253,7 @@ test("at a desktop width, another comment's Reply redirects onto the one whose r
     fireEvent.click(within(composer).getByRole("button", { name: "Send" }));
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
     await act(async () => {
-      reply.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+      reply.reject(new ApiError(409, { code: "UNAVAILABLE", error: "the server is down" }));
       await reply.promise.catch(() => {});
     });
     await within(composer).findByText(refusedText);
@@ -1190,6 +1267,53 @@ test("at a desktop width, another comment's Reply redirects onto the one whose r
   } finally {
     view.unmount();
     createComment.mockRestore();
+    stub.restore();
+  }
+});
+
+// A comment's Reply prefills its mention as the mention picker names the session
+// (`useAgentText().sessionText`): by its registry title, else as `@session <id>`.
+test("a comment's Reply names its session author's mention as the picker does", async () => {
+  const untitled = "01234567-89ab-7def-8000-000000000001";
+  const stub = stubLists({
+    agents: [agent("planner-session", "Planner")],
+    comments: [
+      comment("comment-a", {
+        author: { id: untitled, kind: "session" },
+        body: "Comment A",
+        created_at: "2026-09-20T00:00:00Z",
+      }),
+      comment("comment-b", {
+        author: {
+          id: "planner-session",
+          kind: "session",
+          origin: { session_title: "Old title" },
+        },
+        body: "Comment B",
+        created_at: "2026-09-20T00:01:00Z",
+      }),
+    ],
+  });
+  const queryClient = newQueryClient();
+  const view = render(tab({ "CORE-1": issueState() }, true, queryClient));
+  const turn = (id: string) => {
+    const element = view.container.querySelector<HTMLElement>(`[data-turn="comment:${id}"]`);
+    if (element === null) throw new Error(`expected ${id}'s turn`);
+    return element;
+  };
+
+  try {
+    await screen.findByText("Comment B");
+    await waitFor(() => expect(queryClient.getQueryData(["agents"])).toBeDefined());
+    const composer = screen.getByRole("form", { name: "Comment composer" });
+    const field = within(composer).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" });
+    fireEvent.click(within(turn("comment-a")).getByRole("button", { name: "Reply" }));
+    await waitFor(() => expect(field.value).toBe(`@session ${untitled}`));
+    fireEvent.click(within(composer).getByRole("button", { name: "Cancel reply" }));
+    fireEvent.click(within(turn("comment-b")).getByRole("button", { name: "Reply" }));
+    await waitFor(() => expect(field.value).toBe("@Planner"));
+  } finally {
+    view.unmount();
     stub.restore();
   }
 });
@@ -1223,7 +1347,7 @@ test("another message's Reply redirects onto the one whose refusal the docked co
     fireEvent.click(within(composer).getByRole("button", { name: "Send" }));
     await waitFor(() => expect(createMessage).toHaveBeenCalledTimes(1));
     await act(async () => {
-      reply.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+      reply.reject(new ApiError(409, { code: "UNAVAILABLE", error: "the server is down" }));
       await reply.promise.catch(() => {});
     });
     await within(composer).findByText(refusedText);
@@ -1432,7 +1556,7 @@ test("a comment-delivery retry disables when the target no longer advertises the
   try {
     await screen.findByText(/no live session worker/);
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
-    expect(screen.getByText(/session:worker-session no longer supports Send\./)).toBeTruthy();
+    expect(screen.getByText(wholeText("Worker no longer supports Send."))).toBeTruthy();
   } finally {
     view.unmount();
     stub.restore();
@@ -1627,7 +1751,11 @@ test("Conversation hides reply editing while its owner saves a comment", async (
     fireEvent.change(screen.getByLabelText("Edit comment"), { target: { value: "Updated root" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>
-      expect(editComment).toHaveBeenCalledWith("root-comment", { body: "Updated root" })
+      expect(editComment).toHaveBeenCalledWith(
+        "root-comment",
+        { body: "Updated root" },
+        keyedAttempt
+      )
     );
     expect(within(card).queryAllByRole("button", { name: "Edit" })).toHaveLength(0);
     expect((screen.getByRole("textbox", { name: "Reply" }) as HTMLTextAreaElement).disabled).toBe(
@@ -1671,7 +1799,11 @@ test("Conversation restores edit controls and the draft when its owner save reje
     });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>
-      expect(editComment).toHaveBeenCalledWith("root-comment", { body: "Draft survives" })
+      expect(editComment).toHaveBeenCalledWith(
+        "root-comment",
+        { body: "Draft survives" },
+        keyedAttempt
+      )
     );
     expect(within(card).queryAllByRole("button", { name: "Edit" })).toHaveLength(0);
 
@@ -1695,7 +1827,9 @@ test("Conversation restores edit controls and the draft when its owner save reje
 
 interface ThreadsPage {
   readonly cleanup: () => void;
-  readonly mark: Mock<typeof api.markThreadRead>;
+  readonly mark: Mock<
+    (id: string, body: { read_through: string }, bounds: WriteBounds) => Promise<unknown>
+  >;
   readonly turn: (id: string) => HTMLElement;
   readonly viewport: IntersectionControl;
 }
@@ -1708,8 +1842,8 @@ interface ThreadsPage {
 function renderThreads(lists: Lists, unread: readonly string[], focusItemId?: string): ThreadsPage {
   const viewport = installIntersectionObserver();
   const stub = stubLists(lists);
-  const putIssueState = spyOn(api, "putIssueState").mockImplementation(async () => issueState());
-  const mark = spyOn(api, "markThreadRead").mockResolvedValue(undefined);
+  const putIssueState = answerIssueStates().mockImplementation(async () => issueState());
+  const mark = answerThreadReads().mockResolvedValue(undefined);
   const scrollIntoView = HTMLElement.prototype.scrollIntoView;
   HTMLElement.prototype.scrollIntoView = () => {};
   const queryClient = newQueryClient();
@@ -1770,7 +1904,9 @@ test("landing on a message thread shows its replies and marks the thread read th
     const newest = page.turn("message:message-2");
     expect(page.viewport.observed()).toContain(newest);
     await dwellOn(page.viewport, newest);
-    expect(page.mark.mock.calls).toEqual([["message-1", "2026-09-09T00:05:00.25Z"]]);
+    expect(page.mark.mock.calls).toEqual([
+      ["message-1", { read_through: "2026-09-09T00:05:00.25Z" }, keyedAttempt],
+    ]);
   } finally {
     page.cleanup();
   }
@@ -1789,7 +1925,9 @@ test("a message thread taller than the screen is marked read from its newest rep
     await screen.findByText("Session reply message-3");
     act(() => page.viewport.show(page.turn("message:message-1"), { height: 3_000, visible: 300 }));
     await dwellOn(page.viewport, page.turn("message:message-3"));
-    expect(page.mark.mock.calls).toEqual([["message-1", "2026-09-09T00:06:00Z"]]);
+    expect(page.mark.mock.calls).toEqual([
+      ["message-1", { read_through: "2026-09-09T00:06:00Z" }, keyedAttempt],
+    ]);
     // The older reply is not what the mark watches.
     expect(page.viewport.observed()).not.toContain(page.turn("message:message-2"));
   } finally {
@@ -1810,7 +1948,9 @@ test("a targeted message's thread is marked read once its newest reply is on scr
   try {
     await screen.findByText("Session reply message-2");
     await dwellOn(page.viewport, page.turn("message:message-2"));
-    expect(page.mark.mock.calls).toEqual([["message-1", "2026-09-09T00:07:00Z"]]);
+    expect(page.mark.mock.calls).toEqual([
+      ["message-1", { read_through: "2026-09-09T00:07:00Z" }, keyedAttempt],
+    ]);
   } finally {
     page.cleanup();
   }
@@ -1847,7 +1987,9 @@ test("at a desktop width, landing on a comment opens its thread inline and readi
       page.turn("comment:root-comment").querySelector("article")?.getAttribute("aria-expanded")
     ).toBe("true");
     await dwellOn(page.viewport, replyItem);
-    expect(page.mark.mock.calls).toEqual([["root-comment", reply.created_at]]);
+    expect(page.mark.mock.calls).toEqual([
+      ["root-comment", { read_through: reply.created_at }, keyedAttempt],
+    ]);
   } finally {
     page.cleanup();
   }
@@ -1884,7 +2026,9 @@ test("on a phone, landing on a comment opens its thread dialog and reading it ma
     const replyItem = within(dialog).getByText("Reply comment").closest("li");
     if (replyItem === null) throw new Error("expected the reply's item");
     await dwellOn(page.viewport, replyItem);
-    expect(page.mark.mock.calls).toEqual([["root-comment", reply.created_at]]);
+    expect(page.mark.mock.calls).toEqual([
+      ["root-comment", { read_through: reply.created_at }, keyedAttempt],
+    ]);
   } finally {
     page.cleanup();
     restoreViewport();
@@ -1904,9 +2048,10 @@ test("without a link, a comment's thread stays collapsed", async () => {
 });
 
 // The issue's watermark is the Conversation's to write, and only from the newest conversation:
-// a single mark cannot say "I read the third card only". A write the server refuses re-reads the
-// stored mark and is sent again while the card stays on screen.
-test("the read mark writes the issue's head seq, and retries a refused write", async () => {
+// a single mark cannot say "I read the third card only". W38: the mark is a quiet write of the one
+// write store, so it goes as the person reading (`Dispatch-Login`), under one key on every attempt,
+// and a write Dispatch answers 503 is asked again under that key.
+test("the read mark writes the issue's head seq as the reader, and retries an unanswered write", async () => {
   const viewport = installIntersectionObserver();
   const stub = stubLists({
     comments: [comment("comment-1", { body: "Newest" })],
@@ -1916,12 +2061,13 @@ test("the read mark writes the issue's head seq, and retries a refused write", a
     "CORE-1": issueState([], 1),
   }));
   let writes = 0;
-  const putIssueState = spyOn(api, "putIssueState").mockImplementation(async (_key, input) => {
+  const putIssueState = answerIssueStates().mockImplementation(async (_key, input) => {
     writes += 1;
     if (writes === 1) throw new ApiError(503, { code: "UNAVAILABLE", error: "down" });
     return issueState([], input.last_read_seq ?? 0);
   });
   const queryClient = newQueryClient();
+  queryClient.setQueryData(["whoami"], { event_head: "0", kind: "user", login: "alice" });
   const view = render(tab({ "CORE-1": issueState([], 1) }, true, queryClient));
 
   try {
@@ -1929,16 +2075,22 @@ test("the read mark writes the issue's head seq, and retries a refused write", a
     const card = view.container.querySelector('[data-turn="comment:comment-1"]');
     if (card === null) throw new Error("expected the newest card");
     await dwellOn(viewport, card);
-    expect(putIssueState.mock.calls).toEqual([["CORE-1", { last_read_seq: 7 }]]);
-    expect(getMyState).toHaveBeenCalledTimes(1);
+    for (let flush = 0; flush < 5; flush += 1) await act(async () => {});
+    expect(putIssueState.mock.calls).toEqual([["CORE-1", { last_read_seq: 7 }, keyedAttempt]]);
+    expect(putIssueState.mock.calls[0]?.[2]?.login).toBe("alice");
     act(() => {
       jest.advanceTimersByTime(1_000);
     });
     for (let flush = 0; flush < 5; flush += 1) await act(async () => {});
-    expect(putIssueState.mock.calls).toEqual([
+    expect(putIssueState.mock.calls.map(([key, input]) => [key, input])).toEqual([
       ["CORE-1", { last_read_seq: 7 }],
       ["CORE-1", { last_read_seq: 7 }],
     ]);
+    const [first, second] = putIssueState.mock.calls;
+    expect(second?.[2]?.key).toBe(first?.[2]?.key);
+    await waitFor(() =>
+      expect(queryClient.getQueryData<UserState>(["user-state"])?.["CORE-1"]?.last_read_seq).toBe(7)
+    );
   } finally {
     view.unmount();
     getMyState.mockRestore();

@@ -124,12 +124,14 @@ func Blocked(rows map[string]Row, issues, waiting []record.Issue) []record.Block
 // as a phase of that run begins, re-admission keeps it when the root's own tree comes back, and
 // every other path that opens a run starts it clean — a child's re-entry into its tree, and a
 // child's hand-over to a root of its own without its run. So no issue is exempt unless the run it
-// is exempt for is the run it arrived with. Everything else is checked like any other issue: a
-// child that has been released but never started, a waiting root that only left the line and came
-// back, and a child handed over from a finished tree as a root of its own without its run, whether
-// or not it ran there, a done child a person labels as an orphan root among them. A child held at
-// phase.Admitted in its own tree is no candidate here at all: the workflow holds it, and Blocked
-// reports it, by Holds, whatever its mark — and a re-entered child carries none.
+// is exempt for is the run it arrived with. A root waiting on a person (awaiting_person, answered or
+// not) carries its run (record.Issue.CarriesRun): its links were read when it was first admitted,
+// and its resume takes the next free slot whatever they say now. Everything else is checked like
+// any other issue: a child that has been released but never started, a waiting root that only left
+// the line and came back, and a child handed over from a finished tree as a root of its own without
+// its run, whether or not it ran there, a done child a person labels as an orphan root among them. A
+// child held at phase.Admitted in its own tree is no candidate here at all: the workflow holds it,
+// and Blocked reports it, by Holds, whatever its mark — and a re-entered child carries none.
 func Exempt(issue record.Issue) bool { return issue.CarriesRun() || issue.TakenBack }
 
 // WaitsOn is what issue still waits on, from rows: the issues Dispatch says it is blocked by

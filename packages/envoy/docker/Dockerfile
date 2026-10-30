@@ -5,7 +5,7 @@
 # Bun is pinned to the version the repo locks, like packages/daemon/docker/worker.Dockerfile:
 # bundler output differs across Bun releases, so a published SPA must not be built by whatever
 # 1.x is newest that day. .github/scripts/check-bun-version.sh keeps this equal to .bun-version.
-ARG BUN_VERSION=1.3.14
+ARG BUN_VERSION=1.4.4
 FROM mirror.gcr.io/oven/bun:${BUN_VERSION} AS web
 
 WORKDIR /repo
@@ -51,6 +51,9 @@ RUN go mod download
 
 COPY packages/envoy/cmd ./cmd
 COPY packages/envoy/internal ./internal
+# listenfd: the inherited listening socket envoy-dispatch and envoy-listener serve on
+# (DISPATCH_LISTEN_FD, ENVOY_LISTEN_FD).
+COPY packages/envoy/listenfd ./listenfd
 # The Go contracts file is generated from packages/contracts/schemas; never
 # trust the copy checked into the tree over a fresh regeneration.
 COPY --from=web /repo/packages/envoy/internal/contracts/generated.go ./internal/contracts/generated.go

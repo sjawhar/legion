@@ -18,28 +18,37 @@ type Execer interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
-// MentionExcerpts is, for each target markdown mentions, the block holding its first mention that
-// lies inside a block - blocks index markdown by byte, in document order - as the references route
-// shows it: the block's id and its markdown cut to BlockExcerptRunes. A target none of whose
-// mentions lies inside a block has none.
-func MentionExcerpts(markdown string, blocks []model.ArtifactBlock, serverURL string) map[Target]model.GraphExcerpt {
+// MentionExcerpts is, for each target the mentions located in markdown name, the innermost of
+// blocks holding its first mention that lies inside a block - the block with the tightest byte
+// range - as the references route shows it: the block's id and its markdown cut to
+// BlockExcerptRunes. A target none of whose mentions lies inside a block has none. The block is
+// any of blocks, not only a graph node: IndexBlocks makes no node of a block whose id is past
+// text.MaxBlockIDBytes, empty or unstorable, nor of a later holder of a repeated id
+// (uniqueBlocks), and writes the mention from the innermost node holding it, if any. Such a block
+// still gives the excerpt, so its excerpt_block_id can name a block the graph does not hold.
+// located is text.ExtractAt(markdown, …), the one extraction a version's index reads.
+func MentionExcerpts(markdown string, blocks []model.ArtifactBlock, located []text.Located) map[Target]model.GraphExcerpt {
+	starts := make([]int, len(located))
+	for i, mention := range located {
+		starts[i] = mention.Offset
+	}
+	holders := innermostBlocks(blocks, starts)
 	excerpts := make(map[Target]model.GraphExcerpt)
-	for _, located := range text.ExtractAt(markdown, serverURL) {
-		if located.Kind == "url" {
+	for i, mention := range located {
+		if holders[i] < 0 {
 			continue
 		}
-		target := Target{Kind: located.Kind, ID: ToID(located.Ref)}
+		target, ok := TargetOf(mention.Ref)
+		if !ok {
+			continue
+		}
 		if _, found := excerpts[target]; found {
 			continue
 		}
-		for _, block := range blocks {
-			if block.From <= located.Offset && located.Offset < block.To {
-				excerpts[target] = model.GraphExcerpt{
-					BlockID: block.ID,
-					Text:    text.HeadRunes(markdown[block.From:block.To], BlockExcerptRunes),
-				}
-				break
-			}
+		block := blocks[holders[i]]
+		excerpts[target] = model.GraphExcerpt{
+			BlockID: block.ID,
+			Text:    text.HeadRunes(markdown[block.From:block.To], BlockExcerptRunes),
 		}
 	}
 	return excerpts
@@ -57,12 +66,19 @@ func MentionExcerpts(markdown string, blocks []model.ArtifactBlock, serverURL st
 // marks its mentions owed only when its transaction recorded no rendering of the tree it wrote,
 // which is an upload whose replacement left the document as it was (ReplaceText returns before
 // applyLive records one). Every other version write cuts its excerpts from the render its
-// markdown came from (recordTreeExcerpts), so IndexDocumentReferences' check that the recorded
-// rendering is the version's markdown never clears. That unchanged upload's markdown is the
+// markdown came from (docs' indexDocument, which indexes the version's references, excerpts and
+// blocks from one extraction), so IndexDocumentReferences' check that the recorded rendering is
+// the version's markdown never clears. That unchanged upload's markdown is the
 // document the reconciliation read, so the excerpt stored under the older number is the one the
 // version would have stored. StoredExcerpts hides an owed row, and the reconciliation's non-null
 // version makes that same excerpt current again.
-func RecordExcerpts(ctx context.Context, q Execer, fromID string, version int, excerpts map[Target]model.GraphExcerpt) error {
+//
+// It returns the targets whose excerpt the route answers differently after the write, in kind and
+// id order: the route serves a row's stored block and text only once its version is set and its
+// text is not null (StoredExcerpts), and the document's name otherwise, so a row moves when what it
+// served before differs from what it serves now. A version write names them on its event
+// (ReplaceDocumentCounted).
+func RecordExcerpts(ctx context.Context, q Queryer, fromID string, version int, excerpts map[Target]model.GraphExcerpt) ([]Target, error) {
 	kinds := make([]string, 0, len(excerpts))
 	ids := make([]string, 0, len(excerpts))
 	blockIDs := make([]string, 0, len(excerpts))
@@ -74,18 +90,34 @@ func RecordExcerpts(ctx context.Context, q Execer, fromID string, version int, e
 		texts = append(texts, excerpt.Text)
 	}
 	// The target's excerpt is one row-valued subquery, so a mention whose target excerpts lacks
-	// (no block holds it) is still updated, with no excerpt, and leaves the drift index.
-	if _, err := q.Exec(ctx, `
-		with e(kind, id, block_id, text) as (select * from unnest($3::text[], $4::text[], $5::text[], $6::text[]))
-		update refs r
-		set excerpt_version = $2,
-		    (excerpt_block_id, excerpt_text) = (select e.block_id, e.text from e where e.kind = r.to_kind and e.id = r.to_id)
-		where r.from_kind = 'artifact' and r.from_id = $1
-		  and coalesce(r.excerpt_version, 0) <= $2
-	`, fromID, version, kinds, ids, blockIDs, texts); err != nil {
-		return fmt.Errorf("record reference excerpts of %s: %w", fromID, err)
+	// (no block holds it) is still updated, with no excerpt, and leaves the drift index. Every
+	// part of the statement reads the one snapshot, so prior holds each row as it was.
+	moved, err := scanTargets(q.Query(ctx, `
+		with e(kind, id, block_id, text) as (select * from unnest($3::text[], $4::text[], $5::text[], $6::text[])),
+		prior as (
+			select to_kind, to_id,
+			       case when excerpt_version is not null then excerpt_text end as served_text,
+			       case when excerpt_version is not null and excerpt_text is not null then coalesce(excerpt_block_id, '') end as served_block
+			from refs
+			where from_kind = 'artifact' and from_id = $1 and coalesce(excerpt_version, 0) <= $2
+		),
+		written as (
+			update refs r
+			set excerpt_version = $2,
+			    (excerpt_block_id, excerpt_text) = (select e.block_id, e.text from e where e.kind = r.to_kind and e.id = r.to_id)
+			where r.from_kind = 'artifact' and r.from_id = $1
+			  and coalesce(r.excerpt_version, 0) <= $2
+			returning r.to_kind, r.to_id, r.excerpt_text as served_text,
+			          case when r.excerpt_text is not null then coalesce(r.excerpt_block_id, '') end as served_block
+		)
+		select w.to_kind, w.to_id from written w join prior p on p.to_kind = w.to_kind and p.to_id = w.to_id
+		where (p.served_block, p.served_text) is distinct from (w.served_block, w.served_text)
+		order by w.to_kind, w.to_id
+	`, fromID, version, kinds, ids, blockIDs, texts))
+	if err != nil {
+		return nil, fmt.Errorf("record reference excerpts of %s: %w", fromID, err)
 	}
-	return nil
+	return moved, nil
 }
 
 // StoredExcerpts is, by citing document, the excerpt stored on each mention of (toKind, toID) a

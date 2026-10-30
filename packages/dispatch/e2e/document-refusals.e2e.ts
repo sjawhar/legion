@@ -247,10 +247,12 @@ test("a read-only viewer's saved edits are held through a not-applied answer, th
     const held = await pendingEditCount(page, artifact.id);
 
     // The reconnect is admitted read-only, and the server answers the edits it carries as not
-    // applied: the browser keeps every one of them, the paste included, and is not closed.
+    // applied: the browser keeps every one of them, the paste included, and is not closed. A
+    // closed issue's read-only admission names no reload - a reload cannot make it editable - so
+    // the editor itself is what says the admission landed (close-withdraws-asks.e2e.ts:158-167).
     await patchIssue(issue.key, { status: "done" });
     await transport.release();
-    await expect(page.getByText("Reload to edit.")).toBeVisible();
+    await expect(documentEditor(page)).toHaveAttribute("contenteditable", "false");
     await expect.poll(async () => (await sockets()).statuses).toContain(0);
     expect(await pendingEditCount(page, artifact.id)).toBe(held);
     expect((await sockets()).closes).not.toContain(4413);

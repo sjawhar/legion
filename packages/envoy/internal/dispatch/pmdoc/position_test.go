@@ -133,3 +133,60 @@ func TestContext16KeepsEveryCharacterItTouchesWhole(t *testing.T) {
 		}
 	}
 }
+
+// len16Cases are strings whose UTF-16 length is easy to get wrong: characters of every UTF-8 width,
+// the edges of the Basic Multilingual Plane and of Unicode, and bytes that are not UTF-8 at all.
+var len16Cases = []string{
+	"",
+	"abc",
+	"\x00",
+	"\u00e9",     // two bytes in UTF-8
+	"\u26A1",     // three bytes in UTF-8
+	"\uFFFD",     // written literally, not standing for an invalid byte
+	"\uFFFF",     // the last character of one unit
+	"\U00010000", // the first character of two units
+	"\U0010FFFF", // the last character of Unicode
+	pairA,
+	pairB,
+	pairC,
+	pairD,
+	"\xff",             // a lone invalid byte
+	"\xed\xa0\x80",     // an encoded surrogate, three invalid bytes
+	"\xf4\x90\x80\x80", // above U+10FFFF, four invalid bytes
+	"\xc3",             // a truncated two-byte sequence
+	"\xe2\x9a",         // a truncated three-byte sequence
+	"\xf0\x9f\x93",     // a truncated four-byte sequence
+	"a\u00e9\u26A1" + pairA + "\x00z",
+	"\xff" + pairC + "\xe2\x9a" + "b" + "\uFFFD" + "\xf4\x90\x80\x80",
+	pairD + "\xc3" + "\U0010FFFF" + "\xed\xa0\x80",
+}
+
+// referenceLen16 is the UTF-16 length by definition: the units utf16.Encode writes.
+func referenceLen16(value string) int {
+	return len(utf16.Encode([]rune(value)))
+}
+
+// len16 agrees with utf16.Encode on any string, valid UTF-8 or not, invalid bytes (one U+FFFD
+// each) included. Plain go test runs the seeds, every one of len16Cases.
+func FuzzLen16(f *testing.F) {
+	for _, value := range len16Cases {
+		f.Add(value)
+	}
+	f.Fuzz(func(t *testing.T, value string) {
+		if got, want := len16(value), referenceLen16(value); got != want {
+			t.Errorf("len16(%q) = %d, want %d", value, got, want)
+		}
+	})
+}
+
+// len16Sink keeps len16's result alive so the compiler cannot drop the call being measured.
+var len16Sink int
+
+// len16 runs on every text a walk passes, so it must count without building a slice to count.
+func TestLen16DoesNotAllocate(t *testing.T) {
+	for _, value := range []string{"plain ascii text", "a\u00e9\u26A1" + pairA, "a\xff\xed\xa0\x80b"} {
+		if allocs := testing.AllocsPerRun(100, func() { len16Sink = len16(value) }); allocs != 0 {
+			t.Errorf("len16(%q) allocates %v times per call, want 0", value, allocs)
+		}
+	}
+}

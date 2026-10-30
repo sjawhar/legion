@@ -1013,6 +1013,151 @@ func TestGraphEdgesCarriesTheComponentArms(t *testing.T) {
 	}
 }
 
+// componentFact is one component_facts row as text: each time in UTC, "null" for a null.
+type componentFact struct{ Made, Changed, Digest string }
+
+// stamp spells a recorded time as componentFacts does.
+func stamp(at *time.Time) string {
+	if at == nil {
+		return "null"
+	}
+	return at.UTC().Format(time.RFC3339Nano)
+}
+
+// componentFacts reads CORE's component_facts rows by component id.
+func componentFacts(t *testing.T, database *store.Store) map[string]componentFact {
+	t.Helper()
+	rows, err := database.Pool.Query(context.Background(),
+		`select id, made_at, changed_at, digest from component_facts where project_key = 'CORE'`)
+	if err != nil {
+		t.Fatalf("read component_facts: %v", err)
+	}
+	defer rows.Close()
+	facts := map[string]componentFact{}
+	for rows.Next() {
+		var id string
+		var made, changed *time.Time
+		var digest *string
+		if err := rows.Scan(&id, &made, &changed, &digest); err != nil {
+			t.Fatalf("scan component_facts: %v", err)
+		}
+		fact := componentFact{Made: stamp(made), Changed: stamp(changed), Digest: "null"}
+		if digest != nil {
+			fact.Digest = *digest
+		}
+		facts[id] = fact
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate component_facts: %v", err)
+	}
+	return facts
+}
+
+// Every import deletes the source's components and inserts them again, and component_facts still
+// records when each was made and last changed: an import that changes nothing moves no time, a
+// change to one component moves its changed_at alone, a component retired and imported again is
+// made again, and a component stored before its times were recorded (the migration's null row)
+// keeps them unrecorded through an import that leaves it unchanged and gains its digest.
+func TestComponentFactsRecordWhenAComponentWasMadeAndChanged(t *testing.T) {
+	ctx := context.Background()
+	const platform = "---\ntitle: Platform\n---\nThe platform.\n"
+	tree := func(web string) map[string]string {
+		return map[string]string{"platform.md": platform, "web.md": "---\ntitle: Web\nparent: platform\n---\n" + web}
+	}
+	// Every commit answers its own subtree sha, so an import of identical files still projects.
+	fake := &fakeSource{t: t, files: tree("The web.\n"), treeShaFollowsCommit: true}
+	importer, database := newImporterFixture(t, fake)
+	// importAt imports files at commit through the full projection and answers the import's time
+	// (the source's last_sync_at, written by the import's transaction).
+	importAt := func(commit string, files map[string]string) time.Time {
+		t.Helper()
+		fake.commit, fake.files = commit, files
+		source, err := importer.Sync(ctx, "CORE", archRepo)
+		if err != nil {
+			t.Fatalf("import %s: %v", commit, err)
+		}
+		if source.LastCommit == nil || *source.LastCommit != commit || source.LastError != nil || source.LastSyncAt == nil {
+			t.Fatalf("source after importing %s = %+v", commit, source)
+		}
+		var snapshots int
+		if err := database.Pool.QueryRow(ctx,
+			`select count(*) from architecture_snapshots where project_key = 'CORE' and commit = $1`, commit).Scan(&snapshots); err != nil || snapshots != 1 {
+			t.Fatalf("snapshots of %s = %d err %v, want 1: the import took a shortcut", commit, snapshots, err)
+		}
+		return *source.LastSyncAt
+	}
+	check := func(step string, want map[string]componentFact) {
+		t.Helper()
+		if got := componentFacts(t, database); !reflect.DeepEqual(got, want) {
+			t.Fatalf("component facts %s = %+v\nwant %+v", step, got, want)
+		}
+	}
+
+	// Commit A makes both components at its import.
+	importA := importAt(commitOne, tree("The web.\n"))
+	afterA := componentFacts(t, database)
+	for _, id := range []string{"platform", "web"} {
+		if afterA[id].Digest == "null" {
+			t.Fatalf("%s after A has no digest: %+v", id, afterA)
+		}
+	}
+	if afterA["platform"].Digest == afterA["web"].Digest {
+		t.Fatalf("platform and web digest alike: %+v", afterA)
+	}
+	check("after A", map[string]componentFact{
+		"platform": {stamp(&importA), stamp(&importA), afterA["platform"].Digest},
+		"web":      {stamp(&importA), stamp(&importA), afterA["web"].Digest},
+	})
+
+	// A's files again, at another commit: both components are inserted again and nothing moves.
+	importAt(commitTwo, tree("The web.\n"))
+	check("after A again", afterA)
+
+	// Commit B changes web's prose alone: web's changed_at moves, platform stays.
+	importB := importAt(commitThree, tree("The web, rewritten.\n"))
+	if !importB.After(importA) {
+		t.Fatalf("import B at %s is not after import A at %s", importB, importA)
+	}
+	afterB := componentFacts(t, database)
+	if afterB["web"].Digest == afterA["web"].Digest || afterB["web"].Digest == "null" {
+		t.Fatalf("web's digest after B = %q, want a new one (A's %q)", afterB["web"].Digest, afterA["web"].Digest)
+	}
+	check("after B", map[string]componentFact{
+		"platform": afterA["platform"],
+		"web":      {stamp(&importA), stamp(&importB), afterB["web"].Digest},
+	})
+
+	// Commit C retires web, and its row goes with it.
+	importAt(strings.Repeat("4", 40), map[string]string{"platform.md": platform})
+	check("after C", map[string]componentFact{"platform": afterA["platform"]})
+
+	// Commit D brings web back as B left it: it is made again at D.
+	importD := importAt(strings.Repeat("5", 40), tree("The web, rewritten.\n"))
+	if !importD.After(importB) {
+		t.Fatalf("import D at %s is not after import B at %s", importD, importB)
+	}
+	check("after D", map[string]componentFact{
+		"platform": afterA["platform"],
+		"web":      {stamp(&importD), stamp(&importD), afterB["web"].Digest},
+	})
+
+	// platform as the migration seeds a component stored before this release: nothing recorded.
+	if _, err := database.Pool.Exec(ctx,
+		`update component_facts set made_at = null, changed_at = null, digest = null where project_key = 'CORE' and id = 'platform'`); err != nil {
+		t.Fatalf("seed platform unrecorded: %v", err)
+	}
+	// Commit E changes web alone: platform gains its digest and keeps its times unrecorded.
+	importE := importAt(strings.Repeat("6", 40), tree("The web, once more.\n"))
+	afterE := componentFacts(t, database)
+	check("after E", map[string]componentFact{
+		"platform": {"null", "null", afterA["platform"].Digest},
+		"web":      {stamp(&importD), stamp(&importE), afterE["web"].Digest},
+	})
+	if afterE["web"].Digest == afterB["web"].Digest {
+		t.Fatalf("web's digest after E = %q, want a new one", afterE["web"].Digest)
+	}
+}
+
 // The sync's own deadline is an import failure like any other: it lands on
 // the row (and emits one sync_failed) while the caller is still alive, so the
 // Settings row and the ticker's next tick both see why nothing imported.

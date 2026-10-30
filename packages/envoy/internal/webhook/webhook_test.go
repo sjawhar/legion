@@ -1,6 +1,7 @@
 package webhook
 
 import (
+	"context"
 	"sync"
 
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -14,7 +15,7 @@ type mockPublisher struct {
 	err       error
 }
 
-func (m *mockPublisher) Publish(item contracts.Envelope) error {
+func (m *mockPublisher) PublishWithin(_ context.Context, item contracts.Envelope) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.published = append(m.published, item)
@@ -29,12 +30,12 @@ type mockRecorder struct {
 	suiteErr   error
 }
 
-func (m *mockRecorder) Record(observation contracts.CIObservation) error {
+func (m *mockRecorder) Record(_ context.Context, observation contracts.CIObservation) error {
 	m.calls = append(m.calls, observation)
 	return m.err
 }
 
-func (m *mockRecorder) RecordSuite(observation contracts.CIObservation) error {
+func (m *mockRecorder) RecordSuite(_ context.Context, observation contracts.CIObservation) error {
 	m.suiteCalls = append(m.suiteCalls, observation)
 	return m.suiteErr
 }

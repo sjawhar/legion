@@ -21,9 +21,9 @@ events and sends them to the current Claude Code session as supported
   server. Omitting the key would not work — omp would fall through to `.mcp.json`. Skills are
   unaffected: both harnesses resolve them from `.claude-plugin/plugin.json`.
 - `hooks/hooks.json` runs `dist/session-hook.js open-asks` on every `SessionStart` (startup,
-  resume, clear, compact, fork). Each of its hooks has a 20 s `timeout` (Claude Code's field is in
-  seconds): every hook resolves Dispatch first, and a `!` `dispatch.token` may run for up to 10 s in
-  the hook's own process after Bun starts, so the hook outlasts it and says why rather than being
+  resume, clear, compact, fork). Each of its hooks that resolves Dispatch with commands run has a
+  20 s `timeout` (Claude Code's field is in seconds): a `!` `dispatch.token` may run for up to 10 s
+  in the hook's own process after Bun starts, so the hook outlasts it and says why rather than being
   killed silently. It writes `export DISPATCH_HOST=claude` and
   `export ENVOY_CONFIG_FILE='<path>'` (the session's envoy.json, below) to `CLAUDE_ENV_FILE` once
   each, which Claude Code sources into every later Bash command of the session, records the current
@@ -43,13 +43,47 @@ events and sends them to the current Claude Code session as supported
   session on the same `SessionStart` events and of each subagent (`SubagentStart`), as a hook of
   its own so neither output crowds the other past Claude Code's 10,000-character hook limit. On a
   resume or fork Claude Code adds it only when the transcript does not already hold the same text,
-  so a session keeps one copy, and one opened before the skill shipped gets it. On every
-  `UserPromptSubmit`, `dist/session-title-hook.js` records the name a person gave the session
-  (below, "Session title"); its `timeout` is 5 s, and it is a bundle of its own because Claude
-  Code holds the prompt until it returns.
+  so a session keeps one copy, and one opened before the skill shipped gets it. On the same
+  `SessionStart` events and at each `SubagentStart`, `dist/session-hook.js answers`, a third hook of
+  its own, puts what people wrote to the session in the last 72 hours (answers to its asks, replies
+  to its comments, comments on documents it wrote, messages to it) into the
+  context, read from `GET /api/v1/agents/{session_id}/answers` for the hook input's `session_id`,
+  which at `SubagentStart` is the parent's: the same list, under 8,000 characters, that every
+  Oh My Pi model request carries (`@legion/envoy-client/session-answers`). It prints within 800 ms
+  of its start, Bun's start-up included, or 150 ms after its own code begins when the start-up alone
+  took longer, carrying the last list read (`answers.json` in the session's Dispatch state
+  directory) when Dispatch has not answered by then, or one line saying the list could not be read
+  and why when no list read before has an item to show, and exits 50 ms after that, always with
+  status 0 and with no output when there is nothing to show; its `timeout` is 5 s. A `!` command
+  in envoy.json runs in a process of its own that the hook starts detached, one per session at a
+  time, and waits on until that same deadline: a slower command costs that hook the fresh list,
+  never the bound, and still runs to its end (or its 10 s timeout, its output file removed either
+  way) in that process, which reads the list with its token for the next hook; until then only a
+  list read from the Dispatch URL envoy.json names now stands in, never one another Dispatch
+  answered. On every `UserPromptSubmit`, `dist/session-title-hook.js` records the name a person
+  gave the session (below, "Session title"); its `timeout` is 5 s, and it is a bundle of its own
+  because Claude Code holds the prompt until it returns.
 - The channel server subscribes directly to `notifications.agent.<session_id>` and to every topic
   followed by `envoy_subscribe`. It renders every envelope with the shared
   `@legion/envoy-client/delivery` renderer and never exposes raw envelope bytes.
+- A message published while those subscriptions were down (NATS restarting, the connection
+  dropped, the session not running) is recovered from Envoy's notification stream, which keeps
+  messages for 72 hours: the server asks its listener (`POST /v1/replay`) for what the stream
+  stored on the session's own subject and on each topic it follows, at start (a resume included),
+  after a reconnect, on every heartbeat and after a new follow, and delivers each missed message
+  once, the same way as a live one, with a line saying when it was published while the connection
+  was down. It runs nothing: a Dispatch delivery recovered this way is that event and no more.
+  The server pings NATS every 10 seconds and drops a connection that leaves two pings unanswered,
+  so a connection that stops answering without closing is left within 30 seconds and redialed.
+  Role messages and team or other ad-hoc topics are live only and are not recovered, and neither
+  is anything older than 72 hours, from before the session followed the topic, or from before it
+  first ran this version of the plugin; a `/clear` starts afresh, as a new session does. What the
+  session was shown and where it read to are kept in `replay-<session id>.json` in the plugin's
+  data directory, so a resume skips nothing the stream still holds and delivers nothing again (up
+  to 20,000 messages shown in 72 hours); a crash between handing a message over and recording it
+  can deliver it twice, never lose it. A message that fails three times is replaced by one notice
+  naming it. Against a listener without the route, the server says once on stderr that missed
+  messages are not recovered, and live delivery goes on as before.
 - A forwarded role-lane envelope (one that still names its `notifications.role.<role>` topic while
   arriving on the direct subject) receives its empty receipt immediately after the server accepts
   the event into its ordered MCP notification queue. That confirms adapter acceptance, not that
@@ -234,8 +268,9 @@ Claude Code when `legion.yaml` sets `worker_backends: {<role>: claude}` (tmux ru
   running turn otherwise. So the session advertises `steer` (Dispatch's Send) beside `aside`, and
   the bridge handles both alike.
 
-`legion/` is generated by `scripts/build.ts` from Legion's worker skills and task agents; rebuild it
-with the bundle and never edit it by hand. A standalone Claude Code session doesn't load it.
+`legion/` is generated by `scripts/build.ts` from Legion's worker skills and task agents; main's
+Rebuild Claude Envoy plugin workflow commits it with the bundle (below), and nobody edits it by
+hand. A standalone Claude Code session doesn't load it.
 
 ## The bundle
 
@@ -252,11 +287,38 @@ is inlined from `package.json`, so the MCP server reports `package.json`'s versi
 every third-party package they inline, written from Bun's metafile by
 `scripts/third-party-notices.ts` at the repository root.
 
-- `bun run build` rebuilds `dist/` (`Bun.build`, target `bun`, `minify: false`, no sourcemap), notices included. Minification is off entirely, not case by case: the partial-disable form (`{whitespace: false, identifiers: false, syntax: false}`) still routes through Bun 1.3.14's minifying code-generation path, which picks a non-deterministic CJS/ESM interop check on repeated builds of this exact module graph — on top of the syntax minifier's own separate bug, truncating constant-folded multi-operand string concatenation in CI builds, that made the partial form necessary before this. A plain `false` bypasses that whole path; whitespace and identifiers stay readable as a side effect, so independent changes still merge at line level.
-- `bun run check-dist` rebuilds into a scratch directory and fails when it differs from the
-  committed files. CI runs it on the Bun version pinned in the repo-root `.bun-version`, because
+- Main's tree carries the bundles and `legion/`; a pull request never commits them. Main's Rebuild
+  Claude Envoy plugin workflow (`.github/workflows/claude-envoy-rebuild.yaml`) builds main's tip
+  after each merge and commits `dist/` and `legion/` when they differ, onto main's tip at the time
+  it lands even when main moved meanwhile, unless main already holds a newer build; when a build
+  input (`scripts/build-inputs.txt`) changed in between, it starts a fresh run too. So main's
+  built files are a build of a recent main, at most one run behind its inputs, its two jobs'
+  runner queues included (more than an hour when the Actions queue is long). In that window
+  `hooks/hooks.json`, `.mcp.json`, `bin/` and `.claude-plugin/` from the merge are live beside the
+  previous build, so an install then gets a hook or server entry that names a bundle the previous
+  build lacks; add a bundle in one pull request and the entry that runs it in a later one.
+  `scripts/build.ts` takes exactly one mode and refuses a run that names none (exit 2); neither
+  mode writes the package's own `dist/` or `legion/`. `--check` (`bun run check-dist`) builds into
+  a scratch directory and fails when the committed files differ from it; `--out <dir>` makes a new
+  or empty directory outside the repository a runnable copy of the plugin built from the tree (its
+  manifests, `.mcp.json`, `bin/`, `hooks/`, `package.json` and skills, the skill links
+  dereferenced, with a fresh `dist/` and `legion/`), which is how to run an unmerged tree.
+- `bun run verify-build <tar>` (`scripts/verify-build.sh`) is that workflow's build step: it builds
+  the plugin twice into a scratch directory outside the repository and says so when the two builds
+  differ, runs the private-name check over the first build's `dist/` and `legion/`, refuses a
+  generated file git ignores (`git add -A` would skip it, so main would silently lack it), packs
+  the two directories into `<tar>`, which must be outside the repository, and runs
+  `release-push.sh check-built` over it, the member checks the push job's `push-built` runs before
+  it commits. It writes no file of the checkout, so running it on a pull request's tree changes
+  nothing jj records; nothing a person runs locally writes `dist/` or `legion/`. The jobs that
+  run it are named in its header, and the jobs that extract the checked tar into their own CI
+  checkout in `release-push.sh`'s `extract-built` paragraph. Pull-request CI runs it, so a skill
+  file that is executable, a symlink or named with a space, or a bundle `BUNDLE_ENTRYPOINTS` no
+  longer names, fails there instead of failing every rebuild on main.
+- The build is `Bun.build`, target `bun`, `minify: false`, no sourcemap, notices included. Minification is off entirely, not case by case: the partial-disable form (`{whitespace: false, identifiers: false, syntax: false}`) still routes through Bun 1.3.14's minifying code-generation path, which picks a non-deterministic CJS/ESM interop check on repeated builds of this exact module graph — on top of the syntax minifier's own separate bug, truncating constant-folded multi-operand string concatenation in CI builds, that made the partial form necessary before this. A plain `false` bypasses that whole path; whitespace and identifiers stay readable as a side effect, so independent changes still merge at line level.
+- Every mode builds only on the Bun version pinned in the repo-root `.bun-version`, because
   the bundler's own output depends on the exact Bun build, not only the declared version. Two
-  separate, compounding causes made that check fail unpredictably: the minify setting above (a
+  separate, compounding causes made `check-dist` fail unpredictably: the minify setting above (a
   non-determinism *within* one Bun build's own bundler) and a second, independent bug
   (LEGION-568) — `bun run build`/`bun run check-dist` spawn a new "bun" process to run
   `scripts/build.ts`, and that spawn resolves "bun" from PATH rather than reusing whichever binary
@@ -270,8 +332,8 @@ every third-party package they inline, written from Bun's metafile by
   path directly — not `bun run` — when a version manager's default differs from it.
 - pi-envoy solves the same problem with `scripts/pi-plugin-prepack.sh` (at the repository root, the
   prepack of both Oh My Pi plugins) for npm; this plugin's distribution channel is
-  the git repository, so its bundle lives in-tree. An npm-published plugin and a `dist` release
-  branch were considered and rejected as more moving parts for the same result.
+  the git repository, so its bundle lives in main's tree. An npm-published plugin and a `dist`
+  release branch were considered and rejected as more moving parts for the same result.
 
 ## Updates
 
@@ -288,6 +350,9 @@ Claude Code session loads. Claude Code's background auto-update does the same on
 file would hold every install at the tree it was first installed from until someone changed the
 string, so a test holds both files to none.
 `package.json`'s version plays no part in an update.
+claude-envoy has no release of its own, so `.github/workflows/changelog-fold.yaml` folds its
+changelog fragments (`.changes/unreleased/`) into `CHANGELOG.md` under `main@<commit>` at the
+first fold run after they merge.
 
 ## Enable the channel
 
@@ -450,37 +515,42 @@ source-tree diagnostics, pass a temporary bare-server config through `CLAUDE_MCP
 `CLAUDE_CHANNEL_ENTRY=server:envoy`; the marketplace command above is the plugin packaging check.
 
 To exercise an unmerged checkout the way the marketplace would install it, register a development
-marketplace with a `command` source in copy mode whose command prints a staged copy of the package
-(without `node_modules`), install `claude-envoy@<dev-marketplace>`, and run the smoke against
-that entry. Never `claude plugin marketplace add sjawhar/legion#<branch>`: the marketplace name comes
-from the repository's `marketplace.json` and would replace the real `legion-plugins` registration.
+marketplace with a `command` source in copy mode whose command builds a copy of the plugin with
+`bun packages/claude-envoy/scripts/build.ts --out <dir>` (a new or empty directory outside the
+repository, without `node_modules`) and prints it, install `claude-envoy@<dev-marketplace>`, and
+run the smoke against that entry. Never `claude plugin marketplace add sjawhar/legion#<branch>`: the
+marketplace name comes from the repository's `marketplace.json` and would replace the real
+`legion-plugins` registration.
 
 `smoke-clear-rebind.sh` checks the `/clear` handoff against the live listener. It starts Claude
 Code with user settings left out (`--setting-sources project,local`) and the build under test from
-`--plugin-dir` (`CLAUDE_PLUGIN_DIR`, default: this package, which runs its committed `dist/`, so run
-`bun run build` first), sends `/clear`, and passes when the registry entry has moved to the new
-session id, lists the new direct subject, and still lacks the old one two heartbeats later. It also
-fails when the entry moves later than the handoff poll allows; with `ENVOY_HEARTBEAT_MS=60000` that
-checks the poll rather than a heartbeat that happened to fall soon after `/clear`. It needs
-`tmux`, `curl`, `jq`, an authenticated `claude`, and the listener and NATS; it sends no prompt to the
-model and removes both ids' registry entries when it exits. Like `smoke-channel.sh`, it runs its
-session on its own tmux server, on a socket in its temp directory, and prints the
-`tmux -S <socket> attach -t <session>` line that watches it. Pointed at an older build (an installed
-plugin cache directory), it reproduces the stale subject that build leaves behind:
+`--plugin-dir` (`CLAUDE_PLUGIN_DIR`, default: a copy of the plugin it builds from this tree with
+`scripts/build.ts --out` in its temp directory), sends `/clear`, and passes when the registry entry
+has moved to the new session id, lists the new direct subject, and still lacks the old one two
+heartbeats later. It also fails when the entry moves later than the handoff poll allows; with
+`ENVOY_HEARTBEAT_MS=60000` that checks the poll rather than a heartbeat that happened to fall soon
+after `/clear`. It needs `tmux`, `curl`, `jq`, `bun` (for the default build), an authenticated
+`claude`, and the listener and NATS; it sends no prompt to the model and removes both ids' registry
+entries when it exits. Like `smoke-channel.sh`, it runs its session on its own tmux server, on a
+socket in its temp directory, and prints the `tmux -S <socket> attach -t <session>` line that
+watches it. Pointed at an older build (an installed plugin cache directory), it reproduces the
+stale subject that build leaves behind:
 
 ```bash
 ENVOY_NATS_URL=nats://127.0.0.1:4222 packages/claude-envoy/scripts/smoke-clear-rebind.sh
 ```
 
 `smoke-session-title.sh` checks that the name a person gave a session is what the plugin
-registers. It starts a nats-server and an Envoy listener built from this tree, runs the committed
+registers. It starts a nats-server and an Envoy listener built from this tree, builds a copy of
+the plugin from this tree in its temp directory (`scripts/build.ts --out`), runs that copy's
 `dist/session-hook.js` and `dist/session-title-hook.js` on the payloads Claude Code's hooks
-reference documents and `dist/envoy-channel.js` as the session, and reads each title back through
-the listener's `GET /v1/sessions`: the chosen name registers alone, a rename replaces it, taking
-the name away brings the folder-and-short-id title back, and the `dispatch` command's stamp in
-the session's Dispatch state directory carries the same name. Its negative control runs the first
-case again against the `dist/envoy-channel.js` of `BASE_REV` (default `main@origin`), which
-registers the folder name instead. It needs `bun`, `curl`, `jq`, `go` and `nats-server`
+reference documents and its `dist/envoy-channel.js` as the session, and reads each title back
+through the listener's `GET /v1/sessions`: the chosen name registers alone, a rename replaces it,
+taking the name away brings the folder-and-short-id title back, and the `dispatch` command's stamp
+in the session's Dispatch state directory carries the same name. Its negative control runs the
+first case again against the committed `dist/envoy-channel.js` of `BASE_REV` (default
+`0306bcbe16df-`, the last revision without the fallback), which registers the folder name instead.
+It needs `bun`, `curl`, `jq`, `go` and `nats-server`
 (`go install github.com/nats-io/nats-server/v2@v2.11.4`), and no Claude authentication, since
 Claude Code is not installed in an issue pod and the two hook payloads are written by the script;
 that the field arrives at all rests on Claude Code's documentation. Like the other two, it is
@@ -496,5 +566,18 @@ bash packages/claude-envoy/scripts/smoke-session-title.sh
 bun run --cwd packages/claude-envoy lint
 bun run --cwd packages/claude-envoy typecheck
 bun run --cwd packages/claude-envoy test
-bun run --cwd packages/claude-envoy check-dist
+bun packages/claude-envoy/scripts/build.ts --out "$(mktemp -d)"
+```
+
+`bun run --cwd packages/claude-envoy check-dist` compares main's committed `dist/` and `legion/`
+with a fresh build: run it at a commit on main, since a pull request's tree carries no fresh copy.
+`tests/answers-claude.test.ts` runs the real Claude Code, the release `.claude-code-pin` at the
+repository root pins, against a stand-in Messages endpoint and Dispatch: the list reaches the model
+at startup, on `--resume`, after `/compact` and in a subagent. It skips without `LEGION_TEST_CLAUDE`
+naming the binary, except on GitHub Actions, where `.github/actions/install-claude-code` installs
+the pin. Locally:
+
+```bash
+mkdir -p "$TMPDIR/claude-code" && bun add --cwd "$TMPDIR/claude-code" --exact --no-save "@anthropic-ai/claude-code@$(<.claude-code-pin)"
+cd packages/claude-envoy && LEGION_TEST_CLAUDE="$TMPDIR/claude-code/node_modules/.bin/claude" bun test tests/answers-claude.test.ts
 ```

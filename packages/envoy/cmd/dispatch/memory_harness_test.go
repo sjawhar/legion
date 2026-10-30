@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -27,6 +26,7 @@ import (
 	"github.com/reearth/ygo/encoding"
 	ygsync "github.com/reearth/ygo/sync"
 
+	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -36,9 +36,9 @@ import (
 // The real-process harness the memory tests (memory_test.go) drive Dispatch through: a test
 // binary that runs main as a Dispatch server on the shared test database (memoryTestServeEnv), the
 // server's resident memory read from /proc, and requests over HTTP and the document websocket.
-// Both files build only under the `memory` tag, which the dispatch-memory-shard CI jobs set:
-// their rows run past go test's default deadline, so the unit run of every Go package leaves
-// them out.
+// Both files build only under the `memory` tag, which the shards of ci.yaml's dispatch-memory job
+// set (.github/workflows/ci.yaml): their rows run past go test's default deadline, so the unit
+// run of every Go package leaves them out.
 
 const memoryTestToken = "memory-test-token"
 
@@ -121,16 +121,13 @@ type memoryServer struct {
 	trace string
 }
 
+// start starts a Dispatch server on a loopback port the kernel chose and the test holds from that
+// moment, which the server inherits as DISPATCH_LISTEN_FD and serves on, so no other program can
+// take the port before it serves.
 func (h *memoryHarness) start(t *testing.T) *memoryServer {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("find a free port: %v", err)
-	}
-	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
-	if err := listener.Close(); err != nil {
-		t.Fatalf("free the port: %v", err)
-	}
+	held := cmdtest.HoldPort(t)
+	port := strconv.Itoa(held.Port)
 	// Every server samples its memory: peakResident reads the trace for what the Go memory limit
 	// bounds, what the runtime has mapped less what it has handed back, which no kernel's /proc
 	// reports, and on a kernel without VmHWM for what the pod's kernel would charge as well.
@@ -142,6 +139,7 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 		memoryTestServeEnv + "=1",
 		"DATABASE_URL=" + h.database.Pool.Config().ConnString(),
 		"DISPATCH_AGENT_TOKEN=" + memoryTestToken,
+		"DISPATCH_SIGNING_KEY=memory-test-signing-key",
 		"DISPATCH_IDENTITY=header:X-Dispatch-User",
 		"DISPATCH_IDENTITY_HEADER_TRUSTED=1",
 		"DISPATCH_NATS_DISABLED=1",
@@ -165,9 +163,14 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 		"DISPATCH_MEMORY_TRACE=" + trace,
 	}
 	command.Env = append(command.Env, h.env...)
+	held.Pass(command, "DISPATCH_LISTEN_FD")
 	server := &memoryServer{command: command, base: "http://127.0.0.1:" + port, output: &lockedBuffer{}, exited: make(chan struct{}), trace: trace}
 	command.Stdout, command.Stderr = server.output, server.output
-	if err := command.Start(); err != nil {
+	err := command.Start()
+	// The server holds its own copy of the socket from here on, so it releases the port when it
+	// exits.
+	cmdtest.CloseExtraFiles(command)
+	if err != nil {
 		t.Fatalf("start a Dispatch server: %v", err)
 	}
 	go func() {
@@ -176,8 +179,16 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 	}()
 	t.Cleanup(func() { server.stop(t) })
 	deadline := time.Now().Add(time.Minute)
+	// The kernel queues a request on the held socket until the server serves it, so each one is
+	// bounded by the start's own deadline.
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
 	for {
-		if response, err := http.Get(server.base + "/healthz"); err == nil {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.base+"/healthz", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response, err := http.DefaultClient.Do(request); err == nil {
 			_ = response.Body.Close()
 			if response.StatusCode == http.StatusOK {
 				break

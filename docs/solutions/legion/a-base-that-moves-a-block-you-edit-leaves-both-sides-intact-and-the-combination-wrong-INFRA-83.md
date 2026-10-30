@@ -7,7 +7,7 @@ tags:
   - skills
   - review-rounds
 date: 2026-10-25
-status: active
+status: superseded in part by sjawhar/legion#2423 — a pull request no longer carries a generated copy under `packages/claude-envoy/legion/`, which main's Rebuild Claude Envoy plugin workflow commits after each merge, so the two checks run against a `bun scripts/build.ts --out <dir>` build; theirs-for-structure, ours-for-content and the two reads stand
 module: skills
 related_issues:
   - "INFRA-83"

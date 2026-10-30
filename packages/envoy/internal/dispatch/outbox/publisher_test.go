@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
@@ -21,6 +22,26 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
+
+// answered is a channel already holding err, the outcome of a test publisher that answers each
+// publish before it returns: the outbox reads such an answer the moment it sends, as it reads one
+// a bus.Client.Window's PublishAsync decides before anything is sent.
+func answered(err error) <-chan error {
+	answer := make(chan error, 1)
+	answer <- err
+	return answer
+}
+
+// publish runs one attempt of event to its end, as scanBatch does for each event of a batch, with
+// the comment recipients read as scanBatch reads a batch's (resolveCommentRecipients), and returns
+// why it did not finish: errMentionPending when it held a mentioned session's copy back.
+func publish(ctx context.Context, deps Deps, event model.Event, slug string, routing routing, delivered map[string]struct{}) error {
+	pending := []pendingEvent{{event: event, slug: slug, routing: routing}}
+	resolveCommentRecipients(ctx, deps, pending)
+	a := send(ctx, deps, deps.Publisher.Window(), pending[0], delivered)
+	a.wait(ctx)
+	return a.err()
+}
 
 type recordingPublisher struct {
 	mu          sync.Mutex
@@ -48,6 +69,12 @@ func (p *recordingPublisher) Publish(item contracts.Envelope) error {
 	return nil
 }
 
+func (p *recordingPublisher) Window() bus.Sender { return p }
+
+func (p *recordingPublisher) PublishAsync(item contracts.Envelope) <-chan error {
+	return answered(p.Publish(item))
+}
+
 func (p *recordingPublisher) all() []contracts.Envelope {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -72,6 +99,12 @@ func (p *blockingFailPublisher) Publish(contracts.Envelope) error {
 		<-p.release
 	}
 	return errors.New("publisher unavailable")
+}
+
+func (p *blockingFailPublisher) Window() bus.Sender { return p }
+
+func (p *blockingFailPublisher) PublishAsync(item contracts.Envelope) <-chan error {
+	return answered(p.Publish(item))
 }
 
 func TestRunPublishesAskAnswerEnvelope(t *testing.T) {
@@ -312,7 +345,7 @@ func TestPublishAuthorRoutesNotifiesTheAddedOrRemovedFollowerDirectly(t *testing
 				Actor:   model.Actor{Kind: "user", ID: "alice"},
 				Payload: map[string]any{"ask_id": "5a660655-04ad-4ce0-8a9b-93dd03c412b7", "session_id": "session-asker"},
 			}
-			if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, &attempt{delivered: map[string]struct{}{}}); err != nil {
+			if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, recipientList{}, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
 				t.Fatalf("publish author routes: %v", err)
 			}
 			got := publisher.all()
@@ -374,7 +407,7 @@ func TestPublishPreviousClaimantTellsTheSessionThatLostTheClaim(t *testing.T) {
 			deps := Deps{Store: database, Publisher: publisher}
 			item := contracts.Envelope{EventID: "dispatch-1", Topic: "notifications.dispatch.issue.T-1." + tc.eventType}
 			event := model.Event{Type: tc.eventType, Actor: tc.actor, Payload: tc.payload}
-			if err := publishPreviousClaimant(context.Background(), deps, 0, item, event, &attempt{delivered: map[string]struct{}{}}); err != nil {
+			if err := publishPreviousClaimant(deps, 0, item, event, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
 				t.Fatalf("publish previous claimant: %v", err)
 			}
 			if got := topicsOf(publisher.all()); !reflect.DeepEqual(got, tc.want) {
@@ -782,7 +815,11 @@ func TestPublishAuthorRoutesSkipsAgentReplyingToItself(t *testing.T) {
 		Actor:   model.Actor{Kind: "session", ID: "session-writer"},
 		Payload: map[string]any{"reply_to": rootID},
 	}
-	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, &attempt{delivered: map[string]struct{}{}}); err != nil {
+	recipients, err := loadCommentRecipients(context.Background(), deps, []string{rootID})
+	if err != nil {
+		t.Fatalf("load comment recipients: %v", err)
+	}
+	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, recipientList{sessions: recipients[rootID]}, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
 		t.Fatalf("publish author routes: %v", err)
 	}
 
@@ -806,7 +843,7 @@ func TestPublishAuthorRoutesNotifiesTheUnsubscribedSessionDirectly(t *testing.T)
 			"topics":     []any{"notifications.dispatch.issue.T-1.>"},
 		},
 	}
-	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, &attempt{delivered: map[string]struct{}{}}); err != nil {
+	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, recipientList{}, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
 		t.Fatalf("publish author routes: %v", err)
 	}
 
@@ -827,7 +864,7 @@ func TestPublishAuthorRoutesSkipsSubscriptionRemovedWithoutASessionID(t *testing
 		Actor:   model.Actor{Kind: "user", ID: "alice"},
 		Payload: map[string]any{"by": map[string]any{"kind": "user", "id": "alice"}, "topics": []any{}},
 	}
-	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, &attempt{delivered: map[string]struct{}{}}); err != nil {
+	if err := publishAuthorRoutes(context.Background(), deps, 0, item, event, recipientList{}, &attempt{delivered: map[string]struct{}{}, sender: publisher}); err != nil {
 		t.Fatalf("publish author routes: %v", err)
 	}
 
@@ -962,9 +999,9 @@ func TestRunStillPublishesWhenTheRootWalkHitsAReplyToCycle(t *testing.T) {
 	stop := run(t, database, publisher, broker)
 	defer stop()
 
-	// A malformed cycle must not stop the event from reaching its own issue topic or
-	// resolving the direct parent's author (a plain, non-recursive lookup); only the
-	// unresolvable thread-root walk is skipped.
+	// A malformed cycle must not stop the event from reaching its own issue topic or the
+	// author of the comment it replies to, which the bounded walk up visited; only the
+	// thread root, which the walk cannot find, is missing.
 	waitFor(t, 5*time.Second, "cyclic reply_to publication", func() bool {
 		return len(publisher.all()) == 2 && publishedAt(t, database, event.ID) != nil
 	})

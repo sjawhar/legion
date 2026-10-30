@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/testnats"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -390,6 +391,63 @@ func TestAPublishRefusedAsTooLargeIsNotLoggedAsAFailure(t *testing.T) {
 				t.Fatalf("log = %q, want a %q line and no %q line", got, tc.want, tc.not)
 			}
 		})
+	}
+}
+
+// A delivery whose publish finds the stream full is answered 503, which GitHub redelivers, and not
+// the 422 of a refusal, which it takes as final; it is logged as a failed publish naming the full
+// stream, and the stream keeps every message it held (a real server, a small byte limit).
+func TestADeliveryToAFullStreamIsAnswered503(t *testing.T) {
+	const limit = 16 << 10
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)}, bus.WithStreamMaxBytes(limit))
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(client.Close)
+	for i := 0; ; i++ {
+		if i == 64 {
+			t.Fatalf("the stream took %d messages of 1 KiB under a %d-byte limit", i, limit)
+		}
+		err := client.Publish(contracts.Envelope{
+			EventID: fmt.Sprintf("fill-%d", i), Source: "github", Topic: fmt.Sprintf("notifications.github.fill.%d", i),
+			DedupeKey: fmt.Sprintf("fill.%d", i), PayloadSummary: strings.Repeat("x", 1<<10),
+		})
+		if err != nil {
+			if !errors.Is(err, bus.ErrStreamFull) {
+				t.Fatalf("fill publish %d = %v, want bus.ErrStreamFull", i, err)
+			}
+			break
+		}
+	}
+	before, err := client.JS().StreamInfo(bus.Stream)
+	if err != nil {
+		t.Fatalf("read the full stream: %v", err)
+	}
+
+	var logged bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	push := []byte(`{"ref":"refs/heads/main","repository":{"name":"legion","owner":{"login":"sjawhar"},"full_name":"sjawhar/legion"}}`)
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", bytes.NewReader(push))
+	req.Header.Set("X-GitHub-Delivery", "d-full")
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("X-Hub-Signature-256", githubSign("s", push))
+	rec := httptest.NewRecorder()
+	GitHubHandler("s", "@legion", "", client, &mockRecorder{}).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body = %s", rec.Code, rec.Body.String())
+	}
+	if got := logged.String(); !strings.Contains(got, "github publish failed:") || !strings.Contains(got, bus.ErrStreamFull.Error()) {
+		t.Fatalf("log = %q, want a github publish failed line naming %q", got, bus.ErrStreamFull)
+	}
+	after, err := client.JS().StreamInfo(bus.Stream)
+	if err != nil {
+		t.Fatalf("read the stream after the delivery: %v", err)
+	}
+	if after.State.Msgs != before.State.Msgs || after.State.FirstSeq != before.State.FirstSeq || after.State.LastSeq != before.State.LastSeq {
+		t.Fatalf("stream state after the delivery = %+v, want the state before it, %+v", after.State, before.State)
 	}
 }
 

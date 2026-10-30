@@ -89,7 +89,6 @@ type Anchored struct {
 
 // MarkQuote marks one matching quote and returns what the new mark anchors to.
 func (s *Service) MarkQuote(ctx context.Context, artifactID string, mark MarkSpec, quote string, occurrence *int) (Anchored, error) {
-	var anchored Anchored
 	err := s.applyLive(ctx, artifactID, mark.By, func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		tree, err := startTree(current, doc)
@@ -101,23 +100,17 @@ func (s *Service) MarkQuote(ctx context.Context, artifactID string, mark MarkSpe
 		transact(func(txn *crdt.Transaction) {
 			_, markErr = markQuoteInTxn(txn, fragment, tree, quote, occurrence, nil, mark)
 		})
-		if markErr != nil {
-			return markErr
-		}
-
-		tree, err = treeOf(doc)
-		if err != nil {
-			return err
-		}
-		anchored, err = readAnchored(tree, mark.Kind, mark.ID)
-		if errors.Is(err, ErrAnchorMissing) {
-			return fmt.Errorf("%w: written mark %q is missing", ErrDocSchema, mark.ID)
-		}
-		if err != nil {
-			return err
-		}
-		return nil
+		return markErr
 	})
+	if err != nil {
+		return Anchored{}, err
+	}
+	// applyLive keeps the tree it read from the fork after this callback as the write's rendering,
+	// so the anchor is read off it rather than off a second read of the fork.
+	anchored, err := readAnchored(ledgerFrom(ctx).writtenRendering(artifactID).tree, mark.Kind, mark.ID)
+	if errors.Is(err, ErrAnchorMissing) {
+		return Anchored{}, fmt.Errorf("%w: written mark %q is missing", ErrDocSchema, mark.ID)
+	}
 	if err != nil {
 		return Anchored{}, err
 	}
@@ -343,6 +336,9 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		if next, err = settleAccepted(tree, next, range_, with); err != nil {
 			return err
 		}
+		if err := refuseCodePipeInTableCell(tree, next, range_, "replace_with", "replace_with", with, "reject the suggestion, or reply asking for text the cell can hold"); err != nil {
+			return err
+		}
 		if !insideAsk(at) {
 			if err := refuseUnreadableAccept(tree, next, range_, at, with, replacement); err != nil {
 				return err
@@ -416,13 +412,7 @@ func (s *Service) ProjectMark(ctx context.Context, artifactID, markID string, re
 	if err != nil {
 		return err
 	}
-	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, _ *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
-		marks := doc.GetMap(marksMapName)
-		transact(func(txn *crdt.Transaction) {
-			marks.Set(txn, markID, plain)
-		})
-		return nil
-	})
+	return s.applyMargin(ctx, artifactID, actor, markID, plain)
 }
 
 func toPlain(record MarkRecord) (map[string]any, error) {
@@ -446,6 +436,14 @@ type anchoredMark struct {
 	anchor   model.Anchor
 }
 
+// markRef is the mark identity the row anchors to.
+func (m anchoredMark) markRef() pmdoc.MarkRef {
+	return pmdoc.MarkRef{Type: m.markType, ID: m.anchor.MarkID}
+}
+
+// openAnchoredMarks lists the open anchored asks, then the unresolved anchored comments, each by
+// creation time and id, so a refresh announces its rows, and an upload re-anchors them, in the same
+// order every time it runs over the same rows.
 func (s *Service) openAnchoredMarks(ctx context.Context, source Queryer, artifactID string) ([]anchoredMark, error) {
 	var marks []anchoredMark
 	for _, target := range []struct {
@@ -459,6 +457,7 @@ func (s *Service) openAnchoredMarks(ctx context.Context, source Queryer, artifac
 			select id::text, anchor, %s
 			from %s
 			where anchor is not null and anchor->>'artifact_id' = $1 and %s
+			order by created_at, id
 		`, commentMarkType(target.table), target.table, target.where), artifactID)
 		if err != nil {
 			return nil, fmt.Errorf("list %s anchors: %w", target.table, err)
@@ -503,13 +502,23 @@ func (s *Service) refreshAnchors(ctx context.Context, tx pgx.Tx, artifactID stri
 		return err
 	}
 	skippedMarkID, skipping := ctx.Value(skippedAnchorRefreshKey{}).(string)
+	skipped := func(mark anchoredMark) bool { return skipping && mark.anchor.MarkID == skippedMarkID }
+	// One walk finds every anchor: a walk per row would make each write quadratic in a document
+	// carrying many anchors. Rows sharing a key look the same result up, each refreshed in turn.
+	keys := make([]pmdoc.MarkRef, 0, len(anchors))
 	for _, mark := range anchors {
-		if skipping && mark.anchor.MarkID == skippedMarkID {
+		if !skipped(mark) {
+			keys = append(keys, mark.markRef())
+		}
+	}
+	found := pmdoc.FindMarks(tree, keys)
+	for _, mark := range anchors {
+		if skipped(mark) {
 			continue
 		}
 		refreshed := mark.anchor
-		if _, quote, found := pmdoc.FindMark(tree, mark.markType, mark.anchor.MarkID); found {
-			refreshed.Quote = quote
+		if hit, ok := found[mark.markRef()]; ok {
+			refreshed.Quote = hit.Quote
 			refreshed.Orphaned = false
 		} else {
 			refreshed.Orphaned = true
@@ -739,19 +748,27 @@ func loadAnchorRefreshedCommentDeliveries(ctx context.Context, tx pgx.Tx, id str
 	return deliveries, nil
 }
 
+// recordedMarkRefs is every mark an ask or comment row anchored on artifactID records. Each
+// predicate compares the expression of the table's index, asks_anchor_artifact or
+// comments_anchor_artifact (migration 0032), so the read is an index scan, and keeps the text
+// comparison so it returns exactly the rows that comparison alone would. Only the ask-block insert
+// sets block_artifact_id, and it writes no anchor, so an anchored ask's coalesce is its anchor's
+// artifact_id. The uuid casts cannot fail: both indexes evaluate the same casts on every row, so
+// a row whose artifact_id does not cast could not have been written.
 func (s *Service) recordedMarkRefs(ctx context.Context, artifactID string) (map[pmdoc.MarkRef]struct{}, error) {
 	recorded := make(map[pmdoc.MarkRef]struct{})
 	for _, target := range []struct {
-		table string
+		table   string
+		indexed string
 	}{
-		{table: "asks"},
-		{table: "comments"},
+		{table: "asks", indexed: `coalesce(block_artifact_id, (anchor->>'artifact_id')::uuid)`},
+		{table: "comments", indexed: `(anchor->>'artifact_id')::uuid`},
 	} {
 		rows, err := s.queryFrom(ctx).Query(ctx, fmt.Sprintf(`
 			select anchor, %s
 			from %s
-			where anchor is not null and anchor->>'artifact_id' = $1
-		`, commentMarkType(target.table), target.table), artifactID)
+			where anchor is not null and anchor->>'artifact_id' = $1 and %s = $1::uuid
+		`, commentMarkType(target.table), target.table, target.indexed), artifactID)
 		if err != nil {
 			return nil, fmt.Errorf("list recorded %s marks: %w", target.table, err)
 		}

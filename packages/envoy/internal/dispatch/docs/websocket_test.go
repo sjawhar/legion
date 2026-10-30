@@ -60,6 +60,85 @@ func TestIssueCloseClosesOpenDocumentConnection(t *testing.T) {
 	}
 }
 
+// A browser that connects while its issue is closed is admitted read-only, and a connection keeps
+// the admission it was authorized with. So a reopen closes the issue's rooms as a close does: the
+// browser reconnects and is admitted writable, rather than staying read-only until the person
+// reloads, whichever side of the reopen its reconnect after the close happened to land. It does so
+// whatever the room's state says: a state a connection's own registration (addConnection) or a
+// load after the reopen committed makes holds the default flag, open, while a browser on it was
+// admitted read-only.
+func TestIssueReopenClosesADocumentConnectionAdmittedWhileClosed(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		// recreated gives the room's state the flag a recreated state starts with.
+		recreated bool
+	}{
+		{name: "the state the close flagged closed"},
+		{name: "a recreated state's default open flag", recreated: true},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			seedServiceText(t, service, artifactID, "before")
+			httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+			t.Cleanup(httpServer.Close)
+			setIssueClosed := func(closed bool) {
+				t.Helper()
+				if _, err := service.store.Pool.Exec(context.Background(),
+					`update issues set closed_at = case when $1::boolean then now() end where key = 'DOC-1'`, closed); err != nil {
+					t.Fatalf("set the document issue's closed_at: %v", err)
+				}
+				service.SetIssueClosed(context.Background(), "DOC-1", closed)
+			}
+			setIssueClosed(true)
+			reader := connectPeer(t, httpServer.URL, artifactID, "alice")
+			waitForPeerDocument(t, reader, "before\n")
+
+			// The premise: the room admitted the reader read-only, so it drops what the reader
+			// types and keeps the connection. The room handles one connection's frames in order, so
+			// once it answers the request the reader sends after its keystroke, it has handled the
+			// keystroke.
+			typeOver(t, reader, "before", "refused")
+			for len(reader.Answers) > 0 {
+				<-reader.Answers
+			}
+			if err := reader.AskForDocument(); err != nil {
+				t.Fatalf("ask the room for the document after the reader's keystroke: %v", err)
+			}
+			select {
+			case <-reader.Answers:
+			case <-reader.Ended:
+				t.Fatal("the room closed the read-only reader's connection over its keystroke")
+			case <-time.After(10 * time.Second):
+				t.Fatal("the room did not answer the reader after its keystroke")
+			}
+			if text := documentText(t, service, artifactID); text != "before\n" {
+				t.Fatalf("the room took the read-only reader's keystroke: it holds %q, want %q", text, "before\n")
+			}
+			if row.recreated {
+				state := service.room(artifactID)
+				state.mu.Lock()
+				state.closed = false
+				state.mu.Unlock()
+			}
+
+			setIssueClosed(false)
+			// The regression check: the reopen ends the connection admitted read-only, which the
+			// browser's provider answers by reconnecting.
+			select {
+			case <-reader.Ended:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the connection admitted while the issue was closed was still open 5s after the reopen")
+			}
+			// The room a connection now loads takes edits. It loads from the store, so its copy
+			// also shows the read-only reader's keystroke never reached the store.
+			editor := connectPeer(t, httpServer.URL, artifactID, "alice")
+			waitForPeerDocument(t, editor, "before\n")
+			typeOver(t, editor, "before", "after")
+			waitForPersistedProofText(t, service.store, artifactID, "after\n")
+		})
+	}
+}
+
 func TestClosedColdRoomAuthorizesReadOnly(t *testing.T) {
 	service, artifactID := newTestService(t)
 	if _, err := service.store.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {

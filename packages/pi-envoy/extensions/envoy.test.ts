@@ -1,10 +1,23 @@
-import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  jest,
+  mock,
+  setSystemTime,
+  spyOn,
+  test,
+} from "bun:test";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -13,14 +26,22 @@ import {
 import { createServer } from "node:net";
 import { hostname, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
-import { dispatchIssueSubject } from "@legion/contracts";
+import { dispatchIssueSubject, type SessionAnswer } from "@legion/contracts";
+import { askgateState } from "@legion/envoy-client/askgate-marker";
+import { runDispatchCli } from "@legion/envoy-client/dispatch-cli";
 import { shownPictures } from "@legion/envoy-client/dispatch-picture-tools";
-import {
-  appendResult,
-  readSessionTitle,
-  sessionDirectory,
-} from "@legion/envoy-client/dispatch-session-state";
+import { sessionDirectory } from "@legion/envoy-client/dispatch-session-directory";
+import { appendResult, readSessionTitle } from "@legion/envoy-client/dispatch-session-state";
 import { machineID } from "@legion/envoy-client/machine";
+import { ReplayStateSchema } from "@legion/envoy-client/replay";
+import { renderSessionAnswers } from "@legion/envoy-client/session-answers";
+import {
+  type EnvoyStack,
+  envoyStackEnabled,
+  startEnvoyStack,
+} from "@legion/envoy-client/test/envoy-stack";
+import { startStallProxy } from "@legion/envoy-client/test/stall-proxy";
+import { runFreezeScenario } from "@legion/envoy-client/test/stall-scenario";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
@@ -45,7 +66,9 @@ import type { UserInputBuiltinCommand } from "@oh-my-pi/pi-coding-agent/extensib
 import { logger, procmgr } from "@oh-my-pi/pi-utils";
 import { decode } from "@toon-format/toon";
 import { z } from "zod";
+import { version as packageVersion } from "../package.json" with { type: "json" };
 import { resetEnvoySessionsForTests } from "../src/envoy-session";
+import { REPLAY_STATE_ENTRY } from "../src/missed-messages";
 
 type ToolResult = {
   readonly content: readonly { readonly type: "text"; readonly text: string }[];
@@ -85,6 +108,8 @@ type SessionContext = {
     readonly ensureOnDisk: () => Promise<void>;
   };
   readonly setInterval: (callback: () => void, intervalMs: number) => void;
+  /** The host's `ctx.isIdle()`: false while a turn runs. */
+  readonly isIdle?: () => boolean;
   readonly ui: {
     readonly notify: (message: string, level: "info" | "warning") => void;
     readonly onTerminalInput: (handler: (input: unknown) => void) => () => void;
@@ -167,7 +192,15 @@ const natsState = {
   heldConnect: undefined as Promise<void> | undefined,
   drainHangs: false,
   drainStarted: false,
+  /** Each mocked connection's `status()` readers: a push hands every one of them the status, as
+   *  nats.js reports a reconnect to every reader of the connection's status iterator. */
+  statusReaders: [] as ((status: { readonly type: string; readonly data: unknown }) => void)[],
 };
+
+/** Reports `{ type }` to every reader of a mocked connection's `status()`. */
+function pushNatsStatus(type: string): void {
+  for (const read of natsState.statusReaders) read({ type, data: "" });
+}
 
 const targetedDispatchPayload = readFileSync(
   new URL("../../contracts/fixtures/dispatch-targeted-delivery.json", import.meta.url),
@@ -179,11 +212,12 @@ const clipboardState = {
   error: undefined as Error | undefined,
 };
 
-// @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports, and a row
-// that sets `natsState.realConnect` gets nats.js's own connect. They are copied out of the module
-// before the mock replaces it: a static import's live bindings would read the mock.
-const { connect: realConnect, nkeyAuthenticator, nkeys } = await import("nats");
+// @legion/envoy-client/nats-connection resolves the NATS credential with the real nkey exports, and
+// a row that sets `natsState.realConnect` gets nats.js's own connect. They are copied out of the
+// module before the mock replaces it: a static import's live bindings would read the mock.
+const { connect: realConnect, Events, nkeyAuthenticator, nkeys } = await import("nats");
 mock.module("nats", () => ({
+  Events,
   nkeyAuthenticator,
   nkeys,
   connect: async (options: {
@@ -213,6 +247,34 @@ mock.module("nats", () => ({
       drain: async () => {
         natsState.drainStarted = true;
         if (natsState.drainHangs) await Promise.withResolvers<never>().promise;
+      },
+      // An async iterable of the connection's status events, which a test feeds through
+      // `pushNatsStatus`; it ends once the connection is closed.
+      status: () => {
+        const queued: { readonly type: string; readonly data: unknown }[] = [];
+        let wake: (() => void) | undefined;
+        const reader = (status: { readonly type: string; readonly data: unknown }) => {
+          queued.push(status);
+          wake?.();
+          wake = undefined;
+        };
+        natsState.statusReaders.push(reader);
+        return {
+          [Symbol.asyncIterator]: () => ({
+            next: async (): Promise<
+              IteratorResult<{ readonly type: string; readonly data: unknown }>
+            > => {
+              for (;;) {
+                if (closed) return { done: true, value: undefined };
+                const status = queued.shift();
+                if (status !== undefined) return { done: false, value: status };
+                const pending = Promise.withResolvers<void>();
+                wake = pending.resolve;
+                await pending.promise;
+              }
+            },
+          }),
+        };
       },
       publish: (subject: string, data?: Uint8Array) => {
         if (natsState.failPublishes > 0) {
@@ -347,6 +409,8 @@ const configVariables = [
   "NATS_NKEY_SEED_FILE",
 ] as const;
 const originalConfigVariables = configVariables.map((name) => [name, process.env[name]] as const);
+/** The envoy.json every test starts with: no Dispatch or Envoy section, and AskGate off. */
+const ASKGATE_OFF = { askgate: { enabled: false } };
 let configDirectory = "";
 
 beforeEach(() => {
@@ -371,12 +435,14 @@ beforeEach(() => {
   process.env.DISPATCH_STATE_DIR = mkdtempSync(join(tmpdir(), "envoy-dispatch-state-"));
   delete process.env.DISPATCH_SESSION_ID;
   // The extension picks its envoy.json when its module loads, and each test loads it fresh: a file
-  // that holds no section, so Dispatch and Envoy come from the variables the test sets and never
-  // from the caller's own envoy.json or Oh My Pi profile.
+  // that holds no Dispatch or Envoy section, so Dispatch and Envoy come from the variables the test
+  // sets and never from the caller's own envoy.json or Oh My Pi profile. It turns AskGate off: the
+  // gate loads Oh My Pi modules this workspace does not install, and its handlers would take the
+  // fixture's one slot per event (`createPi`). The tests in "AskGate" turn it back on.
   for (const name of configVariables) delete process.env[name];
   configDirectory = mkdtempSync(join(tmpdir(), "envoy-config-"));
   process.env.ENVOY_CONFIG_FILE = join(configDirectory, "envoy.json");
-  writeFileSync(process.env.ENVOY_CONFIG_FILE, "{}\n");
+  writeFileSync(process.env.ENVOY_CONFIG_FILE, `${JSON.stringify(ASKGATE_OFF)}\n`);
 });
 
 afterEach(async () => {
@@ -437,23 +503,30 @@ afterEach(async () => {
   natsState.realConnect = false;
   natsState.drainHangs = false;
   natsState.drainStarted = false;
+  natsState.statusReaders.length = 0;
   hostBuiltins.length = 0;
 });
+
+/** A message the extension sent through `pi.sendMessage`, as `createPi()` records it. */
+type Delivery = {
+  readonly content: string;
+  readonly customType?: string;
+  readonly details?: unknown;
+  readonly display?: boolean;
+  readonly options: unknown;
+};
+
+/** An event handler the extension registered through `pi.on`. */
+type EventHandler = (event: unknown, context: SessionContext) => Promise<unknown>;
 
 function createPi(options: { readonly clipboardError?: Error; readonly zod?: typeof z } = {}) {
   clipboardState.error = options.clipboardError;
   const commands: RegisteredCommand[] = [];
   const tools: RegisteredTool[] = [];
-  const handlers = new Map<string, (event: unknown, context: SessionContext) => Promise<unknown>>();
+  const handlers = new Map<string, EventHandler>();
   const renderers = new Map<string, MessageRenderer>();
   const messages: string[] = [];
-  const deliveries: {
-    readonly content: string;
-    readonly customType?: string;
-    readonly details?: unknown;
-    readonly display?: boolean;
-    readonly options: unknown;
-  }[] = [];
+  const deliveries: Delivery[] = [];
   // User turns the extension started, in the order it sent them.
   const userMessages: { readonly content: string; readonly options: unknown }[] = [];
   // Persisted custom entries, in the shape a later `getBranch()` or `getEntries()` returns them.
@@ -726,16 +799,20 @@ const acceptOnce =
       ? { accepted: true, ...(body !== undefined && { body }) }
       : { code: "ACCEPT_ALREADY_ACCEPTED", status: 409 };
 
-/** The accept route's response for `answer` to an accept of `attempt`. */
+/** The accept route's response for `answer` to an accept of `attempt`, carrying back the request's
+ *  key as Dispatch's keyed layer does (`key`), which is what lets the client ask again under it. */
 function acceptResponse(
   attempt: number,
   answer: AcceptAnswer,
-  messageID = DIRECT_MESSAGE_ID
+  messageID = DIRECT_MESSAGE_ID,
+  key: string | null = null
 ): Response {
   if ("reject" in answer) throw new TypeError(answer.reject);
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (key !== null) headers["Idempotency-Key"] = key;
   if (!("accepted" in answer)) {
     return new Response(JSON.stringify({ code: answer.code, error: "refused" }), {
-      headers: { "content-type": "application/json" },
+      headers,
       status: answer.status,
     });
   }
@@ -745,7 +822,7 @@ function acceptResponse(
   };
   const body = answer.body === undefined ? DIRECT_MESSAGE_BODY : answer.body;
   return new Response(JSON.stringify(body === null ? accepted : { ...accepted, body }), {
-    headers: { "content-type": "application/json" },
+    headers,
     status: 200,
   });
 }
@@ -756,8 +833,9 @@ function acceptResponse(
  * message call. `entries` are what the session's file already holds, as a restarted session reads
  * them, and `branch` its active branch (the entries by default); every entry the session appends
  * is read back with them. `delivered(n)` resolves once the session has taken `n` deliveries, cards
- * and user turns together, and `recordedWhenDelivered` says how many entries the session had
- * appended when each went out.
+ * and user turns together, `recordedWhenDelivered` says how many handled-attempt entries the
+ * session had appended when each went out, and `sends` holds each of them, in the order the host
+ * was handed them. `idle` is the host's `ctx.isIdle()`, which a context without it lacks.
  */
 async function bootDirectSession(
   query: string,
@@ -776,6 +854,7 @@ async function bootDirectSession(
     readonly sendUserInput?: (text: string, options: unknown) => Promise<UserInputResult>;
     /** The host's `pi.getCommands`. */
     readonly getCommands?: () => readonly HostSlashCommand[];
+    readonly idle?: () => boolean;
   } = {}
 ) {
   process.env.DISPATCH_URL = "http://dispatch.test";
@@ -783,6 +862,7 @@ async function bootDirectSession(
   const accepts: {
     readonly path: string;
     readonly authorization: string | null;
+    readonly key: string | null;
     readonly body: unknown;
   }[] = [];
   const posts: string[] = [];
@@ -791,18 +871,27 @@ async function bootDirectSession(
   const replyWaiters: { readonly count: number; readonly resolve: () => void }[] = [];
   globalThis.fetch = async (input, init) => {
     const url = new URL(input.toString());
+    // This Dispatch runs the keyed layer: its answers to a keyed write carry the key back and its
+    // /healthz says so, so a failed accept is asked again under its key.
+    if (url.pathname === "/healthz") {
+      return new Response(JSON.stringify({ status: "ok", idempotency_keys: true }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
     if (url.pathname.startsWith("/api/v1/messages/")) {
       const authorization = new Headers(init?.headers).get("Authorization");
       if ((init?.method ?? "GET") === "POST" && url.pathname.endsWith("/accept")) {
         accepts.push({
           authorization,
+          key: new Headers(init?.headers).get("Idempotency-Key"),
           body: JSON.parse(init?.body?.toString() ?? "null"),
           path: url.pathname,
         });
         return acceptResponse(
           Number(url.pathname.split("/").at(-2)),
           await (options.accept ?? acceptOnce())(accepts.length),
-          url.pathname.split("/").at(-4)
+          url.pathname.split("/").at(-4),
+          new Headers(init?.headers).get("Idempotency-Key")
         );
       }
       // The session asks Dispatch nothing else about a direct message but its reply: any other
@@ -828,7 +917,12 @@ async function bootDirectSession(
   const fixture = createPi();
   const waiters: { readonly count: number; readonly resolve: () => void }[] = [];
   const recordedWhenDelivered: number[] = [];
+  // The attempt records alone: the replay cursors and ledger the session also appends are not
+  // what a delivery has to follow.
+  const handledRecords = () =>
+    fixture.entries.filter((entry) => entry.customType === "envoy-dispatch-handled-attempt").length;
   const inputs: { readonly text: string; readonly options: unknown }[] = [];
+  const sends: { readonly content: unknown; readonly options: unknown }[] = [];
   const taken = () => {
     const count = fixture.deliveries.length + fixture.userMessages.length + inputs.length;
     for (const waiter of waiters.splice(0)) {
@@ -841,21 +935,24 @@ async function bootDirectSession(
     ...fixture.pi,
     sendMessage: (message: never, sendOptions: unknown) => {
       options.beforeSend?.();
-      recordedWhenDelivered.push(fixture.entries.length);
+      recordedWhenDelivered.push(handledRecords());
       fixture.pi.sendMessage(message, sendOptions);
+      sends.push({ content: fixture.deliveries.at(-1)?.content, options: sendOptions });
       taken();
     },
     sendUserMessage: (content: string, sendOptions?: unknown) => {
       options.beforeSend?.();
-      recordedWhenDelivered.push(fixture.entries.length);
+      recordedWhenDelivered.push(handledRecords());
+      sends.push({ content, options: sendOptions });
       fixture.pi.sendUserMessage(content, sendOptions);
       taken();
     },
     ...(run !== undefined && {
       sendUserInput: (text: string, inputOptions: unknown) => {
         options.beforeSend?.();
-        recordedWhenDelivered.push(fixture.entries.length);
+        recordedWhenDelivered.push(handledRecords());
         inputs.push({ options: inputOptions, text });
+        sends.push({ content: text, options: inputOptions });
         taken();
         return run(text, inputOptions);
       },
@@ -866,6 +963,7 @@ async function bootDirectSession(
   const base = sessionContext("ses_delivery");
   const context: SessionContext = {
     ...base,
+    ...(options.idle !== undefined && { isIdle: options.idle }),
     sessionManager: {
       ...base.sessionManager,
       getBranch: () => options.branch ?? [...prior, ...fixture.entries],
@@ -898,11 +996,50 @@ async function bootDirectSession(
     recordedWhenDelivered,
     replied,
     replies,
+    sends,
   };
+}
+
+/**
+ * Settles `pending` on the test's clock (`jest.useFakeTimers`, on for the call), moving it a
+ * second at a time: a write Dispatch keeps failing is asked again under its key until the
+ * accept's 10 s bound, and those pauses and that bound pass at once rather than in real time.
+ */
+async function onTestClock<T>(pending: () => Promise<T>): Promise<T> {
+  jest.useFakeTimers();
+  try {
+    let settled = false;
+    const watched = pending().finally(() => {
+      settled = true;
+    });
+    for (let second = 0; second < 60 && !settled; second++) {
+      for (let flush = 0; flush < 50 && !settled; flush++) await Promise.resolve();
+      jest.advanceTimersByTime(1_000);
+    }
+    return await watched;
+  } finally {
+    jest.useRealTimers();
+  }
 }
 
 function response(body: unknown): Response {
   return new Response(JSON.stringify(body), { status: 200 });
+}
+
+/** A listener that serves replay over a stream holding nothing: every subject's cursor starts. */
+function emptyReplay(init: RequestInit | undefined): Response {
+  const body = JSON.parse(init?.body?.toString() ?? "{}") as {
+    readonly subjects?: readonly { readonly subject: string }[];
+  };
+  return response({
+    stream: { created: "2026-10-01T00:00:00Z", first_seq: 0, last_seq: 0 },
+    subjects: (body.subjects ?? []).map(({ subject }) => ({
+      subject,
+      messages: [],
+      next_after: 0,
+      more: false,
+    })),
+  });
 }
 
 function responseWithRegistration(
@@ -910,7 +1047,9 @@ function responseWithRegistration(
   init: RequestInit | undefined,
   fallback: unknown
 ): Response {
-  if (new URL(input.toString()).pathname !== "/v1/interests/subscribe") return response(fallback);
+  const path = new URL(input.toString()).pathname;
+  if (path === "/v1/replay") return emptyReplay(init);
+  if (path !== "/v1/interests/subscribe") return response(fallback);
   const body = JSON.parse(init?.body?.toString() ?? "{}") as {
     readonly session_id: string;
     readonly dir: string;
@@ -1415,8 +1554,11 @@ describe("envoy OMP extension", () => {
       expect.stringMatching(/^<btw>\n[\s\S]*WAITING or PROCEEDING[\s\S]*\n<\/btw>$/),
     ]);
     expect(session.asked[0]?.signal?.aborted).toBe(false);
-    // The arming period lives in memory only: nothing about it reaches the transcript.
-    expect(session.fixture.entries).toEqual([]);
+    // The arming period lives in memory only: nothing about it reaches the transcript, whose only
+    // entries are the replay cursors.
+    expect(
+      session.fixture.entries.filter((entry) => !entry.customType.startsWith("envoy-replay-"))
+    ).toEqual([]);
   });
 
   test("runs the stop-time check on the managed timer, after agent_end has returned", async () => {
@@ -2854,7 +2996,14 @@ describe("envoy OMP extension", () => {
           self_subscribed: true,
           capabilities: ["aside", "steer"],
           host: machineID(),
+          plugin: "@sjawhar/pi-envoy",
+          plugin_version: packageVersion,
         },
+      },
+      // The opened agent subject's first sweep, which starts its cursor.
+      {
+        path: "/v1/replay",
+        body: { session_id: "ses_omp", subjects: [{ subject: "notifications.agent.ses_omp" }] },
       },
       { path: "/v1/roles/set", body: { session_id: "ses_omp", role: "controller" } },
       { path: "/v1/interests/ses_omp", body: undefined },
@@ -3625,6 +3774,8 @@ describe("envoy OMP extension", () => {
         expect(process.env.ENVOY_CONFIG_FILE).toBe(file);
         expect(fixture.tools).toEqual([]);
         expect(fixture.commands.map((command) => command.name)).not.toContain("whoami");
+        // The profile's file is missing, so Dispatch is off and AskGate does not bind or say
+        // anything: the start notice is the one line.
         expect(notifications).toEqual([
           `envoy: no envoy.json at ${file}: Dispatch and Envoy are off; ${old} is not read for this profile; copy or link it to ${file}, or write that file`,
         ]);
@@ -3650,6 +3801,7 @@ describe("envoy OMP extension", () => {
       writeFileSync(
         process.env.ENVOY_CONFIG_FILE ?? "",
         JSON.stringify({
+          ...ASKGATE_OFF,
           dispatch: { enabled: false },
           envoy: {
             enabled: true,
@@ -3765,7 +3917,7 @@ describe("envoy OMP extension", () => {
       );
     });
 
-    test("envoy.json: a relative XDG_CONFIG_HOME still loads the plugin, with both sections off and the refusal said once", async () => {
+    test("envoy.json: a relative XDG_CONFIG_HOME still loads the plugin, with both sections off and said once", async () => {
       delete process.env.ENVOY_CONFIG_FILE;
       process.env.XDG_CONFIG_HOME = "relative/config";
       const { default: envoyExtension } = await import("./envoy.ts?envoy-json-relative-xdg");
@@ -3780,10 +3932,746 @@ describe("envoy OMP extension", () => {
       // What needs no configuration still registers.
       expect(fixture.handlers.has("resources_discover")).toBe(true);
       expect(fixture.renderers.has("envoy-message")).toBe(true);
+      // Dispatch is off, so AskGate does not bind and says nothing.
       expect(notifications).toEqual([
         "envoy: XDG_CONFIG_HOME is relative/config, which is not an absolute path: Dispatch and Envoy are off",
       ]);
       expect(natsState.connectedNames).toEqual([]);
+    });
+  });
+
+  // AskGate's switch is read here, at load (extensions/askgate/): Dispatch on and the session's
+  // envoy.json's `askgate.enabled` not false bind the gate. Oh My Pi's modules the gate loads are not
+  // installed in this workspace, so each test stands them in with a model that answers `revise`.
+  describe("AskGate", () => {
+    const REVISE =
+      '{"decision":"revise","reason":"failure 7 (content gate): \\"see the message above\\" points at nothing"}';
+    const MODEL = { provider: "anthropic", id: "claude-fable-5-1", api: "anthropic-messages" };
+    const completions: unknown[] = [];
+    /** What the stand-in model answers: a revise, unless a test sets text that is no verdict. */
+    let standInAnswer = REVISE;
+    const standInHost = () => {
+      completions.length = 0;
+      standInAnswer = REVISE;
+      mock.module("@oh-my-pi/pi-ai", () => ({
+        completeSimple: async (model: unknown) => {
+          completions.push(model);
+          return {
+            content: [{ type: "text", text: standInAnswer }],
+            usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+            stopReason: "stop",
+          };
+        },
+        retryTransientCompletion: (run: () => Promise<unknown>) => run(),
+      }));
+      mock.module("@oh-my-pi/pi-coding-agent/session/session-context", () => ({
+        buildSessionContext: () => ({ messages: [] }),
+      }));
+      mock.module("@oh-my-pi/pi-coding-agent/config/settings", () => ({
+        settings: { getModelRole: () => undefined },
+      }));
+      mock.module("@oh-my-pi/pi-coding-agent/config/model-settings", () => ({
+        cfgDisabledProviders: { get: () => [] },
+      }));
+      mock.module("@oh-my-pi/pi-coding-agent/config/model-resolver", () => ({
+        resolveModelOverride: () => ({}),
+      }));
+      mock.module("@oh-my-pi/pi-coding-agent/extensibility/extensions/runner", () => ({
+        EXTENSION_HANDLER_TIMEOUT_MS: 30_000,
+      }));
+      mock.module("@oh-my-pi/pi-coding-agent/extensibility/settings", () => ({
+        cfgDisabledExtensions: { get: () => [] },
+        cfgSkills: { get: () => ({}) },
+        cfgExtensionHandlersToolCallTimeoutMs: { get: () => 120_000 },
+      }));
+      mock.module("@oh-my-pi/pi-coding-agent/session/retry-fallback-chains", () => ({
+        getRetryFallbackChains: () => ({}),
+        resolveRetryFallbackChainKey: () => undefined,
+        findRetryFallbackCandidates: () => [],
+      }));
+      mock.module("@oh-my-pi/pi-coding-agent/session/settings", () => ({
+        cfgRetry: { get: () => ({ enabled: false, modelFallback: false }) },
+      }));
+    };
+    /** A stand-in `dispatch` whose --dry-run prints its flags as JSON, first on PATH for the call. */
+    const standInDispatch = () => {
+      const bin = join(configDirectory, "bin");
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, "dispatch"),
+        `#!${process.execPath}
+const [command, ...rest] = process.argv.slice(2);
+if (!rest.includes("--dry-run")) process.exit(3);
+const args = {};
+for (let i = 0; i < rest.length; i++) {
+	if (rest[i] === "--dry-run") continue;
+	args[rest[i].slice(2)] = rest[++i];
+}
+console.log(JSON.stringify(args));
+`,
+        { mode: 0o755 }
+      );
+      process.env.PATH = `${bin}:${process.env.PATH ?? ""}`;
+    };
+    /** The context a main agent's tool call carries, on the gate's provider with the askgate role set. */
+    const gateContext = (notifications: string[]): SessionContext =>
+      ({
+        ...sessionContext("ses_askgate"),
+        agent: { kind: "main" },
+        cwd: configDirectory,
+        getSystemPrompt: () => ["PRIMARY"],
+        model: MODEL,
+        models: { resolve: (spec: string) => (spec === "@askgate" ? MODEL : undefined) },
+        modelRegistry: { resolver: () => "standin-key" },
+        sessionManager: {
+          ...topLevelSession,
+          getSessionId: () => "ses_askgate",
+          getLeafId: () => null,
+        },
+        ui: { ...sessionContext().ui, notify: (message) => notifications.push(message) },
+      }) as SessionContext;
+    // Quoted: an unquoted `?` is a glob, which the gate does not take as a literal word.
+    const ASK = "dispatch ask --issue DSP-1 --question 'Ready?'";
+
+    test("(a) with Dispatch on and no askgate section, a dispatch ask reaches the gate's model and a revise blocks it", async () => {
+      writeFileSync(process.env.ENVOY_CONFIG_FILE ?? "", "{}\n");
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      standInHost();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-on");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      const context = gateContext(notifications);
+      await fixture.handlers.get("session_start")?.({}, context);
+      standInDispatch();
+
+      const result = (await fixture.handlers.get("tool_call")?.(
+        { toolName: "bash", toolCallId: "call-ask", input: { command: ASK } },
+        context
+      )) as { block?: boolean; reason?: string } | undefined;
+
+      expect(completions).toEqual([MODEL]);
+      expect(result?.block).toBe(true);
+      expect(result?.reason).toContain("see the message above");
+      // The gate's own entries: the session also records replay state at start, which no gate
+      // test is about.
+      expect(fixture.entries.filter((entry) => entry.customType === "advisor-gate")).toMatchObject([
+        {
+          customType: "advisor-gate",
+          data: { tool: "dispatch_ask", outcome: "verdict", decision: "revise" },
+        },
+      ]);
+      expect(notifications).toEqual([]);
+    }, 30_000);
+    /**
+     * The owner files of `sessionID`'s AskGate record in this test's CLI state directory, each
+     * with its path, or null when it names no owner.
+     */
+    const recordOf = (
+      sessionID: string
+    ): { file: string; v: number; pid: number; store: string }[] | null => {
+      const record = join(sessionDirectory(process.env, sessionID), "askgate");
+      const files = existsSync(record) ? readdirSync(record).map((name) => join(record, name)) : [];
+      return files.length === 0
+        ? null
+        : files.map((file) => ({ file, ...JSON.parse(readFileSync(file, "utf8")) }));
+    };
+    const gateOn = () => {
+      writeFileSync(process.env.ENVOY_CONFIG_FILE ?? "", "{}\n");
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      standInHost();
+    };
+    /**
+     * A fixture whose handlers map runs every handler an event has, in order: the gate binds its own
+     * `session_switch`, `tool_result` and `session_shutdown` beside the extension's, and the plain
+     * fixture keeps only the last one registered.
+     */
+    const allHandlers = () => {
+      const fixture = createPi();
+      const registered = new Map<
+        string,
+        Array<(event: unknown, context: SessionContext) => Promise<unknown>>
+      >();
+      const pi: TestPi = {
+        ...fixture.pi,
+        on: (event, handler) => {
+          const list = registered.get(event) ?? [];
+          list.push(handler);
+          registered.set(event, list);
+          fixture.handlers.set(event, async (payload, context) => {
+            let last: unknown;
+            for (const each of list) last = await each(payload, context);
+            return last;
+          });
+        },
+      };
+      return { ...fixture, pi };
+    };
+    // The record that makes the dispatch CLI ask for AskGate's marker: written by the top-level
+    // instance for every session id it binds while the gate is bound, kept across a switch, since
+    // a shell or kernel started before it still acts as the old session, and removed at shutdown.
+    test("session_start writes the session's record, a switch writes the new one's and keeps the old, and shutdown removes both", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-record");
+      const fixture = allHandlers();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      await fixture.handlers.get("session_start")?.({}, gateContext(notifications));
+      const first = recordOf("ses_askgate");
+      expect(first).toMatchObject([{ v: 2, pid: process.pid, mode: "warn" }]);
+      const store = first?.[0]?.store ?? "";
+      expect(store.startsWith(join(process.env.DISPATCH_STATE_DIR ?? "", "askgate"))).toBe(true);
+      expect(statSync(join(store, "markers")).mode & 0o777).toBe(0o700);
+      expect(statSync(first?.[0]?.file ?? "").mode & 0o777).toBe(0o600);
+      expect(statSync(dirname(first?.[0]?.file ?? "")).mode & 0o777).toBe(0o700);
+
+      const next = {
+        ...gateContext(notifications),
+        sessionManager: {
+          ...topLevelSession,
+          getSessionId: () => "ses_askgate_next",
+          getLeafId: () => null,
+        },
+      } as SessionContext;
+      await fixture.handlers.get("session_switch")?.({ reason: "new" }, next);
+      expect(recordOf("ses_askgate_next")).toMatchObject([{ pid: process.pid, store }]);
+      expect(recordOf("ses_askgate")).toMatchObject([{ pid: process.pid, store }]);
+
+      await fixture.handlers.get("session_shutdown")?.({}, next);
+      expect(recordOf("ses_askgate")).toBeNull();
+      expect(recordOf("ses_askgate_next")).toBeNull();
+      expect(existsSync(store)).toBe(false);
+      expect(notifications).toEqual([]);
+    }, 30_000);
+    // The independent review at 6fd926853, item 1: every session start, switch, branch and host
+    // move rebinds a session, and the rebind wrote this process's owner file from OMP_ASKGATE
+    // alone. A session on block through its experiments arm then read warn on disk until its main
+    // agent's next bash or eval call, and an unmarked write from a subagent or a background job
+    // posted in that window. A rebind of the same session id keeps the block that session recorded.
+    test("a rebind of the same session keeps a block it recorded, never turning it back to warn", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-record-rebind");
+      const fixture = allHandlers();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      const context = gateContext(notifications);
+      await fixture.handlers.get("session_start")?.({}, context);
+      const [own] = recordOf("ses_askgate") ?? [];
+      // The gate records block for this session on a main-agent call, as an arm that is on does.
+      writeFileSync(
+        own?.file ?? "",
+        JSON.stringify({ ...JSON.parse(readFileSync(own?.file ?? "", "utf8")), mode: "block" })
+      );
+      // A switch back onto the same session rebinds it, as a resume or a branch does.
+      await fixture.handlers.get("session_switch")?.({ reason: "resume" }, context);
+      expect(recordOf("ses_askgate")).toMatchObject([{ pid: process.pid, mode: "block" }]);
+      await fixture.handlers.get("session_shutdown")?.({}, context);
+    }, 30_000);
+    // A record AskGate cannot write after a switch turns the CLI's check off for that session, so
+    // the user is told at once, as at session start, and not only in the log.
+    test("a record that cannot be written after a switch reaches the user as a notice", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-record-switch-fails");
+      const fixture = allHandlers();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      await fixture.handlers.get("session_start")?.({}, gateContext(notifications));
+      expect(notifications).toEqual([]);
+      const dir = sessionDirectory(process.env, "ses_askgate_locked");
+      mkdirSync(dir, { recursive: true });
+      chmodSync(dir, 0o500);
+      try {
+        const locked = {
+          ...gateContext(notifications),
+          sessionManager: {
+            ...topLevelSession,
+            getSessionId: () => "ses_askgate_locked",
+            getLeafId: () => null,
+          },
+        } as SessionContext;
+        await fixture.handlers.get("session_switch")?.({ reason: "new" }, locked);
+        expect(notifications).toEqual([
+          expect.stringContaining(
+            "envoy: AskGate could not write its record for session ses_askgate_locked"
+          ),
+        ]);
+        await fixture.handlers.get("session_shutdown")?.({}, locked);
+      } finally {
+        chmodSync(dir, 0o700);
+      }
+    }, 30_000);
+    test("no record is written with the switch off, with Dispatch off, or by a task subagent's instance", async () => {
+      // The switch off: this suite's default envoy.json turns AskGate off.
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      standInHost();
+      const off = await import("./envoy.ts?askgate-record-off");
+      const offFixture = createPi();
+      off.default(offFixture.pi);
+      await offFixture.handlers.get("session_start")?.({}, gateContext([]));
+      expect(recordOf("ses_askgate")).toBeNull();
+      // Dispatch off.
+      writeFileSync(process.env.ENVOY_CONFIG_FILE ?? "", "{}\n");
+      delete process.env.DISPATCH_URL;
+      delete process.env.DISPATCH_TOKEN;
+      const noDispatch = await import("./envoy.ts?askgate-record-no-dispatch");
+      const noDispatchFixture = createPi();
+      noDispatch.default(noDispatchFixture.pi);
+      await noDispatchFixture.handlers.get("session_start")?.({}, gateContext([]));
+      expect(recordOf("ses_askgate")).toBeNull();
+      // A task subagent: its instance binds no session id, so it writes no record.
+      gateOn();
+      const transcripts = transcriptFixture();
+      try {
+        const parentFile = transcripts.transcript("2026-09-23T00-00-00-000Z_ses_parent.jsonl");
+        const childFile = transcripts.transcript("2026-09-23T00-00-00-000Z_ses_parent/Scout.jsonl");
+        const sub = await import("./envoy.ts?askgate-record-subagent");
+        const child = createPi();
+        sub.default(child.pi);
+        await child.handlers.get("session_start")?.(
+          {},
+          sessionWithTranscript("ses_child", childFile, [])
+        );
+        expect(recordOf("ses_child")).toBeNull();
+        const parent = createPi();
+        sub.default(parent.pi);
+        await parent.handlers.get("session_start")?.(
+          {},
+          sessionWithTranscript("ses_parent", parentFile, [])
+        );
+        expect(recordOf("ses_parent")).toMatchObject([{ pid: process.pid }]);
+      } finally {
+        transcripts.remove();
+      }
+    }, 30_000);
+    // A shell command that changes HOME or XDG_STATE_HOME (a test harness with a temporary home)
+    // would resolve another state root, find no record there, and post with no marker.
+    test("the session's processes are told DISPATCH_STATE_DIR, the root its record is under, and a value already set stays", async () => {
+      const preset = process.env.DISPATCH_STATE_DIR ?? "";
+      const originalStateHome = process.env.XDG_STATE_HOME;
+      const stateHome = mkdtempSync(join(tmpdir(), "envoy-state-home-"));
+      try {
+        delete process.env.DISPATCH_STATE_DIR;
+        process.env.XDG_STATE_HOME = stateHome;
+        gateOn();
+        const { default: envoyExtension } = await import("./envoy.ts?askgate-state-dir");
+        const fixture = allHandlers();
+        envoyExtension(fixture.pi);
+        await fixture.handlers.get("session_start")?.({}, gateContext([]));
+        const root = join(stateHome, "dispatch");
+        expect(process.env.DISPATCH_STATE_DIR).toBe(root);
+        // The host refreshes the shell's environment after session_start.
+        procmgr.refreshShellConfigCache();
+        const shell = procmgr.getShellConfig().env;
+        expect(shell.DISPATCH_STATE_DIR).toBe(root);
+        const moved = { ...shell, HOME: "/elsewhere", XDG_STATE_HOME: "/elsewhere/state" };
+        expect(askgateState(sessionDirectory(moved, "ses_askgate")).kind).toBe("on");
+        await fixture.handlers.get("session_shutdown")?.({}, gateContext([]));
+
+        process.env.DISPATCH_STATE_DIR = preset;
+        const again = await import("./envoy.ts?askgate-state-dir-set");
+        const fixtureAgain = allHandlers();
+        again.default(fixtureAgain.pi);
+        await fixtureAgain.handlers.get("session_start")?.({}, gateContext([]));
+        expect(process.env.DISPATCH_STATE_DIR).toBe(preset);
+        expect(askgateState(sessionDirectory(process.env, "ses_askgate")).kind).toBe("on");
+        await fixtureAgain.handlers.get("session_shutdown")?.({}, gateContext([]));
+      } finally {
+        if (originalStateHome === undefined) delete process.env.XDG_STATE_HOME;
+        else process.env.XDG_STATE_HOME = originalStateHome;
+        rmSync(stateHome, { recursive: true, force: true });
+      }
+    }, 30_000);
+    test("a gated write the CLI logged as unmarked becomes an advisor-gate entry the report counts", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-unmarked");
+      const fixture = allHandlers();
+      envoyExtension(fixture.pi);
+      const context = gateContext([]);
+      await fixture.handlers.get("session_start")?.({}, context);
+      const dir = sessionDirectory(process.env, "ses_askgate");
+      appendResult(dir, {
+        tool: "dispatch_comment",
+        error: "dispatch comment was not called: AskGate is on for this session, and …",
+        askgate: { mode: "block", why: "this call carries no AskGate marker" },
+      });
+      appendResult(dir, {
+        tool: "dispatch_message",
+        details: {},
+        askgate: { mode: "warn", why: "this call carries no AskGate marker" },
+      });
+      appendResult(dir, { tool: "dispatch_read", details: {} });
+      await fixture.handlers.get("tool_result")?.(
+        {
+          toolName: "bash",
+          toolCallId: "call-py",
+          input: { command: "python3 post.py" },
+          content: [],
+          isError: false,
+        },
+        context
+      );
+      expect(fixture.entries.filter((entry) => entry.customType === "advisor-gate")).toMatchObject([
+        {
+          data: {
+            tool: "dispatch_comment",
+            path: "dispatch comment",
+            toolCallId: "call-py",
+            outcome: "unmarked",
+            decision: "revise",
+            verdictMode: "block",
+            reason: "this call carries no AskGate marker",
+          },
+        },
+        {
+          data: {
+            tool: "dispatch_message",
+            outcome: "unmarked",
+            decision: "allow",
+            verdictMode: "warn",
+          },
+        },
+      ]);
+    }, 30_000);
+    /** Appends to the session's ledger a gated write the CLI logged as unmarked. */
+    const appendUnmarked = () =>
+      appendResult(sessionDirectory(process.env, "ses_askgate"), {
+        tool: "dispatch_ask",
+        error: "dispatch ask was not called: AskGate is on for this session, and …",
+        askgate: { mode: "block", why: "this call carries no AskGate marker" },
+      });
+    const PY_RESULT = {
+      toolName: "bash",
+      toolCallId: "call-py",
+      input: {},
+      content: [],
+      isError: false,
+    };
+    /** The outcome of each `advisor-gate` entry, in order. */
+    const gateOutcomes = (
+      entries: readonly { readonly customType: string; readonly data: unknown }[]
+    ) =>
+      entries.flatMap(({ customType, data }) =>
+        customType === "advisor-gate" &&
+        typeof data === "object" &&
+        data !== null &&
+        "outcome" in data
+          ? [data.outcome]
+          : []
+      );
+    // An unmarked entry records the CLI's refusal or warning; no review stands behind it, so it is
+    // neither an allow that resets a target's revises nor a verdict that resets the halt's count.
+    test("an unmarked entry leaves the breaker as it was: the third attempt after two revises still trips it", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-unmarked-breaker");
+      const fixture = allHandlers();
+      envoyExtension(fixture.pi);
+      const context = gateContext([]);
+      await fixture.handlers.get("session_start")?.({}, context);
+      standInDispatch();
+      const ask = (toolCallId: string) =>
+        fixture.handlers.get("tool_call")?.(
+          { toolName: "bash", toolCallId, input: { command: ASK } },
+          context
+        );
+      await ask("call-1");
+      await ask("call-2");
+      appendUnmarked();
+      await fixture.handlers.get("tool_result")?.(PY_RESULT, context);
+      await ask("call-3");
+      expect(gateOutcomes(fixture.entries)).toEqual(["verdict", "verdict", "unmarked", "breaker"]);
+    }, 30_000);
+    test("an unmarked entry leaves the halt's count as it was: the third call without a verdict still halts", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-unmarked-halt");
+      const fixture = allHandlers();
+      envoyExtension(fixture.pi);
+      const context = gateContext([]);
+      await fixture.handlers.get("session_start")?.({}, context);
+      standInDispatch();
+      standInAnswer = "no verdict here";
+      const ask = (toolCallId: string) =>
+        fixture.handlers.get("tool_call")?.(
+          { toolName: "bash", toolCallId, input: { command: ASK } },
+          context
+        );
+      await ask("call-1");
+      await ask("call-2");
+      appendUnmarked();
+      await fixture.handlers.get("tool_result")?.(PY_RESULT, context);
+      await ask("call-3");
+      await ask("call-4");
+      expect(gateOutcomes(fixture.entries)).toEqual([
+        "no-verdict",
+        "no-verdict",
+        "unmarked",
+        "no-verdict",
+        "halted",
+      ]);
+    }, 30_000);
+    // The second re-gate of #2159, non-blocking: at the host's default handler limit of 30 s the
+    // review deadline is 25 s, which measured reviews often pass, and the warning that says so
+    // went only to the log. A profile that sets nothing is the case this gate is for.
+    test("a review deadline under 30 s is said at session start, not only logged", async () => {
+      writeFileSync(process.env.ENVOY_CONFIG_FILE ?? "", "{}\n");
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      standInHost();
+      // The host's own default for a tool_call handler, which a profile that sets nothing gets.
+      mock.module("@oh-my-pi/pi-coding-agent/extensibility/settings", () => ({
+        cfgDisabledExtensions: { get: () => [] },
+        cfgSkills: { get: () => ({}) },
+        cfgExtensionHandlersToolCallTimeoutMs: { get: () => 30_000 },
+      }));
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-short-deadline");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      await fixture.handlers.get("session_start")?.({}, gateContext(notifications));
+
+      expect(notifications).toHaveLength(1);
+      expect(notifications[0]).toContain("the review deadline is 25000 ms");
+      expect(notifications[0]).toContain("extensionHandlers.toolCallTimeoutMs");
+    }, 30_000);
+    // A checkout's file can turn the session's Dispatch off in that checkout, but not the gate: the
+    // gate binds where the session's own envoy.json and variables name a Dispatch.
+    test("astra 6: a checkout dispatch disable does not suppress the session's AskGate", async () => {
+      const checkout = mkdtempSync(join(tmpdir(), "askgate-checkout-"));
+      const originalCwd = process.cwd();
+      try {
+        mkdirSync(join(checkout, ".envoy"));
+        writeFileSync(
+          join(checkout, ".envoy", "envoy.json"),
+          JSON.stringify({ dispatch: { enabled: false } })
+        );
+        writeFileSync(
+          process.env.ENVOY_CONFIG_FILE ?? "",
+          `${JSON.stringify({ dispatch: { serverUrl: "http://dispatch.test", token: "dispatch-token" } })}\n`
+        );
+        process.chdir(checkout);
+        standInHost();
+        const { default: envoyExtension } = await import("./envoy.ts?askgate-checkout-disable");
+        const fixture = createPi();
+        envoyExtension(fixture.pi);
+        const notifications: string[] = [];
+        const context = gateContext(notifications);
+        await fixture.handlers.get("session_start")?.({}, context);
+        standInDispatch();
+
+        const result = (await fixture.handlers.get("tool_call")?.(
+          {
+            toolName: "bash",
+            toolCallId: "call-checkout-disabled",
+            input: { command: ASK },
+          },
+          context
+        )) as { block?: boolean } | undefined;
+
+        expect(result?.block).toBe(true);
+        expect(completions).toEqual([MODEL]);
+      } finally {
+        process.chdir(originalCwd);
+        rmSync(checkout, { recursive: true, force: true });
+      }
+    }, 30_000);
+
+    test("(b) with askgate.enabled false the gate does not bind: the dispatch ask runs and no model is asked", async () => {
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      standInHost();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-off");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      const context = gateContext(notifications);
+      await fixture.handlers.get("session_start")?.({}, context);
+      standInDispatch();
+
+      const result = await fixture.handlers.get("tool_call")?.(
+        { toolName: "bash", toolCallId: "call-ask", input: { command: ASK } },
+        context
+      );
+
+      expect(result).toBeUndefined();
+      expect(completions).toEqual([]);
+      expect(fixture.entries.filter((entry) => entry.customType === "advisor-gate")).toEqual([]);
+    });
+
+    // The second final review of #2159: the gate bound wherever its switch was on, so a session or
+    // pod with no Dispatch got its refusals too. It binds only where Dispatch is on.
+    test("with Dispatch off and the switch on, the gate does not bind: no handler acts, nothing is refused or recorded", async () => {
+      writeFileSync(process.env.ENVOY_CONFIG_FILE ?? "", "{}\n");
+      delete process.env.DISPATCH_URL;
+      delete process.env.DISPATCH_TOKEN;
+      standInHost();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-no-dispatch");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      const context = gateContext(notifications);
+      await fixture.handlers.get("session_start")?.({}, context);
+      standInDispatch();
+
+      for (const command of [ASK, 'echo "$a $b"']) {
+        const result = await fixture.handlers.get("tool_call")?.(
+          { toolName: "bash", toolCallId: `call-${command}`, input: { command } },
+          context
+        );
+        expect(result).toBeUndefined();
+      }
+      const device = await fixture.handlers.get("tool_call")?.(
+        { toolName: "dispatch_ask", toolCallId: "call-device", input: { issue: "DSP-1" } },
+        context
+      );
+      expect(device).toBeUndefined();
+      expect(completions).toEqual([]);
+      expect(fixture.entries.filter((entry) => entry.customType === "advisor-gate")).toEqual([]);
+      expect(notifications.filter((notice) => notice.includes("AskGate"))).toEqual([]);
+    });
+
+    test("a switch that does not parse leaves the gate on and is said at session start", async () => {
+      const file = process.env.ENVOY_CONFIG_FILE ?? "";
+      writeFileSync(file, `${JSON.stringify({ askgate: { enabled: "no" } })}\n`);
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      standInHost();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-unparsable");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      const context = gateContext(notifications);
+      await fixture.handlers.get("session_start")?.({}, context);
+
+      expect(notifications).toEqual([
+        `envoy: ${file}: askgate.enabled must be true or false; AskGate stays on`,
+      ]);
+      const result = (await fixture.handlers.get("tool_call")?.(
+        { toolName: "dispatch_ask", toolCallId: "call-device", input: { issue: "DSP-1" } },
+        context
+      )) as { block?: boolean } | undefined;
+      expect(result?.block).toBe(true);
+      expect(completions).toEqual([MODEL]);
+    });
+
+    test("a gate that does not load is said at session start and refuses each write it would review, so a load failure is no off switch", async () => {
+      const file = process.env.ENVOY_CONFIG_FILE ?? "";
+      writeFileSync(file, "{}\n");
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      process.env.OMP_ASKGATE_TIMEOUT_MS = "soon";
+      try {
+        standInHost();
+        const { default: envoyExtension } = await import("./envoy.ts?askgate-load-fails");
+        const fixture = createPi();
+        envoyExtension(fixture.pi);
+        const notifications: string[] = [];
+        const context = gateContext(notifications);
+        await fixture.handlers.get("session_start")?.({}, context);
+        standInDispatch();
+
+        expect(notifications).toEqual([
+          `envoy: AskGate did not load, so it refuses each Dispatch write it would review: OMP_ASKGATE_TIMEOUT_MS must be a positive integer, got "soon". To turn AskGate off for this session, set askgate.enabled to false in ${file}.`,
+        ]);
+        const refused = (await fixture.handlers.get("tool_call")?.(
+          { toolName: "bash", toolCallId: "call-ask", input: { command: ASK } },
+          context
+        )) as { block?: boolean; reason?: string } | undefined;
+        expect(refused?.block).toBe(true);
+        expect(refused?.reason).toContain(
+          'OMP_ASKGATE_TIMEOUT_MS must be a positive integer, got "soon"'
+        );
+        expect(refused?.reason).toContain(`askgate.enabled to false in ${file}`);
+        const other = await fixture.handlers.get("tool_call")?.(
+          { toolName: "bash", toolCallId: "call-ls", input: { command: "ls -la" } },
+          context
+        );
+        expect(other).toBeUndefined();
+        expect(completions).toEqual([]);
+        expect(
+          fixture.entries.filter((entry) => entry.customType === "advisor-gate")
+        ).toMatchObject([
+          {
+            customType: "advisor-gate",
+            data: { tool: "dispatch_ask", outcome: "load-failed", decision: "revise" },
+          },
+        ]);
+      } finally {
+        delete process.env.OMP_ASKGATE_TIMEOUT_MS;
+      }
+    });
+
+    test("a session that chose OMP_ASKGATE=block keeps the CLI's checks at block when its gate does not load", async () => {
+      const file = process.env.ENVOY_CONFIG_FILE ?? "";
+      writeFileSync(file, "{}\n");
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      process.env.OMP_ASKGATE = "block";
+      process.env.OMP_ASKGATE_TIMEOUT_MS = "soon";
+      try {
+        standInHost();
+        const { default: envoyExtension } = await import("./envoy.ts?askgate-load-fails-block");
+        const fixture = createPi();
+        envoyExtension(fixture.pi);
+        await fixture.handlers.get("session_start")?.({}, gateContext([]));
+        // The gate did not load, so it records no mode; the record carries the session's choice,
+        // and a gated write the gate never saw is refused by the CLI, not posted with a warning.
+        const sent: string[] = [];
+        let stdout = "";
+        const code = await runDispatchCli(
+          ["comment", "--issue", "DSP-1", "--body", "hi"],
+          { ...process.env, DISPATCH_HOST: "omp" },
+          {
+            stdout: (text) => {
+              stdout += text;
+            },
+            stderr: () => {},
+            readText: (path) => readFileSync(path, "utf8"),
+            cwd: process.cwd(),
+            fetchImpl: (async (url: string | URL | Request) => {
+              sent.push(String(url));
+              return Response.json({});
+            }) as typeof fetch,
+          }
+        );
+        expect(stdout).toContain("dispatch comment was not called: AskGate is on for this session");
+        expect(code).toBe(1);
+        expect(sent).toEqual([]);
+        await fixture.handlers.get("session_shutdown")?.({}, gateContext([]));
+      } finally {
+        delete process.env.OMP_ASKGATE;
+        delete process.env.OMP_ASKGATE_TIMEOUT_MS;
+      }
+    });
+
+    test("a session whose envoy.json location cannot be worked out has no Dispatch, so the gate does not bind", async () => {
+      // With no file the session's Dispatch is off, and the `dispatch` command its shell runs
+      // works the file out by the same rule and is off too: there is no write for the gate to
+      // review, and a refusal would break only calls that hold none.
+      delete process.env.ENVOY_CONFIG_FILE;
+      process.env.XDG_CONFIG_HOME = "relative/config";
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      standInHost();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-no-config-path");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      const context = gateContext(notifications);
+      await fixture.handlers.get("session_start")?.({}, context);
+      standInDispatch();
+
+      expect(notifications).toEqual([
+        "envoy: XDG_CONFIG_HOME is relative/config, which is not an absolute path: Dispatch and Envoy are off",
+      ]);
+      const result = await fixture.handlers.get("tool_call")?.(
+        { toolName: "bash", toolCallId: "call-ask", input: { command: ASK } },
+        context
+      );
+      expect(result).toBeUndefined();
+      expect(completions).toEqual([]);
+      expect(fixture.entries.filter((entry) => entry.customType === "advisor-gate")).toEqual([]);
     });
   });
 
@@ -9309,8 +10197,44 @@ describe("envoy OMP extension", () => {
         self_subscribed: true,
         capabilities: ["aside", "steer"],
         host: machineID(),
+        plugin: "@sjawhar/pi-envoy",
+        plugin_version: packageVersion,
       },
     });
+  });
+  test("never registers a followed topic reaching a private stream subject", async () => {
+    const registrations: { readonly topics: readonly string[] }[] = [];
+    globalThis.fetch = async (input, init) => {
+      if (new URL(input.toString()).pathname === "/v1/interests/subscribe") {
+        registrations.push(JSON.parse(init?.body?.toString() ?? "{}"));
+      }
+      return response({ session_id: "ses_bounded", machine_id: "test", dir: "/tmp", topics: [] });
+    };
+    // Query isolation gives this stateful extension its own module state, as every test here does.
+    const { default: envoyExtension } = await import("./envoy.ts?register-bounded");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_bounded"));
+    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    if (subscribeTool === undefined) throw new Error("envoy_subscribe was not registered");
+    const issue = "notifications.dispatch.issue.KEY-1.ask.opened";
+    const refused = [
+      "notifications.*.x",
+      "notifications.agent.*",
+      "notifications.agent.ses_other",
+      "notifications.envoy.exceptions.notifications.agent.ses_bounded",
+      "notifications.legion.ACME.controller",
+    ];
+
+    await subscribeTool.execute("", { topics: [...refused, issue] });
+
+    // The model follows them live; the listener, which would refuse them, is never sent them.
+    for (const topic of [...refused, issue])
+      expect(natsState.controls.get(topic)?.active()).toBe(true);
+    const topics = registrations.at(-1)?.topics ?? [];
+    expect(topics).toContain("notifications.agent.ses_bounded");
+    expect(topics).toContain(issue);
+    for (const topic of refused) expect(topics).not.toContain(topic);
   });
   test("answers a targeted BTW delivery ephemerally and registers the capability", async () => {
     process.env.DISPATCH_URL = "http://dispatch.test";
@@ -9446,30 +10370,173 @@ describe("envoy OMP extension", () => {
     ]);
   });
 
-  test("delivers targeted aside and steer frames through their requested primary-turn modes", async () => {
-    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
-    const { default: envoyExtension } = await import("./envoy.ts?targeted-modes");
-    const fixture = createPi();
-    const delivered = Promise.withResolvers<void>();
-    envoyExtension({
-      ...fixture.pi,
-      sendMessage: (message, options) => {
-        fixture.pi.sendMessage(message, options);
-        if (fixture.deliveries.length === 2) delivered.resolve();
-      },
+  test("delivers a targeted Steer card as an aside while a turn runs and an Aside always as one", async () => {
+    let idle = false;
+    const { agent, delivered, fixture } = await bootDirectSession("targeted-modes", {
+      idle: () => idle,
     });
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_delivery"));
-    const agent = natsState.controls.get("notifications.agent.ses_delivery");
-    if (agent === undefined) throw new Error("agent subject was not subscribed");
 
-    agent.push(targetedDispatchEnvelope("aside", "targeted-aside"));
-    agent.push(targetedDispatchEnvelope("steer", "targeted-steer"));
-    await delivered.promise;
+    agent.push(targetedDispatchEnvelope("aside", "targeted-aside-running"));
+    agent.push(targetedDispatchEnvelope("steer", "targeted-steer-running"));
+    await delivered(2);
+    idle = true;
+    agent.push(targetedDispatchEnvelope("aside", "targeted-aside-idle"));
+    agent.push(targetedDispatchEnvelope("steer", "targeted-steer-idle"));
+    await delivered(4);
 
     expect(fixture.deliveries.map((delivery) => delivery.options)).toEqual([
       { deliverAs: "aside", triggerTurn: true },
+      { deliverAs: "aside", triggerTurn: true },
+      { deliverAs: "aside", triggerTurn: true },
       { deliverAs: "steer", triggerTurn: true },
     ]);
+  });
+
+  // The wake for a card the host folds with no turn (`../src/card-wake.ts`, where its rules are
+  // tested) hears of runs, interrupts and the session's end only through this extension's own
+  // handlers. Each row starts a run, sends one card while the host is busy, folds it (its
+  // `message_end` with the host idle) and fires the row's host events, the send and the fold each
+  // before or after them; an event the row marks "idle" finds the host idle, and any other finds
+  // it busy until the fold. The check the fold arms waits on the host's timer until all of that is
+  // through, and the row says whether a wake follows.
+  describe("the wake for a folded card, through the extension's handlers", () => {
+    const busyCard = { deliverAs: "aside", triggerTurn: true };
+    const wake = { deliverAs: "nextTurn", triggerTurn: true };
+    type HostEvent = readonly [event: string, payload: unknown, host?: "idle"];
+    type FoldRow = readonly [
+      name: string,
+      events: readonly HostEvent[],
+      sendAt: "before" | "after",
+      foldAt: "before" | "after",
+      wakes: boolean,
+    ];
+    const rows: readonly FoldRow[] = [
+      ["no host event", [], "before", "before", true],
+      [
+        "an interrupted automatic compaction",
+        [["auto_compaction_end", { aborted: true }]],
+        "before",
+        "after",
+        false,
+      ],
+      [
+        "a retry an interrupt cancelled",
+        [["auto_retry_end", { success: false, finalError: "Retry cancelled" }]],
+        "before",
+        "after",
+        false,
+      ],
+      [
+        "an announced session switch",
+        [["session_before_switch", { reason: "resume" }]],
+        "before",
+        "before",
+        false,
+      ],
+      ["a session switch", [["session_switch", { reason: "resume" }]], "before", "before", false],
+      ["shutdown", [["session_shutdown", {}]], "before", "before", false],
+      // The host's dispose flushes the asides it still holds after shutdown.
+      ["shutdown", [["session_shutdown", {}]], "before", "after", false],
+      // The run is over, and a card sent while the host settles or sets the next prompt up gets
+      // none.
+      ["the run's end", [["agent_end", { messages: [] }]], "after", "after", false],
+      // A switch to a new session and a manual compaction abort the run with the agent
+      // disconnected, so no agent_end comes; the abort leaves the host idle at the event.
+      [
+        "a switch to a new session",
+        [["session_switch", { reason: "new" }, "idle"]],
+        "after",
+        "after",
+        false,
+      ],
+      ["a manual compaction", [["session_compact", {}, "idle"]], "after", "after", false],
+      // A prompt sent from idle: whatever run the host dropped unseen is over.
+      [
+        "a typed input on an idle host",
+        [["input", { text: "next", source: "rpc" }, "idle"]],
+        "after",
+        "after",
+        false,
+      ],
+      // These find the host busy with the run, which goes on, in whatever order an automatic
+      // compaction's events arrive.
+      ["a fork", [["session_switch", { reason: "fork" }]], "after", "after", true],
+      [
+        "an automatic compaction",
+        [
+          ["session_compact", {}],
+          ["auto_compaction_end", { aborted: false }],
+        ],
+        "after",
+        "after",
+        true,
+      ],
+      [
+        "an automatic compaction whose end arrives first",
+        [
+          ["auto_compaction_end", { aborted: false }],
+          ["session_compact", {}],
+        ],
+        "after",
+        "after",
+        true,
+      ],
+      [
+        "a typed input on a busy host",
+        [["input", { text: "steer", source: "rpc" }]],
+        "after",
+        "after",
+        true,
+      ],
+    ];
+    for (const [index, [name, events, sendAt, foldAt, wakes]] of rows.entries()) {
+      test(`${wakes ? "wakes" : "sends no wake"} for a card sent ${sendAt} and folded ${foldAt} ${name}`, async () => {
+        let idle = false;
+        const { context, delivered, fixture } = await bootDirectSession(`folded-card-${index}`, {
+          idle: () => idle,
+        });
+        const timers: (() => void | Promise<void>)[] = [];
+        const held: SessionContext = {
+          ...context,
+          setTimeout: (callback) => {
+            timers.push(callback);
+          },
+        };
+        const send = async (): Promise<void> => {
+          natsState.controls
+            .get("notifications.agent.ses_delivery")
+            ?.push(forwardedRoleEnvelope("legion-controller", "a card", `folded-card-${index}`));
+          await delivered(1);
+        };
+        const fold = async (): Promise<void> => {
+          const card = fixture.deliveries[0];
+          if (card === undefined) throw new Error("the card was not sent");
+          idle = true;
+          const { options: _options, ...record } = card;
+          await fixture.handlers.get("message_end")?.(
+            { message: { role: "custom", ...record } },
+            held
+          );
+        };
+
+        await fixture.handlers.get("agent_start")?.({}, context);
+        if (sendAt === "before") await send();
+        if (foldAt === "before") await fold();
+        for (const [event, payload, host] of events) {
+          const was = idle;
+          if (host === "idle") idle = true;
+          await fixture.handlers.get(event)?.(payload, context);
+          idle = was;
+        }
+        if (sendAt === "after") await send();
+        if (foldAt === "after") await fold();
+        for (const timer of timers.splice(0)) await timer();
+
+        expect(fixture.deliveries.map((delivery) => delivery.options)).toEqual(
+          wakes ? [busyCard, wake] : [busyCard]
+        );
+      });
+    }
   });
 
   // A person's Send or Aside from the Agents page is the user's own turn, as if typed at the
@@ -9487,6 +10554,8 @@ describe("envoy OMP extension", () => {
       expect(accepts).toEqual([
         {
           authorization: "Bearer dispatch-token",
+          // The accept is a write, so it carries an Idempotency-Key of its own.
+          key: expect.stringMatching(/^[A-Za-z0-9._:-]{1,128}$/),
           body: { actor: { id: "ses_delivery", kind: "session" } },
           path: `/api/v1/messages/${DIRECT_MESSAGE_ID}/deliveries/1/accept`,
         },
@@ -9495,8 +10564,11 @@ describe("envoy OMP extension", () => {
       expect(fixture.deliveries).toEqual([]);
       expect(posts).toEqual([]);
       // The attempt is in the transcript before the turn goes out, so no crash in between leaves
-      // a delivered attempt a forged frame could still have accepted.
-      expect(fixture.entries).toEqual([
+      // a delivered attempt a forged frame could still have accepted. (The replay cursors and
+      // ledger are the session's other entries.)
+      expect(
+        fixture.entries.filter((entry) => !entry.customType.startsWith("envoy-replay-"))
+      ).toEqual([
         {
           customType: "envoy-dispatch-handled-attempt",
           data: { attempt: 1, message_id: DIRECT_MESSAGE_ID },
@@ -9538,30 +10610,109 @@ describe("envoy OMP extension", () => {
       });
     }
 
+    // While a turn runs the host queues a steer, which is what a Send is (`sendUserInput` with no
+    // `deliverAs`), and drains that queue one message per turn, first in, first out; an aside it
+    // folds in at the next step instead. Cards that went as steers held a person's Send back one
+    // turn each, so the cards go as asides and the Send is the head of the steering queue.
+    test("is the head of the host's steering queue when cards arrived before it in a running turn", async () => {
+      const { agent, delivered, sends } = await bootDirectSession("direct-send-ahead-of-cards", {
+        accept: () => ({ accepted: true }),
+        idle: () => false,
+        sendUserInput: async () => ({ handled: "prompt" }),
+      });
+
+      for (const n of [1, 2, 3]) {
+        agent.push(forwardedRoleEnvelope("legion-controller", `notification ${n}`, `card-${n}`));
+      }
+      agent.push(directDispatchEnvelope("steer", "direct-send-ahead-of-cards"));
+      await delivered(4);
+
+      const deliverAs = (options: unknown): unknown =>
+        typeof options === "object" && options !== null && "deliverAs" in options
+          ? options.deliverAs
+          : undefined;
+      const queued = (mode: "aside" | "steer") =>
+        sends
+          .filter(({ options }) => (deliverAs(options) ?? "steer") === mode)
+          .map(({ content }) => String(content));
+      expect(queued("steer")).toEqual([DIRECT_MESSAGE_BODY]);
+      const asides = queued("aside");
+      expect(asides).toHaveLength(3);
+      for (const [index, card] of asides.entries()) {
+        expect(card).toContain(`notification ${index + 1}`);
+      }
+      expect(
+        sends.filter(({ options }) => deliverAs(options) === "aside").map(({ options }) => options)
+      ).toEqual(Array(3).fill({ deliverAs: "aside", triggerTurn: true }));
+    });
+
+    // An idle session has no steering queue to wait in. The host starts a turn for a steer with
+    // `triggerTurn` after an interrupt (an Esc, or the RPC `abort` a Legion daemon sends) and in
+    // plan mode too, where an idle aside folds into the context with no turn.
+    test("leaves a card that reaches an idle session a steer that starts a turn", async () => {
+      const { agent, delivered, sends } = await bootDirectSession("idle-card-starts-a-turn", {
+        idle: () => true,
+        sendUserInput: async () => ({ handled: "prompt" }),
+      });
+
+      agent.push(forwardedRoleEnvelope("legion-controller", "wake up", "idle-card"));
+      await delivered(1);
+
+      expect(sends).toHaveLength(1);
+      expect(String(sends[0]?.content)).toContain("wake up");
+      expect(sends[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+    });
+
+    // The Legion entry names its controller's session in the start-turn mark from its
+    // `session_start` until the start turn runs (`../src/card-wake`): an idle card there, in any
+    // mode, is a follow-up that starts no turn, so the start message keeps the first turn. A mark
+    // naming another session (a `task` subagent's) changes nothing.
+    test("sends a card that reaches an idle session the start-turn mark names as a follow-up that starts no turn, and leaves it a steer under another session's mark", async () => {
+      const { agent, delivered, sends } = await bootDirectSession("idle-card-start-turn", {
+        idle: () => true,
+      });
+      const iface = envoyPluginInterface();
+
+      iface.startupTurn = { session: "ses_delivery", sentAt: undefined };
+      agent.push(forwardedRoleEnvelope("legion-controller", "early card", "start-turn-card"));
+      await delivered(1);
+      expect(sends[0]?.options).toEqual({ deliverAs: "followUp", triggerTurn: false });
+
+      iface.startupTurn = { session: "ses_task_subagent", sentAt: undefined };
+      agent.push(forwardedRoleEnvelope("legion-controller", "other mark", "other-mark-card"));
+      await delivered(2);
+      expect(sends[1]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
+    });
+
     // Only Dispatch's 200 makes a turn: whatever it refuses, and whatever keeps it from answering,
-    // keeps the card, and the session posts nothing and injects nothing.
-    for (const [name, answer] of [
-      ["another frame already took it", { code: "ACCEPT_ALREADY_ACCEPTED", status: 409 }],
-      ["a later attempt superseded it", { code: "ACCEPT_SUPERSEDED", status: 409 }],
-      ["it names another session's attempt", { code: "ACCEPT_FORBIDDEN", status: 403 }],
-      ["it is no direct message to this session", { code: "ACCEPT_NOT_DIRECT", status: 409 }],
-      ["a session wrote it", { code: "ACCEPT_NOT_WRITTEN_BY_PERSON", status: 409 }],
-      ["its attempt is a BTW", { code: "ACCEPT_NOT_ASIDE_OR_STEER", status: 409 }],
-      ["Dispatch refuses the session's token", { code: "UNAUTHORIZED", status: 401 }],
-      ["Dispatch predates the accept route", { status: 404 }],
-      ["Dispatch fails", { status: 500 }],
-      ["the accept never reaches Dispatch", { reject: "fetch failed" }],
+    // keeps the card, and the session posts nothing and injects nothing. A failure that can clear
+    // (a 5xx, a transport failure) is asked again under the accept's one key, at 0, 1, 3 and 7 s,
+    // until the accept's 10 s bound cuts the next pause; a refusal is the answer at once.
+    for (const [name, answer, attempts] of [
+      ["another frame already took it", { code: "ACCEPT_ALREADY_ACCEPTED", status: 409 }, 1],
+      ["a later attempt superseded it", { code: "ACCEPT_SUPERSEDED", status: 409 }, 1],
+      ["it names another session's attempt", { code: "ACCEPT_FORBIDDEN", status: 403 }, 1],
+      ["it is no direct message to this session", { code: "ACCEPT_NOT_DIRECT", status: 409 }, 1],
+      ["a session wrote it", { code: "ACCEPT_NOT_WRITTEN_BY_PERSON", status: 409 }, 1],
+      ["its attempt is a BTW", { code: "ACCEPT_NOT_ASIDE_OR_STEER", status: 409 }, 1],
+      ["Dispatch refuses the session's token", { code: "UNAUTHORIZED", status: 401 }, 1],
+      ["Dispatch predates the accept route", { status: 404 }, 1],
+      ["Dispatch fails", { status: 500 }, 4],
+      ["the accept never reaches Dispatch", { reject: "fetch failed" }, 4],
       // A 200 that carries no stored body has nothing to inject.
-      ["Dispatch accepts it without the stored body", { accepted: true, body: null }],
-    ] as const satisfies readonly (readonly [string, AcceptAnswer])[]) {
+      ["Dispatch accepts it without the stored body", { accepted: true, body: null }, 1],
+    ] as const satisfies readonly (readonly [string, AcceptAnswer, number])[]) {
       test(`stays a card when ${name}`, async () => {
         const { accepts, agent, delivered, fixture, posts, recordedWhenDelivered } =
           await bootDirectSession(`direct-accept-refused-${name}`, { accept: () => answer });
 
-        agent.push(directDispatchEnvelope("steer", `direct-accept-refused-${name}`));
-        await delivered(1);
+        await onTestClock(() => {
+          agent.push(directDispatchEnvelope("steer", `direct-accept-refused-${name}`));
+          return delivered(1);
+        });
 
-        expect(accepts).toHaveLength(1);
+        expect(accepts).toHaveLength(attempts);
+        expect(new Set(accepts.map((accept) => accept.key)).size).toBe(1);
         expect(fixture.userMessages).toEqual([]);
         expect(fixture.deliveries.map((delivery) => delivery.customType)).toEqual([
           "envoy-message",
@@ -9571,6 +10722,28 @@ describe("envoy OMP extension", () => {
         expect(recordedWhenDelivered).toEqual([1]);
       });
     }
+
+    // A failure that can clear is no answer: the accept asks again under its key, and Dispatch's
+    // answer to the retry decides, so a Send whose first answer was lost is still the person's turn.
+    test("is the user's turn when the accept's first attempt fails in transport and its retry is accepted", async () => {
+      const { accepts, agent, delivered, fixture } = await bootDirectSession(
+        "direct-accept-retried",
+        { accept: (count) => (count === 1 ? { reject: "fetch failed" } : { accepted: true }) }
+      );
+
+      await onTestClock(() => {
+        agent.push(directDispatchEnvelope("steer", "direct-accept-retried"));
+        return delivered(1);
+      });
+
+      expect(accepts.map((accept) => accept.path)).toEqual([
+        `/api/v1/messages/${DIRECT_MESSAGE_ID}/deliveries/1/accept`,
+        `/api/v1/messages/${DIRECT_MESSAGE_ID}/deliveries/1/accept`,
+      ]);
+      expect(accepts[1]?.key).toBe(accepts[0]?.key as string);
+      expect(fixture.deliveries).toEqual([]);
+      expect(fixture.userMessages).toEqual([{ content: DIRECT_MESSAGE_BODY, options: undefined }]);
+    });
 
     // The ways a session could otherwise make a person's message a fresh user turn (Deep's
     // reviews of #1592): Dispatch refuses the first three, and the session itself the rest.
@@ -9651,24 +10824,29 @@ describe("envoy OMP extension", () => {
     });
 
     test("a person's retry of a Send that arrived as a card is a user turn", async () => {
+      // Dispatch stays unreachable through the first attempt's four tries, so that Send is a card.
       const { accepts, agent, delivered, fixture } = await bootDirectSession(
         "direct-carded-retry",
         {
           accept: (count) =>
-            count === 1 ? { reject: "fetch failed" } : { accepted: true, delivery: "aside" },
+            count <= 4 ? { reject: "fetch failed" } : { accepted: true, delivery: "aside" },
         }
       );
 
-      agent.push(directDispatchEnvelope("steer", "direct-carded-retry-1"));
-      await delivered(1);
+      await onTestClock(() => {
+        agent.push(directDispatchEnvelope("steer", "direct-carded-retry-1"));
+        return delivered(1);
+      });
       // The person's retry is an attempt of its own, which the session has not delivered.
       agent.push(directDispatchEnvelope("aside", "direct-carded-retry-2", { attempt: 2 }));
       await delivered(2);
 
       expect(accepts.map((accept) => accept.path)).toEqual([
-        `/api/v1/messages/${DIRECT_MESSAGE_ID}/deliveries/1/accept`,
+        ...Array<string>(4).fill(`/api/v1/messages/${DIRECT_MESSAGE_ID}/deliveries/1/accept`),
         `/api/v1/messages/${DIRECT_MESSAGE_ID}/deliveries/2/accept`,
       ]);
+      // The person's retry is a write of its own, under a key of its own.
+      expect(accepts[4]?.key).not.toBe(accepts[0]?.key as string);
       expect(fixture.deliveries).toHaveLength(1);
       expect(fixture.userMessages).toEqual([
         { content: DIRECT_MESSAGE_BODY, options: { deliverAs: "aside" } },
@@ -11506,8 +12684,9 @@ describe("envoy OMP extension", () => {
   });
 
   // Dispatch records a BTW answered with an error as failed, and a same-mode re-send of it
-  // repeats the attempt's dedupe key. The agent never answered the first, so the re-send has to
-  // run the side turn again; a repeat of one that was answered is still dropped.
+  // repeats the attempt's dedupe key under the new event id the listener mints for every send.
+  // The agent never answered the first, so the re-send has to run the side turn again; a repeat
+  // of one that was answered is still dropped.
   test("runs a BTW side turn again for a Retry of one whose side turn failed", async () => {
     process.env.DISPATCH_URL = "http://dispatch.test";
     process.env.DISPATCH_TOKEN = "dispatch-token";
@@ -11540,17 +12719,23 @@ describe("envoy OMP extension", () => {
     );
     const agent = natsState.controls.get("notifications.agent.ses_delivery");
     if (agent === undefined) throw new Error("agent subject was not subscribed");
-    const send = async (dedupeKey: string): Promise<void> => {
+    // Each send is a new envelope from the listener: its own event id, the attempt's dedupe key.
+    const btw = (dedupeKey: string, eventID: string) =>
+      JSON.stringify({
+        ...JSON.parse(targetedDispatchEnvelope("btw", dedupeKey)),
+        event_id: eventID,
+      });
+    const send = async (dedupeKey: string, eventID: string): Promise<void> => {
       posted = Promise.withResolvers<void>();
-      agent.push(targetedDispatchEnvelope("btw", dedupeKey));
+      agent.push(btw(dedupeKey, eventID));
       await posted.promise;
     };
 
-    await send("targeted-btw-retry");
-    await send("targeted-btw-retry");
+    await send("targeted-btw-retry", "evt-btw-first");
+    await send("targeted-btw-retry", "evt-btw-retry");
     // Answered now: a third copy is a repeat and runs nothing, so the next reply is the sentinel's.
-    agent.push(targetedDispatchEnvelope("btw", "targeted-btw-retry"));
-    await send("targeted-btw-sentinel");
+    agent.push(btw("targeted-btw-retry", "evt-btw-again"));
+    await send("targeted-btw-sentinel", "evt-btw-sentinel");
 
     expect(sideTurns).toBe(3);
     const actor = { id: "ses_delivery", kind: "session" };
@@ -11892,6 +13077,139 @@ describe("envoy OMP extension", () => {
           },
         },
       ]);
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  /** A Dispatch whose answers route lists `text` as a person's answer, written a minute ago, and
+   *  records each path it is asked for; the listener's routes answer as usual. */
+  function answeringDispatch(text: string): {
+    readonly reads: string[];
+    readonly item: SessionAnswer;
+  } {
+    process.env.DISPATCH_URL = "http://dispatch.test";
+    process.env.DISPATCH_TOKEN = "answers-token";
+    const item: SessionAnswer = {
+      kind: "answer",
+      relation: "answered_your_ask",
+      id: "ask_1",
+      at: new Date(Date.now() - 60_000).toISOString(),
+      author: { kind: "user", id: "alice" },
+      text,
+      ask: { id: "ask_1", question: "Which way?" },
+      owner: { issue: { key: "LEGION-1", title: "The work" } },
+      ref: "dispatch://LEGION-1/ask/ask_1",
+      href: "/issues/LEGION-1#ask-ask_1",
+    };
+    const reads: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.host !== "dispatch.test") return responseWithRegistration(input, init, {});
+      reads.push(url.pathname);
+      const session = url.pathname.split("/")[4] ?? "";
+      return Response.json({ session_id: session, since: item.at, total: 1, items: [item] });
+    };
+    return { reads, item };
+  }
+
+  /** The messages a `context` handler's result carries. */
+  function contextMessages(result: unknown): unknown[] {
+    if (typeof result !== "object" || result === null || !("messages" in result)) {
+      throw new Error(`the context handler returned ${JSON.stringify(result)}`);
+    }
+    return result.messages as unknown[];
+  }
+
+  test("the context handler appends what people wrote to the session after the request's last message", async () => {
+    const { reads, item } = answeringDispatch("Go the second way.");
+    const { default: envoyExtension } = await import("./envoy.ts?session-answers-top");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    const context = sessionContext("ses_answers_top");
+    await fixture.handlers.get("session_start")?.({}, context);
+    const conversation = [
+      { role: "user", content: [{ type: "text", text: "Fix the bug." }], timestamp: 1 },
+      {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "x.ts" } }],
+        timestamp: 2,
+      },
+      {
+        role: "toolResult",
+        toolCallId: "call-1",
+        toolName: "read",
+        content: [{ type: "text", text: "export {};" }],
+        isError: false,
+        timestamp: 3,
+      },
+    ];
+
+    const messages = contextMessages(
+      await fixture.handlers.get("context")?.({ messages: conversation }, context)
+    );
+
+    expect(reads).toEqual(["/api/v1/agents/ses_answers_top/answers"]);
+    // The skill stays at the head, the conversation is untouched, and the list is its own last
+    // message.
+    expect(JSON.stringify(messages[0])).toContain("<dispatch-first-skill>");
+    expect(messages.slice(1, -1)).toEqual(conversation);
+    expect(messages.at(-1)).toEqual({
+      role: "user",
+      content: [{ type: "text", text: renderSessionAnswers([item], { now: Date.now() }) }],
+      timestamp: 0,
+    });
+  });
+
+  // Oh My Pi drops everything a `context` handler returns when it throws: whatever Dispatch
+  // answers, the skill stays and the request says the list could not be read.
+  test("a Dispatch answering 200 with no list keeps the dispatch-first skill and carries the failure line", async () => {
+    process.env.DISPATCH_URL = "http://dispatch.test";
+    process.env.DISPATCH_TOKEN = "answers-token";
+    globalThis.fetch = async (input, init) =>
+      new URL(input.toString()).host === "dispatch.test"
+        ? Response.json({ unexpected: true })
+        : responseWithRegistration(input, init, {});
+    const { default: envoyExtension } = await import("./envoy.ts?session-answers-malformed");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    const context = sessionContext("ses_answers_malformed");
+    await fixture.handlers.get("session_start")?.({}, context);
+    const prompt = { role: "user", content: [{ type: "text", text: "Fix it." }], timestamp: 1 };
+
+    const messages = contextMessages(
+      await fixture.handlers.get("context")?.({ messages: [prompt] }, context)
+    );
+
+    expect(JSON.stringify(messages[0])).toContain("<dispatch-first-skill>");
+    expect(messages.slice(1, -1)).toEqual([prompt]);
+    expect(JSON.stringify(messages.at(-1))).toContain(
+      "[Dispatch: people's answers from the last 72 hours could not be read ("
+    );
+  });
+
+  test("a task subagent's context handler reads its parent's list", async () => {
+    const fixture = transcriptFixture();
+    try {
+      const { reads } = answeringDispatch("Go the parent's way.");
+      const host = await subagentProcess(
+        "session-answers-subagent",
+        "ses_answers_parent",
+        fixture.transcript
+      );
+      const child = await host.boot(
+        "ses_answers_child",
+        fixture.transcript("2026-09-23T00-00-00-000Z_ses_answers_parent/Scout.jsonl")
+      );
+      const prompt = { role: "user", content: [{ type: "text", text: "Look." }], timestamp: 1 };
+
+      const messages = contextMessages(
+        await child.handlers.get("context")?.({ messages: [prompt] }, child.context)
+      );
+
+      expect(reads).toEqual(["/api/v1/agents/ses_answers_parent/answers"]);
+      expect(messages.slice(1, -1)).toEqual([prompt]);
+      expect(JSON.stringify(messages.at(-1))).toContain("Go the parent's way.");
     } finally {
       fixture.remove();
     }
@@ -13351,21 +14669,17 @@ describe("envoy OMP extension", () => {
     ).toHaveLength(1);
   });
 
-  test("inbound envoy messages deliver as steering so they interrupt an in-flight turn", async () => {
-    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
-    const { default: envoyExtension } = await import("./envoy.ts?deliver-as-steer");
-    const fixture = createPi();
+  // A context without `isIdle` cannot say no turn runs, and the wake for a folded card needs it, so
+  // its cards stay steers with `triggerTurn`: an aside there could fold into the context with no
+  // turn after an interrupt or in plan mode, where a steer starts one.
+  test("delivers an inbound card as a steer on a host that reports no idle state", async () => {
+    const { agent, delivered, fixture } = await bootDirectSession("deliver-as-steer");
 
-    envoyExtension(fixture.pi);
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_steer"));
-    const controls = natsState.controls.get("notifications.agent.ses_steer");
-    expect(controls).toBeDefined();
-
-    controls?.push(forwardedRoleEnvelope("legion-controller", "steer me mid-turn", "steer"));
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    agent.push(forwardedRoleEnvelope("legion-controller", "steer me in", "steer"));
+    await delivered(1);
 
     expect(fixture.deliveries.length).toBe(1);
-    expect(fixture.deliveries[0]?.content).toContain("steer me mid-turn");
+    expect(fixture.deliveries[0]?.content).toContain("steer me in");
     expect(fixture.deliveries[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
   });
 
@@ -13632,6 +14946,8 @@ describe("envoy OMP extension", () => {
     expect(drainHadStartedAtDeregistration).toBe(false);
     expect(requests).toEqual([
       { method: "POST", path: "/v1/interests/subscribe" },
+      // The opened agent subject's first sweep.
+      { method: "POST", path: "/v1/replay" },
       { method: "DELETE", path: "/v1/sessions/ses_shutdown" },
     ]);
   });
@@ -13706,7 +15022,9 @@ describe("envoy OMP extension", () => {
 
   test("the heartbeat heals a stale registration when the session ID drifts", async () => {
     const registered: string[] = [];
-    globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+    globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+      // The sweep the opened agent subject starts is answered as an empty stream, not counted.
+      if (new URL(input.toString()).pathname === "/v1/replay") return emptyReplay(init);
       if (init?.body !== undefined) {
         const body = JSON.parse(init.body.toString());
         if (typeof body.session_id === "string") registered.push(body.session_id);
@@ -13880,4 +15198,1900 @@ describe("envoy OMP extension", () => {
     // adjacent lines onto one row; plain-text rendering keeps them apart.
     expect(rendered).not.toContain("- one - two");
   });
+});
+
+describe("messages missed while the subscription was down", () => {
+  const ISSUE = "INFRA-9";
+  const ISSUE_TOPIC = dispatchIssueSubject(ISSUE, ">");
+  const ISSUE_SUBJECT = dispatchIssueSubject(ISSUE, "issue.updated");
+  const HOUR_MS = 60 * 60 * 1_000;
+  const DAY_MS = 24 * HOUR_MS;
+
+  interface StoredFrame {
+    readonly seq: number;
+    readonly subject: string;
+    readonly time: string;
+    readonly data: string;
+  }
+
+  interface ReplayRequest {
+    readonly session_id: string;
+    readonly subjects: readonly { readonly subject: string; readonly after?: number }[];
+  }
+
+  // Lets every promise and I/O callback queued so far run: a sweep's listener call and its
+  // deliveries settle within a few turns, since nothing in the mocked path waits on a clock.
+  async function settle(): Promise<void> {
+    for (let turn = 0; turn < 25; turn += 1) {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setImmediate(resolve);
+      await promise;
+    }
+  }
+
+  // Polls `condition` between event-loop turns. Only the resubscribe path waits on a real timer
+  // (`ENVOY_RESUBSCRIBE_DELAY_MS`, 10 ms here), which no fake clock reaches; the deadline is
+  // measured on the monotonic clock, which `setSystemTime` leaves alone.
+  async function until(condition: () => boolean, what: string): Promise<void> {
+    const deadline = performance.now() + 2_000;
+    while (!condition()) {
+      if (performance.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      await settle();
+    }
+  }
+
+  // NATS subject matching: `*` is one token, `>` one or more trailing tokens.
+  function subjectMatches(pattern: string, subject: string): boolean {
+    const want = pattern.split(".");
+    const got = subject.split(".");
+    for (const [index, token] of want.entries()) {
+      if (token === ">") return got.length > index;
+      if (index >= got.length || (token !== "*" && token !== got[index])) return false;
+    }
+    return want.length === got.length;
+  }
+
+  /**
+   * `ENVOY_NOTIFICATIONS` as the listener's replay route reads it, and the listener's interest
+   * registry: stored messages with their sequence, subject and time, the first sequence retention
+   * left, and the stream's creation time. It keeps agent and Dispatch subjects only, as the
+   * deployed stream keeps no team topic.
+   */
+  class StreamModel {
+    /** When the stream was created; a recreation changes it. */
+    created = "2026-10-20T00:00:00Z";
+    firstSeq = 1;
+    lastSeq = 0;
+    messages: StoredFrame[] = [];
+    /** False is a listener without the route, which answers 404. */
+    served = true;
+    replays = 0;
+    readonly interests = new Map<string, Set<string>>();
+
+    store(subject: string, data: string, time = new Date().toISOString()): number {
+      this.lastSeq += 1;
+      this.messages.push({ seq: this.lastSeq, subject, time, data });
+      return this.lastSeq;
+    }
+
+    /** Retention drops every message up to `seq`. */
+    expireThrough(seq: number): void {
+      this.messages = this.messages.filter((message) => message.seq > seq);
+      this.firstSeq = seq + 1;
+    }
+
+    /** The route's rules: the watermark, a cursor started without `after`, the eligibility. */
+    answer(request: ReplayRequest) {
+      const watermark = this.lastSeq;
+      const registered = this.interests.get(request.session_id) ?? new Set<string>();
+      return {
+        stream: { created: this.created, first_seq: this.firstSeq, last_seq: watermark },
+        subjects: request.subjects.map(({ subject, after }) => {
+          const refused =
+            subject !== `notifications.agent.${request.session_id}` && !registered.has(subject)
+              ? "not_followed"
+              : !subject.startsWith("notifications.agent.") &&
+                  !subject.startsWith("notifications.dispatch.")
+                ? "not_retained"
+                : undefined;
+          if (refused !== undefined) {
+            return { subject, messages: [], next_after: after ?? 0, more: false, refused };
+          }
+          const messages =
+            after === undefined
+              ? []
+              : this.messages.filter(
+                  (message) =>
+                    message.seq > after &&
+                    message.seq <= watermark &&
+                    subjectMatches(subject, message.subject)
+                );
+          return { subject, messages, next_after: watermark, more: false };
+        }),
+      };
+    }
+  }
+
+  function listenerFetch(
+    model: StreamModel,
+    dispatch?: (url: URL) => Promise<Response | undefined>
+  ): typeof fetch {
+    return (async (input: string | URL | Request, init?: RequestInit) => {
+      const request =
+        input instanceof Request ? new Request(input, init) : new Request(input.toString(), init);
+      const url = new URL(request.url);
+      const answered = await dispatch?.(url);
+      if (answered !== undefined) return answered;
+      const body = (request.method === "GET" ? {} : await request.json()) as {
+        readonly session_id: string;
+        readonly dir?: string;
+        readonly topics: readonly string[];
+      };
+      if (url.pathname === "/v1/replay") {
+        model.replays += 1;
+        if (!model.served) {
+          return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
+        }
+        return response(model.answer(body as unknown as ReplayRequest));
+      }
+      if (url.pathname === "/v1/interests/subscribe") {
+        const topics = model.interests.get(body.session_id) ?? new Set<string>();
+        for (const topic of body.topics) topics.add(topic);
+        model.interests.set(body.session_id, topics);
+        return response({
+          session_id: body.session_id,
+          machine_id: "test",
+          dir: body.dir,
+          topics: [...topics],
+        });
+      }
+      if (url.pathname === "/v1/interests/unsubscribe") {
+        for (const topic of body.topics) model.interests.get(body.session_id)?.delete(topic);
+        return response({});
+      }
+      if (url.pathname.startsWith("/v1/interests/")) {
+        const id = url.pathname.slice("/v1/interests/".length);
+        return response({
+          session_id: id,
+          machine_id: "test",
+          dir: "/tmp",
+          topics: [...(model.interests.get(id) ?? [])],
+        });
+      }
+      return response({});
+    }) as typeof fetch;
+  }
+
+  /** A peer session's message to `sessionID`, under a dedupe key minted once for it. */
+  function peerMessage(sessionID: string, label: string): string {
+    const minted = createHash("sha256").update(label).digest("hex").slice(0, 32);
+    return JSON.stringify({
+      event_id: `evt-${label}`,
+      source: "agent",
+      source_event_id: `source-${label}`,
+      source_session: "ses_peer",
+      topic: `notifications.agent.${sessionID}`,
+      dedupe_key: `agent.ses_peer.${minted}`,
+      issued_at: 1,
+      payload_summary: `peer message ${label}`,
+      trace_id: `trace-${label}`,
+    });
+  }
+
+  /** Dispatch's outbox copy of event `id` on `topic`: every copy carries one event id and key. */
+  function issueEvent(topic: string, id: number, notify = true): string {
+    return JSON.stringify({
+      event_id: `dispatch-${id}`,
+      source: "dispatch",
+      source_event_id: String(id),
+      topic,
+      dedupe_key: `dispatch-${id}`,
+      issued_at: 1,
+      payload_summary: `${ISSUE} moved (${id})`,
+      trace_id: `trace-dispatch-${id}`,
+      payload: JSON.stringify({
+        issue_key: ISSUE,
+        type: "issue.updated",
+        actor: { kind: "user", id: "alice" },
+        notify,
+        payload: { status: "in_progress" },
+      }),
+    });
+  }
+
+  const isNotice = (content: string) => content.includes("message not shown");
+
+  /**
+   * Boots a top-level session against `model`, its transcript `entries` already written (a
+   * restart), with a heartbeat the test ticks. `beforeSend` sees every `pi.sendMessage` first and
+   * may throw, the host refusing it. The host's turn: `streaming` (the default) holds every card
+   * it is handed in memory and writes none, as Oh My Pi holds a card sent mid-turn until the turn
+   * takes it; `idle` writes each card as it starts a turn for it, its `custom_message` entry and
+   * then its `message_end`, as Oh My Pi does. The context reads the host as Oh My Pi's does: idle
+   * (`isIdle`) when its turn is, holding messages (`hasPendingMessages`) while it holds a card.
+   */
+  async function bootReplay(
+    query: string,
+    model: StreamModel,
+    options: {
+      readonly sessionID?: string;
+      readonly entries?: readonly unknown[];
+      readonly beforeSend?: (content: string) => void;
+      readonly dispatch?: (url: URL) => Promise<Response | undefined>;
+      readonly turn?: "idle" | "streaming";
+      /** The host's `pi.sendUserInput`; the session has none without it. */
+      readonly sendUserInput?: (text: string, options: unknown) => Promise<UserInputResult>;
+      /** The host's side turn (`runEphemeralTurn`), which a targeted BTW runs. */
+      readonly runEphemeralTurn?: SessionContext["runEphemeralTurn"];
+    } = {}
+  ) {
+    process.env.ENVOY_RESUBSCRIBE_DELAY_MS = "10";
+    globalThis.fetch = listenerFetch(model, options.dispatch);
+    const { default: envoyExtension } = await import(`./envoy.ts?${query}`);
+    const fixture = createPi();
+    const notifications: string[] = [];
+    const intervals: (() => void)[] = [];
+    interface SentCard {
+      readonly content: string;
+      readonly customType?: string;
+      readonly display?: boolean;
+      readonly details?: unknown;
+    }
+    // The `custom_message` entries the host wrote, as its session file holds them, and the cards
+    // a streaming turn holds until it takes them (`take`).
+    const written: unknown[] = [];
+    const held: SentCard[] = [];
+    const write = async (message: SentCard) => {
+      // The host starts the turn the card triggers after `sendMessage` returns.
+      await Promise.resolve();
+      const { content, customType, display, details } = message;
+      written.push({ type: "custom_message", customType, content, display, details });
+      await fixture.handlers.get("message_end")?.(
+        {
+          message: { role: "custom", customType, content, display, details, timestamp: Date.now() },
+        },
+        context
+      );
+    };
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message: SentCard, sendOptions: unknown) => {
+        options.beforeSend?.(message.content);
+        fixture.pi.sendMessage(message, sendOptions);
+        if (options.turn === "idle") void write(message);
+        else held.push(message);
+      },
+      ...(options.sendUserInput !== undefined && { sendUserInput: options.sendUserInput }),
+    });
+    const sessionID = options.sessionID ?? "ses_replay";
+    const prior = options.entries ?? [];
+    const base = sessionContext(sessionID);
+    const context: SessionContext = {
+      ...base,
+      sessionManager: {
+        ...base.sessionManager,
+        getBranch: () => [...prior, ...fixture.entries, ...written],
+        getEntries: () => [...prior, ...fixture.entries, ...written],
+      },
+      setInterval: (callback) => {
+        intervals.push(callback);
+      },
+      isIdle: () => options.turn === "idle",
+      hasPendingMessages: () => held.length > 0,
+      ui: { ...base.ui, notify: (message) => notifications.push(message) },
+      ...(options.runEphemeralTurn !== undefined && { runEphemeralTurn: options.runEphemeralTurn }),
+    };
+    const before = model.replays;
+    await fixture.handlers.get("session_start")?.({}, context);
+    await until(() => model.replays > before, "the session's first sweep");
+    await settle();
+    const tool = (name: string) => {
+      const found = fixture.tools.find((candidate) => candidate.name === name);
+      if (found === undefined) throw new Error(`${name} was not registered`);
+      return found;
+    };
+    const session = {
+      fixture,
+      notifications,
+      agentSubject: `notifications.agent.${sessionID}`,
+      entries: () => [...prior, ...fixture.entries, ...written],
+      /** The `envoy-message` cards naming `eventID`, failure notices aside. */
+      cards: (eventID: string) =>
+        fixture.deliveries.filter(
+          (delivery) =>
+            delivery.customType === "envoy-message" &&
+            delivery.content.includes(eventID) &&
+            !isNotice(delivery.content)
+        ),
+      /** The failure notices naming `eventID`. */
+      notices: (eventID: string) =>
+        fixture.deliveries.filter(
+          (delivery) => isNotice(delivery.content) && delivery.content.includes(eventID)
+        ),
+      /** One heartbeat tick, and the sweep it starts run to its end. */
+      tick: async () => {
+        const sweeps = model.replays;
+        for (const interval of intervals) interval();
+        await until(() => model.replays > sweeps, "a heartbeat sweep");
+        await settle();
+      },
+      /** nats.js reports a reconnect, and the sweep it starts runs to its end. */
+      reconnect: async () => {
+        const sweeps = model.replays;
+        pushNatsStatus("reconnect");
+        await until(() => model.replays > sweeps, "a reconnect sweep");
+        await settle();
+      },
+      /** Follows `topic` with envoy_subscribe; its cursor starts at the stream's end. */
+      follow: async (topic: string) => {
+        const sweeps = model.replays;
+        await tool("envoy_subscribe").execute("", { topics: [topic] });
+        await until(() => model.replays > sweeps, "the new follow's sweep");
+        await settle();
+      },
+      unfollow: (topic: string) => tool("envoy_unsubscribe").execute("", { topics: [topic] }),
+      stop: () => fixture.handlers.get("session_shutdown")?.({}, context),
+      /** The streaming turn takes every card it holds: the host writes each, in order. */
+      take: async () => {
+        for (const message of held.splice(0)) await write(message);
+        await settle();
+      },
+      /**
+       * The person interrupts the streaming turn (Escape at the terminal, or RPC
+       * `abort_and_restore_queue`): Oh My Pi's `clearQueue({ forInterrupt: true })` withdraws the
+       * cards the turn held and writes none of them, the run ends aborted (`agent_end`), and the
+       * host is idle from then on, writing each card it is handed.
+       */
+      interrupt: async () => {
+        held.splice(0);
+        options = { ...options, turn: "idle" };
+        await fixture.handlers.get("agent_end")?.(
+          { messages: [{ role: "assistant", stopReason: "aborted", content: [] }] },
+          context
+        );
+        await settle();
+      },
+      /**
+       * The host switches to another session (`/new`) while the turn streams, withdrawing the cards
+       * it held unwritten, then back to this one, its turn streaming again. What the extension
+       * appends while the host is on the other session goes to that session's file, not this one.
+       */
+      switchAwayAndBack: async (otherSessionID: string) => {
+        held.splice(0);
+        const other: SessionContext = {
+          ...sessionContext(otherSessionID),
+          setInterval: (callback) => {
+            intervals.push(callback);
+          },
+        };
+        const mark = fixture.entries.length;
+        await fixture.handlers.get("session_switch")?.({ reason: "new" }, other);
+        await settle();
+        fixture.entries.splice(mark);
+        await fixture.handlers.get("session_switch")?.({ reason: "resume" }, context);
+        await settle();
+      },
+      /** The host writes a user message, the turn a person's Send became: its `message_end`. */
+      writeUserTurn: async (text: string, tag?: string) => {
+        const message = {
+          role: "user",
+          content: [{ type: "text", text }],
+          timestamp: Date.now(),
+          ...(tag === undefined ? {} : { tag }),
+        };
+        written.push({ type: "message", message });
+        await fixture.handlers.get("message_end")?.({ message }, context);
+        await settle();
+      },
+      /**
+       * The person aborts the streaming turn (RPC `abort`): the run ends aborted (`agent_end`), and
+       * the host, idle at its end, still holds the cards the turn held, for the run it starts next
+       * to take (`take`), as Oh My Pi 18.8.9 does.
+       */
+      abort: async () => {
+        options = { ...options, turn: "idle" };
+        await fixture.handlers.get("agent_end")?.(
+          { messages: [{ role: "assistant", stopReason: "aborted", content: [] }] },
+          context
+        );
+        await settle();
+      },
+      live: (subject: string) => {
+        const controls = natsState.controls.get(subject);
+        if (controls === undefined) throw new Error(`${subject} was never subscribed`);
+        return controls;
+      },
+      /** Two more heartbeat sweeps and the live copy pushed too: the frame is still shown once. */
+      stillOnce: async (subject: string, data: string, eventID: string) => {
+        await session.tick();
+        await session.tick();
+        expect(session.cards(eventID)).toHaveLength(1);
+        session.live(subject).push(data);
+        await settle();
+        expect(session.cards(eventID)).toHaveLength(1);
+      },
+    };
+    return session;
+  }
+
+  describe("on the session's own topic", () => {
+    test("a frame stored while its subscription's iterator was down is shown once it resubscribes", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-own-iterator", model);
+      const frame = peerMessage("ses_replay", "own-iterator");
+
+      session.live(session.agentSubject).fail(new Error("connection lost"));
+      model.store(session.agentSubject, frame);
+      await until(() => session.cards("evt-own-iterator").length > 0, "the replayed card");
+
+      const [card] = session.cards("evt-own-iterator");
+      expect(card?.content).toContain("while this session's connection was down");
+      // The host's turn streams, so the card goes as an aside (`../src/card-wake`).
+      expect(card?.options).toEqual({ deliverAs: "aside", triggerTurn: true });
+      await session.stillOnce(session.agentSubject, frame, "evt-own-iterator");
+    });
+
+    test("a frame stored while NATS was away is shown once nats.js reports its reconnect", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-own-reconnect", model);
+      const frame = peerMessage("ses_replay", "own-reconnect");
+
+      model.store(session.agentSubject, frame);
+      await session.reconnect();
+
+      expect(session.cards("evt-own-reconnect")).toHaveLength(1);
+      await session.stillOnce(session.agentSubject, frame, "evt-own-reconnect");
+    });
+
+    test("a frame stored while the session was stopped is shown once by a fresh instance restoring its entries", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-own-restart-a", model);
+      await first.stop();
+      const frame = peerMessage("ses_replay", "own-restart");
+      model.store(first.agentSubject, frame);
+
+      const second = await bootReplay("replay-own-restart-b", model, { entries: first.entries() });
+
+      expect(second.cards("evt-own-restart")).toHaveLength(1);
+      await second.stillOnce(second.agentSubject, frame, "evt-own-restart");
+    });
+
+    test("a stream that answers the same id after a restart is the same stream, though its creation time moved", async () => {
+      // The listener answers the stream's id, which a leader election or a restore keeps.
+      class IdentifiedStream extends StreamModel {
+        override answer(request: ReplayRequest) {
+          const answered = super.answer(request);
+          return { ...answered, stream: { ...answered.stream, id: "stream-1" } };
+        }
+      }
+      const model = new IdentifiedStream();
+      const first = await bootReplay("replay-own-same-id-a", model);
+      await first.stop();
+      model.created = "2026-10-21T00:00:00Z";
+      const frame = peerMessage("ses_replay", "own-same-id");
+      model.store(first.agentSubject, frame);
+
+      const second = await bootReplay("replay-own-same-id-b", model, {
+        entries: first.entries(),
+        turn: "idle",
+      });
+      await second.tick();
+
+      expect(second.cards("evt-own-same-id")).toHaveLength(1);
+      expect(
+        [
+          ...second.fixture.deliveries.map((delivery) => delivery.content),
+          ...second.notifications,
+        ].filter((text) => text.includes("recreated"))
+      ).toEqual([]);
+    });
+
+    test("a frame delivered live is not shown again when the same envelope arrives after a restart", async () => {
+      const model = new StreamModel();
+      // An idle host writes the live card as it takes it.
+      const first = await bootReplay("replay-own-repeat-a", model, { turn: "idle" });
+      const frame = peerMessage("ses_replay", "own-repeat");
+      model.store(first.agentSubject, frame);
+      first.live(first.agentSubject).push(frame);
+      await until(() => first.cards("evt-own-repeat").length > 0, "the live card");
+      await first.stop();
+
+      const second = await bootReplay("replay-own-repeat-b", model, {
+        entries: first.entries(),
+        turn: "idle",
+      });
+      second.live(second.agentSubject).push(frame);
+      await settle();
+      await second.tick();
+
+      expect(first.cards("evt-own-repeat")).toHaveLength(1);
+      expect(second.cards("evt-own-repeat")).toHaveLength(0);
+    });
+
+    test("a listener without the replay route shows nothing and says so once", async () => {
+      const model = new StreamModel();
+      model.served = false;
+      const session = await bootReplay("replay-own-not-served", model);
+      model.store(session.agentSubject, peerMessage("ses_replay", "own-not-served"));
+
+      await session.reconnect();
+      await session.tick();
+      await session.tick();
+
+      expect(session.cards("evt-own-not-served")).toHaveLength(0);
+      expect(
+        session.notifications.filter((message) =>
+          message.includes("messages published while its connection is down are not recovered")
+        )
+      ).toHaveLength(1);
+    });
+  });
+
+  // While a turn streams, omp holds a card sent with `deliverAs: "steer"` in memory and writes
+  // its `custom_message` entry to the session file only once the turn takes it. A process that
+  // ends in between (a SIGKILL, a pod stopped mid-turn) leaves a session file without the card,
+  // so the card never reached the session: the restarted session must show it.
+  describe("a card the host had not written to the transcript when the process ended", () => {
+    /** The `custom_message` entry omp writes once a turn takes a card: what a shown card leaves. */
+    function writtenCard(
+      session: {
+        readonly cards: (
+          eventID: string
+        ) => readonly { content: string; customType?: string; display?: boolean }[];
+      },
+      eventID: string
+    ) {
+      const [card] = session.cards(eventID);
+      if (card === undefined) throw new Error(`no card for ${eventID}`);
+      return {
+        type: "custom_message",
+        customType: card.customType,
+        content: card.content,
+        display: card.display,
+      };
+    }
+
+    test("a replayed card still queued is shown again after the restart; one written is not", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-queued-replayed-a", model);
+      model.store(first.agentSubject, peerMessage("ses_replay", "queued-written"));
+      model.store(first.agentSubject, peerMessage("ses_replay", "queued-held"));
+      await first.reconnect();
+      expect(first.cards("evt-queued-written")).toHaveLength(1);
+      expect(first.cards("evt-queued-held")).toHaveLength(1);
+      await first.stop();
+
+      // The turn took the first card before the process ended; the second was still queued.
+      const second = await bootReplay("replay-queued-replayed-b", model, {
+        entries: [...first.entries(), writtenCard(first, "evt-queued-written")],
+      });
+      await second.tick();
+
+      expect(second.cards("evt-queued-written")).toHaveLength(0);
+      expect(second.cards("evt-queued-held")).toHaveLength(1);
+    });
+
+    test("a live card still queued is shown again after the restart; one written is not", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-queued-live-a", model);
+      for (const label of ["live-written", "live-held"]) {
+        const frame = peerMessage("ses_replay", label);
+        model.store(first.agentSubject, frame);
+        first.live(first.agentSubject).push(frame);
+      }
+      await until(() => first.cards("evt-live-held").length > 0, "the live cards");
+      await first.tick();
+      expect(first.cards("evt-live-written")).toHaveLength(1);
+      expect(first.cards("evt-live-held")).toHaveLength(1);
+      await first.stop();
+
+      const second = await bootReplay("replay-queued-live-b", model, {
+        entries: [...first.entries(), writtenCard(first, "evt-live-written")],
+      });
+      await second.tick();
+
+      expect(second.cards("evt-live-written")).toHaveLength(0);
+      expect(second.cards("evt-live-held")).toHaveLength(1);
+    });
+  });
+
+  // A card the host held behind a streaming turn can also leave without ever being written while
+  // the process lives on: an interrupt withdraws it, as a switch away does.
+  describe("a card the host withdrew without writing it", () => {
+    test("one a person's interrupt withdrew is shown again in the same process, once", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-withdrawn-interrupt", model);
+      const replayed = peerMessage("ses_replay", "withdrawn-replayed");
+      const live = peerMessage("ses_replay", "withdrawn-live");
+      model.store(session.agentSubject, replayed);
+      await session.reconnect();
+      model.store(session.agentSubject, live);
+      session.live(session.agentSubject).push(live);
+      await until(() => session.cards("evt-withdrawn-live").length > 0, "the live card");
+
+      await session.interrupt();
+      await session.tick();
+      await session.tick();
+
+      // Handed again after the interrupt, and written this time: the session saw each once.
+      expect(session.cards("evt-withdrawn-replayed")).toHaveLength(2);
+      expect(session.cards("evt-withdrawn-live")).toHaveLength(2);
+      await session.tick();
+      expect(session.cards("evt-withdrawn-replayed")).toHaveLength(2);
+      expect(session.cards("evt-withdrawn-live")).toHaveLength(2);
+    });
+
+    test("one a switch away withdrew is not recorded shown when it is handed again after the switch back", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-withdrawn-switch-a", model);
+      // An earlier message the turn took, so the session's replay state is written to its file.
+      model.store(first.agentSubject, peerMessage("ses_replay", "withdrawn-switch-earlier"));
+      await first.reconnect();
+      await first.take();
+      await first.tick();
+      const frame = peerMessage("ses_replay", "withdrawn-switch");
+      model.store(first.agentSubject, frame);
+      first.live(first.agentSubject).push(frame);
+      await until(() => first.cards("evt-withdrawn-switch").length > 0, "the live card");
+
+      await first.switchAwayAndBack("ses_elsewhere");
+      await first.tick();
+      // Handed again after the switch back, and still held by the streaming turn when the
+      // process ends: it never reached the transcript.
+      await first.stop();
+
+      const second = await bootReplay("replay-withdrawn-switch-b", model, {
+        entries: first.entries(),
+      });
+      await second.tick();
+
+      expect(second.cards("evt-withdrawn-switch")).toHaveLength(1);
+    });
+  });
+
+  // What the host held is shown from when it writes it: a card a turn takes later, a failure
+  // notice, and a person's Send run as a turn, which the host writes as a user message.
+  describe("a card or turn the host writes only once a turn takes it", () => {
+    test("a replayed card the turn takes later is shown once, and not again after a restart", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-taken-later-a", model);
+      const frame = peerMessage("ses_replay", "taken-later");
+      model.store(first.agentSubject, frame);
+      await first.reconnect();
+      await first.tick();
+      expect(first.cards("evt-taken-later")).toHaveLength(1);
+
+      await first.take();
+      await first.stillOnce(first.agentSubject, frame, "evt-taken-later");
+      await first.stop();
+
+      const second = await bootReplay("replay-taken-later-b", model, {
+        entries: first.entries(),
+      });
+      await second.tick();
+
+      expect(second.cards("evt-taken-later")).toHaveLength(0);
+    });
+
+    test("one a plain abort left in the host's queue is shown once, by the run the host starts next", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-abort-queued-a", model);
+      const replayed = peerMessage("ses_replay", "abort-replayed");
+      const live = peerMessage("ses_replay", "abort-live");
+      model.store(first.agentSubject, replayed);
+      await first.reconnect();
+      model.store(first.agentSubject, live);
+      first.live(first.agentSubject).push(live);
+      await until(() => first.cards("evt-abort-live").length > 0, "the live card");
+
+      // The host is idle at the aborted run's end and still holds both cards: not handed again.
+      await first.abort();
+      await first.tick();
+      await first.tick();
+      expect(first.cards("evt-abort-replayed")).toHaveLength(1);
+      expect(first.cards("evt-abort-live")).toHaveLength(1);
+
+      await first.take();
+      await first.tick();
+      await first.tick();
+      expect(first.cards("evt-abort-replayed")).toHaveLength(1);
+      expect(first.cards("evt-abort-live")).toHaveLength(1);
+      await first.stop();
+
+      const second = await bootReplay("replay-abort-queued-b", model, {
+        entries: first.entries(),
+      });
+      await second.tick();
+
+      expect(second.cards("evt-abort-replayed")).toHaveLength(0);
+      expect(second.cards("evt-abort-live")).toHaveLength(0);
+    });
+
+    test("a frame shown before the host moved to this session is recorded here only once its card is written", async () => {
+      const model = new StreamModel();
+      // A session that followed the issue, left before the event was published.
+      const left = await bootReplay("replay-moved-left", model, { sessionID: "ses_moved" });
+      await left.follow(ISSUE_TOPIC);
+      await left.stop();
+      const leftEntries = left.entries();
+      // Another session follows the issue too and is shown the event live: its turn takes the card.
+      const session = await bootReplay("replay-moved-a", model);
+      await session.follow(ISSUE_TOPIC);
+      const frame = issueEvent(ISSUE_SUBJECT, 30);
+      model.store(ISSUE_SUBJECT, frame);
+      session.live(ISSUE_TOPIC).push(frame);
+      await until(() => session.cards("dispatch-30").length > 0, "the live card");
+      await session.take();
+
+      // The host resumes the session it left, its turn streaming: that session's sweep hands it
+      // the event's card, which the turn holds until the process ends.
+      const mark = session.fixture.entries.length;
+      const file = () => [...leftEntries, ...session.fixture.entries.slice(mark)];
+      const resumed = sessionContext("ses_moved");
+      await session.fixture.handlers.get("session_switch")?.(
+        { reason: "resume" },
+        {
+          ...resumed,
+          sessionManager: { ...resumed.sessionManager, getBranch: file, getEntries: file },
+        }
+      );
+      await until(() => session.cards("dispatch-30").length > 1, "the resumed session's card");
+      await settle();
+      await session.stop();
+
+      const restarted = await bootReplay("replay-moved-b", model, {
+        sessionID: "ses_moved",
+        entries: file(),
+      });
+
+      expect(restarted.cards("dispatch-30")).toHaveLength(1);
+    });
+
+    test("a frame whose failure notice was still held when the process ended is shown after the restart", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-notice-held-a", model, {
+        beforeSend: (content) => {
+          if (content.includes("evt-notice-held") && !isNotice(content)) {
+            throw new Error("host refuses the card");
+          }
+        },
+      });
+      model.store(first.agentSubject, peerMessage("ses_replay", "notice-held"));
+      await first.reconnect();
+      await first.tick();
+      await first.tick();
+      await first.tick();
+      expect(first.notices("evt-notice-held")).toHaveLength(1);
+      await first.stop();
+
+      const second = await bootReplay("replay-notice-held-b", model, {
+        entries: first.entries(),
+      });
+      await second.tick();
+
+      expect(second.cards("evt-notice-held")).toHaveLength(1);
+      expect(second.notices("evt-notice-held")).toHaveLength(0);
+    });
+
+    for (const [via, slug] of [
+      ["typed input", "typed"],
+      ["a user message", "text"],
+    ] as const) {
+      describe(`a person's Send run as a turn through ${via}`, () => {
+        async function bootSend(query: string, model: StreamModel, entries?: readonly unknown[]) {
+          process.env.DISPATCH_URL = "http://dispatch.test";
+          process.env.DISPATCH_TOKEN = "dispatch-token";
+          const inputs: string[] = [];
+          return {
+            inputs,
+            session: await bootReplay(query, model, {
+              sessionID: "ses_delivery",
+              ...(entries === undefined ? {} : { entries }),
+              dispatch: async (url) =>
+                url.pathname.endsWith("/accept")
+                  ? acceptResponse(
+                      Number(url.pathname.split("/").at(-2)),
+                      { accepted: true },
+                      url.pathname.split("/").at(-4)
+                    )
+                  : undefined,
+              ...(via === "typed input" && {
+                sendUserInput: async (text: string): Promise<UserInputResult> => {
+                  inputs.push(text);
+                  return { handled: "prompt" };
+                },
+              }),
+            }),
+          };
+        }
+
+        // The person's Send arrives live and becomes a turn the host is handed; the stream keeps
+        // its copy, which a sweep shows as a card when the turn never reached the transcript.
+        async function sendTurn(label: string) {
+          const model = new StreamModel();
+          const first = await bootSend(`replay-turn-${label}-a`, model);
+          const send = directDispatchEnvelope("steer", `turn-${label}`);
+          model.store(first.session.agentSubject, send);
+          first.session.live(first.session.agentSubject).push(send);
+          await until(
+            () => first.inputs.length + first.session.fixture.userMessages.length > 0,
+            "the person's turn"
+          );
+          return { first: first.session, inputs: first.inputs, model };
+        }
+
+        test("one the host had not written when the process ended is shown as a card after the restart", async () => {
+          const { first, model } = await sendTurn(`held-${slug}`);
+          await first.tick();
+          await first.stop();
+
+          const second = await bootSend(`replay-turn-held-${slug}-b`, model, first.entries());
+          await second.session.tick();
+
+          const cards = second.session.cards(`dispatch-turn-held-${slug}`);
+          expect(cards).toHaveLength(1);
+          expect(cards[0]?.content).toContain("while this session's connection was down");
+        });
+
+        test("one the host wrote is not shown again after the restart", async () => {
+          const { first, model } = await sendTurn(`written-${slug}`);
+          await first.writeUserTurn(
+            DIRECT_MESSAGE_BODY,
+            slug === "typed" ? DIRECT_MESSAGE_ID : undefined
+          );
+          await first.tick();
+          await first.stop();
+
+          const second = await bootSend(`replay-turn-written-${slug}-b`, model, first.entries());
+          await second.session.tick();
+
+          expect(second.session.cards(`dispatch-turn-written-${slug}`)).toHaveLength(0);
+        });
+
+        // Oh My Pi 18.8.9 hands a typed input the streaming turn held back to whoever interrupted
+        // (RPC `abort_and_restore_queue` answers it in its `steering` list) and never writes it.
+        if (slug === "typed") {
+          test("one a person's interrupt withdrew unwritten is shown as a card that runs nothing, once", async () => {
+            const { first, inputs } = await sendTurn("withdrawn-typed");
+
+            await first.interrupt();
+            await first.tick();
+
+            const cards = first.cards("dispatch-turn-withdrawn-typed");
+            expect(cards).toHaveLength(1);
+            expect(cards[0]?.content).toContain("while this session's connection was down");
+            // A card alone: the input is not typed again, and no user message is sent.
+            expect(inputs).toHaveLength(1);
+            expect(first.fixture.userMessages).toHaveLength(0);
+            await first.tick();
+            await first.tick();
+            expect(first.cards("dispatch-turn-withdrawn-typed")).toHaveLength(1);
+          });
+        }
+      });
+    }
+  });
+
+  describe("on a followed issue topic", () => {
+    test("a frame stored while the topic's iterator was down is shown once it resubscribes", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-issue-iterator", model);
+      await session.follow(ISSUE_TOPIC);
+      const frame = issueEvent(ISSUE_SUBJECT, 1);
+
+      session.live(ISSUE_TOPIC).fail(new Error("connection lost"));
+      model.store(ISSUE_SUBJECT, frame);
+      await until(() => session.cards("dispatch-1").length > 0, "the replayed card");
+
+      expect(session.cards("dispatch-1")).toHaveLength(1);
+      await session.stillOnce(ISSUE_TOPIC, frame, "dispatch-1");
+    });
+
+    test("a frame stored while NATS was away is shown once nats.js reports its reconnect", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-issue-reconnect", model);
+      await session.follow(ISSUE_TOPIC);
+      const frame = issueEvent(ISSUE_SUBJECT, 2);
+
+      model.store(ISSUE_SUBJECT, frame);
+      await session.reconnect();
+
+      expect(session.cards("dispatch-2")).toHaveLength(1);
+      await session.stillOnce(ISSUE_TOPIC, frame, "dispatch-2");
+    });
+
+    test("a frame stored while the session was stopped is shown once by a fresh instance restoring its entries", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-issue-restart-a", model);
+      await first.follow(ISSUE_TOPIC);
+      await first.stop();
+      const frame = issueEvent(ISSUE_SUBJECT, 3);
+      model.store(ISSUE_SUBJECT, frame);
+
+      const second = await bootReplay("replay-issue-restart-b", model, {
+        entries: first.entries(),
+      });
+
+      expect(second.cards("dispatch-3")).toHaveLength(1);
+      await second.stillOnce(ISSUE_TOPIC, frame, "dispatch-3");
+    });
+
+    test("the issue topic's copy and the agent subject's copy of one event are shown once together", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-issue-both-copies", model);
+      await session.follow(ISSUE_TOPIC);
+
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 4));
+      model.store(session.agentSubject, issueEvent(session.agentSubject, 4));
+      await session.reconnect();
+      await session.tick();
+
+      expect(session.cards("dispatch-4")).toHaveLength(1);
+    });
+
+    test("a notify:false issue copy does not keep the eligible agent-subject copy from showing, once", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-issue-notify-false", model);
+      await session.follow(ISSUE_TOPIC);
+
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 5, false));
+      model.store(session.agentSubject, issueEvent(session.agentSubject, 5));
+      await session.reconnect();
+      await session.tick();
+
+      expect(session.cards("dispatch-5")).toHaveLength(1);
+      expect(session.cards("dispatch-5")[0]?.content).toContain("you (ses_replay)");
+    });
+
+    test("a topic followed after a frame was stored shows nothing older than the follow", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-issue-followed-later", model);
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 6));
+
+      await session.follow(ISSUE_TOPIC);
+      await session.reconnect();
+      await session.tick();
+
+      expect(session.cards("dispatch-6")).toHaveLength(0);
+    });
+
+    test("a restart after the listener reaped the session's interests follows the topic again from the transcript and recovers it", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-issue-reaped-a", model);
+      await first.follow(ISSUE_TOPIC);
+      await first.stop();
+      model.interests.clear();
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 7));
+
+      const second = await bootReplay("replay-issue-reaped-b", model, {
+        entries: first.entries(),
+      });
+
+      expect(second.live(ISSUE_TOPIC).active()).toBe(true);
+      expect([...(model.interests.get("ses_replay") ?? [])]).toContain(ISSUE_TOPIC);
+      expect(second.cards("dispatch-7")).toHaveLength(1);
+    });
+
+    test("a session back four days later shows a frame from an hour before its restart once, and says older ones may be missing", async () => {
+      const restartAt = Date.now();
+      try {
+        setSystemTime(new Date(restartAt - 4 * DAY_MS));
+        const model = new StreamModel();
+        const first = await bootReplay("replay-issue-four-days-a", model);
+        await first.follow(ISSUE_TOPIC);
+        await first.stop();
+        // Three days on, retention has dropped what was stored while the session was away.
+        model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 8));
+        model.expireThrough(model.lastSeq);
+        setSystemTime(new Date(restartAt));
+        model.store(
+          ISSUE_SUBJECT,
+          issueEvent(ISSUE_SUBJECT, 9),
+          new Date(restartAt - HOUR_MS).toISOString()
+        );
+
+        const second = await bootReplay("replay-issue-four-days-b", model, {
+          entries: first.entries(),
+          turn: "idle",
+        });
+        await second.tick();
+        await second.tick();
+
+        expect(second.cards("dispatch-9")).toHaveLength(1);
+        expect(second.cards("dispatch-9")[0]?.content).toContain(
+          new Date(restartAt - HOUR_MS).toISOString()
+        );
+        expect(second.cards("dispatch-8")).toHaveLength(0);
+        expect(
+          second.fixture.deliveries.filter((delivery) =>
+            delivery.content.includes("messages older than 72 hours may be missing")
+          )
+        ).toHaveLength(1);
+      } finally {
+        setSystemTime();
+      }
+    });
+
+    test("a retention gap found while the host's turn streams is told once, at the first idle heartbeat", async () => {
+      const restartAt = Date.now();
+      try {
+        setSystemTime(new Date(restartAt - 4 * DAY_MS));
+        const model = new StreamModel();
+        const first = await bootReplay("replay-issue-gap-busy-a", model);
+        await first.follow(ISSUE_TOPIC);
+        await first.stop();
+        model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 8));
+        model.expireThrough(model.lastSeq);
+        setSystemTime(new Date(restartAt));
+        model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 9));
+        // Read by the host context at each call, so the turn can end mid-test.
+        const host: { readonly entries: readonly unknown[]; turn: "idle" | "streaming" } = {
+          entries: first.entries(),
+          turn: "streaming",
+        };
+        const second = await bootReplay("replay-issue-gap-busy-b", model, host);
+        const gapNotices = () =>
+          second.fixture.deliveries.filter((delivery) =>
+            delivery.content.includes("messages older than 72 hours may be missing")
+          );
+        await second.tick();
+        // A card handed while the turn streams is steered into it, and runs a model turn for it.
+        expect(gapNotices()).toHaveLength(0);
+
+        // The turn takes what it held and ends: the host is idle, and the next heartbeat tells it.
+        await second.take();
+        host.turn = "idle";
+        await second.tick();
+        expect(gapNotices()).toHaveLength(1);
+        expect(gapNotices()[0]?.details).toEqual(LOCAL_ENVOY_NOTICE);
+        await second.tick();
+        expect(gapNotices()).toHaveLength(1);
+      } finally {
+        setSystemTime();
+      }
+    });
+
+    test("a retention gap held while the host's turn streams is told after a restart that cut the hold short", async () => {
+      const restartAt = Date.now();
+      try {
+        setSystemTime(new Date(restartAt - 4 * DAY_MS));
+        const model = new StreamModel();
+        const first = await bootReplay("replay-issue-gap-killed-a", model);
+        await first.follow(ISSUE_TOPIC);
+        await first.stop();
+        model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 11));
+        model.expireThrough(model.lastSeq);
+        setSystemTime(new Date(restartAt));
+        model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 12));
+        // The notice is held for the streaming turn, and the process ends before the turn does.
+        const second = await bootReplay("replay-issue-gap-killed-b", model, {
+          entries: first.entries(),
+          turn: "streaming",
+        });
+        await second.tick();
+        await second.stop();
+
+        const third = await bootReplay("replay-issue-gap-killed-c", model, {
+          entries: second.entries(),
+          turn: "idle",
+        });
+        await third.tick();
+        await third.tick();
+
+        // Told once, by the session that came back, since the session it was raised in never was.
+        expect(
+          third.fixture.deliveries.filter((delivery) =>
+            delivery.content.includes("messages older than 72 hours may be missing")
+          )
+        ).toHaveLength(1);
+      } finally {
+        setSystemTime();
+      }
+    });
+
+    test("a retention gap held while the host's turn streams is told once after the process is killed", async () => {
+      const model = new StreamModel();
+      // Read by the host context at each call, so the turn can start mid-test.
+      const host: { turn: "idle" | "streaming" } = { turn: "idle" };
+      const first = await bootReplay("replay-issue-gap-sigkill-a", model, host);
+      await first.follow(ISSUE_TOPIC);
+      // A message shown and recorded: the session has written its replay state just now.
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 13));
+      await first.reconnect();
+      await first.tick();
+      expect(first.cards("dispatch-13")).toHaveLength(1);
+
+      // A turn streams; the stream drops everything it held, on subjects the session does not
+      // follow, so the sweep only moves the session's cursor past the gap and holds the notice.
+      host.turn = "streaming";
+      const unfollowed = dispatchIssueSubject("OTHER-1", "issue.updated");
+      model.store(unfollowed, issueEvent(unfollowed, 14));
+      model.store(unfollowed, issueEvent(unfollowed, 15));
+      model.expireThrough(model.lastSeq);
+      await first.tick();
+      const gapNotices = (session: { readonly fixture: typeof first.fixture }) =>
+        session.fixture.deliveries.filter((delivery) =>
+          delivery.content.includes("messages older than 72 hours may be missing")
+        );
+      expect(gapNotices(first)).toHaveLength(0);
+
+      // SIGKILL: no session_shutdown runs; the session file holds what was appended before it.
+      const restarted = await bootReplay("replay-issue-gap-sigkill-b", model, {
+        entries: first.entries(),
+        turn: "idle",
+      });
+      await restarted.tick();
+      await restarted.tick();
+
+      // One gap, told once: not once for the recorded held notice and again for the gap the
+      // restored cursor finds a second time.
+      expect(gapNotices(restarted)).toHaveLength(1);
+    });
+
+    test("a retention gap on the followed topic held while the host's turn streams is told once after the process is killed showing its page", async () => {
+      const model = new StreamModel();
+      // The session file as it stood when the process was killed.
+      let killedWith: readonly unknown[] | undefined;
+      // Read by the host context at each call, so the turn can start mid-test.
+      const host: { turn: "idle" | "streaming"; readonly beforeSend: (content: string) => void } = {
+        turn: "idle",
+        beforeSend: (content) => {
+          // SIGKILL while the gapped page's surviving frame is being handed to the turn.
+          if (content.includes("dispatch-33")) killedWith ??= first.entries();
+        },
+      };
+      const first = await bootReplay("replay-issue-gap-sigkill-page-a", model, host);
+      await first.follow(ISSUE_TOPIC);
+      // A message shown and recorded: the session has written its replay state just now.
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 30));
+      await first.reconnect();
+      await first.tick();
+      expect(first.cards("dispatch-30")).toHaveLength(1);
+
+      // A turn streams; the stream drops two messages on the followed topic, and one stored after
+      // them is on the page the sweep finds the gap on.
+      host.turn = "streaming";
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 31));
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 32));
+      model.expireThrough(model.lastSeq);
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 33));
+      await first.tick();
+      const gap = "messages older than 72 hours may be missing";
+      expect(first.fixture.deliveries.filter(({ content }) => content.includes(gap))).toEqual([]);
+      expect(killedWith).toBeDefined();
+
+      // No session_shutdown runs; the session file holds what was appended before the kill.
+      const restarted = await bootReplay("replay-issue-gap-sigkill-page-b", model, {
+        entries: killedWith ?? [],
+        turn: "idle",
+      });
+      await restarted.tick();
+      await restarted.tick();
+
+      // One gap, told once: not once for the recorded held notice and again for the gap the
+      // restored cursor finds a second time. The frame the turn never took is shown after all.
+      expect(
+        restarted.fixture.deliveries.filter(({ content }) => content.includes(gap))
+      ).toHaveLength(1);
+      expect(restarted.cards("dispatch-33")).toHaveLength(1);
+    });
+
+    test("a retention gap held while the host's turn streams is told once after the host switches away and back", async () => {
+      const restartAt = Date.now();
+      try {
+        setSystemTime(new Date(restartAt - 4 * DAY_MS));
+        const model = new StreamModel();
+        const first = await bootReplay("replay-issue-gap-switch-a", model);
+        await first.follow(ISSUE_TOPIC);
+        await first.stop();
+        model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 13));
+        model.expireThrough(model.lastSeq);
+        setSystemTime(new Date(restartAt));
+        model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 14));
+        const second = await bootReplay("replay-issue-gap-switch-b", model, {
+          entries: first.entries(),
+          turn: "streaming",
+        });
+        await second.tick();
+
+        // The notice is held for the session it was raised in, through the switch and back, until
+        // the turn the host streams again ends and the host is idle with nothing queued.
+        await second.switchAwayAndBack("ses_replay_other");
+        await second.interrupt();
+        await second.tick();
+        await second.tick();
+
+        const gapNotices = second.fixture.deliveries.filter((delivery) =>
+          delivery.content.includes("messages older than 72 hours may be missing")
+        );
+        expect(gapNotices).toHaveLength(1);
+        expect(gapNotices[0]?.details).toEqual(LOCAL_ENVOY_NOTICE);
+      } finally {
+        setSystemTime();
+      }
+    });
+
+    test("a topic the session unfollowed stays unfollowed after a restart", async () => {
+      const model = new StreamModel();
+      const first = await bootReplay("replay-issue-unfollowed-a", model);
+      await first.follow(ISSUE_TOPIC);
+      await first.unfollow(ISSUE_TOPIC);
+      await first.stop();
+      model.store(ISSUE_SUBJECT, issueEvent(ISSUE_SUBJECT, 10));
+
+      const second = await bootReplay("replay-issue-unfollowed-b", model, {
+        entries: first.entries(),
+      });
+      await second.tick();
+
+      expect(second.live(ISSUE_TOPIC).active()).toBe(false);
+      expect([...(model.interests.get("ses_replay") ?? [])]).not.toContain(ISSUE_TOPIC);
+      expect(second.cards("dispatch-10")).toHaveLength(0);
+    });
+
+    /** Dispatch's `subscription.removed` for this session's follow of the issue, event `id`. */
+    const removal = (id: number) =>
+      JSON.stringify({
+        event_id: `dispatch-${id}`,
+        source: "dispatch",
+        source_event_id: String(id),
+        topic: "notifications.agent.ses_replay",
+        dedupe_key: `dispatch-${id}`,
+        issued_at: 1,
+        payload_summary: `unsubscribed from ${ISSUE}`,
+        trace_id: `trace-dispatch-${id}`,
+        payload: JSON.stringify({
+          issue_key: ISSUE,
+          type: "subscription.removed",
+          actor: { kind: "user", id: "alice" },
+          notify: true,
+          payload: {
+            session_id: "ses_replay",
+            by: { kind: "user", id: "alice" },
+            topics: [ISSUE_TOPIC],
+          },
+        }),
+      });
+
+    test("a replayed removal closes the topic only when it was stored after the session followed it", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-issue-removal", model);
+
+      // A removal from before the session followed the topic (again) says nothing of that follow.
+      model.store(session.agentSubject, removal(11));
+      await session.follow(ISSUE_TOPIC);
+      expect(session.live(ISSUE_TOPIC).active()).toBe(true);
+
+      model.store(session.agentSubject, removal(12));
+      await session.reconnect();
+
+      expect(session.live(ISSUE_TOPIC).active()).toBe(false);
+      await session.tick();
+      expect(session.live(ISSUE_TOPIC).active()).toBe(false);
+    });
+
+    test("a removal replayed after a resume re-registered the topic takes it out of the registry, so the next restart does not follow it", async () => {
+      const model = new StreamModel();
+      let unsubscribes = 0;
+      const countUnsubscribes = async (url: URL) => {
+        if (url.pathname === "/v1/interests/unsubscribe") unsubscribes += 1;
+        return undefined;
+      };
+      const first = await bootReplay("replay-issue-removal-resumed-a", model);
+      await first.follow(ISSUE_TOPIC);
+      await first.stop();
+      // A person removes the follow while the session is stopped.
+      model.store(first.agentSubject, removal(13));
+
+      // The resume follows the topic again from its transcript, and registers it, before its
+      // first sweep replays the removal.
+      const second = await bootReplay("replay-issue-removal-resumed-b", model, {
+        entries: first.entries(),
+        dispatch: countUnsubscribes,
+      });
+
+      expect(second.live(ISSUE_TOPIC).active()).toBe(false);
+      expect(unsubscribes).toBe(1);
+      expect([...(model.interests.get("ses_replay") ?? [])]).not.toContain(ISSUE_TOPIC);
+      await second.stop();
+
+      const third = await bootReplay("replay-issue-removal-resumed-c", model, {
+        entries: second.entries(),
+      });
+      await third.tick();
+
+      expect(third.live(ISSUE_TOPIC).active()).toBe(false);
+      expect([...(model.interests.get("ses_replay") ?? [])]).not.toContain(ISSUE_TOPIC);
+    });
+  });
+
+  describe("a frame the host cannot show", () => {
+    test("is shown by the next sweep after one failed try", async () => {
+      let refusals = 1;
+      const model = new StreamModel();
+      const session = await bootReplay("replay-fail-once", model, {
+        beforeSend: (content) => {
+          if (content.includes("evt-fail-once") && refusals > 0) {
+            refusals -= 1;
+            throw new Error("host busy");
+          }
+        },
+      });
+      model.store(session.agentSubject, peerMessage("ses_replay", "fail-once"));
+
+      await session.reconnect();
+      expect(session.cards("evt-fail-once")).toHaveLength(0);
+      await session.tick();
+      await session.tick();
+
+      expect(session.cards("evt-fail-once")).toHaveLength(1);
+      expect(session.notices("evt-fail-once")).toHaveLength(0);
+    });
+
+    test("gets one notice naming it on its third failure, and none after another sweep or a restart", async () => {
+      const model = new StreamModel();
+      const refuseCards = (content: string) => {
+        if (content.includes("evt-fail-always") && !isNotice(content)) {
+          throw new Error("host refuses the card");
+        }
+      };
+      // An idle host writes the notice as it takes it.
+      const first = await bootReplay("replay-fail-always-a", model, {
+        beforeSend: refuseCards,
+        turn: "idle",
+      });
+      model.store(first.agentSubject, peerMessage("ses_replay", "fail-always"));
+
+      await first.reconnect();
+      await first.tick();
+      expect(first.notices("evt-fail-always")).toHaveLength(0);
+      await first.tick();
+      expect(first.notices("evt-fail-always")).toHaveLength(1);
+      expect(first.notices("evt-fail-always")[0]?.content).toContain("host refuses the card");
+      await first.tick();
+      expect(first.notices("evt-fail-always")).toHaveLength(1);
+      await first.stop();
+
+      const second = await bootReplay("replay-fail-always-b", model, {
+        entries: first.entries(),
+        turn: "idle",
+      });
+      await second.tick();
+
+      expect(second.notices("evt-fail-always")).toHaveLength(0);
+      expect(second.cards("evt-fail-always")).toHaveLength(0);
+    });
+
+    test("whose notice fails too warns in the UI, and the next sweep shows the notice", async () => {
+      let noticesFail = true;
+      const model = new StreamModel();
+      const session = await bootReplay("replay-fail-notice", model, {
+        beforeSend: (content) => {
+          if (!content.includes("evt-fail-notice")) return;
+          if (!isNotice(content) || noticesFail) throw new Error("host refuses everything");
+        },
+      });
+      model.store(session.agentSubject, peerMessage("ses_replay", "fail-notice"));
+
+      await session.reconnect();
+      await session.tick();
+      await session.tick();
+      expect(session.notices("evt-fail-notice")).toHaveLength(0);
+      expect(
+        session.notifications.filter(
+          (message) => message.includes("evt-fail-notice") && message.includes("was not shown")
+        )
+      ).toHaveLength(1);
+
+      noticesFail = false;
+      await session.tick();
+      expect(session.notices("evt-fail-notice")).toHaveLength(1);
+      await session.tick();
+      expect(session.notices("evt-fail-notice")).toHaveLength(1);
+    });
+
+    test("a live role forward that fails after its receipt gets the notice at once and is never replayed", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-fail-role-forward", model, {
+        beforeSend: (content) => {
+          if (!isNotice(content)) throw new Error("host refuses the card");
+        },
+      });
+      const forward = forwardedRoleEnvelope("reviewer", "review this", "role-forward");
+      // The stream captures the agent subject, so it keeps the forward too.
+      model.store(session.agentSubject, forward);
+
+      session.live(session.agentSubject).push(forward, "_INBOX.role-forward");
+      await until(() => session.notices("evt-role-forward").length > 0, "the notice");
+
+      expect(natsState.published.map((message) => message.subject)).toContain(
+        "_INBOX.role-forward"
+      );
+      await session.tick();
+      await session.tick();
+      expect(session.notices("evt-role-forward")).toHaveLength(1);
+      expect(session.cards("evt-role-forward")).toHaveLength(0);
+    });
+
+    test("a live frame on the session's own topic that fails while the listener does not replay gets the notice at once", async () => {
+      const model = new StreamModel();
+      model.served = false;
+      const session = await bootReplay("replay-fail-not-served", model, {
+        beforeSend: (content) => {
+          if (content.includes("evt-live-not-served") && !isNotice(content)) {
+            throw new Error("host refuses the card");
+          }
+        },
+      });
+      const frame = peerMessage("ses_replay", "live-not-served");
+      model.store(session.agentSubject, frame);
+
+      session.live(session.agentSubject).push(frame);
+      await until(() => session.notices("evt-live-not-served").length > 0, "the notice");
+
+      expect(session.notices("evt-live-not-served")[0]?.content).toContain("host refuses the card");
+      await session.tick();
+      expect(session.notices("evt-live-not-served")).toHaveLength(1);
+      expect(session.cards("evt-live-not-served")).toHaveLength(0);
+    });
+
+    test("a live frame still pending while its stored copy is swept, then failing, is shown once later", async () => {
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      const accepting = Promise.withResolvers<void>();
+      let accepts = 0;
+      let refusals = 1;
+      const model = new StreamModel();
+      const session = await bootReplay("replay-fail-pending", model, {
+        sessionID: "ses_delivery",
+        dispatch: async (url) => {
+          if (!url.pathname.endsWith("/accept")) return undefined;
+          accepts += 1;
+          await accepting.promise;
+          return new Response(JSON.stringify({ code: "ACCEPT_ALREADY_ACCEPTED", error: "no" }), {
+            status: 409,
+          });
+        },
+        beforeSend: (content) => {
+          if (content.includes("dispatch-held") && refusals > 0) {
+            refusals -= 1;
+            throw new Error("host refuses the card");
+          }
+        },
+      });
+      const held = directDispatchEnvelope("steer", "held");
+      model.store(session.agentSubject, held);
+      session.live(session.agentSubject).push(held);
+      await until(() => accepts === 1, "the held accept");
+      model.store(session.agentSubject, peerMessage("ses_delivery", "newer"));
+
+      // The sweep leaves the frame the live path holds, and shows the newer one past it.
+      await session.reconnect();
+      expect(session.cards("evt-newer")).toHaveLength(1);
+      expect(session.cards("dispatch-held")).toHaveLength(0);
+
+      // The held delivery fails: the stream's copy is the next sweep's to show.
+      accepting.resolve();
+      await until(() => refusals === 0, "the failed live injection");
+      await settle();
+      expect(session.notices("dispatch-held")).toHaveLength(0);
+      await session.tick();
+      await session.tick();
+
+      expect(session.cards("dispatch-held")).toHaveLength(1);
+      expect(session.cards("dispatch-held")[0]?.content).toContain(
+        "while this session's connection was down"
+      );
+      expect(session.cards("evt-newer")).toHaveLength(1);
+      // The replayed copy is a card alone: Dispatch is asked nothing more.
+      expect(accepts).toBe(1);
+    });
+
+    // The frame behind a held delivery is stamped when it arrived, not when its turn to be
+    // delivered came: the cursor a stream recreation restarted meanwhile stands past it, so no
+    // sweep reads it, and its failure is noticed at once.
+    test("a live frame that arrived behind a held delivery before a stream recreation restarted its cursor gets one notice when it fails", async () => {
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      const accepting = Promise.withResolvers<void>();
+      let accepts = 0;
+      const model = new StreamModel();
+      const session = await bootReplay("replay-fail-queued-recreated", model, {
+        sessionID: "ses_delivery",
+        dispatch: async (url) => {
+          if (!url.pathname.endsWith("/accept")) return undefined;
+          accepts += 1;
+          await accepting.promise;
+          return new Response(JSON.stringify({ code: "ACCEPT_ALREADY_ACCEPTED", error: "no" }), {
+            status: 409,
+          });
+        },
+        beforeSend: (content) => {
+          if (content.includes("evt-queued-behind") && !isNotice(content)) {
+            throw new Error("host refuses the card");
+          }
+        },
+      });
+      const held = directDispatchEnvelope("steer", "held-recreated");
+      model.store(session.agentSubject, held);
+      session.live(session.agentSubject).push(held);
+      await until(() => accepts === 1, "the held accept");
+      // The stream is recreated, and a frame published to the new one arrives behind the held one.
+      model.created = "2026-10-21T00:00:00Z";
+      const behind = peerMessage("ses_delivery", "queued-behind");
+      model.store(session.agentSubject, behind);
+      session.live(session.agentSubject).push(behind);
+      await settle();
+      try {
+        // A second later the reconnect sweep restarts every cursor at the new stream's end.
+        setSystemTime(new Date(Date.now() + 1_000));
+        await session.reconnect();
+        accepting.resolve();
+        await until(() => session.notices("evt-queued-behind").length > 0, "the notice");
+        await session.tick();
+        await session.tick();
+      } finally {
+        setSystemTime();
+      }
+
+      expect(session.notices("evt-queued-behind")).toHaveLength(1);
+      expect(session.notices("evt-queued-behind")[0]?.content).toContain("host refuses the card");
+      expect(session.cards("evt-queued-behind")).toHaveLength(0);
+    });
+  });
+
+  // A BTW answered with an error was handled: Dispatch shows the person that error, and the
+  // stream's copy must not come back as a card that starts a turn on it. A same-mode Retry is a
+  // new event under the same dedupe key, and must still reach the session.
+  describe("a BTW refused live", () => {
+    /**
+     * Boots `ses_delivery` with the host side turn `runEphemeralTurn` (none: a host without one).
+     * Dispatch answers the `n`th reply with `answerReply(n)` (200 by default); every other request
+     * goes to `dispatch` first. `entries`: the transcript already written (a resume).
+     */
+    async function bootBTW(
+      query: string,
+      model: StreamModel,
+      runEphemeralTurn: SessionContext["runEphemeralTurn"],
+      options: {
+        readonly answerReply?: (n: number) => Promise<Response>;
+        readonly dispatch?: (url: URL) => Promise<Response | undefined>;
+        readonly entries?: readonly unknown[];
+      } = {}
+    ) {
+      // DispatchClient remembers whether an origin runs keyed writes. A different test's answer
+      // must not turn this reply fixture's unkeyed 503 into a timed retry.
+      process.env.DISPATCH_URL = `http://${query}.dispatch.test`;
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      const replies: unknown[] = [];
+      const session = await bootReplay(query, model, {
+        sessionID: "ses_delivery",
+        dispatch: async (url) => {
+          const answered = await options.dispatch?.(url);
+          if (answered !== undefined) return answered;
+          if (!url.pathname.endsWith("/reply")) return undefined;
+          replies.push(url.pathname);
+          return options.answerReply?.(replies.length) ?? response({});
+        },
+        ...(runEphemeralTurn !== undefined && { runEphemeralTurn }),
+        ...(options.entries !== undefined && { entries: options.entries }),
+      });
+      return { replies, session };
+    }
+
+    test("whose side turn failed is not shown by a sweep, and its Retry still runs the side turn", async () => {
+      const model = new StreamModel();
+      let sideTurns = 0;
+      const { replies, session } = await bootBTW("replay-btw-refused", model, async () => {
+        sideTurns += 1;
+        if (sideTurns === 1) throw new Error("No active model on session");
+        return { replyText: `Answer ${sideTurns}` };
+      });
+      const btw = targetedDispatchEnvelope("btw", "replay-btw-refused");
+      model.store(session.agentSubject, btw);
+      session.live(session.agentSubject).push(btw);
+      await until(() => replies.length === 1, "the refusal");
+
+      await session.tick();
+      await session.tick();
+
+      expect(session.cards("dispatch-replay-btw-refused")).toHaveLength(0);
+      expect(sideTurns).toBe(1);
+
+      const retry = JSON.stringify({ ...JSON.parse(btw), event_id: "dispatch-replay-btw-retry" });
+      model.store(session.agentSubject, retry);
+      session.live(session.agentSubject).push(retry);
+      await until(() => replies.length === 2, "the Retry's reply");
+      await session.tick();
+
+      expect(sideTurns).toBe(2);
+      expect(session.cards("dispatch-replay-btw-refused")).toHaveLength(0);
+      expect(session.cards("dispatch-replay-btw-retry")).toHaveLength(0);
+    });
+
+    test("by a host without a side turn is not shown by a sweep", async () => {
+      const model = new StreamModel();
+      const { replies, session } = await bootBTW("replay-btw-no-side-turn", model, undefined);
+      const btw = targetedDispatchEnvelope("btw", "replay-btw-no-side-turn");
+      model.store(session.agentSubject, btw);
+      session.live(session.agentSubject).push(btw);
+      await until(() => replies.length === 1, "the refusal");
+
+      await session.tick();
+      await session.tick();
+
+      expect(session.cards("dispatch-replay-btw-no-side-turn")).toHaveLength(0);
+    });
+
+    test("whose refusal Dispatch answers 503 is not shown by a sweep, and its Retry still runs the side turn", async () => {
+      const model = new StreamModel();
+      let sideTurns = 0;
+      const { replies, session } = await bootBTW(
+        "replay-btw-reply-503",
+        model,
+        async () => {
+          sideTurns += 1;
+          if (sideTurns === 1) throw new Error("No active model on session");
+          return { replyText: `Answer ${sideTurns}` };
+        },
+        {
+          answerReply: async (n) =>
+            n === 1
+              ? new Response(JSON.stringify({ error: "unavailable" }), { status: 503 })
+              : response({}),
+        }
+      );
+      const btw = targetedDispatchEnvelope("btw", "replay-btw-reply-503");
+      model.store(session.agentSubject, btw);
+      session.live(session.agentSubject).push(btw);
+      await until(() => replies.length === 1, "the refusal");
+
+      await session.tick();
+      await session.tick();
+
+      expect(session.cards("dispatch-replay-btw-reply-503")).toHaveLength(0);
+      expect(session.notices("dispatch-replay-btw-reply-503")).toHaveLength(0);
+
+      const retry = JSON.stringify({
+        ...JSON.parse(btw),
+        event_id: "dispatch-replay-btw-retry-503",
+      });
+      model.store(session.agentSubject, retry);
+      session.live(session.agentSubject).push(retry);
+      await until(() => replies.length === 2, "the Retry's reply");
+      await session.tick();
+
+      expect(sideTurns).toBe(2);
+      expect(session.cards("dispatch-replay-btw-reply-503")).toHaveLength(0);
+      expect(session.cards("dispatch-replay-btw-retry-503")).toHaveLength(0);
+    });
+
+    test("is not shown by a sweep that runs while its refusal is still being posted", async () => {
+      const model = new StreamModel();
+      const posting = Promise.withResolvers<void>();
+      const { replies, session } = await bootBTW("replay-btw-reply-held", model, undefined, {
+        answerReply: async () => {
+          await posting.promise;
+          return response({});
+        },
+      });
+      const btw = targetedDispatchEnvelope("btw", "replay-btw-reply-held");
+      model.store(session.agentSubject, btw);
+      session.live(session.agentSubject).push(btw);
+      await until(() => replies.length === 1, "the refusal's POST");
+
+      await session.tick();
+      await session.tick();
+      expect(session.cards("dispatch-replay-btw-reply-held")).toHaveLength(0);
+
+      posting.resolve();
+      await settle();
+      await session.tick();
+      expect(session.cards("dispatch-replay-btw-reply-held")).toHaveLength(0);
+    });
+
+    test("refused while its session shuts down is not shown after a resume of that session", async () => {
+      const model = new StreamModel();
+      // Deregistration hangs, so the shutdown handler is still running when the frame drains in.
+      const deregistration = Promise.withResolvers<Response>();
+      let sideTurns = 0;
+      const first = await bootBTW(
+        "replay-btw-shutdown-a",
+        model,
+        async () => {
+          sideTurns += 1;
+          return { replyText: "too late" };
+        },
+        {
+          dispatch: async (url) =>
+            url.pathname === "/v1/sessions/ses_delivery" ? deregistration.promise : undefined,
+        }
+      );
+      const btw = targetedDispatchEnvelope("btw", "replay-btw-shutdown");
+      model.store(first.session.agentSubject, btw);
+
+      const stopping = first.session.stop();
+      first.session.live(first.session.agentSubject).push(btw);
+      await until(() => first.replies.length === 1, "the refusal");
+      deregistration.resolve(response({}));
+      await stopping;
+      expect(sideTurns).toBe(0);
+
+      const resumed = await bootBTW("replay-btw-shutdown-b", model, undefined, {
+        entries: first.session.entries(),
+      });
+      await resumed.session.tick();
+      await resumed.session.tick();
+
+      expect(resumed.session.cards("dispatch-replay-btw-shutdown")).toHaveLength(0);
+    });
+
+    test("whose side turn answered is not shown after a restart that cut its reply's POST short", async () => {
+      const model = new StreamModel();
+      // The answer's POST never completes: the process ends while it is in flight.
+      const never = Promise.withResolvers<Response>();
+      let sideTurns = 0;
+      const first = await bootBTW(
+        "replay-btw-answer-cut-a",
+        model,
+        async () => {
+          sideTurns += 1;
+          return { replyText: "an answer the process never posted" };
+        },
+        { answerReply: () => never.promise }
+      );
+      const btw = targetedDispatchEnvelope("btw", "replay-btw-answer-cut");
+      model.store(first.session.agentSubject, btw);
+      first.session.live(first.session.agentSubject).push(btw);
+      await until(() => first.replies.length === 1, "the answer's POST");
+      expect(sideTurns).toBe(1);
+
+      const restarted = await bootBTW("replay-btw-answer-cut-b", model, undefined, {
+        entries: first.session.entries(),
+      });
+      await restarted.session.tick();
+      await restarted.session.tick();
+
+      // A BTW never falls back to a steering card that starts a turn.
+      expect(restarted.session.cards("dispatch-replay-btw-answer-cut")).toHaveLength(0);
+    });
+
+    test("one the session never received live reaches replay as at most one card that starts no turn", async () => {
+      const model = new StreamModel();
+      let sideTurns = 0;
+      const { replies, session } = await bootBTW("replay-btw-never-live", model, async () => {
+        sideTurns += 1;
+        return { replyText: "late answer" };
+      });
+      // Published while the session's subscription was down (or its process stopped, or killed
+      // between the frame's arrival and its record): only the stream holds it.
+      model.store(session.agentSubject, targetedDispatchEnvelope("btw", "replay-btw-never-live"));
+      await session.reconnect();
+      await session.tick();
+
+      const cards = session.cards("dispatch-replay-btw-never-live");
+      expect(cards.length).toBeLessThanOrEqual(1);
+      for (const card of cards) {
+        expect(card.options).not.toMatchObject({ triggerTurn: true });
+      }
+      expect(sideTurns).toBe(0);
+      expect(replies).toHaveLength(0);
+    });
+
+    test("whose replayed card the host refuses three times gets a failure notice that starts no turn", async () => {
+      const model = new StreamModel();
+      const session = await bootReplay("replay-btw-notice", model, {
+        sessionID: "ses_delivery",
+        turn: "idle",
+        beforeSend: (content) => {
+          if (content.includes("dispatch-replay-btw-notice") && !isNotice(content)) {
+            throw new Error("host refuses the card");
+          }
+        },
+      });
+      model.store(session.agentSubject, targetedDispatchEnvelope("btw", "replay-btw-notice"));
+
+      await session.reconnect();
+      await session.tick();
+      await session.tick();
+
+      const notices = session.notices("dispatch-replay-btw-notice");
+      expect(notices).toHaveLength(1);
+      expect(notices[0]?.options).toMatchObject({ triggerTurn: false });
+    });
+  });
+});
+
+describe.skipIf(!envoyStackEnabled)("against a real natsd and Envoy listener", () => {
+  let stack: EnvoyStack | undefined;
+  beforeAll(async () => {
+    stack = await startEnvoyStack();
+  }, 120_000);
+  afterAll(async () => {
+    await stack?.stop();
+  }, 60_000);
+
+  // The session runs on nats.js's real ping and dial timers and a real listener, so each wait polls
+  // the real clock until its condition holds or its deadline passes.
+  async function waitFor(
+    condition: () => boolean | Promise<boolean>,
+    deadline: number,
+    what: string
+  ): Promise<void> {
+    while (!(await condition())) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+      await Bun.sleep(100);
+    }
+  }
+
+  test("a session whose NATS path freezes reconnects within 60 s and shows the message sent meanwhile once, replayed", async () => {
+    if (stack === undefined) throw new Error("the Envoy stack did not start");
+    const { envoyUrl } = stack;
+    const proxy = await startStallProxy(stack.natsHostPort);
+    const originalHeartbeat = process.env.ENVOY_HEARTBEAT_MS;
+    // No heartbeat sweep runs in the test's window: the reconnect is the only catch-up trigger.
+    process.env.ENVOY_HEARTBEAT_MS = "240000";
+    process.env.ENVOY_URL = envoyUrl;
+    process.env.ENVOY_NATS_URL = proxy.url;
+    globalThis.fetch = originalFetch;
+    natsState.realConnect = true;
+    const sessionID = `ses_stall_${crypto.randomUUID().replaceAll("-", "")}`;
+    const agentSubject = `notifications.agent.${sessionID}`;
+    const { default: envoyExtension } = await import("./envoy.ts?nats-stall");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    const context = sessionContext(sessionID);
+    try {
+      await fixture.handlers.get("session_start")?.({}, context);
+      const started = Date.now();
+      await waitFor(
+        async () => (await fetch(`${envoyUrl}/v1/registry/${sessionID}`)).ok,
+        started + 30_000,
+        "the session's registration"
+      );
+      const registration = {
+        session_id: sessionID,
+        plugin: "@sjawhar/pi-envoy",
+        plugin_version: packageVersion,
+      };
+      expect(await (await fetch(`${envoyUrl}/v1/registry/${sessionID}`)).json()).toMatchObject(
+        registration
+      );
+      expect(await (await fetch(`${envoyUrl}/v1/sessions`)).json()).toContainEqual(
+        expect.objectContaining(registration)
+      );
+      // The first sweep started the agent subject's cursor, and the subscription went out first.
+      await waitFor(
+        () =>
+          fixture.entries.some(
+            (entry) =>
+              entry.customType === REPLAY_STATE_ENTRY &&
+              ReplayStateSchema.safeParse(entry.data).data?.subjects[agentSubject]?.after !==
+                undefined
+          ) && proxy.connections[0]?.subscribedAt !== undefined,
+        started + 30_000,
+        "the session's first sweep"
+      );
+
+      await runFreezeScenario({
+        label: "pi-envoy stall",
+        envoyUrl,
+        sessionID,
+        proxy,
+        shown: (marker) =>
+          fixture.deliveries
+            .filter(
+              (delivery) =>
+                delivery.customType === "envoy-message" && delivery.content.includes(marker)
+            )
+            .map((delivery) => delivery.content),
+        waitFor,
+      });
+    } finally {
+      await fixture.handlers.get("session_shutdown")?.({}, context);
+      await proxy.close();
+      if (originalHeartbeat === undefined) delete process.env.ENVOY_HEARTBEAT_MS;
+      else process.env.ENVOY_HEARTBEAT_MS = originalHeartbeat;
+    }
+  }, 120_000);
 });

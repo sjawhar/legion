@@ -40,7 +40,6 @@ async function seedReference() {
 test("hovering a dispatch:// reference in a comment previews the target issue; Escape closes it", async ({
   browser,
 }, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "touch behaviour is covered by the tap test");
   const { source, target } = await seedReference();
   const alice = await asUser(browser, "alice");
   try {
@@ -88,7 +87,6 @@ test("hovering a dispatch:// reference in a comment previews the target issue; E
 test("hovering a board card previews the issue and moving onto the card keeps it open", async ({
   browser,
 }, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "touch behaviour is covered by the tap test");
   const { target } = await seedReference();
   const alice = await asUser(browser, "alice");
   try {
@@ -145,8 +143,7 @@ test("hovering a board card previews the issue and moving onto the card keeps it
 
 test("a card survives a held-button drag that leaves its reference and comes back", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "a held mouse button is not a touch gesture");
+}) => {
   const { source } = await seedReference();
   const alice = await asUser(browser, "alice");
   try {
@@ -159,6 +156,8 @@ test("a card survives a held-button drag that leaves its reference and comes bac
     const turns = page.getByRole("list", { name: "Conversation turns" });
     const link = turns.getByRole("link", { name: "Hover target" });
     await expect(link).toBeVisible();
+    // The dwell's read mark drops the `New` mark and moves the reference 24 px up; settle it first.
+    await expect(turns.getByText("New", { exact: true })).toHaveCount(0);
     await link.hover();
     const card = page.getByRole("tooltip");
     await expect(card).toBeVisible();
@@ -199,8 +198,7 @@ test("a card survives a held-button drag that leaves its reference and comes bac
 
 test("a card survives a held-button move from the card back onto its reference", async ({
   browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name === "iphone", "a held mouse button is not a touch gesture");
+}) => {
   const { source } = await seedReference();
   const alice = await asUser(browser, "alice");
   try {
@@ -210,6 +208,8 @@ test("a card survives a held-button move from the card back onto its reference",
     const turns = page.getByRole("list", { name: "Conversation turns" });
     const link = turns.getByRole("link", { name: "Hover target" });
     await expect(link).toBeVisible();
+    // The dwell's read mark drops the `New` mark and moves the reference 24 px up; settle it first.
+    await expect(turns.getByText("New", { exact: true })).toHaveCount(0);
     await link.hover();
     const card = page.getByRole("tooltip");
     await expect(card).toBeVisible();
@@ -241,7 +241,7 @@ test("a card survives a held-button move from the card back onto its reference",
   }
 });
 
-test("on a phone, tapping a reference follows it and never shows a card", async ({
+test("on a phone, tapping a reference follows it and never shows a card @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "touch geometry is covered by the iphone project");

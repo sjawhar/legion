@@ -14,14 +14,21 @@ import (
 // session has ended, or a person whose membership could not be confirmed.
 var ErrNoIdentity = errors.New("no identity")
 
+// ErrSignInUnavailable means a sign-in needed the sign-in issuer and could not reach it: a sign-in
+// starting or completing before this process has discovered the issuer, or a lapsed confirmation
+// the issuer could not renew (Membership), whose person stays signed in. Its error chain keeps the
+// issuer's own failure. It is the sign-in issuer's alone: a service-account token's issuer being
+// down is the API's OIDC_ISSUER_UNAVAILABLE, never this.
+var ErrSignInUnavailable = errors.New("the sign-in issuer cannot be reached")
+
 // Identity resolves the person a request comes from, by lowercase email.
 type Identity interface {
 	Login(r *http.Request) (email string, err error)
 }
 
-// CookieIdentity resolves a signed Dispatch session cookie.
+// CookieIdentity resolves a signed Dispatch session cookie, signed with any key of SigningKey.
 type CookieIdentity struct {
-	SigningKey string
+	SigningKey auth.SigningKeys
 	Sessions   auth.SessionStore
 	// Membership confirms, at least hourly, that the person a cookie names may still use Dispatch,
 	// and ends their session when the sign-in issuer no longer says so. It is nil only on the local
@@ -30,7 +37,8 @@ type CookieIdentity struct {
 }
 
 // Login returns the email of a valid session cookie whose generation is current and whose person
-// is still a member, or ErrNoIdentity.
+// is still a member; otherwise ErrNoIdentity, an error matching ErrSignInUnavailable when a lapsed
+// confirmation could not be renewed (Membership.Confirm), or the store's own error.
 func (i CookieIdentity) Login(r *http.Request) (string, error) {
 	session, ok := auth.SessionFromRequest(r, i.SigningKey)
 	if !ok {
@@ -73,13 +81,24 @@ func (i HeaderIdentity) Login(r *http.Request) (string, error) {
 	return email, nil
 }
 
-// WriteError renders an Identity error as Dispatch's JSON error response.
+// signInUnavailableMessage is what WriteError answers, with the code SIGNIN_UNAVAILABLE, a request
+// that needs the sign-in issuer while the issuer cannot be reached.
+const signInUnavailableMessage = "the sign-in issuer cannot be reached; try again in a minute"
+
+// WriteError renders an Identity error, or a sign-in's, as Dispatch's JSON error response: 401
+// NO_IDENTITY for ErrNoIdentity; 503 SIGNIN_UNAVAILABLE for ErrSignInUnavailable (Membership: the
+// person stays signed in, and the first request after the issuer answers is served); and 500
+// IDENTITY_ERROR for anything else.
 func WriteError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
 	body := map[string]string{"error": "identity resolution failed", "code": "IDENTITY_ERROR"}
-	if errors.Is(err, ErrNoIdentity) {
+	switch {
+	case errors.Is(err, ErrNoIdentity):
 		status = http.StatusUnauthorized
 		body = map[string]string{"error": "unauthorized", "code": "NO_IDENTITY"}
+	case errors.Is(err, ErrSignInUnavailable):
+		status = http.StatusServiceUnavailable
+		body = map[string]string{"error": signInUnavailableMessage, "code": "SIGNIN_UNAVAILABLE"}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

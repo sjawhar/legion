@@ -277,7 +277,9 @@ func readAgentSecrets(value *yaml.Node) (*AgentSecretsConfig, error) {
 	}
 	u, err := url.Parse(block.URL)
 	if err != nil || !u.IsAbs() || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
-		return nil, fmt.Errorf("%s.url must be an absolute URL with no path, query, fragment or user; got %q", agentSecretsKey, block.URL)
+		// Not echoed: the refused parts (a user, a password, a query, a fragment, or a value
+		// that does not parse) are where a credential would be.
+		return nil, fmt.Errorf("%s.url must be an absolute URL with no path, query, fragment or user (not echoed)", agentSecretsKey)
 	}
 	if err := refuseNonASCIIHost(agentSecretsKey+".url host", u.Hostname()); err != nil {
 		return nil, err

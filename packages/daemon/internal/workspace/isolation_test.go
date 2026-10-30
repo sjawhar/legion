@@ -797,7 +797,7 @@ func TestTheRunnerRefusesASymlinkedLayoutDirectory(t *testing.T) {
 			t.Errorf("%s, outside the layout, was touched: %v", untouched, err)
 		}
 		before := len(run.Calls())
-		err = Remove(context.Background(), run, ws)
+		err = Remove(context.Background(), run, ws, nil)
 		refused(t, "Remove", err, symlink)
 		if calls := len(run.Calls()); calls != before {
 			t.Errorf("Remove ran %d command(s) after the layout guard, want %d", calls, before)

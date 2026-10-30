@@ -265,9 +265,9 @@ func TestAWakeDuringAnOpenLookIsKeptForTheNextLook(t *testing.T) {
 	}
 }
 
-// Dispatch's start on a build queues a compare for each open check of the repository the daemon is
-// built from and no other, each naming the check it is of, and none with no commit or with no
-// repository configured.
+// Dispatch's announcement of the build every server process serves queues a compare for each open
+// check of the repository the daemon is built from and no other, each naming the check it is of,
+// and none with no commit or with no repository configured.
 func TestServerStartedComparesOnlyTheBuiltFromRepositorysChecks(t *testing.T) {
 	rig := childCheckRig(t, "sjawhar/legion")
 	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-300", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-300", Project: "LEGION", Title: "widgets", Phase: phase.AwaitingMerge, Generation: 2, Status: "retro", Rank: "W"})
@@ -350,6 +350,20 @@ func TestACheckWakeOnTheSameBuildWakesOnce(t *testing.T) {
 	rig.apply("new-build", intake.CheckWake{Issue: "LEGION-209", Look: 2, Cause: "dispatch build", Detail: "c0de"})
 	if check := productionCheck(t, rig.pool, "LEGION-209"); check.Looks != 3 || !check.LookOpen || check.LastWakeDetail != "c0de" {
 		t.Fatalf("the check after another build = %+v, want look 3 open on c0de", check)
+	}
+}
+
+// A look Dispatch's server.started wakes tells the implementer what that announcement means: the
+// build every Dispatch server process serves, not one process's start.
+func TestADispatchStartWakeNamesTheBuildEveryServerProcessServes(t *testing.T) {
+	rig := childCheckRig(t, "sjawhar/legion")
+	rig.apply("pending", intake.CheckReport{Issue: "LEGION-209", Look: 1, Verdict: "pending"})
+	rig.apply("start-wake", intake.CheckWake{Issue: "LEGION-209", Look: 1, Cause: "dispatch start", Detail: "b00f"})
+	if check := productionCheck(t, rig.pool, "LEGION-209"); check.Looks != 2 || !check.LookOpen || check.LastWakeKind != "dispatch start" {
+		t.Fatalf("the check after Dispatch's announcement = %+v, want look 2 open, woken by `dispatch start`", check)
+	}
+	if starts := superviseRowsOf(t, rig.pool, "LEGION-209", "start"); len(starts) != 2 || !strings.Contains(starts[1].Task, "woken by Dispatch serving build b00f on every server process.") {
+		t.Fatalf("start rows = %+v, want look 2's naming the build every Dispatch server process serves", starts)
 	}
 }
 
@@ -651,9 +665,8 @@ func TestTheTreesCloseWaitsForAnOpenCheckAndRunsOnceItCloses(t *testing.T) {
 	}
 }
 
-// A done child set back to todo closes its open check as not run before its new run starts: the
-// record alone, since the rerun reuses the implementer's claim and the pod, and the look open at
-// the re-entry is interrupted under the new generation's stamp, as a phase worker's run is.
+// A done child set back to todo closes its open check as not run before its new run starts. The
+// implementer's live claim stays live: the closed check rejects its old look's report.
 func TestReenterChildClosesItsOpenCheckAsNotRun(t *testing.T) {
 	rig := childCheckRig(t, "")
 	seedSlot(t, rig.pool, record.Slot{Issue: "LEGION-208", Index: 0})
@@ -671,8 +684,8 @@ func TestReenterChildClosesItsOpenCheckAsNotRun(t *testing.T) {
 		t.Fatalf("issue_close rows = %v, want none for the implementer the rerun reuses", got)
 	}
 	suspends := superviseRowsOf(t, rig.pool, "LEGION-209", "suspend")
-	if len(suspends) != 1 || suspends[0].Role != claim.RoleImplementer || suspends[0].Generation != 8 {
-		t.Fatalf("suspend rows = %+v, want the open look's implementer interrupted under generation 8", suspends)
+	if len(suspends) != 0 {
+		t.Fatalf("suspend rows = %+v, want none while the child is back in the workflow", suspends)
 	}
 	if got := issueSuspensions(t, rig.pool, "LEGION-209"); len(got) != 0 {
 		t.Fatalf("issue suspensions = %+v, want none: the pod is the new run's", got)

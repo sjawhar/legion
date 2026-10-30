@@ -124,8 +124,8 @@ const OMP_LEGION_TOOL_DESCRIPTION =
   "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. request_backward_move returns an issue to an earlier phase (`to`, `reason`): " +
   "a phase worker moves its own issue; the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which " +
   "counts a review round. sign_off is the architect's acceptance of an issue in accepting, moving it to retro; the daemon refuses it in every " +
-  "other phase (SIGNOFF_OUTSIDE_ACCEPTING) and refuses it SIGNOFF_CHILD_IN_WORKFLOW while any issue beneath it is still in " +
-  "the workflow, naming each of them: accept once the last of them is done, or take one out with park_child. " +
+  "other phase (SIGNOFF_OUTSIDE_ACCEPTING), and issues still running beneath it do not hold it: a root's close waits " +
+  "for them instead. " +
   "The controller's read_state returns the daemon's whole state and set_status moves an issue to todo, backlog or icebox. " +
   "What a later phase needs goes in your handoff; a question for another live role goes to its role topic with envoy_publish.";
 

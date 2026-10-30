@@ -17,7 +17,10 @@ import (
 // room and 409 DOCUMENT_LOADS otherwise (docs.Service.RebuildDocument). It is human-only because a
 // rebuild intentionally deletes durable history. The rebuild, the version supplied markdown
 // writes, its artifact.version event and the move of the open approval request to that version
-// commit in one transaction, so no refusal or failure leaves a changed document without them.
+// commit in one transaction, so no refusal or failure leaves a changed document without them. A
+// closed issue's document is rebuilt with the close's ask states written into its seed
+// (docs.Service.RebuildDocument), so a block whose ask the close withdrew reads resolved once the
+// rebuild commits, not open as the latest version saved it.
 func (s *server) rebuildArtifact(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {

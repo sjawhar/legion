@@ -643,6 +643,11 @@ func TestWebhookListenerEnvRefusals(t *testing.T) {
 			want: "refused: --nats-replicas: natsReplicas 0 is below 1",
 		},
 		{
+			name: "--nats-replicas 6",
+			args: listenerFlags([]string{"nats-replicas"}, "--nats-replicas", "6"),
+			want: "refused: --nats-replicas: natsReplicas 6 is above 5, the most copies NATS keeps",
+		},
+		{
 			name: "a line break in --listen-host, refused by core.ListenerConfig.Check",
 			args: listenerFlags([]string{"listen-host"}, "--listen-host", "0.0.0.0\n"),
 			want: `refused: --listen-host: listenHost contains a control character: "0.0.0.0\n"`,

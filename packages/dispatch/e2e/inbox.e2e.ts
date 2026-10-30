@@ -8,11 +8,13 @@ import {
   createIssue,
   createProject,
   createProjectDocument,
+  disconnectLiveSockets,
   getAsk,
   getInbox,
   getIssue,
   getIssueEvents,
   patchIssue,
+  putIssueState,
   putProjectDefaultAssignee,
   replyToCommentDelivery,
 } from "./api";
@@ -42,7 +44,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("ask cards show urgency accents and copy their session ID, title, and tmux target", async ({
+test("ask cards show urgency accents and copy their session ID, title, and tmux target @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -181,7 +183,9 @@ test("an ask thread shows its newest two replies, expands older replies, and put
   }
 });
 
-test("an SSE reply refreshes a thread hydrated by the Inbox response", async ({ browser }) => {
+test("a reply on the live event feed refreshes a thread hydrated by the Inbox response", async ({
+  browser,
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Live Inbox thread" });
   const ask = await createAsk(issue.key, { question: "Which thread should refresh?" }, session);
@@ -228,8 +232,9 @@ test("an event before a delayed Inbox response refreshes that ask's thread", asy
   const page = await alice.newPage();
   const listRequested = Promise.withResolvers<void>();
   const releaseList = Promise.withResolvers<void>();
-  const streamResponse = page.waitForResponse(
-    (response) => new URL(response.url()).pathname === "/api/v1/events"
+  const streamResponse = page.waitForEvent(
+    "websocket",
+    (socket) => new URL(socket.url()).pathname === "/ws/live"
   );
   // Only the first response is held on the pre-event snapshot; a refresh the client issues
   // after the event reaches the real server, exactly as a browser's would.
@@ -264,7 +269,9 @@ test("an event before a delayed Inbox response refreshes that ask's thread", asy
   }
 });
 
-test("a later Inbox response clears a hidden ask's pending refresh", async ({ browser }) => {
+test("a later Inbox response clears a hidden ask's pending refresh @phone", async ({
+  browser,
+}, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const visibleIssue = await createIssue({ project: "CORE", title: "Visible Inbox ask" });
   const hiddenIssue = await createIssue({ project: "CORE", title: "Hidden Inbox ask" });
@@ -300,32 +307,57 @@ test("a later Inbox response clears a hidden ask's pending refresh", async ({ br
   });
 
   try {
-    const streamResponse = page.waitForResponse(
-      (response) => new URL(response.url()).pathname === "/api/v1/events"
-    );
+    // Every event frame for the hidden issue the reloaded page's live socket carries.
+    let hiddenFrames = 0;
+    page.on("websocket", (socket) => {
+      if (new URL(socket.url()).pathname !== "/ws/live") return;
+      socket.on("framereceived", ({ payload }) => {
+        const frame = JSON.parse(String(payload)) as {
+          readonly type?: string;
+          readonly event?: { readonly issue_key?: string };
+        };
+        if (frame.type === "event" && frame.event?.issue_key === hiddenIssue.key) hiddenFrames += 1;
+      });
+    });
+    const pinnedRead = (request: { method(): string; url(): string }) =>
+      request.method() === "GET" &&
+      new URL(request.url()).pathname === "/api/v1/issues" &&
+      new URL(request.url()).searchParams.get("pinned") === "true";
+    // The desktop sidebar reads pins during load. Start watching before reload so it cannot be
+    // mistaken for the post-reply pin refresh below.
+    const firstPinnedRead = page.waitForRequest(pinnedRead);
     const reloaded = page.reload();
-    // A reload is a cold client: the server starts its stream at the current head and replays
-    // nothing. Posting the hidden reply before that stream is open means the frame never
-    // reaches the page, no pending marker is ever set, and everything below passes without
-    // testing anything. Wait for the stream as the sibling above does.
-    await Promise.all([listRequested.promise, streamResponse]);
+    // A reload's first subscription resumes from its sign-in check's `event_head`, and the page
+    // reads the Inbox only once that check has answered, so the hidden reply, posted once the
+    // held Inbox read is out, is replayed to the page whenever its live socket opens: no wait for
+    // the socket.
+    await listRequested.promise;
+    const isPhone = testInfo.project.name === "iphone";
+    if (isPhone) {
+      // The phone mounts the sidebar's reads, the pinned list among them, with its drawer.
+      await page.getByRole("button", { name: "Open navigation" }).click();
+    }
+    await firstPinnedRead;
     await createComment(
       hiddenIssue.key,
       { ask_id: hiddenAsk.id, body: "Fresh hidden reply." },
       session
     );
     // The held Inbox response must not land until the browser has handled the hidden ask's
-    // event. A fixed delay is a race under load, and the hidden ask shows nothing to wait on;
-    // a reply posted after it on the visible ask does. Event ids are delivered in order, so
-    // the marker appearing proves the frame before it was processed.
-    await createComment(
-      visibleIssue.key,
-      { ask_id: visibleAsk.id, body: "Ordering marker." },
-      session
-    );
-    await expect(
-      page.getByTestId(`ask-${visibleAsk.id}`).getByText("Ordering marker.")
-    ).toBeVisible();
+    // event. A fixed delay is a race under load, and the hidden ask shows nothing to wait on.
+    // Nor can an Inbox card or the sidebar's rows, which wait for the held first load: it is
+    // never cancelled. alice's own pin, written after the reply, makes the page read the pinned
+    // list again, which the sidebar reads beside the held Inbox. Event ids are delivered in
+    // order, so that read proves the frame before it was processed.
+    const pinnedReadAgain = page.waitForRequest(pinnedRead);
+    await putIssueState(visibleIssue.key, { pinned: true });
+    await pinnedReadAgain;
+    if (isPhone) {
+      await page.getByRole("button", { name: "Close navigation" }).click();
+    }
+    // So the hidden reply reached the page before the held response lands: what follows tests its
+    // pending refresh rather than passing without one.
+    expect(hiddenFrames).toBeGreaterThan(0);
     releaseList.resolve();
     await reloaded;
 
@@ -377,10 +409,9 @@ test("a quote-anchored inbox ask names and opens its document", async ({ browser
     const document = card.getByRole("link", { name: "spec.md" });
     await expect(document).toHaveAttribute("href", documentHref);
     await expect(card).toContainText("quoted passage");
-    const width = testInfo.project.name === "iphone" ? "390" : "1280";
-    const screenshot = testInfo.outputPath(`inbox-quote-anchor-${width}.png`);
+    const screenshot = testInfo.outputPath("inbox-quote-anchor-1280.png");
     await page.screenshot({ path: screenshot, fullPage: true });
-    await testInfo.attach(`quote-anchored Inbox card (${width}px)`, {
+    await testInfo.attach("quote-anchored Inbox card (1280px)", {
       contentType: "image/png",
       path: screenshot,
     });
@@ -391,7 +422,7 @@ test("a quote-anchored inbox ask names and opens its document", async ({ browser
   }
 });
 
-test("inbox shows current asks and answers issue asks in the margin", async ({
+test("inbox shows current asks and answers issue asks in the margin @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -854,7 +885,7 @@ test("a pending credential request alone is listed, counted, and keeps the empty
         requested_at: new Date().toISOString(),
       },
     ]);
-    // The broker publishes nothing to Dispatch's event stream, so the list is read on load.
+    // The broker publishes nothing to Dispatch's event feed, so the list is read on load.
     await page.reload();
     const requests = page.getByRole("region", { name: "Credential requests" });
     await expect(requests.getByRole("link")).toHaveCount(1);
@@ -1016,12 +1047,13 @@ test("a pending credential request naming only the request's session id shows it
 // No Dispatch event names a credential request (the broker holds no Dispatch credential by
 // design), so an Inbox already open can only learn of one, or that one is gone, from the
 // credential list's own poll (`CREDENTIAL_POLL_INTERVAL_MS`, `features/credentials/pending.ts`).
-// `page.clock` fast-forwards past that interval without disturbing the event stream: its watchdog
-// is 45 s (`WATCHDOG_MS`, `api/sse.ts`), well past the 15.5 s advanced here, so the stream never
-// reconnects and the poll is the only thing that could have surfaced the change. This repeats the
-// test above's setup rather than sharing a helper: this file's own convention is self-contained
-// tests, and the two prove different mechanisms (an initial load via reload vs. a live poll that
-// both shows and clears a request with no reload at all).
+// `page.clock` fast-forwards past that interval without disturbing the event feed: its socket is
+// replaced only after 45 s with no frame (`LIVE_SOCKET_SILENT_MS`, `api/live-socket.ts`), well
+// past the 15.5 s advanced here, so the feed never has a gap and the poll is the only thing that
+// could have surfaced the change. This repeats the test above's setup rather than sharing a
+// helper: this file's own convention is self-contained tests, and the two prove different
+// mechanisms (an initial load via reload vs. a live poll that both shows and clears a request
+// with no reload at all).
 test("a credential request seeded after the Inbox loads appears, and counts, without a reload; clearing it leaves the same way", async ({
   browser,
 }) => {
@@ -1060,14 +1092,17 @@ test("a credential request seeded after the Inbox loads appears, and counts, wit
   }
 });
 
-// With nothing waiting, "Nothing needs you" stays on screen through a window focus, which refetches
-// what has gone stale and reopens the event stream, whose reconnect refreshes every query, and
-// through leaving the Inbox and coming back. Every credential-list call after the page's first is
-// held, so a refetch of that list, had one put it back to loading, would take the empty state off
-// the screen for as long as the hold lasts. A Dispatch with no secrets broker answers the list
-// `null` and is asked again only when the stream reconnects, over the held answer, so the held
-// second call leaves the empty state on screen; with the fake broker the list keeps its empty
-// answer on screen while a refetch runs. Neither page may log a failed request.
+// With nothing waiting, "Nothing needs you" stays on screen through a window focus, through a gap
+// in the live socket that refreshes every query, and through leaving the Inbox and coming back. The
+// gap is one whose replay cannot cover it: the socket drops (1012) and the page's resume is
+// rewritten on its way to Dispatch to an id above the log's head, as after a reset log, so
+// Dispatch starts the feed at its head with `replay_complete: false` and the page refreshes every
+// query it holds. Every credential-list call after the page's first is held, so a refetch of that
+// list, had one put it back to loading, would take the empty state off the screen for as long as
+// the hold lasts. A Dispatch with no secrets broker answers the list `null` and is asked again only
+// after such a gap, over the held answer, so the held second call leaves the empty state on screen;
+// with the fake broker the list keeps its empty answer on screen while the refresh refetches it.
+// Neither page may log a failed request.
 test("Nothing needs you stays on screen through a focus and a return to the Inbox", async ({
   browser,
 }) => {
@@ -1087,9 +1122,48 @@ test("Nothing needs you stays on screen through a focus and a return to the Inbo
       if (credentialCalls > 1) await held.promise;
       await route.continue();
     });
+    // Every live socket reaches Dispatch; once `forceGap` is set, the event feed's resume on a
+    // socket opened after it names an id far above the log's head.
+    let forceGap = false;
+    let opens = 0;
+    await page.routeWebSocket(/\/ws\/live$/u, (route) => {
+      opens += 1;
+      const rewrite = forceGap && opens > 1;
+      const server = route.connectToServer();
+      route.onMessage((message) => {
+        const frame = JSON.parse(String(message)) as {
+          readonly type?: string;
+          readonly view?: { readonly kind?: string };
+          readonly resume?: { readonly since?: string };
+        };
+        if (
+          rewrite &&
+          frame.type === "subscribe" &&
+          frame.view?.kind === "events" &&
+          frame.resume?.since !== undefined
+        ) {
+          server.send(JSON.stringify({ ...frame, resume: { since: "999999999999" } }));
+          return;
+        }
+        server.send(message);
+      });
+    });
+    // Each `replay_complete` an events_start carried to the page.
+    const starts: boolean[] = [];
+    page.on("websocket", (socket) => {
+      if (new URL(socket.url()).pathname !== "/ws/live") return;
+      socket.on("framereceived", ({ payload }) => {
+        const frame = JSON.parse(String(payload)) as {
+          readonly type?: string;
+          readonly replay_complete?: boolean;
+        };
+        if (frame.type === "events_start") starts.push(frame.replay_complete === true);
+      });
+    });
     const empty = page.getByText("Nothing needs you");
     await page.goto("/");
     await expect(empty).toBeVisible();
+    await expect.poll(() => starts).toEqual([true]);
     expect(credentialCalls).toBe(1);
     await page.evaluate(() => {
       const record = window as Window & { emptyStateGone?: number };
@@ -1101,15 +1175,21 @@ test("Nothing needs you stays on screen through a focus and a return to the Inbo
       }).observe(document.body, { characterData: true, childList: true, subtree: true });
     });
 
-    // The stream's whole-cache refresh refetches the inbox list; once that has answered, every
-    // refetch the focus started is on the wire.
-    const refreshed = page.waitForResponse(
-      (response) => new URL(response.url()).pathname === "/api/v1/inbox"
-    );
     await page.evaluate(() =>
       document.dispatchEvent(new Event("visibilitychange", { bubbles: true }))
     );
+    // The gap's whole-cache refresh refetches the inbox list; once that has answered, and the held
+    // credential list has been asked again, every refetch the gap started is on the wire.
+    const refreshed = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/v1/inbox"
+    );
+    forceGap = true;
+    await disconnectLiveSockets();
+    // The first start resumed from the sign-in check's head, which the log holds; the one after
+    // the gap resumed above the head, so Dispatch could not replay what the page missed.
+    await expect.poll(() => starts).toEqual([true, false]);
     await refreshed;
+    await expect.poll(() => credentialCalls).toBeGreaterThanOrEqual(2);
     await page.evaluate(() => {
       const frames = Promise.withResolvers<void>();
       requestAnimationFrame(() => requestAnimationFrame(() => frames.resolve()));
@@ -1133,7 +1213,7 @@ test("Nothing needs you stays on screen through a focus and a return to the Inbo
   }
 });
 
-test("an unanchored issue-level comment reaches Conversation, not document review", async ({
+test("an unanchored issue-level comment reaches Conversation, not document review @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -1435,7 +1515,7 @@ test("clearing the filter lists every question, and Assign to me takes one under
 // `features/inbox/BlockedOnYou.tsx`): open questions whose next move is a person's, on issues
 // assigned to them. Widening the list they are looking at is not more work waiting on them, so
 // no count moves with it; another issue assigned to them is, so they all move together.
-test("the rail, the banner and an Agents card count the reader's own work, whatever the filter lists", async ({
+test("the rail, the banner and an Agents card count the reader's own work, whatever the filter lists @phone", async ({
   browser,
 }) => {
   await setLiveSessions([{ session_id: session.actor.id, title: "e2e-session-title" }]);
@@ -1521,10 +1601,10 @@ test("a mentioned session's callback reply reaches the open ask card", async ({ 
 });
 
 // The window #1207's freshness marker covers: a pre-event Inbox body that lands inside the
-// 100 ms debounce is committed and stamped fresh, so there is no request left for
-// `cancelRefetch` to restart, the flush's `["ask-thread", id]` invalidation matches a query that
-// does not exist yet, and a card mounting in the gap seeds its thread from the pre-event row
-// under `staleTime: Infinity` and never refetches.
+// 100 ms batch is committed and stamped fresh before the flush, the flush's
+// `["ask-thread", id]` refresh matches a query that does not exist yet, the Inbox's own fetch
+// after the flush is held here as a slow server's would be, and a card mounting in the gap seeds
+// its thread from the pre-event row under `staleTime: Infinity` and never refetches.
 test("a stale Inbox body landing inside the debounce seeds a later card's thread", async ({
   browser,
 }) => {
@@ -1576,8 +1656,8 @@ test("a stale Inbox body landing inside the debounce seeds a later card's thread
       { ask_id: hiddenAsk.id, body: "Fresh hidden reply." },
       session
     );
-    // ... and the pre-event body lands before the 100ms flush, so cancelRefetch never restarts
-    // it. This hold is shorter than INVALIDATION_DEBOUNCE_MS by design and has no client-visible
+    // ... and the pre-event body lands before the 100 ms flush. This hold is shorter than the
+    // batch window (`BATCH_WINDOW_MS` in `web/src/api/event-feed.ts`) by design and has no client-visible
     // signal to wait on: a failure here means the window slipped, not that the marker regressed.
     await page.waitForTimeout(30);
     releaseSecond.resolve();
@@ -1611,7 +1691,7 @@ for (const refusal of [
       "snoozed_until must be in the future, and this deployment refuses a moment more than one year ahead of the request it arrived on",
   },
 ]) {
-  test(`a refused snooze wraps inside the row and never widens the page: ${refusal.label}`, async ({
+  test(`a refused snooze wraps inside the row and never widens the page: ${refusal.label} @phone`, async ({
     browser,
   }) => {
     await createProject({ key: "CORE", name: "Core" });
@@ -1666,7 +1746,7 @@ for (const refusal of [
   });
 }
 
-test("an ask card's time stays with its author, never opening a line of its own", async ({
+test("an ask card's time stays with its author, never opening a line of its own @phone", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the provenance line only wraps where it must");

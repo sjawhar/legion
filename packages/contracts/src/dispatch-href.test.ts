@@ -30,7 +30,7 @@ describe("itemFromSearch", () => {
 });
 
 test("the golden table covers both item shapes on every document path", () => {
-  const items = DISPATCH_HREF_REFERENCES.filter((row) => row.href.includes("?"));
+  const items = DISPATCH_HREF_REFERENCES.filter((row) => /\?(ask|comment)=/.test(row.href));
   expect(items.map((row) => row.href)).toEqual([
     "/issues/CORE-1/spec?comment=44444444-4444-4444-8444-444444444444",
     "/issues/CORE-1/artifacts/notes-md?comment=55555555-5555-4555-8555-555555555555",
@@ -38,6 +38,7 @@ test("the golden table covers both item shapes on every document path", () => {
     "/issues/CORE-1/artifacts/notes-md?ask=77777777-7777-4777-8777-777777777777",
     "/projects/CORE/documents/handbook-md?comment=88888888-8888-4888-8888-888888888888",
     "/projects/CORE/documents/handbook-md?ask=99999999-9999-4999-8999-999999999999",
+    "/projects/CORE/documents/handbook-md?comment=88888888-8888-4888-8888-888888888888#b-b2",
   ]);
 });
 

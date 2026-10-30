@@ -35,6 +35,7 @@ export function useIssuePriority(issueKey: string): IssuePriorityWrite {
     );
   };
   const write = useIssueFieldWrite<IssuePriority | null>(issueKey, {
+    label: (priority) => `${issueKey} set to ${priority === null ? "no priority" : `P${priority}`}`,
     patch: (priority) => ({ priority }),
     show: showPriority,
   });

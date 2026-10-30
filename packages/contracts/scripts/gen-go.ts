@@ -5,6 +5,8 @@ import { AGENT_STREAM_SUBJECT_PREFIX } from "../src/agent-stream";
 import {
   DEFAULT_ISSUE_PAGE_LIMIT,
   DELIVERY_DUPLICATE_WINDOW_MS,
+  DISPATCH_LOGIN_CHANGED,
+  DISPATCH_LOGIN_HEADER,
   DOCUMENT_BUSY_CLOSE_CODE,
   DOCUMENT_BUSY_CLOSE_REASON,
   DOCUMENT_NEEDS_REBUILD_CLOSE_REASON,
@@ -13,7 +15,22 @@ import {
   DOCUMENT_TOO_LARGE_CLOSE_CODE,
   DOCUMENT_TOO_LARGE_CLOSE_REASON,
   DOCUMENT_TOO_TANGLED_CLOSE_REASON,
+  IDEMPOTENCY_ANSWER_NOT_KEPT,
+  IDEMPOTENCY_KEY_COMMITTED,
+  IDEMPOTENCY_KEY_HEADER,
+  IDEMPOTENCY_KEY_IN_FLIGHT,
+  IDEMPOTENCY_KEY_INVALID,
+  IDEMPOTENCY_KEY_MAX,
+  IDEMPOTENCY_KEY_PATTERN,
+  IDEMPOTENCY_KEY_REUSED,
+  IDEMPOTENCY_KEY_TTL_MS,
+  IDEMPOTENCY_LEASE_MS,
+  IDEMPOTENCY_REPLAYED_HEADER,
   ISSUE_TITLE_MAX,
+  LIVE_SOCKET_MAX_AGE_CLOSE,
+  LIVE_SOCKET_MAX_AGE_MS,
+  LIVE_SOCKET_MAX_SUBSCRIPTIONS,
+  LIVE_SOCKET_MIN_AGE_MS,
   MAX_BROADCAST_RECIPIENTS,
   MAX_ISSUE_BLOCKERS,
   MAX_ISSUE_PAGE_LIMIT,
@@ -22,6 +39,7 @@ import {
   SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE,
 } from "../src/dispatch-api";
 import {
+  ASK_QUESTION_MAX,
   DISPATCH_BODY_MAX,
   PROJECT_KEY_PATTERN,
   PROJECT_KEY_RULE,
@@ -171,6 +189,12 @@ const IssueTitleMax = ${ISSUE_TITLE_MAX}
 // refusal, the agent tools' pre-send refusal and the dashboard composer cannot drift apart.
 const DispatchBodyMax = ${DISPATCH_BODY_MAX}
 
+// AskQuestionMax is the longest ask question the server accepts, in UTF-16 units; an approval
+// request's summary gets what its question leaves of it. Generated from ASK_QUESTION_MAX in
+// packages/contracts so the server's refusal, the agent tools' pre-send refusal and the dashboard
+// ask composer cannot drift apart.
+const AskQuestionMax = ${ASK_QUESTION_MAX}
+
 // ProjectNameMax is the longest project name, in UTF-16 units, that POST /api/v1/projects
 // accepts. Generated from PROJECT_NAME_MAX in packages/contracts so the server's refusal, the
 // Settings name field and the dispatch command cannot drift apart.
@@ -201,6 +225,57 @@ const DocumentTooTangledCloseReason = ${JSON.stringify(DOCUMENT_TOO_TANGLED_CLOS
 const DocumentNeedsRebuildCloseReason = ${JSON.stringify(DOCUMENT_NEEDS_REBUILD_CLOSE_REASON)}
 const DocumentBusyCloseCode = ${DOCUMENT_BUSY_CLOSE_CODE}
 const DocumentBusyCloseReason = ${JSON.stringify(DOCUMENT_BUSY_CLOSE_REASON)}
+
+// LiveSocketMaxAgeClose is the close code Dispatch ends a live socket with once the socket reaches
+// its age, a random point in [LiveSocketMinAge, LiveSocketMaxAge), and LiveSocketMaxSubscriptions
+// the most subscriptions one live socket holds. Generated from LIVE_SOCKET_MAX_AGE_CLOSE,
+// LIVE_SOCKET_MIN_AGE_MS, LIVE_SOCKET_MAX_AGE_MS and LIVE_SOCKET_MAX_SUBSCRIPTIONS in
+// packages/contracts so the server's close and limit and the dashboard's reading of them cannot
+// drift apart.
+const LiveSocketMaxAgeClose = ${LIVE_SOCKET_MAX_AGE_CLOSE}
+const LiveSocketMinAge = ${LIVE_SOCKET_MIN_AGE_MS} * time.Millisecond
+const LiveSocketMaxAge = ${LIVE_SOCKET_MAX_AGE_MS} * time.Millisecond
+const LiveSocketMaxSubscriptions = ${LIVE_SOCKET_MAX_SUBSCRIPTIONS}
+
+// IdempotencyKeyHeader is the request header a write names its intent with, the same on every
+// retry of that intent, and IdempotencyReplayedHeader the response header (?1) on an answer
+// replayed from the first request under the key rather than run again. Generated from
+// IDEMPOTENCY_KEY_HEADER and IDEMPOTENCY_REPLAYED_HEADER in packages/contracts so the server, the
+// dashboard and the agents' client name them once.
+const IdempotencyKeyHeader = ${JSON.stringify(IDEMPOTENCY_KEY_HEADER)}
+const IdempotencyReplayedHeader = ${JSON.stringify(IDEMPOTENCY_REPLAYED_HEADER)}
+
+// IdempotencyKeyMax is the longest key and IdempotencyKeyPattern a whole one. Generated from
+// IDEMPOTENCY_KEY_MAX and IDEMPOTENCY_KEY_PATTERN in packages/contracts so the server's refusal and
+// the keys every client mints cannot drift apart.
+const IdempotencyKeyMax = ${IDEMPOTENCY_KEY_MAX}
+const IdempotencyKeyPattern = ${JSON.stringify(IDEMPOTENCY_KEY_PATTERN.source)}
+
+// The codes of a keyed write's refusals and of a replay whose first answer was not kept: a key
+// used for another request (422), a key whose first request still runs (409), a key whose write
+// landed and whose answer was lost (409), a header that is not a key (400), and a first answer too
+// large to keep. Generated from IDEMPOTENCY_KEY_REUSED, IDEMPOTENCY_KEY_IN_FLIGHT,
+// IDEMPOTENCY_KEY_COMMITTED, IDEMPOTENCY_KEY_INVALID and IDEMPOTENCY_ANSWER_NOT_KEPT in
+// packages/contracts so the server's codes and the clients' reading of them cannot drift apart.
+const IdempotencyKeyReused = ${JSON.stringify(IDEMPOTENCY_KEY_REUSED)}
+const IdempotencyKeyInFlight = ${JSON.stringify(IDEMPOTENCY_KEY_IN_FLIGHT)}
+const IdempotencyKeyCommitted = ${JSON.stringify(IDEMPOTENCY_KEY_COMMITTED)}
+const IdempotencyKeyInvalid = ${JSON.stringify(IDEMPOTENCY_KEY_INVALID)}
+const IdempotencyAnswerNotKept = ${JSON.stringify(IDEMPOTENCY_ANSWER_NOT_KEPT)}
+
+// IdempotencyKeyTTL is how long Dispatch keeps a key's answer, and IdempotencyLease how long a
+// key's first request holds it before a repeat may run it again. Generated from
+// IDEMPOTENCY_KEY_TTL_MS and IDEMPOTENCY_LEASE_MS in packages/contracts so the server's windows and
+// the clients' account of them cannot drift apart.
+const IdempotencyKeyTTL = ${IDEMPOTENCY_KEY_TTL_MS} * time.Millisecond
+const IdempotencyLease = ${IDEMPOTENCY_LEASE_MS} * time.Millisecond
+
+// DispatchLoginHeader is the request header a page puts on every write it makes, naming the login
+// of the person who pressed it, and DispatchLoginChanged the code of the 409 for one whose caller
+// is anyone else: nothing ran. Generated from DISPATCH_LOGIN_HEADER and DISPATCH_LOGIN_CHANGED in
+// packages/contracts so the server's check and the page's header cannot drift apart.
+const DispatchLoginHeader = ${JSON.stringify(DISPATCH_LOGIN_HEADER)}
+const DispatchLoginChanged = ${JSON.stringify(DISPATCH_LOGIN_CHANGED)}
 
 func NowMillis() int64 {
 	return time.Now().UnixMilli()

@@ -13,6 +13,7 @@
     "kind": "push",
     "pusher": "octocat",
     "ref": "refs/heads/main",
-    "repo": "example-org/example-repo"
+    "repo": "example-org/example-repo",
+    "sender": "octocat"
   }
 }

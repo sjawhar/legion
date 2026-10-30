@@ -28,6 +28,15 @@ symptoms:
 
 # Dispatch Playwright Harness from a Legion Pane
 
+**Update (2026-10-26, INFRA-253): the Playwright config no longer starts the harness, and its
+servers have no fixed ports.** `bun run e2e` runs Playwright through
+`packages/dispatch/e2e/run.ts`, which starts the fakes, the server and the plain-HTTP proxy
+through `e2e/harness-start.ts` on ports the OS chooses, and exports them; the defaults
+8777/9021-9024 and the config's port probe below are gone, so the "own your ports" advice is now
+automatic. A port variable set by hand is used as given and fails with `address already in use`
+when taken. `packages/dispatch/AGENTS.md` (the harness-port paragraphs) is current; the rest of
+this entry is the record as it was written.
+
 The Dispatch dashboard's browser suite (`cd packages/dispatch && bun run e2e`) is the package's
 own integration harness: the Playwright config starts the fake Envoy (`e2e/fake-envoy.ts`) and the
 real Go server (`e2e/run-server.sh`, which builds `./cmd/dispatch` and execs the binary) itself, against a Postgres the

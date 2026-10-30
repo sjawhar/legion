@@ -206,6 +206,12 @@ const IssueTitleMax = 1000
 // refusal, the agent tools' pre-send refusal and the dashboard composer cannot drift apart.
 const DispatchBodyMax = 32000
 
+// AskQuestionMax is the longest ask question the server accepts, in UTF-16 units; an approval
+// request's summary gets what its question leaves of it. Generated from ASK_QUESTION_MAX in
+// packages/contracts so the server's refusal, the agent tools' pre-send refusal and the dashboard
+// ask composer cannot drift apart.
+const AskQuestionMax = 2000
+
 // ProjectNameMax is the longest project name, in UTF-16 units, that POST /api/v1/projects
 // accepts. Generated from PROJECT_NAME_MAX in packages/contracts so the server's refusal, the
 // Settings name field and the dispatch command cannot drift apart.
@@ -236,6 +242,57 @@ const DocumentTooTangledCloseReason = "DOC_TOO_TANGLED"
 const DocumentNeedsRebuildCloseReason = "DOC_NEEDS_REBUILD"
 const DocumentBusyCloseCode = 4503
 const DocumentBusyCloseReason = "DOC_BUSY"
+
+// LiveSocketMaxAgeClose is the close code Dispatch ends a live socket with once the socket reaches
+// its age, a random point in [LiveSocketMinAge, LiveSocketMaxAge), and LiveSocketMaxSubscriptions
+// the most subscriptions one live socket holds. Generated from LIVE_SOCKET_MAX_AGE_CLOSE,
+// LIVE_SOCKET_MIN_AGE_MS, LIVE_SOCKET_MAX_AGE_MS and LIVE_SOCKET_MAX_SUBSCRIPTIONS in
+// packages/contracts so the server's close and limit and the dashboard's reading of them cannot
+// drift apart.
+const LiveSocketMaxAgeClose = 4001
+const LiveSocketMinAge = 1800000 * time.Millisecond
+const LiveSocketMaxAge = 3600000 * time.Millisecond
+const LiveSocketMaxSubscriptions = 64
+
+// IdempotencyKeyHeader is the request header a write names its intent with, the same on every
+// retry of that intent, and IdempotencyReplayedHeader the response header (?1) on an answer
+// replayed from the first request under the key rather than run again. Generated from
+// IDEMPOTENCY_KEY_HEADER and IDEMPOTENCY_REPLAYED_HEADER in packages/contracts so the server, the
+// dashboard and the agents' client name them once.
+const IdempotencyKeyHeader = "Idempotency-Key"
+const IdempotencyReplayedHeader = "Idempotency-Replayed"
+
+// IdempotencyKeyMax is the longest key and IdempotencyKeyPattern a whole one. Generated from
+// IDEMPOTENCY_KEY_MAX and IDEMPOTENCY_KEY_PATTERN in packages/contracts so the server's refusal and
+// the keys every client mints cannot drift apart.
+const IdempotencyKeyMax = 128
+const IdempotencyKeyPattern = "^[A-Za-z0-9._:-]{1,128}$"
+
+// The codes of a keyed write's refusals and of a replay whose first answer was not kept: a key
+// used for another request (422), a key whose first request still runs (409), a key whose write
+// landed and whose answer was lost (409), a header that is not a key (400), and a first answer too
+// large to keep. Generated from IDEMPOTENCY_KEY_REUSED, IDEMPOTENCY_KEY_IN_FLIGHT,
+// IDEMPOTENCY_KEY_COMMITTED, IDEMPOTENCY_KEY_INVALID and IDEMPOTENCY_ANSWER_NOT_KEPT in
+// packages/contracts so the server's codes and the clients' reading of them cannot drift apart.
+const IdempotencyKeyReused = "KEY_REUSED"
+const IdempotencyKeyInFlight = "KEY_IN_FLIGHT"
+const IdempotencyKeyCommitted = "KEY_COMMITTED"
+const IdempotencyKeyInvalid = "KEY_INVALID"
+const IdempotencyAnswerNotKept = "ANSWER_NOT_KEPT"
+
+// IdempotencyKeyTTL is how long Dispatch keeps a key's answer, and IdempotencyLease how long a
+// key's first request holds it before a repeat may run it again. Generated from
+// IDEMPOTENCY_KEY_TTL_MS and IDEMPOTENCY_LEASE_MS in packages/contracts so the server's windows and
+// the clients' account of them cannot drift apart.
+const IdempotencyKeyTTL = 86400000 * time.Millisecond
+const IdempotencyLease = 60000 * time.Millisecond
+
+// DispatchLoginHeader is the request header a page puts on every write it makes, naming the login
+// of the person who pressed it, and DispatchLoginChanged the code of the 409 for one whose caller
+// is anyone else: nothing ran. Generated from DISPATCH_LOGIN_HEADER and DISPATCH_LOGIN_CHANGED in
+// packages/contracts so the server's check and the page's header cannot drift apart.
+const DispatchLoginHeader = "Dispatch-Login"
+const DispatchLoginChanged = "LOGIN_CHANGED"
 
 func NowMillis() int64 {
 	return time.Now().UnixMilli()

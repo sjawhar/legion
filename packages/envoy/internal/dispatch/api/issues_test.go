@@ -233,11 +233,13 @@ func TestListIssuesExcludesOpenAsksOnClosedIssues(t *testing.T) {
 		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
 	}
 	issue := decodeBody[model.Issue](t, created)
-	if ask := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]string{
+	asked := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]string{
 		"question": "Which option?",
-	}, "alice"); ask.Code != http.StatusCreated {
-		t.Fatalf("create ask: status=%d body=%s", ask.Code, ask.Body.String())
+	}, "alice")
+	if asked.Code != http.StatusCreated {
+		t.Fatalf("create ask: status=%d body=%s", asked.Code, asked.Body.String())
 	}
+	ask := decodeBody[model.Ask](t, asked)
 
 	assertOpenAskCount := func(want int) {
 		t.Helper()
@@ -257,7 +259,9 @@ func TestListIssuesExcludesOpenAsksOnClosedIssues(t *testing.T) {
 	}, "alice"); closed.Code != http.StatusOK {
 		t.Fatalf("close issue: status=%d body=%s", closed.Code, closed.Body.String())
 	}
+	// The close withdrew the ask, which no longer counts.
 	assertOpenAskCount(0)
+	requireWithdrawn(t, handler, issue.Key, ask.ID, model.Actor{Kind: "user", ID: "alice"})
 	openOnly := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=TEST&open=true", nil, "alice")
 	if openOnly.Code != http.StatusOK || len(decodeBody[[]model.IssueSummary](t, openOnly)) != 0 {
 		t.Fatalf("open issue list: status=%d body=%s", openOnly.Code, openOnly.Body.String())
@@ -267,7 +271,11 @@ func TestListIssuesExcludesOpenAsksOnClosedIssues(t *testing.T) {
 	}, "alice"); reopened.Code != http.StatusOK {
 		t.Fatalf("reopen issue: status=%d body=%s", reopened.Code, reopened.Body.String())
 	}
+	// The reopen restored it.
 	assertOpenAskCount(1)
+	if restored := readBlockAsk(t, handler, ask.ID); restored.State != "open" || restored.Resolution != nil {
+		t.Fatalf("ask after the reopen = %s %#v, want open", restored.State, restored.Resolution)
+	}
 }
 
 func TestListIssuesFiltersByUpdatedSince(t *testing.T) {
@@ -433,6 +441,86 @@ func TestEventDoesNotMoveIssueUpdatedAtBackward(t *testing.T) {
 	}
 	if got := summaries[0].UpdatedAt; !got.Equal(future) {
 		t.Fatalf("issue timestamp after event = %s, want later timestamp %s", got, future)
+	}
+}
+
+// A PATCH begins its transaction before it takes its locks, so a write that commits on the issue
+// while the PATCH waits - here an event append, which every comment, message and receipt makes -
+// stamps updated_at later than the PATCH's own start. The PATCH's commit never moves it back
+// below that stamp: the web page's issue cache keeps the newest updated_at it saw and drops an
+// older answer, so a regressed value would hide the PATCH, and every read after it, until
+// something stamped past it. The PATCH waits on the project's rank lock, which a message takes
+// no part of, so the message's whole transaction begins and commits inside the wait.
+func TestAPatchThatWaitedNeverMovesUpdatedAtBackward(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	keys := make([]string, 0, 2)
+	for _, title := range []string{"Neighbour", "Moved while another write lands"} {
+		created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+			"project": "TEST", "title": title,
+		}, "alice")
+		if created.Code != http.StatusCreated {
+			t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+		}
+		keys = append(keys, decodeBody[model.Issue](t, created).Key)
+	}
+	neighbour, key := keys[0], keys[1]
+
+	ctx := context.Background()
+	gate, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the rank gate: %v", err)
+	}
+	defer func() { _ = gate.Rollback(ctx) }()
+	if _, err := gate.Exec(ctx, `select pg_advisory_xact_lock(hashtext('issue-rank:' || 'TEST'))`); err != nil {
+		t.Fatalf("hold the project's rank lock: %v", err)
+	}
+	responses := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		responses <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+key, map[string]any{
+			"title": "Moved and retitled", "rank": map[string]string{"before": neighbour},
+		}, "alice")
+	}()
+	waitForDatabaseLocks(t, gate, 1)
+
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/messages", map[string]string{
+		"body": "Lands while the PATCH waits.",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("message during the wait: status=%d body=%s", response.Code, response.Body.String())
+	}
+	var bumped time.Time
+	if err := database.Pool.QueryRow(ctx, `select updated_at from issues where key = $1`, key).Scan(&bumped); err != nil {
+		t.Fatalf("read the bumped updated_at: %v", err)
+	}
+	if err := gate.Commit(ctx); err != nil {
+		t.Fatalf("release the rank gate: %v", err)
+	}
+
+	patched := awaitResponse(t, responses)
+	if patched.Code != http.StatusOK {
+		t.Fatalf("patch after the wait: status=%d body=%s", patched.Code, patched.Body.String())
+	}
+	answered := decodeBody[model.Issue](t, patched)
+	var stored time.Time
+	if err := database.Pool.QueryRow(ctx, `select updated_at from issues where key = $1`, key).Scan(&stored); err != nil {
+		t.Fatalf("read the stored updated_at: %v", err)
+	}
+	if stored.Before(bumped) {
+		t.Fatalf("the PATCH moved updated_at back from %s, the message's stamp during its wait, to %s", bumped, stored)
+	}
+	if !answered.UpdatedAt.Equal(stored) {
+		t.Fatalf("the PATCH answered updated_at %s, the row holds %s", answered.UpdatedAt, stored)
+	}
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key, nil, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("read after the PATCH: status=%d body=%s", read.Code, read.Body.String())
+	}
+	if got := decodeBody[model.Issue](t, read); !got.UpdatedAt.Equal(stored) || got.Title != "Moved and retitled" {
+		t.Fatalf("a read after the PATCH = %q at %s, want the PATCH's title at %s", got.Title, got.UpdatedAt, stored)
 	}
 }
 

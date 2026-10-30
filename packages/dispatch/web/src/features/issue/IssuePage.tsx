@@ -476,9 +476,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
         id="issue-activity-panel"
         role="tabpanel"
       >
-        {activatedTabs.activity ? (
-          <ActivityTab issueKey={issueKey} state={state.data} visible={activeTab === "activity"} />
-        ) : null}
+        {activatedTabs.activity ? <ActivityTab issueKey={issueKey} state={state.data} /> : null}
       </div>
     </section>
   );

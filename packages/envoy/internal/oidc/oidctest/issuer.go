@@ -60,30 +60,45 @@ func NewKey(t TB, kid string) *Key {
 // Issuer serves a discovery document and a key set, both under the test's control.
 type Issuer struct {
 	server *httptest.Server
+	mux    *http.ServeMux
 
-	mu              sync.Mutex
-	issuerClaim     string
-	discoveryStatus int
-	served          []jose.JSONWebKey
-	jwksRequests    int
-	keysDelay       time.Duration
-	omitCodeFlow    bool
-	omitRevocation  bool
-	codeFlow        *codeFlow
+	mu                sync.Mutex
+	issuerClaim       string
+	discoveryStatus   int
+	discoveryDelay    time.Duration
+	discoveryRequests int
+	served            []jose.JSONWebKey
+	jwksRequests      int
+	keysDelay         time.Duration
+	omitCodeFlow      bool
+	omitRevocation    bool
+	codeFlow          *codeFlow
 }
 
 // codeFlow is the state of the authorization and token endpoints: the one
 // client they serve, the key ID tokens are signed with, the sign-ins queued for
-// the next authorization requests, and the codes and refresh tokens issued.
+// the next authorization requests and the one used when none is queued, and the
+// codes and refresh tokens issued.
 type codeFlow struct {
-	key          *Key
-	clientID     string
-	clientSecret string
-	queued       []map[string]any
-	codes        map[string]codeGrant
-	grants       map[string]*refreshGrant
-	refreshes    int
-	revocation   revocation
+	key             *Key
+	clientID        string
+	clientSecret    string
+	queued          []map[string]any
+	signInByDefault map[string]any
+	codes           map[string]codeGrant
+	grants          map[string]*refreshGrant
+	refreshes       int
+	token           tokenFailure
+	revocation      revocation
+}
+
+// tokenFailure is how the token endpoint answers every grant instead of
+// granting it, when FailToken or DropToken set it: status with code as the
+// body's OAuth error, or, with drop, closing the connection unanswered.
+type tokenFailure struct {
+	status int
+	code   string
+	drop   bool
 }
 
 // revocation is the state of the revocation endpoint: every token the client
@@ -116,8 +131,8 @@ type refreshGrant struct {
 // New starts an issuer serving no keys yet. The server is closed at cleanup.
 func New(t TB) *Issuer {
 	t.Helper()
-	issuer := &Issuer{}
-	mux := http.NewServeMux()
+	issuer := &Issuer{mux: http.NewServeMux()}
+	mux := issuer.mux
 	mux.HandleFunc("/.well-known/openid-configuration", issuer.handleDiscovery)
 	mux.HandleFunc("/keys", issuer.handleKeys)
 	mux.HandleFunc("GET /authorize", issuer.handleAuthorize)
@@ -132,6 +147,14 @@ func New(t TB) *Issuer {
 // URL is the issuer's base URL, which is also the `iss` it advertises and mints
 // until AdvertiseIssuer says otherwise.
 func (i *Issuer) URL() string { return i.server.URL }
+
+// Handle serves handler for pattern (an http.ServeMux pattern) alongside the
+// issuer's own endpoints, so a caller can add a route of its own at the
+// issuer's URL: cmd/dev-oidc-issuer's control route that queues the next
+// sign-in.
+func (i *Issuer) Handle(pattern string, handler http.Handler) {
+	i.mux.Handle(pattern, handler)
+}
 
 // PublishKey generates a key and serves it — the common case, for a test that
 // only needs one working signing key.
@@ -162,11 +185,29 @@ func (i *Issuer) AdvertiseIssuer(issuer string) {
 	i.issuerClaim = issuer
 }
 
-// FailDiscovery makes the discovery document answer with an HTTP status.
+// FailDiscovery makes the discovery document answer with an HTTP status; a
+// status of 0 makes it answer the document again.
 func (i *Issuer) FailDiscovery(status int) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.discoveryStatus = status
+}
+
+// DelayDiscovery makes the discovery document wait d before answering, or
+// until the client hangs up, so a test can hold one discovery read in flight
+// while others arrive.
+func (i *Issuer) DelayDiscovery(d time.Duration) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.discoveryDelay = d
+}
+
+// DiscoveryRequests counts the discovery document's reads, whatever it
+// answered, so a test can prove when discovery happened and how often.
+func (i *Issuer) DiscoveryRequests() int {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.discoveryRequests
 }
 
 // DelayKeys makes the key-set endpoint wait before answering. A test about a
@@ -219,6 +260,26 @@ func (i *Issuer) OmitRevocationEndpoint() {
 	i.omitRevocation = true
 }
 
+// FailToken makes the token endpoint answer every grant, a code exchange or a
+// refresh, with status instead of granting it, with code as the body's OAuth
+// error when code is not empty: 400 invalid_grant is an issuer refusing the
+// refresh token, a 5xx or a 429 one that cannot answer now. A status of 0
+// makes it grant again, and undoes DropToken too.
+func (i *Issuer) FailToken(status int, code string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.codeFlow.token = tokenFailure{status: status, code: code}
+}
+
+// DropToken makes the token endpoint close every connection a grant arrives
+// on without answering: a client sees a transport failure, as it does when
+// the issuer's network path breaks mid-request. FailToken(0, "") undoes it.
+func (i *Issuer) DropToken() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.codeFlow.token = tokenFailure{drop: true}
+}
+
 // FailRevocation makes the revocation endpoint answer status, with code as the
 // body's OAuth error when code is not empty, instead of revoking; a status of 0
 // makes it revoke again. Cognito answers 400 invalid_request to a client with
@@ -263,6 +324,15 @@ func (i *Issuer) SignInAs(claims map[string]any) {
 	i.codeFlow.queued = append(i.codeFlow.queued, maps.Clone(claims))
 }
 
+// SignInByDefault sets the claims an authorization request signs in with when
+// SignInAs has queued none, so every sign-in completes as that person until a
+// queued one takes a turn. Without it, such a request is refused.
+func (i *Issuer) SignInByDefault(claims map[string]any) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.codeFlow.signInByDefault = maps.Clone(claims)
+}
+
 // UpdateGrants changes the claims every refresh token issued so far answers
 // with, as a pool does when a user's groups change.
 func (i *Issuer) UpdateGrants(change func(claims map[string]any)) {
@@ -293,7 +363,8 @@ func (i *Issuer) Refreshes() int {
 
 // Authorize follows authURL the way a browser does through the identity
 // provider's sign-in, and returns the code and state the issuer redirects back
-// with. The person signed in is the one SignInAs queued.
+// with. The person signed in is the one SignInAs queued, or SignInByDefault set
+// when none is queued.
 func (i *Issuer) Authorize(t TB, authURL string) (code, state string) {
 	t.Helper()
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -354,10 +425,18 @@ func sign(key *Key, claims map[string]any) (string, error) {
 	return signed.CompactSerialize()
 }
 
-func (i *Issuer) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
+func (i *Issuer) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 	i.mu.Lock()
-	status, issuer, omitCodeFlow, omitRevocation := i.discoveryStatus, i.issuerClaim, i.omitCodeFlow, i.omitRevocation
+	i.discoveryRequests++
+	status, issuer, omitCodeFlow, omitRevocation, delay := i.discoveryStatus, i.issuerClaim, i.omitCodeFlow, i.omitRevocation, i.discoveryDelay
 	i.mu.Unlock()
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-r.Context().Done():
+			return
+		}
+	}
 	if status != 0 {
 		http.Error(w, "discovery unavailable", status)
 		return
@@ -390,12 +469,15 @@ func (i *Issuer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	case query.Get("client_id") != flow.clientID || query.Get("response_type") != "code" || query.Get("redirect_uri") == "":
 		http.Error(w, "bad authorization request", http.StatusBadRequest)
 		return
-	case len(flow.queued) == 0:
-		http.Error(w, "no sign-in queued (SignInAs)", http.StatusBadRequest)
+	case len(flow.queued) == 0 && flow.signInByDefault == nil:
+		http.Error(w, "no sign-in queued (SignInAs) and no default (SignInByDefault)", http.StatusBadRequest)
 		return
 	}
-	claims := flow.queued[0]
-	flow.queued = flow.queued[1:]
+	claims := maps.Clone(flow.signInByDefault)
+	if len(flow.queued) > 0 {
+		claims = flow.queued[0]
+		flow.queued = flow.queued[1:]
+	}
 	code := randomValue()
 	flow.codes[code] = codeGrant{claims: claims, nonce: query.Get("nonce"), redirectURI: query.Get("redirect_uri")}
 	target, err := url.Parse(query.Get("redirect_uri"))
@@ -424,6 +506,24 @@ func (i *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
 	flow := i.codeFlow
 	if flow == nil {
 		http.Error(w, "code flow not enabled", http.StatusNotFound)
+		return
+	}
+	if failure := flow.token; failure.status != 0 || failure.drop {
+		if r.PostForm.Get("grant_type") == "refresh_token" {
+			flow.refreshes++
+		}
+		switch {
+		case failure.drop:
+			if hijacker, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hijacker.Hijack(); err == nil {
+					_ = conn.Close()
+				}
+			}
+		case failure.code == "":
+			http.Error(w, http.StatusText(failure.status), failure.status)
+		default:
+			tokenError(w, failure.status, failure.code)
+		}
 		return
 	}
 	clientID, clientSecret, basic := r.BasicAuth()

@@ -43,7 +43,9 @@ function subscribe(listener: () => void): () => void {
   };
 }
 
-function relativeTimeLabel(at: Date, now: number) {
+/** "4 minutes ago", "just now": the relative form every `<Timestamp>` shows, for a caller that
+ *  needs it as text (an attribute). */
+export function relativeTimeLabel(at: Date, now: number): string | undefined {
   const deltaMs = at.getTime() - now;
   if (Math.abs(deltaMs) < 60_000) {
     return "just now";

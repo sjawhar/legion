@@ -3,9 +3,12 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -212,6 +215,105 @@ func TestEventCursorCheckReadsTheNewestEventAndTheCursorsRow(t *testing.T) {
 	}
 	if maxID != reset[0] || maxID >= ids[2] || cursorAt != nil {
 		t.Fatalf("after a reset = %d, %v; want the new newest id %d below the cursor %d, and nil", maxID, cursorAt, reset[0], ids[2])
+	}
+}
+
+// cursorCheck is one answer of eventCursorCheck.
+type cursorCheck struct {
+	maxID    int64
+	maxAt    time.Time
+	cursorAt *time.Time
+}
+
+func (c cursorCheck) equal(other cursorCheck) bool {
+	if c.maxID != other.maxID || !c.maxAt.Equal(other.maxAt) {
+		return false
+	}
+	if c.cursorAt == nil || other.cursorAt == nil {
+		return c.cursorAt == nil && other.cursorAt == nil
+	}
+	return c.cursorAt.Equal(*other.cursorAt)
+}
+
+func (c cursorCheck) String() string {
+	cursorAt := "no row"
+	if c.cursorAt != nil {
+		cursorAt = c.cursorAt.UTC().Format(time.RFC3339)
+	}
+	return fmt.Sprintf("newest id %d at %s, cursor's row %s", c.maxID, c.maxAt.UTC().Format(time.RFC3339), cursorAt)
+}
+
+// resetAfterFirstStatement is a queryer that resets the event log the moment the first statement
+// read through it has answered, which is a reset committing in the middle of whatever read that
+// statement began.
+type resetAfterFirstStatement struct {
+	queryer
+	reset func()
+	fired bool
+}
+
+func (q *resetAfterFirstStatement) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	return scanThen{row: q.queryer.QueryRow(ctx, sql, args...), after: func() {
+		if !q.fired {
+			q.fired = true
+			q.reset()
+		}
+	}}
+}
+
+// scanThen is a row that runs after once its Scan has answered.
+type scanThen struct {
+	row   pgx.Row
+	after func()
+}
+
+func (r scanThen) Scan(dest ...any) error {
+	err := r.row.Scan(dest...)
+	r.after()
+	return err
+}
+
+// A reset of the event log (e2e/seed.ts's `truncate events restart identity` and its refill) that
+// commits while eventCursorCheck is reading must leave the answer describing one log, the old one
+// or the new one. A mixed answer - the old log's newest id with no row at the cursor in the new
+// one - is what the relay took for a reset to the old log's head: it moved its cursor there, and
+// the new log's lower ids then read as a second reset that closed the subscription opened after
+// the first (TestEventStreamRelayRecoversWhenTheEventLogIsReset).
+func TestEventCursorCheckReadsOneLogWhenTheLogIsResetMidCheck(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	base := time.Date(2026, 10, 12, 9, 0, 0, 0, time.UTC)
+	ids := seedLiveEvents(t, database, []liveEventSeed{
+		{kind: "issue.created", actor: liveUser, payload: `{}`, at: base},
+		{kind: "issue.updated", actor: liveUser, payload: `{}`, at: base.Add(time.Minute)},
+		{kind: "issue.updated", actor: liveUser, payload: `{}`, at: base.Add(2 * time.Minute)},
+	})
+	cursor := ids[1]
+	check := func(q queryer) cursorCheck {
+		t.Helper()
+		maxID, maxAt, cursorAt, err := eventCursorCheck(ctx, q, cursor)
+		if err != nil {
+			t.Fatalf("eventCursorCheck: %v", err)
+		}
+		return cursorCheck{maxID: maxID, maxAt: maxAt, cursorAt: cursorAt}
+	}
+
+	oldLog := check(database.Pool)
+	resetting := &resetAfterFirstStatement{queryer: database.Pool, reset: func() {
+		if _, err := database.Pool.Exec(ctx, `truncate events restart identity cascade`); err != nil {
+			t.Fatalf("reset the event log: %v", err)
+		}
+		seedLiveEvents(t, database, []liveEventSeed{{kind: "issue.created", actor: liveUser, payload: `{}`, at: base.Add(time.Hour)}})
+	}}
+	got := check(resetting)
+	if !resetting.fired {
+		t.Fatal("the check read nothing through the queryer, so no reset landed inside it")
+	}
+	newLog := check(database.Pool)
+
+	if !got.equal(oldLog) && !got.equal(newLog) {
+		t.Fatalf("a reset during the check answered %v; want the old log's answer (%v) or the new log's (%v), not two logs in one answer",
+			got, oldLog, newLog)
 	}
 }
 

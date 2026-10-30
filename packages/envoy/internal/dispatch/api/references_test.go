@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -49,7 +50,18 @@ func createReferenceAPIComment(t *testing.T, handler http.Handler, issueKey, bod
 
 func issueReferencesRequest(t *testing.T, handler http.Handler, issueKey, etag string) *httptest.ResponseRecorder {
 	t.Helper()
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/issues/"+issueKey+"/references", nil)
+	return issueReferencesQueryRequest(t, handler, issueKey, "", etag)
+}
+
+// issueReferencesQueryRequest reads an issue's references as alice with query as the raw query
+// string ("" for none) and etag, when set, as If-None-Match.
+func issueReferencesQueryRequest(t *testing.T, handler http.Handler, issueKey, query, etag string) *httptest.ResponseRecorder {
+	t.Helper()
+	target := "/api/v1/issues/" + issueKey + "/references"
+	if query != "" {
+		target += "?" + query
+	}
+	request := httptest.NewRequest(http.MethodGet, target, nil)
 	request.Header.Set("X-Dispatch-User", "alice")
 	if etag != "" {
 		request.Header.Set("If-None-Match", etag)
@@ -168,6 +180,41 @@ func TestIssueReferencesTruncateBeyondDepthEight(t *testing.T) {
 	}
 }
 
+// ?versions=all is the full answer, byte for byte and under the same ETag, as no parameter is;
+// any value but all and latest is refused, and so is a versions given more than once.
+func TestIssueReferencesVersionsAllIsTheFullAnswerAndOtherValuesAreRefused(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	issue := createReferenceAPIIssue(t, handler, "CORE")
+	design := createProjectDocument(t, handler, "CORE", "Design notes", "# Design notes\n")
+	seedReferenceDocumentHistory(t, database, design.ID, 4, 0, `{"kind":"human","id":"alice"}`)
+	createReferenceAPIComment(t, handler, issue.Key, "dispatch://CORE/artifact/"+design.Slug)
+
+	plain := issueReferencesRequest(t, handler, issue.Key, "")
+	if plain.Code != http.StatusOK {
+		t.Fatalf("get issue references: status=%d body=%s", plain.Code, plain.Body.String())
+	}
+	if members := decodeBody[model.IssueReferences](t, plain).Members; len(members) != 1 || len(members[0].Artifact.Versions) != 4 {
+		t.Fatalf("issue references members = %#v; want Design notes with 4 versions", members)
+	}
+	all := issueReferencesQueryRequest(t, handler, issue.Key, "versions=all", "")
+	if all.Code != plain.Code ||
+		all.Header().Get("ETag") != plain.Header().Get("ETag") ||
+		all.Header().Get("Content-Type") != plain.Header().Get("Content-Type") ||
+		!bytes.Equal(all.Body.Bytes(), plain.Body.Bytes()) {
+		t.Fatalf("versions=all: status=%d etag=%q type=%q body=%s\nwant status=%d etag=%q type=%q body=%s",
+			all.Code, all.Header().Get("ETag"), all.Header().Get("Content-Type"), all.Body.String(),
+			plain.Code, plain.Header().Get("ETag"), plain.Header().Get("Content-Type"), plain.Body.String())
+	}
+
+	for _, query := range []string{"versions=bogus", "versions=latest&versions=bogus", "versions=all&versions=latest"} {
+		refused := issueReferencesQueryRequest(t, handler, issue.Key, query, "")
+		if refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"INVALID_QUERY"`) {
+			t.Fatalf("%s: status=%d body=%s; want 400 INVALID_QUERY", query, refused.Code, refused.Body.String())
+		}
+	}
+}
+
 func TestArtifactReferencesListOutgoingAndReferencedBy(t *testing.T) {
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
@@ -192,10 +239,14 @@ func TestArtifactReferencesListOutgoingAndReferencedBy(t *testing.T) {
 
 func TestIssueReferencesRejectUnauthenticatedRequest(t *testing.T) {
 	handler := newTestHandler(t)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/issues/CORE-1/references", nil))
-	if response.Code != http.StatusUnauthorized || !strings.Contains(response.Body.String(), `"code":"NO_IDENTITY"`) {
-		t.Fatalf("unauthenticated issue references: status=%d body=%s", response.Code, response.Body.String())
+	// Authentication comes before the versions parameter: a value the route refuses still
+	// answers 401 to a caller with no identity.
+	for _, target := range []string{"/api/v1/issues/CORE-1/references", "/api/v1/issues/CORE-1/references?versions=bogus"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+		if response.Code != http.StatusUnauthorized || !strings.Contains(response.Body.String(), `"code":"NO_IDENTITY"`) {
+			t.Fatalf("unauthenticated %s: status=%d body=%s", target, response.Code, response.Body.String())
+		}
 	}
 }
 
@@ -214,9 +265,10 @@ func graphEdges(t *testing.T, handler http.Handler, query url.Values) model.Grap
 }
 
 // A message on an ACME issue that cites a LEGION ask is a backlink on that ask: the edge names
-// the message with its own issue, project, and dispatch:// address, carries the message body as
-// excerpt, and is stamped with the events.id of the message.created write. Read from the
-// message, the same edge points out at the ask. Filters narrow it and malformed input is 400.
+// the message's block holding the link (R7), under the message's own issue, project, and
+// dispatch:// address, carries the block's text as excerpt, and is stamped with the events.id of
+// the message.created write. Read from the message, the same edge points out at the ask. Filters
+// narrow it and malformed input is 400.
 func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	createReferenceAPIProject(t, handler, "LEGION")
@@ -247,7 +299,11 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 
 	incoming := graphEdges(t, handler, url.Values{"to": {askRef}})
 	legionKey := legion.Key
-	if want := (model.GraphNode{Kind: "ask", ID: ask.ID, IssueKey: &legionKey, Project: "LEGION", Ref: askRef}); !reflect.DeepEqual(incoming.Node, want) {
+	if want := (model.GraphNode{
+		Kind: "ask", ID: ask.ID, IssueKey: &legionKey, Project: "LEGION", Ref: askRef,
+		MadeBy: []model.Actor{ask.Author}, MadeAt: &ask.CreatedAt, ChangedBy: []model.Actor{ask.Author}, ChangedAt: &ask.CreatedAt,
+		Parent: &model.NodeParent{Kind: "issue", ID: legion.Key, Ref: "dispatch://" + legion.Key},
+	}); !reflect.DeepEqual(incoming.Node, want) {
 		t.Fatalf("queried node = %#v; want %#v", incoming.Node, want)
 	}
 	if len(incoming.Edges) != 1 {
@@ -255,12 +311,19 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 	}
 	edge := incoming.Edges[0]
 	acmeKey := acme.Key
-	wantNode := model.GraphNode{Kind: "message", ID: message.ID, IssueKey: &acmeKey, Project: "ACME", Ref: "dispatch://" + acme.Key + "/message/" + message.ID}
+	messageRef := "dispatch://" + acme.Key + "/message/" + message.ID
+	// An edge's block node carries no text, only the node a reference read names does; the edge's
+	// excerpt holds the block's text.
+	wantNode := model.GraphNode{
+		Kind: "block", ID: "message/" + message.ID + "#b1", BlockID: "b1", IssueKey: &acmeKey, Project: "ACME", Ref: messageRef + "#b-b1",
+		MadeBy: []model.Actor{message.Author}, MadeAt: &message.CreatedAt, ChangedBy: []model.Actor{message.Author}, ChangedAt: &message.CreatedAt,
+		Parent: &model.NodeParent{Kind: "message", ID: message.ID, Ref: messageRef},
+	}
 	if edge.Kind != "mentions" || edge.Direction != "in" || !reflect.DeepEqual(edge.Node, wantNode) {
 		t.Fatalf("backlink edge = %#v; want mentions in from %#v", edge, wantNode)
 	}
-	if edge.Excerpt == nil || edge.Excerpt.BlockID != "" || edge.Excerpt.Text != message.Body {
-		t.Fatalf("backlink excerpt = %#v; want the message body", edge.Excerpt)
+	if edge.Excerpt == nil || edge.Excerpt.BlockID != "b1" || edge.Excerpt.Text != message.Body {
+		t.Fatalf("backlink excerpt = %#v; want the message's one block", edge.Excerpt)
 	}
 	if edge.SourceSeq == nil || *edge.SourceSeq != messageEventID || !edge.CreatedAt.Equal(message.CreatedAt) {
 		t.Fatalf("backlink provenance = seq %v at %v; want event %d at %v", edge.SourceSeq, edge.CreatedAt, messageEventID, message.CreatedAt)
@@ -305,9 +368,10 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 }
 
 // An issue's backlinks are its mentions and its structure in one list: the child issue
-// (child_of), its own documents (attached_to), and a document elsewhere that cites it, whose
-// excerpt is the block containing the mention. Read from the citing document the same mention
-// points out at the issue; read from the issue's spec the structural edge points out at it.
+// (child_of), its own documents (attached_to), and a document elsewhere that cites it, listed
+// from the block holding the mention, whose excerpt is that block. Read from the citing document
+// the same mention points out at the issue; read from the issue's spec the structural edge points
+// out at it.
 func TestReferencesIncludeStructuralEdgesAndDocumentBlockExcerpts(t *testing.T) {
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
@@ -336,8 +400,8 @@ func TestReferencesIncludeStructuralEdgesAndDocumentBlockExcerpts(t *testing.T) 
 		}
 	}
 	mention := byKind["mentions"]
-	if mention.Node.Kind != "artifact" || mention.Node.ID != design.ID || mention.Node.Project != "OPS" || mention.Node.Ref != "dispatch://OPS/artifact/design-notes" {
-		t.Fatalf("mention node = %#v; want the OPS design document", mention.Node)
+	if mention.Node.Kind != "block" || mention.Node.Document != "dispatch://OPS/artifact/design-notes" || mention.Node.Project != "OPS" {
+		t.Fatalf("mention node = %#v; want a block of the OPS design document", mention.Node)
 	}
 	if mention.Excerpt == nil || mention.Excerpt.BlockID == "" || mention.Excerpt.Text != "The plan lives in dispatch://"+parent.Key+" and nowhere else." {
 		t.Fatalf("mention excerpt = %#v; want the containing paragraph block with its id", mention.Excerpt)
@@ -401,8 +465,8 @@ func TestReferencesAnswerAroundAnEdgeOfAKindThisBuildCannotAddress(t *testing.T)
 		{"comment", comment.ID, "future", "x#y"},
 	})
 
-	// The target's own spec is attached to it and the comment cites it: two edges this build
-	// can address, and the header counts the same edges the panel lists.
+	// The target's own spec is attached to it and the comment cites it, from its block: two edges
+	// this build can address, and the header counts the same edges the panel lists.
 	incoming := graphRequest(t, handler, url.Values{"to": {"dispatch://" + target.Key}})
 	if incoming.Code != http.StatusOK {
 		t.Errorf("GET references to %s: status=%d body=%s", target.Key, incoming.Code, incoming.Body.String())
@@ -413,8 +477,8 @@ func TestReferencesAnswerAroundAnEdgeOfAKindThisBuildCannotAddress(t *testing.T)
 			byKind[edge.Kind] = edge
 		}
 		mention, attached := byKind["mentions"], byKind["attached_to"]
-		if len(edges) != 2 || mention.Node.Kind != "comment" || mention.Node.ID != comment.ID || attached.Node.Kind != "artifact" || attached.Node.ID != target.PrimaryArtifactID {
-			t.Errorf("backlinks of %s = %#v; want the comment's mention and the attached spec, nothing of kind future", target.Key, edges)
+		if len(edges) != 2 || !blockOf(mention.Node, "comment", comment.ID) || attached.Node.Kind != "artifact" || attached.Node.ID != target.PrimaryArtifactID {
+			t.Errorf("backlinks of %s = %#v; want the comment's mention, from its block, and the attached spec, nothing of kind future", target.Key, edges)
 		}
 	}
 
@@ -472,7 +536,8 @@ func TestArtifactReferencesSkipANodeKindThisBuildCannotAddress(t *testing.T) {
 // A spec seeded at issue creation that cites an issue in bold, another project's issue in a code
 // span and a third project's issue as an autolink, which the spec stores as a link whose text is
 // its target, mentions all three. The source of each mention is the spec document, not the issue
-// that owns it: the issue node writes no mention, and each target's backlink names the spec.
+// that owns it: the issue node writes no mention, and each target's backlink names the spec's
+// block holding it.
 func TestSeededSpecCitationsInMarkdownDelimitersAreDocumentMentions(t *testing.T) {
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "LEGION")
@@ -509,8 +574,8 @@ func TestSeededSpecCitationsInMarkdownDelimitersAreDocumentMentions(t *testing.T
 	}
 	for _, target := range targets {
 		backlinks := graphEdges(t, handler, url.Values{"to": {"dispatch://" + target.Key}, "kind": {"mentions"}}).Edges
-		if len(backlinks) != 1 || backlinks[0].Node.Kind != "artifact" || backlinks[0].Node.ID != citing.PrimaryArtifactID || backlinks[0].Node.Ref != specRef {
-			t.Fatalf("%s backlinks = %#v; want one mention from %s", target.Key, backlinks, specRef)
+		if len(backlinks) != 1 || backlinks[0].Node.Kind != "block" || backlinks[0].Node.Document != specRef {
+			t.Fatalf("%s backlinks = %#v; want one mention from a block of %s", target.Key, backlinks, specRef)
 		}
 	}
 }
@@ -615,6 +680,9 @@ func TestRebuildRefsConvergesOnTheLiveIndex(t *testing.T) {
 		{`delete from refs where from_kind = 'comment' and to_kind = 'artifact' and to_id = $1`, []any{issue.Key + "/spec"}},
 		{`insert into refs (from_kind, from_id, to_kind, to_id, source_seq) values ('artifact', $1, 'issue', 'ZZZ-9', 1)`, []any{design.ID}},
 		{`insert into refs (from_kind, from_id, to_kind, to_id) values ('message', '00000000-0000-0000-0000-000000000000', 'issue', $1)`, []any{issue.Key}},
+		// A message whose state row is gone, as one stored before the item-block state seeded it
+		// would be: the rebuild inserts it owed.
+		{`delete from message_block_state`, nil},
 	} {
 		if _, err := database.Pool.Exec(context.Background(), statement.sql, statement.args...); err != nil {
 			t.Fatalf("doctor refs: %v", err)
@@ -629,9 +697,32 @@ func TestRebuildRefsConvergesOnTheLiveIndex(t *testing.T) {
 		t.Fatalf("rebuild refs: %v", err)
 	}
 	// Every document has a version (three, counting the two specs); the planted row from a message
-	// that does not exist is the one orphan.
-	if report != (refs.Rebuild{Documents: 3, Asks: 1, Comments: 1, Messages: 1, Orphans: 1, Edges: 6}) {
+	// that does not exist is the one orphan. Each of the three is marked owed a block index, and
+	// the comment and the message are marked owed a block index of their own blocks.
+	if report != (refs.Rebuild{Documents: 3, Asks: 1, Comments: 1, Messages: 1, Orphans: 1, Edges: 6, BlocksOwed: 3, ItemsOwed: 2}) {
 		t.Fatalf("rebuild report = %#v", report)
+	}
+	var documents, owed int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*), count(*) filter (where b.artifact_id is not null and b.version is null)
+		from artifacts a left join document_block_versions b on b.artifact_id = a.id
+		where a.kind = 'doc'
+	`).Scan(&documents, &owed); err != nil {
+		t.Fatalf("read the block index of every document: %v", err)
+	}
+	if documents != 3 || owed != documents {
+		t.Fatalf("after rebuild-refs %d of %d documents are owed a block index, want every one", owed, documents)
+	}
+	var items, owedItems int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select (select count(*) from comments) + (select count(*) from messages),
+		       (select count(*) from comments c join comment_block_state s on s.comment_id = c.id where s.owed_at is not null) +
+		       (select count(*) from messages m join message_block_state s on s.message_id = m.id where s.owed_at is not null)
+	`).Scan(&items, &owedItems); err != nil {
+		t.Fatalf("read the block state of every comment and message: %v", err)
+	}
+	if items != 2 || owedItems != items {
+		t.Fatalf("after rebuild-refs %d of %d comments and messages are owed a block index, want every one", owedItems, items)
 	}
 	rebuilt := readRefRows(t, database)
 	if len(rebuilt) != len(live) {

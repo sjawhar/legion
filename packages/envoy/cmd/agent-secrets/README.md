@@ -8,11 +8,20 @@ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh
 
 It asks the broker for the named secrets, waits while a person approves them in Dispatch if the
 secret's owner and tier require it, and runs the command with each granted value in its
-environment, writing one line to standard error first: the names it injected and the broker and
-store they came from, never a value. Every form names that source the same way - `request`,
-`status` and `self` as a `source:` line, `secret show` as a `store:` line, and every refusal as
-`; asked the broker at <host> (<store>)` - so an answer of this CLI's is never taken for another
-secrets CLI's about the same name. People and launchers use its other forms to log a machine in
+environment, writing one line to standard error first: the names it injected, that the broker
+`AGENT_SECRETS_URL` names gave them, and that store's kind, as `agent-secrets: NAME from the broker
+AGENT_SECRETS_URL names (GCP Secret Manager)`, never a value. Every other line about a secret names
+its source the same way - `request`, `status` and `self` as a `source:` line, a denial, a pending
+request and every refusal as `; asked the broker AGENT_SECRETS_URL names (<store kind>)` - so an
+answer of this CLI's is never taken for another secrets CLI's about the same name. Those lines are
+quoted wherever an agent's output is, so none names the broker's host or the store's account,
+region or project (only a broker that could not be reached is named, by its URL, so a stale
+address reads as one); the secret forms below, which a person runs under their own cloud
+sign-in, name the account or project they write to. No output of `agent-secrets`,
+`agent-secrets-helper` or `agent-secrets-devrelay` prints a credential the broker's URL carries:
+the URL prints only when it is provably a plain http(s) URL (no user info, query, fragment,
+escape or control byte), and as `(not printed: the value carries a credential or is not a plain
+http(s) URL)` otherwise. People and launchers use its other forms to log a machine in
 (`agent-secrets machine
 login`), register an agent session (`agent-secrets register --exec -- <agent>`), and inspect a
 session's grants (`agent-secrets self`). People manage the agent secrets themselves with

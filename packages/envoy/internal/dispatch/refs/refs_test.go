@@ -2,6 +2,8 @@ package refs
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"os"
 	"reflect"
 	"strconv"
@@ -13,6 +15,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
@@ -89,7 +92,7 @@ func TestReplaceWritesRefKeysAndSkipsExternalURLs(t *testing.T) {
 	defer tx.Rollback(ctx)
 
 	body := "see dispatch://CORE/artifact/design-notes and dispatch://OPS-2/artifact/spec and https://example.com"
-	if _, err := replace(ctx, tx, "comment", "c1", body, "https://dispatch.example"); err != nil {
+	if _, err := replaceRefs(ctx, tx, "comment", "c1", text.Extract(body, "https://dispatch.example"), nil); err != nil {
 		t.Fatalf("replace references: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -136,7 +139,7 @@ func TestReplaceWritesRefKeysAndSkipsExternalURLs(t *testing.T) {
 		t.Fatalf("begin clear transaction: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err := replace(ctx, tx, "comment", "c1", "", "https://dispatch.example"); err != nil {
+	if _, err := replaceRefs(ctx, tx, "comment", "c1", text.Extract("", "https://dispatch.example"), nil); err != nil {
 		t.Fatalf("clear references: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -148,6 +151,209 @@ func TestReplaceWritesRefKeysAndSkipsExternalURLs(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("references after clear = %d; want 0", count)
+	}
+}
+
+// The target id the grammar bounds is the one an edge stores, and every key holding it fits: a
+// block reference whose target is at text.MaxTargetBytes, an issue's document's or a
+// project's, is written to refs from a comment, and to block_refs from a block whose id is
+// text.MaxBlockIDBytes long, the widest key either table has, each to_id exactly the bound. The
+// slug and the citing block's id are incompressible, so no index holds them by compressing them.
+func TestABlockTargetAtTheGrammarsBoundIsStoredWhole(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	random := func(t *testing.T, length int) string {
+		t.Helper()
+		bytes := make([]byte, (length+1)/2)
+		if _, err := rand.Read(bytes); err != nil {
+			t.Fatal(err)
+		}
+		return hex.EncodeToString(bytes)[:length]
+	}
+	for _, owner := range []string{"CORE-1", "CORE"} {
+		t.Run(owner, func(t *testing.T) {
+			const server = "https://dispatch.example"
+			markdown := "See dispatch://" + owner + "/artifact/" + random(t, text.MaxTargetBytes-len(owner+"/#x")) + "#b-x.\n"
+			located := text.ExtractAt(markdown, server)
+			if len(located) != 1 || located[0].Kind != "block" {
+				t.Fatalf("the reference at the bound parsed as %#v, want one block", located)
+			}
+			if id := text.TargetID(located[0].Ref); len(id) != text.MaxTargetBytes {
+				t.Fatalf("TargetID is %d bytes, want the bound %d", len(id), text.MaxTargetBytes)
+			}
+			tx, err := database.Pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(ctx)
+			if _, err := replaceRefs(ctx, tx, "comment", "00000000-0000-4000-8000-000000000000", text.Extract(markdown, server), nil); err != nil {
+				t.Fatalf("write the reference at the bound from a comment: %v", err)
+			}
+			createReferenceProject(t, tx, "ACME")
+			citer, _ := createReferenceArtifact(t, tx, "", "ACME", "citer")
+			citingBlock := random(t, text.MaxBlockIDBytes)
+			blocks := []model.ArtifactBlock{{ID: citingBlock, Type: "paragraph", From: 0, To: len(markdown)}}
+			if _, err := IndexBlocks(ctx, tx, citer, 1, time.Now(), markdown, blocks, located); err != nil {
+				t.Fatalf("write the reference at the bound from a block of %d bytes: %v", text.MaxBlockIDBytes, err)
+			}
+			var fromComment, fromBlock int
+			if err := tx.QueryRow(ctx, `select length(to_id) from refs where to_kind = 'block'`).Scan(&fromComment); err != nil || fromComment != text.MaxTargetBytes {
+				t.Fatalf("refs.to_id is %d bytes (%v), want %d", fromComment, err, text.MaxTargetBytes)
+			}
+			if err := tx.QueryRow(ctx, `select length(to_id) from block_refs where block_id = $1 and to_kind = 'block'`, citingBlock).Scan(&fromBlock); err != nil || fromBlock != text.MaxTargetBytes {
+				t.Fatalf("block_refs.to_id is %d bytes (%v), want %d", fromBlock, err, text.MaxTargetBytes)
+			}
+		})
+	}
+}
+
+// Every target id the grammar reads at text.MaxTargetBytes is the id its edge stores, and every key
+// holding it fits: an issue whose number is long, an issue's and a project's document, an agent's
+// upload under a long session id, an ask's, a comment's and a message's id and a component's, all
+// at the bound, are written to refs from a document (`artifact`, the widest source kind, under its
+// uuid) beside the widest target kind, `component`, and to block_refs from a block whose id is
+// text.MaxBlockIDBytes long. Each run is incompressible, so no index holds it by compressing it.
+func TestEveryTargetAtTheGrammarsBoundIsStoredWhole(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	random := func(t *testing.T, length int) string {
+		t.Helper()
+		bytes := make([]byte, (length+1)/2)
+		if _, err := rand.Read(bytes); err != nil {
+			t.Fatal(err)
+		}
+		return hex.EncodeToString(bytes)[:length]
+	}
+	digits := func(t *testing.T, length int) string {
+		t.Helper()
+		bytes := make([]byte, length)
+		if _, err := rand.Read(bytes); err != nil {
+			t.Fatal(err)
+		}
+		for index := range bytes {
+			bytes[index] = '0' + bytes[index]%10
+		}
+		return string(bytes)
+	}
+	const server = "https://dispatch.example"
+	references := []string{
+		"dispatch://CORE-1" + digits(t, text.MaxTargetBytes-len("CORE-1")),
+		"dispatch://CORE-1/artifact/" + random(t, text.MaxTargetBytes-len("CORE-1/")),
+		"dispatch://CORE/artifact/" + random(t, text.MaxTargetBytes-len("CORE/")),
+		"dispatch://agent/" + random(t, text.MaxTargetBytes-len("agent//x")) + "/artifact/x",
+		"dispatch://CORE-1/ask/" + random(t, text.MaxTargetBytes),
+		"dispatch://CORE-1/comment/" + random(t, text.MaxTargetBytes),
+		"dispatch://CORE-1/message/" + random(t, text.MaxTargetBytes),
+		"dispatch://CORE/artifact/plan-md/comment/" + random(t, text.MaxTargetBytes),
+		"dispatch://CORE/component/" + random(t, text.MaxTargetBytes-len("CORE/")),
+	}
+	markdown := ""
+	for _, reference := range references {
+		markdown += "See " + reference + ".\n"
+	}
+	located := text.ExtractAt(markdown, server)
+	if len(located) != len(references) {
+		t.Fatalf("%d references at the bound parsed as %d", len(references), len(located))
+	}
+	for _, item := range located {
+		if id := text.TargetID(item.Ref); len(id) != text.MaxTargetBytes {
+			t.Fatalf("TargetID of a %s is %d bytes, want the bound %d", item.Kind, len(id), text.MaxTargetBytes)
+		}
+	}
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	createReferenceProject(t, tx, "ACME")
+	citer, _ := createReferenceArtifact(t, tx, "", "ACME", "citer")
+	if _, err := replaceRefs(ctx, tx, "artifact", citer, text.Extract(markdown, server), nil); err != nil {
+		t.Fatalf("write the references at the bound from a document: %v", err)
+	}
+	citingBlock := random(t, text.MaxBlockIDBytes)
+	blocks := []model.ArtifactBlock{{ID: citingBlock, Type: "paragraph", From: 0, To: len(markdown)}}
+	if _, err := IndexBlocks(ctx, tx, citer, 1, time.Now(), markdown, blocks, located); err != nil {
+		t.Fatalf("write the references at the bound from a block of %d bytes: %v", text.MaxBlockIDBytes, err)
+	}
+	for _, table := range []string{"refs", "block_refs"} {
+		var count, shortest, longest int
+		if err := tx.QueryRow(ctx, `select count(*), coalesce(min(length(to_id)), 0), coalesce(max(length(to_id)), 0) from `+table).Scan(&count, &shortest, &longest); err != nil {
+			t.Fatal(err)
+		}
+		if count != len(references) || shortest != text.MaxTargetBytes || longest != text.MaxTargetBytes {
+			t.Fatalf("%s holds %d edges of %d to %d bytes, want %d of %d", table, count, shortest, longest, len(references), text.MaxTargetBytes)
+		}
+	}
+}
+
+// Every kind of reference stores its edge under the id the graph names its target node by, the
+// one text.TargetID writes and the target bound counts: an issue's key; a document's own ref_key
+// as the artifacts row stores it, for an issue's spec and document, a project's document and an
+// agent's upload, a version making no difference; a block's `<ref_key>#<block id>` (the block's
+// node id), a pin making none; a component's `<project>/<id>` as graph_edges spells it; and an
+// ask's, a comment's or a message's id, decoded.
+func TestEveryTargetIDIsTheNodeIDTheGraphStores(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	createReferenceProject(t, tx, "CORE")
+	createReferenceIssue(t, tx, "CORE-1", "CORE")
+	refKey := func(owner, values string, args ...any) string {
+		t.Helper()
+		var key string
+		if err := tx.QueryRow(ctx, `insert into artifacts (`+owner+`, slug, name, kind, is_primary, created_by) values (`+values+`, 'doc', $3, '{"kind":"user","id":"alice"}') returning ref_key`, args...).Scan(&key); err != nil {
+			t.Fatalf("create artifact %v: %v", args, err)
+		}
+		return key
+	}
+	spec := refKey("issue_key, project_key", "$1, 'CORE', $2, $2", "CORE-1", "spec", true)
+	notes := refKey("issue_key, project_key", "$1, 'CORE', $2, $2", "CORE-1", "notes-md", false)
+	handbook := refKey("project_key", "$1, $2, $2", "CORE", "handbook-md", false)
+	shot := refKey("session_id", "$1, $2, $2", "01a1058e-f14f-7684-87eb-3dc885955551", "shot-png", false)
+	if spec != "CORE-1/spec" || notes != "CORE-1/notes-md" || handbook != "CORE/handbook-md" || shot != "agent/01a1058e-f14f-7684-87eb-3dc885955551/shot-png" {
+		t.Fatalf("the documents' ref_keys are %q, %q, %q and %q", spec, notes, handbook, shot)
+	}
+	const server, from = "https://dispatch.example", "00000000-0000-4000-8000-000000000000"
+	for _, test := range []struct{ reference, kind, node string }{
+		{"dispatch://CORE-1", "issue", "CORE-1"},
+		{"dispatch://CORE-1/spec", "artifact", spec},
+		{"dispatch://CORE-1/artifact/notes-md@v2", "artifact", notes},
+		{"dispatch://CORE/artifact/handbook-md", "artifact", handbook},
+		{"dispatch://agent/01a1058e-f14f-7684-87eb-3dc885955551/artifact/shot-png@v3", "artifact", shot},
+		{"dispatch://CORE-1/spec#b-ship%5Fit@v3", "block", spec + "#ship_it"},
+		{"dispatch://CORE-1/artifact/notes-md#b-x", "block", notes + "#x"},
+		{"https://dispatch.example/projects/CORE/documents/handbook-md#b-d%C3%A9", "block", handbook + "#dé"},
+		{"dispatch://CORE/component/api", "component", "CORE/api"},
+		{"dispatch://CORE-1/ask/a1", "ask", "a1"},
+		{"dispatch://CORE/artifact/handbook-md/ask/a2", "ask", "a2"},
+		{"dispatch://CORE-1/comment/c%3B1", "comment", "c;1"},
+		{"https://dispatch.example/issues/CORE-1/spec?comment=c2", "comment", "c2"},
+		{"dispatch://CORE-1/message/m1", "message", "m1"},
+		{"dispatch://CORE-1/comment/c1#b-b2@v1", "comment_block", "comment/c1#b2"},
+		{"dispatch://CORE/artifact/handbook-md/comment/c2#b-b%31", "comment_block", "comment/c2#b1"},
+		{"https://dispatch.example/issues/CORE-1/messages/m1#b-b2", "message_block", "message/m1#b2"},
+	} {
+		t.Run(test.reference, func(t *testing.T) {
+			ref, ok := text.ParseRef(test.reference, server)
+			target, _ := TargetOf(ref)
+			if !ok || target.Kind != test.kind || target.ID != test.node {
+				t.Fatalf("%s parsed as %#v (%t), whose target is %#v; want a %s at %q", test.reference, ref, ok, target, test.kind, test.node)
+			}
+			if _, err := replaceRefs(ctx, tx, "comment", from, text.Extract("See "+test.reference+".", server), nil); err != nil {
+				t.Fatalf("write the reference: %v", err)
+			}
+			var stored []string
+			if err := tx.QueryRow(ctx, `select coalesce(array_agg(to_kind || ' ' || to_id), '{}') from refs where from_kind = 'comment' and from_id = $1`, from).Scan(&stored); err != nil {
+				t.Fatal(err)
+			}
+			if want := test.kind + " " + test.node; len(stored) != 1 || stored[0] != want {
+				t.Fatalf("refs stores %q, want only %q", stored, want)
+			}
+		})
 	}
 }
 
@@ -191,7 +397,7 @@ func replaceAndStamp(t *testing.T, database *store.Store, fromKind, fromID, body
 		t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err := replace(ctx, tx, fromKind, fromID, body, "https://dispatch.example"); err != nil {
+	if _, err := replaceRefs(ctx, tx, fromKind, fromID, text.Extract(body, "https://dispatch.example"), nil); err != nil {
 		t.Fatalf("replace references: %v", err)
 	}
 	if err := Stamp(ctx, tx, fromKind, fromID, eventID); err != nil {
@@ -390,5 +596,129 @@ func TestGraphReadsSkipANodeKindThisBuildCannotAddress(t *testing.T) {
 		t.Errorf("count issue backlinks excluding mentions: %v", err)
 	} else if len(excluded) != 0 {
 		t.Errorf("issue backlink counts excluding mentions = %v; want none", excluded)
+	}
+}
+
+// A cited document or file is named as its Referenced by panel is opened - its uuid and its
+// dispatch:// address, an issue's primary document as its spec - beside the issues and asks; a
+// block of a document by its node id, its reference and its document's uuid, whatever block the
+// document holds now; a citation that resolves to nothing is not named. Each kind is capped on its
+// own: an index citing 25 documents names every one, and past CountedChangeLimit documents the
+// event names none of them, says documents were cut and still names the issue and the block,
+// with the truncated flag an older reader falls back on set.
+func TestCountedChangesNamesCitedDocumentsWithinTheCap(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	createReferenceProject(t, tx, "CORE")
+	createReferenceIssue(t, tx, "CORE-1", "CORE")
+	runbookID, runbookKey := createReferenceArtifact(t, tx, "", "CORE", "runbook")
+	specID, specKey := createReferenceArtifact(t, tx, "CORE-1", "CORE", "spec")
+	var shotID, shotKey string
+	if err := tx.QueryRow(ctx, `
+		insert into artifacts (session_id, slug, name, kind, created_by)
+		values ('session-1', 'shot-png', 'shot.png', 'image', '{"kind":"session","id":"session-1"}')
+		returning id::text, ref_key
+	`).Scan(&shotID, &shotKey); err != nil {
+		t.Fatalf("create agent artifact: %v", err)
+	}
+
+	changes, err := CountedChanges(ctx, tx, []Target{
+		{Kind: "artifact", ID: runbookKey},
+		{Kind: "issue", ID: "CORE-1"},
+		{Kind: "artifact", ID: specKey},
+		{Kind: "artifact", ID: "CORE/missing"},
+		{Kind: "artifact", ID: shotKey},
+		{Kind: "artifact", ID: runbookKey},
+		{Kind: "block", ID: specKey + "#ship_it"},
+		{Kind: "block", ID: "CORE/missing#intro"},
+		{Kind: "block", ID: specKey + "#ship_it"},
+	})
+	if err != nil {
+		t.Fatalf("resolve changed targets: %v", err)
+	}
+	want := model.ReferenceChanges{Targets: []model.ChangedReference{
+		{Kind: "artifact", ID: runbookID, Ref: "dispatch://CORE/artifact/runbook"},
+		{Kind: "issue", ID: "CORE-1"},
+		{Kind: "artifact", ID: specID, Ref: "dispatch://CORE-1/spec"},
+		{Kind: "artifact", ID: shotID, Ref: "dispatch://agent/session-1/artifact/shot-png"},
+		{Kind: "block", ID: specKey + "#ship_it", ArtifactID: &specID, Ref: "dispatch://CORE-1/spec#b-ship%5Fit"},
+	}}
+	if !reflect.DeepEqual(changes, want) {
+		t.Fatalf("changed targets = %#v, want %#v", changes, want)
+	}
+
+	documents := make([]Target, 0, CountedChangeLimit+1)
+	for index := range CountedChangeLimit + 1 {
+		_, key := createReferenceArtifact(t, tx, "", "CORE", "doc-"+strconv.Itoa(index))
+		documents = append(documents, Target{Kind: "artifact", ID: key})
+	}
+	for _, count := range []int{25, CountedChangeLimit} {
+		named, err := CountedChanges(ctx, tx, documents[:count])
+		if err != nil {
+			t.Fatalf("resolve %d documents: %v", count, err)
+		}
+		if named.Truncated() || len(named.Targets) != count {
+			t.Fatalf("%d documents named %d (truncated kinds %v), want every one", count, len(named.Targets), named.TruncatedKinds)
+		}
+	}
+	pastCap, err := CountedChanges(ctx, tx, append(documents[:CountedChangeLimit+1:CountedChangeLimit+1],
+		Target{Kind: "issue", ID: "CORE-1"}, Target{Kind: "block", ID: specKey + "#ship_it"}))
+	if err != nil {
+		t.Fatalf("resolve targets past the cap: %v", err)
+	}
+	wantPastCap := model.ReferenceChanges{
+		Targets: []model.ChangedReference{
+			{Kind: "issue", ID: "CORE-1"},
+			{Kind: "block", ID: specKey + "#ship_it", ArtifactID: &specID, Ref: "dispatch://CORE-1/spec#b-ship%5Fit"},
+		},
+		TruncatedKinds: []string{"artifact"},
+	}
+	if !reflect.DeepEqual(pastCap, wantPastCap) {
+		t.Fatalf("%d documents, an issue and a block = %#v, want %#v", CountedChangeLimit+1, pastCap, wantPastCap)
+	}
+	if payload := model.NewReferenceChangesPayload(pastCap); !payload.ReferencesChangedTruncated {
+		t.Fatalf("payload past the cap = %#v, want the truncated flag set", payload)
+	}
+}
+
+// Two counted parts of one write merge into what one CountedChanges over both would name: each
+// target once, a kind either part truncated named by neither, and the cap applied to the sum.
+func TestMergeChangesNamesEachTargetOnceWithinTheCap(t *testing.T) {
+	issue := func(key string) model.ChangedReference { return model.ChangedReference{Kind: "issue", ID: key} }
+	ask := model.ChangedReference{Kind: "ask", ID: "ask-1"}
+	merged := MergeChanges(
+		model.ReferenceChanges{Targets: []model.ChangedReference{issue("CORE-1"), ask}, TruncatedKinds: []string{"artifact"}},
+		model.ReferenceChanges{Targets: []model.ChangedReference{
+			issue("CORE-2"), issue("CORE-1"), {Kind: "artifact", ID: "doc"},
+		}},
+	)
+	want := model.ReferenceChanges{
+		Targets:        []model.ChangedReference{issue("CORE-1"), ask, issue("CORE-2")},
+		TruncatedKinds: []string{"artifact"},
+	}
+	if !reflect.DeepEqual(merged, want) {
+		t.Fatalf("merged = %#v, want %#v", merged, want)
+	}
+	if empty := MergeChanges(model.ReferenceChanges{}, model.ReferenceChanges{}); !reflect.DeepEqual(empty, model.ReferenceChanges{}) {
+		t.Fatalf("two empty parts merged = %#v, want nothing named", empty)
+	}
+
+	first, second := model.ReferenceChanges{}, model.ReferenceChanges{Targets: []model.ChangedReference{ask}}
+	for index := range CountedChangeLimit + 1 {
+		part := &first
+		if index%2 == 1 {
+			part = &second
+		}
+		part.Targets = append(part.Targets, issue("CORE-"+strconv.Itoa(index+10)))
+	}
+	if pastCap := MergeChanges(first, second); !reflect.DeepEqual(pastCap, model.ReferenceChanges{
+		Targets: []model.ChangedReference{ask}, TruncatedKinds: []string{"issue"},
+	}) {
+		t.Fatalf("%d issues over two parts merged = %#v, want the issue kind truncated and the ask named", CountedChangeLimit+1, pastCap)
 	}
 }

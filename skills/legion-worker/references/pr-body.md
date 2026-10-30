@@ -43,7 +43,7 @@ Verified the implementer's proof by <re-running its command | driving the same s
 **Production:** <what was checked in production, how, what was observed> — merge commit <sha>; woken by <event>.
 (written by the implementer from the production check after the merge closes the issue, naming what woke that look; `pending deploy of <sha>` until then)
 
-**Fast-follow:** <one named cleanup item and where it will land>, or "none".
+**Fast-follow:** "none", or one named cleanup item in a file this pull request does not touch, and where it will land.
 
 **Chain:** stacked on <base bookmark> frozen at <sha> / not stacked.
 ```
@@ -124,13 +124,13 @@ and the tester's proof below are both this proof.
   tester names that missing surface as the blocker instead of passing the phase. Environment or
   secret-scrub evidence (e.g. "`LEGION_*`/`DISPATCH_*`/`ENVOY_*` unset") is recorded once, in
   `.legion/<issue>/test.json`, and only when the issue's acceptance criteria call for it — never
-  re-pasted into the PR body each round. After a conflict-forced rebase, compute the
+  re-pasted into the PR body each round. After a forward merge, compute the
   fingerprint (*The unchanged-diff check* in
   `skill://legion-worker/references/conflicts-and-rewrites.md`) at the head your `E2E` line
   names and at the new head. Equal: re-run only the
   bare gates — the repository's CI green at the new head and its smoke check — and change the
   `E2E` line's head to the new SHA with
-  `rebase re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only`; the
+  `forward-merge re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only`. The
   real-surface verification is not repeated. Different: a full test round.
 - **The implementer runs `skill://ce-simplify-code` once per pull request, in its first
   implementing round, after its own proof and before it completes that round, when the diff
@@ -144,8 +144,12 @@ and the tester's proof below are both this proof.
   That cost is why 0-applied is the expected outcome and a pass that applies is spent sparingly.
   The reviewer's pair runs at the head each round reviews. Record both in the `Thermo` line.
 - **No deferrals** is the body's rule (*PR body, review, and the merge gate* in
-  `skill://legion-worker`): the `Fast-follow:` line holds naming, duplication, or wording cleanup
-  only. A base frozen for others to stack on is never rewritten (*Rewriting pushed commits* in
+  `skill://legion-worker`): a wording nit, and any clear fix in a file this pull request touches,
+  is made in the running round, because a later round costs a CI pass and a re-read of the whole
+  change (the operator's answer on that case: fix it while you are there, and defer no fix to
+  another issue). The `Fast-follow:` line reads
+  `none`, or names only cleanup in files this pull request does not touch.
+  A base frozen for others to stack on is never rewritten (*Rewriting pushed commits* in
   `skill://legion-worker/references/conflicts-and-rewrites.md`); the `Chain` line records it.
 - **GitHub refuses a pull request body over 65,536 characters.** Each verification round links its
   evidence (the run, the comment) rather than inlining it once the body passes about 48,000

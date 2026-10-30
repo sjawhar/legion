@@ -55,3 +55,9 @@ retry:
   # the repository's to add, as retry.fallbackChains keys (a record), under the models.yml route
   # above.
   modelFallback: true
+extensionHandlers:
+  # AskGate (pi-envoy, in every pod) reviews each Dispatch write inside one tool_call handler, and
+  # holds its deadline 5 s under this limit. At Oh My Pi's 30 s default the deadline is 25 s, a review
+  # of a long session often times out, and a write whose review times out posts unreviewed
+  # (packages/pi-envoy/README.md, "The time limit"; docs/kubernetes.md, "AskGate's time limit").
+  toolCallTimeoutMs: 120000

@@ -1,8 +1,22 @@
 # Changelog
 
-## [Unreleased]
+## [9.8.0] - 2026-10-28
 
 ### Added
+
+- Every registration names the plugin: `plugin` `@sjawhar/opencode-legion-envoy` and
+  `plugin_version` this package's version, which the listener's `GET /v1/sessions` and
+  `GET /v1/registry/<id>` show.
+
+## Before changelog fragments
+
+### Added
+
+- `dispatch search` prints, under each ask hit, where the ask stands: `Answered by …` with the
+  options chosen and `Answer text: …`, `Closed with no answer: …`, `Closed after an answer: …` with
+  `Last answer by …`, or `Open: no answer yet.`; against a Dispatch older than this release, which
+  reports no state, `Answer state not reported by this Dispatch; open the link to read the ask.`
+  (INFRA-569).
 
 - The packaged skills gain `asd-ste100`, which OpenCode finds on the skills path the config hook
   adds: the ASD-STE100 rules (Simplified Technical English) for text a reader must not misread.
@@ -25,6 +39,11 @@
 
 ### Changed
 
+- The packaged `dispatch` command carries AskGate's marker check, which reads the session's
+  AskGate record (`askgate/`) before a gated write posts. An OpenCode session's id is no Oh My Pi
+  process's record, so the check is inert under OpenCode.
+- The logged start notice names an `askgate` section in a checkout's `.envoy/envoy.json` as not
+  read, and names the session's file to set it in.
 - The packaged skills ship `dispatch-writing-specs` in place of `dispatch-brainstorming`,
   with no code change: the prepack copies all of `skills/`. The three Dispatch skills
   are under 2,000 words together; `packages/pi-envoy/CHANGELOG.md` lists what each holds. The

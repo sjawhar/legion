@@ -19,7 +19,7 @@ type routeIndex struct {
 
 func TestRouteIndexListsEveryRouteSortedByPathThenMethod(t *testing.T) {
 	mux := http.NewServeMux()
-	Register(mux, Deps{AgentTokens: sharedAgentTokens(t, "agent-token")})
+	Register(mux, t.Context(), Deps{AgentTokens: sharedAgentTokens(t, "agent-token")})
 
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1", nil))
@@ -94,7 +94,7 @@ func TestWriteRouteIndexCarriesEveryRouteTheTableHas(t *testing.T) {
 	}
 
 	mux := http.NewServeMux()
-	Register(mux, Deps{AgentTokens: sharedAgentTokens(t, "agent-token")})
+	Register(mux, t.Context(), Deps{AgentTokens: sharedAgentTokens(t, "agent-token")})
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1", nil))
 	if served := response.Body.String(); served != output.String() {
@@ -105,7 +105,7 @@ func TestWriteRouteIndexCarriesEveryRouteTheTableHas(t *testing.T) {
 // The table is the registration: every row is mounted, every row is described, and the
 // count only moves when a route is deliberately added or removed.
 func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
-	const registeredRoutes = 138
+	const registeredRoutes = 146
 	routes := (&server{}).routes()
 	if len(routes) != registeredRoutes {
 		t.Fatalf("routes() has %d rows, want %d (update the pin when adding a route)", len(routes), registeredRoutes)
@@ -129,8 +129,8 @@ func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
 			t.Fatalf("route %q has auth %q", key, route.Auth)
 		}
 	}
-	if got := len((&server{deps: Deps{TestHooksEnabled: true}}).routes()); got != registeredRoutes+10 {
-		t.Fatalf("test hooks add ten routes: got %d, want %d", got, registeredRoutes+10)
+	if got := len((&server{deps: Deps{TestHooksEnabled: true}}).routes()); got != registeredRoutes+11 {
+		t.Fatalf("test hooks add eleven routes: got %d, want %d", got, registeredRoutes+11)
 	}
 }
 

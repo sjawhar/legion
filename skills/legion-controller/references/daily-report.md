@@ -17,7 +17,7 @@ reach that person's Inbox.
 dispatch issue --project <PROJECT> --title 'Legion daily report' --assignee '<email>' --spec-file - <<'EOF'
 ## Summary
 
-Legion's controller posts one message here each day: what Legion finished, what it closed without a change and why, and what is running. Legion's agents also ask here whether a problem they found outside their own work needs an issue. This issue is not work, so it carries no `legion` label and stays in icebox.
+Legion's controller posts one message here each day: what Legion finished, what it closed without a change and why, and what is running. Legion's agents also post here the evidence of each clear defect they found outside their own work, which the controller hands to the tree that owns the code, or files for Legion when no tree does. They ask here whether a problem that needs a decision needs an issue. This issue is not work, so it carries no `legion` label and stays in icebox.
 EOF
 legion({ op: "set_status", issue: "<report KEY>", status: "icebox" })
 ```
@@ -30,9 +30,9 @@ unassigned.
 
 Each time you read it:
 
-- `Status: done` means someone closed it, and Dispatch then refuses an ask or a message there
-  (`409 ISSUE_CLOSED`) and hides its open asks. Reopen it with `set_status` to `icebox` and say so
-  in the day's report.
+- `Status: done` means someone closed it: the close withdrew its open asks (each recorded
+  `withdrawn`; a reopen brings them back), and Dispatch refuses an ask or a message there
+  (`409 ISSUE_CLOSED`). Reopen it with `set_status` to `icebox` and say so in the day's report.
 - `Assignee: unassigned` with a person known: assign it, naming your session (`dispatch whoami`):
   `curl -sS -X PATCH -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" -H 'Content-Type: application/json' -d '{"assignee": "<email>", "actor": {"kind": "session", "id": "<session id>"}}' "$DISPATCH_URL/api/v1/issues/<REPORT KEY>"`.
   An answer that does not print the issue with its new `assignee` left the assignee as it was
@@ -53,7 +53,7 @@ person reads every report in their Inbox. Write it as `skill://dispatch-writing-
 every issue by its `dispatch://` link and what it does for the reader, every pull request by its URL.
 
 - **Finished.** `dispatch issues --project <PROJECT> --status done --updated-since <the previous
-  report's time, or 24 hours ago> --limit 250`, every page, keeping the issues `read_state` records
+  report's time, or 24 hours ago> --all`, keeping the issues `read_state` records
   under `issues` whose `issue.closed` event is after the previous report. `dispatch read` each: the
   pull request under `External links:` is the one that merged.
 - **Closed without a change.** Those with no pull request, each with the reason its closing

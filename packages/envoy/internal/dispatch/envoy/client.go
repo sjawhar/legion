@@ -29,11 +29,15 @@ var ErrReceiptTimeout = errors.New("envoy listener did not answer the send in ti
 // ErrNotFound reports that the listener has no record of the requested session.
 var ErrNotFound = errors.New("envoy listener: session not found")
 
-// Interest is a session's persisted Envoy topic subscriptions.
+// Interest is a session's persisted Envoy topic subscriptions. LastSeen is the session's last
+// heartbeat (Unix ms) as the listener's session cache knows it, zero when the listener does not
+// know it: it lost it in a restart, or it predates the field. UpdatedAt, the row's last write, can
+// lag that heartbeat by up to the listener's interest refresh age (five minutes).
 type Interest struct {
 	SessionID string   `json:"session_id"`
 	Topics    []string `json:"topics"`
 	UpdatedAt int64    `json:"updated_at"`
+	LastSeen  int64    `json:"last_seen,omitempty"`
 }
 
 // Session is the public subset of a live Envoy listener session.

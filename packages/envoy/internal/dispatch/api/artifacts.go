@@ -10,17 +10,20 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"mime"
 	"mime/multipart"
 	"net/http"
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -34,6 +37,16 @@ const (
 	// the store accepts and serves back.
 	maxArtifactBlobSize      = files.MaxObjectSize
 	maxDocumentMarkdownBytes = pmdoc.MaxDocumentBytes // A Markdown document, and what a write may grow one to (docs' refuseGrowth); maxJSONRequestBytes bounds an issue's spec and every edit the same way (LEGION-465).
+	// maxNewArtifactKeyBytes bounds, in bytes, a new artifact's name and the reference key
+	// `<owner>/<slug>` that name gives it (newArtifactNameRefusal, newArtifactKeyRefusal).
+	// artifacts_ref_key_key is a B-tree index on ref_key, and a Postgres B-tree entry holds at
+	// most 2704 bytes: an 8-byte tuple header, then the value's 4-byte length word and its bytes,
+	// so incompressible text of 2692 bytes fits and one byte more fails the insert (SQLSTATE
+	// 54000). No index holds the name, but it is held to the same bytes: its slug is the part of
+	// the key a caller writes, so one number names what a new artifact may be called. An artifact
+	// already stored past it, under a key Postgres compressed into the index, keeps its name and
+	// key: an upload naming it stores a version as before.
+	maxNewArtifactKeyBytes = 2692
 )
 
 // artifactColumns is the canonical artifact column list scanArtifact reads.
@@ -95,6 +108,68 @@ func (s *server) uploadArtifact(w http.ResponseWriter, r *http.Request) {
 	s.uploadArtifactFor(w, r, artifactTarget{IssueKey: &issueKey})
 }
 
+// issueUploadRoute is the upload to an issue, which refuseUploadToAClosedIssue guards.
+const issueUploadRoute = http.MethodPost + " /api/v1/issues/{key}/artifacts"
+
+// refuseUploadToAClosedIssue answers an upload to an issue that is closed, or missing, with the
+// refusal its handler would make (requireOpenOwnerStatus) before anything spools or parses the
+// upload's body: the keyed layer spools a keyed body whole to disk before its handler runs
+// (readKeyedBody), and the multipart parser spools an unkeyed one whole before the handler reaches
+// the issue, so an upload to a closed issue would otherwise be written out in full only to be
+// refused. The body is still read off the connection, and discarded, before the refusal is written
+// (drainBeforeAnswer), so a client that sends it whole before it reads the answer gets the
+// answer. register mounts it ahead of the keyed layer, so the refusal claims no key. The handler's
+// locked check still decides an issue that closes meanwhile; this one only spares the spool. A
+// caller that resolves to nobody is left to the route's own 401, and a malformed Idempotency-Key
+// to the keyed layer's 400, which spools no body either and refuses the request's form before
+// anything is looked up.
+//
+// The refusal stands in for the handler, so it answers only a request whose handler would run. A
+// repeat under a key the keyed layer answers itself (requestKeyAnswersItself) - its first upload's
+// stored answer, a first upload still running, one that committed and lost its answer - goes on to
+// that layer whatever the issue's state now: an upload that landed before the issue closed is
+// replayed its 201, and one still running is told KEY_IN_FLIGHT, unspooled, until the first
+// answers.
+func (s *server) refuseUploadToAClosedIssue(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		requestKey, keyed, err := requestKeyHeader(r)
+		if keyed && err != nil {
+			handler(w, r)
+			return
+		}
+		actor, human, err := s.optionalActor(r)
+		if err != nil {
+			handler(w, r)
+			return
+		}
+		// The caller is resolved once a request: the key layer and the handler read this.
+		r = r.WithContext(context.WithValue(r.Context(), resolvedCallerKey{}, resolvedCaller{actor: actor, human: human}))
+		refusal := s.refuseClosedOwnerBeforeResolving(r.Context(), issueOwner(r.PathValue("key")))
+		if refusal == nil {
+			handler(w, r)
+			return
+		}
+		// Only the issue's own refusal (closed, missing) stands aside for the key: a check that
+		// failed is answered as it always was.
+		var ownerRefusal *apiError
+		if keyed && errors.As(refusal, &ownerRefusal) && ownerRefusal.status < http.StatusInternalServerError {
+			answers, err := s.requestKeyAnswersItself(r.Context(), requestKeyLogin(actor, human), requestKey)
+			if err != nil {
+				// As the keyed layer answers its own failed lookup: under the key, which nothing has
+				// claimed, so the client asks again under it.
+				w.Header().Set(contracts.IdempotencyKeyHeader, requestKey)
+				s.writeHandlerError(w, err)
+				return
+			}
+			if answers {
+				handler(w, r)
+				return
+			}
+		}
+		s.writeHandlerError(w, refusal)
+	}
+}
+
 func (s *server) uploadArtifactFor(w http.ResponseWriter, r *http.Request, target artifactTarget) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxArtifactBlobSize+(1<<20))
 	requestType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
@@ -130,7 +205,7 @@ func (s *server) uploadArtifactFor(w http.ResponseWriter, r *http.Request, targe
 		return
 	}
 	if len(input.content) > maxArtifactBlobSize {
-		writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "artifact blob exceeds 25 MB")
+		s.writeHandlerError(w, errUploadTooLarge)
 		return
 	}
 	mediaType, _, err := mime.ParseMediaType(input.contentType)
@@ -173,7 +248,7 @@ func (s *server) jsonArtifactUpload(w http.ResponseWriter, r *http.Request) (art
 	if err := decoder.Decode(&body); err != nil {
 		var maxBytesError *http.MaxBytesError
 		if errors.As(err, &maxBytesError) {
-			writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "artifact blob exceeds 25 MB")
+			s.writeHandlerError(w, errUploadTooLarge)
 		} else {
 			writeError(w, "INVALID_JSON", http.StatusBadRequest, "invalid JSON body")
 		}
@@ -217,7 +292,7 @@ func (s *server) multipartArtifactUpload(w http.ResponseWriter, r *http.Request)
 		var spool *fs.PathError
 		switch {
 		case errors.As(err, &tooLarge):
-			writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "artifact blob exceeds 25 MB")
+			s.writeHandlerError(w, errUploadTooLarge)
 		case errors.Is(err, multipart.ErrMessageTooLarge):
 			writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge, "the upload's form fields are too large to read")
 		case errors.As(err, &spool):
@@ -227,6 +302,17 @@ func (s *server) multipartArtifactUpload(w http.ResponseWriter, r *http.Request)
 		}
 		return artifactUploadInput{}, false
 	}
+	// The parser spools a file part past a megabyte to a temporary file. net/http removes the
+	// files of the request it handed its handler, but this is a copy (the access log and the
+	// transaction tracking each wrap it with WithContext), so the server never sees them; left
+	// alone, every such upload kept its file on the pod's disk until the pod's ephemeral storage
+	// ran out. The content is read into memory below, so the files go when this returns, stored
+	// or refused.
+	defer func() {
+		if err := r.MultipartForm.RemoveAll(); err != nil {
+			slog.Error("dispatch: remove a multipart upload's spooled files", "error", err)
+		}
+	}()
 	if refusal := unstorableForm(r.MultipartForm.Value); refusal != nil {
 		s.writeHandlerError(w, refusal)
 		return artifactUploadInput{}, false
@@ -360,9 +446,17 @@ func (s *server) storeArtifact(
 	artifact, err = s.findArtifactByName(r.Context(), tx, target, input.name)
 	if errors.Is(err, pgx.ErrNoRows) {
 		created = true
+		if refusal := newArtifactNameRefusal(input.name); refusal != nil {
+			s.writeHandlerError(w, refusal)
+			return
+		}
 		slug, err := s.nextArtifactSlug(r.Context(), tx, target, input.name)
 		if err != nil {
 			s.writeHandlerError(w, err)
+			return
+		}
+		if refusal := newArtifactKeyRefusal(target, slug); refusal != nil {
+			s.writeHandlerError(w, refusal)
 			return
 		}
 		actorJSON, err := encodeJSON(actor)
@@ -860,12 +954,17 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
 		return
 	}
+	// release ends the conditional edit gate once: right after the commit, which is all a later
+	// conditional edit of this document waits on, so the checks of this edit's new decision blocks
+	// never hold it; on every earlier return, here.
+	release := func() {}
 	if input.Precondition != nil {
-		release, err := s.deps.Docs.AcquireConditionalEdit(r.Context(), artifact.ID)
+		acquired, err := s.deps.Docs.AcquireConditionalEdit(r.Context(), artifact.ID)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
+		release = sync.OnceFunc(acquired)
 		defer release()
 	}
 	tx, err := s.begin(r.Context())
@@ -937,6 +1036,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	release()
 	var version *model.Version
 	if written != nil {
 		version = &written.Version
@@ -965,7 +1065,10 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	// The ask blocks the edit added, read from the documents the batch was applied to: whether an
 	// operation's markdown makes a block depends on where it lands and on the parser's reading of
 	// code and containers, which a caller's own reading of that markdown would only approximate.
-	blocks := &editBlocks{DecisionBlocksAdded: edit.AskBlocksAdded}
+	blocks := &editBlocks{
+		DecisionBlocksAdded: len(edit.AddedAskBlocks),
+		DecisionBlockChecks: s.decisionBlockChecks(r.Context(), artifact, edit.AddedAskBlocks, actor),
+	}
 	if artifact.IssueKey == nil || advice == nil {
 		WriteJSON(w, http.StatusOK, withRawAdvice(responsePayload, blocks))
 		return
@@ -1061,13 +1164,33 @@ const documentHintLimit = 8
 // loadArtifactByDocumentReference reads an issue's or a project's artifact at slug reference, or
 // the one document whose filename it is.
 func (s *server) loadArtifactByDocumentReference(ctx context.Context, q queryer, target artifactTarget, reference string) (model.Artifact, error) {
-	artifact, err := s.loadArtifactByRefKey(ctx, q, target.refPrefix()+"/"+reference)
+	return resolveDocumentReference(ctx, s, q, target, reference,
+		func(refKey string) (model.Artifact, error) { return s.loadArtifactByRefKey(ctx, q, refKey) },
+		func(id string) (model.Artifact, error) { return s.loadArtifact(ctx, q, id) },
+	)
+}
+
+// resolveDocumentReference is the one resolution of an issue's or a project's document reference,
+// shared by the full read and the summary: the artifact at slug reference (byRefKey, given the
+// ref_key), else the one document whose filename it is (byID, given its id). Each reader answers
+// ARTIFACT_NOT_FOUND for no row, and reads only the shape its route serves.
+func resolveDocumentReference[T any](
+	ctx context.Context,
+	s *server,
+	q queryer,
+	target artifactTarget,
+	reference string,
+	byRefKey func(refKey string) (T, error),
+	byID func(id string) (T, error),
+) (T, error) {
+	found, err := byRefKey(target.refPrefix() + "/" + reference)
 	if err == nil || !isArtifactNotFound(err) {
-		return artifact, err
+		return found, err
 	}
+	var none T
 	documents, listErr := s.loadDocumentReferences(ctx, q, target)
 	if listErr != nil {
-		return model.Artifact{}, listErr
+		return none, listErr
 	}
 	matches := make([]model.Artifact, 0, 1)
 	for index := range documents {
@@ -1077,11 +1200,11 @@ func (s *server) loadArtifactByDocumentReference(ctx context.Context, q queryer,
 	}
 	switch len(matches) {
 	case 0:
-		return model.Artifact{}, documentReferenceError(target, reference, documents)
+		return none, documentReferenceError(target, reference, documents)
 	case 1:
-		return s.loadArtifact(ctx, q, matches[0].ID)
+		return byID(matches[0].ID)
 	default:
-		return model.Artifact{}, ambiguousDocumentReferenceError(target, reference, matches)
+		return none, ambiguousDocumentReferenceError(target, reference, matches)
 	}
 }
 
@@ -1338,6 +1461,30 @@ func artifactSlug(name string) string {
 	return result
 }
 
+// newArtifactNameRefusal is the 400 refusing a new artifact's name past maxNewArtifactKeyBytes,
+// or nil. An upload naming an artifact that already exists is never held to it.
+func newArtifactNameRefusal(name string) error {
+	if len(name) <= maxNewArtifactKeyBytes {
+		return nil
+	}
+	return errorf(http.StatusBadRequest, "INVALID_ARTIFACT",
+		"artifact name is %d bytes, past the %d bytes a new artifact's name may hold; give it a shorter name",
+		len(name), maxNewArtifactKeyBytes)
+}
+
+// newArtifactKeyRefusal is the 400 refusing a new artifact whose reference key, the target's
+// owner, `/` and slug (the one nextArtifactSlug took, suffix and all), is past
+// maxNewArtifactKeyBytes, or nil.
+func newArtifactKeyRefusal(target artifactTarget, slug string) error {
+	key := len(target.refPrefix()) + 1 + len(slug)
+	if key <= maxNewArtifactKeyBytes {
+		return nil
+	}
+	return errorf(http.StatusBadRequest, "INVALID_ARTIFACT",
+		"the reference key `%s/<slug>` this name gives a new artifact is %d bytes, past the %d bytes a new artifact's reference key may hold; give it a shorter name",
+		target.refPrefix(), key, maxNewArtifactKeyBytes)
+}
+
 func (s *server) nextArtifactSlug(ctx context.Context, q queryer, target artifactTarget, name string) (string, error) {
 	base := artifactSlug(name)
 	query, owner := target.ownerLookup(artifactSlugTakenSQL, agentArtifactSlugTakenSQL)
@@ -1450,38 +1597,48 @@ func (s *server) holdArtifactAdmission(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// documentTestHook answers a POST that runs run, one of docs.API's document test hooks, on the
+// useUpScanTotal and tangleBeyondOneApply are the two document test hooks' handlers, each the
+// shared body below with one of docs.API's hooks. Each route names a method of its own rather
+// than a handler this file builds, so the static guards that read the routes table resolve the
+// handler behind every row (keyed_write_guard_test.go, copy_lock_test.go).
+func (s *server) useUpScanTotal(w http.ResponseWriter, r *http.Request) {
+	s.runDocumentTestHook(w, r, docs.API.UseUpScanTotalForTest)
+}
+
+func (s *server) tangleBeyondOneApply(w http.ResponseWriter, r *http.Request) {
+	s.runDocumentTestHook(w, r, docs.API.TangleBeyondOneApplyForTest)
+}
+
+// runDocumentTestHook answers a POST that runs run, one of docs.API's document test hooks, on the
 // request's artifact: the caller must be authenticated, the artifact must be a document
 // (NOT_DOCUMENT), and a hook that returns an error answers it as every handler answers one. run is
-// a method expression of docs.API, so the row that mounts it names the hook without reading
-// Deps.Docs, which routes() is called with unset (TestRoutesTablePinsEveryRegisteredRoute).
-// Test-only: the rows that mount it are appended by routes() only when Deps.TestHooksEnabled is
-// set. They are the used-up row (docs.Service.UseUpScanTotalForTest, which gives the document a
-// stored history whose re-scan uses up a room's scan total, closing its room first, so a browser
-// test can drive the editor's handling of DOC_NEEDS_REBUILD and the rebuild it offers without
-// typing the 1,000,000 scans a real room takes) and the tangled row
+// a method expression of docs.API, so the caller names the hook without reading Deps.Docs, which
+// routes() is called with unset (TestRoutesTablePinsEveryRegisteredRoute).
+// Test-only: the rows that mount its two callers are appended by routes() only when
+// Deps.TestHooksEnabled is set. They are the used-up row (docs.Service.UseUpScanTotalForTest,
+// which gives the document a stored history whose re-scan uses up a room's scan total, closing
+// its room first, so a browser test can drive the editor's handling of DOC_NEEDS_REBUILD and the
+// rebuild it offers without typing the 1,000,000 scans a real room takes) and the tangled row
 // (docs.Service.TangleBeyondOneApplyForTest, which gives it a stored history ending in a tangle
 // no one apply of a browser's may scan through, so a browser test can drive 4413 DOC_TOO_TANGLED
 // without making the tens of thousands of items at one place a browser would have to meet for an
 // honest apply to pass the scans one apply is allowed).
-func (s *server) documentTestHook(run func(service docs.API, ctx context.Context, artifactID string) error) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.requireAuthenticated(w, r) {
-			return
-		}
-		artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		if artifact.Kind != "doc" {
-			writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
-			return
-		}
-		if err := run(s.deps.Docs, r.Context(), artifact.ID); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
+func (s *server) runDocumentTestHook(w http.ResponseWriter, r *http.Request, run func(service docs.API, ctx context.Context, artifactID string) error) {
+	if !s.requireAuthenticated(w, r) {
+		return
 	}
+	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if artifact.Kind != "doc" {
+		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
+		return
+	}
+	if err := run(s.deps.Docs, r.Context(), artifact.ID); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
