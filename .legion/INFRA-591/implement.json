@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-591",
-  "completed": "2026-10-30T07:05:00Z",
+  "completed": "2026-10-30T09:40:00Z",
   "proof": [
     {
       "criterion": "The global serialization is gone: a write holds no lock shared with writes to other issues.",
@@ -107,6 +107,38 @@
       "observed": "shell.e2e.ts:57 (the tester's test, e0b2e7f4, unmodified) passes with every shell test; bun run test 2955 pass 0 fail, including 'a failed identity refetch keeps the cached user's sidebar preference', which failed in CI at 229b8995 when the retry sat on the whoami query. Full chromium suite at 229b8995: 919 passed, 25 skipped, 1 failed (hover-preview.e2e.ts:87, which fails 2 of 5 runs on main).",
       "headSha": "629fe0eec6ec31ae4a10cc47310e797d3869e914",
       "negativeControl": "With the EVENT_HEAD_UNAVAILABLE clause of queryRetry turned off, shell.e2e.ts:57 fails."
+    },
+    {
+      "criterion": "Review round 5 item 1, server: whoami answers 503 EVENT_HEAD_UNAVAILABLE only while no head is proven (api.ErrEventHeadUnproven), and 503 EVENT_HEAD_READ_FAILED for a failed read of the database or horizon pool.",
+      "surface": "go test ./internal/dispatch/routes/ against a local Postgres 16.2",
+      "command": "go test ./internal/dispatch/routes/ -count=1",
+      "observed": "TestWhoamiAnswersEventHeadUnavailableOnlyWhileNoHeadIsProven (unproven, unproven wrapped, failed read) passes; TestWhoamiRefusesWhenItCannotReadTheEventHead (no store, a closed pool) and TestAnAnonymousWhoamiIsUnauthorizedWhileTheEventHeadCannotBeRead answer EVENT_HEAD_READ_FAILED; the routes package passes.",
+      "headSha": "7d09eefb13105c3e28d43c3b8f8e5afb1a006d73",
+      "negativeControl": "Before this round every eventHead error answered EVENT_HEAD_UNAVAILABLE, which the new test's failed-read case refuses."
+    },
+    {
+      "criterion": "Review round 5 item 1, app: only EVENT_HEAD_UNAVAILABLE is retried without limit; EVENT_HEAD_READ_FAILED ends at \"Couldn't reach Dispatch.\" with Retry.",
+      "surface": "Chromium (Playwright) against envoy-dispatch and packages/dispatch/web/dist built at the head; Dispatch's bun unit lane",
+      "command": "cd packages/dispatch && bun run build:web && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/shell.e2e.ts; bun test web/src/api/query-client.test.ts",
+      "observed": "shell.e2e.ts 20 passed, including the new shell.e2e.ts:93 (the page stops on \"Couldn't reach Dispatch.\" with Retry after at most 3 asks and asks no more) and the tester's shell.e2e.ts:57 unmodified; the queryRetry unit test passes; full chromium suite 921 passed, 0 failed, 25 skipped; bun run test 2956 pass.",
+      "headSha": "7d09eefb13105c3e28d43c3b8f8e5afb1a006d73",
+      "negativeControl": "With queryRetry retrying every 503 without limit: shell.e2e.ts:93 and :19 fail, and the unit test fails."
+    },
+    {
+      "criterion": "Review round 5 item 2: the migration no longer shares a version with main; the merged tree migrates.",
+      "surface": "go test ./internal/dispatch/store/ ./internal/pgmigrate/... at the merge head (main a21100c5 merged forward)",
+      "command": "go test -p 2 ./internal/dispatch/store/ ./internal/pgmigrate/... -count=1",
+      "observed": "0148_event_horizon (up and census) above main's 0147; store, including the migration guard, and pgmigrate pass on a fresh schema.",
+      "headSha": "7d09eefb13105c3e28d43c3b8f8e5afb1a006d73",
+      "negativeControl": "A schema that had applied the branch's old 0145 refuses 0148 (relation event_horizon already exists), the local test database's state before it was reset; production never ran the branch's 0145."
+    },
+    {
+      "criterion": "Review round 5 minors: a refused persist write is retried at most once per horizonPersistEvery; a persist decided before a Reset, or reaching a reset log, writes nothing.",
+      "surface": "go test ./internal/dispatch/events/ against a local Postgres 16.2",
+      "command": "go test ./internal/dispatch/events/ -count=2",
+      "observed": "TestAFailedPersistIsTriedAgainOnlyOnceEveryPersistInterval (1 write for ten advances in one interval, 2 after another), TestAPersistDecidedBeforeAResetWritesNothing and TestAPersistOfAnOldLogsHorizonWritesNothingAfterTheLogIsReset pass with the package.",
+      "headSha": "7d09eefb13105c3e28d43c3b8f8e5afb1a006d73",
+      "negativeControl": "persistedAt only on success: 19 writes; no generation check: 1 write sent; created_at taken at write time: 1 row written for the old log's H."
     }
   ],
   "filesChanged": [
@@ -162,20 +194,24 @@
     "packages/envoy/internal/dispatch/routes/whoami_test.go",
     "packages/envoy/internal/dispatch/store/pool.go",
     "packages/envoy/internal/dispatch/store/pool_test.go",
-    "packages/envoy/internal/dispatch/store/migrations/0145_event_horizon.up.sql",
-    "packages/envoy/internal/dispatch/store/migrations/0145_event_horizon.census.sql",
     "packages/envoy/internal/dispatch/store/store_test.go",
     "packages/dispatch/web/src/api/client.ts",
     "packages/dispatch/web/src/api/query-client.ts",
     "packages/dispatch/web/src/api/queries.ts",
-    "packages/dispatch/web/src/main.tsx"
+    "packages/dispatch/web/src/main.tsx",
+    "packages/contracts/src/dispatch-api.ts",
+    "packages/dispatch/web/src/api/query-client.test.ts",
+    "packages/dispatch/e2e/shell.e2e.ts",
+    "packages/envoy/internal/dispatch/store/migrations/0148_event_horizon.up.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0148_event_horizon.census.sql"
   ],
   "trickyParts": [
     "events.Horizon: an observation is safe only once a LATER snapshot's xmin is above the observer's own xid; one snapshot cannot prove its own max(id) (xmax hole). Await waits for an observation that started after the call.",
     "Relay: one mutex is held across each page's publish and the cursor move, and across subscribe and the cursor read, so streamEvents can hand over at the published cursor P with no gap and no repeat; sentDuringCatchup is gone.",
     "Relay and hub cursors stay on the last existing row at or below H, so the existing reset check (row at the cursor gone or another created_at) still works; a detected reset calls Horizon.Reset and re-awaits.",
     "The horizon observes on store.Pool.Horizon (2 connections): on the shared pool the relay queued behind ~1,500 requests per observation under load. A gap re-read asks only the horizon (no reset check), so a gap held open by a long transaction costs the shared pool nothing.",
-    "Round 11: event_horizon is written only by a process's own Horizon, at most once a second, and is trusted only while the event at its safe id still carries the created_at it recorded, so a reset log (e2e seed's truncate ... restart identity) never lends an old value; the write keeps the higher value unless the stored one is of a reset log. The migration only adds a table, so an older build running beside it reads and writes nothing of it."
+    "Round 11: event_horizon is written only by a process's own Horizon, at most once a second, and is trusted only while the event at its safe id still carries the created_at it recorded, so a reset log (e2e seed's truncate ... restart identity) never lends an old value; the write keeps the higher value unless the stored one is of a reset log. The migration only adds a table, so an older build running beside it reads and writes nothing of it.",
+    "Round 12: each horizon observation now reads the created_at of the event at A in its one statement, and H carries it, so the persist write is conditioned on the event at H still carrying that created_at; together with the generation re-check under h.mu this keeps an old log's H off a new log whatever the timing of a reset."
   ],
   "deviations": [
     "The plan's 1x pass thresholds (committed/offered >= 0.99, SSE p99 <= 1 s) are not met (0.72 and 86 s from creation) on INFRA-589's committed harness: once the lock is gone, the shared pool and the 2 CPUs saturate at 1x (INFRA-592, INFRA-512). INFRA-514's architect accepted this on 2026-10-27; it is recorded in the PR body.",
@@ -198,7 +234,8 @@
     "Review round 8 (tester at 144ee198: conflicting head, and the first start read the whole log on 5M ids): cce412e3 bounds the first start's gap read by Horizon.Mark/WriterFloor (the newest mark, the server's boot mark or the start's own, older than every transaction holding a transaction id in Dispatch's database; else the proven horizon, logged). Merge 9290fdc7 of main 88840d35 (#2449 removed GET /api/v1/events; the feed is an events subscription on /ws/live): feedEvents rewritten with the horizon handover, and GET /auth/whoami's event_head made final (eventFeedHead: waits at most 2 s for writes in Dispatch's database, never for other databases, then the boot mark's floor) because main's raw max(id) head would let a page miss an event still open below it. ea9ecdec ports the SSE horizon tests to /ws/live (a deep-worker wrote them; reviewed). Merge ff684ac1 of main 1f5b0828: per-pod budget 89 (main's 13th lease connection plus the horizon's 2); envoy-and-contracts.yaml deleted as main did, its one comment carried into ci.yaml. 86fdc500 guards the boot mark against a Store with no pool. Two pod moves this round; the work was pushed before each.",
     "Review round 9 (architect: retry a fresh mark rather than read from 0; whoami must not wait). 28d06c20: the server keeps its marks (eventMarks: the boot mark and up to 32 recent ones, thinned like the horizon's pending list); the first start and whoami take the newest kept mark older than every writer in Dispatch's database. The first start marks again (10 ms doubling to 250 ms) until one counts, a wait its horizon has anyway, and never reads the whole log. whoami answers at once from the same marks or the proven horizon; only a process with no proven horizon and no mark counting waits (2 s at most) rather than answer 0. Marks now carry their newest row's created_at, and WriterFloor passes over a mark from before a reset of the log (and over a horizon above the newest mark), which an e2e reset would otherwise let vouch for open ids. The code commit was pushed first; this handoff is a second push.",
     "Review round 10 (architect's cap: the pre-boot-writer case). The fix differs from the architect's suggested boot-mark read: an insert into events takes RowExclusiveLock on events before it draws its id and the broker takes its transaction id first, so WriterFloor now counts only transactions holding a write lock on events (and prepared transactions); a transaction holding only a transaction id, the tester's pre-boot writer, keeps no mark from counting. The first start reads floor and gaps once at its start; when no mark counts (an event insert open since before every mark) it reads above the proven horizon, logged. whoami answers 503 EVENT_HEAD_UNAVAILABLE (the page retries) instead of 0 when it has nothing it can vouch for. Also: a stale relay cursor at or below the new log's head (browser-suite resets) is waited out by row identity; the hub tests settle on recomputes alone, flush a still clock's pending recompute, and give event deltas eventFeedWait; ported live tests run on a 1 s heartbeat (the tester's three rigs keep 100 ms, reported to the tester: CI reset one). Two merges of main (edc99283 at the architect's request, cd5ca7c3 on a conflict); the route tables' since sentence, which stood outside its row, now stands inside it.",
-    "Round 11: the whoami EVENT_HEAD_UNAVAILABLE retry first sat on whoAmIQuery (005075ed), which overrode every client's retry and broke a unit test in CI; it now lives in the app's default retry (queryRetry/queryRetryDelay in api/query-client.ts, used by main.tsx)."
+    "Round 11: the whoami EVENT_HEAD_UNAVAILABLE retry first sat on whoAmIQuery (005075ed), which overrode every client's retry and broke a unit test in CI; it now lives in the app's default retry (queryRetry/queryRetryDelay in api/query-client.ts, used by main.tsx).",
+    "Round 12: any database that applied this branch's old 0145_event_horizon (a developer's or tester's local database) must be recreated: its schema records version 145 as event_horizon and 0148 then refuses with relation already exists. Production never ran it."
   ],
   "openQuestions": [
     "D2 (from the plan): ship before multi-replica Dispatch (INFRA-63) or roll this release with Recreate; old pods' readers would skip events new pods commit out of id order during a rolling update."
