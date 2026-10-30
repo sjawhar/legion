@@ -2,44 +2,63 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-558",
-  "round": 2,
-  "completed": "2026-10-28T23:42:00Z",
-  "codeHead": "07b79a109da39ee7a6e13b0206135d95686ca554",
+  "round": 3,
+  "completed": "2026-10-30T10:42:00Z",
+  "codeHead": "377d5a496a48",
+  "scope": "Every change since code head 07b79a10: 0722ae5a (take-over retry), 88c16635 and 0823965b (former Fast-follow items), 4ca0e707 and 15c5f814 (CI fixes), and the merges of main to 96a7e5ea. Tested in full, as the architect set it, not by fingerprint.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I re-ran both proof commands at 07b79a10 against legion-envoy-v19.0.0, the release --previous-release resolves at merge base 8674a6df. Go harness: 3 of 3 PASS. Cross-build browser spec: 2 passed and 1 skipped as designed with B=v19, and 3 passed with both processes on this tree. I re-ran TestAProcessStoppedWhileWaitingForAdmissionReleasesItsDurables with real processes: PASS, and it FAILs once the new stopIntakes() call is removed."
+    "how": "I re-ran both proof commands at 377d5a49 against legion-envoy-v24.0.0 (9d60d92f), which build-dispatch-build.sh --previous-release resolves at merge base 96a7e5ea. Go harness: 3 of 3 PASS. Browser cross-build: 2 passed and 1 skipped as designed with B=v24; 3 passed with both processes on this tree."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
       "criterion": "Acceptance 1 / item 6: the two-build test passes for the current build against the previous release (CLI, documents, messages both ways), and each build's page works against the other's server.",
-      "surface": "Two real envoy-dispatch processes, legion-envoy-v19.0.0 and this head, on one Postgres 17 + pgvector and one nats-server; the Dispatch web app in Chromium through the two-process proxy",
-      "command": "cd packages/envoy && DISPATCH_PREVIOUS_BUILD=$TMPDIR/t558/prev-v19 DISPATCH_TEST_DATABASE_URL=<local postgres> go test -tags twobuild -count=1 -timeout 30m -v -run TestTwoBuilds ./cmd/dispatch; cd packages/dispatch && DISPATCH_E2E_BINARY_B=<v19>/envoy-dispatch DISPATCH_E2E_WEB_DIST_B=<v19>/web DISPATCH_E2E_PORT_B=<free> bun run e2e:multiprocess -- cross-build.multiprocess (and again with both processes on this tree)",
-      "observed": "CLI PASS (16.6s), documents PASS (45.4s), messages PASS (116.0s), ok 178.214s. Browser with B=v19: 2 passed (24.1s), 1 skipped as designed. Browser with both on this tree: 3 passed (28.7s). Evidence: https://github.com/sjawhar/legion/pull/2461#issuecomment-6483443367",
-      "headSha": "07b79a109da39ee7a6e13b0206135d95686ca554",
-      "negativeControl": "Round 1's G3 controls (https://github.com/sjawhar/legion/pull/2461#issuecomment-6477673061): a release that makes 'tip' creatable at once FAILs the documents test, and a CLI that adds a member FAILs the CLI test against v19."
+      "surface": "Two real envoy-dispatch processes, legion-envoy-v24.0.0 and this head, on one Postgres 17 + pgvector and one nats-server; the Dispatch web app in Chromium through the two-process proxy",
+      "command": "cd packages/envoy && DISPATCH_PREVIOUS_BUILD=$TMPDIR/dispatch-previous-24 DISPATCH_TEST_DATABASE_URL=<local postgres> go test -tags twobuild -count=1 -timeout 30m -v -run TestTwoBuilds ./cmd/dispatch; cd packages/dispatch && DISPATCH_E2E_BINARY_B=<v24>/envoy-dispatch DISPATCH_E2E_WEB_DIST_B=<v24>/web DISPATCH_E2E_PORT_B=<free> bun run e2e:multiprocess -- cross-build.multiprocess (then again with both processes on this tree)",
+      "observed": "CLI PASS (18.7s); documents PASS (62.9s, 57 of 57 refs rows survive each way); messages PASS (118.6s); ok 200.386s. Browser with B=v24: 2 passed (25.3s), 1 skipped. Browser with both on this tree: 3 passed (31.0s). Evidence: https://github.com/sjawhar/legion/pull/2461#issuecomment-6520680355",
+      "headSha": "377d5a496a48",
+      "negativeControl": "Round 1's G3 controls stand (https://github.com/sjawhar/legion/pull/2461#issuecomment-6477673061): a release that makes an element creatable at once FAILs the documents test, and a CLI member under a strict server FAILs the CLI test."
     },
     {
-      "criterion": "Review round 1 fixes: a stop during the admission wait releases the intake holds; a failed take-over keeps the ack floor; a rolled-back newer page is read-only; an intake skips a payload member that is not a string.",
-      "surface": "Real envoy-dispatch processes of this head on one Postgres and one NATS (throwaway probes on the twobuild helpers, never committed), plus the multiprocess test that runs real processes",
-      "command": "go test -tags multiprocess -count=1 -run TestAProcessStoppedWhileWaitingForAdmissionReleasesItsDurables ./cmd/dispatch; probes: document sockets with (C,R) pages; a hold row '<subject> start=11' that has lapsed, with the durable deleted, then a restart; a merged-PR envelope whose payload holds an array, a number, a bool and an object",
-      "observed": "The admission-wait stop: PASS, with the standby bound in 1.9s. Admission: (2,1), (2,-), (3,1) and (1,1) are read-write; (3,2), (2,3), a garbage version and no parameters are readonly. Ack floor: bound start_seq=11, and 0 of 10 handled messages were handled again. Payload: the envelope reached its handler with 0 ERROR lines.",
-      "headSha": "07b79a109da39ee7a6e13b0206135d95686ca554",
-      "negativeControl": "With stopIntakes() removed from the admission-wait stop, the test FAILs with 'the stopped process left its hold of delivery-events in place'. With no hold token, the restart bound start_seq=0, and 10 of 10 handled messages were handled again."
+      "criterion": "INFRA-563, folded in: a red dispatch-two-builds fails ci-ok.",
+      "surface": "GitHub Actions CI run 41000521744 at 78e951ea; .github/scripts/ci-ok.sh run with the needs, SELECTED_BY and PULL_REQUEST_ONLY of this head's ci.yaml ci-ok job",
+      "command": "gh api repos/sjawhar/legion/actions/runs/41000521744/jobs?filter=all and the ci-ok job's log; uv run --with pyyaml==6.0.2 python ciok.py, which reads ci.yaml's ci-ok job and runs ci-ok.sh with dispatch-two-builds set to each result",
+      "observed": "Real run: dispatch-two-builds failure (job 123888676329) and ci-ok failure (job 123920188039), whose log reads 'dispatch-two-builds ended failure, but changes selected it'. ci-ok.sh with this head's config: selected and failure, cancelled or skipped give exit 1 with an ::error:: naming the job; selected and success give exit 0. Run 41036163886's changes job at 377d5a49 logs 'Filter dispatch_two_builds = true'.",
+      "headSha": "377d5a496a48",
+      "negativeControl": "dispatch-two-builds skipped and not selected: ci-ok exit 0. Failure while not selected: exit 1 ('a job changes did not select must succeed or be skipped')."
     },
     {
-      "criterion": "Contract change census entries 1-3, driven through their real surfaces.",
-      "surface": "A manual stack: this head (:18881) and a staged build of this head (callout kind 'tip', since 3, creatable_since 4) on one database and one NATS; curl, a Bun websocket client, the current and v19 dispatch CLIs, and envoy-dispatch backfill-files",
-      "command": "POST /_test/newer-content, then GET /text, POST /edits, POST /versions, POST /rebuild, dispatch doc-read (both CLIs), /ws/doc/<room>; on the staged build, POST /api/v1/issues and /edits holding kind=\"tip\"; envoy-dispatch backfill-files with DISPATCH_FILE_STORE_BUCKET set while the two processes were live",
-      "observed": "Entry 1: 409 DOC_NEWER_CONTENT '... Try again in one minute. Do not replace or rebuild the document' on /text, /edits, /versions and both CLIs; /rebuild answers 409 DOCUMENT_LIVE '... Stop. Ask a person ...'; the socket closes '4425 DOC_NEWER_CONTENT'. Entry 2: the staged build answers 400 INVALID_MARKDOWN / INVALID_OP 'reads value \"tip\" ... but cannot write it yet. Remove it from your markdown, or write it again after the next release'. Entry 3: backfill-files exits 1, 'refused: these live server processes have no bucket ...', naming both instances.",
-      "headSha": "07b79a109da39ee7a6e13b0206135d95686ca554",
-      "negativeControl": "A plain document's socket stays open for 5s; kind=\"warning\" on the staged build answers 201; backfill-files with both processes stopped passes the gate and reaches the bucket check (S3 403 for the placeholder bucket)."
+      "criterion": "Changes since round 2: a revoked writable document socket closes with 1012 (15c5f814).",
+      "surface": "This head (:18981) and a build of this head whose manifest makes callout kind 'tip' creatable at once (V3, R3), on one database and one NATS; a (2,1) page socket opened with the twobuild harness's openDocumentSocket",
+      "command": "Open a (2,1) socket on :18981, then start the newer build; scripted 4 times (revoke-trials.sh), plus 1 run by hand",
+      "observed": "The socket was admitted read-write, then ended 2.9-8.2s after the newer build started, with 'websocket: close 1012: the server processes changed; reconnect'. The server logged 'close a writable document socket the live server processes no longer admit' (5 of 5 runs).",
+      "headSha": "377d5a496a48",
+      "negativeControl": "With no newer build, the socket stayed open for 25s. With the newer build live, a new (2,1) socket is admitted readonly."
+    },
+    {
+      "criterion": "Changes since round 2: members refused by name, the margin write refuses newer content, the shared no-route retry, renumbered migrations (4ca0e707, 88c16635, merges).",
+      "surface": "A manual stack of this head (:18981) and legion-envoy-v24.0.0 (:18982) on one database and one NATS, driven with curl, a Bun /ws/live client, and the current dispatch CLI through a proxy that sends a route to a path the real server has no route for",
+      "command": "POST /api/v1/broadcasts with a body idempotency_key; /ws/live subscribe frames carrying resumes with undeclared members; POST /api/v1/writes/_test/slow with an undeclared member; POST /api/v1/issues/{key}/comments anchored on a document holding newer content; dispatch read and dispatch answers through the proxy",
+      "observed": "Broadcast: 400 'idempotency_key is the Idempotency-Key header, not a body member'. A resume with an undeclared member: INVALID_FRAME 'this view's resume does not take cursor_v2'. Test hook: 400 'the hook does not take: bogus'. Anchored comment on newer content: 409 DOC_NEWER_CONTENT, with no comment written. No-route retry: 4 attempts about 1, 2 and 4s apart, then the release message (read) or 'has no answers route yet' (answers). v24 served on the database this head migrated (schema_version 150), with no ERROR on either process.",
+      "headSha": "377d5a496a48",
+      "negativeControl": "An unknown member on the frame itself is ignored (events_start). A broadcast with only an unknown body member gets past decoding to field validation. An anchored comment on a plain document: 201. dispatch read with 2 attempts missing: exit 0. dispatch answers directly: exit 0."
+    },
+    {
+      "criterion": "Contract change census entries 1-3, driven again at this head.",
+      "surface": "This head, and a staged build of this head (callout kind 'tip' with since 3, creatable_since 4), on one database; envoy-dispatch backfill-files",
+      "command": "GET /text, an edit and an anchored comment on a document holding newer content; on the staged build, POST /api/v1/issues and POST /edits holding kind=\"tip\"; backfill-files with DISPATCH_FILE_STORE_BUCKET set while this head was live, and again after it stopped",
+      "observed": "Entry 1: 409 DOC_NEWER_CONTENT. Entry 2: 400 INVALID_MARKDOWN / INVALID_OP '... reads value \"tip\" ... but cannot write it yet. Remove it from your markdown, or write it again after the next release'. Entry 3: exit 1 'refused: these live server processes have no bucket ...', naming the instance.",
+      "headSha": "377d5a496a48",
+      "negativeControl": "kind=\"warning\" on the staged build: 201. backfill-files with no live process passes the gate and stops at the bucket check (S3 403 for the placeholder bucket)."
     }
   ],
-  "ci": "GitHub has run no workflow for the round-1 code. (1) The push that ended in 29c7e379 carried 'skip-checks: true' although it held code commits (bbfff9c8, c01c8161, 32f979a0, 0d2dba72, 07b79a10). (2) On the architect's instruction I pushed this handoff, b8b5bb63, without the trailer; compare 07b79a10...b8b5bb63 is .legion/ only. GitHub still created no run within 4 minutes, because PR #2461 conflicts with main (mergeStateStatus DIRTY, 9 commits behind origin/main 571f729b; git merge-tree names packages/proof-editor/AGENTS.md), and GitHub runs no pull_request workflow on a pull request that conflicts. Lint, types and the unit, integration and two-build CI lanes are therefore unread at this code. They run once the implementer merges main; the next test round compares the fingerprint and reads them. I reported both facts to the architect.",
+  "ci": "CI run 41036163886 at code head 377d5a49: changes succeeded and selected dispatch_two_builds. Every other job, including the required lint, typecheck and test and dispatch-two-builds, was still queued on GitHub at 10:37Z. I did not wait for them, and none had settled red.",
   "notes": [
-    "Not reached on a real surface: proof-editor's paste and import creation gate and the abortable no-route wait. Every element of the shipped manifest is creatable, so the gate has nothing to refuse in a real build. Both are covered by bun tests that CI runs.",
-    "I did not re-run round 1's SIGKILL/SIGSTOP, stream-generation and reconnect probes. Since round 1, intake.go changed in the take-over start (driven above) and in the lenient payload members (driven above). internal/bus changed only in the shared publishDenied predicate (bus/confirm.go, nats.go). The harness's message test passed at 07b79a10."
+    "main's effective rules (ruleset 12331919) require lint, typecheck, test and pr-title, not ci-ok. So a red dispatch-two-builds fails ci-ok but does not by itself stop a merge until a person changes the ruleset to require ci-ok. That is tracked on dispatch://INFRA-430 and dispatch://INFRA-490, and this pull request cannot make it.",
+    "Revoked socket: in one earlier attempt, run by hand before the scripted trials, the socket did not close within 40s of the newer build starting, and I could not establish why. The newer build's registration time was not captured, and its log file was overwritten. The 5 controlled runs after it all closed with 1012 within 8.2s.",
+    "Per the architect: migrations 0148-0150 share numbers with INFRA-562's #2387 (0148-0151). Whichever pull request lands second renumbers, and the deployment lane's merge test refuses a clash. This round does not fail on it.",
+    "0722ae5a's retry inside the consumer lease after a stop-cancelled context is a timing path I could not hit on real processes. The harness's message test (graceful stops of each build while it holds the intake) passed, and the intake hold tests that CI runs cover the retry."
   ]
 }
