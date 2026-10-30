@@ -2,57 +2,51 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-177",
-  "completed": "2026-10-30T13:08:00Z",
-  "round": 15,
-  "headTested": "ec393773d37555d4084557447714d6e370b16598 (code head a1a6523df1cb)",
-  "scope": "Per the architect: review round 11's eleven findings and three merges with main (a21100c5; 96a7e5ea carrying #2478; 2d3a725f). Tested what moved: the #2478 merge resolution in full, the ported claude-backend-sandbox.sh, handoff-records.sh and handoffs.e2e.ts at the merged head, the renumbered migrations, the new limit and key-reuse tests, and CI.",
-  "mergeability": "gh pr view 2354 -> MERGEABLE (BLOCKED: required checks not reported); git merge-tree of main 2d3a725f with ec393773 -> no conflict; contract 44, daemon 0065_handoff_records, Dispatch 0148_handoffs free on main (43, 0064, 0147); recordsSchema 65.",
-  "ci": "Read 13:07Z: CI run 41055339339 at ec393773 (the pushed head, code head a1a6523d's tree plus .legion/): changes success, every other job queued (test, typecheck, lint, ci-filters, the Go, Bun, browser and worker-image lanes). Read as running, not waited for.",
-  "pr2478": {
-    "tests": "676 of #2478's tests (its 68 test files) exist at the head by name; run by name per package: cmd/legion, admit, api, classify, dispatch, githubrest, projection, prompts, record, workflow, envoy infra aws/core, cistore, contracts, dispatch/api, integration, webhook ok; redeliver ok on a fresh database (the shared harness database still held an earlier head's handoffs table: 'relation \"handoffs\" already exists'). Two fail here and need Docker, which this pod has not: TestDaemonPermissionsOnRealServers/2.10 and TestConsumerLagCountsEveryConsumerWhileNATSRefusesTheOldestMessageRead (testcontainers docker_host.go); CI's.",
-    "dropped": "15 names. Each covered a handoff-only push, its approval carry, the forced marker, the committed handoff on READY's head, or the commit-keyed completion: TestALatePushWithItsPathsCutShortKeepsTheHandoffPushThePassRebuilt, TestHandoffPushTakesOnlyAComparisonThatProvesTheCodeUnchanged, TestThePassFollowsAHandoffPushSoAnApprovalBeneathItStands, TestAFailedComparisonStillReadsThePullRequest, TestAPushReplacesAnApprovalCarrierOfItsTwoHeads, TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder (review half kept as TestDecodingCarriesTheReviewOrder), TestNoComposedPromptKeepsTheIssuesHandoffsOnTheMergedHead, TestHandoffCompleteReadyRefusesAHeadThatStillCarriesTheIssuesHandoffs, TestHandoffCompleteEnforcesRoleSpecificFieldsAndDeduplicatesTheCommit (…TheRecord), the four classify ones judged in rounds 6-8. Two carried non-handoff protections and have head equivalents: TestThePassRebuildsAForcePushLost -> TestThePassRebuildsAPushLostWhateverTheActivityCallsIt (push and force_push both counted, the approval of the replaced head not standing; passes), and TestHandoffCompleteRecordsTheCommitTheWorkerReportsAndTheOpenPullRequestGitHubShows -> HANDOFF_NO_PULL_REQUEST kept in api/handoff.go:390 with its tests in handoff_test.go (api package ok).",
-    "mechanics": "The pass's activity-rebuilt pushes judge by pusher, not paths: TestThePassRebuildsTheReviewAppsRedTestPushesLost, TestThePassRebuildsTheImplementersFixPushLost, TestThePassRebuildsAPushLostWhateverTheActivityCallsIt, TestThePassAppliesNoPushWhenTheActivityCannotBeFollowed, TestThePassFollowsAPushAboveAnApprovalAsANewHead pass.",
-    "noHandoffOnlyPath": "git grep -nE 'skip-checks|READY_HEAD_CARRIES_HANDOFFS|HandoffOnly|handoffOnly|ClassifyPush|classifyPush|HandoffPath|carriesApproval|carriedBack|readApprovalCarry|handoffPush' ec393773 (A4's scope and exclusions, plus claude-envoy's generated dist/ and legion/): two hits, docs/kubernetes.md:5453 and handoffimport.go:59, both describing the release before's HandoffPath for the cutover. No ChangedPaths, changed_paths or .legion/ read in pull_request_reads.go, classify settlement/decisions, workflow/pullrequest.go or review.go."
-  },
-  "claudeBackendSandbox": "Not runnable from this pod: it needs the restricted cluster context (LEGION_E2E_RUNTIME_CONTEXT unset here), docker (absent) and the operator's own account (require_proof_human). Ran here: `bash -n scripts/e2e/claude-backend-sandbox.sh` ok; its handoff check assert_handoff_record (lib/workflow.sh, shared with claude-backend-tmux.sh and stage4b) applied to a real record on a scratch Dispatch from the head: the right issue, word, version and session pass, another session, another phase and another version fail. Its 'no .legion/ path in the implementer's commit' check is a grep on the commit's file list. The full proof is the operator's to run.",
+  "completed": "2026-10-30T21:29:30Z",
+  "round": 16,
+  "headTested": "c024f2572e667dae5bee6da7a5c326fa5952f6ca (code head 14f6fdc983e4)",
+  "workspace": "Recreated before this round; it holds legion/INFRA-177 as pushed, my round-15 handoff (33db91e8) beneath the implementer's commits. Nothing of mine was unpushed.",
+  "scope": "Per the architect: review round 12's seven findings and the merges with main a4af0341, d126b19d and 2b891d47. Tested what moved: the Dispatch API package (route pin), the pass test's rebuilt push, the HandedOffWithoutOpenOrMergedPullRequest filter, handoff-records.sh and handoffs.e2e.ts at the merged head, and CI. No rerun of untouched paths.",
+  "mergeability": "gh pr view 2354 -> MERGEABLE (BLOCKED: required checks not reported); git merge-tree of main e4dc7c4f with c024f257 -> no conflict; contract 44, daemon 0065_handoff_records, Dispatch 0150_handoffs free on main (43, 0064, 0149_event_horizon); registeredRoutes 151.",
+  "ci": "Read 21:29Z: CI run 41127718749 at c024f257 (code head 14f6fdc9's tree plus .legion/): changes success, every other job queued (test, typecheck, lint, ci-filters, ci-images, the Go, Bun, browser and docs lanes, the envoy Dispatch API lane 'dispatch' among them). 14f6fdc9 itself has no check run. Read as running, not waited for; the Dispatch API package passed here (below).",
   "implementerProof": {
     "verdict": "verified",
-    "how": "handoff-records.sh on a fresh database at the merged head (9 checks ok, PASS in 47s); e2e/handoffs.e2e.ts 3 passed; handoffs_test.go's 11 tests (TestARetriedHandoffWriteReplaysItsAnswerAndRecordsOneVersion, TestAKeyedHandoffWritePastAMegabyteSpillsAndReplays, TestAnEarlyHandoffAnswerDrainsUpToTheHandoffWritesLimit and the cap/refusal tests) ok; the limit and key claims hold on a scratch Dispatch. Finding 10's workflow test not re-run by me (CI's)."
+    "how": "Re-ran the implementer's finding-1 command `go test -count=1 -p 1 ./internal/dispatch/api/` on a fresh database (ok, 1492.6 s, route pin 151); TestThePassFollowsAPushAboveAnApprovalAsANewHead passes; handoff-records.sh 9 checks ok; handoffs.e2e.ts 3 passed."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Findings 5 and 7: one route body limit gives the handoff write its limit and its 413 CAP_EXCEEDED in the drain, the keyed layer and the handler; a keyed write past 1 MiB spills and replays; a held key answers KEY_IN_FLIGHT; another body under the key is KEY_REUSED",
-      "surface": "POST /api/v1/issues/{key}/handoffs/{phase} on a scratch Dispatch built from the head",
-      "command": "keys.sh: a 262,144-byte body sent \\u003c-escaped (1,572,881-byte request) twice with one Idempotency-Key; six concurrent POSTs under another key; the same key with another session's body; a 262,145-byte body keyed; a 2,625,583-byte request (past 6 x cap + 4 KiB + 1 MiB) keyed and unkeyed",
-      "observed": "both keyed writes 201 with one id and version 1, the second 'Idempotency-Replayed: ?1'; six concurrent: one 201 v1 and five 409 KEY_IN_FLIGHT; one record per issue stored",
-      "headSha": "ec393773d37555d4084557447714d6e370b16598",
-      "negativeControl": "same key, other body -> 422 KEY_REUSED; 262,145 bytes keyed -> 413 CAP_EXCEEDED; past the request limit -> 413 CAP_EXCEEDED keyed and unkeyed"
+      "criterion": "Finding 1: the Dispatch API package passes at the merged head with the route pin at the true count",
+      "surface": "packages/envoy/internal/dispatch/api against a fresh Postgres",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=…/dispatch_t16 go test -count=1 -p 1 -timeout 60m ./internal/dispatch/api/",
+      "observed": "ok github.com/sjawhar/envoy/internal/dispatch/api 1492.648s; routes_table_test.go pins registeredRoutes = 151 (main's 147 plus this PR's 4)",
+      "headSha": "c024f2572e667dae5bee6da7a5c326fa5952f6ca",
+      "negativeControl": "the shared harness database an earlier head migrated refuses Dispatch's migrations ('relation \"handoffs\" already exists', round 15), so a fresh database is the surface"
     },
     {
-      "criterion": "Handoff records end to end at the merged head (contract 44): a worker's record is read back, another session's refused, Dispatch outages handled, the import's record re-written; a contract-43 plugin is refused",
-      "surface": "the whole daemon in scripts/e2e/handoff-records.sh",
-      "command": "LEGION_TEST_PG_DSN=…/legion_t15 … bash scripts/e2e/handoff-records.sh; then with the driver registering at api.DaemonAPIVersion - 1 (restored after)",
-      "observed": "9 checks ok, PASS in 47s",
-      "headSha": "ec393773d37555d4084557447714d6e370b16598",
-      "negativeControl": "at 43: 'register … = 409 {\"error\":\"pi-legion speaks daemon API contract 43; this daemon requires 44: …\"}'"
+      "criterion": "Finding 7: the pass test asserts the push it rebuilt from the branch's activity above an approval",
+      "surface": "the required-checks pass (readRequiredChecks) against a GitHub stand-in serving the branch's activity, on a real Postgres",
+      "command": "go test ./internal/daemon/ -run '^TestThePassFollowsAPushAboveAnApprovalAsANewHead$' -v, with the #2478 pass tests beside it",
+      "observed": "PASS; with TestThePassRebuildsAPushLostWhateverTheActivityCallsIt, TestThePassTellsTheArchitectOfAPullRequestMissingOncePerHandoff, TestThePassRecordsAnOpenedLostInAnyPhase, TestThePassRecordsAnOpenPullRequestWhoseOpenedHasNotArrived and the two declined-opened tests, ok",
+      "headSha": "c024f2572e667dae5bee6da7a5c326fa5952f6ca",
+      "negativeControl": "with lostPushes returning no push (pull_request_reads.go:189, restored after) the test fails: 'the pass applied 0 pushes it rebuilt from the branch's activity, want the one code..pushed'"
     },
     {
-      "criterion": "The Conversation shows handoff records, live, at the merged head",
-      "surface": "the Dispatch dashboard in Chromium against the real Go server, SPA rebuilt from the head",
-      "command": "bash /legion/harness/dispatch-e2e.sh 'postgres://postgres@127.0.0.1:5433/dispatch_e2e_t15?sslmode=disable' e2e/handoffs.e2e.ts",
-      "observed": "3 passed, the live test among them",
-      "headSha": "ec393773d37555d4084557447714d6e370b16598",
-      "negativeControl": "round 14 at 5024f6c6: with event-refresh.ts's [\"handoffs\", key] target removed the live test fails 'Expected: 3, Received: 2'; this round touched neither the test nor the rule"
+      "criterion": "Finding 3: HandedOffWithoutOpenOrMergedPullRequest keeps main's handoff_commit <> '' filter",
+      "surface": "record/store.go and the pass that reads it (pull_request_reads.go:252)",
+      "command": "diff of the function at main e4dc7c4f and at the head; TestThePassTellsTheArchitectOfAPullRequestMissingOncePerHandoff",
+      "observed": "the function is identical to main's; the test passes. The implementer still reports a commit (its pushed tip) at every completion, so every completed implementer row carries handoff_commit",
+      "headSha": "c024f2572e667dae5bee6da7a5c326fa5952f6ca",
+      "negativeControl": "an implementer row with no completion (handoff_commit '') is not listed, as on main"
     },
     {
-      "criterion": "The renumbered migrations: Dispatch 0148 on main's 0147, daemon 0065 on main's 0064 with docs/kubernetes.md's rollback",
-      "surface": "Dispatch built from main 2d3a725f and from the head on one database; psql on main's daemon migrations",
-      "command": "upg.sh (main's Dispatch, then the head's, then main's); main's 0001-0064 each in a transaction, then 0065, then the rollback SQL twice, then 0065 again",
-      "observed": "Dispatch: main at 147, head at 148 with UPG-1 kept and plan v1 recorded, census 0, main serves the 148 database (200). Daemon: 0065 adds handoff_record '' and handoff_version 0; rollback 'ALTER TABLE', 'DELETE 1', then the two NOTICEs and 'DELETE 0', store at 64; 0065 applies again",
-      "headSha": "ec393773d37555d4084557447714d6e370b16598",
-      "negativeControl": "main's Dispatch answers the handoff route 404"
+      "criterion": "Handoff records end to end and the live Conversation at the merged head (main's #2392 event-lock change)",
+      "surface": "scripts/e2e/handoff-records.sh; the Dispatch dashboard in Chromium with the SPA rebuilt from the head",
+      "command": "LEGION_TEST_PG_DSN=…/legion_t16 … bash scripts/e2e/handoff-records.sh; bash /legion/harness/dispatch-e2e.sh …/dispatch_e2e_t16 e2e/handoffs.e2e.ts",
+      "observed": "9 checks ok, PASS in 53s; 3 passed",
+      "headSha": "c024f2572e667dae5bee6da7a5c326fa5952f6ca",
+      "negativeControl": "with event-refresh.ts's [\"handoffs\", key] target removed (restored after) the live test fails 'Expected: 3, Received: 2'"
     }
   ]
 }
