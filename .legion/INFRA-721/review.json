@@ -2,60 +2,39 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-721",
-  "completed": "2026-10-30T07:20:00Z",
-  "round": 2,
+  "completed": "2026-10-30T09:50:00Z",
+  "round": 3,
   "decision": "changes_requested",
-  "reviewedCodeHead": "95362581a559a97a08665945f7d77f5a11df3d74",
-  "ci": "Required checks lint, typecheck, test, pr-title (main's ruleset). CI run 41018038054 at 95362581 was queued at review time; every earlier CI run on the branch was cancelled when the head moved, so no code check has completed on this branch. A request for changes does not wait on CI.",
-  "thermonuclear": "deep-review: CHANGES at 95362581 (2 Medium, 4 Minor); code-quality: CHANGES at 95362581 (2 Medium, 3 Low). Round-1 findings 1, 3 and 4 and every round-1 minor but the budget are fixed; finding 2 is fixed for an edit carrying no options and open for one that carries them.",
+  "reviewedCodeHead": "d5c931074f57",
+  "ci": "Required checks lint, typecheck, test, pr-title. CI run 41032019334 at d5c93107 (the code CI head; ede52b12 adds .legion/ only, compare handoffsOnly true) was queued at review time; no CI run has completed on this branch. A request for changes does not wait on CI.",
+  "thermonuclear": "deep-review: CHANGES at d5c93107 (1 Medium, 3 Minor); code-quality: CHANGES at d5c93107 (2 Minor). Round-2 M1 (spaces), M2 (row options) and every round-2 minor are verified fixed.",
   "critical": 0,
-  "important": 2,
-  "minor": 6,
+  "important": 1,
+  "minor": 3,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/docs/ask_option_merge.go:190",
-      "description": "The rewrite and drop checks compare an item with a fresh item built from the trimmed option, and the renderer keeps whitespace (a trailing space renders as &#32;; 'Hold : Wait' and 'Hold:  Wait' as typed). So an option line whose only extra is whitespace a person typed is refused a drop or a rewrite as 'markup a person wrote', where main applied it. The round-1 High fix is incomplete; the empty-question guard already compares a paragraph with its own text."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/asks.go:443",
-      "description": "SeveralOptionLists only skips copying stored.Options; asks.go:407 already set ask.Options from the request. A repair that sends the joined options with the question (withoutUnchanged drops them as unchanged, so the block accepts) writes the joined reading into the row, the round-1 finding 2 outcome. Set ask.Options = previous.Options and extend the api test."
+      "file": "packages/envoy/internal/dispatch/docs/ask_option_merge.go:315",
+      "description": "Regression from round 2: holdsOnlyItsOptionLine now weighs only the item's paragraph, but a task item's checked attribute is written by the item ([x] / [ ], pmdoc/render.go:531-534). An options edit now silently drops a '- [x] Hold: Wait' option, which round 2 refused, and the issue's task progress (CountTasks -> tasks_done/tasks_total) changes unseen. The thermonuclear pass reproduced it end to end."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go:87",
-      "description": "emptyQuestion and writesTheQuestion are two flags for one exclusive branch; refuseEmptyQuestionEdit takes a bool mode flag; SeveralOptionLists needs no writesTheQuestion term."
+      "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go:546",
+      "description": "writesNothingButItsText rebuilds from TextContent, so a pasted soft break (hardbreak isInline) or a trailing line feed in the text is refused as markup with a quote that looks plain: the same false-refusal class as round 2's M1."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/ask_option_merge.go:161",
-      "description": "refuseLostOptionWords re-derives the merge's unchanged/rewritten/dropped classification; build it from mergeAskOptions' result."
+      "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go:635",
+      "description": "The upload step names only --issue <KEY>; an ask on a project document needs --project <KEY>. 'the one case a document edit cannot reach' overstates: a nested decision with no text is another."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go:636",
-      "description": "The image-question refusal's upload step omits --issue and contradicts the dispatch_artifact tool rule 'never upload a document's own name'; say this is the case doc-edit cannot reach."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/ask_option_merge.go:44",
-      "description": "Round-1 budget item open: the caller's new items are still parsed on the fresh budget."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go:25",
-      "description": "Rationale copies remain (BlockBoundary x3, settlement restore x4, SeveralOptionLists x5, budget x3) and the render-one-block code is written five times."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/service_test.go",
-      "description": "TestAskOptionsEditPairsOnTheWholeOptionBeforeTheLabel sends two options of one label, which the route refuses (asks.go:83-85); the reachable case is several same-label items in the document."
+      "file": "packages/envoy/internal/dispatch/docs/ask_option_merge.go:76",
+      "description": "callerSentItems picks the caller's line by position (written.Children[:1]); build the sent items from the options themselves (optionItem(options[i]) for each non-whole entry)."
     }
   ],
   "proseFixed": [
-    "packages/envoy/AGENTS.md: the ask-edit paragraph named label-first pairing and editedOptionList in ask_block_text.go, and said only a drop refusal names dispatch doc-edit; it now names the two-pass pairing, ask_option_merge.go, and doc-edit for both refusals.",
-    "packages/envoy/.changes/unreleased/pr2525-Fixed-20261029-224000.yaml: the same pairing and doc-edit wording.",
-    "PR body: the Threads line said round 1 opened no threads; it opened 12 (body edit, no commit). Look at first and Not proven / risk written."
+    "ask_block_text.go comments at 228-229 and 678-679 said an emptied question is refused by or weighed before the content rule; since the branch is exclusive they now say refuseEmptyQuestionEdit and 'instead'. 602: 'this file' -> 'this package'.",
+    "packages/envoy/AGENTS.md: 'before its content rule' -> 'instead of its content rule', and the budget sentence now says the caller's items are parsed on the write's budget."
   ]
 }
