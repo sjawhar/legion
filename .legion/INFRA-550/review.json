@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-550",
+  "completed": "2026-10-30T08:20:00Z",
+  "round": 3,
+  "decision": "approved",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2529",
+  "previousApproval": "132dcb9e10dd06cdc0a5c14b2d6ec053112a1ee6",
+  "reviewedCodeHead": "c452a95e79bc",
+  "fingerprint": "132dcb9e10dd -> 2348c9005826; 60bab9cb... -> 0e605e34...; changed (forward merge 54644c3d1fa0 of main bringing sjawhar/legion#2528), so a new round",
+  "critical": 0,
+  "important": 0,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "docs/solutions/infra/an-optional-mode-that-zeroes-an-input-inherits-every-refusal-that-input-carried-pr2529.md",
+      "description": "The four docs/solutions learnings retro wrote before the merge cited line numbers the merge shifted by 1 to 135 lines, and one gave the schema's input count as 52 where clusterOnly makes 53. Each citation checked against its pre-merge target at cb96806b0524 and moved onto the same code; fixed as prose in c452a95e79bc. The PR body's Look at first line numbers were moved too."
+    },
+    {
+      "severity": "minor",
+      "file": "PR body",
+      "description": "The E2E (implementer) line still named cfc95b6efe98 as the newest head that renders anything, false after the merge added three clusterOnly refusal rows. The implementer rewrote it onto the merge head 54644c3d1fa0 from its recorded run (plugin under Pulumi CLI 3.268.0, two negative controls including natsInCluster refused under clusterOnly). A body edit; no commit."
+    }
+  ],
+  "mergeResolution": "Correct. dispatch_kube.go keeps every natsInCluster gate (no port-1055 Service, no front-door DependsOn, empty front-door ingress, no ENVOY_NATS_SOCKS5_PROXY, the local-URL refusal) on #2528's error-only newDispatchKubernetes; dispatch.go adds natsInCluster, natsReplicas and streamMaxBytes to dispatchClusterOnlyRefusals in DispatchArgs order with != nil like their neighbours, and the census test table mirrors them; newDispatchSettings hands clusterOnly off before the three fields are resolved and NewDispatch returns before newDispatchKubernetes; the README keeps the clusterOnly column beside the natsInCluster clauses.",
+  "thermonuclear": {
+    "head": "2348c90058264a0b5d88aa0c973c745d4d8a4251",
+    "deepReview": "APPROVE: merge resolution correct, nothing lost from either side; one Minor (stale line citations), fixed.",
+    "codeQuality": "CHANGES on the stale citations alone, fixed; merge resolution and clusterOnly interaction no findings."
+  },
+  "ci": "Required set on main: lint, typecheck, test, pr-title. At c452a95e79bc (run 41015488821, PR Title 41015522649): lint success, pr-title success, typecheck and test skipped by path filter; envoy-infra-go, envoy-go, envoy-go-race, envoy-smoke, envoy-session-stall, ci-filters and worker-image build success."
+}
