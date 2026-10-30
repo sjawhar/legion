@@ -155,11 +155,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		askPointers[index] = &asks[index].Ask
 		askIDs[index] = asks[index].ID
 	}
-	if err := s.attachOpenedEventIDs(r.Context(), s.deps.Store.Pool, askPointers); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if err := attachAskBacklinkCounts(r.Context(), s.deps.Store.Pool, askPointers); err != nil {
+	if err := loadAskDetails(r.Context(), s.deps.Store.Pool, askPointers); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

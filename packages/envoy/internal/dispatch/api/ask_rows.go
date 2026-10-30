@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
@@ -152,19 +153,58 @@ func attachAskBacklinkCounts(ctx context.Context, q queryer, asks []*model.Ask) 
 	if len(asks) == 0 {
 		return nil
 	}
-	ids := make([]string, 0, len(asks))
-	for _, ask := range asks {
-		ids = append(ids, ask.ID)
-	}
-	counts, err := refs.BacklinkCounts(ctx, q, "ask", ids, refs.AskBacklinkExclusions)
+	counts, err := refs.BacklinkCounts(ctx, q, "ask", distinctAskIDs(asks), refs.AskBacklinkExclusions)
 	if err != nil {
 		return err
 	}
+	applyAskBacklinkCounts(asks, counts)
+	return nil
+}
+
+// applyAskBacklinkCounts stamps each ask with its count, zero included, from what the count
+// query answered: attachAskBacklinkCounts for one ask, and queueAskDetails for every list of
+// asks.
+func applyAskBacklinkCounts(asks []*model.Ask, counts map[string]int) {
 	for _, ask := range asks {
 		count := counts[ask.ID]
 		ask.ReferencedByCount = &count
 	}
-	return nil
+}
+
+// queueAskDetails queues in b what every listed ask carries beside its row - its identity event
+// and its inbound graph-edge count - and returns the apply that stamps them onto the asks once
+// the batch is closed. The two statements are queued in that order wherever an ask is read: the
+// issue read queues them beside its other reads (readIssueDetails), and a read of its own sends
+// them as a batch of its own (loadAskDetails). No ask queues nothing and its apply stamps
+// nothing.
+func queueAskDetails(b *pgx.Batch, asks []*model.Ask) func() error {
+	askIDs := distinctAskIDs(asks)
+	openedEventIDs := make(map[string]int64, len(askIDs))
+	counts := map[string]int{}
+	events.QueueOpenedEventIDs(b, askIDs, openedEventIDs)
+	refs.QueueBacklinkCounts(b, "ask", askIDs, refs.AskBacklinkExclusions, counts)
+	return func() error {
+		if err := applyOpenedEventIDs(asks, openedEventIDs); err != nil {
+			return err
+		}
+		applyAskBacklinkCounts(asks, counts)
+		return nil
+	}
+}
+
+// loadAskDetails sends queueAskDetails's statements as a batch of their own on q, for an ask read
+// that queues nothing else: an owner's asks, the Inbox's rows, an event payload's asks. The batch
+// holds q's connection until its results close, so nothing else reads the database in between.
+func loadAskDetails(ctx context.Context, q queryer, asks []*model.Ask) error {
+	batch := &pgx.Batch{}
+	apply := queueAskDetails(batch, asks)
+	if batch.Len() == 0 {
+		return nil
+	}
+	if err := q.SendBatch(ctx, batch).Close(); err != nil {
+		return err
+	}
+	return apply()
 }
 
 func (s *server) loadAskAnchorArtifact(

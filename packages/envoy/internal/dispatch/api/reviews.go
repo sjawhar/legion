@@ -69,9 +69,32 @@ func (s *server) loadReviews(ctx context.Context, q queryer, artifactID string) 
 	return reviews, nil
 }
 
-// attachApprovals fills Approval for every document in place: one query for the
-// latest review per artifact and one for open approval asks.
-func (s *server) attachApprovals(ctx context.Context, q queryer, artifacts []*model.Artifact) error {
+// latestReviewsStatement reads the newest review of every document in $1, one row each
+// (docs.ReviewOrder decides which); scanLatestReviews reads its rows.
+const latestReviewsStatement = `
+		select distinct on (artifact_id) ` + docs.ReviewColumns + `
+		from artifact_reviews where artifact_id = any($1::uuid[])
+		order by artifact_id, ` + docs.ReviewOrder + `
+	`
+
+// openApprovalAsksStatement reads the open approval request of every document in $1, with the
+// turn waitingOnExpression gives it; scanOpenApprovalRequests reads its rows.
+const openApprovalAsksStatement = `
+		select a.id::text, a.author, a.approval->>'artifact_id', ` + waitingOnExpression + `
+		from asks a` + lastReplyJoin + `
+		where a.kind = 'approval' and a.state = 'open' and a.approval->>'artifact_id' = any($1::text[])
+	`
+
+// openApprovalRequest is one document's open approval request: who asked, and whose turn it is.
+type openApprovalRequest struct {
+	id        string
+	author    model.Actor
+	waitingOn string
+}
+
+// approvalTargets is the documents of artifacts, whose approval the two statements read, and the
+// ids they take as $1. Anything that is not a document carries no approval.
+func approvalTargets(artifacts []*model.Artifact) ([]string, map[string]*model.Artifact) {
 	ids := make([]string, 0, len(artifacts))
 	byID := make(map[string]*model.Artifact, len(artifacts))
 	for _, artifact := range artifacts {
@@ -81,63 +104,57 @@ func (s *server) attachApprovals(ctx context.Context, q queryer, artifacts []*mo
 		ids = append(ids, artifact.ID)
 		byID[artifact.ID] = artifact
 	}
-	if len(ids) == 0 {
-		return nil
-	}
-	latestReviews := map[string]model.ArtifactReview{}
-	rows, err := q.Query(ctx, `
-		select distinct on (artifact_id) `+docs.ReviewColumns+`
-		from artifact_reviews where artifact_id = any($1::uuid[])
-		order by artifact_id, `+docs.ReviewOrder+`
-	`, ids)
-	if err != nil {
+	return ids, byID
+}
+
+// scanLatestReviews reads the rows latestReviewsStatement returns into latestReviews, keyed by
+// document id. Its rows always come from a batch (queueApprovals queues the statement), whose own
+// execution error comes out of the last rows.Err(), unwrapped; the leading check names the read
+// for an error pgx recorded before this callback ran.
+func scanLatestReviews(rows pgx.Rows, latestReviews map[string]model.ArtifactReview) error {
+	if err := rows.Err(); err != nil {
 		return fmt.Errorf("load latest reviews: %w", err)
 	}
 	for rows.Next() {
 		review, err := docs.ScanReview(rows)
 		if err != nil {
-			rows.Close()
 			return err
 		}
 		latestReviews[review.ArtifactID] = review
 	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
+	return rows.Err()
+}
 
-	type openRequest struct {
-		id        string
-		author    model.Actor
-		waitingOn string
-	}
-	requests := map[string]openRequest{}
-	askRows, err := q.Query(ctx, `
-		select a.id::text, a.author, a.approval->>'artifact_id', `+waitingOnExpression+`
-		from asks a`+lastReplyJoin+`
-		where a.kind = 'approval' and a.state = 'open' and a.approval->>'artifact_id' = any($1::text[])
-	`, ids)
-	if err != nil {
+// scanOpenApprovalRequests reads the rows openApprovalAsksStatement returns into requests, keyed
+// by document id, reaching an error the way scanLatestReviews does: the statement's own failure
+// is the last rows.Err(), unwrapped, and the leading check names the read for an error pgx
+// recorded before this callback ran.
+func scanOpenApprovalRequests(rows pgx.Rows, requests map[string]openApprovalRequest) error {
+	if err := rows.Err(); err != nil {
 		return fmt.Errorf("load open approval asks: %w", err)
 	}
-	for askRows.Next() {
+	for rows.Next() {
 		var id, artifactID, waitingOn string
 		var author []byte
-		if err := askRows.Scan(&id, &author, &artifactID, &waitingOn); err != nil {
-			askRows.Close()
+		if err := rows.Scan(&id, &author, &artifactID, &waitingOn); err != nil {
 			return err
 		}
 		var actor model.Actor
 		if err := json.Unmarshal(author, &actor); err != nil {
-			askRows.Close()
 			return fmt.Errorf("decode approval ask author: %w", err)
 		}
-		requests[artifactID] = openRequest{id: id, author: actor, waitingOn: waitingOn}
+		requests[artifactID] = openApprovalRequest{id: id, author: actor, waitingOn: waitingOn}
 	}
-	askRows.Close()
-	if err := askRows.Err(); err != nil {
-		return err
-	}
+	return rows.Err()
+}
+
+// applyApprovals fills each document's Approval from its latest review and its open request, the
+// rule queueApprovals's apply runs once both statements have been read.
+func applyApprovals(
+	byID map[string]*model.Artifact,
+	latestReviews map[string]model.ArtifactReview,
+	requests map[string]openApprovalRequest,
+) {
 	for _, artifact := range byID {
 		latest := 0
 		for _, version := range artifact.Versions {
@@ -175,6 +192,43 @@ func (s *server) attachApprovals(ctx context.Context, q queryer, artifacts []*mo
 		}
 		artifact.Approval = approval
 	}
+}
+
+// queueApprovals queues in b the latest review and the open approval request of every document in
+// artifacts, and returns the apply that fills each document's Approval once the batch is closed.
+// The apply reads each document's Versions (applyApprovals), so a caller that queues those too
+// applies them first (queueArtifactDetails). No document queues nothing and its apply fills
+// nothing.
+func queueApprovals(b *pgx.Batch, artifacts []*model.Artifact) func() {
+	ids, byID := approvalTargets(artifacts)
+	if len(ids) == 0 {
+		return func() {}
+	}
+	latestReviews := map[string]model.ArtifactReview{}
+	requests := map[string]openApprovalRequest{}
+	b.Queue(latestReviewsStatement, ids).Query(func(rows pgx.Rows) error {
+		return scanLatestReviews(rows, latestReviews)
+	})
+	b.Queue(openApprovalAsksStatement, ids).Query(func(rows pgx.Rows) error {
+		return scanOpenApprovalRequests(rows, requests)
+	})
+	return func() { applyApprovals(byID, latestReviews, requests) }
+}
+
+// attachApprovals fills Approval for every document in place, sending queueApprovals's two
+// statements as a batch of their own on q (as loadArtifactDetails sends the whole detail batch),
+// so a read that wants the approval alone costs one round trip. A list holding no document
+// queues nothing and reads nothing.
+func (s *server) attachApprovals(ctx context.Context, q queryer, artifacts []*model.Artifact) error {
+	batch := &pgx.Batch{}
+	apply := queueApprovals(batch, artifacts)
+	if batch.Len() == 0 {
+		return nil
+	}
+	if err := q.SendBatch(ctx, batch).Close(); err != nil {
+		return err
+	}
+	apply()
 	return nil
 }
 

@@ -43,13 +43,13 @@ import (
 // as its address (isBareEmailLink), its `@` escaped where the ats spellings escape them, so the
 // address and the text beside it are one text again.
 //
-// It reads a run back under readBackReaders: inlineMarkdown, which reads as every document is
+// It reads a run back under three readers: inlineMarkdown, which reads as every document is
 // read now (editorRules), and the two readers Dispatch read stored markdown under before,
 // storedMarkdown (storedRules: a `*` or `_` run may open or close beside a `*` or `_` but not a
 // `~`, a `~` run is read by goldmark's strikethrough, which pairs runs of either length and
 // refuses one after any `~`, and every run is paired in goldmark's one loop over them in order)
 // and flankingMarkdown (flankingRules: those, with a `*` or `_` run judged by CommonMark's
-// flanking rules alone). A writing's depth is how many of readBackReaders, from inlineMarkdown, it
+// flanking rules alone). A writing's depth is how many of those readers, from inlineMarkdown, it
 // reads back under (readsBackUnder), and the writer keeps the earliest writing of the greatest
 // depth, the first writing counting first. Each depth asks more than the writer before the tilde
 // pairing (sjawhar/legion#2360) asked at that step, so wherever its choice reads back under
@@ -79,13 +79,14 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 		return
 	}
 	labels, signature := referencedLabels(nodes), inlineSignature(nodes)
-	// firstReads is how many of readBackReaders, from the first, the first writing reads back under.
+	// firstReads is how many of the readBackReaderCount readers, from the first, the first writing
+	// reads back under.
 	firstReads := r.readsBackUnder(from, prefix, labels, signature)
-	if firstReads == len(readBackReaders) {
+	if firstReads == readBackReaderCount {
 		return
 	}
 	written := string(r.b.Bytes()[from:])
-	// readsByBytes is how many of readBackReaders, from the first, each writing read back so far
+	// readsByBytes is how many of those readers, from the first, each writing read back so far
 	// reads back under, by the digest of its bytes.
 	readsByBytes := map[[sha256.Size]byte]int{sha256.Sum256(r.b.Bytes()[from:]): firstReads}
 	// keepsDeeper writes each of spellings once and reports whether one of them reads back deeper
@@ -104,14 +105,14 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, context inlin
 			count, read := readsByBytes[digest]
 			if !read {
 				count = r.readsBackUnder(from, prefix, labels, signature)
-				if count == len(readBackReaders) {
+				if count == readBackReaderCount {
 					return true
 				}
 				readsByBytes[digest] = count
 			}
 			reads[index] = count
 		}
-		for under := len(readBackReaders) - 1; under > firstReads; under-- {
+		for under := readBackReaderCount - 1; under > firstReads; under-- {
 			for index, spelling := range spellings {
 				if reads[index] >= under {
 					r.b.Truncate(from)
@@ -165,9 +166,10 @@ func runNeedsOf(nodes []*Node, context inlineContext, fused bool) runNeeds {
 	}
 }
 
-// readBackReaders is the readers inlineWithEscapes reads a run back under, in the order it drops
-// them from the last: inlineMarkdown, storedMarkdown and flankingMarkdown (readsBackUnder).
-var readBackReaders = [...]inlineReader{inlineMarkdown, storedMarkdown, flankingMarkdown}
+// readBackReaderCount is how many readers inlineWithEscapes reads a run back under, in the order
+// it drops them from the last: inlineMarkdown, storedMarkdown and flankingMarkdown
+// (readsBackUnder).
+const readBackReaderCount = 3
 
 // runSpelling is how writeInlineRun writes a run beyond the escape rules: the delimiters in its
 // text it escapes, whether it writes each bare URL (isBareURLLink) as an autolink (`<href>`, whose
@@ -536,17 +538,18 @@ func writesAddressSyntax(nodes []*Node) (colons, dots, ats bool) {
 	return colons, dots, ats
 }
 
-// readsBackUnder is how many of readBackReaders, from the first, the inline markdown
-// written since from reads back under as the nodes whose footnote labels are labels and whose
+// readsBackUnder is how many of the three readers, from the first, the inline markdown written
+// since from reads back under as the nodes whose footnote labels are labels and whose
 // inlineSignature is signature: the run's own lines, with the prefix its later lines are written
 // behind taken off, read after a definition for each label, since a reference reads as one only
 // then. It stops at the first reader the run does not read back under, and makes no read that is
-// the same parse as one it made: storedMarkdown reads a source holding no `~`, its labels included,
-// as inlineMarkdown does, since editorRules and storedRules differ only beside a `~` (a `*` or `_`
-// run's widening by one, tildeParser, tildeDelimiters, and the `~` runs' own group in
-// delimiterList), so that parse's nodes, error and divergence are inlineMarkdown's; and
-// flankingMarkdown reads a source as storedMarkdown does unless the stored parse reported a `*` or
-// `_` run that could open or close otherwise under flankingRules (parseInlineWithDefinitions).
+// the same parse as one it made: storedMarkdown reads a source holding no `~` as inlineMarkdown
+// does, since editorRules and storedRules differ only beside a `~` (a `*` or `_` run's widening by
+// one, tildeParser, tildeDelimiters, and the `~` runs' own group in delimiterList), so that
+// parse's nodes, error and divergence are inlineMarkdown's; and flankingMarkdown reads a source as
+// storedMarkdown does unless the stored parse reported a `*` or `_` run that could open or close
+// otherwise under flankingRules (parseInlineWithDefinitions). A label's `~` is the source's own:
+// the run writes every label it refers to as `[^label]`, and escapeFootnoteLabel escapes no `~`.
 func (r *renderer) readsBackUnder(from int, prefix string, labels, signature []string) int {
 	written := r.b.Bytes()[from:]
 	var lines strings.Builder
@@ -564,32 +567,26 @@ func (r *renderer) readsBackUnder(from int, prefix string, labels, signature []s
 		parsed, diverged, err := parseInlineWithDefinitions(source, labels, reader)
 		return err == nil && slices.Equal(inlineSignature(parsed), signature), diverged
 	}
-	reads, diverged := readsBack(readBackReaders[0])
+	reads, diverged := readsBack(inlineMarkdown)
 	if !reads {
 		return 0
 	}
-	if holdsTilde(source, labels) {
-		if reads, diverged = readsBack(readBackReaders[1]); !reads {
+	if strings.Contains(source, "~") {
+		if reads, diverged = readsBack(storedMarkdown); !reads {
 			return 1
 		}
 	}
 	if diverged {
-		if reads, _ = readsBack(readBackReaders[2]); !reads {
+		if reads, _ = readsBack(flankingMarkdown); !reads {
 			return 2
 		}
 	}
-	return 3
+	return readBackReaderCount
 }
 
 // readBackObserver, where a test sets it, is given each markdown readsBackUnder parses and the
 // reader it parses it under.
 var readBackObserver func(markdown string, reader inlineReader)
-
-// holdsTilde reports whether a run's source or any of the footnote labels whose definitions are
-// read after it holds a `~`.
-func holdsTilde(source string, labels []string) bool {
-	return strings.Contains(source, "~") || slices.ContainsFunc(labels, func(label string) bool { return strings.Contains(label, "~") })
-}
 
 // delimiterBesidePunctuation reports whether nodes write a delimiter run (a strong, emphasis or
 // strikethrough mark's) with punctuation or whitespace just inside it and text just outside it,

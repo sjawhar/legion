@@ -974,6 +974,21 @@ func (s *server) queryOwnerAsks(ctx context.Context, q queryer, owner owner, sta
 		return nil, nil, err
 	}
 	defer rows.Close()
+	asks, replies, err := scanAskReads(rows)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := loadAskDetails(ctx, q, askReadPointers(asks)); err != nil {
+		return nil, nil, err
+	}
+	return asks, replies, nil
+}
+
+// scanAskReads reads the rows an askReadColumns query returns, in the order it listed them, with
+// the newest reply in each ask's thread keyed by ask id; an ask nobody has replied to has no
+// entry. The issue read queues one of those queries in a batch (getIssue) and reads its rows
+// with this, so the two paths decode an ask the same way.
+func scanAskReads(rows pgx.Rows) ([]model.Ask, map[string]model.AskLastReply, error) {
 	asks := []model.Ask{}
 	replies := map[string]model.AskLastReply{}
 	for rows.Next() {
@@ -989,17 +1004,17 @@ func (s *server) queryOwnerAsks(ctx context.Context, q queryer, owner owner, sta
 	if err := rows.Err(); err != nil {
 		return nil, nil, err
 	}
-	askPointers := make([]*model.Ask, len(asks))
-	for index := range asks {
-		askPointers[index] = &asks[index]
-	}
-	if err := s.attachOpenedEventIDs(ctx, q, askPointers); err != nil {
-		return nil, nil, err
-	}
-	if err := attachAskBacklinkCounts(ctx, q, askPointers); err != nil {
-		return nil, nil, err
-	}
 	return asks, replies, nil
+}
+
+// askReadPointers addresses each ask in place, which the opened-event and backlink-count
+// loaders fill.
+func askReadPointers(asks []model.Ask) []*model.Ask {
+	pointers := make([]*model.Ask, len(asks))
+	for index := range asks {
+		pointers[index] = &asks[index]
+	}
+	return pointers
 }
 
 // lockAskForTransition reads one ask and locks its row for the transition about to be applied.
@@ -1028,14 +1043,7 @@ func (s *server) attachOpenedEventIDs(
 	q queryer,
 	asks []*model.Ask,
 ) error {
-	askIDs := make([]string, 0, len(asks))
-	seen := make(map[string]struct{}, len(asks))
-	for _, ask := range asks {
-		if _, exists := seen[ask.ID]; !exists {
-			seen[ask.ID] = struct{}{}
-			askIDs = append(askIDs, ask.ID)
-		}
-	}
+	askIDs := distinctAskIDs(asks)
 	if len(askIDs) == 0 {
 		return nil
 	}
@@ -1044,6 +1052,27 @@ func (s *server) attachOpenedEventIDs(
 	if err != nil {
 		return err
 	}
+	return applyOpenedEventIDs(asks, openedEventIDs)
+}
+
+// distinctAskIDs is each listed ask's id once, in the order the asks are listed: the argument
+// events.OpenedEventIDs takes, whether it is run on its own or queued in a batch
+// (events.QueueOpenedEventIDs, through queueAskDetails).
+func distinctAskIDs(asks []*model.Ask) []string {
+	askIDs := make([]string, 0, len(asks))
+	seen := make(map[string]struct{}, len(asks))
+	for _, ask := range asks {
+		if _, exists := seen[ask.ID]; !exists {
+			seen[ask.ID] = struct{}{}
+			askIDs = append(askIDs, ask.ID)
+		}
+	}
+	return askIDs
+}
+
+// applyOpenedEventIDs stamps each ask with its identity event. An ask the query answered none
+// for has no identity to serve, so the read fails rather than answering an ask without one.
+func applyOpenedEventIDs(asks []*model.Ask, openedEventIDs map[string]int64) error {
 	for _, ask := range asks {
 		openedEventID, ok := openedEventIDs[ask.ID]
 		if !ok {

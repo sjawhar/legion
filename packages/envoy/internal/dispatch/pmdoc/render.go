@@ -971,32 +971,31 @@ func hardBreaksAsSpaces(nodes []*Node) []*Node {
 }
 
 // asWritten is doc as its markdown writes it: without the marks the rendering does not write
-// (renderedMarkTypes) and with adjacent text runs under equal marks merged, as StripAnchorMarks
-// gives it, with each line break its textblocks hold in the one form markdown carries, and with
-// each U+0000 as U+FFFD (withNulsWritten). The browser editor holds two more line breaks. A soft
-// line break it keeps from a paste (a hard break with isInline) it draws as a space, and one is
-// written: both parsers read a soft break as one too. A line feed in text outside code it draws as
-// a line break (white-space: break-spaces), and a hard break is written, which both parsers read
-// back as the editor draws it, except where nothing but whitespace follows it in its textblock: a
-// hard break there reads back as a backslash, and a line feed as nothing, as trailing whitespace
-// does.
+// (renderedMarkTypes) and with adjacent text runs under equal marks merged (writtenTree, which is
+// what StripAnchorMarks copies), with each line break its textblocks hold in the one form markdown
+// carries, and with each U+0000 as U+FFFD (nulsWrittenTree). The U+0000s are written last, once
+// every merge is decided, so each decision is taken on the values as they are: two runs whose
+// links differ only in a U+0000 and a U+FFFD stay two runs. The browser editor holds two more line
+// breaks. A soft line break it keeps from a paste (a hard break with isInline) it draws as a
+// space, and one is written: both parsers read a soft break as one too. A line feed in text
+// outside code it draws as a line break (white-space: break-spaces), and a hard break is written,
+// which both parsers read back as the editor draws it, except where nothing but whitespace follows
+// it in its textblock: a hard break there reads back as a backslash, and a line feed as nothing,
+// as trailing whitespace does.
 //
 // It never writes doc, and shares doc's nodes, their attributes and their marks wherever they are
 // written as they are: only a node written otherwise, and the nodes above it, is a copy, so a
 // document with no anchor mark, no line break to rewrite and no U+0000 is doc itself. What it
 // returns is only read.
 func asWritten(doc *Node) *Node {
-	out := writtenTree(doc, true)
-	if holdsNul(out) {
-		out = withNulsWritten(out)
-	}
-	return out
+	return nulsWrittenTree(writtenTree(doc, true))
 }
 
-// writtenTree is node as asWritten writes it but for a U+0000 in its own text and attributes,
-// which its parent writes once it has merged its children (childrenAsWritten); node itself where
-// nothing under it is written otherwise. lineBreaks is whether a paragraph or heading at or under
-// node has its line breaks written (writtenLineBreaks): not under a textblock or a code block.
+// writtenTree is node as asWritten writes it but for the U+0000s under it, which nulsWrittenTree
+// writes after every merge is decided (childrenAsWritten); node itself where nothing under it is
+// written otherwise. lineBreaks is whether a paragraph or heading at or under node has its line
+// breaks written (writtenLineBreaks): not under a textblock or a code block, and under none of
+// them for StripAnchorMarks, which copies what it gives with lineBreaks false.
 func writtenTree(node *Node, lineBreaks bool) *Node {
 	marks, marksKept := renderedMarks(node.Marks)
 	children, childrenKept := childrenAsWritten(node, lineBreaks)
@@ -1032,10 +1031,11 @@ func renderedMarks(marks []Mark) ([]Mark, bool) {
 
 // childrenAsWritten is node's children as asWritten writes them, and whether that is node's own
 // slice. Each child is written (writtenTree), and adjacent text runs whose written marks are equal
-// merge into one that keeps the first's attributes. A paragraph or heading's children then have
-// their line breaks written where they hold one to rewrite (holdsLineBreakToWrite). Only after
-// those decisions is each child's own U+0000 written, so they are taken on the values as they are:
-// two runs whose links differ only in a U+0000 and a U+FFFD stay two runs.
+// merge into one that keeps the first's attributes and children. A paragraph or heading's children
+// then have their line breaks written where they hold one to rewrite (holdsLineBreakToWrite).
+// Nothing here writes a U+0000, which nulsWrittenTree writes after every one of these decisions is
+// taken, so each is taken on the values as they are: two runs whose links differ only in a U+0000
+// and a U+FFFD stay two runs.
 func childrenAsWritten(node *Node, lineBreaks bool) ([]*Node, bool) {
 	textblock := lineBreaks && (node.Type == "paragraph" || node.Type == "heading")
 	childLineBreaks := lineBreaks && !textblock && node.Type != "code_block"
@@ -1078,16 +1078,6 @@ func childrenAsWritten(node *Node, lineBreaks bool) ([]*Node, bool) {
 	if textblock && holdsLineBreakToWrite(out) {
 		out = writtenLineBreaks(out)
 		kept = false
-	}
-	for index, child := range out {
-		if !holdsNul(child) {
-			continue
-		}
-		if kept {
-			out = slices.Clone(out)
-			kept = false
-		}
-		out[index] = withNulsWritten(child)
 	}
 	return out, kept
 }
@@ -1159,15 +1149,40 @@ func attrsHoldNul(attrs Attrs) bool {
 	return false
 }
 
-// withNulsWritten is a copy of node, which holds a U+0000 (holdsNul), with each U+0000 the
-// rendering would write as it is - in its text, in a string attribute a node or mark writes (a
-// link's href, an image's alt, a code block's language), or in a block's id - as U+FFFD
-// (nulAsReplacement). node may be asWritten's input, so the copy's attributes and marks are its
-// own before any is written. A typed block's other attributes are written quoted
-// (renderTypedAttributes), U+0000 as the escape \x00 that its parser unquotes back, so they keep
-// it; its id is written bare, `#` and the id.
-func withNulsWritten(node *Node) *Node {
-	out := &Node{Type: node.Type, Attrs: cloneAttrs(node.Attrs), Text: nulAsReplacement(node.Text), Marks: cloneMarks(node.Marks), Children: node.Children}
+// nulsWrittenTree is node, the tree writtenTree gives, with each U+0000 under it written
+// (withNulsWritten): node itself where nothing under it holds one. It copies only a node holdsNul
+// reports and the nodes above it, and shares every other node, its attributes and its marks, as
+// asWritten's contract says.
+func nulsWrittenTree(node *Node) *Node {
+	children, kept := node.Children, true
+	for index, child := range children {
+		written := nulsWrittenTree(child)
+		if written == child {
+			continue
+		}
+		if kept {
+			children, kept = slices.Clone(children), false
+		}
+		children[index] = written
+	}
+	if holdsNul(node) {
+		return withNulsWritten(node, children)
+	}
+	if kept {
+		return node
+	}
+	return &Node{Type: node.Type, Attrs: node.Attrs, Text: node.Text, Marks: node.Marks, Children: children}
+}
+
+// withNulsWritten is a copy of node, which holds a U+0000 (holdsNul), holding children in place of
+// its own children and with each U+0000 the rendering would write as it is - in its text, in a
+// string attribute a node or mark writes (a link's href, an image's alt, a code block's language),
+// or in a block's id - as U+FFFD (nulAsReplacement). node may be asWritten's input, so the copy's
+// attributes and marks are its own before any is written. A typed block's other attributes are
+// written quoted (renderTypedAttributes), U+0000 as the escape \x00 that its parser unquotes back,
+// so they keep it; its id is written bare, `#` and the id.
+func withNulsWritten(node *Node, children []*Node) *Node {
+	out := &Node{Type: node.Type, Attrs: cloneAttrs(node.Attrs), Text: nulAsReplacement(node.Text), Marks: cloneMarks(node.Marks), Children: children}
 	if !IsTypedBlock(out.Type) {
 		writeNulsInAttrs(out.Attrs)
 	} else if id, ok := out.Attrs[BlockIDAttr].(string); ok && strings.IndexByte(id, 0) >= 0 {

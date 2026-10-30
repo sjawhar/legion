@@ -1355,29 +1355,17 @@ func markAttributeID(value any) string {
 	return id
 }
 
-// StripAnchorMarks returns a copy of doc with every mark the rendering does not write
-// (renderedMarkTypes) removed - Proof and Dispatch anchors - coalescing adjacent equal-mark text
-// runs.
+// StripAnchorMarks is a copy of node without the marks the rendering does not write
+// (renderedMarkTypes) - Proof and Dispatch anchors - and with adjacent text runs under equal
+// written marks merged into one that keeps the first run's attributes and children. That is what
+// the rendering reads (writtenTree), with lineBreaks false, so no line break is rewritten, and
+// before any U+0000 is written (nulsWrittenTree): the text and the attributes are node's own
+// bytes. The copy is the caller's, which cloneNode gives whether or not the rendering writes
+// anything otherwise, since callers own and change what they get (docs.asUploaded, the paragraph
+// a docs edit builds, spreadDifferences).
 func StripAnchorMarks(node *Node) *Node {
 	if node == nil {
 		return nil
 	}
-	out := &Node{Type: node.Type, Attrs: cloneAttrs(node.Attrs), Text: node.Text}
-	for _, mark := range node.Marks {
-		if renderedMarkTypes[mark.Type] {
-			out.Marks = append(out.Marks, Mark{Type: mark.Type, Attrs: cloneAttrs(mark.Attrs)})
-		}
-	}
-	for _, child := range node.Children {
-		clean := StripAnchorMarks(child)
-		if len(out.Children) > 0 {
-			previous := out.Children[len(out.Children)-1]
-			if previous.Type == "text" && clean.Type == "text" && marksEqual(previous.Marks, clean.Marks) {
-				previous.Text += clean.Text
-				continue
-			}
-		}
-		out.Children = append(out.Children, clean)
-	}
-	return out
+	return cloneNode(writtenTree(node, false))
 }

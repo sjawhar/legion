@@ -1,0 +1,220 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-512",
+  "completed": "2026-10-27T15:07:43Z",
+  "planDocument": "dispatch://INFRA-512/artifact/plan-md",
+  "scope": "Root pull request only, started when the architect says the last child (INFRA-639..INFRA-653) closed: (a) the garbage-collection row: profile LINUX's replay on main with every child merged, fix in one pass each in-lane allocation site holding >=5% of the window's allocated bytes, by deliverable 2's merge rule; (b) deliverable 3: whole-replay CPU (CPU-seconds and cores at full rate) at B0 (parent of the first fix child's merge commit) and at the root head, profiles at each end, quoted on INFRA-512 before the merge; then the production check (Cloud Monitoring CPU and a live profile on the pull request).",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: its pr-body.md proof rules, the conflicts-and-rewrites.md forward merge (one approved merge of main@origin before the first code commit), and merge-gate.md's production check after the close",
+      "dispatch: posting the site table and deliverable 3's comment and profile artifacts on INFRA-512 (dispatch comment, dispatch artifact --path)",
+      "ce-simplify-code: the simplify pass pr-body.md calls for on the allocation changes",
+      "asd-ste100: the pull request body and Dispatch comments, per the deployment instructions"
+    ],
+    "test": [
+      "legion-worker: test-phase proofs (pr-body.md 'What a proof is'), re-running one replay run each at B0, M and H on its own LOADTEST_ROOT and A5's negative control",
+      "dispatch: reading INFRA-512's deliverable-3 comment and artifacts (dispatch read --all-events) to check them against the run directories"
+    ],
+    "review": [
+      "legion-worker: merge-gate.md and review-threads.md for the review of the head by SHA",
+      "dispatch: checking the INFRA-512 comment and artifacts named by A8 and A9"
+    ]
+  },
+  "dependencies": [
+    "Every child of INFRA-512 closed (the architect messages the root implementer's role topic).",
+    "INFRA-639 merged with acceptance 6 (window start/end heap profiles), 7 (Dispatch built alone from a named commit), 8 (seed migration), 9 (per-run CPU-seconds, window, F, cores at full rate); it merges after sjawhar/legion#2369 (INFRA-589)."
+  ],
+  "definitions": {
+    "M": "the forward-merge commit of main@origin into legion/INFRA-512 (main with every child), the GC pass's base",
+    "H": "the root head after the GC pass",
+    "B0": "first parent on main of the earliest-merged fix child's merge commit (gh api repos/sjawhar/legion/commits/<sha> --jq '.parents[0].sha')",
+    "windowBytesT": "end heap profile total alloc_space minus start heap profile total, each read alone; never the 'of N total' of a -diff_base read (it prints the base's total: 132.87 GB vs the true 89.48 GB on the old replay)",
+    "allocationSite": "a function of github.com/sjawhar/envoy/..., credited with the window bytes whose innermost Dispatch frame it is: flat column of go tool pprof -top -nodecount=1000000 -nodefraction=0 -edgefraction=0 -sample_index=alloc_space -diff_base=<start> '-show=^github\\.com/sjawhar/envoy/' <bin> <end>",
+    "profileOfRecord": "window allocation profile of the median-CPU run of the three M runs; one pass, no second profile",
+    "gcCpu": "^runtime\\.gcBgMarkWorker$|^runtime\\.gcAssistAlloc$|^runtime\\.bgsweep$|^runtime\\.bgscavenge$ (W1), idle-priority mark included, split reported",
+    "expectedGain": "E = sum over fixed sites of f_s*b_s/T*G + f_s*m_s; f_s from a per-site benchmark B/op, m_s = CPU under the site in runtime.mallocgc",
+    "mergeRule": "S = max(M) - min(M) CPU-seconds; E >= S: every H run below every M run; E < S: the -focus share of GC regex plus fixed sites in the median H profile is lower than in the median M profile by >= E/median(M)/2; plus each site's flat bytes in the median H window profile below its bytes in the profile of record, or the site comes out and is written up on INFRA-512"
+  },
+  "tasks": [
+    "1 Preflight: every child done; main's loadtest has INFRA-639 acceptance 6/7/9; no SetGCPercent/SetMemoryLimit/GOGC/GOMEMLIMIT outside tests",
+    "2 Forward merge: jj new legion/INFRA-512 main@origin (architect-approved 14:51Z), push without skip-checks; every child merge commit is an ancestor of M",
+    "3 Find B0 and record the defining child, pull request and SHAs",
+    "4 Seed/migration check: B0's highest migration >= seed.meta.json .migration (else reseed with B0's build, used for every side); no backfill owed or running inside any window (migrated seed copy if needed)",
+    "5 Three M runs, alternated with the three B0 runs: box_busy_before <= 0.10, committed == offered, Dispatch peak 5 s cores < 0.9 x GOMAXPROCS",
+    "6 Site table from the profile of record (every site >= 2%, qualifying >= 5%), allocating lines via -list; INFRA-514-lane sites (docs/fold.go history fold, coldFork) to the architect with bytes and a proposed fix; ygo-only fixes to the architect as a decision; table posted on INFRA-512",
+    "7 Design each fix with f_s and E; no sync.Pool or buffer kept beyond one request without Sami's decision through the architect; outputs byte-identical",
+    "8 Per-site benchmark and anti-aliasing test on generated real-size documents (no LINUX content in the public tree); throwaway corpus comparison over 1,157 LINUX specs under $TMPDIR; CHANGELOG entry; AGENTS.md where a changed function is described",
+    "9 go test ./internal/dispatch/... ./cmd/dispatch/..., go vet ./..., -tags memory suite, -race on changed packages, INFRA-179 grep",
+    "10 Three H runs; merge rule; per-site byte drop (failing sites removed, H re-run); heap in use p50 and RSS max <= highest M run",
+    "11 Deliverable 3 comment and six profile artifacts on INFRA-512 (B0/M/H SHAs, inputs, CPU-seconds and cores at full rate beside production's 10.9-14.0, T, GC split, W-row partition at each end, commits B0..H touching Dispatch's server marked by tree, each child's merge-rule result, what the replay does not reproduce)",
+    "12 No qualifying in-lane site: the pull request carries a docs/solutions note of deliverable 3 plus the INFRA-512 comment (architect 15:00Z)",
+    "13 Pull request body: Dispatch: INFRA-512, E2E lines, site table, f_s, E, 3+3 runs, S, rule branch, per-site bytes, deliverable 3; no private names",
+    "14 After any later commit under packages/envoy: re-run H and re-post before READY; diff posted H..READY head under packages/envoy empty"
+  ],
+  "acceptance": [
+    {
+      "id": "A1",
+      "criterion": "Profile of record and site table from window bytes",
+      "surface": "Dispatch server under packages/envoy/loadtest's LINUX replay (INFRA-639) on the pod",
+      "check": "task 6 pprof command on the median M run's heap profiles, T from the two separate totals; INFRA-512 comment lists every site >= 2%"
+    },
+    {
+      "id": "A2",
+      "criterion": "Every qualifying in-lane site fixed; every other qualifying site sent to the architect",
+      "surface": "the branch diff and the architect's answers",
+      "check": "site table vs jj diff --from <M> --to <H> --stat; architect's answer quoted per out-of-lane site"
+    },
+    {
+      "id": "A3",
+      "criterion": "Deliverable 2's rule holds for the pass",
+      "surface": "loadtest summary.json of the 3 M and 3 H runs and their CPU profiles",
+      "check": "max(H) < min(M) when E >= S, else the -focus share drop >= E/median(M)/2"
+    },
+    {
+      "id": "A4",
+      "criterion": "Each fixed site's bytes fell",
+      "surface": "median H run's window allocation profile",
+      "check": "task 6 command: each site's flat bytes below the profile of record's; failing sites absent from the branch and written up on INFRA-512"
+    },
+    {
+      "id": "A5",
+      "criterion": "Outputs unchanged",
+      "surface": "Go test suites and a throwaway corpus run",
+      "check": "per-site tests, go test ./internal/dispatch/... ./cmd/dispatch/..., -race on changed packages; corpus comparison 0 differences over 1,157 specs; negative control: a fix returning the reused buffer without a copy fails its per-site test"
+    },
+    {
+      "id": "A6",
+      "criterion": "No memory kept resident",
+      "surface": "real-process memory suite and loadtest Resources table",
+      "check": "go test -tags memory -count=1 -timeout 60m ./cmd/dispatch passes; every H run's heap in use p50 and RSS max <= highest M run; no sync.Pool in the M..H diff"
+    },
+    {
+      "id": "A7",
+      "criterion": "No GC settings changed",
+      "surface": "source at H",
+      "check": "grep -rnE 'SetGCPercent|SetMemoryLimit|GOGC|GOMEMLIMIT' packages/envoy --include='*.go' | grep -v _test.go prints nothing"
+    },
+    {
+      "id": "A8",
+      "criterion": "Deliverable 3 on INFRA-512 with its profiles",
+      "surface": "Dispatch issue INFRA-512",
+      "check": "dispatch read --issue INFRA-512 --all-events shows the comment with every task-11 item and the six profile artifacts"
+    },
+    {
+      "id": "A9",
+      "criterion": "Deliverable 3 measures the head that merges",
+      "surface": "the branch",
+      "check": "jj diff --from <posted H> --to <READY head> packages/envoy is empty"
+    },
+    {
+      "id": "A10",
+      "criterion": "Production check",
+      "surface": "production Dispatch",
+      "check": "served commit from /healthz carries the merge (else verdict pending); Cloud Monitoring kubernetes.io/container/cpu/core_usage_time 10-minute means since the deploy beside the hour before, via the Monitoring v3 timeSeries API with the metadata-server token; 30 s CPU and allocs profiles via kubectl -n dispatch port-forward to pprof 6060, every 5 minutes within the 2 h look until one shows the fixed sites; numbers and pprof text only on the pull request, no private identifiers"
+    }
+  ],
+  "testerPlan": "Own LOADTEST_ROOT after the implementer's runs: one replay run each at B0, M and H, each within [min - S, max + S] of the implementer's side and H below M when E >= S; re-run the task-6 pprof commands and the merge-rule arithmetic from the run directories; task-9 suites including the memory suite; A5's negative control; A8 and A9.",
+  "reviewFocus": "Aliasing of reused buffers escaping to callers or cached reads; no buffer kept beyond one call; byte-identical outputs; the site definition and T arithmetic; no private names in pull request text.",
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "Qualifying sites may sit in INFRA-514's history-fold code or inside the ygo fork",
+        "answer": "Architect 15:00Z: INFRA-514-lane sites go to the architect with bytes and a proposed fix before any change; ygo-only fixes go to the architect as a decision; ygo and stdlib bytes are credited to the calling Dispatch function (task 6)"
+      },
+      {
+        "finding": "'Allocation site' is undefined",
+        "answer": "Defined in plan section 3: innermost Dispatch-module frame, flat bytes of one literal pprof command with -show; no-Dispatch-frame bytes reported as one line"
+      },
+      {
+        "finding": "The profile must hold only the window's bytes",
+        "answer": "INFRA-639 acceptance 6 (start and end heap profiles) is a preflight check; T is read from the two totals separately because a -diff_base read prints the base's total (verified on the old replay)"
+      },
+      {
+        "finding": "Deliverable 2's rule is per pull request; the pass is several sites",
+        "answer": "Architect 15:00Z: one combined 3+3 measurement; each site's byte drop shown in the head's window profile; a failing site comes out and is written up"
+      },
+      {
+        "finding": "Expected gain and 'changed function's share' undefined for GC",
+        "answer": "Section 3: E formula from the ranking's bytes model plus mallocgc CPU under each site; the share is one -focus of the GC regex plus every fixed site"
+      },
+      {
+        "finding": "Idle-priority GC can hide a reduction",
+        "answer": "GC CPU includes idle-priority mark (production pays it on 16 cores); the split is reported each end"
+      },
+      {
+        "finding": "No answer for no qualifying site; one pass must stay one pass",
+        "answer": "Architect 15:00Z: the pull request carries a docs/solutions note of deliverable 3 plus the comment; no second profile; a site crossing 5% after the pass is not fixed"
+      },
+      {
+        "finding": "Deliverable 3's difference includes other trees' work",
+        "answer": "Task 11 lists every commit B0..H touching Dispatch's server, marked by tree, plus each child's merge-rule result and the W-row partition at each end"
+      },
+      {
+        "finding": "Same inputs both ends; seed may be newer than B0",
+        "answer": "Task 4: migration check, reseed with B0's build for every side if needed; generator and listener from the root checkout, Dispatch per commit (acceptance 7)"
+      },
+      {
+        "finding": "Forward-migration backfills could run inside the after window",
+        "answer": "Task 4: the owed-backfill query is 0 at window start and no backfill pass in the window; a migrated seed copy otherwise"
+      },
+      {
+        "finding": "Saturation and the measuring interval",
+        "answer": "Task 5: peak 5 s cores < 0.9 x GOMAXPROCS and committed == offered, else lower F for every side of the record; interval is INFRA-639's window CPU-seconds, the same one every child measures"
+      },
+      {
+        "finding": "Deliverable 3 has no run count or format",
+        "answer": "Three runs each at B0, M, H; task 11 fixes the comment's content and the six artifacts; A8 checks it"
+      },
+      {
+        "finding": "Deliverable 3 must be posted before the merge at the merging head",
+        "answer": "Task 14 and A9"
+      },
+      {
+        "finding": "Order of the forward merge and the profile",
+        "answer": "Tasks 1-5 in order; ancestor check of every child merge commit in task 2; later base merges follow the worker skill's rule"
+      },
+      {
+        "finding": "'No resident memory' has no check for pools or buffers",
+        "answer": "No sync.Pool or kept buffer without Sami's decision via the architect; A6 memory suite plus heap/RSS against the M runs"
+      },
+      {
+        "finding": "Equivalence tests must not commit LINUX specs to the public repository",
+        "answer": "Generated real-size fixtures in the tree; the LINUX corpus comparison is throwaway under $TMPDIR"
+      },
+      {
+        "finding": "Production check posts on a public pull request and must drive the changed path",
+        "answer": "Numbers and pprof text only, no identifiers; production's own traffic drives it, profiles every 5 minutes within the 2 h look until one shows the fixed sites"
+      },
+      {
+        "finding": "Replay only, or also the route mix",
+        "answer": "Replay only: the GC row says 'profile the replay' (architect agreed)"
+      },
+      {
+        "finding": "INFRA-179 boundary needs a check",
+        "answer": "A7 grep"
+      },
+      {
+        "finding": "Dependency on INFRA-639 and #2369",
+        "answer": "Task 1 preflight; the architect names the branch if INFRA-639 has not merged"
+      },
+      {
+        "finding": "Runs take hours on a shared pod",
+        "answer": "box_busy_before <= 0.10 per run; the tester runs after the implementer, one run per side"
+      },
+      {
+        "finding": "Old-replay shares cannot decide qualifying sites; some claims unverified",
+        "answer": "The profile of record decides; old shares are labelled estimates in section 9; production access was checked live on 2026-10-27 (kubectl get pods and port-forward allowed in namespace dispatch, metadata-server token answers 200)"
+      },
+      {
+        "finding": "A changelog entry is needed",
+        "answer": "Task 8: packages/envoy/CHANGELOG.md [Unreleased] entry per site"
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": []
+}

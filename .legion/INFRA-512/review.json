@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-512",
+  "completed": "2026-10-30T13:05:00Z",
+  "round": 3,
+  "decision": "approved",
+  "scope": "The architect capped this round (10:28:46Z) to review 5710976883's two findings; I reviewed the cd2e246d..1b91d67f delta only, plus my prose commit ffb71e47.",
+  "reviewedCodeHead": "ffb71e47",
+  "critical": 0,
+  "important": 0,
+  "minor": 2,
+  "roundTwoFindings": "Both resolved in 1b91d67f. (1) queueApprovals (api/reviews.go) is the one queue of the latest-review and open-request statements; queueArtifactDetails nests it after the versions and applies versions first, attachApprovals sends it as one batch on its queryer (the approval-request route's transaction), and loadArtifactRow sends loadArtifactDetails for its one artifact, so a single-artifact read goes from four statements to the row plus one batch (tester's traced count). The scans fill caller-made maps and their comments match the code. (2) storetest.Reopened is the one copy-config/open/cleanup helper; Traced and SingleConnection are one-liners over it, and singleConnectionStore is gone.",
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/approval_request_batch_test.go",
+      "description": "The test accepts 409 for sixteen repeat requests on one document, which renewApprovalAsk cannot answer here (no summary is sent, so summary equals the open one, reviews.go:588-602); and its fault coverage repeats reviews_test.go's first and repeat request. Require 200, or replace it with a storetest.Traced round-trip count on requestArtifactApproval. For the (a)+(b) round of this pull request, under the architect's cap."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/store/storetest/second.go",
+      "description": "SecondProcess still holds its own copy of Reopened's body; make it Reopened with an empty configure. For the (a)+(b) round of this pull request, under the architect's cap."
+    }
+  ],
+  "proseFixedByReviewer": [
+    "ffb71e47: loadArtifactDetails' and queueArtifactDetails' comments listed only list reads; loadArtifactRow now sends the same batch for one artifact. AGENTS.md said the two approval writes call attachApprovals to re-read the document they changed; requestArtifactApproval calls it before and after it opens or renews the ask."
+  ],
+  "thermonuclear": {
+    "deepReview": "Verdict: APPROVE at 054169df. No Medium or High. A batch on the transaction aborts it on a failed statement as the two statements did; every caller's queryer is the pool or a transaction from Pool.Begin; attachApprovals' only artifacts already carry their versions (loadArtifact at reviews.go:400). Two Minor findings on the new test, recorded above.",
+    "codeQuality": "Verdict: CHANGES at 054169df: the new test's coverage, SecondProcess' copy, and two comments (fixed in ffb71e47). I judge the first two Minor: they change no behaviour and hide no production error."
+  },
+  "ci": "envoy-go at 1b91d67f (merge with main 88818a3b) failed TestRoutesTablePinsEveryRegisteredRoute: main itself holds 147 routes against a pin of 146 after #2478 and #2376 each bumped it; this branch touches neither file, and sjawhar/legion#2551 fixes main's pin. envoy-go is not a required check. Required checks are read at the head this review approves."
+}
