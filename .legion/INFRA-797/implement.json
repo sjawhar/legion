@@ -2,116 +2,91 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-797",
-  "completed": "2026-10-30T13:10:00Z",
+  "completed": "2026-10-30T16:05:00Z",
+  "round": 2,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2553",
+  "codeHead": "9af8b64a2817fa81cc40b404bea356ac2356d0fe",
+  "answeredReview": "0cbae6316cd8d82b312fec60348829f05026fc6a",
   "proof": [
     {
-      "criterion": "A1/R2: a Dispatch server with no DISPATCH_SIGNIN_* setting boots, serves the agent-token API, and answers GET /auth/start with a refusal that says browser sign-in is off.",
-      "surface": "The real envoy-dispatch binary built from this head, as a process on a real Postgres (Debian PostgreSQL 17.11 with pgvector at 127.0.0.1:5433, the rootless harness docs/solutions/testing/the-real-dispatch-stack-runs-inside-a-legion-pod-with-no-postgres-no-docker-and-no-root-INFRA-42.md describes), driven over HTTP with curl.",
-      "command": "cd packages/envoy && go build -o $TMPDIR/envoy-dispatch ./cmd/dispatch, then env -i PATH=/usr/bin:/bin HOME=$TMPDIR TMPDIR=$TMPDIR DATABASE_URL='postgres://postgres@127.0.0.1:5433/dispatch_sandbox_proof?sslmode=disable' DISPATCH_AGENT_TOKEN=sandbox-proof-agent-token DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT=18766 DISPATCH_SERVER_URL=http://127.0.0.1:18766 $TMPDIR/envoy-dispatch (no DISPATCH_SIGNIN_* at all), then curl -si -H 'Authorization: Bearer sandbox-proof-agent-token' http://127.0.0.1:18766/api/v1/whoami and curl -si http://127.0.0.1:18766/auth/start and curl -s http://127.0.0.1:18766/healthz",
-      "observed": "The server migrated the database and listened. GET /api/v1/whoami answered HTTP/1.1 200 OK with {\"kind\":\"agent\",\"owner\":null,\"service\":null}. GET /auth/start answered HTTP/1.1 503 Service Unavailable with {\"code\":\"SIGNIN_UNCONFIGURED\",\"error\":\"Google sign-in is not configured on this server (DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET, one of DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN)\"}. /healthz reported \"signin\":null.",
-      "headSha": "d4acfcdb20466a2d8197a165fd96a73b56227a99",
-      "negativeControl": "The same boot with DISPATCH_SIGNIN_CLIENT_ID=example-client-id alone and nothing else changed: the process exited 1 with \"Google sign-in needs DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET and one of DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN: DISPATCH_SIGNIN_CLIENT_ID set, DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_SECRET, DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN missing\", so a half-configured deployment still refuses the boot. GET /api/v1/whoami with a wrong bearer answered HTTP/1.1 401 Unauthorized {\"code\":\"UNAUTHORIZED\",\"error\":\"invalid bearer token\"}, so the 200 above is the token's and not an open API."
+      "criterion": "The review's blocking authz finding: a cookie server with no DISPATCH_SIGNIN_* setting must not go on honouring the dsession cookies its sign-in already issued.",
+      "surface": "The real envoy-dispatch binary built from this head, as a process on a real Postgres (Debian PostgreSQL 17.11 with pgvector at 127.0.0.1:5433), against a database carrying the people and user_sessions rows a sign-in leaves behind, driven over HTTP with curl. That database state is what a converted stack holds and is what makes the request reach the cookie check at all.",
+      "command": "Minted a dsession cookie for someone@example.com with the deployment's own DISPATCH_SIGNING_KEY (auth.IssueSessionCookie through a throwaway cmd/zzmintcookie, deleted after the run), inserted the rows a sign-in leaves (insert into people (email) …; insert into user_sessions (login) …, then select login, generation from user_sessions → someone@example.com|0), started the binary with DATABASE_URL, DISPATCH_AGENT_TOKEN, DISPATCH_SIGNING_KEY, DISPATCH_LISTEN_HOST, DISPATCH_PORT and DISPATCH_SERVER_URL and no DISPATCH_SIGNIN_* at all, then curl -si -H 'Cookie: dsession=<value>' http://127.0.0.1:18769/api/v1/whoami with no bearer.",
+      "observed": "HTTP/1.1 401 Unauthorized with {\"code\":\"NO_IDENTITY\",\"error\":\"unauthorized\"}. requestIdentityFor returns identity.NoBrowserIdentity for that boot, so no cookie names a person.",
+      "headSha": "9af8b64a2817fa81cc40b404bea356ac2356d0fe",
+      "negativeControl": "The same cookie, the same database and the same request against the same binary with the new guard removed (`if false && …` in requestIdentityFor, rebuilt, run on port 18770, then reverted and the file restored with jj restore): HTTP/1.1 200 OK with {\"kind\":\"user\",\"login\":\"someone@example.com\"}. That is the defect the reviewer named, driven on the real surface, and it is what the guard now stops."
     },
     {
-      "criterion": "A1/R1: with the tailnet inputs empty the component declares no front door, and its url output and DISPATCH_SERVER_URL name the in-cluster Service.",
-      "surface": "The component under the Pulumi mock engine: the resolver and every registration the engine receives, which is what a consumer's pulumi up declares.",
-      "command": "cd packages/envoy/infra && go test ./gcp/ -run 'TestDispatchSandbox' -count=1 -v",
-      "observed": "--- PASS for TestDispatchSandboxRegistrations (the declaration equals gcp/testdata/dispatch-registrations.golden minus exactly the nine front-door lines, ConfigMap example-dispatch-serve among them), TestDispatchSandboxServesInTheCluster (the url output and the app's DISPATCH_SERVER_URL are both http://example-dispatch.dispatch.svc.cluster.local:8766, asserted equal to one another), TestDispatchSandboxRendersNoSignIn, TestDispatchSandboxDialsTheInClusterHub, TestDispatchSandboxAdmitsOnlyTheAllowedNamespaces and TestDispatchSandboxRefusesWhatItDoesNotBuild. ok github.com/sjawhar/envoy/infra/gcp.",
-      "headSha": "d4acfcdb20466a2d8197a165fd96a73b56227a99",
-      "negativeControl": "Two deliberate breaks, each reverted with jj restore and the suite re-run green afterwards. serverURL's front-door test forced to true: TestDispatchSandboxServesInTheCluster and TestConstructDispatchSandbox both FAIL with expected \"http://example-dispatch.dispatch.svc.cluster.local:8766\". The front-door Deployment/NetworkPolicy gate and the app NetworkPolicy's podPeer gate forced on: TestDispatchSandboxRegistrations FAILs naming +kubernetes:networking.k8s.io/v1:NetworkPolicy example-dispatch-tailnet, and TestDispatchSandboxAdmitsOnlyTheAllowedNamespaces FAILs with \"should have 1 item(s), but has 2\"."
+      "criterion": "A1/R2: a Dispatch server with no DISPATCH_SIGNIN_* setting boots, serves the agent-token API, and answers GET /auth/start with a refusal that says browser sign-in is off (re-proved at this head).",
+      "surface": "The same real envoy-dispatch process on the same real Postgres, over HTTP.",
+      "command": "cd packages/envoy && go build -o $TMPDIR/envoy-dispatch ./cmd/dispatch, start it with no DISPATCH_SIGNIN_*, then curl -si -H 'Authorization: Bearer <token>' http://127.0.0.1:18766/api/v1/whoami, curl -si http://127.0.0.1:18766/auth/start and curl -s http://127.0.0.1:18766/healthz",
+      "observed": "HTTP/1.1 200 OK {\"kind\":\"agent\",\"owner\":null,\"service\":null}; HTTP/1.1 503 Service Unavailable {\"code\":\"SIGNIN_UNCONFIGURED\",\"error\":\"Google sign-in is not configured on this server (DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET, one of DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN)\"}; /healthz reporting \"signin\":null.",
+      "headSha": "9af8b64a2817fa81cc40b404bea356ac2356d0fe",
+      "negativeControl": "The same boot with DISPATCH_SIGNIN_CLIENT_ID alone exited 1 naming the four settings it misses; GET /api/v1/whoami with a wrong bearer answered HTTP/1.1 401 Unauthorized {\"code\":\"UNAUTHORIZED\",\"error\":\"invalid bearer token\"}, so the 200 above is the token's."
     },
     {
-      "criterion": "A1/R1: setting some of the tailnet inputs but not all is refused, and the refusal names the missing ones.",
-      "surface": "The resolver through the exported gcp.ResolveDispatch, the call NewDispatch makes before anything registers.",
+      "criterion": "The authz fix and the whole server package in process, on a real database, with dev sign-in unaffected.",
+      "surface": "resolveBootConfig and the router main serves, built through appContextFor as main builds it, on databases storetest clones from the migrated template.",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' go test ./cmd/dispatch/ -count=1",
+      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 257.801s, carrying TestABootWithNoSignInRefusesACookieIssuedWhileSignInWasOn (the new test the reviewer asked for: a cookie minted with the deployment key against a session store that holds the person, answered 401 NO_IDENTITY), TestABootWithNoSignInServesAgentsAndRefusesBrowserSignIn, TestResolveBootConfigRefusesAPartialSignIn, every TestEverySettingReachesItsReader case and all fourteen dev sign-in tests. No --- SKIP at any level, so storetest.Open reached the database.",
+      "headSha": "9af8b64a2817fa81cc40b404bea356ac2356d0fe",
+      "negativeControl": "The new test was written before the fix and run against the unfixed code: it answered 200 {\"kind\":\"user\",\"login\":\"someone@example.com\"} with the access log naming caller=someone@example.com, which is the defect. It passes only with the guard in place."
+    },
+    {
+      "criterion": "The reviewer's shortfall finding: a set-but-malformed input of a half-set group must still name every input of that group left unset.",
+      "surface": "The resolver through the exported gcp.ResolveDispatch.",
       "command": "cd packages/envoy/infra && go test ./gcp/ -run 'TestDispatchPartialTailnetGroupNamesEveryMissingInput' -count=1 -v",
-      "observed": "--- PASS for all nine subtests: tailnet_tailnetDnsName, tailnet_tags, tailnet_tailnetAuthKey, tailnet_tailnetService, tailnet_tailscaleImage, tailnet_frontDoorToolsImage, sign-in_signInClientId, sign-in_signInClientSecret and sign-in_signInDomain. Each sets one input of its group and asserts the refusal names every other input of that group, so one run names the whole shortfall; the clause reads, for example, \"(the tailnet inputs are set together or not at all; unset: tags, tailnetAuthKey)\".",
-      "headSha": "d4acfcdb20466a2d8197a165fd96a73b56227a99",
-      "negativeControl": "A whole group is not refused: TestDispatchSandboxRefusesWhatItDoesNotBuild closes with gcp.ResolveDispatch(dispatchSandboxArgs()) returning no error, and every default-mode test resolves with both groups set, so the clause fires only on a partial group. TestDispatchResolverRefusesInvalidInputs is unedited and still passes, so a set-but-malformed input keeps its old message with no clause."
+      "observed": "--- PASS for all thirteen subtests: the nine single-set inputs and four malformed-value rows added this round (a non-ts.net tailnetDnsName, a tag without its tag: prefix, an unpinned tailscaleImage, and signInDomain \"Example.com\" with the rest of its group unset). Measured on the resolver before and after the fix: tailnetDnsName \"bad\" alone named no unset input before and now ends with \"(the tailnet inputs are set together or not at all; unset: tags, tailnetAuthKey, tailnetService, tailscaleImage, frontDoorToolsImage)\".",
+      "headSha": "9af8b64a2817fa81cc40b404bea356ac2356d0fe",
+      "negativeControl": "A whole group still carries no clause: TestDispatchResolverRefusesInvalidInputs is unedited and passes, and TestDispatchSandboxRefusesWhatItDoesNotBuild's closing ResolveDispatch(dispatchSandboxArgs()) returns no error."
     },
     {
-      "criterion": "A1/R1 and R3 on the plugin's own call path, where a nil pulumi.StringInput would crash the provider.",
-      "surface": "pulumitest.Construct — the Construct call the Pulumi engine makes against the served component, with the nine inputs absent from the call as an SDK leaves out what the program never set.",
-      "command": "cd packages/envoy/infra && go test ./gcp/ -run 'TestConstructDispatchSandbox' -count=1 -v",
-      "observed": "--- PASS: TestConstructDispatchSandbox. The response's url output is http://example-dispatch.dispatch.svc.cluster.local:8766 and no registration is named example-dispatch-tailnet, example-dispatch-tailnet-auth-key, example-dispatch-tailnet-tls or example-dispatch-serve. tailnetAuthKey and signInClientSecret arrive as nothing at all, so refuseDispatchSeedInSecret is never called with a nil Input.",
-      "headSha": "d4acfcdb20466a2d8197a165fd96a73b56227a99",
-      "negativeControl": "serverURL's front-door test forced to true: TestConstructDispatchSandbox FAILs at dispatch_construct_test.go:542 with expected \"http://example-dispatch.dispatch.svc.cluster.local:8766\"; reverted and re-run green."
+      "criterion": "A1/R1 and R3: the sandbox's declaration, its in-cluster url and DISPATCH_SERVER_URL, its empty sign-in rendering, its in-cluster NATS and its ingress, re-proved after this round's restructuring; and the combination the component keeps allowed.",
+      "surface": "The component under the Pulumi mock engine and, for the Construct case, the plugin's own Construct call.",
+      "command": "cd packages/envoy/infra && go test ./gcp/ -run 'TestDispatchSandbox|TestConstructDispatch' -count=1 -v",
+      "observed": "--- PASS for TestConstructDispatchSandbox, TestDispatchSandboxRegistrations, TestDispatchSandboxServesInTheCluster, TestDispatchSandboxRendersNoSignIn, TestDispatchSandboxSignInGroupUnsetKeepsTheFrontDoor (new this round: the tailnet group set with the sign-in group unset renders the whole front door, the app carries no DISPATCH_SIGNIN_* and the Secret has no DISPATCH_SIGNIN_CLIENT_SECRET), TestDispatchSandboxDialsTheInClusterHub, TestDispatchSandboxAdmitsOnlyTheAllowedNamespaces and TestDispatchSandboxRefusesWhatItDoesNotBuild.",
+      "headSha": "9af8b64a2817fa81cc40b404bea356ac2356d0fe",
+      "negativeControl": "Four deliberate breaks, each reverted and the suite re-run green: serverURL's front-door test forced true (TestDispatchSandboxServesInTheCluster and TestConstructDispatchSandbox FAIL on the in-cluster address); the front-door Deployment/NetworkPolicy and app-ingress gates forced on (TestDispatchSandboxRegistrations FAILs naming +kubernetes:networking.k8s.io/v1:NetworkPolicy example-dispatch-tailnet, TestDispatchSandboxAdmitsOnlyTheAllowedNamespaces FAILs with \"should have 1 item(s), but has 2\"); the sign-in render gate forced on (TestDispatchSandboxRendersNoSignIn FAILs, \"DISPATCH_SIGNIN_CLIENT_SECRET configures browser sign-in\"); socks5Proxy's natsInCluster test forced false (TestDispatchSandboxDialsTheInClusterHub FAILs with ENVOY_NATS_SOCKS5_PROXY on the app)."
     },
     {
-      "criterion": "A1/R2: with the sign-in inputs empty the component renders no DISPATCH_SIGNIN_* variable.",
-      "surface": "The app container's environment and the <hostname>-dispatch Secret as the mock engine receives them.",
-      "command": "cd packages/envoy/infra && go test ./gcp/ -run 'TestDispatchSandboxRendersNoSignIn' -count=1 -v",
-      "observed": "--- PASS. No name in the envoy-dispatch container's environment begins DISPATCH_SIGNIN_, and the example-dispatch-dispatch Secret's stringData keys are exactly DATABASE_URL, DISPATCH_AGENT_TOKEN and DISPATCH_SIGNING_KEY.",
-      "headSha": "d4acfcdb20466a2d8197a165fd96a73b56227a99",
-      "negativeControl": "The sign-in render gate in newDispatchKubernetes forced on: the test FAILs with \"Should be false … DISPATCH_SIGNIN_CLIENT_SECRET configures browser sign-in\"; reverted and re-run green."
-    },
-    {
-      "criterion": "A1/R3: with no tailnet the component reaches the clustered NATS hub through natsInCluster, and the Dispatch container's environment names the in-cluster NATS address.",
-      "surface": "The registered app and listener containers' environments.",
-      "command": "cd packages/envoy/infra && go test ./gcp/ -run 'TestDispatchSandboxDialsTheInClusterHub' -count=1 -v",
-      "observed": "--- PASS. Both containers carry NATS_URLS nats://envoy-hub.envoy.svc.cluster.local:4222 and neither carries ENVOY_NATS_SOCKS5_PROXY at all, the key being absent rather than empty.",
-      "headSha": "d4acfcdb20466a2d8197a165fd96a73b56227a99",
-      "negativeControl": "socks5Proxy's natsInCluster test forced false: the test FAILs with the app's environment carrying ENVOY_NATS_SOCKS5_PROXY example-dispatch-tailnet.dispatch.svc.cluster.local:1055 and the message \"envoy-dispatch dials the hub itself\"; reverted and re-run green. The resolver also refuses the mode without natsInCluster, both unset and explicitly false (TestDispatchSandboxRefusesWhatItDoesNotBuild)."
-    },
-    {
-      "criterion": "A1/R2: resolveBootConfig loads with no DISPATCH_SIGNIN_* and DISPATCH_IDENTITY unset, boot succeeds, one agent-token request gets 200 and one GET /auth/start gets the refusal.",
-      "surface": "resolveBootConfig and the router main serves, in process, on a database storetest cloned from the migrated template on the real Postgres.",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' go test ./cmd/dispatch/ -run 'TestABootWithNoSignInServesAgentsAndRefusesBrowserSignIn|TestResolveBootConfig' -count=1 -v",
-      "observed": "--- PASS: TestABootWithNoSignInServesAgentsAndRefusesBrowserSignIn (1.61s) and --- PASS for all 26 TestResolveBootConfig* tests, TestResolveBootConfigBootsWithoutSignInAndRefusesAPartialOne among them. No --- SKIP appeared at any level, so storetest.Open really reached the database rather than skipping. The whole package also passes: DISPATCH_TEST_DATABASE_URL=<harness> go test ./cmd/dispatch/ -count=1 → ok github.com/sjawhar/envoy/cmd/dispatch 254.254s.",
-      "headSha": "d4acfcdb20466a2d8197a165fd96a73b56227a99",
-      "negativeControl": "Inside the same test, the same environment with DISPATCH_SIGNIN_CLIENT_ID alone set is refused by resolveBootConfig naming the four settings it misses, so the boot's success is the empty set's and not a dropped check."
-    },
-    {
-      "criterion": "A2/R4: with every tailnet and sign-in input set the component renders exactly what the previous release renders, and every pre-existing test passes with no change to its expectations.",
-      "surface": "The pre-existing component suite and the golden files under gcp/testdata/, which hold the default mode's whole declaration and each pod template.",
-      "command": "cd packages/envoy/infra && go test ./gcp/ -count=1 -skip DataDisk, and cd /legion/workspaces/sjawhar/legion/infra-797 && jj diff -r 'main..@' --stat packages/envoy/infra/gcp/testdata/",
-      "observed": "ok github.com/sjawhar/envoy/infra/gcp 53.497s. The golden diff prints \"0 files changed, 0 insertions(+), 0 deletions(-)\": no file under gcp/testdata/ moved. Module-wide: gofmt -l . prints nothing, go vet -tags pulumilive,natslive ./... is clean, and go test ./... is green but for TestTheDataDiskIsFormattedOnlyWhenItReadsAsZerosToItsEnd and TestARefusedDataDiskIsNeverFormattedOnALaterBoot, which call t.Fatalf(\"these tests need %s on this machine\", \"mkfs.ext4\") on a pod that has no mkfs.ext4; gcp/data_disk_test.go is unchanged by this branch (jj diff -r '3d5548da..@' --name-only lists it nowhere), so that failure is environmental and pre-existing.",
-      "headSha": "d4acfcdb20466a2d8197a165fd96a73b56227a99",
-      "negativeControl": "The sign-in render gate forced off, which drops the four DISPATCH_SIGNIN_* entries from the default path as well: TestDispatchPodMatchesGolden FAILs against gcp/testdata/dispatch-pod.golden. So the goldens do catch a default-path change, and their being unchanged here means the default path did not move."
-    },
-    {
-      "criterion": "A2/R4: a release of envoy-infra carries the change (the pre-merge half; gh release view is the production check's row).",
-      "surface": "The pull request's title, which becomes main's commit subject under this repository's squash merge and is what .github/scripts/release-bump.sh reads to decide a version bump.",
-      "command": "gh pr view 2553 --repo sjawhar/legion --json title",
-      "observed": "\"feat(envoy-infra): gcp:Dispatch deploys with no tailnet and no Google sign-in client, in its own cluster\" — it begins feat(envoy-infra):, which release-bump.sh bumps a minor version for, so release-envoy-infra.yaml cuts a release on the main push.",
-      "headSha": "d4acfcdb20466a2d8197a165fd96a73b56227a99",
-      "negativeControl": "A chore: or docs: subject bumps no version and publishes no release, which is why the title is a criterion rather than an afterthought; the tag itself does not exist before the merge, so gh release view envoy-infra-v<X.Y.Z> is the production check's row and not a pre-merge one."
+      "criterion": "A2/R4: with every tailnet and sign-in input set the component renders exactly what the previous release renders, and every pre-existing test passes with no change to its expectations, after this round's restructuring of the group tables and the front-door block.",
+      "surface": "The pre-existing component suite and the golden files under gcp/testdata/.",
+      "command": "cd packages/envoy/infra && go test ./gcp/ -count=1 -skip DataDisk, test -z \"$(gofmt -l .)\", go vet -tags pulumilive,natslive ./..., go test ./..., and cd /legion/workspaces/sjawhar/legion/infra-797 && jj diff -r 'main..@' --stat packages/envoy/infra/gcp/testdata/",
+      "observed": "ok github.com/sjawhar/envoy/infra/gcp 53.689s; gofmt prints nothing; vet is clean; the golden diff prints \"0 files changed, 0 insertions(+), 0 deletions(-)\", so no file under gcp/testdata/ moved. go test ./... is green but for TestTheDataDiskIsFormattedOnlyWhenItReadsAsZerosToItsEnd and TestARefusedDataDiskIsNeverFormattedOnALaterBoot, which call t.Fatalf(\"these tests need %s on this machine\", \"mkfs.ext4\") on a pod with no mkfs.ext4; gcp/data_disk_test.go is unchanged by this branch, so the failure is environmental and pre-existing. TestDispatchClusterOnlyRefusesEveryDispatchInput and TestDispatchEveryInputIsLiveOrRefusedUnderClusterOnly pass unedited although the cluster-only table's row order moved.",
+      "headSha": "9af8b64a2817fa81cc40b404bea356ac2356d0fe",
+      "negativeControl": "The sign-in render gate forced off, which drops four variables from the default path too: TestDispatchPodMatchesGolden FAILs against gcp/testdata/dispatch-pod.golden. The goldens do catch a default-path change, so their being unchanged means the default path did not move."
     }
   ],
   "filesChanged": [
-    "packages/envoy/infra/gcp/dispatch.go — the two input groups, their partial-group refusal clause, the sandbox's own refusals, serverURL and clusterURL, and comp.Url",
-    "packages/envoy/infra/gcp/dispatch_kube.go — the front door, its auth-key Secret, its NetworkPolicy, the app policy's front-door rule, the sign-in Secret key and the four DISPATCH_SIGNIN_* variables all gated on their group",
-    "packages/envoy/infra/gcp/dispatch_frontdoor.go — the serve config's upstream now reads dispatchSettings.clusterURL()",
-    "packages/envoy/infra/gcp/dispatch_sandbox_test.go — new: the mode's seven tests",
-    "packages/envoy/infra/gcp/dispatch_construct_test.go — TestConstructDispatchSandbox",
-    "packages/envoy/infra/gcp/dispatch_cluster_only_test.go — dispatchNamedRefusals, the by-name selector over the package's refusal table",
-    "packages/envoy/cmd/dispatch/signin.go — requireCookieSignIn removed",
-    "packages/envoy/cmd/dispatch/main.go — its call site removed from resolveBootConfig",
-    "packages/envoy/cmd/dispatch/settings.go — the five DISPATCH_SIGNIN_* rows' Required text, and DISPATCH_IDENTITY's Description",
-    "packages/envoy/cmd/dispatch/main_test.go — noSignInSettings, noSignInEnvironment, and the renamed TestResolveBootConfigBootsWithoutSignInAndRefusesAPartialOne",
-    "packages/envoy/cmd/dispatch/settings_test.go — the DISPATCH_SIGNIN_ISSUER case's all-cleared assertion",
-    "packages/envoy/cmd/dispatch/signin_off_test.go — new: TestABootWithNoSignInServesAgentsAndRefusesBrowserSignIn",
-    "packages/envoy/infra/README.md — the mode, its requirements and refusals, its url, its YAML example, and the front-door section's gate",
-    "packages/envoy/cmd/dispatch/README.md and AGENTS.md — the empty sign-in set, and DISPATCH_SERVER_URL as a callback origin only where sign-in is configured",
-    "packages/envoy/.changes/unreleased/INFRA-797-dispatch-sandbox-mode.yaml and INFRA-797-signin-optional.yaml — the two changelog fragments"
+    "packages/envoy/internal/dispatch/identity/identity.go — new NoBrowserIdentity, and Membership's doc naming where a cookie server with no sign-in goes instead",
+    "packages/envoy/cmd/dispatch/signin.go — requestIdentityFor returns NoBrowserIdentity for a cookie server with no sign-in issuer and no dev sign-in; signInRule's and signInFlow's docs name the third nil case",
+    "packages/envoy/cmd/dispatch/main.go — the cookie arm's comment says what becomes of cookies already issued",
+    "packages/envoy/cmd/dispatch/signin_off_test.go — TestABootWithNoSignInRefusesACookieIssuedWhileSignInWasOn",
+    "packages/envoy/infra/gcp/dispatch.go — literal group tables with dispatchClusterOnlyRefusals built from them, dispatchNamedInputs and its panic gone, dispatchGroupUnset folded into dispatchGroupClause(feature, group), each clause computed once and trailed on every refusal of its group's inputs",
+    "packages/envoy/infra/gcp/dispatch_kube.go — one if s.frontDoor block building the auth-key Secret, newDispatchFrontDoor, the Deployment, the 1055 Service and the front-door NetworkPolicy, each comment beside its code",
+    "packages/envoy/infra/gcp/dispatch_cluster_only_test.go — dispatchNamedRefusals and its panic gone; the table is slices.Concat of the two literal group tables and the rest",
+    "packages/envoy/infra/gcp/dispatch_sandbox_test.go — readDispatchSandboxURL deleted, the group tables literal, four malformed-value rows, and TestDispatchSandboxSignInGroupUnsetKeepsTheFrontDoor",
+    "packages/envoy/infra/gcp/dispatch_construct_test.go — the Construct case matches dispatchSandboxFrontDoor",
+    "packages/envoy/cmd/dispatch/main_test.go — noSignInEnvironment is a literal of the two keys it needs; the duplicated no-sign-in boot assertion is gone and the test is TestResolveBootConfigRefusesAPartialSignIn",
+    "packages/envoy/cmd/dispatch/settings.go — DISPATCH_SERVER_URL is the sign-in callback origin only where sign-in is configured",
+    "packages/envoy/infra/README.md, packages/envoy/cmd/dispatch/README.md, packages/envoy/deploy/README.md, packages/envoy/deploy/compose/dispatch.env.example — the prose the change made false, including what becomes of a cookie issued while sign-in was on",
+    "packages/envoy/.changes/unreleased/INFRA-797-signin-optional.yaml — the changelog entry carries the cookie refusal"
   ],
   "trickyParts": [
-    "refuseDispatchSeedInSecret calls value.ToStringOutput() on its argument, so a nil args.TailnetAuthKey or args.SignInClientSecret dereferences nil and takes the provider down. Both Secret call sites are gated on their group, not only the environment variables, and TestConstructDispatchSandbox runs the plugin's own Construct path, where such a crash would show.",
-    "The sandbox's refusal of a set sign-in input runs before the sign-in group's own checks. Otherwise a sandbox sent signInClientId alone would be refused for signInDomain being unset — the wrong reason — instead of for sending a sign-in input to a deployment that can host no OAuth redirect origin.",
-    "A partly set group keeps each input's existing refusal wording and only appends a clause, because TestDispatchResolverRefusesInvalidInputs asserts input-specific substrings (tags + 'at least one', frontDoorToolsImage + 'pinned by digest', signInDomain + 'lowercase DNS name', tailnetDnsName + 'ts.net') and A2 forbids editing them. The clause is added only for an input that is itself unset, so a set-but-malformed value keeps its message exactly.",
-    "The four DISPATCH_SIGNIN_* entries render in the place they always held, and no other entry moved, so gcp/testdata/dispatch-pod.golden is byte-identical for a deployment with sign-in on.",
-    "TestDispatchSandboxRegistrations removes nine named lines from the registration golden rather than filtering on '-tailnet': ConfigMap example-dispatch-serve carries no such word, and a substring filter would keep it and pass while the sandbox still declared the front door's serve configuration."
+    "The guard reads boot.SignInIssuer, not the signIn argument. Keying it on signIn == nil looked more direct and broke six cases of TestEverySettingReachesItsReader: settings_test.go's appContextFor passes built.SignIn, which a case leaves nil to mean 'cookie identity with no membership check', and reading that nil as 'this deployment configured no sign-in' gave those cases an identity main would never build. signInFlow builds a flow for exactly the boot whose issuer is set, so in every process main starts the two are the same fact.",
+    "Handing the harness signInFlow(boot) instead does not work either: with a flow in hand requestIdentityFor builds a Membership, and the cases that wire no people store then dereference a nil pool (store.Pool.QueryRow, SIGSEGV), while giving them a store makes Membership.Confirm end the session of a person no cookie ever recorded. That is why the harness keeps its nil flow.",
+    "The refusal is an explicit identity rather than a nil Sessions field. Leaving Sessions nil also returns ErrNoIdentity today, but nothing in CookieIdentity says that is a decision, and a later change to Login would reopen it in silence.",
+    "Membership's 'nil only on the local dev sign-in server' is true again after the fix, since no cookie server without sign-in gets a CookieIdentity at all; the comment gained the clause saying where that case went instead of being rewritten.",
+    "The cluster-only refusal table's row order moved when it became slices.Concat of the two group tables and the rest. Nothing depends on it: TestDispatchClusterOnlyRefusesEveryDispatchInput sets one input per row, and TestDispatchEveryInputIsLiveOrRefusedUnderClusterOnly sorts before it compares."
   ],
   "deviations": [
-    "The plan's 'The pod prerequisite for the two Postgres-backed rows' says pgvector is not needed. It is: storetest.Open migrates a template database, and migration 0072_embeddings_core.up.sql runs 'create extension if not exists vector', which fails without it. The harness here installs postgresql-17-pgvector as well, and the two Postgres-backed rows ran with no skip.",
-    "The simplify pass applied eight dedups rather than none, so the head the proofs ran at is the applied head (d4acfcdb20466a2d8197a165fd96a73b56227a99) and every command above was run there. Two reviewer findings were skipped: a capacity hint on the app environment slice in dispatch_kube.go (a magic number that rots when an entry is added, for one allocation per pulumi up) and renaming TestDispatchPartialTailnetGroupNamesEveryMissingInput, which this issue's plan names and the proof table selects with -run.",
-    "The plan's T4.2 named only the five DISPATCH_SIGNIN_* rows of settings.go. The DISPATCH_IDENTITY row's Description also became false ('cookie (Google sign-in … then a signed session cookie)' describes only the configured case), and the docs site's configuration reference is generated from that table, so it was corrected too.",
-    "The plan did not name packages/envoy/cmd/dispatch/settings_test.go. Its DISPATCH_SIGNIN_ISSUER case asserted the removed 'cookie identity signs people in: …' refusal for an all-cleared environment; TestEverySettingReachesItsReader cannot pass without changing it, so it now asserts the boot succeeds with no issuer."
+    "The reviewer suggested expressing the cookie refusal by leaving Sessions nil. It is an explicit identity.NoBrowserIdentity instead, for the reason in trickyParts; the behaviour the reviewer asked for is unchanged.",
+    "The reviewer asked for identity.go:34-35 to be corrected. The fix makes that sentence true again, so it is kept and extended rather than rewritten; the thread reply says so.",
+    "TestDispatchPartialTailnetGroupNamesEveryMissingInput keeps its name although it now covers both groups and four malformed-value rows: this issue's plan names it and the proof table selects it with -run. The reviewer's naming nit was recorded as skipped in the previous round for the same reason."
   ],
-  "openQuestions": [
-    "The gap analysis's finding 8 stands and is reported to the architect: R1-R4 cite dispatch://INFRA-243/spec 'Sandboxes', which carries no tailnet, sign-in, NATS, url or reachability requirement, so 'no Google sign-in client' and 'in-cluster agent-token API only' are the architect's own reading of the one sentence that root/ gets no sandbox stack. It changed no task here."
-  ],
+  "openQuestions": [],
   "discoveredComplexity": [
-    "TestTheDataDiskIsFormattedOnlyWhenItReadsAsZerosToItsEnd and TestARefusedDataDiskIsNeverFormattedOnALaterBoot fail in this pod for want of mkfs.ext4 (gcp/data_disk_test.go's tool() calls t.Fatalf). The file is unchanged by this branch, so every run above uses -skip DataDisk and the failure is recorded rather than fixed; CI's own runner has the binary."
+    "The workspace was recreated between the push of 9af8b64a and this handoff. Every code commit of this round was already pushed, so nothing was lost; the rootless Postgres harness in $TMPDIR was, which is why the two Postgres-backed rows above quote the runs made at this same head before the recreation rather than being re-run after it.",
+    "TestTheDataDiskIsFormattedOnlyWhenItReadsAsZerosToItsEnd and TestARefusedDataDiskIsNeverFormattedOnALaterBoot fail in this pod for want of mkfs.ext4. The file is unchanged by this branch, so every run above uses -skip DataDisk; CI's own runner has the binary."
   ]
 }
