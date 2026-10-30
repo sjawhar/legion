@@ -99,6 +99,17 @@ function typeInto(view: EditorView, index: number, text: string): void {
   view.dispatch(view.state.tr.insertText(text, end));
 }
 
+/** Switches the language of the document's last `mermaid` code block. The position is read once,
+ *  at this call: a block that has left mermaid is not found again, and switching it back needs
+ *  the position it had. */
+function languageSetter(view: EditorView): (language: string) => void {
+  let pos = -1;
+  view.state.doc.descendants((node, at) => {
+    if (node.attrs.language === "mermaid") pos = at;
+  });
+  return (language) => view.dispatch(view.state.tr.setNodeAttribute(pos, "language", language));
+}
+
 /** Waits until `check` holds, for at most a second. */
 async function until(check: () => boolean): Promise<void> {
   const deadline = performance.now() + 1000;
@@ -265,12 +276,7 @@ test("a code block in another language keeps upstream's plain layout and asks no
 
       // Switching the mermaid block to another language cancels its request and puts the pre
       // back alone in the frame; switching back asks again.
-      let mermaidPos = -1;
-      view.state.doc.descendants((node, pos) => {
-        if (node.attrs.language === "mermaid") mermaidPos = pos;
-      });
-      const setLanguage = (language: string) =>
-        view.dispatch(view.state.tr.setNodeAttribute(mermaidPos, "language", language));
+      const setLanguage = languageSetter(view);
       setLanguage("ts");
       expect(requests[0]?.cancels).toBe(1);
       expect(Array.from(mermaid.frame.children)).toEqual([mermaid.pre]);
@@ -278,6 +284,59 @@ test("a code block in another language keeps upstream's plain layout and asks no
       setLanguage("mermaid");
       expect(requests.map((request) => request.source)).toEqual([FIRST, FIRST]);
       expectSourceShown(mermaid);
+    },
+    { drawMermaid }
+  );
+});
+
+// The case above switches a block that never drew, so what `showPlainLayout` clears is never
+// observed there. It shows on the way back: `showMermaidLayout` puts the preview and the status
+// into the frame again and the block asks for the current source, and until that answer arrives
+// whatever the block held before its trip through another language is on the reader's page.
+// These two cases take that window, one for each half of what the clearing empties.
+test("a mermaid block that drew, changed language and changed back shows no drawing until its new answer", async () => {
+  const { drawMermaid, requests } = fakeDrawer();
+  await withMarksEditor(
+    ONE_DIAGRAM,
+    ({ view }) => {
+      const [block] = blocks(view);
+      if (!block) throw new Error("the document draws a code block");
+      const setLanguage = languageSetter(view);
+      requests[0]?.answer(diagram(view.dom.ownerDocument, "drawn"));
+      expect(shownDiagram(block)).toBe("drawn");
+
+      setLanguage("js");
+      setLanguage("mermaid");
+
+      // The block asked again and nothing has answered, so only its source shows: the preview and
+      // the status are back in the frame, empty and hidden.
+      expect(requests.map((request) => request.source)).toEqual([FIRST, FIRST]);
+      expect(shownDiagram(block)).toBeNull();
+      expectSourceShown(block);
+    },
+    { drawMermaid }
+  );
+});
+
+test("a mermaid block the renderer refused, changed language and changed back shows no refusal until its new answer", async () => {
+  const { drawMermaid, requests } = fakeDrawer();
+  await withMarksEditor(
+    ONE_DIAGRAM,
+    ({ view }) => {
+      const [block] = blocks(view);
+      if (!block) throw new Error("the document draws a code block");
+      const setLanguage = languageSetter(view);
+      const error = "Unable to render Mermaid diagram: Dangling Mermaid edge";
+      requests[0]?.answer({ error });
+      expect(block.status?.textContent).toBe(error);
+      expect(block.status?.hidden).toBe(false);
+
+      setLanguage("js");
+      setLanguage("mermaid");
+
+      expect(requests.map((request) => request.source)).toEqual([FIRST, FIRST]);
+      expect(block.status?.textContent).toBe("");
+      expectSourceShown(block);
     },
     { drawMermaid }
   );

@@ -328,7 +328,20 @@ readonly session_port
     const connection = await connect({ servers: url, name: "envoy-e2e-capture" });
     const subscription = connection.subscribe("notifications.>");
     process.stdout.write("ready\n");
-    for await (const message of subscription) appendFileSync(output, `${codec.decode(message.data)}\n`);
+    for await (const message of subscription) {
+      const raw = codec.decode(message.data);
+      appendFileSync(output, `${raw}\n`);
+      // The fake session holds the role below, and the publish route answers a role message only
+      // once its holder confirms the forward to its agent subject with an empty receipt, as the
+      // plugins do for a frame whose envelope names another topic (envoy-client expectsLaneReceipt).
+      if (message.reply && message.subject.startsWith("notifications.agent.")) {
+        let topic;
+        try {
+          topic = JSON.parse(raw).topic;
+        } catch {}
+        if (topic !== undefined && topic !== message.subject) message.respond();
+      }
+    }
   ' >"$subscriber_ready_fifo" 2>"$subscriber_log_file"
 ) &
 subscriber_pid=$!

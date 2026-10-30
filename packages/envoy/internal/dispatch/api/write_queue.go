@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"slices"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -99,6 +100,87 @@ func (s *server) queueEditedReferences(ctx context.Context, tx pgx.Tx, ledger *d
 		return model.ReferenceChanges{}, err
 	}
 	return changes, queueReplacement(ctx, tx, ledger, replacement)
+}
+
+// queueItemReferences is refs.ReplaceCountedItem split in two, for a comment or an issue message
+// this transaction writes at `at`: it plans the index of the item's blocks and the mentions each
+// holds (refs.PlanItemIndex) and the reconciliation of the item's own references, resolves the
+// counted targets both move, and queues the index's statements and the reconciliation's, in that
+// order, in tx's write phase. A direct message (cites false) writes no mention, so its blocks
+// hold none either: its blocks alone are indexed, and it moves nothing.
+func (s *server) queueItemReferences(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, kind refs.ItemKind, itemID, body string, at time.Time, cites bool) (model.ReferenceChanges, error) {
+	changes, write, err := s.planItemWrite(ctx, tx, kind, itemID, body, at, cites, nil, nil)
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	return changes, queueWrite(ctx, tx, ledger, write)
+}
+
+// queueEditedItemReferences is queueItemReferences for an edit of a comment from previous to
+// body, written at `at`, with the block ids the editor carried (carried; nil: the ids follow the
+// text, refs.IndexItem). The counted targets also name every target the comment still cites when
+// the edit moves the head of its text, which each of its edges shows (refs.EditedTargets). A
+// carried id the index refuses returns its *itemblocks.CarriedError.
+func (s *server) queueEditedItemReferences(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, kind refs.ItemKind, itemID, previous, body string, at time.Time, carried *refs.CarriedEdit) (model.ReferenceChanges, error) {
+	changes, write, err := s.planItemWrite(ctx, tx, kind, itemID, body, at, true, carried, func(found []text.Ref) []refs.Target {
+		return refs.EditedTargets(previous, body, found)
+	})
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	return changes, queueWrite(ctx, tx, ledger, write)
+}
+
+// planItemWrite plans the item's index and, when the item cites its mentions, the reconciliation
+// of its own references, counts what they and edited (the targets an edit moves although its
+// edges stay; nil for a first write) move, and returns those counts with the step that writes
+// both, for the route to queue where it makes the write: on its ledger (queueItemReferences), or
+// on the batch of a transaction that runs its write phase itself (createStoredMessage).
+func (s *server) planItemWrite(
+	ctx context.Context,
+	tx pgx.Tx,
+	kind refs.ItemKind,
+	itemID, body string,
+	at time.Time,
+	cites bool,
+	carried *refs.CarriedEdit,
+	edited func(found []text.Ref) []refs.Target,
+) (model.ReferenceChanges, docs.WriteStep, error) {
+	index, err := refs.ReadItemIndex(ctx, tx, kind, itemID)
+	if err != nil {
+		return model.ReferenceChanges{}, nil, err
+	}
+	if edited != nil {
+		// The update that sets edited_at is queued, so the read above does not show it.
+		index = index.Edited()
+	}
+	var located []text.Located
+	if cites {
+		located = text.ExtractAt(body, s.deps.ServerURL)
+	}
+	indexing, err := refs.PlanItemIndex(index, kind, itemID, body, at, located, carried)
+	if err != nil {
+		return model.ReferenceChanges{}, nil, err
+	}
+	var replacement refs.Replacement
+	var changes model.ReferenceChanges
+	if cites {
+		found := text.Refs(located)
+		moved := indexing.Moved()
+		if edited != nil {
+			moved = slices.Concat(moved, edited(found))
+		}
+		if replacement, changes, err = planFoundReferences(ctx, tx, string(kind), itemID, found, moved); err != nil {
+			return model.ReferenceChanges{}, nil, err
+		}
+	}
+	return changes, func(b *store.WriteBatch) error {
+		indexing.Queue(b)
+		if cites {
+			replacement.Queue(b)
+		}
+		return nil
+	}, nil
 }
 
 // queueReplacement queues replacement's delete and insert in tx's write phase.

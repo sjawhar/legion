@@ -201,14 +201,14 @@ func (s *server) loadOwnedComment(
 }
 
 // commentColumns is the comments select list scanComment reads, in scan order.
-const commentColumns = `id::text, issue_key, artifact_id::text, author, body, anchor, reply_to::text, ask_id::text, turn, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at`
+const commentColumns = `id::text, issue_key, artifact_id::text, author, body, anchor, reply_to::text, ask_id::text, turn, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at, replies_to_block`
 
 // commentThreadColumns is commentColumns without the ::text casts, qualified to the comments
 // alias `c`. A recursive walk joins c.reply_to to the visited row's id, so those columns have
 // to stay uuid inside the CTE; and a recursive union cannot take c.* because comments.search
 // is a tsvector, which has no hash operator.
 const commentThreadColumns = `c.id, c.issue_key, c.artifact_id, c.author, c.body, c.anchor, c.reply_to,
-		c.ask_id, c.turn, c.resolved, c.resolved_by, c.resolved_at, c.edited_at, c.suggestion, c.created_at`
+		c.ask_id, c.turn, c.resolved, c.resolved_by, c.resolved_at, c.edited_at, c.suggestion, c.created_at, c.replies_to_block`
 
 func scanComment(row pgx.Row, extra ...any) (model.Comment, error) {
 	var comment model.Comment
@@ -216,7 +216,7 @@ func scanComment(row pgx.Row, extra ...any) (model.Comment, error) {
 	var resolvedAt, editedAt *time.Time
 	destinations := []any{
 		&comment.ID, &comment.IssueKey, &comment.ArtifactID, &author, &comment.Body, &anchor, &comment.ReplyTo, &comment.AskID, &comment.Turn, &comment.Resolved,
-		&resolvedBy, &resolvedAt, &editedAt, &suggestion, &comment.CreatedAt,
+		&resolvedBy, &resolvedAt, &editedAt, &suggestion, &comment.CreatedAt, &comment.RepliesToBlock,
 	}
 	destinations = append(destinations, extra...)
 	if err := row.Scan(destinations...); err != nil {
@@ -253,12 +253,15 @@ func scanComment(row pgx.Row, extra ...any) (model.Comment, error) {
 	return comment, nil
 }
 
-// hydrateCommentSideTables loads mentions and delivery attempts once per comment page, avoiding
-// a per-comment query while keeping all reads of a Comment's visible delivery state consistent.
+// hydrateCommentSideTables loads mentions, delivery attempts and the block each reply answers once
+// per comment page, avoiding a per-comment query while keeping all reads of a Comment's visible
+// delivery state consistent.
 func (s *server) hydrateCommentSideTables(ctx context.Context, q queryer, comments []model.Comment) ([]model.Comment, error) {
 	ids := make([]string, len(comments))
+	replies := make([]*model.Comment, len(comments))
 	for index := range comments {
 		ids[index] = comments[index].ID
+		replies[index] = &comments[index]
 	}
 	mentions, err := s.loadCommentMentions(ctx, q, ids)
 	if err != nil {
@@ -266,6 +269,9 @@ func (s *server) hydrateCommentSideTables(ctx context.Context, q queryer, commen
 	}
 	deliveries, err := s.loadCommentDeliveries(ctx, q, ids)
 	if err != nil {
+		return nil, err
+	}
+	if err := hydrateCommentReplyBlocks(ctx, q, replies...); err != nil {
 		return nil, err
 	}
 	for index := range comments {

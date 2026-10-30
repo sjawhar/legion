@@ -157,6 +157,8 @@ export type {
   IssueReferences,
   IssueRouteReach,
   IssueSummary,
+  ItemBlock,
+  ItemBlocks,
   ListUsersResponse,
   LiveAgentFrame,
   LiveClientFrame,
@@ -195,6 +197,7 @@ export type {
   Subscriber,
   SubscriptionRemovedEventPayload,
   Suggestion,
+  Suggestions,
   TargetCandidate,
   UpdateDeliverySessionGroupInput,
   UpdateIssueInput,
@@ -204,6 +207,7 @@ export type {
   UserIssueState,
   UserState,
   Version,
+  WriteSuggestion,
 } from "@legion/contracts";
 
 // Dispatch-UI-only DTOs mirroring the credential broker's JSON verbatim (its UI routes, in the

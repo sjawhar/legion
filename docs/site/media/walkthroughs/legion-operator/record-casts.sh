@@ -2,7 +2,7 @@
 # Records the Legion section's two terminal casts, `state.cast` and `controller.cast` beside this
 # file, which the `legion-state` and `legion-controller` walkthroughs render. Both come from one
 # local Go daemon in the shape scripts/e2e/controller-start-tmux.sh builds: this checkout's `legion`
-# on a scratch postgres:16, a NATS server and an Envoy listener of its own, and this checkout's two
+# on a scratch PostgreSQL 18, a NATS server and an Envoy listener of its own, and this checkout's two
 # plugins in an Oh My Pi profile under the run's own HOME. Every name on screen is example data: the
 # project is SHOP, its one running claim is the architect of SHOP-2, and the model the agents are
 # configured with is an example provider served by a local listener that accepts each request and
@@ -119,8 +119,8 @@ chmod +x "$work/bin/omp"
 keep_port daemon_keeper daemon_port
 
 check=services
-docker run -d --name "$pg_container" --cpus 0.5 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql/data \
-  -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 postgres:16 >/dev/null
+docker run -d --name "$pg_container" --cpus 0.5 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
+  -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 mirror.gcr.io/library/postgres@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4 >/dev/null
 pg_port=$(docker port "$pg_container" 5432/tcp | head -1 | sed 's/.*://')
 until_true 60 "Postgres" docker exec "$pg_container" pg_isready -h 127.0.0.1 -U legion -d legion
 docker run -d --name "$nats_container" --cpus 0.5 --memory 512m -p 127.0.0.1::4222 nats:2.10 -js >/dev/null

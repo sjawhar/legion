@@ -327,7 +327,7 @@ func blockPairs(nodes []model.ArtifactBlock, located []text.Located) []blockPair
 		if holders[i] < 0 {
 			continue
 		}
-		target, ok := targetOf(mention.Ref)
+		target, ok := TargetOf(mention.Ref)
 		if !ok {
 			continue
 		}

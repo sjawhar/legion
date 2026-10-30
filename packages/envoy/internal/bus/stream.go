@@ -397,10 +397,11 @@ func (r streamReconciliation) log() {
 // overlaps none the stream carries, so the race ends at the most copies and the largest byte limit
 // any program asks for. Programs of a deployment with different ENVOY_NATS_REPLICAS or
 // ENVOY_STREAM_MAX_BYTES therefore do not fight over the stream: neither is ever lowered, and the
-// largest stands. One race shows even with the same settings: nats-server can leave one of two
-// replica changes proposed at once unanswered (seen with v2.10.29,
-// TestTwoStartsRaisingOneStreamAtOnceBothSucceed), so an update whose answer never came succeeds
-// when the stream, read again, needs nothing more from this start (updateStream). A
+// largest stands. Two races show even with the same settings, both of them settled where the
+// update is sent (updateStream): nats-server can leave one of two replica changes proposed at once
+// unanswered (seen with v2.10.29), and every nats-server before v2.12.5 can refuse the later of
+// two updates of one stream as overlapping an existing stream, the stream itself, when the other
+// update lands while the server checks this one (TestTwoStartsRaisingOneStreamAtOnceBothSucceed). A
 // stream one start creates first is reconciled by the other, keeping the id it was created with
 // (AddStream answers ErrStreamNameAlreadyInUse, as its config's id differs). Two that both find no
 // id write the same one, derived from what both read.
@@ -504,19 +505,61 @@ func keptSubjects(deployed, own []string) []string {
 	return kept
 }
 
-// updateStream sends update, a whole stream configuration, and succeeds when the server accepts it
-// or when its answer never came (unanswered) and the stream update names, read again, holds what
-// the caller asked for (holds). Any other refusal, and an unanswered update the stream read again
-// does not hold, is the update's own error.
+// updateStream sends update, a whole stream configuration, and succeeds when the server accepts
+// it. Two other answers come of another update of the same stream landing at once rather than of
+// update itself, and after either the stream update names is read again, the update succeeding
+// when the stream holds what the caller asked for (holds):
+//   - an answer that never came (unanswered): nats-server can leave one of two replica changes
+//     proposed at once unanswered (seen with v2.10.29). That update may still land, so it is not
+//     sent again, and a stream that does not hold it returns the update's own error;
+//   - a refusal of the update's subjects as overlapping an existing stream (overlapRefused), which
+//     every nats-server before v2.12.5 can give the later of two updates of one stream: the server
+//     reads the stream's assignment, releases its lock to check the new configuration, and then
+//     looks for an overlap among the account's assignments skipping only the assignment it read,
+//     so an update that lands in between leaves the stream overlapping itself
+//     (jsClusteredStreamUpdateRequest, v2.10.29 server/jetstream_cluster.go; nats-server commit
+//     cb1afd68d014, first released in v2.12.5, skips by name). Nothing was written, so a stream
+//     that does not hold the update is sent it again, the write a server without that race would
+//     have taken after the other, up to overlapSends sends in all. A stream another stream really
+//     does overlap is refused every send, and the last refusal is returned.
+//
+// Any other refusal is the update's own error.
 func updateStream(js nats.JetStreamContext, update *nats.StreamConfig, holds func(*nats.StreamInfo) bool) error {
-	_, err := js.UpdateStream(update)
-	if !unanswered(err) {
-		return err
+	settled := func() bool {
+		again, err := js.StreamInfo(update.Name)
+		return err == nil && holds(again)
 	}
-	if again, infoErr := js.StreamInfo(update.Name); infoErr == nil && holds(again) {
+	var err error
+	for range overlapSends {
+		if _, err = js.UpdateStream(update); !overlapRefused(err) {
+			break
+		}
+		if settled() {
+			return nil
+		}
+	}
+	if unanswered(err) && settled() {
 		return nil
 	}
 	return err
+}
+
+// overlapSends bounds the sends of one update the server refuses as overlapping an existing stream
+// (updateStream). Each such refusal of a stream no other stream overlaps means another update of
+// that stream landed while the server checked this one, so five sends outlast four such updates in
+// a row, and a stream another stream does overlap costs four sends and five stream reads more
+// before its refusal is returned.
+const overlapSends = 5
+
+// jsStreamSubjectOverlap is nats-server's error code for a stream create or update whose subjects
+// overlap an existing stream's (JSStreamSubjectOverlapErr). nats.go names no constant for it.
+const jsStreamSubjectOverlap = 10065
+
+// overlapRefused reports whether err is nats-server's refusal of a stream's subjects as
+// overlapping an existing stream's.
+func overlapRefused(err error) bool {
+	var apiErr *nats.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode == jsStreamSubjectOverlap
 }
 
 // unanswered reports whether err is a JetStream request's wait running out with no answer, rather

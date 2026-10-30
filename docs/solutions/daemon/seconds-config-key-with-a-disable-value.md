@@ -9,7 +9,7 @@ tags:
   - env-parsing
   - silent-fallback
 date: 2026-09-12
-status: active
+status: superseded — worker_idle_retire_seconds is rejected; a worker of an open issue stays live and is never retired or suspended for idleness
 module: daemon
 related_issues:
   - "LEGION-30"

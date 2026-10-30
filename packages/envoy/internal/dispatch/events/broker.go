@@ -299,51 +299,69 @@ func lockEventOwner(batch *store.WriteBatch, e *model.Event) {
 	})
 }
 
-// Notify reports whether an event should wake agents and receive routed delivery.
-// The issue topic, event log, and event feed carry every event regardless of this value.
-// A message reply (`message.answered`) follows the same rule as a fresh message: a targeted
-// one reached its session through the synchronous listener send and stays quiet; a human's
-// reply on a plain agent message must wake the route and the message's author.
-func (b *Broker) Notify(e model.Event) bool {
+// Quiet reports whether an event carries nothing for a reader that follows its owner topic: a
+// delivery receipt, an anchor refresh, settings or per-viewer bookkeeping, a targeted message the
+// session it names already had through the synchronous listener send, an ask edit that only moved
+// the version it names, or a document version nobody named.
+//
+// It is the half of Notify that does not depend on who acted, and it is what the outbox puts on
+// the wire (`quiet`), because the two answer different questions. Notify answers whether to wake
+// the route, the claimant and the authors, so an agent's own comment is not a wake. Quiet answers
+// whether the event is worth showing at all, so an agent's comment, document or ask is not quiet:
+// a session that subscribed to `notifications.dispatch.issue.<KEY>.>` asked for exactly that
+// activity (skills/dispatch/SKILL.md), and a reader that skipped every non-notifying frame saw
+// none of it.
+func Quiet(e model.Event) bool {
 	if e.Type == "message.delivery" || e.Type == "comment.delivery" {
-		return false
+		return true
 	}
 	if e.Type == "message.created" || e.Type == "message.answered" {
-		if message, ok := e.Payload.(model.MessageEventPayload); ok && message.Target != nil {
-			return false
+		if targetedMessage(e.Payload) {
+			return true
 		}
 	}
 	switch e.Type {
 	case "comment.anchor_refreshed", "ask.anchor_refreshed":
 		// Refresh is a document mutation side effect, not a human addressing its
 		// author. Retain it for every stream consumer without waking anyone.
-		return false
+		return true
 	case "project.created", "settings.repo_project.updated", "settings.architecture_source.updated",
 		"settings.project_default_assignee.updated",
 		"architecture.synced", "architecture.sync_failed", "user_state.updated", "user_agent_state.updated",
 		"user_thread_state.updated":
 		// Settings, importer and per-viewer bookkeeping: retained on their log and carried by
 		// the event feed, but nobody is woken by them.
+		return true
+	case "ask.edited":
+		// A version move of an approval request that an earlier version already moved since it was
+		// opened or last handed back changes only the version it names.
+		if quietAskEdit(e.Payload) {
+			return true
+		}
+	case "artifact.version":
+		// An unnamed version is a document's autosave: every writer makes them constantly, and
+		// neither a wake nor a card is owed for one, whoever wrote it.
+		return !namedVersion(e.Payload)
+	}
+	return false
+}
+
+// Notify reports whether an event should wake agents and receive routed delivery.
+// The issue topic, event log, and event feed carry every event regardless of this value.
+// A message reply (`message.answered`) follows the same rule as a fresh message: a targeted
+// one reached its session through the synchronous listener send and stays quiet; a human's
+// reply on a plain agent message must wake the route and the message's author.
+func (b *Broker) Notify(e model.Event) bool {
+	if Quiet(e) {
 		return false
+	}
+	switch e.Type {
 	case "child.status", "child.added", "child.removed":
 		// A child status flip or a reparent changes the parent's Children set whoever
 		// the actor is; the parent's watchers always hear about it.
 		return true
-	case "ask.edited":
-		// A version move of an approval request that an earlier version already moved since it was
-		// opened or last handed back changes only the version it names: quiet, as a human's unnamed
-		// version is below.
-		if edit, ok := e.Payload.(model.AskEditEventPayload); ok && edit.Quiet {
-			return false
-		}
 	}
-	if e.Actor.Kind != "user" {
-		return false
-	}
-	if e.Type != "artifact.version" {
-		return true
-	}
-	return namedVersion(e.Payload)
+	return e.Actor.Kind == "user"
 }
 
 func namedVersion(payload any) bool {
@@ -359,6 +377,42 @@ func namedVersion(payload any) bool {
 	case map[string]any:
 		named, _ := version["named"].(bool)
 		return named
+	default:
+		return false
+	}
+}
+
+// targetedMessage reports whether a message event names the session the message was aimed at.
+//
+// Quiet is asked of one event from two payload shapes, and must answer the same for both: at
+// append time (Broker.Notify) the payload is the typed value the caller built, and at publish
+// time it is the event the outbox scanned out of Postgres, whose payload JSON decodes into a
+// map[string]any (outbox/publisher.go, scanPendingEvents). quietAskEdit and namedVersion read
+// their field the same way.
+func targetedMessage(payload any) bool {
+	switch message := payload.(type) {
+	case model.MessageEventPayload:
+		return message.Target != nil
+	case map[string]any:
+		// Target is a *string, so the decoded field is a string on a targeted message and
+		// nil ("target": null) on every other.
+		_, targeted := message["target"].(string)
+		return targeted
+	default:
+		return false
+	}
+}
+
+// quietAskEdit reports whether an ask edit marks itself a version move that changes only the
+// version the request names (model.AskEditEventPayload.Quiet), from either payload shape.
+func quietAskEdit(payload any) bool {
+	switch edit := payload.(type) {
+	case model.AskEditEventPayload:
+		return edit.Quiet
+	case map[string]any:
+		// Quiet is omitempty, so the decoded field is absent unless the edit set it.
+		quiet, _ := edit["quiet"].(bool)
+		return quiet
 	default:
 		return false
 	}

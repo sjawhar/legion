@@ -105,11 +105,7 @@ func (s *Service) indexUnrenderedVersion(ctx context.Context, tx pgx.Tx, artifac
 // worked out here, before the reconciliation and the excerpts are written, in that order, by one
 // write).
 func replaceVersionRefs(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, located []text.Located, moved []refs.Target, excerpts map[refs.Target]model.GraphExcerpt) (model.ReferenceChanges, error) {
-	found := make([]text.Ref, len(located))
-	for i, mention := range located {
-		found[i] = mention.Ref
-	}
-	replacement, err := planReplacement(ctx, tx, "artifact", artifactID, found, &versionAt)
+	replacement, err := planReplacement(ctx, tx, "artifact", artifactID, text.Refs(located), &versionAt)
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}

@@ -297,6 +297,9 @@ type server struct {
 	// liveKinds starts a live socket's subscriptions to the views beside the delivery views, by
 	// kind (live_subscriptions.go); a kind it does not hold is refused.
 	liveKinds map[string]liveKind
+	// liveWriterBeforePick is each live socket's beforePick (live_socket.go): nil outside tests,
+	// and set by a test before the socket it drives opens.
+	liveWriterBeforePick func(socket *liveSocket, takesStream bool)
 	// agentWatchInterval is how often an agent view re-arms its session: agentStreamWatchInterval,
 	// which a test replaces.
 	agentWatchInterval time.Duration

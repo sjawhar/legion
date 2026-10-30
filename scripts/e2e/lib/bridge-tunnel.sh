@@ -33,7 +33,6 @@
 # Sourced after lib/namespace-rig.sh (both callers source both), whose `op` this file reuses for
 # every operator-context read and write. The caller sets (beside begin/note/fail/pass and
 # namespace-rig.sh's own variables, op included):
-#   root         the checkout root, for the pinned chisel client's `go install`
 #   operator     the admin kubectl context; bridge_stop and every read here use it alone
 #   work         the run's scratch directory (the chisel client binary, logs, never printed)
 #   bridge_name  the bridge pod and Service's shared name, deterministic from the project alone
@@ -180,7 +179,13 @@ bridge_start() {
 
   local chisel_bin="$work/bin/chisel"
   mkdir -p "$work/bin"
-  GOBIN="$work/bin" go install "github.com/jpillora/chisel@${bridge_chisel_version}" ||
+  # The toolchain's own go, under its own GOROOT. mise's go shim replaces a caller's GOBIN when
+  # go.set_gobin is true, and, on mise before 2026.9.0, in any shell `mise activate` set up.
+  # Separately, an activated shell exports mise's Go's GOROOT, whose compiler a newer toolchain's go
+  # refuses.
+  local goroot
+  goroot=$(go env GOROOT) &&
+    GOBIN="$work/bin" GOROOT=$goroot "$goroot/bin/go" install "github.com/jpillora/chisel@${bridge_chisel_version}" ||
     fail "building the chisel client ($bridge_chisel_version, the same release the bridge pod's server runs) failed"
 
   # The auth token never appears in the pod's own spec: a Pod and a Secret are readable under

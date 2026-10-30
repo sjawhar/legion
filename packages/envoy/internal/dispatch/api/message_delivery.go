@@ -534,6 +534,11 @@ func finishPendingMessageDelivery(
 ) error {
 	thread := replyThread
 	if thread == nil {
+		// A retry sends the stored message, so the block it answers is read as its write named
+		// it, for the frame's message and the preview its thread carries.
+		if err := hydrateMessageReplyBlocks(ctx, tx, &message); err != nil {
+			return err
+		}
 		derived, err := loadMessageReplyThread(ctx, tx, message)
 		if err != nil {
 			return err
@@ -722,6 +727,8 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		Attempt int          `json:"attempt"`
 		Body    *string      `json:"body"`
 		Error   *string      `json:"error"`
+		// InReplyToBlock is the id of the block of message {id} the reply answers ("b2").
+		InReplyToBlock *string `json:"in_reply_to_block"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
@@ -737,6 +744,10 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.Body != nil && strings.TrimSpace(*input.Body) == "" {
 		writeError(w, "MESSAGE_INPUT", http.StatusBadRequest, "message body is required")
+		return
+	}
+	if input.InReplyToBlock != nil && input.Body == nil {
+		writeError(w, "INVALID_MESSAGE", http.StatusBadRequest, "in_reply_to_block names the block a reply's body answers; an error report has none")
 		return
 	}
 
@@ -766,6 +777,13 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if input.InReplyToBlock != nil {
+		// Before the attempt row, as the accept route takes them: issue, message, attempt.
+		if err := lockReplyParentMessage(r.Context(), tx, message.ID); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
 	attempt, err := scanMessageDelivery(tx.QueryRow(r.Context(), `
 		select `+messageDeliveryColumns+`
 		from message_deliveries where message_id = $1 and attempt = $2 for update
@@ -785,6 +803,11 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 	var events []model.Event
 	switch {
 	case attempt.ReplyID != nil:
+		if followUp && input.InReplyToBlock != nil {
+			writeError(w, "INVALID_MESSAGE", http.StatusBadRequest,
+				"a follow-up is filed under the session's first reply, so it names no block of message "+message.ID)
+			return
+		}
 		answer, err := s.loadMessage(r.Context(), tx, messageIssueKey(message), *attempt.ReplyID)
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -794,6 +817,13 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
+		}
+		// A message handed back as it is stored reads the block it answers as every read does.
+		if posted == nil {
+			if err := hydrateMessageReplyBlocks(r.Context(), tx, &read.Message); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
 		}
 		response = read
 		if posted != nil {
@@ -819,7 +849,15 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		}
 		response, events = updated, append(events, receipt)
 	default:
-		reply, answered, err := s.insertSessionReply(r.Context(), tx, message, actor, *input.Body)
+		var block *namedBlock
+		if input.InReplyToBlock != nil {
+			block, err = s.replyBlockOf(r.Context(), tx, nil, refs.ItemMessage, message.ID, *input.InReplyToBlock, "in_reply_to_block", "INVALID_MESSAGE")
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+		}
+		reply, answered, err := s.insertSessionReply(r.Context(), tx, message, actor, *input.Body, block)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -868,7 +906,7 @@ func (s *server) replyAfterAnswer(
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return replyRead{}, nil, err
 	}
-	followUpReply, event, err := s.insertSessionReply(ctx, tx, answer, actor, *body)
+	followUpReply, event, err := s.insertSessionReply(ctx, tx, answer, actor, *body, nil)
 	if err != nil {
 		return replyRead{}, nil, err
 	}
@@ -907,30 +945,35 @@ func followUpRequested(r *http.Request) (bool, error) {
 }
 
 // insertSessionReply writes a session's reply to parent in parent's conversation - its issue,
-// or none, and its target - with the reply's references and its message.answered event.
+// or none, and its target - with the reply's references and its message.answered event. A reply
+// naming a block of parent stores it and previews that block's text in place of the parent's.
 func (s *server) insertSessionReply(
-	ctx context.Context, tx pgx.Tx, parent model.Message, actor model.Actor, body string,
+	ctx context.Context, tx pgx.Tx, parent model.Message, actor model.Actor, body string, block *namedBlock,
 ) (model.Message, model.Event, error) {
 	author, err := json.Marshal(actor)
 	if err != nil {
 		return model.Message{}, model.Event{}, err
 	}
 	reply, err := scanMessage(tx.QueryRow(ctx, `
-		insert into messages (issue_key, author, body, target, in_reply_to)
-		values ($1, $2, $3, $4, $5)
+		insert into messages (issue_key, author, body, target, in_reply_to, replies_to_block)
+		values ($1, $2, $3, $4, $5, $6)
 		returning `+messageColumns+`
-	`, parent.IssueKey, author, body, parent.Target, parent.ID))
+	`, parent.IssueKey, author, body, parent.Target, parent.ID, block.nodeID()))
 	if err != nil {
 		return model.Message{}, model.Event{}, err
 	}
-	var referenceChanges model.ReferenceChanges
-	if reply.IssueKey != nil {
-		referenceChanges, err = s.replaceReferences(ctx, tx, "message", reply.ID, reply.Body)
-		if err != nil {
+	replyParent := messageReplyParentOf(parent)
+	if block != nil {
+		if err := hydrateMessageReplyBlocks(ctx, tx, &reply); err != nil {
 			return model.Message{}, model.Event{}, err
 		}
+		replyParent.ReplyBody = messageReplyPreview(block.excerpt)
 	}
-	thread, err := messageReplyParentOf(parent).thread(ctx, tx)
+	referenceChanges, err := s.indexMessage(ctx, tx, reply)
+	if err != nil {
+		return model.Message{}, model.Event{}, err
+	}
+	thread, err := replyParent.thread(ctx, tx)
 	if err != nil {
 		return model.Message{}, model.Event{}, err
 	}

@@ -53,8 +53,9 @@ func engineReadings(t *testing.T, markdowns []string) []*Node {
 
 // A document the browser editor holds is stored as its rendering, so the rendering must read back,
 // in Go and in the browser editor's engine alike, as what the editor shows - where markdown has a
-// form for it. Each row is a tree the editor can hold whose rendering main misreads, and the
-// markdown whose reading both parsers must give the rendering back as.
+// form for it. Each row is a tree the editor can hold whose rendering the reader before
+// sjawhar/legion#1563 misreads, and the markdown whose reading both parsers must give the
+// rendering back as.
 func TestRenderReadsBackInBothParsersAsTheEditorShowsIt(t *testing.T) {
 	parsed := func(markdown string) *Node {
 		doc, err := Parse(markdown)

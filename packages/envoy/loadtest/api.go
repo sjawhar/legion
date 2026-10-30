@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/contracts"
 )
 
 // api is a Dispatch HTTP client: agent requests use the stack's shared bearer and name a session
@@ -43,6 +45,8 @@ type who struct {
 type callResult struct {
 	status int
 	body   []byte
+	// etag is the answer's ETag header, empty when it carries none.
+	etag string
 	// start is when the client began the request; wrote is when the whole request was in the
 	// socket (httptrace WroteRequest), 0 when it never got there; end is when the response body
 	// was read.
@@ -65,6 +69,14 @@ func (r callResult) arrival() int64 {
 
 // call sends one request and reads the whole response.
 func (a *api) call(ctx context.Context, method, path string, w who, body any) callResult {
+	return a.callKeyed(ctx, method, path, w, body, "")
+}
+
+// callKeyed is call under an idempotency key (contracts.IdempotencyKeyHeader): Dispatch runs the
+// write of a key once and replays its stored answer to every later request under that key, so a
+// retry of a write whose answer was lost adds no second version. An empty key sends none, which
+// is what every unkeyed caller does.
+func (a *api) callKeyed(ctx context.Context, method, path string, w who, body any, key string) callResult {
 	var payload []byte
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -100,10 +112,14 @@ func (a *api) call(ctx context.Context, method, path string, w who, body any) ca
 	} else {
 		req.Header.Set("Authorization", "Bearer "+a.token)
 	}
+	if key != "" {
+		req.Header.Set(contracts.IdempotencyKeyHeader, key)
+	}
 	res := callResult{start: time.Now().UnixNano()}
 	resp, err := a.client.Do(req)
 	if err == nil {
 		res.status = resp.StatusCode
+		res.etag = resp.Header.Get("ETag")
 		res.body, err = io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 	}
@@ -119,14 +135,34 @@ func (a *api) call(ctx context.Context, method, path string, w who, body any) ca
 // callRetry retries a transient failure (a transport error, 429 or 5xx) once a second, up to six
 // times, as the seed always has; any other answer returns at once.
 func (a *api) callRetry(ctx context.Context, method, path string, w who, body any) callResult {
+	return a.callRetryKeyed(ctx, method, path, w, body, "")
+}
+
+// callRetryKeyed is callRetry under an idempotency key. A repeat that reaches Dispatch while the
+// key's first request still runs is 409 KEY_IN_FLIGHT, which this retries too: under a key that
+// answer says the write is running once, not that it must be sent again.
+func (a *api) callRetryKeyed(ctx context.Context, method, path string, w who, body any, key string) callResult {
 	for attempt := 0; ; attempt++ {
-		res := a.call(ctx, method, path, w, body)
-		transient := res.err != nil || res.status == http.StatusTooManyRequests || res.status >= 500
+		res := a.callKeyed(ctx, method, path, w, body, key)
+		transient := res.err != nil || res.status == http.StatusTooManyRequests || res.status >= 500 ||
+			(key != "" && res.status == http.StatusConflict && refusalCode(res.body) == contracts.IdempotencyKeyInFlight)
 		if res.ok() || !transient || attempt >= 6 || ctx.Err() != nil {
 			return res
 		}
 		time.Sleep(time.Second)
 	}
+}
+
+// refusalCode is the code of a Dispatch refusal ({"error", "code"}), empty when the body is not
+// one.
+func refusalCode(body []byte) string {
+	var refusal struct {
+		Code string `json:"code"`
+	}
+	if json.Unmarshal(body, &refusal) != nil {
+		return ""
+	}
+	return refusal.Code
 }
 
 func sessionActor(id string) map[string]string { return map[string]string{"kind": "session", "id": id} }
