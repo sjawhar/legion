@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-722",
-  "completed": "2026-10-30T05:35:00Z",
+  "completed": "2026-10-30T10:05:00Z",
   "proof": [
     {
       "criterion": "A1 / D12 reader-facing: a document, a comment and a past version draw the same thing for every shape this change touches, and the tab-grammar write is refused",
       "surface": "Dispatch issue page in Chromium on the real stack: the spec editor, the past version view and a Conversation comment, plus getIssueArtifactText for the stored markdown and POST /api/v1/issues for the refusal (Go server and production SPA built from the checkout, Playwright Chromium, Postgres 17 + pgvector)",
       "command": "cd packages/dispatch && source $TMPDIR/bp-harness/env.sh && bun run e2e -- e2e/document-and-comment-read-alike.e2e.ts --project=chromium",
-      "observed": "8 passed, re-run at this head on a harness rebuilt after the pod replacement ($TMPDIR/bp-harness/setup.sh, idempotent). The footnote definition over a delimiter-like line draws one h1 in the editor and in a comment; a one-cell header over a two-cell delimiter row draws a paragraph and no table in both; the quoted definition before a lone tag line keeps 'note' in the editor, the past version and the comment; a comment holding '> a' then '<b>' keeps its blockquote and the word a; a code span's tag line is stored behind '> '; the tab-grammar write is refused 400 INVALID_MARKDOWN naming line 1; a NUL draws as U+FFFD in the editor and the past version alike; a comment holding '<div>' draws it as a paragraph and the Conversation goes on drawing.",
-      "headSha": "193ca00ca293ae3583ca8d5dc0bcfa5be35a0331",
+      "observed": "8 passed (23.8s), re-run at this head on the harness $TMPDIR/bp-harness/setup.sh builds (idempotent, inherited by the tester and reviewer). The footnote definition over a delimiter-like line draws one h1 in the editor and in a comment; a one-cell header over a two-cell delimiter row draws a paragraph and no table in both; the quoted definition before a lone tag line keeps 'note' in the editor, the past version and the comment; a comment holding '> a' then '<b>' keeps its blockquote and the word a; a code span's tag line is stored behind '> '; the tab-grammar write is refused 400 INVALID_MARKDOWN naming line 1; a NUL draws as U+FFFD in the editor and the past version alike; a comment holding '<div>' draws it as a paragraph and the Conversation goes on drawing.",
+      "headSha": "46aa74d3192715774ba9f9ef158689882f30c7c4",
       "negativeControl": "The same spec against a build of the branch's fork point f45c6716eacfa82bed5ad29d2371c52aacfadde2 (its own tree, its own database): 7 failed, 1 passed. The heading row drew [] where the head draws ['other |-|-|']; the table row drew ['a','','',''] where the head draws the paragraph; the quoted definition and the blockquote drew [] (their text gone); the code span's tag line was stored bare as '<b>'; the tab-grammar write was accepted with no refusal; the block-HTML comment drew no paragraph at all."
     },
     {
@@ -17,7 +17,7 @@
       "surface": "TestParseMatchesMilkdownForFixtures over testdata/fixtures.json, which gen.ts builds with the browser engine itself, and TestCorpusErrorsOfDefinitionsAndBrowserBlockHTMLAreRefused over blockMarkdownReaders()",
       "command": "cd packages/envoy/internal/dispatch/pmdoc/gen && bun run gen && bun run check; cd packages/envoy && GOWORK=off go test ./internal/dispatch/pmdoc/ -count=1 -timeout 0 -p 1",
       "observed": "fixtures up to date (145 documents, 43 splice cases); ok github.com/sjawhar/envoy/internal/dispatch/pmdoc 930.383s, every test passing, the four clock-sensitive ...Linear... tests included once the package runs with -p 1.",
-      "headSha": "193ca00ca293ae3583ca8d5dc0bcfa5be35a0331",
+      "headSha": "46aa74d3192715774ba9f9ef158689882f30c7c4",
       "negativeControl": "The same fixtures and tests in a checkout of the fork point f45c6716, with fixtures.json regenerated there by the fork point's own engine: every new corpus fixture fails its Milkdown comparison and every new corpus-errors fixture fails by being accepted."
     },
     {
@@ -25,15 +25,15 @@
       "surface": "ParseForWrite against the headless browser engine, on the LF text the document write path reads, over the reviewer's 916 documents and the 320 measured misreads",
       "command": "bash $TMPDIR/p722/h/probe.sh $TMPDIR/diff722/corpus/n916lf.jsonl $LEGION_WORKSPACE/packages/envoy/internal/dispatch/pmdoc $TMPDIR/p722/h/pmdoc.final.test",
       "observed": "880 read alike, 32 refused by a named reason, 4 read otherwise. Per class: T 83 -> 79 alike + 4 holding a short body row; L 38 -> 38; S 34 -> 2 alike + 32 refused; I 4 -> 4; H 75 -> 74 alike + 1 whose other difference is CRLF; F 2 -> 2; P 70 -> 70; W 14 -> 14. The 4 left are the pre-existing short-body-row padding, which the live editor's tableEditing pads on load and the headless engine does not.",
-      "headSha": "193ca00ca293ae3583ca8d5dc0bcfa5be35a0331",
+      "headSha": "46aa74d3192715774ba9f9ef158689882f30c7c4",
       "negativeControl": "The same 916 against the fork point's binary: 596 alike, 0 refused, 320 read otherwise."
     },
     {
       "criterion": "A2 differential against the base: no regression, no misread, no panic, no lost fixed point, and every byte change named",
       "surface": "pmdoc/gen/differential.sh, which reads one corpus at two revisions and reads each rendering back with Go and with the browser engine",
-      "command": "bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base 08c2e8adcf55d747c0fce1cbedf8564da41caee3 --corpus $TMPDIR/diff722/corpus --out $TMPDIR/diff722/out5",
-      "observed": "149,456 documents. regressions 0, misreads 0, churn 1, engine-tree regressions 0, engine-tree churn 4, panics 0, lost fixed points 0, newly refused by the writer 0; fixed 18,125 and engine-tree fixed 16,086. The two nonzero lines are two documents: the code-span fixture the renderer now writes behind its containers' prefix, and A13:708, whose escape is no longer needed; both read back correctly in Go and in the browser at the head.",
-      "headSha": "193ca00ca293ae3583ca8d5dc0bcfa5be35a0331",
+      "command": "bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base a21100c5bc1bf692fd923afac0506f9824c43dba --corpus $TMPDIR/diff722/corpus --out $TMPDIR/diff722/out6",
+      "observed": "149,456 documents against the base this head merged. regressions 0, misreads 0, churn 1, engine-tree regressions 0, engine-tree churn 4, panics 0, lost fixed points 0, newly refused by the writer 0. The two nonzero lines are the same two documents as every earlier run: the code-span fixture the renderer now writes behind its containers' prefix, and A13:708, whose escape is no longer needed.",
+      "headSha": "46aa74d3192715774ba9f9ef158689882f30c7c4",
       "negativeControl": "The same gate over an earlier head of this branch, before the block-HTML refusal was narrowed, reported 36 regressions, 37 churn, 55 engine-tree regressions and 1 lost fixed point, each a document the base read alike and that head refused; the gate bites."
     },
     {
@@ -41,7 +41,7 @@
       "surface": "The fork point's headless engine against this head's, each reading judged against Go's reading at this head",
       "command": "bun $TMPDIR/enginefuzz2.ts $TMPDIR/diff722/corpus/{n916,htmllazy,fencews,classes,pfam1}.jsonl",
       "observed": "42,510 documents: unchanged 39,100; the new engine agrees with the reader where the old did not 620; changed where neither agrees with the reader 2,790; the old engine threw 489. Zero documents where the old engine agreed with the Go reader and the new one does not.",
-      "headSha": "193ca00ca293ae3583ca8d5dc0bcfa5be35a0331",
+      "headSha": "46aa74d3192715774ba9f9ef158689882f30c7c4",
       "negativeControl": "The 489 the old engine threw on are bodies holding a block of HTML: at the fork point parseMarkdown raises MilkdownError 'Cannot create node for doc' and the view draws nothing, and at this head each draws as a paragraph holding the block as inline HTML."
     },
     {
@@ -49,7 +49,7 @@
       "surface": "Production Dispatch through the agent token, read with the pmdoc of each revision",
       "command": "bun infra-719-crawl.ts versions.jsonl; python3 infra-719-dedupe.py versions.jsonl distinct.jsonl versions-map.tsv; bash infra-719-census-run.sh 08c2e8adcf55d747c0fce1cbedf8564da41caee3 distinct.jsonl out; python3 infra-719-census-compare.py out versions-map.tsv",
       "observed": "14 projects, 7,462 documents, 35,434 stored versions, 35,023 distinct stored markdowns. distinct markdowns read: 35023; changed: 0. stored versions: 35434 (latest 7462); changed: 0 (latest 0) in 0 documents. So no stored document needs rewriting. NUL: 0 stored versions hold a raw U+0000, 205 hold U+FFFD.",
-      "headSha": "193ca00ca293ae3583ca8d5dc0bcfa5be35a0331",
+      "headSha": "46aa74d3192715774ba9f9ef158689882f30c7c4",
       "negativeControl": "The same runner and comparison over the 301 distinct class documents, which this change does move: 214 of 301 changed, so a 0 is a comparison rather than an empty run."
     },
     {
@@ -57,7 +57,7 @@
       "surface": "Every reader of caller markdown (Parse, ParseForWrite, ParseFragment), against a mutant of the head tree with asHeldBefore's one line removed",
       "command": "GOWORK=off go test ./internal/dispatch/pmdoc/ -run TestIndentedCodesHeldLineInATypedBlockIsRefusedBesideAnEmptyItem -count=1 -timeout 0, at the head and with `l.held = nil` deleted from sourceLines.asHeldBefore",
       "observed": "asHeldBefore is not dead. A typed block in a list item beside an empty item holding indented code whose last line is whitespace the code holds - \"-\\n\\n- a\\n  :::callout{#c1 kind=\\\"note\\\" title=\\\"T\\\"}\\n      code\\n      \\n  :::\\n\" - is refused at the head by every reader and stored by every reader with asHeldBefore removed. Those lines are none of the code's to blanksOutsideCode, which reads a code block only up to the line it began holding at, so asHeldBefore is the only thing that puts them back for that refusal. The test passes at the head.",
-      "headSha": "193ca00ca293ae3583ca8d5dc0bcfa5be35a0331",
+      "headSha": "46aa74d3192715774ba9f9ef158689882f30c7c4",
       "negativeControl": "The same test against the mutant: 'document: <nil>, want ErrSchema saying \"a typed block holding a blank line inside a list item\"', and the same for upload and fragment. The fenced form of the shape, which the tester's own TestATypedBlocksBlankLineInAnItemIsRefusedBesideAnEmptyItem locks, is refused under that mutant too, so it does not decide asHeldBefore."
     },
     {
@@ -65,8 +65,24 @@
       "surface": "ParseForWrite against the headless browser engine, and the engine's own reading of the drawn paragraph",
       "command": "bash $TMPDIR/p722/h/probe.sh $TMPDIR/lead.jsonl $LEGION_WORKSPACE/packages/envoy/internal/dispatch/pmdoc $TMPDIR/p722/h/pmdoc.r2.test; cd packages/proof-editor && bun test tests/html-flow.test.ts",
       "observed": "\" </script>\", \"[^f]: a\\n\\n      <b\\t>\" and \"  </a\\t>\" all read equal=true at the head, where the engine held \" </script>\" and Go held \"</script>\". The up-to-three spaces are block syntax: micromark takes them into the block's own token and a paragraph of the same text holds none of them, so the transform that draws a block of HTML as a paragraph drops the first line's indentation. tests/html-flow.test.ts is 60 pass, 0 fail, with three cases for it, including one proving a later line's indentation stays.",
-      "headSha": "193ca00ca293ae3583ca8d5dc0bcfa5be35a0331",
+      "headSha": "46aa74d3192715774ba9f9ef158689882f30c7c4",
       "negativeControl": "The same three documents against the binary of the head before this round: equal=false, the engine's html node holding \" </script>\" and \"  </a\\t>\" where Go's holds the tag alone."
+    },
+    {
+      "criterion": "The pull request must not break the repository's own tests: the tester found six red in four packages, and the branch was conflicting with main so GitHub ran no CI behind them",
+      "surface": "Each package's own suite, by the tester's own commands, with the harness Postgres for the two that need one",
+      "command": "GOWORK=off go test ./internal/dispatch/docs/ -run 'TestApplyOperationReplaceKeepsHTMLThatOpensNoBlockWhereItLands|TestApplyOperationReplaceEscapesBlockMarkersAfterAHardBreak|TestApplyOperationReplaceRefusesHTMLThatOpensABlockWhereItLands' -count=1; DISPATCH_TEST_DATABASE_URL=... go test ./internal/dispatch/api/ -run TestDocumentEditsRefuseAPaddedTableBeforeItsCells -count=1; DISPATCH_TEST_DATABASE_URL=... go test ./internal/dispatch/store/ -run TestSearchTextKeepsEveryLexeme -count=1; cd packages/dispatch && bun test --parallel web/src e2e/__tests__",
+      "observed": "docs ok 0.051s, api ok 3.038s, store ok 5.748s, packages/dispatch 2956 pass / 0 fail. The whole pmdoc suite is ok 713.670s with -p 1; go vet over ./internal/dispatch/... and gofmt -l internal/ are clean; packages/proof-editor is 265 pass / 0 fail with typecheck and biome clean. The pull request is MERGEABLE again, so GitHub computes a merge ref and runs CI on this head.",
+      "headSha": "46aa74d3192715774ba9f9ef158689882f30c7c4",
+      "negativeControl": "Each of the six fails at the head before this round (48bf164a), by the same commands, with the messages the tester recorded: the two docs tests on the inline refusal, the api test with status=200 where it wants 400, the store test with 'invalid byte sequence for encoding \"UTF8\": 0x00', and the two browser tests with 'Expected: \"true\", Received: null'."
+    },
+    {
+      "criterion": "The architect's added divergence: a list item holding a typed block whose indented code ends in a whitespace-only line shorter than the code's indentation is tight in Go and spread in the browser",
+      "surface": "ParseForWrite against the headless browser engine, and the corpus-errors test over blockMarkdownReaders()",
+      "command": "bash $TMPDIR/p722/h/probe.sh $TMPDIR/newdiv.jsonl $LEGION_WORKSPACE/packages/envoy/internal/dispatch/pmdoc $TMPDIR/p722/h/pmdoc.r3.test; go test ./internal/dispatch/pmdoc/ -run TestCorpusErrorsOfItemSpreadReadOtherwiseAreRefused -count=1",
+      "observed": "\"- a\\n  :::callout{#c1 kind=\\\"note\\\" title=\\\"T\\\"}\\n      code\\n     \\n  :::\\n\" is refused by name at this head, naming indented code in a typed block in a list item ending in a whitespace-only line shorter than the code's indentation. The browser's indented code ends before that line, so it is a blank line of the item and spreads it, where goldmark drops the line and the item stays tight. Reading it spread was not available: TestBrowserListSpacingRefusesWhatItCannotRead pins that the same family parses under goldmark's looseness, which is how every stored document was read.",
+      "headSha": "46aa74d3192715774ba9f9ef158689882f30c7c4",
+      "negativeControl": "The same document against the head before this round: equal=false, write=ok - Go spread:false against the engine's spread:true. And the neighbouring \"- a\\n  :::callout{...}\\n      code\\n\\ntext\\n\", which an earlier cut of the rule over-refused, is equal=true and stored at this head."
     }
   ],
   "filesChanged": [
@@ -97,7 +113,9 @@
     "Two classes the architect added mid-phase are in: a header row with fewer cells than its delimiter row (the table fix already covered it, 83 documents), and an empty list item in a quote opened after indented code, whose exact document INFRA-719's tester supplied and which turned out to be a family rather than one shape.",
     "The engine also throws on a body holding a block of HTML, which the architect added: it now draws as a paragraph of that HTML and keeps its container.",
     "The simplify pass applied a correctness fix (the refusal's carve-out), not only simplifications; it is recorded in the PR body's Thermo line with what was skipped and why.",
-    "The census was re-run whole at this head against base 08c2e8ad after the pod was replaced; it is no longer the earlier round's run against 8db58db4, and production has grown to 14 projects and 35,434 versions since. The answer is the same: 0 changed."
+    "The census was re-run whole at this head against base 08c2e8ad after the pod was replaced; it is no longer the earlier round's run against 8db58db4, and production has grown to 14 projects and 35,434 versions since. The answer is the same: 0 changed.",
+    "The api test is renamed TestDocumentEditsRefuseAPaddedTableBeforeItsCells: its old name said 'narrow header', which is no longer the shape it drives nor a table at all under the new rule. The guard it holds is unchanged.",
+    "The new refusal is deliberately narrow: it does not look through a quote or a list inside the typed block, and it is restricted to a block a fence closes. Two neighbouring shapes are therefore left as they read at the fork point - code inside a nested list in the typed block, and an unclosed typed block whose code ends the document - because refusing them would have meant guessing where the browser's parser puts a container's exit, which could not be measured both ways here."
   ],
   "openQuestions": [
     "None. The architect accepted the NUL guard row as written (2026-10-30 02:06Z), so the earlier open question is closed."
