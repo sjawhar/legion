@@ -50,6 +50,8 @@ describe("omp.skills / prepack manifest contract", () => {
         "dispatch-first",
         "dispatch-writing-specs",
         "envoy",
+        "outside-message",
+        "plain-words",
       ]);
     });
   });
