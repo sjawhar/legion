@@ -112,11 +112,14 @@
 # threshold sends no load, one whose free space falls under it mid-run has its runner job stopped
 # by the disk watcher, both are marked failed with kind pg_disk, and each step writes pg-disk.json
 # with the volume's size, the used bytes around the load, the peak, the least free and the
-# readings; (w) the disk watcher of a step killed outright stops at its next reading, recording
-# no failure in that step's directory and stopping no runner job, however little free space the
-# volume then shows; (x) a step whose heap.txt alone did not come back from the runner is no
-# failed step: its summary.json is here, it says in a note where heap.txt stayed, and the
-# runner's step directory is not removed.
+# readings; (w) the disk watcher and the runner-job wait of a step killed outright stop at their
+# next poll, recording no failure in that step's directory and stopping no runner job, however
+# little free space the volume then shows, and a wait past its deadline stops no job once the
+# lock names another run, while a wait with no pid and start time still stops its job there;
+# (x) a step whose heap.txt alone did not come back from the runner is no
+# failed step: its summary.json is here, it says in a note and in heap-missing.txt where heap.txt
+# stayed, and the runner keeps that heap.txt with the step's other files removed, while an
+# existence check that failed removes nothing there.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -134,9 +137,9 @@ cleanup() {
     pid=$(<"$f")
     kill -TERM -- "-$pid" 2>/dev/null || true
   done
-  # (w) kills a step shell outright, which leaves its runner_wait (a command substitution of its
-  # own) polling the fake runner, and on a cluster.sh whose disk watcher has no liveness its
-  # watcher too.
+  # A case that failed before its assertions could see the step end leaves the step shell (w)
+  # killed, its disk watcher and its wait on the runner job behind; a cluster.sh that passes (w)
+  # ends all three itself.
   pkill -f "$cluster step --namespace $ns " 2>/dev/null || true
   rm -rf -- "$tmp"
 }
@@ -245,8 +248,10 @@ case $verb in
         f=$FAKE_DIR/runner${cmd[5]}
         test "${cmd[4]}" "$f" && sha256sum "$f" || exit 1
         ;;
-      # A step's directory and copy-meta file, removed from the runner once copied back.
+      # A step's directory and copy-meta file, removed from the runner once copied back, and the
+      # same with heap.txt left behind when that file alone did not come back.
       "rm -rf /work/steps/"*) ;;
+      'sh -c rm -f "/work/meta/'*) printf '%s\n' "${cmd[4]}" >>"$FAKE_DIR/runner-heap-kept" ;;
       # Browser typing: the agent token written into the runner from standard input, the token and
       # document list removed when typing stops.
       'sh -c umask 077 && mkdir -p "$1" && cat >"$1/token" sh '*)
@@ -368,7 +373,15 @@ case $verb in
         # The copy-back streams everything but heap.txt, compressed; heap.txt comes separately.
         tar -C "$FAKE_DIR/stepdir" --exclude=./heap.txt -czf - .
         ;;
-      "sh -c if test -f "*) if [ -f "$FAKE_DIR/stepdir/heap.txt" ]; then echo yes; else echo no; fi ;;
+      # FAKE_HEAP_EXISTS_FAIL: the read of whether the runner holds heap.txt fails, on an error
+      # kube_read does not retry.
+      "sh -c if test -f "*)
+        if [ -n "${FAKE_HEAP_EXISTS_FAIL:-}" ]; then
+          echo 'error: unable to upgrade connection: container not found ("runner")' >&2
+          exit 1
+        fi
+        if [ -f "$FAKE_DIR/stepdir/heap.txt" ]; then echo yes; else echo no; fi
+        ;;
       # FAKE_HEAP_COPY_FAIL: the heap.txt stream alone fails (every try), while every other file
       # of the step came back in the stream above.
       "gzip -1 -c /work/steps/"*)
@@ -688,7 +701,7 @@ export POD_UID=00000000-1111-2222-3333-444444444444 LEGION_ISSUE=TEST-1
 export PATH="$bin:$PATH"
 unset FAKE_EXEC_FAIL FAKE_SAMPLE FAKE_PROD_MAJOR FAKE_LOADGEN_FAIL FAKE_APPLY_FAIL FAKE_QUIET FAKE_STORED_ORDER \
   FAKE_EXEC_ERRORS FAKE_FAST_SLEEP FAKE_TYPING_RC FAKE_DISPATCH_BUILD_ERROR FAKE_COPY_BACK_FAIL \
-  FAKE_PG_DF_SEQ FAKE_RC_UNTIL_STOP FAKE_HEAP_COPY_FAIL
+  FAKE_PG_DF_SEQ FAKE_RC_UNTIL_STOP FAKE_HEAP_COPY_FAIL FAKE_HEAP_EXISTS_FAIL
 export DISPATCH_URL=http://dispatch.invalid DISPATCH_TOKEN_FILE=$fake/token
 echo fake-token >"$fake/token"
 # The seed's counts query, as common.sh holds it: the fake kubectl answers every count only for
@@ -794,7 +807,7 @@ write_pods() {
 
 reset_fake() {
   rm -f -- "$fake/lock.json" "$fake/applied.yaml" "$fake/kubectl.log" "$fake/seeded" "$fake/runner-starts" "$fake/dispatch.log" "$fake/loadgen.log" "$fake"/refine.[0-9]* \
-    "$fake/runner-stops" "$fake/rc-polls" "$fake/df-seq" \
+    "$fake/runner-stops" "$fake/rc-polls" "$fake/df-seq" "$fake/runner-heap-kept" \
     "$fake/sleep.log" "$fake/apply-errors" "$fake/replay-template" "$fake/restores" "$fake/pod-dump" \
     "$fake/stored-order.log" "$fake/go-dispatch.log" "$fake/go-browsertype.log" "$fake/git.log" \
     "$fake/go-dispatch-tree.log" "$fake/go-subcommands.go"
@@ -2373,10 +2386,12 @@ unset FAKE_FAST_SLEEP
 run_cluster down --namespace "$ns"
 pass "up sizes the Postgres claim with --pg-volume and refuses one the quota cannot hold; a step under the free-space threshold sends no load, one that falls under it mid-run has its load stopped, both failed with kind pg_disk, and each step writes pg-disk.json"
 
-# (w) The disk watcher's liveness. A step killed outright (a SIGKILL, an OOM, a worker turn cut
-# short) runs neither pg_disk_watch_stop nor its EXIT trap, so its watcher read the volume every
-# 30 s for ever. Step names, job names and pods repeat across runs, so that watcher would later
-# record pg_disk in a dead step's directory and stop a new run's job of the same name.
+# (w) The liveness of what a step leaves on this pod. A step killed outright (a SIGKILL, an OOM, a
+# worker turn cut short) runs neither pg_disk_watch_stop nor its EXIT trap, so its disk watcher
+# read the volume every 30 s for ever and its wait on the runner job polled that job's .rc file on
+# to its deadline. Step names, job names and pods repeat across runs, so the watcher would later
+# record pg_disk in a dead step's directory and stop a new run's job of the same name, and the
+# wait would TERM a new run's job of that name at the dead step's deadline.
 reset_fake
 export LOADTEST_CLUSTER_ROOT=$tmp/root-watchkill
 run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok" --pg-volume 150Gi
@@ -2403,11 +2418,12 @@ for ((i = 0; i < 600; i++)); do
 done
 [ "$watching" = yes ] || fail "the step read the volume through no 30 s watcher in 60 s: $(cat "$tmp/out")"
 kill -KILL "$kill_step"
-# The zombie reaped, so the pid the watcher holds names no process any more. A watcher that is
-# gone takes no 30 s nap and reads the volume no more; the step's runner_wait, in a command
-# substitution the kill leaves behind too, sleeps a real 15 s and reads no volume, and the fake
-# kubectl's df is the watcher's read alone. The wait below is the watcher's one poll, not an
-# assertion: a watcher that polls on fails the counts.
+# The zombie reaped, so the pid the watcher and the wait hold names no process any more. A watcher
+# that is gone takes no 30 s nap and reads the volume no more; the step's runner_wait, in a
+# command substitution the kill leaves behind too, sleeps a real 15 s and reads no volume, so the
+# fake kubectl's df is the watcher's read alone, and it ends at the poll after that sleep, which
+# the assertions below wait for. The wait here is the watcher's one poll, not an assertion: a
+# watcher that polls on fails the counts.
 wait "$kill_step" 2>/dev/null || true
 for ((i = 0; i < 100; i++)); do
   if grep -q 'disk watcher' "$tmp/out"; then break; fi
@@ -2429,14 +2445,74 @@ kill_dfs_after=$(grep -c -- 'df -B1 --output' "$fake/kubectl.log" || true)
   fail "the killed step's disk watcher made $((kill_dfs_after - kill_dfs)) more reads of the volume in the 2 s after it was reaped: it reads on for ever"
 ! grep -qx 30 "$fake/sleep.log" ||
   fail "the killed step's disk watcher took $(grep -cx 30 "$fake/sleep.log") more 30 s naps after it was reaped: it polls on for ever"
+# The step's wait on its runner job is a command substitution, a subshell of its own that the
+# SIGKILL does not reach either. Left alone it polls /work/logs/step-pgkill.rc on and, at the
+# step's deadline, TERMs the pid that job's .pid file names in whatever pod is named runner --
+# which a later run's step of that name would be. Given the step shell's pid and start time it
+# ends at its next poll instead, so the kill leaves nothing of the step running here and no job
+# is stopped. Nothing but cluster.sh ends it: the cleanup's pkill runs long after this.
+kill_left=yes
+for ((i = 0; i < 400; i++)); do
+  if ! pgrep -f "$cluster step --namespace $ns " >/dev/null 2>&1; then
+    kill_left=no
+    break
+  fi
+  sleep 0.1
+done
+[ "$kill_left" = no ] ||
+  fail "40 s after the step shell was killed, the step still runs here ($(pgrep -af "$cluster step --namespace $ns " | tr '\n' ';')): its wait on the runner job polls on, and at the step's deadline it stops the job step-pgkill, which a later run's step of that name would be"
+! grep -qx 'step-pgkill' "$fake/runner-stops" 2>/dev/null ||
+  fail "the killed step's wait on its runner job stopped step-pgkill: $(cat "$fake/runner-stops")"
 unset FAKE_FAST_SLEEP
 run_cluster down --namespace "$ns"
-pass "the disk watcher of a step that was killed outright stops at its next reading, records nothing and stops no runner job"
+# The same rule with a bound small enough to reach, the step's own being its window, grace and
+# drain away: a wait whose step shell is gone ends at its first poll, printing nothing its caller
+# would read as an exit status; a wait at its deadline stops nothing once the lock names another
+# run; and a wait with no pid and start time (seed, typing_stop, replay-prepare) is what it was,
+# stopping its job at the deadline.
+(
+  # shellcheck source=packages/envoy/loadtest/cluster/cluster.sh
+  source "$cluster"
+  NS=$ns
+  set_run "$kill_run"
+  mkdir -p "$RUN_DIR/logs"
+  rm -f -- "$fake/runner-stops" "$fake/rc-polls"
+  export FAKE_RC_UNTIL_STOP=1
+  sleep 60 &
+  gone=$!
+  gone_start=$(proc_start "$gone")
+  kill -KILL "$gone"
+  wait "$gone" 2>/dev/null || true
+  wait_rc=0
+  wait_out=$(runner_wait step-pgkill 2 "$RUN_DIR/logs" "$gone" "$gone_start" 2>/dev/null) || wait_rc=$?
+  ! grep -qx 'step-pgkill' "$fake/runner-stops" 2>/dev/null ||
+    fail "a wait whose step shell is gone stopped the runner job step-pgkill: $(cat "$fake/runner-stops")"
+  [ -z "$wait_out" ] ||
+    fail "a wait whose step shell is gone printed '$wait_out', which its caller reads as the job's exit status"
+  ((wait_rc != 0)) || fail "a wait whose step shell is gone returned 0, which its caller reads as a job that ended"
+  write_lock "$other_run" "$(utc_now)"
+  self=$BASHPID
+  self_start=$(proc_start "$self")
+  wait_rc=0
+  wait_out=$(runner_wait step-pgkill 0 "$RUN_DIR/logs" "$self" "$self_start" 2>/dev/null) || wait_rc=$?
+  ! grep -qx 'step-pgkill' "$fake/runner-stops" 2>/dev/null ||
+    fail "a wait at its deadline stopped step-pgkill although the lock names run $other_run: $(cat "$fake/runner-stops")"
+  ((wait_rc != 0)) || fail "a wait that ended because the lock names another run returned 0"
+  rm -f -- "$fake/rc-polls"
+  wait_out=$(runner_wait step-pgkill 0 "$RUN_DIR/logs" 2>/dev/null)
+  [ "$wait_out" = timeout ] ||
+    fail "a wait with no pid and start time printed '$wait_out' past its deadline, not timeout"
+  grep -qx 'step-pgkill' "$fake/runner-stops" ||
+    fail "a wait with no pid and start time did not stop its job past its deadline: $(cat "$fake/runner-stops" 2>/dev/null)"
+)
+pass "the disk watcher and the runner-job wait of a step that was killed outright stop at their next poll, record nothing and stop no runner job, and a wait stops no job at its deadline once the lock names another run"
 
 # (x) A copy-back where heap.txt alone did not come back. Every other file of the step is here,
 # so the step is a complete one: marking it failed (kind copy_back) would drop its row from the
-# curves and the tables for a heap profile they take no number from. It is a note instead, and
-# the runner keeps the step's directory, the heap.txt that stayed among it.
+# curves and the tables for a heap profile they take no number from. It is a note and the marker
+# heap-missing.txt instead, and the runner keeps that heap.txt, the step's other files removed
+# from it; an existence check that failed says so in its own words and leaves the runner whole,
+# since the heap.txt that may be there would go with the rest.
 reset_fake
 export LOADTEST_CLUSTER_ROOT=$tmp/root-heapback
 run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok"
@@ -2452,11 +2528,31 @@ unset FAKE_HEAP_COPY_FAIL
 [ -f "$heap_dir/summary.json" ] || fail "the step's summary.json did not come back: $(names "$heap_dir")"
 [ ! -e "$heap_dir/heap.txt" ] && [ ! -e "$heap_dir/heap.txt.part" ] ||
   fail "the step directory holds a heap.txt the runner never sent whole: $(names "$heap_dir")"
-grep -qF 'step heapcut: heap.txt (the step-end heap profile in text) was not copied back; every other file is here, and codepaths shows - for the MemStats rows' "$tmp/out" ||
+heap_note='heap.txt (the step-end heap profile in text) was not copied back; it stays in the runner at /work/steps/heapcut/heap.txt; every other file of the step is here and was removed from the runner, and codepaths shows - for the MemStats rows.'
+grep -qF "step heapcut: $heap_note" "$tmp/out" ||
   fail "the step does not say that heap.txt alone was not copied back: $(cat "$tmp/out")"
-grep -qF '/work/steps/heapcut/heap.txt' "$tmp/out" ||
-  fail "the note does not say where heap.txt stays in the runner: $(cat "$tmp/out")"
+[ "$(cat "$heap_dir/heap-missing.txt" 2>/dev/null)" = "$heap_note" ] ||
+  fail "the step directory keeps no heap-missing.txt holding the note: $(cat "$heap_dir/heap-missing.txt" 2>/dev/null)"
 ! grep -q -- "exec runner -c runner -- rm -rf /work/steps/heapcut " "$fake/kubectl.log" ||
-  fail "the runner's step directory was removed although heap.txt did not come back"
+  fail "the runner's step directory was removed whole although heap.txt stayed in it"
+grep -qx heapcut "$fake/runner-heap-kept" 2>/dev/null ||
+  fail "the step's other files were not removed from the runner, heap.txt apart: $(grep -c . "$fake/runner-heap-kept" 2>/dev/null)"
+# The existence check itself failing: nothing of the step is removed from the runner, since a
+# heap.txt that is there would go with it, and the note says what could not be read.
+rm -f -- "$fake/runner-heap-kept"
+heap_dir=$LOADTEST_CLUSTER_ROOT/$(jq -r .data.run "$fake/lock.json")/steps/heapask
+FAKE_HEAP_EXISTS_FAIL=1 run_cluster step --namespace "$ns" heapask 1 --duration 1m
+unset FAKE_HEAP_EXISTS_FAIL
+((RC == 0)) || fail "a step whose heap.txt existence check failed exited $RC: $(cat "$tmp/out")"
+[ ! -f "$heap_dir/step-failed.json" ] ||
+  fail "a step whose heap.txt existence check failed was marked failed: $(cat "$heap_dir/step-failed.json")"
+[ -f "$heap_dir/summary.json" ] || fail "the step's summary.json did not come back: $(names "$heap_dir")"
+heap_ask_note='could not read whether /work/steps/heapask/heap.txt exists; the rest of the step is here, and codepaths shows - for the MemStats rows. Nothing of the step was removed from the runner.'
+grep -qF "step heapask: $heap_ask_note" "$tmp/out" ||
+  fail "the step does not say that the heap.txt existence check failed: $(cat "$tmp/out")"
+[ "$(cat "$heap_dir/heap-missing.txt" 2>/dev/null)" = "$heap_ask_note" ] ||
+  fail "the step directory keeps no heap-missing.txt holding that note: $(cat "$heap_dir/heap-missing.txt" 2>/dev/null)"
+{ ! grep -q -- "exec runner -c runner -- rm -rf /work/steps/heapask " "$fake/kubectl.log" && [ ! -s "$fake/runner-heap-kept" ]; } ||
+  fail "something of the step was removed from the runner although it is not known whether heap.txt is there"
 run_cluster down --namespace "$ns"
-pass "a step whose heap.txt alone did not come back is complete, says so in a note, and keeps the runner's step directory with it"
+pass "a step whose heap.txt alone did not come back is complete, says so in a note and in heap-missing.txt, and the runner keeps that heap.txt alone; an existence check that failed removes nothing there"

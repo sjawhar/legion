@@ -179,7 +179,12 @@
 # end by themselves after the step's window, grace and drain, still loading the copy. down ends
 # them with the runner pod; to keep the copy, stop each by the pid it recorded before the next
 # step: kubectl -n NS exec runner -c runner -- sh -c 'kill -TERM "$(cat /work/logs/JOB.pid)"'
-# (README.md, "Clean up after a killed run").
+# (README.md, "Clean up after a killed run"). What the killed step leaves on this pod ends on its
+# own and stops no job: its disk watcher (pg_disk_watch) and the wait on its runner job
+# (runner_wait, a command substitution the kill does not reach either) are given the step shell's
+# pid and start time, and each ends at its next poll once that shell is gone, recording nothing
+# and stopping nothing -- step names, job names and pods repeat across runs, so an orphan of one
+# run must never TERM another run's job of the same name.
 #
 # Every subcommand needs --namespace (no default; a Legion pod's own namespace is builds), and
 # every kubectl call names it. Subcommands after up find the run from the lock's `run` and its
@@ -757,6 +762,18 @@ kube_lock_get() {
   kube get configmap "$LOCK" --ignore-not-found -o json || die "kubectl could not read ConfigMap $LOCK in $NS"
 }
 
+# lock_names_other_run: the namespace's lock names a run that is not this one, so this run is over
+# whatever the pids on this pod still look like. A daemon of a step (the disk watcher, the wait on
+# a runner job) asks this before it stops a job in the runner, because job names and pods repeat
+# across runs. A read that failed, and a namespace with no lock at all, say nothing: the caller
+# then acts as it would have.
+lock_names_other_run() {
+  local lock
+  lock=$(kube_lock_get 2>/dev/null) || return 1
+  [ -n "$lock" ] || return 1
+  [ "$(jq -r '.data.run // ""' <<<"$lock")" != "$RUN" ]
+}
+
 # heartbeat_age RFC3339: seconds since it, or "unknown".
 heartbeat_age() {
   local t
@@ -1177,7 +1194,7 @@ pg_disk_write() {
 # the run directory is gone; and the lock, which costs an exec, is read only when the watcher is
 # about to act, never once a poll.
 pg_disk_watch() {
-  local name=$1 dir=$2 job=$3 file=$4 pid=$5 start=$6 nap="" lock
+  local name=$1 dir=$2 job=$3 file=$4 pid=$5 start=$6 nap=""
   # Its own TERM ends the nap it is in, so the step leaves no sleep of its own behind.
   trap '[ -z "$nap" ] || kill -- "$nap" 2>/dev/null; exit 0' TERM
   while :; do
@@ -1196,8 +1213,7 @@ pg_disk_watch() {
     trap '' TERM
     # A lock that names another run is this run's end, whatever the step shell still looks like;
     # a read that failed says nothing, and the step shell above is alive, so the watcher acts.
-    lock=$(kube_lock_get 2>/dev/null) || lock=""
-    if [ -n "$lock" ] && [ "$(jq -r '.data.run // ""' <<<"$lock")" != "$RUN" ]; then
+    if lock_names_other_run; then
       note "step $name: the lock no longer names run $RUN; the disk watcher stops, recording nothing and stopping no job"
       return 0
     fi
@@ -1407,15 +1423,38 @@ runner_stop() {
   kube exec runner -c runner -- sh -c 'kill -TERM "$(cat "/work/logs/$1.pid")"' sh "$1" >/dev/null 2>&1 || true
 }
 
-# runner_wait NAME SECONDS [LOG_DIR]: NAME's exit status once it has one; past SECONDS it stops
-# NAME and prints "timeout". Its log is copied to LOG_DIR (default the run's logs/).
+# runner_wait NAME SECONDS [LOG_DIR [PID START]]: NAME's exit status once it has one; past SECONDS
+# it stops NAME and prints "timeout". Its log is copied to LOG_DIR (default the run's logs/).
+#
+# PID and START are the step shell's pid and its start time (proc_start), which run_in_runner
+# passes and every other caller (seed, typing_stop, replay-prepare) leaves out; without them the
+# wait is what it was. A step's wait runs in a command substitution, a subshell of its own that a
+# SIGKILL of the step shell (an OOM, an interrupted worker turn) does not reach, so an abandoned
+# one polled on and at its deadline TERMed the pid /work/logs/NAME.pid holds in whatever pod is
+# named runner. Step names, job names and pods repeat across runs, so that wait would stop a
+# later run's job of the same name. With PID and START it has the disk watcher's liveness
+# (pg_disk_watch): each poll ends the wait, printing no exit status and stopping nothing, once
+# that process is gone or is another process now, or the run directory is gone; and the lock,
+# which costs an exec, is read only before the stop at the deadline, which a lock that names
+# another run leaves undone. It ends non-zero on either, so the step shell that reads its output
+# (rc=$(runner_wait ...)) ends there under errexit instead of taking the empty output for the
+# job's exit status: a step whose shell was killed has no reader left, and a step whose run the
+# lock no longer names has nothing left to measure.
 runner_wait() {
-  local name=$1 deadline=$((EPOCHSECONDS + $2)) log_dir=${3:-$RUN_DIR/logs} rc
+  local name=$1 deadline=$((EPOCHSECONDS + $2)) log_dir=${3:-$RUN_DIR/logs} pid=${4:-} start=${5:-} rc
   while :; do
+    if [ -n "$pid" ] && { [ "$(proc_start "$pid")" != "$start" ] || [ ! -d "$RUN_DIR" ]; }; then
+      note "job $name: the step that started this wait is gone; the wait ends, stopping no job"
+      return 1
+    fi
     if rc=$(kube_read exec runner -c runner -- cat "/work/logs/$name.rc" 2>/dev/null) && [[ $rc =~ ^[0-9]+$ ]]; then
       break
     fi
     if ((EPOCHSECONDS >= deadline)); then
+      if [ -n "$pid" ] && lock_names_other_run; then
+        note "job $name: the lock no longer names run $RUN; the wait ends, stopping no job"
+        return 1
+      fi
       runner_stop "$name"
       rc=timeout
       break
@@ -2261,22 +2300,51 @@ run_step() {
   note "step $name done: $dir"
 }
 
+# runner_step_remove NAME [keep-heap]: the step's directory and its copy-meta file removed from
+# the runner, so the runner's disk holds only the steps still to come; with keep-heap, every file
+# of the step but heap.txt, which stayed because its own stream failed.
+runner_step_remove() {
+  local name=$1
+  if [ "${2:-}" = keep-heap ]; then
+    # shellcheck disable=SC2016 # expanded by the runner's sh
+    kube exec runner -c runner -- sh -c 'rm -f "/work/meta/$1.json" &&
+      find "/work/steps/$1" -mindepth 1 -maxdepth 1 ! -name heap.txt -exec rm -rf -- {} +' sh "$name" ||
+      note "step $name: removing the step's files from the runner, heap.txt apart, failed"
+    return 0
+  fi
+  kube exec runner -c runner -- rm -rf "/work/steps/$name" "/work/meta/$name.json" ||
+    note "step $name: removing /work/steps/$name from the runner failed"
+}
+
+# runner_heap_note NAME DIR TEXT: TEXT as a note of step NAME, and the same words in
+# DIR/heap-missing.txt. The step is a whole one without its heap profile, so it holds no
+# step-failed.json and nothing in it would otherwise say why heap.txt is not there: the marker
+# file says it, beside the files it belongs to and inside collect's tar of the step.
+runner_heap_note() {
+  note "step $1: $3"
+  printf '%s\n' "$3" >"$2/heap-missing.txt"
+}
+
 # runner_copy_back NAME DIR: the runner's /work/steps/NAME into DIR, in two gzip-compressed
 # streams: every file but heap.txt first, then heap.txt alone. With typing at 10x, heap.txt (the
 # step-end heap profile in text form) passed 1 GB, and one uncompressed tar stream of it through
 # kubectl exec ended early ("Unexpected EOF in archive", run lt-20261029t115927-655c, r16-typing),
-# which lost meta.json and summary.json with it. Each stream is tried twice. A failure of the
-# first stream returns 1: the step's files are missing here, and run_in_runner records the step as
-# failed (kind copy_back). A failure of heap.txt alone, its existence check or both tries of its
-# stream, returns 2: every other file of the step is here, so the step is a complete one that
-# lacks the heap profile, which run_in_runner says in a note. Nothing is removed in the runner
-# unless everything came back, so the heap.txt that did not stays there with the step's other
-# files. The first stream is extracted into a scratch directory beside DIR and its files are moved
-# into DIR only once the stream ended cleanly, so a stream cut mid-file never leaves a truncated
+# which lost meta.json and summary.json with it. Each stream is tried twice.
+#
+# It returns 1 only when the first stream failed: the step's files are missing here, and the
+# caller records the step as failed (kind copy_back), the runner keeping everything. Every other
+# path returns 0, the step being whole here, and clears the runner itself: with heap.txt back (or
+# none there), the step's directory and its copy-meta file go; with the existence check failed,
+# nothing goes, since the heap.txt that may be there would go with it; with both tries of an
+# existing heap.txt failed, everything but that heap.txt goes. Each of those two leaves the step a
+# complete one that lacks its heap profile, in a note and in DIR/heap-missing.txt.
+#
+# The first stream is extracted into a scratch directory beside DIR and its files are moved into
+# DIR only once the stream ended cleanly, so a stream cut mid-file never leaves a truncated
 # summary.json in DIR for loadgen curves and tables to read; heap.txt lands the same way, through
 # heap.txt.part.
 runner_copy_back() {
-  local name=$1 dir=$2 src="/work/steps/$1" try scratch copied
+  local name=$1 dir=$2 src="/work/steps/$1" try scratch copied has
   for try in 1 2; do
     scratch=$(mktemp -d "$dir/.copy-back.XXXXXX") || return 1
     copied=no
@@ -2289,20 +2357,27 @@ runner_copy_back() {
     ((try < 2)) || return 1
     note "step $name: copying $src back failed (try $try of 2); retrying"
   done
-  local has
   # shellcheck disable=SC2016 # expanded by the runner's sh
-  has=$(kube_read exec runner -c runner -- sh -c 'if test -f "$1"; then echo yes; else echo no; fi' sh "$src/heap.txt") ||
-    return 2
-  [ "$has" = yes ] || return 0
-  for try in 1 2; do
-    if kube exec runner -c runner -- gzip -1 -c "$src/heap.txt" | gzip -d >"$dir/heap.txt.part" &&
-      mv -- "$dir/heap.txt.part" "$dir/heap.txt"; then
-      return 0
-    fi
-    rm -f -- "$dir/heap.txt.part"
-    note "step $name: copying $src/heap.txt back failed (try $try of 2)"
-  done
-  return 2
+  has=$(kube_read exec runner -c runner -- sh -c 'if test -f "$1"; then echo yes; else echo no; fi' sh "$src/heap.txt") || {
+    runner_heap_note "$name" "$dir" "could not read whether $src/heap.txt exists; the rest of the step is here, and codepaths shows - for the MemStats rows. Nothing of the step was removed from the runner."
+    return 0
+  }
+  if [ "$has" = yes ]; then
+    for try in 1 2; do
+      if kube exec runner -c runner -- gzip -1 -c "$src/heap.txt" | gzip -d >"$dir/heap.txt.part" &&
+        mv -- "$dir/heap.txt.part" "$dir/heap.txt"; then
+        runner_step_remove "$name"
+        return 0
+      fi
+      rm -f -- "$dir/heap.txt.part"
+      note "step $name: copying $src/heap.txt back failed (try $try of 2)"
+    done
+    runner_heap_note "$name" "$dir" "heap.txt (the step-end heap profile in text) was not copied back; it stays in the runner at $src/heap.txt; every other file of the step is here and was removed from the runner, and codepaths shows - for the MemStats rows."
+    runner_step_remove "$name" keep-heap
+    return 0
+  fi
+  runner_step_remove "$name"
+  return 0
 }
 
 # step_at_exit: the EXIT trap run_in_runner sets before the step's load: the step's disk watcher
@@ -2320,15 +2395,15 @@ step_at_exit() {
 # (pg-stats-before.json, pg-stats-after.json) and, with --typing, browser typing from just before
 # it (typing_start) until the stored-order command ends (typing_stop, and at the latest when the
 # step ends); then the
-# after-work of every step: DIR/pg-disk.json, /work/steps/NAME copied back into DIR (and, once
-# every file of it came back, removed from the runner with /work/meta/NAME.json; a copy-back that
-# failed is a step failure, kind copy_back, and leaves the files in the runner, while a heap.txt
-# that alone did not come back is a note, not a failure: the step is whole without it), the crash
+# after-work of every step: DIR/pg-disk.json, /work/steps/NAME copied back into DIR (and cleared
+# in the runner by the copy back itself; one that failed is a step failure, kind copy_back, and
+# leaves the files in the runner, while a heap.txt that alone did not come back is a note and
+# DIR/heap-missing.txt, not a failure: the step is whole without it), the crash
 # check, the container logs, a non-zero exit recorded, the stored-order check while Dispatch still
 # runs (one that dies leaves the step going), cgroup-merge and tables.
 run_in_runner() {
   local name=$1 dir=$2 job=$3 seconds=$4 started rc readings=$2/.pg-disk.jsonl
-  local shell_pid=$BASHPID shell_start copy_rc=0
+  local shell_pid=$BASHPID shell_start
   shell_start=$(proc_start "$shell_pid")
   shift 4
   trap step_at_exit EXIT
@@ -2344,25 +2419,14 @@ run_in_runner() {
   runner_start "$job" "$@"
   pg_disk_watch "$name" "$dir" "$job" "$readings" "$shell_pid" "$shell_start" &
   PG_DISK_WATCHER=$!
-  rc=$(runner_wait "$job" "$seconds" "$dir")
+  rc=$(runner_wait "$job" "$seconds" "$dir" "$shell_pid" "$shell_start")
   pg_disk_watch_stop
   pg_disk_sample "$readings" || true
   pg_disk_write "$dir" "$readings"
   pg_stats "$dir/pg-stats-after.json"
   [ ! -f "$dir/$job.log" ] || mv -- "$dir/$job.log" "$dir/loadgen.out"
-  runner_copy_back "$name" "$dir" || copy_rc=$?
-  case $copy_rc in
-    0)
-      kube exec runner -c runner -- rm -rf "/work/steps/$name" "/work/meta/$name.json" ||
-        note "step $name: removing /work/steps/$name from the runner failed"
-      ;;
-    2)
-      note "step $name: heap.txt (the step-end heap profile in text) was not copied back; every other file is here, and codepaths shows - for the MemStats rows. It stays in the runner at /work/steps/$name/heap.txt, with the rest of the step's files."
-      ;;
-    *)
-      record_failure "$dir" copy_back "" "copying /work/steps/$name back from the runner failed, so the step's files are missing here; they stay in the runner at /work/steps/$name"
-      ;;
-  esac
+  runner_copy_back "$name" "$dir" ||
+    record_failure "$dir" copy_back "" "copying /work/steps/$name back from the runner failed, so the step's files are missing here; they stay in the runner at /work/steps/$name"
 
   container_snapshot "$dir/containers-after.tsv"
   crash_check "$dir/containers-before.tsv" "$dir/containers-after.tsv" "$dir"

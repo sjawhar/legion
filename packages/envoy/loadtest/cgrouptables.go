@@ -58,10 +58,20 @@ func failedMark(kinds []string) string {
 	return "(failed: " + strings.Join(kinds, ", ") + ")"
 }
 
+// failedKindsText spells the step-failed.json kinds that any step can hold, for the note that
+// defines the (failed: <kinds>) mark. Both notes that carry it, this file's under the cgroup
+// tables and CURVES.md's (renderCurves), add after it the kinds only they can show: sampler_gap,
+// whose words name the reader of the gap, and in CURVES.md failedKindCgroup and
+// failedKindNoSummary, which come from no step-failed.json at all.
+const failedKindsText = "`restart`: a container of the copy restarted during the step; " +
+	"`loadgen_exit`: loadgen run exited non-zero; " +
+	"`copy_back`: the step's files could not be copied back from the runner, so they are missing here; " +
+	"`pg_disk`: the Postgres data volume had less free space than the step needs, so the step sent no load or its load was stopped"
+
 // failedNote defines failedMark under a table, when a row has it.
 func failedNote(md *markdown, marked bool) {
 	if marked {
-		md.line("\n(failed: <kinds>): the step directory holds step-failed.json, whose `reasons[].kind` say why the step failed (`restart`: a container of the copy restarted during the step; `loadgen_exit`: loadgen run exited non-zero; `copy_back`: the step's files could not be copied back from the runner, so they are missing here; `pg_disk`: the Postgres data volume had less free space than the step needs, so the step sent no load or its load was stopped; `sampler_gap`: loadgen cgroup-merge found a role over %s without a good cgroup sample in the window), so its row, in every table here, does not measure the load.", seconds(cgroupMaxGap))
+		md.line("\n(failed: <kinds>): the step directory holds step-failed.json, whose `reasons[].kind` say why the step failed ("+failedKindsText+"; `sampler_gap`: loadgen cgroup-merge found a role over %s without a good cgroup sample in the window), so its row, in every table here, does not measure the load.", seconds(cgroupMaxGap))
 	}
 }
 
