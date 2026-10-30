@@ -2,30 +2,30 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-592",
-  "completed": "2026-10-30T09:33:32Z",
+  "completed": "2026-10-30T10:19:15Z",
   "proof": [
     {
       "criterion": "Every request-only refusal of the gated write routes answers before the writer gate, TURN_REQUIRES_ASK for a comment with a turn and no ask_id or reply_to included (tester round 5)",
-      "surface": "Real envoy-dispatch binary on INFRA-589's local stack (lt3: Postgres via 1 ms proxy, NATS, listener), built from the head (build-info 93436e52, dirty false)",
-      "command": "stack.sh setup/start/reset; bash /legion/scratch/tmp/infra-592/r7-refusals.sh (the tester's r6-refusals.sh, output path changed): eight invalid requests with no gate held, then again while a comment edit holds the spec's writer gate (psql holds the comment row)",
-      "observed": "while the gate is held (held edit 200 in 14.2 s), all eight answer 400 in 0.006-0.021 s: INVALID_COMMENT x3, TURN_REQUIRES_ASK 0.0067 s, INVALID_ANCHOR x3, INVALID_URL; 0 ERROR lines in Dispatch's log; the red tests TestAnAnchoredCommentWithATurnIsRefusedBeforeTheWriterGate (a9f861bf) and TestACommentEditRefusedForItsInputWaitsOnNoWriterGate pass unmodified",
-      "headSha": "93436e52882422bbc2a3c34cde46961c3f62e7cd",
+      "surface": "Real envoy-dispatch binary on INFRA-589's local stack (lt3: Postgres via 1 ms proxy, NATS, listener), built from the head (build-info b18e2678, dirty false)",
+      "command": "stack.sh setup/start/reset; bash /legion/scratch/tmp/infra-592/r8-refusals.sh (the tester's r6-refusals.sh, output path changed): eight invalid requests with no gate held, then again while a comment edit holds the spec's writer gate (psql holds the comment row)",
+      "observed": "while the gate is held (held edit 200 in 14.2 s), all eight answer 400 in 0.005-0.023 s: INVALID_COMMENT x3, TURN_REQUIRES_ASK 0.0056 s, INVALID_ANCHOR x3, INVALID_URL; 0 ERROR lines in Dispatch's log; the red tests TestAnAnchoredCommentWithATurnIsRefusedBeforeTheWriterGate (a9f861bf) and TestACommentEditRefusedForItsInputWaitsOnNoWriterGate pass unmodified",
+      "headSha": "b18e2678e2b6e6691e3d7e3743a61bc25266aaa6",
       "negativeControl": "At bb5628b3 the same script answered 'turn without ask_id' 400 TURN_REQUIRES_ASK after 12.05 s behind the held gate (tester round 5, r6-refusals.out)"
     },
     {
-      "criterion": "The forward merge of main's #2376 and #2480 keeps both behaviours and this PR's invariants; connections re-derived",
+      "criterion": "The forward merges of main's #2376, #2480, #2508 and #2478 keep both behaviours and this PR's invariants; connections re-derived",
       "surface": "go build/vet/test against a real Postgres 16 (UTF-8 cluster); bun test; check-ci-filters.sh",
       "command": "cd packages/envoy && go build ./... && go vet ./...; (cd infra && go vet ./... && go vet -tags natslive ./core/ && go test -run ConnectionsPer ./gcp/); go test ./internal/dispatch/docs/ ./internal/dispatch/pmdoc/... ./internal/dispatch/api/; cd packages/envoy-client && bun test && bun run typecheck; bunx biome check packages/envoy-client/; packages/contracts bun run typecheck; check-ci-filters.sh",
-      "observed": "build and vet ok; ConnectionsPerProcess 87 = dispatchConnectionsPerPod 87 (this PR adds no migration; main's highest 0147); docs ok (1295 s), pmdoc ok; api passes but for TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (refuses this pod's byte-order collation); envoy-client 1166 pass 0 fail, typecheck and biome clean; contracts typecheck clean; filters: 25 gates covered",
-      "headSha": "93436e52882422bbc2a3c34cde46961c3f62e7cd",
-      "negativeControl": "Before the resolution, #2376's session_answers.go failed to compile against this PR's writeHandlerError(w, r, err), and #2480's upload_memory_test.go failed go vet on the ungated joinedWrite"
+      "observed": "build and vet ok; ConnectionsPerProcess 87 = dispatchConnectionsPerPod 87 (this PR adds no migration; main's highest 0147); docs ok (1295 s), pmdoc ok; api passes but for TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (refuses this pod's byte-order collation); envoy-client 1166 pass 0 fail, typecheck and biome clean; contracts typecheck clean; filters: 25 gates covered; after #2508/#2478 at b18e2678: build and vet ok, cmd/dispatch, events, outbox, store ok, envoy-client 1169 pass 0 fail, ConnectionsPerProcess still 87",
+      "headSha": "b18e2678e2b6e6691e3d7e3743a61bc25266aaa6",
+      "negativeControl": "Before the resolution, #2376's session_answers.go failed to compile against this PR's writeHandlerError(w, r, err), and #2480's upload_memory_test.go failed go vet on the ungated joinedWrite; #2478's getAppInstallation did not compile against writeHandlerError(w, r, err) before its resolution"
     },
     {
       "criterion": "Excess load refused early with a retryable status, connection waits bounded, 1x served, at the merged head",
-      "surface": "INFRA-589's 2-core load reproduction (lt3), Dispatch built from the head (build_commit 93436e52, dirty false)",
-      "command": "run-step.sh r7-1x --events 4 --sessions 400 --requests 60; run-step.sh r7-10x --events 40 --sessions 1000 --requests 600",
-      "observed": "1x: 100.0% of 59.7 req/s 2xx, 0 read refusals and 2 write refusals 429 OVERLOADED, 3.98/3.99 events/s committed, 0 goroutines waiting for a connection. 10x: 89,928 reads and 6,861 writes refused 429 OVERLOADED (read refusal p50 22 ms, p99 138 ms), 16.2% of 596 req/s served, 1.69 events/s committed, 0 connection failures, at most 13 goroutines waiting",
-      "headSha": "93436e52882422bbc2a3c34cde46961c3f62e7cd",
+      "surface": "INFRA-589's 2-core load reproduction (lt3), Dispatch built from the head (build_commit b18e2678, dirty false)",
+      "command": "run-step.sh r8-1x and r8-1x-b --events 4 --sessions 400 --requests 60; run-step.sh r8-10x --events 40 --sessions 1000 --requests 600",
+      "observed": "1x r8-1x-b: 100.0% of 59.7 req/s 2xx, 0 refusals, 3.99/3.99 events/s committed; r8-1x: 98.6%, 150 reads and 11 writes refused 429 OVERLOADED (wait_exceeded bursts, inside the 0-223/0-55 band measured without #2392), 3.93 events/s; 0 goroutines waiting for a connection in both. 10x: 88,980 reads and 6,843 writes refused 429 OVERLOADED (read refusal p50 21 ms, p99 142 ms), 17.1% of 596 req/s served, 1.79 events/s committed, 0 connection failures, at most 11 goroutines waiting",
+      "headSha": "b18e2678e2b6e6691e3d7e3743a61bc25266aaa6",
       "negativeControl": "Before (merge-base 2df3353c, PR body tables): 2x-10x 0.0-55 successful reads/s and 3,485-20,174 goroutines waiting for a connection"
     }
   ],
@@ -36,14 +36,17 @@
     ".dispatch/architecture/dispatch-api.md (merge)",
     ".dispatch/architecture/dispatch-outbox.md (merge)",
     "packages/envoy/AGENTS.md (merge)",
-    "packages/envoy/internal/dispatch/docs/upload_memory_test.go (merge)"
+    "packages/envoy/internal/dispatch/docs/upload_memory_test.go (merge)",
+    "packages/envoy/cmd/dispatch/main.go (merge: #2508's metrics registry beside this PR's pools)",
+    "packages/envoy/internal/dispatch/api/github_app_installation.go (merge)"
   ],
   "trickyParts": [
     "#2376's per-call signal now also ends the Retry-After wait in #send (AbortSignal.any with the client's signal)",
     "A root comment with turn 'nobody' answers TURN_REQUIRES_ASK again, before the turn value check, as before this PR's previous round"
   ],
   "deviations": [
-    "dispatch-api.md's api package file count was 87 on main and 82 on this branch; the resolution writes the counted 99"
+    "dispatch-api.md's api package file count was 87 on main and 82 on this branch; the resolution writes the counted 99",
+    "One of two 1x runs at b18e2678 refused 150 reads and 11 writes in 1 s wait bursts (the 2-core harness's saturation band without #2392); the repeat refused none"
   ],
   "openQuestions": []
 }
