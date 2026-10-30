@@ -2,22 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-562",
-  "completed": "2026-10-30T14:03:15Z",
-  "round": 11,
-  "scope": "Narrowed by the INFRA-63 architect: the DATABASE_URL fix (every caller of redeliver-webhooks covered, the census entry complete), any merge of main by fingerprint, migration versions against main, and the four required checks green at the code head. Approve when they hold; do not hold for a migration landing after the read; a text-only conflict with main at landing is approved and said so.",
-  "reviewedHead": "8725ff13fc70a132f113aaa6bea2ed5ace617fca",
-  "codeHead": "1d914afe59a78d3e908670a627281ad74cf07eee",
+  "completed": "2026-10-30T19:25:41Z",
+  "round": 12,
+  "scope": "Narrowed by the INFRA-63 architect: the landing merge by fingerprint (approved diff plus conflict resolution, renumbering and any connection-count change); the CI filter change 9ebeb9b3 by fingerprint, check-ci-filters, ci-ok and the four required checks at the code head; migration versions against main at my read. Approve when they hold, naming the run and its head SHA.",
+  "reviewedHead": "55482da01dc944fd102018191f6021946d39f434",
+  "codeHead": "9ebeb9b31bbe",
   "decision": "approved",
   "critical": 0,
   "important": 0,
   "minor": 0,
   "scopeResults": {
-    "databaseUrlFix": "Holds. 1d914afe gives packages/daemon/internal/intake/redelivered_test.go a database of its own (testpg.Database), migrates it with envoy-dispatch backfill-block-ids (cmd/dispatch has no bare migrate subcommand; openMigrated is how the subcommands migrate), and passes DATABASE_URL to redeliver-webhooks. Tester round 15: PASS 8.23 s, and CI's required test job is green at 02362d13. Re-running the census search, every caller of the command passes a migrated database: redelivered_test.go:154, multiprocess_test.go:2717 (startRedeliverWebhooks; callers pass DATABASE_URL), settings_test.go:953 and stream_replicas_test.go:192 (storetest.Open). No script, workflow or deploy runs it; theorem-labs/agent-infra has no hit (code search). Census item 1 lists the daemon test with disposition 'fixed in this PR (1d914afe)', and lists the other callers and the doc mentions.",
-    "mergeOfMain": "None this round: the only code commit since round 10 is 1d914afe, one test file.",
-    "migrationVersions": "Held at my read at 12:07Z: main@origin 2d3a725f's highest was 0147, so 0148-0151 were free. Since then main's #2483 (a4af0341, 13:41Z) added 0148_asks_anchor_artifact_id, which collides with this PR's 0148. Per the architect's rule this does not hold the approval; the forward merge the conflict below needs must renumber to 0149-0152 or above."
+    "landingMerge": "eabadbf1 (main a4af0341) is my round-11 approved diff (96a7e5ea -> 1d914afe) plus the renumbering 0148-0151 -> 0149-0152 with every reference, and README's predecessor line now names 0148_asks_anchor_artifact_id. With migration numbers masked, no other line of the PR's patch differs. No pool or connection-count change. The README conflict resolved, and main's route-pin fix (#2551) came in: TestRoutesTablePinsEveryRegisteredRoute and TestMigrationSetIsNumberedOneToN pass at the head.",
+    "ciFilterChange": "9ebeb9b3 changes only .github/workflows/ci.yaml (two filters gain 'packages/envoy/internal/dispatch/githubapp/ratelimit/*', the only two that list githubapp/*) and docs-pages.yaml's on.push.paths (one line). Nothing else. The architect's message said five ci.yaml filters; the diff touches the two that name githubapp, and check-ci-filters finds no gap.",
+    "checkCiFilters": "CI's ci-filters job is success at 8293b3d7. Locally on the branch tree it reported one miss, listener-server-change not matching api/testdata/decision-block-inserts.json. That gap is main's: main's #2161 added the file, and main's own ci.yaml has since added 'packages/envoy/internal/dispatch/api/testdata/*' to that filter. CI runs on the merge ref, so it passes there.",
+    "migrationVersions": "At main@origin cc825086 (17:58Z), main's highest is 0148_asks_anchor_artifact_id; this PR's 0149-0152 share no version with it."
   },
-  "ci": "At 02362d13 (code 1d914afe plus implement.json): lint, typecheck, test and pr-title all success; dispatch-multiprocess success. envoy-go failed only on TestRoutesTablePinsEveryRegisteredRoute ('routes() has 147 rows, want 146'), and main fails it identically (job 124035532618 at 3d5548da), because the fork point 96a7e5ea registers 147 routes under a pin of 146. That is main's, fixed on main by #2551 (cd9b50df) and taken in at the next merge. The compare from 02362d13 to the head touches only .legion/ (1 file).",
-  "mergeState": "GitHub reports CONFLICTING against main a4af0341. git merge-tree of 1d914afe with a4af0341 conflicts in packages/envoy/cmd/dispatch/README.md alone, a text-only conflict; main.go, model.go, AGENTS.md and dispatch-execute.ts auto-merge. That merge must also renumber this PR's migrations above main's 0148 and take main's route-pin fix.",
+  "ci": "CI run 41100941550 at head SHA 8293b3d7dd2a7dacebc4020e1e5a4e26245b8f85 (code 9ebeb9b3 plus implement.json), completed success: ci-ok, lint, typecheck, test, ci-filters, envoy-go, dispatch and every other job success; PR Title run 41100941435 success. The compare from 8293b3d7 to the head touches only .legion/ (1 file). GitHub reports MERGEABLE.",
   "threads": "No open thread.",
   "keyFindings": []
 }
