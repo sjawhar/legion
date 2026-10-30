@@ -2,30 +2,24 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-264",
-  "completed": "2026-10-30T14:47:00Z",
-  "round": 2,
-  "reviewedHead": "c0cacf98573ddaccbe3d6b1cdfac4fa81d5c58c4 (code head 02b80896702e)",
+  "completed": "2026-10-30T19:20:00Z",
+  "round": 3,
+  "reviewedHead": "315196597d1d0d5fd7e37bfa458ad46b7b5e3453 (code head b5103ea37381, CI head)",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
-  "minor": 6,
-  "roundOneFindings": "H1, M1, M2 and every round-1 minor closed at 02b80896, re-probed by the deep review (six uuid spellings of another project's comment, ask, document and message ids all 403 PROJECT_SCOPE; machine-login and no-person tokens 401 BROKER_TOKEN_NOT_A_SESSION; another session's upload 403 SESSION_SCOPE; honest scoped calls incl. keyed replays 2xx).",
-  "ci": "Not readable: GitHub reports the pull request CONFLICTING with main (mergeStateStatus DIRTY; packages/envoy/cmd/dispatch/README.md conflicts, git merge-tree against main a4af0341). CI run 41061943386 at 4598e4d7 queued since 13:17Z.",
+  "minor": 2,
+  "scope": "Narrowed by the architect: the forward merges, the six round-2 minors, and CI at the head; new topics only for correctness or security.",
+  "roundTwoFindings": "All closed: merged with main (MERGEABLE), main added no mutating route in the range (its one new route is a GET), 0149_dpop_proofs consistent; the five code minors in a1f34c47 and the PR body's reply exception verified by both thermonuclear passes and by the reviewer's read.",
+  "ci": "CI run 41103928584 at b5103ea3: ci-filters completed failure; typecheck, docs, contracts, broker-multiprocess, envoy-e2e-local and others success; test, lint, dispatch and the race jobs still running at the time of review. Reviewer locally: go test ./internal/broker/oauth/... ./internal/brokertoken/... ./internal/ratelimit/... ./internal/broker/api/... ok, and the Dispatch scope suites ok, so the round-2 oauth failure does not reproduce.",
   "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at c0cacf98 (minors only; one go test ./internal/broker/oauth/... failure on its copy not diagnosed)",
-    "codeQuality": "Verdict: CHANGES at c0cacf98 (resolver duplication, retryAfterSeconds copy, per-request scope branch, exchange_test.go past 1000 lines)"
+    "deepReview": "Verdict: APPROVE at 31519659 (minors: docs still claim the existence oracle closes; named scope with empty project reads unscoped; stale PR body lines)",
+    "codeQuality": "Verdict: CHANGES at 31519659 (an unreachable third closure in withinProjectScope) — declined under the architect's narrowing: structure, not correctness"
   },
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/cmd/dispatch/README.md", "description": "The branch conflicts with main; merge main forward, resolve, and give any mutating route main added a write class (routes_table.go auto-merges). No CI can be read until then."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/project_scope.go", "description": "Comments at :38 and :273 (and project_scope_test.go:292-295) say failing closed closes the existence oracle; a refusal still names the other project, so it does not."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/project_scope.go", "description": "withinProjectScope branches on route.Scope per request and discards the resolver's ok; decide at mount as withinSessionScope does. projectOfProject goes through loadProject and is the only reason unaddressed has its apiError branch."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/broker_token.go", "description": "retryAfterSeconds copies internal/broker/api/limits.go's helper; move it into internal/ratelimit."},
-    {"severity": "minor", "file": "packages/envoy/internal/brokertoken/introspect.go", "description": "callerOf treats an empty or unknown project_scope as unscoped; fail closed on anything but named or person."},
-    {"severity": "minor", "file": "packages/contracts/src/dispatch-api.ts", "description": "Actor.Project is now stored in authors and claim actors but the TypeScript Actor type does not list it."},
-    {"severity": "minor", "file": "PR body", "description": "The Change list says a write to a message of another project is refused; POST /api/v1/messages/{id}/reply is scopeSession and can reply onto another project's issue when that session was sent the message. State the exception."}
+    {"severity": "important", "file": ".github/workflows/ci.yaml", "description": "ci-filters is red at the code head: the changes job's filters for typecheck, test, docs, dispatch, dispatch-browser-multiprocess, dispatch-memory, dispatch-multiprocess, envoy-infra-go and listener-server-change do not match packages/envoy/internal/brokertoken/**, packages/envoy/internal/ratelimit/** or packages/envoy/internal/broker/oauthwire/**, which this PR adds or moves and those jobs read, so a later change to them would skip the jobs that test them."},
+    {"severity": "minor", "file": "packages/envoy/AGENTS.md", "description": ":2844-2845 and cmd/dispatch/README.md:136-138 still say failing closed closes an existence oracle; the code comment now says it does not. Named to the implementer rather than fixed by the reviewer, so that no reviewer push cancels the CI run still in progress at b5103ea3."},
+    {"severity": "minor", "file": "packages/envoy/internal/brokertoken/brokertoken.go", "description": "Same topic as round-2 minor 4: a named scope with an empty project still reads as unscoped through callerOf and callerProject; refuse it in live as the unknown scope is refused."}
   ],
-  "declined": [
-    "Quality: one table for all resolvers — six explicit resolvers are not a defect.",
-    "Quality: split exchange_test.go — an 84-line growth of a test file is not a defect."
-  ]
+  "declined": ["Quality: fold withinProjectScope's unreachable no-resolver closure into the fail-closed path — structure only, outside the round's narrowed scope."]
 }
