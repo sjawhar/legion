@@ -2718,6 +2718,191 @@ func TestAskOptionsEditRefusesDroppingAnItemHoldingContent(t *testing.T) {
 	}
 }
 
+// typedMark is the mark the browser's editor puts on every character a person types. Canonical
+// markdown writes none of it (pmdoc renders link, strong, emphasis, strike_through and
+// inlineCode alone), so a line carrying it reads as the plain line it is.
+func typedMark(id string) pmdoc.Mark {
+	return pmdoc.Mark{Type: "proofAuthored", Attrs: pmdoc.Attrs{
+		"id": id, "by": "user:alice", "at": int64(1_700_000_000_000),
+	}}
+}
+
+// markAsTyped puts the editor's own mark on every text node under node, as the browser leaves
+// what a person typed there.
+func markAsTyped(node *pmdoc.Node, id string) {
+	if node.Type == "text" {
+		node.Marks = []pmdoc.Mark{typedMark(id)}
+	}
+	for _, child := range node.Children {
+		markAsTyped(child, id)
+	}
+}
+
+// An option a person typed in the browser carries the editor's own mark on every character of
+// it, and no markdown writes that mark: the item holds nothing a rebuilt item would not write
+// again, so the edit that drops it is applied rather than refused for a mark no reader can see.
+func TestAskOptionsEditDropsAnItemTheEditorMarked(t *testing.T) {
+	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		markAsTyped(firstAsk(tree).Children[1], "typed")
+		return tree
+	})
+	list := askOptionList(t, service, artifactID)
+	if _, _, found := pmdoc.FindMark(liveTree(t, service, artifactID), "proofAuthored", "typed"); !found {
+		t.Fatalf("the fixture's options carry no mark of the editor's")
+	}
+	ship := list.Children[0]
+
+	options := []model.AskOption{{Label: "Ship", Description: "Release it"}}
+	if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options}); err != nil {
+		t.Fatalf("options edit dropping an option the editor marked: %v", err)
+	}
+
+	after := askOptionList(t, service, artifactID)
+	if len(after.Children) != 1 || !after.Children[0].EqualWithBlockIDs(ship) {
+		t.Fatalf("the list holds %d items, want the Ship item alone as it was", len(after.Children))
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", options)
+}
+
+// A person who empties a decision's question in the browser can leave the whitespace they typed
+// behind, under the editor's own mark. The markdown writes nothing of that mark, so a question
+// written over the paragraph deletes no word, and the ask edit carrying one repairs the decision
+// rather than being refused for a mark no reader can see.
+func TestEditAskRepairsAnEmptyQuestionOfTypedWhitespace(t *testing.T) {
+	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		question := firstAsk(tree).Children[0]
+		question.Children = []*pmdoc.Node{{Type: "text", Text: " ", Marks: []pmdoc.Mark{typedMark("typed")}}}
+		return tree
+	})
+	settleCurrentGeneration(t, service, artifactID)
+
+	if err := sendAskOptions(service, artifactID, AskBlockEdit{Question: new("Should we ship it today?")}); err != nil {
+		t.Fatalf("the ask edit sending a question to the decision a person emptied: %v", err)
+	}
+
+	block, err := parseAskBlock(firstAsk(liveTree(t, service, artifactID)))
+	if err != nil {
+		t.Fatalf("the repaired block does not parse: %v", err)
+	}
+	if block.question != "Should we ship it today?" {
+		t.Fatalf("the repaired block asks %q, want the question the ask edit sent", block.question)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship it today?", []model.AskOption{
+		{Label: "Ship", Description: "Release it"},
+		{Label: "Hold", Description: "Wait for review"},
+	})
+}
+
+// Rewriting an option replaces its line with the plain text the edit sends, so a link's address,
+// bold or code written in that line would be deleted unseen - what the drop refusal exists to
+// prevent. The whole edit is refused instead, quoting the line's markdown so every word of it
+// can be restored and naming both ways out.
+func TestAskOptionsEditRefusesRewritingALineHoldingMarkup(t *testing.T) {
+	for _, test := range []struct {
+		name, line, markdown, description string
+	}{
+		{
+			name:        "a link's address",
+			line:        "- Hold: see [the memo](https://memo.test)\n",
+			markdown:    "Hold: see [the memo](https://memo.test)",
+			description: "see the memo",
+		},
+		{
+			name:        "bold",
+			line:        "- Hold: wait for **finance**\n",
+			markdown:    "Hold: wait for **finance**",
+			description: "wait for finance",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, ":::ask{#ask-lists urgency=\"med\" multiple=\"false\" state=\"open\"}\n"+
+				"Should we ship?\n\n- Ship: Release it\n"+test.line+":::\n")
+			settleCurrentGeneration(t, service, artifactID)
+			before := liveTree(t, service, artifactID)
+
+			options := []model.AskOption{
+				{Label: "Ship", Description: "Release it"},
+				{Label: "Hold", Description: "wait for the sign-off"},
+			}
+			err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options})
+
+			var unrepresentable *ErrAskBlockUnrepresentable
+			if !errors.As(err, &unrepresentable) || unrepresentable.Field != "options" {
+				t.Fatalf("err = %v, want ErrAskBlockUnrepresentable on the options", err)
+			}
+			want := `options: the edit rewrites the line of the option "Hold", which holds more than its plain ` +
+				`text, and the ask-edit route does not delete the markup a person wrote in a line; its line reads ` +
+				strconv.Quote(test.markdown) +
+				`; send that option back unchanged with this edit, or rewrite the line with a document edit ` +
+				`(dispatch doc-edit, replacing quoted text with replace)`
+			if err.Error() != want {
+				t.Fatalf("refusal =\n%v\nwant\n%s", err, want)
+			}
+			assertAskEditWroteNothing(t, service, artifactID, before, err)
+			_, question, held := blockAskRow(t, service, artifactID, "ask-lists")
+			if question != "Should we ship?" || !slices.Equal(held, []model.AskOption{
+				{Label: "Ship", Description: "Release it"},
+				{Label: "Hold", Description: test.description},
+			}) {
+				t.Fatalf("the ask row = question=%q options=%#v, want it as the refused edit found it", question, held)
+			}
+		})
+	}
+}
+
+// Two items can carry one label, and what a person wrote belongs to the item they wrote it
+// under. An edit sending both options pairs the option it does not change with the item that
+// already says it, whole, wherever that item stands, and rewrites the other's line. Pairing on
+// the label alone would give the first item to the first option sent, moving the sub-list under
+// the line the edit rewrote and dropping the item that holds nothing.
+func TestAskOptionsEditPairsOnTheWholeOptionBeforeTheLabel(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#ask-lists urgency=\"med\" multiple=\"false\" state=\"open\"}\n"+
+		"Should we ship?\n\n- Hold: Wait for review\n\n  - only if **finance** agrees\n\n- Hold: Wait for the memo\n:::\n")
+	settleCurrentGeneration(t, service, artifactID)
+	list := askOptionList(t, service, artifactID)
+	if len(list.Children) != 2 {
+		t.Fatalf("the seeded list holds %d items, want the two of one label", len(list.Children))
+	}
+	held := list.Children[0]
+
+	// The option whose description changed is sent first, which is where the two pairings differ:
+	// on the label alone it would take the first item, the one holding the sub-list.
+	options := []model.AskOption{
+		{Label: "Hold", Description: "Wait for the sign-off"},
+		{Label: "Hold", Description: "Wait for review"},
+	}
+	if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options}); err != nil {
+		t.Fatalf("options edit of two items of one label: %v", err)
+	}
+
+	after := askOptionList(t, service, artifactID)
+	if len(after.Children) != 2 {
+		t.Fatalf("the list holds %d items after the edit, want 2", len(after.Children))
+	}
+	if !after.Children[1].EqualWithBlockIDs(held) {
+		t.Fatalf("the option the edit left alone reads %q, want the item the document held, %q",
+			askOptionItemMarkdown(t, after, after.Children[1]), askOptionItemMarkdown(t, list, held))
+	}
+	rewritten := after.Children[0]
+	if got := strings.TrimSpace(pmdoc.TextContent(rewritten.Children[0])); got != "Hold: Wait for the sign-off" {
+		t.Fatalf("the rewritten item reads %q, want the line the edit sent", got)
+	}
+	if len(rewritten.Children) != 1 {
+		t.Fatalf("the rewritten item holds %d nodes, want its line alone: the sub-list is the other item's",
+			len(rewritten.Children))
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", options)
+}
+
 // A comment anchored inside what a person wrote under an option is anchored to the same words
 // after an options edit: the nodes it points into are the document's own, not a rebuilt copy.
 func TestAskOptionsEditKeepsACommentAnchoredUnderAnOption(t *testing.T) {
