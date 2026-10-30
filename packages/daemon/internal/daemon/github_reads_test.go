@@ -56,13 +56,19 @@ func mergeStateStandIn(t *testing.T, state string) *httptest.Server {
 	return pullStandIn(t, `{"number":86,"state":"open","base":{"ref":"main"},"head":{"ref":"legion/CAPTURE-1","sha":"code"},"mergeable":true,"mergeable_state":"`+state+`"}`)
 }
 
-// readRuntime is a workflow runtime over pool whose GitHub reads go to api, logging to log.
+// readRuntime is a workflow runtime over pool whose GitHub reads go to api, logging to log. Its
+// handlers are the daemon's own order with the engine standing in for the whole workflow, so the
+// merge-state trigger judges every fact a test applies as it does in production; its queue is
+// empty and nothing reads it until a test starts readMergeStates.
 func readRuntime(pool *pgxpool.Pool, api string, log *slog.Logger) *workflowRuntime {
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
-	return &workflowRuntime{
-		pool: pool, records: projectRecords{Store: record.NewStore(), project: "CAPTURE"}, engine: engine, handlers: []intake.Handler{engine},
+	w := &workflowRuntime{
+		pool: pool, records: projectRecords{Store: record.NewStore(), project: "CAPTURE"}, engine: engine,
 		tokens: outboxTokens{}, dispatchProject: "CAPTURE", bootID: "test-boot", log: log, githubAPI: api,
+		mergeStateWanted: map[string]bool{}, mergeStateRunning: map[string]bool{}, mergeStateWake: make(chan struct{}, 1),
 	}
+	w.handlers = []intake.Handler{engine, mergeStateTrigger{runtime: w}}
+	return w
 }
 
 func capturePhase(t *testing.T, pool *pgxpool.Pool) (phase.Phase, *record.PullRequest) {
@@ -91,8 +97,9 @@ func readCapture(t *testing.T, w *workflowRuntime) {
 	}
 }
 
-// seedCapture records CAPTURE-1 in from with its pull request 86 at head code, whose required check
-// passed there, and its phases.
+// seedCapture records CAPTURE-1 in from with its pull request 86 at head code, whose required
+// check passed there and which GitHub's last read found clean, and its phases. A test about what
+// an unread or another merge state leaves undone sets its own (clearCaptureMergeState).
 func seedCapture(t *testing.T, pool *pgxpool.Pool, from phase.Phase, status string, phases ...record.PhaseRow) {
 	t.Helper()
 	records := record.NewStore()
@@ -105,7 +112,7 @@ func seedCapture(t *testing.T, pool *pgxpool.Pool, from phase.Phase, status stri
 		if err := records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: "CAPTURE-1", Repo: "acme/widgets",
 			Number: 86, Branch: "legion/CAPTURE-1", HeadSHA: "code", CheckedHead: "code", Failing: []string{},
 			CheckRuns:  []record.AttemptRun{{Name: "pr-checks-result", ID: 1}, {Name: "review", ID: 2}},
-			Generation: 1, Snapshot: "settled"}); err != nil {
+			Generation: 1, Snapshot: "settled", Mergeability: record.MergeabilityMergeable, MergeState: record.MergeStateClean}); err != nil {
 			return err
 		}
 		for _, row := range append([]record.PhaseRow{{Issue: "CAPTURE-1", Role: claim.RoleImplementer, Claim: "implement-claim"}}, phases...) {

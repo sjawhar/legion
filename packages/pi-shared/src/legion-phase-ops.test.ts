@@ -113,7 +113,7 @@ test("each op refuses its arguments whole before any daemon request, naming ever
       { op: "handoff_complete", summary: "x", phase: "plan", other: 1 },
       'handoff_complete does not accept field "phase"; handoff_complete does not accept field "other"',
     ],
-    [{ op: "read_record" }, "read_record requires issue"],
+    [{ op: "read_record", issue: 44 }, "expected string"],
     [{ op: "request_backward_move", reason: "r" }, "request_backward_move requires to"],
     [{ op: "request_backward_move", to: " ", reason: "r" }, "request_backward_move requires to"],
     [{ op: "request_backward_move", to: 44, reason: "r" }, "request_backward_move requires to"],
@@ -346,12 +346,26 @@ test("request_backward_move names the issue an architect returns from accepting,
   expect(posted).toHaveLength(before + 2);
 });
 
-test("read_record answers the issue's record, or names an issue the daemon has none for; request_backward_move posts with a fresh grant", async () => {
+test("read_record answers the issue's record, or the claim's own when it names none, and names an issue the daemon has none for; request_backward_move posts with a fresh grant", async () => {
   const { ops, routes } = runtime();
   const state = daemonFixture("state.json") as { issues: Record<string, unknown> };
   await expect(executePhaseOp(ops, { op: "read_record", issue: "LEGION-208" })).resolves.toEqual({
     record: state.issues["LEGION-208"],
   });
+  // The claim's own issue, which the daemon already told it: a worker reads the issue it works
+  // far more often than another, and naming none is no refusal.
+  await expect(executePhaseOp(ops, { op: "read_record" })).resolves.toEqual({
+    record: state.issues["LEGION-208"],
+  });
+  await expect(executePhaseOp(ops, { op: "read_record", issue: "  " })).resolves.toEqual({
+    record: state.issues["LEGION-208"],
+  });
+  await expect(
+    executePhaseOp(
+      { ...ops, claim: { ...implementer, issue: "LEGION-210" } },
+      { op: "read_record" }
+    )
+  ).resolves.toEqual({ record: state.issues["LEGION-210"] });
   await expect(executePhaseOp(ops, { op: "read_record", issue: "LEGION-999" })).rejects.toThrow(
     "The daemon has no record for LEGION-999"
   );
@@ -362,5 +376,5 @@ test("read_record answers the issue's record, or names an issue the daemon has n
       reason: "The plan misses X.",
     })
   ).resolves.toEqual({});
-  expect(routes.slice(2)).toEqual(["/legion/v1/grants", "/legion/v1/phase/backward"]);
+  expect(routes.slice(5)).toEqual(["/legion/v1/grants", "/legion/v1/phase/backward"]);
 });

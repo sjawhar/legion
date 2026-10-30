@@ -60,7 +60,10 @@ const operation = <Op extends PhaseOp, Shape extends z.ZodRawShape>(op: Op, shap
 export const PhaseOpArguments = z.discriminatedUnion(
   "op",
   [
-    operation("read_record", { issue: requiredString("read_record", "issue") }),
+    // The issue whose record it answers, the caller's own when the call names none: a worker
+    // reads the issue it works far more often than another, and its own key is one the daemon
+    // already told it (its claim), so making it say that key again only refused first calls.
+    operation("read_record", { issue: z.string().optional() }),
     operation("handoff_complete", {
       summary: requiredString("handoff_complete", "summary"),
       verdict: z
@@ -202,8 +205,9 @@ const ROOT_COMPLETION_REFUSAL =
   "handoff_complete is not available to a root architect session, which runs no phase";
 
 /**
- * Runs one phase op and answers its JSON result: `{ record }` for `read_record`, the daemon's
- * answer for `handoff_complete`, `{}` for `request_backward_move`. A refusal throws before any
+ * Runs one phase op and answers its JSON result: `{ record }` for `read_record`, of the issue it
+ * names or of the claim's own when it names none, the daemon's answer for `handoff_complete`,
+ * `{}` for `request_backward_move`. A refusal throws before any
  * write, minting nothing and posting nothing: each problem `PhaseOpArguments` finds, joined by
  * `; `, a field the operation does not take named first, then a root architect's completion,
  * then each problem with the operation's own fields in the order it takes them; then what the
@@ -243,8 +247,10 @@ export async function executePhaseOp(
   }
   const args = parsed.data;
   switch (args.op) {
-    case "read_record":
-      return { record: recordFrom(await daemon.state(), args.issue) };
+    case "read_record": {
+      const issue = args.issue !== undefined && args.issue.trim() !== "" ? args.issue : claim.issue;
+      return { record: recordFrom(await daemon.state(), issue) };
+    }
     case "handoff_complete":
       // Retried whole while the daemon restarts: the record, the commit and a fresh grant are read
       // again on each attempt. A repeat never applies twice, but it cannot tell a landed attempt

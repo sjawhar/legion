@@ -220,7 +220,7 @@ func TestTheReadCarriesAnApprovalOfAHeadBetweenTheRecordedAndGitHubsHead(t *test
 					return
 				}
 				if r.URL.Path == "/repos/acme/widgets/pulls/86" {
-					w.Write([]byte(`{"number":86,"state":"open","base":{"ref":"main"},"head":{"ref":"legion/CAPTURE-1","sha":"handoff"},"updated_at":"2026-10-26T22:42:00Z","mergeable":true}`))
+					w.Write([]byte(`{"number":86,"state":"open","base":{"ref":"main"},"head":{"ref":"legion/CAPTURE-1","sha":"handoff"},"updated_at":"2026-10-26T22:42:00Z","mergeable":true,"mergeable_state":"clean"}`))
 					return
 				}
 				reviews.Config.Handler.ServeHTTP(w, r)

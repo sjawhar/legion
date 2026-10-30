@@ -1646,7 +1646,7 @@ describe("Legion OMP extension", () => {
           refused: [],
           caches: [],
         },
-        settings: { max_fix_attempts: 3, worker_boot_timeout_seconds: 120 },
+        settings: { review_round_cap: 3, worker_boot_timeout_seconds: 120 },
       };
       const booted = await bootPane({
         role: options.role ?? "implementer",
@@ -3312,7 +3312,9 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     const requestsBeforeTool = controller.requests.length;
     await expect(
       legion.execute("start-turn-state", { op: "read_state" }, undefined, undefined, context)
-    ).resolves.toMatchObject({ details: { daemon: { project: "OMP" } } });
+    ).resolves.toMatchObject({
+      content: [{ type: "text", text: expect.stringContaining("project OMP") }],
+    });
     await expect(
       legion.execute(
         "start-turn-status",
@@ -3340,7 +3342,9 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     // Still registered once the claim has failed.
     await expect(
       legion.execute("after-refusal-state", { op: "read_state" }, undefined, undefined, context)
-    ).resolves.toMatchObject({ details: { daemon: { project: "OMP" } } });
+    ).resolves.toMatchObject({
+      content: [{ type: "text", text: expect.stringContaining("project OMP") }],
+    });
 
     const registrations = () =>
       controller.requests.filter((request) => request.path === "/legion/v1/claims/register");
@@ -3482,7 +3486,9 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     if (legion === undefined) throw new Error("the controller's legion tool was not registered");
     await expect(
       legion.execute("after-switch-state", { op: "read_state" }, undefined, undefined, after)
-    ).resolves.toMatchObject({ details: { daemon: { project: "OMP" } } });
+    ).resolves.toMatchObject({
+      content: [{ type: "text", text: expect.stringContaining("project OMP") }],
+    });
     expect(registrations()).toHaveLength(2);
 
     refuseRole = false;
@@ -4288,7 +4294,12 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     await expect(
       legion.execute("controller-state", { op: "read_state" }, undefined, undefined, context)
     ).resolves.toMatchObject({
-      details: { daemon: { project: "OMP" }, issues: expect.any(Object) },
+      content: [
+        {
+          type: "text",
+          text: expect.stringMatching(/project OMP[\s\S]*\nissues [0-9]+\n/),
+        },
+      ],
     });
     await expect(
       legion.execute(

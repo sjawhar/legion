@@ -19,28 +19,31 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// A review ends when the reviewer completes it, not when GitHub reports it: the reviewer's handoff
-// is part of its phase's contract, and a transition fired on the review event left it nowhere to
-// land — the issue had already moved on, so the reviewer's completion was refused as a phase it no
-// longer runs and its review.json never recorded. GitHub's decision and the reviewer's completion
-// can arrive in either order; whichever lands second moves the issue.
-func TestAReviewEndsWhenTheReviewerCompletesIt(t *testing.T) {
+// The review event decides the round, and the reviewer's handoff records its findings
+// (dispatch://INFRA-714/spec R1): a request for changes on the current head returns the issue to
+// implementing the moment GitHub reports it, counting the round, and an approval of a head GitHub
+// reports clean moves it to accepting. The reviewer is still mid-turn when either happens, so the
+// completion that follows is recorded on its own row with the issue where the review left it -
+// the findings the next implementer reads - rather than refused as a phase it no longer runs. A
+// completion that arrives first records the same row and moves nothing, the review deciding when
+// it lands.
+func TestTheReviewEventDecidesAndTheCompletionRecordsItsFindings(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
 		decision      string
-		verdict       string
 		completeFirst bool
 		want          phase.Phase
+		rounds        int
 	}{
-		{name: "changes requested, then the reviewer completes", decision: "changes_requested", want: phase.Implementing},
-		{name: "the reviewer completes, then changes are requested", decision: "changes_requested", completeFirst: true, want: phase.Implementing},
-		{name: "approved on a green head, then the reviewer completes", decision: "approved", verdict: "green", want: phase.Accepting},
-		{name: "the reviewer completes, then an approval on a green head", decision: "approved", verdict: "green", completeFirst: true, want: phase.Accepting},
+		{name: "changes requested, then the reviewer completes", decision: "changes_requested", want: phase.Implementing, rounds: 1},
+		{name: "the reviewer completes, then changes are requested", decision: "changes_requested", completeFirst: true, want: phase.Implementing, rounds: 1},
+		{name: "approved on a clean head, then the reviewer completes", decision: "approved", want: phase.Accepting},
+		{name: "the reviewer completes, then an approval on a clean head", decision: "approved", completeFirst: true, want: phase.Accepting},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			ctx := context.Background()
-			seedReview(t, pool, tc.verdict)
+			seedReview(t, pool, "green")
 			engine := testEngine(config.DesignGateRootIssues, nil)
 			review := func() {
 				t.Helper()
@@ -65,8 +68,8 @@ func TestAReviewEndsWhenTheReviewerCompletesIt(t *testing.T) {
 				review()
 			} else {
 				review()
-				if got := issuePhase(t, pool); got != phase.Reviewing {
-					t.Fatalf("after the review alone the issue is in %s, want reviewing until the reviewer completes", got)
+				if got := issuePhase(t, pool); got != tc.want {
+					t.Fatalf("after the review alone the issue is in %s, want %s: the review event decides", got, tc.want)
 				}
 				complete()
 			}
@@ -82,7 +85,54 @@ func TestAReviewEndsWhenTheReviewerCompletesIt(t *testing.T) {
 			if commit != "review-1" {
 				t.Fatalf("the reviewer's handoff commit = %q, want its completion's review-1", commit)
 			}
+			if got := implementerRounds(t, pool); got != tc.rounds {
+				t.Fatalf("review rounds = %d, want %d: only a request for changes ends a round", got, tc.rounds)
+			}
 		})
+	}
+}
+
+// An approval moves the issue on only once GitHub reports the head one the issue may advance on
+// (record.MergeState.Mergeable). GitHub answers `mergeable: true` for a head it holds blocked on a
+// check or a review the repository requires just as it does for one it would merge now, so the
+// merge state is the only answer that tells the two apart: an approval standing on a blocked head
+// leaves the issue in reviewing, with nothing told - the round is waiting, not stuck - and the
+// read that finds the state clean is what moves it to accepting.
+func TestAnApprovalWaitsForAHeadGitHubReportsMergeable(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+		Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{},
+		Mergeability: record.MergeabilityMergeable, MergeState: record.MergeStateBlocked})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+	seedClaimSession(t, pool, "review-claim", "")
+	apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
+
+	apply("approve", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head",
+		HeadSHA: "head", Author: testReviewApp, Body: "ship it"})
+	if got := issuePhase(t, pool); got != phase.Reviewing {
+		t.Fatalf("after the approval of a blocked head the issue is in %s, want reviewing: GitHub has not reported the head mergeable", got)
+	}
+	if result := apply("complete", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer,
+		Claim: "review-claim", Summary: "reviewed", Commit: "review-1"}); result.Refusal != nil {
+		t.Fatalf("the reviewer's completion = %+v, want it recorded", result.Refusal)
+	}
+	if got := issuePhase(t, pool); got != phase.Reviewing {
+		t.Fatalf("after the completion the issue is in %s, want reviewing: the head is still blocked", got)
+	}
+	if told := reviewStuckNotices(t, pool); len(told) != 0 {
+		t.Fatalf("the architect was told the round was stuck %+v, want nothing: an approval waiting on the merge state is not stuck", told)
+	}
+
+	apply("merge-state", intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main",
+		Mergeable: record.MergeabilityMergeable, MergeState: record.MergeStateClean})
+	if got := issuePhase(t, pool); got != phase.Accepting {
+		t.Fatalf("after GitHub reported the head clean the issue is in %s, want accepting", got)
+	}
+	if told := reviewStuckNotices(t, pool); len(told) != 0 {
+		t.Fatalf("the architect was told the round was stuck %+v, want nothing", told)
 	}
 }
 
@@ -151,6 +201,7 @@ func seedReviewUndecided(t *testing.T, pool *pgxpool.Pool, head string) {
 		CheckRuns: []record.AttemptRun{{Name: "lint", ID: 1}}})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+	seedClaimSession(t, pool, "review-claim", "")
 }
 
 func seedReview(t *testing.T, pool *pgxpool.Pool, verdict string) {
@@ -186,6 +237,7 @@ func seedReviewReporting(t *testing.T, pool *pgxpool.Pool, head, verdict string,
 	seedPR(t, pool, pr)
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+	seedClaimSession(t, pool, "review-claim", "")
 }
 
 func issuePhase(t *testing.T, pool *pgxpool.Pool) phase.Phase {
@@ -204,10 +256,13 @@ func issuePhase(t *testing.T, pool *pgxpool.Pool) phase.Phase {
 // .legion/, whichever of the approval, the new heads and the pushes' paths is processed first. A
 // push that changes code, whose changed paths are not known, or that rewrote history - or did not
 // say whether it did - carries no approval across. Deciding reviews are ordered by when they were
-// submitted, then by GitHub's review id, so the newest one submitted decides; a review without a
-// submission time is ordered by id against any other. A pull request recorded before the daemon
-// kept its pushes has none, so only an approval of its current head stands. Only the review App's
-// reviews and those of an account with write access to the repository decide anything: an
+// submitted, then by GitHub's review id, so the newest one submitted is the one the round records;
+// a review without a submission time is ordered by id against any other. That ordering decides the
+// round while it is open: the review event moves the issue as it lands
+// (dispatch://INFRA-714/spec R1), so a second deciding review, however it is ordered, finds the
+// issue in the phase the first sent it to and decides nothing. A pull request recorded before the
+// daemon kept its pushes has none, so only an approval of its current head stands. Only the review
+// App's reviews and those of an account with write access to the repository decide anything: an
 // outsider's approval neither overrides the reviewer's request for changes nor, delivered first,
 // makes it look old.
 func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.T) {
@@ -228,15 +283,15 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		{name: "the push's paths arrive before the new head", steps: []string{"push handoff", "approve head", "sync", "green", "complete"}, want: phase.Accepting},
 		{name: "a new head whose push never arrives", steps: []string{"sync", "approve head", "green", "complete"}, want: phase.Reviewing},
 		{name: "a code push, then the approval of the head before it", steps: []string{"sync", "push code", "green", "approve head", "complete"}, want: phase.Reviewing},
-		{name: "the approval, then a code push", steps: []string{"approve head", "sync", "push code", "green", "complete"}, want: phase.Reviewing},
+		{name: "the approval of the head, then a code push: the round had already ended", steps: []string{"approve head", "sync", "push code", "green", "complete"}, want: phase.Accepting},
 		{name: "a push of truncated paths, then the approval of the head before it", steps: []string{"sync", "push truncated", "green", "approve head", "complete"}, want: phase.Reviewing},
 		{name: "a push with no paths marker, then the approval of the head before it", steps: []string{"sync", "push paths unmarked", "green", "approve head", "complete"}, want: phase.Reviewing},
-		{name: "a comment between a code push and its new head", steps: []string{"approve head", "push code", "comment", "sync", "green", "complete"}, want: phase.Reviewing},
+		{name: "a comment between a code push and its new head", steps: []string{"push code", "approve head", "comment", "sync", "green", "complete"}, want: phase.Reviewing},
 		{name: "a comment on the handoff head after the approval", steps: []string{"approve head", "sync", "push handoff", "comment", "green", "complete"}, want: phase.Accepting},
-		{name: "a code push whose new head has not arrived", steps: []string{"approve head", "push code", "complete"}, want: phase.Reviewing},
+		{name: "a code push whose new head has not arrived", steps: []string{"push code", "approve head", "complete"}, want: phase.Reviewing},
 		{name: "the round ends on its approval of the head before a code push arrives", steps: []string{"approve head", "complete", "push code", "green head"}, want: phase.Accepting, unsettled: true},
-		{name: "a code push, then a handoff push on top of it, neither head arrived", steps: []string{"approve head", "push code", "push handoff head-3", "complete"}, want: phase.Reviewing},
-		{name: "a code push that does not say which head it replaced", steps: []string{"approve head", "push code unplaced", "complete"}, want: phase.Reviewing},
+		{name: "a code push, then a handoff push on top of it, neither head arrived", steps: []string{"push code", "push handoff head-3", "approve head", "complete"}, want: phase.Reviewing},
+		{name: "a code push that does not say which head it replaced", steps: []string{"push code unplaced", "approve head", "complete"}, want: phase.Reviewing},
 		{name: "a code push that did not say which head it replaced, then the branch moves on without it", steps: []string{"approve head", "sync", "push handoff", "push code unplaced head-x", "sync head-3", "push handoff head-3", "green head-3", "complete"}, want: phase.Accepting},
 		{name: "a code head never synchronized, under a handoff head, pushes first", steps: []string{"push code", "push handoff head-3", "sync head-3", "green head-3", "approve head", "complete"}, want: phase.Reviewing},
 		{name: "a code head never synchronized, under a handoff head, the head first", steps: []string{"sync head-3", "push code", "push handoff head-3", "green head-3", "approve head", "complete"}, want: phase.Reviewing},
@@ -246,24 +301,24 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		{name: "two handoff pushes, both classified after both heads, the second first", steps: []string{"approve head", "sync", "sync head-3", "push handoff head-3", "push handoff", "green head-3", "complete"}, want: phase.Accepting},
 		{name: "two handoff pushes, both classified after both heads, in order", steps: []string{"approve head", "sync", "sync head-3", "push handoff", "push handoff head-3", "green head-3", "complete"}, want: phase.Accepting},
 		{name: "two handoff pushes, the second classified between the heads", steps: []string{"approve head", "sync", "push handoff head-3", "sync head-3", "push handoff", "green head-3", "complete"}, want: phase.Accepting},
-		{name: "a force push to a handoff commit on an older base, its push first", steps: []string{"approve head", "push handoff forced head-l", "sync head-l", "green head-l", "complete"}, want: phase.Reviewing},
-		{name: "a force push to a handoff commit on an older base, its head first", steps: []string{"approve head", "sync head-l", "push handoff forced head-l", "green head-l", "complete"}, want: phase.Reviewing},
-		{name: "a handoff push that does not say whether it was forced", steps: []string{"approve head", "sync", "push handoff unmarked", "green", "complete"}, want: phase.Reviewing},
+		{name: "a force push to a handoff commit on an older base, its push first", steps: []string{"push handoff forced head-l", "approve head", "sync head-l", "green head-l", "complete"}, want: phase.Reviewing},
+		{name: "a force push to a handoff commit on an older base, its head first", steps: []string{"sync head-l", "approve head", "push handoff forced head-l", "green head-l", "complete"}, want: phase.Reviewing},
+		{name: "a handoff push that does not say whether it was forced", steps: []string{"sync", "approve head", "push handoff unmarked", "green", "complete"}, want: phase.Reviewing},
 		{name: "a request for changes written after the approval, delivered first", steps: []string{"cr head id=12", "approve head id=11", "complete"}, want: phase.Implementing},
-		{name: "a request for changes written after the approval, delivered after", steps: []string{"approve head id=11", "cr head id=12", "complete"}, want: phase.Implementing},
+		{name: "a request for changes written after the approval, delivered after it moved the issue", steps: []string{"approve head id=11", "cr head id=12", "complete"}, want: phase.Accepting},
 		{name: "a comment written after a request for changes, delivered first", steps: []string{"comment id=12", "cr head id=11", "complete"}, want: phase.Implementing},
 		{name: "a comment written after an approval, delivered first", steps: []string{"comment id=12", "approve head id=11", "complete"}, want: phase.Accepting},
-		{name: "the reviewer's approval written after its request for changes", steps: []string{"cr head id=11", "approve head id=12", "complete"}, want: phase.Accepting},
+		{name: "the reviewer's approval written after its request for changes, which moved the issue first", steps: []string{"cr head id=11", "approve head id=12", "complete"}, want: phase.Implementing},
 		{name: "an outsider's approval written after the reviewer's request for changes", steps: []string{"cr head id=11", "approve head id=12 by=outsider", "complete"}, want: phase.Implementing},
 		{name: "an outsider's approval written after the reviewer's request for changes, delivered first", steps: []string{"approve head id=12 by=outsider", "cr head id=11", "complete"}, want: phase.Implementing},
 		{name: "an outsider's approval the only review of the round", steps: []string{"approve head id=12 by=outsider", "complete"}, want: phase.Reviewing, told: "no review that decides it"},
-		{name: "a request for changes by an account with write access, written after the reviewer's approval", steps: []string{"approve head id=11", "cr head id=12 by=writer", "complete"}, want: phase.Implementing},
-		{name: "an approval by an account with write access, written after the reviewer's request for changes", steps: []string{"cr head id=11", "approve head id=12 by=writer", "complete"}, want: phase.Accepting},
-		{name: "a draft's request for changes submitted after a one-step approval", steps: []string{"approve head id=101 at=2", "cr head id=100 at=3", "complete"}, want: phase.Implementing},
+		{name: "a request for changes by an account with write access, delivered after the approval moved the issue", steps: []string{"approve head id=11", "cr head id=12 by=writer", "complete"}, want: phase.Accepting},
+		{name: "an approval by an account with write access, delivered after the request for changes moved the issue", steps: []string{"cr head id=11", "approve head id=12 by=writer", "complete"}, want: phase.Implementing},
+		{name: "a draft's request for changes submitted after a one-step approval that moved the issue", steps: []string{"approve head id=101 at=2", "cr head id=100 at=3", "complete"}, want: phase.Accepting},
 		{name: "a draft's request for changes submitted after a one-step approval, delivered first", steps: []string{"cr head id=100 at=3", "approve head id=101 at=2", "complete"}, want: phase.Implementing},
-		{name: "a draft's approval submitted after a request for changes", steps: []string{"cr head id=101 at=2", "approve head id=100 at=3", "complete"}, want: phase.Accepting},
+		{name: "a draft's approval submitted after a request for changes that moved the issue", steps: []string{"cr head id=101 at=2", "approve head id=100 at=3", "complete"}, want: phase.Implementing},
 		{name: "an untimed request for changes, then an older approval redelivered with a time", steps: []string{"cr head id=12", "approve head id=11 at=2", "complete"}, want: phase.Implementing},
-		{name: "a timed approval, then a newer untimed request for changes", steps: []string{"approve head id=11 at=2", "cr head id=12", "complete"}, want: phase.Implementing},
+		{name: "a timed approval, then a newer untimed request for changes", steps: []string{"approve head id=11 at=2", "cr head id=12", "complete"}, want: phase.Accepting},
 		// The code push head..head-2 arrives after head-2 arrived and the branch was reset to head: it
 		// is the move the record already made, spent as it arrives (classify.unspentPushes), not code
 		// on its way. A second push of the same two heads looks the same until its synchronize moves
@@ -285,14 +340,14 @@ func TestAnApprovalStandsForEveryHeadThatChangesNothingButTheHandoff(t *testing.
 		// A code push since the approval leaves it standing for nothing, whatever the new head's
 		// own settlement left pending: the round is told once that the approval does not approve the
 		// head, never that it stands, and the head's later green tells nothing more.
-		{name: "an approval, a code push, then the new head's own pending settlement and its green", steps: []string{"approve head", "sync", "push code", "cancelled", "complete", "rerun green"}, want: phase.Reviewing, unsettled: true, told: "does not approve head head-2"},
+		{name: "an approval, a code push, then the new head's own pending settlement and its green", steps: []string{"sync", "push code", "approve head", "cancelled", "complete", "rerun green"}, want: phase.Reviewing, unsettled: true, told: "does not approve head head-2"},
 		{name: "the code head's checks settle after the reviewer's handoff head", steps: []string{"approve head", "sync", "push handoff", "green head", "complete"}, want: phase.Accepting, unsettled: true},
 		{name: "the code head's checks settle before the reviewer's handoff head, its push last", steps: []string{"green head", "approve head", "sync", "push handoff", "complete"}, want: phase.Accepting, unsettled: true},
 		{name: "the code head's checks settle before the reviewer's handoff head, its push first", steps: []string{"green head", "approve head", "push handoff", "sync", "complete"}, want: phase.Accepting, unsettled: true},
 		{name: "the code head's checks settle under two handoff heads", steps: []string{"approve head", "sync", "push handoff", "sync head-3", "push handoff head-3", "green head", "complete"}, want: phase.Accepting, unsettled: true},
-		{name: "the checks of a head a code push replaced", steps: []string{"approve head", "sync", "push code", "green head", "complete"}, want: phase.Reviewing, unsettled: true},
+		{name: "the checks of a head a code push replaced", steps: []string{"sync", "push code", "approve head", "green head", "complete"}, want: phase.Reviewing, unsettled: true},
 		{name: "a late settlement of a head a code push replaced leaves the head's own", steps: []string{"sync", "push code", "green", "red head", "approve", "complete"}, want: phase.Accepting, unsettled: true},
-		{name: "the checks of a head a force push replaced", steps: []string{"approve head", "sync head-l", "push handoff forced head-l", "green head", "complete"}, want: phase.Reviewing, unsettled: true},
+		{name: "the checks of a head a force push replaced", steps: []string{"sync head-l", "approve head", "push handoff forced head-l", "green head", "complete"}, want: phase.Reviewing, unsettled: true},
 		// The handoff head's own settlement outranks the code head's late one
 		// (classify.SettlementFor), and neither moves the issue: the round is the reviewer's to
 		// decide, and a CI result is told to the roles and read by them
@@ -886,14 +941,17 @@ func TestOnlyTheReviewAppOrAWriterDecidesARound(t *testing.T) {
 	}
 }
 
-// An approval ends the round only while it approves the head's code. One that does not - a push
-// since the approved head may have changed code - leaves the round as stuck as no review at all, so
-// the architect is told, once, when the round becomes stuck, by whichever fact made it so: the
+// An approval ends the round only while it approves the head's code. One that does not - the pull
+// request has moved on since the head the approval names, by a push that may have changed code -
+// leaves the round as stuck as no review at all, so the architect is told, once, when the round
+// becomes stuck, by whichever fact made it so: the
 // completion, or the arrival of the new head a code push was still on its way from. A push
 // classified late that leaves the round stuck the same way tells nothing more. An approval of the
 // head, or a request for changes, then ends the round and tells nothing further. A round whose
 // approved head a code push is still on its way from is open, not stuck, and tells nobody: the
-// push's new head decides whether the approval stands. No CI verdict is read anywhere here
+// push's new head decides whether the approval stands. Each round's push comes before its
+// approval, since an approval of the head the pull request stands at ends the round as it lands
+// (dispatch://INFRA-714/spec R1). No CI verdict is read anywhere here
 // (TestAnApprovalEndsTheRoundWhateverCISays).
 func TestARoundItsApprovalCannotEndTellsTheArchitect(t *testing.T) {
 	approve := func(head string) intake.Fact {
@@ -924,21 +982,21 @@ func TestARoundItsApprovalCannotEndTellsTheArchitect(t *testing.T) {
 		want phase.Phase
 	}{
 		{name: "a push since the approved head changed code, then an approval of the head",
-			steps: []intake.Fact{approve("head"), sync("head-2"), push("head", "head-2", code), complete},
+			steps: []intake.Fact{sync("head-2"), push("head", "head-2", code), approve("head"), complete},
 			told:  []string{"head-2"}, by: "the reviewer's completion", then: []intake.Fact{approve("head-2")}, want: phase.Accepting},
 		{name: "a push since the approved head changed code, then a request for changes",
-			steps: []intake.Fact{approve("head"), sync("head-2"), push("head", "head-2", code), complete},
+			steps: []intake.Fact{sync("head-2"), push("head", "head-2", code), approve("head"), complete},
 			told:  []string{"head-2"}, by: "the reviewer's completion", then: []intake.Fact{requestChanges}, want: phase.Implementing},
 		{name: "a push since the approved head changed another issue's handoffs",
-			steps: []intake.Fact{approve("head"), sync("head-2"), push("head", "head-2", otherHandoffs), complete},
+			steps: []intake.Fact{sync("head-2"), push("head", "head-2", otherHandoffs), approve("head"), complete},
 			told:  []string{"head-2"}, by: "the reviewer's completion", then: []intake.Fact{approve("head-2")}, want: phase.Accepting},
 		{name: "the handoff push over a code push is classified after the completion",
-			steps: []intake.Fact{approve("head"), sync("head-2"), push("head", "head-2", code), sync("head-3"), complete, push("head-2", "head-3", handoff)},
+			steps: []intake.Fact{sync("head-2"), push("head", "head-2", code), sync("head-3"), approve("head"), complete, push("head-2", "head-3", handoff)},
 			told:  []string{"head-3"}, by: "the reviewer's completion", then: []intake.Fact{approve("head-3")}, want: phase.Accepting},
 		{name: "a code push whose new head has not arrived",
-			steps: []intake.Fact{approve("head"), push("head", "head-2", code), complete}, want: phase.Reviewing},
+			steps: []intake.Fact{push("head", "head-2", code), approve("head"), complete}, want: phase.Reviewing},
 		{name: "a code push whose new head arrives after the completion",
-			steps: []intake.Fact{approve("head"), push("head", "head-2", code), complete, sync("head-2")},
+			steps: []intake.Fact{push("head", "head-2", code), approve("head"), complete, sync("head-2")},
 			told:  []string{"head-2"}, by: "a push", then: []intake.Fact{approve("head-2")}, want: phase.Accepting},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1110,12 +1168,16 @@ func reviewStuckNotices(t *testing.T, pool *pgxpool.Pool) []record.Notice {
 }
 
 // seedClaimSession records a claims row for token holding session, so the workflow's read of the
-// reviewer's claim (record.Store.ClaimSession) finds it (byReviewer).
+// reviewer's claim (record.Store.ClaimSession) finds it (byReviewer) and the daemon is known to
+// have started the reviewer on the issue (engine's leftItsPhase). A row already seeded takes the
+// session given, so a fixture that records the claim and a test that then names its session do not
+// collide.
 func seedClaimSession(t *testing.T, pool *pgxpool.Pool, token claim.Token, session string) {
 	t.Helper()
 	if _, err := pool.Exec(context.Background(), `insert into claims (token, project, tree, issue, role, generation, session, session_file,
 		state, launch_failures, prompt_failures, prompt_retires, uncertain_streak)
-		values ($1, 'LEGION', 'LEGION-208', 'LEGION-208', 'reviewer', 1, $2, '', 'working', 0, 0, 0, 0)`,
+		values ($1, 'LEGION', 'LEGION-208', 'LEGION-208', 'reviewer', 1, $2, '', 'working', 0, 0, 0, 0)
+		on conflict (token) do update set session = excluded.session`,
 		string(token), session); err != nil {
 		t.Fatalf("seed the claim's session: %v", err)
 	}

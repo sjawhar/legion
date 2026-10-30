@@ -314,17 +314,17 @@ func TestACompletionHandsOnASettledHeadWithoutReadingIt(t *testing.T) {
 	}
 }
 
-// A READY pull request that starts conflicting with its base while awaiting_merge is the one thing
-// a pull request's own state still withdraws a READY for: GitHub computes no merge ref for a
-// conflicting head, so it runs no checks on it at all, and the daemon's own read of GitHub's
-// mergeability (workflow's mergeability) is the only path to it. A conflicting read sends the tree
-// back to implementing, naming the base the implementer must merge forward, and counts the return
-// as a round, so the implementer's completion of the merge is told from its completion of the
-// round before. GitHub reports mergeability UNKNOWN until it has computed it - that is "not yet
-// known", never a conflict - so an unknown or a mergeable read moves nothing. Outside
-// awaiting_merge a conflict moves nothing either: the tester or reviewer already at work will see
-// it on GitHub.
-func TestAConflictingMergeabilityInAwaitingMergeSendsTheTreeBackToImplementing(t *testing.T) {
+// A head that conflicts with its base sends its issue back to implementing from whatever later
+// phase it stands in: GitHub computes no merge ref for a conflicting head, so it runs no checks on
+// it at all and no CI result will ever arrive for it, and only the implementer merging the base
+// forward clears it. The daemon's own read of GitHub's mergeability (workflow's mergeability) is
+// the only path to it, since GitHub sends no event when it recomputes one. The move names the
+// base the implementer must merge forward and counts the return as a pass, so the implementer's
+// completion of the merge is told from its completion of the pass before; in awaiting_merge the
+// READY is withdrawn with it. GitHub reports mergeability UNKNOWN until it has computed it - that
+// is "not yet known", never a conflict - so an unknown or a mergeable read moves nothing, and
+// neither does a conflict read in implementing, where the work it needs already is.
+func TestAConflictingHeadSendsTheIssueBackToImplementingFromEveryLaterPhase(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		from      phase.Phase
@@ -332,11 +332,15 @@ func TestAConflictingMergeabilityInAwaitingMergeSendsTheTreeBackToImplementing(t
 		mergeable record.Mergeability
 		want      phase.Phase
 	}{
+		{"conflicting in testing", phase.Testing, "testing", record.MergeabilityConflicting, phase.Implementing},
+		{"conflicting in reviewing", phase.Reviewing, "needs_review", record.MergeabilityConflicting, phase.Implementing},
+		{"conflicting in accepting", phase.Accepting, "needs_review", record.MergeabilityConflicting, phase.Implementing},
+		{"conflicting in retro", phase.Retro, "retro", record.MergeabilityConflicting, phase.Implementing},
+		{"conflicting in merging", phase.Merging, "retro", record.MergeabilityConflicting, phase.Implementing},
 		{"conflicting in awaiting_merge", phase.AwaitingMerge, "retro", record.MergeabilityConflicting, phase.Implementing},
+		{"conflicting in implementing: the work it needs is already there", phase.Implementing, "in_progress", record.MergeabilityConflicting, phase.Implementing},
 		{"unknown in awaiting_merge: GitHub has not computed it yet", phase.AwaitingMerge, "retro", record.MergeabilityUnknown, phase.AwaitingMerge},
 		{"mergeable in awaiting_merge", phase.AwaitingMerge, "retro", record.MergeabilityMergeable, phase.AwaitingMerge},
-		{"conflicting in testing: the tester is already at work", phase.Testing, "testing", record.MergeabilityConflicting, phase.Testing},
-		{"conflicting in reviewing: no round is open to decide it", phase.Reviewing, "needs_review", record.MergeabilityConflicting, phase.Reviewing},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -357,7 +361,8 @@ func TestAConflictingMergeabilityInAwaitingMergeSendsTheTreeBackToImplementing(t
 				t.Fatalf("after the mergeability read the issue is in %s, want %s", got, tc.want)
 			}
 			published := mergeQueuePublishes(t, pool)
-			if tc.want != phase.Implementing {
+			if tc.from == tc.want {
+				// Nothing moved: no phase to leave, so no notice, no start and no pass.
 				if len(published) != 0 {
 					t.Fatalf("merge queue publishes %v, want none: nothing moved", published)
 				}
@@ -373,11 +378,18 @@ func TestAConflictingMergeabilityInAwaitingMergeSendsTheTreeBackToImplementing(t
 			if err := pool.QueryRow(context.Background(), "select payload->>'status' from outbox where kind = 'dispatch_status'").Scan(&status); err != nil {
 				t.Fatalf("read the status write: %v", err)
 			}
-			if task := implementerTask(t, pool); !strings.Contains(task, want) || !strings.Contains(reason, want) || from != phase.AwaitingMerge || status != "in_progress" {
-				t.Fatalf("task %q, notice %q from %q, status %q; want both to say %q, from awaiting_merge, and the issue in_progress", task, reason, from, status, want)
+			if task := implementerTask(t, pool); !strings.Contains(task, want) || !strings.Contains(reason, want) || from != tc.from || status != "in_progress" {
+				t.Fatalf("task %q, notice %q from %q, status %q; want both to say %q, from %s, and the issue in_progress", task, reason, from, status, want, tc.from)
 			}
 			if pass := implementerPass(t, pool); pass != 1 {
 				t.Fatalf("pass = %d, want the return to implementing counted", pass)
+			}
+			// Only awaiting_merge has a READY standing to withdraw; every earlier phase has none.
+			if tc.from != phase.AwaitingMerge {
+				if len(published) != 0 {
+					t.Fatalf("merge queue publishes %v, want none: no READY stood in %s", published, tc.from)
+				}
+				return
 			}
 			if len(published) != 1 || published[0].Role != "merge-queue" || !strings.Contains(published[0].Packet, "READY withdrawn") || !strings.Contains(published[0].Packet, want) {
 				t.Fatalf("merge queue publishes %v, want one to merge-queue withdrawing the READY and saying %q", published, want)
@@ -386,17 +398,14 @@ func TestAConflictingMergeabilityInAwaitingMergeSendsTheTreeBackToImplementing(t
 	}
 }
 
-// A conflict read before the issue reaches awaiting_merge - in merging, where the merger pushes
-// nothing on its way to READY - is stored but decides nothing there: no worker is suspended yet,
-// and no round is open to act on it. The merger's READY still posts, so the issue enters
-// awaiting_merge with CONFLICTING already on the record. Deciding only on a read that changes the
-// stored value would leave that conflict permanently unacted on - every later read of the same
-// CONFLICTING answer "changes" nothing - so the tree would wait forever, reached in a different
-// order than a conflict that starts after READY. The handler must decide on every CONFLICTING
-// read, whether or not the record already said so: the first read after the issue reaches
-// awaiting_merge withdraws the READY, and the transition itself, which takes the issue out of
-// awaiting_merge, is what stops a further repeat of the same read from doing it again.
-func TestAConflictRecordedBeforeAwaitingMergeIsWithdrawnOnTheFirstReadAfterReady(t *testing.T) {
+// The handler decides on every CONFLICTING read, whether or not the record already said so: the
+// read that found the conflict first may have run while the issue stood in a phase the trigger has
+// no row for, and deciding only on a read that changes the stored value would leave that conflict
+// unacted on for good - every later read of the same CONFLICTING answer "changes" nothing. What
+// stops the repeat from acting twice is the move itself: implementing, where the conflict sends
+// the issue, has no row for the trigger, so the same read again changes nothing and tells nobody
+// a second time.
+func TestEveryConflictingReadDecidesAndTheMoveItselfStopsTheRepeat(t *testing.T) {
 	pool := migratedPool(t)
 	engine := testEngine(config.DesignGateRootIssues, nil)
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
@@ -409,18 +418,13 @@ func TestAConflictRecordedBeforeAwaitingMergeIsWithdrawnOnTheFirstReadAfterReady
 
 	conflict := intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", Mergeable: record.MergeabilityConflicting}
 	applyRefusingNothing(t, pool, engine, conflict)
-	if got := issuePhase(t, pool); got != phase.Merging {
-		t.Fatalf("after the first conflicting read the issue is in %s, want merging: nothing decides it before awaiting_merge", got)
-	}
-
-	applyRefusingNothing(t, pool, engine, intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Ready: true, Summary: readyPacket, Commit: "head"})
-	if got := issuePhase(t, pool); got != phase.AwaitingMerge {
-		t.Fatalf("after READY the issue is in %s, want awaiting_merge: a conflict already on the record does not refuse it", got)
+	if got := issuePhase(t, pool); got != phase.Implementing {
+		t.Fatalf("after the conflicting read the issue is in %s, want implementing: the merger cannot merge a head GitHub will not", got)
 	}
 
 	applyRefusingNothing(t, pool, engine, conflict)
 	if got := issuePhase(t, pool); got != phase.Implementing {
-		t.Fatalf("after the same conflicting read again the issue is in %s, want implementing: the record did not change, but the decision must still run on this first read in awaiting_merge", got)
+		t.Fatalf("after the same conflicting read again the issue is in %s, want implementing", got)
 	}
 	want := "the head conflicts with main: GitHub runs no checks on it; merge main forward"
 	var notices int
@@ -430,6 +434,9 @@ func TestAConflictRecordedBeforeAwaitingMergeIsWithdrawnOnTheFirstReadAfterReady
 	reason, _ := checksRedNotice(t, pool)
 	if notices != 1 || !strings.Contains(reason, want) {
 		t.Fatalf("checks-red notices = %d, reason %q; want exactly one saying %q", notices, reason, want)
+	}
+	if pass := implementerPass(t, pool); pass != 1 {
+		t.Fatalf("pass = %d, want the one return to implementing counted once", pass)
 	}
 }
 

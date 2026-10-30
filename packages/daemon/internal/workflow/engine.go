@@ -502,6 +502,55 @@ func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, f
 	return nil
 }
 
+// leftPhase is the phase role has left when the issue no longer stands in a phase that role works,
+// RoleFor read the other way round: the one phase each role works, and, for the implementer, which
+// works two, implementing while the issue stands before retro and retro once it stands past it.
+// The architect works accepting with its sign-off and completes nothing, so it leaves no phase
+// here.
+func leftPhase(role claim.Role, at phase.Phase) phase.Phase {
+	switch role {
+	case claim.RolePlanner:
+		return phase.Planning
+	case claim.RoleTester:
+		return phase.Testing
+	case claim.RoleReviewer:
+		return phase.Reviewing
+	case claim.RoleMerger:
+		return phase.Merging
+	case claim.RoleImplementer:
+		if phaseIndex(at) > phaseIndex(phase.Retro) {
+			return phase.Retro
+		}
+		return phase.Implementing
+	}
+	return ""
+}
+
+// leftItsPhase says whether role's completion of a phase its issue has already left is recorded
+// rather than refused: the daemon started role on this issue, which is what gives it the claim the
+// completion names (record.Store.RoleRun), and role reported no completion of the phase it was in.
+// That is this completion arriving after the daemon moved the issue on without it - the review
+// event taking reviewing on, or a conflicting head taking a later phase back - and its handoff is
+// the findings the next phase reads, which a refusal would lose. Three completions are not: one
+// from a role whose handoff already stands, which is reporting a phase it finished a second time;
+// one from a role the daemon never started on this issue, which has held no phase of it to report;
+// and any while the issue stands where no role works - parked, closed or held - which is past
+// recording work at all.
+func (e *Engine) leftItsPhase(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, token claim.Token) (bool, error) {
+	if token == "" || RoleFor(issue.Phase) == "" || leftPhase(role, issue.Phase) == "" {
+		return false, nil
+	}
+	row, err := e.phaseRow(ctx, tx, issue.Key, role)
+	if err != nil || row.HandoffCommit != "" {
+		return false, err
+	}
+	run, err := e.store.RoleRun(ctx, tx, token, issue.Key, role, issue.Generation)
+	if err != nil {
+		return false, err
+	}
+	return run.Claim != nil, nil
+}
+
 func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComplete) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil {
@@ -518,8 +567,24 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 	if fact.Role == claim.RoleArchitect {
 		return refused("ACCEPTANCE_IS_SIGN_OFF", fmt.Sprintf("the architect accepts %s with sign_off, not handoff_complete; this completion changed nothing", issue.Key)), nil
 	}
-	if RoleFor(issue.Phase) != fact.Role {
-		return refused("HANDOFF_NOT_CURRENT_PHASE", fmt.Sprintf("the %s does not run phase %s of %s; this completion changed nothing", fact.Role, issue.Phase, issue.Key)), nil
+	// A role can still be mid-turn in a phase the issue has left: the review event moves reviewing
+	// on, so a reviewer's own request for changes starts the implementer before the reviewer's
+	// handoff lands. Its completion is recorded on its own row and moves nothing (leftItsPhase).
+	current := RoleFor(issue.Phase) == fact.Role
+	if !current {
+		left, err := e.leftItsPhase(ctx, tx, *issue, fact.Role, fact.Claim)
+		if err != nil {
+			return intake.Result{}, err
+		}
+		if !left {
+			return refused("HANDOFF_NOT_CURRENT_PHASE", fmt.Sprintf("the %s does not run phase %s of %s; this completion changed nothing", fact.Role, issue.Phase, issue.Key)), nil
+		}
+	}
+	// reported is the phase this completion is of: the issue's own, or, for a role the issue has
+	// moved on without, the phase that role has left.
+	reported := issue.Phase
+	if !current {
+		reported = leftPhase(fact.Role, issue.Phase)
 	}
 	// A worker still in its turn when its tree's root closed can yet complete; linger holds the
 	// member where it stood (record.TreeLingers), so the completion records nothing.
@@ -528,9 +593,9 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		return intake.Result{}, err
 	}
 	if lingers {
-		return refusedLingering(*issue, fmt.Sprintf("the %s's completion of phase %s", fact.Role, issue.Phase)), nil
+		return refusedLingering(*issue, fmt.Sprintf("the %s's completion of phase %s", fact.Role, reported)), nil
 	}
-	if issue.Phase == phase.Merging && !fact.Ready {
+	if current && issue.Phase == phase.Merging && !fact.Ready {
 		return refused("READY_REQUIRED", "the merger's completion is READY: call the legion tool's handoff_complete with ready: true; this completion changed nothing"), nil
 	}
 	row, err := e.phaseRow(ctx, tx, fact.Issue, fact.Role)
@@ -541,12 +606,12 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 	if err != nil {
 		return intake.Result{}, err
 	}
-	if issue.Phase == phase.Merging {
+	if current && issue.Phase == phase.Merging {
 		if result, err := e.holdReadyToItsHead(ctx, tx, *issue, pr, fact); err != nil || result.Refusal != nil {
 			return result, err
 		}
 	}
-	if phase.FileBacked(issue.Phase) {
+	if phase.FileBacked(reported) {
 		// The commit a completion carries is the pushed commit carrying the phase's handoff, which
 		// the `legion` tool's handoff_complete found in the pane: the one the role reported for its
 		// previous phase means this phase wrote none.
@@ -559,6 +624,9 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 	row.MergeNote = fact.MergeNote
 	if err := e.store.PutPhase(ctx, tx, row); err != nil {
 		return intake.Result{}, err
+	}
+	if !current {
+		return intake.Result{}, nil
 	}
 	switch issue.Phase {
 	case phase.Planning:
@@ -892,7 +960,7 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	if err := e.notice(ctx, tx, issue.Key, noticeFor(trigger, from, handoff, reason)); err != nil {
 		return err
 	}
-	if from == phase.AwaitingMerge && trigger == TriggerChecksRed {
+	if from == phase.AwaitingMerge && (trigger == TriggerChecksRed || trigger == TriggerConflict) {
 		return e.withdrawReady(ctx, tx, issue, pr, reason)
 	}
 	if row.To == phase.AwaitingMerge {
@@ -915,14 +983,16 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 }
 
 // noticeFor is what a transition on trigger out of from tells the architect: that from finished,
-// with its worker's handoff, or, when CI stopped the phase, the head started conflicting with its
-// base, or the merge queue failed its merge (TriggerChecksRed), why. Two moves tell it nothing (a
+// with its worker's handoff, or, when the head started conflicting with its base (TriggerConflict),
+// or the merge queue failed its merge (TriggerChecksRed), why. Both of those are told under the
+// one checks-red kind the architect's prompt reads, since both are the daemon stopping the phase
+// on something it read of the head. Two moves tell it nothing (a
 // notice of no kind, which notice drops): its own sign-off, whose only recipient would be the
 // architect that just acted, and the merge that closes the issue, whose close tells a child's
 // architect child-closed itself (leave) and suspends a root's with the rest of its tree.
 func noticeFor(trigger TriggerKind, from phase.Phase, handoff record.PhaseRow, reason string) record.Notice {
 	switch trigger {
-	case TriggerChecksRed:
+	case TriggerChecksRed, TriggerConflict:
 		return record.Notice{Kind: "checks-red", Role: claim.RoleArchitect, Phase: from, Reason: reason}
 	case TriggerSignOff, TriggerPullRequestMerged:
 		return record.Notice{}
@@ -930,19 +1000,36 @@ func noticeFor(trigger TriggerKind, from phase.Phase, handoff record.PhaseRow, r
 	return record.Notice{Kind: "phase-finished", Role: RoleFor(from), Phase: from, Summary: handoff.Summary, Verdict: handoff.Verdict}
 }
 
+// daemonRaised says whether the daemon raises trigger on its own, out of something it read of the
+// pull request, rather than an agent's handoff or request raising it: a head that conflicts with
+// its base, a merge the repository failed, the review GitHub delivered, and the merge that closes
+// the issue. Every other trigger is a worker's completion or the architect's own act, and the
+// phase it ends was the worker's to end.
+func daemonRaised(trigger TriggerKind) bool {
+	switch trigger {
+	case TriggerChecksRed, TriggerConflict, TriggerReviewApproved, TriggerReviewRejected, TriggerPullRequestMerged:
+		return true
+	}
+	return false
+}
+
 // takenOver is the role a transition on trigger out of from takes the phase from while that role
-// may still be at work in it: CI settled red while the tester tested, while the reviewer reviewed a
-// round it had not completed, or while the merger worked toward its READY. Every other move is a
-// completion's (the outgoing worker's turn reports it once its handoff is committed and pushed),
-// the outgoing role's own request (a backward move from inside its turn), or a reviewer's round it
-// already completed, and takes over from nobody. Nor does a move between two phases of one role -
+// may still be at work in it: a move the daemon made on its own (daemonRaised) out of a phase
+// whose role has reported no completion - the head started conflicting with its base while the
+// tester tested, the reviewer's own review decided a round it had not completed, or the merge the
+// merger asked for failed. Every other move is a completion's (the outgoing worker's turn reports
+// it once its handoff is committed and pushed) or
+// the outgoing role's own request (a backward move from inside its turn), and takes over from
+// nobody. Nor does a move between two phases of one role -
 // retro back to implementing, where starting, the role the transition starts, is the one leaving -
 // take the phase from anyone: the implementer keeps its turn and is handed the new phase's task
 // once it ends, and a start may not wait on its own role (record.SuperviseRequest's Quiesce). The
-// architect, whose phase accepting is, holds no workspace turn either: CI red there starts the
-// implementer waiting on nobody.
+// architect, whose phase accepting is, holds no workspace turn either: a conflict there starts the
+// implementer waiting on nobody. Two daemon-raised moves start no role at all - the approval into
+// accepting, which is the architect's, and the merge into done, which closes the issue - so the
+// quiesce they grant is one start never asks for.
 func (e *Engine) takenOver(ctx context.Context, tx pgx.Tx, issue string, trigger TriggerKind, from phase.Phase, starting claim.Role) (claim.Role, error) {
-	if trigger != TriggerChecksRed {
+	if !daemonRaised(trigger) {
 		return "", nil
 	}
 	leaving := RoleFor(from)

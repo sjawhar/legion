@@ -1606,10 +1606,20 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 			putOutboxIssue(t, pool, records, issue)
 			const head = "16973163"
 			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-				// The settlement is the head's own, which the approval reads nothing of.
-				return records.PutPullRequest(ctx, tx, record.PullRequest{Issue: issue.Key, Repo: "acme/widgets", Number: 118, Branch: "legion/LEGION-208", HeadSHA: head, CheckedHead: head, Failing: []string{}, State: record.PullRequestOpen})
+				// The settlement is the head's own, which the approval reads nothing of; GitHub's
+				// merge state for it is clean, which an approval of it advances on.
+				return records.PutPullRequest(ctx, tx, record.PullRequest{Issue: issue.Key, Repo: "acme/widgets", Number: 118, Branch: "legion/LEGION-208", HeadSHA: head, CheckedHead: head, Failing: []string{}, State: record.PullRequestOpen,
+					Mergeability: record.MergeabilityMergeable, MergeState: record.MergeStateClean})
 			}); err != nil {
 				t.Fatalf("put the pull request: %v", err)
+			}
+			// The reviewer's claim, which the daemon started it on: its completion arrives after
+			// its own review has moved the issue, and is recorded on its row (workflow's
+			// leftItsPhase).
+			if _, err := pool.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation, session, session_file,
+				state, launch_failures, prompt_failures, prompt_retires, uncertain_streak)
+				values ('reviewer', 'LEGION', 'LEGION-208', 'LEGION-208', 'reviewer', 1, '', '', 'working', 0, 0, 0, 0)`); err != nil {
+				t.Fatalf("seed the reviewer's claim: %v", err)
 			}
 			sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 			sup.deps.PhaseHolds = (&workflowRuntime{pool: pool, records: records}).phaseHolds // exactly what the daemon wires
@@ -1652,7 +1662,8 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 
 			// The reviewer asks for round 2, and the implementer starts on its task.
 			apply("review:round-2", intake.PullRequestReview{Repo: "acme/widgets", Number: 118, State: "CHANGES_REQUESTED", CommitID: head, HeadSHA: head, Author: reviewApp, Body: "scripted changes requested, round 2"})
-			// A review ends when its reviewer completes it: its handoff is part of the phase.
+			// The review itself ended the round; the reviewer's completion follows it, recorded on
+			// the reviewer's own row with the issue already in implementing.
 			apply("handoff:reviewer:reviewing:1", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleReviewer,
 				Claim: "reviewer", Commit: "review-round-1"})
 			due("the round-2 start")

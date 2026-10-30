@@ -35,7 +35,7 @@ const compareFails = "<502>"
 func pullRequestStandIn(t *testing.T, head string, updated time.Time, changed string, listed *atomic.Int32) *httptest.Server {
 	t.Helper()
 	pull := `{"number":86,"state":"open","html_url":"https://github.com/acme/widgets/pull/86","body":"Dispatch: CAPTURE-1",` +
-		`"base":{"ref":"main"},"head":{"ref":"legion/CAPTURE-1","sha":"` + head + `"},"updated_at":"` + updated.Format(time.RFC3339) + `","mergeable":true}`
+		`"base":{"ref":"main"},"head":{"ref":"legion/CAPTURE-1","sha":"` + head + `"},"updated_at":"` + updated.Format(time.RFC3339) + `","mergeable":true,"mergeable_state":"clean"}`
 	files := []string{}
 	for _, name := range strings.Split(changed, ",") {
 		if name != "" {

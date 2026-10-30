@@ -187,6 +187,17 @@ type workflowRuntime struct {
 	handoffMu   sync.Mutex
 	handedOff   map[string]bool
 	handoffWake chan struct{}
+	// mergeStateWanted is each issue a fact left waiting on GitHub's merge state (the handler
+	// mergeStateTrigger) that readMergeStates has not started a ladder for yet, and
+	// mergeStateRunning each issue whose ladder is still reading; mergeStateWake, holding at most
+	// one wake, tells the reader there are some. mergeStateRetry is how long a ladder waits
+	// between reads of a state GitHub answers `unknown` for, mergeStateLadderWait when zero, which
+	// a test shortens.
+	mergeStateMu      sync.Mutex
+	mergeStateWanted  map[string]bool
+	mergeStateRunning map[string]bool
+	mergeStateWake    chan struct{}
+	mergeStateRetry   time.Duration
 }
 
 // readyReleaseTimeout bounds one release of ready architects' waiting notices
@@ -287,6 +298,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 		grants: credential.New(nil), projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1), mappingChanged: make(chan struct{}, 1),
 		handedOff: map[string]bool{}, handoffWake: make(chan struct{}, 1),
+		mergeStateWanted: map[string]bool{}, mergeStateRunning: map[string]bool{}, mergeStateWake: make(chan struct{}, 1),
 		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI,
 		defaultBranches: newDefaultBranches(tokens, githubAPI, defaultBranchTTL, time.Now),
 	}
@@ -320,8 +332,11 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// transaction, from the mirror's rows, so the row an event carries must already be written
 	// when they look. Neither could write it itself: the engine returns early on an event whose
 	// sequence or status it has already seen (Engine.dispatchIssue), which is exactly the
-	// blocked-by-only edit this mirror exists for, and admission runs second in any case.
-	w.handlers, w.reviewAppLogin = []intake.Handler{blockers.NewMirror(w.records, cfg.Project), w.engine, w.admission}, reviewAppLogin
+	// blocked-by-only edit this mirror exists for, and admission runs second in any case. The
+	// merge-state trigger runs last of all and decides nothing: it reads the record the fact left
+	// to see whether the daemon owes GitHub a read of the head's merge state, and queues it for
+	// after the commit.
+	w.handlers, w.reviewAppLogin = []intake.Handler{blockers.NewMirror(w.records, cfg.Project), w.engine, w.admission, mergeStateTrigger{runtime: w}}, reviewAppLogin
 	w.pool = st.Pool()
 	if err := backfillRepositories(ctx, w.pool, w.records, w.dispatch, cfg.Project, cfg.StateDir, w.defaultBranches, log); err != nil {
 		return nil, err
@@ -796,6 +811,10 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 	})
 	group.Go(func() error {
 		w.readHandedOff(running)
+		return nil
+	})
+	group.Go(func() error {
+		w.readMergeStates(running)
 		return nil
 	})
 	group.Go(func() error {

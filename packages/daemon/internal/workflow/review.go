@@ -81,21 +81,22 @@ func (e *Engine) carryApproval(ctx context.Context, tx pgx.Tx, issue record.Issu
 }
 
 // mergeability records what GitHub's last read found for whether the pull request's head can be
-// merged into its base (intake.PullRequestMergeability, readPullRequest's own GitHub
-// answer). In awaiting_merge it withdraws a conflicting head the way decideChecks's AwaitingMerge
-// case withdraws a red one (classify.ConflictWithdrawsReady, the same TriggerChecksRed
-// transition), since GitHub computes no merge ref for a conflicting head and no CI result will
-// ever arrive for it. It decides on every read, not only a changed one: a conflict recorded
-// before the issue reaches awaiting_merge - in testing, reviewing, retro or merging, where
-// nothing moves yet, since the pass reads every open pull request, in whatever phase its issue
-// is when the base moves - must still withdraw the READY once the issue gets there. Outside
-// awaiting_merge the read is recorded and nothing moves: a conflict is no red for RedSendsBack to
-// act on (GitHub runs no checks on it for a verdict to stand), and the tester or implementer
-// already at work will see it on its own pass or push. Leaving awaiting_merge is what stops a
-// repeated CONFLICTING read from withdrawing twice. GitHub's own merge state for the head rides
-// along on the same fact and is recorded with the verdict, deciding nothing of itself: it is what
-// the read found, kept for a reader that needs to tell a head GitHub holds on a check or a review
-// the repository requires from one GitHub would merge now. The base the read names is recorded with
+// merged into its base (intake.PullRequestMergeability, readPullRequest's own GitHub answer), and
+// acts on the two things that read can say.
+//
+// A head that conflicts with its base sends the issue back to implementing from whatever later
+// phase it stands in (TriggerConflict, and in awaiting_merge the READY is withdrawn with it):
+// GitHub computes no merge ref for a conflicting head, so no check runs on it and no CI result
+// will ever arrive for it, and only the implementer merging the base forward clears it. It
+// decides on every read, not only a changed one, since the recorded conflict is what a read made
+// in an earlier phase left. Implementing, where the work already is, has no row for the trigger,
+// so a read there records the conflict and moves nothing (transition).
+//
+// GitHub's own merge state for the head rides along on the same fact: it is what says whether
+// GitHub would merge this head now, which the tri-state mergeability cannot, and it is what an
+// approval standing on the head waits for (reviewRound). So in reviewing the round is asked again
+// once the state is recorded - this read is the one that moves an approved issue to accepting, as
+// often as not. The base the read names is recorded with
 // them, since that read is the only one that names the base of a pull request opened before the
 // record kept one: it is what a push onto that branch finds the pull request by (basePush), and a
 // read that answers for a base push already recorded clears the push's mark, the two having been
@@ -109,6 +110,7 @@ func (e *Engine) mergeability(ctx context.Context, tx pgx.Tx, fact intake.PullRe
 	if fact.Base != "" {
 		base = fact.Base
 	}
+	prior := *pr
 	if pr.Mergeability != fact.Mergeable || pr.MergeState != fact.MergeState || pr.Base != base || pr.BaseMoved != "" {
 		pr.Mergeability, pr.MergeState, pr.Base, pr.BaseMoved = fact.Mergeable, fact.MergeState, base, ""
 		if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
@@ -116,11 +118,22 @@ func (e *Engine) mergeability(ctx context.Context, tx pgx.Tx, fact intake.PullRe
 		}
 	}
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
-	if err != nil || issue == nil || issue.Phase != phase.AwaitingMerge || !classify.ConflictWithdrawsReady(*pr) {
+	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	reason := fmt.Sprintf("the head conflicts with %s: GitHub runs no checks on it; merge %s forward", fact.Base, fact.Base)
-	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerChecksRed, "", record.PhaseRow{}, pr, reason)
+	if classify.ConflictWithdrawsReady(*pr) {
+		reason := fmt.Sprintf("the head conflicts with %s: GitHub runs no checks on it; merge %s forward", base, base)
+		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerConflict, "", record.PhaseRow{}, pr, reason)
+	}
+	if issue.Phase != phase.Reviewing {
+		return intake.Result{}, nil
+	}
+	reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
+	if err != nil {
+		return intake.Result{}, err
+	}
+	_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, e.reviewRound(*issue, reviewer, &prior), byMergeState)
+	return intake.Result{}, err
 }
 
 // settledChecks is what the CI settlement standing for the pull request's head says: the head it
@@ -386,6 +399,7 @@ const (
 	byAnswer      = "the reviewer's review"
 	byOtherReview = "a review that is not the reviewer's answer"
 	byPush        = "a push"
+	byMergeState  = "GitHub's merge state for the head"
 )
 
 // roundOutcome is what a review round comes to after a fact (reviewRound).
@@ -434,16 +448,16 @@ func (r round) stuckAs(other round) bool {
 }
 
 // reviewRound is what issue's review round comes to, row being its reviewer's and pr its pull
-// request as a fact left them. A round ends once both of its halves are in: the reviewer's
-// completion, which is its handoff landing - part of its phase's contract, as every role's is - and
-// the decision it posted on GitHub, recorded on the round. Either may arrive second. The round
-// reads no CI verdict: a CI result moves nothing and decides no round
-// (dispatch://INFRA-714/spec R1), and the reviewer reads the head's checks on GitHub itself. A
-// round whose reviewer never completes is not ended by the decision alone: the reviewer's worker
-// gets a reminder at the end of every turn that ends with its phase open (the phase reminder in
-// @legion/pi-shared, driven by each harness's own hooks), and past that the issue stays in
-// reviewing, as a tester's that never completes stays in testing. A completed round that nothing
-// on its way would end is stuck, its reason naming the
+// request as a fact left them. The review event decides it, and the reviewer's handoff records its
+// findings (dispatch://INFRA-714/spec R1): a request for changes ends the round whether or not the
+// reviewer has completed, and the completion that follows is recorded on the reviewer's own row
+// (engine's leftItsPhase). An approval ends it once it approves the head's code
+// (classify.ApprovalStands) and GitHub reports that head one the issue may advance on
+// (record.MergeState.Mergeable): an approval of a head GitHub holds blocked on a check or a review
+// the repository requires leaves the issue in reviewing, and the merge state arriving clean is
+// what moves it (mergeability). The round reads no CI verdict: a CI result moves nothing and
+// decides no round, and the reviewer reads the head's checks on GitHub itself. A completed round
+// that nothing on its way would end is stuck, its reason naming the
 // head, since the decision it needs is of the head: no review decided it (stuckUndecided), or its
 // approval is of other code than the head's (stuckApprovedOtherCode). An approval of the head a
 // push that may change code is still on its way from (classify.CodeOnItsWay) keeps the round open:
@@ -457,14 +471,19 @@ func (e *Engine) reviewRound(issue record.Issue, row record.PhaseRow, pr *record
 	if row.Decision != nil {
 		decided = row.Decision.State
 	}
-	if completed && decided == "changes_requested" {
+	if decided == "changes_requested" {
 		return round{outcome: roundRejected}
 	}
 	if pr == nil {
 		return round{}
 	}
 	switch {
-	case completed && decided == "approved" && classify.ApprovalStands(*pr, row.Decision.Head):
+	case decided == "approved" && classify.ApprovalStands(*pr, row.Decision.Head):
+		if !pr.MergeState.Mergeable() {
+			// GitHub has not reported this head one it would merge. The round waits where it
+			// stands, and the next read of the merge state asks again (daemon's readMergeState).
+			return round{}
+		}
 		return round{outcome: roundApproved}
 	case !completed:
 		return round{}

@@ -59,7 +59,7 @@ func reviewsStandInWith(t *testing.T, reviews func() string, reads *atomic.Int64
 		}
 		switch r.URL.Path {
 		case "/repos/acme/widgets/pulls/86":
-			w.Write([]byte(`{"number":86,"base":{"ref":"main"},"mergeable":true}`))
+			w.Write([]byte(`{"number":86,"base":{"ref":"main"},"mergeable":true,"mergeable_state":"clean"}`))
 		case "/repos/acme/widgets/pulls/86/reviews":
 			reads.Add(1)
 			w.Write([]byte(reviews()))

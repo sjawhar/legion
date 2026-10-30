@@ -1,8 +1,11 @@
-import type { LegionRole } from "@legion/contracts";
+import { LEGION_ROLES, type LegionRole } from "@legion/contracts";
 import {
+  LEGION_PHASES,
   LegionGateRegisterRequest,
   type LegionGrant,
+  type LegionIssue,
   type LegionPhase,
+  type LegionState,
 } from "@legion/contracts/legion-api";
 import {
   type DaemonRestartRetry,
@@ -67,7 +70,7 @@ const OPERATION_FIELDS: Readonly<Record<string, readonly string[]>> = {
   close_root: ["issue", "reason"],
   park_child: ["issue"],
   rerun_child: ["issue"],
-  read_state: [],
+  read_state: ["issue", "issues", "phase", "settings"],
   set_status: ["issue", "status"],
 };
 
@@ -76,14 +79,132 @@ const ISSUE_STATUSES = ["todo", "backlog", "icebox"] as const;
 const jsonSuccess = (details: Readonly<Record<string, unknown>>): ToolResult =>
   toolSuccess(JSON.stringify(details), details);
 
+/** `read_state`'s filters, each naming the full records it answers with, in the order the schema
+ * declares them. Naming none answers the summary. */
+const STATE_FILTERS = ["issue", "issues", "phase", "settings"] as const;
+
+/** One claim as the summary shows it, the architect's or a phase worker's. */
+type SummaryClaim = NonNullable<LegionIssue["architect"]>;
+
+/** The first line of every summary: what the lines below it are, since they are not JSON. */
+const SUMMARY_LEGEND =
+  "legion state summary. Lines: project; admission cap; active/waiting/blocked; " +
+  "capability <name> <status> [detail] [config <legion.yaml line>]; issues <count>; then " +
+  "<KEY> <phase> <status> for every issue the daemon records, and under each issue Legion still " +
+  "runs its slot, hold, gate <current> approved <version|none> and <role> <claim state> " +
+  "<last turn start> <last turn end> lines, - for a value the daemon has none for. " +
+  "read_state with issue, issues, phase or settings returns the full records it names.";
+
+/**
+ * The whole state as the controller reads it between its filtered reads: the project, the
+ * admission lists, each capability's status, one line per recorded issue, and under each issue
+ * Legion still runs its slot, its hold, its gate and its claims.
+ *
+ * Line-oriented, not JSON: the INFRA deployment's state is about 160 KB of JSON for the 92 issues
+ * it records, and the tool's output reaches the controller cut at about 41 KB
+ * (dispatch://INFRA-329), so the controller acted on a read whose middle it never saw. Every
+ * recorded key is named, whatever the size: a summary that drops issues to fit is the bug this
+ * replaces. What costs the bytes is the per-claim detail, so only an issue Legion still runs
+ * carries it — a `done` issue's claims are retired and an `unrecorded` one (an operator's claim)
+ * has none — and `read_state` with a filter answers the rest in full.
+ */
+function stateSummary(state: LegionState): string {
+  const { admission, daemon } = state;
+  const lines = [
+    SUMMARY_LEGEND,
+    `project ${daemon.project} boots ${daemon.boots} started ${daemon.startedAt}`,
+    `admission cap ${admission.cap}${admission.free === undefined ? "" : ` free ${admission.free}`}`,
+    `active ${admission.active.join(" ") || "(none)"}`,
+    `waiting ${admission.waiting.join(" ") || "(none)"}`,
+  ];
+  for (const blocked of admission.blocked) {
+    lines.push(`blocked ${blocked.issue} on ${blocked.blockedBy.join(" ")}`);
+  }
+  for (const capability of state.capabilities) {
+    // A row that is not `present` is one someone acts on, so it keeps the fact its check found
+    // and the legion.yaml line that would record a decision; no filter answers for capabilities.
+    const detail = capability.status === "present" ? "" : ` ${capability.detail}`;
+    const config = capability.configLine === undefined ? "" : ` config ${capability.configLine}`;
+    lines.push(`capability ${capability.name} ${capability.status}${detail}${config}`);
+  }
+  const keys = Object.keys(state.issues).sort();
+  lines.push(`issues ${keys.length}`);
+  for (const key of keys) {
+    const issue = state.issues[key];
+    if (issue === undefined) continue;
+    lines.push(`${key} ${issue.phase} ${issue.status}`);
+    if (issue.phase === "done" || issue.phase === "unrecorded") continue;
+    if (issue.slot !== undefined) {
+      const lent = issue.slot.lentTo === undefined ? "" : ` lent ${issue.slot.lentTo}`;
+      lines.push(`  slot ${issue.slot.index} since ${issue.slot.admittedAt}${lent}`);
+    }
+    if (issue.holdReason !== undefined) lines.push(`  hold ${issue.holdReason}`);
+    if (issue.designGate !== undefined) {
+      const gate = issue.designGate;
+      lines.push(`  gate ${gate.currentVersion} approved ${gate.approvedVersion ?? "none"}`);
+    }
+    const claims: Array<readonly [string, SummaryClaim]> = [];
+    if (issue.architect !== undefined) claims.push(["architect", issue.architect]);
+    for (const role of LEGION_ROLES) {
+      const worker = issue.workers[role];
+      if (worker !== undefined) claims.push([role, worker.claim]);
+    }
+    for (const [role, claim] of claims) {
+      // A working claim whose last turn began hours ago is wedged; an idle claim's end is when
+      // it last did anything, and a dash is a turn the daemon recorded none of.
+      lines.push(
+        `  ${role} ${claim.state} ${claim.lastTurnStart ?? "-"} ${claim.lastTurnEnd ?? "-"}`
+      );
+    }
+  }
+  return lines.join("\n");
+}
+
+/** `read_state`'s answer: the summary when the call names no filter, and the full records the one
+ * filter it names selects. Two filters are refused: each answers a different shape. */
+function readState(state: LegionState, parameters: Record<string, unknown>): ToolResult {
+  const named = STATE_FILTERS.filter((filter) => parameters[filter] !== undefined);
+  if (named.length === 0) return toolSuccess(stateSummary(state));
+  if (named.length > 1) {
+    throw new Error(
+      `read_state takes one of ${STATE_FILTERS.join(", ")}, not ${named.join(" and ")}`
+    );
+  }
+  if (named[0] === "settings") {
+    if (parameters.settings !== true) throw new Error("read_state's settings is true");
+    return jsonSuccess({ settings: state.settings });
+  }
+  if (named[0] === "phase") {
+    const phase = LEGION_PHASES.find((candidate) => candidate === parameters.phase);
+    if (phase === undefined) {
+      throw new Error(`read_state's phase is one of ${LEGION_PHASES.join(", ")}`);
+    }
+    const selected = Object.entries(state.issues).filter(([, issue]) => issue.phase === phase);
+    return jsonSuccess({ issues: Object.fromEntries(selected) });
+  }
+  let keys: readonly string[];
+  if (named[0] === "issue") keys = [requiredString(parameters, "read_state", "issue")];
+  else {
+    const issues = parameters.issues;
+    if (!Array.isArray(issues) || !issues.every((issue) => typeof issue === "string")) {
+      throw new Error("read_state's issues is a list of issue keys");
+    }
+    keys = issues;
+  }
+  const missing = keys.filter((key) => state.issues[key] === undefined);
+  if (missing.length > 0) throw new Error(`The daemon has no record for ${missing.join(", ")}`);
+  const records = keys.map((key) => [key, state.issues[key]] as const);
+  return jsonSuccess({ issues: Object.fromEntries(records) });
+}
+
 /** The tool's one object schema, `op` choosing the operation; its fields and the `op` values are
  * in the order `tools.test.ts` pins. */
 function toolSchema(pi: PiApi): unknown {
   const z = pi.zod;
-  const phase = phaseOpParameters(z);
+  const phaseOp = phaseOpParameters(z);
   return z.object({
     op: z.enum([...OPERATIONS.architect, ...OPERATIONS.controller]),
-    issue: phase.issue,
+    issue: phaseOp.issue,
     artifactId: z
       .string()
       .describe(
@@ -92,13 +213,15 @@ function toolSchema(pi: PiApi): unknown {
       .optional(),
     version: z.number().optional(),
     issues: z.array(z.string()).optional(),
-    to: phase.to,
-    reason: phase.reason,
+    to: phaseOp.to,
+    reason: phaseOp.reason,
     decision: z.enum(["retry", "escalate"]).optional(),
-    summary: phase.summary,
-    verdict: phase.verdict,
-    ready: phase.ready,
+    summary: phaseOp.summary,
+    verdict: phaseOp.verdict,
+    ready: phaseOp.ready,
     status: z.enum(ISSUE_STATUSES).optional(),
+    phase: z.enum([...LEGION_PHASES]).optional(),
+    settings: z.boolean().optional(),
   });
 }
 
@@ -173,7 +296,10 @@ export function createLegionTool(deps: {
         "sign_off is the architect's acceptance of an issue in accepting, moving it to retro; the daemon refuses it in every " +
         "other phase (SIGNOFF_OUTSIDE_ACCEPTING), and issues still running beneath it do not hold it: a root's close waits " +
         "for them instead. " +
-        "The controller's read_state returns the daemon's whole state and set_status moves an issue to todo, backlog or icebox. ",
+        "The controller's read_state with no field returns a summary of the daemon's whole state — the project, admission, each " +
+        "capability, one line per recorded issue, and under each issue Legion still runs its slot, hold, gate and each claim's " +
+        "state with its last turn times — and with issue, issues, phase or settings returns the full records it names; " +
+        "set_status moves an issue to todo, backlog or icebox. ",
     }),
     defaultInactive: true,
     parameters: toolSchema(pi),
@@ -212,7 +338,7 @@ export function createLegionTool(deps: {
         assertOperationInput(parameters, operation);
         const client = daemon();
         if (active.kind === "controller") {
-          if (operation === "read_state") return jsonSuccess(await client.state());
+          if (operation === "read_state") return readState(await client.state(), parameters);
           // set_status, the controller's one write: validated whole before its grant is minted.
           const issue = requiredString(parameters, operation, "issue");
           const status = ISSUE_STATUSES.find((candidate) => candidate === parameters.status);

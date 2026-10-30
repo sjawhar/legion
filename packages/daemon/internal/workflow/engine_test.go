@@ -833,9 +833,15 @@ func seedPhase(t *testing.T, pool *pgxpool.Pool, row record.PhaseRow) {
 }
 
 // seedPR records pr. A seeded settlement names the head it is of (CheckedHead), as the engine
-// records one.
+// records one. A pull request seeded with no merge state at all takes GitHub's clean, the state
+// of a head with nothing against it: the merge state is what an approval waits on (reviewRound),
+// so a test about that wait names the state it means, and every other test is left saying what it
+// is about.
 func seedPR(t *testing.T, pool *pgxpool.Pool, pr record.PullRequest) {
 	t.Helper()
+	if pr.MergeState == record.MergeStateUnread {
+		pr.MergeState = record.MergeStateClean
+	}
 	seedRecord(t, pool, func(tx pgx.Tx) error { return record.NewStore().PutPullRequest(t.Context(), tx, pr) })
 }
 
