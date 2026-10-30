@@ -41,11 +41,11 @@ type Config struct {
 	// open production check of that repository (deployRunCompleted). Empty, no run wakes a check.
 	Deploys []config.Deploy
 	Clock   func() time.Time
-	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
-	// by it is never a fix attempt, and a red on its red tests is planned; a review it submits decides
-	// a round whatever GitHub gives its bot account (DecidesRound) and can be the reviewer's answer
-	// to a round it left undecided (reviewersAnswer). Empty matches no one. A workflow boot never
-	// leaves it empty: it refuses a review App that names no login (daemon.appLoginsAtBoot).
+	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A review
+	// it submits decides a round whatever GitHub gives its bot account (DecidesRound) and can be the
+	// reviewer's answer to a round it left undecided (reviewersAnswer); a push by it is recorded as
+	// the review App's (record.ClassifiedPush.ByReviewApp). Empty matches no one. A workflow boot
+	// never leaves it empty: it refuses a review App that names no login (daemon.appLoginsAtBoot).
 	ReviewAppLogin string
 	// Repositories is the daemon's in-memory view of the project's repositories, which the workflow
 	// records an issue's repository and default branch from when it first records the issue.
@@ -66,7 +66,8 @@ type Engine struct {
 
 var _ intake.Handler = (*Engine)(nil)
 
-// New constructs a workflow engine with the shipped review and fix caps when callers omit them.
+// New constructs a workflow engine, taking the shipped design gate, review round cap, production
+// check bound and clock for every one of them a caller omits.
 func New(store record.Store, cfg Config, log *slog.Logger) *Engine {
 	if cfg.DesignGate == "" {
 		cfg.DesignGate = config.DesignGateRootIssues
@@ -1274,10 +1275,6 @@ func (e *Engine) ownPullRequest(ctx context.Context, tx pgx.Tx, pr *record.PullR
 // never from the project's whole record.
 func (e *Engine) treeMembers(ctx context.Context, tx pgx.Tx, root record.Issue) ([]record.Issue, error) {
 	return e.store.TreeIssues(ctx, tx, root.Tree)
-}
-
-func (e *Engine) gateForIssue(ctx context.Context, tx pgx.Tx, issue record.Issue) (*record.DesignGate, error) {
-	return e.store.Gate(ctx, tx, issue.Tree)
 }
 
 func phaseIndex(value phase.Phase) int {

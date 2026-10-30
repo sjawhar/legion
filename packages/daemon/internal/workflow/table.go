@@ -110,29 +110,18 @@ var Table = append([]Row{
 	{From: phase.Merging, Trigger: TriggerPullRequestMerged, Guard: allow, To: phase.Done, Status: "done", Effects: []EffectKind{EffectStatus, EffectSuspend, EffectNotice, EffectLinger}},
 }, backwardRows()...)
 
+// backwardRows is one row for every move back from a phase to an earlier one. Each writes the
+// status of the phase it moves into, as every other row does (PhaseStatus): a move back into
+// planning writes in_progress, the status an issue shows while Legion works it
+// (dispatch://INFRA-714/spec R4), rather than leaving Dispatch showing the phase it left.
 func backwardRows() []Row {
 	ordered := []phase.Phase{phase.Planning, phase.Implementing, phase.Testing, phase.Reviewing, phase.Accepting, phase.Retro, phase.Merging}
 	rows := make([]Row, 0, len(ordered)*(len(ordered)-1)/2)
 	for fromIndex, from := range ordered {
 		for _, to := range ordered[:fromIndex] {
-			rows = append(rows, Row{From: from, Trigger: TriggerBackward, Guard: allow, To: to, Status: statusForBackward(to),
+			rows = append(rows, Row{From: from, Trigger: TriggerBackward, Guard: allow, To: to, Status: PhaseStatus(to),
 				Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}})
 		}
 	}
 	return rows
-}
-
-func statusForBackward(to phase.Phase) string {
-	switch to {
-	case phase.Testing:
-		return "testing"
-	case phase.Reviewing, phase.Accepting:
-		return "needs_review"
-	case phase.Retro:
-		return "retro"
-	case phase.Implementing:
-		return "in_progress"
-	default:
-		return ""
-	}
 }

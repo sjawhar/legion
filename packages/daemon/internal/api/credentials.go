@@ -248,22 +248,6 @@ func (s *server) appLease(w http.ResponseWriter, r *http.Request, role appauth.A
 	return lease, true
 }
 
-// leaseForGrant is appLease for a claim's grant, minted for owner, the owner of the repository the
-// claim's issue works: the mint runs first since it is the slow step, then the grant's claim must
-// still hold the capability that minted it, so a claim revoked while the mint was in flight is
-// caught before its token is handed back.
-func (s *server) leaseForGrant(w http.ResponseWriter, r *http.Request, grant credential.Grant, role appauth.AppRole, owner string) (appauth.Lease, bool) {
-	lease, ok := s.appLease(w, r, role, owner, string(grant.Role))
-	if !ok {
-		return appauth.Lease{}, false
-	}
-	if _, holds := s.claimHolds(grant); !holds {
-		writeFailure(w, http.StatusForbidden, "GRANT_REVOKED", grantRevoked)
-		return appauth.Lease{}, false
-	}
-	return lease, true
-}
-
 func (s *server) operatorAuthorized(r *http.Request) bool {
 	given, bearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	return s.operatorSet && bearer && secureBearerEqual(s.operatorHash, given)

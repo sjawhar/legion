@@ -48,48 +48,38 @@ var _ intake.Handler = mergeStateTrigger{}
 
 func (t mergeStateTrigger) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
 	records := t.runtime.records
-	var pulls []record.PullRequest
+	// Every fact but the base push names one pull request, and the arms differ only in how the
+	// record is looked up: by the branch the fact names, or by its number.
+	var (
+		named *record.PullRequest
+		pulls []record.PullRequest
+		err   error
+	)
 	switch fact := fact.(type) {
 	case intake.PullRequestOpened:
-		pr, err := records.PullRequestByBranch(ctx, tx, fact.Repo, fact.Branch)
-		if err != nil || pr == nil {
-			return intake.Result{}, err
-		}
-		pulls = []record.PullRequest{*pr}
+		named, err = records.PullRequestByBranch(ctx, tx, fact.Repo, fact.Branch)
 	case intake.PullRequestSynchronized:
-		pr, err := records.PullRequestByBranch(ctx, tx, fact.Repo, fact.Branch)
-		if err != nil || pr == nil {
-			return intake.Result{}, err
-		}
-		pulls = []record.PullRequest{*pr}
+		named, err = records.PullRequestByBranch(ctx, tx, fact.Repo, fact.Branch)
 	case intake.Push:
-		pr, err := records.PullRequestByBranch(ctx, tx, fact.Repo, fact.Branch)
-		if err != nil || pr == nil {
-			return intake.Result{}, err
-		}
-		pulls = []record.PullRequest{*pr}
+		named, err = records.PullRequestByBranch(ctx, tx, fact.Repo, fact.Branch)
 	case intake.PullRequestReview:
-		pr, err := records.PullRequestByNumber(ctx, tx, fact.Repo, fact.Number)
-		if err != nil || pr == nil {
-			return intake.Result{}, err
-		}
-		pulls = []record.PullRequest{*pr}
+		named, err = records.PullRequestByNumber(ctx, tx, fact.Repo, fact.Number)
 	case intake.PullRequestChecks:
-		pr, err := records.PullRequestByNumber(ctx, tx, fact.Repo, fact.Number)
-		if err != nil || pr == nil {
-			return intake.Result{}, err
-		}
-		pulls = []record.PullRequest{*pr}
+		named, err = records.PullRequestByNumber(ctx, tx, fact.Repo, fact.Number)
 	case intake.BasePush:
 		// One push to a base serves every pull request sitting on it, which is how the engine
 		// marked them (workflow's basePush).
-		open, err := records.OpenPullRequestsOnBase(ctx, tx, fact.Repo, fact.Branch)
-		if err != nil {
-			return intake.Result{}, err
-		}
-		pulls = open
+		pulls, err = records.OpenPullRequestsOnBase(ctx, tx, fact.Repo, fact.Branch)
 	default:
 		return intake.Result{}, nil
+	}
+	if err != nil {
+		return intake.Result{}, err
+	}
+	// A fact whose pull request the record does not hold is read for nothing: there is no head to
+	// ask GitHub about.
+	if named != nil {
+		pulls = []record.PullRequest{*named}
 	}
 	for _, pr := range pulls {
 		waits, err := t.runtime.approvalWaitsOnTheMergeState(ctx, tx, pr)

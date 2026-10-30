@@ -489,9 +489,17 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 	}
 	// A done write's reason goes on the issue first: Dispatch refuses a message on a closed issue.
 	// It is posted as this row's message, so a retry after a failed write finds it and posts none.
+	// The post is an event of the issue and moves its sequence, so the issue read above is stale
+	// the moment it lands and the write is fenced on a read made after it (writeStatus). Fenced on
+	// the older read, the first write of every row carrying a reason would be refused
+	// (ISSUE_CHANGED) and pay another issue read, a fact transaction on the apply-fact lock
+	// (applyRead) and a record read before making the write that was always going to land.
 	if payload.Reason != "" {
 		if err := r.message(ctx, row, record.MessagePost{Body: payload.Reason}); err != nil {
 			return err
+		}
+		if issue, err = r.dispatch.GetIssue(ctx, row.Issue); err != nil {
+			return fmt.Errorf("read Dispatch issue %s after posting the reason of its status write: %w", row.Issue, err)
 		}
 	}
 	return r.writeStatus(ctx, row, payload, issue)
@@ -1530,6 +1538,18 @@ func (r *outbox) checkBound(ctx context.Context, row record.OutboxRow) error {
 	return nil
 }
 
+// implementClient is a client for repository's REST API on the implement App's installation token:
+// the App every row reads an issue's own repository as, and the one the per-issue reads use
+// (workflowRuntime.implementClient). The mint failure is returned bare, so each row says in its
+// own words what it was minting the token for.
+func (r *outbox) implementClient(ctx context.Context, repository ghrepo.Repository) (githubrest.Client, error) {
+	lease, err := r.tokens.Token(ctx, appauth.Implement, repository.Owner())
+	if err != nil {
+		return githubrest.Client{}, err
+	}
+	return githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.githubAPI, repository)}, nil
+}
+
 // approvalCarry is the compare that carries a reviewer's approval across a handoff-only push
 // (record.ApprovalCarry), read from GitHub as the implement App. The push that left the approval
 // set aside below the pull request's head queued the row (workflow's carryApproval), because the
@@ -1577,11 +1597,10 @@ func (r *outbox) approvalCarry(ctx context.Context, row record.OutboxRow, payloa
 	if err != nil {
 		return fmt.Errorf("carry the approval on %s: %w", row.Issue, err)
 	}
-	lease, err := r.tokens.Token(ctx, appauth.Implement, repository.Owner())
+	github, err := r.implementClient(ctx, repository)
 	if err != nil {
 		return fmt.Errorf("mint implement App token: %w", err)
 	}
-	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.githubAPI, repository)}
 	push, aside, err := handoffPush(ctx, github, *pr, payload.Approved, payload.Head)
 	if err != nil {
 		return fmt.Errorf("compare the approved head %s of %s with its head %s: %w", payload.Approved, row.Issue, payload.Head, err)
@@ -1639,11 +1658,10 @@ func (r *outbox) checkCompare(ctx context.Context, row record.OutboxRow, payload
 	if err != nil {
 		return fmt.Errorf("compare %s's production check: %w", row.Issue, err)
 	}
-	lease, err := r.tokens.Token(ctx, appauth.Implement, repository.Owner())
+	github, err := r.implementClient(ctx, repository)
 	if err != nil {
 		return fmt.Errorf("mint implement App token: %w", err)
 	}
-	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.githubAPI, repository)}
 	if payload.Deploy != nil {
 		return r.checkDeployRun(ctx, row, payload, check, github)
 	}
@@ -1956,11 +1974,10 @@ func (r *outbox) createBranch(ctx context.Context, issue record.Issue) error {
 	if err != nil {
 		return err
 	}
-	lease, err := r.tokens.Token(ctx, appauth.Implement, repo.Owner())
+	github, err := r.implementClient(ctx, repo)
 	if err != nil {
 		return fmt.Errorf("mint the implement App token for %s: %w", repo.Owner(), err)
 	}
-	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.githubAPI, repo)}
 	return ghbranch.Create(ctx, github, repo, workspace.Bookmark(issue.Key), issue.DefaultBranch)
 }
 

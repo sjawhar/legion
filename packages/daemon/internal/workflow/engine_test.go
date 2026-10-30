@@ -566,7 +566,7 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "row", Phase: tc.current, Generation: 1, Status: fixtureStatus(tc.current), Rank: "U"})
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "row", Phase: tc.current, Generation: 1, Status: PhaseStatus(tc.current), Rank: "U"})
 			if tc.role != "" {
 				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: tc.role, Claim: "claim"})
 			}
@@ -616,19 +616,6 @@ func assertStartTasksNamePhase(t *testing.T, pool *pgxpool.Pool, want phase.Phas
 	}
 }
 
-func fixtureStatus(current phase.Phase) string {
-	switch current {
-	case phase.Testing:
-		return "testing"
-	case phase.Reviewing, phase.Accepting:
-		return "needs_review"
-	case phase.Retro, phase.Merging:
-		return "retro"
-	default:
-		return "in_progress"
-	}
-}
-
 // Every backward edge applies through intake, and the worker that asked for it is not stopped: its
 // assignment ends with the move, and the start of the phase it moved to delivers the next one.
 // Every move a backward row serves applies, and counts the implementer one pass, as every move
@@ -666,6 +653,34 @@ func TestEveryBackwardEdgeAppliesThroughIntake(t *testing.T) {
 	}
 }
 
+// A move back into planning writes planning's own status, in_progress, over the one the issue
+// stood at: every row writes its target phase's (PhaseStatus), so Dispatch stops showing
+// needs_review while Legion plans the issue again (dispatch://INFRA-714/spec R4). The queued
+// write carries the status the record held as the status it was observed at, so a person's move
+// since is not written over.
+func TestAMoveBackIntoPlanningWritesInProgress(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "backward", Phase: phase.Reviewing, Generation: 1, Status: PhaseStatus(phase.Reviewing), Rank: "U"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim"})
+	if _, err := intake.ApplyFact(context.Background(), pool, "api", "reviewing-planning", intake.BackwardMove{Issue: "LEGION-208", Requester: claim.RoleReviewer, To: phase.Planning, Reason: "the plan is wrong"}, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact backward: %v", err)
+	}
+	var gotPhase, gotStatus string
+	if err := pool.QueryRow(t.Context(), "select phase, status from issues where key = $1", "LEGION-208").Scan(&gotPhase, &gotStatus); err != nil {
+		t.Fatalf("read the row: %v", err)
+	}
+	if gotPhase != string(phase.Planning) || gotStatus != "in_progress" {
+		t.Fatalf("phase/status = %q/%q, want planning/in_progress", gotPhase, gotStatus)
+	}
+	var status, observed string
+	if err := pool.QueryRow(t.Context(), "select payload->>'status', payload->>'observedStatus' from outbox where kind = $1", string(record.OutboxKindDispatchStatus)).Scan(&status, &observed); err != nil {
+		t.Fatalf("read the status write the move queued: %v", err)
+	}
+	if status != "in_progress" || observed != "needs_review" {
+		t.Fatalf("the queued write sets %q over %q, want in_progress over needs_review", status, observed)
+	}
+}
+
 // A backward move no backward row serves is refused, and nothing moves or is counted: to the
 // phase the issue is already in or a later one; by a role that does not run the phase, the
 // implementer's from accepting among them; or to no phase at all, which the row lookup would
@@ -685,7 +700,7 @@ func TestABackwardMoveNoRowServesIsRefused(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "backward", Phase: tc.from, Generation: 1, Status: fixtureStatus(tc.from), Rank: "U"})
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "backward", Phase: tc.from, Generation: 1, Status: PhaseStatus(tc.from), Rank: "U"})
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 			result, err := intake.ApplyFact(context.Background(), pool, "api", "backward", intake.BackwardMove{Issue: "LEGION-208", Requester: tc.requester, To: tc.to, Reason: "probe"}, testEngine(config.DesignGateRootIssues, nil), admissionStub{})
 			if err != nil || refusalCode(result) != "BACKWARD_REFUSED" {

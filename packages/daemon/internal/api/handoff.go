@@ -30,8 +30,10 @@ import (
 // request on its branch, or a merged one recorded (implementationPullRequest:
 // HANDOFF_NO_PULL_REQUEST). A check report carries no commit (nothing was pushed) and a Verdict of
 // pass, pending or fail; a tester's completion a Verdict of pass or fail. Ready is the merger flag
-// the `legion` tool still sends on the merger's completion; the merger merges and the daemon
-// merges nothing, so it selects no behaviour and only tells one completion's key from another's.
+// the `legion` tool still sends on the merger's completion: this route refuses it from any role
+// but the merger (READY_ROLE_FORBIDDEN), and from the merger it only tells one completion's key
+// from another's (the event id below). It reaches no fact, since the merger merges and the daemon
+// merges nothing, so no workflow decision is taken on it.
 type HandoffCompleteRequest struct {
 	GrantID string `json:"grantId"`
 	Summary string `json:"summary"`
@@ -126,8 +128,10 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// pass through that phase — with the role and what it reported: the commit, the verdict, and
 	// READY. A retried call for the same phase is the same fact; the next phase's completion at the
 	// same commit (the implementer's retro, standing on its implementing pass's last push) is a
-	// different one, and so is a corrected report at the same commit (a merger's ready: true after
-	// READY_REQUIRED), since a refusal the workflow commits is recorded as processed. The position is
+	// different one, and so is a second report of the same phase at the same commit that says
+	// something else — another verdict, or another READY — since a refusal the workflow commits is
+	// recorded as processed, and a corrected report must not be answered as that refusal's
+	// duplicate. The position is
 	// read before the fact's own transaction: should the issue move in between, the engine re-reads
 	// it there and refuses a completion whose role no longer owns the phase, or whose run is no
 	// longer the issue's (workflow's HANDOFF_STALE_GENERATION guard).
