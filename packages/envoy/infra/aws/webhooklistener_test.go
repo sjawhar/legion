@@ -141,7 +141,7 @@ var listenerSignals = []struct {
 			{"publish-failure-filter", `{ $.level = "ERROR" && $.msg = "listener exception publish failed" }`},
 			{"webhook-publish-failure-filter", `[date=%^\d{4}/\d{2}/\d{2}$%, time=%^\d{2}:\d{2}:\d{2}$%, source=github||source=slack||source=ghostwispr, verb=publish, result=failed*, ...]`},
 		},
-		description: "Envoy listener could not publish to JetStream (`listener exception publish failed` or `<webhook> publish failed`, e.g. `nats: no response from stream`) — a delivery from the Dispatch GitHub App (legion-envoy) waits for Dispatch's redelivery sweep, a Slack event is retried by Slack three times with backoff and lost only if every attempt fails, any other GitHub sender's delivery answered 503 is lost, and delivery-exception notices are lost; read /ecs/envoy-listener for the nats error.",
+		description: "Envoy listener could not publish to JetStream (`listener exception publish failed` or `<webhook> publish failed`, e.g. `nats: no response from stream`) — a delivery from the Dispatch GitHub App (legion-envoy) waits for Dispatch's redelivery sweep, a Slack event is retried by Slack three times with backoff and lost only if every attempt fails, any other GitHub sender's delivery answered 503 is lost, and delivery-exception notices are lost. A GitHub delivery is counted at its first failure in each listener task; a later failure of it is logged `redelivery <delivery>: github publish failed` and not counted. Read /ecs/envoy-listener for the nats error.",
 	},
 	{
 		alarm: "webhook-refused", metric: "WebhookRefusals",
@@ -150,7 +150,7 @@ var listenerSignals = []struct {
 			{"ci-record-refused-filter", `[date=%^\d{4}/\d{2}/\d{2}$%, time=%^\d{2}:\d{2}:\d{2}$%, source=github, w1=ci, w2=record, result=refused*, ...]`},
 			{"ci-head-suite-record-refused-filter", `[date=%^\d{4}/\d{2}/\d{2}$%, time=%^\d{2}:\d{2}:\d{2}$%, source=github, w1=ci, w2=head||w2=suite, w3=record, result=refused*, ...]`},
 		},
-		description: "Envoy listener refused a webhook delivery (`<source> publish refused`, `github ci record refused` or `github ci suite record refused`, answered 422): the envelope is past what NATS takes or the commit's CI record is past its bound, the same input is refused on every attempt, and Dispatch's redelivery sweep does not retry a 4xx, so the delivery is lost (a refused CI record leaves its commit overflowed, never settling). Read /ecs/envoy-listener for the refusal's reason; the fix is a cap in legion's normalizer or a CI bound, not the NATS server's limits.",
+		description: "Envoy listener refused a webhook delivery (`<source> publish refused`, `github ci record refused` or `github ci suite record refused`, answered 422): the envelope is past what NATS takes or the commit's CI record is past its bound, and the same input is refused on every attempt. A GitHub delivery is counted at its first refusal in each listener task: Dispatch's redelivery sweep asks for a failed delivery again for 72 hours, and each later refusal of it is logged `redelivery <delivery>: <action> refused` and not counted. A delivery refused before a fix deploys is recovered once the fix lands within those 72 hours; past them it is lost. A refused CI record leaves its commit overflowed, never settling, whatever is redelivered. Read /ecs/envoy-listener for the refusal's reason; the fix is a cap in legion's normalizer or a CI bound, not the NATS server's limits.",
 	},
 	{
 		alarm: "stream-subject-dropped", metric: "StreamSubjectsDropped",
