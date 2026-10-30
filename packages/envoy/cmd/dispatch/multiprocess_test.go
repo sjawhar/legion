@@ -1747,10 +1747,13 @@ func TestAStagedKeyRotationAcrossThreeAppliesKeepsPeopleSignedIn(t *testing.T) {
 	issuer := oidctest.New(t)
 	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), cookieClientID, cookieClientSecret)
 	pair := newPair(t)
+	// Every process of the walk runs the same unstamped build, and only its DISPATCH_SIGNING_KEY
+	// differs, so the binary is built once rather than once per start.
+	binary := cmdtest.Build(t, "envoy-dispatch")
 	start := func(setting string) *dispatchProcess {
 		t.Helper()
 		process := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
-			NATSURL: pair.nats, SigningKey: setting, Env: cookieSignIn(issuer),
+			NATSURL: pair.nats, SigningKey: setting, Env: cookieSignIn(issuer), Binary: binary,
 		})
 		process.waitHealthy(t)
 		return process
@@ -1856,16 +1859,20 @@ func TestAStagedKeyRotationThatSkipsTheAddApplyIsRefusedAtBoot(t *testing.T) {
 	issuer := oidctest.New(t)
 	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), cookieClientID, cookieClientSecret)
 	pair := newPair(t)
-	options := dispatchOptions{NATSURL: pair.nats, SigningKey: stagedGeneration0, Env: cookieSignIn(issuer)}
+	// All three processes run the same unstamped build and differ only in their setting, so the
+	// binary is built once.
+	options := dispatchOptions{
+		NATSURL: pair.nats, SigningKey: stagedGeneration0, Env: cookieSignIn(issuer),
+		Binary: cmdtest.Build(t, "envoy-dispatch"),
+	}
 	pair.a = startDispatchProcessWith(t, pair.databaseURL(t), options)
 	pair.b = startDispatchProcessWith(t, pair.databaseURL(t), options)
 	pair.a.waitHealthy(t)
 	pair.b.waitHealthy(t)
 	session := signInThrough(t, pair.a, issuer)
 
-	skipped := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
-		NATSURL: pair.nats, SigningKey: stagedGeneration1, Env: cookieSignIn(issuer),
-	})
+	options.SigningKey = stagedGeneration1
+	skipped := startDispatchProcessWith(t, pair.databaseURL(t), options)
 	requireRefusedToStart(t, skipped, "the first pod of an apply that moved straight from [0] to [1]")
 	requireWhoami(t, pair, pair.a, session, "the cookie A minted, once the skipped apply's pod was refused")
 	requireWhoami(t, pair, pair.b, session, "the cookie A minted, once the skipped apply's pod was refused")

@@ -226,27 +226,23 @@ func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
 		require.False(t, dispatch.InputProperties[input].Secret, input)
 		require.NotContains(t, dispatch.RequiredInputs, input)
 	}
-	// The pods' disruption protection, the front door's and the listener's replica counts and the
-	// database's availability are optional plain strings and integers.
+	// The pods' disruption protection, the front door's and the listener's replica counts, the
+	// database's availability and the image cert-publish runs on are optional plain strings and
+	// integers. Every input that configures Dispatch is optional in the schema: a generated Go
+	// SDK's constructor refuses a nil required input, so a cluster-only consumer could not call
+	// the component at all while one stayed required, and the resolver is what requires it with
+	// clusterOnly off.
 	for input, typ := range map[string]string{
 		"priorityClassName": "string", "appPdbMinAvailable": "integer",
 		"frontDoorPdbMinAvailable": "integer", "listenerPdbMinAvailable": "integer",
 		"frontDoorReplicas": "integer", "listenerReplicas": "integer",
-		"databaseAvailabilityType": "string",
+		"databaseAvailabilityType": "string", "frontDoorToolsImage": "string",
 	} {
 		require.Equal(t, typ, dispatch.InputProperties[input].Type, input)
 		require.True(t, dispatch.InputProperties[input].Plain, input)
 		require.False(t, dispatch.InputProperties[input].Secret, input)
 		require.NotContains(t, dispatch.RequiredInputs, input)
 	}
-	// The image cert-publish runs on is a plain string, optional in the schema as every input
-	// that configures Dispatch is: a generated Go SDK's constructor refuses a nil required
-	// input, so a cluster-only consumer could not call the component at all while it stayed
-	// required, and the resolver is what requires it with clusterOnly off.
-	require.Equal(t, "string", dispatch.InputProperties["frontDoorToolsImage"].Type)
-	require.True(t, dispatch.InputProperties["frontDoorToolsImage"].Plain)
-	require.False(t, dispatch.InputProperties["frontDoorToolsImage"].Secret)
-	require.NotContains(t, dispatch.RequiredInputs, "frontDoorToolsImage")
 	// clusterOnly, which builds the cluster alone, is an optional plain boolean: it decides which
 	// resources register, so it is never another resource's output, and a stack that sets nothing
 	// sends no property at all, leaving an applied stack's inputs where they are.

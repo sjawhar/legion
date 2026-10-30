@@ -489,7 +489,7 @@ gate() {
 // only once that restart is over, not while the database is away.
 func newDispatchTailscaleService(ctx *pulumi.Context, comp *Dispatch, s dispatchSettings, instance *sql.DatabaseInstance) (*tailscale.Service, error) {
 	return tailscale.NewService(ctx, s.hostname, &tailscale.ServiceArgs{
-		Name:    pulumi.String("svc:" + s.hostname),
+		Name:    pulumi.String(tailnetServiceName(s.hostname)),
 		Comment: pulumi.String("Dispatch, served at " + core.TailnetHostName(s.hostname, s.tailnetDNSName)),
 		Ports:   pulumi.StringArray{pulumi.String("tcp:443")},
 		Tags:    pulumi.ToStringArray(s.tags),

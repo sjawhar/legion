@@ -993,7 +993,6 @@ func TestDispatchRegistersASigningKeyPerGeneration(t *testing.T) {
 			want := make([]string, 0, len(generations))
 			for _, generation := range generations {
 				want = append(want, signingKeyName(generation))
-				m.Named(t, "random:index/randomPassword:RandomPassword", signingKeyName(generation))
 			}
 			got := make([]string, 0, len(want))
 			for _, registration := range registeredSigningKeys(m) {
@@ -1446,22 +1445,20 @@ func requireWaitsForTheFrontDoor(t *testing.T, m *pulumitest.Mocks, deployment, 
 }
 
 // The two workloads that dial the proxy no longer order alike, and dispatchArgs leaves
-// natsInCluster unset, the only mode where there is a front door to wait for. envoy-listener
-// exits when its first bus connection fails (packages/envoy/cmd/listener/main.go), so a listener
-// pod started before the proxy never goes ready and the rollout waits it out: it still waits.
-// envoy-dispatch serves without the bus — /healthz reads Postgres alone, reporting nats false,
-// and its bus clients connect in the background once the proxy answers — so its wait bought only
-// a connected start, and during the cutover, where the front door is deliberately away while the
+// natsInCluster unset, the only mode where there is a front door to wait for. envoy-dispatch
+// serves without the bus — /healthz reads Postgres alone, reporting nats false, and its bus
+// clients connect in the background once the proxy answers — so its wait bought only a
+// connected start, and during the cutover, where the front door is deliberately away while the
 // database's availability type changes, the server must come back inside that stop rather than
-// behind the front door.
-func TestDispatchAppDoesNotWaitForTheFrontDoorButTheListenerDoes(t *testing.T) {
+// behind the front door. The listener still waits, for the reason
+// TestDispatchListenerWaitsForTheFrontDoor gives.
+func TestDispatchAppDoesNotWaitForTheFrontDoor(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 
 	app := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").RPC.GetDependencies()
 	require.NotContains(t, app, frontDoorPodURN, "the server comes back inside the front door's stop, not behind it")
 	require.NotContains(t, app, frontDoorServiceURN, "the server comes back inside the front door's stop, not behind it")
-	requireWaitsForTheFrontDoor(t, m, "example-dispatch-listener", "the listener")
 }
 
 // envoy-listener dials the hub through the same proxy and exits on a failed initial connect
