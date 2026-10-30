@@ -733,8 +733,17 @@ func publishFallbackCopies(ctx context.Context, deps Deps) {
 		switch {
 		case err == nil:
 		case errors.Is(err, bus.ErrRefused):
+			deps.countPublishFailure("refused")
 			slog.Error("dispatch outbox: fallback copy refused", "comment_id", item.held.commentID, "destination", item.held.destination, "error", err)
 		default:
+			// Counted as the publisher counts a destination that did not reach NATS (attempt.answer),
+			// except an answer a stopping process stopped waiting for, which says nothing of NATS.
+			switch {
+			case errors.Is(err, bus.ErrPublishDenied):
+				deps.countPublishFailure("denied")
+			case ctx.Err() == nil || !errors.Is(err, ctx.Err()):
+				deps.countPublishFailure("failed")
+			}
 			slog.Error("dispatch outbox: publish fallback copy", "comment_id", item.held.commentID, "destination", item.held.destination, "error", err)
 			if errors.Is(err, bus.ErrUnavailable) {
 				release(item.held, retryInterval)

@@ -103,8 +103,10 @@ func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 	return githubHandler(secret, mentionTrigger, reviewerAppID, publisher, ci, newBodyBudget(githubBodyBudget))
 }
 
-// githubHandler is GitHubHandler reading bodies against the given budget.
+// githubHandler is GitHubHandler reading bodies against the given budget. Each handler remembers
+// the failed deliveries it has logged (failedDeliveries).
 func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publisher, ci CIRecorder, bodies *bodyBudget) http.HandlerFunc {
+	failures := newFailedDeliveries(githubFailuresKept, githubFailureAge)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusOK)
@@ -170,7 +172,7 @@ func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 			for _, o := range obs {
 				if o.CheckName == "" {
 					if err := ci.RecordSuite(answer, o); err != nil {
-						deliveryFailed(w, "github ci suite record", err)
+						failures.deliveryFailed(w, delivery, "github ci suite record", err)
 						return
 					}
 					continue
@@ -186,7 +188,7 @@ func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 					}
 				}
 				if err := ci.Record(answer, o); err != nil {
-					deliveryFailed(w, "github ci record", err)
+					failures.deliveryFailed(w, delivery, "github ci record", err)
 					return
 				}
 			}
@@ -211,7 +213,7 @@ func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 				return
 			}
 			if err := publisher.PublishWithin(answer, item); err != nil {
-				deliveryFailed(w, "github publish", err)
+				failures.deliveryFailed(w, delivery, "github publish", err)
 				return
 			}
 		}
