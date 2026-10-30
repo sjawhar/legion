@@ -15,10 +15,8 @@ import {
   type RenderInboundResult,
   renderInbound,
 } from "@legion/envoy-client/delivery"
-import {
-  sessionDirectory as dispatchSessionDirectory,
-  writeSessionTitle,
-} from "@legion/envoy-client/dispatch-session-state"
+import { sessionDirectory as dispatchSessionDirectory } from "@legion/envoy-client/dispatch-session-directory"
+import { writeSessionTitle } from "@legion/envoy-client/dispatch-session-state"
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe"
 import { messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
@@ -412,7 +410,9 @@ export function createChannelDelivery(input: {
         // <channel> tag, so the Envoy producer travels under `producer`.
         meta: sanitizeChannelMetadata({
           producer: envelope?.source ?? "unknown",
-          topic: subject,
+          // A forward on the agent subject (a role message, or an ad-hoc topic's copy the
+          // publish route confirms with this session) carries the topic it was published to.
+          topic: envelope?.topic || subject,
           event_id: envelope?.event_id,
           dedupe_key: envelope?.dedupe_key,
           urgency: envelope?.urgency,

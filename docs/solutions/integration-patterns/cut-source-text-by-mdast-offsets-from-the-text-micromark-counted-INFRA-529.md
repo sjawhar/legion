@@ -40,15 +40,15 @@ micromark reads it:
 
 ## Evidence
 
-- `packages/proof-editor/src/typed-block-drawing.ts:46-49` is `markdownSource`, the one helper that
+- `packages/proof-editor/src/typed-block-drawing.ts:42-45` is `markdownSource`, the one helper that
   returns the source with one leading U+FEFF removed (the U+FEFF fix landed in `6af96b96`, in
   `read-only-directives.ts`; INFRA-565 moved it and the code below into `typed-block-drawing.ts`).
   Before that fix, `"\ufeff:::note\nbody\n:::\n"` lost its closing `:::`, and
   `"\ufeffHello **b**\n\n:::note…"` drew an empty opening line (`RangeError: Empty text nodes are
   not allowed`).
-- `:129-139` in `drawDirective` ends lines at CR or LF (fixed in `75cd715e`). Before that,
+- `:125-135` in `drawDirective` ends lines at CR or LF (fixed in `75cd715e`). Before that,
   `":::a\r:::\r".repeat(3555)` (31,995 characters) drew 44,245,530 characters; after, 24,885.
-- `:40` and `:142-156` hold the closing-fence rule (fixed in `75cd715e`).
+- `:36` and `:138-152` hold the closing-fence rule (fixed in `75cd715e`).
 - Browser rows 3 and 4 of `packages/dispatch/e2e/unknown-directive.e2e.ts` post a lone-CR message
   and a BOM-led message through the real API and assert each line once.
 - Both callers now read the source through `markdownSource`: read-only mode's transform and default

@@ -331,23 +331,25 @@ test("a later Inbox response clears a hidden ask's pending refresh @phone", asyn
         if (frame.type === "event" && frame.event?.issue_key === hiddenIssue.key) hiddenFrames += 1;
       });
     });
+    const pinnedRead = (request: { method(): string; url(): string }) =>
+      request.method() === "GET" &&
+      new URL(request.url()).pathname === "/api/v1/issues" &&
+      new URL(request.url()).searchParams.get("pinned") === "true";
+    // The desktop sidebar reads pins during load. Start watching before reload so it cannot be
+    // mistaken for the post-reply pin refresh below.
+    const firstPinnedRead = page.waitForRequest(pinnedRead);
     const reloaded = page.reload();
     // A reload's first subscription resumes from its sign-in check's `event_head`, and the page
     // reads the Inbox only once that check has answered, so the hidden reply, posted once the
     // held Inbox read is out, is replayed to the page whenever its live socket opens: no wait for
     // the socket.
     await listRequested.promise;
-    const pinnedRead = (request: { method(): string; url(): string }) =>
-      request.method() === "GET" &&
-      new URL(request.url()).pathname === "/api/v1/issues" &&
-      new URL(request.url()).searchParams.get("pinned") === "true";
     const isPhone = testInfo.project.name === "iphone";
     if (isPhone) {
       // The phone mounts the sidebar's reads, the pinned list among them, with its drawer.
-      const firstPinnedRead = page.waitForRequest(pinnedRead);
       await page.getByRole("button", { name: "Open navigation" }).click();
-      await firstPinnedRead;
     }
+    await firstPinnedRead;
     await createComment(
       hiddenIssue.key,
       { ask_id: hiddenAsk.id, body: "Fresh hidden reply." },

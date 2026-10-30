@@ -77,11 +77,11 @@ tells the agent who Dispatch takes it for.
 | --- | --- |
 | Issues | `dispatch issue` creates one; `--blocked-by <key>`, repeated, names up to 20 issues in the same project it waits on. `dispatch issue-update` changes status, title, labels, priority, parent, links, blockers, or components; its `--blocked-by` replaces the list, and `--clear-blocked-by` empties it; `--before <KEY>` and `--after <KEY>` move it on its project's board, above that issue, below it, or between the two. `dispatch claim` claims an issue before work starts. `dispatch issues` lists a project's issues. |
 | Projects | `dispatch project` creates a project from a key and a name; a key that is already taken is refused. `dispatch projects` lists every project's key and name. |
-| Asks | `dispatch ask` opens one. `dispatch edit-ask` rewords an open one. `dispatch resolve-ask` retracts or resolves one. `dispatch follow` follows or leaves an ask's thread. `dispatch open-asks` lists open asks. |
+| Asks | `dispatch ask` opens one. `dispatch edit-ask` rewords an open one. `dispatch resolve-ask` retracts or resolves one. `dispatch follow` follows or leaves an ask's thread. `dispatch open-asks` lists open asks. `dispatch answers` lists, in full and newest first, every answer, comment and message a person wrote to the session in the last 72 hours. |
 | Comments | `dispatch comment` comments on a document or replies in a thread. `dispatch suggest` proposes replacement text. `dispatch resolve-comment` resolves a thread. |
 | Messages | `dispatch message` posts a message or replies to one. |
 | Documents | `dispatch doc-read` reads a document, or the text of an uploaded file; with `--blocks` it lists the document's block ids, tokens and table rows that `dispatch doc-edit` addresses. `dispatch doc-edit` edits one in place. `dispatch artifact` uploads a file or a new document. `dispatch request-approval` asks a person to approve a document. |
-| Reading | `dispatch read` reads an issue, ask, comment, message, or document summary; an issue read lists the issue's last 10 events, `--events N` the last N, and `--all-events` every one. `dispatch search` searches everything. `dispatch whoami` reports who Dispatch takes the agent for. |
+| Reading | `dispatch read` reads an issue, ask, comment, message, or document summary; an issue read lists the issue's last 10 events, `--events N` the last N, and `--all-events` every one. `dispatch search` searches everything. `dispatch related --project <KEY>` runs the related-item check a new issue or ask gets on a `--title` and `--text`, and writes nothing. `dispatch whoami` reports who Dispatch takes the agent for. |
 | Architecture | `dispatch architecture-sync` imports a project's architecture model now, from every source repository with a line for each, or from one with `--repo <owner/name>`. |
 
 A command with several problems is refused once, with every problem listed, so the next run can
@@ -136,6 +136,15 @@ Each kind of write reaches people differently. Pick by what you need from them.
 
 Never post progress, "starting work", or status on a timer as a message. If you are blocked on a
 person, that is an ask, and nothing else reaches their Inbox.
+
+Every model request of an Oh My Pi session that reaches Dispatch, its `task` subagents' included,
+ends with a list of what people wrote to that session in the last 72 hours: answers to its asks,
+replies on its asks and in its comment threads, comments on its documents and on issues routed to
+it, mentions, and messages to it, each word for word, newest first, under 8,000 characters. A
+Claude Code session gets the same list at its start, resume and compaction and when a subagent
+starts. When the list leaves older items out, its last line says how many; `dispatch answers`
+reads them all. The request waits at most 800 ms for the list and carries the last one read when
+Dispatch does not answer.
 
 The server holds every write to a size, and refuses rather than truncates:
 
@@ -280,11 +289,26 @@ dispatch://KEY/spec
 dispatch://KEY/artifact/<slug>
 dispatch://KEY/ask/<id>
 dispatch://KEY/comment/<id>
+dispatch://KEY/comment/<id>#b-<block>[@v<N>]
 dispatch://KEY/message/<id>
+dispatch://KEY/message/<id>#b-<block>
 dispatch://PROJECT/artifact/<document>
+dispatch://PROJECT/artifact/<document>/comment/<id>#b-<block>[@v<N>]
 ```
 
 `dispatch read` on any of them shows what it is and everything that references it.
+
+A comment or message is made of blocks, one per paragraph, list or other top-level block, named
+`b1`, `b2` and so on. `#b-<block>` names one of them, and a link in a comment or issue message
+starts at the block that holds it. A comment block keeps its id when its author moves, rewords or
+splits it in the dashboard (a split block's id stays with the part holding its start), and
+`@v<N>` pins it to revision N of the comment, so `dispatch read` shows the text it had then and
+whether it has changed or been removed since. A message never changes, so its blocks take no pin.
+
+To answer one block rather than the whole item, pass its reference to
+`dispatch comment --reply-to` or `dispatch message --in-reply-to`. Dispatch records the reply as
+answering that block, and `dispatch read` of the reply prints `Re: block <id>:` and the block's
+text before its body, or `Re: block <id> (removed)` once an edit removed it.
 
 ## The HTTP API
 

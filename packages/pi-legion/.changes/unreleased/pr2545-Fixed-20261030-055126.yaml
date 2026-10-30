@@ -1,0 +1,5 @@
+kind: Fixed
+body: The `legion-retro` skill names a retro learning file `docs/solutions/<category>/<slug>-pr<number>.md` by the pull request number, and its front-matter example carries the pull request alone, so no Dispatch issue key reaches a file name in this public repository.
+time: 2026-10-30T05:51:26.048793053Z
+custom:
+    Issue: pr2545

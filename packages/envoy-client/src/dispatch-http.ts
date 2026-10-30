@@ -39,14 +39,18 @@ import type {
   IssueRouteStatus,
   IssueSummary,
   IssueSummaryPage,
+  ItemBlocks,
   Message,
   MessageRead,
   MessageReplyInput,
   MessageReplyResult,
   OpenAsksResponse,
   Project,
+  RelatedCheckInput,
   ResolveAskInput,
   SearchResponse,
+  SessionAnswersResponse,
+  Suggestions,
   UpdateIssueInput,
   Version,
   WhoamiResponse,
@@ -213,7 +217,7 @@ function isJson(response: Response): boolean {
 /** Whether `error` is a server's answer that it has no route for the request (`404 NOT_FOUND`,
  *  "no route for …"), as a server older than a route answers it; a `404 NOT_FOUND` for a
  *  resource the server does not know says "not found" instead. */
-function isNoRoute(error: unknown): boolean {
+export function isNoRoute(error: unknown): boolean {
   return (
     error instanceof DispatchServiceError &&
     error.status === 404 &&
@@ -681,8 +685,13 @@ export class DispatchClient {
     this.#signal = requestSignal(signal);
   }
 
-  async issue(input: CreateIssueInput): Promise<Advised<Issue>> {
-    return this.#json("POST", ["api", "v1", "issues"], input);
+  /**
+   * Creates an issue. `created` is whether this call made one (Dispatch's 201); false (its 200)
+   * means Dispatch already holds the issue `external` names and answered with that issue.
+   */
+  async issue(input: CreateIssueInput): Promise<Advised<Issue> & { created: boolean }> {
+    const answer = await this.#jsonAnswer<Advised<Issue>>("POST", ["api", "v1", "issues"], input);
+    return { ...answer.payload, created: answer.status === 201 };
   }
 
   /** Resolves an existing native key or external reference without creating an issue. */
@@ -739,11 +748,18 @@ export class DispatchClient {
     );
   }
 
+  /**
+   * `POST /api/v1/projects/{key}/artifacts`: an upload the project owns. `key` is the caller's own
+   * `Idempotency-Key` for the upload, where the caller has one intent across calls and processes —
+   * AskGate's decision document, created once per session however many processes reach for it — and
+   * replaces the key this call would mint for itself. It must match `IDEMPOTENCY_KEY_PATTERN`.
+   */
   async projectArtifact(
     project: string,
-    input: CreateArtifactInput
+    input: CreateArtifactInput,
+    key?: string
   ): Promise<ArtifactUploadResponse> {
-    return this.#upload(["api", "v1", "projects", project, "artifacts"], input);
+    return this.#upload(["api", "v1", "projects", project, "artifacts"], input, key);
   }
 
   async getProjectArtifact(project: string, slug: string): Promise<Artifact> {
@@ -777,6 +793,12 @@ export class DispatchClient {
 
   async search(query: string, options: SearchOptions = {}): Promise<SearchResponse> {
     return this.#json("GET", ["api", "v1", "search"], undefined, { q: query, ...options });
+  }
+
+  /** `POST /api/v1/projects/{key}/related`: the related-item check over a title and a text,
+   *  writing nothing. A blank title and text answer `outcome: "not_made"` with the reason. */
+  async related(project: string, input: RelatedCheckInput): Promise<Suggestions> {
+    return this.#json("POST", ["api", "v1", "projects", project, "related"], input);
   }
 
   async getIssue(issue: string): Promise<IssueDetails> {
@@ -877,6 +899,32 @@ export class DispatchClient {
   /** Every open ask on a project's issues and documents (issue- or document-owned), oldest first. */
   async openAsksForProject(project: string): Promise<OpenAsksResponse> {
     return this.#json("GET", ["api", "v1", "asks", "open"], undefined, { project });
+  }
+
+  /** `GET /api/v1/agents/{session_id}/answers`: what people wrote that Dispatch delivered to the
+   *  session since `since` (72 hours ago when unset), newest first. With `maxChars` the server
+   *  stops after the item whose text takes the running sum of text lengths past it, so the body
+   *  stays about that size plus one item. `signal` aborts the request beside the client's own
+   *  deadline, so a caller with a shorter deadline of its own does not leave it running. A server
+   *  older than the route answers 404. */
+  async sessionAnswers(
+    sessionID: string,
+    options: {
+      readonly since?: string;
+      readonly maxChars?: number;
+      readonly signal?: AbortSignal;
+    } = {}
+  ): Promise<SessionAnswersResponse> {
+    return this.#json(
+      "GET",
+      ["api", "v1", "agents", sessionID, "answers"],
+      undefined,
+      {
+        ...(options.since === undefined ? {} : { since: options.since }),
+        ...(options.maxChars === undefined ? {} : { max_chars: options.maxChars }),
+      },
+      options.signal
+    );
   }
 
   /** `GET /api/v1/agents`: the Envoy listener's live sessions, as of Dispatch's copy of its list
@@ -1215,8 +1263,39 @@ export class DispatchClient {
     return this.#json("GET", ["api", "v1", "artifacts", id, "blocks"]);
   }
 
-  async docEdit(id: string, input: EditArtifactInput): Promise<EditArtifactResponse> {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "edits"], input);
+  /** `GET /api/v1/comments/{id}/blocks`: the comment's current blocks with their ids, text,
+   *  references and UTF-16 offsets into its stored body, and the comment's revision. */
+  async commentBlocks(id: string): Promise<ItemBlocks> {
+    return this.#json("GET", ["api", "v1", "comments", id, "blocks"]);
+  }
+
+  /** `GET /api/v1/messages/{id}/blocks`: the message's current blocks, read under
+   *  `GET /api/v1/messages/{id}`'s rule, so a direct message is read as `session`, a session in
+   *  its conversation (`getMessageThread`). */
+  async messageBlocks(id: string, session?: string): Promise<ItemBlocks> {
+    return this.#json(
+      "GET",
+      ["api", "v1", "messages", id, "blocks"],
+      undefined,
+      session === undefined ? undefined : { session }
+    );
+  }
+
+  /**
+   * `POST /api/v1/artifacts/{id}/edits`: an edit of a document's text. `key` is the caller's own
+   * `Idempotency-Key` for the edit, where the caller has one intent across calls and processes —
+   * AskGate's one append per decision, which a resumed session must not write twice — and replaces
+   * the key this call would mint for itself. It must match `IDEMPOTENCY_KEY_PATTERN`.
+   */
+  async docEdit(id: string, input: EditArtifactInput, key?: string): Promise<EditArtifactResponse> {
+    return this.#json(
+      "POST",
+      ["api", "v1", "artifacts", id, "edits"],
+      input,
+      undefined,
+      undefined,
+      key
+    );
   }
 
   async nameArtifactVersion(id: string, input: CreateVersionInput): Promise<Version> {
@@ -1258,13 +1337,12 @@ export class DispatchClient {
   }
 
   async getIssueReferences(issue: string): Promise<IssueReferences> {
-    return this.#json("GET", [
-      "api",
-      "v1",
-      "issues",
-      await this.#resolveIssue(issue),
-      "references",
-    ]);
+    return this.#json(
+      "GET",
+      ["api", "v1", "issues", await this.#resolveIssue(issue), "references"],
+      undefined,
+      { versions: "latest" }
+    );
   }
 
   async getReferences(query: GraphReferencesQuery): Promise<GraphReferences> {
@@ -1297,36 +1375,44 @@ export class DispatchClient {
     method: string,
     path: readonly string[],
     body?: unknown,
-    query?: object
+    query?: object,
+    signal?: AbortSignal,
+    key?: string
   ): Promise<T> {
-    return (await this.#jsonAnswer<T>(method, path, body, query)).payload;
+    return (await this.#jsonAnswer<T>(method, path, body, query, signal, key)).payload;
   }
 
-  /** `#json` with the status Dispatch answered, for a route whose status says what it did. */
+  /** `#json` with the status Dispatch answered, for a route whose status says what it did.
+   *  `signal` aborts a read beside the client's own signal (`#send`). */
   async #jsonAnswer<T>(
     method: string,
     path: readonly string[],
     body?: unknown,
-    query?: object
+    query?: object,
+    signal?: AbortSignal,
+    key?: string
   ): Promise<{ readonly status: number; readonly payload: T }> {
     const url = this.#url(path, query);
     const response = await this.#send(
       method,
       url,
-      body === undefined ? undefined : { content: JSON.stringify(body), type: "application/json" }
+      body === undefined ? undefined : { content: JSON.stringify(body), type: "application/json" },
+      undefined,
+      signal,
+      key
     );
     return { status: response.status, payload: await this.#response<T>(method, url, response) };
   }
 
   /** An upload to an owner's artifact route: inline content as JSON, a file as multipart. */
-  async #upload<T>(path: readonly string[], input: CreateArtifactInput): Promise<T> {
-    if ("content" in input) return this.#json("POST", path, input);
+  async #upload<T>(path: readonly string[], input: CreateArtifactInput, key?: string): Promise<T> {
+    if ("content" in input) return this.#json("POST", path, input, undefined, undefined, key);
     const form = new FormData();
     form.set("name", input.name);
     if (input.summary !== undefined) form.set("summary", input.summary);
     if (input.actor !== undefined) form.set("actor", JSON.stringify(input.actor));
     form.set("file", input.file, input.name);
-    return this.#form("POST", path, form);
+    return this.#form("POST", path, form, key);
   }
 
   /**
@@ -1334,19 +1420,26 @@ export class DispatchClient {
    * boundary, and a retry whose bytes differ from its first attempt's is a different request to
    * Dispatch, which refuses a key reused for one (`422 KEY_REUSED`).
    */
-  async #form<T>(method: string, path: readonly string[], form: FormData): Promise<T> {
+  async #form<T>(
+    method: string,
+    path: readonly string[],
+    form: FormData,
+    key?: string
+  ): Promise<T> {
     const url = this.#url(path);
     const encoded = new Response(form);
     const type = encoded.headers.get("Content-Type") ?? "multipart/form-data";
     const content = new Uint8Array(await encoded.arrayBuffer());
-    const response = await this.#send(method, url, { content, type });
+    const response = await this.#send(method, url, { content, type }, undefined, undefined, key);
     return this.#response<T>(method, url, response);
   }
 
   /**
    * The one request function: every call the client makes goes through here. A read, a PUT or a
-   * DELETE goes once. A write (POST or PATCH) carries an `Idempotency-Key` minted here for this
-   * call alone, so all its attempts are one intent to Dispatch, which runs it once and answers a
+   * DELETE goes once, and `signal` aborts it beside the client's own signal. A write (POST or
+   * PATCH) carries an `Idempotency-Key`: the caller's own `callerKey`, where it has one intent
+   * across calls and processes, else one minted here for this call alone, so all its attempts are
+   * one intent to Dispatch, which runs it once and answers a
    * repeat with the answer it stored, while two calls are two writes. Each attempt sends the same
    * encoded body. While an attempt gets no definitive answer (`writeAnswer`, a transport failure,
    * or `writeRetry.silenceMs` without progress, `#attempt`) the write asks again under its key,
@@ -1368,7 +1461,9 @@ export class DispatchClient {
     method: string,
     url: string,
     body?: EncodedBody,
-    accept = "application/json"
+    accept = "application/json",
+    signal?: AbortSignal,
+    callerKey?: string
   ): Promise<Response> {
     const headers: Record<string, string> = {
       Accept: accept,
@@ -1379,11 +1474,11 @@ export class DispatchClient {
       return this.fetchImpl(url, {
         method,
         headers,
-        signal: this.#signal,
+        signal: signal === undefined ? this.#signal : AbortSignal.any([this.#signal, signal]),
         ...(body === undefined ? {} : { body: body.content }),
       });
     }
-    const key = crypto.randomUUID();
+    const key = callerKey ?? crypto.randomUUID();
     headers[IDEMPOTENCY_KEY_HEADER] = key;
     const { pausesMs, withinMs, silenceMs, pause = pauseFor } = this.writeRetry;
     const request = `${method} ${url}`;

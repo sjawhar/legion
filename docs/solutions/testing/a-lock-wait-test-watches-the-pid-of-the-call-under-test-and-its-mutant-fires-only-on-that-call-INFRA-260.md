@@ -84,3 +84,9 @@ Two other callers of the counting idiom have the same exposure, inferred from th
 reproduced: `cmd/dispatch/shutdown_test.go:101` and `api/ask_turn_test.go:386`. The report,
 dispatch://INFRA-49/ask/4e275ed1-291c-42ad-9f0e-927495b45e44, was folded into dispatch://INFRA-436,
 the issue that fixes flaky Dispatch tests.
+
+**Note 2026-10-27:** `computeAndPersistSuggestions` was replaced by the related-item
+check (`relatedCheck`, `internal/dispatch/api/suggestions.go`). The two tests above are now
+`TestRelatedCheckRespectsDeadlineUnderLock` and
+`TestRelatedCheckRespectsDeadlineWhenProjectLookupIsLocked`, and `suggestionsBehindLock` still
+runs the call on its own one-connection pool and polls for its pid, now around the check.

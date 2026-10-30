@@ -6,8 +6,10 @@
 # stream and the session database) and claude-backend-sandbox.sh (six ports: the daemon API, the
 # worker stream, Dispatch, the Envoy listener, NATS and the session database). Pods dial the
 # Service; the Service's one pod runs a chisel reverse-tunnel server (mirror.gcr.io/jpillora/chisel,
-# pulled through the mirror and pinned by digest per AGENTS.md); the devbox reaches that pod's
-# control port only through `kubectl port-forward` (never exposed by the Service, never by the
+# pinned by digest). This file is a devbox live proof no CI job runs, which is why it keeps Google's
+# mirror rather than a copy in ghcr.io/sjawhar/legion/ci (.github/scripts/check-ci-images.sh names
+# it in EXCEPTIONS on that ground). The devbox reaches that pod's control port only through
+# `kubectl port-forward` (never exposed by the Service, never by the
 # cluster network at all), and a chisel client built from the pinned source on the devbox asks the
 # server, over that port-forward, to open one reverse listener per port the caller names, each
 # proxying back through the tunnel to 127.0.0.1 on the devbox, where the caller's own services
@@ -33,7 +35,6 @@
 # Sourced after lib/namespace-rig.sh (both callers source both), whose `op` this file reuses for
 # every operator-context read and write. The caller sets (beside begin/note/fail/pass and
 # namespace-rig.sh's own variables, op included):
-#   root         the checkout root, for the pinned chisel client's `go install`
 #   operator     the admin kubectl context; bridge_stop and every read here use it alone
 #   work         the run's scratch directory (the chisel client binary, logs, never printed)
 #   bridge_name  the bridge pod and Service's shared name, deterministic from the project alone
@@ -180,7 +181,13 @@ bridge_start() {
 
   local chisel_bin="$work/bin/chisel"
   mkdir -p "$work/bin"
-  GOBIN="$work/bin" go install "github.com/jpillora/chisel@${bridge_chisel_version}" ||
+  # The toolchain's own go, under its own GOROOT. mise's go shim replaces a caller's GOBIN when
+  # go.set_gobin is true, and, on mise before 2026.9.0, in any shell `mise activate` set up.
+  # Separately, an activated shell exports mise's Go's GOROOT, whose compiler a newer toolchain's go
+  # refuses.
+  local goroot
+  goroot=$(go env GOROOT) &&
+    GOBIN="$work/bin" GOROOT=$goroot "$goroot/bin/go" install "github.com/jpillora/chisel@${bridge_chisel_version}" ||
     fail "building the chisel client ($bridge_chisel_version, the same release the bridge pod's server runs) failed"
 
   # The auth token never appears in the pod's own spec: a Pod and a Secret are readable under

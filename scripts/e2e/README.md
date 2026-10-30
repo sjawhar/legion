@@ -46,6 +46,45 @@ the kernel kill pod processes below their own limits, and the kubelet does not s
 | `TestRealGitHubCredentialSurface` | the real `api.NewServer`'s App leases, rendered as the gh files a pane's `GH_CONFIG_DIR` holds, make the real `gh` identify as the implementer and reviewer bots, an empty `GH_CONFIG_DIR` authenticates nobody, and `git` clones the smoke repository through `gh auth git-credential` from the implement App's files alone. Devbox only |
 | `TestRealGitHubReadyHoldsTheHeadToRetrosCommits` | the daemon's `POST /legion/v1/handoff/complete` with `ready: true`, over a real Postgres and as the real implement App, holds a pull request's head to its review round's approved head plus retro's commits: GitHub's compare of the two must show nothing outside `docs/solutions/` and `.legion/<issue>/`, or READY is refused `READY_UNREVIEWED_CHANGE` naming the paths. Devbox only |
 
+## On a GitHub-hosted runner
+
+[`.github/workflows/e2e.yaml`](../../.github/workflows/e2e.yaml) runs one proof per job on
+`ubuntu-24.04`, against a Postgres service. Five scripts run there: `child-adoption.sh`,
+`dispatch-claimant-delivery.sh`, `merged-root-waits.sh`, `no-required-checks.sh` and
+`stage1-skeleton.sh`, which the `test` job of `ci.yaml` also runs. None of them needs a secret,
+and none there may: Sami answered that no API key goes into this repository, and that a smoke
+test which calls a model runs in the deployment repository on workload identity federation
+(sjawhar/legion#2512). Every other script needs a devbox, a throwaway kind cluster, a real
+cluster or a model key, and the workflow refuses it by name with what its own header says it
+needs. `.github/e2e-scripts.json` holds both lists, and a script in neither fails the run.
+
+A person or a role starts a proof two ways, and takes no devbox for either:
+
+```sh
+gh workflow run e2e.yaml -f script=merged-root-waits   # one proof, with or without the .sh
+gh pr edit <number> --add-label e2e                    # every hosted proof, on that pull request
+```
+
+A nightly run makes the whole hosted set on `main`: GitHub starts a scheduled run from the default
+branch alone, so it proves main's scripts, never a pull request's.
+
+Read the result, and take the evidence:
+
+```sh
+gh run list --workflow e2e.yaml --limit 5
+gh run view <run id>        # one job per proof, each named for its script, and which one failed
+gh run view --log --job <job id>
+gh run download <run id>    # every evidence directory the run uploaded
+```
+
+Each job writes its evidence to one directory and uploads it as
+`e2e-<script>-<run id>-<run attempt>`, on a pass and on a failure. The job sets the evidence
+variable of the script it runs (`CHILD_ADOPTION_EVIDENCE_DIR`, `MERGED_ROOT_WAITS_EVIDENCE_DIR`,
+`NO_REQUIRED_CHECKS_EVIDENCE_DIR`), so that script writes its transcript and its logs there. It
+also keeps the run's own output as `output.log` in the same directory, which is what
+`stage1-skeleton.sh` and `dispatch-claimant-delivery.sh` leave a reader: they take no evidence
+variable and keep a work directory of their own, whose path that output names.
+
 ## TestRealGitHubCredentialSurface
 
 ```sh
@@ -127,7 +166,7 @@ plugins (`lib/install-plugin-profile.sh`); this one proves the skeleton.
 
 | input | default | meaning |
 | :--- | :--- | :--- |
-| `LEGION_E2E_PG_DSN` | unset | the Postgres to run against. Unset, the script starts its own `postgres:16` container (`legion-e2e-pg-<pid>`) on an ephemeral loopback port and removes it on the way out — the devbox path. Set, it starts no container: that is how CI hands it the job's service. |
+| `LEGION_E2E_PG_DSN` | unset | the Postgres to run against. Unset, the script starts its own PostgreSQL 18 container (`legion-e2e-pg-<pid>`) on an ephemeral loopback port and removes it on the way out — the devbox path. Set, it starts no container: that is how CI hands it the job's service. |
 
 Everything the run takes is its own, so two runs on one box — a CI job and a devbox session, or
 two sessions — neither collide nor report each other as a leftover:
@@ -242,7 +281,7 @@ route, and the Envoy role claim.
 
 What it stands up, all of it the run's own:
 
-- **Postgres**: `LEGION_E2E_PG_DSN` when set; otherwise a `postgres:16` container on tmpfs
+- **Postgres**: `LEGION_E2E_PG_DSN` when set; otherwise a PostgreSQL 18 container on tmpfs
   (`legion-e2e2-pg-<pid>`) on an ephemeral loopback port — tmpfs rather than the image's anonymous
   volume, which a box whose docker volume subsystem stalls would hang on.
 - **NATS and the Envoy listener** on the host: a `nats:2.10 -js` container
@@ -482,15 +521,14 @@ configured, there is none to audit. The scratch Dispatch runs with `HOME` and `X
 the run's work directory, so it reads no envoy.json of the operator's.
 
 It proves admission order and slotless children — the child is parked to `backlog` as soon as it
-is seen slotless, which is all it was filed for, so it holds up no close above it — then
-drives a root from `todo` through an
-architect's spec and gate registration, which the architect does on its own (the proof never
-prompts it: its first turn is the daemon's `catch-up` notice, and the root's primary document is
-the proof's one-file smoke spec), the root's wait on the human at its gate (`awaiting_person`, no
-slot, the architect suspended), the human approval, the root's return to a slot, planner, implementer pull request,
-tester, reviewer, the architect's acceptance at `accepting`, retro, merger READY, the daemon's
-merge of the READY head, which closes the issue (`daemon-merge`), and the implementer's production
-check after the close, its first look and the bound's last look
+is seen slotless, which is all it was filed for, so it holds up no close above it — then drives a
+root from `todo` through an architect's spec and gate registration, which the architect does on its
+own (the proof never prompts it: its first turn is the daemon's `catch-up` notice, and the root's
+primary document is the proof's one-file smoke spec), the root's wait on the human at its gate
+(`awaiting_person`, no slot, architect live), the human approval, the root's return to a slot,
+planner, implementer pull request, tester, reviewer, the architect's acceptance at `accepting`,
+retro, merger READY, the daemon's merge of the READY head, which closes the issue (`daemon-merge`),
+and the implementer's production check after the close, its first look and the bound's last look
 (`production-check-bound`). It also proves three changes-requested rounds, each posted by the reviewer
 pane and ended by that reviewer's completion — a review ends when its reviewer completes it, so
 the round returns to implementing only once the reviewer's handoff is recorded, authored and
@@ -1850,10 +1888,10 @@ back, or requests approval again, which opens a new request since Request change
 one. It keeps the issue's asks as `<issue>-asks.json`, approval events as
 `<issue>-events.json`, each requested version as `<issue>-spec-v<N>.json`, and the verdict as
 `<issue>-gate-verdict.json`. While tree 1 waits on the human (its question, or a closed gate it
-registered) it is in `awaiting_person` with no slot and its architect suspended; once the gate
-opens, `spec-posted` waits for the root to hold a slot again (`await_root_slot`, which tree 1, the
-run's one root under `admission_cap: 2`, takes at once) before it waits for planning, and notes how
-many times the daemon logged the root giving its slot back.
+registered) it is in `awaiting_person` with no slot and its architect live; once the gate opens,
+`spec-posted` waits for the root to hold a slot again (`await_root_slot`, which tree 1, the run's
+one root under `admission_cap: 2`, takes at once) before it waits for planning, and notes how many
+times the daemon logged the root giving its slot back.
 
 `LEGION_E2E_POD_FILE` names a JSON file holding a deployment's own worker pod block, the
 `runtime.kubernetes.pod` value its configuration renders (`service_account`, `env`, `volumes`,
@@ -1995,11 +2033,13 @@ the run that owns it. A signal to the whole process group does not stop the remo
   went to `/dev/null`;
 - a teardown command that fails prints `cleanup warning: line N exited S`, never a check's `FAIL`
   line, and leaves the exit status the checks set.
-- **Production NATS, stream `ENVOY_NOTIFICATIONS`**: the daemon's two durable consumers. They are
-  named by the Dispatch key: `legion-go-<project>-dispatch` (`notifications.dispatch.issue.>`) and
+- **Production NATS, stream `ENVOY_NOTIFICATIONS`**: the daemon's three durable consumers. They are
+  named by the Dispatch key: `legion-go-<project>-dispatch` (`notifications.dispatch.issue.>`),
+  `legion-go-<project>-dispatch-server` (`notifications.dispatch.server.started`) and
   `legion-go-<project>-github` (`notifications.github.sjawhar.legion-smoke.>`) — `LEGSMOKE` by default.
-  - The teardown deletes both by exact name and prints `deleted` or `absent` for each.
-  - `hygiene` fails if either remains, and the preflight refuses to start while either exists.
+  - The teardown deletes every consumer named under `legion-go-<project>-` and notes each it
+    deleted or could not delete, so a consumer the daemon gains needs no change here.
+  - `hygiene` fails if any remains, and the preflight refuses to start while any exists.
   - A SIGKILLed driver runs no trap, and the next run of the same identity's preflight names what it left; a different identity's run never sees it.
 - **Production Dispatch, project `LEGSMOKE` by default**: three root issues per run. The preflight moves stale
   todo issues to backlog, roots and the children a failed run left todo alike. The proof human's writes use the agents' bearer and name the session
@@ -3867,17 +3907,16 @@ that quotes it.
 With the design gate armed (`gates.design: root-issues`), a root whose architect registers a closed
 gate while no worker of its tree runs waits on a person: `drive_gate ISSUE LABEL [SECONDS]` runs
 `architect_registers_gate`, then `await_gate_wait` (the root in `awaiting_person` with
-`waitingOn.kind` `gate` and no `answeredAt`, no `.slot` and absent from `admission.active`, then its
-architect `suspended` within `phase_seconds`), approves the registered version as the proof human,
-then `await_answered_slot`: the answer (`waitingOn.answeredAt`, or the root already holding a slot,
-since a slot free at the answer is taken in the same transaction) within 120 s, then
+`waitingOn.kind` `gate` and no `answeredAt`, no `.slot` and absent from `admission.active`, while
+its architect stays live within `phase_seconds`), approves the registered version as the proof
+human, then `await_answered_slot`: the answer (`waitingOn.answeredAt`, or the root already holding
+a slot, since a slot free at the answer is taken in the same transaction) within 120 s, then
 `await_root_slot`, the root out of `awaiting_person` holding a slot in `admission.active`, within
 `SECONDS` (`phase_seconds` by default; Stage 3's first root passes 1800, since its slot comes back
 only when a root that took the slot it gave up registers its own gate in turn). A timeout in any of
 them prints the root's phase, slot, `waitingOn` and architect state and the admission state. Only
-then does it wait for planning. `wait_for_architect ISSUE` and so `architect_registers_gate` accept
-an architect already suspended in `awaiting_person`, whose pane the watcher checked at its launch,
-since a proof may look after the root's wait began.
+then does it wait for planning. `wait_for_architect ISSUE` and so `architect_registers_gate` require
+that architect to remain live even after the root's wait began.
 
 `request_changes_as_reviewer ISSUE ROUND BODY [NOTE]` is a scripted changes-requested round: it
 tells the reviewer pane its decision and the review's text, quoted, which the reviewer ends with
@@ -4092,21 +4131,20 @@ session database).
 . "$root/scripts/e2e/lib/bridge-tunnel.sh"     # sourced, never run
 ```
 
-The caller sets `root` (the checkout, for the pinned chisel client's `go install`), `operator` (the
-admin kubectl context, the only one this file uses), `work` (the run's scratch directory),
-`bridge_name` (the run's deterministic bridge pod/Service name, set before `bridge_start` runs, so
-the cluster-DNS name pods dial is known from it alone), `run_label` and, optionally,
-`bridge_priority_class` (a PriorityClass the bridge pod runs at; unset, it has none), beside
-`lib/namespace-rig.sh`'s own (`namespace`, and `op`, which every read and write here goes through)
-and `begin`, `note`, `fail` and `pass`. It defines `kill_harness`, which stops whatever the run
-drives. This file defines `bridge_start` and `bridge_stop`. The watchdog's two fatal paths, a
-port-forward it cannot restart within 60 s and a chisel client that exits, both go through
-`bridge_down`: it writes the reason and the bridge pod's last events (or, once the pod's are gone,
-its node's) to `$work/bridge-failed` for the caller's `FAIL` line, calls `kill_harness` and sends
-the script `SIGTERM`, and does nothing once `bridge_stop` has begun. The watchdog runs under the
-caller's `errexit`, so every command on that path that may fail (a `kill` of a process already
-gone, `kill_harness`) is guarded, and its `EXIT` trap, which stops the port-forward and the chisel
-client it last started, never changes its exit status.
+The caller sets `operator` (the admin kubectl context, the only one this file uses), `work` (the
+run's scratch directory), `bridge_name` (the run's deterministic bridge pod/Service name, set
+before `bridge_start` runs, so the cluster-DNS name pods dial is known from it alone), `run_label`
+and, optionally, `bridge_priority_class` (a PriorityClass the bridge pod runs at; unset, it has
+none), beside `lib/namespace-rig.sh`'s own (`namespace`, and `op`, which every read and write here
+goes through) and `begin`, `note`, `fail` and `pass`. It defines `kill_harness`, which stops
+whatever the run drives. This file defines `bridge_start` and `bridge_stop`. The watchdog's two
+fatal paths, a port-forward it cannot restart within 60 s and a chisel client that exits, both go
+through `bridge_down`: it writes the reason and the bridge pod's last events (or, once the pod's
+are gone, its node's) to `$work/bridge-failed` for the caller's `FAIL` line, calls `kill_harness`
+and sends the script `SIGTERM`, and does nothing once `bridge_stop` has begun. The watchdog runs
+under the caller's `errexit`, so every command on that path that may fail (a `kill` of a process
+already gone, `kill_harness`) is guarded, and its `EXIT` trap, which stops the port-forward and
+the chisel client it last started, never changes its exit status.
 
 | function | does |
 | :--- | :--- |

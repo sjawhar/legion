@@ -71,7 +71,8 @@ phase worker `worker_backends` puts on `claude`, on Claude Code. It carries:
   `packages/daemon/docker/omp-plugins` (its `package.json` is the pin; the build resolves nothing from
   npm), the one plugin linked into the OMP profile `legion`
   (`OMP_PROFILE=legion`; plugins resolve to `/home/legion/.omp/profiles/legion/plugins/node_modules`),
-  backed by the CodeGraph CLI (`@colbymchenry/codegraph`, pinned) at `/opt/codegraph/bin` (`PATH`) — the
+  backed by the CodeGraph CLI (`@colbymchenry/codegraph`, installed at `/opt/codegraph` from the
+  committed lockfile at `packages/daemon/docker/codegraph`) at `/opt/codegraph/bin` (`PATH`) — the
   `codegraph` tool a tester queries for `affected` tests and a reviewer for `impact`/`callers` blast
   radius (`packages/daemon/internal/prompts/roles/core/tester.md`, `core/reviewer.md`). A pod's agent has that tool because its launch loads profile plugins (dispatch://LEGION-629), which the capability report's `codegraph` row says ([The deployment's capability report](#the-deployments-capability-report));
 - OMP's native module, extracted at build into `/home/legion/.omp/natives/<version>/`: from 18.11.0 OMP writes only the variant the CPU selects (AVX2 or not), so this is the build runner's variant, and a pod whose node selects the same one extracts nothing, while a node that selects the other has each role write that one (111 MiB) into its own home overlay, on the pod's `role-homes` volume, at its first OMP run;
@@ -91,7 +92,9 @@ phase worker `worker_backends` puts on `claude`, on Claude Code. It carries:
   `node`, `npm`, `npx` and `corepack` from Node 24 LTS, with `pnpm`, `pnpx`, `yarn` and `yarnpkg` linked
   to corepack's shims (the links `corepack enable` would write, which uid 1000 cannot); the Go toolchain
   at `go.work`'s version — `go` and `gofmt`, the tree at `/opt/go` (its `GOROOT`, which `go` finds by
-  resolving the `/usr/local/bin/go` symlink; the image sets no `GOROOT`); the AWS CLI v2's `aws`; and
+  resolving the `/usr/local/bin/go` symlink; the image sets no `GOROOT`), with the warm module cache
+  of the two modules `go.work` binds, which the second paragraph after this list places; the AWS
+  CLI v2's `aws`; and
   `kubectl` 1.35, the minor version of the API server of the production cluster the workers run on,
   which Kubernetes' version skew policy requires within one minor of kubectl (a deployment whose
   cluster runs another minor layers its own `kubectl` on the image:
@@ -119,7 +122,9 @@ phase worker `worker_backends` puts on `claude`, on Claude Code. It carries:
   the TypeScript installed beside it unless the repository's own
   `node_modules` holds one, which it prefers. From Debian trixie's archive, at `/usr/bin`: `python3`
   (the interpreter Oh My Pi's Python eval runs — `omp setup python --check` answers `available: true`
-  on it), `curl`, `wget`, `jq`, `flock` (from `util-linux`: the install Legion renders for an
+  on it) with Debian's PyYAML, `python3-yaml`, so `python3 -c "import yaml"` answers in a pod (the
+  third paragraph after this list names the gates that need it),
+  `curl`, `wget`, `jq`, `flock` (from `util-linux`: the install Legion renders for an
   installing launch serialises on the issue's shared bun install cache with `/usr/bin/flock`, so a
   `roles` container whose image lacks it fails every installing launch; the apt line names the package
   even though Debian's `priority:required` set already brings it into the base, so the day a base
@@ -201,20 +206,57 @@ runs. A deployment still pinning an older image digest has no `gcc`
 and needs zig as `CC`
 (`docs/solutions/testing/the-race-detector-runs-in-a-worker-pod-with-zig-as-the-c-compiler-and-a-library-callback-from-an-earlier-test-writes-your-log-sink-INFRA-182.md`).
 
+The image also carries the Go module cache of the two modules `go.work` binds, so a role's first Go
+build in this repository reads no package registry. The build fills it in the Dockerfile's `go`
+stage, in the layer that copies `go.work`, `go.work.sum` and each module's `go.mod` and `go.sum` and
+runs `go mod download`, above every source `COPY`, so a commit never rebuilds it. The runtime stage
+copies the download cache alone — the module zips, `.mod` and `.info` files and their hashes, 380
+MiB over 419 module zips — to `/home/legion/go/pkg/mod/cache/download`, as the runtime user, its
+files 0644 in 0755 directories, so a role can add a module the cache does not hold. The extracted
+module trees are left out: `go` extracts what a build needs from the zips, and the whole module
+cache — those trees and this download cache together — is 2.2 GiB, which buys nothing in every
+pull. A pod tells every role `GOMODCACHE=/legion/go/mod` on the issue's volume
+(`roleEnvironment`, `manifest.go`), which is empty in a fresh pod and dies with it ([The disk dies
+with its pod](#the-disk-dies-with-its-pod)), so the image's copy reaches a role as a proxy rather
+than as its `GOMODCACHE`: the build rewrites `/opt/go/go.env`'s `GOPROXY` line to
+`file:///home/legion/go/pkg/mod/cache/download|https://proxy.golang.org|direct`, and the `|` makes
+a go command fall through to the public proxy after any error, so a module the cache does not hold
+still resolves. The `go` stage deletes every `@v/list` and `@latest` file from the cache before the
+runtime stage copies it, and the final stage's toolchain step fails the build if one is there. Such
+a file would name the versions of this image and no other, and a file proxy answers a list request
+from it with no error, so `go get X@latest`, `go get -u`, `go list -m -u all` and
+`go list -m -versions` would stop at this image's pins in every repository a role opens. Without
+those files the file proxy answers a version query with a 404, and the query falls through to
+`proxy.golang.org`, while the `.info`, `.mod` and `.zip` of a pinned version still come from the
+cache. `go.env` is the place for it rather than the final stage's `ENV`, for the reason
+the cgo paragraph above gives in reverse: a variable the image's `ENV` sets is one
+`runtime.kubernetes.pod.env` may not set, while a `go.env` default leaves `GOPROXY` to an operator,
+a role, or one command, each of which outranks it through the process environment.
+
+The image's `python3` carries Debian's PyYAML, `python3-yaml`, because six of this repository's own
+gates read a workflow or `.github/ci-images.yaml` with `import yaml`:
+`.github/scripts/check-action-pins.sh`, `check-bun-version.sh`, `check-ci-images.sh`,
+`check-image-trigger-paths.sh`, `check-release-credentials.sh`, and `check-ci-filters.sh` through
+`ci_filter_coverage.py`. A role runs those gates on its own change, so an image without PyYAML
+fails every one of them. Debian's package is the route rather than `pip`, because the image
+installs system packages in one `apt` step and trixie marks its `python3` externally managed
+(PEP 668).
+
 It runs as user `legion` (uid 1000, declared numerically so `runAsNonRoot` can verify it from the image
 alone) with `HOME=/home/legion`, which must be writable (OMP writes logs and `models.db` under
 `~/.omp/profiles/legion`; every session is a row in the session database). Mount writable volumes
 below the profile directory, never at `/home/legion`
 itself: everything the image-time probe proved lives under `HOME` — the CodeGraph plugin's link and the
-lock at `~/.omp/profiles/legion/plugins`, the natives at `~/.omp/natives` — and a volume at `HOME` (an `emptyDir`,
+lock at `~/.omp/profiles/legion/plugins`, the natives at `~/.omp/natives`, the warm Go module cache at
+`~/go/pkg/mod/cache/download` — and a volume at `HOME` (an `emptyDir`,
 or a `HOME` volume under `readOnlyRootFilesystem`) shadows all of it silently. It is `linux/amd64` only:
 the OMP fork release has no linux/arm64 build. One commit ⇒ one image, with one exception: a
 fresh pod still loads the image's own copies of `@sjawhar/pi-envoy` and `@sjawhar/pi-legion`, from
 the commit, never from an npm release, but a role relaunched onto a newer plugin contract in a
 kept pod loads the release's published pair, installed from npm under the generation directory
-("Contract discipline" below) — what the image does take from npm is pinned: the CodeGraph CLI by an
-`ARG` at the top of `worker.Dockerfile`, and the CodeGraph plugin, TypeScript and the two npm language
-servers by the committed lockfiles under `packages/daemon/docker/` (`omp-plugins`, `language-servers`).
+("Contract discipline" below) — what the image does take from npm is pinned: the CodeGraph CLI, the
+CodeGraph plugin, TypeScript and the two npm language servers all by the committed lockfiles under
+`packages/daemon/docker/` (`codegraph`, `omp-plugins`, `language-servers`).
 
 ### The tools a role's own work needs
 
@@ -278,7 +320,13 @@ image's compressed size is a cold launch's first cost. Before the capability too
 them it is 22 layers and 1007 MiB compressed (1,056,280,622 bytes, the `sha-ff33c8c9fb1b` build of the
 pull request that added them): the Debian layer grows from about 30 MiB to 307 MiB, almost all of it
 Chromium and the library closure it depends on; the Go toolchain is 64 MiB and `gopls` 20 MiB; Node's
-tree with the two npm language servers is 66 MiB. The five client tools
+tree with the two npm language servers is 66 MiB. The warm Go module cache is a layer of its own,
+380 MiB over 419 module zips with their `.mod`, `.info` and hash files — the download cache alone,
+not the whole 2.2 GiB module cache, whose other half is the extracted trees — measured on disk
+from `go mod download` over `go.work`'s two
+modules in a worker pod on 2026-10-29 rather than from a built image: the zips are compressed
+already, so the layer should land near that figure, and the image's first build is what measures
+it. The five client tools
 ([The tools a role's own work needs](#the-tools-a-roles-own-work-needs)) cost 7.9 MiB — not a slice
 of that 22-layer figure, but a difference measured like for like between a later pair of builds,
 this branch's head and the base it forks from: the head
@@ -476,8 +524,12 @@ the image `PATH` — the language servers (`gopls version`, `typescript-language
 version` with `go env GOROOT` required to be `/opt/go`, `gcc --version` (Go's cgo, and so its race
 detector, needs it), `go env CGO_ENABLED` with `CGO_ENABLED` removed from the environment required
 to be `0` (so the build fails if `/opt/go/go.env`'s `CGO_ENABLED=0` line, the default a scrubbed
-environment depends on, is ever lost), `gofmt`, `kubectl version --client`, and trixie's
-`python3`, `curl`, `wget`, `jq --version`, `flock --version`, `psql --version`, `redis-cli --version`,
+environment depends on, is ever lost), `go env GOPROXY` read the same way and required to be the
+`file:///home/legion/go/pkg/mod/cache/download|https://proxy.golang.org|direct` that same `go.env`
+carries, with the cache it names held to the runtime user, to a writable download directory and to
+carrying no `@v/list` and no `@latest` file,
+`gofmt`, `kubectl version --client`, and trixie's
+`python3` with `python3 -c "import yaml"` for its PyYAML, `curl`, `wget`, `jq --version`, `flock --version`, `psql --version`, `redis-cli --version`,
 `sqlite3 --version`, `nc -h`, `dig -v`, `chromium --version` and `socat -V` included — the corepack shims fetching their shipped default pnpm and yarn
 into a scratch directory the step removes. `ssh-keygen` takes no `--version`, so the step generates a
 throwaway ed25519 key in that scratch directory and fingerprints it with `ssh-keygen -l`. Two of the
@@ -488,7 +540,7 @@ prints its usage and exits 0, under the `nc` name the alternatives system instal
 when the toolchain or an earlier layer changes, so a commit that only rebuilds `legion` needs no package
 registry.
 To check a published image's toolchain end to end, a project Python install included:
-`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && kubectl version --client && go version && gcc --version && gopls version && python3 --version && jq --version && flock --version && psql --version && redis-cli --version && sqlite3 --version && nc -h && dig -v && ssh-keygen -t ed25519 -N "" -f /tmp/k && chromium --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
+`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && kubectl version --client && go version && go env GOPROXY && gcc --version && gopls version && python3 --version && python3 -c "import yaml" && jq --version && flock --version && psql --version && redis-cli --version && sqlite3 --version && nc -h && dig -v && ssh-keygen -t ed25519 -N "" -f /tmp/k && chromium --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
 
 ### Pin by digest, never by tag
 
@@ -2662,9 +2714,13 @@ connection authenticates as. That user's grants, which `legion-pane` does not ho
 the connection uses: publish `$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS`,
 `$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.>`, `$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.>`,
 `$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` and `$JS.ACK.ENVOY_NOTIFICATIONS.>` (which its
-two durable consumers, `legion-go-<project>-dispatch` and `legion-go-<project>-github`, use, though
-the trailing `>` reaches every consumer of the stream, each host's listener consumer included, and
-lets the seed create a push consumer that delivers stream messages to any subject), and
+three durable consumers, `legion-go-<project>-dispatch`, `legion-go-<project>-dispatch-server` and
+`legion-go-<project>-github`, use, though the trailing `>` reaches every consumer of the stream,
+each host's listener consumer included, and lets the seed create a push consumer that delivers
+stream messages to any subject), `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS` (the stored-message
+get `legion state` reads each consumer's oldest waiting message with; without it the state's
+`consumers` show `unavailable: read the oldest waiting message: context deadline exceeded` on each
+consumer with messages waiting, its waiting count still shown), and
 subscribe `notifications.envoy.exceptions.notifications.role.>` and `_INBOX.>` (which receives
 every reply any client on the server gets, key-value reads and watch updates included, such as
 the listener's `envoy_roles` and `envoy_sessions` watchers). It publishes on no core
@@ -2673,7 +2729,11 @@ over the worker stream, so the Go daemon needs no `legion.ctl` grant. These subj
 live: a server granting exactly them logged no refusal across a boot creating both durables, a
 restart onto the existing ones, Dispatch and GitHub events acknowledged and a poison message
 terminated, and its trace showed no other API subject (no `$JS.API.INFO`, no
-`CONSUMER.DURABLE.CREATE`, which the TypeScript daemon uses instead). It is read by the same rule
+`CONSUMER.DURABLE.CREATE`, which the TypeScript daemon uses instead); the daemon's permission test
+(`internal/daemon/nats_permissions_test.go`) reads the consumers' lag under the same grant and
+expects no refusal. The stored-message get reaches a deployment with the envoy-infra release that
+carries it: until then the daemon runs as before, and only the lag's oldest message is
+`unavailable`. The daemon's seed is read by the same rule
 and refusals as the pane seed, the
 group-readable mount included, and neither seed falls back to the other: an unusable
 daemon seed refuses boot even beside a good pane seed. Unset, the daemon connects as the pane
@@ -3237,6 +3297,44 @@ names no repository and the default is then the project's owners sorted and the 
 (`appauth.GitHubCredential`, `credential.go`);
 [Daemon-launched controller](#daemon-launched-controller) has the rest of it.
 
+The token behind `DISPATCH_TOKEN_FILE` is the daemon's own, not the role's. The daemon reads it
+once at boot from `dispatch_token_file` (`readBoot`,
+`packages/daemon/internal/daemon/bootreads.go`) and puts it in every launch's secrets as
+`DISPATCH_TOKEN` (`secrets[dispatchTokenKey]`,
+`packages/daemon/internal/runtime/sandbox/manifest.go`, the key from `names.go`), and the role's
+launcher writes it into the generation's `g<generation>` directory beside the generation's other
+launch credentials. The daemon-launched controller takes the same path, because `prepare` adds
+that secret to every launch it builds, whichever kind of pod the role names. So every role of
+every issue of the project, and that controller, present the same bytes.
+
+When `dispatch_token_file` holds one of the deployment's shared agent tokens
+(`DISPATCH_AGENT_TOKEN`), Dispatch matches the bytes against them (`MatchesSharedAgentToken`,
+`packages/envoy/internal/dispatch/auth/agent_token.go`) and reads no person, no service and no
+project from them. Whatever the bearer, the acting session is the one the request body names
+(`bearerSessionActor`, `packages/envoy/internal/dispatch/api/server.go`), which for the daemon's
+own writes is `legion-daemon:<PROJECT>` (`DaemonSession`,
+`packages/daemon/internal/dispatch/client.go`), so a shared agent token names nobody. Dispatch
+takes any other bearer as a service token or a personal token (`optionalActor`, `server.go`), and
+every role's session then carries that token's service or owner as well.
+`dispatch whoami` in a role tells the two apart: for a shared agent token it answers
+`Session <id> runs under the shared token: no owner, …`
+(`packages/envoy-client/src/dispatch-execute.ts`).
+
+The one Kubernetes service-account token this runtime projects for a role is the broker's,
+`agent-secrets-token` under `runtime.kubernetes.agent_secrets` (`agentSecretsVolumes`,
+`manifest.go`), and it reaches the secrets broker and nothing else. Dispatch can verify a projected
+token minted for its own audience (`DISPATCH_OIDC_AUDIENCE` in
+`packages/envoy/cmd/dispatch/settings.go`, checked by
+`serviceTokenActor` in `packages/envoy/internal/dispatch/api/server.go`), and the runtime projects
+none. The operator's own pod volumes are outside this statement: the operator controls them.
+An operator-launched controller can differ: `legion controller start` points
+`DISPATCH_TOKEN_FILE` at the controller file's own `dispatch_token_file`
+(`controllerEnvironment`, `packages/daemon/cmd/legion/controller.go`), so it presents the token
+that file holds, which need not be the daemon's. What the broker can already issue is
+[The Dispatch identity the broker can issue](#the-dispatch-identity-the-broker-can-issue).
+`dispatch://INFRA-267` is where Legion's pods and its daemon get tokens of their own, and
+`dispatch://INFRA-264` is where Dispatch accepts one.
+
 Every role is told `LEGION_GH_OWNERS_DIR=/var/run/legion/gh`, the bundle's root (its own, bound
 there in its namespaces),
 `GH_CONFIG_DIR` at the issue's repository's owner's directory under it (the table above), and
@@ -3330,7 +3428,10 @@ too. The two Go caches
 are the issue's as they already were, one pair every role of the issue is told:
 `GOCACHE=/legion/go/build` and `GOMODCACHE=/legion/go/mod` (`goBuildCache` and `goModCache`,
 `manifest.go`), beside the workspaces rather than under the scratch, on the same volume beside
-uv's cache. Both hold content addressed
+uv's cache. Both are empty in a fresh pod, since the disk dies with its pod, and the module cache
+fills from the image rather than from `proxy.golang.org`: `/opt/go/go.env` names the image's own
+copy of this repository's modules first in `GOPROXY` ([Worker image](#worker-image)).
+Both hold content addressed
 by its hash, and the roles of one issue may fill them at once: of the build cache `go help cache`
 says "The cache is safe for concurrent invocations of the go command", and what reaches the
 module cache is a module zip or `go.mod` the go command has verified against a known hash
@@ -4259,13 +4360,13 @@ spec:
         <the compute-class selector the deployment's declaration names>
       containers:
         - name: db
-          image: mirror.gcr.io/library/postgres:16   # the mirror, as every image here is pulled
+          image: mirror.gcr.io/library/postgres@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4   # Google's mirror: the cluster pulls this image itself, and this example is outside CI's reach
           terminationMessagePolicy: FallbackToLogsOnError   # an exited server's last lines stay in its status
           env:
             - { name: POSTGRES_PASSWORD, value: "$password" }
           resources:
             requests: { cpu: "4", memory: 8Gi }      # the largest container asks at least 4 CPU
-          volumeMounts: [{ name: data, mountPath: /var/lib/postgresql/data }]
+          volumeMounts: [{ name: data, mountPath: /var/lib/postgresql }]
       volumes:
         - name: data
           emptyDir: {}                    # dies with the pod, by design
@@ -4451,7 +4552,7 @@ it names the class of the failure, which is what the readings below key on.
 
 It loops because `kubectl wait` cannot tell a role the server is listening. The pod carries no
 readiness probe, so `condition=Ready` means the container started, and a database spends its
-first seconds initialising with its listener closed — `postgres:16`'s entrypoint does exactly
+first seconds initialising with its listener closed — `postgres:18`'s entrypoint does exactly
 that. A connection *refused* in those first seconds is the workload reachable and not listening
 yet: the loop retries and it answers. When the minute runs out, the check prints the class of its
 last attempt alone, with a reading for it, and each reading is the next thing to check rather than
@@ -5604,13 +5705,18 @@ issue's pod (every role of it alike) and the image probe's.
 - **AskGate's time limit** is the operator's too. Every pod loads pi-envoy, whose AskGate reviews
   each Dispatch write of a role's main agent before it posts. Its review must finish inside Oh My
   Pi's limit for one `tool_call` handler, `extensionHandlers.toolCallTimeoutMs`, and the gate holds
-  its deadline 5 s under that limit. The limit is 30 s by default, so the deadline is then 25 s. A
-  review of a long session often takes longer, a review that times out lets the write post
+  its deadline 5,000 ms under that limit: the room its handler still needs for an aborted call's
+  usage report and its entry. The Dispatch decision record is no part of it, since it runs after
+  the handler has returned. The limit is 30 s by default, so the deadline is then
+  25,000 ms. A
+  review of a long session can take longer, a review that times out lets the write post
   unreviewed, and three timeouts in a row stop the gate for the rest of that session. Set
   `extensionHandlers.toolCallTimeoutMs: 120000` in the operator's `overlay.yml`, as the example
   overlay does (pi-envoy's README, "The time limit"). Legion's own turn-scoping overlay does not set
   it. Without it, the gate logs one warning at start, `AskGate: the review deadline is 25000 ms`,
-  through Oh My Pi's logger. The gate binds in a pod because the pod has Dispatch; one without it
+  through Oh My Pi's logger. A limit under 15,000 ms leaves no room for a verdict: the gate does
+  not bind there, and a gate that did not load refuses every Dispatch write it would have
+  reviewed. The gate binds in a pod because the pod has Dispatch; one without it
   gets no gate. The pod's `dispatch` command enforces the review: while the gate is bound, a
   gated write that is not one literal `dispatch` call the gate reviewed (a pipe other than one
   trailing `head` or `tail`, a script, `python3 -c`, an eval cell's process) is refused by the
@@ -5892,6 +5998,67 @@ issue's pod (every role of it alike) and the image probe's.
   failed key is the fallback the gate exists to stop. Nothing restarts the Go daemon on its own: it
   runs off the cluster, and whoever started it starts it again.
 
+#### The Dispatch identity the broker can issue
+
+The secrets broker also serves an RFC 8693 token exchange at `POST /v1/oauth/token`, which every
+caller reaches with `client_id=dispatch-token-exchange` (`ExchangeClientID`,
+`packages/envoy/internal/broker/oauthwire`). It takes three kinds of subject token, each under its
+own `subject_token_type`: a pod's projected Kubernetes service-account token, minted for the
+exchange's own audience (`SubjectTokenTypeKubernetes`), a GitHub Actions workflow run's token
+(`SubjectTokenTypeGitHub`), and a machine login's own access token
+(`SubjectTokenTypeAccessToken`).
+
+The exchange answers with an opaque Dispatch access token, bound to the key the request's DPoP
+proof names (`exchangeGrant`, `packages/envoy/internal/broker/oauth/exchange.go`). The token
+lives `BROKER_ACCESS_TOKEN_SECONDS`, 900 seconds by default
+(`packages/envoy/internal/broker/config/config.go`).
+An issued token carries these claims and no others:
+
+- `session` — the session the token's writes are recorded as.
+- `person` — the person the session acts for.
+- `project_scope` — `named` or `person`, which says what `project` means.
+- `project` — the one project key a `named` token may write. A `person` token carries none.
+
+The subject token's own kind decides those claims
+(`packages/envoy/internal/broker/exchange/exchange.go`). A pod's token needs an entry for its
+service account, which gives the project and the person and may fix the session, and Kubernetes
+must have bound that token to a pod (`Set.Pod`). A workflow run's token needs an entry for its
+repository, its workflow path and its ref (`Set.Workflow`). A machine login's token needs no entry
+at all: the person is the login's approver, the scope is `person`, and the token names no project
+(`Set.Machine`). A session name belongs to one principal — the service account, the workflow, or
+the person — and the broker refuses `invalid_grant` to another principal that names it
+(`claimSession`, `packages/envoy/internal/broker/oauth/exchange.go`). A claim holds the name for
+`oauthstore.SessionRetention`, 90 days, past the expiry of the token the claim was made for
+(`BindSession`, `packages/envoy/internal/broker/oauthstore/exchange.go`). A name an entry fixes is
+held for that entry with no expiry: the broker reserves it for the entry unless another principal
+holds it (`ReserveSessions`, the same file), and the entry's own exchange takes it from any other
+holder.
+
+A resource server reads such a token back with `POST /v1/oauth/introspect`
+(`packages/envoy/internal/broker/api/handlers_introspect.go`). It authenticates with its own
+Kubernetes service-account token, of an account the broker lists in `BROKER_API_ACCOUNTS`. The
+answer carries `active` and, for a live token, the four claims, `exp`, `client_id` and `jkt`
+(`Introspection`, `packages/envoy/internal/broker/oauth/introspect.go`).
+
+A broker that sets neither `BROKER_EXCHANGE_K8S_AUDIENCE` nor `BROKER_EXCHANGE_GITHUB_ISSUER`
+accepts no pod's token and no workflow run's token, and says so at boot with the log line
+`token exchange state=unconfigured`. With either one set it logs `token exchange state=on`, naming
+which issuers it accepts and how many entries it holds (`packages/envoy/cmd/broker/main.go`). A
+machine login's access token is exchanged in both cases, because its subject type is always
+registered (`ExchangeConfig.tokenTypes`, `packages/envoy/internal/broker/oauth/exchange.go`). For
+the settings themselves, read the broker's generated configuration reference, which
+`docs/site/generators/broker-reference.sh` writes from the doc comments in
+`packages/envoy/internal/broker/config/config.go`, and the
+walk-through in `docs/site/src/content/docs/broker/guides/run-locally.md`, its section "Exchange a
+pod's token".
+
+Nothing Legion runs presents such a token at this release. A pod, the daemon, a tmux pane and the
+daemon-launched controller present the daemon's shared bearer that
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod) describes. An operator-launched controller
+presents the token its own file names. Dispatch accepts no broker token yet.
+`dispatch://INFRA-264` is where Dispatch accepts one and reads the session, the person and the
+project from it. `dispatch://INFRA-267` is where Legion's pods and its daemon get tokens of their
+own, and the daemon hands none out.
 
 #### Network shares
 

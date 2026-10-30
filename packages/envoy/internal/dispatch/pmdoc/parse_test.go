@@ -68,6 +68,61 @@ func TestParsePreservesTaskListCheckboxState(t *testing.T) {
 	}
 }
 
+// An image's alt text keeps the characters of the raw HTML in its label, as the browser editor's
+// reader keeps them: `mdast-util-to-string`, which that reader builds an image's `alt` with,
+// writes a literal node's own value, and an mdast `html` node is a literal node. parseImage
+// writes each `html` node's value into the alt beside the label's text and its nested images, so
+// every kind of raw HTML a label can hold reaches the alt. An anchor span is one of them: inside
+// a label parseInlineMarks reads a `<span data-proof=…>` as the raw HTML it is rather than as
+// the mark it is elsewhere, since the browser editor's reader builds the alt as the label closes,
+// before it turns such a span into a mark.
+//
+// Measured with gen/differential.ts against the engine of this head: `![p <!a> q](i.png)` reads
+// with alt `p <!a> q`, `![r <b> s](i.png)` with alt `r <b> s`, the same for a comment
+// (`<!-- c -->`), a processing instruction and a CDATA section, and an anchored label with the
+// span's own characters. An alt holding less would have a comment drawing the markdown and the
+// document editor drawing the stored document show different alt text, the divergence this
+// package exists to close.
+func TestParseKeepsRawHTMLInAnImageAltText(t *testing.T) {
+	for _, row := range []struct{ markdown, alt string }{
+		// A declaration at a lowercase letter: inline raw HTML to both readers
+		// (inlineRawHTMLParser), so its characters are the alt's.
+		{"![p <!a> q](i.png)\n", "p <!a> q"},
+		{"![<!a>](i.png)\n", "<!a>"},
+		{"![p <!a> q](i.png \"t\")\n", "p <!a> q"},
+		// Every other kind of raw HTML in a label, which both readers read as raw HTML.
+		{"![r <b> s](i.png)\n", "r <b> s"},
+		{"![r <!A> s](i.png)\n", "r <!A> s"},
+		{"![r <!-- c --> s](i.png)\n", "r <!-- c --> s"},
+		{"![r <?x?> s](i.png)\n", "r <?x?> s"},
+		{"![r <![CDATA[x]]> s](i.png)\n", "r <![CDATA[x]]> s"},
+		// An anchor span, which parseInlineMarks reads as a mark everywhere but in a label. The
+		// mark would reach nothing here, an attribute holding none, and the engine's alt carries
+		// the span's characters.
+		{"![a <span data-proof=\"comment\" data-id=\"c1\" data-by=\"user:x\">b</span> c](i.png)\n", "a <span data-proof=\"comment\" data-id=\"c1\" data-by=\"user:x\">b</span> c"},
+	} {
+		t.Run(row.markdown, func(t *testing.T) {
+			doc, err := Parse(row.markdown)
+			if err != nil {
+				t.Fatalf("parse %q: %v", row.markdown, err)
+			}
+			var images []*Node
+			Walk(doc, func(node *Node) bool {
+				if node.Type == "image" {
+					images = append(images, node)
+				}
+				return true
+			})
+			if len(images) != 1 {
+				t.Fatalf("parse %q: %d images, want 1", row.markdown, len(images))
+			}
+			if alt, _ := images[0].Attrs["alt"].(string); alt != row.alt {
+				t.Fatalf("alt of %q = %q, want %q", row.markdown, alt, row.alt)
+			}
+		})
+	}
+}
+
 func TestParseRejectsBlockHTML(t *testing.T) {
 	_, err := Parse("<div>\nblock HTML\n</div>\n")
 	if err == nil || !errors.Is(err, ErrSchema) {
@@ -457,6 +512,53 @@ func TestParseJoinsAParagraphsLinesOnce(t *testing.T) {
 	}
 	if allocated > 64<<20 {
 		t.Errorf("allocated %d bytes, want at most %d", allocated, 64<<20)
+	}
+}
+
+// Each top-level block starts where its own markdown does: front matter at 0, a heading at its
+// marker, a paragraph at its first line, a fenced code block at its opening fence, a table at its
+// header row and a callout at its opener. The tree is the one Parse reads, and the empty paragraph
+// of a document with no blocks starts nowhere.
+func TestParseWithSourceStartsPlacesEveryTopLevelBlock(t *testing.T) {
+	openings := []string{
+		"---\ntitle: x\n---",
+		"# Heading",
+		"A paragraph\nsecond line.",
+		"```go\ncode\n```",
+		"| a | b |\n|---|---|\n| 1 | 2 |",
+		":::callout{kind=\"note\"}\nInside.\n:::",
+	}
+	markdown := strings.Join(openings, "\n\n") + "\n"
+	doc, starts, err := ParseWithSourceStarts(markdown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := Parse(markdown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !doc.Equal(parsed) {
+		got, _ := doc.JSON()
+		want, _ := parsed.JSON()
+		t.Fatalf("tree differs from Parse\n got: %s\nwant: %s", got, want)
+	}
+	types := []string{"frontmatter", "heading", "paragraph", "code_block", "table", "callout"}
+	if len(doc.Children) != len(types) || len(starts) != len(types) {
+		t.Fatalf("children = %d, starts = %v, want %d of each", len(doc.Children), starts, len(types))
+	}
+	for index, opening := range openings {
+		want := strings.Index(markdown, opening)
+		if doc.Children[index].Type != types[index] || starts[index] != want {
+			t.Errorf("child %d = %s at %d, want %s at %d", index, doc.Children[index].Type, starts[index], types[index], want)
+		}
+	}
+
+	_, starts, err = ParseWithSourceStarts(" \n\n\t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(starts) != 1 || starts[0] != -1 {
+		t.Errorf("starts of a body of whitespace = %v, want [-1]", starts)
 	}
 }
 

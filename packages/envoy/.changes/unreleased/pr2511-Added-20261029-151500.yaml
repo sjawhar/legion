@@ -1,0 +1,16 @@
+kind: Added
+body: |-
+    Dispatch's new-issue dialog lists what it already holds on the same subject while a person
+    types the title. A title that has rested 400 ms is checked against the project through
+    `GET /api/v1/projects/{key}/related`, which records nothing, and up to three related items —
+    issues, asks, comments, messages and documents — are listed under the Spec field, each named
+    by its owner and linked in a new tab so the draft survives the click, an ask carrying where
+    it stands and its latest answer, with the past decision that may already answer the question
+    named under them. Typing sends one check per pause rather than one per keystroke, a check a
+    newer title supersedes is aborted, and an answer that arrives after the title changed is never
+    shown under the new title. A check that searched and found nothing and a check that could not
+    run read differently, the second naming the words to search Dispatch for, and a failed check
+    says so with Retry; nothing is asked below two characters of title or with no project chosen.
+time: 2026-10-29T15:15:00.000000000Z
+custom:
+    Issue: pr2511

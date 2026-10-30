@@ -225,15 +225,23 @@ export interface WriteAdvice {
    */
   readonly decision_blocks_added?: number;
   /**
+   * The related-item check each of a document edit's new decision blocks got, in
+   * document order; a block past the fifth in one edit answers `not_made`. Omitted when the edit
+   * added none, and absent from a Dispatch server predating the check, which only counts them in
+   * `decision_blocks_added`.
+   */
+  readonly decision_block_checks?: DecisionBlockCheck[];
+  /**
    * The typed block openings (`:::ask{…}`) the written document holds as text rather than as
    * blocks, outside code: written inside a line, or escaped. `examples` quotes the first few with a
    * little of the text before each. Omitted when there are none.
    */
   readonly unparsed_openers?: { readonly count: number; readonly examples: readonly string[] };
   /**
-   * LEGION-550's write-time feedback, set only on an issue or ask creation: the items most like
-   * what was just filed, and any past decision that matches. Never refuses or delays the write;
-   * `suggestions.missing` explains why search did not answer in time instead.
+   * The related-item check (LEGION-550), set on an issue or ask creation: the items
+   * most like what was just filed, any past decision that matches, and what the check did
+   * (`outcome`). Never refuses the write; it waits at most five seconds, and a check that did not
+   * search to the end says why in `missing`.
    */
   readonly suggestions?: Suggestions;
   /**
@@ -1043,6 +1051,83 @@ export interface MyRepliesResponse {
   readonly offset: number;
 }
 
+/** What a `SessionAnswer` is to the session Dispatch delivered it to, one snake_case wire value per
+ *  relation, each spelling the phrase a reader prints: a person answered the session's ask,
+ *  replied in its ask's thread, replied in a comment thread it wrote in, commented on a document it
+ *  wrote, commented on an issue routed to it, mentioned it, sent it a message (direct, on an issue,
+ *  or a broadcast's copy), or replied to its message. Mirrored in Go as the
+ *  `model.SessionAnswerRelation*` constants. */
+export const SESSION_ANSWER_RELATIONS = [
+  "answered_your_ask",
+  "replied_on_your_ask",
+  "replied_in_a_comment_thread",
+  "commented_on_a_document",
+  "commented_on_an_issue",
+  "mentioned_you",
+  "sent_you_a_message",
+  "replied_to_your_message",
+] as const;
+
+export type SessionAnswerRelation = (typeof SESSION_ANSWER_RELATIONS)[number];
+
+/** One thing a person wrote that Dispatch delivered to a session, on
+ *  `GET /api/v1/agents/{session_id}/answers`: an ask's current answer, a comment at its current
+ *  body, or a message. The list holds each `(kind, id)` once, whichever ways it reached the
+ *  session. Mirrors `model.SessionAnswer`. */
+export interface SessionAnswer {
+  /** `answer` is an ask's current answer, `comment` a comment (a reply in an ask's thread
+   *  included), `message` a message. */
+  readonly kind: "answer" | "comment" | "message";
+  /** What the item is to the session. */
+  readonly relation: SessionAnswerRelation;
+  /** The ask's id for an answer, else the comment's or the message's id. */
+  readonly id: string;
+  /** When the person wrote it (RFC 3339, UTC): the current answer's time, or the comment's or the
+   *  message's creation. The window and the order both read it. */
+  readonly at: string;
+  /** When a comment's body was last edited; absent on a comment never edited, and on an answer or
+   *  a message. */
+  readonly edited_at?: string;
+  /** The person who wrote it: the list carries nothing an agent or the system wrote. */
+  readonly author: Extract<Actor, { readonly kind: "user" }>;
+  /** The person's words in full, never cut: the answer's text (`""` when the answer chose options
+   *  only), the comment's current body, or the message's body. */
+  readonly text: string;
+  /** An answer's chosen option labels, in the order the person chose them; absent when it chose
+   *  none, and on a comment or a message. */
+  readonly selected?: string[];
+  /** `true` on an answer when the ask has more than one answer, so this one replaced an earlier
+   *  one; absent otherwise. */
+  readonly replaced?: true;
+  /** The ask the item answers or replies in, with the session's whole question (a reader cuts
+   *  it): present on an answer and on a reply in an ask's thread, absent otherwise. */
+  readonly ask?: { readonly id: string; readonly question: string };
+  /** The issue (key and title) or the project document holding the item; null for a direct
+   *  message, which is on no issue. */
+  readonly owner: OpenAskOwner | null;
+  /** The item's `dispatch://` address (`dispatch://KEY/ask/ID`, `dispatch://KEY/comment/ID`,
+   *  `dispatch://KEY/message/ID`, or `dispatch://PROJECT/artifact/SLUG/ask/ID` and `/comment/ID`
+   *  on a project document); null for a direct message, which has no address. */
+  readonly ref: string | null;
+  /** Relative Dispatch deep link to the item, as `DISPATCH_HREF_REFERENCES` lists the shapes, or
+   *  `/agents/SESSION/live` for a direct message. */
+  readonly href: string;
+}
+
+/** `GET /api/v1/agents/{session_id}/answers`: what people wrote to one session since `since`,
+ *  newest first. Mirrors `model.SessionAnswersResponse`. */
+export interface SessionAnswersResponse {
+  readonly session_id: string;
+  /** The window's start the server applied (RFC 3339, UTC): the request's `since`, or 72 hours
+   *  before the read when it named none. */
+  readonly since: string;
+  /** How many items the window holds, `max_chars` notwithstanding. */
+  readonly total: number;
+  /** Newest first by `at`, then by `id`. With `max_chars`, the list stops after the item whose
+   *  `text` takes the running sum of text lengths past it, so it can be shorter than `total`. */
+  readonly items: SessionAnswer[];
+}
+
 export interface AskOption {
   readonly label: string;
   readonly description?: string;
@@ -1225,6 +1310,49 @@ export interface Comment extends AnchorPosition {
   readonly created_at: string;
   readonly mentions: CommentMention[];
   readonly deliveries: CommentDelivery[];
+  /** The block of the comment this reply answers (`reply_to_block`); null on every other
+   *  comment, and absent from a Dispatch older than the field. */
+  readonly reply_block?: ReplyBlock | null;
+}
+
+/** The block a reply answers: its node id (`comment/<uuid>#b2`), its reference (absent for a
+ *  block of a direct message, which has no address), its id, its text cut to 480 characters (the
+ *  last text it held once removed), and whether its item's current revision no longer holds it. */
+export interface ReplyBlock {
+  readonly node: string;
+  readonly ref?: string;
+  readonly block_id: string;
+  readonly text: string;
+  readonly removed: boolean;
+}
+
+/** What `GET /api/v1/comments/{id}/blocks` and `GET /api/v1/messages/{id}/blocks` answer: the
+ *  comment or message as a graph node, the comment's revision (absent for a message, which is
+ *  never edited), whether its blocks are indexed from the body it stores, and its current blocks
+ *  in body order. While the item is owed an index, or was indexed from another body than it
+ *  stores, `indexed` is false and `blocks` is empty (the read writes nothing): an editor then
+ *  edits the comment without carrying block ids. */
+export interface ItemBlocks {
+  readonly item: GraphNode;
+  readonly revision?: number;
+  readonly indexed: boolean;
+  readonly blocks: readonly ItemBlock[];
+}
+
+/** One current block of a comment or message: its id (`b2`), its type, its whole text as its
+ *  author wrote it, its reference (absent for a block of a direct message, which has no address),
+ *  and `from`/`to`, where it starts and ends in the stored body in UTF-16 code units (a JavaScript
+ *  string index). A comment block also carries the revision its text last changed in and that
+ *  revision's time; a message block has neither. */
+export interface ItemBlock {
+  readonly id: string;
+  readonly type: string;
+  readonly text: string;
+  readonly ref?: string;
+  readonly from: number;
+  readonly to: number;
+  readonly changed_revision?: number;
+  readonly changed_at?: string;
 }
 
 /** What a route that writes a comment answers (`POST /api/v1/issues/{key}/comments`,
@@ -1566,6 +1694,9 @@ export interface Message {
   readonly broadcast_id?: string | null;
   readonly deliveries: MessageDelivery[];
   readonly created_at: string;
+  /** The block of the message this reply answers (`in_reply_to_block`); null on every other
+   *  message, and absent from a Dispatch older than the field. */
+  readonly reply_block?: ReplyBlock | null;
 }
 
 /**
@@ -1594,7 +1725,8 @@ export interface ChangedReference {
  *  `message.created` and `message.answered`; a direct (issue-less) conversation has no Replies
  *  thread, so its messages carry none. */
 export interface MessageEventPayload extends Message, ReferenceChangesPayload, ThreadLoginsPayload {
-  /** First 160 characters of the reply target's body; empty otherwise. */
+  /** First 160 characters of the reply target's body, or of the block it names (`reply_block`);
+   *  empty otherwise. */
   readonly reply_body?: string;
   /** The target of a reply's thread root: the conversation the reply lands in, for a consumer
    *  that groups a thread under its root. A session replying to a message aimed at that
@@ -1776,10 +1908,12 @@ export interface DuplicateCandidate {
 }
 
 /**
- * One item LEGION-550's write-time feedback judges similar to what was just filed: a fused-search
- * hit (`SearchResult`) over the same project. `answered_by`/`answered_at` are set only when this
- * is `Suggestions.decision` — the "past decision" case, where the agent needs who answered and
- * when, not just a link.
+ * One item the related-item check (LEGION-550) judges like what was just filed: a
+ * search hit over the same project. `ask` is where an ask item stands, absent from an older
+ * Dispatch and when the check could not read the asks' states (no item then carries `ask`, and
+ * there is no `decision`). `answered_by`/`answered_at` are set only when this is
+ * `Suggestions.decision` — the "past decision" case, where the agent needs who answered and when,
+ * not just a link — and repeat `ask.answer`'s user and time for clients built before `ask`.
  */
 export interface WriteSuggestion {
   readonly kind: SearchResultKind;
@@ -1788,20 +1922,101 @@ export interface WriteSuggestion {
   readonly id: string;
   readonly snippet: string;
   readonly href: string;
+  readonly ask?: SearchAsk;
   readonly answered_by?: string;
   readonly answered_at?: string;
 }
 
+/** `Suggestions.outcome`: the check listed items, searched and found none, or did not search to
+ *  the end (`missing` says why). */
+export type RelatedCheckOutcome = "found" | "none" | "not_made";
+
+/** `Suggestions.search`: how the check searched; keywords only when meaning search could not run
+ *  (`search_note` says why) or the caller asked for it. */
+export type RelatedCheckSearch = "meaning_and_keywords" | "keywords_only";
+
 /**
- * LEGION-550's write-time feedback on a newly created issue or ask: the three items most like
- * it (`related`) and, when an answered ask already settles the same question, that decision
- * (`decision`). `missing` explains why search did not answer within the write's bounded budget,
- * instead of refusing or delaying the write itself.
+ * The related-item check's result (LEGION-550) on a newly created issue or ask, on
+ * each new decision block of a document edit, and as the whole answer of the no-write related
+ * route: the three items most like it (`related`, one per owner, always an array) and, when an
+ * answered ask already settles the same question, that decision (`decision`). The check never
+ * refuses the write; it waits at most five seconds.
+ *
+ * A Dispatch predating the check's outcome sends only `related`, `decision` and `missing`; every other
+ * field is absent there. From that release on, `outcome` is always set, `search` is set unless the
+ * check was not made, and `missing` is set, to the reason, exactly when `outcome` is `not_made`.
+ * `search_query` is two or three of the words the keyword search used, spelled as the text spells
+ * them, for a reader to run `dispatch search` with. `title_matches` is the issues whose titles
+ * near-duplicate a new issue's when the create was forced past that refusal. Mirrors
+ * `model.Suggestions`.
  */
 export interface Suggestions {
+  readonly outcome?: RelatedCheckOutcome;
+  readonly search?: RelatedCheckSearch;
+  readonly search_note?: string;
+  readonly search_query?: string;
   readonly related: WriteSuggestion[];
   readonly decision?: WriteSuggestion;
   readonly missing?: string;
+  readonly title_matches?: DuplicateCandidate[];
+}
+
+/** One new decision block's related-item check in a document edit's advice
+ *  (`WriteAdvice.decision_block_checks`): the block's id, its question, and the check's result. */
+export interface DecisionBlockCheck {
+  readonly block_id: string;
+  readonly question: string;
+  readonly suggestions: Suggestions;
+}
+
+/**
+ * The body of `POST /api/v1/projects/{key}/related` (and the query of its `GET` form, which caps
+ * title and text together at `SEARCH_QUERY_MAX`): the related-item check over a title and a text
+ * without writing anything. `exclude_issue` leaves that issue's own items out of the results, as a
+ * check on that issue's own write does; `keywords_only` skips meaning search. A blank title and
+ * text answer `not_made`. The answer is `Suggestions`.
+ */
+export interface RelatedCheckInput {
+  readonly title?: string;
+  readonly text?: string;
+  readonly exclude_issue?: string;
+  readonly keywords_only?: boolean;
+}
+
+/** One millisecond column of `RelatedChecksReport` over the checks that hold a value in it
+ *  (`count`): discrete 50th and 95th percentiles, the largest, and how many took more than 300 ms.
+ *  `p50`, `p95` and `max` are null when `count` is 0. Mirrors `model.RelatedCheckTiming`. */
+export interface RelatedCheckTiming {
+  readonly count: number;
+  readonly p50: number | null;
+  readonly p95: number | null;
+  readonly max: number | null;
+  readonly over_300ms: number;
+}
+
+/**
+ * `GET /api/v1/related-checks?project=&from=&to=&source_kind=`: how the related-item checks of
+ * writes recorded within one window went. `project`, `source_kind`, `from` and `to` echo the
+ * filters, each null when not given (`from` inclusive, `to` exclusive). Each `by_*` map holds only
+ * the values seen; `by_search` counts a check not made under `not_made`, and `by_reason` leaves
+ * out checks with no reason. `completed` is the checks that searched to the end (found or none),
+ * `skipped_for_time` those not made because the search ran out of time. Mirrors
+ * `model.RelatedChecksReport`.
+ */
+export interface RelatedChecksReport {
+  readonly project: string | null;
+  readonly source_kind: string | null;
+  readonly from: string | null;
+  readonly to: string | null;
+  readonly total: number;
+  readonly by_source_kind: Readonly<Record<string, number>>;
+  readonly by_outcome: Readonly<Record<string, number>>;
+  readonly by_search: Readonly<Record<string, number>>;
+  readonly by_reason: Readonly<Record<string, number>>;
+  readonly completed: number;
+  readonly skipped_for_time: number;
+  readonly keyword_ms: RelatedCheckTiming;
+  readonly total_ms: RelatedCheckTiming;
 }
 
 export interface Agent {
@@ -1866,6 +2081,8 @@ export interface ReferenceMember {
   readonly via: ReferenceVia;
 }
 
+// IssueReferences is the answer of GET /api/v1/issues/{key}/references. With `?versions=latest`
+// each member's `artifact.versions` holds only its latest version.
 export interface IssueReferences {
   readonly members: ReferenceMember[];
   readonly truncated: boolean;
@@ -1910,9 +2127,12 @@ export type GraphEdgeKind =
 //
 // A block node (`kind: "block"`, id `<document ref_key>#<block id>`) also carries `block_id`,
 // its document's reference as `document`, and `changed_version`, the document version in which
-// its text last changed (its `changed_at` is that version's time). `text` and `pin` are set only
-// on the node a reference read names: `text` is the block's whole current text, and `pin`
-// answers a reference pinned to a version.
+// its text last changed (its `changed_at` is that version's time). A block of a comment or an
+// issue message (id `comment/<uuid>#<block id>` or `message/<uuid>#<block id>`) carries no
+// `document`: its `parent` is the comment or message, and a comment block's `changed_version` is
+// the comment revision in which its text last changed (a message block has none). `text` and
+// `pin` are set only on the node a reference read names: `text` is the block's whole current
+// text, and `pin` answers a reference pinned to a version (or a comment's revision).
 export interface GraphNode {
   readonly kind:
     | "issue"
@@ -2254,6 +2474,9 @@ interface DispatchEventBase {
   readonly project?: string;
   readonly seq: number;
   readonly actor: Actor;
+  /** Whether the event wakes the issue's route, claimant and authors (`events.Notify`), so an
+   *  agent's own event is not a wake. A reader following an owner topic on the bus skips on the
+   *  published copy's `quiet` instead (`PublishedDispatchEvent`). */
   readonly notify: boolean;
   readonly created_at: string;
 }
@@ -2628,6 +2851,10 @@ export interface CreateCommentInput {
   readonly body: string;
   readonly anchor?: AnchorInput;
   readonly reply_to?: string;
+  /** The id of the block of the comment `reply_to` names that the reply answers (`b2`), checked
+   *  against that comment before `reply_to` climbs to its thread's head. `400 INVALID_COMMENT`
+   *  without `reply_to`, for a block that comment does not hold now, and in an ask's thread. */
+  readonly reply_to_block?: string;
   readonly ask_id?: string;
   readonly mentions?: Array<{ readonly target: string }>;
   readonly delivery?: DeliveryCapability;
@@ -2642,11 +2869,24 @@ export interface CreateCommentInput {
 
 export interface EditCommentInput {
   readonly body: string;
+  /** The comment's revision the editor read its blocks at. Required with `blocks`; when it is not
+   *  the comment's current revision (another edit saved first), `blocks` is ignored and the
+   *  server matches the new body's blocks to the comment's by their text. */
+  readonly base_revision?: number;
+  /** Each block id the editor carried through the edit, in body order, with `from`, where the
+   *  block's span starts in `body`, in UTF-16 code units (a JavaScript string index). The new
+   *  body's block holding a carried `from` keeps that id. `400 INVALID_COMMENT` naming the field
+   *  for an id that is not a block of the comment at `base_revision`, an id twice, a `from`
+   *  outside `body` or before the one ahead of it, or `blocks` without `base_revision`. */
+  readonly blocks?: readonly { readonly id: string; readonly from: number }[];
 }
 
 export interface CreateMessageInput {
   readonly body: string;
   readonly in_reply_to?: string;
+  /** The id of the block of the message `in_reply_to` names that the reply answers (`b2`).
+   *  `400 INVALID_MESSAGE` without `in_reply_to` and for a block that message does not hold. */
+  readonly in_reply_to_block?: string;
   readonly target?: string;
   readonly delivery?: MessageDeliveryMode;
   readonly urgency?: "low" | "med" | "high" | "blocking";
@@ -2659,6 +2899,8 @@ export interface CreateAgentMessageInput {
   readonly body: string;
   readonly delivery: MessageDeliveryMode;
   readonly in_reply_to?: string;
+  /** The id of the block of the message `in_reply_to` names that the reply answers (`b2`). */
+  readonly in_reply_to_block?: string;
 }
 
 /** The targeted session's answer to one delivery attempt of a message
@@ -2673,6 +2915,9 @@ export interface MessageReplyInput {
   /** The delivery attempt being answered; attempts count from 1. */
   readonly attempt: number;
   readonly actor: Actor;
+  /** The id of the block of the message answered that the reply answers (`b2`); refused on a
+   *  follow-up, which is filed under the session's first reply. */
+  readonly in_reply_to_block?: string;
 }
 
 /** What `POST /api/v1/messages/{id}/reply` answers for a body: the message, with `duplicate`
@@ -2917,6 +3162,21 @@ export const DispatchEventSchema = z.object({
 
 export type InboundDispatchEvent = z.infer<typeof DispatchEventSchema>;
 
+/**
+ * One event as Dispatch's outbox publishes it to NATS: the event this API serves, plus `quiet`.
+ *
+ * `quiet` is whether the event carries nothing for a reader following its owner topic
+ * (`events.Quiet` in envoy): a delivery receipt, an anchor refresh, settings or per-viewer
+ * bookkeeping, a targeted message its session already had, an ask edit that only moved a version,
+ * or a version nobody named. That is what such a reader skips on, where `notify` answers only
+ * whether the event wakes the issue's route, claimant and authors - false for every event an agent
+ * wrote, so a reader skipping on it drops the activity a session subscribed to the issue asked
+ * for. It is optional because a frame published before Dispatch stated it carries none, and such a
+ * frame is judged by `notify` instead. The API's own event shape carries no `quiet`: the outbox
+ * adds it to the copy it publishes.
+ */
+export type PublishedDispatchEvent = DispatchEvent & { readonly quiet?: boolean };
+
 export const IssueEventPayloadSchema = z.object({
   title: z.string().optional(),
   labels: z.array(z.string()).optional(),
@@ -3056,6 +3316,16 @@ const CommentDeliverySchema = z.object({
   created_at: z.string(),
 });
 
+/** The block a reply answers, as a comment or message event payload carries it (`ReplyBlock`).
+ *  An event recorded before the field, or by a Dispatch older than it, carries none. */
+export const ReplyBlockSchema = z.object({
+  node: z.string(),
+  ref: z.string().optional(),
+  block_id: z.string(),
+  text: z.string(),
+  removed: z.boolean(),
+});
+
 export const CommentEventPayloadSchema = z
   .object({
     id: z.string().optional(),
@@ -3084,6 +3354,7 @@ export const CommentEventPayloadSchema = z
     created_at: z.string().optional(),
     mentions: z.array(CommentMentionSchema).optional(),
     deliveries: z.array(CommentDeliverySchema).optional(),
+    reply_block: ReplyBlockSchema.nullish(),
     thread_logins: z.array(z.string()).optional(),
   })
   // Bus frames are untrusted and this schema declares only the fields Dispatch
@@ -3102,6 +3373,7 @@ export const MessageEventPayloadSchema = z.object({
   reply_body: z.string().optional(),
   thread_target: z.string().optional(),
   author: z.object({ kind: z.string(), id: z.string() }).optional(),
+  reply_block: ReplyBlockSchema.nullish(),
   thread_logins: z.array(z.string()).optional(),
 });
 

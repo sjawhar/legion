@@ -51,7 +51,7 @@ function resolutionText(resolution: AskResolution): string {
 
 /** Where an ask hit stands, as the lines under its hit; `undefined` is a Dispatch that predates
  *  reporting it. */
-function askStateLines(ask: SearchAsk | undefined): string[] {
+export function askStateLines(ask: SearchAsk | undefined): string[] {
   if (ask === undefined) {
     return ["  Answer state not reported by this Dispatch; open the link to read the ask."];
   }

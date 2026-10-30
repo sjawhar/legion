@@ -1,0 +1,20 @@
+kind: Fixed
+body: |-
+    `readSessionAnswers` returns no text, with the new `source: "unavailable"` and the reason
+    `this Dispatch build has no answers route`, when Dispatch answers its own `404 NOT_FOUND` "no
+    route for …" (or a request falls in the 5 minutes that URL is then not asked again) and no list
+    read before from that URL renders. Before, it returned the failure line, which sends the agent
+    to `dispatch answers`, a command that fails against that same Dispatch. A list read before from
+    that URL is still carried, its header naming why this read failed and its left-out line,
+    when the cap leaves items out, naming no command. The first such read for a session and URL,
+    and the first again after a read of it answered with a list, sets the new `notice`, naming the
+    URL, for the host to report. `isNoAnswersRoute` is now only that answer of Dispatch's own
+    (`isNoRoute`, which `dispatch-http` now exports), so a proxy's 404 page or an empty 404 is a
+    failed read with the failure line naming it, starts no back-off, and makes `dispatch answers`
+    report that page rather than an old Dispatch build. Every other failure, a 200 that is no
+    answers list and a 503 included, still returns the failure line. `renderSessionAnswers` takes
+    `withoutCommand`, which ends a list that left items out with
+    `<N> older items left out to stay under 8,000 characters.`
+time: 2026-10-30T09:08:26.929143037Z
+custom:
+    Issue: answers-line-on-old-dispatch

@@ -5,6 +5,7 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"sync"
 	"unsafe"
 
 	"github.com/reearth/ygo/crdt"
@@ -535,12 +536,41 @@ func cloneYAttributes(attrs crdt.Attributes) crdt.Attributes {
 	return copy
 }
 
+// yTextStart is the head of text's item list, ygo's private YText.abstractType.start, which every
+// walk of a text's items (yTextDeltaInTransaction, readUnsharedText, AuthoredTextRuns) starts
+// from. ygo exports the items but not their head.
 func yTextStart(text *crdt.YXmlText) *crdt.Item {
-	yText := reflect.ValueOf(text).Elem().FieldByName("YText")
-	abstractType := yText.FieldByName("abstractType")
-	start := abstractType.FieldByName("start")
-	return reflect.NewAt(start.Type(), unsafe.Pointer(start.UnsafeAddr())).Elem().Interface().(*crdt.Item)
+	return *yTextStartField(text)
 }
+
+// yTextStartField is the address of text's item-list head (yTextStart).
+func yTextStartField(text *crdt.YXmlText) **crdt.Item {
+	return (**crdt.Item)(unsafe.Add(unsafe.Pointer(text), yTextStartOffset()))
+}
+
+// yTextStartOffset is the offset of the item-list head in a crdt.YXmlText, found by name once. A
+// ygo whose YXmlText holds no field start of type *crdt.Item, or holds it behind a pointer, panics
+// at the first read of a text, naming the field, rather than read a wrong pointer.
+var yTextStartOffset = sync.OnceValue(func() uintptr {
+	textType := reflect.TypeFor[crdt.YXmlText]()
+	field, ok := textType.FieldByName("start")
+	if !ok || field.Type != reflect.TypeFor[*crdt.Item]() {
+		panic("pmdoc: ygo's crdt.YXmlText has no field start of type *crdt.Item, the head of a text's item list")
+	}
+	// A field's Offset is within the struct declaring it, here an embedded one: the field's
+	// offset in YXmlText adds the offsets of the structs embedded along its index path.
+	var offset uintptr
+	holder := textType
+	for _, index := range field.Index {
+		if holder.Kind() != reflect.Struct {
+			panic("pmdoc: ygo's crdt.YXmlText reaches its field start through a pointer, not an embedded struct")
+		}
+		step := holder.Field(index)
+		offset += step.Offset
+		holder = step.Type
+	}
+	return offset
+})
 
 // simpleDiff is the characters current and want do not share, between their common prefix and
 // suffix: current's from index, remove long, are replaced by insert. index and remove are in UTF-16

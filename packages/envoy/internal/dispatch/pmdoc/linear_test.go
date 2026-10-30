@@ -303,8 +303,7 @@ func TestParseIsLinearInATableOfEscapedPipes(t *testing.T) {
 // CDATA section or a tag the run's markdown closes only at its end is asked whether that markdown
 // reads as raw HTML there (rawHTMLScan), which reads to the closer at the run's end, and past the
 // next `<` in a quoted attribute value. Each such `<` is then escaped, so the readers, which search
-// from each `<` they read as one for its closer, read none of them. (Without the closer, goldmark
-// searches from each `<` to the paragraph's end itself, which no writing changes.)
+// from each `<` they read as one for its closer, read none of them.
 //
 // A paragraph that reads back in no spelling is written in every spelling runSpellings lists for
 // it, and unreadableRun calls for every family of them. The plain text after it is in each writing,
@@ -326,6 +325,45 @@ func TestBareURLShapesParseAndRenderLinearly(t *testing.T) {
 		readsAndWritesLinearly(t, "", shape.opener, shape.closer, sizes)
 	}
 	readsAndWritesLinearly(t, unreadableRun, "lorem ipsum ", "", []int{renderFullTarget / 16, renderFullTarget})
+}
+
+// A paragraph of declarations no `>` closes is read and written in time linear in its size. A
+// declaration opens at `<!` and any ASCII letter (opensDeclaration) and ends at the first `>`
+// after it, over as many lines of its block as that takes, so an opener with no `>` after it
+// walked to the block's end and kept nothing: every later opener in the paragraph walked the same
+// bytes again. A mebibyte of `p ` and `<!a` repeated took 9.97 s to Parse and 19.38 s to
+// ParseForWrite, and `<!A` 19.24 s and 37.02 s, since goldmark's own raw HTML parser, which opens
+// a declaration after an uppercase letter, walked each of them again after this package's parser
+// gave up; `x <!a` on each line, where a walk crosses every later line of the paragraph, grew
+// about fourfold per doubling, 6.88 s at 64 KiB and 27.60 s at 128 KiB. The block's record of the
+// offset from which it holds no `>` (unclosedRawHTML) now answers every later opener without a
+// walk, and the one parser that reads every kind of inline raw HTML (inlineRawHTMLParser, which
+// wraps goldmark's own) walks a declaration once rather than twice: the same reads take 0.21 s,
+// 0.67 s, 0.20 s, 0.51 s, 0.05 s and 0.13 s.
+//
+// So is a paragraph of the three other kinds of inline raw HTML that end at a closer of their own
+// - a comment at `-->`, a processing instruction at `?>`, a CDATA section at `]]>` - whose walk
+// is goldmark's, inside the wrapped parser, and which goldmark has walked from every opener to
+// the block's end since it had a raw HTML parser. Before the record a mebibyte of `p ` and
+// `<!--` repeated took 24.97 s to Parse and 50.17 s to ParseForWrite, `<?` 46.31 s and 93.65 s,
+// and `<![CDATA[`, whose parse the element limit refuses past, 1.61 s and 1.66 s. The record
+// holds one offset per kind, and the wrapper records for those three what the wrapped parser's
+// own walk answered, so the same reads take 0.23 s and 0.55 s, 0.22 s and 0.62 s, and 0.15 s
+// and 0.11 s.
+//
+// Each shape is one paragraph, read as a rendering is and written from that tree, at the sizes
+// TestBareURLShapesParseAndRenderLinearly reads its own shapes at. All but the CDATA sections are
+// one text node, which no element limit stops; each `[` of those is a link opener of its own, so
+// a caller's write of a mebibyte of them is refused for the elements they make, which the
+// read-back counts none of.
+func TestUnclosedRawHTMLShapesParseAndRenderLinearly(t *testing.T) {
+	sizes := []int{16 << 10, 256 << 10, 1 << 20}
+	for _, form := range []struct{ head, shape string }{
+		{"p ", "<!a"}, {"p ", "<!A"}, {"", "x <!a\n"},
+		{"p ", "<!--"}, {"p ", "<?"}, {"p ", "<![CDATA["},
+	} {
+		readsAndWritesLinearly(t, form.head, form.shape, "", sizes)
+	}
 }
 
 // readsAndWritesLinearly requires a paragraph of head, then shape repeated to each of sizes and then
@@ -367,10 +405,10 @@ func readsAndWritesLinearly(t *testing.T, head, shape, tail string, sizes []int)
 // runs were batched. That shape is held to ygo's own walks instead: Update may take no more than
 // alternatingAllowance times what a Delete and an Insert at each replaced index take on the same
 // document in the same process. On one machine at a load of 105 to 121, back to back, it took
-// 134 ms and 5.83 s at 4,096 and 16,384 blocks (2.1 and 1.6 times ygo's walks), main's Update
-// 112 ms and 5.65 s (1.6 and 1.6 times); the write that typed its batch from the live fragment's
-// children, walking the whole fragment once more per replaced block, took 936 ms at 4,096 (12.7
-// times).
+// 134 ms and 5.83 s at 4,096 and 16,384 blocks (2.1 and 1.6 times ygo's walks), the Update before
+// sjawhar/legion#1892 112 ms and 5.65 s (1.6 and 1.6 times); the write that typed its batch from
+// the live fragment's children, walking the whole fragment once more per replaced block, took 936
+// ms at 4,096 (12.7 times).
 func TestUpdateIsLinearInTheBlockCount(t *testing.T) {
 	for _, test := range []struct {
 		name, from, to string
@@ -471,8 +509,9 @@ func TestUpdateIsLinearInTheBlockCount(t *testing.T) {
 // alternatingAllowance is how many times ygo's own index walks replacing every other block may
 // take (TestUpdateIsLinearInTheBlockCount). Update's work beside the walks - building each block
 // and comparing the trees - grows linearly while the walks grow quadratically, so the ratio falls
-// as the document grows: 1.6 to 2.6 at the sizes the test runs, main's Update included, against
-// 12.7 for a write that walks the fragment once more per replaced block.
+// as the document grows: 1.6 to 2.6 at the sizes the test runs, the Update before
+// sjawhar/legion#1892 included, against 12.7 for a write that walks the fragment once more per
+// replaced block.
 const alternatingAllowance = 4
 
 // repeatedBlocks is the tree of unit written blocks times, read as a stored rendering is, which no

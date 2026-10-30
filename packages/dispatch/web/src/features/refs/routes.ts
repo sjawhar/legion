@@ -11,7 +11,13 @@ import { matchPath } from "react-router-dom";
 import type { ArtifactOwner } from "../../api/client";
 import type { Artifact } from "../../api/types";
 import { EVERYONE_FILTER_VALUE } from "../inbox/sections";
-import { type BlockTarget, blockFragment, parseBlockReference, withBlock } from "./block-reference";
+import {
+  type BlockTarget,
+  blockFragment,
+  itemOfBlock,
+  parseBlockReference,
+  withBlock,
+} from "./block-reference";
 import { referenceSpans } from "./reference-spans";
 import { pageInBound, routeInBound } from "./target-id";
 
@@ -24,8 +30,8 @@ export type IssueRoute =
   | { key: string; kind: "artifacts" }
   | ({ key: string; kind: "artifact"; slug: string; version?: number } & BlockTarget)
   | { key: string; kind: "ask"; id: string }
-  | { key: string; kind: "comment"; id: string }
-  | { key: string; kind: "message"; id: string };
+  | ({ key: string; kind: "comment"; id: string } & BlockTarget)
+  | ({ key: string; kind: "message"; id: string } & BlockTarget);
 
 /** `project` is the bare `/projects/:key`, which opens on `architecture` when the project has
  *  an architecture source and on `issues` otherwise (`ProjectPage`'s open-on rule); the Issues
@@ -452,11 +458,14 @@ export function nodeRouteFromHref(
 /** What a same-origin dashboard path names, as the server's `text` reads the page: `page`, and
  * `block`, the block of it its `#b-<block id>` fragment names, of any length. A path holding a
  * control character, naming a slug Dispatch never gives a document, or that is no issue/document
- * reference names nothing. A document page carrying `?comment=`/`?ask=` names that item, and a
- * version of the spec (`?v=N`) the spec's artifact at N, as `dispatch read` reads the page; no
- * fragment names a block of either, nor of any version page, whose stored text holds no block
- * ids. A raw `@` in a fragment is no pin, since pins are written only in `dispatch://`
- * references; any other fragment leaves the page. */
+ * reference names nothing. A document page carrying `?comment=`/`?ask=` names that item whatever
+ * its fragment, at any version of the document: the dashboard writes a document block's fragment
+ * beside `?comment=`, never a block of the comment. A version of the spec (`?v=N`) is the spec's
+ * artifact at N, as `dispatch read` reads the page. The fragment names a block of a live
+ * document, or of the issue comment or message its own page shows; no block of an ask, nor of a
+ * document's version page, whose stored text holds no block ids (`withBlock`). A raw `@` in a
+ * fragment is no pin, since pins are written only in `dispatch://` references; any other fragment
+ * leaves the page. */
 function pageRoutes(
   href: string,
   appOrigin: string
@@ -483,10 +492,13 @@ function pageRoutes(
   if ("slug" in route && !artifactSlugOnlyPattern.test(route.slug)) {
     return undefined;
   }
-  // An issue document path carrying `?comment=`/`?ask=` names that item, the same rule
-  // `parseProjectPath` already applies to a project document. Without it a search hit's hover
-  // card previewed the document instead of the comment the reader is about to open.
-  let page: DispatchReferenceRoute = route;
+  // A document page carrying `?comment=`/`?ask=` names that item whatever its fragment, on an
+  // issue's document as `parseProjectPath` already reads a project document's. Without it a
+  // search hit's hover card previewed the document instead of the comment the reader is about to
+  // open.
+  if (route.kind === "document" && route.item !== undefined) {
+    return { block: undefined, page: route };
+  }
   if (!isProjectRoute(route) && (route.kind === "spec" || route.kind === "artifact")) {
     const item = itemFromSearch(url.search);
     const version = url.searchParams.get("v") ?? "";
@@ -494,14 +506,15 @@ function pageRoutes(
       return undefined;
     }
     if (item !== undefined) {
-      page = { id: item.id, key: route.key, kind: item.kind };
-    } else if (route.kind === "spec" && version !== "") {
+      return { block: undefined, page: { id: item.id, key: route.key, kind: item.kind } };
+    }
+    if (route.kind === "spec" && version !== "") {
       // `parseIssuePath` leaves the version to the spec's own page; a malformed one is the spec.
       return { block: undefined, page: artifactRoute(route.key, "spec", version) ?? route };
     }
   }
   const id = url.hash.startsWith("#b-") ? decodeBlockId(url.hash.slice(3)) : undefined;
-  return { block: id === undefined ? undefined : withBlock(page, id), page };
+  return { block: id === undefined ? undefined : withBlock(route, id), page: route };
 }
 
 /** A reference a text cites: the `dispatch://` form and the dashboard path it opens. */
@@ -578,7 +591,7 @@ export function buildDispatchReference(route: DispatchReferenceRoute): string {
       route.version === undefined ? "" : `@v${route.version}`
     }${block}`;
   }
-  return `${issue}/${route.kind}/${encodeURIComponent(route.id)}`;
+  return `${issue}/${route.kind}/${encodeURIComponent(route.id)}${block}`;
 }
 
 /** Whether `artifact` belongs to an agent's conversation (its `session_id` is set, its
@@ -734,7 +747,7 @@ export function shortForm(route: DispatchReferenceRoute): string {
     target === undefined ? "" : ` block${target.pin === undefined ? "" : ` v${target.pin}`}`;
   if (isProjectRoute(route)) {
     const base = `${route.project}/${route.slug}`;
-    return route.item === undefined ? `${base}${block}` : `${base} ${route.item.kind}`;
+    return route.item === undefined ? `${base}${block}` : `${base} ${route.item.kind}${block}`;
   }
   switch (route.kind) {
     case "issue":
@@ -754,19 +767,22 @@ export function shortForm(route: DispatchReferenceRoute): string {
     case "ask":
       return `${route.key} ask`;
     case "comment":
-      return `${route.key} comment`;
+      return `${route.key} comment${block}`;
     case "message":
-      return `${route.key} message`;
+      return `${route.key} message${block}`;
   }
 }
 
 /** The SPA path a reference navigates to, whichever side of the issue/project split it is on. A
- *  block opens its document at the block (`#b-`); a pinned block opens the version of its document
- *  it pins, since a version's stored text holds no block ids to land on, the pin's digits written
- *  as the reference holds them. An issue's spec keeps its versions under its own slug, which a
- *  spec route does not carry: `specSlug` names it once the issue's summary is read
- *  (`useReferencePath`), and until then a pinned block of the spec opens the live spec at the
- *  block. */
+ *  block opens its document, issue comment or message at the block (`#b-`); a pinned block of a
+ *  document opens the version of its document it pins, since a version's stored text holds no
+ *  block ids to land on, the pin's digits written as the reference holds them, and a pinned block
+ *  of a comment opens the live comment at the block, a comment's revisions having no page of
+ *  their own. A block of a project document's comment opens the comment (`?comment=<id>`) with no
+ *  fragment: that page's `#b-` names a block of the document. An issue's spec keeps its versions
+ *  under its own slug, which a spec route does not carry: `specSlug` names it once the issue's
+ *  summary is read (`useReferencePath`), and until then a pinned block of the spec opens the live
+ *  spec at the block. */
 export function buildReferencePath(route: DispatchReferenceRoute, specSlug?: string): string {
   if (route.kind === "agent-artifact") {
     const artifact = `/agents/${encodeURIComponent(route.session)}/artifacts/${encodeURIComponent(route.slug)}`;
@@ -774,11 +790,11 @@ export function buildReferencePath(route: DispatchReferenceRoute, specSlug?: str
   }
   const path = isProjectRoute(route) ? buildProjectPath(route) : buildIssuePath(route);
   const target = "block" in route ? route.block : undefined;
-  if (target === undefined) {
+  if (target === undefined || (route.kind === "document" && route.item !== undefined)) {
     return path;
   }
   const live = `${path}${blockFragment(target.id)}`;
-  if (target.pin === undefined) {
+  if (target.pin === undefined || itemOfBlock(route) !== undefined) {
     return live;
   }
   if (route.kind === "document") {
