@@ -112,14 +112,20 @@
 # threshold sends no load, one whose free space falls under it mid-run has its runner job stopped
 # by the disk watcher, both are marked failed with kind pg_disk, and each step writes pg-disk.json
 # with the volume's size, the used bytes around the load, the peak, the least free and the
-# readings; (w) the disk watcher and the runner-job wait of a step killed outright stop at their
+# out; (w) the disk watcher and the runner-job wait of a step killed outright stop at their
 # next poll, recording no failure in that step's directory and stopping no runner job, however
-# little free space the volume then shows, and a wait past its deadline stops no job once the
-# lock names another run, while a wait with no pid and start time still stops its job there;
-# (x) a step whose heap.txt alone did not come back from the runner is no
+# little free space the volume then shows, a wait past its deadline stops no job once the lock
+# names another run and the step's EXIT trap then stops no browser typing and removes no token
+# there, while a wait with no pid and start time still stops its job while the lock is its own
+# run's; (x) a step whose heap.txt alone did not come back from the runner is no
 # failed step: its summary.json is here, it says in a note and in heap-missing.txt where heap.txt
-# stayed, and the runner keeps that heap.txt with the step's other files removed, while an
-# existence check that failed removes nothing there.
+# stayed, written from what the removal then did -- the runner keeps that heap.txt with the
+# step's other files removed, or every file of the step when that removal failed too -- while an
+# existence check that failed removes nothing there; (y) with the lock naming another run,
+# nothing of this run touches the copy those fixed names reach: runner_stop, runner_step_remove
+# and typing_stop stop and remove nothing, runner_start and stop_copy refuse outright, each
+# saying which copy it left alone, and a command whose --run names this run is refused, naming
+# both runs.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -250,8 +256,15 @@ case $verb in
         ;;
       # A step's directory and copy-meta file, removed from the runner once copied back, and the
       # same with heap.txt left behind when that file alone did not come back.
+      # FAKE_HEAP_KEEP_REMOVE_FAIL: that second removal fails, so every file of the step stays.
       "rm -rf /work/steps/"*) ;;
-      'sh -c rm -f "/work/meta/'*) printf '%s\n' "${cmd[4]}" >>"$FAKE_DIR/runner-heap-kept" ;;
+      'sh -c rm -f "/work/meta/'*)
+        if [ -n "${FAKE_HEAP_KEEP_REMOVE_FAIL:-}" ]; then
+          echo 'error: unable to upgrade connection: container not found ("runner")' >&2
+          exit 1
+        fi
+        printf '%s\n' "${cmd[4]}" >>"$FAKE_DIR/runner-heap-kept"
+        ;;
       # Browser typing: the agent token written into the runner from standard input, the token and
       # document list removed when typing stops.
       'sh -c umask 077 && mkdir -p "$1" && cat >"$1/token" sh '*)
@@ -701,7 +714,7 @@ export POD_UID=00000000-1111-2222-3333-444444444444 LEGION_ISSUE=TEST-1
 export PATH="$bin:$PATH"
 unset FAKE_EXEC_FAIL FAKE_SAMPLE FAKE_PROD_MAJOR FAKE_LOADGEN_FAIL FAKE_APPLY_FAIL FAKE_QUIET FAKE_STORED_ORDER \
   FAKE_EXEC_ERRORS FAKE_FAST_SLEEP FAKE_TYPING_RC FAKE_DISPATCH_BUILD_ERROR FAKE_COPY_BACK_FAIL \
-  FAKE_PG_DF_SEQ FAKE_RC_UNTIL_STOP FAKE_HEAP_COPY_FAIL FAKE_HEAP_EXISTS_FAIL
+  FAKE_PG_DF_SEQ FAKE_RC_UNTIL_STOP FAKE_HEAP_COPY_FAIL FAKE_HEAP_EXISTS_FAIL FAKE_HEAP_KEEP_REMOVE_FAIL
 export DISPATCH_URL=http://dispatch.invalid DISPATCH_TOKEN_FILE=$fake/token
 echo fake-token >"$fake/token"
 # The seed's counts query, as common.sh holds it: the fake kubectl answers every count only for
@@ -2468,14 +2481,18 @@ run_cluster down --namespace "$ns"
 # The same rule with a bound small enough to reach, the step's own being its window, grace and
 # drain away: a wait whose step shell is gone ends at its first poll, printing nothing its caller
 # would read as an exit status; a wait at its deadline stops nothing once the lock names another
-# run; and a wait with no pid and start time (seed, typing_stop, replay-prepare) is what it was,
-# stopping its job at the deadline.
+# run, and neither does the step's own way out, which that wait starts (the step shell reads the
+# wait's output under errexit, so it ends there and runs its EXIT trap: step_at_exit,
+# typing_stop_at_exit, typing_stop, which would TERM typing-<name> and remove the agent token in
+# the pod named runner -- another run's by then); and a wait with no pid and start time (seed,
+# seed-refs, seed-finish and typing_stop) is what it was, stopping its job at the deadline while
+# the lock is its own run's.
 (
   # shellcheck source=packages/envoy/loadtest/cluster/cluster.sh
   source "$cluster"
   NS=$ns
   set_run "$kill_run"
-  mkdir -p "$RUN_DIR/logs"
+  mkdir -p "$RUN_DIR/logs" "$kill_dir"
   rm -f -- "$fake/runner-stops" "$fake/rc-polls"
   export FAKE_RC_UNTIL_STOP=1
   sleep 60 &
@@ -2498,6 +2515,21 @@ run_cluster down --namespace "$ns"
   ! grep -qx 'step-pgkill' "$fake/runner-stops" 2>/dev/null ||
     fail "a wait at its deadline stopped step-pgkill although the lock names run $other_run: $(cat "$fake/runner-stops")"
   ((wait_rc != 0)) || fail "a wait that ended because the lock names another run returned 0"
+  # What the step shell does next on that path: its EXIT trap, with the typing of a --typing step
+  # still running as job typing-pgkill and its token in TYPING_DIR.
+  TYPING=1 TYPING_PEERS=2 TYPING_RATE=5 TYPING_DOCS=1
+  TYPING_LIST=(doc-1)
+  TYPING_STEP=(pgkill "$kill_dir")
+  token_rms=$(grep -c -- "rm -f $TYPING_DIR/token" "$fake/kubectl.log" || true)
+  typing_stop_at_exit
+  ! grep -qx 'typing-pgkill' "$fake/runner-stops" 2>/dev/null ||
+    fail "the EXIT trap of a step that ended because the lock names run $other_run stopped the browser typing job typing-pgkill, which that run's typing is: $(cat "$fake/runner-stops")"
+  [ "$(grep -c -- "rm -f $TYPING_DIR/token" "$fake/kubectl.log" || true)" = "$token_rms" ] ||
+    fail "that EXIT trap removed the agent token from the runner, which is run $other_run's pod now"
+  [ ! -e "$kill_dir/browsertype.json" ] && [ ! -e "$kill_dir/browsertype.txt" ] ||
+    fail "that EXIT trap wrote a browsertype record of a job it must not touch: $(names "$kill_dir")"
+  # The lock is this run's again, so a wait with no pid and start time stops its job as it did.
+  write_lock "$kill_run" "$(utc_now)"
   rm -f -- "$fake/rc-polls"
   wait_out=$(runner_wait step-pgkill 0 "$RUN_DIR/logs" 2>/dev/null)
   [ "$wait_out" = timeout ] ||
@@ -2505,14 +2537,17 @@ run_cluster down --namespace "$ns"
   grep -qx 'step-pgkill' "$fake/runner-stops" ||
     fail "a wait with no pid and start time did not stop its job past its deadline: $(cat "$fake/runner-stops" 2>/dev/null)"
 )
-pass "the disk watcher and the runner-job wait of a step that was killed outright stop at their next poll, record nothing and stop no runner job, and a wait stops no job at its deadline once the lock names another run"
+rm -f -- "$fake/lock.json"
+pass "the disk watcher and the runner-job wait of a step that was killed outright stop at their next poll, record nothing and stop no runner job; a wait stops no job at its deadline once the lock names another run, and the step's EXIT trap then stops no browser typing and removes no token there"
 
 # (x) A copy-back where heap.txt alone did not come back. Every other file of the step is here,
 # so the step is a complete one: marking it failed (kind copy_back) would drop its row from the
 # curves and the tables for a heap profile they take no number from. It is a note and the marker
 # heap-missing.txt instead, and the runner keeps that heap.txt, the step's other files removed
 # from it; an existence check that failed says so in its own words and leaves the runner whole,
-# since the heap.txt that may be there would go with the rest.
+# since the heap.txt that may be there would go with the rest. The marker is collected with the
+# step, inside its tar, so it must say what the removal did and not what it was about to try: a
+# removal that failed leaves every file of the step in the runner, and the marker says so.
 reset_fake
 export LOADTEST_CLUSTER_ROOT=$tmp/root-heapback
 run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok"
@@ -2554,5 +2589,105 @@ grep -qF "step heapask: $heap_ask_note" "$tmp/out" ||
   fail "the step directory keeps no heap-missing.txt holding that note: $(cat "$heap_dir/heap-missing.txt" 2>/dev/null)"
 { ! grep -q -- "exec runner -c runner -- rm -rf /work/steps/heapask " "$fake/kubectl.log" && [ ! -s "$fake/runner-heap-kept" ]; } ||
   fail "something of the step was removed from the runner although it is not known whether heap.txt is there"
+# The removal of the step's other files failing too: the note and the marker say that every file
+# of the step stays in the runner, never that they were removed.
+rm -f -- "$fake/runner-heap-kept"
+heap_dir=$LOADTEST_CLUSTER_ROOT/$(jq -r .data.run "$fake/lock.json")/steps/heapstay
+FAKE_HEAP_COPY_FAIL=1 FAKE_HEAP_KEEP_REMOVE_FAIL=1 run_cluster step --namespace "$ns" heapstay 1 --duration 1m
+unset FAKE_HEAP_COPY_FAIL FAKE_HEAP_KEEP_REMOVE_FAIL
+((RC == 0)) || fail "a step whose heap.txt and whose removal both failed exited $RC: $(cat "$tmp/out")"
+[ ! -f "$heap_dir/step-failed.json" ] ||
+  fail "a step whose heap.txt alone did not come back was marked failed because the removal failed too: $(cat "$heap_dir/step-failed.json")"
+[ -f "$heap_dir/summary.json" ] || fail "the step's summary.json did not come back: $(names "$heap_dir")"
+heap_stay_note='heap.txt (the step-end heap profile in text) was not copied back; it stays in the runner at /work/steps/heapstay/heap.txt; every other file of the step is here; removing them from the runner failed, so they stay at /work/steps/heapstay, and codepaths shows - for the MemStats rows.'
+[ "$(cat "$heap_dir/heap-missing.txt" 2>/dev/null)" = "$heap_stay_note" ] ||
+  fail "heap-missing.txt, which collect packs with the step, does not say that the removal failed and the step's files stay in the runner: $(cat "$heap_dir/heap-missing.txt" 2>/dev/null)"
+grep -qF "step heapstay: $heap_stay_note" "$tmp/out" ||
+  fail "the step does not say that the removal of its files from the runner failed: $(cat "$tmp/out")"
+[ ! -s "$fake/runner-heap-kept" ] ||
+  fail "the runner recorded a removal although it failed: $(cat "$fake/runner-heap-kept")"
 run_cluster down --namespace "$ns"
-pass "a step whose heap.txt alone did not come back is complete, says so in a note and in heap-missing.txt, and the runner keeps that heap.txt alone; an existence check that failed removes nothing there"
+pass "a step whose heap.txt alone did not come back is complete, says so in a note and in heap-missing.txt written from what the removal did, and the runner keeps that heap.txt alone, or every file of the step when that removal failed; an existence check that failed removes nothing there"
+
+# (y) The copy answers to fixed names -- the pods runner and postgres-0, the deployments dispatch
+# and listener -- so every one of them reaches whatever run holds the namespace now. Once the
+# lock names another run this run's files, pids and job names say nothing about who owns what
+# they point at, and a stop, a scale or a removal of this run's would hit that run's copy. So
+# each such path reads the lock first (copy_is_ours) and leaves the copy alone, saying which part
+# of it, and a command whose --run names a run the lock does not is refused before it registers
+# itself, naming both runs.
+reset_fake
+export LOADTEST_CLUSTER_ROOT=$tmp/root-othersrun
+run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok"
+((RC == 0)) || fail "up exited $RC: $(cat "$tmp/out")"
+own_run=$(jq -r .data.run "$fake/lock.json")
+own_dir=$LOADTEST_CLUSTER_ROOT/$own_run
+# The namespace is another run's from here: the lock says so, whatever this pod still holds.
+write_lock "$other_run" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+guard_out=$tmp/guard.out
+(
+  # shellcheck source=packages/envoy/loadtest/cluster/cluster.sh
+  source "$cluster"
+  NS=$ns
+  set_run "$own_run"
+  rm -f -- "$fake/runner-stops" "$fake/runner-starts" "$fake/runner-heap-kept"
+  guard_rc=0
+  runner_stop step-guard 2>"$guard_out" || guard_rc=$?
+  ((guard_rc != 0)) || fail "runner_stop returned 0 although the lock names run $other_run"
+  [ ! -s "$fake/runner-stops" ] ||
+    fail "runner_stop TERMed the runner job step-guard, which is run $other_run's now: $(cat "$fake/runner-stops")"
+  grep -qF "the lock no longer names run $own_run" "$guard_out" ||
+    fail "runner_stop did not say why it stopped nothing: $(cat "$guard_out")"
+  grep -qF 'the runner job step-guard' "$guard_out" ||
+    fail "runner_stop did not name the job it left alone: $(cat "$guard_out")"
+  guard_rc=0
+  runner_step_remove guard 2>"$guard_out" || guard_rc=$?
+  ((guard_rc != 0)) || fail "runner_step_remove returned 0 although the lock names run $other_run"
+  ! grep -q -- 'exec runner -c runner -- rm -rf /work/steps/guard ' "$fake/kubectl.log" ||
+    fail "runner_step_remove removed a step directory from run $other_run's runner"
+  grep -qF '/work/steps/guard in the runner' "$guard_out" ||
+    fail "runner_step_remove did not name what it left in the runner: $(cat "$guard_out")"
+  TYPING=1 TYPING_PEERS=2 TYPING_RATE=5 TYPING_DOCS=1
+  TYPING_LIST=(doc-1)
+  mkdir -p "$own_dir/steps/guard"
+  typing_stop guard "$own_dir/steps/guard" 2>"$guard_out" ||
+    fail "typing_stop returned non-zero while the lock names run $other_run; its callers treat that as a failure"
+  [ ! -s "$fake/runner-stops" ] ||
+    fail "typing_stop TERMed the browser typing job of run $other_run's copy: $(cat "$fake/runner-stops")"
+  [ ! -e "$own_dir/steps/guard/browsertype.json" ] ||
+    fail "typing_stop wrote a browsertype record of a job it never stopped"
+  grep -qF 'typing-guard' "$guard_out" || fail "typing_stop did not name what it left alone: $(cat "$guard_out")"
+  scales=$(grep -c -- 'scale deployment' "$fake/kubectl.log" || true)
+  guard_rc=0
+  (stop_copy) 2>"$guard_out" || guard_rc=$?
+  ((guard_rc != 0)) || fail "stop_copy returned 0 although the lock names run $other_run"
+  [ "$(grep -c -- 'scale deployment' "$fake/kubectl.log" || true)" = "$scales" ] ||
+    fail "stop_copy scaled run $other_run's Dispatch or listener: $(grep -- 'scale deployment' "$fake/kubectl.log" | tail -n2)"
+  grep -qF 'refusing to scale deployment dispatch to 0' "$guard_out" ||
+    fail "stop_copy did not refuse the scale in its own words: $(cat "$guard_out")"
+  grep -qF "the lock no longer names run $own_run" "$guard_out" ||
+    fail "stop_copy did not say whose copy it left alone: $(cat "$guard_out")"
+  guard_rc=0
+  (runner_start step-guard /work/loadgen run) 2>"$guard_out" || guard_rc=$?
+  ((guard_rc != 0)) || fail "runner_start returned 0 although the lock names run $other_run"
+  [ ! -s "$fake/runner-starts" ] ||
+    fail "runner_start sent a job into run $other_run's runner pod: $(cat "$fake/runner-starts")"
+  grep -qF 'the runner pod' "$guard_out" || fail "runner_start did not say which pod it left alone: $(cat "$guard_out")"
+  guard_rc=0
+  calls=$(wc -l <"$fake/kubectl.log")
+  (runner_put "$cluster" /work/loadgen) 2>"$guard_out" || guard_rc=$?
+  ((guard_rc != 0)) || fail "runner_put returned 0 although the lock names run $other_run"
+  new_calls=$(tail -n +$((calls + 1)) "$fake/kubectl.log")
+  ! grep -q -- ' cp ' <<<"$new_calls" || fail "runner_put copied into run $other_run's runner pod: $(grep -- ' cp ' <<<"$new_calls")"
+)
+# A command of this run, named by --run, is refused before it drives run $other_run's copy.
+run_cluster step --namespace "$ns" --run "$own_run" guardstep 1 --duration 1m
+((RC != 0)) || fail "step --run $own_run ran although the lock names run $other_run: $(cat "$tmp/out")"
+{ grep -qF "$own_run" "$tmp/out" && grep -qF "$other_run" "$tmp/out"; } ||
+  fail "the refusal of --run $own_run does not name both runs: $(cat "$tmp/out")"
+[ ! -e "$own_dir/steps/guardstep" ] || fail "the refused step made the step directory $own_dir/steps/guardstep"
+run_cluster down --namespace "$ns" --run "$own_run"
+((RC == 0)) || fail "down --run $own_run exited $RC: $(cat "$tmp/out")"
+[ -f "$fake/lock.json" ] || fail "down --run $own_run deleted run $other_run's lock"
+rm -f -- "$fake/lock.json"
+pass "with the lock naming another run, runner_stop, runner_step_remove and typing_stop touch nothing of the copy, runner_start and stop_copy refuse outright, each saying which part it left alone, and a command whose --run names this run is refused, naming both runs"

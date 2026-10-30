@@ -1611,7 +1611,12 @@ hold `cluster.sh hold --namespace <ns> --for <duration>` extends while you type 
 ### Subcommands
 
 Each subcommand needs `--namespace`. After `up`, a subcommand finds its run from the lock's `run`
-key, or from `--run <id>`. A `kubectl exec` that only reads (a `psql` query, a nats-box listing,
+key, or from `--run <id>`. A `--run` that names a run other than the one the lock names is
+refused, naming both: the copy answers to fixed names (the pods `runner` and `postgres-0`, the
+deployments `dispatch` and `listener`), so they all reach the run the lock names, and a command
+of the other run would stop, scale or clear that run's copy. Only `status`, which reads, and
+`down`, whose deletes are scoped to one run's label, take such a `--run`. A `kubectl exec` that
+only reads (a `psql` query, a nats-box listing,
 a file read in the runner or a container) and fails on a transient API server error (`error
 dialing backend`, as in `Error from server: error dialing backend: dial timeout, backstop`, or a
 refused or reset connection to the API server) is retried once, 5 s later, with one line saying
@@ -1997,7 +2002,7 @@ its cores and working set from `cgroup.json`. It also holds:
 | `replay-prepared.json`, `last-reset.json`, `envoy-dispatch.json` | Only in a replay step: `replay-prepare`'s record, and the two files written into the runner's `LOADTEST_ROOT` for `loadgen run` (above). |
 | `containers-before.tsv`, `containers-after.tsv` | Each sampled container's role, pod, container, `restartCount` and `lastState.terminated.reason`, before and after the step. |
 | `step-failed.json` | Only when the step failed: `reasons`, each with `kind`, `role` and `detail`. `restart`: a container of the copy restarted during the step. `loadgen_exit`: `loadgen run` exited non-zero. `copy_back`: the step's files could not be copied back from the runner, so they are missing here and stay in the runner at `/work/steps/<name>`; a `heap.txt` that alone did not come back is no failed step, since the step is whole without it, and has no reason here: it leaves the marker file `heap-missing.txt` (below). `pg_disk`: the Postgres data volume had less than `threshold_pct` free, so the step sent no load, or the watcher stopped its load; the detail names the reading and `--pg-volume` (The Postgres data volume, above). `sampler_gap`: a container had no good cgroup read for more than 30 s in the window. |
-| `heap-missing.txt` | Only when `heap.txt` alone did not come back from the runner, which leaves a whole step without its heap profile (`loadgen codepaths` then shows `-` in the `runtime.MemStats` rows), never a failed step: the words of the note the step printed. Either both tries of that file's own stream failed, and it stays in the runner at `/work/steps/<name>/heap.txt` with the step's other files removed there, or the read of whether the runner holds it failed, and nothing of the step was removed there. |
+| `heap-missing.txt` | Only when `heap.txt` alone did not come back from the runner, which leaves a whole step without its heap profile (`loadgen codepaths` then shows `-` in the `runtime.MemStats` rows), never a failed step: the words of the note the step printed, written after the removal it describes and from that removal's result. One of three: both tries of that file's own stream failed and the step's other files were removed from the runner, so `heap.txt` stays there alone at `/work/steps/<name>/heap.txt`; the same with that removal failed too, so every file of the step stays at `/work/steps/<name>`; or the read of whether the runner holds `heap.txt` failed, and nothing of the step was removed there. |
 | `cgroup.json` | `loadgen cgroup-merge` of `cgroup.jsonl` over the window: `window_start`, `window_end`, `window_s`, `failed` and `failures`, and for each role `pods`, `container`, `samples`, `failed_reads`, `restarts`, `cpu_max`, `limit_cores`, `cores_mean`, `cores_peak_5s`, `cpu_s`, `throttled_s`, `working_set_bytes_mean` and `working_set_bytes_max` (`memory.current` less `inactive_file`), `max_gap_s`, and `minutes` (each whole minute's cores and mean working set; `null` for a minute with a gap over 30 s). A figure the reads cannot give is `null`, never 0. |
 | `loadgen.out` | The output of `loadgen run` in the runner. |
 | `stored-order.txt`, `stored-order.json`, `stored-order-evidence/` | The output of `envoy-dispatch stored-order --since <window_start>` over every document after the step, and the checker's fields (`dispatch_commit`, `built_from`, `overlay_source`, `overlay_files`, `registration`, `renderer_matches`, `sha256`), `exit`, `since` and the counts of its summary line (`null` without one, never 0) and `evidence`; and the rows of each mismatched or refused document, never uploaded (The stored-order check, above). A non-zero exit is a correctness finding, not a `step-failed.json` reason. |
@@ -2121,6 +2126,13 @@ and 15 s) once that shell is gone, recording nothing in the dead step's director
 job. That matters because step names, job names and pods repeat across runs: an orphan that went
 on polling would, at the dead step's deadline, `kill -TERM` the pid `/work/logs/step-<name>.pid`
 holds in whatever pod is then named `runner` — a later run's step of the same name.
+
+The same names are why nothing of one run touches the copy once the lock names another: before
+it stops a runner job, removes a step's files or the browser typing token from the runner, scales
+`dispatch` or `listener`, resets the runner's own directories or removes the replay dump from
+`postgres-0`, `cluster.sh` reads the lock and leaves all of it alone when the run there is not
+its own, saying which copy it left. A step that ends because its wait found the lock renamed
+therefore stops no typing job and deletes no token of the run that holds the namespace now.
 
 ## What this harness does not do
 

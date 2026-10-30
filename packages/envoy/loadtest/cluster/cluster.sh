@@ -186,6 +186,15 @@
 # and stopping nothing -- step names, job names and pods repeat across runs, so an orphan of one
 # run must never TERM another run's job of the same name.
 #
+# Every name the copy answers to is fixed -- the pods runner and postgres-0, the deployments
+# dispatch and listener, the lock ConfigMap -- so each of them reaches whatever run holds the
+# namespace now. Before it stops, kills or removes anything they name, cluster.sh checks that the
+# lock still names this run (copy_is_ours): a runner job stopped, the step's files and the
+# browser typing token removed from the runner, Dispatch or the listener scaled, the runner's own
+# directories reset, the replay dump removed from the Postgres pod. A command whose --run names a
+# run other than the one the lock names is refused outright, naming both; only status (which
+# reads) and down (whose deletes are scoped to the run's label) run then.
+#
 # Every subcommand needs --namespace (no default; a Legion pod's own namespace is builds), and
 # every kubectl call names it. Subcommands after up find the run from the lock's `run` and its
 # directory ${LOADTEST_CLUSTER_ROOT:-$TMPDIR/dispatch-loadtest-cluster}/<run id>/ (state.json, mode
@@ -605,15 +614,21 @@ pg_tier() {
 
 # ---- run state --------------------------------------------------------------------------------------
 
-# use_run: RUN from --run, else from the lock; then its directory and state.json, which must name
-# NS and, when it records one, this PID namespace (pid_ns_check); then this command is registered
-# as one that holds the run alive.
+# use_run: RUN from --run, else from the lock. A --run that names a run other than the lock's is
+# refused: the fixed names its commands would reach (the pods runner and postgres-0, the
+# deployments dispatch and listener) belong to the run the lock names. Then the run's directory
+# and state.json, which must name NS and, when it records one, this PID namespace
+# (pid_ns_check); then this command is registered as one that holds the run alive.
 use_run() {
-  local run=${OPT[run]:-} lock
+  local run=${OPT[run]:-} lock lock_run=""
+  lock=$(kube_lock_get)
+  [ -z "$lock" ] || lock_run=$(jq -r '.data.run // ""' <<<"$lock")
   if [ -z "$run" ]; then
-    lock=$(kube_lock_get)
-    [ -n "$lock" ] || die "namespace $NS has no lock ConfigMap $LOCK, so no run is up there (cluster.sh up first, or name a run with --run)"
-    run=$(jq -r '.data.run // ""' <<<"$lock")
+    [ -n "$lock_run" ] || die "namespace $NS has no lock ConfigMap $LOCK, so no run is up there (cluster.sh up first, or name a run with --run)"
+    run=$lock_run
+  elif [ -n "$lock_run" ] && [ "$run" != "$lock_run" ]; then
+    note "the lock ConfigMap $LOCK in $NS names run $lock_run; --run names run $run."
+    die "$CMD: run $run is not the run that is up in $NS: run $lock_run is, and the copy's fixed names (the pods runner and postgres-0, the deployments dispatch and listener) all reach its copy, so a command of run $run would drive run $lock_run's. cluster.sh status --namespace $NS reads run $lock_run; cluster.sh down --namespace $NS --run $run removes what is left of run $run."
   fi
   valid run "$run" || die "run id '$run' is not one cluster.sh makes"
   set_run "$run"
@@ -772,6 +787,34 @@ lock_names_other_run() {
   lock=$(kube_lock_get 2>/dev/null) || return 1
   [ -n "$lock" ] || return 1
   [ "$(jq -r '.data.run // ""' <<<"$lock")" != "$RUN" ]
+}
+
+# copy_is_ours WHAT: the lock still names this run, so WHAT -- a pod, a deployment, a runner job
+# or a file of the copy, each of which carries the same fixed name in every run -- is this run's
+# to stop, kill or remove. Once the lock names another run (lock_names_other_run) the copy those
+# names reach is that run's: it returns 1, naming WHAT, and its caller ends nothing. Every path
+# that stops, kills or removes something in the namespace's shared pods asks this first, except
+# the ones that are this run's own by construction: the heartbeat's patch, which tests the lock's
+# run id in the patch itself; the sampler, which kills only its own process group; stop_daemon,
+# which reads this run's pidfiles in its own PID namespace (pid_ns_check); and down, whose
+# deletes are scoped to one run's label and which refuses another run's lock without --run.
+copy_is_ours() {
+  lock_names_other_run || return 0
+  note "the lock no longer names run $RUN, so $1 is another run's now; this run stops and removes nothing of it"
+  return 1
+}
+
+# step_gone PID START: the process PID is gone, or is another process now (its start time is no
+# longer the START proc_start read when it was the step shell), or the run directory is gone. A
+# step killed outright (a SIGKILL, an OOM, a worker turn cut short) runs neither
+# pg_disk_watch_stop nor its EXIT trap, so what it left on this pod -- its disk watcher, and the
+# wait on its runner job, a command substitution the kill does not reach either -- would poll on
+# for ever. Step names, job names and pods repeat across runs, so such an orphan would later
+# record a failure in a dead step's directory or TERM a new run's job of the same name. Each poll
+# of pg_disk_watch and runner_wait asks this, and ends, recording nothing and stopping nothing,
+# once it is true.
+step_gone() {
+  [ "$(proc_start "$1")" != "$2" ] || [ ! -d "$RUN_DIR" ]
 }
 
 # heartbeat_age RFC3339: seconds since it, or "unknown".
@@ -1185,14 +1228,10 @@ pg_disk_write() {
 # still arriving, and the step's after-work runs as it does for any step. run_in_runner starts it
 # in the background, and pg_disk_watch_stop ends it on every path out of the step.
 #
-# PID and START are the step shell's pid and its start time (proc_start), which give the watcher
-# the heartbeat's kind of liveness: a step killed outright (SIGKILL, an OOM) runs neither
-# pg_disk_watch_stop nor its EXIT trap, and a watcher left behind reads the volume for ever. Step
-# names, job names and pods repeat across runs, so such a watcher would later record pg_disk in a
-# dead step's directory and stop a new run's job of the same name. So each poll ends the watch,
-# recording nothing and stopping nothing, once that process is gone or is another process now, or
-# the run directory is gone; and the lock, which costs an exec, is read only when the watcher is
-# about to act, never once a poll.
+# PID and START are the step shell's pid and its start time (proc_start): each poll ends the
+# watch, recording nothing and stopping nothing, once step_gone says that shell is gone, which
+# step_gone explains; and the lock, which costs an exec, is read only when the watcher is about
+# to act, never once a poll.
 pg_disk_watch() {
   local name=$1 dir=$2 job=$3 file=$4 pid=$5 start=$6 nap=""
   # Its own TERM ends the nap it is in, so the step leaves no sleep of its own behind.
@@ -1202,7 +1241,7 @@ pg_disk_watch() {
     nap=$!
     wait "$nap" || true
     nap=""
-    if [ "$(proc_start "$pid")" != "$start" ] || [ ! -d "$RUN_DIR" ]; then
+    if step_gone "$pid" "$start"; then
       note "step $name: the step that started this disk watcher is gone; it stops, recording nothing and stopping no job"
       return 0
     fi
@@ -1213,12 +1252,12 @@ pg_disk_watch() {
     trap '' TERM
     # A lock that names another run is this run's end, whatever the step shell still looks like;
     # a read that failed says nothing, and the step shell above is alive, so the watcher acts.
-    if lock_names_other_run; then
-      note "step $name: the lock no longer names run $RUN; the disk watcher stops, recording nothing and stopping no job"
+    if ! copy_is_ours "the runner job $job of step $name"; then
+      note "step $name: the disk watcher stops, recording nothing and stopping no job"
       return 0
     fi
     record_failure "$dir" pg_disk postgres "$(pg_disk_detail); the step's loadgen run was stopped before Postgres filled the volume"
-    runner_stop "$job"
+    runner_stop "$job" || return 0
     typing_stop "$name" "$dir" || note "step $name: stopping browser typing after the disk watcher fired failed"
     return 0
   done
@@ -1251,9 +1290,13 @@ nats_box() {
 }
 
 # scale_to DEPLOYMENT N [SECONDS]: scale it; with 0, wait until none of its pods is left, else
-# until its rollout is done (at most SECONDS, default 900).
+# until its rollout is done (at most SECONDS, default 900). Deployment names repeat across runs,
+# so a copy the lock no longer gives this run (copy_is_ours) is not scaled at all: no command may
+# start or stop another run's Dispatch or listener under it.
 scale_to() {
   local d=$1 n=$2 seconds=${3:-900} deadline pods
+  copy_is_ours "deployment $d" ||
+    die "refusing to scale deployment $d to $n in $NS: that deployment is another run's now, and scaling it would start or stop that run's copy under it"
   kube scale deployment "$d" --replicas "$n" >/dev/null || die "kubectl could not scale deployment $d to $n"
   if ((n == 0)); then
     deadline=$((EPOCHSECONDS + 180))
@@ -1381,7 +1424,12 @@ reset_copy() {
 
 # ---- the runner -----------------------------------------------------------------------------------
 
-runner_put() { kube cp "$1" "runner:$2" -c runner >/dev/null || die "kubectl cp of $1 into the runner failed"; }
+# runner_put FILE DEST: FILE copied into the runner as DEST; refused, like runner_start, once the
+# lock gives the runner pod to another run, so a command never overwrites that run's files.
+runner_put() {
+  copy_is_ours "the runner pod" || die "refusing to copy $1 into another run's runner"
+  kube cp "$1" "runner:$2" -c runner >/dev/null || die "kubectl cp of $1 into the runner failed"
+}
 
 # runner_has FILE DEST TEST: the runner's DEST passes `test TEST DEST` and has FILE's sha256. /work
 # lasts as long as the runner pod, so a file that an earlier command put there need not be copied
@@ -1405,10 +1453,13 @@ put_executable() {
 put_loadgen() { put_executable "$LOADGEN" /work/loadgen; }
 
 # runner_start NAME CMD...: CMD detached in the runner pod, its output in /work/logs/NAME.log, its
-# pid in NAME.pid and its exit status in NAME.rc.
+# pid in NAME.pid and its exit status in NAME.rc. The pod is named runner in every run, so a
+# start into a copy the lock no longer gives this run (copy_is_ours) is refused outright.
 runner_start() {
   local name=$1
   shift
+  copy_is_ours "the runner pod" ||
+    die "refusing to start $name in the runner pod of $NS: that pod is another run's now, and the job would load that run's copy"
   # shellcheck disable=SC2016 # expanded by the runner's sh
   kube exec runner -c runner -- sh -c 'name=$1; shift; mkdir -p /work/logs; rm -f "/work/logs/$name.rc"
     ( cd /work || exit 1; "$@" >"/work/logs/$name.log" 2>&1 & child=$!; echo "$child" >"/work/logs/$name.pid"; wait "$child"; echo "$?" >"/work/logs/$name.rc" ) </dev/null >/dev/null 2>&1 &' \
@@ -1416,9 +1467,13 @@ runner_start() {
 }
 
 # runner_stop NAME: the runner job NAME sent SIGTERM, by the pid it recorded, so a job that ends
-# on it (browsertype writes its summary) does. It never fails: the job may have ended already.
-# runner_wait's bound, the disk watcher and typing_stop all end a job this way.
+# on it (browsertype writes its summary) does. The pod is named runner in every run and job names
+# repeat across runs, so it stops nothing and returns 1 once the lock names another run
+# (copy_is_ours); otherwise it never fails, the job having possibly ended already. runner_wait's
+# deadline, the disk watcher and typing_stop all end a job this way, so that one check covers
+# every stop of a runner job.
 runner_stop() {
+  copy_is_ours "the runner job $1" || return 1
   # shellcheck disable=SC2016 # expanded by the runner's sh
   kube exec runner -c runner -- sh -c 'kill -TERM "$(cat "/work/logs/$1.pid")"' sh "$1" >/dev/null 2>&1 || true
 }
@@ -1427,23 +1482,22 @@ runner_stop() {
 # it stops NAME and prints "timeout". Its log is copied to LOG_DIR (default the run's logs/).
 #
 # PID and START are the step shell's pid and its start time (proc_start), which run_in_runner
-# passes and every other caller (seed, typing_stop, replay-prepare) leaves out; without them the
-# wait is what it was. A step's wait runs in a command substitution, a subshell of its own that a
-# SIGKILL of the step shell (an OOM, an interrupted worker turn) does not reach, so an abandoned
-# one polled on and at its deadline TERMed the pid /work/logs/NAME.pid holds in whatever pod is
-# named runner. Step names, job names and pods repeat across runs, so that wait would stop a
-# later run's job of the same name. With PID and START it has the disk watcher's liveness
-# (pg_disk_watch): each poll ends the wait, printing no exit status and stopping nothing, once
-# that process is gone or is another process now, or the run directory is gone; and the lock,
-# which costs an exec, is read only before the stop at the deadline, which a lock that names
-# another run leaves undone. It ends non-zero on either, so the step shell that reads its output
-# (rc=$(runner_wait ...)) ends there under errexit instead of taking the empty output for the
-# job's exit status: a step whose shell was killed has no reader left, and a step whose run the
-# lock no longer names has nothing left to measure.
+# passes and every other caller (seed, seed-refs, seed-finish and typing_stop) leaves out;
+# without them the wait is what it was. A step's wait runs in a command substitution, a subshell
+# of its own that a SIGKILL of the step shell (an OOM, an interrupted worker turn) does not
+# reach, so an abandoned one polled on and at its deadline TERMed the pid /work/logs/NAME.pid
+# holds in whatever pod is named runner. With PID and START each poll ends the wait, printing no
+# exit status and stopping nothing, once step_gone says that shell is gone, which step_gone
+# explains. The stop at the deadline is runner_stop's, so the lock, which costs an exec, is read
+# there and nowhere else in the wait, and a lock that names another run leaves that stop undone
+# whether or not the caller passed a pid. It ends non-zero on either, so the step shell that
+# reads its output (rc=$(runner_wait ...)) ends there under errexit instead of taking the empty
+# output for the job's exit status: a step whose shell was killed has no reader left, and a step
+# whose run the lock no longer names has nothing left to measure.
 runner_wait() {
   local name=$1 deadline=$((EPOCHSECONDS + $2)) log_dir=${3:-$RUN_DIR/logs} pid=${4:-} start=${5:-} rc
   while :; do
-    if [ -n "$pid" ] && { [ "$(proc_start "$pid")" != "$start" ] || [ ! -d "$RUN_DIR" ]; }; then
+    if [ -n "$pid" ] && step_gone "$pid" "$start"; then
       note "job $name: the step that started this wait is gone; the wait ends, stopping no job"
       return 1
     fi
@@ -1451,11 +1505,10 @@ runner_wait() {
       break
     fi
     if ((EPOCHSECONDS >= deadline)); then
-      if [ -n "$pid" ] && lock_names_other_run; then
-        note "job $name: the lock no longer names run $RUN; the wait ends, stopping no job"
+      runner_stop "$name" || {
+        note "job $name: the wait ends at its deadline, stopping no job and giving no exit status"
         return 1
-      fi
-      runner_stop "$name"
+      }
       rc=timeout
       break
     fi
@@ -2121,14 +2174,24 @@ typing_summary() {
 # runner, and one line naming the sums. A peer error or a non-zero exit is said, never a step
 # failure. Called right after the stored-order command, and again after the check (which a run
 # whose state.json records no checker does not run), so it never fails.
+#
+# It stops, waits for and removes nothing once the lock names another run (copy_is_ours): the job
+# typing-NAME and the token under TYPING_DIR are in the pod named runner, which is that run's
+# now. The step shell's EXIT trap comes through here (step_at_exit, typing_stop_at_exit), and a
+# step ends on that path exactly when its wait on the runner job found the lock renamed, so
+# without this check the end of a step would TERM another run's typing and delete its token. The
+# removal, which the wait above it leaves up to 120 s of room, asks again.
 typing_stop() {
   local name=$1 dir=$2 job=typing-$1 rc
   { [ -n "$TYPING" ] && [ ! -f "$dir/browsertype.json" ]; } || return 0
-  runner_stop "$job"
+  copy_is_ours "the browser typing job $job and the agent token in the runner" || return 0
+  runner_stop "$job" || return 0
   rc=$(runner_wait "$job" 120 "$dir") || rc=timeout
   if [ -f "$dir/$job.log" ]; then mv -f -- "$dir/$job.log" "$dir/browsertype.txt"; else : >"$dir/browsertype.txt"; fi
-  kube exec runner -c runner -- rm -f "$TYPING_DIR/token" "$TYPING_DIR/$name.docs" >/dev/null 2>&1 ||
-    note "step $name: removing the agent token from the runner failed"
+  if copy_is_ours "the agent token $TYPING_DIR/token in the runner"; then
+    kube exec runner -c runner -- rm -f "$TYPING_DIR/token" "$TYPING_DIR/$name.docs" >/dev/null 2>&1 ||
+      note "step $name: removing the agent token from the runner failed"
+  fi
   [[ $rc =~ ^[0-9]+$ ]] || rc=null
   if ! typing_summary "$dir/browsertype.txt" "$rc" >"$dir/browsertype.json.tmp"; then
     rm -f -- "$dir/browsertype.json.tmp"
@@ -2300,20 +2363,24 @@ run_step() {
   note "step $name done: $dir"
 }
 
-# runner_step_remove NAME [keep-heap]: the step's directory and its copy-meta file removed from
-# the runner, so the runner's disk holds only the steps still to come; with keep-heap, every file
-# of the step but heap.txt, which stayed because its own stream failed.
+# runner_step_remove NAME [KEEP]: the step's directory and its copy-meta file removed from the
+# runner, so the runner's disk holds only the steps still to come; with KEEP, every file of the
+# step but that one, which stays there (heap.txt, when its own stream failed). The pod is named
+# runner in every run, so a copy the lock no longer gives this run (copy_is_ours) keeps
+# everything. It returns 1 when nothing was removed, so its caller records where the files are
+# instead of claiming they are gone.
 runner_step_remove() {
-  local name=$1
-  if [ "${2:-}" = keep-heap ]; then
+  local name=$1 keep=${2:-} src="/work/steps/$1" rc=0
+  copy_is_ours "$src in the runner" || return 1
+  if [ -n "$keep" ]; then
     # shellcheck disable=SC2016 # expanded by the runner's sh
     kube exec runner -c runner -- sh -c 'rm -f "/work/meta/$1.json" &&
-      find "/work/steps/$1" -mindepth 1 -maxdepth 1 ! -name heap.txt -exec rm -rf -- {} +' sh "$name" ||
-      note "step $name: removing the step's files from the runner, heap.txt apart, failed"
-    return 0
+      find "/work/steps/$1" -mindepth 1 -maxdepth 1 ! -name "$2" -exec rm -rf -- {} +' sh "$name" "$keep" || rc=1
+  else
+    kube exec runner -c runner -- rm -rf "$src" "/work/meta/$name.json" || rc=1
   fi
-  kube exec runner -c runner -- rm -rf "/work/steps/$name" "/work/meta/$name.json" ||
-    note "step $name: removing /work/steps/$name from the runner failed"
+  ((rc == 0)) || note "step $name: removing the step's files from the runner failed; they stay at $src"
+  return "$rc"
 }
 
 # runner_heap_note NAME DIR TEXT: TEXT as a note of step NAME, and the same words in
@@ -2337,14 +2404,16 @@ runner_heap_note() {
 # none there), the step's directory and its copy-meta file go; with the existence check failed,
 # nothing goes, since the heap.txt that may be there would go with it; with both tries of an
 # existing heap.txt failed, everything but that heap.txt goes. Each of those two leaves the step a
-# complete one that lacks its heap profile, in a note and in DIR/heap-missing.txt.
+# complete one that lacks its heap profile, in a note and in DIR/heap-missing.txt. That marker is
+# written after the removal it describes and from its result, never before it: it is collected
+# with the step, so a removal that failed must read as files that stayed in the runner.
 #
 # The first stream is extracted into a scratch directory beside DIR and its files are moved into
 # DIR only once the stream ended cleanly, so a stream cut mid-file never leaves a truncated
 # summary.json in DIR for loadgen curves and tables to read; heap.txt lands the same way, through
 # heap.txt.part.
 runner_copy_back() {
-  local name=$1 dir=$2 src="/work/steps/$1" try scratch copied has
+  local name=$1 dir=$2 src="/work/steps/$1" try scratch copied has got kept
   for try in 1 2; do
     scratch=$(mktemp -d "$dir/.copy-back.XXXXXX") || return 1
     copied=no
@@ -2363,20 +2432,27 @@ runner_copy_back() {
     return 0
   }
   if [ "$has" = yes ]; then
+    got=no
     for try in 1 2; do
       if kube exec runner -c runner -- gzip -1 -c "$src/heap.txt" | gzip -d >"$dir/heap.txt.part" &&
         mv -- "$dir/heap.txt.part" "$dir/heap.txt"; then
-        runner_step_remove "$name"
-        return 0
+        got=yes
+        break
       fi
       rm -f -- "$dir/heap.txt.part"
       note "step $name: copying $src/heap.txt back failed (try $try of 2)"
     done
-    runner_heap_note "$name" "$dir" "heap.txt (the step-end heap profile in text) was not copied back; it stays in the runner at $src/heap.txt; every other file of the step is here and was removed from the runner, and codepaths shows - for the MemStats rows."
-    runner_step_remove "$name" keep-heap
-    return 0
+    if [ "$got" = no ]; then
+      kept="heap.txt (the step-end heap profile in text) was not copied back; it stays in the runner at $src/heap.txt; every other file of the step is here"
+      if runner_step_remove "$name" heap.txt; then
+        runner_heap_note "$name" "$dir" "$kept and was removed from the runner, and codepaths shows - for the MemStats rows."
+      else
+        runner_heap_note "$name" "$dir" "$kept; removing them from the runner failed, so they stay at $src, and codepaths shows - for the MemStats rows."
+      fi
+      return 0
+    fi
   fi
-  runner_step_remove "$name"
+  runner_step_remove "$name" || true
   return 0
 }
 
@@ -2686,11 +2762,17 @@ replay_prepare_run() {
   local log=$RUN_DIR/logs/replay-restore.log
   note "pg_restore --no-owner --no-privileges -j 8 of the seed dump into database dispatch; log $log"
   if ! kube_for 7200 exec postgres-0 -c postgres -- pg_restore --no-owner --no-privileges -j 8 -U dispatch -d dispatch "$REPLAY_POD_DUMP" >"$log" 2>&1; then
-    kube exec postgres-0 -c postgres -- rm -f "$REPLAY_POD_DUMP" >/dev/null 2>&1 || true
+    if copy_is_ours "the dump $REPLAY_POD_DUMP in postgres-0"; then
+      kube exec postgres-0 -c postgres -- rm -f "$REPLAY_POD_DUMP" >/dev/null 2>&1 || true
+    fi
     tail -n 20 -- "$log" >&2 || true
     die "pg_restore of the replay seed failed; see $log"
   fi
-  kube exec postgres-0 -c postgres -- rm -f "$REPLAY_POD_DUMP" || note "removing $REPLAY_POD_DUMP from the Postgres pod failed"
+  # The dump is a path in the Postgres pod, which is postgres-0 in every run, so it goes only
+  # while the lock still names this run.
+  if copy_is_ours "the dump $REPLAY_POD_DUMP in postgres-0"; then
+    kube exec postgres-0 -c postgres -- rm -f "$REPLAY_POD_DUMP" || note "removing $REPLAY_POD_DUMP from the Postgres pod failed"
+  fi
   local before want_before
   before=$(psql_at dispatch 'select max(version) from schema_migrations') || die "reading the restored seed's migration failed"
   want_before=$(jq -r .seed.migration "$manifest")
@@ -2813,6 +2895,8 @@ run_replay() {
       migration: $p[0].migration_after, prepared: $p[0], reset_at: $r[0].ended}' >"$dir/last-reset.json"
   jq -n --slurpfile p "$rec" '{dispatch_commit: $p[0].dispatch_commit, dispatch_image: $p[0].dispatch_image,
     newest_migration: $p[0].schema_version}' >"$dir/envoy-dispatch.json"
+  copy_is_ours "the runner's /work/bundle and /work/root" ||
+    die "replay $name: refusing to reset the runner's directories: that pod is another run's now"
   kube exec runner -c runner -- sh -c 'rm -rf /work/bundle /work/root && mkdir -p /work/meta /work/steps /work/root/replay /work/root/bin' ||
     die "preparing the runner's directories failed"
   tar -C "$RUN_DIR/replay" -cf - bundle | kube_for 900 exec -i runner -c runner -- tar -C /work -xf - ||
