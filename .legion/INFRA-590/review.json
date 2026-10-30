@@ -2,25 +2,25 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-590",
-  "completed": "2026-10-29T18:55:00Z",
-  "round": 10,
-  "reviewedCodeHead": "24d206a67ed534782b501e9a3f399b5b8f640d4f",
-  "reviewerProseCommit": "2887a59f03d56446c8eb1bc0c57ecbf128d32484 (comments and docs only: the pr2370 solutions note says RequestCoreTo's MsgId is its caller's choice, the publish-route test's comment says the stream keeps one copy and no durable delivers it, the changelog fragment names the role lane's forward)",
+  "completed": "2026-10-30T00:53:00Z",
+  "round": 11,
+  "reviewedCodeHead": "bb6c22f975342594a32f777ac87c66b8059aa32d",
   "decision": "approved",
   "critical": 0,
   "important": 0,
   "minor": 0,
-  "fingerprint": "de32e06739c472425a57a76c4e4c3cead84d3c98e3415e173d3240f65909c4c3 at c7795484 -> 7949491123eb0c4061516b90f237e74f628343f5c3e3e25c94bd0aadd87081e5 at 24d206a6: changed (forward merge of main's #2370 and #2505), so a new round.",
-  "ci": "Approval waits for the required set and envoy-go, envoy-go-race, dispatch, dispatch-memory and dispatch-multiprocess green at 2887a59f; main's known red close-withdraws-asks.e2e.ts:126.",
-  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at 24d206a6 over merge 5ea3ce58 and test commit 24d206a6; both approve with no finding.",
+  "fingerprint": "61f47ca7d911a54dc8baac0fba32f313509e24cb97a0289f721eed213e0000bf at 5d0cf73b -> bd52726b41f4deff09685e8df550ca4f759359005343218ebbf3c109e8bff345 at bb6c22f9: changed (forward merge of main dfd128f14 with #2377, migrations renumbered, the tester's test), so a new round.",
+  "ci": "At code head bb6c22f9 (compare to f5a4898b handoffs only): required lint, typecheck, test, pr-title success; envoy-go, dispatch, dispatch-memory, dispatch-multiprocess success. envoy-go-race failed on internal/dispatch/api TestAnUploadHoldsNoIssueLockWhileTheStoreWrites (files_test.go:306, a nowait lock on the issue row found it held, 55P03): this PR changes neither the upload path nor files_test.go (api changes are a test helper and a comment), the same package passed in envoy-go, and main's race job fails too (run 40955932013, docs package); recorded as main's.",
+  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at bb6c22f9; both approve with no finding.",
   "keyFindings": [],
   "notes": [
-    "The publish route's topic forward MsgId (confirmed.go:453) has no test: replacing it with \"\" leaves PublishRoute/Durable/Topic/Confirm tests green; main's behaviour is kept, and stored forward copies are delivered to no one."
+    "Not fixed, at the architect's instruction to push nothing during the run: the second subtest of TestCoreRoleDeliverySkipsAHolderThatStoppedHeartbeating (delivery_role_stale_holder_test.go:62) names 'a holder that stopped heartbeating before the claim went stale' where it means one that last heartbeated longer ago than session.ClaimStaleAfter. Wording only.",
+    "The publish route's later attempts (confirmed.go:351) use the same laneHolderFresh gate and have no stale-holder test."
   ],
   "verifiedCorrect": [
-    "Main's #2370 resolver over roles.ResolveHolder keeps every typed failure, log line, metric and exception; roles.Fresh is main's freshness rule; main's tests change only in signatures.",
-    "The publish route passes the MsgId main's RequestCoreTo stamped itself; the role lane keeps this PR's conditional rule.",
-    "bus: one ForwardMsgID, #2505's c.stop() guards kept, async.go byte for byte the branch's.",
-    "TestPublishRouteStoresOneCopyOfARoleMessageItForwardsTwice fails with the route's MsgId dropped."
+    "#2377 keeps writing the session row on every heartbeat (PutWithin via mergeForClaim), so roles.Fresh reads a current UpdatedAt; the outbox reads the session bucket directly; ReleaseExpiredRoleClaim and the rewatch hooks are unchanged.",
+    "Migrations 0141_drop_broadcast_idempotency_keys (main), 0142_duty_holds, 0143_outbox_claim with census files; no stale reference; connections 89; ci-filters green.",
+    "AGENTS.md and cmd/dispatch/README.md conflicts keep both sides word for word.",
+    "TestCoreRoleDeliverySkipsAHolderThatStoppedHeartbeating fails with laneHolderFresh forced true and checks the claim release."
   ]
 }
