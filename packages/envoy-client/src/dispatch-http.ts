@@ -49,6 +49,7 @@ import type {
   RelatedCheckInput,
   ResolveAskInput,
   SearchResponse,
+  SessionAnswersResponse,
   Suggestions,
   UpdateIssueInput,
   Version,
@@ -900,6 +901,32 @@ export class DispatchClient {
     return this.#json("GET", ["api", "v1", "asks", "open"], undefined, { project });
   }
 
+  /** `GET /api/v1/agents/{session_id}/answers`: what people wrote that Dispatch delivered to the
+   *  session since `since` (72 hours ago when unset), newest first. With `maxChars` the server
+   *  stops after the item whose text takes the running sum of text lengths past it, so the body
+   *  stays about that size plus one item. `signal` aborts the request beside the client's own
+   *  deadline, so a caller with a shorter deadline of its own does not leave it running. A server
+   *  older than the route answers 404. */
+  async sessionAnswers(
+    sessionID: string,
+    options: {
+      readonly since?: string;
+      readonly maxChars?: number;
+      readonly signal?: AbortSignal;
+    } = {}
+  ): Promise<SessionAnswersResponse> {
+    return this.#json(
+      "GET",
+      ["api", "v1", "agents", sessionID, "answers"],
+      undefined,
+      {
+        ...(options.since === undefined ? {} : { since: options.since }),
+        ...(options.maxChars === undefined ? {} : { max_chars: options.maxChars }),
+      },
+      options.signal
+    );
+  }
+
   /** `GET /api/v1/agents`: the Envoy listener's live sessions, as of Dispatch's copy of its list
    *  (at most 5 s old), for naming a session by the title it is running under rather than the
    *  one it stamped on an old write. */
@@ -1261,7 +1288,14 @@ export class DispatchClient {
    * the key this call would mint for itself. It must match `IDEMPOTENCY_KEY_PATTERN`.
    */
   async docEdit(id: string, input: EditArtifactInput, key?: string): Promise<EditArtifactResponse> {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "edits"], input, undefined, key);
+    return this.#json(
+      "POST",
+      ["api", "v1", "artifacts", id, "edits"],
+      input,
+      undefined,
+      undefined,
+      key
+    );
   }
 
   async nameArtifactVersion(id: string, input: CreateVersionInput): Promise<Version> {
@@ -1342,17 +1376,20 @@ export class DispatchClient {
     path: readonly string[],
     body?: unknown,
     query?: object,
+    signal?: AbortSignal,
     key?: string
   ): Promise<T> {
-    return (await this.#jsonAnswer<T>(method, path, body, query, key)).payload;
+    return (await this.#jsonAnswer<T>(method, path, body, query, signal, key)).payload;
   }
 
-  /** `#json` with the status Dispatch answered, for a route whose status says what it did. */
+  /** `#json` with the status Dispatch answered, for a route whose status says what it did.
+   *  `signal` aborts a read beside the client's own signal (`#send`). */
   async #jsonAnswer<T>(
     method: string,
     path: readonly string[],
     body?: unknown,
     query?: object,
+    signal?: AbortSignal,
     key?: string
   ): Promise<{ readonly status: number; readonly payload: T }> {
     const url = this.#url(path, query);
@@ -1361,6 +1398,7 @@ export class DispatchClient {
       url,
       body === undefined ? undefined : { content: JSON.stringify(body), type: "application/json" },
       undefined,
+      signal,
       key
     );
     return { status: response.status, payload: await this.#response<T>(method, url, response) };
@@ -1368,7 +1406,7 @@ export class DispatchClient {
 
   /** An upload to an owner's artifact route: inline content as JSON, a file as multipart. */
   async #upload<T>(path: readonly string[], input: CreateArtifactInput, key?: string): Promise<T> {
-    if ("content" in input) return this.#json("POST", path, input, undefined, key);
+    if ("content" in input) return this.#json("POST", path, input, undefined, undefined, key);
     const form = new FormData();
     form.set("name", input.name);
     if (input.summary !== undefined) form.set("summary", input.summary);
@@ -1392,15 +1430,16 @@ export class DispatchClient {
     const encoded = new Response(form);
     const type = encoded.headers.get("Content-Type") ?? "multipart/form-data";
     const content = new Uint8Array(await encoded.arrayBuffer());
-    const response = await this.#send(method, url, { content, type }, undefined, key);
+    const response = await this.#send(method, url, { content, type }, undefined, undefined, key);
     return this.#response<T>(method, url, response);
   }
 
   /**
    * The one request function: every call the client makes goes through here. A read, a PUT or a
-   * DELETE goes once. A write (POST or PATCH) carries an `Idempotency-Key`: the caller's own
-   * `callerKey`, where it has one intent across calls and processes, else one minted here for this
-   * call alone, so all its attempts are one intent to Dispatch, which runs it once and answers a
+   * DELETE goes once, and `signal` aborts it beside the client's own signal. A write (POST or
+   * PATCH) carries an `Idempotency-Key`: the caller's own `callerKey`, where it has one intent
+   * across calls and processes, else one minted here for this call alone, so all its attempts are
+   * one intent to Dispatch, which runs it once and answers a
    * repeat with the answer it stored, while two calls are two writes. Each attempt sends the same
    * encoded body. While an attempt gets no definitive answer (`writeAnswer`, a transport failure,
    * or `writeRetry.silenceMs` without progress, `#attempt`) the write asks again under its key,
@@ -1423,6 +1462,7 @@ export class DispatchClient {
     url: string,
     body?: EncodedBody,
     accept = "application/json",
+    signal?: AbortSignal,
     callerKey?: string
   ): Promise<Response> {
     const headers: Record<string, string> = {
@@ -1434,7 +1474,7 @@ export class DispatchClient {
       return this.fetchImpl(url, {
         method,
         headers,
-        signal: this.#signal,
+        signal: signal === undefined ? this.#signal : AbortSignal.any([this.#signal, signal]),
         ...(body === undefined ? {} : { body: body.content }),
       });
     }

@@ -18,7 +18,10 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import { selfOwner, setRecordMode } from "@legion/envoy-client/askgate-marker";
-import { sessionDirectory, sessionStateRoot } from "@legion/envoy-client/dispatch-session-state";
+import {
+  sessionDirectory,
+  sessionStateRoot,
+} from "@legion/envoy-client/dispatch-session-directory";
 import type { SessionConfigFile } from "@legion/envoy-client/session-settings";
 import type { PiApi, PiEventContract } from "@legion/pi-shared/pi-types";
 import type { ApiKeyResolver, AssistantMessage, Model } from "@oh-my-pi/pi-ai";

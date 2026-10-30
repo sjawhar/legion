@@ -17,7 +17,7 @@ import {
 import { newAsks } from "@legion/envoy-client/askgate-new-asks";
 import { runDispatchCli } from "@legion/envoy-client/dispatch-cli";
 import { DispatchClient, DispatchServiceError } from "@legion/envoy-client/dispatch-http";
-import { sessionDirectory } from "@legion/envoy-client/dispatch-session-state";
+import { sessionDirectory } from "@legion/envoy-client/dispatch-session-directory";
 import type { DispatchSession } from "../../src/dispatch-session";
 import * as core from "./askgate-core";
 import {

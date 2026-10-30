@@ -9,26 +9,25 @@ import {
   readdirSync,
   readFileSync,
   readSync,
-  renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import { askgateState, sweepStores } from "./askgate-marker";
 import { adviceMemory } from "./dispatch-execute";
 import { shownPictures } from "./dispatch-picture-tools";
 import type { PictureType, ToolImage } from "./dispatch-pictures";
+import { writeAtomically } from "./dispatch-session-directory";
 import { hasErrnoCode, messageFor } from "./errors";
 
 /**
- * The `dispatch` CLI's state, one directory per host session under
- * `<root>/sessions/<session id>`: what a long-lived host kept in memory across calls (the triage
- * lines and pictures already shown, the asks whose follow notice was printed) in `state.json`, a
- * ledger of every call's result in `results.jsonl`, and the pictures and long results the CLI
- * wrote for the agent to open. The state names issue keys and picture addresses, so every file
- * is the owner's alone.
+ * The `dispatch` CLI's state, one directory per host session under `<root>/sessions/<session id>`
+ * (`dispatch-session-directory.ts` names it): what a long-lived host kept in memory across calls
+ * (the triage lines and pictures already shown, the asks whose follow notice was printed) in
+ * `state.json`, a ledger of every call's result in `results.jsonl`, and the pictures and long
+ * results the CLI wrote for the agent to open. The state names issue keys and picture addresses,
+ * so every file is the owner's alone.
  *
  * Two calls racing in one session can lose a memory entry; that costs one repeated line.
  */
@@ -59,7 +58,6 @@ interface SessionMemory {
   readonly follows: readonly string[];
 }
 
-const SESSION_ID = /^[A-Za-z0-9._-]{1,128}$/;
 const PRIVATE_DIR = 0o700;
 const PRIVATE_FILE = 0o600;
 const IDLE_SESSION_MS = 14 * 86_400_000;
@@ -73,30 +71,6 @@ const PICTURE_EXTENSIONS: Record<PictureType, string> = {
   "image/webp": "webp",
 };
 
-/** `DISPATCH_STATE_DIR`, else `<XDG_STATE_HOME or ~/.local/state>/dispatch`. Empty counts as unset. */
-export function sessionStateRoot(env: Readonly<Record<string, string | undefined>>): string {
-  // Bracket access, not a dot: claude-envoy type-checks this source under
-  // noPropertyAccessFromIndexSignature, which refuses a dot on an index signature.
-  // biome-ignore-start lint/complexity/useLiteralKeys: claude-envoy's tsconfig refuses dot access
-  const stateDir = env["DISPATCH_STATE_DIR"];
-  if (stateDir) return stateDir;
-  return join(env["XDG_STATE_HOME"] || join(homedir(), ".local", "state"), "dispatch");
-  // biome-ignore-end lint/complexity/useLiteralKeys: see above
-}
-
-/** `<root>/sessions/<id>`; an id that is not one plain path segment is refused. */
-export function sessionDirectory(
-  env: Readonly<Record<string, string | undefined>>,
-  sessionId: string
-): string {
-  if (!SESSION_ID.test(sessionId) || sessionId === "." || sessionId === "..") {
-    throw new Error(
-      `dispatch: the session id ${JSON.stringify(sessionId)} is not 1-128 letters, digits, ".", "_" or "-"`
-    );
-  }
-  return join(sessionStateRoot(env), "sessions", sessionId);
-}
-
 function ensureDirectory(dir: string): void {
   mkdirSync(dir, { recursive: true, mode: PRIVATE_DIR });
 }
@@ -109,13 +83,6 @@ function readIfPresent(path: string): string | undefined {
     if (hasErrnoCode(error, "ENOENT")) return undefined;
     throw error;
   }
-}
-
-/** Writes `text` to `path` through a temporary file and `rename`, so a reader sees all or none. */
-function writeAtomically(path: string, text: string): void {
-  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync(temporary, text, { mode: PRIVATE_FILE });
-  renameSync(temporary, path);
 }
 
 function stringList(value: unknown): string[] {

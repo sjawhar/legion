@@ -16,7 +16,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { cliRefusals } from "@legion/envoy-client/dispatch-cli";
-import { sessionDirectory } from "@legion/envoy-client/dispatch-session-state";
+import { sessionDirectory } from "@legion/envoy-client/dispatch-session-directory";
 import { z } from "zod";
 // The gate's own names for its rules and the line its refusal opens with, read from the module
 // that writes them, so this rig scores what AskGate actually says. The rigs are not shipped
