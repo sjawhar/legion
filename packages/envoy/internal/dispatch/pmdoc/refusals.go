@@ -35,21 +35,22 @@ func refuseBlocks(root ast.Node, source []byte, firstLine int) error {
 
 // blockRefusal is why node cannot be stored: the browser editor's parser reads it differently
 // from goldmark or refuses it, or the Proof schema holds nothing like it. A typed block that passes
-// keeps its attributes' values for conversion (typedDirective.values). htmlFlow is where the
-// document's paragraph lines that parser reads as a block of HTML start (htmlFlowLines).
-func blockRefusal(node ast.Node, source []byte, firstLine int, htmlFlow map[int]struct{}) error {
+// keeps its attributes' values for conversion (typedDirective.values). htmlFlow is which kind of
+// block of HTML that parser opens on each of the document's paragraph lines it reads as opening
+// one, by where that line starts (htmlFlowLines).
+func blockRefusal(node ast.Node, source []byte, firstLine int, htmlFlow map[int]int) error {
 	refuse := func(reason string) error { return fmt.Errorf("%w: %s", ErrSchema, reason) }
 	switch current := node.(type) {
 	case *ast.Paragraph, *ast.TextBlock:
 		if reason, ok := paragraphDirectiveReason(current.Lines(), source, firstLine); ok {
 			return refuse(reason)
 		}
-		if err := htmlFlowRefusal(current, current.Lines(), htmlFlow, source, firstLine); err != nil {
+		if err := htmlFlowRefusal(current, htmlFlow, source, firstLine); err != nil {
 			return err
 		}
 	case *ast.Heading:
 		// A setext heading holds the lines of the paragraph its underline ended.
-		if err := htmlFlowRefusal(current, current.Lines(), htmlFlow, source, firstLine); err != nil {
+		if err := htmlFlowRefusal(current, htmlFlow, source, firstLine); err != nil {
 			return err
 		}
 		if _, underlined := current.Attribute(underlinedTextAttr); underlined {

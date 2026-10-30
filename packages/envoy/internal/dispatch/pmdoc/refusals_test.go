@@ -94,8 +94,11 @@ func TestParseRefusesACodeLanguageTheBrowserDecodes(t *testing.T) {
 // HTML, and that parser drops the one it reads with the container around it, so nothing the
 // document could be stored as reads back as written. The two grammars part where micromark takes
 // a tab for the whitespace goldmark's patterns spell as a space - in the line's indentation,
-// inside the tag and after it - and over a declaration opening with a lower-case letter and a
-// closing tag of a raw text name, which goldmark's patterns match nowhere.
+// inside the tag and after it - and over a closing tag of a raw text name, which goldmark's
+// patterns match nowhere. A declaration opening with a lower-case letter parted them until
+// PR #2518, which opens that block in this package's reader too (declarationBlockParser), so such
+// a line belongs to no paragraph now and is refused as goldmark's own block of HTML; only a tab
+// in its indentation, which that parser alone reads as a block, still parts the two.
 func TestParseRefusesALineTheBrowserReadsAsBlockHTML(t *testing.T) {
 	for _, test := range []struct{ name, markdown, line string }{
 		{"a closing tag a tab ends, opening a quoted paragraph", "> </a\t>\n> text\n", `"> </a\t>"`},
@@ -103,7 +106,7 @@ func TestParseRefusesALineTheBrowserReadsAsBlockHTML(t *testing.T) {
 		{"a tab indenting a comment under a paragraph", "> A quote\n> \t<!-- c -->\n", `"> \t<!-- c -->"`},
 		{"a tab before a tag's own closing slash", "> <br\t/>\n> text\n", `"> <br\t/>"`},
 		{"a tab after a tag opening a quoted paragraph", "> <b>\t\n> text\n", `"> <b>\t"`},
-		{"a declaration opening with a lower-case letter", "> <!x>\n> text\n", `"> <!x>"`},
+		{"a tab indenting a declaration opening with a lower-case letter", "> A quote\n> \t<!x>\n", `"> \t<!x>"`},
 		{"a closing tag of a raw text name", "> </script>\n> text\n", `"> </script>"`},
 		{"such a line in a tight item's text block", "- </a\t>\n  text\n", `"- </a\t>"`},
 		{"such a line in the paragraph a setext underline ends", "> </a\t>\n> text\n> ===\n", `"> </a\t>"`},
@@ -189,19 +192,14 @@ func TestParseInlineReadsHTMLADocumentIsRefusedFor(t *testing.T) {
 	}
 }
 
-// browserBlockHTML is the part of htmlFlowRefusal's reason (html_flow.go) that says why the line it
-// names cannot be stored; the reason names the line itself, which differs from document to
-// document.
-const browserBlockHTML = "opens with HTML the browser editor's parser reads as a block of HTML"
-
 // The corpus-errors documents measured for PR #2507, each refused by every reader of caller
 // markdown for the reason named here, so that a reader lifting a refusal for some other reason
 // would still be caught. Two reasons stand behind them. A footnote definition inside a typed block
 // whose delimiter-like line and narrower setext underline the browser editor's parser reads as a
 // table and a heading holds a block other than a paragraph there (typedDefinitionHoldingBlock),
-// which main refused already and this change leaves refused. A line whose tab, lower-case
-// declaration or closing tag of a raw text name opens a block of HTML for that parser, where
-// goldmark's own patterns read the text of a paragraph, is refused by name (browserBlockHTML):
+// which the reader before PR #2507 refused already and this change leaves refused. A line whose
+// tab or closing tag of a raw text name opens a block of HTML for that parser, where goldmark's
+// own patterns read the text of a paragraph, is refused by name (browserBlockHTML, html_flow.go):
 // the Proof schema holds no block of HTML, and that parser drops the one it reads together with
 // the container around it, so no tree the document could be stored as reads back.
 func TestCorpusErrorsOfDefinitionsAndBrowserBlockHTMLAreRefused(t *testing.T) {
@@ -220,7 +218,6 @@ func TestCorpusErrorsOfDefinitionsAndBrowserBlockHTMLAreRefused(t *testing.T) {
 		"item-text-block-opening-with-a-closing-tag-a-tab-ends":                           browserBlockHTML,
 		"quoted-paragraph-opening-with-a-closing-raw-text-tag":                            browserBlockHTML,
 		"quoted-paragraph-opening-with-a-closing-tag-a-tab-ends":                          browserBlockHTML,
-		"quoted-paragraph-opening-with-a-lower-case-declaration":                          browserBlockHTML,
 		"quoted-paragraph-opening-with-a-tab-before-a-tags-slash":                         browserBlockHTML,
 		"quoted-paragraph-opening-with-a-tag-a-tab-follows":                               browserBlockHTML,
 		"quoted-paragraph-then-a-tab-indented-block-tag":                                  browserBlockHTML,

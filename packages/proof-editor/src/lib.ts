@@ -58,11 +58,8 @@ import { proofMarkPlugins } from 'proof-sdk-upstream/src/editor/schema/proof-mar
 import { codeBlockExtPlugins } from 'proof-sdk-upstream/src/editor/schema/code-block-ext';
 import { frontmatterSchema } from 'proof-sdk-upstream/src/editor/schema/frontmatter';
 import { libraryRemarkFrontmatterPlugin } from './lib-remark-frontmatter-plugin';
-import {
-  libraryRemarkDirectivePlugin,
-  libraryRemarkHtmlBlockPlugin,
-  libraryRemarkHtmlFlowPlugin
-} from './lib-remark-directive-plugin';
+import { libraryRemarkDirectivePlugin } from './lib-remark-directive-plugin';
+import { libraryRemarkHtmlBlockPlugin, libraryRemarkHtmlFlowPlugin } from './html-blocks';
 import { libraryRemarkNestedLinksPlugin } from './nested-links';
 import { liveTypedBlocksRemarkPlugin } from './read-only-directives';
 import { brokenAskInputGuards, keepUnselectedAskBlocks, relaxAskContentCheck } from './ask-content';

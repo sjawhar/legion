@@ -7,25 +7,29 @@ import (
 
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/parser"
-	gmtext "github.com/yuin/goldmark/text"
-	"github.com/yuin/goldmark/util"
 )
 
-// htmlFlowLinesKey holds, while a document parses, where each line starts that goldmark gave to a
-// paragraph and the browser editor's parser reads as opening a block of HTML (htmlFlowKind), and
-// htmlFlowLinesAttr holds the same on the parsed document root afterwards (parseSource). Both
-// parsers read the seven kinds of block CommonMark names, but that parser's grammar is micromark's
-// own tokenizer where goldmark's is a handful of patterns (parser/html_block.go), and the two
-// disagree at the edges: micromark takes a tab where those patterns take only a space, in the
-// line's indentation, between a tag's parts and after the tag, and it reads a declaration opening
-// with a lower-case letter, and a closing tag of a raw text name, as a block as well. So
-// `> </a\t>` and `> a\n> \t<div>` open a block of HTML in the browser and are the text of a
-// paragraph to goldmark. The Proof schema holds no block of HTML, and the browser editor drops the
-// block it reads together with the container around it, so such a document cannot read back:
-// blockRefusal refuses the paragraph, text block or setext heading holding such a line
-// (htmlFlowRefusal). Where goldmark's own patterns open a block of HTML it refuses that block
-// already (ErrBlockHTML) and the line belongs to no paragraph, so nothing is recorded for it;
-// the lines recorded here are the ones those patterns miss.
+// htmlFlowLinesKey holds, while a document parses, which kind of block of HTML the browser
+// editor's parser opens on each line goldmark gave to a paragraph and that parser reads as opening
+// one (htmlFlowKind), by where the line starts, and htmlFlowLinesAttr holds the same on the parsed
+// document root afterwards (parseSource). Both parsers read the seven kinds of block CommonMark
+// names, but that parser's grammar is micromark's own tokenizer where goldmark's is a handful of
+// patterns (parser/html_block.go), and the two disagree at the edges: micromark takes a tab where
+// those patterns take only a space, in the line's indentation, between a tag's parts and after the
+// tag, and it reads a closing tag of a raw text name as a block as well. So `> </a\t>` and
+// `> a\n> \t<div>` open a block of HTML in the browser and are the text of a paragraph to
+// goldmark. The Proof schema holds no block of HTML, and the browser editor drops the block it
+// reads together with the container around it, so such a document cannot read back: blockRefusal
+// refuses the paragraph, text block or setext heading holding such a line (htmlFlowRefusal).
+// Where goldmark's own patterns open a block of HTML it refuses that block already (ErrBlockHTML)
+// and the line belongs to no paragraph, so nothing is recorded for it; the lines recorded here are
+// the ones those patterns miss.
+//
+// A declaration opening with a lower-case letter (`<!x>`) was one of those lines until PR #2518,
+// which has this package's reader open that block itself wherever micromark does
+// (declarationBlockParser, opensDeclaration): goldmark's tree holds a block of HTML there now, so
+// the line belongs to no paragraph and the two parsers no longer disagree about it, except where
+// a tab stands in its indentation, which that parser alone still reads as a block.
 var (
 	htmlFlowLinesKey  = parser.NewContextKey()
 	htmlFlowLinesAttr = []byte("pmdoc-html-flow-lines")
@@ -42,23 +46,23 @@ func recordHTMLFlowLine(kind int, continued bool, start int, pc parser.Context) 
 	if kind == 0 || kind == 7 && continued {
 		return
 	}
-	recorded, _ := pc.Get(htmlFlowLinesKey).(map[int]struct{})
+	recorded, _ := pc.Get(htmlFlowLinesKey).(map[int]int)
 	if recorded == nil {
-		recorded = make(map[int]struct{})
+		recorded = make(map[int]int)
 		pc.Set(htmlFlowLinesKey, recorded)
 	}
-	recorded[start] = struct{}{}
+	recorded[start] = kind
 }
 
-// htmlFlowLines is where each paragraph line the browser editor's parser reads as opening a block
-// of HTML starts, recorded on the document node stands in (htmlFlowLinesAttr), or nil where the
-// document holds none.
-func htmlFlowLines(node ast.Node) map[int]struct{} {
+// htmlFlowLines is which kind of block of HTML the browser editor's parser opens on each paragraph
+// line it reads as opening one, by where that line starts, recorded on the document node stands in
+// (htmlFlowLinesAttr), or nil where the document holds none.
+func htmlFlowLines(node ast.Node) map[int]int {
 	for node.Parent() != nil {
 		node = node.Parent()
 	}
 	recorded, _ := node.Attribute(htmlFlowLinesAttr)
-	lines, _ := recorded.(map[int]struct{})
+	lines, _ := recorded.(map[int]int)
 	return lines
 }
 
@@ -72,35 +76,46 @@ func htmlFlowLines(node ast.Node) map[int]struct{} {
 // is refused as before. Goldmark's node only sets attributes, so the lines are set to none rather
 // than removed, which htmlFlowLines reads as a document that holds none.
 func dropHTMLFlowLines(root ast.Node) {
-	root.SetAttribute(htmlFlowLinesAttr, map[int]struct{}(nil))
+	root.SetAttribute(htmlFlowLinesAttr, map[int]int(nil))
 }
 
-// htmlFlowRefusal is why node, a paragraph, text block or setext heading holding lines, cannot be
-// stored when the browser editor's parser reads one of them as opening a block of HTML (recorded,
-// from htmlFlowLines), naming the first such line as source's markdown numbers it from firstLine,
-// or nil where it reads none of them so. It wraps ErrBlockHTML, the refusal of the block of HTML
+// browserBlockHTML is why a line the browser editor's parser alone reads as opening a block of
+// HTML cannot be stored: the part of htmlFlowRefusal's reason that follows the line it names,
+// which differs from document to document. It is a constant so that what the reader says and what
+// a test asserts are one text, as the footnote definition refusals are (typedDefinitionInItem).
+const browserBlockHTML = "opens with HTML the browser editor's parser reads as a block of HTML where goldmark reads the text of a paragraph: that parser takes a tab in the line's indentation, inside the tag or after it as goldmark takes spaces, and reads a closing tag of script, pre or style as a block as well; escape the < to write it as text"
+
+// htmlFlowRefusal is why node, a paragraph, text block or setext heading, cannot be stored when
+// the browser editor's parser reads one of its lines as opening a block of HTML (recorded, from
+// htmlFlowLines), naming the first such line as source's markdown numbers it from firstLine, or
+// nil where it reads none of them so. It wraps ErrBlockHTML, the refusal of the block of HTML
 // goldmark opens itself, because the document is unreadable for the same reason and a caller
 // telling the two apart would learn nothing (docs/edits.go, unreadableReason).
 //
-// A node that is read alike is not refused: that parser's block of HTML runs to the first blank
-// line, and the editor draws such a block as a paragraph holding its text as inline HTML
+// A node that is read alike is not refused: a block of kind 6 or 7 runs to the first blank line,
+// and the editor draws such a block as a paragraph holding its text as inline HTML
 // (packages/proof-editor, remarkHtmlBlockParagraphs), which is goldmark's own reading of the one
-// line. So the two agree where the block holds that line and nothing else: the node holds no
-// other line, and nothing stands between it and the blank line or the container's end - no block
-// opening right under it (a heading, a list, a fence, a rule, a table), which goldmark reads as
-// its own and that parser swallows, and no setext underline, which goldmark takes into the
-// heading and that parser swallows the same way.
-func htmlFlowRefusal(node ast.Node, lines *gmtext.Segments, recorded map[int]struct{}, source []byte, firstLine int) error {
+// line. So the two agree where the block holds that line and nothing else: the line opens a block
+// of one of those two kinds, the node holds no other line, and nothing stands between it and the
+// blank line or the container's end - no block opening right under it (a heading, a list, a fence,
+// a rule, a table), which goldmark reads as its own and that parser swallows, and no setext
+// underline, which goldmark takes into the heading and that parser swallows the same way. A block
+// of kinds 1 to 5 runs to an end marker of its own instead (`</script>`, `-->`, `>`, `?>`, `]]>`)
+// and swallows every line up to it, blank lines among them, so a line opening one of those is
+// refused wherever it stands.
+func htmlFlowRefusal(node ast.Node, recorded map[int]int, source []byte, firstLine int) error {
 	if recorded == nil {
 		return nil
 	}
-	if lines.Len() < 2 && readAloneBeforeABlankLine(node) {
-		return nil
-	}
+	lines := node.Lines()
 	for index := range lines.Len() {
 		start := lineStart(source, lines.At(index).Start)
-		if _, ok := recorded[start]; !ok {
+		kind, opens := recorded[start]
+		if !opens {
 			continue
+		}
+		if (kind == 6 || kind == 7) && lines.Len() < 2 && readAloneBeforeABlankLine(node) {
+			return nil
 		}
 		end := bytes.IndexByte(source[start:], '\n')
 		if end < 0 {
@@ -108,7 +123,7 @@ func htmlFlowRefusal(node ast.Node, lines *gmtext.Segments, recorded map[int]str
 		}
 		number := firstLine + bytes.Count(source[:start], []byte("\n"))
 		written := strings.TrimRight(string(source[start:start+end]), "\r")
-		return fmt.Errorf("%w: line %d, %q, opens with HTML the browser editor's parser reads as a block of HTML where goldmark reads the text of a paragraph: that parser takes a tab in the line's indentation, inside the tag or after it as goldmark takes spaces, and reads a declaration opening with a lower-case letter, or a closing tag of script, pre or style, as a block as well; escape the < to write it as text", ErrBlockHTML, number, written)
+		return fmt.Errorf("%w: line %d, %q, %s", ErrBlockHTML, number, written, browserBlockHTML)
 	}
 	return nil
 }
@@ -131,36 +146,57 @@ func readAloneBeforeABlankLine(node ast.Node) bool {
 // column on, where nothing holds it off - 1 to 7 as CommonMark numbers them - or 0 where it opens
 // none. Four columns of indentation stop it, and then, read from the `<`: a raw text opening
 // (`<script`, `<pre`, `<style`, `<textarea`, the name ended by a space, a tab, `/`, `>` or the
-// line's end) is kind 1, `<!--` kind 2, `<?` kind 3, `<!` and a letter of either case kind 4,
-// `<![CDATA[` kind 5, an opening or closing tag of a block-level name (htmlBlockNames) ended so,
-// or by `/>`, kind 6, and one complete opening or closing tag of any other name with nothing after
-// it but spaces and tabs kind 7. Whether a kind opens a block while it interrupts a paragraph is
-// the caller's (recordHTMLFlowLine): this answers only what the line holds.
+// line's end) is kind 1, `<!--` kind 2, `<?` kind 3, `<!` and a letter of either case kind 4
+// (opensDeclaration), `<![CDATA[` kind 5, an opening or closing tag of a block-level name
+// (htmlBlockNames) ended so, or by `/>`, kind 6, and one complete opening or closing tag of any
+// other name with nothing after it but spaces and tabs kind 7. Whether a kind opens a block while
+// it interrupts a paragraph is the caller's (recordHTMLFlowLine, htmlBlockStart): this answers
+// only what the line holds.
+//
+// It is the package's one reading of that grammar, taken over a string or over the bytes of one as
+// its caller holds the line: the reader asks it of each paragraph line it takes, and the writer
+// asks it of each line it has written a `<` at the start of (htmlBlockStart). A second port of the
+// same grammar is what would let the writer escape a `<` the refusal reads as text, or leave one
+// it refuses unescaped.
 //
 // It is a port of micromark's tokenizer, state for state, not of goldmark's patterns, and the two
 // differ where it matters: micromark reads a tab as the whitespace it allows in the indentation,
 // between a tag's parts and after the tag, takes no space between a closing tag's slash and its
 // name, and lets a declaration open with a letter of either case.
-func htmlFlowKind(line []byte, column int) int {
-	indent, position := util.IndentWidth(line, column)
+func htmlFlowKind[T string | []byte](line T, column int) int {
+	indent, position := 0, 0
+	for ; position < len(line); position++ {
+		// A tab spans the columns to the next multiple of four from where it stands, which is
+		// goldmark's util.IndentWidth over the bytes a caller holds.
+		if line[position] == ' ' {
+			indent++
+		} else if line[position] == '\t' {
+			indent += 4 - (column+indent)%4
+		} else {
+			break
+		}
+	}
 	if indent >= 4 {
 		return 0
 	}
-	line = bytes.TrimRight(line[position:], "\r\n")
+	line = line[position:]
+	if end := htmlLineEnd(line); end >= 0 {
+		line = line[:end]
+	}
 	if len(line) < 2 || line[0] != '<' {
 		return 0
 	}
 	switch {
-	case bytes.HasPrefix(line, []byte("<!--")):
+	case htmlOpensWith(line, "<!--"):
 		return 2
 	case line[1] == '?':
 		return 3
-	case bytes.HasPrefix(line, []byte("<![CDATA[")):
+	case htmlOpensWith(line, "<![CDATA["):
 		return 5
 	case line[1] == '!':
-		// A declaration, which micromark opens on a letter of either case where goldmark's
-		// pattern takes an upper-case one alone.
-		if len(line) > 2 && isASCIILetter(line[2]) {
+		// A declaration, which micromark and this package's reader open on a letter of either
+		// case where goldmark's own pattern takes an upper-case one alone (opensDeclaration).
+		if opensDeclaration(line) {
 			return 4
 		}
 		return 0
@@ -221,11 +257,25 @@ func htmlFlowKind(line []byte, column int) int {
 	return 7
 }
 
+// htmlBlockStart reports whether the browser editor's parser opens a block of HTML at the `<` line
+// begins with, line being the markdown written from that `<` to its line's end or past it, where
+// the `<` is the first character after its line's container prefix. interrupt reports whether the
+// line would go on a paragraph, which only a complete tag (kind 7) cannot interrupt; every other
+// kind opens its block there as well.
+//
+// It is the one grammar (htmlFlowKind) asked the writer's question: the writer escapes a `<` that
+// would open a block of HTML where goldmark reads a paragraph, and the reader refuses a line a
+// caller wrote that way (htmlFlowRefusal), so the two read the same line by the same rule.
+func htmlBlockStart(line string, interrupt bool) bool {
+	kind := htmlFlowKind(line, 0)
+	return kind != 0 && !(interrupt && kind == 7)
+}
+
 // completeAttributes reads a complete opening tag's attributes from line[*at] on, state by state
 // as micromark's html-flow does (completeAttributeNameBefore and the states after it), up to the
 // tag's `>`: it leaves *at there, or at a character that is not `>`, which no complete tag holds,
 // or reports false where an attribute's value cannot stand.
-func completeAttributes(line []byte, at *int) bool {
+func completeAttributes[T string | []byte](line T, at *int) bool {
 	char := func() byte {
 		if *at < len(line) {
 			return line[*at]
@@ -275,7 +325,7 @@ func completeAttributes(line []byte, at *int) bool {
 				return false
 			case current == '"' || current == '\'':
 				*at++
-				end := bytes.IndexByte(line[*at:], current)
+				end := htmlIndexByte(line[*at:], current)
 				if end < 0 {
 					return false
 				}
@@ -310,24 +360,59 @@ func htmlValueEnd(char byte) bool {
 	return false
 }
 
+// htmlLineEnd is where line's first line ending stands, or -1 where it holds none: the reader
+// gives the grammar one line with the ending it was read with, and the writer what it has written
+// from a `<` on, which can run past that line.
+func htmlLineEnd[T string | []byte](line T) int {
+	for index := range len(line) {
+		if line[index] == '\n' || line[index] == '\r' {
+			return index
+		}
+	}
+	return -1
+}
+
+// htmlOpensWith reports whether line opens with prefix.
+func htmlOpensWith[T string | []byte](line T, prefix string) bool {
+	if len(line) < len(prefix) {
+		return false
+	}
+	for index := range len(prefix) {
+		if line[index] != prefix[index] {
+			return false
+		}
+	}
+	return true
+}
+
+// htmlIndexByte is where char first stands in line, or -1 where it stands nowhere in it.
+func htmlIndexByte[T string | []byte](line T, char byte) int {
+	for index := range len(line) {
+		if line[index] == char {
+			return index
+		}
+	}
+	return -1
+}
+
 // htmlNamed reports whether name, a tag name read as written, is one micromark opens a block of
-// kind 1 or of kind 6 on: a name of htmlRawNames or of htmlBlockNames, which both it and the
-// writer's own reading of a line (htmlBlockStart) match in any case. Goldmark's list
-// (parser/html_block.go, allowedBlockTags) holds one name more, `meta`, which it opens a block of
-// kind 6 on and refuses there.
-func htmlNamed(name []byte) (raw, block bool) {
+// kind 1 or of kind 6 on: a name of htmlRawNames or of htmlBlockNames, which it matches in any
+// case. Goldmark's list (parser/html_block.go, allowedBlockTags) holds one name more, `meta`,
+// which it opens a block of kind 6 on and refuses there.
+func htmlNamed[T string | []byte](name T) (raw, block bool) {
 	return htmlNameIn(htmlRawNames, name), htmlNameIn(htmlBlockNames, name)
 }
 
 // htmlNameIn reports whether name, read as written, is one of names, which are written in lower
 // case: it folds name's own case as it compares, taking no buffer and no string of its own.
-func htmlNameIn(names []string, name []byte) bool {
+func htmlNameIn[T string | []byte](names []string, name T) bool {
 	for _, known := range names {
 		if len(known) != len(name) {
 			continue
 		}
 		folded := true
-		for position, char := range name {
+		for position := range len(name) {
+			char := name[position]
 			if char >= 'A' && char <= 'Z' {
 				char += 'a' - 'A'
 			}
@@ -342,3 +427,18 @@ func htmlNameIn(names []string, name []byte) bool {
 	}
 	return false
 }
+
+// htmlRawNames and htmlBlockNames are the tag names that open a block of HTML of kind 1 and of
+// kind 6 to the browser editor's parser (micromark-util-html-tag-name), which reads them in any
+// case (htmlNameIn).
+var (
+	htmlRawNames   = []string{"pre", "script", "style", "textarea"}
+	htmlBlockNames = []string{
+		"address", "article", "aside", "base", "basefont", "blockquote", "body", "caption", "center",
+		"col", "colgroup", "dd", "details", "dialog", "dir", "div", "dl", "dt", "fieldset",
+		"figcaption", "figure", "footer", "form", "frame", "frameset", "h1", "h2", "h3", "h4", "h5",
+		"h6", "head", "header", "hr", "html", "iframe", "legend", "li", "link", "main", "menu",
+		"menuitem", "nav", "noframes", "ol", "optgroup", "option", "p", "param", "search", "section",
+		"summary", "table", "tbody", "td", "tfoot", "th", "thead", "title", "tr", "track", "ul",
+	}
+)

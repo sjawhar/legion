@@ -229,8 +229,13 @@ func (l tableLines) at(index int) gmtext.Segment {
 	return tabExpandedLine(l.asRead(index), l.source)
 }
 
-// asRead is line index as lineRecordingParagraph read it, or the line itself where the parse
-// recorded none.
+// asRead is line index as lineRecordingParagraph read it, before the paragraph trimmed its
+// leading whitespace, or the line itself where the parse recorded none under its start. The parse
+// keys each line it records by where the trimmed line starts (recordLine, lines.go), while the
+// line of a paragraph goldmark has not closed starts where its containers left it, untrimmed, so
+// the lookup misses on every line of such a paragraph. What it misses is that same untrimmed
+// segment, recorded under the trimmed start, so the line itself is the answer there, and a closed
+// paragraph's trimmed lines find what they were read as.
 func (l tableLines) asRead(index int) gmtext.Segment {
 	line := l.lines.At(index)
 	if read, ok := l.read[line.Start]; ok {

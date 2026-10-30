@@ -1,7 +1,7 @@
 /*
  * `htmlFlowStrict`, the HTML (flow) construct, copied from micromark-core-commonmark 2.0.3
  * (`dev/lib/html-flow.js`), which exports its own `htmlFlow` but gives no way to change this one
- * reading. `./lib-remark-directive-plugin` registers it in place of upstream's, under
+ * reading. `./html-blocks` registers it in place of upstream's, under
  * `codes.lessThan`, with upstream's disabled by name.
  *
  * One line differs, in `tagName`, where a complete tag (an HTML block of kind 7) is found:

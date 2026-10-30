@@ -55,6 +55,7 @@
       "includes": [
         "packages/proof-editor/src/**",
         "!packages/proof-editor/src/tests/harness.ts",
+        "!packages/proof-editor/src/html-blocks.ts",
         "!packages/proof-editor/src/collab-cursor-plugin.ts",
         "!packages/proof-editor/src/editor-highlights.ts",
         "!packages/proof-editor/src/editor/schema/uuid.ts",

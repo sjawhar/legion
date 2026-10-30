@@ -101,8 +101,9 @@ func goldmarkSpreadsItemsBeforeBlanks(list *ast.List) bool {
 // in a typed block in a footnote definition with a blank line at or after it
 // (typedFootnoteListBlank), where that editor spreads the item a blank line follows and never the
 // list, and goldmark's looseness then reads the list tight, or spreads it, or leaves that item
-// holding one block unspread; and one whose item holds a typed block whose indented code ends in a
-// whitespace-only line (typedCodeBlankInItem).
+// holding one block unspread; and one whose item holds a typed block with a blank line inside it
+// of a shape that editor reads as spacing the item (typedBlankInItem: typedCodeBlankInItem,
+// unclosedTypedCodeBlankInItem and typedListBlankInItem).
 func readExactListSpacing(root ast.Node, lines sourceLines) (refusal string) {
 	_ = ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
 		switch node := node.(type) {
@@ -119,9 +120,11 @@ func readExactListSpacing(root ast.Node, lines sourceLines) (refusal string) {
 			}
 			// A list the lines decide carries that reading already; only one left to goldmark's
 			// looseness, which reads such an item tight, is refused.
-			if reason != "" && codeBlankSpreadsATightItem(node, lines) {
-				refusal = typedCodeBlankInItem
-				return ast.WalkStop, nil
+			if reason != "" {
+				if blank := typedBlankSpreadsATightItem(node, lines); blank != "" {
+					refusal = blank
+					return ast.WalkStop, nil
+				}
 			}
 		}
 		return ast.WalkContinue, nil
@@ -255,11 +258,7 @@ func readListSpacing(list *ast.List, lines sourceLines) string {
 		// A typed block's content is a document of its own to the browser editor's parser, whose
 		// last line ends where the fence, or the block around the typed block, ends it, and the
 		// blank lines that reach a list there are counted in that document (quotedListSpread).
-		inDirective := typed && isAncestor(quote, directive)
-		spread, reason := quotedListSpread(list, quote, directive, inDirective, lines)
-		if reason != "" {
-			return reason
-		}
+		spread := quotedListSpread(list, quotedListIn(list, quote, directive, typed), lines)
 		// The blank lines after an item ending in a footnote definition whose typed block ends in a
 		// fenced code block no fence closed are that code's to the browser editor's parser, where
 		// definitionEndSpreadsItem counts them as the definition's.
@@ -375,50 +374,67 @@ const typedFootnoteListBlank = "a blank line at or after a list in a typed block
 // (typedFenceKeepsBlankLinesAfter), where they would spread the item (definitionEndSpreadsItem).
 const quotedDefinitionFenceBlank = "blank lines after a list item in a quote ending in a footnote definition whose typed block holds a fenced code block no fence closed, which the browser editor reads as that code's lines and not as spacing the item"
 
-// typedCodeBlankInItem is the refusal of indented code in a typed block a fence closes, in a list
-// item, that ends in a whitespace-only line the code does not hold (codeEndsBeforeABlankLine).
-// Indented code keeps a blank line of four columns or more past its container and ends before a
-// shorter one, in both parsers (codeColumns), so that line is a blank line of the list item to the
-// browser editor, which spreads the item by it, while goldmark drops the line and leaves the item
-// to its looseness, which reads it tight. A blank line anywhere else in a typed block in a list
-// item is left to that looseness, since the writer writes such a line - a tight item's typed block
-// holding two blocks is written that way - and the documents Dispatch stores were read with it.
-// The writer writes no indented code, so no document it wrote holds this shape, and a caller who
-// writes it can write the code fenced or the line as wide as the code.
-const typedCodeBlankInItem = "indented code in a typed block in a list item ending in a whitespace-only line shorter than the code's indentation, which the browser editor reads as a blank line spacing the item"
+// typedCodeBlankInItem, unclosedTypedCodeBlankInItem and typedListBlankInItem are the refusals of
+// the blank lines inside a typed block in a list item that the browser editor reads as spacing
+// the item and goldmark reads as no block's (typedBlankInItem), one for each shape measured at
+// the fork point and at this head (PR #2507). The first two are indented code ending in a
+// whitespace-only line the code does not hold, in a block a fence closes and in one nothing in
+// the document follows: indented code keeps a blank line of four columns or more past its
+// container and ends before a shorter one, in both parsers (codeColumns), so that line is a blank
+// line of the list item to the browser editor, which spreads the item by it, while goldmark drops
+// the line and leaves the item to its looseness, which reads it tight. The third is a blank line
+// between a list the typed block ends with and the block's own end, which that editor reads the
+// same way while leaving the list inside the block tight.
+//
+// A blank line anywhere else in a typed block in a list item is left to that looseness, since the
+// writer writes such a line - a tight item's typed block holding two blocks is written that way -
+// and the documents Dispatch stores were read with it. The writer writes no indented code and no
+// blank line before a block's closing fence, so no document it wrote holds any of these shapes,
+// and a caller who writes one can write the code fenced, the line as wide as the code, or no
+// blank line where the block ends.
+const (
+	typedCodeBlankInItem         = "indented code in a typed block in a list item ending in a whitespace-only line shorter than the code's indentation, which the browser editor reads as a blank line spacing the item"
+	unclosedTypedCodeBlankInItem = "indented code in a typed block no fence closes, in a list item, ending in a whitespace-only line shorter than the code's indentation with nothing in the document past the block, which the browser editor reads as a blank line spacing the item"
+	typedListBlankInItem         = "a blank line between a list a typed block in a list item ends with and the block's own end, which the browser editor reads as a blank line spacing the item around the block"
+)
 
-// codeBlankSpreadsATightItem reports whether an item of list holds such code
-// (holdsCodeEndingInABlankLine) where goldmark's looseness leaves that item unspread: a tight
+// typedBlankSpreadsATightItem is why an item of list holds a typed block with such a blank line
+// inside it (typedBlankInTheItem) where goldmark's looseness leaves that item unspread: a tight
 // list's item, or one holding a single block (parseList), which is the item the browser editor
-// reads spread.
-func codeBlankSpreadsATightItem(list *ast.List, lines sourceLines) bool {
+// reads spread. It is "" where no item of the list holds one.
+func typedBlankSpreadsATightItem(list *ast.List, lines sourceLines) string {
 	for item := list.FirstChild(); item != nil; item = item.NextSibling() {
-		if (list.IsTight || item.ChildCount() < 2) && holdsCodeEndingInABlankLine(item, lines) {
-			return true
+		if list.IsTight || item.ChildCount() < 2 {
+			if reason := typedBlankInTheItem(item, lines); reason != "" {
+				return reason
+			}
 		}
 	}
-	return false
+	return ""
 }
 
-// holdsCodeEndingInABlankLine reports whether container holds, in a typed block it holds, indented
-// code ending in a whitespace-only line the code does not hold (codeEndsBeforeABlankLine). It
-// looks through the typed blocks and the footnote definitions inside it, whose lines are the list
-// item's own, and through no quote or list, which the browser editor's parser counts a blank line
-// inside as that quote's or that list's.
-func holdsCodeEndingInABlankLine(container ast.Node, lines sourceLines) bool {
+// typedBlankInTheItem is why a typed block container holds holds a blank line only the browser
+// editor reads as spacing the list item (typedBlankInItem), or "" where it holds none. It looks
+// through the typed blocks and the footnote definitions inside it, whose lines are the list
+// item's own, and through no quote or list, which that parser counts a blank line inside as that
+// quote's or that list's.
+func typedBlankInTheItem(container ast.Node, lines sourceLines) string {
 	for child := container.FirstChild(); child != nil; child = child.NextSibling() {
 		switch child := child.(type) {
 		case *typedDirective:
-			if lines.codeEndsBeforeABlankLine(child) || holdsCodeEndingInABlankLine(child, lines) {
-				return true
+			if reason := lines.typedBlankInItem(child); reason != "" {
+				return reason
+			}
+			if reason := typedBlankInTheItem(child, lines); reason != "" {
+				return reason
 			}
 		case *extensionast.Footnote:
-			if holdsCodeEndingInABlankLine(child, lines) {
-				return true
+			if reason := typedBlankInTheItem(child, lines); reason != "" {
+				return reason
 			}
 		}
 	}
-	return false
+	return ""
 }
 
 // blankAtOrAfterTypedList reports whether a line blank(line) holds stands from list's start up to
@@ -434,16 +450,42 @@ func (l sourceLines) blankAtOrAfterTypedList(list ast.Node, directive *typedDire
 	return len(l.blanks(l.lineOf(startOf(list)), last, blank)) > 0
 }
 
-// quotedListSpread is a list's spread in a quote, as the browser editor's parser reads it: spread
-// by a blank line after an item that does not end in a list, or, when the last item does not, by
-// blank lines between it and what the quote goes on with: one before a quote, a list, an item or a
-// footnote definition - and before a quote, a list or a footnote definition that opens right after
-// them in a quote around the list's - and two before anything else or at the quote's end; in a
-// typed block inside the quote, one before anything and two at its fence, three where no fence
-// closes it and the last of them holds nothing past the quote's markers, and one more of each after
-// an item ending in a quote; with the list's quote in a typed block that stands in a quote, as
-// quotedInTypedBlockSpread reads.
-func quotedListSpread(list *ast.List, quote ast.Node, directive *typedDirective, inDirective bool, lines sourceLines) (bool, string) {
+// quotedList is where a list in a quote stands among the containers that decide its spacing, read
+// once for the list (readListSpacing): quote is the quote around it, directive the nearest typed
+// block around it or nil, inDirective whether that block stands inside the quote - its content is
+// a document of its own to the browser editor's parser, which the blank lines reaching the list
+// are counted in - and inQuotedTyped whether the list's quote stands in a typed block that stands
+// in a quote itself, where that parser ends the list where the block's content starts on the line
+// after its blank lines (quotedInTypedBlockSpread). The two cannot both hold.
+type quotedList struct {
+	quote         ast.Node
+	directive     *typedDirective
+	inDirective   bool
+	inQuotedTyped bool
+}
+
+// quotedListIn is where list, in quote, stands among those containers, directive being the
+// nearest typed block around it and typed whether there is one.
+func quotedListIn(list *ast.List, quote ast.Node, directive *typedDirective, typed bool) quotedList {
+	inDirective := typed && isAncestor(quote, directive)
+	return quotedList{
+		quote:         quote,
+		directive:     directive,
+		inDirective:   inDirective,
+		inQuotedTyped: typed && !inDirective && quoteDepth(directive) > 0,
+	}
+}
+
+// quotedListSpread is the spread of a list in a quote, standing as in says, as the browser
+// editor's parser reads it: spread by a blank line after an item that does not end in a list, or,
+// when the last item does not, by blank lines between it and what the quote goes on with: one
+// before a quote, a list, an item or a footnote definition - and before a quote, a list or a
+// footnote definition that opens right after them in a quote around the list's - and two before
+// anything else or at the quote's end; in a typed block inside the quote, one before anything and
+// two at its fence, three where no fence closes it and the last of them holds nothing past the
+// quote's markers, and one more of each after an item ending in a quote; with the list's quote in
+// a typed block that stands in a quote, as quotedInTypedBlockSpread reads.
+func quotedListSpread(list *ast.List, in quotedList, lines sourceLines) bool {
 	// Blank lines after an item that ends in a list are that list's. In a typed block inside the
 	// quote, one after an item that ends in a quote is that quote's, and more spread the list.
 	// A blank line of a quote around the list's own holds fewer markers, and the list's quote has
@@ -452,12 +494,8 @@ func quotedListSpread(list *ast.List, quote ast.Node, directive *typedDirective,
 	// one of its own (blanksThroughOuterQuotes).
 	depth := quoteDepth(list)
 	blank := quoteBlankLineAt(depth)
-	// Where the list's quote stands in a typed block that stands in a quote, the browser editor's
-	// parser ends the list on a line that goes on with the typed block where that block's content
-	// starts, past the markers of the quotes around it (quotedInTypedBlockSpread).
-	quotedInTyped := directive != nil && !inDirective && quoteDepth(directive) > 0
 	least := func(item ast.Node) int {
-		if _, endsInQuote := item.LastChild().(*ast.Blockquote); (inDirective || quotedInTyped) && endsInQuote {
+		if _, endsInQuote := item.LastChild().(*ast.Blockquote); (in.inDirective || in.inQuotedTyped) && endsInQuote {
 			return 2
 		}
 		return 1
@@ -465,7 +503,7 @@ func quotedListSpread(list *ast.List, quote ast.Node, directive *typedDirective,
 	for item := list.FirstChild(); item.NextSibling() != nil; item = item.NextSibling() {
 		next := item.NextSibling()
 		if blankBefore(next) && !endsWithList(item) && !itemEndsInDefinition(item) && lines.blanksBefore(startOf(next), blank) >= least(item) {
-			return true, ""
+			return true
 		}
 	}
 	last := list.LastChild()
@@ -473,27 +511,27 @@ func quotedListSpread(list *ast.List, quote ast.Node, directive *typedDirective,
 	// or its quote's, and space no list, and those after one ending in a footnote definition are the
 	// definition's (definitionEndSpreadsItem).
 	if endsWithList(last) || endsInOpenFence(list) || itemEndsInDefinition(last) {
-		return false, ""
+		return false
 	}
 	next := nextBlock(list)
-	if quotedInTyped {
-		return lines.quotedInTypedBlockSpread(list, directive, next, least(last)), ""
+	if in.inQuotedTyped {
+		return lines.quotedInTypedBlockSpread(list, in.directive, next, least(last))
 	}
 	threshold := 2
-	if inDirective {
+	if in.inDirective {
 		threshold = 1
 	}
 	threshold = max(threshold, least(last))
-	within := quote
-	if inDirective {
-		within = directive
+	within := in.quote
+	if in.inDirective {
+		within = in.directive
 	}
 	// The next item of a list around this one, but not past the closing fence of the list's own
 	// typed block: the typed block's content is a document of its own to the browser editor's
 	// parser, which ends at that fence, so blank lines after it are not the list's, and the fence
 	// decides below.
-	if _, enclosingItem := next.(*ast.ListItem); enclosingItem && (!inDirective || !directive.Closed || isAncestor(within, next)) {
-		return lines.blanksBefore(startOf(next), blank) >= threshold, ""
+	if _, enclosingItem := next.(*ast.ListItem); enclosingItem && (!in.inDirective || !in.directive.Closed || isAncestor(within, next)) {
+		return lines.blanksBefore(startOf(next), blank) >= threshold
 	}
 	if next == nil || !isAncestor(within, next) {
 		// At the end of the quote, or of a typed block inside it before its closing fence. A typed
@@ -502,14 +540,12 @@ func quotedListSpread(list *ast.List, quote ast.Node, directive *typedDirective,
 		// quote's markers and their spaces, the browser editor's parser reading that line as no
 		// line of the typed block, but for a container opening on the line right after them, which
 		// the last one spaces too; and an item ending in a quote gives that quote one more (least).
-		end := lines.endBefore(list, next)
-		outer := outerBlankLineAt(depth)
-		blanks := lines.blanksEndingBefore(end, outer, blank)
+		blanks, end, outer := lines.blanksEndingTheList(list, next, depth)
 		// A quote, a list or a footnote definition opening in a quote around the list's, on the
 		// line right after its blank lines, ends the list past that quote's markers on that line,
 		// so the browser editor's parser spaces the list by one blank line.
-		if !inDirective && opensInQuoteAround(next, list) && lines.blanksBefore(startOf(next), outer) == 0 {
-			return blanks >= 1, ""
+		if !in.inDirective && opensInQuoteAround(next, list) && lines.blanksBefore(startOf(next), outer) == 0 {
+			return blanks >= 1
 		}
 		need := 2
 		if typed, ok := within.(*typedDirective); ok {
@@ -527,19 +563,19 @@ func quotedListSpread(list *ast.List, quote ast.Node, directive *typedDirective,
 				blanks = lines.blanksEndingBefore(lines.lineOf(ending.closer), outer, blank)
 			}
 		}
-		return blanks >= need, ""
+		return blanks >= need
 	}
 	blanks := lines.blanksBefore(startOf(next), blank)
-	if inDirective {
+	if in.inDirective {
 		blanks = lines.blanksThroughOuterQuotes(startOf(next), depth)
 	}
 	switch {
 	case blanks == 0:
-		return false, ""
+		return false
 	case startsContainer(next):
-		return blanks >= least(last), ""
+		return blanks >= least(last)
 	default:
-		return blanks >= threshold, ""
+		return blanks >= threshold
 	}
 }
 
@@ -553,16 +589,23 @@ func quotedListSpread(list *ast.List, quote ast.Node, directive *typedDirective,
 // an item ending in a quote, whose own end the first blank line holds, and 1 otherwise.
 func (l sourceLines) quotedInTypedBlockSpread(list *ast.List, typed *typedDirective, next ast.Node, least int) bool {
 	depth := quoteDepth(list)
-	end := l.endBefore(list, next)
-	outer := outerBlankLineAt(depth)
+	blanks, end, outer := l.blanksEndingTheList(list, next, depth)
 	ending := l.lastBefore(end, outer) + 1
-	blanks := l.blanksEndingBefore(end, outer, quoteBlankLineAt(depth))
 	goesOn := ending < end && leadingQuoteMarkers(l.text(ending)) >= quoteDepth(typed) ||
 		ending == end && next != nil && isAncestor(typed, next)
 	if goesOn {
 		return blanks >= least
 	}
 	return blanks >= least+1
+}
+
+// blanksEndingTheList is how many blank lines end list in depth quotes before next, the block that
+// follows it (nil at the source's end), with end the line its container ends before (endBefore)
+// and outer the blank line of the quotes around it, which both callers read on as well.
+func (l sourceLines) blanksEndingTheList(list *ast.List, next ast.Node, depth int) (blanks, end int, outer func([]byte) bool) {
+	end = l.endBefore(list, next)
+	outer = outerBlankLineAt(depth)
+	return l.blanksEndingBefore(end, outer, quoteBlankLineAt(depth)), end, outer
 }
 
 // endBefore is the line that node's container ends before where next follows it: next's line, or

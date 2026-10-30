@@ -26,8 +26,9 @@ var nulPlaces = map[string]string{
 // it as it is, so before this a write holding one was accepted into a tree holding a character the
 // markdown it is stored as does not carry, since the rendering writes U+FFFD (withNulsWritten).
 // The tree a read served and the bytes the version carried disagreed, and the write that left them
-// so was refused nowhere. The readers below share one entry (parseUnstamped), which ParseRendering
-// reaches as well, and each tree's own rendering is written back with the replacement in it.
+// so was refused nowhere. The readers below share one entry (parseMarkdown), which ParseRendering
+// and ParseWithSourceStarts reach as well, and each tree's own rendering is written back with the
+// replacement in it.
 func TestEveryReaderReadsNulAsReplacement(t *testing.T) {
 	for place, markdown := range nulPlaces {
 		for _, reader := range blockMarkdownReaders() {
@@ -38,6 +39,34 @@ func TestEveryReaderReadsNulAsReplacement(t *testing.T) {
 				}
 				assertNulRead(t, doc, markdown)
 			})
+		}
+	}
+}
+
+// ParseWithSourceStarts answers offsets into the markdown its caller wrote, not into the source
+// the parse read, where each U+0000 stands as the three bytes of the U+FFFD it is read as
+// (startsInMarkdown). itemblocks.Split cuts the caller's body at these offsets, so an offset left
+// two bytes late for each U+0000 before it would cut a block's text mid-paragraph and hash the
+// wrong bytes.
+func TestParseWithSourceStartsCountsTheCallersBytes(t *testing.T) {
+	markdown := "\x00\x00\x00\n\nshort\nline two of para long\n\n# heading long\n"
+	doc, starts, err := ParseWithSourceStarts(markdown)
+	if err != nil {
+		t.Fatalf("ParseWithSourceStarts(%q): %v", markdown, err)
+	}
+	if len(starts) != len(doc.Children) {
+		t.Fatalf("ParseWithSourceStarts(%q) read %d children and %d starts", markdown, len(doc.Children), len(starts))
+	}
+	want := []string{"\x00\x00\x00\n", "short\nline two of para long\n", "# heading long\n"}
+	if len(starts) != len(want) {
+		t.Fatalf("ParseWithSourceStarts(%q) read %d blocks, want %d", markdown, len(starts), len(want))
+	}
+	for index, start := range starts {
+		if start < 0 || start > len(markdown) {
+			t.Fatalf("start %d of %q is %d, want an offset into it", index, markdown, start)
+		}
+		if !strings.HasPrefix(markdown[start:], want[index]) {
+			t.Errorf("markdown from start %d (%d) is %q, want it to open with %q", index, start, markdown[start:], want[index])
 		}
 	}
 }

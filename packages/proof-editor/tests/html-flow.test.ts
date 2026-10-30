@@ -242,15 +242,21 @@ const unchanged: Case[] = [
  * A record mark covering whole blocks is written as a `<span …>` line and a `</span>` line, which
  * are two blocks of HTML until the mark plugins have paired them: drawing a paragraph around
  * either line first would leave the mark unread and both lines in the document, so the transform
- * runs after those plugins. The mark reaches the block of HTML it covers, and the pair collapses
- * to the inline span it has always written back as.
+ * runs after those plugins. The pair collapses to the one node it covers rather than standing as
+ * two blocks of HTML of its own.
+ *
+ * A mark over a block of HTML alone then reaches no node that may carry it: the drawn paragraph
+ * holds one inline `html` node, an inline leaf, and `withoutLeafMarks`
+ * (`src/editor/schema/leaf-marks`) takes every mark off such a node, since Go's reader refuses a
+ * mark on any node that is not text and this editor's own store drops one on the next round trip.
+ * So the spans are read and consumed, and what stands is the block of HTML on its own.
  */
 const markSpans: Case[] = [
   [
     "a block-level mark span is read before a block of HTML is drawn",
     '<span data-dispatch="ask" data-id="x">\n\n<div>\n\n</span>\n',
-    'doc[paragraph[html("<div>")<dispatchAsk>]]',
-    '<span data-dispatch="ask" data-id="x" data-by="unknown"><div></span>\n',
+    'doc[paragraph[html("<div>")]]',
+    "<div>\n",
   ],
   [
     "a block-level mark span around text reads as it did",

@@ -42,11 +42,8 @@ import { dispatchMarkPlugins, remarkDispatchMarks, dispatchMarkHandler } from '.
 import remarkInlineLinks from 'remark-inline-links';
 import { remarkSoftBreakAsLine, remarkSoftBreakAsSpace } from './dispatch-soft-breaks.js';
 import { remarkHoistNestedLinks } from './nested-links.js';
-import {
-  remarkContainerDirectives,
-  remarkHtmlBlockParagraphs,
-  remarkStrictHtmlFlow,
-} from './lib-remark-directive-plugin.js';
+import { remarkContainerDirectives } from './lib-remark-directive-plugin.js';
+import { remarkHtmlBlockParagraphs, remarkStrictHtmlFlow } from './html-blocks.js';
 import { remarkReadOnlyDirectives } from './read-only-directives.js';
 import { remarkUnfitTypedBlocks } from './typed-block-drawing.js';
 import { relaxAskContentCheck } from './ask-content.js';
@@ -223,7 +220,6 @@ export async function createHeadlessProof(options: HeadlessProofOptions = {}): P
     .use(remarkGfm)
     .use(remarkFrontmatter, ['yaml'])
     .use(remarkContainerDirectives)
-    .use(remarkStrictHtmlFlow)
     .use(remarkStringify, {
       handlers: {
         proofMark: proofMarkHandler,

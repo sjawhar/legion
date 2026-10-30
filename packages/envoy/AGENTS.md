@@ -2082,9 +2082,12 @@ ask block carries; and in a block ask's edited question and options. The browser
 updates cannot carry a carriage return. No stored document holds one, and `pmdoc` handles line
 feeds alone. Caller text never holds a U+0000, which the API refuses (`NUL_CHARACTER`, below), and
 every reader of a caller's markdown reads one as U+FFFD where it takes the bytes in
-(`parseUnstamped`, `readInline`), as CommonMark and the browser editor's parser read it, since
+(`parseMarkdown`, `readInline`), as CommonMark and the browser editor's parser read it, since
 goldmark keeps the character while the rendering writes it as U+FFFD, which left a write holding
-one accepted into a tree the markdown it is stored as did not carry (PR #2507). A
+one accepted into a tree the markdown it is stored as did not carry (PR #2507). The replacement is
+three bytes where the character was one, so `ParseWithSourceStarts` maps each block's start back
+to the byte of the caller's own markdown it stands at (`startsInMarkdown`), which is where
+`itemblocks.Split` cuts a body. A
 browser's update can put one in the live document, and text Dispatch takes from the tree carries
 it as U+FFFD, which is what CommonMark reads one as (`pmdoc`'s `nulAsReplacement`): the rendering
 a version stores and every read serves, a block's id among it, an anchor's quote (`FindMark`), an
@@ -2161,9 +2164,13 @@ in them sheds nothing. The writer writes a span's later line as it is, without t
 prefix, except where a list item or footnote definition would take columns off the whitespace it
 opens with, and there behind the prefix (`takesCodeLineIndent`), and except a line holding one
 complete HTML tag and nothing else, which is written behind the prefix too
-(`codeLineOpensHTML`): without it that line is a lazy continuation line opening a block of HTML
-of kind 7, which ends the paragraph, the containers around it and the code with them in every
-CommonMark reader. The spaces and tabs a line of text
+(`codeLineOpensHTML`): CommonMark lets no block of HTML of kind 7 interrupt a paragraph, and
+goldmark and the browser editor's copy of the construct both obey that, so either reader reads
+such a line as the paragraph's and the code's with the prefix or without it, while a reader that
+opens one there - upstream micromark, and the browser's engine before PR #2507 - ends the
+paragraph, the containers around it and the code with them; the prefix makes the stored bytes
+read the same in that reader too, and the containers take it off the code's text again. The
+spaces and tabs a line of text
 ends with are dropped, as that parser drops them, and are a hard break only where they are two
 spaces or more and no tab (`trimLineSuffixes`); goldmark kept all but the last and broke at any two
 spaces. A backslash ending the line keeps what stands before it. A lazy continuation line - one that
@@ -2255,16 +2262,25 @@ container inside them or an item takes its own columns from them (`lastLineColum
 block indented in its container takes its indentation from that line too (`typedDirectiveParser`).
 A line the browser editor's parser opens a block of HTML on is refused, since the Proof schema
 holds no block of HTML and that parser drops the one it reads with the container around it
-(`ErrBlockHTML`). Goldmark opens a block of HTML on most such lines itself and refuses it there;
-the rest are the ones its patterns (`parser/html_block.go`) miss, which are recorded per
-paragraph line as the lines are taken (`htmlFlowKind`, a port of micromark's own html-flow
-tokenizer, with `recordHTMLFlowLine`) and refuse the paragraph, text block or setext heading
-holding one (`htmlFlowRefusal`): that parser takes a tab where those patterns take only a space,
-in the line's indentation, inside the tag and after it, so `> </a\t>` and `> a` over `> \t<div>`
-are refused, and it reads a declaration opening with a lower-case letter (`<!x>`) and a closing
-tag of a raw text name (`</script>`) as a block as well. A block of kind 7, one complete tag and
+(`ErrBlockHTML`). Goldmark opens a block of HTML on most such lines itself and refuses it there,
+a declaration opening with a lower-case letter (`<!x>`) among them since PR #2518
+(`declarationBlockParser`); the rest are the ones its patterns (`parser/html_block.go`) miss,
+which are recorded per paragraph line, with the kind of block they open, as the lines are taken
+(`htmlFlowKind`, a port of micromark's own html-flow tokenizer and the one this package's writer
+asks as well through `htmlBlockStart`, with `recordHTMLFlowLine`) and refuse the paragraph, text
+block or setext heading holding one (`htmlFlowRefusal`): that parser takes a tab where those
+patterns take only a space, in the line's indentation, inside the tag and after it, so `> </a\t>`
+and `> a` over `> \t<div>` are refused, and it reads a closing tag of a raw text name
+(`</script>`) as a block as well. A node holding such a line alone is read, not refused, where
+the two parsers read it alike: a block of kind 6 or 7 runs to the first blank line, and the
+editor draws it as a paragraph of inline HTML, which is goldmark's own reading of the line, so
+`ParseForWrite("> </a\t>\n")` is stored where `"> </a\t>\n> text\n"` is refused. The exemption
+asks the kind, since a block of kinds 1 to 5 runs to an end marker of its own (`</script>`,
+`-->`, `>`, `?>`, `]]>`) and swallows every line up to it. A block of kind 7, one complete tag and
 nothing else, interrupts a paragraph in neither parser, so a lone tag continuing one, lazily or
-not, is read as inline HTML and refused nowhere.
+not, is read as inline HTML and refused nowhere; the refusal is a document's, so a textblock's
+inline markdown, which lands inside a paragraph the document already holds, keeps such a line
+(`dropHTMLFlowLines`).
 A task list item's marker (`[ ]`, `[x]` or `[X]` opening a list item's first paragraph) is read as
 the browser editor's parser reads it (`taskList`): followed by a space or a tab and then more text on
 the line, or by a line ending the paragraph continues past, and it takes only the one character
@@ -2437,12 +2453,11 @@ after it that hold four or more columns past where its container's content start
 measured from its content, a footnote definition from its own start), and the shorter blank lines
 between them, as that parser reads it, so they are its text, less one final line ending (a last
 line with no line feed has none of its own, so `    code\n    \n    ` holds `code\n`), and space
-nothing (`codeColumns`, `heldCodeLines`, `markBlocksAfterHeldCode`, `codeBlockText`). The two
-refusals the lines alone do not decide, of a typed block holding a blank line inside a list item
-(`blankInside`) and of a blank line in a quote at or after a list that quotes and typed blocks nest
-around more than once (`nestedQuotedListBlank`), still read those lines, and a last line
-`lastLineColumns` kept, as the blank lines they were before (`asHeldBefore`), so they refuse what
-they refused before. A list item decides by what follows its list only
+nothing (`codeColumns`, `heldCodeLines`, `markBlocksAfterHeldCode`, `codeBlockText`). The refusal
+the lines alone do not decide, of a typed block holding a blank line inside a list item
+(`blankInside`), still reads those lines, and a last line
+`lastLineColumns` kept, as the blank lines they were before (`asHeldBefore`), so it refuses what
+it refused before. A list item decides by what follows its list only
 inside its own quote or typed block; past one, that container's rule decides, so a typed block's
 fence keeps the line and a quote's end judges it by what opens right after. The renderer writes each spacing so that it reads back
 (`blanksAfterList`, `writesBlankAfterItem`): no blank line before a block that opens on the line after
@@ -2464,7 +2479,17 @@ marker where its marker line holds nothing more or indented code (`itemContentCo
 a loose list's items holding more than one block are spread, the list when none is - which is how
 the documents Dispatch stores were read; but a blank line at or after a list in a typed block in a
 footnote definition is refused there too, unless goldmark spreads every item a blank line follows
-(`goldmarkSpreadsItemsBeforeBlanks`), since that parser spreads such an item and never the list.
+(`goldmarkSpreadsItemsBeforeBlanks`), since that parser spreads such an item and never the list,
+and so are three shapes of blank line inside a typed block in a list item, which that parser
+reads as spacing the item where goldmark reads the line as no block's and leaves the item tight:
+indented code ending in a whitespace-only line shorter than its own indentation, in a block a
+fence closes (`typedCodeBlankInItem`) and in one nothing in the document follows
+(`unclosedTypedCodeBlankInItem`), and a blank line between a list the block ends with and the
+block's own end (`typedListBlankInItem`, the three of `typedBlankInItem`). A block no fence closes
+that a block does follow is read, since that parser leaves the item unspread there as this reader
+does, and every other blank line in such a typed block is left to that looseness, which is how the
+documents Dispatch stores were read and what the writer writes for a tight item's typed block
+holding two blocks.
 
 A footnote definition is read where it is written, as that parser keeps it: inside another block,
 ahead of other blocks, in any order, and whether or not anything refers to it. One inside another

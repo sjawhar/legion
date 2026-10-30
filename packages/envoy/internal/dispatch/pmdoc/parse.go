@@ -108,7 +108,9 @@ func ParseRendering(markdown string) (*Node, error) {
 // starts (startOf): a paragraph's first line, and every other block's recorded position, so a
 // fenced code block starts at its opening fence. Front matter starts at 0. A child converted from
 // no goldmark block (the empty paragraph of a document with no blocks), or from one that records
-// no position, answers -1.
+// no position, answers -1. Each offset counts markdown's own bytes, the U+0000 the parse reads as
+// U+FFFD included (startsInMarkdown), so a caller cutting markdown at them cuts it where its
+// blocks begin (itemblocks.Split).
 func ParseWithSourceStarts(markdown string) (*Node, []int, error) {
 	var starts []int
 	doc, err := parseMarkdown(markdown, fromStart, true, NewWriteBudget(), &starts)
@@ -247,7 +249,8 @@ func parseUnstamped(markdown string, at origin, readFrontmatter bool, budget *Wr
 // after it is an offset into source and never into markdown: a refusal's line number counts
 // source's line feeds, which the replacement neither adds nor removes, at.server measures a
 // prefix the server itself wrote ahead of the caller's text (parseTableRows), which holds no
-// U+0000 and so keeps its length, and starts are offsets into source as well.
+// U+0000 and so keeps its length, and starts are offsets into source until startsInMarkdown maps
+// each of them back to the byte of markdown it stands at.
 func parseMarkdown(markdown string, at origin, readFrontmatter bool, budget *WriteBudget, starts *[]int) (doc *Node, err error) {
 	defer recoverPanic(&doc, &err, "reading markdown")
 	source := []byte(nulAsReplacement(markdown))
@@ -286,7 +289,7 @@ func parseMarkdown(markdown string, at origin, readFrontmatter bool, budget *Wri
 		return nil, err
 	}
 	if starts != nil {
-		*starts = sourceStarts(doc, root, front != nil, rest)
+		*starts = startsInMarkdown(sourceStarts(doc, root, front != nil, rest), markdown)
 	}
 	return doc, nil
 }
@@ -311,6 +314,37 @@ func sourceStarts(doc *Node, root ast.Node, front bool, offset int) []int {
 			starts[index] = offset + start
 		}
 		block = block.NextSibling()
+	}
+	return starts
+}
+
+// startsInMarkdown is starts, offsets into the source parsed, as offsets into markdown itself,
+// the bytes the caller wrote: the parse reads every U+0000 as U+FFFD (nulAsReplacement), three
+// bytes where the caller wrote one, so a start past one of them stands two bytes further on in
+// the source than in markdown, two bytes past two, and so on. ParseWithSourceStarts promises the
+// caller's own offsets, and itemblocks.Split cuts the caller's body at them, so a start left
+// unmapped would cut a body holding a U+0000 inside a block instead of between two.
+//
+// Markdown holding no U+0000 is answered as it is, which is every document a route carries today
+// (decodeJSON refuses the character), so the mapping costs nothing there.
+func startsInMarkdown(starts []int, markdown string) []int {
+	if strings.IndexByte(markdown, 0) < 0 {
+		return starts
+	}
+	// Where each replacement stands in the source, which is where the U+0000 before it stood plus
+	// the two bytes each earlier replacement added.
+	var replacements []int
+	for index := range len(markdown) {
+		if markdown[index] == 0 {
+			replacements = append(replacements, index+2*len(replacements))
+		}
+	}
+	for index, start := range starts {
+		if start >= 0 {
+			// The replacements before start, which is where the first one at or past it stands.
+			earlier, _ := slices.BinarySearch(replacements, start)
+			starts[index] = start - 2*earlier
+		}
 	}
 	return starts
 }
