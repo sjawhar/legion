@@ -88,7 +88,7 @@ The OS chooses the NATS, listener and fake-session ports, and the run builds
 each URL from the port its own process reports. `E2E_NATS_PORT`, `E2E_PORT` or
 `E2E_SESSION_PORT` sets a port explicitly: it is used as given, and one already
 in use fails the run with `address already in use`. CI runs it as the
-`envoy-e2e-local` job of `.github/workflows/envoy-and-contracts.yaml`.
+`envoy-e2e-local` job of `.github/workflows/ci.yaml`.
 
 ## Contract source of truth
 

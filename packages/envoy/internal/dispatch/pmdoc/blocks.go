@@ -25,16 +25,9 @@ func findBlock(doc *Node, blockID string) ([]int, Range, bool) {
 	return found, r, found != nil
 }
 
-func wantDocument(doc *Node, operation string) error {
-	if doc == nil || doc.Type != "doc" {
-		return fmt.Errorf("%w: %s wants a document", ErrSchema, operation)
-	}
-	return doc.Validate()
-}
-
 // BlockRange returns the ProseMirror range covering the block carrying blockID.
 func BlockRange(doc *Node, blockID string) (Range, error) {
-	if err := wantDocument(doc, "BlockRange"); err != nil {
+	if _, err := ValidateDocument(doc, "BlockRange"); err != nil {
 		return Range{}, err
 	}
 	_, r, ok := findBlock(doc, blockID)
@@ -47,7 +40,7 @@ func BlockRange(doc *Node, blockID string) (Range, error) {
 // BlockDescendantIDs returns the target block id followed by every block id
 // that deleting it would remove as a descendant.
 func BlockDescendantIDs(doc *Node, blockID string) ([]string, error) {
-	if err := wantDocument(doc, "BlockDescendantIDs"); err != nil {
+	if _, err := ValidateDocument(doc, "BlockDescendantIDs"); err != nil {
 		return nil, err
 	}
 	path, _, ok := findBlock(doc, blockID)
@@ -72,11 +65,22 @@ func BlockDescendantIDs(doc *Node, blockID string) ([]string, error) {
 
 // TableDescendantIDs reports every non-inline descendant block id for each
 // table. Table ids themselves are excluded because their direct references are
-// counted separately.
+// counted separately. It validates doc first (ValidateDocument).
 func TableDescendantIDs(doc *Node) (map[string][]string, error) {
-	if err := wantDocument(doc, "TableDescendantIDs"); err != nil {
+	valid, err := ValidateDocument(doc, "TableDescendantIDs")
+	if err != nil {
 		return nil, err
 	}
+	return valid.TableDescendantIDs()
+}
+
+// TableDescendantIDs is TableDescendantIDs of d's tree without validating it again; the zero
+// ValidDocument is TableDescendantIDs' error for a nil tree.
+func (d ValidDocument) TableDescendantIDs() (map[string][]string, error) {
+	if d.doc == nil {
+		return TableDescendantIDs(nil)
+	}
+	doc := d.doc
 	tables := make(map[string][]string)
 	var descendants func(*Node, *[]string, map[string]struct{})
 	descendants = func(node *Node, ids *[]string, seen map[string]struct{}) {
@@ -116,7 +120,7 @@ func TableDescendantIDs(doc *Node) (map[string][]string, error) {
 // document or footnote definition keeps one empty paragraph; any other container
 // the removal leaves outside its content rule rejects the delete with that rule.
 func DeleteBlock(doc *Node, blockID string) (*Node, error) {
-	if err := wantDocument(doc, "DeleteBlock"); err != nil {
+	if _, err := ValidateDocument(doc, "DeleteBlock"); err != nil {
 		return nil, err
 	}
 	path, _, ok := findBlock(doc, blockID)
@@ -186,7 +190,7 @@ func tableIndexError(table *Node, axis, index, problem string) error {
 }
 
 func editTable(doc *Node, blockID, operation string) ([]int, *Node, error) {
-	if err := wantDocument(doc, operation); err != nil {
+	if _, err := ValidateDocument(doc, operation); err != nil {
 		return nil, nil, err
 	}
 	path, _, ok := findBlock(doc, blockID)
@@ -481,7 +485,7 @@ var ErrListItemContent = errors.New("list item has content besides its text")
 // removed=false when r covers part of a textblock's text or the textblock is a
 // table cell's, whose content rule keeps the cell.
 func DeleteTextblock(doc *Node, r Range) (*Node, bool, error) {
-	if err := wantDocument(doc, "DeleteTextblock"); err != nil {
+	if _, err := ValidateDocument(doc, "DeleteTextblock"); err != nil {
 		return nil, false, err
 	}
 	var textblockPath []int
@@ -559,7 +563,7 @@ func listItemRemoval(parent *Node, textblockPath []int) (removePath []int, hoist
 // start or end selects that edge. A target inside the moved block is
 // ErrMoveInsideItself; a block that cannot stand at document level is ErrSchema.
 func MoveBlock(doc *Node, blockID string, target Range, after bool) (*Node, error) {
-	if err := wantDocument(doc, "MoveBlock"); err != nil {
+	if _, err := ValidateDocument(doc, "MoveBlock"); err != nil {
 		return nil, err
 	}
 	path, moved, ok := findBlock(doc, blockID)

@@ -144,7 +144,7 @@ func TestAPublishCancelledWhileWaitingForAReconnectSendsNothing(t *testing.T) {
 		return err
 	}
 
-	// The deadline is a minute out, so publishBound's 5 s is the one publishCoreTo keeps: still
+	// The deadline is a minute out, so publishBound's 5 s is the one PublishCoreContext keeps: still
 	// ahead when the cancel lands one tick into the wait and when the reconnect follows about a
 	// second later.
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -213,7 +213,7 @@ func TestAPublishCancelledAsTheReconnectCompletesSendsNothing(t *testing.T) {
 		return err
 	}
 
-	// The deadline is a minute out, so publishBound's 5 s is the one publishCoreTo keeps, and it is
+	// The deadline is a minute out, so publishBound's 5 s is the one PublishCoreContext keeps, and it is
 	// still ahead when the reconnect completes about a second into the wait.
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()

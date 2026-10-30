@@ -1146,8 +1146,7 @@ func TestACompletionInAForeignTurnIsNotTheRefusedTasksRun(t *testing.T) {
 				t.Fatalf("ready: %v", err)
 			}
 			// The claim has confirmed no task: run 1's prompt was acknowledged and its turn was
-			// never seen, and the re-entry's stop retired that task on its way through. The child
-			// re-entered at run 2, whose task is delivered and acknowledged.
+			// never seen. The child re-entered at run 2, whose task is delivered and acknowledged.
 			second := "outbox:42"
 			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: "run 2's task", ID: second, Generation: 2}); err != nil {
 				t.Fatalf("deliver run 2's task: %v", err)

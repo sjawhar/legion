@@ -38,12 +38,25 @@ go test -timeout 20m ./internal/dispatch/api
 ```
 
 CI's `envoy-go` job runs it that way, alone and before the module's other packages
-(`.github/workflows/envoy-and-contracts.yaml`), and `envoy-go-race` gives it 30
-minutes. A
-command that runs one of its tests by name (`-run`) needs no deadline of its own. Run it alone
-rather than beside the module's other Postgres-backed packages: together they share one database
-service and the machine's CPU, and on a small machine `api` and `docs` then each overran the default
+(`.github/workflows/ci.yaml`), and `envoy-go-race` gives it 30 minutes; `docs` runs under `-race`
+in `envoy-go-race-docs`, which gives it 60. A command that runs one of its tests by name (`-run`)
+needs no deadline of its own. Run it alone rather than beside the module's other Postgres-backed
+packages: together they share one database service and the machine's CPU, and on a small machine
+`api` and `docs` then each overran the default
 (`docs/solutions/testing/the-dispatch-servers-go-suites-in-an-issue-pod-run-api-and-docs-alone-with-a-timeout-and-read-the-c-collation-docker-and-bun-failures-as-the-environment-LEGION-752.md`).
+
+## A writer a test holds
+
+A test that needs a live socket's writer held, so that frames queue behind it while the test
+sends the socket more frames, holds the writer itself: it builds its rig on a `heldWrites`
+listener (`packages/envoy/internal/dispatch/api/live_socket_test.go`), calls `hold`, and waits
+with `waitHeld` until a write waits at the gate. Small TCP buffers and a page that reads nothing
+(`smallSendBuffers`, `smallReadDialer`) stall the writer only until the transport lets its write
+through, and the transport decides when that is. Under gVisor, the runtime of Legion's worker
+pods, a write blocked for a third of a second completed the moment the page sent its next frame.
+`TestARepeatedSubReplacesAnotherKind` then waited for a queued frame the writer had already
+written, and failed 8 of 300 runs. Those two helpers are for tests of a slow page itself, such as
+one whose queue overflows.
 
 ## Containers a test starts
 

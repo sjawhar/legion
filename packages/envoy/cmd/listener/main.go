@@ -49,6 +49,19 @@ type listenerDeps struct {
 	consumer   string
 	streamName string
 	streamInfo streamInfoLookup
+	// delivery is the config main hands the delivery handlers (the role lane, the live lane and the
+	// durable), wired once, so the publish route forwards through its forwardRole, records each
+	// session it confirms in its dedupeCache (so the handlers do not push that key to it again), and
+	// writes each send's delivery line and delivery_status count through its logger and
+	// messagesDelivered, reading as the role lane's do, beside the route's own request record
+	// (request_record.go). The route never reads that dedupeCache, since the handlers also
+	// record a self-subscribed session whose push they skipped without hearing from it.
+	delivery *listenerDeliveryHandlerConfig
+	// confirmed is the publish route's own record of each (dedupe key, session) whose receipt arrived
+	// through the route, which only the route writes. A send skips a holder or recipient recorded
+	// there, so envoy-client's retry of a send does not forward again to one the first attempt
+	// confirmed, and no one is counted as confirming a message without having sent its receipt.
+	confirmed *dedupe.Cache
 }
 
 // kvCache is what the listener asks of each KV-backed cache it keeps.
@@ -658,11 +671,7 @@ func main() {
 		if d == nil {
 			return 0
 		}
-		entries, err := d.sessions.List()
-		if err != nil {
-			return 0
-		}
-		return int64(len(entries))
+		return int64(d.sessions.LiveCount())
 	})
 	met.NewGaugeFunc("envoy_active_interests", "Number of active interest subscriptions", func() int64 {
 		d := deps.Load()
@@ -775,10 +784,16 @@ func main() {
 	}
 	cacheReadyCancel()
 
+	// A dead session's last heartbeat is kept for as long as the interest reaper can still hold its
+	// interest: the reaper deletes the row only store.InterestReapAllowance after its last write,
+	// so /v1/interests/ can report the session's real last heartbeat (the row's updated_at lags it
+	// by up to store.InterestRefreshAge) for every row it still lists. The allowance is the
+	// reaper's own (store.Registry.Reap), so the two cannot drift apart.
 	sessions, err := session.OpenSessionRegistry(
 		client.Conn,
 		session.WithSessionReplicas(cfg.NATSReplicas),
 		session.WithSessionLogger(logger.Slog()),
+		session.WithLastSeenRetention(store.InterestReapAllowance(store.InterestReapGrace)),
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -917,6 +932,8 @@ func main() {
 		caches:     caches,
 		consumer:   consumer,
 		streamName: bus.Stream,
+		delivery:   &deliveryConfig,
+		confirmed:  dedupe.New(10 * time.Minute),
 	}
 	openV1Routes(v1Gate, ready, cfg.MachineID, logger, listeningAt)
 

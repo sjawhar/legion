@@ -32,6 +32,7 @@ import {
   type DispatchWriteRetry,
 } from "../dispatch-http";
 import { followedAsk } from "../dispatch-subscribe";
+import { renderSessionAnswersList } from "../session-answers";
 import { ToolInputError } from "../tool-input-errors";
 import { fakeSearchResponse } from "./fake-search-response";
 
@@ -95,8 +96,12 @@ function executeAsk(args: Record<string, unknown>, fetchImpl: typeof fetch) {
 const architectureComponentsGuidance =
   'Project LEGION has an architecture model, but this issue is not linked to any of its current components. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
 
-const createdIssueLine =
-  "Created LEGION-216: Architecture work → http://dispatch.test/issues/LEGION-216";
+/** A new issue's result as these fixtures' server answers it: the created line, then the
+ *  not-made form a server that sends no related-item check result gets. */
+const createdIssueLines = [
+  "Created LEGION-216: Architecture work → http://dispatch.test/issues/LEGION-216",
+  "No related-item check was made: the server sent no check result. Search before you rely on this being new: dispatch search --project LEGION --query 'Architecture work'",
+].join("\n");
 
 const architectureSourceUnavailableGuidance =
   'Could not check whether project LEGION has an architecture model: architecture source network error. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
@@ -162,12 +167,15 @@ async function createIssueWithComponents(
     const target = new URL(String(url));
     requests.push(`${init?.method ?? "GET"} ${target.pathname}`);
     if (target.pathname === "/api/v1/issues") {
-      return response({
-        key: "LEGION-216",
-        title: "Architecture work",
-        project: "LEGION",
-        components,
-      });
+      return response(
+        {
+          key: "LEGION-216",
+          title: "Architecture work",
+          project: "LEGION",
+          components,
+        },
+        201
+      );
     }
     if (target.pathname === "/api/v1/projects/LEGION/architecture-sources") {
       if (source.startsWith("older-")) {
@@ -273,6 +281,7 @@ describe("executeDispatchTool", () => {
     expect(result.details).not.toHaveProperty("topic");
     expect(result.text).toBe(
       `Asked ask-1 on DSP-41 (urgency med): ${releaseQuestion}\n` +
+        "No related-item check was made: the server sent no check result. Search before you rely on this being new: dispatch search --project DSP --query 'release ready should'\n" +
         "You follow this ask: its answer and replies reach you directly."
     );
   });
@@ -536,14 +545,14 @@ describe("executeDispatchTool", () => {
     expect(replying.problems).toEqual([
       "--body is required (string)",
       "unknown flag --message",
-      "in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference",
+      "in_reply_to must be a full message id (uuid), a dispatch://KEY/message/<id> reference, or a block of one (dispatch://KEY/message/<id>#b-<block id>)",
     ]);
     expect(replying.message).toBe(
       [
         "dispatch message was not called: 3 problems",
         "- --body is required (string)",
         "- unknown flag --message",
-        "- in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference",
+        "- in_reply_to must be a full message id (uuid), a dispatch://KEY/message/<id> reference, or a block of one (dispatch://KEY/message/<id>#b-<block id>)",
         "- Allowed flags: --issue, --issue-file, --body, --body-file, --in-reply-to, --in-reply-to-file, --image, --clear-images, --help, --dry-run",
         "- Example: dispatch message --issue DSP-1 --body 'Implementation started.'",
       ].join("\n")
@@ -928,6 +937,145 @@ describe("executeDispatchTool", () => {
     expect(refResult.text).toBe(posted);
   });
 
+  test("a message reply to a block reference names the block", async () => {
+    const parent = "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c";
+    const bodies: unknown[] = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname !== "/api/v1/issues/DSP-42/messages") {
+        throw new Error(`unexpected request: ${target.pathname}`);
+      }
+      bodies.push(JSON.parse(init?.body as string));
+      return response({ id: "message-2", issue_key: "DSP-42" });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_message",
+      args: {
+        issue: "DSP-42",
+        body: "Sounds good",
+        in_reply_to: `dispatch://DSP-42/message/${parent}#b-b2`,
+      },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(bodies).toEqual([
+      {
+        body: "Sounds good",
+        in_reply_to: parent,
+        in_reply_to_block: "b2",
+        actor: expect.anything(),
+      },
+    ]);
+    expect(result.text).toBe("Posted message message-2 (dispatch://DSP-42/message/message-2)");
+  });
+
+  test("a message reply refuses a block of a comment, naming the reply that answers it", async () => {
+    const parent = "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c";
+    const comment = `dispatch://DSP-42/comment/${parent}#b-b2`;
+    const error = await executeDispatchTool({
+      tool: "dispatch_message",
+      args: { issue: "DSP-42", body: "Sounds good", in_reply_to: comment },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: (() => {
+        throw new Error("network must not be called");
+      }) as unknown as typeof fetch,
+    }).then(
+      () => undefined,
+      (thrown: unknown) => thrown
+    );
+
+    if (!(error instanceof ToolInputError)) throw new Error("expected ToolInputError");
+    expect(error.problems).toEqual([
+      `in_reply_to ${comment} names a block of a comment, but a message reply answers a block of a message (dispatch://KEY/message/<id>#b-<block id>); answer it with dispatch comment --reply-to '${comment}'`,
+    ]);
+  });
+
+  test("a read of a message conversation prints the block each reply answers", async () => {
+    const long = `${"Ship the build tonight. ".repeat(6)}Then tell the team.`;
+    const block = (text: string, removed: boolean) => ({
+      node: "message/message-42#b2",
+      ref: "dispatch://DSP-42/message/message-42#b-b2",
+      block_id: "b2",
+      text,
+      removed,
+    });
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/issues/DSP-42/messages/message-42") {
+        return response({
+          message: {
+            id: "message-42",
+            issue_key: "DSP-42",
+            author: { kind: "session", id: "writer-1" },
+            body: `Plan.\n\n${long}`,
+            in_reply_to: null,
+            created_at: "2026-09-09T00:00:00Z",
+            reply_block: null,
+          },
+          replies: [
+            {
+              id: "message-43",
+              issue_key: "DSP-42",
+              author: { kind: "user", id: "sami" },
+              body: "Sounds good.",
+              in_reply_to: "message-42",
+              created_at: "2026-09-09T00:01:00Z",
+              reply_block: block(long, false),
+            },
+            {
+              id: "message-44",
+              issue_key: "DSP-42",
+              author: { kind: "user", id: "sami" },
+              body: "Never mind.",
+              in_reply_to: "message-42",
+              created_at: "2026-09-09T00:02:00Z",
+              reply_block: block("Gone.", true),
+            },
+          ],
+        });
+      }
+      if (target.pathname === "/api/v1/references") return response(emptyGraph("message"));
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: "dispatch://DSP-42/message/message-42" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text.split("\n").slice(0, 12)).toEqual([
+      "Message:",
+      "message-42 · session writer-1",
+      "Body: Plan.",
+      "",
+      long,
+      "Reply chain:",
+      "message-43 · user sami",
+      // The block's text reads as its head, as every other quoted text on a read does.
+      `Re: block b2: ${long.slice(0, 120)}…`,
+      "Body: Sounds good.",
+      "message-44 · user sami",
+      "Re: block b2 (removed)",
+      "Body: Never mind.",
+    ]);
+  });
+
   // A human's direct message to a session (the Agents page, POST /api/v1/agents/{id}/messages)
   // belongs to no issue, and only POST /api/v1/messages/{id}/reply can carry an answer into that
   // conversation. The route the tool picks is decided by what the caller named, not by what the
@@ -1193,7 +1341,7 @@ describe("executeDispatchTool", () => {
         fetchImpl,
       })
     ).rejects.toThrow(
-      "in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference"
+      "in_reply_to must be a full message id (uuid), a dispatch://KEY/message/<id> reference, or a block of one (dispatch://KEY/message/<id>#b-<block id>)"
     );
   });
 
@@ -2009,6 +2157,73 @@ describe("executeDispatchTool", () => {
     });
   });
 
+  test("dispatch_answers prints every item of the 72 hours newest first, in full and uncapped", async () => {
+    const requests: string[] = [];
+    const at = (hours: number) => new Date(Date.now() - hours * 3_600_000).toISOString();
+    const items = Array.from({ length: 10 }, (_, index) => ({
+      kind: "message" as const,
+      relation: "sent_you_a_message" as const,
+      id: `m-${index}`,
+      at: at(index + 1),
+      author: { kind: "user" as const, id: "ana@example.com" },
+      text: `${index} ${"w".repeat(1_000)}`,
+      owner: { issue: { key: "DSP-42", title: "Native workspace" } },
+      ref: `dispatch://DSP-42/message/m-${index}`,
+      href: `/issues/DSP-42#message-m-${index}`,
+    }));
+    const since = at(72);
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      return response({ session_id: "session-1", since, total: 10, items });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_answers",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(requests).toEqual(["/api/v1/agents/session-1/answers"]);
+    expect(result.text).toBe(renderSessionAnswersList(items, { now: Date.now() }));
+    expect(result.text.length).toBeGreaterThan(10_000);
+    expect(result.text.split("\n")[0]).toBe(
+      "10 items people wrote to this session in the last 72 hours, newest first, word for word:"
+    );
+    for (const item of items) expect(result.text).toContain(item.text);
+    expect(result.details).toEqual({ session: "session-1", since, total: 10 });
+  });
+
+  test("dispatch_answers against a Dispatch without the route says its build is older than the answers route", async () => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> =>
+      response(
+        { code: "NOT_FOUND", error: `no route for GET ${new URL(String(url)).pathname}` },
+        404
+      );
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_answers",
+        args: {},
+        cwd: "/workspace",
+        host: "omp",
+        sessionId: "session-1",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).rejects.toThrow(
+      "This Dispatch (http://dispatch.test) has no answers route yet: its build is older than the answers route."
+    );
+  });
+
   test("dispatch_claim claims for the calling session and releases with release: true", async () => {
     const calls: Array<{ method: string; pathname: string; body: unknown }> = [];
     const claim = {
@@ -2786,12 +3001,15 @@ describe("executeDispatchTool", () => {
         return noSources();
       }
       requests.push({ body: JSON.parse(String(init?.body)) });
-      return response({
-        key: "LEGION-13",
-        title: "New global search work",
-        project: "LEGION",
-        components: issueComponents("inherit", []),
-      });
+      return response(
+        {
+          key: "LEGION-13",
+          title: "New global search work",
+          project: "LEGION",
+          components: issueComponents("inherit", []),
+        },
+        201
+      );
     };
 
     const result = await executeDispatchTool({
@@ -2806,7 +3024,8 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toBe(
-      "Created LEGION-13: New global search work → http://dispatch.test/issues/LEGION-13"
+      "Created LEGION-13: New global search work → http://dispatch.test/issues/LEGION-13\n" +
+        "No related-item check was made: the server sent no check result. Search before you rely on this being new: dispatch search --project LEGION --query 'global search work'"
     );
     expect(result.details).toEqual({ issue: "LEGION-13" });
     expect(followedAsk(result.details)).toBeNull();
@@ -2825,13 +3044,16 @@ describe("executeDispatchTool", () => {
       if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-sources") {
         return noSources();
       }
-      return response({
-        key: "LEGION-13",
-        title: "New global search work",
-        project: "LEGION",
-        assignee,
-        components: issueComponents("inherit", []),
-      });
+      return response(
+        {
+          key: "LEGION-13",
+          title: "New global search work",
+          project: "LEGION",
+          assignee,
+          components: issueComponents("inherit", []),
+        },
+        201
+      );
     };
 
     const result = await executeDispatchTool({
@@ -2850,7 +3072,8 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toBe(
-      `Created LEGION-13: New global search work → https://dispatch.example.org/issues/LEGION-13${said}`
+      `Created LEGION-13: New global search work → https://dispatch.example.org/issues/LEGION-13${said}\n` +
+        "No related-item check was made: the server sent no check result. Search before you rely on this being new: dispatch search --project LEGION --query 'global search work'"
     );
   });
 
@@ -2863,7 +3086,7 @@ describe("executeDispatchTool", () => {
       source
     );
 
-    expect(result.text).toBe([createdIssueLine, architectureComponentsGuidance].join("\n"));
+    expect(result.text).toBe([createdIssueLines, architectureComponentsGuidance].join("\n"));
     expect(requests).toEqual([
       "POST /api/v1/issues",
       "GET /api/v1/projects/LEGION/architecture-sources",
@@ -2877,12 +3100,15 @@ describe("executeDispatchTool", () => {
       requests.push(`${init?.method ?? "GET"} ${target.pathname}`);
       if (target.pathname === "/api/v1/issues") {
         expect(JSON.parse(String(init?.body))).toMatchObject({ project: " LEGION " });
-        return response({
-          key: "LEGION-216",
-          title: "Architecture work",
-          project: "LEGION",
-          components: issueComponents("inherit", []),
-        });
+        return response(
+          {
+            key: "LEGION-216",
+            title: "Architecture work",
+            project: "LEGION",
+            components: issueComponents("inherit", []),
+          },
+          201
+        );
       }
       if (target.pathname === "/api/v1/projects/LEGION/architecture-sources") {
         return response([architectureSource("LEGION")]);
@@ -2918,12 +3144,15 @@ describe("executeDispatchTool", () => {
           project: "",
           external: "owner/repo#42",
         });
-        return response({
-          key: "LEGION-216",
-          title: "Architecture work",
-          project: "LEGION",
-          components: issueComponents("inherit", []),
-        });
+        return response(
+          {
+            key: "LEGION-216",
+            title: "Architecture work",
+            project: "LEGION",
+            components: issueComponents("inherit", []),
+          },
+          201
+        );
       }
       if (target.pathname === "/api/v1/projects/LEGION/architecture-sources") {
         return response([architectureSource("LEGION")]);
@@ -2955,7 +3184,7 @@ describe("executeDispatchTool", () => {
       "none"
     );
 
-    expect(result.text).toBe(createdIssueLine);
+    expect(result.text).toBe(createdIssueLines);
     expect(requests).toEqual([
       "POST /api/v1/issues",
       "GET /api/v1/projects/LEGION/architecture-sources",
@@ -2970,7 +3199,7 @@ describe("executeDispatchTool", () => {
 
     expect(result.text).toBe(
       [
-        createdIssueLine,
+        createdIssueLines,
         'Could not check whether project LEGION has an architecture model: not found. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.',
       ].join("\n")
     );
@@ -2991,7 +3220,7 @@ describe("executeDispatchTool", () => {
       source
     );
 
-    expect(result.text).toBe(createdIssueLine);
+    expect(result.text).toBe(createdIssueLines);
     expect(requests).toEqual([
       "POST /api/v1/issues",
       "GET /api/v1/projects/LEGION/architecture-sources",
@@ -3005,7 +3234,7 @@ describe("executeDispatchTool", () => {
       "older-one"
     );
 
-    expect(result.text).toBe([createdIssueLine, architectureComponentsGuidance].join("\n"));
+    expect(result.text).toBe([createdIssueLines, architectureComponentsGuidance].join("\n"));
     expect(requests).toEqual([
       "POST /api/v1/issues",
       "GET /api/v1/projects/LEGION/architecture-sources",
@@ -3018,7 +3247,7 @@ describe("executeDispatchTool", () => {
       issueComponents("explicit", ["web"], [], null, "LEGION-200")
     );
 
-    expect(result.text).toBe(createdIssueLine);
+    expect(result.text).toBe(createdIssueLines);
     expect(requests).toEqual(["POST /api/v1/issues"]);
   });
 
@@ -3027,7 +3256,7 @@ describe("executeDispatchTool", () => {
       issueComponents("none", [], [], "hiring, not code")
     );
 
-    expect(result.text).toBe(createdIssueLine);
+    expect(result.text).toBe(createdIssueLines);
     expect(requests).toEqual(["POST /api/v1/issues"]);
   });
 
@@ -3036,7 +3265,7 @@ describe("executeDispatchTool", () => {
       issueComponents("explicit", [], ["legacy-ui"])
     );
 
-    expect(result.text).toBe([createdIssueLine, architectureComponentsGuidance].join("\n"));
+    expect(result.text).toBe([createdIssueLines, architectureComponentsGuidance].join("\n"));
     expect(requests).toEqual([
       "POST /api/v1/issues",
       "GET /api/v1/projects/LEGION/architecture-sources",
@@ -3049,7 +3278,7 @@ describe("executeDispatchTool", () => {
       "fails"
     );
 
-    expect(result.text).toBe([createdIssueLine, architectureSourceUnavailableGuidance].join("\n"));
+    expect(result.text).toBe([createdIssueLines, architectureSourceUnavailableGuidance].join("\n"));
     expect(requests).toEqual([
       "POST /api/v1/issues",
       "GET /api/v1/projects/LEGION/architecture-sources",
@@ -3061,7 +3290,7 @@ describe("executeDispatchTool", () => {
       issueComponents("explicit", ["web"])
     );
 
-    expect(result.text).toBe(createdIssueLine);
+    expect(result.text).toBe(createdIssueLines);
     expect(requests).toEqual(["POST /api/v1/issues"]);
   });
 
@@ -3280,7 +3509,7 @@ describe("executeDispatchTool", () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const pathname = new URL(String(url)).pathname;
       if (pathname === "/api/v1/projects/LEGION/architecture-sources") return noSources();
-      return response(olderIssue);
+      return response(olderIssue, pathname === "/api/v1/issues" ? 201 : 200);
     };
     const run = (tool: string, args: Record<string, unknown>) =>
       executeDispatchTool({
@@ -5427,6 +5656,172 @@ describe("executeDispatchTool", () => {
         "Referenced by:\n- mentions issue dispatch://OPS-1 (2026-10-21T00:00:00Z) (block dispatch://CORE/artifact/handbook-md#b-ship-it)\nLinks:"
       );
     });
+
+    // A block of a comment or message reads as one line naming the block, its item and the comment
+    // revision its text last changed in, then its text; a comment's pin names a revision of the
+    // comment. A block of a comment or message citing the node is listed as its item, then the block.
+    describe("of a comment or message", () => {
+      const comment = "11111111-1111-4111-8111-111111111111";
+      const message = "33333333-3333-4333-8333-333333333333";
+      const commentRef = `dispatch://CORE-1/comment/${comment}`;
+      const messageRef = `dispatch://CORE-1/message/${message}`;
+      const commentBlock = {
+        kind: "block",
+        id: `comment/${comment}#b2`,
+        block_id: "b2",
+        issue_key: "CORE-1",
+        project: "CORE",
+        ref: `${commentRef}#b-b2`,
+        parent: { kind: "comment", id: comment, ref: commentRef },
+      };
+      const messageBlock = {
+        kind: "block",
+        id: `message/${message}#b1`,
+        block_id: "b1",
+        issue_key: "CORE-1",
+        project: "CORE",
+        ref: `${messageRef}#b-b1`,
+        parent: { kind: "message", id: message, ref: messageRef },
+      };
+      const sections = ["Referenced by:", "- none", "Links:", "- none"];
+
+      test("read prints a block of a comment", async () => {
+        const block = `dispatch://DSP-1/comment/${comment}#b-b2`;
+        const node = {
+          ...commentBlock,
+          issue_key: "DSP-1",
+          project: "DSP",
+          ref: block,
+          parent: { kind: "comment", id: comment, ref: `dispatch://DSP-1/comment/${comment}` },
+          changed_version: 1,
+          made_by: [{ kind: "user", id: "alice@example.com" }],
+          made_at: "2026-10-20T00:00:00Z",
+          changed_by: [{ kind: "user", id: "alice@example.com" }],
+          changed_at: "2026-10-20T00:00:00Z",
+          parent_version: 1,
+          text: "Beta.\nIts second line.",
+        };
+        const { result } = readBlock(
+          block,
+          () => response({ node, edges: [] }),
+          () => response({ node, edges: [] })
+        );
+
+        expect(await result).toEqual({
+          text: [
+            `Block b2 of comment ${comment} (changed in revision 1):`,
+            "Beta.\nIts second line.",
+            `Node: block ${block} · made by user alice@example.com at 2026-10-20T00:00:00Z · changed by user alice@example.com at 2026-10-20T00:00:00Z · part of dispatch://DSP-1/comment/${comment} (revision 1)`,
+            ...sections,
+          ].join("\n"),
+          details: { issue: "DSP-1", block: "b2" },
+        });
+
+        // Once an edit removed the block, no current revision holds it: the read fails, naming it.
+        const removed = () => notFound(`no block "b2" in comment ${comment}`);
+        await expect(readBlock(block, removed, removed).result).rejects.toThrow(
+          new Error(`No block b2 in dispatch://DSP-1/comment/${comment}.`)
+        );
+      });
+
+      test("a pinned comment block prints the revision its text last changed in and how it stands against its pin", async () => {
+        const pinned = `${commentRef}#b-b2@v1`;
+        const { result } = readBlock(
+          pinned,
+          () =>
+            response({
+              node: {
+                ...commentBlock,
+                changed_version: 2,
+                made_by: [{ kind: "user", id: "alice@example.com" }],
+                changed_by: [{ kind: "user", id: "alice@example.com" }],
+                changed_at: "2026-10-20T00:00:00Z",
+                parent_version: 2,
+                text: "Beta, as edited.",
+                pin: { version: 1, ref: pinned, text: "Beta.", state: "changed" },
+              },
+              edges: [
+                {
+                  kind: "mentions",
+                  direction: "in",
+                  node: messageBlock,
+                  excerpt: { block_id: "b1", text: "The message cites it." },
+                  created_at: "2026-10-21T00:00:00Z",
+                  source_seq: 7,
+                },
+              ],
+            }),
+          () => response({ node: commentBlock, edges: [] })
+        );
+
+        expect(await result).toEqual({
+          text: [
+            `Block b2 of comment ${comment} (changed in revision 2):`,
+            "Beta, as edited.",
+            "Pinned to revision: 1",
+            "Changed since revision 1; last changed in revision 2.",
+            "Text at revision 1:",
+            "Beta.",
+            `Node: block ${commentRef}#b-b2 · made by user alice@example.com · changed by user alice@example.com at 2026-10-20T00:00:00Z · part of ${commentRef} (revision 2)`,
+            "Referenced by:",
+            `- mentions message ${messageRef} block b1 (The message cites it. · 2026-10-21T00:00:00Z)`,
+            "Links:",
+            "- none",
+          ].join("\n"),
+          details: { issue: "CORE-1", block: "b2" },
+        });
+      });
+
+      test("a message block prints its message and its text", async () => {
+        const block = `${messageRef}#b-b1`;
+        const node = { ...messageBlock, text: "The first paragraph." };
+        const expected = [
+          `Block b1 of message ${message}:`,
+          "The first paragraph.",
+          ...sections,
+        ].join("\n");
+        expect(
+          (
+            await readBlock(
+              block,
+              () => response({ node, edges: [] }),
+              () => response({ node, edges: [] })
+            ).result
+          ).text
+        ).toBe(expected);
+      });
+
+      test("a comment block no current revision holds is an error naming the block and its comment", async () => {
+        const absent = () => notFound(`no block "b9" in comment ${comment}`);
+        await expect(readBlock(`${commentRef}#b-b9`, absent, absent).result).rejects.toThrow(
+          new Error(`No block b9 in ${commentRef}.`)
+        );
+      });
+
+      test("a tool that would act on the block's owner refuses it as it refuses the comment", async () => {
+        const refused = await executeDispatchTool({
+          tool: "dispatch_comment",
+          args: { ref: `${commentRef}#b-b2`, body: "Agreed." },
+          cwd: "/workspace",
+          host: "omp",
+          config,
+          env: {},
+          exec: repoExec("owner/repo"),
+          fetchImpl: (() => {
+            throw new Error("network must not be called");
+          }) as unknown as typeof fetch,
+        }).then(
+          () => [],
+          (error: unknown) => {
+            if (!(error instanceof ToolInputError)) throw error;
+            return error.problems;
+          }
+        );
+        expect(refused).toEqual([
+          `ref ${commentRef}#b-b2 names block b2 of a comment on CORE-1; dispatch comment would act on CORE-1 and drop the block: reply in its thread with reply_to ${comment} and issue CORE-1`,
+        ]);
+      });
+    });
   });
 
   test("reads a named artifact version from a singular dispatch URI", async () => {
@@ -6019,7 +6414,11 @@ describe("executeDispatchTool", () => {
         "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " +
         "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " +
         "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " +
-        "dispatch read), or " +
+        "dispatch read), dispatch://KEY-1/comment/<uuid>#b-<block id>, " +
+        "dispatch://PROJECT/artifact/<slug>/comment/<uuid>#b-<block id> or " +
+        "dispatch://KEY-1/message/<uuid>#b-<block id> (one block of a comment or message, a " +
+        "comment's optionally pinned to a revision of the comment with @v<N> after it; for dispatch " +
+        "read), or " +
         "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " +
         "for dispatch doc-read)"
     );
@@ -8104,12 +8503,15 @@ describe("executeDispatchTool", () => {
       requests.push(request);
       const target = new URL(request.url);
       if (target.pathname === "/api/v1/issues") {
-        return response({
-          key: "TEST-1",
-          title: "External issue",
-          project: "TEST",
-          components: issueComponents("inherit", []),
-        });
+        return response(
+          {
+            key: "TEST-1",
+            title: "External issue",
+            project: "TEST",
+            components: issueComponents("inherit", []),
+          },
+          201
+        );
       }
       if (target.pathname === "/api/v1/projects/TEST/architecture-sources") {
         return noSources();
@@ -8703,6 +9105,149 @@ describe("executeDispatchTool", () => {
         fetchImpl,
       })
     ).rejects.toThrow(/reply_to and reply_to_ask/);
+  });
+
+  test("a comment reply to a block reference names the block", async () => {
+    const parent = "11111111-1111-4111-8111-111111111111";
+    const bodies: unknown[] = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname !== "/api/v1/issues/DSP-1/comments") {
+        throw new Error(`unexpected request: ${target.pathname}`);
+      }
+      bodies.push(JSON.parse(init?.body as string));
+      return response({ id: "comment-2", issue_key: "DSP-1", ask_id: null, reply_to: parent });
+    };
+    const reply = (replyTo: string) =>
+      executeDispatchTool({
+        tool: "dispatch_comment",
+        args: { issue: "DSP-1", body: "Yes", reply_to: replyTo },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+    const toBlock = await reply(`dispatch://DSP-1/comment/${parent}#b-b2`);
+    // A reply to the comment itself names no block.
+    await reply(parent);
+
+    expect(bodies).toEqual([
+      { body: "Yes", reply_to: parent, reply_to_block: "b2", actor: expect.anything() },
+      { body: "Yes", reply_to: parent, actor: expect.anything() },
+    ]);
+    expect(toBlock.text).toBe("Posted comment comment-2");
+  });
+
+  test("a comment reply refuses a block reference that names no block of a comment", async () => {
+    const parent = "11111111-1111-4111-8111-111111111111";
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+    const problems = async (replyTo: string) => {
+      const error = await executeDispatchTool({
+        tool: "dispatch_comment",
+        args: { issue: "DSP-1", body: "Yes", reply_to: replyTo },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      }).then(
+        () => undefined,
+        (thrown: unknown) => thrown
+      );
+      if (!(error instanceof ToolInputError)) throw new Error("expected ToolInputError");
+      return error.problems;
+    };
+    const message = `dispatch://DSP-1/message/${parent}#b-b2`;
+
+    expect(await problems(message)).toEqual([
+      `reply_to ${message} names a block of a message, but a comment reply answers a block of a comment (dispatch://KEY/comment/<id>#b-<block id>); answer it with dispatch message --in-reply-to '${message}'`,
+    ]);
+    expect(await problems("dispatch://DSP-1/spec#b-goal")).toEqual([
+      "reply_to dispatch://DSP-1/spec#b-goal names a block of a document, but a comment reply answers a block of a comment (dispatch://KEY/comment/<id>#b-<block id>)",
+    ]);
+    expect(await problems(`dispatch://DSP-1/comment/${parent}#b-b2@v1`)).toEqual([
+      `reply_to dispatch://DSP-1/comment/${parent}#b-b2@v1 names revision 1 of the block, but a reply answers the block whatever its text becomes: drop @v1`,
+    ]);
+    expect(await problems(`dispatch://DSP-1/ask/${parent}#b-b2`)).toEqual([
+      `reply_to dispatch://DSP-1/ask/${parent}#b-b2 names no block; a block of a comment reads dispatch://KEY/comment/<id>#b-<block id>`,
+    ]);
+  });
+
+  test("a read of a reply that names a block prints the block before the reply's body", async () => {
+    const parent = "11111111-1111-4111-8111-111111111111";
+    const replyId = "22222222-2222-4222-8222-222222222222";
+    const node = `comment/${parent}#b2`;
+    const ref = `dispatch://DSP-1/comment/${parent}#b-b2`;
+    const comment = (id: string, body: string, replyBlock: unknown) => ({
+      id,
+      issue_key: "DSP-1",
+      author: { kind: "session", id: "reviewer-1" },
+      body,
+      anchor: null,
+      reply_to: parent,
+      resolved: false,
+      suggestion: null,
+      created_at: "2026-09-09T00:00:00Z",
+      reply_block: replyBlock,
+    });
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === `/api/v1/comments/${replyId}`) {
+        return response({
+          comment: comment(replyId, "Yes", {
+            node,
+            ref,
+            block_id: "b2",
+            text: "Beta.",
+            removed: false,
+          }),
+          replies: [
+            comment("comment-3", "Still yes", {
+              node,
+              ref,
+              block_id: "b2",
+              text: "Beta.",
+              removed: true,
+            }),
+            comment("comment-4", "Agreed", null),
+          ],
+        });
+      }
+      if (target.pathname === "/api/v1/references") return response(emptyGraph("comment"));
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: `dispatch://DSP-1/comment/${replyId}` },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text.split("\n").slice(0, 12)).toEqual([
+      "Comment:",
+      `${replyId} · session reviewer-1`,
+      "Re: block b2: Beta.",
+      "Body: Yes",
+      "Reply chain:",
+      "comment-3 · session reviewer-1",
+      "Re: block b2 (removed)",
+      "Body: Still yes",
+      "comment-4 · session reviewer-1",
+      "Body: Agreed",
+      "Referenced by:",
+      "- none",
+    ]);
   });
 
   test("reads the targeted comment and quoted reply chain from a Dispatch comment reference", async () => {
@@ -9676,7 +10221,7 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toContain(
-      "References:\n- unavailable: GET http://dispatch.test/api/v1/issues/DSP-42/references " +
+      "References:\n- unavailable: GET http://dispatch.test/api/v1/issues/DSP-42/references?versions=latest " +
         "answered 404 Not Found with a body that is not Dispatch's error JSON"
     );
     expect(result.text).toContain(

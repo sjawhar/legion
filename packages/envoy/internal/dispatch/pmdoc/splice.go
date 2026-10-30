@@ -70,7 +70,7 @@ func BlockIndex(doc *Node, target Range) (int, error) {
 }
 
 func documentBlock(doc *Node, target Range, caller string) (index, start, end int, err error) {
-	if err := wantDocument(doc, caller); err != nil {
+	if _, err := ValidateDocument(doc, caller); err != nil {
 		return 0, 0, 0, err
 	}
 	position := 0

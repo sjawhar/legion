@@ -243,7 +243,7 @@ prefix in an unprivileged container, unpacking
 one by hand works for some tools and not others, and what rules out a client a role unpacks onto
 its own `PATH` is the withheld `operator-setup` capability, not the unpacking itself.
 `legion.yaml` accepts the image only by digest (`ghcr.io/sjawhar/legion-worker@sha256:…`). A digest
-is published in each Worker Image workflow run's summary and in the body of each `legion-v<version>`
+is published in the summary of each run that builds the worker image and in the body of each `legion-v<version>`
 GitHub release; for a `sha-` or release-version worker-image tag,
 `docker buildx imagetools inspect ghcr.io/sjawhar/legion-worker:<tag>` prints its digest. Worker-image
 tags are `sha-<the commit's first 12 hex digits>` for every build and `<legion version>` for a
@@ -652,20 +652,20 @@ Closing the terminal leaves the project without one, and the daemon logs
    pod brings a disk of its own, so its workspace is provisioned afresh from the issue's branch
    and anything the old pod held unpushed is gone. Let the agent push before you suspend it.
 
-   **An operator's suspension holds until the operator resumes the claim.** The daemon resumes a
-   suspended claim on its own when its issue's phase moves to the claim's role (a phase start,
-   re-admission, a child's return to `todo`), and keeps its own controller running, unless an
-   operator suspended it; a phase start for a claim an operator suspended waits instead. At boot
-   it also resumes a claim that owns its issue's current phase, but only one the daemon or the
-   agent's own exit suspended. A notice for a suspended architect resumes nothing: it waits until
-   the architect holds its role again, so an operator-suspended architect receives it when the
-   operator resumes it. A drain therefore ends with the operator resuming every claim they
+   **An operator's suspension holds until the operator resumes the claim.** The daemon keeps every
+   role of an open issue live and idle between phases, while the root waits on a person, and when a
+   child re-enters. It suspends or ends claims only when an issue leaves the workflow, when a claim
+   moves to another tree, or for a production check after the issue is done. A phase start gives
+   its task to that live claim. At boot the daemon resumes by rule a suspended worker that still
+   owns its issue's phase, but never a claim an operator suspended; a start for an
+   operator-suspended claim waits instead. A notice for an operator-suspended architect waits until
+   the operator resumes it. A drain therefore ends with the operator resuming every claim they
    suspended, one `legion claims resume` each; `legion claims list --json` names each one's
    `suspendedBy` (`operator`, `daemon`, `exit`, or `unknown` for one suspended before this
-   release). The daemon's own suspension of a claim in a turn waits for the turn however long it
-   takes, with no stop timeout: a child parked in Dispatch (`backlog` or `icebox`) stops its worker
-   only once the worker's current turn ends, and a lingering tree's claims stay suspended until the
-   tree is re-admitted.
+   release). A daemon suspension of a claim whose issue left the workflow waits for its current turn
+   to finish, with no stop timeout: a child parked in Dispatch (`backlog` or `icebox`) stops its
+   worker only once the worker's current turn ends, and a lingering tree's claims stay suspended
+   until the tree is re-admitted.
 
    **After the first upgrade to a release that records `suspendedBy`,** every claim already
    suspended reads `unknown`. The next phase start, re-admission and the controller keeper resume

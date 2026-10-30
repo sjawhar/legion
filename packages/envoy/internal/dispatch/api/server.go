@@ -16,10 +16,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/sjawhar/envoy/internal/brokertoken"
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -277,14 +279,14 @@ type server struct {
 	// broadcast's recipients) finishes across the signal, and the wait Register returns holds
 	// shutdown for it (detached). Register sets it from its lifetime parameter and refuses a nil one, since nothing would
 	// ever end the work it bounds; a test passes its own t.Context(). A server a test builds
-	// directly (directServer) has none unless the test sets it.
+	// directly has none unless the test sets it (directServer sets context.Background()).
 	lifetime        context.Context
 	routeIndex      []routeIndexEntry
 	adviceQueryHook func(context.Context, pgx.Tx, string) error
-	// suggestionTimeout overrides the allowance the suggestion step runs under; zero, which every
-	// server the deployment builds leaves it, means writeSuggestionTimeout. Only tests set it
-	// (newFailingAdviceHandler, and suggestionsBehindLock for the two lock tests), so a case's
-	// outcome is its own choice rather than its machine's speed (INFRA-56).
+	// suggestionTimeout overrides the allowance the related-item check runs under; zero, which
+	// every server the deployment builds leaves it, means relatedCheckAllowance. Only tests set it
+	// (newFailingAdviceHandler, and the check's bound tests), so a case's outcome is its own choice
+	// rather than its machine's speed.
 	suggestionTimeout time.Duration
 	// broadcastResolveBudget overrides the budget a broadcast's recipient resolution runs under;
 	// zero, which every server the deployment builds leaves it, means broadcastResolveTimeout.
@@ -303,6 +305,9 @@ type server struct {
 	// liveKinds starts a live socket's subscriptions to the views beside the delivery views, by
 	// kind (live_subscriptions.go); a kind it does not hold is refused.
 	liveKinds map[string]liveKind
+	// liveWriterBeforePick is each live socket's beforePick (live_socket.go): nil outside tests,
+	// and set by a test before the socket it drives opens.
+	liveWriterBeforePick func(socket *liveSocket, takesStream bool)
 	// agentWatchInterval is how often an agent view re-arms its session: agentStreamWatchInterval,
 	// which a test replaces.
 	agentWatchInterval time.Duration
@@ -343,6 +348,13 @@ type server struct {
 	// names and apply step that it has warned about, until the configuration is fixed or the process
 	// restarts.
 	warnedUnmatchedRuns sync.Map
+	// termStats is the per-project term-statistics refreshes a related-item check started
+	// (ensureSearchTermStats), keyed by project, so a project's many checks start one.
+	termStats singleflight.Group
+	// relatedRecordRetrying is how many related_checks records being retried in the background
+	// (recordRelatedChecks, run as detached work) hold or wait on a pool connection right now, at
+	// most relatedRecordRetryLimit.
+	relatedRecordRetrying atomic.Int32
 }
 
 // warnedProductionRun keys server.warnedUnmatchedRuns: one deploy run under one configured set of

@@ -312,6 +312,15 @@ balancer's or Kubernetes' readiness probe at it.
 A check that needs NATS, the bucket or sign-in asserts `nats: true`, `files: true` or `signin: true`
 itself.
 
+## Metrics
+
+`GET /metrics` needs no credential either, so whoever reaches the server's HTTP port can read it.
+It answers in the Prometheus text format with one counter,
+`envoy_dispatch_outbox_publish_failures_total`: one count for each destination of an event
+publish that did not reach NATS, labelled `reason`. `denied` is a publish NATS refused under the
+server's own grant, `refused` one NATS refuses however often it is retried, and `failed` any other
+failure. A denied publish also logs `dispatch outbox: publish event` at ERROR, naming the subject.
+
 ## Behind a proxy
 
 A page's live updates ride one WebSocket per tab, `GET /ws/live`. A browser keeps WebSockets apart
@@ -364,12 +373,12 @@ one. Three things have to be true first; Dispatch checks the first for you.
   rather than rolling it (Kubernetes `strategy: Recreate`), until a single-publisher lock lands.
 
 A second server also costs connections, and Postgres counts them per server. Each server opens up
-to 64 connections for requests, up to 12 for the periodic work it runs once across the servers, up
+to 64 connections for requests, up to 13 for the periodic work it runs once across the servers, up
 to 4 for loading documents, one for the health check, and one for the events outbox, and it holds
 four more open for as long as it runs: one each for the three things that wait on Postgres
 notifications, which are delivery, the live socket's event-feed relay, and closing a document
 session another server has written to, and one for its entry in the list of running servers, which
-it renews every five seconds. That is 86 connections for one server at its ceiling, and twice that
+it renews every five seconds. That is 87 connections for one server at its ceiling, and twice that
 for two, past a default Postgres's limit of 100. Check the database's connection
 limit before you start the second server: a limit sized for one server, with whatever else uses
 that database counted in, is the thing that runs out.
@@ -445,8 +454,11 @@ first; above one replica, scale to zero before the new version starts. Releases 
 again. Rolling it back brings the hazard back the other way: a tab still open, and a `dispatch`
 client that saw this version keep keys in the last five minutes, retry a write whose answer was
 lost against the earlier server, which runs it again. So fix it forward, as above; if you must roll
-back, stop this version first, knowing a write in flight at that moment may land twice. A tab
-opened before the deploy needs a reload: its event route is gone and it shows
+back, stop this version first, knowing a write in flight at that moment may land twice. Once a
+later release has dropped the broadcast send's old key table (migration `0141`), rolling back past
+this version also stops broadcasts: the earlier version's broadcast send reads and writes that
+table, so every broadcast send fails while the rest of that version keeps working. A tab opened
+before the deploy needs a reload: its event route is gone and it shows
 **Live updates unavailable**, and its broadcast body still carries a field the new server refuses.
 
 From that release on, every page write that could otherwise happen twice carries an

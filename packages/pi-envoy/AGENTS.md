@@ -297,22 +297,28 @@ Role claims are routed by the listener: this extension receives a receipt-backed
 direct agent subject instead of subscribing to a role subject itself. The agent pump replies the
 moment the envelope is decoded — before the inbox update, any Dispatch call, or the session
 injection — so the listener's two-second receipt window measures decoding, not the host's turn: a
-claimed-but-deaf holder still becomes a `delivery_failed` exception, and a busy one does not
-(LEGION-101). The receipt goes only to a role-lane frame — one whose envelope `topic` is not the
-direct subject, the shape the listener forwards to the holder. Every other frame carrying a reply
-inbox on the direct subject (a Dispatch author route, a peer `envoy_send`) is a JetStream publish
-whose inbox belongs to the server's PubAck; an empty receipt there fails the publisher with
+claimed-but-deaf holder still misses the receipt, and a busy one does not (LEGION-101). The
+listener's publish route (`POST /v1/messages/publish`) forwards the message again after a miss
+until its four-second window ends, then answers the sender 504 `receipt_timeout`; the role lane (a
+role topic published straight onto NATS) forwards once and reports a miss as a `receipt_timeout`
+exception. The same route forwards an ad-hoc topic's message to each self-subscribed session
+registered on the topic, so such a frame waits for this receipt too, and a session that misses it
+is named in the sender's 504. The receipt goes only to a forwarded frame — one whose envelope
+`topic` is not the direct subject, the shape the listener forwards. Every other frame carrying a
+reply inbox on the direct subject (a Dispatch author route, a peer `envoy_send`) is a JetStream
+publish whose inbox belongs to the server's PubAck; an empty receipt there fails the publisher with
 `nats: invalid jetstream publish response`. A frame that cannot be decoded is still never
 acknowledged, and a receipt that fails to publish is logged while delivery continues. Nor is a
 frame on the agent subject of a session the host has replaced (a `/new` or resume) that arrives
 once the host has moved its session manager but before a pass closes that subject: it is logged and
-left undelivered (`replacedSessionTopic`), as on the closed subject, so a role lane counts a failed
-delivery and the daemon re-sends to the role's holder. Any other such frame stays in the
-notification stream instead of being lost: when that session id is resumed within the stream's
-72 hours, its first sweep shows it ("Missed messages" below). A fork's or branch's parent's frames
-still arrive, and so do notices on a subject the replaced session's role holds, which are
-addressed to the role until a pass ends it: the controller claims its role again for the session
-its pane is left on when the switch's event runs, and a wake dropped there would be lost.
+left undelivered (`replacedSessionTopic`), as on the closed subject, so the forward draws no
+receipt: the publish route forwards again to the role's holder it resolves then, and a role lane
+counts a failed delivery and the daemon re-sends to the role's holder. Any other such frame stays
+in the notification stream instead of being lost: when that session id is resumed within the
+stream's 72 hours, its first sweep shows it ("Missed messages" below). A fork's or branch's
+parent's frames still arrive, and so do notices on a subject the replaced session's role holds,
+which are addressed to the role until a pass ends it: the controller claims its role again for the
+session its pane is left on when the switch's event runs, and a wake dropped there would be lost.
 
 Every registration (`registerSession`, at the first and on every heartbeat) names the plugin the
 session runs: `plugin` `@sjawhar/pi-envoy` and `plugin_version` the `version` of this package's
@@ -421,8 +427,10 @@ up to 6 minutes.
 What is replayed: the frames the stream keeps on the agent subject and on the topics the session
 follows (the issue topics, and any other topic the deployed stream captures). What is not: role
 messages, which stay live only (a frame whose dedupe key starts `envoy.role.forward.` or whose
-topic is a role lane is passed over); team and other ad-hoc topics, which the stream does not keep
-(the listener answers them `not_retained`) and which stay live only; anything published before
+topic is a role lane is passed over); team and other ad-hoc topics on their own subjects, which the
+stream does not keep (the listener answers them `not_retained`), except the copy the listener's
+publish route forwards to the agent subject of a session registered on the topic, which the stream
+keeps there and a sweep of that subject replays like any of its frames; anything published before
 the session followed the subject; and anything older than the stream's 72 hours. A replayed frame
 (`showReplayed`) is rendered by `renderInbound` and shown as an `envoy-message` card, sent as a live
 card is (`CardWake`, above: an aside with `triggerTurn` while a turn runs, a steer with
@@ -432,8 +440,11 @@ line says when it was published while the session's connection was down. A repla
 Dispatch to accept no user turn and posts no Dispatch reply, since a person's stale input run late
 could act on an old instruction. Dispatch
 recorded that attempt as sent when the listener stored it, and nothing later accepts or answers
-it. A frame the renderer skips (`notify: false`, the session's own event, another session's
-follow) records nothing, so an eligible copy of it on another subject still shows. A replayed
+it. A frame the renderer skips (an event Dispatch marks `quiet` on an owner topic, the session's
+own event, another session's follow) records nothing, so an eligible copy of it on another
+subject still shows. An agent's comment, document or ask on an issue is not quiet, so a session
+that followed that issue's topic is shown it, where a renderer skipping every `notify: false`
+frame showed it none of them. A replayed
 `subscription.removed` closes a topic only when it was stored after the session started following
 that topic (the cursor's `since`), and takes it out of the listener's registry as
 `envoy_unsubscribe` does (`client.unsubscribe`), both by the engine's shared rule
@@ -756,6 +767,88 @@ never switches the skill off. Oh My Pi marks the inserted message per-call, so o
 every request as a session without it, plus the skill's own tokens. `src/dispatch-first.test.ts`
 holds the insertion rules, and `extensions/dispatch-first-omp.test.ts` checks turn 1, turn 2, after
 a compaction, and without Dispatch on the real binary.
+
+The same `context` handler appends, after the last message of each main-loop request, what
+people wrote to the session in the last 72 hours: `readSessionAnswers`
+from `@legion/envoy-client/session-answers` over `GET /api/v1/agents/{session_id}/answers`, as a
+separate user message (`src/session-answers-context.ts`), never merged into the last message and
+never at the head. The session is the one `replyAddress` names: the top-level one's
+`getSessionId()`, and for a `task` subagent its parent's, resolved through `resolveEnvoySession`,
+which is also the session it writes to Dispatch as (`DISPATCH_SESSION_ID`); a subagent this
+process cannot place carries no list. Dispatch is resolved per request with `commands: "kept"`,
+so no `!` token command runs on the request path, and `readSessionAnswers` works out the cache's
+directory from `process.env`. Position: Oh My Pi marks every message a `context` handler adds as
+per-call, and its Anthropic placement puts no `cache_control` on a per-call message, so the
+anchors stay on the conversation's own last messages and a change in the list re-reads none of
+the cached prefix; at the head, every change would invalidate everything after it.
+
+The pinned host (18.12.2) runs a `context` handler on every conversion of messages for a model,
+not only on the main loop's requests, and `withSessionAnswers` adds no list, and starts no read,
+on the others, each recognized by what the binary builds: a side turn
+(`AgentSession.runEphemeralTurn`: a Dispatch BTW, the stop-time self-check, `/btw`, the idle
+recap) converts `[...conversation, developer notice, .../btw history, user prompt]`, the notice
+and the prompt `attribution: "agent"`, the notice the host's `side-channel-no-tools.md`; the
+handoff converts `[...conversation, user prompt]`, the prompt `attribution: "agent"` and opening
+with the host's `handoff-document.md`; Anthropic remote compaction (`buildLiveProviderContext`)
+converts the conversation up to its cut, counts the result and keeps that many messages of the
+whole conversation's conversion, so the request that ends at a message the session's branch
+(`getBranch`) holds with a later one after it gets no list (a failed or aborted reply, which a
+retry drops from the context but not from the branch, does not count as later). The branch's
+messages are those the compaction builds its conversation from (`MI`): a `message` entry's
+message, a `custom_message` entry as role `custom` (every Envoy delivery with `triggerTurn` is
+one, and the cut can fall right after it) and a `branch_summary` entry as role `branchSummary`,
+each timestamped `new Date(entry.timestamp).getTime()`, matched by role and timestamp; a
+`compaction` entry becomes none there, since the earlier summary heads the conversion. The whole
+conversation's conversion carries the list at its end, past the cut. A compaction that keeps no
+tail converts the same messages twice, both ending at the branch's last message, so nothing on
+the branch tells either from a main-loop request: the second is a repeat of the conversion
+before it in the same session (`sessionManager`), ending at the same branch tip with the same
+messages' roles and timestamps, while the live `AgentSession` reads `isCompacting` (an automatic
+or manual compaction, the main loop paused) or `compactionSpeculation === "running"`, and it gets
+no list, so the compaction keeps none whatever the first carried. A repeat right after a cut
+keeps its list: that is the main loop's next request beside a speculative compaction with a tail,
+matching its whole conversion. Each session's last conversion lives in a process-wide `WeakMap`
+(on `globalThis` under `Symbol.for("legion.pi-envoy.session-answers-conversions.v1")`). Left
+open: a speculative compaction that keeps no tail (its kept turn right after a failed reply the
+branch still holds) beside the main loop's request matching it, which can lose that request's
+list; and a `task` subagent, which the host's registry does not list, so its compaction that
+keeps no tail carries the list. The dispatch-first skill goes on all of them as before. Not
+covered: OpenAI live steering (`providers.openaiLiveSteering`, a Codex WebSocket stream) converts
+the queued steers alone through the same handler, which no message tells apart from a first
+turn, so the skill and the list go out with a live steer there.
+
+Two copies of the extension run their handlers in turn on one request. The list's first line is
+`SESSION_ANSWERS_MARKER` (the failure line has its own), and only the last message is checked for
+it, so a second copy appends no second list. A copy that read no text appends nothing, so each
+copy also records the messages array it decided in a process-wide `WeakSet` (on `globalThis`
+under `Symbol.for("legion.pi-envoy.session-answers-requests.v1")`): the host hands the next
+handler that same array when one returns nothing, and the second copy neither reads nor waits.
+Bounds, all in the shared module: under 8,000 characters (at most 7,999) for the whole message, items newest first as a
+strict prefix with a left-out line naming `dispatch answers`; one read in flight per session and
+Dispatch URL for the whole process, the parent's and every subagent's requests joining it; each
+request waits at most `SESSION_ANSWERS_DEADLINE_MS` (800 ms), then carries the last list read
+from that Dispatch (memory, then `answers.json` in the session's state directory) with its read
+time and why this read failed, or, when that renders nothing, the failure line naming why; a read
+that already passed its deadline is not waited on again; a 404 keeps that Dispatch URL from being
+asked for 5 minutes. The pinned host hands a `context` handler no abort signal: it races the
+handler against the run's own and drops an aborted handler's result. A handler that throws loses
+everything it returns, the skill included, so a read that throws rather than answering carries
+the failure line naming the error. `src/session-answers-context.test.ts` holds the insertion
+rules, the requests that carry no list and the two-copy cases, `extensions/envoy.test.ts` the
+handler, a subagent reading its parent's id and a Dispatch that answers no list, and
+`extensions/session-answers-omp.test.ts` the real binary: a new answer in the next turn, after a
+compaction and in a subagent's first request; every kind of item word for word; the cap; a route
+that never answers costing a request under one second; a route that answers 404; the cache
+prefix byte for byte with no `cache_control` on the list; a `/btw` side turn and the handoff
+ending with their own prompts, with no list and no read; a remote compaction request ending at
+its cut, after a question and after a delivered message, and one that keeps no tail carrying no
+list (the stand-in model claims `supportsServerCompaction` and `bedrockMessagesApi`, which the
+binary takes for a first-party endpoint; a test-only extension sends the delivered messages as
+`extensions/envoy.ts` does, since pi-envoy reads deliveries off NATS); and two copies with an
+empty list making one read.
+The timed cases run against a profile whose model catalog is already built: a fresh profile
+builds it beside its first turn, holding the host's event loop for one to two seconds whatever
+the extension does.
 
 `before_agent_start` injects nothing into the conversation; its open-asks query arms the run-end
 nudge only for a turn carrying the user's own text, its snapshot `as_of` becoming the period's first

@@ -52,11 +52,13 @@ export function VersionView({
       ? versionQuery.data.markdown
       : undefined;
 
-  // The parent builds `highlight` afresh on every render (`ArtifactDocument`), and the editor
-  // effect below keys on it: keyed on the object, every render of the parent destroyed the editor,
-  // built a new one and scrolled again, so the page collapsed between mounts and the last scroll
-  // could run before the last editor had laid out, leaving the reader at the top. Keyed on what
-  // the highlight says, the editor mounts once per highlighted comment.
+  // `ProofDocument` renders this view and forwards `highlight`; `ArtifactDocument` above it
+  // builds that object afresh on every render. So the editor effect below keys on what the
+  // highlight says rather than on the object: keyed on the object, every render of
+  // `ArtifactDocument` destroys the editor, builds a new one and scrolls again, so the page
+  // collapses between mounts and the last scroll can run before the last editor has laid out,
+  // leaving the reader at the top. Keyed on the fields, the editor mounts once per highlighted
+  // comment.
   const highlightBy = highlight?.by;
   const highlightId = highlight?.id;
   const highlightQuote = highlight?.quote;

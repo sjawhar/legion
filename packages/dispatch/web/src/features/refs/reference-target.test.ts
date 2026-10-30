@@ -2,20 +2,23 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import {
   focusManager,
   QueryClient,
+  QueryClientProvider,
   type QueryKey,
   QueryObserver,
   type QueryObserverOptions,
 } from "@tanstack/react-query";
-import { waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
+import { createElement, type ReactNode } from "react";
 
-import { api } from "../../api/client";
-import type { IssueReferenceSummary } from "../../api/types";
+import { ApiError, api } from "../../api/client";
+import type { GraphReferences, IssueReferenceSummary } from "../../api/types";
 import {
   blockQuery,
   documentSummaryQuery,
   issueSummaryQuery,
   messageQuery,
   prefetchReference,
+  useReferenceTarget,
 } from "./reference-target";
 
 let restore = () => {};
@@ -237,4 +240,120 @@ test("hovering an ask, a comment or a message warms its own read and nothing of 
   expect(reads.getIssue).not.toHaveBeenCalled();
   expect(reads.getIssueSummary).not.toHaveBeenCalled();
   expect(reads.getProjectDocumentSummary).not.toHaveBeenCalled();
+});
+
+test("hovering a block of a comment or message warms its graph read alone, no summary of a document", async () => {
+  const reads = spyReads();
+  const queryClient = new QueryClient();
+  prefetchReference(queryClient, {
+    block: { id: "b2" },
+    id: "c-1",
+    key: "CORE-1",
+    kind: "comment",
+  });
+  prefetchReference(queryClient, {
+    block: { id: "b1" },
+    id: "m-1",
+    key: "CORE-1",
+    kind: "message",
+  });
+  prefetchReference(queryClient, {
+    block: { id: "b3" },
+    item: { id: "c-2", kind: "comment" },
+    kind: "document",
+    project: "CORE",
+    slug: "runbook-md",
+  });
+  await expectKeys(queryClient, [
+    ["references", "to", "dispatch://CORE-1/comment/c-1#b-b2"],
+    ["references", "to", "dispatch://CORE-1/message/m-1#b-b1"],
+    ["references", "to", "dispatch://CORE/artifact/runbook-md/comment/c-2#b-b3"],
+  ]);
+  expect(reads.getIssue).not.toHaveBeenCalled();
+  expect(reads.getIssueSummary).not.toHaveBeenCalled();
+  expect(reads.getProjectDocumentSummary).not.toHaveBeenCalled();
+  expect(reads.getComment).not.toHaveBeenCalled();
+  expect(reads.getMessage).not.toHaveBeenCalled();
+});
+
+/** A block's graph read: its current text, and the pin a pinned reference's read carries. */
+function blockRead(text: string | undefined, pin?: NonNullable<GraphReferences["node"]["pin"]>) {
+  return {
+    edges: [],
+    node: { block_id: "b2", id: "CORE-1/spec#b2", kind: "block", pin, text },
+  } satisfies GraphReferences;
+}
+
+// A link to a block is titled by the block's text, from its graph read, which an event that can
+// change the block fetches again. An edit that deletes the block makes the read answer 404: the
+// link drops the title it showed and reads as a freshly loaded page's link (no title, so its
+// short form). A pinned reference to the removed block answers 200 with the pin's `removed` state
+// and keeps the pinned text; any other failure keeps the title it last read.
+test.each([
+  [
+    "a comment block deleted by its author",
+    { block: { id: "b2" }, id: "c-1", key: "CORE-1", kind: "comment" } as const,
+    new ApiError(404, { code: "NOT_FOUND", error: "no block" }),
+    undefined,
+  ],
+  [
+    "a message block that is gone",
+    { block: { id: "b2" }, id: "m-1", key: "CORE-1", kind: "message" } as const,
+    new ApiError(404, { code: "NOT_FOUND", error: "no block" }),
+    undefined,
+  ],
+  [
+    "a spec block deleted by a document edit",
+    { block: { id: "b2" }, key: "CORE-1", kind: "spec" } as const,
+    new ApiError(404, { code: "NOT_FOUND", error: "no block" }),
+    undefined,
+  ],
+  [
+    "a spec block whose refresh failed with a 500",
+    { block: { id: "b2" }, key: "CORE-1", kind: "spec" } as const,
+    new ApiError(500, { code: "INTERNAL", error: "boom" }),
+    "Beta as written.",
+  ],
+  [
+    "a pinned comment block whose refresh answers it removed",
+    { block: { id: "b2", pin: "1" }, id: "c-1", key: "CORE-1", kind: "comment" } as const,
+    blockRead(undefined, {
+      ref: "dispatch://CORE-1/comment/c-1#b-b2@v1",
+      removed_version: 2,
+      state: "removed",
+      text: "Beta as written.",
+      version: 1,
+    }),
+    "Beta as written.",
+  ],
+] as const)("the link to %s is titled as the refresh leaves it", async (_case, route, refresh, kept) => {
+  const pin =
+    "pin" in route.block
+      ? {
+          ref: "dispatch://CORE-1/comment/c-1#b-b2@v1",
+          state: "unchanged" as const,
+          text: "Beta as written.",
+          version: 1,
+        }
+      : undefined;
+  const getReferences = spyOn(api, "getReferences")
+    .mockResolvedValueOnce(blockRead("Beta as written.", pin))
+    .mockImplementationOnce(() =>
+      refresh instanceof Error ? Promise.reject(refresh) : Promise.resolve(refresh)
+    );
+  restore = () => getReferences.mockRestore();
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const hook = renderHook(() => useReferenceTarget(route, { text: false }), {
+    wrapper: ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: queryClient }, children),
+  });
+  try {
+    await waitFor(() => expect(hook.result.current.title).toBe("Beta as written."));
+
+    await act(() => queryClient.refetchQueries({ queryKey: ["references", "to"] }));
+    expect(getReferences).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(hook.result.current.title).toBe(kept));
+  } finally {
+    hook.unmount();
+  }
 });

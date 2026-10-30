@@ -337,7 +337,7 @@ func TestSendAnswersServiceUnavailableWhenTheBusRefusesThePublish(t *testing.T) 
 	const target = "ses_refused_publish_target"
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, map[string]int{target: 1})
-	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	state := withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
 	// The stream goes after every store is open: opening one reconciles the stream back.
 	if err := client.JS().DeleteStream(bus.Stream); err != nil {
 		t.Fatalf("delete the notification stream: %v", err)
@@ -436,7 +436,7 @@ func TestListenerRecordsEverySendAndPublishRequest(t *testing.T) {
 	const sender = "ses_recorded_sender"
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, map[string]int{target: 1, sender: 1})
-	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	state := withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
 	send := func(body string) (*httptest.ResponseRecorder, map[string]any) {
 		t.Helper()
 		return serveRecorded(t,

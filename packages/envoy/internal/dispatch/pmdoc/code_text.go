@@ -13,10 +13,14 @@ import (
 // included, as the browser editor's parser reads them, without the last line's line feed. Of a
 // block no fence closed, that parser drops the last line where it is blank and the block ends in a
 // quote, or in a list item or footnote definition flow content follows: the blank line is the
-// container's there.
+// container's there. It drops it too where it is the document's last, with no line feed, holding
+// nothing past the fence's indentation (fenceEndsEmptyAttr), which is no line of the code, and
+// drops one line either way: a quote takes that line in place of the code's last.
 func fencedCodeText(code *ast.FencedCodeBlock, source []byte) []*Node {
 	value := strings.TrimSuffix(segmentsText(code.Lines(), source), "\n")
-	if _, closed := code.Attribute(fenceClosedAttr); !closed && blankTaker(code, source) != nil {
+	_, closed := code.Attribute(fenceClosedAttr)
+	_, endsEmpty := code.Attribute(fenceEndsEmptyAttr)
+	if endsEmpty || !closed && blankTaker(code, source) != nil {
 		value = strings.TrimSuffix(value, "\n")
 	}
 	if value == "" {
@@ -112,10 +116,20 @@ func enclosingFlow(node ast.Node) ast.Node {
 	return nil
 }
 
-// codeBlockText is an indented code block's lines as its text; its trailing blank lines are the
-// blank lines after it.
+// codeBlockText is an indented code block's lines as its text: the last line's own line feed
+// dropped, where it has one, and then one more final line ending, as mdast-util-from-markdown drops
+// one from indented code (onexitcodeindented). Its trailing blank lines are the blank lines it
+// keeps (codeColumns), so two trailing lines of four columns read `code\n`, and so does a document
+// ending `    code\n    \n    ` with no line feed after its last line.
 func codeBlockText(lines *gmtext.Segments, source []byte) []*Node {
-	value := strings.TrimRight(segmentsText(lines, source), "\n")
+	value := segmentsText(lines, source)
+	if lines.Len() > 0 {
+		last := lines.At(lines.Len() - 1)
+		if last.ForceNewline || (last.Stop > last.Start && source[last.Stop-1] == '\n') {
+			value = strings.TrimSuffix(value, "\n")
+		}
+	}
+	value = strings.TrimSuffix(value, "\n")
 	if value == "" {
 		return nil
 	}

@@ -367,10 +367,10 @@ func readsAndWritesLinearly(t *testing.T, head, shape, tail string, sizes []int)
 // runs were batched. That shape is held to ygo's own walks instead: Update may take no more than
 // alternatingAllowance times what a Delete and an Insert at each replaced index take on the same
 // document in the same process. On one machine at a load of 105 to 121, back to back, it took
-// 134 ms and 5.83 s at 4,096 and 16,384 blocks (2.1 and 1.6 times ygo's walks), main's Update
-// 112 ms and 5.65 s (1.6 and 1.6 times); the write that typed its batch from the live fragment's
-// children, walking the whole fragment once more per replaced block, took 936 ms at 4,096 (12.7
-// times).
+// 134 ms and 5.83 s at 4,096 and 16,384 blocks (2.1 and 1.6 times ygo's walks), the Update before
+// sjawhar/legion#1892 112 ms and 5.65 s (1.6 and 1.6 times); the write that typed its batch from
+// the live fragment's children, walking the whole fragment once more per replaced block, took 936
+// ms at 4,096 (12.7 times).
 func TestUpdateIsLinearInTheBlockCount(t *testing.T) {
 	for _, test := range []struct {
 		name, from, to string
@@ -471,8 +471,9 @@ func TestUpdateIsLinearInTheBlockCount(t *testing.T) {
 // alternatingAllowance is how many times ygo's own index walks replacing every other block may
 // take (TestUpdateIsLinearInTheBlockCount). Update's work beside the walks - building each block
 // and comparing the trees - grows linearly while the walks grow quadratically, so the ratio falls
-// as the document grows: 1.6 to 2.6 at the sizes the test runs, main's Update included, against
-// 12.7 for a write that walks the fragment once more per replaced block.
+// as the document grows: 1.6 to 2.6 at the sizes the test runs, the Update before
+// sjawhar/legion#1892 included, against 12.7 for a write that walks the fragment once more per
+// replaced block.
 const alternatingAllowance = 4
 
 // repeatedBlocks is the tree of unit written blocks times, read as a stored rendering is, which no
