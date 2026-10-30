@@ -141,6 +141,10 @@ type workflowRuntime struct {
 	// review it submits decides a round by that login and the reviewer's recorded session
 	// (workflow's DecidesRound), so reviewerCanWrite asks GitHub nothing about it.
 	reviewAppLogin string
+	// reviewAppID is the review App's id as the configuration names it (github_apps.review.app_id,
+	// the id GitHub's GET /app answers for it): a check run named tester or architect counts as a
+	// Legion verdict only when that App created it, as Envoy's listener counts it (readSettlement).
+	reviewAppID string
 	// build is the daemon's own build (Build): what the boot fact carries as the revision it
 	// compares the open production checks against, and the guard on whether Dispatch's build is
 	// read and compared too.
@@ -166,12 +170,6 @@ type workflowRuntime struct {
 	// changes its answer. It is held in memory only; a restart's first pass asks again. Only the
 	// pass touches it.
 	uncarried map[string]bool
-	// unrecordedOpened is, by issue, the open pull request the pass found for an issue with none
-	// recorded and applied, keyed by what the workflow decides it by (readUnrecordedPullRequests),
-	// that the workflow did not record: the pass applies it again only once one of those changes.
-	// It is held in memory only; a restart's first pass applies each again. Only the pass touches
-	// it.
-	unrecordedOpened map[string]string
 	// failed carries the first supervision terminal fact that could not be applied. serve stops
 	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
 	// the fact the failed callback lost.
@@ -280,7 +278,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 		tokens: tokens, forget: forget, installs: installs, dispatch: dispatch.New(cfg.DispatchURL, dispatchToken), repositories: repos, build: build,
 		grants: credential.New(nil), projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1), mappingChanged: make(chan struct{}, 1),
-		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI,
+		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI, reviewAppID: cfg.GitHubApps.Review.AppID,
 		defaultBranches: newDefaultBranches(tokens, githubAPI, defaultBranchTTL, time.Now),
 	}
 	log.Info("legion workflow boot stage", "stage", "dispatch")
@@ -381,8 +379,8 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc nat
 		w.conn = nil
 		return err
 	}
-	w.consumers, err = intake.OpenConsumers(ctx, js, intake.ConsumerSpec{
-		Project: cfg.Project, Repositories: heard, AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
+	w.consumers, err = intake.OpenConsumers(ctx, js, w.pool, intake.ConsumerSpec{
+		Project: cfg.Project, Repositories: heard, Deploys: cfg.Projects[cfg.Project].Deploys, AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
 		ReviewPermission: w.reviewerCanWrite, ReviewBody: w.reviewBody,
 		RepositoryMapping: w.mappingChange, PrepareRepository: w.prepareRepository,
 	})
@@ -783,7 +781,7 @@ func terminalEventID(c supervise.Claim, state supervise.ClaimState) string {
 func (w *workflowRuntime) run(ctx context.Context) error {
 	group, running := errgroup.WithContext(ctx)
 	group.Go(func() error {
-		if err := w.consumers.Run(running, w.pool, w.handlers...); err != nil {
+		if err := w.consumers.Run(running, w.handlers...); err != nil {
 			// A terminal close's cause is the connection's alone (natsauth.WithLastError).
 			return fmt.Errorf("workflow intake stopped: %w", natsauth.WithLastError(err, w.conn))
 		}

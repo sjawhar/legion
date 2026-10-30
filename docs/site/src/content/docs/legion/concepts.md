@@ -279,14 +279,23 @@ Legion uses GitHub's own review mechanisms rather than labels:
   red and sends the work back as the code head's own would. The daemon reads each open pull
   request's required set with the implement App as it starts and every two minutes after, with the
   required workflows' runs on the head; until a read succeeds, no verdict stands for the head, and
-  a read GitHub refuses is logged with the repository and the HTTP status. The same read follows
-  the pull request's head: when GitHub shows a head the daemon has not recorded, the daemon takes
-  it as the synchronize webhook would, and takes its push too when GitHub shows that it changed
-  only the issue's own `.legion/<issue>/`, so a lost or late webhook leaves the record behind for
-  at most one read. A push that changed anything else is still read from its webhook. The daemon
-  also looks up the open pull request of each issue whose implementer completed while no pull
-  request is recorded, and records it as the opened webhook would, which moves the issue to
-  testing.
+  a read GitHub refuses is logged with the repository and the HTTP status. The same pass applies
+  what a GitHub event lost, or still waiting behind the daemon's GitHub consumer, would have
+  carried, so the record is behind for at most one pass. It lists each served repository's open
+  pull requests and records one on an issue's branch that the daemon does not record open, as the
+  opened or reopened webhook would, whatever phase the issue is in, which moves an implementing
+  issue whose implementer completed on to testing. It applies the close or merge GitHub shows of a
+  pull request recorded open. When GitHub shows a head the daemon has not recorded, it takes it as
+  the synchronize webhook would, after the pushes that took the branch there: those GitHub's
+  repository activity of the branch shows, when no recorded push ends at the head, or, when one does
+  or that activity cannot be followed, the one push GitHub's compare shows changed only the issue's
+  own `.legion/<issue>/`; any other push is still read from its webhook. For a head no CI
+  settlement stands for, it reads the head's check runs and, once every check's latest run has
+  completed and the newest at least two minutes before, applies the settlement Envoy's listener
+  would have published; the listener's own settlement arriving later changes nothing the pass
+  learned. An issue in `implementing` whose implementer completed while GitHub lists no open pull
+  request on its branch, and whose record holds none merged, is told to its architect as
+  `pull-request-missing`, once per handoff commit.
 - **Review threads** close one by one, and only once the thread's opener (or, for a thread a bot
   opened, Legion's reviewer) accepts the reply.
 - Two limits flag a loop: after `review_round_cap` rounds (three by default), or once

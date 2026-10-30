@@ -955,9 +955,8 @@ func underTodoChild(children []releasedChild) map[string]bool {
 
 // releaseOutcome answers what this request did with each of its children, once its writes and
 // observations are in, in the request's own order. It reads each child's record again and the
-// project's whole mirror with one query (record.Store.DispatchIssues), as every blocker judgement
-// reads it, in one read-only transaction: a wave's children share the issues they wait on, and the
-// mirror is one row per issue of the project.
+// mirror rows of the issues the children wait on with one query (blockers.Load), in one read-only
+// transaction: a wave's children share the issues they wait on.
 //
 // A child is started when this request started its first phase (startedByRelease): the request
 // records every child it releases, one it writes todo — out of backlog, or parked at done — by its
@@ -982,10 +981,14 @@ func (s *server) releaseOutcome(ctx context.Context, children []releasedChild) (
 		return nil, nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	var waitedOn []string
+	for _, child := range children {
+		waitedOn = append(waitedOn, child.view.BlockedBy...)
+	}
 	// The mirror's rows are keyed by the Dispatch project key the issues are filed under, never
 	// by the claim project token: a read with the token finds nothing wherever the two differ,
 	// which in a deployment is always (Options.Project, Options.DispatchProject).
-	rows, err := blockers.Load(ctx, tx, s.records, s.dispatchProject)
+	rows, err := blockers.Load(ctx, tx, s.records, s.dispatchProject, waitedOn)
 	if err != nil {
 		return nil, nil, err
 	}
