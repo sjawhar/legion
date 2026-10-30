@@ -2,77 +2,71 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-594",
-  "completed": "2026-10-30T18:05:00Z",
-  "round": 7,
+  "completed": "2026-10-30T20:00:00Z",
+  "round": 8,
   "roundShape": {
     "classification": "full",
-    "tool": "dispatch://INFRA-598/artifact/round-shape-py version 3, run from $LEGION_WORKSPACE with the pull request number",
-    "output": "pull request 2446, base main / old head 97b6b471 -> 97b6b4714798cd11b6dcfb948d6deff314ef9580 / new head 6ada3bda -> 6ada3bda7905f80428f986f72542393b82c76550 / files whose own diff differs: 26, among them packages/envoy/cmd/listener/{api.go,claim_wiring.go,delivery.go,role_lane.go,serve_port_workers.go,main.go}, packages/envoy-client/src/{consumer-delivery.ts,tool-contract.ts} and packages/claude-envoy/src/envoy-channel-server.ts. No 'equal only after normalisation' list was printed.",
-    "why": "Many runtime files, so a full round, which is what the architect's task said. I checked the printed ids: the old is my round-6 handoff, the new is `gh pr view 2446 --json headRefOid`."
+    "tool": "dispatch://INFRA-598/artifact/round-shape-py version 3, re-fetched into this pod and run from $LEGION_WORKSPACE with the pull request number",
+    "output": "pull request 2446, base main / old head 3767f97f -> 3767f97f2b8b25085bf0ab6d9b9d8fc8f990fc97 / new head 797faf7d -> 797faf7d3db27ca7bb7c155017bf9751eba5d6d9 / files whose own diff differs: 6 — .github/workflows/ci.yaml, packages/envoy/AGENTS.md, packages/envoy/cmd/listener/interest_record_unreadable_test.go, packages/envoy/cmd/listener/main.go, scripts/e2e/README.md, scripts/e2e/envoy-session-delivery.sh. No 'equal only after normalisation' list was printed.",
+    "why": "packages/envoy/cmd/listener/main.go is runtime, so a full round, which is what the architect's task said. I checked the printed ids: the old is my round-7 handoff, the new is `gh pr view 2446 --json headRefOid`."
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "I drove each of review round 2's three defects on the real stack and broke each one myself to see it fail. The rest of the round's evidence held too. What I did not verify at the end is CI, which had not reported when my pod died and which has since settled red on two lanes (failures below)."
+    "how": "Round 7's two CI reds are both answered at this head and I confirmed each myself: `envoy-go` is green on CI's own run at the code head (the claim-view test now reads the registry once the role claim view is complete, d0e53387), and `ci-filters` is green because the forward merge brought main's missing filter line. The round's own three subjects held: the live proof runs again reading the key from the pod's mounted file, the nats.go resolution keeps both sides, and each of review round 2's three defects is still broken by its control. What fails is a different required lane, `test`, for a reason this branch owns (failures[0])."
   },
-  "failed": 2,
+  "failed": 1,
   "failures": [
     {
-      "criterion": "CI green at the pull request's code head for the lanes this change owns",
-      "evidence": "`envoy-go` is red at the code head b7649448 (run 41067868440, job 124141623851, exit 123 from the package batch): `--- FAIL: TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering` at packages/envoy/cmd/listener/interest_record_unreadable_test.go:85, `GET /v1/registry/ses_interest_record_readable: status 503, body {\"error\":\"envoy: the message bus did not answer: the role claim view is not complete: its watcher has not delivered every claim\"}` (the sentinel is store.ErrRoleViewNotReady, packages/envoy/internal/store/kv.go:500). I could not reproduce it in this pod: `go test -count=5 -run TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering ./cmd/listener` is ok, and two full-package runs at this head are green, one of them `-race` (ok 603.780s). It is not visibly main's: main's own recent runs have envoy-go success (7d12a871, a4af0341), and the branch's previous head failed that lane on a different test. Per the architect at 17:41Z this is to be settled in code rather than by a re-run — either `/v1/registry` must not depend on the role-claim view being complete, or the test must wait for that view, whichever the code shows is right. I re-ran no lane, as my role forbids.",
-      "redTest": "the repository's own `envoy-go` lane; `cd packages/envoy && go test -run TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering ./cmd/listener` (green here, red on CI's runner)"
-    },
-    {
-      "criterion": "CI green at the code head for every other selected lane (ci-filters, and ci-ok with it)",
-      "evidence": "`ci-filters` is red (job 124141623688): 'listener-server-change reads packages/envoy/internal/dispatch/api/testdata/decision-block-inserts.json, which its filter listener_server_change does not match, so a change to it skips the job'. This one is main's and the next forward merge fixes it: main's tip carries the missing filter line `- 'packages/envoy/internal/dispatch/api/testdata/*'` in `listener_server_change`, while main at this branch's merge base d9aee5bf does not, and no commit of this branch does (`jj file show -r <rev> .github/workflows/ci.yaml | grep -c \"dispatch/api/testdata/\\*'\"` is 0 at 97b6b471, d9aee5bf, f45ef147 and b7649448, and non-zero on main@origin's tip). Main's own run a4af0341 was red on ci-filters for the same reason and 7d12a871 green once the fix landed. `ci-ok` is red because it condenses the two lanes above; it is not in main's required set (lint, typecheck, test, pr-title), all four of which are green here.",
-      "redTest": "the repository's own `ci-filters` lane"
+      "criterion": "The checks main's ruleset requires are green at the code head (lint, typecheck, test, pr-title)",
+      "evidence": "`test` is red at the code head c6be54a4 (run at that head, job 124244645045), in `.github/scripts/select-e2e-proofs.test.sh`: 17 cases fail, each a `json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)` from the suite reading the select script's empty output, under the case 'the repository's own .github/e2e-scripts.json and scripts/e2e/'. The cause is this branch's and I reproduced it in the pod rather than inferring it: `bash .github/scripts/select-e2e-proofs.test.sh` here exits 1 with the same 17 failures, and running the script by hand gives the whole reason in one line — `GITHUB_OUTPUT=/dev/stdout EVENT=schedule bash .github/scripts/select-e2e-proofs.sh` prints `::error file=.github/e2e-scripts.json::scripts/e2e/envoy-session-delivery.sh is in neither list: add it to \\`hosted\\` with what a job must give it, or to \\`elsewhere\\` with what its own header says it needs`. It is ours, not main's, and it is new this round: the same suite on main's own tree passes (`git archive <main cc825086> .github scripts/e2e` into a scratch directory, then `bash .github/scripts/select-e2e-proofs.test.sh` there: exit 0, 0 failures), and `test` was green at the branch's previous code head b7649448. The gate came in with this round's forward merge and this branch's own script trips it: `.github/e2e-scripts.json` is byte-identical to main's, so it cannot list a script main does not have. Remedy, one entry: add `scripts/e2e/envoy-session-delivery.sh` to `elsewhere` with what its header says it needs — a loopback Postgres with pgvector (LEGION_TEST_PG_DSN), the model key file, go, bun, jq, curl, socat 1.8.0 or later, setsid, psql, git, tar, pgrep, mkfifo, python3 and the checkout's node_modules — since the script's own header says it is manual and never CI, so `hosted` would be wrong.",
+      "redTest": "the repository's own required `test` lane; `bash .github/scripts/select-e2e-proofs.test.sh` from the workspace (exit 1 here, exit 0 on main's tree)"
     }
   ],
   "proof": [
     {
-      "criterion": "Review round 2 defect 1: a serving-port session following a topic that another interest makes take the durable path gets every message once (only the port's 204 writes the relay's dedupe record)",
-      "surface": "The listener binary with a session consumer and a serving port, on a real nats-server",
-      "command": "cd packages/envoy && go test -count=1 -v -run TestServePortRelayPushesAFollowedTopicTheDurablePathAlsoReads ./cmd/listener",
-      "observed": "PASS in both orderings — `the_durable_path_runs_first` and `the_relay_runs_first` — ok 6.662s with the next test.",
-      "headSha": "6ada3bda7905f80428f986f72542393b82c76550",
-      "negativeControl": "Mine: the `target != nil && target.ConsumerRelaysStored(item.Topic, message.storedSeq())` branch in fanoutDelivery (packages/envoy/cmd/listener/delivery.go:949) disabled with `if false && …` — the test fails, 'the message 17df67772936103c2aec09849da1251d never reached the relayed session's port'. Reverted; `go build ./...` green."
-    },
-    {
-      "criterion": "Review round 2 defect 2: a role-forward copy stored below a serving-port holder's consumer start reaches its port",
-      "surface": "The same listener rig",
-      "command": "cd packages/envoy && go test -count=1 -v -run TestServePortRoleForwardStoredBelowTheConsumerStartReachesThePort ./cmd/listener",
-      "observed": "PASS (2.07s): the copy reaches the port once.",
-      "headSha": "6ada3bda7905f80428f986f72542393b82c76550",
-      "negativeControl": "Mine: roleForwardCopyDelivery's guard (packages/envoy/cmd/listener/role_lane.go:238) put back to the raw `entry.Delivery == session.DeliveryConsumer` instead of `takesStoredMessagesItself(entry, message.storedSeq())` — the test fails, 'the role forward stored below the consumer's start never reached the port'. Reverted."
-    },
-    {
-      "criterion": "Review round 2 defect 3: a seeded resume on a replaced stream reports stream_recreated to the session, once",
-      "surface": "The envoy-client consumer-delivery protocol on its fakes, where the listener answers another stream id than the registration asked to resume on",
-      "command": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/envoy-client -t 'an answer naming another stream'",
-      "observed": "'gaps > an answer naming another stream than the seeded resume's is told once' passes.",
-      "headSha": "6ada3bda7905f80428f986f72542393b82c76550",
-      "negativeControl": "Mine: `const asked = resumePoint() ?? registeredResume` in packages/envoy-client/src/consumer-delivery.ts:650 cut back to `resumePoint()` alone — that test fails. Reverted; working copy clean."
-    },
-    {
-      "criterion": "Sessions take every event once through all six disruptions, and the upgrade from the released plugins holds with two followed issue topics and a role",
+      "criterion": "Sessions take every event once through all six disruptions, with the model key read from the pod's mounted file and never leaked",
       "surface": "The live stack in this issue's pod: real Oh My Pi and real Claude Code under `legion claude-bridge`, natsd with JetStream, two listeners, envoy-dispatch on Postgres",
-      "command": "bash scripts/e2e/envoy-session-delivery.sh; and bash scripts/e2e/envoy-session-delivery.sh --disruptions a --second-followed-issue --resume-plugins-from 96a7e5ea9099aabf25dc8b524177b6f73df4eab5",
-      "observed": "Six windows: `ENVOY SESSION DELIVERY: PASS (every event once, the issue in order)`, all 60 markers 1, no `!` cell. Upgrade with two followed issue topics: `PASS`, eleven markers each counted 1 (the first issue's two comments, the second issue's comment on notifications.dispatch.issue.LIVE-3.>, both agent events, both listener sends and all four role events), no order break. Both runs were made at this head between 14:11Z and 14:17Z; their evidence directories died with the pod at about 14:20Z, and I could not repeat them after the recreation because this pod carries no model gateway key (see observations), so these two lines rest on my own reading of the runs rather than on files a reader can open.",
-      "headSha": "6ada3bda7905f80428f986f72542393b82c76550",
-      "negativeControl": "Round 1's run of the same script with listener and both plugins from c3d09eec printed `NEGATIVE CONTROL HOLDS` (every agent, issue and role event of window a counted 0 in both sessions), and round 6's control of the upgrade — `followedOnCorePath` returning false — turned that PASS into a FAIL with both comments 0."
+      "command": "cd -- \"$LEGION_WORKSPACE\" && LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' bash scripts/e2e/envoy-session-delivery.sh  — with no ANTHROPIC_API_KEY and no LEGION_MODEL_GATEWAY_KEY in my shell",
+      "observed": "`ENVOY SESSION DELIVERY: PASS (every event once, the issue in order)`: all 60 markers of windows a-f counted 1, no `!` cell. The script took the key from /var/run/model-gateway-key/key itself (its SESSION_DELIVERY_MODEL_KEY_FILE default) and I exported nothing. Leak check: I read the key into a shell variable, grepped the run's whole evidence directory and its output for it — 244 files, 0 hits, and the run output clean — then unset the variable. The upgrade run below was checked the same way: 65,874 files, 0 hits.",
+      "headSha": "797faf7d3db27ca7bb7c155017bf9751eba5d6d9",
+      "negativeControl": "Round 1's run of the same script with listener and both plugins from c3d09eec printed `NEGATIVE CONTROL HOLDS`: every agent, issue and role event of window a counted 0 in both sessions. For the key itself the control is the refusal path the script keeps: an unreadable or empty key file refuses the run by name before anything starts (`the model key file … is not readable`), which is what it did for me in round 7 when only the environment variable was gone."
     },
     {
-      "criterion": "No data race in the listener package, and the suites the round's files touch stay green",
-      "surface": "The listener package under the race detector, and the TypeScript packages as CI builds them",
-      "command": "cd packages/envoy && CGO_ENABLED=1 DISPATCH_TEST_DATABASE_URL=… GOMAXPROCS=4 go test -race -p 2 -parallel 4 -count=1 -timeout 40m ./cmd/listener; bun test packages/envoy-client packages/pi-envoy; claude-envoy built with verify-build and extract-built, then bun run test",
-      "observed": "ok cmd/listener 603.780s under -race, no DATA RACE. bun over envoy-client and pi-envoy: 3,097 tests, 0 fail. claude-envoy: 298 tests, 0 fail, once built as CI builds it; the tracked dist/ and legion/ restored afterwards. All at this head before the pod died.",
-      "headSha": "6ada3bda7905f80428f986f72542393b82c76550",
-      "negativeControl": "CI's run at 1099510d (41018009099, job 123944941163) is the control for the race: the same package, `WARNING: DATA RACE`, before round 6's fix."
+      "criterion": "The upgrade from the released plugins holds with two followed issue topics and a role",
+      "surface": "The same live stack, both sessions started on main's released plugins and resumed on this checkout's, following two Dispatch issue topics and holding a role",
+      "command": "bash scripts/e2e/envoy-session-delivery.sh --disruptions a --second-followed-issue --resume-plugins-from 96a7e5ea9099aabf25dc8b524177b6f73df4eab5",
+      "observed": "`ENVOY SESSION DELIVERY: PASS (every event once, the issue in order)`: eleven markers, each counted 1 — the first issue's two comments, the second issue's comment on notifications.dispatch.issue.LIVE-3.>, both agent events, both listener sends and all four role events — with no order break.",
+      "headSha": "797faf7d3db27ca7bb7c155017bf9751eba5d6d9",
+      "negativeControl": "Round 6's control of the same run: `followedOnCorePath` in packages/envoy-client/src/consumer-delivery.ts made to return false turns this PASS into a FAIL with both of the first issue's comments counted 0 in both transcripts."
+    },
+    {
+      "criterion": "Review round 2's three defects are each still closed, and each still broken by its own control",
+      "surface": "The listener binary on a real nats-server with a serving port, and the envoy-client consumer-delivery protocol on its fakes",
+      "command": "cd packages/envoy && go test -count=1 -v -run 'TestServePortRelayPushesAFollowedTopicTheDurablePathAlsoReads|TestServePortRoleForwardStoredBelowTheConsumerStartReachesThePort' ./cmd/listener; bun test packages/envoy-client -t 'an answer naming another stream'",
+      "observed": "All three pass at this head (ok cmd/listener 7.052s with the claim-view test beside them; the envoy-client gap test 2 pass 0 fail).",
+      "headSha": "797faf7d3db27ca7bb7c155017bf9751eba5d6d9",
+      "negativeControl": "Mine, all three applied again this round and all three reverted: the `ConsumerRelaysStored` branch in fanoutDelivery (delivery.go:949) disabled → 'the message f65f4c180bc6a21f3635d6e22c61a4ab never reached the relayed session's port'; roleForwardCopyDelivery's guard (role_lane.go:238) back to the raw `entry.Delivery == session.DeliveryConsumer` → 'the role forward stored below the consumer's start never reached the port'; `const asked = resumePoint() ?? registeredResume` (consumer-delivery.ts:650) cut to `resumePoint()` alone → 'gaps > an answer naming another stream than the seeded resume's is told once' fails. Working copy clean afterwards and `go build ./...` green."
+    },
+    {
+      "criterion": "The nats.go resolution keeps both sides, and main's #2504 hook-stall repair still works",
+      "surface": "The bus package and the listener's /healthz, at the merged head",
+      "command": "cd packages/envoy && go test -count=1 -v -run 'HookStall|RepairGrace' ./internal/bus ./cmd/listener; and a read of the merged file for both sides' symbols",
+      "observed": "TestHookStallReportsTheStallAndTheLastHookError PASS (ok internal/bus 0.343s); TestHealthzAnswersAHookStallPastTheRepairGrace and TestHealthzReportsARecreatedDurableThroughAHookStall PASS (ok cmd/listener 0.704s). Both sides are present in the merged tree: main's `HookStall` and `RepairGrace` (internal/bus/nats.go:99 and :599) and its denial recording (`recordPublishDenial`, `deniedPublishes`, now in internal/bus/denials.go), beside this change's `ErrForwardNotStored` (nats.go:1586). main.go's health handler reads the stall last, below every 503 check, so a stall never stands in for a worse fault.",
+      "headSha": "797faf7d3db27ca7bb7c155017bf9751eba5d6d9",
+      "negativeControl": "Round 6's control for the other half of this file stands: the seven denial tests of internal/bus, which cover main's #2508 branch and this change's forward denial, fail if either branch is dropped. I did not break onAsyncError again this round; the two hook-stall tests above are the ones that would fail if the merge had lost #2504's side, and they pass."
+    },
+    {
+      "criterion": "No data race in the listener package",
+      "surface": "The listener package under Go's race detector in this pod",
+      "command": "cd packages/envoy && CGO_ENABLED=1 DISPATCH_TEST_DATABASE_URL=… GOMAXPROCS=4 go test -race -p 2 -parallel 4 -count=1 -timeout 40m ./cmd/listener",
+      "observed": "ok github.com/sjawhar/envoy/cmd/listener 691.427s, no DATA RACE.",
+      "headSha": "797faf7d3db27ca7bb7c155017bf9751eba5d6d9",
+      "negativeControl": "CI's run at 1099510d (41018009099, job 123944941163) is the control: the same package, `WARNING: DATA RACE`, before round 6's fix."
     }
   ],
-  "ci": "Read on GitHub, never re-run. Run 41067868440 at the code head b7649448: 27 green, 1 skipped, 3 red — envoy-go and ci-filters (failures above) and ci-ok with them. The four checks main's ruleset requires, lint, typecheck, test and pr-title, are green. No check exists at the pull request's head 6ada3bda, which carries the handoff with the trailer.",
+  "ci": "Read on GitHub at the code head c6be54a4, never re-run. Green: lint, typecheck, pr-title, ci-filters, pi-envoy, claude-envoy, listener-server-change, envoy-go, worker-image / build and the rest of the completed lanes. Red: `test`, one of the four main's ruleset requires (failures[0], ours). Unread at the time I completed: `envoy-go-race`, which was still in progress; I ran that package under `-race` here myself and it is green (691.427s), but CI's own verdict on that lane is unread and this pass of the other lanes is stated as what it is. Round 7's two reds are both answered: `envoy-go` is green here, and `ci-filters` is green because the merge brought main's missing filter line.",
   "observations": [
-    "A correction I owe about my own round 6: I completed it `pass` while every lane of its run was still queued, and wrote 'nothing red'. That run later settled red on envoy-go, `TestRoutesTablePinsEveryRegisteredRoute` ('147 rows, want 146') at afa4eb55 — fixed at this head by the forward merge. The habit was wrong, not just unlucky: from now on a verdict of mine says in itself when CI is unread and that the pass is conditional on it, which is what the architect confirmed at 17:41Z.",
-    "This pod cannot run the live proof. After the recreation `LEGION_MODEL_GATEWAY_KEY` is unset and no ANTHROPIC_API_KEY is in the environment, so `scripts/e2e/envoy-session-delivery.sh` refuses to start ('ANTHROPIC_API_KEY is required: both sessions run their turns on it'). Earlier pods of this issue carried that key. Whoever tests this issue next needs it back, or the live proof — the only thing that has caught a rollout regression here — cannot run at all. I did not guess a secret name at the broker to find one.",
-    "Also new in this pod: GH_TOKEN and GITHUB_TOKEN are set in the environment, where `skill://legion-worker` says to leave them empty because a set variable outranks the role's gh directory. Everything I did with gh this round was a read, so nothing was written under the wrong identity, but a role that pushes or comments from this pod would want to know."
+    "The correction the architect asked for, and it replaces what I wrote in round 7's handoff: the model gateway key did not go away. Since agent-infra #1020 it is mounted at /var/run/model-gateway-key/key with no environment variable, and my round-7 sentence — 'this pod carries no model gateway key … the live proof cannot run until it is back' — was an inference from the environment alone, presented as a fact. The script now reads that file itself (SESSION_DELIVERY_MODEL_KEY_FILE, default that path) and hands it to the sessions alone; nothing is exported into a shell, and the leak greps above are the check that it stays there.",
+    "Also from round 7 and still true here: GH_TOKEN and GITHUB_TOKEN are set in this pod's environment, where `skill://legion-worker` says to leave them empty because a set variable outranks the role's gh directory. Every gh call of mine this round was a read."
   ]
 }
