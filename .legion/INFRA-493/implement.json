@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-493",
+  "completed": "2026-10-30T00:55:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2478",
+  "proof": [
+    {
+      "criterion": "Round 9: main merged forward at the #2521 conflict in record/project.go; both #2521's change and this branch's TreeLive narrowing hold",
+      "surface": "the daemon's real record, admission, workflow and API code on a real Postgres and nats-server",
+      "command": "cd packages/daemon && go test -count=1 ./internal/record/ ./internal/admit/ ./internal/workflow/ ./internal/api/ ./internal/projection/ ./internal/intake/ ./internal/blockers/ ./internal/store/ && go test -count=1 ./internal/daemon/ -run 'Tick|Tree|Hold|Admission|Adopt|Linger|Person|Release|Orphan|Ancestor'",
+      "observed": "every package ok (record 27 s, admit 188 s, workflow 287 s, api 93 s, intake 63 s, store 38 s, daemon 69 s); TreeLive keeps #2521's AwaitingPerson early return and this branch's slots-only read; build, vet (both tags) and gofmt clean",
+      "headSha": "53bf175c1aa36044042a0fc96eadef3c7b5b8538",
+      "negativeControl": "admit's TestAFactReadsAsManyRowsWhateverNumberOfFinishedRecordsTheProjectKeeps (in the admit run) fails if TreeLive or admission read every record again (11,423 rows vs 1,423, as shown in round 1)"
+    }
+  ],
+  "filesChanged": [
+    "packages/daemon/internal/record/project.go: conflict resolution in TreeLive's doc comment only"
+  ],
+  "deviations": [
+    "The earlier rounds' handoffs were removed by retro (51ba749d); this file records round 9 only."
+  ],
+  "openQuestions": [
+    "ci-ok had not run at 53bf175c when this was written."
+  ]
+}
