@@ -176,11 +176,18 @@ function routeOf(trigger: HTMLElement): DispatchReferenceRoute | undefined {
   return reference === null ? undefined : parseNodeReference(reference);
 }
 
-/** How long after the reader's last pointer movement a boundary event still counts as theirs.
- *  A page that reflows under a still pointer - a card above the reference settling its height,
- *  a picture landing, a long body formatting - slides the anchor out from under the pointer, and
- *  the browser reports that as `pointerout` with no movement behind it. */
-const POINTER_MOVE_GRACE_MS = 100;
+/** How long after the reader's last input a boundary event or a scroll still counts as theirs.
+ *  A page that moves under a still pointer - a card above the reference settling its height, a
+ *  picture landing, a long body formatting - slides the anchor out from under the pointer and
+ *  scrolls the page under it, and the browser reports each with no input behind it. */
+const READER_INPUT_GRACE_MS = 100;
+
+/** `event.timeStamp` of the reader's last input that moves the pointer or the page: a pointer
+ *  they moved, a wheel they turned, a key they pressed, a button they put down. Module-level
+ *  beside the card's own state because two document listeners judge an event by it - the one
+ *  that judges a boundary event (`attachTriggers`) and the one that judges a scroll
+ *  (`RefPreviewHost`) - and the two must read the same answer. */
+let lastInputAt = Number.NEGATIVE_INFINITY;
 
 /** Where `element` sits in the viewport, rounded, for telling an anchor that moved from a
  *  pointer that did. */
@@ -193,17 +200,33 @@ function placeOf(element: HTMLElement): { left: number; top: number } {
  * future — React-rendered links and the anchors inside Markdown bodies and the Proof editor
  * alike, which come and go outside React's knowledge. Returns the detach function. */
 function attachTriggers(): () => void {
-  /** `event.timeStamp` of the reader's last pointer movement, so a boundary event can be told
-   *  from one the page caused by moving under a pointer that never left. */
-  let lastMoveAt = Number.NEGATIVE_INFINITY;
   /** Where the hovered anchor sat when the pointer came to rest on it, so a boundary event can
    *  say which of the two moved. A card the keyboard opened has none: nothing rested on it. */
   let anchorWas: { anchor: HTMLElement; left: number; top: number } | undefined;
   /** The page slid an open card's zone out from under a still pointer, and the card was kept.
    *  The reader's next movement decides it: back in the zone it stays, anywhere else it goes. */
   let keptUnderAStillPointer = false;
+  /** Where the pointer last was, so a `pointermove` the reader made can be told from the one the
+   *  engine makes itself: WebKit and Firefox both dispatch a move at the pointer's own place
+   *  after the page scrolls under it, to settle `:hover` on whatever is under it now
+   *  (sjawhar/legion#2403). The reader moving is the position changing. */
+  let pointerWas: { x: number; y: number } | undefined;
+  /** Anything the reader did that moves the pointer or the page, so neither a boundary event nor
+   *  a scroll after it is read as the page moving by itself: a wheel they turned, a key they
+   *  pressed (a space or an arrow scrolls), a button they put down (a drag of the scrollbar). */
+  const onReaderInput = (event: Event) => {
+    lastInputAt = event.timeStamp;
+  };
   const onPointerMove = (event: PointerEvent) => {
-    lastMoveAt = event.timeStamp;
+    const moved =
+      pointerWas === undefined || event.clientX !== pointerWas.x || event.clientY !== pointerWas.y;
+    pointerWas = { x: event.clientX, y: event.clientY };
+    if (!moved) {
+      // The engine's own move, at the place the reader left the pointer: it says only that the
+      // page moved under it, which is what the card is being kept for.
+      return;
+    }
+    lastInputAt = event.timeStamp;
     if (!keptUnderAStillPointer) {
       return;
     }
@@ -245,14 +268,14 @@ function attachTriggers(): () => void {
     // A card the reader is reading is not taken away because the page moved: where the anchor
     // has slid out from under a pointer that never moved - a card above it settling its height,
     // a picture landing, a long body formatting - the card stays, measured where the anchor is
-    // now, until the reader themselves moves away. The reader leaving is the pointer moving,
-    // and that is what tells the two apart. A hover that has not opened yet is abandoned as
-    // before: there is nothing on screen to protect.
+    // now, until the reader themselves moves away. The reader leaving is the reader doing
+    // something, and that is what tells the two apart. A hover that has not opened yet is
+    // abandoned as before: there is nothing on screen to protect.
     const anchor = state?.phase === "open" ? state.target.anchor : undefined;
     if (
       anchor !== undefined &&
       anchorWas?.anchor === anchor &&
-      event.timeStamp - lastMoveAt > POINTER_MOVE_GRACE_MS
+      event.timeStamp - lastInputAt > READER_INPUT_GRACE_MS
     ) {
       const place = placeOf(anchor);
       if (place.left !== anchorWas.left || place.top !== anchorWas.top) {
@@ -290,12 +313,18 @@ function attachTriggers(): () => void {
   document.addEventListener("pointerout", onPointerOut);
   document.addEventListener("focusin", onFocusIn);
   document.addEventListener("focusout", onFocusOut);
+  document.addEventListener("wheel", onReaderInput, { capture: true, passive: true });
+  document.addEventListener("keydown", onReaderInput, { capture: true, passive: true });
+  document.addEventListener("pointerdown", onReaderInput, { capture: true, passive: true });
   return () => {
     document.removeEventListener("pointermove", onPointerMove);
     document.removeEventListener("pointerover", onPointerOver);
     document.removeEventListener("pointerout", onPointerOut);
     document.removeEventListener("focusin", onFocusIn);
     document.removeEventListener("focusout", onFocusOut);
+    document.removeEventListener("wheel", onReaderInput, { capture: true });
+    document.removeEventListener("keydown", onReaderInput, { capture: true });
+    document.removeEventListener("pointerdown", onReaderInput, { capture: true });
   };
 }
 
@@ -567,11 +596,24 @@ export function RefPreviewHost(): ReactNode {
     // Only an open card reacts to scroll. A pending hover is left alone — the pointer often
     // comes to rest on a link while the page is still settling (smooth scrolling, a
     // scrollIntoView), and the card is measured fresh when it opens anyway.
-    const onScroll = () => {
+    const onScroll = (event: Event) => {
       if (state?.phase !== "open") {
         return;
       }
-      if (document.activeElement === state.target.anchor) {
+      // The card follows its anchor rather than closing where the reader did nothing to move the
+      // page: a long body above the reference formatting, a picture landing, the reader's place
+      // being kept after a late paint all scroll the page under a resting pointer, and a card
+      // the reader is reading must not be taken away by that. It is the same page movement the
+      // `pointerout` rule above protects it from, reported as a scroll rather than as a boundary
+      // event, and in WebKit and Firefox the scroll is the one that arrives first
+      // (sjawhar/legion#2403). The reader's own scroll - a wheel, a key, a drag of the scrollbar
+      // - still closes it, and so does any scroll once they have moved the pointer away, since
+      // leaving the zone closes the card itself. An anchor that holds keyboard focus keeps its
+      // card either way: focusing it may itself scroll it into view.
+      if (
+        document.activeElement === state.target.anchor ||
+        event.timeStamp - lastInputAt > READER_INPUT_GRACE_MS
+      ) {
         refPreview.reposition();
       } else {
         closeRefPreview();

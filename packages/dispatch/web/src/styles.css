@@ -521,20 +521,6 @@ a {
   font-weight: 600;
 }
 
-/* A body long enough for the parse worker (`features/refs/markdown-engine.ts`, whose
-   `markdownWorkerThreshold` decides it) carries this class. Such a body is where a list of
-   thousands of items turns up: `MarkdownBody` puts its items into the page a slice of work at a
-   time, and this keeps the browser's own layout of them off the reader's thread in the same way,
-   by skipping an item that is off screen and standing it in at one line's height until it is
-   scrolled to. Measured together on a two-core pod, the two hold the longest task of an
-   8,000-item body at about a quarter of the second a reader may wait; slicing alone left half of
-   it in layout. Every item is in the page either way - a row counts `li` elements, never their
-   boxes - and an item scrolled to lays out as any other does. */
-.dispatch-markdown-long li {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 1.5em;
-}
-
 /* A `MarkdownPreview` sits inside a control (a link, a search option, a card's toggle), so its
    links are inert spans (`data-markdown-link`) rather than nested `<a>`s; they keep Typography's
    own `a` look so a reference still reads as one. */

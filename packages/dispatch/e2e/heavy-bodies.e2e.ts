@@ -570,6 +570,49 @@ test("a document write of each heavy body answers in under a second, stored or r
   }
 });
 
+/** How long one measurement must hold before a row reads it as where the page has come to rest. */
+const AT_REST_MS = 600;
+
+/**
+ * `measure` once it has answered the same thing for `AT_REST_MS`, which is where the page has
+ * come to rest; `undefined` where it never answered one.
+ *
+ * The two rows below measure a place, let a long body format above it, and measure again, so
+ * anything else that moves the page between the two reads is read as the late paint's doing. The
+ * deep link they land on marks the conversation read, and the `New` mark leaving each of the 13
+ * cards once the server answers (`ConversationTab`'s `item.unread`) is 24 px a card: the document
+ * loses 312 px and the browser's own scroll anchoring scrolls by it, leaving the card the reader
+ * is on 24 px lower than it first rendered. Measured in WebKit on this pod (sjawhar/legion#2403),
+ * that landed 600-700 ms after the first read in 2 runs of 21, and the late paint itself moved the
+ * content under it by 0 px in the failing runs exactly as in the passing ones. So the first read
+ * waits for the page to stop moving; what the paint does to it is what these rows measure.
+ */
+async function atRest(
+  measure: () => Promise<number | undefined>,
+  what: string
+): Promise<number | undefined> {
+  let place: number | undefined;
+  let since = 0;
+  await expect
+    .poll(
+      async () => {
+        const now = await measure();
+        if (now === undefined) {
+          return false;
+        }
+        if (now !== place) {
+          place = now;
+          since = Date.now();
+          return false;
+        }
+        return Date.now() - since >= AT_REST_MS;
+      },
+      { intervals: [100], message: `${what} never came to rest` }
+    )
+    .toBe(true);
+  return place;
+}
+
 // The reader's place is proven in Chromium and WebKit: the compensation reads layout the two
 // engines measure and anchor differently.
 test("a long comment above the reader keeps the comment they are reading where it was when it formats", async ({
@@ -601,7 +644,10 @@ test("a long comment above the reader keeps the comment they are reading where i
     const reading = cards.last();
     await reading.scrollIntoViewIfNeeded();
     await expect(reading).toBeVisible();
-    const before = (await reading.boundingBox())?.y;
+    const before = await atRest(
+      async () => (await reading.boundingBox())?.y,
+      "the comment the reader is on"
+    );
     expect(before, "the comment the reader is on is on screen").not.toBeUndefined();
 
     held.release();
@@ -661,14 +707,15 @@ test("Jump to latest keeps a newest long comment under the composer when it form
     const jump = page.getByTestId("jump-to-latest");
     await expect(jump).toBeVisible();
     await jump.click();
-    const placed = await underTheComposer(page);
+    const placed = await atRest(() => underTheComposer(page), "the newest card's place");
+    expect(placed, "Jump to latest placed the newest card").not.toBeUndefined();
 
     held.release();
     await expect(markdownBody(newest).locator("li")).toHaveCount(8_000);
     await expectSettled(newest);
 
     expect(
-      Math.abs((await underTheComposer(page)) - placed),
+      Math.abs((await underTheComposer(page)) - (placed ?? 0)),
       "the newest card left the place Jump to latest gave it when it formatted"
     ).toBeLessThan(2);
   } finally {

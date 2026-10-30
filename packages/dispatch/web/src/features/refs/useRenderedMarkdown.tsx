@@ -104,22 +104,31 @@ export type DecorateMarkdown = (
 ) => readonly ReferenceAnchor[];
 
 /**
+ * What one piece of a sliced paint yields: `"page"` where the work it has just done reached the
+ * page - a batch of the body put into the element - so the task ends there whatever is left of
+ * `SLICE_MS`, and the engine styles and lays out that batch before the next one adds to it;
+ * nothing where the work was off the page, where `SLICE_MS` alone decides when the thread goes
+ * back. A painter yields `"page"` because the cost of attaching is not its own: it is paid by
+ * the engine in the rendering update after the task, which no clock in the painter can measure.
+ */
+export type SliceYield = "page" | undefined;
+
+/**
  * A `paint` run a piece at a time: it fills the element as `paint` does, yielding wherever the
  * work can be cut, and the element holds the whole body once it is done.
  * `useRenderedMarkdown` drives it across tasks for a body the parse worker parsed, so a list of
- * thousands of items is built without holding the reader's thread for one long task; everything
- * a surface reads from a painted element - the ask hosts, the anchors, the pictures, the
- * diagrams, `onRendered` - waits for the last piece. A painter builds off the page and puts the
- * body in the element at the end (`MarkdownBody`), so no portal and no pass ever meets half a
- * body.
+ * thousands of items is built, and then put into the page, without holding the reader's thread
+ * for one long task; everything a surface reads from a painted element - the ask hosts, the
+ * anchors, the pictures, the diagrams, `onRendered` - waits for the last piece, so no portal and
+ * no pass ever meets half a body.
  */
 export type PaintMarkdownInSlices = (
   element: HTMLElement,
   parsed: ProseMirrorNode,
   serializer: DOMSerializer
-) => Generator<void>;
+) => Generator<SliceYield>;
 
-/** How long one slice may hold the page's thread before it hands it back. */
+/** How long one slice of off-page work may hold the page's thread before it hands it back. */
 const SLICE_MS = 50;
 
 /** What a surface tells `useRenderedMarkdown` beyond its element, source and paint; each has a
@@ -202,9 +211,9 @@ function whereTheContentUnderItWas(element: HTMLElement): number {
  * they are reading from - and it is not measured again either: reading a rectangle lays the whole
  * body out there and then, which for a list of thousands of items is a tenth of a second on the
  * reader's thread for a page that was never going to move. One measurement covers a whole paint,
- * its slices included, for the same reason: measuring between slices lays the list out again for
- * every one of them, which is seconds of the reader's thread, and leaves the reader where this
- * puts them anyway.
+ * the batches it reaches the page in included: the reader is put back once the whole body is in,
+ * which is where measuring between batches would leave them anyway, and so no batch of the paint
+ * ever reads layout - the engine is left to lay each one out in its own time.
  */
 function keepTheReadersPlace(element: HTMLElement, before: number): void {
   if (before > 0) {
@@ -260,17 +269,18 @@ function keepTheReadersPlace(element: HTMLElement, before: number): void {
  * the turn that just formatted.
  *
  * A body the parse worker parsed, where the surface gave a `paintInSlices`, is built a piece at
- * a time: each task does at most `SLICE_MS` of the work and hands the thread back, so the 16,000
- * elements of an 8,000-item list are never built in one task. The painter builds off the page
- * and puts the body in the element with the last piece, so the reader never sees half a list and
- * the page lays the body out once. The element stays pending until that last piece, and the ask
- * hosts, the anchors, the pictures, the diagrams and `onRendered` all wait for it, so no portal
- * is mounted into a body still being built. A paint the element has moved on from is stopped
- * where it stands, and what the reader is reading stays until the newer source's own paint
- * lands. Only the paint that first formats a body here is built that way: a repaint of a body
- * the element already shows - a new decision card, a new `decorate` pass - lands in the commit
- * that asked for it, so everything mounted into the paint the reader is reading moves to the
- * new one with it.
+ * a time and put into the page a batch at a time: each task does at most `SLICE_MS` of off-page
+ * work, and ends at once on a piece that reached the page (`SliceYield`), so neither the
+ * building of the 16,000 elements of an 8,000-item list nor the engine's styling and layout of
+ * them ever falls into one task. The reader sees the body fill where their own text was, over
+ * those tasks. The element stays pending until the last piece, and the ask hosts, the anchors,
+ * the pictures, the diagrams and `onRendered` all wait for it, so no portal is mounted into a
+ * body still being built. A paint the element has moved on from is stopped where it stands,
+ * part-built if that is where it was, and the newer source's own render replaces whatever the
+ * element holds - its text while that source is pending, its paint once it lands. Only the paint
+ * that first formats a body here is built that way: a repaint of a body the element already
+ * shows - a new decision card, a new `decorate` pass - lands in the commit that asked for it, so
+ * everything mounted into the paint the reader is reading moves to the new one with it.
  */
 export function useRenderedMarkdown(
   root: RefObject<HTMLElement | null>,
@@ -307,7 +317,7 @@ export function useRenderedMarkdown(
     setIsFallback(false);
     let cancelDraw: (() => void) | undefined;
     let sliceTimer: number | undefined;
-    let slices: Generator<void> | undefined;
+    let slices: Generator<SliceYield> | undefined;
     const cancelRender = renderWithEngine(
       markdown,
       softBreaks,
@@ -388,9 +398,24 @@ export function useRenderedMarkdown(
         const nextSlice = (): void => {
           const until = performance.now() + SLICE_MS;
           let done = false;
+          // A piece whose work reached the page ends the task where it stands: what it costs is
+          // the engine's own styling and layout of it, which this thread's clock cannot see, so
+          // the budget below must not pack another batch in behind it.
+          let reachedThePage = false;
           do {
-            done = slices?.next().done === true;
-          } while (!done && performance.now() < until);
+            const piece = slices?.next();
+            done = piece?.done === true;
+            reachedThePage = piece?.value === "page";
+          } while (!done && !reachedThePage && performance.now() < until);
+          if (reachedThePage) {
+            // The batch that has just arrived is laid out here, while it is all of the page that
+            // is dirty. Left to the engine, the layout of every batch would fall into whichever
+            // task first reads the page's geometry - the reader's-place measurement at the end
+            // of this very paint - and in WebKit a list of 8,000 items laid out in one go is
+            // ~700 ms of that task (sjawhar/legion#2403). Laid out a batch at a time it is a
+            // few milliseconds each, and the measurement at the end finds nothing left to do.
+            element.getBoundingClientRect();
+          }
           if (done) {
             slices = undefined;
             formatted.current = true;

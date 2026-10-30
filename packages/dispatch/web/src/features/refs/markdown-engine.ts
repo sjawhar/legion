@@ -201,9 +201,9 @@ export interface MarkdownRendering {
   readonly openMermaidFence: boolean | undefined;
 }
 
-/** Whether a body is parsed in the worker rather than on the page's own thread. `MarkdownBody`
- *  reads it too: a body drawn from the worker's answer carries `dispatch-markdown-long`, whose
- *  rule keeps a list of thousands of items off the layout of the page (`styles.css`). */
+/** Whether a body is parsed in the worker rather than on the page's own thread.
+ *  `useRenderedMarkdown` reads it too: such a body's first paint is the one put into the page a
+ *  batch at a time, since it is the one that lands after its own commit. */
 export function parsesInTheWorker(markdown: string): boolean {
   return markdown.length > markdownWorkerThreshold;
 }
