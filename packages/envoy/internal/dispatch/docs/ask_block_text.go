@@ -535,19 +535,40 @@ func questionParagraphs(question string) []*pmdoc.Node {
 }
 
 // writesNothingButItsText reports whether node writes no more than the text in it: it renders to
-// exactly what a paragraph holding that text, its hard breaks included, renders to
-// (inlineWithHardBreaks). A paragraph holding an image, or a link whose text is empty, writes
-// what no text of its own does; one holding the whitespace a person typed, under the mark the
-// editor leaves on every character they type, writes that whitespace and nothing else - as the
+// exactly what a paragraph holding its own text and the breaks a person typed in it renders to
+// (textAndBreaksOf). A paragraph holding an image, or a link whose text is empty, writes what no
+// text of its own does; one holding the whitespace a person typed, under the mark the editor
+// leaves on every character they type, writes that whitespace and nothing else - as the
 // character reference the markdown spells a space a line would drop with, which every reader
 // decodes back to the space. So a caller weighing what a write over a paragraph would delete
 // reads it by what it renders to, not by its marks: the marks a reader sees are the marks the
 // markdown writes (rendersTheSame).
 func writesNothingButItsText(node *pmdoc.Node) bool {
-	return rendersTheSame(node, &pmdoc.Node{
-		Type:     "paragraph",
-		Children: inlineWithHardBreaks(pmdoc.TextContent(node)),
-	})
+	return rendersTheSame(node, &pmdoc.Node{Type: "paragraph", Children: textAndBreaksOf(node)})
+}
+
+// textAndBreaksOf is node's own inline content as its text alone: each text node's text and each
+// break node as it stands, both without the marks they carry, and nothing else. The breaks are
+// kept rather than rebuilt from the text (inlineWithHardBreaks), which writes every one of them
+// as a hard break: a soft break, which the editor keeps from a paste and the markdown writes as
+// the space a reader sees, and a line feed a text node ends with, which the markdown drops as
+// the trailing whitespace it is, both read back as the line feed a hard break reads back as
+// (pmdoc.TextContent), and rebuilding either would make a break a person typed look like markup
+// their line does not hold. Every other inline node - an image, a footnote's reference, a piece
+// of inline HTML - is left out, so it is in node and not in the text it is weighed against, and
+// a write over it is weighed as the deletion it is; a link's address rides on a mark, and goes
+// with the marks.
+func textAndBreaksOf(node *pmdoc.Node) []*pmdoc.Node {
+	inline := make([]*pmdoc.Node, 0, len(node.Children))
+	for _, child := range node.Children {
+		if child.Type != "text" && child.Type != "hardbreak" {
+			continue
+		}
+		unmarked := *child
+		unmarked.Marks = nil
+		inline = append(inline, &unmarked)
+	}
+	return inline
 }
 
 // inlineWithHardBreaks carries a single newline as the hardbreak node nodeText reads back as
@@ -612,12 +633,14 @@ func normalizeAskOptions(options []model.AskOption) []model.AskOption {
 // quotes it and names the two places the question can be written without losing it: an upload of
 // the document as a new version, which carries a block whose question it writes and is the path
 // an agent has, and the document editor, where a person writes the question beside the
-// paragraph. The upload is named with the issue the document belongs to, since the command does
-// not address the document without it, and the refusal says this is the one case a document edit
-// cannot reach: an agent reading it has been told to change a document with a document edit
-// rather than to upload its name again (the dispatch_artifact tool's own description), and only
-// the reason above lets it do otherwise here. The block and the paragraph are quoted as data
-// (quotedAskChild), never written into the reason raw.
+// paragraph. The upload is named with the owner the document belongs to, since the command does
+// not address the document without one, and both spellings of that owner stand in one clause,
+// since an agent holding a project document would read a step it cannot run were the issue named
+// alone. The refusal says this is the one case a document edit cannot reach: an agent reading it
+// has been told to change a document with a document edit rather than to upload its name again
+// (the dispatch_artifact tool's own description), and only the reason above lets it do otherwise
+// here. The block and the paragraph are quoted as data (quotedAskChild), never written into the
+// reason raw.
 func refuseEmptyQuestionEdit(block askBlock, edit AskBlockEdit) error {
 	for _, child := range block.node.Children {
 		if child.Type == "bullet_list" || writesNothingButItsText(child) {
@@ -632,7 +655,8 @@ func refuseEmptyQuestionEdit(block askBlock, edit AskBlockEdit) error {
 				"paragraphs holds, which is no text: %s; no document edit writes a paragraph into a "+
 				"decision, so this is the one case a document edit cannot reach - upload the document again "+
 				"as a new version with the question written beside that paragraph (dispatch artifact "+
-				"--issue <KEY> --name <the document> --content-file -), or write the question beside it in "+
+				"--issue <KEY>, or --project <KEY> for a project's document, --name <the document> "+
+				"--content-file -), or write the question beside it in "+
 				"the document editor; either keeps what the paragraph holds",
 			block.id, quoted)}
 	}

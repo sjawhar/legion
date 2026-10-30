@@ -2,6 +2,7 @@ package docs
 
 import (
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 
@@ -69,10 +70,11 @@ func editedOptionList(list *pmdoc.Node, options []model.AskOption, budget *pmdoc
 }
 
 // callerSentItems is the list of what an options edit's caller sent of their own, out of the
-// merged items (mergeAskOptions): an item no option held, whole, and for a rewritten line that
-// line alone, without the nodes under it the document already held. Its parse is what charges the
-// write's budget for the caller's items (editedOptionList), so it carries no content the document
-// already holds; an item the merge keeps whole carries nothing the caller sent and is left out.
+// merged items (mergeAskOptions): an item no option held, whole, and for a rewritten line the
+// caller's own line alone (mergedOption.line), without the nodes under it the document already
+// held. Its parse is what charges the write's budget for the caller's items (editedOptionList),
+// so it carries no content the document already holds; an item the merge keeps whole carries
+// nothing the caller sent and is left out.
 func callerSentItems(merged []mergedOption) *pmdoc.Node {
 	sent := &pmdoc.Node{Type: "bullet_list", Children: make([]*pmdoc.Node, 0, len(merged))}
 	for _, option := range merged {
@@ -80,7 +82,7 @@ func callerSentItems(merged []mergedOption) *pmdoc.Node {
 		case option.held == nil:
 			sent.Children = append(sent.Children, option.written)
 		case !option.whole:
-			sent.Children = append(sent.Children, withChildren(option.written, option.written.Children[:1]))
+			sent.Children = append(sent.Children, withChildren(option.written, []*pmdoc.Node{option.line}))
 		}
 	}
 	return sent
@@ -95,6 +97,11 @@ type mergedOption struct {
 	// whole reports that the held item already says what the edit sends, so the result is that
 	// item itself and not what the parse made of its rendering.
 	whole bool
+	// line is the line the caller sent for a rewritten item, the paragraph the merge wrote above
+	// what that item already held, and nil for every other entry: the charge for the caller's own
+	// text is of the node they sent (callerSentItems), never of whichever node the merge happened
+	// to write first.
+	line *pmdoc.Node
 }
 
 // mergeAskOptions is the item each sent option is written as, in the order sent, over the
@@ -123,9 +130,11 @@ func mergeAskOptions(list *pmdoc.Node, options []model.AskOption) []mergedOption
 			merged = append(merged, mergedOption{written: item, held: item, whole: true})
 			continue
 		}
+		line := optionParagraph(option)
 		merged = append(merged, mergedOption{
-			written: withChildren(item, append([]*pmdoc.Node{optionParagraph(option)}, itemContent(item)...)),
+			written: withChildren(item, append([]*pmdoc.Node{line}, itemContent(item)...)),
 			held:    item,
+			line:    line,
 		})
 	}
 	return merged
@@ -307,14 +316,37 @@ func itemContent(item *pmdoc.Node) []*pmdoc.Node {
 }
 
 // holdsOnlyItsOptionLine reports whether item holds nothing a rebuilt list would not write
-// again: one line, written as a paragraph, that writes no more than the text in it
-// (writesNothingButItsText). An item holding a sub-list, a second paragraph, a link's address,
-// bold, code or an image writes more than that, and dropping it would delete what a person
-// wrote; the whitespace a person typed in its line is text, and is written again, so an item
+// again. It weighs what the whole item writes, not what its line writes: `checked` is the one
+// list-item attribute the markdown writes as content - the `- [x] ` or `- [ ] ` of a task - so
+// an item is weighed against one holding the same line's text and breaks (textAndBreaksOf) under
+// its own list-item attributes but for that one. A ticked option is then no edit's to drop, and
+// the issue's task count does not change under the person who ticked it, while the attributes a
+// rebuilt list carries anyway (`label`, `listType`, `spread`) are on both sides and blame
+// nothing.
+//
+// An item holding a sub-list, a second paragraph, a link's address, bold, code or an image
+// writes more than its line, and dropping it would delete what a person wrote; the whitespace
+// and the line breaks a person typed in that line are text, and are written again, so an item
 // whose line reads "Hold: Wait " is the edit's to drop as one reading "Hold: Wait" is.
 func holdsOnlyItsOptionLine(item *pmdoc.Node) bool {
-	return len(item.Children) == 1 && item.Children[0].Type == "paragraph" &&
-		writesNothingButItsText(item.Children[0])
+	if len(item.Children) != 1 || item.Children[0].Type != "paragraph" {
+		return false
+	}
+	attrs := maps.Clone(item.Attrs)
+	delete(attrs, "checked")
+	return rendersTheSame(itemInAListOfItsOwn(item), itemInAListOfItsOwn(&pmdoc.Node{
+		Type:     "list_item",
+		Attrs:    attrs,
+		Children: []*pmdoc.Node{{Type: "paragraph", Children: textAndBreaksOf(item.Children[0])}},
+	}))
+}
+
+// itemInAListOfItsOwn is item in the shape a document holds it, a bullet list holding it alone,
+// which is the shape the renderer reads: a list item is no block of a document on its own. Both
+// sides of a weighing are wrapped the same way (holdsOnlyItsOptionLine), so what the list
+// carries of its own makes no difference to them.
+func itemInAListOfItsOwn(item *pmdoc.Node) *pmdoc.Node {
+	return &pmdoc.Node{Type: "bullet_list", Children: []*pmdoc.Node{item}}
 }
 
 // rendersTheSame reports whether two nodes write the same markdown, which is all a document
