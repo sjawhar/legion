@@ -1,7 +1,5 @@
 package gcp
 
-import "strconv"
-
 // CloudConfig is the hub VM's cloud-config document, for the tests outside the package.
 type CloudConfig = cloudConfig
 
@@ -175,7 +173,6 @@ func DispatchKubeconfig(endpoint, ca, name string) string {
 // for the refusal tests, with the front door's proxy in the default namespace: nil when the URL
 // renders an environment.
 func DispatchListenerEnvError(hostname, url string) error {
-	proxy := clusterLocal(hostname+"-tailnet", defaultDispatchNamespace) + ":" + strconv.Itoa(dispatchSOCKS5Port)
-	_, err := dispatchListenerEnv(hostname, proxy, hostname+"-listener", url)
+	_, err := dispatchListenerEnv(dispatchSettings{hostname: hostname, namespace: defaultDispatchNamespace}, hostname+"-listener", url)
 	return err
 }
