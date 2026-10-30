@@ -47,6 +47,10 @@ export const lazyPieces = {
   "headless-markdown":
     "the headless Markdown renderer, @legion/proof-editor/headless, which every page warms at " +
     "boot (features/refs/markdown-engine.ts)",
+  "markdown-worker":
+    "the Markdown parse worker (features/refs/markdown-parse.worker.ts), which a body longer " +
+    "than markdownWorkerThreshold is parsed in rather than on the page's own thread " +
+    "(features/refs/markdown-engine.ts)",
   mermaid:
     "the Mermaid renderer's Web Worker (features/refs/mermaid-render.worker.ts), which a body " +
     "holding a fenced `mermaid` block starts (features/refs/mermaid-diagrams.ts)",
