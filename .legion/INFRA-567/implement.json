@@ -2,61 +2,58 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-567",
-  "completed": "2026-10-30T02:30:00Z",
-  "round": 7,
-  "answers": "Review round 3: one High and two Minor findings, each answered on its thread and resolved",
+  "completed": "2026-10-30T04:45:00Z",
+  "round": 8,
+  "answers": "Review round 4: two correctness findings in the Go check and three small fixes, each answered on its thread and resolved",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2512",
-  "head": "45c0fb686c2ccdea9f34e645335314c52b329581",
+  "head": "9862c8d8b99962284b5fc00075c5a7b41daed9f7",
   "proof": [
     {
-      "criterion": "Review round 3, High (mirror-ci-images.sh:77): round 2's label check fails a row that is labelled correctly, so the ci-images job of this pull request would exit 1 and a re-run would give the same answer",
-      "surface": "Docker Hub and ghcr.io, read anonymously from the issue pod, and the copy script's own harness",
-      "command": "An anonymous manifest read of docker.io/library/nats:2.15.1-alpine against the row's digest; then bash .github/scripts/mirror-ci-images.test.sh",
-      "observed": "The reviewer's reading is confirmed: that tag now resolves elsewhere than the row's correctly pinned sha256:2ae57dfb, so the deleted check would have refused it, and this pull request retags every row, so every tagged row would have reached it. The read is deleted, with its row field, its output lines and the header section that explained them; the header now says why no read of an upstream tag can stand there. The copy itself is unchanged: it reads <the row's upstream>@<the row's digest>, skips a row the package holds at that tag, and refuses a copy that lands elsewhere. The harness prints 32 assertions, 30 before.",
-      "headSha": "45c0fb686c2ccdea9f34e645335314c52b329581",
-      "negativeControl": "The harness keeps the case where the stand-in registry has moved a held row's upstream tag, and that run now passes, which is the behaviour the deleted check got wrong."
+      "criterion": "Review round 4, finding 1 (mirror-ci-images.sh:117): the Go check read a third-party registry on every ci-images run, held rows included, which put a Docker Hub fetch back into a CI job and made .github/ci-images.yaml:10-11 false",
+      "surface": "The copy script's own harness, whose stand-in crane records every reference it is asked for and reaches no network",
+      "command": "bash .github/scripts/mirror-ci-images.test.sh",
+      "observed": "45 assertions, 32 before. The loop now asks the package first: a held row's Go is read at ghcr.io/sjawhar/legion/ci@<the row's digest>, the package's own copy, which crane copy landed at the row's digest, and a row being copied is read at <upstream>@<digest> before the copy, so bytes whose label is wrong never land. Every library/golang row is still checked, held or copied; only the reference changes. The new case 'a run whose package holds every row' asserts that no reference the stand-in was asked for is a docker.io one and none is outside the package.",
+      "headSha": "9862c8d8b99962284b5fc00075c5a7b41daed9f7",
+      "negativeControl": "That case run against the script as the reviewer read it (the parent commit's file put in place, then restored): 'FAIL: reads the Go of the package's own copy', 'FAIL: asks crane for no docker.io reference', 'FAIL: and for no reference outside the package at all'. All six assertions pass at this head."
     },
     {
-      "criterion": "The finding round 2 raised is still answered: a row's label must be held to its bytes, for the versions rule 3 and check-bun-version.sh read from the upstream text",
-      "surface": "The image's own config, read with crane for every library/golang row, and the build that uses the Bun bytes",
-      "command": "An anonymous read of each image's config in the pod, then bash .github/scripts/mirror-ci-images.test.sh and bash .github/scripts/check-image-trigger-paths.sh",
-      "observed": "library/golang publishes its version: the row's digest carries GOLANG_VERSION=1.27.1 in .config.Env. The copy script now runs `crane config --platform linux/amd64 <upstream>@<row digest>` for every library/golang row, held or copied, and refuses when that version is not the one the row's tag names, naming the row, the version its label claims and the version its bytes carry; it asks for the row's digest and for no tag, so its answer is the same on every day. oven/bun publishes no version anywhere in its config (PATH, BUN_RUNTIME_TRANSPILER_CACHE_PATH, BUN_INSTALL_BIN and nothing else), so the build decides instead: packages/envoy/docker/Dockerfile's web stage copies .bun-version and refuses a `bun --version` that is not its content, before it installs or builds anything, as worker.Dockerfile already does through its build script. .bun-version joined release-envoy-listener.yaml's on.push.paths and ci.yaml's envoy_smoke filter, and check-image-trigger-paths.sh passes with 5 image builds.",
-      "headSha": "45c0fb686c2ccdea9f34e645335314c52b329581",
-      "negativeControl": "Two new harness cases: a held library/golang row whose image carries Go 1.26.3 under a 1.27.1-alpine label fails, naming the row and both versions and copying nothing, and a row whose image carries the Go its tag names passes. The held half is the one the deleted check could never reach."
+      "criterion": "Review round 4, finding 2 (mirror-ci-images.sh:88): the copy script decided which rows are Go rows with a parser of its own, which disagreed with check-ci-images.sh's upstream_parts, so a row rules 3 and 7 count as the Go row could escape the Go check",
+      "surface": "Both harnesses, over fixtures, and the gate over the real tree",
+      "command": "bash .github/scripts/mirror-ci-images.test.sh ; bash .github/scripts/check-ci-images.test.sh ; bash .github/scripts/check-ci-images.sh tree",
+      "observed": "One parser: split_reference, upstream_parts, the four grammar regexes and DOCKER_HUB_HOSTS moved out of check-ci-images.sh's heredoc into .github/scripts/ci_images.py, beside workflow_paths.py and imported the same way (PYTHONPATH=.github/scripts, which that heredoc already ran under). The gate imports them and lost its copies; the copy script's heredoc imports upstream_parts and its hand-written rpartition/partition split and its own DOCKER_HUB set are deleted. The gate's harness is unchanged at 99 assertions, which is what a refactor should leave; the tree mode passes with 12 rows and 35 references.",
+      "headSha": "9862c8d8b99962284b5fc00075c5a7b41daed9f7",
+      "negativeControl": "The new case 'a library/golang row whose upstream names a host with a port' (registry.example.com:5000/library/golang:1.27.1-alpine, bytes carrying Go 1.26.3 against a tag naming 1.27.1) against the reviewed script: 'FAIL: fails', 'FAIL: names the reference it read and both versions', 'FAIL: and copies no golang row' — the old split read the host as part of the repository, so the row went past the check and into the package. All three pass at this head."
     },
     {
-      "criterion": "Review round 3's two Minor findings",
-      "surface": "The gate over fixtures and over the real tree",
-      "command": "bash .github/scripts/check-ci-images.test.sh ; bash .github/scripts/check-ci-images.sh tree",
-      "observed": "99 assertions, 96 before, and the tree mode passes with 12 rows and 35 references. upstream_parts writes out Docker Hub's implicit library/ for the hosts \"\", docker.io, index.docker.io and registry-1.docker.io and for a repository of one path element, so every rule that compares a repository reads both spellings alike; and the copy script's output sentence describes what the run now prints, one line per held row, two per copied row, one more per library/golang row, then the summary.",
-      "headSha": "45c0fb686c2ccdea9f34e645335314c52b329581",
-      "negativeControl": "The new red case golang-short-spelling: both golang rows respelled without library/ and a FROM moved onto the next-version row; rule 7 fires, and the case also asserts rule 3 reads the pinned row under its short spelling rather than reporting it missing."
+      "criterion": "Review round 4's three minor findings, and the job selection the new module needs",
+      "surface": "The repository's own gates over the real tree",
+      "command": "bash .github/scripts/check-ci-filters.sh ; bash .github/scripts/check-image-trigger-paths.sh ; bash .github/scripts/check-action-pins.sh ; bash .github/scripts/check-private-names.sh ; bash .github/scripts/check-bun-version.sh ; bash .github/scripts/check-bun-version.test.sh",
+      "observed": "The refusal names the row's whole upstream (docker.io/library/golang:1.27.1-alpine, not golang:1.27.1, a different image) and which reference it read; the harness's dead fixtures, its dead 'upstream tag that has moved' case and the header prose the deleted upstream-tag read left behind are gone; the THE GO CHECK paragraph describes what the script does. .github/scripts/ci_images.py joined ci.yaml's ci_images filter and ci_job_reads.py's gate for that job, so a change to the module alone selects the ci-images job: check-ci-filters.sh passes with 25 gates and reports ci-images at 6 files, 0 uncovered. check-image-trigger-paths.sh passes with 5 image builds; every action is pinned; no private name; every Bun install reads .bun-version (1.4.4) with 119 assertions.",
+      "headSha": "9862c8d8b99962284b5fc00075c5a7b41daed9f7",
+      "negativeControl": "check-ci-filters.sh is the control on the filter edit: it fails a job whose reads its filter misses, which is how the missing ci_images.py entry would have shown."
     },
     {
-      "criterion": "The round's other checks, which these changes could have broken",
-      "surface": "The repository's own gates, over the real tree",
-      "command": "bash .github/scripts/check-bun-version.sh ; check-bun-version.test.sh ; check-ci-filters.sh ; check-action-pins.sh ; check-private-names.sh ; a PyYAML parse of every workflow file",
-      "observed": "`every Bun install reads .bun-version (1.4.4)`; 119 assertions; `every ci.yaml filter matches every file its job reads (25 gates)`; every action pinned; no private name; every workflow parses.",
-      "headSha": "45c0fb686c2ccdea9f34e645335314c52b329581",
-      "negativeControl": "check-ci-filters.sh is the control on the two filter edits: it fails a step whose reads its filter misses, and it passes with .bun-version named in the envoy_smoke filter and in release-envoy-listener.yaml's on.push.paths."
+      "criterion": "The open risk of earlier rounds: merged-root-waits green on a hosted runner, which no settled run had shown",
+      "surface": "GitHub Actions, the E2E proofs workflow on a hosted runner",
+      "command": "gh workflow run e2e.yaml -R sjawhar/legion --ref legion/INFRA-567 -f script=merged-root-waits ; gh api repos/sjawhar/legion/actions/runs/40999737194/jobs",
+      "observed": "Run 40999737194 at e719a7f2, which carries the restart fix of 35db766a: select success, merged-root-waits success. The earlier red at 368e3d2b was that restart defect, fixed before this run. This round changes only .github/scripts/ and ci.yaml's filter list, no daemon code, so it moves nothing that proof reads.",
+      "headSha": "9862c8d8b99962284b5fc00075c5a7b41daed9f7",
+      "negativeControl": "The same proof at 368e3d2b, run 40979438094, failed at merged_root_waits_live_test.go:523 in step 5 with the five clone lines in daemon.log — the defect this change fixed."
     }
   ],
   "filesChanged": [
-    ".github/scripts/mirror-ci-images.sh and its harness: the tag read deleted, the Go config check added, the output sentence corrected",
-    ".github/scripts/check-ci-images.sh and its harness: Docker Hub's implicit library/ written out wherever a rule compares a repository",
-    "packages/envoy/docker/Dockerfile: the web stage refuses a Bun that is not .bun-version's",
-    ".github/workflows/release-envoy-listener.yaml and .github/workflows/ci.yaml: .bun-version as a build input of the listener image",
-    "AGENTS.md: the sentence that described the deleted check"
+    ".github/scripts/ci_images.py, new: the one reference reader, split_reference and upstream_parts with their grammar",
+    ".github/scripts/check-ci-images.sh and its harness: imports that module in place of its own copies, no behaviour change",
+    ".github/scripts/mirror-ci-images.sh and its harness: the package read first, the Go check on the package's copy for a held row and on the upstream before a copy, one parser, the refusal's wording, the header, and the dead fixtures removed",
+    ".github/workflows/ci.yaml and .github/scripts/ci_job_reads.py: ci_images.py as a file the ci-images job reads"
   ],
   "deviations": [],
   "openQuestions": [
-    "This round was written and pushed during the INFRA re-pin drain, at the architect's instruction to commit and push immediately. The code, the thread answers, the body and this handoff are complete; nothing is left in the working copy.",
-    "CI run 40986598621 at the previous code head 35db766a was queued when the drain began; the run that matters now is the one at 45c0fb68.",
-    "merged-root-waits has not yet passed on a hosted runner: E2E proofs 40979438094 carries the construction's InPod and not the restart's, which landed at 35db766a. The run that shows that proof green end to end is the next one the `e2e` label starts at or above 35db766a.",
-    "Docs (main) run 40946334589 on scratch pull request #2520 is still pending in the `pages` concurrency group. #2520 stays open until it settles.",
+    "The pod was re-pinned to a new worker image at 03:17Z, and that image carries no PyYAML, so every gate of this repository that reads a YAML file fails in it with ModuleNotFoundError. I installed pyyaml 6.0.3 into a user site on the issue volume (PYTHONUSERBASE) to run the checks; the hosted runners are unaffected. dispatch://INFRA-333 is the issue that carries that gap.",
+    "CI run 41003510761 is running at this code head, started by this round's code push. The runs at the three earlier code heads were each cancelled, by the 03:17Z drain or by this push's own concurrency group.",
     "The gate's package half fails until this change's own ci-images job copies the per-digest tags, which is expected and is why this round ran the tree half alone."
   ],
   "discoveredComplexity": [
-    "A registry cannot tell a wrong label from a moved tag: both read the same way. Only the image's own metadata, where it publishes a version, or the build that uses the bytes, can bind a row's label to what it carries, and the two images this change pins differ on which of those is available."
+    "A copy that keeps the manifest digest makes the package's own copy and the upstream the same bytes, so a check that must read an image can read whichever of the two costs nothing: the package for a row it already holds, the upstream only where the run is going to read it anyway."
   ]
 }
