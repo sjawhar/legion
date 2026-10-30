@@ -33,6 +33,16 @@
       "jj": false
     },
     {
+      "script": "handoff-records.sh",
+      "go_version_file": "packages/daemon/go.mod",
+      "apt": [],
+      "bun": true,
+      "evidence_variable": "HANDOFF_RECORDS_EVIDENCE_DIR",
+      "timeout_minutes": 25,
+      "why_hosted": "Run it from a checkout on a Linux host with go, bun (after bun install) and awk, as LEGION_TEST_PG_DSN=... bash scripts/e2e/handoff-records.sh; CI's pgvector service is the server it needs, its role creates Dispatch's database there, it builds and starts Dispatch and the daemon itself, and it reaches no outside service; a run takes two to four minutes",
+      "jj": true
+    },
+    {
       "script": "merged-root-waits.sh",
       "go_version_file": "packages/daemon/go.mod",
       "apt": [],
@@ -91,6 +101,10 @@
     {
       "script": "dispatch-user-turns.sh",
       "needs": "a devbox: tmux, the pinned Oh My Pi on a model route (LEGION_E2E_MODEL_ROUTE), a Chromium that Playwright drives, and its own Postgres and NATS containers"
+    },
+    {
+      "script": "handoff-cutover-github.sh",
+      "needs": "gh acting as an App installed on sjawhar/legion-smoke with contents and pull-request write (the implement App), and jq; it pushes branches and opens pull requests there and waits on that repository's Actions queue"
     },
     {
       "script": "multi-repo-acceptance.sh",

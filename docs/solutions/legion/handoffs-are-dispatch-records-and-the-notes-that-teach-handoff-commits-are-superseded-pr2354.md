@@ -17,6 +17,7 @@ supersedes:
   - docs/solutions/legion/an-implement-handoff-push-runs-ci-in-full-and-cancels-the-code-heads-runs-cite-the-tips-runs-and-give-the-lane-the-code-heads-image-LEGION-631.md
   - docs/solutions/legion/lint-the-handoffs-you-inherit-before-your-first-code-push-a-redaction-commit-answers-another-roles-private-name-LEGION-791.md
   - docs/solutions/legion/handoff-file-conflicts-during-rebases.md
+  - docs/solutions/legion/a-branch-whose-every-round-pushes-never-settles-a-required-check-pr2512.md
 ---
 
 # Handoffs are Dispatch records, and the notes that teach handoff commits are superseded
@@ -42,13 +43,13 @@ handoff-only push or its `skip-checks: true` trailer. None of those exists after
 ## Notes that mention the mechanism and keep their rule
 
 These still hold. Skip only the sentence about handoff pushes:
-- `docs/solutions/github/an-unknown-blob-from-mirror-gcr-io-….md`, its "push the handoff
-  alone" step;
 - `docs/solutions/legion/the-private-names-check-reads-each-events-frozen-body-….md`,
   its handoff half;
 - `docs/solutions/legion/a-forward-merge-after-retro-reinstalls-….md`, its retro
   removal step;
-- `docs/solutions/legion/a-description-edit-clears-pr-title-but-not-lint-….md`.
+- `docs/solutions/legion/a-description-edit-clears-pr-title-but-not-lint-….md`;
+- `docs/solutions/github/zero-check-runs-on-a-pushed-head-is-a-conflicting-head-not-a-trailer-pr2504.md`,
+  its handoff-push clauses, corrected in place.
 
 ## Evidence
 
