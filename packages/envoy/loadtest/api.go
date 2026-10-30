@@ -186,7 +186,9 @@ func errorCode(body []byte) string {
 	return refusal.Code
 }
 
-func sessionActor(id string) map[string]string { return map[string]string{"kind": "session", "id": id} }
+// sessionActor is a write's actor body field for a session id, the form a request body and
+// multipartFile's form both take.
+func sessionActor(id string) map[string]any { return map[string]any{"kind": "session", "id": id} }
 
 func trunc(b []byte) string {
 	if len(b) > 300 {

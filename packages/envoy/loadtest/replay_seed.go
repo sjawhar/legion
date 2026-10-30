@@ -12,10 +12,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"hash/fnv"
 	"log"
 	"maps"
-	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"os"
@@ -290,7 +288,7 @@ func jsonBody(v any) rawBody {
 // session named in the body, a user through the identity header.
 func actorOf(a *replayActor) (who, map[string]any, error) {
 	if a == nil {
-		return who{}, map[string]any{"kind": "session", "id": replaySeedActorID}, nil
+		return who{}, sessionActor(replaySeedActorID), nil
 	}
 	switch a.Kind {
 	case "session":
@@ -745,22 +743,6 @@ func (s *replaySeeder) adoptUnmapped(ctx context.Context, kind, query string, ar
 	return "", nil
 }
 
-// fileBytes are a file's stand-in bytes: size bytes from a PCG keyed by the rng seed and the
-// file's logged id.
-func fileBytes(rngSeed uint64, id string, size int) []byte {
-	h := fnv.New64a()
-	h.Write([]byte(id))
-	r := rand.New(rand.NewPCG(rngSeed, h.Sum64()))
-	out := make([]byte, size)
-	for i := 0; i < size; i += 8 {
-		v := r.Uint64()
-		for j := 0; j < 8 && i+j < size; j++ {
-			out[i+j] = byte(v >> (8 * j))
-		}
-	}
-	return out
-}
-
 func (s *replaySeeder) ensureFile(ctx context.Context, key string, a *replayArtifact) error {
 	if _, ok := s.ids.get(idArtifact, a.ID); ok {
 		return nil
@@ -780,7 +762,7 @@ func (s *replaySeeder) ensureFile(ctx context.Context, key string, a *replayArti
 		// The upload form is built in one place (multipartFile): the boundary is the replay's,
 		// derived from the rng seed and the logged id, and the parts are the same bytes.
 		ct, body, err := multipartFile(s.rngSeed, &replayFile{Name: a.Name, MIME: mimeType, Seed: a.ID, Size: *a.Size,
-			Actor: map[string]any{"kind": "session", "id": replaySeedActorID}}) // sessionActor's fields, as multipartFile takes them
+			Actor: sessionActor(replaySeedActorID)})
 		if err != nil {
 			return err
 		}

@@ -367,7 +367,9 @@ port_holder() {
 # can see it, and saying that it cannot when it cannot. A port this namespace cannot see is most
 # often another Legion role of the pod whose LOADTEST_ROOT hashed into this root's block of ports
 # (common.sh: a block out of 200, so about 1 pair of roots in 200 collides), and then all 7 ports
-# are the same, so the refusal names the block and both remedies.
+# are the same, so the refusal names the block and both remedies. It says that only of a port this
+# root's block still sets: a port stack.json recorded under another block, or one a LOADTEST_*_PORT
+# overrides, is held by whoever holds it, which this root's block says nothing about.
 check_port() {
   local name=$1 key=$2 p holders block
   p=$(port "$key")
@@ -376,6 +378,8 @@ check_port() {
   [ -n "$holders" ] &&
     die "port $p ($key, for $name) is already in use by $holders, which is not this stack's; stop it or set ${PORT_VAR[$key]} and rerun stack.sh setup"
   block=$(port_block "$LOADTEST_ROOT")
+  [ "$p" = "$(default_port "$key" "$block")" ] ||
+    die "port $p ($key, for $name) is already in use, and no process of this PID namespace holds it: another Legion role of this pod, or another PID namespace, may hold it, in the network namespace they share. This port is not the default of this root's port block $block (stack.json records it, or ${PORT_VAR[$key]} sets it), so no other root's block of ports explains it. Stop whatever holds it, or set ${PORT_VAR[$key]} to a port no one holds; then rerun stack.sh setup"
   die "port $p ($key, for $name) is already in use, and no process of this PID namespace holds it: another Legion role of this pod, or another PID namespace, may hold it, in the network namespace they share. This root is in port block $block of $PORT_BLOCKS (the block is the hash of $LOADTEST_ROOT modulo $PORT_BLOCKS), and a second root in block $block holds these same 7 ports. Stop that stack from the role that started it, or set the LOADTEST_*_PORT variables (${PORT_VAR[$key]} for this one) to ports no one holds, or move this stack to another LOADTEST_ROOT, which picks another block with probability $((PORT_BLOCKS - 1))/$PORT_BLOCKS; then rerun stack.sh setup"
 }
 

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestKeepIssueDeterministicAndProportional(t *testing.T) {
@@ -104,29 +105,55 @@ func TestReadBundleRoundTripAndRefusal(t *testing.T) {
 	}
 }
 
-// TestReplayEventTypeConstants holds each constant to the event type Dispatch's log names, so a
-// rename here cannot quietly stop matching the bundle's events, and checks decodePayload names the
-// event in its error.
-func TestReplayEventTypeConstants(t *testing.T) {
-	want := map[string]string{
-		"issue.created": evIssueCreated, "issue.updated": evIssueUpdated, "issue.closed": evIssueClosed,
-		"issue.claimed": evIssueClaimed, "issue.released": evIssueReleased,
-		"comment.created": evCommentCreated, "comment.edited": evCommentEdited, "comment.resolved": evCommentResolved,
-		"comment.reopened": evCommentReopened, "comment.anchor_refreshed": evCommentAnchorRefreshed,
-		"artifact.created": evArtifactCreated, "artifact.version": evArtifactVersion,
-		"ask.opened": evAskOpened, "ask.answered": evAskAnswered, "ask.resolved": evAskResolved,
-		"message.created": evMessageCreated, "message.delivery": evMessageDelivery, "message.accepted": evMessageAccepted,
-		"child.status": evChildStatus,
-		"issue.":       evPrefixIssue, "ask.": evPrefixAsk, "user_state.": evPrefixUserState,
-	}
-	for lit, got := range want {
-		if got != lit {
-			t.Errorf("constant for %s holds %q", lit, got)
-		}
-	}
+// TestReplayDecodePayloadNamesTheEvent: a payload its handler cannot read is refused by event id
+// and type.
+func TestReplayDecodePayloadNamesTheEvent(t *testing.T) {
 	if _, err := decodePayload[struct {
 		N int `json:"n"`
-	}](replayEvent{ID: 7, Payload: json.RawMessage(`{"n":"x"}`)}); err == nil || !strings.Contains(err.Error(), "event 7: ") {
+	}](replayEvent{ID: 7, Type: evCommentCreated, Payload: json.RawMessage(`{"n":"x"}`)}); err == nil ||
+		!strings.Contains(err.Error(), "event 7 (comment.created): ") {
 		t.Errorf("decodePayload error %v", err)
+	}
+}
+
+// TestReplayPlannerHandlesEveryTypeItNames sends one event of every type planWrite handles, named
+// by the constant the planner switches on, through planReplay: a constant spelt otherwise than
+// Dispatch's log spells it no longer matches the bundle's events, which the planner counts as
+// unhandled instead of planning.
+func TestReplayPlannerHandlesEveryTypeItNames(t *testing.T) {
+	size := len(rpDocText) + 16
+	payloads := []struct {
+		typ, key string
+		payload  any
+	}{
+		{evCommentCreated, "LINUX-1", map[string]any{"id": "C9", "body": "b"}},
+		{evCommentResolved, "LINUX-1", map[string]any{"id": "C1", "resolved": true}},
+		{evArtifactVersion, "LINUX-1", map[string]any{"artifact_id": "D1", "name": "spec",
+			"version": map[string]any{"number": 2, "named": false, "size": size}}},
+		{evArtifactCreated, "LINUX-1", map[string]any{"artifact": map[string]any{"id": "D9", "name": "notes", "kind": "doc",
+			"versions": []any{map[string]any{"number": 1, "size": 512}}}}},
+		{evIssueUpdated, "LINUX-1", map[string]any{"status": "in_progress"}},
+		{evIssueClosed, "LINUX-1", map[string]any{"status": "done"}},
+		{evIssueClaimed, "LINUX-2", map[string]any{"claim": map[string]any{"actor": rpSession}}},
+		{evMessageCreated, "LINUX-2", map[string]any{"body": "m"}},
+		{evAskOpened, "LINUX-2", map[string]any{"id": "A9", "state": "open", "kind": "decision", "question": "q", "author": rpSession}},
+		{evAskAnswered, "LINUX-2", map[string]any{"id": "A9", "state": "answered", "kind": "decision", "author": rpSession}},
+		{evAskResolved, "LINUX-2", map[string]any{"id": "A9", "state": "resolved", "kind": "decision", "author": rpSession,
+			"resolution": map[string]any{"kind": "withdrawn", "reason": "r", "actor": rpSession}}},
+		{evIssueCreated, "LINUX-3", map[string]any{"title": "three", "status": "open"}},
+	}
+	var lines []string
+	for i, p := range payloads {
+		lines = append(lines, rpEvent(int64(i+1), p.typ, p.key, rpSession, time.Duration(i+1)*time.Second, p.payload))
+	}
+	plan := rpPlan(t, rpOptions(), lines, nil)
+	for reason, n := range plan.Counts.NotSent {
+		if strings.HasPrefix(reason, "unhandled:") {
+			t.Errorf("%d events the planner does not handle: %s", n, reason)
+		}
+	}
+	if plan.Counts.TransactionsPlanned != len(payloads) {
+		t.Fatalf("%d transactions planned, want one per type (%d); not sent: %v",
+			plan.Counts.TransactionsPlanned, len(payloads), plan.Counts.NotSent)
 	}
 }

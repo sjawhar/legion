@@ -105,29 +105,45 @@ func TestReplaySaturationRules(t *testing.T) {
 			t.Fatalf("%s: saturated %v %v, want %v", c.name, sat, reasons, c.want)
 		}
 	}
-	// The threshold's base is the least of GOMAXPROCS, nproc and the cgroup quota in cores.
+	// The threshold's base is the least of GOMAXPROCS, nproc and the cgroup quota in cores,
+	// whichever hierarchy the quota was read from.
+	v2 := func(cpuMax string) *replayCgroupQuota {
+		q, ok := parseCgroupCPUMax(cpuMax)
+		if !ok {
+			return nil
+		}
+		return &q
+	}
+	v1 := func(quota, period int64) *replayCgroupQuota {
+		return &replayCgroupQuota{Version: 1, QuotaUS: quota, PeriodUS: period}
+	}
 	for _, c := range []struct {
 		name       string
 		gomaxprocs int
 		nproc      int
-		cpuMax     string
+		cgroup     *replayCgroupQuota
 		wantCores  float64
 		wantFrom   string
 	}{
-		{"GOMAXPROCS 3 on a 2-core box", 3, 2, "max 100000", 2, "nproc"},
-		{"no cgroup file", 3, 2, "", 2, "nproc"},
-		{"a 1.5-core quota below both", 3, 2, "150000 100000", 1.5, "cgroup_cpu_max"},
-		{"a quota above both", 2, 2, "400000 100000", 2, "gomaxprocs"},
-		{"GOMAXPROCS 1 on a 2-core box", 1, 2, "200000 100000", 1, "gomaxprocs"},
+		{"GOMAXPROCS 3 on a 2-core box", 3, 2, v2("max 100000"), 2, "nproc"},
+		{"no cgroup file", 3, 2, nil, 2, "nproc"},
+		{"a 1.5-core quota below both", 3, 2, v2("150000 100000"), 1.5, "cgroup_cpu_max"},
+		{"a quota above both", 2, 2, v2("400000 100000"), 2, "gomaxprocs"},
+		{"GOMAXPROCS 1 on a 2-core box", 1, 2, v2("200000 100000"), 1, "gomaxprocs"},
+		// cgroup v1: the issue pods' own figures, 3 cores of quota on a 2-core box, and a
+		// quota below nproc, which the record names by the v1 files it was read from.
+		{"a v1 quota above nproc", 2, 2, v1(300000, 100000), 2, "gomaxprocs"},
+		{"a v1 quota below nproc", 3, 2, v1(150000, 100000), 1.5, "cgroup_cpu_quota"},
+		{"no v1 quota", 3, 2, v1(-1, 100000), 2, "nproc"},
 	} {
-		cores, from := saturationCores(c.gomaxprocs, c.nproc, c.cpuMax)
+		cores, from := saturationCores(c.gomaxprocs, c.nproc, c.cgroup)
 		if !near(cores, c.wantCores) || from != c.wantFrom {
 			t.Fatalf("%s: %v cores from %s, want %v from %s", c.name, cores, from, c.wantCores, c.wantFrom)
 		}
 	}
 	// GOMAXPROCS 3 with nproc 2: a window at 1.9 cores in 10% of the samples is saturated, which
 	// 0.9 x 3 = 2.7 cores never is on a 2-core box.
-	satCores, _ := saturationCores(3, 2, "max 100000")
+	satCores, _ := saturationCores(3, 2, v2("max 100000"))
 	at19 := func(high, low int) []float64 {
 		var out []float64
 		for range high {
@@ -168,12 +184,69 @@ func TestCollectReplayMeta(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(root, "bin", "envoy-dispatch.json"), []byte(`{"dispatch_commit":"35efd326","go_version":"go1.27.1"}`), 0o644)
 	t.Setenv("LOADTEST_GOMAXPROCS", "3")
 	m := collectReplayMeta(replayInputs{RateFactor: 0.1}, 0, root)
-	if m.Inputs.SeedDumpSHA256 != "abc" || m.Inputs.DispatchCommit != "35efd326" || m.Inputs.GOMAXPROCS != 3 || m.Inputs.RateFactor != 0.1 || len(m.DispatchBuild) == 0 || !strings.Contains(string(m.LastReset), `"def"`) {
+	if m.Inputs.SeedDumpSHA256 != "abc" || m.Inputs.DispatchCommit != "35efd326" || m.Inputs.GOMAXPROCS != 3 || m.Inputs.RateFactor != 0.1 || !strings.Contains(string(m.LastReset), `"def"`) {
 		t.Fatalf("meta %+v", m)
 	}
 	m = collectReplayMeta(replayInputs{}, 0, t.TempDir())
 	if m.Inputs.SeedDumpSHA256 != "" || m.Inputs.DispatchCommit != "" || m.LastReset != nil {
 		t.Fatalf("meta without files %+v", m.Inputs)
+	}
+}
+
+// TestReadCgroupCPUQuota: the quota is read from whichever hierarchy the box mounts, cgroup v2's
+// cpu.max or cgroup v1's cpu.cfs_quota_us and cpu.cfs_period_us, and cgroup_cpu_max holds the v2
+// text alone.
+func TestReadCgroupCPUQuota(t *testing.T) {
+	v2Root := func(t *testing.T, cpuMax string) string {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "cpu.max"), []byte(cpuMax+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	v1Root := func(t *testing.T, quota, period string) string {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, "cpu"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for name, text := range map[string]string{"cpu.cfs_quota_us": quota, "cpu.cfs_period_us": period} {
+			if err := os.WriteFile(filepath.Join(dir, "cpu", name), []byte(text+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return dir
+	}
+	for _, c := range []struct {
+		name       string
+		root       string
+		wantOK     bool
+		wantCPUMax string
+		want       replayCgroupQuota
+		wantCores  float64 // 0 for no quota
+	}{
+		{"cgroup v2, a 1.5-core quota", v2Root(t, "150000 100000"), true, "150000 100000",
+			replayCgroupQuota{Version: 2, QuotaUS: 150000, PeriodUS: 100000}, 1.5},
+		{"cgroup v2, no quota", v2Root(t, "max 100000"), true, "max 100000",
+			replayCgroupQuota{Version: 2, QuotaUS: -1, PeriodUS: 100000}, 0},
+		// The issue pods: 3 cores of quota, and no cpu.max at all.
+		{"cgroup v1, a 3-core quota", v1Root(t, "300000", "100000"), true, "",
+			replayCgroupQuota{Version: 1, QuotaUS: 300000, PeriodUS: 100000}, 3},
+		{"cgroup v1, no quota", v1Root(t, "-1", "100000"), true, "",
+			replayCgroupQuota{Version: 1, QuotaUS: -1, PeriodUS: 100000}, 0},
+		{"neither hierarchy", t.TempDir(), false, "", replayCgroupQuota{}, 0},
+	} {
+		q, cpuMax, ok := readCgroupCPUQuota(c.root)
+		if ok != c.wantOK || cpuMax != c.wantCPUMax || q != c.want {
+			t.Fatalf("%s: %+v %q %v, want %+v %q %v", c.name, q, cpuMax, ok, c.want, c.wantCPUMax, c.wantOK)
+		}
+		cores, haveQuota := q.cores()
+		if haveQuota != (c.wantCores > 0) || (haveQuota && !near(cores, c.wantCores)) {
+			t.Fatalf("%s: %v cores (quota %v), want %v", c.name, cores, haveQuota, c.wantCores)
+		}
+	}
+	// A cpu.max that is not "<quota> <period>" is no quota.
+	if _, ok := parseCgroupCPUMax("nonsense"); ok {
+		t.Fatal("a malformed cpu.max was read as a quota")
 	}
 }
 

@@ -356,11 +356,11 @@ const (
 	evPrefixUserState = "user_state."
 )
 
-// decodePayload decodes one event's payload, naming the event in the error.
+// decodePayload decodes one event's payload, naming the event and its type in the error.
 func decodePayload[T any](ev replayEvent) (T, error) {
 	var v T
 	if err := json.Unmarshal(ev.Payload, &v); err != nil {
-		return v, fmt.Errorf("event %d: %w", ev.ID, err)
+		return v, fmt.Errorf("event %d (%s): %w", ev.ID, ev.Type, err)
 	}
 	return v, nil
 }

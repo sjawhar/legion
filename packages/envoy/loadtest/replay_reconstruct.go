@@ -118,7 +118,7 @@ func buildState(project string, at, until time.Time, logs []issueLog, subset boo
 	for _, lg := range logs {
 		is, window, err := replayIssueAt(lg, at, until, rec)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%s: %w", lg.Key, err)
 		}
 		rec.Window = append(rec.Window, window...)
 		for _, ev := range lg.Events {
@@ -167,13 +167,10 @@ func replayIssueAt(lg issueLog, at, until time.Time, rec *reconstruction) (repla
 	asks := map[string]int{}
 	var askList []replayAsk
 	for _, ev := range lg.Events {
-		where := func(err error) error {
-			return fmt.Errorf("%s event %d (%s): %w", lg.Key, ev.ID, ev.Type, err)
-		}
 		if commentStates[ev.Type] && ev.CreatedAt.Before(until) {
-			var c wireComment
-			if err := json.Unmarshal(ev.Payload, &c); err != nil {
-				return is, nil, where(err)
+			c, err := decodePayload[wireComment](ev)
+			if err != nil {
+				return is, nil, err
 			}
 			if ev.Type == evCommentCreated {
 				if c.ReplyTo != nil {
@@ -192,9 +189,9 @@ func replayIssueAt(lg issueLog, at, until time.Time, rec *reconstruction) (repla
 		}
 		switch {
 		case strings.HasPrefix(ev.Type, evPrefixIssue):
-			var w wireIssue
-			if err := json.Unmarshal(ev.Payload, &w); err != nil {
-				return is, nil, where(err)
+			w, err := decodePayload[wireIssue](ev)
+			if err != nil {
+				return is, nil, err
 			}
 			if w.Title != nil {
 				is.Exists = true
@@ -208,9 +205,9 @@ func replayIssueAt(lg issueLog, at, until time.Time, rec *reconstruction) (repla
 				}
 			}
 		case commentStates[ev.Type]:
-			var c wireComment
-			if err := json.Unmarshal(ev.Payload, &c); err != nil {
-				return is, nil, where(err)
+			c, err := decodePayload[wireComment](ev)
+			if err != nil {
+				return is, nil, err
 			}
 			i, ok := comments[c.ID]
 			if !ok {
@@ -231,9 +228,9 @@ func replayIssueAt(lg issueLog, at, until time.Time, rec *reconstruction) (repla
 				cm.ResolvedAt, cm.ResolvedBy = nil, nil
 			}
 		case strings.HasPrefix(ev.Type, evPrefixAsk):
-			var a wireAsk
-			if err := json.Unmarshal(ev.Payload, &a); err != nil {
-				return is, nil, where(err)
+			a, err := decodePayload[wireAsk](ev)
+			if err != nil {
+				return is, nil, err
 			}
 			if a.ID == "" || a.State == "" {
 				continue
@@ -256,13 +253,13 @@ func replayIssueAt(lg issueLog, at, until time.Time, rec *reconstruction) (repla
 				askList = append(askList, ra)
 			}
 		case ev.Type == evArtifactCreated:
-			var p struct {
+			p, err := decodePayload[struct {
 				Artifact struct {
 					ID string `json:"id"`
 				} `json:"artifact"`
-			}
-			if err := json.Unmarshal(ev.Payload, &p); err != nil {
-				return is, nil, where(err)
+			}](ev)
+			if err != nil {
+				return is, nil, err
 			}
 			rec.CreatedBefore[lg.Key] = append(rec.CreatedBefore[lg.Key], p.Artifact.ID)
 		}
@@ -297,9 +294,9 @@ func replayIssueAt(lg issueLog, at, until time.Time, rec *reconstruction) (repla
 		if !commentStates[ev.Type] {
 			continue
 		}
-		var c wireComment
-		if err := json.Unmarshal(ev.Payload, &c); err != nil {
-			return is, nil, fmt.Errorf("%s event %d (%s): %w", lg.Key, ev.ID, ev.Type, err)
+		c, err := decodePayload[wireComment](ev)
+		if err != nil {
+			return is, nil, err
 		}
 		if ev.Type == evCommentCreated {
 			if c.ReplyTo != nil {

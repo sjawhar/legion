@@ -119,7 +119,9 @@ a root meet. The block is a hash, not a reservation: two roots land in one block
 `stack.sh start` refuses the second stack (`check_port`, so no stack is ever shared) and the
 refusal names the block and the remedies: set the `LOADTEST_*_PORT` variables, or move to another
 `LOADTEST_ROOT`, which picks another block with probability 199/200. Each `LOADTEST_*_PORT`
-overrides its own port.
+overrides its own port, and `stack.json` keeps the port a `setup` recorded; a port that is not
+this root's block default any more is refused without the block explanation, which would name a
+block that has nothing to do with the port in use.
 
 `stack.sh setup` writes the ports into `$LOADTEST_ROOT/stack.json`, and `stack.sh status` prints
 them with the path of that file. A later `setup` keeps the ports the file records and moves only
@@ -990,7 +992,7 @@ Dispatch binary (`$LOADTEST_ROOT/bin/envoy-dispatch` until the next `stack.sh se
 | `edits` | Edit requests by derivation: `diff`, `substitute`. |
 | `inflight_at_end`, `timeouts` | Actions in flight at the window end; actions that hit the 60 s deadline. |
 | `saturated`, `saturated_reasons` | Saturated when Dispatch's 5 s cores reach 0.9 × `saturation_cores` in at least 10% of the window's samples (`dispatch_cpu`), an action timed out (`timeouts`), or more than 20 actions were in flight at the end (`inflight_at_end`). |
-| `saturation_cores`, `saturation_cores_from` | The cores the CPU criterion was measured against: the least of Dispatch's `GOMAXPROCS`, the box's nproc and the cgroup's CPU quota in cores (`/sys/fs/cgroup/cpu.max`, `<quota> <period>`; `max` is no quota), and which of the three set it (`gomaxprocs`, `nproc` or `cgroup_cpu_max`). `--gomaxprocs 3` on a 2-core pod is measured against 2 cores, not 3. |
+| `saturation_cores`, `saturation_cores_from` | The cores the CPU criterion was measured against: the least of Dispatch's `GOMAXPROCS`, the box's nproc and the cgroup's CPU quota in cores, and which of the three set it (`gomaxprocs`, `nproc`, `cgroup_cpu_max` on a cgroup v2 box or `cgroup_cpu_quota` on a cgroup v1 one). `--gomaxprocs 3` on a 2-core pod is measured against 2 cores, not 3. |
 | `roster` | Sessions registered. |
 | `roster_skipped` | Bundle roster ids the listener refuses as a session key, replaced by synthetic ids. |
 | `doc_order_waits` | Writes that found the previous write on their document still running and waited for it (Sending, above). |
@@ -998,14 +1000,19 @@ Dispatch binary (`$LOADTEST_ROOT/bin/envoy-dispatch` until the next `stack.sh se
 | `base_docs` | {`read`, `unread`, `differed`, `replanned`, `documents`}: the documents the plan modelled whose current markdown the build served and those it did not, how many it serves otherwise than the bundle holds them (their logged ids in `documents`, sorted), and whether the plan was built again from those texts (The client's text is the build's, above); null when the plan modelled no document. |
 | `end_state` | {`documents`, `sha256`}: the documents the run wrote and the sha256 over one sorted line per document (its logged artifact id, its highest version number, that version's size, and, sorted, the sha256 of the quote and the block index of each unresolved anchored root comment on it). A block index is where the anchor's block stands in the document: `<i>` for the i-th top-level block, `<i>.<r>` for its r-th table row, `<i>.<r>.<c>` for that row's c-th cell, `-1` for a block id the document no longer holds. The digest covers the block index, not the block id, because Dispatch mints a fresh uuid for every block a write creates, so two runs that did the same work differ in their block ids. `end_state.json` in the step directory holds the lines' fields (ids, numbers and hashes, no quote text), keeps each anchor's `block_id` for debugging, and names the digested fields in its `digest` field. Null when a read failed (`-allow-foreign` with no Postgres or no API reachable). |
 
-`meta.json` `replay` holds the same `inputs`, `cgroup_cpu_max` (`/sys/fs/cgroup/cpu.max`, `""`
-when absent), `heap_start_at`, `heap_end_at`, `dispatch_build` (the build JSON:
-`dispatch_commit`, `dispatch_tree`, `dispatch_pprof_overlay`, `dispatch_binary_sha256`,
-`go_version`, `newest_migration`) and `last_reset` (`replay/last-reset.json`: the template,
+`meta.json` `replay` holds the same `inputs`, `cgroup_cpu_max`, `cgroup_cpu_quota`,
+`heap_start_at`, `heap_end_at` and `last_reset` (`replay/last-reset.json`: the template,
 `seed_dump_sha256`, `checksum`, ...); `nproc`, `build_commit` and `pg_direct` are `meta.json`'s
-own. Every step, replay or not, records that same build JSON at `meta.json`'s own top level, as
-`dispatch_build` with `dispatch_commit` and `dispatch_binary_sha256` beside it (The step directory,
-below).
+own. The cgroup's CPU quota is read from whichever hierarchy the box mounts:
+`cgroup_cpu_max` is `/sys/fs/cgroup/cpu.max` (`<quota> <period>` in microseconds, `max` for no
+quota) and is `""` on a cgroup v1 box, which has no such file; `cgroup_cpu_quota` is the quota
+from either hierarchy, `{version, quota_us, period_us}` with `version` 2 for `cpu.max` and 1 for
+`/sys/fs/cgroup/cpu/cpu.cfs_quota_us` and `cpu.cfs_period_us`, `quota_us` `-1` when no quota is
+set, and null when neither hierarchy's files are there. The Dispatch that ran the step is
+`meta.json`'s own top-level `dispatch_build` (the build JSON: `dispatch_commit`, `dispatch_tree`,
+`dispatch_pprof_overlay`, `dispatch_binary_sha256`, `go_version`, `newest_migration`), with
+`dispatch_commit` and `dispatch_binary_sha256` beside it, written once for every step, replay or
+not (The step directory, below); `replay.inputs.dispatch_commit` names the same commit.
 
 **Measuring a change.** This README states no merge rule; the rule is in dispatch://INFRA-512/spec.
 It states how to run a comparison and what to compare.

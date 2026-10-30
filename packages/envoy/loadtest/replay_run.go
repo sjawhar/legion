@@ -14,8 +14,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"maps"
+	"math/rand/v2"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -671,6 +673,22 @@ func renderBody(v any, local map[replayRef]string, state *replayActionState) any
 		return out
 	}
 	return v
+}
+
+// fileBytes are a file's stand-in bytes: size bytes from a PCG keyed by the rng seed and the
+// file's logged id.
+func fileBytes(rngSeed uint64, id string, size int) []byte {
+	h := fnv.New64a()
+	h.Write([]byte(id))
+	r := rand.New(rand.NewPCG(rngSeed, h.Sum64()))
+	out := make([]byte, size)
+	for i := 0; i < size; i += 8 {
+		v := r.Uint64()
+		for j := 0; j < 8 && i+j < size; j++ {
+			out[i+j] = byte(v >> (8 * j))
+		}
+	}
+	return out
 }
 
 // multipartFile is the multipart body of a file upload: name, actor and the file's bytes, under a

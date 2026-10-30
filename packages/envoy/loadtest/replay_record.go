@@ -101,7 +101,8 @@ type replayRecord struct {
 	Saturated         bool                        `json:"saturated"`
 	SaturatedReasons  []string                    `json:"saturated_reasons"`
 	// SaturationCores is the cores the CPU criterion was measured against (saturationCores), and
-	// SaturationCoresFrom names which limit set it: "gomaxprocs", "nproc" or "cgroup_cpu_max".
+	// SaturationCoresFrom names which limit set it: "gomaxprocs", "nproc", "cgroup_cpu_max"
+	// (cgroup v2) or "cgroup_cpu_quota" (cgroup v1).
 	SaturationCores     float64 `json:"saturation_cores"`
 	SaturationCoresFrom string  `json:"saturation_cores_from"`
 	Roster              int     `json:"roster"`
@@ -120,17 +121,46 @@ type replayRecord struct {
 	EndState *replayEndState `json:"end_state"`
 }
 
+// replayCgroupQuota is the CPU quota the cgroup sets on this process, from whichever hierarchy
+// the box mounts (readCgroupCPUQuota).
+type replayCgroupQuota struct {
+	// Version is the cgroup hierarchy read: 2 for cpu.max, 1 for cpu.cfs_quota_us and
+	// cpu.cfs_period_us.
+	Version int `json:"version"`
+	// QuotaUS is the quota in microseconds per period, -1 when no quota is set (cgroup v2's
+	// "max"); PeriodUS is the period in microseconds.
+	QuotaUS  int64 `json:"quota_us"`
+	PeriodUS int64 `json:"period_us"`
+}
+
+// cores is the quota in cores; ok is false when no quota is set.
+func (q replayCgroupQuota) cores() (float64, bool) {
+	if q.QuotaUS <= 0 || q.PeriodUS <= 0 {
+		return 0, false
+	}
+	return float64(q.QuotaUS) / float64(q.PeriodUS), true
+}
+
+// source names the files the quota was read from, for saturation_cores_from.
+func (q replayCgroupQuota) source() string {
+	if q.Version == 1 {
+		return "cgroup_cpu_quota"
+	}
+	return "cgroup_cpu_max"
+}
+
 // replayMetaRecord is meta.json's replay record.
 type replayMetaRecord struct {
 	Inputs replayInputs `json:"inputs"`
-	// CgroupCPUMax is /sys/fs/cgroup/cpu.max; "" when absent.
+	// CgroupCPUMax is /sys/fs/cgroup/cpu.max (cgroup v2); "" when absent, as it is on a cgroup v1
+	// box.
 	CgroupCPUMax string `json:"cgroup_cpu_max"`
+	// CgroupCPUQuota is the quota read from either hierarchy (readCgroupCPUQuota); null when
+	// neither hierarchy's files are there.
+	CgroupCPUQuota *replayCgroupQuota `json:"cgroup_cpu_quota"`
 	// HeapStartAt and HeapEndAt are when heap-start.pprof and heap-end.pprof were requested.
 	HeapStartAt time.Time `json:"heap_start_at,omitzero"`
 	HeapEndAt   time.Time `json:"heap_end_at,omitzero"`
-	// DispatchBuild is $LOADTEST_ROOT/bin/envoy-dispatch.json (dispatch_commit, dispatch_tree,
-	// dispatch_pprof_overlay, dispatch_binary_sha256, go_version, ...).
-	DispatchBuild json.RawMessage `json:"dispatch_build,omitempty"`
 	// LastReset is $LOADTEST_ROOT/replay/last-reset.json, stack.sh reset --replay's record: the
 	// template, the build key, seed_dump_sha256, the checksum of database dispatch before Dispatch
 	// started, the migration and whether the block index owed nothing.
@@ -158,7 +188,8 @@ const (
 )
 
 // collectReplayMeta records the inputs only the stack knows: the seed dump, Dispatch's GOMAXPROCS
-// and build, the cgroup's CPU limit.
+// and commit, the cgroup's CPU limit. The Dispatch build itself is meta.json's top-level
+// dispatch_build (collectMeta), written once.
 func collectReplayMeta(in replayInputs, pid int, root string) replayMetaRecord {
 	m := replayMetaRecord{}
 	if b, err := os.ReadFile(filepath.Join(root, "replay", "last-reset.json")); err == nil && json.Valid(b) {
@@ -176,11 +207,10 @@ func collectReplayMeta(in replayInputs, pid int, root string) replayMetaRecord {
 	}
 	in.GOMAXPROCS = dispatchGOMAXPROCS(pid)
 	if bld, ok := readDispatchBuild(root); ok {
-		m.DispatchBuild = bld.raw
 		in.DispatchCommit = bld.commit
 	}
-	if b, err := os.ReadFile("/sys/fs/cgroup/cpu.max"); err == nil {
-		m.CgroupCPUMax = strings.TrimSpace(string(b))
+	if q, cpuMax, ok := readCgroupCPUQuota(cgroupCPURoot); ok {
+		m.CgroupCPUMax, m.CgroupCPUQuota = cpuMax, &q
 	}
 	m.Inputs = in
 	return m
@@ -241,32 +271,71 @@ func dispatchCoreSamples(ss []sample) []float64 {
 	return out
 }
 
-// cgroupQuotaCores is the CPU quota of a /sys/fs/cgroup/cpu.max text ("<quota> <period>", both in
-// microseconds) in cores; ok is false when no quota is set ("max") or the text is not that shape.
-func cgroupQuotaCores(cpuMax string) (float64, bool) {
+// cgroupCPURoot is where the cgroup CPU files are: cgroup v2's cpu.max, or cgroup v1's
+// cpu/cpu.cfs_quota_us and cpu/cpu.cfs_period_us.
+const cgroupCPURoot = "/sys/fs/cgroup"
+
+// parseCgroupCPUMax reads a cgroup v2 cpu.max text ("<quota> <period>", microseconds; "max" for
+// no quota) as a quota; ok is false when the text is not that shape.
+func parseCgroupCPUMax(cpuMax string) (replayCgroupQuota, bool) {
 	q, p, ok := strings.Cut(strings.TrimSpace(cpuMax), " ")
 	if !ok {
-		return 0, false
+		return replayCgroupQuota{}, false
 	}
-	quota, qErr := strconv.ParseFloat(q, 64)
-	period, pErr := strconv.ParseFloat(strings.TrimSpace(p), 64)
-	if qErr != nil || pErr != nil || quota <= 0 || period <= 0 {
-		return 0, false
+	period, err := strconv.ParseInt(strings.TrimSpace(p), 10, 64)
+	if err != nil || period <= 0 {
+		return replayCgroupQuota{}, false
 	}
-	return quota / period, true
+	if q == "max" {
+		return replayCgroupQuota{Version: 2, QuotaUS: -1, PeriodUS: period}, true
+	}
+	quota, err := strconv.ParseInt(q, 10, 64)
+	if err != nil {
+		return replayCgroupQuota{}, false
+	}
+	return replayCgroupQuota{Version: 2, QuotaUS: quota, PeriodUS: period}, true
+}
+
+// readCgroupCPUQuota reads the CPU quota under root: cgroup v2's cpu.max when it is there, else
+// cgroup v1's cpu/cpu.cfs_quota_us and cpu/cpu.cfs_period_us (a quota of -1 is no quota, as the
+// issue pods run). cpuMax is the cpu.max text, "" on a cgroup v1 box; ok is false when neither
+// hierarchy's files can be read.
+func readCgroupCPUQuota(root string) (q replayCgroupQuota, cpuMax string, ok bool) {
+	if b, err := os.ReadFile(filepath.Join(root, "cpu.max")); err == nil {
+		cpuMax = strings.TrimSpace(string(b))
+		q, ok = parseCgroupCPUMax(cpuMax)
+		return q, cpuMax, ok
+	}
+	readUS := func(name string) (int64, bool) {
+		b, err := os.ReadFile(filepath.Join(root, "cpu", name))
+		if err != nil {
+			return 0, false
+		}
+		n, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+		return n, err == nil
+	}
+	quota, qOK := readUS("cpu.cfs_quota_us")
+	period, pOK := readUS("cpu.cfs_period_us")
+	if !qOK || !pOK || period <= 0 {
+		return replayCgroupQuota{}, "", false
+	}
+	return replayCgroupQuota{Version: 1, QuotaUS: quota, PeriodUS: period}, "", true
 }
 
 // saturationCores are the cores Dispatch can in fact use: the least of its GOMAXPROCS, the box's
 // nproc and the cgroup's CPU quota in cores when one is set. GOMAXPROCS alone is not a limit a
 // 2-core box can reach (--gomaxprocs 3 there), and neither is a GOMAXPROCS above the cgroup quota.
-// from names which of the three set the figure.
-func saturationCores(gomaxprocs, nproc int, cgroupCPUMax string) (float64, string) {
+// from names which of the three set the figure, the quota by the files it was read from
+// (replayCgroupQuota.source).
+func saturationCores(gomaxprocs, nproc int, cgroup *replayCgroupQuota) (float64, string) {
 	cores, from := float64(gomaxprocs), "gomaxprocs"
 	if nproc > 0 && float64(nproc) < cores {
 		cores, from = float64(nproc), "nproc"
 	}
-	if q, ok := cgroupQuotaCores(cgroupCPUMax); ok && q < cores {
-		cores, from = q, "cgroup_cpu_max"
+	if cgroup != nil {
+		if q, ok := cgroup.cores(); ok && q < cores {
+			cores, from = q, cgroup.source()
+		}
 	}
 	return cores, from
 }
@@ -332,7 +401,7 @@ func (rr *replayRun) record(ss []sample, windowS float64) *replayRecord {
 			rec.DrainCPUS = &drain
 		}
 	}
-	rec.SaturationCores, rec.SaturationCoresFrom = saturationCores(rec.Inputs.GOMAXPROCS, runtime.NumCPU(), rr.meta.CgroupCPUMax)
+	rec.SaturationCores, rec.SaturationCoresFrom = saturationCores(rec.Inputs.GOMAXPROCS, runtime.NumCPU(), rr.meta.CgroupCPUQuota)
 	rec.Saturated, rec.SaturatedReasons = replaySaturation(dispatchCoreSamples(ss), rec.SaturationCores, rec.Timeouts, rec.InflightAtEnd)
 	return rec
 }
