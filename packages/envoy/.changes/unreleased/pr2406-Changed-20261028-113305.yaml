@@ -17,13 +17,16 @@ body: |-
     held and whether or not a Retry overtook the attempt: past that the outbox records the copy it
     skipped (migration `0148`,
     `comment_fallback_copies`), publishes the event to every other destination, and publishes that
-    copy to its one destination only if the send - the sweep's resend, the queued send the lane
-    comes to, or the settle of an attempt a Retry overtook - then fails; a copy whose publish fails is
+    copy to its one destination only if every send of that mention - the sweep's resend, the
+    queued send the lane comes to, a Retry that overtook it - failed; a copy whose publish fails is
     retried on the outbox's event backoff, never given up, and logged at Error when it reaches the
     ten attempts at which the outbox reports an event dead-lettered. A Retry of a mention from its
-    card while its first attempt is still waiting on a lane opens the attempt that is sent: the
-    first is settled `failed`, "not sent: a later attempt of this mention superseded it", when its
-    lane reaches it, so the recipient is handed one copy. The comment's own event is
+    card while its first attempt is still waiting on a lane opens an attempt of its own, and the
+    recipient is handed one copy: the Retry that is delivered takes the mention over, and the
+    attempt it overtook is settled `failed`, "not sent: a later attempt of this mention superseded
+    it", by whichever of the two comes second; a Retry that fails delivers nothing, so the attempt
+    it overtook stands, and the lane sends it when it reaches it, or the delivery sweep does once
+    that lane's claim has lapsed. The comment's own event is
     never published again, so a route, claimant or follower that changed since gets nothing of it.
     A client that read a mention's delivery state from the create response reads it from the
     comment, or from its `comment.delivery` event, afterwards.

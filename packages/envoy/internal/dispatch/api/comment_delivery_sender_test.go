@@ -146,6 +146,14 @@ func (l *mentionListener) refuseSends(session string) {
 	l.refused[session] = struct{}{}
 }
 
+// allowSends answers sends to session normally again: the recipient's host is back, and a send
+// that reaches the listener from now on lands.
+func (l *mentionListener) allowSends(session string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.refused, session)
+}
+
 // stall holds the next send to session before the listener records it - a send that has not
 // reached the recipient at all - and lets every later send through. reached is closed when that
 // send arrives; release lets it be recorded and answered, and may be called more than once.

@@ -642,7 +642,9 @@ func TestTheDeliverySweepSettlesWhatItCannotSend(t *testing.T) {
 // INFRA-258. The sweep sends exactly the attempt it found owed. A delivery a card retry
 // overtook while its first sender still held it has two pending attempts once both senders die,
 // and the sweep owes only the retry's, the latest: it sends that one, in its own mode and to its
-// own session, and never the older attempt in its place, which stays the retry's to answer.
+// own session, and never the older attempt in its place. A mention's older attempt is then the
+// retry's to answer, and its sender settles it superseded once its own send has landed
+// (supersedeOvertakenAttempts); a message's is left as it stands.
 func TestTheDeliverySweepSendsTheAttemptItFoundOwed(t *testing.T) {
 	t.Run("a comment's mention", func(t *testing.T) {
 		listener, sends := newBroadcastListener(t, agentSessions)
@@ -679,9 +681,11 @@ func TestTheDeliverySweepSendsTheAttemptItFoundOwed(t *testing.T) {
 		}
 		if states := rig.count(`
 			select count(*) from comment_deliveries
-			where comment_id = $1 and (attempt, state) in ((1, 'pending'), (2, 'sent'))
-		`, comment); states != 2 {
-			t.Fatalf("after the sweep the attempts are not the first pending and the retry's sent")
+			where comment_id = $1 and ((attempt, state) = (2, 'sent')
+			  or (attempt, state, error) = (1, 'failed', $2))
+		`, comment, mentionSupersededError); states != 2 {
+			t.Fatalf("after the sweep the attempts are not the retry's sent and the one it overtook " +
+				"settled superseded by it")
 		}
 	})
 	t.Run("a message", func(t *testing.T) {

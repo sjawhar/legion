@@ -132,7 +132,8 @@ const (
 	mentionSent mentionState = iota
 	// mentionResending: an attempt past the lease the outbox waits a send out for
 	// (model.MentionResumedSQL): the delivery sweep's to resend, or a queued send's to make, or
-	// one a later attempt overtook, which its sender settles superseded.
+	// one a later attempt overtook, which its sender sends when its lane reaches it, or settles
+	// superseded once a later attempt has delivered the comment.
 	mentionResending
 	// mentionSending: an attempt whose send is live (model.MentionLiveSQL).
 	mentionSending
@@ -597,8 +598,9 @@ func failedFallbackCopy(held fallbackCopy) fallbackRecord {
 // with the send in flight, or never started it, perhaps after the listener took it, and the
 // listener drops the resend as a repeat when it did - or a live sender holds it, queued behind a
 // lane its recipient has held longer than a lease, and sends it when that lane reaches it, or
-// settles it superseded without sending when a Retry from the card overtook it meanwhile
-// (supersedeCommentDelivery). The outbox cannot tell which, and holding the comment's event for a
+// settles it superseded without sending when a Retry from the card has delivered the comment
+// meanwhile (supersedeCommentDelivery). The outbox cannot tell which, and holding the comment's
+// event for a
 // lane's minutes would be no bound at all, so it neither publishes that copy nor waits on the
 // send. It records the copy it held back as a comment_fallback_copies row instead, keyed by the
 // comment and the exact
@@ -630,7 +632,8 @@ func failedFallbackCopy(held fallbackCopy) fallbackRecord {
 // count to retry.DeadLetterAttempts is logged at Error (failedFallbackCopy). One cut short by NATS
 // being unreachable counts nothing and releases the claim for retryInterval, the next tick's pass;
 // one cut short by the process stopping counts nothing and releases it at once, for whatever
-// process runs next; a process that dies between the publish and the mark leaves the claim too,
+// process runs next, and a pass that starts once the process is already stopping claims nothing
+// at all; a process that dies between the publish and the mark leaves the claim too,
 // and the repeat carries the same dedupe key, which the host, and the stream within its duplicate
 // window, drop.
 // Every write of a pass's record is guarded on the claim the pass took (recordFallbackCopies), so
@@ -646,6 +649,12 @@ func failedFallbackCopy(held fallbackCopy) fallbackRecord {
 // comment.delivery receipt, an event insert that wakes the event scan; the pass runs on the next
 // retry tick, within retryInterval.
 func publishFallbackCopies(ctx context.Context, deps Deps) {
+	if ctx.Err() != nil {
+		// Nothing this pass claimed could be decided: every row would be read and handed straight
+		// back, and the events behind them read on a context that is already done. The rows are
+		// left for whatever process runs next, as a pass that claimed them would leave them.
+		return
+	}
 	copies, err := claimFallbackCopies(ctx, deps)
 	if err != nil {
 		slog.Error("dispatch outbox: claim fallback copies", "error", err)

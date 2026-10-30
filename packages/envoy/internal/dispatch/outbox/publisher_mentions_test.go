@@ -1287,42 +1287,50 @@ func TestAFallbackPassWritesNothingToARowClaimedSinceItsClaim(t *testing.T) {
 	}
 }
 
-// TestAFallbackPassThatIsStoppingReleasesEveryRowItClaimed: a pass whose context has ended claims
-// its rows all the same - the claim runs outside that context (claimFallbackCopies) - and hands
-// every one of them straight back: the row is unsettled, counts no attempt and is due at once,
-// for whatever process runs next, rather than sitting claimed for claimWindow. That is what a
-// context ending while the claim runs comes to as well: the statement commits, and the pass
-// releases what it took. A claim made on the pass's own context would answer context canceled
-// with its rows claimed in the database, and the pass would return having left them so. The row
-// starts due on a wait that has passed, the shape a pass before this one released it in, so the
-// claim this pass takes and gives back is told apart from no claim at all.
-func TestAFallbackPassThatIsStoppingReleasesEveryRowItClaimed(t *testing.T) {
+// TestAFallbackPassThatIsStoppingClaimsNoRow: a pass that starts once its context has ended
+// claims nothing at all. Every row it claimed would be handed straight back unread - the events
+// behind them cannot be read on a context that is done, which would fail the pass's one read of
+// them and log an Error - so the rows are left exactly as they were, due when they were due, for
+// whatever process runs next. The row starts due on a wait that has passed, the shape a pass
+// before this one released it in, so a claim this pass took would show as a wait pushed out by
+// claimWindow.
+func TestAFallbackPassThatIsStoppingClaimsNoRow(t *testing.T) {
 	const sessionTopic = "notifications.agent.s1"
 	ctx := store.WithTransactionTracking(context.Background())
 	database := storetest.Open(t)
 	publisher := &recordingPublisher{}
 	deps := Deps{Store: database, Publisher: publisher, Broker: events.NewBroker()}
 	commentID := seedHeldFallbackCopy(ctx, t, deps)
-	if _, err := database.Pool.Exec(ctx, `
+	var due time.Time
+	if err := database.Pool.QueryRow(ctx, `
 		update comment_fallback_copies set next_attempt_at = now() - interval '1 second'
 		where comment_id = $1 and destination = $2
-	`, commentID, sessionTopic); err != nil {
+		returning next_attempt_at
+	`, commentID, sessionTopic).Scan(&due); err != nil {
 		t.Fatalf("let the held copy's wait pass: %v", err)
 	}
 	published := len(publisher.all())
+	var logged lockedBuffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
 
 	stopping, stop := context.WithCancel(ctx)
 	stop()
 	publishFallbackCopies(stopping, deps)
 
 	row := readHeldCopy(t, database, commentID, sessionTopic)
-	if row.attempts != 0 || row.settled || row.published || row.due != nil {
-		t.Fatalf("the held copy has attempts=%d settled=%v published=%v next_attempt_at=%v, want it released "+
-			"by the pass that claimed it: no attempt counted, unsettled, unpublished and due at once",
-			row.attempts, row.settled, row.published, row.due)
+	if row.attempts != 0 || row.settled || row.published || row.due == nil || !row.due.Equal(due) {
+		t.Fatalf("the held copy has attempts=%d settled=%v published=%v next_attempt_at=%v, want it as the "+
+			"stopping pass found it: no attempt counted, unsettled, unpublished and still due at %v",
+			row.attempts, row.settled, row.published, row.due, due)
 	}
 	if now := len(publisher.all()); now != published {
-		t.Fatalf("the stopping pass published %d envelopes, want none: it decided no row", now-published)
+		t.Fatalf("the stopping pass published %d envelopes, want none: it claimed no row", now-published)
+	}
+	if logs := logged.String(); strings.Contains(logs, "level=ERROR") {
+		t.Fatalf("the stopping pass logged %q, want nothing at Error: it claimed no row, so it read no "+
+			"event of one and gave none back", logs)
 	}
 }
 

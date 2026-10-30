@@ -1424,7 +1424,10 @@ its row in `internal/dispatch/model` (`MentionLiveSQL`, `MentionAbandonedSQL` an
 `MentionResumedSQL`, which split the pending attempts three ways, each into exactly one, all
 turning on `model.DeliveryClaimLapse`, the lease the sweep waits an attempt out for before it
 sends it (`OwedMentionAttemptSQL`): past that lease no attempt is live, whoever holds it and
-whether or not a later attempt overtook it) - decides that copy and which of
+whether or not a later attempt overtook it. A later attempt decides the one it overtook only once
+it has been delivered: until then the overtaken attempt stands (`MentionAttemptStandsSQL`), so a
+Retry that fails leaves its mention to the attempt it overtook, which the sweep owes and a sender
+bound to it sends) - decides that copy and which of
 the outbox, a sender's claim and the sweep acts on the attempt; `publishFallbackCopies` in
 `internal/dispatch/outbox/mentions.go` is the protocol's one description, the
 `comment_fallback_copies` rows (migration `0148`) included. So a mentioned session loses no
@@ -1443,8 +1446,12 @@ outbox counts such an attempt live for the `model.DeliveryClaimLapse` after its 
 and no longer: past that lease it counts it resumed, holds that session's copy as a
 `comment_fallback_copies` row and publishes the comment's event, and the fallback pass settles
 that row with nothing published once the lane's send lands, or publishes the copy when that send
-fails - a Retry that overtook the queued attempt included, which the lane settles superseded
-without sending. The lane's own send takes its process's claim
+fails. A Retry that overtook the queued attempt and was sent takes the mention over: the lane
+settles that attempt superseded without sending it (`MentionAttemptDeliveredLaterSQL`), and a
+Retry that is still in flight when the lane reaches the attempt it overtook decides it either way
+- the lane leaves it `pending` and unclaimed, for the sweep to send should the Retry fail and for
+the Retry's own sender to settle superseded should it land. The lane's own send takes its
+process's claim
 over (`model.DeliveryClaimMineSQL`) and refuses another sender's. A send past the queue's bound
 gives that claim back, so its attempt stays `pending` and unclaimed. Once the server's lifetime ends
 nothing more is queued - a comment that commits during the HTTP drain is answered, its refused
@@ -1454,7 +1461,8 @@ cancelled; the drain then gives back the claim of every send it never started. A
 sender finishes is the
 delivery sweep's (`resumeOwedDeliveries`, `api/delivery_sweep.go`): one process's maintenance
 loop, under the sweep's lease, sends once a minute the attempts `model.OwedMentionAttemptSQL`
-reads - `pending`, unclaimed or with a lapsed claim, the latest attempt of its target, and created
+reads - `pending`, unclaimed or with a lapsed claim, its mention's to send still (no later
+attempt of that target stands in its place, every later one having failed), and created
 between a claim lease (one minute) and `model.MentionSweepWindow` (the duplicate window) ago -
 whichever process left them, through the same claim, so an attempt a
 live sender holds is not sent twice. So a process that stops leaves its refused and never-started

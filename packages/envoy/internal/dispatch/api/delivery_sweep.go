@@ -26,17 +26,18 @@ import (
 // its own idempotency key, as a repeat under the write's key does, so the listener drops a frame
 // that did land (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts).
 //
-// An attempt is owed when it is its message's, or its mention's, latest attempt, still pending,
-// its claim lapsed, and opened over a lease ago: an unclaimed attempt the write itself opened (a
-// broadcast recipient's) is its live sender's for the first minute, and a comment mention's
-// attempt is claimed from the moment its comment commits and stays claimed while its send waits
-// on its recipient's lane (mentionSender), so a live process's queue is never swept out of order.
-// A pending attempt
-// a later retry overtook is that retry's to answer, so the sweep sends the attempt it found owed
-// and no other (deliverMessageResuming and claimCommentDeliveryAttempt, bound to its number). A
-// keyed send whose process died between its message's commit and its first attempt has no attempt
-// at all; its key's recovery point names the message, and its first attempt is owed once the key's
-// holder is gone.
+// An attempt is owed when it is its message's latest attempt, or its mention's to send still -
+// no later attempt of that mention stands in its place, every later one having failed
+// (model.MentionAttemptStandsSQL) - and it is pending, its claim lapsed, and opened over a lease
+// ago: an unclaimed attempt the write itself opened (a broadcast recipient's) is its live
+// sender's for the first minute, and a comment mention's attempt is claimed from the moment its
+// comment commits and stays claimed while its send waits on its recipient's lane (mentionSender),
+// so a live process's queue is never swept out of order. A pending attempt a later retry
+// delivered the write in the place of is that retry's to answer, and the sweep sends the attempt
+// it found owed and no other (deliverMessageResuming and claimCommentDeliveryAttempt, bound to
+// its number). A keyed send whose process died between its message's commit and its first attempt
+// has no attempt at all; its key's recovery point names the message, and its first attempt is
+// owed once the key's holder is gone.
 //
 // An owed attempt nothing can send is settled instead of sent: one whose issue closed, since every
 // sender refuses a delivery there (requireOpenIssue, lockedComment), and one whose comment no
@@ -79,10 +80,12 @@ var (
 		where m.id = d.message_id and i.closed_at is not null
 	)`
 	// owedCommentAttempt is model.OwedMentionAttemptSQL, built from the same lease the outbox's
-	// split of a pending attempt reads (model.MentionResumedSQL, which counts beside it every
-	// attempt past that lease a sender holds, overtaken ones included), so the outbox holds a
-	// session's copy back for exactly the attempts this sweep will send and for no attempt it
-	// waits longer on than this sweep does.
+	// split of a pending attempt reads (model.MentionResumedSQL, which counts beside the attempts
+	// this sweep sends every attempt past that lease a sender holds - one queued behind a held
+	// lane, and one a later attempt overtook, which that lane sends or settles superseded when it
+	// reaches it). So the outbox holds a session's copy back for every attempt that may yet be
+	// sent, this sweep's and a live sender's alike, and waits on no attempt longer than this
+	// sweep does.
 	owedCommentAttempt = `d.state = 'pending' and ` + model.OwedMentionAttemptSQL("d")
 	// commentAttemptMentionGone holds for an attempt whose comment no longer holds its mention.
 	commentAttemptMentionGone = `not exists (
