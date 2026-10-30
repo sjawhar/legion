@@ -1,24 +1,34 @@
 #!/bin/sh
 # legion-testpg: the pod's own PostgreSQL for tests, on loopback, from the server the worker image
 # ships. `ensure` serves exactly the server LEGION_TEST_PG_DSN names, so the deployment's DSN is the
-# one contract and no caller has to agree on a port: a DSN naming anything but a loopback host is
-# refused rather than served, since a test must never reach a database that holds real rows.
+# one contract and no caller has to agree on a port. A DSN naming anything but a loopback host, or
+# carrying a password, is refused rather than served: this script never serves a database that holds
+# real rows. The refusal binds this script alone — it does not stop a test from opening a sessions
+# DSN it was handed, which is why the runtime refuses LEGION_TEST_PG_DSN in a deployment's pod.env
+# and sets it itself.
 #
-# The data directory lives on the issue's volume (LEGION_TESTPG_DIR, /legion/testpg), which the
-# pod's kubelet creates with the pod and deletes with it, so every issue pod gets an empty cluster
-# and nothing of one issue's tests reaches another.
+# The data directory is LEGION_TESTPG_DIR, /var/run/legion/roles/testpg: a disk emptyDir the daemon
+# mounts there, which the kubelet makes with the pod and deletes with it, so every issue pod gets an
+# empty cluster and nothing of one issue's tests reaches another. Every role's own mounts cover that
+# path inside the role's namespace, so no role can edit postgresql.auto.conf and have the next start
+# load it into the launcher's namespace.
 #
-# `ensure` runs at every role start (runtime.kubernetes.setup), and an issue pod's roles share one
-# network namespace, so it is one server per pod: the first role's start makes it and the rest find
-# it listening. It is idempotent and holds a lock over the work, because two roles can start at
-# once.
+# The issue pod's launcher runs `ensure` at container start, as PID 1 of the roles container and
+# outside every role's PID namespace, and again if the postmaster dies; a role never starts the
+# server, it finds it listening. `ensure` is idempotent and holds a lock over the work all the same.
+#
+# initdb's superuser is the OS user (`id -un`, legion). The DSN names another role, created after
+# the server is up with LOGIN CREATEDB NOSUPERUSER, because a superuser can run
+# `copy … to program '…'`, which runs as the server process — in the roles container's own
+# namespace, where every role's tokens live.
 set -eu
 
 name=legion-testpg
-dir=${LEGION_TESTPG_DIR:-/legion/testpg}
+dir=${LEGION_TESTPG_DIR:-/var/run/legion/roles/testpg}
 data=$dir/data
 sockets=$dir/sockets
 log=$dir/server.log
+superuser=$(id -un)
 
 die() {
 	echo "$name: $*" >&2
@@ -52,7 +62,8 @@ bindir() {
 # parse_dsn sets user, host, port and database from a DSN, and refuses one this script must not
 # serve: a password means the DSN names a server with accounts, which is somebody else's, and a
 # host that is not loopback means a server outside this pod, where creating and dropping databases
-# is not ours to do.
+# is not ours to do. The user and the database are held to plain identifiers because start() names
+# both in SQL and in pg_hba.conf.
 parse_dsn() {
 	rest=${1#postgres://}
 	if [ "$rest" = "$1" ]; then
@@ -62,13 +73,14 @@ parse_dsn() {
 	rest=${rest%%\?*}
 	case $rest in
 	*@*) ;;
-	*) die "DSN names no user before @: initdb needs the superuser's name" ;;
+	*) die "DSN names no user before @: nothing names the role to create" ;;
 	esac
 	user=${rest%%@*}
 	rest=${rest#*@}
 	case $user in
 	*:*) die "DSN carries a password, so it names a server with accounts, not this pod's own" ;;
 	'') die "DSN names an empty user" ;;
+	*[!A-Za-z0-9_]*) die "DSN names user $user, which is no plain identifier" ;;
 	esac
 	case $rest in
 	*/*)
@@ -82,8 +94,10 @@ parse_dsn() {
 	if [ "$port" = "$rest" ]; then
 		port=5432
 	fi
+	# No bracketed [::1] arrives here: the host is everything before the first colon, so an IPv6
+	# literal would already have lost its tail.
 	case $host in
-	127.0.0.1 | localhost | '[::1]') ;;
+	127.0.0.1 | localhost) ;;
 	*) die "DSN names host $host, which is no loopback address: a test database is this pod's own" ;;
 	esac
 	case $port in
@@ -95,7 +109,18 @@ parse_dsn() {
 }
 
 listening() {
-	pg_isready -q -h 127.0.0.1 -p "$port" -U "$user" -d "$database"
+	pg_isready -q -h 127.0.0.1 -p "$port"
+}
+
+# answering: a server holds the port, ready (0) or starting or recovering (1); 2 is no server.
+answering() {
+	pg_isready -q -h 127.0.0.1 -p "$port" || [ $? -ne 2 ]
+}
+
+# super runs psql as the initdb superuser over the local socket, the one route pg_hba.conf admits
+# it on: the superuser has no host line, so nothing that reaches 127.0.0.1 can be it.
+super() {
+	psql -X -q -h "$sockets" -p "$port" -U "$superuser" "$@"
 }
 
 start() {
@@ -105,28 +130,52 @@ start() {
 	# An interrupted initdb leaves a directory with no PG_VERSION, which no server starts on.
 	if [ ! -f "$data/PG_VERSION" ]; then
 		rm -rf "${data:?}"/* "${data:?}"/.[!.]* 2> /dev/null || true
-		"$bin/initdb" --pgdata "$data" --username "$user" --auth-local=trust --auth-host=trust \
-			--encoding=UTF8 --no-sync > "$log" 2>&1 ||
+		# --locale-provider=icu with en-US sorts text the way CI's en_US.utf8 databases do: a
+		# suite whose ORDER BY output is a fixture would otherwise pass here and fail there on
+		# C collation. --username keeps the OS user as the superuser; the DSN's role is made
+		# below, with no superuser rights.
+		"$bin/initdb" --pgdata "$data" --username "$superuser" --auth-local=trust \
+			--auth-host=trust --encoding=UTF8 --locale-provider=icu --icu-locale=en-US \
+			--no-sync > "$log" 2>&1 ||
 			die "initdb failed; $log holds its output"
+		# initdb's own pg_hba.conf trusts every user on every address this server listens on.
+		# This one admits the superuser on the socket alone and the DSN's role on loopback, and
+		# rejects the rest, so a connection that arrives over TCP cannot be the superuser.
+		printf '%s\n' \
+			"local all  $superuser  trust" \
+			"host  all  $user  127.0.0.1/32 trust" \
+			"host  all  all  0.0.0.0/0 reject" > "$data/pg_hba.conf" ||
+			die "writing $data/pg_hba.conf failed"
 	fi
+	# This process holds the lock and no server answers, so a postmaster.pid or socket lock left
+	# here names a server that died with its PID namespace; postgres would test that PID in this
+	# namespace, where it may be a live process.
+	answering || rm -f "$data/postmaster.pid" "$sockets/.s.PGSQL.$port.lock"
 	# A throwaway cluster trades durability for speed: nothing in it survives the pod. 100
 	# connections cover a package's parallel tests, and 256MB of shared buffers their fixtures.
+	# huge_pages and dynamic_shared_memory_type are the pod's: gVisor serves no huge pages, and
+	# each role mounts its own 64 MiB /dev/shm, too small for the posix segments the default
+	# picks. jit off keeps LLVM out of a test's plan times.
 	"$bin/pg_ctl" --pgdata "$data" --log "$log" --wait --timeout 120 \
-		--options "-p $port -k $sockets -c listen_addresses=127.0.0.1 -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=100 -c shared_buffers=256MB" \
+		--options "-p $port -k $sockets -c listen_addresses=127.0.0.1 -c fsync=off -c full_page_writes=off -c synchronous_commit=off -c max_connections=100 -c shared_buffers=256MB -c huge_pages=off -c dynamic_shared_memory_type=mmap -c jit=off" \
 		start >> "$log" 2>&1 ||
 		die "pg_ctl start failed; $log holds its output"
 	# vector in template1 reaches every database a test makes from it, so a suite that needs
-	# pgvector (Dispatch's) runs on this server with no extension step of its own.
-	if [ -f "$(pg_config --sharedir 2> /dev/null || echo /usr/share/postgresql/unknown)/extension/vector.control" ]; then
-		psql -X -q -h 127.0.0.1 -p "$port" -U "$user" -d template1 \
-			-c 'create extension if not exists vector' >> "$log" 2>&1 ||
-			die "create extension vector in template1 failed; $log holds its output"
-	fi
+	# pgvector (Dispatch's) runs on this server with no extension step of its own, and a
+	# `create extension if not exists vector` of its own is a no-op the DSN's role may run.
+	super -d template1 -c 'create extension if not exists vector' >> "$log" 2>&1 ||
+		die "create extension vector in template1 failed; $log holds its output"
+	# The DSN's role: it may log in and make databases, and it is no superuser, so nothing that
+	# holds the DSN can `copy … to program` as the server's own process.
+	super -tA -d postgres -c "select 1 from pg_roles where rolname = '$user'" 2>> "$log" |
+		grep -q 1 ||
+		super -d postgres -c "create role $user login createdb nosuperuser" >> "$log" 2>&1 ||
+		die "create role $user failed; $log holds its output"
 	if [ "$database" != postgres ]; then
-		psql -X -tAq -h 127.0.0.1 -p "$port" -U "$user" -d postgres \
-			-c "select 1 from pg_database where datname = '$database'" 2> /dev/null | grep -q 1 ||
-			createdb -h 127.0.0.1 -p "$port" -U "$user" "$database" >> "$log" 2>&1 ||
-			die "createdb $database failed; $log holds its output"
+		super -tA -d postgres -c "select 1 from pg_database where datname = '$database'" 2>> "$log" |
+			grep -q 1 ||
+			super -d postgres -c "create database $database owner $user" >> "$log" 2>&1 ||
+			die "create database $database failed; $log holds its output"
 	fi
 }
 
@@ -139,12 +188,17 @@ ensure() {
 		return 0
 	}
 	mkdir -p "$dir"
-	# flock serialises the roles that start together; the second finds the first's server listening.
-	# -o closes the lock's descriptor in the child, so the server flock's child starts does not
-	# inherit it and hold the lock for the pod's whole life: without -o, measured, the second and
-	# third role's ensure blocked until their own timeout. -w bounds the wait at one cold start, so
-	# a holder that dies mid-start costs a role one wait and never its launch.
-	flock -w 180 -o "$dir/.lock" "$0" start-locked
+	# flock serialises the callers that start together; the second finds the first's server
+	# listening. -o closes the lock's descriptor in the child, so the server flock's child starts
+	# does not inherit it and hold the lock for the pod's whole life: without -o, measured, a
+	# second ensure blocked until its own timeout. -w bounds the wait at one cold start, so a
+	# holder that dies mid-start costs one wait and never a launch; -E makes that timeout 75, a
+	# status no command of start-locked returns, so the wait is reported rather than silent.
+	flock -E 75 -w 180 -o "$dir/.lock" "$0" start-locked || {
+		s=$?
+		[ "$s" -ne 75 ] || die "waited 180 s for $dir/.lock"
+		exit "$s"
+	}
 	echo "$name: serving $LEGION_TEST_PG_DSN from $data"
 }
 
@@ -153,10 +207,17 @@ ensure)
 	ensure
 	;;
 start-locked)
-	# flock's child: the environment names the DSN, and another role may have started the server
+	# flock's child: the environment names the DSN, and another caller may have started the server
 	# while this one waited for the lock.
 	parse_dsn "${LEGION_TEST_PG_DSN:?}"
 	listening || start
+	;;
+stop)
+	# A fast shutdown this waits for: the postmaster's exit leaves its shutdown checkpoint still
+	# running, and a caller that deletes the data directory next races it. The data directory is
+	# all pg_ctl needs, so `stop` reads LEGION_TESTPG_DIR alone, not the DSN.
+	bin=$(bindir)
+	"$bin/pg_ctl" --pgdata "$data" --mode fast --wait --timeout 60 stop
 	;;
 check)
 	# The image probe's toolchain check runs this: a worker image whose server package went missing
@@ -169,6 +230,6 @@ check)
 	echo "pgvector $(sed -n "s/^default_version = '\(.*\)'/\1/p" "$control")"
 	;;
 *)
-	die "usage: $name ensure|check"
+	die "usage: $name ensure|check|stop"
 	;;
 esac
