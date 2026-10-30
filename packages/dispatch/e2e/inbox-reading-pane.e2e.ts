@@ -12,6 +12,7 @@ import {
   getInbox,
   patchIssue,
   requestApproval,
+  resolveAsk,
 } from "./api";
 import { inboxList, inboxPane, selectedRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
@@ -587,6 +588,100 @@ test("the Inbox keeps today's card below 1280 px and in the drawer @phone", asyn
     const drawerCard = drawer.getByTestId(`ask-${seed.decisionAskId}`);
     await expect(drawerCard.locator("[data-ask-answer]")).toBeVisible();
     await expect(drawerCard.getByRole("link", { name: "Open in document" })).toBeVisible();
+  } finally {
+    await alice.close();
+  }
+});
+
+/**
+ * Whether the reading column holds `text` where a reader can read and copy it: as drawn text, or
+ * as the value of a box it keeps. The column may keep a reader's unsent answer either way, so the
+ * row reads the behaviour rather than one markup.
+ */
+function paneHoldsText(page: Page, text: string): Promise<boolean> {
+  return page.evaluate((wanted) => {
+    const pane = document.querySelector<HTMLElement>('[data-testid="inbox-pane"]');
+    if (pane === null) return false;
+    if ((pane.textContent ?? "").includes(wanted)) return true;
+    return [
+      ...pane.querySelectorAll<HTMLTextAreaElement | HTMLInputElement>("textarea, input"),
+    ].some((field) => field.value.includes(wanted));
+  }, text);
+}
+
+test("a question the server withdraws leaves the list at once and the next row is selected", async ({
+  browser,
+}) => {
+  const seed = await seedInbox();
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize({ height: 900, width: 1440 });
+    const list = inboxList(page);
+    const pane = inboxPane(page);
+    await page.goto(INBOX);
+    await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", seed.decisionAskId);
+
+    // The server takes the selected question away. The reader has typed nothing into it: the
+    // Inbox selected its row for them when the page opened.
+    await resolveAsk(
+      seed.decisionAskId,
+      { kind: "retracted", reason: "A newer question supersedes this one." },
+      session
+    );
+
+    // It leaves at once, with no reload and no second look: a withdrawn question with a live
+    // answer form invites an answer the server refuses. The next visible row in list order is
+    // selected, as after an answer in the column, and the address follows it.
+    await expect(list.locator(`[data-inbox-row="${seed.decisionAskId}"]`)).toHaveCount(0);
+    await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", seed.approvalAskId);
+    await expect(page).toHaveURL(inboxAt(seed.approvalAskId));
+    await expect(
+      pane.locator("header").getByRole("button", { exact: true, name: "Approve" })
+    ).toBeVisible();
+    await expect(pane.getByTestId(`ask-${seed.decisionAskId}`)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a withdrawn question the reader was answering keeps its text in the column, closed", async ({
+  browser,
+}) => {
+  const seed = await seedInbox();
+  const alice = await asUser(browser, "alice");
+  const typed = "Only on a cold start, and only back to the last lease.";
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize({ height: 900, width: 1440 });
+    const pane = inboxPane(page);
+    await page.goto(inboxAt(seed.anchoredAskId));
+    const card = pane.getByTestId(`ask-${seed.anchoredAskId}`);
+    await expect(card).toContainText(ANCHORED_QUESTION);
+
+    // The reader is writing an answer to this question when the server takes it away.
+    await card.locator("[data-ask-answer]").fill(typed);
+    await resolveAsk(
+      seed.anchoredAskId,
+      { kind: "retracted", reason: "Answered on another issue." },
+      session
+    );
+
+    // The one exception to the rule above: the column keeps the question, shows its closed state
+    // in place of the answer form, and keeps what the reader typed where they can copy it.
+    await expect(card.getByTestId("ask-resolution-badge")).toBeVisible();
+    await expect(card.getByRole("button", { exact: true, name: "Answer" })).toHaveCount(0);
+    await expect(card.locator("[data-ask-answer]")).toHaveCount(0);
+    await expect.poll(() => paneHoldsText(page, typed)).toBe(true);
+
+    // Until the reader selects another row, which shows that row's question and nothing of this
+    // one: the question is gone from the Inbox and its row with it.
+    await page.keyboard.press("j");
+    await expect(selectedRow(page)).not.toHaveAttribute("data-inbox-row", seed.anchoredAskId);
+    await expect(pane.getByTestId(`ask-${seed.anchoredAskId}`)).toHaveCount(0);
+    await expect(inboxList(page).locator(`[data-inbox-row="${seed.anchoredAskId}"]`)).toHaveCount(
+      0
+    );
   } finally {
     await alice.close();
   }
