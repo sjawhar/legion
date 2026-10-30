@@ -104,9 +104,8 @@ func TestHealthzAnswersAHookStallPastTheRepairGrace(t *testing.T) {
 
 // hookStallFixture is the listener a hook stall is tested against, on the package's shared NATS
 // server: a bus client whose reconnect reporting reads the clock the test moves, and over it the
-// listener every other /healthz test is served by (setupUnboundDurableFixture). It returns the
-// client, that clock and a get() serving one /healthz request, which is every piece the tests in
-// this file share.
+// listener setupUnboundDurableFixture builds. It returns the client, that clock and a get() serving
+// one /healthz request, which is every piece the tests in this file share.
 func hookStallFixture(t *testing.T, consumer string) (*bus.Client, *hookStallClock, func() (int, map[string]any)) {
 	t.Helper()
 	clock := &hookStallClock{now: time.Now()}

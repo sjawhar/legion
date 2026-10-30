@@ -43,9 +43,9 @@ func TestHealthzReportsARecreatedDurableUnhealthy(t *testing.T) {
 // setupUnboundDurableFixture is the listener a recreated durable or a stalled rewatch is tested
 // against, built on client: handler bound to the durable, both registries open with their caches
 // ready, and the listenerDeps /healthz reads. The client is the caller's, so a test that needs one
-// of its own - a clock for the bus's reconnect reporting, a server it keeps - connects it and
-// hands it over. It returns a get() that serves one /healthz request, which is every piece the
-// tests against this listener share.
+// of its own, with a clock for the bus's reconnect reporting, connects it and hands it over. It
+// returns a get() that serves one /healthz request, which is every piece the tests against this
+// listener share.
 func setupUnboundDurableFixture(t *testing.T, client *bus.Client, consumer string, handler natsgo.MsgHandler) func() (int, map[string]any) {
 	t.Helper()
 	sub, err := startListenerSubscription(client, consumer, handler)

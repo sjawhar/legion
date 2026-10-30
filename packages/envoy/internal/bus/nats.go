@@ -568,13 +568,11 @@ const RepairGrace = time.Minute
 
 // HookStall reports how long the reconnect hooks have been due without a run that succeeded, zero
 // while none is due, and the error of the last run that failed. That error is nil when no run has
-// failed since the last run that succeeded: while the hooks are current, after a run that
-// succeeded which a connection event overtook (rewatch clears the error whether or not an event
-// landed under the run, and starts that event's stall at the run's end), and while the run the
-// hooks are due for is still in flight with no failure of its own. So a caller can read a stall
-// with no error behind it, which cmd/listener's /healthz reports as the stall alone. That handler
-// is a reader, as reportHookFailure is, so this takes the client's state under mu and touches no
-// connection, as Connected and SubOK do.
+// failed since the last run that succeeded (rewatch clears it on every success, even one a
+// connection event overtook), so a caller can read a stall with no error behind it, which
+// cmd/listener's /healthz reports as the stall alone. That handler is a reader, as
+// reportHookFailure is, so this takes the client's state under mu and touches no connection, as
+// Connected and SubOK do.
 func (c *Client) HookStall() (time.Duration, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

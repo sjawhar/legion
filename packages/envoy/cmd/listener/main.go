@@ -401,14 +401,14 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 // probes act on /healthz: the ECS container health check is curl -sf /healthz, every 30 s with 3
 // retries (infra/aws/rendering/listener.go:202-203), on a service of one task
 // (infra/aws/webhooklistener.go:227), and GKE's readiness probe reads it too
-// (infra/gcp/dispatch_kube.go, readyProbe). A 503 would replace, or unroute, the only listener there is,
-// and its replacement rebuilds into the same failing rewatch with cold caches that warm up empty,
-// whose fanout then acknowledges general-topic messages as unmatched and loses them (delivery.go,
-// fanoutDelivery), while the running task still serves from the caches it holds, stale but not
-// empty. The paging signal for this state is the bus's ERROR "envoy nats reconnect hooks have not
-// succeeded" (internal/bus/recovery.go, reportHookFailure), which the AWS rendering counts as a
-// log metric filter (infra/aws/rendering/metricfilters.go). A shorter stall is reported nowhere
-// here: the bus runs the hooks again within seconds of a failure (internal/bus/recovery.go,
+// (infra/gcp/dispatch_kube.go, readyProbe). A 503 would replace, or unroute, the only listener
+// there is, and its replacement rebuilds into the same failing rewatch with cold caches that warm
+// up empty, whose fanout then acknowledges general-topic messages as unmatched and loses them
+// (delivery.go, fanoutDelivery), while the running task still serves from the caches it holds,
+// stale but not empty. The paging signal for this state is the bus's ERROR "envoy nats reconnect
+// hooks have not succeeded" (internal/bus/recovery.go, reportHookFailure), which the AWS rendering
+// counts as a log metric filter (infra/aws/rendering/metricfilters.go). A shorter stall is reported
+// nowhere here: the bus runs the hooks again within seconds of a failure (internal/bus/recovery.go,
 // recoverUntilHealthy), so a rebuild under the bound is being repaired, and a listener would
 // otherwise read as degraded over every reconnect. The stall is one bus.Client's, naming no
 // cache, so a listener that keeps no CI cache needs no branch of its own, and the live topics
