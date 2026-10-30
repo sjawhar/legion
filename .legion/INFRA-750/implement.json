@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-750",
-  "completed": "2026-10-30T11:15:00Z",
+  "completed": "2026-10-30T12:20:00Z",
   "generation": 2,
-  "round": 4,
+  "round": 5,
   "pullRequest": "sjawhar/legion#2542",
-  "head": "3de30a206f8e32c83507fce5e1730e67fda22843",
+  "head": "3fec0f3465e272f0bac6a1c6f7f59a803293396f",
   "plan": "dispatch://INFRA-750/artifact/plan-md@v4, with the architect's decision of 2026-10-30 that put the daemon in scope (roll-call line 4)",
   "proof": [
     {
@@ -64,6 +64,14 @@
       "observed": "cmd/listener ok 455.270s; cmd/dispatch ok 50.543s; every raced package ok (internal/webhook 12.114s, internal/dispatch/outbox 6.982s among them); the infra module ok throughout; natsauth ok 5.180s. go build, go vet and gofmt clean in both modules. GitHub answers MERGEABLE (BLOCKED only on checks it had just started at the merge head), where before the merge it answered CONFLICTING.",
       "headSha": "3de30a206f8e32c83507fce5e1730e67fda22843",
       "negativeControl": "The conflict itself is the control for the resolution: before it was resolved the tree carried jj's markers and no package built; after it, `go build ./...` and `go vet ./...` pass and every sentence of both sides is present, each checked by name at the merged head."
+    },
+    {
+      "criterion": "The review's one code finding: on the new base, bustest's documentation named one caller of the fill loop where main had made two copies.",
+      "surface": "The two full-stream tests of internal/webhook against a real in-process NATS server, one of them a three-server cluster, now both filling the stream through the shared helper.",
+      "command": "From packages/envoy: `go test -count=2 -timeout 15m -run 'TestAGitHubDeliveryAnsweredNotStoredIsRepublishedWithoutItsID$|TestADeliveryToAFullStreamIsAnswered503$' ./internal/webhook/`; `CGO_ENABLED=1 go test -race -count=1 -timeout 15m ./internal/webhook/`; `go vet ./internal/webhook/ ./internal/bus/bustest/`; `gofmt -l internal`.",
+      "observed": "Both tests pass twice (ok 1.524s) and the package passes under -race (ok 11.697s); vet and gofmt print nothing. errors, strings and fmt are still used elsewhere in github_test.go and const limit still feeds bus.WithStreamMaxBytes(limit) at :617, so the fold left nothing unused.",
+      "headSha": "3fec0f3465e272f0bac6a1c6f7f59a803293396f",
+      "negativeControl": "The fold is behaviour-identical - the same kibibyte envelopes on notifications.github.fill.<n>, the same bound of 64, the same refusal accepted - so the control is the two tests themselves: the republish test now reaches its full stream through the helper and still refuses, and the 503 test is unchanged. A helper that filled nothing would fail both at their first assertion."
     }
   ],
   "filesChanged": [
@@ -103,10 +111,10 @@
   },
   "reviewRound": {
     "threads": [
-      "PRRT_kwDORFy7ds6x5O3- (internal/kvwatch/kvwatch.go): fixed in 73196dfc \u2014 the replaced watch's INFO line reads `<cache> first watch failed after a rewatch replaced it; the replacement feeds the cache`, so it names the failure and leaves the cause with the error attribute; the test's expected message follows, and Start's doc says the watch fails only before it installs a watcher and that the branch is while no watcher is current.",
-      "PRRT_kwDORFy7ds6x5O4E (cmd/listener/cut_rewatch_test.go): fixed in 73196dfc \u2014 freezeUntilBothClientsReportTheCut in silent_cut_test.go holds the freeze, the log offset and the wait for both clients' lines, with the per-client missing diagnostic and the timing log, and both listener tests call it."
+      "PRRT_kwDORFy7ds6x9MaS (internal/bus/bustest/bustest.go): fixed in 3fec0f34 - main's second copy of the kibibyte fill loop, which TestAGitHubDeliveryAnsweredNotStoredIsRepublishedWithoutItsID brought in at internal/webhook/github_test.go:645-659, is now bustest.FillStream(t, client, 64), and the package doc and the helper's doc name both full-stream tests that call it, with the in-package copies still named as the exception."
     ],
-    "allAnsweredAndResolved": true
+    "allAnsweredAndResolved": true,
+    "scope": "The INFRA-14 architect narrowed this round to that one change and the reviewer's own prose commit cb63e006, since the issue is past its review-round cap. Nothing else was touched."
   },
   "forwardMerge": {
     "trigger": "GitHub reported the pull request CONFLICTING with main, 19 commits behind (the controller's task named #2529 3d5548da, #2527 b260b0c7, #2531 852b8619 and the plugin releases).",
