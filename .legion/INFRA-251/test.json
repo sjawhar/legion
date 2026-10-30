@@ -2,51 +2,46 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-251",
-  "completed": "2026-10-30T12:01:00Z",
-  "round": 12,
-  "headSha": "f8391ab47cc7e170dc7308273848e4e4f3518f94",
-  "handoffHead": "78400b187821aaa4cbbb7754a2ade41bdf4d0761",
-  "fingerprint": "changed (the forward merge of main 96a7e5ea brought main's text into files this branch's diff touches, then the renumber and two fixes): a full round",
-  "rig": "My PostgreSQL 17.2 (UTF8 template1, 127.0.0.1:55433; a fresh database tester12 for the whole-daemon drives, since my old scratch database held the branch's former 62/63) and nats-server 2.10.29 (127.0.0.1:54333). Drivers not committed; kept at $TMPDIR/tnats/zz_tester_parked_live_test.round12.go.",
+  "completed": "2026-10-30T20:25:00Z",
+  "round": 13,
+  "headSha": "963c757df5572096cb7b0ae391a8ef2f5b321b5d",
+  "handoffHead": "260b5e30cc039ff6184cfbdc1667ae23f95d3e10",
+  "rig": "The pod was recreated: my own fresh PostgreSQL 17.2 (UTF8, $TMPDIR/tester/pgdata, 127.0.0.1:55433) and nats-server 2.10.29 (127.0.0.1:54333); the implementer's pg251 in the shared $TMPDIR was not touched. Drivers rewritten, not committed; kept at $TMPDIR/tester/zz_tester_parked_live_test.round13.go.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its migration proof my own way on a fresh database and on one at main's latest (proof 1), the wake fix's negative control on the whole daemon (proof 3), and its property test with 500 seeds x 300 steps (proof 4). My two red tests pass unmodified (`jj diff --from 2f9a32bebb12 --to 78400b187821 --stat` on parked_decision_test.go: 0 files changed)."
+    "how": "Re-ran on my rig: its seven new tests (TestAReadyLeavesTheCatchUpThatIsPublishingWhatItNamed, TestAReceiptTimeoutOnASupersededCatchUpHandsOverWhatItNamed, TestAClosingTreeNamesEveryDecisionStillOwedToItsArchitect, TestAHandedOverChildTakesTheDecisionsKeptOnItsSubtree, TestAHandedOverChildTakesWhatTheOldArchitectsHeldTaskNames, TestAStreamingAgentDoesNotConfirmARootArchitectsHeldTask, TestAForeignTurnDoesNotConfirmARootArchitectsHeldTask) PASS, as do my two earlier red tests, unmodified (parked_decision_test.go against 2f9a32bebb12: 149 insertions, 0 deletions). Its claim that the property test holds 'over long runs' does not hold at 300 steps (failure below)."
   },
-  "failures": [],
-  "failed": 0,
-  "proof": [
+  "failures": [
     {
-      "criterion": "At the merge of this head with main as it is now, store.Migrate applies on a fresh database, and a database at main's latest applies 0065 and 0066",
-      "surface": "store.Migrate (store.Open + Migrate, the boot's own call) against new databases of my PostgreSQL 17.2; the merge tree from git merge-tree",
-      "command": "main read again: 88818a3b9b14, ending at 0064_pull_request_pass_settlement. git merge-tree --write-tree 78400b18 88818a3b -> 7549f158 (clean); archive it; go run <store.Open+Migrate> on mergefresh12 -> `migrated: 66 <nil>`; go test ./internal/store/ at the merge tree -> ok 83.6s. Upgrade path: main 88818a3b's Migrate on migupgrade12 -> `migrated: 64`, then this head's Migrate on the same database -> `migrated: 2`; schema_version 60..66; parked_decisions, readmitted_approvals and consumer_positions present; claims.delivered_rows bigint[] not null default '{}'. This head alone on migfresh12 -> `migrated: 66 <nil>`.",
-      "observed": "Fresh at the merge: 66 migrations, store suite ok. A database at main's 64 applies exactly 0065 and 0066.",
-      "headSha": "f8391ab47cc7e170dc7308273848e4e4f3518f94",
-      "negativeControl": "Round 11's merge of e8a595d3 with main refused `migrations 0062_live_issue_reads.up.sql and 0062_parked_decisions.up.sql share version 62` and applied nothing."
-    },
-    {
-      "criterion": "The design gate default: where it changed, and whether main's behaviour changes for any deployment",
-      "surface": "The diff of d71718d0e1c7 against its parent",
-      "command": "jj diff -r d71718d0e1c7 config/stage3.go workflow/engine.go workflow/parked_decision.go daemon/daemon.go",
-      "observed": "config.DesignGate.OrDefault is new: \"\" -> root-issues, any other value unchanged. workflow.New replaces its own `if cfg.DesignGate == \"\" { cfg.DesignGate = DesignGateRootIssues }` with cfg.DesignGate.OrDefault(), the same behaviour. The one behavioural change is in this branch's own workflow.HandOverKept, whose catch-up now states gate.OrDefault() where it passed the raw value; main has no hand-over. legion.yaml's loader already defaults gates.design to root-issues, so no deployment's gate changes. It fixes a defect this change exposed (my round-11 note: the hand-over catch-up said policy \"\" where the ready's said root-issues), so it is in scope.",
-      "headSha": "f8391ab47cc7e170dc7308273848e4e4f3518f94",
-      "negativeControl": "On the whole daemon the hand-over catch-up now carries `\"gate\":{\"policy\":\"root-issues\",\"open\":false}`; in round 11 the same drive's carried `\"policy\":\"\"`."
-    },
-    {
-      "criterion": "Whole daemon: the round-7 drive, the crash window, round 10's stale start (the hand-over catch-up arrives without waiting for the sweep), and RootHears on main's resume paths",
-      "surface": "The whole Legion daemon (startDaemonWithin) on real PostgreSQL and nats-server; Dispatch events as envelopes on ENVOY_NOTIFICATIONS; the architect's shim, registration and prompt frames over the daemon's own worker stream and routes; no model ran, so no provider applies",
-      "command": "LEGION_TEST_PG_DSN=postgres://...@127.0.0.1:55433/tester12 LEGION_E2E_NATS_URL=nats://127.0.0.1:54333 TESTER_REAL_EVENTS=$TMPDIR/real-ask-events.jsonl TESTER_JSON_LOG=... go test -tags e2e -count=1 -run '^(TestTesterParkedDecisionLive|TestTesterCrashWindowLive|TestTesterStaleStartReleaseLive|TestTesterRootHearsMainPathsLive)$' -v ./internal/daemon/",
-      "observed": "All 4 PASS (84 s). Round-7 drive: 14 steps, 13 real Dispatch events relay 3; verdict jq over the daemon's JSON log: undelivered 2, sent 1, unrelayed ['its root is not parked'], unmatched []. Crash window: the retry after a refused forget, a finished turn and a daemon restart queued nothing; a newer start delivered ask-2. Stale start: the released decision reached the generation-3 architect in 1 catch-up message, 1 s after the stale start finished (23 s in round 11). RootHears: the answered awaiting_person root, the re-admission and the parked root's held task were each prompted once, the fresh admission 0 times.",
-      "headSha": "f8391ab47cc7e170dc7308273848e4e4f3518f94",
-      "negativeControl": "Each reverted with jj restore: projectRecords.EnqueueID's wakeOnCommit commented out -> the stale-start decision waits 23 s again for the sweep; `|| root.AwaitingPerson()` dropped from record.WaitsForSlot -> the round-7 drive FAILs at the awaiting-root-set-to-todo step; the RelayNotParked check off -> FAILs at the lingering-root step (`parked-decision notices = 6, want 3`)."
-    },
-    {
-      "criterion": "The property test, with launch and resume failure, a denied publish and delivery_failed, over far longer runs than its default",
-      "surface": "TestKeptDecisionsReachTheCurrentArchitectOnce on my real PostgreSQL",
-      "command": "LEGION_KEPT_PROPERTY_RUNS=500 LEGION_KEPT_PROPERTY_STEPS=300 timeout 3300 ./daemon.test -test.run '^TestKeptDecisionsReachTheCurrentArchitectOnce$' -test.timeout=55m -test.v",
-      "observed": "PASS in 1400 s: 500 seeds x 300 steps = 150,000 steps, every seed PASS. Across them: 1750 launches refused, 452 claim failures, 3852 starts relaunching a failed claim, 26 catch-ups finished for an architect that will not hold its role again; catch-up publishes answered 1071 delivered, 130 no-holder, 96 refused, 80 receipt-timeout, 89 denied, 97 delivery-failed; 364 of 500 seeds reached a failed architect claim.",
-      "headSha": "f8391ab47cc7e170dc7308273848e4e4f3518f94",
-      "negativeControl": "The implementer's mutations (hand-over off: told 0 times; DeliveredRows off: told twice; RootHears off: told while parked); I did not repeat them this round."
+      "criterion": "Review finding 3 and the tree's rule (a person's decision is never lost): on an orphan hand-over, the child's held decisions move to the child and its new architect is told them",
+      "evidence": "Red test TestADecisionHeldInTheOldArchitectsTaskAtAHandOverReachesTheChild (packages/daemon/internal/daemon/kept_decision_handover_seeds_test.go, commit 7f9d08bf), which runs the implementer's own property model at seeds 96, 414 and 432 for 300 steps. Command: `cd packages/daemon && LEGION_TEST_PG_DSN=... LEGION_TEST_NATS_URL=... go test -count=1 -run TestADecisionHeldInTheOldArchitectsTaskAtAHandOverReachesTheChild ./internal/daemon/` -> FAIL on all three. Found by `LEGION_KEPT_PROPERTY_RUNS=500 LEGION_KEPT_PROPERTY_STEPS=300` (the implementer ran 300 seeds at the default 100 steps): 11 of 500 seeds fail (11, 73, 96, 125, 311, 365, 367, 414, 432, 459, 475), each reproduced 3 of 3 times except 367 (2 of 3), all with the same message from the model's own oracle (kept_decision_property_test.go:1845): `dispatch://LEGION-2/ask/ask-0002, an ask of LEGION-2 now in the tree of LEGION-2, which the hand-over moved: false, was told 0 times to the architect it was owed to ... and 1 times to the architect of the tree it left by a row composed before the hand-over (at step 34 by the start task of row 5, prompt outbox:5, the architect of LEGION-1, while LEGION-2 stood in the tree of LEGION-2)`. Seed 414's trace: generation 2's start row 5 names LEGION-1's ask-0001 and LEGION-2's ask-0002; its first run delivers the task and its forget fails (step 20); after two streaming restarts the root is parked, row 5 runs again and forgets both rows (step 26), so the old root's architect holds outbox:5 unsent; a foreign turn arrives (step 31, delivery outbox:5 still pending); the linger hands LEGION-2 over and moves only ask-0003, the one still kept (step 30) - it does not re-key ask-0002 from the held task; the old root's next start then prompts outbox:5 to LEGION-1's architect (step 34), naming LEGION-2's decision, and LEGION-2's architect is never told it. The held-task re-key that TestAHandedOverChildTakesWhatTheOldArchitectsHeldTaskNames proves for a task seeded unsent and unconfirmed misses a held task in this state (delivered after a failed forget, through streaming restarts and a foreign turn)."
     }
   ],
-  "ci": "Head 78400b18, read 2026-10-30T11:50Z: CI's changes job queued, PR Title queued, an earlier PR Title cancelled. Not waited on. GitHub: MERGEABLE, BLOCKED (reviews and CI)."
+  "failed": 1,
+  "proof": [
+    {
+      "criterion": "Whole daemon: the round-7 drive, the crash window, the stale start, RootHears on main's paths with a foreign turn on a held task, the orphan hand-over, and the closing tree's owed-decision log",
+      "surface": "The whole Legion daemon (startDaemonWithin) on real PostgreSQL and nats-server; Dispatch events only as envelopes on ENVOY_NOTIFICATIONS; the architect's shim, registration and prompt frames over the daemon's own worker stream and routes; the daemon's own JSON log; no model ran, so no provider applies",
+      "command": "LEGION_TEST_PG_DSN=postgres://...@127.0.0.1:55433/drives13 LEGION_E2E_NATS_URL=nats://127.0.0.1:54333 TESTER_REAL_EVENTS=... TESTER_JSON_LOG=... go test -tags e2e -count=1 -run '^(TestTesterParkedDecisionLive|TestTesterCrashWindowLive|TestTesterStaleStartReleaseLive|TestTesterRootHearsMainPathsLive|TestTesterClosingTreeLogsOwedDecisionsLive|TestTesterOrphanHandOverLive)$' -v ./internal/daemon/",
+      "observed": "All PASS. Round-7 drive: 14 steps, 13 real Dispatch events relay 3; verdict jq: undelivered 2, sent 1, unrelayed ['its root is not parked'], unmatched []. Crash window: the retry after a refused forget, a finished turn and a restart queued nothing; a newer start delivered ask-2. Stale start: the released decision reached the current architect in 1 message, 0.5 s after release. RootHears: answered awaiting_person root, re-admission and held task each prompted once, fresh admission 0; a foreign turn (agent_start/agent_end) sent at once on the held task's claim left the task pending and unsent, and the next start prompted it once. Orphan hand-over (root closed done, child mid-phase, a person's answer on the child and one on the root while lingering): the linger handed the child over, its new architect's start task names the child's decision and not the root's; 1 kept under the old root, 0 under the child. Closing tree: a parked tree lingering out logs exactly one WARN naming the owed decision's ref ('where':'kept for its root').",
+      "headSha": "963c757df5572096cb7b0ae391a8ef2f5b321b5d",
+      "negativeControl": "Each reverted with jj restore: admission's MoveKeptDecisions call taken out -> the hand-over drive FAILs, the child's architect gets no task naming its decision; `|| root.AwaitingPerson()` dropped from record.WaitsForSlot -> the round-7 drive FAILs at the awaiting-root-set-to-todo step; RelayNotParked off -> FAILs at the lingering-root step (6 notices, want 3)."
+    },
+    {
+      "criterion": "Migrations at the merge with main as it is now",
+      "surface": "store.Migrate on a fresh database of the merge tree",
+      "command": "git merge-tree --write-tree 260b5e30 0be366cf (main, still ending at 0064) -> 67480149; archive; go run <store.Open+Migrate> on mergefresh13",
+      "observed": "`migrated: 66 <nil>`.",
+      "headSha": "963c757df5572096cb7b0ae391a8ef2f5b321b5d",
+      "negativeControl": "Round 11's merge with the old numbering refused 'share version 62'."
+    }
+  ],
+  "notDriven": [
+    "Finding 1 (a catch-up dropped mid-publish) and finding 4 (a superseded catch-up's receipt timeout) need an interleaving inside one transaction or a listener answering receipt-timeout to a superseded copy; they stand on the implementer's TestAReadyLeavesTheCatchUpThatIsPublishingWhatItNamed and TestAReceiptTimeoutOnASupersededCatchUpHandsOverWhatItNamed (both PASS here) and the concurrent property model.",
+    "Finding 2 on the whole daemon: a restart with a streaming agent while a root task is held needs a live claim on a parked root, which the whole daemon suspends; my foreign-turn drive sent the turn in the moment after ready and the task survived, but the suspend may have come first. It stands on the two supervise tests (PASS)."
+  ],
+  "notes": [
+    "Minor, log accuracy: at a done root's linger close, the owed-decision WARN names the child's decision as 'kept for its root' and then the same close hands the child over with that decision, which its new architect is told. The WARN says it is owed and the controller already has it; the parked-decision-verdict.jq does not read it."
+  ],
+  "ci": "Head 260b5e30, read 2026-10-30T19:45Z: CI run 41116871688 queued (changes queued; lint and pi-envoy not started yet), PR Title queued. The CI at 78400b18 failed (run 41048653819: the lint red was the deleted comment, the pi-envoy red main's, fixed by #2550 merged here). Not waited on. GitHub: MERGEABLE, BLOCKED."
 }
