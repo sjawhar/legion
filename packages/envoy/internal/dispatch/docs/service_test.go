@@ -2622,6 +2622,44 @@ func TestAskOptionsEditRewritesAnOptionAndKeepsTheRest(t *testing.T) {
 	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", options)
 }
 
+// An options edit pairs each option it sends with the item already holding its label, not with
+// the item standing at its position: an edit that reorders the options carries what a person
+// wrote under an option along with that option's own label. Pairing by position would leave the
+// sub-list, the second paragraph and the link under another option's words, which is a wrong
+// record rather than a deletion anyone can see.
+func TestAskOptionsEditPairsAnOptionByItsLabelNotItsPosition(t *testing.T) {
+	service, artifactID := seedIndexedRichAsk(t)
+	list := askOptionList(t, service, artifactID)
+	hold := list.Children[1]
+
+	options := []model.AskOption{
+		{Label: "Hold", Description: "Wait for review"},
+		{Label: "Ship", Description: "Release it today"},
+	}
+	if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options}); err != nil {
+		t.Fatalf("options edit: %v", err)
+	}
+
+	after := askOptionList(t, service, artifactID)
+	if len(after.Children) != 2 {
+		t.Fatalf("the list holds %d items after the edit, want 2", len(after.Children))
+	}
+	if !after.Children[0].EqualWithBlockIDs(hold) {
+		t.Fatalf("the Hold option reads %q after the edit, want the item the document held, %q",
+			askOptionItemMarkdown(t, after, after.Children[0]), askOptionItemMarkdown(t, list, hold))
+	}
+	ship := after.Children[1]
+	if got := strings.TrimSpace(pmdoc.TextContent(ship.Children[0])); got != "Ship: Release it today" {
+		t.Fatalf("the second item reads %q, want the Ship line the edit sent", got)
+	}
+	if len(ship.Children) != 1 {
+		t.Fatalf("the Ship item holds %d nodes, want its line alone: nothing of Hold's belongs under it",
+			len(ship.Children))
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", options)
+}
+
 // An edit that leaves an option out, renames it, or sends no option at all drops that option's
 // item. An item holding nothing but its plain line is the edit's to drop; one holding what a
 // person wrote is not, and the whole edit is refused, quoting the item so the caller can restore
