@@ -144,6 +144,14 @@ env:
     -- packages/daemon/ packages/daemon/internal/prompts/roles/ packages/daemon/internal/prompts/go/
     scripts/go-third-party-notices.sh scripts/assemble-third-party-notices.sh .github/go-release-targets.json
 
+  # A `|` between proxy entries makes a go command fall through to the next source after ANY error,
+  # where a `,` falls through only after a 404 or a 410 (Go's module reference, "GOPROXY protocol").
+  # proxy.golang.org reset a download mid-stream and turned a Go lane red on a module whose hash
+  # go.sum already holds (sjawhar/legion#2512); with `|direct` the command fetches the same bytes
+  # straight from the source and checks them against go.sum, so this is a second path, not a weaker
+  # check.
+  GOPROXY: https://proxy.golang.org|direct
+
 jobs:
   # The Go `legion`: linux and darwin archives of the binary, which embeds its role prompts, with
   # its THIRD_PARTY_NOTICES, on a legion-v* tag of the commit the run checked out. Nothing is
@@ -161,6 +169,7 @@ jobs:
     # Only main releases, as above; a workflow_dispatch on main runs it as a push does.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     # contents: read is for the checkout; nothing here writes to the repository, a registry or a
     # release.
     permissions:
@@ -302,6 +311,7 @@ jobs:
     # main"). A workflow_dispatch on main runs it as a push does.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # contents: read is for the checkout; nothing here writes to the repository, a registry or a
     # release.
     permissions:
@@ -368,6 +378,7 @@ jobs:
     # Only main publishes, as envoy_plugin_build says.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # contents: read is for the checkout; nothing here writes to the repository, a registry or a
     # release.
     permissions:
@@ -439,6 +450,7 @@ jobs:
     # Only main publishes, as envoy_plugin_build says.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # contents: read is for the checkout; nothing here writes to the repository, a registry or a
     # release.
     permissions:
@@ -530,6 +542,7 @@ jobs:
     needs: [pi_envoy_build, pi_legion_build, legion_build, envoy_plugin_build]
     if: always() && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     # contents: write creates the GitHub releases (`release-push.sh release`, below); id-token: write
     # is the OIDC token npm trusted publishing exchanges for the publish credential (the registry
     # records `trustedPublisher: github` for each plugin; no NPM_TOKEN is set), which also signs npm
@@ -1067,6 +1080,7 @@ jobs:
       (needs.publish.result == 'success' || needs.publish.result == 'failure') &&
       needs.publish.outputs.tag != ''
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: write # gh release edit
       packages: write # the legion version tag on ghcr.io

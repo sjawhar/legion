@@ -57,7 +57,9 @@ retry:
   modelFallback: true
 extensionHandlers:
   # AskGate (pi-envoy, in every pod) reviews each Dispatch write inside one tool_call handler, and
-  # holds its deadline 5 s under this limit. At Oh My Pi's 30 s default the deadline is 25 s, a review
-  # of a long session often times out, and a write whose review times out posts unreviewed
+  # holds its deadline 5,000 ms under this limit. At Oh My Pi's 30 s default the deadline is
+  # 25,000 ms, a review of a long session can still time out, and a write whose review times out
+  # posts unreviewed. A limit under 15,000 ms leaves no room for a verdict, so the gate does not
+  # bind and refuses every write it would have reviewed
   # (packages/pi-envoy/README.md, "The time limit"; docs/kubernetes.md, "AskGate's time limit").
   toolCallTimeoutMs: 120000
