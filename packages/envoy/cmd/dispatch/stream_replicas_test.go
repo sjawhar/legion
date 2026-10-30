@@ -43,8 +43,13 @@ const reconcileWait = 30 * time.Second
 // ask of it (reconciledFor), or until the client logs that reconcile's failure: main's constructor
 // no longer returns a refusal of the server, which reaches the log as the reconnect hook's failure
 // (`envoy nats reconnect hook failed`). A refused start is closed, so it retries no more, and the
-// logged error is returned. It sets the default logger to record the client's lines until the
-// test ends: a test that calls it must not run in parallel.
+// logged error is returned. The helper waits for this client's own reconcile, not for a stream
+// that already looks reconciled: it returns only once the client's hooks have covered a
+// connection event (bus.Client.HookedConnectionEvents). An earlier start of the same test can
+// leave the stream holding what the settings ask of it, and a helper that returned on that alone
+// would let a check that the next start wrote nothing pass before this start had written at all.
+// It sets the default logger to record the client's lines until the test ends: a test that calls
+// it must not run in parallel.
 func startDispatchStream(t *testing.T, urls []string, overrides map[string]string) (*bus.Client, error) {
 	t.Helper()
 	env := bootEnvironment(overrides)
@@ -68,13 +73,13 @@ func startDispatchStream(t *testing.T, urls []string, overrides map[string]strin
 			client.Close()
 			return nil, errors.New(refusal)
 		}
-		if client.Connected() {
+		if client.Connected() && client.HookedConnectionEvents() >= 1 {
 			if info, err = client.JS().StreamInfo(bus.Stream); err == nil && reconciled(info.Config) {
 				return client, nil
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("Dispatch's start for %v did not reconcile the stream within %s, nor log a failure: %+v (%v)", overrides, reconcileWait, info, err)
+			t.Fatalf("Dispatch's start for %v did not reconcile the stream within %s, nor log a failure: %+v (%v), hooked events %d", overrides, reconcileWait, info, err, client.HookedConnectionEvents())
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

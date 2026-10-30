@@ -549,6 +549,18 @@ func (c *Client) Connected() bool {
 	return c.Conn != nil && c.Conn.Status() == nats.CONNECTED
 }
 
+// HookedConnectionEvents is how many connection events this client's reconnect hooks have run to
+// completion for, counted as rewatch records a run that succeeded. It is state about the client's
+// own hooks, for a test that must wait for them and for nothing else. A hook a caller adds after
+// the constructor returns can miss the first connection event, because a run of the hooks copies
+// the list at its start (runReconnectHooks). ConnectOwningStream registers its reconcile hook
+// inside the constructor, before a caller can add one, so this count covers that reconcile.
+func (c *Client) HookedConnectionEvents() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.hookedEvents
+}
+
 // Subscribe creates the client's recoverable JetStream subscription. The client keeps one
 // JetStream subscription: a later call on the same subject replaces it, unsubscribing the handle
 // an earlier one returned, and a call on another subject is refused with ErrSubscriptionHeld. On a
