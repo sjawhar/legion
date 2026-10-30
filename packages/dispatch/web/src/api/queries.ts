@@ -21,7 +21,9 @@ import type {
 } from "./types";
 
 /** The signed-in principal (`/auth/whoami`). One key shared by every surface that reads it; it
- *  names the person by lowercase email, the form issue assignees carry. */
+ *  names the person by lowercase email, the form issue assignees carry. While it answers
+ *  `EVENT_HEAD_UNAVAILABLE` it is asked again for as long as that lasts (`queryRetry`), so the
+ *  shell shows its skeleton, never the error page. */
 export const whoAmIQuery = () =>
   queryOptions({
     queryKey: ["whoami"],
