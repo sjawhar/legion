@@ -50,7 +50,11 @@ type Config struct {
 	Connect, Token, Sandbox, Role, PodUID, PrivateDir string
 	RolesDir                                          string
 	Roles                                             []string
-	Stdout, Stderr                                    io.Writer
+	// TestPostgres has this launcher serve the pod's own PostgreSQL for tests (testpg.go), which
+	// only an issue pod's container does (RolesDir set). The deployment asks for it with
+	// `runtime.kubernetes.test_postgres`.
+	TestPostgres   bool
+	Stdout, Stderr io.Writer
 	// StopGrace is the container shutdown and natural-exit descendant cleanup budget. Every role
 	// of an issue pod's container is given it whole, since they stop together.
 	StopGrace time.Duration
@@ -97,14 +101,20 @@ func Run(ctx context.Context, cfg Config) error {
 	// of their own, whose init reaps theirs, but anything else started in the container (a
 	// `kubectl exec` and what it leaves behind) is this process's. The reaper never waits on a
 	// generation's own process, whose exit its manager reads.
+	guard := &pidGuard{}
 	if os.Getpid() == 1 {
 		exits := make(chan os.Signal, 1)
 		signal.Notify(exits, syscall.SIGCHLD)
 		defer signal.Stop(exits)
-		go reapOrphans(ctx, exits, managers)
+		go reapOrphans(ctx, exits, managers, guard)
 	}
 	if cfg.RolesDir == "" {
 		return managers[0].serveUntil(ctx, address)
+	}
+	// The pod's own test database, before any role starts: a role that starts at once finds the
+	// server listening (serveTestPG).
+	if cfg.TestPostgres {
+		serveTestPG(ctx, cfg, managers[0].log, guard)
 	}
 	var running sync.WaitGroup
 	for _, m := range managers {

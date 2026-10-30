@@ -57,7 +57,7 @@ type podKind interface {
 	// the config home, the agent-secrets volumes, the providers and the operator's.
 	container() string
 	launcherContainer(r *Runtime, l launch, resolved []corev1.EnvVar, providersMounts []corev1.VolumeMount) corev1.Container
-	mainVolumes() []corev1.Volume
+	mainVolumes(r *Runtime) []corev1.Volume
 	// agentEnv is what each agent is told of its kind, mainEnvironment's one block of its own.
 	agentEnv(l launch) []corev1.EnvVar
 	// provision readies what a new pod needs before relaunch writes its launcher Secrets and sets
@@ -254,6 +254,12 @@ func (k issuePod) launcherContainer(r *Runtime, l launch, resolved []corev1.EnvV
 		}
 	}
 	mounts = append(mounts, corev1.VolumeMount{Name: roleHomesVolume, MountPath: RoleHomesDir})
+	if r.testPostgres {
+		// The launcher serves the pod's own test database (launcher's testpg.go) and the roles
+		// container keeps its cluster here; no role's namespace shows this mount.
+		command = append(command, "--test-postgres")
+		mounts = append(mounts, corev1.VolumeMount{Name: testPGVolume, MountPath: TestPGDir})
+	}
 	if r.agentSecrets != nil {
 		mounts = append(mounts, corev1.VolumeMount{Name: agentSecretsTokenVolume, MountPath: AgentSecretsTokenDir, ReadOnly: true})
 	}
@@ -274,8 +280,16 @@ func (k issuePod) launcherContainer(r *Runtime, l launch, resolved []corev1.EnvV
 // overlay's writable layer, its /tmp and /var/tmp, and its own config home (`legion launcher
 // role-init`). An overlay's writable layer cannot be the container's own root filesystem, and a
 // memory one would charge a role's /tmp to the pod's memory.
-func (issuePod) mainVolumes() []corev1.Volume {
-	return []corev1.Volume{{Name: roleHomesVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}
+func (issuePod) mainVolumes(r *Runtime) []corev1.Volume {
+	volumes := []corev1.Volume{{Name: roleHomesVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}}
+	if r.testPostgres {
+		// The test database's cluster, on the node's disk for the same reason the role homes are:
+		// a memory volume would charge its data directory and every test's database to the pod's
+		// memory. It is created with the pod and deleted with it, so each issue starts on an
+		// empty cluster.
+		volumes = append(volumes, corev1.Volume{Name: testPGVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}})
+	}
+	return volumes
 }
 
 // agentEnv tells each agent its tree, issue and workspace, where its gh reads its credentials, and
@@ -444,8 +458,9 @@ func (k controllerPod) launcherContainer(r *Runtime, l launch, resolved []corev1
 	}
 }
 
-// mainVolumes are none beyond the controller's own: its launcher has no namespaces to keep homes in.
-func (controllerPod) mainVolumes() []corev1.Volume { return nil }
+// mainVolumes are none beyond the controller's own: its launcher has no namespaces to keep homes
+// in, and the pod's own test database is an issue pod's (issuePod.mainVolumes).
+func (controllerPod) mainVolumes(*Runtime) []corev1.Volume { return nil }
 
 // initVolumes are none: the controller's pod runs no init container.
 func (controllerPod) initVolumes(launch) []corev1.Volume { return nil }
