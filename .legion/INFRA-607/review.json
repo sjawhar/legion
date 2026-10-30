@@ -2,25 +2,14 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-607",
-  "completed": "2026-10-30T10:25:32Z",
+  "completed": "2026-10-30T13:07:39Z",
   "decision": "approved",
-  "reviewedCodeHead": "f6aae9bade245cc9118988a86e03f554bf23ae46",
-  "round": 9,
+  "reviewedCodeHead": "98b5c5ffb297a08d49da7cfa0c4c531b7d06a35d",
+  "round": 10,
   "critical": 0,
   "important": 0,
-  "minor": 1,
-  "scope": "Full round: f6aae9ba forward-merges main a21100c5 into e027da2c (approved code e8337760 plus retro's docs/solutions commit and .legion removal); main changed 5 of the PR's files. The PR's own diff is byte-identical to e8337760's (0 differing lines of 10,005) once the branch's migrations shift by three to 0148-0154, matching diff-check comment 6517841104. The only conflict, .dispatch/architecture/dispatch-api.md, keeps both sides (the PR's depends_on, main's paths and paragraph, then the PR's paragraph).",
-  "cursorCheck": "Main's #2376 adds no events column: 0145_events_person_words is a partial index on events (created_at desc, id desc) where actor->>'kind' = 'user' and type in four person types; 0146/0147 are partial indexes on comment_deliveries/message_deliveries. The suggestion cursor names its event columns (api/suggestion_outcomes.go:222, 234) and the rules filter by issue_key/artifact_id with a parameterised actor, which the partial predicate cannot serve, so reads and plans are unchanged; main adds no production write to events, refs, embeddings, document_edit_notices, write_suggestions or delivery_settings, and redefines neither embeddings_enqueue nor delivery_settings_changed.",
-  "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at f6aae9ba (Minor only)",
-    "codeQuality": "Verdict: APPROVE at f6aae9ba (one cleanup-only note)"
-  },
-  "ci": "CI head f6aae9ba (newest pull_request run); compare f6aae9ba...d213e7d1 is .legion/ only. Green at f6aae9ba, read at 10:25Z: lint, typecheck, test, pr-title, envoy-go, envoy-go-race, envoy-go-race-docs, envoy-infra-go, dispatch. ci-ok was queued behind the remaining jobs; not required.",
-  "keyFindings": [
-    {
-      "severity": "minor",
-      "file": "docs/solutions/envoy/a-merge-that-only-renumbers-migrations-is-proven-in-both-directions-pr2391.md:33-35",
-      "description": "The evidence paragraph lists two renumberings (to 0142-0148, then 0145-0151) and not this merge's third (0148-0154, f6aae9ba); the history it states is still true and its method still covers 0148-0154. Retro's learning; not fixed here because the architect asked for no push while the head's CI ran."
-    }
-  ]
+  "minor": 0,
+  "scope": "98b5c5ff forward-merges main 0e636ed7 into 6c3a4fc2 (approved at code f6aae9ba). round-shape.py v3 (dispatch://INFRA-598/artifact/round-shape-py), run from the workspace with PR 2391: 'old head f6aae9ba -> f6aae9bade245cc9118988a86e03f554bf23ae46; new head 98b5c5ff -> 98b5c5ffb297a08d49da7cfa0c4c531b7d06a35d; files whose own diff differs: 0', and no file equal only after normalisation. The one conflict, cmd/dispatch/main.go, resolves to the branch's two loop starts (RunSuggestionOutcomeSweep(ctx, database.Pool, eventsWake) and RunMaintenanceSweep(..., leases, background.ResumeDeliveries)), drops main's old one-call RunSuggestionOutcomeSweep(..., api.SuggestionSweepInterval, ...) that the branch replaced, and takes main's new dispatchHandler(routesHandler, met, ...) signature (read with git show --remerge-diff). The PR's own diff is unchanged, so no thermonuclear pass this round, per the architect's 10:43Z scope.",
+  "ci": "CI head 98b5c5ff (newest pull_request run); compare 98b5c5ff...8fd398bc is .legion/ only. Green: lint, typecheck, test, pr-title, dispatch (read at 13:07Z), and envoy-go-race-docs, envoy-infra-go and the rest. envoy-go and envoy-go-race each fail one test only, TestRoutesTablePinsEveryRegisteredRoute (routes_table_test.go:111, 'routes() has 147 rows, want 146'): main's, failing the same way on main 3d5548da (run 41041086299, job 124035532618), which contains the merge parent 0e636ed7; the tester reproduced it on 0e636ed7 without this PR, which adds no route.",
+  "keyFindings": []
 }
