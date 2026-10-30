@@ -307,6 +307,73 @@ func TestACatchUpLeavesOutWhatAQueuedStartClaims(t *testing.T) {
 	}
 }
 
+// A start that claimed a kept decision and then serves an earlier generation (its resume kept
+// failing while the tree was parked and re-admitted again) finishes without acting, and its
+// finish releases the claim. The new generation's start named nothing the old start claimed, and
+// its architect's ready wrote a catch-up that left the claimed decision out too, so once the claim
+// is released the decision must be handed to that running architect: some start or catch-up of
+// the root names it. Otherwise it waits, kept and unclaimed, for the architect's next relaunch or
+// the tree's next re-admission, while the architect works the tree without the person's decision.
+func TestADecisionAStaleStartReleasesReachesTheRunningArchitect(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	root := record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION",
+		Tree: "LEGION-1", Title: "Root", Phase: phase.Admitted, Generation: 2, Status: "in_progress"}
+	putOutboxIssue(t, pool, records, root)
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
+	answer := record.ParkedDecision{Root: root.Key, Ref: "dispatch://LEGION-1/ask/ask-1", Decision: record.DecisionAskAnswered, Actor: "user:alice",
+		At: time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)}
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		if err := records.AddParkedDecision(ctx, tx, answer); err != nil {
+			return err
+		}
+		task, kept, err := engine.ParkedDecisionTask(ctx, tx, root)
+		if err != nil {
+			return err
+		}
+		return engine.EnqueueNaming(ctx, tx, root.Key, root.Key, record.SuperviseRequest{Op: "start", Tree: root.Tree, Role: claim.RoleArchitect,
+			Generation: 2, Task: task, Kept: kept}, kept, time.Now())
+	}); err != nil {
+		t.Fatalf("queue generation 2's start naming the answer: %v", err)
+	}
+	var stale record.OutboxRow
+	if err := pool.QueryRow(ctx, "select id, kind, issue, payload from outbox where kind = 'supervise'").Scan(&stale.ID, &stale.Kind, &stale.Issue, &stale.Payload); err != nil {
+		t.Fatalf("read the queued start: %v", err)
+	}
+	// The tree is parked and re-admitted while that start waits out its backoff: generation 3's start
+	// names nothing (the answer is claimed), and its architect comes up and is told its tree.
+	root.Generation = 3
+	putOutboxIssue(t, pool, records, root)
+	if _, err := intake.ApplyFact(ctx, pool, "outbox", "generation-3-ready", intake.ClaimReady{Issue: root.Key, Role: claim.RoleArchitect, Launch: 1}, engine); err != nil {
+		t.Fatalf("apply generation 3's architect ready: %v", err)
+	}
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup,
+		tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), now: time.Now,
+		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
+			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-1"}, nil
+		},
+	}
+	if err := runner.execute(ctx, stale); err != nil {
+		t.Fatalf("run generation 2's start: %v", err)
+	}
+	// The lane finishes the row it ran (Store.FinishOutbox), which releases what it claimed.
+	if _, err := pool.Exec(ctx, "delete from outbox where id = $1", stale.ID); err != nil {
+		t.Fatalf("finish generation 2's start: %v", err)
+	}
+	if left := keptDecisions(t, pool, records, root.Key); len(left) != 1 {
+		t.Fatalf("kept after the stale start finished = %#v, want the answer still kept", left)
+	}
+	var naming int
+	if err := pool.QueryRow(ctx, "select count(*) from outbox where strpos(payload::text, $1) > 0", answer.Ref).Scan(&naming); err != nil {
+		t.Fatalf("read the outbox: %v", err)
+	}
+	if naming == 0 {
+		t.Fatalf("after the stale start released %s, no start or catch-up of %s names it: generation 3's running architect is never told the person's decision", answer.Ref, root.Key)
+	}
+}
+
 // A start row whose task named kept decisions, delivered and then retired once the architect's
 // turn on it ended, is not delivered again when the row runs again (a ClaimReady that failed after
 // the forget, or a finish that did not commit): the delivered mark its forget wrote stops it, so the
