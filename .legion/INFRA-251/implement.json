@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-251",
-  "completed": "2026-10-30T11:40:00Z",
+  "completed": "2026-10-30T19:40:00Z",
   "stateTable": [
     "Kept-decision hand-over: one rule, with the generation dimension",
     "",
@@ -41,57 +41,68 @@
   ],
   "proof": [
     {
-      "criterion": "The change merges onto main and the daemon still boots: its migrations apply after main's 0062-0064",
-      "surface": "store.Migrate on a fresh PostgreSQL 17.2 database at the merge head (main 96a7e5ea merged forward in 98e39d1f, migrations renumbered in f9cbaaa7)",
-      "command": "create database mig_fresh_r12; cd packages/daemon && go run <throwaway main calling store.Open + store.Migrate> 'postgres://postgres:pw@127.0.0.1:55432/mig_fresh_r12?sslmode=disable'; psql -c 'select version from schema_version where version >= 60' -c '\\d claims'; then cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 timeout 900 go test -count=1 ./internal/store/",
-      "observed": "'migrated: 66 <nil>'; schema_version 60,61,62,63,64,65,66; parked_decisions and readmitted_approvals exist; claims.delivered_rows bigint[] not null default '{}'. store ok 51.0s (TestParkedDecisionsArriveWith0065AndGoWithTheirRoot migrates through 64, then finds the tables added by 65). main@origin read again before the push: 88818a3b, still ending at 0064_pull_request_pass_settlement.",
-      "headSha": "f8391ab47cc7e170dc7308273848e4e4f3518f94",
-      "negativeControl": "At e8a595d3 merged with main (the tester's merge-tree reproduction) Migrate refuses 'migrations 0062_live_issue_reads.up.sql and 0062_parked_decisions.up.sql share version 62' and applies nothing. In this pod's own shared test database, which had applied the branch's old 62/63, the daemon suite failed with 'relation \"parked_decisions\" already exists' until that scratch schema was dropped; no deployed database ever held the old numbers (never on main)."
+      "criterion": "The property model reaches each of review 5712285709's four findings and fails on 78400b18's code",
+      "surface": "TestKeptDecisionsReachTheCurrentArchitectOnce (commit 3bb0ee41) over real PostgreSQL 17.2: rows run on concurrent goroutines with their own lease tokens, a catch-up's publish held open while a ready, a stale start's settlement or a re-admission runs to completion, restart with a streaming agent, foreign turns, a child handed over into a tree of its own, receipt timeouts on superseded catch-ups",
+      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 timeout 900 go test -count=1 -run TestKeptDecisionsReachTheCurrentArchitectOnce ./internal/daemon/  (and LEGION_KEPT_PROPERTY_SEED=<n>)",
+      "observed": "On 78400b18's production code 12 of 30 seeds fail, the same set on two runs. Finding 1 (told twice after a drop during publish): seeds 8, 29, and 66 in the concurrent mode. Finding 2 (told 0 times after a streaming restart or a foreign turn confirmed a held task): seeds 22, 14, 27. Finding 3 (a child's decision told only to the old tree after the hand-over): seeds 4, 19, 21, 25. Finding 4's state (a superseded receipt timeout) is reached at seed 30 step 34; on the old code the drop of finding 1 re-names the released decisions first, so it fails only through its own test once fix 1 is in. Each reproducible seed replays byte for byte.",
+      "headSha": "963c757df5572096cb7b0ae391a8ef2f5b321b5d",
+      "negativeControl": "At the head all of those seeds pass (next entry)."
     },
     {
-      "criterion": "A row written with its id (a start or catch-up claiming kept decisions, workflow.EnqueueNaming, the hand-over's catch-up among them) wakes its lane as it commits (the tester's 23 s latency note)",
-      "surface": "The outbox lanes with the workflow's wake-decorated store (projectRecords) on real PostgreSQL",
-      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 timeout 900 go test -count=1 -run 'TestARowWrittenWithItsIDRunsOnItsLaneWithoutASweep|TestACommittedRowRunsOnItsLaneWithoutASweep' ./internal/daemon/",
-      "observed": "Both PASS (1.5s): the row written with EnqueueID is posted with no sweep fired. projectRecords.EnqueueID now wakes on commit; the hand-over's catch-up also states the default design gate (config.DesignGate.OrDefault, shared with the engine) where the tester saw \"\".",
-      "headSha": "f8391ab47cc7e170dc7308273848e4e4f3518f94",
-      "negativeControl": "With projectRecords.EnqueueID's wakeOnCommit removed, the new test FAILs: 'timed out waiting for the row written with its id was posted' (60.6s); reverted."
+      "criterion": "Each finding fixed, with a test that fails before its fix",
+      "surface": "Deterministic tests: catch_up_settling_test.go (TestAReadyLeavesTheCatchUpThatIsPublishingWhatItNamed, TestAReceiptTimeoutOnASupersededCatchUpHandsOverWhatItNamed), supervise/root_task_hold_test.go (TestAStreamingAgentDoesNotConfirmARootArchitectsHeldTask, TestAForeignTurnDoesNotConfirmARootArchitectsHeldTask), admit/handed_over_decisions_test.go (TestAHandedOverChildTakesTheDecisionsKeptOnItsSubtree, TestAHandedOverChildTakesWhatTheOldArchitectsHeldTaskNames)",
+      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 timeout 900 go test -count=1 -run 'TestAReadyLeavesTheCatchUpThatIsPublishingWhatItNamed|TestAReceiptTimeoutOnASupersededCatchUpHandsOverWhatItNamed' ./internal/daemon/ && go test -count=1 ./internal/supervise/ && go test -count=1 -run TestAHandedOver ./internal/admit/",
+      "observed": "All pass at the head. Before each fix: finding 1 'the catch-ups left beside the publishing row name dispatch://LEGION-1/ask/ask-1 ... want the one fresh catch-up to name nothing of it'; finding 4 'the catch-ups left after the superseded receipt timeout name dispatch://LEGION-1/ask/ask-2 0 times'; finding 2 'ConfirmedAt:2026-09-22 12:00:00 ... want the held task unsent and unconfirmed' (both supervise tests); finding 3 'the start task of LEGION-209 = \"\", want it to name the answers on dispatch://LEGION-209/ask/ask-1 and dispatch://LEGION-210/ask/ask-2', and for a decision only the old architect's held task names 'the start task of LEGION-209 = \"\", want it to name dispatch://LEGION-209/ask/ask-1, which the old architect's held task is the only record of'.",
+      "headSha": "963c757df5572096cb7b0ae391a8ef2f5b321b5d",
+      "negativeControl": "Each 'before' line above is the same test with its fix taken out."
     },
     {
-      "criterion": "The property model covers launch and resume failure (claims reaching failed, RequestRetry, architectEnded), a denied publish and delivery_failed; every decision is still told once and none lost",
-      "surface": "TestKeptDecisionsReachTheCurrentArchitectOnce with keptRuntime refusing Spawn and Resume, and listener modes keptDenied (notify.ErrPublishDenied) and keptDeliveryFailed (notify.ErrNotDelivered, ReasonDeliveryFailed)",
-      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 timeout 600 go test -count=1 -v -run TestKeptDecisionsReachTheCurrentArchitectOnce ./internal/daemon/ ; LEGION_KEPT_PROPERTY_RUNS=300 timeout 1500 go test -count=1 -timeout 25m -v -run TestKeptDecisionsReachTheCurrentArchitectOnce ./internal/daemon/",
-      "observed": "Defaults ok (31.2s): 62 launches refused, 19 claim failures, 71 starts relaunched a failed claim; catch-up publishes answered 50 delivered, 12 no-holder, 5 refused, 4 receipt-timeout, 3 denied, 7 delivery-failed; 17 of 30 seeds reached a failed claim. 300 seeds ok (316.5s): 544 refused launches, 166 claim failures, 744 failed-claim relaunches, 6 catch-ups finished because the architect will not hold its role (1 with the claim failed), 26 denied and 41 delivery-failed publishes. No seed failed, so no production change was needed for these.",
-      "headSha": "f8391ab47cc7e170dc7308273848e4e4f3518f94",
-      "negativeControl": "The round-11 mutations still apply to this model: hand-over off -> told 0 times; DeliveredRows check off -> told twice; RootHears off -> told while parked (round 11 proof, unchanged code paths)."
+      "criterion": "A kept decision never vanishes silently: a tree that closes while decisions are still kept for its root, or held in its architect's unconfirmed task, logs each one (the architect's condition on the refused/denied ending)",
+      "surface": "workflow.lingerExpired (the one path that closes a root for good; the outbox's linger row applies it) through warnOnCommit; TestAClosingTreeNamesEveryDecisionStillOwedToItsArchitect with a JSON slog handler",
+      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 timeout 900 go test -count=1 -run TestAClosingTreeNamesEveryDecisionStillOwedToItsArchitect ./internal/daemon/",
+      "observed": "PASS: one Warn line per owed decision with ref, root, issue and where ('kept for its root' or 'held by its architect's unconfirmed task'), saying the controller already had the parked-decision notice; the linger row run a second time logs nothing.",
+      "headSha": "963c757df5572096cb7b0ae391a8ef2f5b321b5d",
+      "negativeControl": "With the call removed: 'the close logged [], want one line per decision the tree still owes: [WARN dispatch://LEGION-208/ask/ask-1 ... where=kept for its root, ... ask-2 ... issue=LEGION-209 ..., ... ask-3 ... where=held by its architect's unconfirmed task]'."
     },
     {
-      "criterion": "Nothing else regresses at the merge head",
-      "surface": "The whole daemon module at f8391ab47cc7",
+      "criterion": "The property test holds at the head over every seed it ever failed and over long runs",
+      "surface": "TestKeptDecisionsReachTheCurrentArchitectOnce at the head",
+      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 timeout 900 go test -count=1 -run TestKeptDecisionsReachTheCurrentArchitectOnce ./internal/daemon/ ; LEGION_KEPT_PROPERTY_SEED=<each of 1 4 7 8 14 19 21 22 25 27 29 30 56 66 69 96 110 199 260> timeout 300 go test ... ; LEGION_KEPT_PROPERTY_RUNS=300 timeout 1800 go test -count=1 -timeout 28m -run TestKeptDecisionsReachTheCurrentArchitectOnce ./internal/daemon/",
+      "observed": "Defaults ok (41.9s); all 19 seeds ok; 300 seeds ok (386.5s). Seeds 56, 69, 96, 199 and 260 came from the 300-seed sweep after the first fixes; the hand-over fix (moving claimed rows too, re-keeping what the old architect's held task names) and the oracle's rule for seed 199 (a decision told to the architect of the tree its issue stood in at that time was told correctly; the hand-over moves only what is still kept or held) answer them.",
+      "headSha": "963c757df5572096cb7b0ae391a8ef2f5b321b5d",
+      "negativeControl": "See the first entry: the same model fails 12 of 30 seeds on 78400b18."
+    },
+    {
+      "criterion": "Nothing else regresses, after merging main forward for #2550",
+      "surface": "The whole daemon module at the head; main ef1b05a3 merged in 63f75b29",
       "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go build ./... && go vet ./... && gofmt -l internal cmd; timeout 3000 go test -count=1 -p 1 -timeout 48m ./internal/... ./cmd/... -skip '<Docker-only tests, tmux-on-PATH test, the keeper flake>'",
-      "observed": "build, vet, gofmt clean. Every package ok: admit 282.5s, api 135.6s, workflow 424.2s, store 57.0s, supervise 28.4s, record 40.3s, sandbox 220.0s, workspace 342.2s, cmd/legion 125.2s, ompsessions ok on this UTF8 cluster; daemon 543.1s and intake 110.5s after the shared scratch schema holding the old 62/63 was reset.",
-      "headSha": "f8391ab47cc7e170dc7308273848e4e4f3518f94",
-      "negativeControl": "intake's TestConsumerLagCountsEveryConsumerWhileNATSRefusesTheOldestMessageRead (new on main) panics 'rootless Docker not found', like the other Docker-only tests this pod cannot run; CI runs them."
+      "observed": "build, vet, gofmt clean; exit 0, every package ok (admit 309.0s, api 141.3s, daemon 579.3s, intake 74.1s, store, supervise, record, workflow, sandbox, workspace, cmd/legion and the rest).",
+      "headSha": "963c757df5572096cb7b0ae391a8ef2f5b321b5d",
+      "negativeControl": "The red pi-envoy check at 78400b18 (card-delivery-omp.test.ts: a Dispatch answers line before the Envoy line) is main's, fixed on main by #2550; this branch changes no pi-envoy file, and the merge brings the fix."
     }
   ],
   "filesChanged": [
-    "packages/daemon/internal/store/migrations/0065_parked_decisions.up.sql, 0066_claim_delivered_rows.up.sql (renumbered from 0062, 0063), migration_0065_test.go (renamed from migration_0062_test.go, migrates through 64)",
-    "packages/daemon/.changes/unreleased/INFRA-251-kept-decision-once.yaml (names migration 0066)",
-    "packages/daemon/internal/daemon/daemon.go: projectRecords.EnqueueID wakes the row's lane on commit; outbox_lanes_test.go: TestARowWrittenWithItsIDRunsOnItsLaneWithoutASweep",
-    "packages/daemon/internal/config/stage3.go: DesignGate.OrDefault; internal/workflow/engine.go and parked_decision.go use it",
-    "packages/daemon/internal/daemon/kept_decision_property_test.go: launch and resume refusal, denied and delivery_failed listener modes, per-run counters",
-    "Merge of main 96a7e5ea (98e39d1f), no conflicts"
+    "internal/record/store.go, record.go: DropCatchUps keeps a leased catch-up that carries kept decisions; MoveKeptDecisions; HeldKeptDecisions; ReKeepDeliveredDecisions; parked_decisions.issue",
+    "internal/record/parked_decision.go: RelayParkedDecision records the issue; KeptToldSource comment names the Published key",
+    "internal/store/migrations/0065_parked_decisions.up.sql (issue column), 0066_claim_delivered_rows.up.sql (pending_task_deliveries.kept_decisions), store/claims.go",
+    "internal/daemon/notice_exceptions.go: a superseded receipt timeout hands over (supersededKept)",
+    "internal/supervise/delivery.go, table.go: a root architect's held run task is never confirmed by askFirst or a foreign turn while the root does not hear; Delivery.Kept",
+    "internal/admit/admit.go: readmit's orphan hand-over moves the child subtree's kept decisions and re-keeps what the old architect's unconfirmed task names",
+    "internal/workflow/linger.go: lingerExpired logs each decision still owed",
+    "internal/workflow/catch_up.go, parked_decision.go: DropCatchUps' clock; HandOverKept's doc lists three endings that hand over",
+    "tests: kept_decision_property_test.go, catch_up_settling_test.go, parked_decision_test.go (the close log), notice_exceptions_test.go (message), notice_routing_test.go, supervise/root_task_hold_test.go, admit/handed_over_decisions_test.go, store/migration_0065_test.go"
   ],
   "trickyParts": [
-    "Which start tasks RootHears holds: only a delivery with Phase \"\" and Generation != 0 on a claim that is its tree's root architect. Main writes exactly two such tasks: admission's fresh start of a root (its task names the decisions kept for it, admit.go) and ResumeAwaitedRoot's task (an answered awaiting_person root, by admission's answered branch or by the reconcile when a person already acted). A phase worker's task, an operator's task (Generation 0), a production-check look and the controller's start are never asked. The root hears when it is its tree's root, not lingering, not out of the workflow, and not waiting in todo for a slot (workflow.ArchitectHears). Every main path that writes such a task gives the root a slot or keeps it in awaiting_person first, so it hears: TestARootThatMainsCodeResumesGetsItsTaskWithRootHearsWired shows each prompts exactly as with RootHears nil.",
-    "A held task never wedges the claim: StartedBy (which every start row calls) and queue's ErrDeliveryPending refusal both call sendPending, so the next run's start sends it, even a start carrying no task of its own (property-test seed 101).",
-    "A catch-up's publish and its forget are two transactions; the publish marks the telling (KeptToldSource, under the dedupe key a re-held copy shares) first, so a failed forget or a crash between them never releases a told decision for a second telling (seeds 21, 74), and DropCatchUps keeps a told-but-unforgotten catch-up (seed 159).",
-    "Settlement serializes with every fact (intake.SerializeFacts) because the hand-over reads the root and writes the catch-up a ready would write; a re-run row whose settlement committed finds nothing claimed and writes no second catch-up.",
-    "Two notes the tester logged are fixed here rather than left: the hand-over's catch-up, written with its id (EnqueueID), woke no lane because only Enqueue was wrapped by projectRecords; and the outbox passed the raw design gate, so a configuration with no gate set gave the catch-up policy \"\" while the engine said root-issues."
+    "DropCatchUps' guard reads lease_until against the clock ClaimRow writes leases with, so a crashed lane's expired lease no longer protects its row.",
+    "A receipt timeout marks no telling, so the superseded re-hold hands over everything the row claims; a row that told (publish then failed forget) is settled by settleTold instead.",
+    "The held run task's KeptDecisions travel with the delivery (pending_task_deliveries.kept_decisions), so a hand-over can re-keep for the child what only the old architect's unsent task names.",
+    "Issue deletion has no production path in the daemon, so the vanish log sits at the close (lingerExpired)."
   ],
   "deviations": [
-    "The merge was made because the pull request's migrations collide with main's 0062-0064 (no text conflict). main moved again to 88818a3b before the push, still ending at 0064, so no second merge was made.",
-    "The fingerprint changed (before 271e9e3c82fbec5a66a7cf6a5a6fbd571a5df7f8dde08ab81e283a0cc458cdb5 at e8a595d3, after a3e43cd2852acf65aac8c1cc11331323902551e1e51c01f19f61022db4c21638 at the pure merge 98e39d1f), since main changed files this branch's diff touches; the renumber and the fixes follow in their own commits.",
-    "The listener rollout case the reviewer judged out of scope remains: an earlier listener's 200 forgets a catch-up's decisions before its forward fails."
+    "main merged forward twice in this phase's history; this round's merge (63f75b29, main ef1b05a3) is for #2550, the fix of the red pi-envoy check, which this branch does not touch. Fingerprint before 0b2cf92e18af9fac607e144d2d2ece6a0c59c488a4e226744f6f0958a879cbff at b8a8c223 (the round's pre-merge code), after f3f0426a036e0c96f0bc48196c3f9b5a316a8b1e18e1e45537bde702283ad839 at the pure merge.",
+    "The red lint at 78400b18 was a PR comment (6522962858) naming a MagicDNS host; the architect deleted and reposted it.",
+    "notice_exceptions_test.go's expected log line was updated to the re-hold's new message (its hand-over clause).",
+    "The listener rollout case the reviewer judged out of scope remains."
   ],
   "openQuestions": [],
   "propertyModelGaps": [
@@ -102,5 +113,10 @@
     "Publish answers: denied and delivery_failed are now modelled. An unroutable notice and a re-hold whose budget is spent both finish the row without a telling, so the row's deletion releases its claims (FK on delete set null). The architect's next launch's ready then names them: the same ending as 'refused', which is modelled.",
     "Concurrency and time: every naming claims only rows whose claimed_by is null in its own transaction. The settlement and the hand-over take the facts' advisory lock (intake.SerializeFacts), so two lanes or two daemons cannot claim one row twice or settle one row against a different read. A moving clock only changes when a row runs; the model already runs due rows in random order and drops finishes, which covers any order backoff, lease expiry or a re-hold delay could produce. The model's admission start is checked against the real admission by TestARootThatMainsCodeResumesGetsItsTaskWithRootHearsWired."
   ],
-  "round11Proof": "Round 11's proof entries are in this file at commit e8a595d31f14."
+  "round11Proof": "Round 11's proof entries are in this file at commit e8a595d31f14.",
+  "oracle": [
+    "A catch-up names the generation current when the daemon decided to send it (read at the start of its publish). The publish is network I/O outside every transaction; a re-admission landing inside it is followed by the new generation's own catch-up, queued behind it (earlierNoticeFor). The architect agreed (A).",
+    "A refused or denied catch-up keeps its decisions unclaimed; quiesce ends a refusal as it ends in real life, by relaunching the architect, whose ready names them. The architect agreed to keep that ending (B), on condition that a decision never vanishes silently: lingerExpired logs each decision still owed.",
+    "A decision counts as told when told once to the architect of the tree its issue stood in at that telling. After a child's hand-over, what was still kept or held is owed to the child's architect; one extra telling to the old tree, by a row composed before the hand-over, is allowed."
+  ]
 }
