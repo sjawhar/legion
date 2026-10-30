@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-721",
+  "completed": "2026-10-30T00:58:00Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Drove the same surface independently, not the implementer's processes: its Dispatch stack was gone when this phase started (the pod had been replaced; only the fakes survived), so the tester started Postgres 17 again from the issue volume, built packages/dispatch/e2e/run-server.sh from this branch and served it on port 8790 against a database of its own (dispatch_tester), and started the base build from /legion/scratch/tmp/main-tree on port 8778 (dispatch_main) for the negative control. Every command of the implementer's proof entries A1 through A5 was sent again through the real dispatch CLI against those two servers, with fixtures the tester wrote, and each observation held: the branch keeps the words the base deletes, and repairs the question the base refuses. The Go tests of entries A6 through A10 were re-run on a test database of the tester's own and all pass, the 1,364-body corpus logging the line the implementer quoted. No proof entry was found to be blank or unverifiable."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "A1 - an options edit keeps an option it does not change, node for node",
+      "surface": "the real dispatch CLI against a Dispatch server the tester built and started from this branch (packages/dispatch/e2e/run-server.sh, port 8790, Postgres 17 with pgvector, database dispatch_tester)",
+      "command": "dispatch issue --project TEST --title 'An options edit keeps an option it does not change' --spec-file <an ask whose gRPC option holds bold, a link, a second paragraph and a sub-list>; dispatch edit-ask --ask d1393126-b4b7-4ca0-abc5-305df258db6b --option 'REST: Matches the platform the team already runs' --option 'gRPC: Adds streaming, see the note'; dispatch doc-read --issue TEST-1 --artifact spec.md",
+      "observed": "The REST line reads the new description and the gRPC item is as it was: '- gRPC: **Adds** streaming, see [the note](https://example.com/grpc)', with 'A second paragraph the reviewer wrote under gRPC.' and the '- only if the client team agrees' sub-list under it. The Go test TestAskOptionsEditKeepsWhatItDoesNotWrite, which asserts EqualWithBlockIDs against the node before the edit, passes on the tester's own database.",
+      "headSha": "37cbd586a0b5d4da5dd45a3fc7226ff6c292192e",
+      "negativeControl": "The same three commands against a server built from the base 2b427f93 (port 8778, issue MAIN-2): dispatch doc-read showed '- gRPC: Adds streaming, see the note' - the bold, the link's address, the second paragraph and the sub-list all deleted."
+    },
+    {
+      "criterion": "A2 - an options edit keeps the extra content under the option it rewrites",
+      "surface": "the same server at port 8790, issue TEST-1",
+      "command": "dispatch edit-ask --ask d1393126-b4b7-4ca0-abc5-305df258db6b --option 'gRPC: Adds streaming for the mobile client' --option 'REST: Matches the platform the team already runs' --option 'GraphQL: a new third option'; dispatch doc-read --issue TEST-1 --artifact spec.md",
+      "observed": "The gRPC item's first line reads the new plain text, and its second paragraph and its sub-list are still under it. An earlier edit of the same ask that sent the options in the other order and added a third moved each item with its own label, the gRPC content included, and appended GraphQL last. The Go test TestAskOptionsEditRewritesAnOptionAndKeepsTheRest passes.",
+      "headSha": "37cbd586a0b5d4da5dd45a3fc7226ff6c292192e",
+      "negativeControl": "dispatch edit-ask on the same ask sending REST alone, which would drop the gRPC item: refused 'options: the edit drops the option \"gRPC\", whose list item holds more than its plain line, and the ask-edit route does not delete what a person wrote under an option; its item reads ...; send that option back with this edit, or remove what the item holds with a document edit first (dispatch doc-edit, deleting a block by its id)', and dispatch doc-read showed the document unchanged."
+    },
+    {
+      "criterion": "A2 - an edit that would drop a person's words is refused, whichever shape it takes",
+      "surface": "the same server at port 8790, issues TEST-1, TEST-2 and TEST-5",
+      "command": "dispatch edit-ask --clear-options; the same edit with gRPC renamed to GRPC; on TEST-2 (a document holding two items labelled gRPC) an edit sending one of them; on TEST-5 an edit dropping an option whose line holds an image and no text",
+      "observed": "Each is refused with the same sentence, quoting the item whole: the rename and the cleared list quote the gRPC item; TEST-2's refusal quotes the second gRPC item, so the first-unused-match pairing is what the refusal reports; TEST-5's quotes '- Square: ![the square badge](https://example.com/square.png)', so an item that holds no word is kept too. dispatch doc-read showed the document unchanged after each. The step the refusal names applies: 'dispatch edit-ask --option Round: ... --option Square:' was accepted on TEST-5 and the image is still in the document.",
+      "headSha": "37cbd586a0b5d4da5dd45a3fc7226ff6c292192e",
+      "negativeControl": "The refusal is the control; the accepted edit beside it (sending the quoted option back) shows the route is not simply refusing everything. The CLI refuses two sent options with one label ('ask option labels must be unique'), so a duplicate label can only come from the document."
+    },
+    {
+      "criterion": "A3 - the real command keeps the person's words",
+      "surface": "the same server at port 8790, issue TEST-1",
+      "command": "the three steps of A1, read back with dispatch doc-read --issue TEST-1 --artifact spec.md",
+      "observed": "The output holds the sub-list, the second paragraph, the link's address (https://example.com/grpc) and the bold marks of the gRPC option unchanged; only the option the edit named changed. 40 s later, through the server's settlement passes, the document token was the same (sha256:0a834ea2...), and GET /api/v1/asks/<id> carries the options the document's lines read.",
+      "headSha": "37cbd586a0b5d4da5dd45a3fc7226ff6c292192e",
+      "negativeControl": "The same three steps on the base build (MAIN-2, port 8778) flattened the item to one line."
+    },
+    {
+      "criterion": "A4 - an edit-ask that sends a question repairs an emptied question",
+      "surface": "the same server at port 8790, issue TEST-3",
+      "command": "dispatch artifact --issue TEST-3 --name spec.md --content-file <a version whose ask question paragraph holds only &nbsp;>; dispatch edit-ask --ask f74a03e7-9efd-4888-b6a2-88980febcb2c --urgency high --question 'Which storage should the 4.2 release use, Postgres or SQLite?'; dispatch doc-read --issue TEST-3 --artifact spec.md",
+      "observed": "The edit was accepted ('Ask edited: Which storage should the 4.2 release use, Postgres or SQLite?') and the document holds that question with urgency=\"high\", both options, and the bold, the link and the sub-list under the SQLite option. The block carries no invalid attribute after settlement.",
+      "headSha": "37cbd586a0b5d4da5dd45a3fc7226ff6c292192e",
+      "negativeControl": "The same emptied question and the same question-carrying edit on the base build (MAIN-2): refused 'block: ask block \"transport\" has an empty question', so that decision has no agent path at all."
+    },
+    {
+      "criterion": "A5 - an edit that carries no question is refused with the step that applies",
+      "surface": "the same server at port 8790, issue TEST-3",
+      "command": "dispatch edit-ask --ask f74a03e7-9efd-4888-b6a2-88980febcb2c --urgency high; then the same ask with options alone; then --question '   '",
+      "observed": "The urgency edit and the options-only edit are both refused 'block: ask block \"choice\" has an empty question; send this ask edit again with a question, which writes it into the block'. A question of spaces alone is refused earlier, 'ask question is required'. The document was unchanged after each. A question paragraph holding only an image is refused with that paragraph quoted and the document editor named, so no image is written over.",
+      "headSha": "37cbd586a0b5d4da5dd45a3fc7226ff6c292192e",
+      "negativeControl": "The same urgency edit on the base build: 'block: ask block \"transport\" has an empty question', which names no step."
+    },
+    {
+      "criterion": "A6 and A7 - a broken ask has one named path that keeps every word, and the refusal names a nested decision's own block",
+      "surface": "the Go service with a Postgres of the tester's own (database dispatch_test_tester), package internal/dispatch/docs",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_test_tester?sslmode=disable go test ./internal/dispatch/docs/ -count=1 -timeout 30m -v -run 'TestEditAskRefusalOfAnEmptyQuestionNamesAPathThatApplies|TestSetAskBlockTextRefusalOfNestedDecisionsNamesOnlyWhatBreaksTheRule|TestEditAskRepairsAnEmptyQuestion|TestEditAskOfAnEmptyQuestionNamesTheStep|TestAskOptionsEdit|TestRestoringADecidedWording'",
+      "observed": "PASS for all ten tests (16.565s). The CLI cannot make the A6 state itself - an upload holding a second bullet list after the options is refused by the content rule, as the tester measured - so the service test is the surface that reaches it, which is the surface the plan names.",
+      "headSha": "37cbd586a0b5d4da5dd45a3fc7226ff6c292192e",
+      "negativeControl": "go test -overlay with the merge writing its items back in document order: TestAskOptionsEditPairsAnOptionByItsLabelNotItsPosition fails and every other options test passes, so the suite does read the pairing and not only the preservation."
+    },
+    {
+      "criterion": "A8 - the corpus still reaches a valid decision",
+      "surface": "the Go service with the tester's Postgres, package internal/dispatch/docs",
+      "command": "DISPATCH_TEST_DATABASE_URL=... go test ./internal/dispatch/docs/ -count=1 -timeout 60m -v -run 'TestSetAskBlockTextRefusalOfEveryBrokenBody(HoldingADecision)?LeadsToAValidDecision'",
+      "observed": "PASS (195.451s). '1364 bodies enumerated, 1242 breaking the content rule: 1242 followed to a valid decision, 0 naming no delete and saying why, 0 failing', and for the nested corpus '780 bodies enumerated, 715 breaking the content rule: 816 refusals followed to a valid decision, 342 naming no delete and saying why; 715 of the 715 bodies end with the decision reading as one'.",
+      "headSha": "37cbd586a0b5d4da5dd45a3fc7226ff6c292192e",
+      "negativeControl": "The suite's own noDeleteExplanation no longer excuses the empty-question sentence, so a body that ends there fails rather than passing; the 0 in the count is that assertion holding."
+    },
+    {
+      "criterion": "A10 - the whole package and the route package pass",
+      "surface": "the Go service with the tester's Postgres, packages internal/dispatch/docs and internal/dispatch/api",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=... go test ./internal/dispatch/docs/ -count=1 -timeout 50m (twice: at the implementer's head, then with the tester's new test in the file); DISPATCH_TEST_DATABASE_URL=... go test ./internal/dispatch/api/ -count=1 -timeout 20m -run 'TestAskBlockEdit|Settlement'; and the four api tests of the edited settlement file by name",
+      "observed": "docs: ok 1458.164s at the implementer's head, and ok 1456.682s with the tester's test added, so the added test leaves the package green. api: ok 38.094s for the settlement selection, and TestAskBlockOptionsEditKeepingContentSettlesUnchanged, TestBlockAskOptionsEditWritesAParsedList, TestIdempotentBlockAskEditRewritesNothing and TestDocumentEditOfAnAskBlockStillUpdatesTheRow pass by name (9.102s). Lint, types and every other lane are CI's, read on GitHub, not run here.",
+      "headSha": "37cbd586a0b5d4da5dd45a3fc7226ff6c292192e",
+      "negativeControl": "The same package under the overlay mutant fails, so the run is reading the production file under test and not a cached result."
+    },
+    {
+      "criterion": "The change holds under inputs it must refuse or survive, beyond the acceptance list",
+      "surface": "the real dispatch CLI against the server at port 8790, issues TEST-1, TEST-5, TEST-6, TEST-7",
+      "command": "an option holding a 1,500-line sub-list, then an edit of the other option's line; two dispatch edit-ask calls started at once on one ask; an option description carrying ':::', '## ' and '- ' markers, sent through --options-json; a document whose option item opens with a sub-list and holds no line of its own",
+      "observed": "The 1,500-line sub-list is whole after the edit (all 1,500 lines, the last included), so a preserved list is not weighed on the caller's write budget. Both concurrent edits were accepted, the later list written whole, with the preserved content under gRPC unchanged and no duplicated item. The smuggled markers are escaped into the item ('\\:::', '\\## '), and no block was broken out of. The item that opens with a sub-list makes the ask unreadable, so no ask row exists for it and the options route never reaches it.",
+      "headSha": "37cbd586a0b5d4da5dd45a3fc7226ff6c292192e",
+      "negativeControl": "The injection probe is the control: the description that reads as a new ask block ':::ask{#stolen ...}' wrote no second decision, and dispatch doc-read shows it as text inside the item."
+    },
+    {
+      "criterion": "The suite holds the design decision that pairs an option by its label (a regression lock the tester added)",
+      "surface": "the Go service with the tester's Postgres, package internal/dispatch/docs",
+      "command": "DISPATCH_TEST_DATABASE_URL=... go test ./internal/dispatch/docs/ -count=1 -timeout 10m -v -run 'TestAskOptionsEditPairsAnOptionByItsLabelNotItsPosition'; then the same with -overlay naming a copy of ask_block_text.go whose mergeAskOptions sorts its result back into document order",
+      "observed": "PASS (4.60s) at the head. Under the overlay the new test is the only options test that fails ('options: the block carries option 1 as \"Ship\"/\"Release it today\", not \"Hold\"/\"Wait for review\"'); TestAskOptionsEditKeepsWhatItDoesNotWrite, TestAskOptionsEditRewritesAnOptionAndKeepsTheRest, TestAskOptionsEditRefusesDroppingAnItemHoldingContent, TestAskOptionsEditKeepsACommentAnchoredUnderAnOption and both decided-wording tests stay green, because every one of them sends the options in the document's own order. The reorder the CLI accepts (proof entry A2) had nothing holding it.",
+      "headSha": "f4489714",
+      "negativeControl": "The overlay run above is the control; a second mutant, restoring an unchanged item by its position in the list rather than by its pairing, is caught by this test and by one row of the drop test."
+    }
+  ],
+  "observations": [
+    "The implementer's Dispatch stack and its Postgres were gone at the start of this phase: the pod had been replaced and only the three fakes (ports 22965, 46808, 50331) were still listening. The issue volume kept the data, so Postgres was started again from /legion/scratch/tmp/pgdata on port 5433. The tester's own server is on port 8790 (database dispatch_tester), the base build on port 8778 (dispatch_main), and the test databases dispatch_test_tester and dispatch_test_tester2 are the tester's.",
+    "CI at the tested head 37cbd586 was queued, not finished, for the whole phase (runs 40974714399 and 40974714436; the branch's last completed CI run, at 1494ecb9, was cancelled when the head moved). Nothing of lint, types or the unit lanes is claimed here; the reviewer reads the checks of the head it approves.",
+    "An options edit that rewrites an option drops the marks of the line it replaces (a link's address in the option's own line goes with the description the edit replaces) and keeps every block under that line. That is the plan's recorded decision, pinned by TestAskOptionsEditRewritesAnOptionAndKeepsTheRest; it is reported here because the agent sending the edit cannot see that address before it goes.",
+    "The refusal for an ask whose question paragraph holds only an image names the document editor, a person's surface. An agent has one surface of its own for it, a new version of the document through dispatch artifact, which the refusal does not name; the tester used it to make and unmake that state. No word is lost either way, so this is wording for the reviewer to weigh, not a failure.",
+    "An insert anchored on a block inside an ask lands outside the ask and is accepted, which the implementer recorded as the reason no document edit can write a question into a decision. The tester reproduced it (dispatch doc-edit --ops-json insert before block:<the ask's paragraph> put the paragraph above the whole decision). It is pmdoc's behaviour on main, not this change's.",
+    "The PR body's Thermo line reads 'once at 8924f9d1...: applied -> new head 8924f9d1...', naming one SHA for both the head the pass ran at and the head it produced; 8924f9d1 is the simplify commit itself. Prose for the reviewer."
+  ]
+}
