@@ -1,0 +1,14 @@
+kind: Changed
+body: |-
+  `envoy-infra`'s `gcp:Dispatch` now declares Dispatch's Tailscale Service `svc:<hostname>` itself,
+  after the Cloud SQL instance, so the tailnet name comes back only once an availability-type
+  switch has restarted the database. Breaking: the `tailnetService` input is gone and a consumer
+  passes a `tailscale` provider instead. The front door's Deployment waits for the Service and the
+  instance; the server Deployment no longer waits for the front door, so it comes back inside a
+  cutover's stop, while the listener's still does. A new `databaseWaitsFor` input orders the
+  instance's update after a resource the consumer names. A new `signingKeyGenerations` input makes
+  `DISPATCH_SIGNING_KEY` an ordered key set, so an operator rotates the session signing key in
+  three applies — `[0]`, `[0, 1]`, `[1, 0]`, `[1]` — without signing anyone out; the default `[0]`
+  renders exactly the one key the component always wrote.
+custom:
+  Issue: pr2584
