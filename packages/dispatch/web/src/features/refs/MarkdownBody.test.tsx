@@ -14,8 +14,14 @@ import type {
 import { TextAskBlockCard } from "../doc/AskBlockCard";
 import { MarkdownBody } from "./MarkdownBody";
 import { TextAskCard } from "./markdown-cards";
-import { markdownWorkerThreshold, setParseDeadline, warmMarkdownRenderer } from "./markdown-engine";
-import { flushTasks, installFakeParseWorker, restoreParseWorker } from "./parse-worker-fixture";
+import { setParseDeadline, warmMarkdownRenderer } from "./markdown-engine";
+import { markdownWorkerThreshold } from "./markdown-worker-threshold";
+import {
+  flushTasks,
+  type InstalledParseWorker,
+  installFakeParseWorker,
+  restoreParseWorker,
+} from "./parse-worker-fixture";
 
 function withQueries(children: ReactNode): ReactNode {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -45,12 +51,21 @@ const testWindow = window as unknown as HappyDOMWindow;
 let pageBefore = "about:blank";
 
 describe("Dispatch pictures", () => {
+  // Three of the rows below name a document whose slug is 2,683 characters, which puts their
+  // body past `markdownWorkerThreshold` and so in the parse worker's hands. The page's own
+  // `new Worker(…)` names a module this process cannot serve, so these rows drive the faked one
+  // (`parse-worker-fixture.ts`) and answer it: what they prove - a long name drawn and opened -
+  // is proved on the path the dashboard itself takes for a body that size.
+  let worker: InstalledParseWorker;
+
   beforeEach(() => {
+    worker = installFakeParseWorker();
     pageBefore = window.location.href;
     testWindow.happyDOM.setURL("https://dispatch.test/issues/CORE-1/conversation");
   });
 
   afterEach(() => {
+    restoreParseWorker();
     testWindow.happyDOM.setURL(pageBefore);
   });
 
@@ -250,6 +265,7 @@ describe("Dispatch pictures", () => {
     );
 
     try {
+      await act(() => worker.answer(0));
       const shot = await within(view.container).findByRole("img", { name: "shot" });
       expect(shot.getAttribute("src")).toBe(`/api/v1/issues/CORE-1/artifacts/${slug}/versions/1`);
       expect(shot.closest("a")?.getAttribute("href")).toBe(`/issues/CORE-1/artifacts/${slug}?v=1`);
@@ -291,6 +307,7 @@ describe("Dispatch pictures", () => {
     );
 
     try {
+      await act(() => worker.answer(0));
       const designs = await within(view.container).findAllByRole("link", { name: "design.md" });
       expect(designs).toHaveLength(2);
       for (const link of designs) {
@@ -343,6 +360,7 @@ describe("Dispatch pictures", () => {
     );
 
     try {
+      await act(() => worker.answer(0));
       const designs = await within(view.container).findAllByRole("link", { name: "design.md" });
       expect(designs).toHaveLength(1);
       expect(designs[0]?.getAttribute("href")).toBe(`/issues/CORE-1/artifacts/${slug}`);
@@ -1095,8 +1113,22 @@ function longBody(lead: string): string {
   return `${lead}\n\n${"- x\n".repeat(longItems)}`;
 }
 
+/** A body past the threshold written as plain paragraphs, with no list in it, so the rows below
+ *  count what one task of a paint puts in without the body's finishing pass moving anything
+ *  after it. */
+const paragraphs = Math.ceil(markdownWorkerThreshold / "x\n\n".length) + 200;
+
+function paragraphBody(lead: string): string {
+  return `${lead}\n\n${"x\n\n".repeat(paragraphs)}`;
+}
+
+/** The body's own paragraphs, the lead one included. */
+function topParagraphs(container: HTMLElement): HTMLElement[] {
+  return Array.from(markdownElement(container).querySelectorAll<HTMLElement>(":scope > p"));
+}
+
 /**
- * A body longer than `markdownWorkerThreshold` is parsed in a Web Worker (sjawhar/legion#2403),
+ * A body longer than `markdownWorkerThreshold` is parsed in a Web Worker (sjawhar/legion#2519),
  * so the reader's own thread is free while the heaviest body on the page parses. These rows are
  * what a reader sees of that: the text at once, the formatting when the answer lands, their
  * place in the body kept across it, and - whatever becomes of the worker - a formatted body in
@@ -1188,28 +1220,126 @@ describe("A long body parsed in the worker", () => {
     }
   });
 
-  test("drops an older answer that arrives after a newer one, so only the newest source paints", async () => {
+  // A turn streaming into the live view hands the same body a longer source every frame. The
+  // frame the worker has already started on cannot be taken back, so the page waits for that one
+  // answer and posts the frame the reader is waiting for in its place, rather than one message
+  // per frame: the worker is made to parse exactly one stale frame, its answer paints nothing
+  // because nobody waits for it any more, and the newest frame is what the reader ends on. A
+  // queue that posted each frame as it arrived would have the worker parse every one of them and
+  // would let an older answer land on a body that has moved on (sjawhar/legion#2519).
+  test("gives the worker one stale frame while a turn streams, and paints only the newest", async () => {
     const worker = installFakeParseWorker();
-    const first = longBody("A turn answered out of order");
+    const first = longBody("A turn streaming past the worker");
     const grown = `${first}${"- y\n".repeat(50)}`;
+    const grownAgain = `${grown}${"- z\n".repeat(50)}`;
     const view = render(<MarkdownBody markdown={first} />);
 
     try {
       await worker.waitForRequests(1);
       view.rerender(<MarkdownBody markdown={grown} />);
-      await worker.waitForRequests(2);
-      expect(worker.requests.map(({ markdown }) => markdown)).toEqual([first, grown]);
+      view.rerender(<MarkdownBody markdown={grownAgain} />);
+      await flushTasks();
+      // The worker holds the frame it started on and nothing else: neither frame written since
+      // was posted behind it.
+      expect(worker.requests.map(({ markdown }) => markdown)).toEqual([first]);
 
-      // The newer body is answered first, the older one after it.
-      await act(() => worker.answer(1));
-      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems + 50));
+      // The stale frame's answer lands. Nothing paints from it, and the frame the reader is on
+      // takes its place in the worker.
       await act(() => worker.answer(0));
       await flushTasks();
+      expect(topItems(view.container)).toHaveLength(0);
+      expect(pendingMark(view.container)).toBe("true");
+      expect(worker.requests.map(({ markdown }) => markdown)).toEqual([first, grownAgain]);
 
-      expect(topItems(view.container)).toHaveLength(longItems + 50);
-      expect(topItems(view.container).at(-1)?.textContent).toBe("y");
+      await act(() => worker.answer(1));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(longItems + 100));
+      expect(topItems(view.container).at(-1)?.textContent).toBe("z");
       expect(pendingMark(view.container)).toBeNull();
       expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // Every edit of a long comment, and a streamed turn that crossed the threshold after a short
+  // paint, is a source the element does not hold - and 16,000 elements of it. Put in with one
+  // `replaceChildren` that is 918-971 ms of WebKit's thread (`MarkdownBody.tsx`, `ATTACH_BATCH`),
+  // so what decides is the source, not whether anything is painted here already
+  // (sjawhar/legion#2519).
+  test("slices the paint of a changed source into a body it already shows formatted", async () => {
+    const worker = installFakeParseWorker();
+    const first = paragraphBody("A long comment before its edit");
+    const edited = `${first}${"y\n\n".repeat(50)}`;
+    const view = render(<MarkdownBody markdown={first} />);
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 1));
+
+      view.rerender(<MarkdownBody markdown={edited} />);
+      await act(() => worker.answer(1));
+      // The task the answer lands in puts in one batch of the body and hands the thread back.
+      // A paint of the whole body in one task - what a repaint of the source already painted
+      // here gets - would have every paragraph of it in by now.
+      expect(topParagraphs(view.container).length).toBeLessThan(paragraphs + 51);
+
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 51));
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // A body the engine already has the answer for is rendered in the commit that mounts it, never
+  // pending on the worker - and is still built across tasks, so between them the element holds
+  // part of a body. It carries the marker all the same, which is what a reader's surface, and
+  // every browser row that waits for a body to settle, reads to know the body is not all there.
+  test("marks a body painted in slices from the answer cache as pending until its last piece", async () => {
+    const worker = installFakeParseWorker();
+    const markdown = paragraphBody("A body the engine has already parsed");
+    const first = render(<MarkdownBody markdown={markdown} />);
+    await act(() => worker.answer(0));
+    await waitFor(() => expect(topParagraphs(first.container)).toHaveLength(paragraphs + 1));
+    first.unmount();
+
+    const view = render(<MarkdownBody markdown={markdown} />);
+    try {
+      // The answer came from the cache: the worker was asked for this body once, on the mount
+      // before.
+      expect(worker.requests).toHaveLength(1);
+      expect(topParagraphs(view.container).length).toBeLessThan(paragraphs + 1);
+      expect(pendingMark(view.container)).toBe("true");
+
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 1));
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // The body's finishing pass (`finishBlock`) runs on the sliced path as it does on the
+  // whole-body one: a task item draws its checkbox, ticked as its source is, and a tight item's
+  // paragraph is unwrapped so the item reads as one line.
+  test("draws its task checkboxes and unwraps its tight items when it is painted in slices", async () => {
+    const worker = installFakeParseWorker();
+    const pairs = Math.ceil(markdownWorkerThreshold / "- [ ] todo\n- [x] done\n".length) + 50;
+    const markdown = `A long task list\n\n${"- [ ] todo\n- [x] done\n".repeat(pairs)}`;
+    const view = render(<MarkdownBody markdown={markdown} />);
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topItems(view.container)).toHaveLength(pairs * 2));
+
+      const items = topItems(view.container);
+      const boxes = items.map((item) => item.querySelector<HTMLInputElement>("input"));
+      expect(boxes.every((box) => box?.type === "checkbox" && box.disabled)).toBe(true);
+      expect(boxes.map((box) => box?.checked)).toEqual(
+        Array.from({ length: pairs * 2 }, (_unused, at) => at % 2 === 1)
+      );
+      // Each item is tight, so none of them keeps a paragraph of its own.
+      expect(items.some((item) => item.querySelector("p") !== null)).toBe(false);
     } finally {
       view.unmount();
     }

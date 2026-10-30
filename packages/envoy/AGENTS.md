@@ -1563,7 +1563,15 @@ message, below): kind `block`, id
 as `text.EncodeBlockID` writes it (`refs.BlockRef`). `refs.IndexBlocks` indexes a version's blocks
 in the version writer's transaction, from the same render and extraction as its references: the
 blocks the render's offsets name, which `GET /api/v1/artifacts/{id}/blocks` lists, the first
-holder of a repeated id being the node. A block whose id is longer than `text.MaxBlockIDBytes` is
+holder of a repeated id being the node. A write of more than 2,000 blocks
+(`docs.deferBlockIndexBlocks`, about a tenth of the second an upload is held to) indexes its
+references alone and leaves its blocks owed: migration 0122's trigger marked the version owed when
+its row was inserted, and the block-index reconciliation below indexes them out of the request,
+within 30 s of the write, unless a settlement that writes a version of its own indexes that
+version's blocks first - which it does only where the document changed after the write
+(`docs.contentChangedSinceVersion`). Until the index catches up, a reference into such a document
+resolves to no block, so the mention is listed from the document and a backlink names the document
+rather than the block holding it. A block whose id is longer than `text.MaxBlockIDBytes` is
 no node (`uniqueBlocks`): a mention inside it starts at the innermost node holding it, or at the
 document when none does, and `IndexBlocks` logs a warning naming the document, the version, how
 many such blocks it skipped, the longest one's id bytes and the bound. The version is still
@@ -2045,7 +2053,7 @@ which `maxNesting`'s comment names back), as it was already held to `maxTypedNes
 block there and its line reads as the text it is. So every document this accepts draws in a
 browser as it reads here, and a list or quote this refuses reads in a comment as its own text
 rather than costing the reader the page, which a few hundred `- ` markers on one line did by
-overflowing that parser's stack (sjawhar/legion#2403). The browser counts no footnote definition,
+overflowing that parser's stack (sjawhar/legion#2519). The browser counts no footnote definition,
 which only lets it draw deeper than this accepts, never shallower.
 
 Typed document blocks are declared only in `internal/dispatch/pmdoc/schema/blocks.json`. The

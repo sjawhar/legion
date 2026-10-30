@@ -5,12 +5,12 @@ import type { BlockSchema } from "../../api/types";
 import { setParseWorkerFactory } from "./markdown-engine";
 // The worker's own protocol, which this fake answers; a type import, so nothing of the worker's
 // module runs in the test's process.
-import type { ParseReply, ParseRequest } from "./markdown-parse.worker";
+import type { DocumentJSON, ParseReply, ParseRequest } from "./markdown-parse.worker";
 
 /**
  * The page's parse worker, faked in process, for the rows that prove what a reader sees while a
  * body longer than `markdownWorkerThreshold` is parsed off the page's own thread
- * (sjawhar/legion#2403; `markdown-engine.ts` and `MarkdownBody.test.tsx` hold those rows).
+ * (sjawhar/legion#2519; `markdown-engine.ts` and `MarkdownBody.test.tsx` hold those rows).
  *
  * `markdown-engine.ts` creates its worker through one module-level factory, which
  * `setParseWorkerFactory` replaces, so a row installs this fake in its place and the engine's own
@@ -176,9 +176,9 @@ export function installFakeParseWorker({
       const { request, worker } = await sent(index);
       headless ??= createHeadlessProof({ blockSchema, readOnly: true });
       const engine = await headless;
-      let doc: object | undefined;
+      let doc: DocumentJSON | undefined;
       try {
-        doc = engine.parseMarkdown(request.markdown, request.softBreaks).toJSON();
+        doc = engine.parseMarkdown(request.markdown, request.softBreaks).toJSON() as DocumentJSON;
       } catch {
         doc = undefined;
       }

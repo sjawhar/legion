@@ -40,6 +40,14 @@ func mintBlockID() string {
 // document of 8,000 list items spent about half its parse inside sixteen-byte reads, one per item
 // (the plain list of heavy_bodies_test.go). Every id still comes from those bytes alone, 122 of
 // them as a version 4 UUID holds.
+//
+// google/uuid's own EnableRandPool buffers the same way, and this reader exists instead of it
+// because that switch is process-wide and, as its doc says, "not thread-safe and should only be
+// called when there is no possibility that New or any other UUID Version 4 generation function
+// will be called concurrently": the server mints version 4 UUIDs from other goroutines while a
+// document is parsed (a process id in dispatch/processes, a suggestion row's in dispatch/api), so
+// there is no moment at which it may be turned on. This reader is handed to one call site
+// instead, and the buffer it draws from is this package's own.
 var blockIDEntropy blockIDBytes
 
 // blockIDEntropyIDs is how many ids one read of crypto/rand fills. Each costs sixteen bytes, so

@@ -44,7 +44,7 @@ function unmarkedText(node: ProseMirrorNode): string | undefined {
  * Blocks holding nothing but unmarked words go in as one text node, however many they are: a
  * preview is one run of text, and a body of thousands of plain blocks - the 8,000 items of a
  * list - would otherwise put 16,000 nodes into the page for the three lines a reader sees, which
- * is ~2 s of WebKit's thread to style and lay out (sjawhar/legion#2403). What the preview reads
+ * is ~2 s of WebKit's thread to style and lay out (sjawhar/legion#2519). What the preview reads
  * is the same either way, character for character.
  */
 const paintOneLine: PaintMarkdown = (element, parsed, serializer) => {

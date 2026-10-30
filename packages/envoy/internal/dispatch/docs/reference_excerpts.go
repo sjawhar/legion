@@ -24,7 +24,7 @@ import (
 // rows a block, one in document_blocks and one in document_block_texts. At the bound itself a
 // write of a list of 1,999 blocks took 234, 239 and 252 ms against 144, 145 and 157 ms for the
 // same list one block longer, which defers - 92 ms for 2,000 blocks - and the same difference at
-// 5,000 blocks is 239 ms, 48 µs a block. The heavy write measured for sjawhar/legion#2403 agrees:
+// 5,000 blocks is 239 ms, 48 µs a block. The heavy write measured for sjawhar/legion#2519 agrees:
 // its 8,000-item list body is 8,001 blocks and spends 347 ms in IndexDocumentReferences, 43 µs a
 // block, of a request total of 939-1,130 ms against the 1 s that write is held to. A bullet list
 // is one block for the list and one for each item's paragraph; the list item itself is no block.
@@ -34,8 +34,12 @@ import (
 // a document that stays inline is never what carries its write past the bound. 100 ms ÷ 48 µs a
 // block is 2,083 blocks, and the bound is 2,000 of them, the 92 ms measured above. A document of
 // 1,999 blocks is indexed by its own write and pays that there; one of 2,001 pays nothing in the
-// request, and its blocks reach the index at the settlement that follows. The 8,000-item list
-// pays nothing instead of 347 ms.
+// request, and its blocks reach the index out of it, through the block-index reconciliation,
+// which indexes every document owed one and runs every BlockIndexReconcileInterval, 30 s
+// (RunBlockIndexReconciliation, block_index.go). The settlement the write queues indexes them
+// only where it writes a version of its own, which it does only where the document changed after
+// that write (contentChangedSinceVersion, mutation.go), so an upload nothing follows is the
+// reconciliation's. The 8,000-item list pays nothing instead of 347 ms.
 const deferBlockIndexBlocks = 2000
 
 // IndexDocumentReferences indexes version's markdown, which the calling transaction has just
@@ -45,8 +49,8 @@ const deferBlockIndexBlocks = 2000
 // twice - ReplaceText's render of the replacement, which is the version's markdown, and
 // applyLive's render of the fork, which the ledger records - so the excerpts and blocks are cut
 // from applyLive's render only when the two agree. A document of more blocks than a write indexes
-// in its own request leaves them to the settlement (deferBlockIndexBlocks). It refuses a context
-// that was not joined.
+// in its own request leaves them to the block-index reconciliation (deferBlockIndexBlocks). It
+// refuses a context that was not joined.
 func (s *Service) IndexDocumentReferences(ctx context.Context, artifactID string, version int, markdown string) (model.ReferenceChanges, error) {
 	tx, joined := txFromContext(ctx)
 	if !joined {

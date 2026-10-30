@@ -25,6 +25,9 @@ declare global {
     __heavyBodiesResetAt?: number;
     /** Starts the heartbeat's record again: no gap so far, and the last tick now. */
     __heavyBodiesResetGap?: () => void;
+    /** How far the reader's own scroll moved the page, once `scrollOnTheFirstBatch` has run it;
+     *  0 until then. */
+    __heavyBodiesReaderScrolled?: number;
   }
 }
 
@@ -74,6 +77,11 @@ const markerChain = `${"- ".repeat(15_999)}x`;
 /** 49 items nested on one line, which Go accepts (49 lists and 49 items is 98 of its 100
  *  blocks), then blank lines to the cap. */
 const nested49ThenBlankLines = padTo(`${"- ".repeat(49)}x\n`, "\n", DISPATCH_BODY_MAX);
+
+/** How many items `- x\n` repeated to one character under the worker's threshold spells: the
+ *  last one is cut short of its newline and is a list item all the same. Derived, so the row
+ *  that counts them follows `markdownWorkerThreshold` wherever it is set. */
+const subThresholdItems = Math.ceil((markdownWorkerThreshold - 1) / "- x\n".length);
 
 /** Go's nesting bound, which the browser now counts the same way (`pmdoc/nesting.go`
  *  `maxNesting`): a list and its item each count one, so 50 levels stand and the 51st reads as
@@ -343,9 +351,9 @@ const rows: readonly Row[] = [
   {
     body: padTo("", "- x\n", markdownWorkerThreshold - 1),
     formatted: async (body) => {
-      await expect(body.locator("li")).toHaveCount(1_000);
+      await expect(body.locator("li")).toHaveCount(subThresholdItems);
     },
-    name: "1,000 list items, just under the worker's threshold",
+    name: `${subThresholdItems.toLocaleString("en-US")} list items, just under the worker's threshold`,
   },
 ];
 
@@ -582,10 +590,11 @@ const AT_REST_MS = 600;
  * deep link they land on marks the conversation read, and the `New` mark leaving each of the 13
  * cards once the server answers (`ConversationTab`'s `item.unread`) is 24 px a card: the document
  * loses 312 px and the browser's own scroll anchoring scrolls by it, leaving the card the reader
- * is on 24 px lower than it first rendered. Measured in WebKit on this pod (sjawhar/legion#2403),
- * that landed 600-700 ms after the first read in 2 runs of 21, and the late paint itself moved the
- * content under it by 0 px in the failing runs exactly as in the passing ones. So the first read
- * waits for the page to stop moving; what the paint does to it is what these rows measure.
+ * is on 24 px lower than it first rendered. Measured in WebKit on this pod
+ * (sjawhar/legion#2519), that landed 600-700 ms after the first read in 2 runs of 21, and the
+ * late paint itself moved the content under it by 0 px in the failing runs exactly as in the
+ * passing ones. So the first read waits for the page to stop moving; what the paint does to it
+ * is what these rows measure.
  */
 async function atRest(
   measure: () => Promise<number | undefined>,
@@ -659,6 +668,96 @@ test("a long comment above the reader keeps the comment they are reading where i
     expect(
       Math.abs((after ?? 0) - (before ?? 0)),
       "the comment the reader was on moved when the long body above it formatted"
+    ).toBeLessThan(2);
+  } finally {
+    await alice.close();
+  }
+});
+
+/**
+ * Scrolls the page once, the moment the first batch of the pending body reaches it, so the
+ * reader's scroll lands between two batches of the paint rather than before or after the whole
+ * of it. A `MutationObserver` on the pending element is what sees the batch; `window.scrollBy`
+ * moves the page exactly as a wheel, a key or a drag of the scrollbar does, and what the page
+ * is given to tell them apart by is the same in each case: its own scroll position changed, and
+ * the content under the formatting body with it.
+ */
+async function scrollOnTheFirstBatch(page: Page, by: number): Promise<void> {
+  await page.evaluate((distance) => {
+    const pending = document.querySelector("[data-markdown-pending]");
+    if (pending === null) {
+      throw new Error("no body is waiting on the parse worker");
+    }
+    window.__heavyBodiesReaderScrolled = 0;
+    const observer = new MutationObserver(() => {
+      if (pending.childElementCount === 0) {
+        return;
+      }
+      observer.disconnect();
+      const from = window.scrollY;
+      window.scrollBy(0, distance);
+      window.__heavyBodiesReaderScrolled = window.scrollY - from;
+    });
+    observer.observe(pending, { childList: true });
+  }, by);
+}
+
+// A reader does not sit still for the ~32 batches a body of 8,000 items lands in. With the
+// reader's place read once before the first batch and put back after the last, a reader who
+// scrolled by S while the body formatted was carried back by exactly S - the correction for the
+// body's growth swallowed their own scroll whole (sjawhar/legion#2519). The row scrolls between
+// two batches and asks for exactly one thing: the card they are reading ends where their scroll
+// put it, with the rest of the body still landing above it.
+test("a reader who scrolls while a long body above them formats keeps where they scrolled to", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "chromium" && testInfo.project.name !== "webkit",
+    "the reader's place is proven in Chromium and WebKit"
+  );
+  const issue = await seedIssue("A reader scrolling through a late paint");
+  for (let turn = 1; turn <= 12; turn += 1) {
+    await createComment(issue.key, { body: `Turn ${turn} is short and already formatted.` }, agent);
+  }
+  const long = await createComment(issue.key, { body: plainList }, agent);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const held = await holdTheWorkerChunk(alice);
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/comments/${long.id}`);
+    const cards = page.locator('[data-turn^="comment:"]');
+    await expect(cards).toHaveCount(13);
+    const longCard = cards.first();
+    await expect(longCard.locator("[data-markdown-pending]")).toHaveCount(1);
+    await expectTheWorkerWasAskedFor(held);
+
+    const reading = cards.last();
+    await reading.scrollIntoViewIfNeeded();
+    await expect(reading).toBeVisible();
+    const before = await atRest(
+      async () => (await reading.boundingBox())?.y,
+      "the comment the reader is on"
+    );
+    expect(before, "the comment the reader is on is on screen").not.toBeUndefined();
+
+    // Back up through the turns they have read: the deep link left them at the end of the page,
+    // where scrolling further down moves nothing.
+    await scrollOnTheFirstBatch(page, -200);
+    held.release();
+    await expect(markdownBody(longCard).locator("li")).toHaveCount(8_000);
+    await expectSettled(longCard);
+
+    const scrolled = await page.evaluate(() => window.__heavyBodiesReaderScrolled ?? 0);
+    expect(
+      Math.abs(scrolled),
+      "the reader scrolled while the body above them formatted"
+    ).toBeGreaterThan(0);
+    const after = (await reading.boundingBox())?.y;
+    expect(after, "the comment the reader is on is still on screen").not.toBeUndefined();
+    expect(
+      Math.abs((after ?? 0) - ((before ?? 0) - scrolled)),
+      "the reader was carried off the place they scrolled to while the body above them formatted"
     ).toBeLessThan(2);
   } finally {
     await alice.close();

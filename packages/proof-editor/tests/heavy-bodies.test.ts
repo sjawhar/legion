@@ -1,5 +1,5 @@
 /**
- * The bodies that froze a reader's browser tab (sjawhar/legion#2403): a long list, a list or a
+ * The bodies that froze a reader's browser tab (sjawhar/legion#2519): a long list, a list or a
  * quote followed by lines carrying no marker of their own, a run of brackets, and lists nested
  * deeply. Each parses here in time a reader can wait through, and the blocks of each nest no
  * deeper than the document service accepts, so a body the service stores reads the same in the

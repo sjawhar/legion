@@ -8,7 +8,7 @@
  * container runs its continuation on every line, so a body of D nested items and N lines costs
  * D*N, and a chain of a few hundred openers on one line also overflows the stack of Milkdown's
  * parser and of prosemirror-model's `DOMSerializer`, which costs a reader the page rather than the
- * body (sjawhar/legion#2403). An opener past the bound therefore does not open here either; it
+ * body (sjawhar/legion#2519). An opener past the bound therefore does not open here either; it
  * reads as the text it is, the way a `:::` opener past `maxDirectiveNesting` does
  * (./directive-container.ts). A body the service accepted nests within the bound, so no opener in
  * one is ever refused and it reads exactly as it read before.
@@ -38,7 +38,6 @@
  */
 
 import { blockQuote, list } from "micromark-core-commonmark";
-import { markdownLineEnding } from "micromark-util-character";
 import type {
   Code,
   Construct,
@@ -69,41 +68,91 @@ declare module "micromark-util-types" {
  */
 export const maxBlockNesting = 100;
 
-/** Per parse, the depth of the innermost container whose continuation passed a line. */
-interface Continued {
-  /** The line `depth` was last recorded on. */
+/**
+ * Per parse, what the document tokenizer has found of the containers around its lines: the depths
+ * recorded for the line it is on, and the directive containers ./directive-container.ts follows
+ * across lines. The two modules count different containers over the same lines, so one record
+ * holds both counts: a continuation records its depth once per line, and every start, here or
+ * there, reads what the line stands inside.
+ */
+export interface ParseRecord {
+  /** The line `blocks` and `directives` were last recorded on. */
   line: number;
-  /** How many blocks stand around what that line holds. */
-  depth: number;
+  /**
+   * How many blocks stand around what that line holds: the depth of the innermost container whose
+   * continuation passed it. The document tokenizer runs continuations outermost first and stops
+   * at the first that fails, so the last one to record on a line is the innermost container still
+   * open around it; a continuation records only where it succeeded, so one that failed leaves the
+   * line at its parent's depth.
+   */
+  blocks: number;
+  /**
+   * How many directive containers are open around that line, by the same reading. A start only
+   * reads it, so a start that micromark runs inside `effects.check` and throws away cannot change
+   * it.
+   */
+  directives: number;
+  /** The depth of the innermost directive container that is open and not closed. */
+  openDirectives: number;
+  /**
+   * The line on which the continuation of a closed directive container, still on the container
+   * stack, last ran: every container around it went on there. It is 0 once that block exits.
+   */
+  reachedClosedDirective: number;
 }
 
-const continued = new WeakMap<ParseContext, Continued>();
+const parses = new WeakMap<ParseContext, ParseRecord>();
+
+/** The record of `context`'s parse, made on the first call. */
+export function parseRecord(context: TokenizeContext): ParseRecord {
+  let record = parses.get(context.parser);
+  if (record === undefined) {
+    record = { line: 0, blocks: 0, directives: 0, openDirectives: 0, reachedClosedDirective: 0 };
+    parses.set(context.parser, record);
+  }
+  return record;
+}
 
 /**
- * Records that a container whose content stands inside `depth` blocks went on at the current line.
- * The document tokenizer runs continuations outermost first and stops at the first that fails, so
- * the last one to record on a line is the innermost container still open around it; a continuation
- * records only where it succeeded, so one that failed leaves the line at its parent's depth.
+ * The record to record a depth of the current line into: a record of an earlier line holds no
+ * container of this one, so both depths start again at 0.
  */
-export function recordContinued(context: TokenizeContext, depth: number): void {
-  let at = continued.get(context.parser);
-  if (at === undefined) {
-    at = { line: 0, depth: 0 };
-    continued.set(context.parser, at);
+function recordToWrite(context: TokenizeContext): ParseRecord {
+  const record = parseRecord(context);
+  const line = context.now().line;
+  if (record.line !== line) {
+    record.line = line;
+    record.blocks = 0;
+    record.directives = 0;
   }
-  at.line = context.now().line;
-  at.depth = depth;
+  return record;
+}
+
+/** Records that a container whose content stands inside `depth` blocks went on at the current line. */
+export function recordContinued(context: TokenizeContext, depth: number): void {
+  recordToWrite(context).blocks = depth;
+}
+
+/** Records that `depth` directive containers are open around the current line. */
+export function recordDirectivesAround(context: TokenizeContext, depth: number): void {
+  recordToWrite(context).directives = depth;
 }
 
 /**
  * How many blocks stand around a container opening now: the one that opened before it on this
  * line, or else the innermost one whose continuation passed the line.
  */
-export function openAround(context: TokenizeContext): number {
+export function blocksAround(context: TokenizeContext): number {
   const opened = openedOnLine(context);
   if (opened !== undefined) return opened._nestDepth ?? 0;
-  const at = continued.get(context.parser);
-  return at !== undefined && at.line === context.now().line ? at.depth : 0;
+  const record = parses.get(context.parser);
+  return record !== undefined && record.line === context.now().line ? record.blocks : 0;
+}
+
+/** How many directive containers are open around the current line; it never makes a record. */
+export function directivesAround(context: TokenizeContext): number {
+  const record = parses.get(context.parser);
+  return record !== undefined && record.line === context.now().line ? record.directives : 0;
 }
 
 /**
@@ -131,20 +180,16 @@ function openedOnLine(context: TokenizeContext): Token | undefined {
 }
 
 /**
- * Holds micromark's `list` and `blockQuote` to `maxBlockNesting`, and takes a blank line's list
- * continuation without the `blankLine` check. It runs once; a second call does nothing, so every
- * import of the module that installs it leaves the two constructs rewritten exactly once.
- *
- * The fast path goes on first, so that `bound` wraps it and a blank line still records the depth
- * its list went on at.
+ * Holds micromark's `list` and `blockQuote` to `maxBlockNesting`. It runs once; a second call does
+ * nothing, so every import of the module that installs it leaves the two constructs rewritten
+ * exactly once.
  */
 export function boundBlockNesting(): void {
-  takeBlankLineFast(list);
   bound(list, 2, (state) => state.type === undefined);
   bound(blockQuote, 1, (state) => state.open !== true);
 }
 
-/** Whether a construct, or a construct's continuation, already carries one of the rewrites below. */
+/** Whether a construct already carries the rewrite below. */
 const rewritten = new WeakSet<object>();
 
 /** The container state micromark set before it ran a container's start or continuation. */
@@ -195,7 +240,7 @@ function bound(
     return (code: Code) => {
       depth = 0;
       if (isFresh(state)) {
-        depth = openAround(this) + opens;
+        depth = blocksAround(this) + opens;
         if (depth > maxBlockNesting) return nok(code);
         state._nestDepth = depth;
       }
@@ -222,47 +267,5 @@ function bound(
       },
       nok
     );
-  };
-}
-
-/**
- * Takes a blank line's list continuation without asking `blankLine` whether the line is blank.
- *
- * The continuation opens with `effects.check(blankLine, onBlank, notBlank)`
- * (micromark-core-commonmark/lib/list.js), and `blankLine` only reads whether the rest of the line
- * is whitespace. Where the line is already over - the code is a line ending or the end of the
- * document - the answer is yes, and the check's store and restore, and the `blankLine` dispatch,
- * are work for nothing. A line of only spaces or tabs is over here too, once the continuations
- * above have taken their indentation. Every open list item runs that check once per blank line, so
- * a body of D nested items and N blank lines runs D*N of them; on a body of 50 nested items and
- * 32 KB of blank lines it is about two fifths of what micromark spends.
- *
- * `onBlank` then runs `factorySpace(effects, ok, "listItemIndent", size + 1)`, which consumes
- * nothing where the code is a line ending, so this leaves the state the original leaves:
- * `furtherBlankLines` set from `initialBlankLine`, `_closeFlow` cleared.
- */
-function takeBlankLineFast(construct: Construct): void {
-  const continuation = construct.continuation;
-  if (continuation === undefined || rewritten.has(continuation)) return;
-  rewritten.add(continuation);
-
-  const onLine = continuation.tokenize;
-  continuation.tokenize = function fastBlankLine(
-    this: TokenizeContext,
-    effects: Effects,
-    ok: State,
-    nok: State
-  ): State {
-    let slow: State | undefined;
-    return (code: Code) => {
-      if (code === null || markdownLineEnding(code)) {
-        const state = containerStateOf(this);
-        state._closeFlow = undefined;
-        state.furtherBlankLines = state.furtherBlankLines || state.initialBlankLine;
-        return ok(code);
-      }
-      slow ??= onLine.call(this, effects, ok, nok);
-      return slow(code);
-    };
   };
 }

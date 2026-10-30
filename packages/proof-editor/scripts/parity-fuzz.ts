@@ -14,13 +14,12 @@
  *   The HTML micromark writes and the mdast tree mdast-util-from-markdown builds, positions
  *   included, must be identical to the unpatched packages', in plain, GFM and GFM + typed-block
  *   parses. Any difference is a defect in a patch.
- * - **The bound and the blank-line fast path** (../src/block-nesting.ts). The bound is the one
- *   change here that may alter a reading, and only for a document the document service refuses:
- *   a list or quote opener standing past `maxBlockNesting` reads as the text it is. So the
- *   patched engine reads every document twice, once before `boundBlockNesting()` and once after,
- *   and every document whose reading changed is put to Go: `pmdoc.Parse` and
- *   `pmdoc.ParseForWrite` must both refuse it (the dump gen/differential.sh runs). A document the
- *   fast path changed, or any other document the bound changed, fails the run.
+ * - **The bound** (../src/block-nesting.ts). The bound is the one change here that may alter a
+ *   reading, and only for a document the document service refuses: a list or quote opener
+ *   standing past `maxBlockNesting` reads as the text it is. So the patched engine reads every
+ *   document twice, once before `boundBlockNesting()` and once after, and every document whose
+ *   reading changed is put to Go: `pmdoc.Parse` and `pmdoc.ParseForWrite` must both refuse it
+ *   (the dump gen/differential.sh runs). Any other document the bound changed fails the run.
  *
  * The oracle is installed under `$TMPDIR`, at the versions this workspace resolves, and the
  * workspace's own `node_modules` is never written to. The run asserts that the oracle's sources
@@ -95,19 +94,28 @@ function options(): Settings {
 // ---------------------------------------------------------------------------------------------
 // The two dependency trees.
 
-/** The packages the fuzz loads, and the patch each one's source must or must not carry. */
+/** The packages the fuzz loads, and the sources each one's patch must or must not have changed. */
 const packages = [
-  { name: "micromark", file: "lib/initialize/document.js", marker: "lazyScanFrom" },
-  { name: "micromark-core-commonmark", file: "lib/label-end.js", marker: "_labelEndSeen" },
+  {
+    name: "micromark",
+    sources: [{ file: "lib/initialize/document.js", marker: "lazyScanFrom" }],
+  },
+  {
+    name: "micromark-core-commonmark",
+    sources: [
+      { file: "lib/label-end.js", marker: "_labelEndSeen" },
+      { file: "lib/list.js", marker: "markdownLineEnding" },
+    ],
+  },
   {
     name: "micromark-extension-gfm-footnote",
-    file: "lib/syntax.js",
-    marker: "_gfmFootnoteCallStop",
+    sources: [{ file: "lib/syntax.js", marker: "_gfmFootnoteCallStop" }],
   },
   {
     name: "mdast-util-from-markdown",
-    file: "lib/index.js",
-    marker: "function prepareList(events, start, length, insertions)",
+    sources: [
+      { file: "lib/index.js", marker: "function prepareList(events, start, length, insertions)" },
+    ],
   },
 ] as const;
 
@@ -135,11 +143,13 @@ function locate(from: string): Tree {
   return at;
 }
 
-/** Whether each package of a tree carries its patch, by package name. */
+/** Whether each package of a tree carries every part of its patch, by package name. */
 function patchState(at: Tree): Record<string, boolean> {
   const state: Record<string, boolean> = {};
-  for (const { name, file, marker } of packages) {
-    state[name] = readFileSync(join(at[name], file), "utf8").includes(marker);
+  for (const { name, sources } of packages) {
+    state[name] = sources.every(({ file, marker }) =>
+      readFileSync(join(at[name], file), "utf8").includes(marker)
+    );
   }
   return state;
 }
@@ -467,7 +477,7 @@ function specPath(): string {
   return path;
 }
 
-/** The superlinear shapes of sjawhar/legion#2403, each small enough for the unpatched packages. */
+/** The superlinear shapes of sjawhar/legion#2519, each small enough for the unpatched packages. */
 function heavyShapes(): [string, string][] {
   const definitions = "[a]: /u\n[^1]: note\n\n";
   const shapes: [string, string][] = [

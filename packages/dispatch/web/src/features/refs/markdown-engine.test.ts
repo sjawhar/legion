@@ -3,12 +3,8 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import serverBlockSchema from "../../../../../envoy/internal/dispatch/pmdoc/schema/blocks.json";
 import type { BlockSchema } from "../../api/types";
 import * as schemaModule from "../doc/schema";
-import {
-  type MarkdownRendering,
-  markdownWorkerThreshold,
-  renderWithEngine,
-  warmMarkdownRenderer,
-} from "./markdown-engine";
+import { type MarkdownRendering, renderWithEngine, warmMarkdownRenderer } from "./markdown-engine";
+import { markdownWorkerThreshold } from "./markdown-worker-threshold";
 import { flushTasks, installFakeParseWorker, restoreParseWorker } from "./parse-worker-fixture";
 
 const blockSchema = serverBlockSchema as unknown as BlockSchema;
@@ -53,7 +49,7 @@ test("a parse the engine refuses leaves the next parses of unrelated text intact
 // The boundary the browser rows measure (`e2e/heavy-bodies.e2e.ts`, whose two shortest rows sit
 // one character under it): a body of exactly `markdownWorkerThreshold` characters is parsed
 // where every body always was, on the page's own thread, and one character more is parsed in the
-// worker (sjawhar/legion#2403).
+// worker (sjawhar/legion#2519).
 describe("the parse worker's threshold", () => {
   afterEach(restoreParseWorker);
 

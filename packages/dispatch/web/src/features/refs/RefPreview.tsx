@@ -210,7 +210,7 @@ function attachTriggers(): () => void {
   /** Where the pointer last was, so a `pointermove` the reader made can be told from the one the
    *  engine makes itself: WebKit and Firefox both dispatch a move at the pointer's own place
    *  after the page scrolls under it, to settle `:hover` on whatever is under it now
-   *  (sjawhar/legion#2403). The reader moving is the position changing. */
+   *  (sjawhar/legion#2519). The reader moving is the position changing. */
   let pointerWas: { x: number; y: number } | undefined;
   /** Anything the reader did that moves the pointer or the page, so neither a boundary event nor
    *  a scroll after it is read as the page moving by itself: a wheel they turned, a key they
@@ -623,7 +623,7 @@ export function RefPreviewHost(): ReactNode {
       // the reader is reading must not be taken away by that. It is the same page movement the
       // `pointerout` rule above protects it from, reported as a scroll rather than as a boundary
       // event, and in WebKit and Firefox the scroll is the one that arrives first
-      // (sjawhar/legion#2403). The reader's own scroll - a wheel, a key, a drag of the scrollbar
+      // (sjawhar/legion#2519). The reader's own scroll - a wheel, a key, a drag of the scrollbar
       // - still closes it, and so does any scroll once they have moved the pointer away, since
       // leaving the zone closes the card itself. An anchor that holds keyboard focus keeps its
       // card either way: focusing it may itself scroll it into view.

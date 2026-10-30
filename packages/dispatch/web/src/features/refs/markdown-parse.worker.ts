@@ -1,7 +1,7 @@
 /**
  * The Web Worker that parses a long Markdown body for `markdown-engine.ts`: the same read-only
  * headless Proof engine the page parses with, off the reader's own thread, so no body under the
- * server's cap holds the tab while it is read (sjawhar/legion#2403). The page creates it with
+ * server's cap holds the tab while it is read (sjawhar/legion#2519). The page creates it with
  * `new Worker(new URL(…), { type: "module" })` once a body longer than `markdownWorkerThreshold`
  * is rendered, so Vite bundles this module and the engine as the worker's own chunk, fetched by
  * a page that holds such a body and by no other.
@@ -51,9 +51,22 @@ export interface ParseRequest {
   softBreaks: SoftBreaks;
 }
 
+/** A document, or one node of it, as `ProseMirrorNode.toJSON()` writes it: what this worker
+ *  answers with, and what `documentFromJSON` (`markdown-engine.ts`) turns back into a node of
+ *  the page's own schema. */
+export interface DocumentJSON {
+  readonly type: string;
+  readonly attrs?: Record<string, unknown>;
+  readonly content?: readonly DocumentJSON[];
+  readonly marks?: readonly { readonly type: string; readonly attrs?: Record<string, unknown> }[];
+  readonly text?: string;
+}
+
 /** What the worker posts: that it is ready, or the answer to one request. An answer with no
  *  `doc` is a body the parser refused. */
-export type ParseReply = { ready: true } | { id: number; doc?: object; openMermaidFence?: boolean };
+export type ParseReply =
+  | { ready: true }
+  | { id: number; doc?: DocumentJSON; openMermaidFence?: boolean };
 
 /** The dedicated worker's own scope: `self`, typed as far as this module uses it (the SPA's
  *  TypeScript program carries the DOM library, not the worker one). */
@@ -79,7 +92,7 @@ function answerParseRequest(
     return { id };
   }
   return {
-    doc: parsed.toJSON() as object,
+    doc: parsed.toJSON() as DocumentJSON,
     id,
     openMermaidFence: endsInOpenMermaidFence(parsed, markdown, (source) => {
       try {

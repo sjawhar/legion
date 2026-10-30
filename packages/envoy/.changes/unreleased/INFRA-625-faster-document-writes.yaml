@@ -2,4 +2,4 @@ kind: Fixed
 body: 'Dispatch reads a document of many blocks faster when it writes one: block ids are minted from a buffered read of the system random source rather than one read per block, and the tab-indentation check is skipped for a source that holds no tab. What a document write stores is unchanged.'
 time: 2026-10-29T23:56:35.938137229Z
 custom:
-    Issue: pr2519
+    Issue: INFRA-625

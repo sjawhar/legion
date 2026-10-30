@@ -2,4 +2,4 @@ kind: Fixed
 body: 'Reading a comment, message or ask whose body holds a long list, a deeply nested list, a quote followed by lines without `>`, or a long run of `[` and `]` no longer freezes the browser tab. Four patched parser dependencies (micromark, micromark-core-commonmark, micromark-extension-gfm-footnote and mdast-util-from-markdown) make each of those shapes cost time in proportion to its length rather than to its square, without changing what any of them reads. At the 32,000-character body cap, in Chromium on a three-core pod: a quote followed by lines without `>` took about 21.7 s to parse and now takes about 0.6 s, a list item followed by such lines 18.7 s and now 0.5 s, and a run of 15,000 brackets 10.2 s and now 0.2 s.'
 time: 2026-10-29T23:56:14.220207311Z
 custom:
-    Issue: pr2519
+    Issue: INFRA-625

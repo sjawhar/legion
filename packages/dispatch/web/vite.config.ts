@@ -20,7 +20,7 @@ import {
  * condition answers from the `character-entities` table instead - the table Bun, Node, the unit
  * suites and the pmdoc fixture generator already run - so a body reads the same above and below
  * the parse worker's threshold, and the same as the generator that pins Go's fixtures
- * (sjawhar/legion#2403), for 11.6 KB gzipped on the page's bundle.
+ * (sjawhar/legion#2519), for 11.6 KB gzipped on the page's bundle.
  *
  * The package publishes no `./index.js` subpath, so the file is resolved rather than named: from
  * the editor, which `micromark-core-commonmark` is a dependency of, and from that package, which

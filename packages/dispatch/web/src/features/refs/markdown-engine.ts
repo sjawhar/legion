@@ -5,7 +5,7 @@ import { useLayoutEffect, useState } from "react";
 import type { BlockSchema } from "../../api/types";
 import { loadBlockSchema } from "../doc/schema";
 import { renderAskBlockShell, renderTypedBlock } from "../doc/typed-block-drawing";
-import type { ParseReply, ParseRequest, ParseSchema } from "./markdown-parse.worker";
+import type { DocumentJSON, ParseReply, ParseRequest, ParseSchema } from "./markdown-parse.worker";
 import { markdownWorkerThreshold } from "./markdown-worker-threshold";
 import { referenceSpans } from "./reference-spans";
 import {
@@ -15,6 +15,7 @@ import {
   pictureReference,
   shortForm,
 } from "./routes";
+import { rememberUpTo, type WorkerJob, WorkerQueue } from "./worker-queue";
 
 /** What a single newline inside a paragraph becomes, chosen per parse: `"space"` (the document
  *  default, hard-wrapped Markdown is one paragraph) or `"line"` (text whose author meant its
@@ -165,10 +166,6 @@ export async function warmMarkdownRenderer(): Promise<void> {
   await loadEngine(await loadBlockSchema());
 }
 
-/** The longest body parsed on the page's own thread, which a Playwright spec reads from
- *  `markdown-worker-threshold.ts`, the module that carries it and imports nothing. */
-export { markdownWorkerThreshold };
-
 /** How long the worker may hold one body before the page parses it itself. It runs from the
  *  moment the worker can start on that body, never while its chunk is still downloading, as the
  *  diagram renderer's own limit does (`mermaid-diagrams.ts`). */
@@ -219,52 +216,21 @@ interface ParsedAnswer {
   readonly openMermaidFence: boolean | undefined;
 }
 
-/** One render waiting on a body's parse. */
-type ParseWaiter = (answer: ParsedAnswer) => void;
-
-/** One body the worker is parsing, or is about to. */
-interface SentBody {
+/** One body the parse worker is parsing, or is about to (`worker-queue.ts`). */
+interface SentBody extends WorkerJob {
   /** The engine its answer becomes a document of, and that parses it here if the worker cannot. */
   readonly engine: MarkdownEngine;
-  readonly id: number;
-  /** Its entry in the answer cache: the schema version, the soft-break policy and the source. */
+  /** Its entry in the answer cache, and its place in the queue: the schema version, the
+   *  soft-break policy and the source. */
   readonly key: string;
   readonly markdown: string;
-  /** It has been posted to the worker the page holds, which is parsing it: the one body the
-   *  worker has. */
-  posted: boolean;
   readonly softBreaks: SoftBreaks;
-  /** Every render waiting on it; a body two surfaces draw at once is sent once. */
-  readonly waiters: ParseWaiter[];
-  /** Its deadline, armed once the worker can have started on it. */
-  timer: number | undefined;
 }
 
 let createParseWorker: ParseWorkerFactory | undefined;
-let parseWorker: Worker | undefined;
-/** The worker has posted `{ ready: true }`: it starts on a body as soon as it has one. */
-let workerReady = false;
-/** The bodies waiting on the worker, oldest first; the first is the one it holds. */
-let sentBodies: SentBody[] = [];
-let lastBodyId = 0;
-/** A cancel has queued `dropAbandonedBodies` and it has not run yet. */
-let dropQueued = false;
-/** No worker will parse for this page: one could not be created, its chunk did not load, or one
- *  crashed. Every long body is parsed on the page from then on - the reader waits, and then
- *  reads the body formatted, which is never the parser refusing it. */
-let noParseWorker = false;
 /** `PARSE_TIME_LIMIT_MS`, unless a test shortened it through `setParseDeadline`. */
 let deadlineMs = PARSE_TIME_LIMIT_MS;
 const answers = new Map<string, ParsedAnswer>();
-
-/** A document, or one node of it, as `ProseMirrorNode.toJSON()` writes it. */
-interface DocumentJSON {
-  readonly type: string;
-  readonly attrs?: Record<string, unknown>;
-  readonly content?: readonly DocumentJSON[];
-  readonly marks?: readonly { readonly type: string; readonly attrs?: Record<string, unknown> }[];
-  readonly text?: string;
-}
 
 /**
  * The document `json` describes, as a document of `schema`.
@@ -285,169 +251,15 @@ function documentFromJSON(schema: Schema, json: DocumentJSON): ProseMirrorNode {
   return schema.nodes[json.type].create(json.attrs, content, marks);
 }
 
-/** Keeps `answer` under `key`, dropping the entry read longest ago where the cache is full. */
-function remember(key: string, answer: ParsedAnswer): void {
-  if (answers.size >= ANSWER_LIMIT) {
-    const oldest = answers.keys().next();
-    if (oldest.done !== true) answers.delete(oldest.value);
-  }
-  answers.set(key, answer);
-}
-
 /** Parses `body` here, for a worker that could not: the reader waits for a parse on their own
- *  thread, and then reads the body formatted. A body no render waits for any more is not parsed
- *  at all, so a page nobody is reading costs the thread nothing. */
-function parseOnThePage(body: SentBody): void {
-  if (body.waiters.length === 0) {
-    return;
-  }
+ *  thread, and then reads the body formatted. */
+function parseOnThePage(body: SentBody): ParsedAnswer {
   const answer: ParsedAnswer = {
     openMermaidFence: undefined,
     parsed: body.engine.parse(body.markdown, body.softBreaks),
   };
-  remember(body.key, answer);
-  for (const waiter of [...body.waiters]) {
-    waiter(answer);
-  }
-}
-
-/** Terminates the worker, which stops the parse it is running, and forgets it and every body it
- *  held, which this answers so the caller can place them: an answer the worker posted before is
- *  dropped, and the next body starts a fresh one. */
-function stopParseWorker(): SentBody[] {
-  const held = sentBodies;
-  sentBodies = [];
-  for (const body of held) {
-    window.clearTimeout(body.timer);
-    body.timer = undefined;
-    // The worker it was posted to is gone, so a body sent to the next one is posted again.
-    body.posted = false;
-  }
-  parseWorker?.terminate();
-  parseWorker = undefined;
-  workerReady = false;
-  return held;
-}
-
-/** Starts the deadline of the body the worker is on, once it can be on one. */
-function armDeadline(): void {
-  const oldest = sentBodies[0];
-  if (oldest === undefined || !workerReady || oldest.timer !== undefined) {
-    return;
-  }
-  oldest.timer = window.setTimeout(() => {
-    // The worker had its deadline and answered nothing: it is terminated, which stops that
-    // parse, this body is parsed on the page, and the bodies behind it go to a fresh worker.
-    for (const body of stopParseWorker()) {
-      if (body !== oldest) {
-        sendToWorker(body);
-      }
-    }
-    parseOnThePage(oldest);
-  }, deadlineMs);
-}
-
-/**
- * Posts the body at the head of the queue, once there is a worker ready to start on it and it
- * holds nothing else. The worker parses one body at a time and the page keeps the rest: a turn
- * streaming into the live view abandons the frames behind the one the reader waits for before
- * the worker ever sees them (`dropAbandonedBodies`), where a message already posted could not be
- * taken back, and the worker starts on the frame the reader is waiting for rather than parsing
- * its way to it through every stale one.
- */
-function postNextBody(): void {
-  const next = sentBodies[0];
-  if (next === undefined || next.posted || !workerReady || parseWorker === undefined) {
-    return;
-  }
-  next.posted = true;
-  parseWorker.postMessage({
-    id: next.id,
-    markdown: next.markdown,
-    softBreaks: next.softBreaks,
-  } satisfies ParseRequest);
-}
-
-/**
- * Drops every body no render waits for any more, so a turn streaming into the live view leaves
- * the worker only the frame someone is reading. It runs on the microtask after a cancel, not in
- * it: React runs a layout effect's cleanup and the next run of it in one commit, so a body the
- * same commit asks for again keeps its place in the worker's queue, and its answer.
- *
- * A body the worker is already parsing is parsed to the end - a message cannot be taken back -
- * and its answer is dropped on arrival, with nothing kept for a source the page has moved on
- * from; every body behind it the page simply forgets.
- */
-function dropAbandonedBodies(): void {
-  dropQueued = false;
-  sentBodies = sentBodies.filter((body) => {
-    if (body.waiters.length > 0) {
-      return true;
-    }
-    window.clearTimeout(body.timer);
-    body.timer = undefined;
-    return false;
-  });
-  postNextBody();
-  armDeadline();
-}
-
-function answerFromWorker(worker: Worker, reply: ParseReply): void {
-  // An answer from a worker since replaced says nothing about the body a fresh one holds.
-  if (worker !== parseWorker) {
-    return;
-  }
-  if ("ready" in reply) {
-    workerReady = true;
-    postNextBody();
-    armDeadline();
-    return;
-  }
-  const at = sentBodies.findIndex((body) => body.id === reply.id);
-  if (at === -1) {
-    return;
-  }
-  const [body] = sentBodies.splice(at, 1);
-  window.clearTimeout(body.timer);
-  body.timer = undefined;
-  postNextBody();
-  let answer: ParsedAnswer;
-  if (reply.doc === undefined) {
-    // The parser refused the body: its one final failure, which reads as its literal text.
-    answer = { openMermaidFence: undefined, parsed: undefined };
-  } else {
-    try {
-      answer = {
-        openMermaidFence: reply.openMermaidFence,
-        parsed: documentFromJSON(body.engine.schema, reply.doc as DocumentJSON),
-      };
-    } catch (error) {
-      console.error(
-        "Parsing a long Markdown body on the page, its answer does not fit the schema",
-        error
-      );
-      parseOnThePage(body);
-      armDeadline();
-      return;
-    }
-  }
-  remember(body.key, answer);
-  for (const waiter of [...body.waiters]) {
-    waiter(answer);
-  }
-  armDeadline();
-}
-
-/** Leaves every body the worker held, and every later one, to the page's own thread. */
-function parseWorkerFailed(worker: Worker, error: unknown): void {
-  if (worker !== parseWorker) {
-    return;
-  }
-  noParseWorker = true;
-  console.error("Parsing long Markdown bodies on the page, the parse worker is unavailable", error);
-  for (const body of stopParseWorker()) {
-    parseOnThePage(body);
-  }
+  rememberUpTo(answers, ANSWER_LIMIT, body.key, answer);
+  return answer;
 }
 
 /**
@@ -456,56 +268,84 @@ function parseWorkerFailed(worker: Worker, error: unknown): void {
  * `new Worker(new URL(…), { type: "module" })` below is written as one expression because that is
  * the shape a bundler recognises; split in two, the worker's module is copied out as an asset and
  * never bundled.
- *
- * One is started only where this module came from somewhere a page can fetch. Where nothing
- * bundled it, its URL is a file path, which no browser starts a worker from (Chromium refuses a
- * `file:` worker outright), so the body is parsed on the page, as it is wherever a page can hold
- * no worker of its own.
  */
 function newParseWorker(): Worker {
-  if (import.meta.url.startsWith("file:")) {
-    throw new Error("A parse worker's module is a file, which no page can fetch.");
-  }
   return new Worker(new URL("./markdown-parse.worker.ts", import.meta.url), { type: "module" });
 }
 
-/** Queues `body` for the worker, starting one where none runs; it is posted once the worker has
- *  no other body (`postNextBody`). A worker that cannot be created leaves the body to the page,
- *  as a crashed one does. */
-function sendToWorker(body: SentBody): void {
-  if (parseWorker === undefined) {
-    if (noParseWorker) {
-      parseOnThePage(body);
-      return;
+/**
+ * The bodies waiting on the parse worker, through the queue both workers of this folder share
+ * (`worker-queue.ts`). A body the worker cannot answer - its deadline ran out, the worker
+ * crashed, or none could be created at all - is parsed on the page instead, so a reader always
+ * ends with a formatted body; only the parser refusing a body ends in its literal text.
+ *
+ * The worker is kept rather than terminated where the page moves on from the body it holds
+ * (`stopAnAbandonedJob: false`): it carries a module of its own and builds a headless engine
+ * before it can answer anything, which costs more than the one stale parse it would save. A turn
+ * streaming into the live view therefore leaves the worker exactly one stale frame - the one it
+ * was already parsing - and the frame the reader is waiting for is posted the moment that answer
+ * lands, rather than queueing behind every frame the stream has written since.
+ */
+const parseQueue = new WorkerQueue<SentBody, ParseReply, ParsedAnswer>({
+  stopAnAbandonedJob: false,
+  answeredId(reply) {
+    return "ready" in reply ? undefined : reply.id;
+  },
+  answerOf(body, reply) {
+    if ("ready" in reply) {
+      return undefined;
     }
-    let worker: Worker;
+    if (reply.doc === undefined) {
+      // The parser refused the body: its one final failure, which reads as its literal text.
+      const refused: ParsedAnswer = { openMermaidFence: undefined, parsed: undefined };
+      rememberUpTo(answers, ANSWER_LIMIT, body.key, refused);
+      return refused;
+    }
+    let answer: ParsedAnswer;
     try {
-      worker = (createParseWorker ?? newParseWorker)();
+      answer = {
+        openMermaidFence: reply.openMermaidFence,
+        parsed: documentFromJSON(body.engine.schema, reply.doc),
+      };
     } catch (error) {
-      noParseWorker = true;
       console.error(
-        "Parsing long Markdown bodies on the page, no parse worker can be created",
+        "Parsing a long Markdown body on the page, its answer does not fit the schema",
         error
       );
-      parseOnThePage(body);
-      return;
+      return undefined;
     }
-    parseWorker = worker;
-    workerReady = false;
-    worker.addEventListener("message", (event: MessageEvent<ParseReply>) => {
-      answerFromWorker(worker, event.data);
-    });
-    worker.addEventListener("error", (event) => {
-      parseWorkerFailed(worker, event);
-    });
+    rememberUpTo(answers, ANSWER_LIMIT, body.key, answer);
+    return answer;
+  },
+  createWorker(first) {
+    const worker = (createParseWorker ?? newParseWorker)();
     // The page loads one schema version per session (`doc/schema.ts`), so the worker is built
     // from the schema of the first long body it is sent and parses every later one the same way.
-    worker.postMessage({ blockSchema: body.engine.blockSchema } satisfies ParseSchema);
-  }
-  sentBodies.push(body);
-  postNextBody();
-  armDeadline();
-}
+    worker.postMessage({ blockSchema: first.engine.blockSchema } satisfies ParseSchema);
+    return worker;
+  },
+  isReady(reply) {
+    return "ready" in reply;
+  },
+  limitMs() {
+    return deadlineMs;
+  },
+  noWorkerFrom(error) {
+    console.error(
+      "Parsing long Markdown bodies on the page, the parse worker is unavailable",
+      error
+    );
+  },
+  post(worker, id, body) {
+    worker.postMessage({
+      id,
+      markdown: body.markdown,
+      softBreaks: body.softBreaks,
+    } satisfies ParseRequest);
+  },
+  withoutAWorker: parseOnThePage,
+  withoutTheWorker: parseOnThePage,
+});
 
 /**
  * Replaces the page's own `new Worker(…)` with `factory`, for the rows that drive a faked worker
@@ -514,10 +354,8 @@ function sendToWorker(body: SentBody): void {
  * the page, so nothing a page asked the worker before reaches the next one.
  */
 export function setParseWorkerFactory(factory: ParseWorkerFactory | undefined): void {
-  noParseWorker = false;
-  for (const body of stopParseWorker()) {
-    parseOnThePage(body);
-  }
+  parseQueue.recover();
+  parseQueue.clear(parseOnThePage);
   createParseWorker = factory;
 }
 
@@ -565,40 +403,15 @@ function renderLoaded(
     });
     return () => undefined;
   }
-  const waiter: ParseWaiter = ({ openMermaidFence, parsed }) => {
-    render({ engine, openMermaidFence, parsed, pending: false });
-  };
   // What the reader has until the answer lands is the body's own text.
   render({ engine, openMermaidFence: undefined, parsed: undefined, pending: true });
-  let body = sentBodies.find((waited) => waited.key === key);
-  if (body === undefined) {
-    lastBodyId += 1;
-    body = {
-      engine,
-      id: lastBodyId,
-      key,
-      markdown,
-      posted: false,
-      softBreaks,
-      timer: undefined,
-      waiters: [waiter],
-    };
-    sendToWorker(body);
-  } else {
-    body.waiters.push(waiter);
-  }
-  const sent = body;
-  return () => {
-    const at = sent.waiters.indexOf(waiter);
-    if (at !== -1) {
-      sent.waiters.splice(at, 1);
+  return parseQueue.wait(
+    key,
+    () => ({ engine, key, markdown, softBreaks }),
+    ({ openMermaidFence, parsed }) => {
+      render({ engine, openMermaidFence, parsed, pending: false });
     }
-    if (sent.waiters.length > 0 || dropQueued) {
-      return;
-    }
-    dropQueued = true;
-    queueMicrotask(dropAbandonedBodies);
-  };
+  );
 }
 
 /**
@@ -730,7 +543,11 @@ export function useMarkdownHeadline(
     }
     return renderWithEngine(markdown, "space", ({ parsed, pending }) => {
       if (pending) {
-        // A long body's headline waits for the worker rather than reading as its own source.
+        // A long body's headline waits for the worker rather than reading as its own source,
+        // and the source before it goes with it: `undefined` is what this hook documents for a
+        // body whose parse is still owed, where the headline left in place would be the one a
+        // streaming turn's last frame produced.
+        setHeadline(undefined);
         return;
       }
       const characters = Array.from(

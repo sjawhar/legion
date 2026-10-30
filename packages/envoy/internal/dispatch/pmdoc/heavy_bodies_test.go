@@ -10,7 +10,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 )
 
-// The bodies a reader's browser tab froze on (sjawhar/legion#2403) are read here through the
+// The bodies a reader's browser tab froze on (sjawhar/legion#2519) are read here through the
 // parser a caller's write takes, at the longest body one may write: a plain list of 8,000 items, a
 // quote and a list item each followed by lines that carry no marker of their own, a run of
 // brackets, items nested by indentation and then blank lines, a chain of list markers on one line,

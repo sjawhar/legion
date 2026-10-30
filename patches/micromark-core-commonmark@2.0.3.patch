@@ -179,6 +179,48 @@ index 492756f04eb7e5f0b77d0c4283692ef7457e6d7c..751a512de58921c916817ecfbb8c8542
  /**
   * @this {TokenizeContext}
   *   Context.
+diff --git a/dev/lib/list.js b/dev/lib/list.js
+index 55671e12ec43194115cecf4e58c23bc4b2e5fcb5..0de401bc8b59d4015292292e490a6f162fc2e761 100644
+--- a/dev/lib/list.js
++++ b/dev/lib/list.js
+@@ -11,7 +11,7 @@
+ 
+ import {ok as assert} from 'devlop'
+ import {factorySpace} from 'micromark-factory-space'
+-import {asciiDigit, markdownSpace} from 'micromark-util-character'
++import {asciiDigit, markdownLineEnding, markdownSpace} from 'micromark-util-character'
+ import {codes, constants, types} from 'micromark-util-symbol'
+ import {blankLine} from './blank-line.js'
+ import {thematicBreak} from './thematic-break.js'
+@@ -172,7 +172,27 @@ function tokenizeListContinuation(effects, ok, nok) {
+   assert(self.containerState, 'expected state')
+   self.containerState._closeFlow = undefined
+ 
+-  return effects.check(blankLine, onBlank, notBlank)
++  return start
++
++  /** @type {State} */
++  function start(code) {
++    // Where the line is already over - the code is a line ending or the end of the document -
++    // it is blank, so the check below answers yes and `onBlank` consumes nothing: `factorySpace`
++    // takes no space from a line ending. A line of only spaces or tabs is over here too, once
++    // the continuations above have taken their indentation. Every open list item runs the check
++    // once per blank line, so a body of D nested items and N blank lines runs D*N of them, and
++    // the check's store and restore, and the `blankLine` dispatch, are then work for nothing: on
++    // a body of 50 nested items and 32 KB of blank lines, about two fifths of what micromark
++    // spends.
++    if (code === codes.eof || markdownLineEnding(code)) {
++      self.containerState.furtherBlankLines =
++        self.containerState.furtherBlankLines ||
++        self.containerState.initialBlankLine
++      return ok(code)
++    }
++
++    return effects.check(blankLine, onBlank, notBlank)(code)
++  }
+ 
+   /** @type {State} */
+   function onBlank(code) {
 diff --git a/lib/label-end.js b/lib/label-end.js
 index 927808f648bac3803c8149d3b24c97e6def7e103..e87326955606ec400db5ba4b08a77fcb2f856834 100644
 --- a/lib/label-end.js
@@ -322,3 +364,42 @@ index 927808f648bac3803c8149d3b24c97e6def7e103..e87326955606ec400db5ba4b08a77fcb
  /**
   * @this {TokenizeContext}
   *   Context.
+diff --git a/lib/list.js b/lib/list.js
+index dd3368ecbc8a1995cfdaab38b08738f01b4c02b1..d7081cf036b7977506f6867d08636481ac3a30cc 100644
+--- a/lib/list.js
++++ b/lib/list.js
+@@ -10,7 +10,7 @@
+  */
+ 
+ import { factorySpace } from 'micromark-factory-space';
+-import { asciiDigit, markdownSpace } from 'micromark-util-character';
++import { asciiDigit, markdownLineEnding, markdownSpace } from 'micromark-util-character';
+ import { blankLine } from './blank-line.js';
+ import { thematicBreak } from './thematic-break.js';
+ 
+@@ -133,7 +133,24 @@ function tokenizeListStart(effects, ok, nok) {
+ function tokenizeListContinuation(effects, ok, nok) {
+   const self = this;
+   self.containerState._closeFlow = undefined;
+-  return effects.check(blankLine, onBlank, notBlank);
++  return start;
++
++  /** @type {State} */
++  function start(code) {
++    // Where the line is already over - the code is a line ending or the end of the document -
++    // it is blank, so the check below answers yes and `onBlank` consumes nothing: `factorySpace`
++    // takes no space from a line ending. A line of only spaces or tabs is over here too, once
++    // the continuations above have taken their indentation. Every open list item runs the check
++    // once per blank line, so a body of D nested items and N blank lines runs D*N of them, and
++    // the check's store and restore, and the `blankLine` dispatch, are then work for nothing: on
++    // a body of 50 nested items and 32 KB of blank lines, about two fifths of what micromark
++    // spends.
++    if (code === null || markdownLineEnding(code)) {
++      self.containerState.furtherBlankLines = self.containerState.furtherBlankLines || self.containerState.initialBlankLine;
++      return ok(code);
++    }
++    return effects.check(blankLine, onBlank, notBlank)(code);
++  }
+ 
+   /** @type {State} */
+   function onBlank(code) {

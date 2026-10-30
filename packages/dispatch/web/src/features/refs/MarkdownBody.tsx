@@ -1,4 +1,9 @@
-import { DOMSerializer, type Node as ProseMirrorNode } from "prosemirror-model";
+import {
+  type Attrs,
+  type DOMOutputSpec,
+  DOMSerializer,
+  type Node as ProseMirrorNode,
+} from "prosemirror-model";
 import { type ReactNode, useRef } from "react";
 
 import { markdownClassName, type SoftBreaks } from "./markdown-engine";
@@ -69,15 +74,14 @@ const paintInline: PaintMarkdown = (element, parsed, serializer) => {
   }
 };
 
-const paintBlock: PaintMarkdown = (element, parsed, serializer) => {
-  element.replaceChildren(serializer.serializeFragment(parsed.content));
+/**
+ * The two passes over a whole painted body, after its nodes are in it and before anything reads
+ * it: a task item's checkbox drawn, and a tight list item's paragraph unwrapped so the item
+ * reads as one line rather than a paragraph of its own. One function, so the sliced painter and
+ * the whole-body one cannot drift apart - a pass added to either reaches both.
+ */
+function finishBlock(element: HTMLElement): void {
   drawTaskCheckboxes(element);
-  unwrapTightItems(element);
-};
-
-/** A tight list item's paragraph (`li[data-spread='false']`) holding nothing else is unwrapped,
- *  so the item reads as one line rather than a paragraph of its own. */
-function unwrapTightItems(element: HTMLElement): void {
   for (const item of element.querySelectorAll("li[data-spread='false']")) {
     const paragraph = item.firstElementChild;
     if (item.childElementCount === 1 && paragraph?.tagName === "P") {
@@ -86,12 +90,36 @@ function unwrapTightItems(element: HTMLElement): void {
   }
 }
 
+const paintBlock: PaintMarkdown = (element, parsed, serializer) => {
+  element.replaceChildren(serializer.serializeFragment(parsed.content));
+  finishBlock(element);
+};
+
+/**
+ * `DOMSerializer.renderSpec` with the attribute object prosemirror-model's own serializer passes
+ * it. Upstream's signature is `renderSpec(doc, structure, xmlNS = null, blockArraysIn)`, and
+ * `blockArraysIn` is what makes it refuse a spec array that came out of an attribute object
+ * (`suspiciousAttributes`), the guard a node's own `toDOM` is held to everywhere else.
+ * prosemirror-model 1.25.11 declares only the first three in `dist/index.d.ts`, so the fourth is
+ * passed through this one named type rather than at each call (sjawhar/legion#2519).
+ */
+const renderSpecWithAttrs = DOMSerializer.renderSpec as (
+  doc: Document,
+  structure: DOMOutputSpec,
+  xmlNS: string | null,
+  blockArraysIn: Attrs
+) => { dom: HTMLElement; contentDOM?: HTMLElement };
+
 /**
  * One node into `parent`, yielding where the work can be cut: a node holding several block
  * children - a list, a quote, the document itself - is opened with its own `toDOM`, as the
  * serializer would, and its children go in one at a time; everything else, a textblock and its
  * marks included, goes in whole, since splitting inline content would split a mark across
  * elements.
+ *
+ * An opened node is opened exactly as `DOMSerializer.serializeNode` opens it: its attributes go
+ * to `renderSpec` as the guard wants them, and its own marks wrap what comes back, outermost
+ * last, with the children still going into the node's own content hole.
  */
 function* appendNode(
   parent: Node,
@@ -104,8 +132,19 @@ function* appendNode(
     yield;
     return;
   }
-  const { contentDOM, dom } = DOMSerializer.renderSpec(document, toDOM(node));
-  parent.appendChild(dom);
+  const { contentDOM, dom } = renderSpecWithAttrs(document, toDOM(node), null, node.attrs);
+  let outermost: HTMLElement = dom;
+  for (let at = node.marks.length - 1; at >= 0; at -= 1) {
+    const mark = node.marks[at];
+    const markToDOM = serializer.marks[mark.type.name];
+    if (markToDOM === undefined) {
+      continue;
+    }
+    const wrap = renderSpecWithAttrs(document, markToDOM(mark, node.isInline), null, mark.attrs);
+    (wrap.contentDOM ?? wrap.dom).appendChild(outermost);
+    outermost = wrap.dom;
+  }
+  parent.appendChild(outermost);
   if (contentDOM === undefined) {
     yield;
     return;
@@ -119,7 +158,7 @@ function* appendNode(
  * How many nodes of the built body one task puts into the page. What an engine spends on a batch
  * is the style and layout of what has just arrived, in the rendering update after that task, so
  * the batch is what one such pass costs. Measured on this pod against the dashboard's own
- * stylesheet (sjawhar/legion#2403), an 8,000-item list: put in with one `replaceChildren` the
+ * stylesheet (sjawhar/legion#2519), an 8,000-item list: put in with one `replaceChildren` the
  * thread runs no task for 918-971 ms in WebKit, 211 ms in Chromium and 173 ms in Firefox; put in
  * 500 nodes at a time, 72 ms, 124 ms and 39 ms, because each engine then lays out only the items
  * of the batch. WebKit is why the batch exists at all: it spends ~700 ms on a pass over 16,000
@@ -182,9 +221,9 @@ function* attachNode(parent: Node, node: Node, batch: { left: number }): Generat
  * The build is off the page, exactly as `paintBlock` serializes a body off the page: a tree
  * built in the page would be styled and laid out again for every piece, and everything watching
  * the document - a `MutationObserver`, the DOM recorder a browser test runs under - would pay
- * for each of the 16,000 changes. What reaches the page is the finished tree, and the two passes
- * over the whole body (`drawTaskCheckboxes`, `unwrapTightItems`) run on it before it does, so
- * they cost one off-page walk rather than thousands of live mutations. Only the attach itself is
+ * for each of the 16,000 changes. What reaches the page is the finished tree, and the body's
+ * finishing pass (`finishBlock`, the same one `paintBlock` runs) runs on it before it does, so
+ * it costs one off-page walk rather than thousands of live mutations. Only the attach itself is
  * split, and by node count rather than by time: putting a node in is a pointer's work, and what
  * it costs is paid by the engine afterwards, where no clock of this module's can see it.
  */
@@ -197,9 +236,7 @@ function* paintBlockInSlices(
   for (let block = 0; block < parsed.childCount; block += 1) {
     yield* appendNode(built, parsed.child(block), serializer);
   }
-  drawTaskCheckboxes(built);
-  yield;
-  unwrapTightItems(built);
+  finishBlock(built);
   yield;
   // The reader's own text goes as the first batch of the body arrives, so the element holds one
   // or the other at every moment the engine draws, and the batches fill it from there.

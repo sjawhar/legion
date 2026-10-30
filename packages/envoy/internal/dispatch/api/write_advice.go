@@ -283,8 +283,8 @@ var typedOpening = regexp.MustCompile(`:{3,}[A-Za-z0-9_-]+\{`)
 
 // readDocumentBlocks reads markdown, a document's canonical markdown - the rendering a write
 // stored, read back (pmdoc.ParseRendering) - for its advice, or nil when it does not read. A
-// caller whose own write already read that rendering back hands documentBlocksOf the tree instead
-// (docs' Ledger.ReadBackOf), which is this parse of the same markdown.
+// caller whose own write already read that rendering back passes the tree to documentBlocksFor
+// instead, which is this parse of the same markdown.
 func readDocumentBlocks(markdown string) *documentBlocks {
 	tree, err := pmdoc.ParseRendering(markdown)
 	if err != nil {
@@ -311,6 +311,17 @@ func documentBlocksOf(tree *pmdoc.Node) *documentBlocks {
 		return true
 	})
 	return blocks
+}
+
+// documentBlocksFor reads, for its advice, the document a write just stored. readBack is the
+// rendering that write stored, read back by its own parse (docs' Ledger.ReadBackOf): the blocks
+// are read from that tree rather than from a second parse of the same markdown, and markdown is
+// parsed here when the write left none.
+func documentBlocksFor(readBack *pmdoc.Node, markdown string) *documentBlocks {
+	if readBack != nil {
+		return documentBlocksOf(readBack)
+	}
+	return readDocumentBlocks(markdown)
 }
 
 // readOpenersAsText records the typed block openings in node's own text: its text children outside
