@@ -2,21 +2,20 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-557",
-  "completed": "2026-10-30T13:28:08Z",
-  "round": 9,
-  "scope": "The two round-8 items and the required checks (architect, 12:57Z). At 13:27Z the architect chose option B: request changes for one sentence in its four places, with the exact replacement, and nothing else; the no-push rule is lifted for that one push.",
-  "reviewedHead": "7469fd634604c2830553fdbe4af61d7573b2b195",
+  "completed": "2026-10-30T17:30:52Z",
+  "round": 10,
+  "scope": "The round-9 sentence and CI at 9d8b44af (architect, 13:49Z); after the drain the architect (17:30Z) set exactly two required changes: one forward merge of main keeping both sides, and the two listener filters covering the api testdata the listener tests read. The next round checks only those, by fingerprint, and CI.",
+  "reviewedHead": "9d8b44af94219d8de2f2e401a96465d161ef5da2",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
-  "minor": 1,
-  "ci": "Required set (rulesets) lint, typecheck, test, pr-title. At 7469fd63 lint, typecheck and test were queued at 13:28Z; no required check of this PR's code has completed.",
-  "thermonuclear": "deep-review: APPROVE at 7469fd63 (one Minor: the cut-off sentence); code-quality: CHANGES at 7469fd63 (the same sentence). Reviewer ran TestAStopMarksNoHandBackWhenItsLingerOrItsTermFellShort and TestAStopWhoseHandlerIgnoresItsCancelMarksNoHandBack (ok 15.066s) and go vet ./cmd/listener (clean).",
+  "important": 2,
+  "minor": 0,
+  "ci": "CI run 41063948989 at 9d8b44af: lint, typecheck, test and pr-title success; ci-filters failure (job 124104513284), so ci-ok failure. GitHub reports the PR CONFLICTING (DIRTY).",
   "items": {
-    "round-8 item 3, no-mark rows assert their gate": "done: noMark column asserted in every row, lingerEnd constants, no_mark reasons as constants with values unchanged",
-    "round-8 item 4, overrun text": "the cause is now the listener's own shutdown, and the text parses; one sentence, worded as the reviewer asked in round 8, names os.Exit(1) as what cuts a lingering or draining hand-back off, where client.Drain does (keyFindings[0])"
+    "round-9 sentence": "done: the exact replacement text in main.go, README.md, receive.go and the changelog fragment, and nothing else changed (git diff 22298a3c 9d8b44af: 4 files, +17/-13)"
   },
   "keyFindings": [
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/main.go:1457", "description": "The cut-off sentence at main.go:1457-1460, README.md:209-212, receive.go:96-98 and pr2404-Changed-20261028-102427.yaml:23-25 says os.Exit(1) cuts off a hand-back still draining or writing its mark. client.Drain closes the bus connection first, which ends the subscription of a hand-back still lingering or draining; os.Exit(1) ends only a mark write still in flight on the lease's own connection. The replacement text is in the review."}
+    {"severity": "important", "file": ".github/workflows/ci.yaml", "description": "ci-filters fails at 9d8b44af: listener-multiprocess and listener-server-change read packages/envoy/internal/dispatch/api/testdata/decision-block-inserts.json (added on main by #2161), which their filters listener_multiprocess and listener_server_change do not match. Add 'packages/envoy/internal/dispatch/api/testdata/**' (as envoy_go's filter has) to both, and run the ci-filters check green locally."},
+    {"severity": "important", "file": "PR #2404", "description": "The PR conflicts with main (mergeStateStatus DIRTY): listener main.go, durable_unbound_test.go and docs. One forward merge of main keeping both sides, pushed without the skip-checks trailer so CI runs."}
   ]
 }
