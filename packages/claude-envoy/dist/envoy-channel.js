@@ -37356,6 +37356,45 @@ function roleToken(project, issue, role) {
   const [, dispatchProject, number] = dispatchMatch;
   return `legion-${project}-${dispatchProject?.toLowerCase()}-${number}-${role}`;
 }
+// ../contracts/src/related-forms.ts
+function relatedCheckFormOf(suggestions) {
+  const { outcome, missing } = suggestions;
+  const searchQuery = suggestions.search_query;
+  if (outcome === "not_made" || outcome === undefined && missing !== undefined) {
+    return { form: "not_made", reason: missing ?? "the server gave no reason", searchQuery };
+  }
+  const mode = relatedCheckModeWords(suggestions);
+  if (suggestions.related.length > 0) {
+    return { form: "items", mode, related: suggestions.related };
+  }
+  if (outcome === undefined) {
+    return {
+      form: "not_made",
+      reason: "the server did not say whether it searched",
+      searchQuery
+    };
+  }
+  if (outcome === "found" || outcome === "none") {
+    return { form: "nothing", mode };
+  }
+  return {
+    form: "not_made",
+    reason: `the server answered an outcome this client does not know (${String(outcome)})`,
+    searchQuery
+  };
+}
+function relatedCheckModeWords(suggestions) {
+  const { search, search_note: note } = suggestions;
+  if (search === undefined)
+    return;
+  if (search === "meaning_and_keywords")
+    return "meaning and keywords";
+  const words = search === "keywords_only" ? "keywords only" : String(search);
+  return note === undefined || note === "" ? words : `${words}: ${note}`;
+}
+function relatedCheckSearchWords(text) {
+  return (text.match(/[\p{L}\p{N}_]+/gu) ?? []).filter((word) => (word.match(/\p{L}/gu) ?? []).length >= 4).slice(0, 3).join(" ");
+}
 // ../contracts/src/repo.ts
 function canonicalRepo(owner, repo) {
   return `${owner.trim().toLowerCase()}/${repo.trim().toLowerCase().replace(/\.git$/, "")}`;
@@ -41189,38 +41228,17 @@ function decisionBlockLines(advice, context) {
   }
 }
 function relatedCheckForm(suggestions, context) {
-  const { outcome, missing } = suggestions;
-  if (outcome === "not_made" || outcome === undefined && missing !== undefined) {
-    return [notMadeLine(missing ?? "the server gave no reason", context, suggestions.search_query)];
+  const form = relatedCheckFormOf(suggestions);
+  if (form.form === "not_made") {
+    return [notMadeLine(form.reason, context, form.searchQuery)];
   }
-  const related = suggestions.related ?? [];
-  const mode = searchModeWords(suggestions);
-  if (related.length > 0) {
-    const header = mode === undefined ? "Related items:" : `Related items (searched by ${mode}):`;
-    return [header, ...related.flatMap((item) => relatedItemLines(item, context.configUrl))];
-  }
-  if (outcome === undefined) {
-    return [
-      notMadeLine("the server did not say whether it searched", context, suggestions.search_query)
-    ];
-  }
-  if (outcome === "found" || outcome === "none") {
-    return [
-      mode === undefined ? "Related-item check searched and found nothing." : `Related-item check searched (${mode}) and found nothing.`
-    ];
+  if (form.form === "items") {
+    const header = form.mode === undefined ? "Related items:" : `Related items (searched by ${form.mode}):`;
+    return [header, ...form.related.flatMap((item) => relatedItemLines(item, context.configUrl))];
   }
   return [
-    notMadeLine(`the server answered an outcome this client does not know (${String(outcome)})`, context, suggestions.search_query)
+    form.mode === undefined ? "Related-item check searched and found nothing." : `Related-item check searched (${form.mode}) and found nothing.`
   ];
-}
-function searchModeWords(suggestions) {
-  const { search, search_note: note } = suggestions;
-  if (search === undefined)
-    return;
-  if (search === "meaning_and_keywords")
-    return "meaning and keywords";
-  const words = search === "keywords_only" ? "keywords only" : String(search);
-  return note === undefined || note === "" ? words : `${words}: ${note}`;
 }
 function relatedItemLines(item, configUrl) {
   try {
@@ -41258,12 +41276,9 @@ function absoluteHref(href, configUrl) {
   }
 }
 function notMadeLine(reason, context, searchQuery) {
-  const words = searchQuery?.trim() || searchWords(context.text);
+  const words = searchQuery?.trim() || relatedCheckSearchWords(context.text);
   const query = words === "" ? " with two or three of its words as --query" : ` --query '${words.replaceAll("'", "'\\''")}'`;
   return `No related-item check was made: ${reason}. Search before you rely on this being new: dispatch search --project ${context.project}${query}`;
-}
-function searchWords(text) {
-  return (text.match(/[\p{L}\p{N}_]+/gu) ?? []).filter((word) => (word.match(/\p{L}/gu) ?? []).length >= 4).slice(0, 3).join(" ");
 }
 
 // ../envoy-client/src/dispatch-execute.ts

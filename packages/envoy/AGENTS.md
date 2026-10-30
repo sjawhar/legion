@@ -667,10 +667,12 @@ in the same collection, and the listing goes once the document is collected (`ke
 `TestAnEvictedRoomsReplicaGoesWithIt`). A reader holding an evicted instance of a room reaches that
 instance's replica or none, never its successor's. `TestReadsOfALiveDocumentRunBesideItsPeers` runs
 each of these reads while a websocket peer types, until 50 of its runs have overlapped one of the
-peer's updates, and CI's `envoy-go-race` job runs the `docs` and `api` packages under `-race`, which
-reports a walk of the live tree beside a write; the unit tests' own step runs without it. The race
-job runs only when a file its `envoy_go_race` filter in `.github/workflows/ci.yaml` names
-changes; see Critical conventions for what keeps that filter current.
+peer's updates, and CI runs the `docs` package under `-race` in `envoy-go-race-docs` and the `api`
+package in `envoy-go-race`; the detector reports a walk of the live tree beside a write, and the
+unit tests' own step runs without it. Each race job runs only when a file its filter in
+`.github/workflows/ci.yaml` names changes — `envoy_go_race_docs`, the closure of the `docs` package
+alone, whose job gives it a 60-minute deadline, and `envoy_go_race` for the rest; see Critical
+conventions for what keeps those filters current.
 
 Writes to one room never meet each other unlocked. A browser's update reaches the room as ygo
 applies it, inside one Yjs transaction under the document's lock (`sync.ApplySyncMessage`,
@@ -1893,10 +1895,33 @@ under that parser's rules (`inlineMarkdown`, `editorRules`) and both readers Dis
 markdown under (`storedMarkdown`: `*`/`_` judged beside another `*` or `_` but not a `~`, `~` runs
 of either length paired, a run after any `~` refused, every run in one loop; `flankingMarkdown`:
 the same with flanking alone), and failing that under the first two, and failing that under
-that parser's alone (`inlineWithEscapes`), so wherever the bytes main wrote read back as that
-parser reads them they stay; an image's alt text is kept the same way under `Parse` and
-`storedMarkdown` (`altReadsBack`). A code span keeps the whitespace that
-starts each of its later lines past the prefix of the containers around it, as the browser editor's
+that parser's alone (`inlineWithEscapes`), so wherever the bytes the writer before
+sjawhar/legion#2360 wrote read back as that parser reads them they stay: the one rule is that the
+writer keeps the earliest spelling of the greatest read-back prefix depth under `readBackReaders`
+(`inlineWithEscapes`, `readsBackUnder`). A text
+`!` written right before a link's `[` is written `\!`, since `![` opens an image
+(`needsInlineEscape`'s `beforeLabel`).
+A code block whose language holds a backtick is fenced with tildes, since a backtick fence's info
+string cannot hold one (`codeBlockFence`). Every order the writer opens marks in opens a code span's
+mark innermost, since a mark opened inside the span would be its text (`codeInnermost`). Only where
+no spelling before reads back under `inlineMarkdown` does the writer try `lastResorts`, so that no
+stored run's bytes change. A letter written as a character reference for the flanking rules takes
+one more backslash there where the bytes before it end in an odd run of backslashes, since
+`\&#97;` reads as an escaped `&` (`pairBackslash`). A run whose one free asterisk run stands beside
+a bold or italic code span is read back and written there with every `*` and `_` escaped
+(`delimitersInText`'s `lastHeld`). An escaped tilde is written `\~` there, beside which the
+browser editor's parser lets a `*` run open or close, where the `;` ending `&#126;` is punctuation
+that keeps it from closing before a letter (`tildeBackslash`). Marks are opened by reach there, the
+one the texts after carry furthest outermost, so that a nearer one ending closes no other
+(`byReach`). And marks a text shares with the one before are closed and opened again there inside
+the marks it opens (`*a*~~*b*~~`), so that the new run stands beside a delimiter run rather than a
+letter (`reopening`). And a bare URL whose text is its href is written there as text with the
+colon of its scheme escaped, so that the tokenizer reads no URL and reads no delimiter run written
+after it on into one, while the decoded text is the URL the transform links again
+(`bareURLColons`). An
+image's alt text is kept the same way under `Parse` and `storedMarkdown` (`altReadsBack`). A code
+span keeps the whitespace that starts each of its later lines past the prefix of the containers
+around it, as the browser editor's
 parser reads it, a line holding only whitespace before the closer included; goldmark's paragraph
 trims it (`lineRecordingParagraph`, `multilineCodeSpanText`). A space or a line feed is the padding
 such a span sheds at each end (`codeSpanPadded`) where something else stands between, and the
@@ -2015,7 +2040,7 @@ back (`linkifyBlock.settle`), and a markdown holding no address is counted and w
 it. Its transform (`autolink_transform.go`) reads, at block close, each run of text nodes between
 other nodes, decoded, its URL pattern first and its email pattern over what that leaves
 (`linkTextAddresses`); one decoder gives each text's decoded text and the source offset each of its
-characters was written at (`decodeMarkdownTextOffsets`), where an address's edges split the text.
+characters was written at (`decodeMarkdown`), where an address's edges split the text.
 The two readers end an address differently (`x;https://x.test/a_ b` leaves the `_` out, `see
 http\://x.test/a_ b` keeps it), each as the engine does. So an address is a link after any
 punctuation, a letter outside ASCII, `]`, `|`, `!`, a character reference or an escape, a URL after
@@ -2056,11 +2081,11 @@ written in one order - link, strong, emphasis - so where a text still carries a 
 before it opened, and the order puts that mark after the text's other marks, the mark is closed and
 opened again; where that puts two runs of one delimiter character side by side (bold inside italic:
 `*`, `**` and `*`), the parser reads one run. Such a run is kept where it reads back, as the parser
-then splits it as written, and one that does not is written again in the plain respellings, as main
-writes it again. Only where none of those reads back, and a text is under more than one mark
-(`nestsMarks`), is it written with the marks still open kept
-open, then the marks the next text still carries, and the text's others opened inside them
-(`keepingOpen`), kept only where that reads back with nothing fused, so `_**a** b_` is written
+then splits it as written, and one that does not is written again in the plain respellings, as the
+writer before sjawhar/legion#1464 writes it again. Only where none of those reads back, and a text
+is under more than one mark (`nestsMarks`), is it written with the marks still open kept open, then
+the marks the next text still carries, and the text's others opened inside them (`keepingOpen`),
+kept only where that reads back with nothing fused, so `_**a** b_` is written
 `***a** b*`; a run that fuses nothing is written as before, so italic closed around a link keeps
 its bytes. A spelling that writes a delimiter run's neighbouring letter as a reference (`flanking`)
 is made only where such a letter stands beside one (`letterBesideDelimiter`). The respellings are
@@ -2513,7 +2538,7 @@ read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy census").
 - Every KV bucket is opened through `bus.EnsureKeyValue` or `bus.OpenKeyValue`, whose handle checks its keys as the bus checks a subject (`bus.ErrRefused`), since a KV call builds its subjects from the key: a key that would take one past the server's 4 KiB protocol line, or holding an empty token, is refused before anything is sent, and nats.go's own refusal of a key outside its key alphabet (`ses:bad`), which it makes on every read, write, delete and watch before sending anything, is named the refusal it is (`bus.ErrInvalidKey`, naming the key). A write is held to the longest subject its key makes (a watcher's create request), so a key written now stays readable, watchable and deletable; any other call only to its own subject, so a key an earlier build stored past that bound still lists and deletes. The stores skip a key they cannot read or rewrite, with a WARN whose `error` names it (or, past the bound, its size), rather than fail a start, a sweep or a caller's own request, and the reapers delete it. No build writes a key outside the alphabet, but a direct bucket write can store one, and an earlier build's bare-string role claim can name one as its holder; no KV call deletes it either, so the reapers skip it with that WARN every cycle until an operator purges it by hand with the purge nats.go would send for it, `nats pub '$KV.<bucket>.<key>' '' -H 'KV-Operation:PURGE' -H 'Nats-Rollup:sub'`. That removes every revision of the key, every listener's cache drops it at once, and the purge marker it leaves is collected as any other (the interest bucket's marker collection, `nats kv compact <bucket>` for the others). A JetStream purge filtered to the subject (`nats req '$JS.API.STREAM.PURGE.KV_<bucket>' '{"filter":"$KV.<bucket>.<key>"}'`) leaves no marker, but nothing a watcher sees, so a listener's interest cache keeps the key, and its reaper keeps warning, until the listener restarts.
 - A failed control delivery or a terminal capability refusal during generic fanout emits `notifications.envoy.exceptions.<original-topic>`. Control exceptions keep their ordinary transport: a role lane's `notifications.envoy.exceptions.notifications.role.<role>` takes core NATS because no stream subject captures it (`bus.UsesCoreTransport`), and an agent subject's `notifications.envoy.exceptions.notifications.agent.<id>` is the one exception subject the stream captures, so it keeps JetStream. A fanout refusal's original topic is never a control topic, since `listenerDeliveryHandler` sends a `notifications.role.` topic to `roleTopicDelivery` and a `notifications.agent.` topic to `agentSubjectDelivery` and only what remains to `fanoutDelivery`, the one place `fanoutRefusal` is set; its exception subject is therefore never one the stream captures either, so `bus.UsesCoreTransport` already routes it over core NATS and the explicit `client.PublishCore` in `publishDeliveryException` now only restates the routing rule's own answer for every reachable input. The payload preserves `original_topic`, `event_id`, `reason` (one of `no_holder`, `delivery_failed`, `receipt_timeout`), `recipient_session` when a recipient is known (the receiving session, not `source_session`; omitted rather than empty when unknown), `payload_summary`, the original machine `payload`, `dedupe_key`, `source`, and `source_session`; the exception lane is not recursively exceptional. Each refusal records its recipient before publishing its exception, so an identical redelivery emits at most one exception during the attempt-cache window and never NAKs the original envelope. A role or ad-hoc topic sent through `/v1/messages/publish` raises no exception: the route answers its sender instead, 404 for an unheld role and 403 or 504 for a recipient that did not take it (the Listener API).
 - **Source-specific vs generic ingestion**: Envoy has two ingestion paths: listener-hosted webhook handlers behind the listener's starting gate (`internal/webhook/{github,slack,ghostwispr}.go`, `startingGate` in `cmd/listener/main.go`) and the generic MCP bridge (`cmd/mcp/`). The MCP bridge connects to any MCP server that publishes resources, so it's the low-maintenance default for new sources. Building source-specific webhook logic adds maintenance burden — consider whether the cost justifies the benefit over the generic MCP bridge before adding custom source-specific logic to Envoy. When using the MCP bridge, Envoy should stay naive about the message content — the MCP server owns the domain logic.
-- Every Go job of `.github/workflows/ci.yaml` runs only when a file its own filter there names changes, the six Envoy jobs this module's tagged and race suites run in among them: `dispatch-memory` (`dispatch_memory`), `dispatch-multiprocess` (`dispatch_multiprocess`), `listener-server-change` (`listener_server_change`), `broker-multiprocess` (`broker_multiprocess`), `envoy-go-race` (`envoy_go_race`) and `envoy-infra-go` (`envoy_infra_go`). Each filter lists the packages the job's command compiles with its build tags, the packages of each binary its tests build, and the files its tests read. Any change that makes a job's command, or a binary its tests build, compile a new package or read a new file - production code included, not only a test - adds that package or file to that job's filter in the same pull request. `.github/scripts/check-ci-filters.sh` (ci.yaml's `ci-filters` job) recomputes each go command's package closure and fails naming a file a filter misses; a file a test reads through `..` and a go command a test starts are rows of `.github/scripts/ci_job_reads.py`, which the change that adds them extends, since the check finds neither by itself. `envoy-go`, gated by its broad `envoy_go` filter, runs every untagged unit test of the `packages/envoy` module on every Envoy change (`internal/integration` in a step of its own in that job), so it also runs the untagged tests of every other job's packages in that module; `packages/envoy/infra` is a module of its own, which that `go test` does not reach, so envoy-infra's unit tests run only in `envoy-infra-go`.
+- Every Go job of `.github/workflows/ci.yaml` runs only when a file its own filter there names changes, the seven Envoy jobs this module's tagged and race suites run in among them: `dispatch-memory` (`dispatch_memory`), `dispatch-multiprocess` (`dispatch_multiprocess`), `listener-server-change` (`listener_server_change`), `broker-multiprocess` (`broker_multiprocess`), `envoy-go-race` (`envoy_go_race`), `envoy-go-race-docs` (`envoy_go_race_docs`) and `envoy-infra-go` (`envoy_infra_go`). Each filter lists the packages the job's command compiles with its build tags, the packages of each binary its tests build, and the files its tests read. Any change that makes a job's command, or a binary its tests build, compile a new package or read a new file - production code included, not only a test - adds that package or file to that job's filter in the same pull request. `.github/scripts/check-ci-filters.sh` (ci.yaml's `ci-filters` job) recomputes each go command's package closure and fails naming a file a filter misses; a file a test reads through `..` and a go command a test starts are rows of `.github/scripts/ci_job_reads.py`, which the change that adds them extends, since the check finds neither by itself. `envoy-go`, gated by its broad `envoy_go` filter, runs every untagged unit test of the `packages/envoy` module on every Envoy change (`internal/integration` in a step of its own in that job), so it also runs the untagged tests of every other job's packages in that module; `packages/envoy/infra` is a module of its own, which that `go test` does not reach, so envoy-infra's unit tests run only in `envoy-infra-go`.
 
 ## Security
 

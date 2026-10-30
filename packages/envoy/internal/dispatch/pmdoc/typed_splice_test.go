@@ -43,9 +43,10 @@ func TestSpliceKeepsAnAskItsReplacementDoesNotFit(t *testing.T) {
 
 // A replacement that is one typed block of the same type as the typed block it lands in, under its
 // id, is that block rewritten, the way the dispatch skill tells a writer to edit one (the same id,
-// the new text), so the fit replaces the block rather than nesting the rewrite inside it: the document
-// holds the id once, as main's server stores it. ProseMirror would leave the old ask emptied
-// beside the new one, under the same id, which the write's block-id check would refuse.
+// the new text), so the fit replaces the block rather than nesting the rewrite inside it: the
+// document holds the id once, as the server before sjawhar/legion#1425 stores it. ProseMirror
+// would leave the old ask emptied beside the new one, under the same id, which the write's
+// block-id check would refuse.
 func TestSpliceRewritesATypedBlockAReplacementOfItsTypeCovers(t *testing.T) {
 	for _, test := range []struct{ name, markdown, quote, replacement, want string }{
 		{name: "an ask's whole question",
