@@ -34,6 +34,26 @@ import (
 // delete set, so the later update applied first deletes what the earlier one replaced while its
 // own insertions wait for the earlier one's - a tree no transaction left.
 //
+// A logged commit is two parts, and the replica takes both: the update ygo handed the room's
+// observers (crdt.LoggedUpdate.Update), what the transaction integrated, and what it parked
+// (Parked) - the structs and deletions waiting for something the document lacks, which the room
+// holds and the update leaves out, as Yjs's update event does. So the replica is the room's copy,
+// what the room holds parked included, and when the commit that fills a gap arrives the replica
+// integrates what waited behind it just as the room does. The copy would converge on the room's
+// tree without the parked part - a logged update is the room's whole store past the commit's
+// beginning with the room's whole delete set, so the commit that fills the gap carries what it
+// integrates from the queue too - but until then the replica would not be the room: what a reader
+// takes from it (readLive) and its encoded state, which carries parked structs
+// (crdt.EncodeStateAsUpdateV1), would both leave out what the room is holding.
+//
+// Applying the parked part integrates nothing, so it renders nothing new: its transaction names
+// no changed type (crdt.Transaction.ChangedTypes), so it touches no block of the record the
+// update is classified against (noteChangedTypes, touchedBlocks), which observe resets before the
+// update's own apply and again once the update is classified. Both transactions therefore record
+// into the one update's record, which is what the classification is of: the room's state as the
+// commit left it, what it parked included. One commit is consumed, classified and recorded once,
+// whether it parked anything or not (observe).
+//
 // The observer renders the replica after an update only when it can neither know the update is a
 // margin write's publish into the room its fork was warm-built from (liveWriteOrigin.marginOnly
 // says why that changes no text), nor reuse the rendering the published live write that made the
@@ -236,6 +256,12 @@ func (r *renderedReplica) lockForUpdate() {
 // one that drains the log: every committed update is classified exactly once, by whichever
 // observer reaches the log first.
 //
+// Each update is applied in the two parts the log hands over: Update, the structs and deletions
+// the transaction integrated, and then what it parked (crdt.LoggedUpdate.Parked), nil when it
+// parked nothing. Either failing leaves the replica holding a state the room never had, so it
+// goes to recover with the rest of the drain. The two are one commit: it is consumed, classified
+// and recorded once, and renderedReplica says why the second apply changes no rendering.
+//
 // asks answers the id of every ask block the update left. It finds them only when called, so a
 // classify that never reads them - an identity repair's, which returns before it does - walks
 // nothing, and it is valid only during classify's call, since it reads the replica, which only a
@@ -261,6 +287,13 @@ func (r *renderedReplica) observe(room string, classify func(update crdt.LoggedU
 			slog.Error("dispatch: apply a committed update to the document's rendered copy", "room", room, "error", err)
 			r.recover(room, updates[i:], classify)
 			return
+		}
+		if update.Parked != nil {
+			if err := crdt.ApplyUpdateV1(r.doc, update.Parked, nil); err != nil {
+				slog.Error("dispatch: apply what a committed update parked to the document's rendered copy", "room", room, "error", err)
+				r.recover(room, updates[i:], classify)
+				return
+			}
 		}
 		published, rendering := r.consumed(update)
 		changed, asks := r.changedBy(room, published, rendering)

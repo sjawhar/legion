@@ -1241,6 +1241,193 @@ func TestRenderReuseARoomBehindTheHeadRendersThePublish(t *testing.T) {
 	sh.versions(t, write)
 }
 
+// E15. A peer sends the room the second of its two transactions first: its structs wait for the
+// first transaction's, which the room lacks, so the room parks them and the commit integrates
+// nothing. The replica takes what each commit parked beside what it integrated
+// (crdt.LoggedUpdate.Parked, renderedReplica), so it holds what the room holds parked while it
+// waits, and when the first transaction arrives both integrate what waited behind it: the room,
+// the replica and a render of the room all hold the text of both transactions, and the commit
+// that brought them is a content change.
+func TestRenderReuseAReplicaRebuiltFromTheLogHoldsWhatTheRoomParked(t *testing.T) {
+	service, artifactID, sh := newWarmRenderReuseRoom(t)
+	live := service.srv.GetDoc(artifactID)
+	replica := service.replicaOf(live)
+	if replica == nil {
+		t.Fatal("the warm room has no replica")
+	}
+	// A log of the test's own, opened before the peer's commits, to read what each one parked:
+	// the replica's log hands its updates to the observer, which drains it.
+	parked := live.OpenUpdateLog()
+	t.Cleanup(parked.Close)
+
+	const firstText = "A paragraph the peer's first transaction wrote."
+	const secondText = "A paragraph the peer's second transaction wrote."
+	peer := newRoomPeer(t, service, artifactID, 2, reuseBob, nil)
+	before := peer.doc.StateVector()
+	peerAppendsBlock(t, peer, firstText)
+	between := peer.doc.StateVector()
+	peerAppendsBlock(t, peer, secondText)
+	first := crdt.EncodeStateAsUpdateV1(peer.doc, before)
+	second := crdt.EncodeStateAsUpdateV1(peer.doc, between)
+
+	m := sh.measure()
+	sendPeerUpdate(t, live, second)
+	logged := drainOneLoggedUpdate(t, parked, "the peer's second transaction")
+	if logged.Parked == nil {
+		t.Fatal("the room logged nothing parked for an update whose structs wait for an earlier one of the same peer")
+	}
+	if waiting := live.PendingStats(); waiting.Items == 0 {
+		t.Fatal("the room parked nothing, so nothing here is tested")
+	}
+	replicaHoldsTheRoom(t, live, replica, "the peer's second transaction")
+	if rendered := renderOfRoom(t, live); strings.Contains(rendered, firstText) || strings.Contains(rendered, secondText) {
+		t.Error("the room renders a paragraph of the peer's while the transaction that holds its place is missing")
+	}
+
+	sendPeerUpdate(t, live, first)
+	integrated := drainOneLoggedUpdate(t, parked, "the peer's first transaction")
+	if integrated.Parked != nil {
+		t.Error("the commit that fills the gap parked something of its own, so nothing here is tested")
+	}
+	if waiting := live.PendingStats(); waiting.Items != 0 {
+		t.Fatalf("the room still holds %d structs parked once the first transaction arrived", waiting.Items)
+	}
+	replicaHoldsTheRoom(t, live, replica, "the peer's first transaction")
+	waitForLandedAppends(t, service, artifactID)
+	sh.check(t)
+	rendered := renderOfRoom(t, live)
+	if !strings.Contains(rendered, firstText) || !strings.Contains(rendered, secondText) {
+		t.Error("the room's rendering is missing the text one of the peer's transactions wrote")
+	}
+	if markdown := heldReplicaMarkdown(t, replica); markdown == nil || *markdown != rendered {
+		t.Errorf("the replica renders %s and the room %d bytes", describeRendering(markdown), len(rendered))
+	}
+	// The commit that integrated what the room parked rendered two blocks more, so it changed the
+	// room's markdown; the commit that only parked changed nothing of it.
+	if changed := storedClassOf(t, service, artifactID, integrated.Update); !changed {
+		t.Error("the commit that integrated what the room parked was not recorded as a content change")
+	}
+	if changed := storedClassOf(t, service, artifactID, logged.Update); changed {
+		t.Error("the commit that only parked was recorded as a content change")
+	}
+	m.expect(t, renderPaths{observerUntouched: 1, observerRendered: 1}, 0)
+}
+
+// peerAppendsBlock writes markdown as a paragraph at the end of the peer's document, in one
+// transaction of its own, and sends the room nothing: the test sends the transactions itself, out
+// of the order they were made (sendPeerUpdate).
+func peerAppendsBlock(t *testing.T, peer *roomPeer, markdown string) {
+	t.Helper()
+	tree, err := treeOf(peer.doc)
+	if err != nil {
+		t.Fatalf("read the peer's document: %v", err)
+	}
+	want := appendBlocks(t, markdown+"\n")(tree)
+	var updateErr error
+	peer.doc.Transact(func(txn *crdt.Transaction) { updateErr = pmdoc.Update(txn, peer.fragment, want) })
+	if updateErr != nil {
+		t.Fatalf("write the peer's paragraph: %v", updateErr)
+	}
+}
+
+// sendPeerUpdate applies one of the peer's updates to the room as its connection would, and
+// returns once the room's update observer has run for it.
+func sendPeerUpdate(t *testing.T, live *crdt.Doc, update []byte) {
+	t.Helper()
+	if err := crdt.ApplyUpdateV1(live, update, "peer"); err != nil {
+		t.Fatalf("apply the peer's update to the room: %v", err)
+	}
+}
+
+// drainOneLoggedUpdate is the one commit log has taken since the last drain, named by what made
+// it.
+func drainOneLoggedUpdate(t *testing.T, log *crdt.UpdateLog, made string) crdt.LoggedUpdate {
+	t.Helper()
+	_, updates := log.Drain()
+	if len(updates) != 1 {
+		t.Fatalf("the room logged %d commits for %s, want 1", len(updates), made)
+	}
+	return updates[0]
+}
+
+// replicaHoldsTheRoom asserts that the replica, once it holds every logged commit, is the room:
+// the same state vector, the same structs and deletions parked (crdt.Doc.PendingStats), the same
+// tree, and the same whole state, which carries what is parked (crdt.EncodeStateAsUpdateV1). The
+// room is read first, with nothing else writing it, so neither read walks a document another
+// holds.
+func replicaHoldsTheRoom(t *testing.T, live *crdt.Doc, replica *renderedReplica, after string) {
+	t.Helper()
+	clocks, waiting, tree := live.StateVector(), live.PendingStats(), live.GetXmlFragment(fragmentName).ToXML()
+	state := crdt.EncodeStateAsUpdateV1(live, nil)
+	doc := heldReplica(t, replica)
+	defer replica.mu.Unlock()
+	if got := doc.StateVector(); !maps.Equal(got, clocks) {
+		t.Errorf("after %s the replica stands at state vector %v and the room at %v", after, got, clocks)
+	}
+	if got := doc.PendingStats(); got.Items != waiting.Items || got.DeleteRanges != waiting.DeleteRanges || !slices.Equal(got.MissingFor, waiting.MissingFor) {
+		t.Errorf("after %s the replica holds %+v parked and the room %+v", after, got, waiting)
+	}
+	if got := doc.GetXmlFragment(fragmentName).ToXML(); got != tree {
+		t.Errorf("after %s the replica holds a tree of %d bytes and the room one of %d", after, len(got), len(tree))
+	}
+	if got := crdt.EncodeStateAsUpdateV1(doc, nil); !bytes.Equal(got, state) {
+		t.Errorf("after %s the replica's whole state is %d bytes and the room's %d", after, len(got), len(state))
+	}
+}
+
+// heldReplica is the replica's document once it holds every commit the room has logged, with the
+// replica's lock held for the caller to release (renderedReplica.hold).
+func heldReplica(t *testing.T, replica *renderedReplica) *crdt.Doc {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if doc := replica.hold(); doc != nil {
+			return doc
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the replica never stood at the room's latest commit")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// heldReplicaMarkdown is the markdown of the rendering the replica keeps once it holds every
+// logged commit, or nil where it keeps none.
+func heldReplicaMarkdown(t *testing.T, replica *renderedReplica) *string {
+	t.Helper()
+	heldReplica(t, replica)
+	defer replica.mu.Unlock()
+	return replicaMarkdown(replica)
+}
+
+// renderOfRoom is a render of the room as of now, taken from a copy of it, as a read of the
+// document renders it.
+func renderOfRoom(t *testing.T, live *crdt.Doc) string {
+	t.Helper()
+	copied, err := snapshotDocument(live)
+	if err != nil {
+		t.Fatalf("copy the room: %v", err)
+	}
+	markdown, _, err := shadowRender(copied)
+	if err != nil || markdown == nil {
+		t.Fatalf("render the room: %v", err)
+	}
+	return *markdown
+}
+
+// storedClassOf is the content_changed the room's persistence stored for update, the very bytes
+// its commit was logged and observed with (sameUpdate).
+func storedClassOf(t *testing.T, service *Service, artifactID string, update []byte) bool {
+	t.Helper()
+	var changed bool
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select content_changed from doc_updates where artifact_id = $1 and update = $2
+	`, artifactID, update).Scan(&changed); err != nil {
+		t.Fatalf("read the stored class of a %d-byte update: %v", len(update), err)
+	}
+	return changed
+}
+
 // typingDocument is renderReuseDocument behind a section a browser types into - a paragraph, a
 // nested list, a code block, and paragraphs it splits, deletes and leaves to an agent - and ahead
 // of appendices holding deeper nested lists and more code blocks.

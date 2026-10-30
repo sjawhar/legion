@@ -26,13 +26,13 @@ import (
 //
 // The first test here is the scenario itself: a browser deletes exactly the text another browser's
 // bold run covers, which leaves the markers covering nothing. Whether ygo commits a cleanup for it
-// is the pinned version's answer - v1.51.3-sami.8 commits none, the pin that carries reearth/ygo
-// #284 commits one - so the test holds what the room does with however many updates the delete
-// leaves, and logs the count rather than asserting it. The second test is the path on which a room
-// credits such a commit at all, and is deterministic on any ygo: a replica that cannot place an
-// update hands it to recover, which classifies every update it could not place as a content
-// change (renderedReplica.recover), so a nil-origin commit made while a browser is connected is
-// the one that would credit that browser for an edit it never made.
+// is the pinned version's answer - a fork before its v1.54 line commits none, one that carries
+// reearth/ygo #284 commits one - so the test holds what the room does with however many updates
+// the delete leaves, and logs the count rather than asserting it. The second test is the path on
+// which a room credits such a commit at all, and is deterministic on any ygo: a replica that
+// cannot place an update hands it to recover, which classifies every update it could not place as
+// a content change (renderedReplica.recover), so a nil-origin commit made while a browser is
+// connected is the one that would credit that browser for an edit it never made.
 
 const (
 	nilOriginParagraph = "Paragraph 0 opens"

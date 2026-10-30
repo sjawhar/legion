@@ -913,13 +913,13 @@ document, and after each transaction that applies an update to the replica it re
 types ygo says the transaction changed (`crdt.Transaction.ChangedTypes`) and walks each up its
 `Parent` chain to the top-level block it sits in, marking the update for a whole render when one
 is the fragment itself or sits deeper than any document in the schema nests. Both accessors are
-the sjawhar/ygo fork's since v1.51.3-sami.8 (reearth/ygo#336). The markdown the replica keeps
-and that markdown's `pmdoc.Layout`, 5 bytes per top-level block (each block's end offset and
-flags), are one value
-(`replicaRendering`), so a replica holding a rendering holds that rendering's layout; a published
-live write's rendering is one value too (`publishedRendering`), which the replica takes whole when
-it takes it. The ask blocks an update left are walked only when its classification asks for them,
-and on the incremental path only in the blocks the layout says hold one.
+the sjawhar/ygo fork's (reearth/ygo#336), whose v1.54 line also logs what each commit parked. The
+markdown the replica keeps and that markdown's `pmdoc.Layout`, 5 bytes per top-level block (each
+block's end offset and flags), are one value (`replicaRendering`), so a replica holding a
+rendering holds that rendering's layout; a published live write's rendering is one value too
+(`publishedRendering`), which the replica takes whole when it takes it. The ask blocks an update
+left are walked only when its classification asks for them, and on the incremental path only in
+the blocks the layout says hold one.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code
