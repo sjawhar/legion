@@ -2,41 +2,36 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-797",
-  "round": 2,
-  "completed": "2026-10-30T19:05:00Z",
-  "decision": "changes_requested",
-  "reviewedCodeHead": "9af8b64a2817fa81cc40b404bea356ac2356d0fe",
+  "round": 3,
+  "completed": "2026-10-30T20:10:00Z",
+  "decision": "approved",
+  "reviewedCodeHead": "ea9bd231f72e1850df31c678361b733ea0d2a014",
   "critical": 0,
-  "important": 2,
-  "minor": 3,
-  "roundOneFindings": "All ten round-1 threads are fixed at 9af8b64a; the authz fix (identity.NoBrowserIdentity from requestIdentityFor when cookie identity has no issuer and no dev sign-in) holds on every browser path (the one identity value reaches the document service and the routes; signin.go builds the only production CookieIdentity; identity.go is the only production caller of auth.SessionFromRequest).",
+  "important": 0,
+  "minor": 4,
+  "roundTwoFindings": "All four round-2 threads are fixed at ea9bd231. The malformed-value rows now assert the refusal they target: with the clause removed from the signInDomain refusal, sign-in_signInDomain_malformed FAILs (reviewer's mutation, reverted). newDispatchSettings calls refuseDispatchTailnetGroup, refuseDispatchSandbox and refuseDispatchSignInGroup once each; both audits confirmed every former check survives exactly once with byte-identical text, and only the first-error order for multi-error inputs moved, which nothing reads.",
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/envoy/infra/gcp/dispatch_sandbox_test.go:297-338",
-      "description": "The four `… malformed` rows of TestDispatchPartialTailnetGroupNamesEveryMissingInput never assert that the bad value's own refusal fired; they rely on `valid` matching the resolver's check order. The signInDomain row has valid=0, so signInClientId's 'required' refusal fires first: with signInClause removed from the signInDomain refusal (dispatch.go:823) the subtest still passes (reviewer's mutation, reverted). The code-quality audit's scratch mutation (clause removed from the tailnetDnsName, tags and image refusals, tailnetAuthKey check moved first) left all four rows green. Fix: each row asserts the bad value's own refusal text (for example `signInDomain \"Example.com\" must be a lowercase DNS name`) plus the unset list, with an explicit per-row setup rather than a positional prefix."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/infra/gcp/dispatch.go:747-842",
-      "description": "Each group's checks are spread across newDispatchSettings: the tailnet group gated at :757, inside the shared image loop by frontDoorOnly and a clause column (:774-789), at :799 and again at :826; the sign-in group at :818 and :840, with region, natsUrl and natsSeedSecret between. Follow newDispatchAzure's pattern: one refuse function per mode (tailnet, sandbox, sign-in), each called once; the image loop goes back to the two app images. The comments at :135-140 (DispatchArgs: 'refuses each one missing, in the wording it always used') and :770-773 ('the sandbox block below' never checks the images) are false and go with it."
+      "severity": "minor",
+      "file": "packages/envoy/infra/gcp/dispatch.go:135-148 and :840-847 (fixed by the reviewer)",
+      "description": "The DispatchArgs doc said every half-set group gets the per-input refusal with a clause, which is false for a sign-in input sent without the tailnet group (refuseDispatchSandbox refuses it for being sent at all), and left out the accepted tailnet-without-sign-in case; the block comment in newDispatchSettings repeated the three functions' docs and ended on a sentence about precomputed clauses the code no longer has. Rewritten in the reviewer's own commit."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/infra/gcp/dispatch_cluster_only_test.go:104-105",
-      "description": "dispatchClusterOnlyRefusal's doc says a row sets an input 'alone on a valid cluster-only DispatchArgs'; its rows now also feed the two group tables and the Construct test. Rename it (the production type became dispatchInput for the same reason) and fix the doc."
+      "file": "packages/envoy/infra/gcp/dispatch_sandbox_test.go:310-366",
+      "description": "Not a defect: each malformed row lists in sets the inputs its setup assigns; all five rows agree, and each row asserts its own refusal text, so the duplication is a style choice rather than a hole."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/cmd/dispatch/main_test.go:72-80, settings_test.go:623-628",
-      "description": "noSignInSettings has one caller left, settings_test.go:625, which repeats signin_off_test.go:17-19's SignInIssuer == \"\" assertion; delete both."
+      "file": "packages/envoy/infra/gcp/dispatch_sandbox_test.go:274",
+      "description": "Not a defect: TestDispatchPartialTailnetGroupNamesEveryMissingInput also covers the sign-in group, but the plan and the proof table select it by this name; a rename would break that trace for no behaviour."
     },
     {
       "severity": "minor",
-      "file": "prose (fixed by the reviewer in 4717e434)",
-      "description": "'every browser request answers 401' overstated (static files and /auth/start answer otherwise) in infra/README.md, deploy/README.md, dispatch.env.example, cmd/dispatch/README.md, identity.go and the changelog fragment; main.go's cookie arm now says 'and no DISPATCH_DEV_SIGNIN'; requestIdentityFor's doc cut to the rule; dispatch_kube.go names the front door's Role and RoleBinding; infra/README.md's sign-in-unset paragraph now carries the envoyImage floor and says to revoke personal agent tokens before dropping sign-in (revokeAgentToken needs a person, agent_tokens.go:113)."
+      "file": "PR body component table",
+      "description": "Not a defect: the implementer's component table names its own head (9af8b64a) truthfully; both E2E lines name ea9bd231, and the reviewer ran go test ./gcp/ -count=1 -skip DataDisk green at ea9bd231 and at the prose head."
     }
   ],
-  "ci": "Required set lint, typecheck, test, pr-title (rulesets). At code head 9af8b64a run 41078189271: lint, test, pr-title success, typecheck skipped; dispatch and dispatch-memory still in progress at 18:13Z; envoy-go (not required) failed on cmd/listener TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering, a package this branch does not touch. The reviewer's prose push starts a new run.",
-  "thermonuclear": "Both run once at c253e267: thermonuclear-deep-review APPROVE (no Medium/High; three Minor doc findings and two hardening notes, taken into the prose commit), thermonuclear-code-quality CHANGES (two important: resolver structure, malformed rows; four minor). Every finding checked by the reviewer at the head."
+  "ci": "Required set lint, typecheck, test, pr-title (rulesets). Read at the reviewer's prose head before approving; the approval waits for those checks green there.",
+  "thermonuclear": "Both run once at 54745eba: thermonuclear-deep-review APPROVE (no critical or important; one minor: the PR body's component table names an older head; hardening: in-cluster plain http, documented), thermonuclear-code-quality CHANGES on minor findings only (two prose drifts fixed by the reviewer, two test-clarity points judged not defects). Every finding checked by the reviewer at the head."
 }
