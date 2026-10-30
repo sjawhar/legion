@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-750",
-  "completed": "2026-10-30T08:35:00Z",
+  "completed": "2026-10-30T11:15:00Z",
   "generation": 2,
-  "round": 3,
+  "round": 4,
   "pullRequest": "sjawhar/legion#2542",
-  "head": "73196dfca8cd",
+  "head": "3de30a206f8e32c83507fce5e1730e67fda22843",
   "plan": "dispatch://INFRA-750/artifact/plan-md@v4, with the architect's decision of 2026-10-30 that put the daemon in scope (roll-call line 4)",
   "proof": [
     {
@@ -56,6 +56,14 @@
       "observed": "The unit test passes both rows twice under -race (ok 1.601s). Both listener tests pass twice through the shared helper with the timings unchanged by the fold: envoy 2.784 s to 2.837 s and envoy-live-topics 2.835 s to 2.839 s after the freeze. gofmt and vet print nothing.",
       "headSha": "73196dfca8cd",
       "negativeControl": "With the old wording back in kvwatch.go and the test untouched, the `a rewatch replaced it` row fails: `kvwatch_test.go:223: timed out waiting for the replaced first watch's end`. The helper fold is behaviour-identical rather than new behaviour, and its control is that both tests keep passing with the same per-client timings and the same per-client failure diagnostic."
+    },
+    {
+      "criterion": "The forward merge leaves the change working: GitHub no longer reports the pull request conflicting, and every suite the merged files touch passes at the merge head.",
+      "surface": "The package suites of packages/envoy and packages/daemon at the merge head, and GitHub's own mergeability read.",
+      "command": "From packages/envoy: `go test -count=1 -timeout 30m ./cmd/listener/` (this pod's four Postgres-container tests skipped by name); `go test -count=1 -timeout 20m ./cmd/dispatch/`; `CGO_ENABLED=1 go test -race -count=1 -timeout 40m ./internal/bus/... ./internal/kvwatch/ ./internal/cistore/ ./internal/session/ ./internal/store/ ./internal/webhook/ ./internal/dispatch/outbox/`; `(cd infra && go test -count=1 ./...)` with the two data-disk tests that need mkfs.ext4 skipped; from packages/daemon, `CGO_ENABLED=1 go test -race -count=1 -p 1 -timeout 15m ./internal/natsauth/` against a local nats-server. `gh pr view 2542 --json mergeable,mergeStateStatus`.",
+      "observed": "cmd/listener ok 455.270s; cmd/dispatch ok 50.543s; every raced package ok (internal/webhook 12.114s, internal/dispatch/outbox 6.982s among them); the infra module ok throughout; natsauth ok 5.180s. go build, go vet and gofmt clean in both modules. GitHub answers MERGEABLE (BLOCKED only on checks it had just started at the merge head), where before the merge it answered CONFLICTING.",
+      "headSha": "3de30a206f8e32c83507fce5e1730e67fda22843",
+      "negativeControl": "The conflict itself is the control for the resolution: before it was resolved the tree carried jj's markers and no package built; after it, `go build ./...` and `go vet ./...` pass and every sentence of both sides is present, each checked by name at the merged head."
     }
   ],
   "filesChanged": [
@@ -99,5 +107,13 @@
       "PRRT_kwDORFy7ds6x5O4E (cmd/listener/cut_rewatch_test.go): fixed in 73196dfc \u2014 freezeUntilBothClientsReportTheCut in silent_cut_test.go holds the freeze, the log offset and the wait for both clients' lines, with the per-client missing diagnostic and the timing log, and both listener tests call it."
     ],
     "allAnsweredAndResolved": true
+  },
+  "forwardMerge": {
+    "trigger": "GitHub reported the pull request CONFLICTING with main, 19 commits behind (the controller's task named #2529 3d5548da, #2527 b260b0c7, #2531 852b8619 and the plugin releases).",
+    "shape": "One merge commit of the branch's bookmark with main@origin, nothing rebased and no existing commit moved.",
+    "conflicts": "One file, packages/envoy/docs/architecture.md, in two places, each an edit of the same lines by both sides, both kept: (1) the send-and-publish answers table takes this branch's full-stream 503 stream_full row and main's denied-publish 403 publish_denied row, this branch's first; (2) the outcome list reads `bus_unavailable` and `stream_full`, plus `no_live_session` for send, `capability_refused` for send and a role send, `publish_denied` for send and publish alike, since a publish on either transport can be denied, and `role_unclaimed` ... \u2014 this branch's addition inside main's new wording.",
+    "mergedWithoutConflict": "Six files both sides changed merged clean: packages/envoy/AGENTS.md, internal/bus/async.go, internal/bus/nats.go, internal/dispatch/outbox/publisher.go, internal/webhook/github_test.go and packages/envoy-client/README.md. Each of this branch's sentences and its one bustest.FillStream call is still in place at the merged head.",
+    "fingerprint": "47c0c5cf22cfd099e0ba99c934efcfdfe59118461d1ec5e8f7b6942ca9ad312f -> 2210db3128b1bcee1b8f4aa8e8b891486c1ecdfacbff948536802197c5a14d9f, changed. The only change to the pull request's own diff is the second resolution's sentence; the table row of the first is in the base at the merged head and leaves the diff. 34 files, 762 insertions and 259 deletions against 761 and 258.",
+    "comment": "https://github.com/sjawhar/legion/pull/2542#issuecomment-6521186770"
   }
 }
