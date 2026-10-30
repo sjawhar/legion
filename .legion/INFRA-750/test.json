@@ -2,65 +2,62 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-750",
-  "completed": "2026-10-30T08:05:00Z",
+  "completed": "2026-10-30T08:40:00Z",
   "generation": 2,
-  "round": 2,
+  "round": 3,
   "pullRequest": "sjawhar/legion#2542",
-  "head": "b41bf83ff20f13ae967537e4b7952e56548a810b",
-  "codeHead": "d5dbcf927aa7",
+  "head": "ac614cc15b803736c5ee18f548e955d63394bd49",
+  "codeHead": "73196dfca8cd",
+  "answers": "The review round of 2026-10-30 (.legion/INFRA-750/review.json, decision changes_requested, 0 critical, 0 important, 2 minor). Both findings are in the code and both were driven here.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The two entries this round changed were re-run here and each was broken on its own. Entry 5 (roll call 5, the new one): `CGO_ENABLED=1 go test -race -count=2 -run 'TestAFailedFirstStartLogsItsErrorOnlyWhileItIsTheLiveWatch$' ./internal/kvwatch/` passed twice (ok 1.604s), and `go test -run 'TestASilentCutRewatchesTheCachesWithNoErrorLine$' ./cmd/listener/` passed (ok 7.133s, the cut reported 2.833 s in). The entry's own disclosure was checked rather than taken: with the replaced-watch line forced to ERROR in kvwatch.Start, the listener guard still passes (ok 6.332s), so that test does not reach the replaced branch and the unit test is the pin, exactly as the entry says. The entries carried from round 1 were re-run at this head: the listener's silent cut 3 of 3 (2.787 s to 2.856 s for `envoy`, 2.837 s to 2.856 s for `envoy-live-topics`) and the daemon's 2 of 2 under -race (3.011 s and 3.014 s). kvwatch and its three dependants are green under -race (65.755s, 25.581s, 11.697s, 33.249s). Entry 3 (item 1.8) and entry 4 (the suites) were verified in round 1 at code head 725e26a83afa and their code is unchanged since: the diff d5998d5f..d5dbcf92 touches only internal/kvwatch, cmd/listener/cut_rewatch_test.go, one changelog fragment and .legion/."
+    "how": "This round's whole diff is one commit, 73196dfca8cd, over the reviewed head 721792617475: the replaced-watch INFO line's wording, Start's doc, the test constant that reads the line, and the extraction of the freeze-and-wait sequence into freezeUntilBothClientsReportTheCut. Every test that reads either was re-run here. `CGO_ENABLED=1 go test -race -count=2 -run 'TestAFailedFirstStartLogsItsErrorOnlyWhileItIsTheLiveWatch$' ./internal/kvwatch/`: both rows pass twice (ok 1.574s). `go test -run 'TestBothOfTheListenersNATSClientsReportASilentCutWithinSeconds$|TestASilentCutRewatchesTheCachesWithNoErrorLine$' ./cmd/listener/`: both pass (ok 12.042s), each printing the per-client timings the helper kept. `CGO_ENABLED=1 go test -race -count=2 -run 'TestAHubThatStopsAnsweringIsNoticedWithinSeconds$' ./internal/natsauth/` from packages/daemon: 2 of 2 (ok 7.084s). Three negative controls, each a break of production with the tests untouched, go red. The earlier entries were verified at their own heads in rounds 1 and 2 and their code is untouched by this commit."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Roll call 5, the INFRA-14 architect's decision of 2026-10-30: a watch a rewatch replaced ends without an ERROR line, and a watch that fails while it is still the live one keeps its ERROR.",
-      "surface": "The kvwatch watcher against a real in-process NATS server, both branches driven directly through its public API (New, Rewatch, Start, KV), with the records read from a JSON logger.",
+      "criterion": "Review finding 1 (minor, kvwatch.go:212): the replaced-watch line must name the failure as the first watch's own, not as something the rewatch caused, and Start's doc must say the real condition.",
+      "surface": "The kvwatch watcher against a real in-process NATS server, both branches driven through its public API, with the records read from a JSON logger; and the source the finding cites.",
       "command": "From packages/envoy: `CGO_ENABLED=1 go test -race -count=2 -timeout 15m -v -run 'TestAFailedFirstStartLogsItsErrorOnlyWhileItIsTheLiveWatch$' ./internal/kvwatch/`.",
-      "observed": "Both rows passed in both runs (ok 1.604s). `no replacement`: the failed first start logs exactly one ERROR `test cache watch failed` and no INFO end line, so a cache nothing feeds still pages. `a rewatch replaced it`: no ERROR record of any message, one INFO `test cache first watch ended because a rewatch replaced it`, and the replacement still delivers a put made afterwards.",
-      "headSha": "b41bf83ff20f13ae967537e4b7952e56548a810b",
-      "negativeControl": "Start's old body restored (the unconditional `w.logger().Error(...)` before the lock, the `if !current { w.signalReady() }` after it) with both test files untouched: `--- FAIL ... a first watch a rewatch replaced logged [test cache watch failed: nats: connection closed], want no ERROR`, while the `no replacement` row still passes, so the test separates the two branches rather than counting lines. kvwatch.go was restored with `jj restore` and `jj status` is clean."
+      "observed": "Both rows pass twice (ok 1.574s) with the line now reading `<cache> first watch failed after a rewatch replaced it; the replacement feeds the cache`, which the test's `replaced` constant matches. The finding's premise was checked in the code rather than taken: `watch` returns an error at two places only, `bus.ReadStreamState` (internal/kvwatch/kvwatch.go:515) and `open` with `from == 0` (:525-527), both before any watcher is installed, so the new doc's `The watch fails only before it has installed a watcher, so the error is always the first watch's own` is true, and so is its `While no watcher is current` condition.",
+      "headSha": "ac614cc15b803736c5ee18f548e955d63394bd49",
+      "negativeControl": "Start's old body restored (the unconditional ERROR before the lock, `if !current { w.signalReady() }` after it), both test files untouched: `--- FAIL ... a first watch a rewatch replaced logged [test cache watch failed: nats: connection closed], want no ERROR`, while the `no replacement` row still passes. kvwatch.go was restored with `jj restore`."
     },
     {
-      "criterion": "The whole cut path of the real listener writes no ERROR line: a hub that stops answering is declared lost, every cache is rewatched, and the caches follow the bucket again.",
-      "surface": "The real envoy-listener binary with its three caches and the live topics lane, against an in-process NATS whose relay freezes and thaws, read through its own log and its GET /v1/interests/.",
-      "command": "From packages/envoy: `go test -count=1 -timeout 15m -v -run 'TestASilentCutRewatchesTheCachesWithNoErrorLine$' ./cmd/listener/`; and a throwaway second-run test of the tester's own (TestTwoSilentCutsInARowRewatchTheCachesWithNoErrorLine), two freezes and two thaws in one process, run the same way and removed afterwards since it pins no defect.",
-      "observed": "The implementer's guard passed (ok 7.133s), both clients reporting the cut 2.833 s in. The two-cut run passed in 10.86 s: cut 1 reported 2.838 s in and every cache warmed up again 1.062 s after the thaw; cut 2 reported 3.042 s in and every cache warmed up again 1.012 s after the thaw; an interest another listener wrote after the second thaw reached this listener's cache 1 ms later; and no ERROR line anywhere in the process's output, start included. So the second cut ends as the first does.",
-      "headSha": "b41bf83ff20f13ae967537e4b7952e56548a810b",
-      "negativeControl": "Two, and they answer different questions. (1) The guard's no-ERROR assertion is live: one `slog.Error` added to rewatchListenerKVWatchers in cmd/listener/main.go, which the cut path runs, makes it fail — `a silent cut and its rewatch logged an error: ... ERROR tester control: rewatching a cache cache=interest`. (2) The guard does not reach the replaced-watch branch: with kvwatch.Start's replaced-watch line forced from INFO to ERROR, the guard still passes, which is why the unit test above is the pin for roll call 5 and why the implementer's entry says so. Both patches were reverted with `jj restore`."
+      "criterion": "Review finding 2 (minor, cut_rewatch_test.go:43-65): the freeze-and-wait-for-both-cut-lines sequence must live in one helper both listener tests call, keeping the per-client diagnostic and the timing log.",
+      "surface": "The real envoy-listener binary with the live lane on, against an in-process NATS whose relay freezes; both tests that now call the helper.",
+      "command": "From packages/envoy: `go test -count=1 -timeout 20m -v -run 'TestBothOfTheListenersNATSClientsReportASilentCutWithinSeconds$|TestASilentCutRewatchesTheCachesWithNoErrorLine$' ./cmd/listener/`.",
+      "observed": "Both pass (ok 12.042s). The timing log survived the extraction and is printed by both callers: `envoy reported the cut 2.799s after it began` and `envoy-live-topics ... 2.85s` from the cut test, `2.786s` and `2.836s` from the rewatch test. The helper takes its own log offset per call, so a caller that freezes twice judges each cut on its own window.",
+      "headSha": "ac614cc15b803736c5ee18f548e955d63394bd49",
+      "negativeControl": "The per-client diagnostic is still live after the extraction: `bus.WithSilentCutDetection()` removed from listenerStreamOptions alone, the test files untouched, fails naming one client only — `no disconnect line for envoy 5.025s into a silent cut`, with `envoy-live-topics`'s `nats: stale connection` line present. main.go was restored with `jj restore`."
     },
     {
-      "criterion": "The listener notices a dead hub in seconds (the spec's `Also in the second pull request` acceptance): a test stops answering the listener's pings without closing its socket, and the listener reports the connection lost within 5 seconds.",
-      "surface": "The real envoy-listener binary with the live lane on, against an in-process NATS whose relay stops moving bytes with both sides' connections kept (testnats.Server.Freeze).",
-      "command": "From packages/envoy: `go test -count=3 -timeout 15m -v -run 'TestBothOfTheListenersNATSClientsReportASilentCutWithinSeconds$' ./cmd/listener/`.",
-      "observed": "3 of 3 passed (ok 15.798s). `envoy` reported the cut 2.806 s, 2.837 s and 2.787 s after the freeze; `envoy-live-topics` 2.856 s, 2.837 s and 2.838 s. Every run is inside the 5 s the acceptance asks for.",
-      "headSha": "b41bf83ff20f13ae967537e4b7952e56548a810b",
-      "negativeControl": "`bus.WithSilentCutDetection()` removed from openLiveTopics alone, at this head, with the test file untouched: `--- FAIL ... no disconnect line for envoy-live-topics 5.019s into a silent cut`, with `envoy`'s `nats: stale connection` line present, so the test pins each call site on its own. The same break of listenerStreamOptions failed naming `envoy` only in round 1, at code head 725e26a83afa, where that file is byte for byte what it is here. live_topics.go was restored with `jj restore`."
+      "criterion": "The whole cut path of the real listener still writes no ERROR line, and a second cut in the same process ends as the first does.",
+      "surface": "The real envoy-listener binary with its three caches and the live lane, frozen and thawed twice in one process, read through its own log and its GET /v1/interests/.",
+      "command": "From packages/envoy: `go test -run 'TestASilentCutRewatchesTheCachesWithNoErrorLine$' ./cmd/listener/`, and a throwaway two-cut test of the tester's own on the new helper (TestTwoSilentCutsInARowRewatchTheCachesWithNoErrorLine), run the same way and removed afterwards since it pins no defect.",
+      "observed": "The implementer's guard passes. The two-cut run passed in 11.08 s: cut 1 reported 2.835 s in by both clients and every one of the three caches warmed up again 1.064 s after the thaw; cut 2 reported 2.996 s in and every cache warmed up again 1.015 s after the thaw; an interest another listener wrote after the second thaw reached this listener's cache 103 ms later; and the process wrote no ERROR line at all, its start included.",
+      "headSha": "ac614cc15b803736c5ee18f548e955d63394bd49",
+      "negativeControl": "The guard's no-ERROR assertion is live at this head, after the output reader moved into the helper: one `slog.Error` added to rewatchListenerKVWatchers in cmd/listener/main.go, which the cut path runs, makes it fail — `a silent cut and its rewatch logged an error: ... ERROR tester control: rewatching a cache cache=interest`. main.go was restored with `jj restore`."
     },
     {
-      "criterion": "The daemon notices a dead hub in seconds (the INFRA-14 architect's decision of 2026-10-30): the same ping settings at the daemon's one NATS connection, with a frozen-server test inside the same bound.",
-      "surface": "The daemon's own natsauth.Connect, called as internal/daemon/workflow.go:366 calls it (LogEvents and ReconnectForever), against a server that answers the handshake PING and then answers nothing with the socket open.",
-      "command": "From packages/daemon: `CGO_ENABLED=1 go test -race -count=2 -timeout 10m -v -run 'TestAHubThatStopsAnsweringIsNoticedWithinSeconds$' ./internal/natsauth/`.",
-      "observed": "2 of 2 passed under -race (ok 7.080s): the cut was noticed 3.011342769 s and 3.014144001 s after the server went quiet, with `NATS connection lost` logged and IsConnected false.",
-      "headSha": "b41bf83ff20f13ae967537e4b7952e56548a810b",
-      "negativeControl": "`options = append(options, detectSilentCuts)` removed from Connect, at this head, the test file untouched: `--- FAIL ... the connection was not reported lost within 5.010558966s of the server going quiet: IsConnected = true, the warning logged = false`. natsauth.go was restored with `jj restore`."
+      "criterion": "The two headline criteria still hold at this head: the listener reports a silent cut within 5 seconds, and the daemon reports one within the same bound.",
+      "surface": "The real envoy-listener binary against a frozen relay, and the daemon's own natsauth.Connect against a server that answers the handshake and then nothing.",
+      "command": "From packages/envoy: `go test -count=1 -run 'TestBothOfTheListenersNATSClientsReportASilentCutWithinSeconds$' ./cmd/listener/`. From packages/daemon: `CGO_ENABLED=1 go test -race -count=2 -timeout 10m -v -run 'TestAHubThatStopsAnsweringIsNoticedWithinSeconds$' ./internal/natsauth/`.",
+      "observed": "The listener: pass, `envoy` 2.799 s and `envoy-live-topics` 2.85 s after the freeze; in the two-cut run both clients reported each of two cuts at 2.835 s and 2.996 s. The daemon: 2 of 2 under -race (ok 7.084s), the cut noticed 3.011111250 s and 3.016850422 s after the server went quiet.",
+      "headSha": "ac614cc15b803736c5ee18f548e955d63394bd49",
+      "negativeControl": "The listener control above (the option removed from listenerStreamOptions alone). For the daemon, the same break ran in rounds 1 and 2 — `options = append(options, detectSilentCuts)` removed from Connect gives `the connection was not reported lost within 5.0105s ...: IsConnected = true, the warning logged = false` — and packages/daemon is untouched by this round's commit, which the diff 721792617475..73196dfca8cd shows: it holds only internal/kvwatch and cmd/listener test files."
     }
   ],
-  "roundOneFailureClosed": {
-    "failure": "Round 1 failed because the head carried no CI: that push ended on a handoff commit holding `skip-checks: true` while also carrying seven code commits, so GitHub started no run.",
-    "readAtThisHead": "Fixed. `gh api repos/sjawhar/legion/commits/b41bf83ff20f13ae967537e4b7952e56548a810b/check-runs` answers 2 at 08:00Z, `changes` and `pr-title`, both queued, where the same call answered 0 at every head of round 1. The head's commit message carries no `skip-checks` line (`jj log -r b41bf83f -T description | cat -A` ends at the `Omp-Session` trailer). A lane that is queued or running is read as such and waited for by nobody here; the required checks will settle on this head, and a red one sends the issue back without my completion.",
-    "notRewritten": "The implementer left the two already-pushed trailered commits as they are and says why in its handoff. That is right: what starts a run is the push, and this push started one."
-  },
+  "ciAtTheHead": "The code head 73196dfca8cd carries CI run 41026772876, queued at 08:34Z with `changes` queued and `pr-title` queued; the handoff head ac614cc1 carries none, which is right, since its push touched `.legion/INFRA-750/` alone and its message carries `skip-checks: true`, so the daemon carries the code head's verdict to it. Round 2's run at b41bf83f reads `cancelled` throughout: the newer push superseded it under ci.yaml's `cancel-in-progress` for a pull request. A queued lane is read as queued; nothing here waited for it and no lane was re-run as evidence.",
   "environment": [
-    "This pod has no container runtime, so the cmd/listener tests that start a Postgres container and the natsauth tests that need an authorized-server container are skipped by name or fail on `rootless Docker not found`, as the implementer records. Everything in this handoff ran without either.",
-    "No nats-server of this round was left running: every test above uses an in-process server from internal/testnats."
+    "Every test in this handoff runs against an in-process NATS server from internal/testnats; no container and no external server is needed, and none was left running.",
+    "This pod has no container runtime, so the cmd/listener tests that start a Postgres container and the three natsauth tests that need an authorized-server container do not run here, as the implementer records. CI runs them."
   ],
   "alsoChecked": [
-    "The claim in kvwatch.Start's new doc comment that `the end of a replaced watcher is silent on the other path too (consume)` holds: consume guards its warm-up log, its scanEnded and its readiness release with `current := w.current(generation)` (internal/kvwatch/kvwatch.go:700, 717, 722), so a replaced generation writes nothing there.",
-    "The new code keeps the live-watch behaviour whole: a failed first start with no replacement still records w.err and still releases readiness, and the stopped case is unchanged, so Err(), Ping(), /healthz and the self-health rebuild read what they read before.",
-    "Acceptance 6's `The new text names no Dispatch key`: every added line of this round's diff outside .legion/INFRA-750/ holds no INFRA-, LEGION- or dispatch:// text; the new fragment packages/envoy/.changes/unreleased/pr-2542-replaced-watch-no-error.yaml carries `Issue: pr2542`.",
-    "The tester's round-1 observation is answered and its attribution corrected by the implementer: the two ERROR lines came from the test process's own second registry, whose connection the test closes while its first watches are live. Those watches are the live ones, so they keep their ERROR, which is what the architect's decision asks for; the branch the decision quiets is the replaced one, pinned by the unit test above."
+    "The helper's contract: it returns the thaw and the output reader, takes a fresh log offset at each call, and registers its own `t.Cleanup(thaw)`; the freeze is a `sync.OnceFunc`, so a caller that thaws and the cleanup that thaws again are safe, which the two-cut run exercises twice.",
+    "The review's two findings are the whole of this round's diff. Nothing else of the pull request changed: `jj diff -r '721792617475::73196dfca8cd' --stat` lists internal/kvwatch/kvwatch.go, internal/kvwatch/kvwatch_test.go, cmd/listener/silent_cut_test.go, cmd/listener/cut_rewatch_test.go and the two handoff files.",
+    "The new text names no Dispatch key: every added line outside .legion/INFRA-750/ holds no INFRA-, LEGION- or dispatch:// text.",
+    "One prose nit the reviewer may want to take itself, not a failure and not a defect: the unit test's name, TestAFailedFirstStartLogsItsErrorOnlyWhileItIsTheLiveWatch, keeps the wording the finding corrected in the doc (`while it is still the live one`). The meaning is right — the first watch is the live watch exactly while no replacement is current — but the doc now says `While no watcher is current` and the name does not."
   ]
 }
