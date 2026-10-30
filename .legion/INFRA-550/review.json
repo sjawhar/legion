@@ -2,50 +2,34 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-550",
-  "completed": "2026-10-30T01:38:00Z",
+  "completed": "2026-10-30T04:45:00Z",
+  "round": 2,
   "decision": "approved",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2529",
-  "reviewedCodeHead": "dc1634a7868e0c6e897b27afef5003ace4d1ff13",
+  "previousApproval": "58bcb22c46d35968b99c8bb7dedcf0ad0e4b9131",
+  "reviewedCodeHead": "ded1386e81f1",
   "critical": 0,
   "important": 0,
-  "minor": 6,
+  "minor": 2,
   "keyFindings": [
     {
       "severity": "minor",
       "file": "packages/envoy/infra/README.md",
-      "description": "The natsInCluster paragraph did not say that natsUrl must change in the same apply, nor that the hub must admit the pods' namespace first (clientNamespaces for gcp:ClusteredNatsHub); the natsReplicas paragraph did not name the hub's server count as the ceiling. Fixed as prose in dc1634a7868e."
+      "description": "Round 2's thermonuclear deep review: 'JetStream keeps no more copies of a stream than it has servers' (gcp:Dispatch's natsReplicas paragraph, and gcp:ClusteredNatsHub's natsReplicas row) reads as a clamp, while JetStream refuses the stream and envoy-listener exits at start naming ENVOY_NATS_REPLICAS (internal/bus/stream.go refusedSettings, cmd/listener/main.go log.Fatal, TestARefusedRaiseNamesTheReplicaSetting). The ClusteredNatsHub streamMaxBytes row also still said an unset limit is the listener's own default. Fixed as prose in ded1386e81f1."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/infra/gcp/dispatch.go",
-      "description": "An unset streamMaxBytes was described as each binary keeping 'its own default'; bus.ParseStreamMaxBytes sets no limit, so a deployed stream keeps the one it has. Fixed in dispatch.go (two comments), README.md and a dispatch_test.go comment and assertion message, in dc1634a7868e."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/infra/gcp/dispatch_frontdoor.go",
-      "description": "Three unchanged comments (dispatch_frontdoor.go file header, dispatch_kube.go dispatchSOCKS5Port and the front-door block) said every front-door pod runs the SOCKS5 proxy; with natsInCluster none does. Fixed in dc1634a7868e."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/infra/gcp/dispatch_construct_test.go",
-      "description": "The comment claimed every Construct test 'carries them through the plugin' while none asserts the rendered values. Reworded in dc1634a7868e to what holds: the plugin decodes them (an undecodable value refuses the Construct), and their rendering is asserted on the direct path; the real-CLI proof's resolver refusal of natsReplicas 6 shows the plugin path decodes them."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/infra/gcp/dispatch_kube.go",
-      "description": "Not a defect: the code-quality pass proposed one local-URL refusal for both modes, a socks5Server() helper beside socks5Proxy(), one table in place of the four natsInCluster tests, and a resolver function for the two numbers. The SOCKS5 mode's refusal text is kept byte for byte by design, the front door's bind address is a different value from the clients' proxy address, and TestDispatchAppAndListenerAgreeOnNats compares the two maps for equality (the count only pins that the mode renders every key), so none changes behaviour or hides an error."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/infra/gcp/dispatch_kube.go",
-      "description": "Hardening, not a defect: with natsInCluster, NATS traffic is plaintext nats:// over the pod network, as the app-to-front-door SOCKS5 hop already was; the nkey challenge-response does not expose the seed."
+      "file": "packages/envoy/.changes/unreleased/pr2529-Added-20261030-014028.yaml",
+      "description": "Not a defect: the round's code change, the fragment rename in fcb80dcf72ef, is the name .changie.yaml's fragmentFileFormat gives for custom.Issue pr2529 and matches its pr<number> neighbours; changie v1.26.0 batch renders it, and the fold follows renames to the first add."
     }
   ],
   "thermonuclear": {
-    "head": "02b24ffbf9230e9de5cf7f181c9a9749f921473c",
-    "deepReview": "APPROVE: no Medium or High finding; default rendering byte-identical, refusals land on natsUrl, empty front-door ingress denies every source (PolicyTypes Ingress), a live flip deletes the tailnet Service after both workloads roll.",
-    "codeQuality": "CHANGES on structure and test shape; adjudicated above as not defects, and its comment and README findings fixed as prose."
+    "head": "b8fa955eb2a70db33779ed30b479ef88155455e8",
+    "deepReview": "APPROVE: every Go hunk since 02b24ffbf923 is a comment or one require message; the renamed fragment is valid; dc1634a7868e's prose matches the code. One Minor, fixed above.",
+    "codeQuality": "APPROVE: no findings."
   },
-  "ci": "Required set on main: lint, typecheck, test, pr-title. At dc1634a7868e (run 40971650488 CI, 40971650270 PR Title): lint success, typecheck and test skipped by path filter, pr-title success; envoy-infra-go and envoy-go read green before the approval. The code head cfc95b6efe98's CI run 40966785630 was cancelled by the newer push's concurrency group.",
-  "localChecks": "At dc1634a7868e, packages/envoy/infra: gofmt -l empty, go vet -tags pulumilive,natslive ./... clean, go test ./... ok for every package (skipping the two mkfs.ext4 tests this container cannot run)."
+  "ci": "Required set on main: lint, typecheck, test, pr-title. At ded1386e81f1 (run 40998520278): lint success, pr-title success, typecheck and test skipped by path filter; envoy-infra-go, envoy-go, envoy-go-race, envoy-smoke success. Not required and not this change: ci-filters fails on main itself at e4c9ab857e (envoy_go_race_docs misses internal/dispatch/itemblocks, reported to the controller); envoy-session-stall failed one timing case of nats-stall.test.ts in a package this PR does not touch, green on main.",
+  "notes": [
+    "The previous turn's process died before it pushed anything; the workspace was recreated at b8fa955eb2a7 and this round was done again from there."
+  ]
 }
