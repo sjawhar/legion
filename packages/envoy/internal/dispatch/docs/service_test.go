@@ -1110,8 +1110,9 @@ func TestEditAskOfAnEmptyQuestionNamesTheStep(t *testing.T) {
 			`what one of its paragraphs holds, which is no text: block ` + strconv.Quote(photo) +
 			` (paragraph) reads "![a photo](/photo.png)"; no document edit writes a paragraph into a decision, ` +
 			`so this is the one case a document edit cannot reach - upload the document again as a new version ` +
-			`with the question written beside that paragraph (dispatch artifact --issue <KEY> ` +
-			`--name <the document> --content-file -), or write the question beside it in the document editor; ` +
+			`with the question written beside that paragraph (dispatch artifact --issue <KEY>, or ` +
+			`--project <KEY> for a project's document, --name <the document> --content-file -), or write the ` +
+			`question beside it in the document editor; ` +
 			`either keeps what the paragraph holds`
 		if err == nil || err.Error() != want {
 			t.Fatalf("refusal =\n%v\nwant\n%s", err, want)
@@ -2857,6 +2858,91 @@ func seedTypedOptionLine(t *testing.T, line string) (*Service, string) {
 	return service, artifactID
 }
 
+// A line break a person typed is text of the option's own line, whichever way the document holds
+// it: a soft break, which the editor keeps from a paste and the markdown writes as the space a
+// reader sees, and a line feed a text node ends with, which the markdown writes as the trailing
+// whitespace it is. Neither is markup the line holds, and the ask row reads the same words
+// either way, so an edit dropping such an option and one rewording it are both applied, as they
+// are for the whitespace a person typed.
+func TestAskOptionsEditOfALineHoldingATypedBreak(t *testing.T) {
+	ship := model.AskOption{Label: "Ship", Description: "Release it"}
+	for _, test := range []struct {
+		name   string
+		inline []*pmdoc.Node
+		text   string
+	}{
+		{
+			name: "a soft break",
+			inline: []*pmdoc.Node{
+				{Type: "text", Text: "Hold: Wait"},
+				{Type: "hardbreak", Attrs: pmdoc.Attrs{"isInline": true}},
+				{Type: "text", Text: "for review"},
+			},
+			text: "Hold: Wait\nfor review",
+		},
+		{
+			name:   "a line feed its text ends with",
+			inline: []*pmdoc.Node{{Type: "text", Text: "Hold: Wait for review\n"}},
+			text:   "Hold: Wait for review\n",
+		},
+	} {
+		t.Run("the drop of "+test.name, func(t *testing.T) {
+			service, artifactID := seedOptionLineHolding(t, test.inline, test.text)
+			held := askOptionList(t, service, artifactID).Children[0]
+
+			options := []model.AskOption{ship}
+			if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options}); err != nil {
+				t.Fatalf("options edit dropping an option whose line holds the break a person typed: %v", err)
+			}
+
+			after := askOptionList(t, service, artifactID)
+			if len(after.Children) != 1 || !after.Children[0].EqualWithBlockIDs(held) {
+				t.Fatalf("the list holds %d items, want the Ship item alone as it was", len(after.Children))
+			}
+			settleCurrentGeneration(t, service, artifactID)
+			assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", options)
+		})
+		t.Run("the rewrite of "+test.name, func(t *testing.T) {
+			service, artifactID := seedOptionLineHolding(t, test.inline, test.text)
+
+			options := []model.AskOption{ship, {Label: "Hold", Description: "Wait for the sign-off"}}
+			if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &options}); err != nil {
+				t.Fatalf("options edit rewording an option whose line holds the break a person typed: %v", err)
+			}
+
+			after := askOptionList(t, service, artifactID)
+			if len(after.Children) != 2 {
+				t.Fatalf("the list holds %d items after the edit, want 2", len(after.Children))
+			}
+			if got := pmdoc.TextContent(after.Children[1].Children[0]); got != "Hold: Wait for the sign-off" {
+				t.Fatalf("the rewritten item reads %q, want the line the edit sent", got)
+			}
+			settleCurrentGeneration(t, service, artifactID)
+			assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", options)
+		})
+	}
+}
+
+// seedOptionLineHolding is seedIndexedShipAsk with inline, which reads as text, written into the
+// Hold option's line as the browser left it, under the editor's mark on every character of its
+// text. The parse reads the line's words either way, so the ask row reads the option it was
+// indexed with.
+func seedOptionLineHolding(t *testing.T, inline []*pmdoc.Node, text string) (*Service, string) {
+	t.Helper()
+	service, artifactID := seedIndexedShipAsk(t, "ask-lists")
+	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
+		hold := firstAsk(tree).Children[1].Children[1]
+		hold.Children[0].Children = inline
+		markAsTyped(hold, "typed")
+		return tree
+	})
+	if got := pmdoc.TextContent(askOptionList(t, service, artifactID).Children[1]); got != text {
+		t.Fatalf("the seeded option line reads %q, want %q", got, text)
+	}
+	assertShipAskRow(t, service, artifactID, "ask-lists")
+	return service, artifactID
+}
+
 // A person who empties a decision's question in the browser can leave the whitespace they typed
 // behind, under the editor's own mark. The markdown writes nothing of that mark, so a question
 // written over the paragraph deletes no word, and the ask edit carrying one repairs the decision
@@ -2988,6 +3074,58 @@ func TestAskOptionsEditRefusesDroppingALineHoldingMarkup(t *testing.T) {
 	}) {
 		t.Fatalf("the ask row = question=%q options=%#v, want it as the refused edit found it", question, held)
 	}
+}
+
+// A ticked option carries its checkbox as its item's own `checked` attribute, which the markdown
+// writes as content, `- [x] ` before the line: the item holds more than its plain line, dropping
+// it would delete the tick and change the issue's task count under the person who wrote it, and
+// the ask row shows the sender none of that. The drop is refused, quoting the item so every word
+// and the tick can be restored, while the plain option beside it is still the edit's to drop.
+func TestAskOptionsEditRefusesDroppingATickedOption(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#ask-lists urgency=\"med\" multiple=\"false\" state=\"open\"}\n"+
+		"Should we ship?\n\n- [x] Ship: Release it\n- Hold: Wait for review\n:::\n")
+	settleCurrentGeneration(t, service, artifactID)
+	before := liveTree(t, service, artifactID)
+	list := askOptionList(t, service, artifactID)
+	if ticked, _ := list.Children[0].Attrs["checked"].(bool); !ticked {
+		t.Fatalf("the seeded Ship item is no ticked task: %#v", list.Children[0].Attrs)
+	}
+
+	hold := []model.AskOption{{Label: "Hold", Description: "Wait for review"}}
+	err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &hold})
+
+	var unrepresentable *ErrAskBlockUnrepresentable
+	if !errors.As(err, &unrepresentable) || unrepresentable.Field != "options" {
+		t.Fatalf("err = %v, want ErrAskBlockUnrepresentable on the options", err)
+	}
+	want := `options: the edit drops the option "Ship", whose list item holds more than its plain line, ` +
+		`and the ask-edit route does not delete what a person wrote under an option; its item reads ` +
+		strconv.Quote(askOptionItemMarkdown(t, list, list.Children[0])) +
+		`; send that option back with this edit, or remove what the item holds with a document edit ` +
+		`first (dispatch doc-edit, deleting a block by its id)`
+	if err.Error() != want {
+		t.Fatalf("refusal =\n%v\nwant\n%s", err, want)
+	}
+	if !strings.Contains(err.Error(), "[x]") {
+		t.Fatalf("err = %v, want it to quote the tick", err)
+	}
+	assertAskEditWroteNothing(t, service, artifactID, before, err)
+	assertShipAskRow(t, service, artifactID, "ask-lists")
+
+	// The plain option beside it is the edit's to drop: what the refusal weighs is the tick, not
+	// every item of a list holding one.
+	ship := []model.AskOption{{Label: "Ship", Description: "Release it"}}
+	if err := sendAskOptions(service, artifactID, AskBlockEdit{Options: &ship}); err != nil {
+		t.Fatalf("options edit dropping the plain option beside a ticked one: %v", err)
+	}
+	after := askOptionList(t, service, artifactID)
+	if len(after.Children) != 1 || !after.Children[0].EqualWithBlockIDs(list.Children[0]) {
+		t.Fatalf("the list holds %d items, want the ticked Ship item alone as it was", len(after.Children))
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	assertAskRepaired(t, service, artifactID, "ask-lists", "Should we ship?", ship)
 }
 
 // Two items can carry one label, and what a person wrote belongs to the item they wrote it
