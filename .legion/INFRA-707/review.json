@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-707",
+  "completed": "2026-10-30T21:34:00Z",
+  "round": 1,
+  "reviewedCodeHead": "eb0fe0be3cdfe265e0313569afb04ba405cb1b35",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 6,
+  "minor": 3,
+  "ci": "Required checks (rulesets: lint, typecheck, test, pr-title; branch protection: none) at CI head eb0fe0be: lint success, typecheck skipped, test success, pr-title success. Compare eb0fe0be...c02a5f14 changes only .legion/INFRA-707/ (2 files). envoy-go-race (not required): attempt 2 of run 40966135659 in progress at 21:30Z.",
+  "proofLines": "E2E (implementer) and E2E (tester) both present in the PR body; each names surface, command, observation, head eb0fe0be and a negative control.",
+  "contractCensus": "Not required: the new stored-order subcommand and loadtest/browsertype are new surfaces; VersionedStore and the docs package are internal to packages/envoy; no existing process or package boundary changes shape.",
+  "thermonuclear": {
+    "deepReview": "Verdict: APPROVE at eb0fe0be; Minor: errForkReleased unmapped (500) on a path no production caller reaches; stored-order holds one repeatable-read snapshot per document.",
+    "codeQuality": "Verdict: CHANGES at eb0fe0be; findings 1, 2, 3, 5, 6, 7, 8 accepted; finding 4 (shadow re-implements the measure) judged not blocking: the shared part is renderDocumentForUpdate, already one function, and the comparison is one line."
+  },
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/persistence.go", "description": "AppendUpdateWithCredit becomes a different operation (a whole flush, ignoring its update and contentChanged arguments) when the context carries withWorkerFlush; flushGateContextKey is a second context key for the same *roomFlush that only appendingCursor reads. Give the worker flush a named VersionedStore method and drop flushGateContextKey."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/ledger.go", "description": "The merge of a transaction's appended versions for one room instance is written four times (roomFlush.appended, liveWrite.withOwnAppends, takeRoomCursors' taken type and sort, commitSettlement/appendFlushing advance loops). One fold helper and one advance helper."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/service.go", "description": "backfillBlockIDs is the one durable writer still on the old path (closureChangedMarkdown, bare AppendUpdateTx, manual advanceRoomCursor) with no flush; route it through storeRepair/commitSettlement and delete closureChangedMarkdown, or state the exception where the stamp is appended."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/pending_authors.go", "description": "991 -> 1030 lines, past 1000; the room instance/cursor/gate code (roomInstance through appendingCursor) is not pending-authors code; move it to its own file."},
+    {"severity": "important", "file": "packages/envoy/AGENTS.md", "description": "Cutover left false statements: recordUpdateClass, finishDurableAppend, holdLive for a version's capture, closureChangedMarkdown for settlement's closure, and the lock-order paragraph saying only observe blocks on the replica lock (readPoint and drainedSeq now do too). Also service.go SettleNow's and cmd/dispatch/multiprocess_test.go's mentions of the deleted retrySettleSoon."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/flush.go", "description": "flushRead and storeRead are pass-through layers over Ledger.flushThrough; put the nil-cursor return in Ledger.flushThrough and call it directly."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/flush.go", "description": "roomFlush.ran is redundant: commit positions start at 1 (tree.go r.seq++ before use), so class.seq <= flush.through is false while through is 0."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/livewrite.go", "description": "errForkReleased maps to no HTTP status (500) where the pre-change code rebuilt the fork; wrap it as ErrServiceUnavailable or document that the retry needs a transaction with no earlier append to the document."},
+    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/README.md", "description": "stored-order holds one repeatable-read snapshot per document while it renders every update; say to pass --since (or read a replica) against production."}
+  ]
+}
