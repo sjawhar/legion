@@ -88,13 +88,14 @@ type schemaAdmissionKey struct {
 
 // schemaAdmission is one document socket's admission: what its page presented, the documentSince
 // it was admitted against, and whether it was admitted writable. answered is set once its token
-// had its answer.
+// had its answer, and revoked once a re-check has closed its socket (revokeUnless).
 type schemaAdmission struct {
 	key           schemaAdmissionKey
 	page          schemaPage
 	documentSince int
 	writable      bool
 	answered      bool
+	revoked       bool
 	conn          *admittedConn
 }
 
@@ -102,7 +103,10 @@ type schemaAdmission struct {
 // until ServeHTTP returns. Its zero value is ready to use.
 //
 // Every waiting socket of one key - admitted, its token not yet answered - holds one decision
-// (admit), so a token's answer is that decision, whichever of them sent it.
+// (admit), so a token's answer is that decision, whichever of them sent it. A socket a re-check
+// revoked waits on with them until its own ServeHTTP removes it (revokeUnless): its token may
+// still be on its way, and a token that found its socket's entry gone would take the answer of
+// another socket of the key, which would then be read-only for as long as it stays open.
 type schemaAdmissions struct {
 	mu      sync.Mutex
 	sockets map[schemaAdmissionKey][]*schemaAdmission
@@ -110,8 +114,13 @@ type schemaAdmissions struct {
 
 // admit records a, unless a socket of a's key still waiting for its token's answer was admitted
 // otherwise: then it records nothing and returns false, and the socket is refused. The two are one
-// token, and the answer must be the one each was admitted with. The provider retries the refused
-// socket, and the first socket's token is answered within its first round trip.
+// token, and the answer must be the one each was admitted with. A revoked socket still waiting for
+// its answer is one of them, so the reconnect of a revoked writable socket, which is read-only
+// now, is refused while that socket's entry waits: admitted beside it, its own token could take
+// the writable answer that entry holds and write what the fleet no longer admits. The provider
+// retries the refused socket, and the first socket's token is answered within its first round
+// trip; a revoked socket's entry goes as its ServeHTTP returns, which the revoke's close brings
+// on.
 func (a *schemaAdmissions) admit(admission *schemaAdmission) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -128,7 +137,9 @@ func (a *schemaAdmissions) admit(admission *schemaAdmission) bool {
 }
 
 // answer is the decision of the first socket of key still waiting for its token's answer, which
-// it marks answered, or false (read-only) when none is waiting.
+// it marks answered, or false (read-only) when none is waiting. A revoked socket's entry is one
+// of them: its socket is closing, and ygo made it writable when it was admitted, so the decision
+// it holds takes nothing from any other socket of the key, each of which holds that same decision.
 func (a *schemaAdmissions) answer(key schemaAdmissionKey) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -164,22 +175,27 @@ func (a *schemaAdmissions) removeLocked(admission *schemaAdmission) {
 	}
 }
 
-// revokeUnless closes every writable socket that fleet no longer admits, and forgets it: its read
-// loop ends, and its connection closes with schemaRevokedCloseCode (admittedConn). It returns the
-// sockets it closed.
+// revokeUnless closes every writable socket that fleet no longer admits: its read loop ends, and
+// its connection closes with schemaRevokedCloseCode (admittedConn). A socket whose token had its
+// answer is forgotten here; one still waiting for its answer keeps its place in its key's list,
+// marked revoked, until ServeHTTP removes it (schemaAdmissions). A socket already revoked is left
+// as it is: its connection is closing. It returns the sockets it closed.
 func (a *schemaAdmissions) revokeUnless(fleet schemaFleet) []*schemaAdmission {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	var revoked []*schemaAdmission
 	for _, sockets := range a.sockets {
 		for _, admission := range sockets {
-			if admission.writable && !fleet.admits(admission.page, admission.documentSince) {
+			if admission.writable && !admission.revoked && !fleet.admits(admission.page, admission.documentSince) {
 				revoked = append(revoked, admission)
 			}
 		}
 	}
 	for _, admission := range revoked {
-		a.removeLocked(admission)
+		admission.revoked = true
+		if admission.answered {
+			a.removeLocked(admission)
+		}
 		if admission.conn != nil {
 			admission.conn.revoke()
 		}
@@ -275,13 +291,16 @@ func (w *admittedWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter 
 // without a change to ygo (revoke). ygo writes on a socket from its writer goroutine alone, and
 // only reading ends its read loop, so revoke sets a read deadline already past, which ends that
 // loop; ygo then stops its writer and closes the connection, and that Close writes the close frame
-// first. Two of ygo's goroutines close one connection, and Close serializes them. Until revoke,
-// every call passes through.
+// first. Until revoke, every call passes through.
 type admittedConn struct {
 	net.Conn
-	mu      sync.Mutex
-	revoked bool
-	closed  bool
+	mu sync.Mutex
+	// keepAlive is Conn, the connection ygo's upgrade hijacked: the keep-alive's, which follows
+	// what ygo's websocket writer puts on it, so the close frame can take the end of one of its
+	// messages (keepAliveWriter.Hijack, keepAliveConn). A connection of any other kind follows
+	// nothing, and its socket closes without the frame.
+	keepAlive *keepAliveConn
+	revoked   bool
 }
 
 // attach is the connection ygo's upgrade hijacked. A socket revoked before ygo hijacked it reads
@@ -290,6 +309,7 @@ func (c *admittedConn) attach(raw net.Conn) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.Conn = raw
+	c.keepAlive, _ = raw.(*keepAliveConn)
 	if c.revoked {
 		_ = raw.SetReadDeadline(revokedDeadline)
 	}
@@ -327,22 +347,32 @@ func (c *admittedConn) SetDeadline(t time.Time) error {
 	return c.Conn.SetReadDeadline(revokedDeadline)
 }
 
-// Close writes, on a revoked connection, the close frame with schemaRevokedCloseCode before it
-// closes. Two of ygo's goroutines close one connection (provider/websocket/server.go): its
-// ServeHTTP teardown, once its writer has stopped (after handleDisconnect), and its context
-// watcher, which the revoke itself wakes - gorilla reads through the buffered reader net/http
-// hijacked with the connection, whose connReader reads the connection directly and cancels the
-// request's context on the read error the past deadline gives it (net/http's server.go,
-// connReader.Read calling handleReadError). So whichever call arrives first writes the frame while
-// it holds the lock, and the other waits there rather than closing the connection from under that
-// write: a close that beats the frame reaches the page as an abnormal closure, not as 1012.
+// Close writes, on a revoked connection, the close frame with schemaRevokedCloseCode, and then
+// closes. The frame goes out between two of ygo's messages and never inside one, which a plain
+// write could not promise, since gorilla writes a frame larger than its write buffer in more than
+// one write (keepAliveConn.closeBetweenMessages). Close waits for that boundary for at most
+// keepAliveWriteWait, the deadline ygo gives each of its own writes (provider/websocket's
+// writeTimeout), so a message that holds the boundary has as long to go out as ygo allows it; past
+// that, and once ygo's writer has sent a close frame of its own, the connection closes without the
+// frame. Nothing goes on the connection after the frame: every later write is refused, the
+// keep-alive's included.
+//
+// Two of ygo's goroutines close one connection (provider/websocket/server.go): its ServeHTTP
+// teardown, once its writer has stopped (after handleDisconnect), and its context watcher, which
+// the revoke itself wakes - gorilla reads through the buffered reader net/http hijacked with the
+// connection, whose connReader reads the connection directly and cancels the request's context on
+// the read error the past deadline gives it (net/http's server.go, connReader.Read calling
+// handleReadError). Whichever arrives first writes the frame. The other writes no second frame and
+// waits for the first, so it closes the connection after that frame rather than from under it: a
+// close that beats the frame reaches the page as an abnormal closure, not as 1012. That wait is on
+// the keep-alive's connection, not on this one's lock, which Close holds only to read what it
+// needs: revoke takes it under schemaAdmissions.mu, where a wait would hold up every admission.
 func (c *admittedConn) Close() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.revoked && !c.closed {
-		_ = c.Conn.SetWriteDeadline(time.Now().Add(time.Second))
-		_, _ = c.Conn.Write(schemaRevokedCloseFrame)
+	conn, keepAlive, revoked := c.Conn, c.keepAlive, c.revoked
+	c.mu.Unlock()
+	if revoked && keepAlive != nil {
+		_ = keepAlive.closeBetweenMessages(schemaRevokedCloseFrame, keepAliveWriteWait)
 	}
-	c.closed = true
-	return c.Conn.Close()
+	return conn.Close()
 }
