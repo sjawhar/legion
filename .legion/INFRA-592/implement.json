@@ -2,46 +2,48 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-592",
-  "completed": "2026-10-30T07:03:24Z",
+  "completed": "2026-10-30T09:33:32Z",
   "proof": [
     {
-      "criterion": "A write refused for its own input waits on no writer gate (tester round 4: editComment took the gate before 'blocks: requires base_revision')",
-      "surface": "Real envoy-dispatch binary on INFRA-589's local stack (lt3: Postgres via 1 ms proxy, NATS, listener), built from the head",
-      "command": "stack.sh setup; stack.sh reset; bash /legion/scratch/tmp/infra-592/r6-demo.sh (the tester's r5-demo.sh, output path changed): psql holds an anchored comment's row for 12 s while a valid carried-blocks edit holds the document's writer gate; then PATCH the same comment with blocks and no base_revision",
-      "observed": "invalid edit while the gate is held: 400 INVALID_COMMENT in 0.004 s; held valid edit 200 in 11.2 s; reads during the hold 200 in 0.03-0.10 s; invalid edit with no gate held 400 in 0.007 s; block-index pass waiter is dispatch-background; 0 ERROR lines",
-      "headSha": "bb5628b39c67defb89d9fb58709031bda891401c",
-      "negativeControl": "At b7892ad2 the same demo (tester round 4, r5-demo.out) answered the invalid edit 400 after 8.93 s, behind the held gate"
+      "criterion": "Every request-only refusal of the gated write routes answers before the writer gate, TURN_REQUIRES_ASK for a comment with a turn and no ask_id or reply_to included (tester round 5)",
+      "surface": "Real envoy-dispatch binary on INFRA-589's local stack (lt3: Postgres via 1 ms proxy, NATS, listener), built from the head (build-info 93436e52, dirty false)",
+      "command": "stack.sh setup/start/reset; bash /legion/scratch/tmp/infra-592/r7-refusals.sh (the tester's r6-refusals.sh, output path changed): eight invalid requests with no gate held, then again while a comment edit holds the spec's writer gate (psql holds the comment row)",
+      "observed": "while the gate is held (held edit 200 in 14.2 s), all eight answer 400 in 0.006-0.021 s: INVALID_COMMENT x3, TURN_REQUIRES_ASK 0.0067 s, INVALID_ANCHOR x3, INVALID_URL; 0 ERROR lines in Dispatch's log; the red tests TestAnAnchoredCommentWithATurnIsRefusedBeforeTheWriterGate (a9f861bf) and TestACommentEditRefusedForItsInputWaitsOnNoWriterGate pass unmodified",
+      "headSha": "93436e52882422bbc2a3c34cde46961c3f62e7cd",
+      "negativeControl": "At bb5628b3 the same script answered 'turn without ask_id' 400 TURN_REQUIRES_ASK after 12.05 s behind the held gate (tester round 5, r6-refusals.out)"
     },
     {
-      "criterion": "Every gated write route answers its request-only refusals before the gate; codes unchanged",
-      "surface": "go test against a real Postgres 16 (UTF-8 cluster)",
-      "command": "go test -count=1 -run 'TestACommentEditRefusedForItsInputWaitsOnNoWriterGate$|Comment|Ask|Anchor|External|Turn|WriterGate|PatchIssue|Suggestion' ./internal/dispatch/api/; the worker's full go test ./internal/dispatch/api/ on the same cluster; gofmt, go build ./..., go vet",
-      "observed": "selected tests ok (248 s), the red test passes unmodified (document_writer_gate_test.go unchanged since 22fcdcdf); the full api package passes but for TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, which refuses this pod's byte-order collation",
-      "headSha": "bb5628b39c67defb89d9fb58709031bda891401c",
-      "negativeControl": "TestACommentEditRefusedForItsInputWaitsOnNoWriterGate fails at 22fcdcdf (the tester's red commit)"
+      "criterion": "The forward merge of main's #2376 and #2480 keeps both behaviours and this PR's invariants; connections re-derived",
+      "surface": "go build/vet/test against a real Postgres 16 (UTF-8 cluster); bun test; check-ci-filters.sh",
+      "command": "cd packages/envoy && go build ./... && go vet ./...; (cd infra && go vet ./... && go vet -tags natslive ./core/ && go test -run ConnectionsPer ./gcp/); go test ./internal/dispatch/docs/ ./internal/dispatch/pmdoc/... ./internal/dispatch/api/; cd packages/envoy-client && bun test && bun run typecheck; bunx biome check packages/envoy-client/; packages/contracts bun run typecheck; check-ci-filters.sh",
+      "observed": "build and vet ok; ConnectionsPerProcess 87 = dispatchConnectionsPerPod 87 (this PR adds no migration; main's highest 0147); docs ok (1295 s), pmdoc ok; api passes but for TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves (refuses this pod's byte-order collation); envoy-client 1166 pass 0 fail, typecheck and biome clean; contracts typecheck clean; filters: 25 gates covered",
+      "headSha": "93436e52882422bbc2a3c34cde46961c3f62e7cd",
+      "negativeControl": "Before the resolution, #2376's session_answers.go failed to compile against this PR's writeHandlerError(w, r, err), and #2480's upload_memory_test.go failed go vet on the ungated joinedWrite"
     },
     {
       "criterion": "Excess load refused early with a retryable status, connection waits bounded, 1x served, at the merged head",
-      "surface": "INFRA-589's 2-core load reproduction, a fresh stack seeded by the head (build_commit b7892ad2, dirty false)",
-      "command": "run-step.sh r4-1x --events 4 --sessions 400 --requests 60; run-step.sh r4-10x --events 40 --sessions 1000 --requests 600 (LOADTEST_ROOT=/legion/scratch/tmp/infra-592/lt3)",
-      "observed": "1x: 100.0% of 59.7 req/s 2xx, 0 refusals, 3.99/3.99 events/s committed, 0 goroutines waiting for a connection, 37/37 metrics samples with all ten pools. 10x: 88,874 reads and 6,847 writes refused 429 OVERLOADED (read refusal p50 21 ms, p99 132 ms), 17.2% of 596 req/s served, 1.77 events/s committed, 0 connection failures, at most 14 goroutines waiting",
-      "headSha": "b7892ad2e20da894e66f7809ef300ecdf4bf4671",
+      "surface": "INFRA-589's 2-core load reproduction (lt3), Dispatch built from the head (build_commit 93436e52, dirty false)",
+      "command": "run-step.sh r7-1x --events 4 --sessions 400 --requests 60; run-step.sh r7-10x --events 40 --sessions 1000 --requests 600",
+      "observed": "1x: 100.0% of 59.7 req/s 2xx, 0 read refusals and 2 write refusals 429 OVERLOADED, 3.98/3.99 events/s committed, 0 goroutines waiting for a connection. 10x: 89,928 reads and 6,861 writes refused 429 OVERLOADED (read refusal p50 22 ms, p99 138 ms), 16.2% of 596 req/s served, 1.69 events/s committed, 0 connection failures, at most 13 goroutines waiting",
+      "headSha": "93436e52882422bbc2a3c34cde46961c3f62e7cd",
       "negativeControl": "Before (merge-base 2df3353c, PR body tables): 2x-10x 0.0-55 successful reads/s and 3,485-20,174 goroutines waiting for a connection"
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/api/comment_actions.go",
     "packages/envoy/internal/dispatch/api/comment_create.go",
-    "packages/envoy/internal/dispatch/api/anchors.go",
-    "packages/envoy/internal/dispatch/api/asks.go",
-    "packages/envoy/internal/dispatch/api/issue_patch.go"
+    "packages/envoy-client/src/dispatch-http.ts (merge: #2376's signal through #send)",
+    "packages/envoy/internal/dispatch/api/session_answers.go (merge)",
+    ".dispatch/architecture/dispatch-api.md (merge)",
+    ".dispatch/architecture/dispatch-outbox.md (merge)",
+    "packages/envoy/AGENTS.md (merge)",
+    "packages/envoy/internal/dispatch/docs/upload_memory_test.go (merge)"
   ],
   "trickyParts": [
-    "Audit of every gated write: editComment (carried blocks), commentAction (actor encoding), createCommentFor (thread fields, turn value, anchor shape), createAskFor (anchor shape) and patchIssue (external-link URL syntax) moved; reopenComment, editAsk, closeAsk, storeArtifact, editArtifact, rebuildArtifact and the background ask repair had no request-only refusal after the gate",
-    "Two precedences change because input is now refused first: a PATCH with a malformed and a taken external link answers INVALID_URL, and a root comment with turn 'nobody' answers INVALID_COMMENT rather than TURN_REQUIRES_ASK"
+    "#2376's per-call signal now also ends the Retry-After wait in #send (AbortSignal.any with the client's signal)",
+    "A root comment with turn 'nobody' answers TURN_REQUIRES_ASK again, before the turn value check, as before this PR's previous round"
   ],
   "deviations": [
-    "The load-step proof is from b7892ad2 (r4-1x, r4-10x); this round moves only refusal order on write routes"
+    "dispatch-api.md's api package file count was 87 on main and 82 on this branch; the resolution writes the counted 99"
   ],
   "openQuestions": []
 }
