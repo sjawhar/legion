@@ -2,50 +2,35 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-774",
-  "completed": "2026-10-29T23:39:12Z",
-  "round": 1,
-  "reviewedCodeHead": "546423e234e9414d71a6d8e0ba3e6ef1e559e63e",
-  "reviewedHead": "the head the push of this handoff makes, above 5fb7eeded5df03640cb72bf5b2db0b37c8d9098a, with the reviewer's prose commit 1ae0f6a7294c",
-  "decision": "changes_requested",
+  "completed": "2026-10-30T04:27:25Z",
+  "round": 2,
+  "reviewedCodeHead": "5d65f97b800f425dc7ec81016f78434b4d5456e1",
+  "reviewedHead": "the head the push of this handoff makes, above 26298862b7ea954d537eae6fc35eed3566cfe821, with only .legion/INFRA-774/ changed since the code head",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
-  "minor": 5,
-  "keyFindings": [
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "roundOneFindings": [
     {
       "severity": "important",
       "file": "PR #2528 body",
-      "description": "No `## Contract change census`. The change alters a signature at a package boundary: the served schema makes thirteen inputs optional, so a regenerated Go SDK turns seven plain inputs from string to *string and five from pulumi.StringInput to pulumi.StringPtrInput. Add the census: the search commands (in sjawhar/legion and in theorem-labs/agent-infra, whose dispatch/ program and legion/ program consume the component and its outputs), every hit with its disposition, and the rollout line (consumers move only when they move their pinned envoy-infra version, which dispatch://INFRA-775 does; the new refusals apply only with the new opt-in input, so no existing caller reaches them)."
+      "description": "Contract change census: added by the implementer. I re-ran its three searches in sjawhar/legion at this head; the hits match the body's list, each with a disposition. I read theorem-labs/agent-infra dispatch/main.go: the one DispatchArgs literal (lines 746-775) and NewDispatch call (line 816) match, and its secret inputs are a TailnetKey output and a pulumi.StringOutput, which still compile against StringPtrInput. The rollout line is immediate for opt-in refusals that no existing caller reaches, with the pin move in dispatch://INFRA-775."
     },
     {
       "severity": "minor",
       "file": "packages/envoy/infra/gcp/dispatch_kube.go",
-      "description": "dispatchKubeconfig (line 27) is cluster-half code: its one caller is newDispatchCluster in dispatch_cloud.go, its own comment says the cluster half computes it, and it adds the gcp container import (line 9) to the Kubernetes file. Move it to dispatch_cloud.go beside the issuer apply and drop the import."
+      "description": "Fixed in 5d65f97b: dispatchKubeconfig moved to dispatch_cloud.go:133-144 beside its caller, and the gcp/container import dropped. Thread PRRT_kwDORFy7ds6xy5DW answered (reply 4419382299)."
     },
     {
       "severity": "minor",
       "file": "packages/envoy/infra/gcp/dispatch_cluster_only_test.go",
-      "description": "Lines 72-94 cannot fail apart from line 70, which already compares the whole sorted registration set with the golden-derived cluster set; TestDispatchClusterOnlyNeedsNoRandomProvider (line 103) runs the same program as the first test, whose NoError at line 69 already holds the random provider unrequired. Delete both and move the random-provider sentence into the first test's comment."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/.changes/unreleased/INFRA-774-cluster-only.yaml",
-      "description": "Fixed by the reviewer in 1ae0f6a7294c: the Breaking note now names the five Inputs' change from pulumi.StringInput to pulumi.StringPtrInput, which the tester's SDK diff measured; a value whose static type is pulumi.StringInput no longer compiles there."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/infra/AGENTS.md",
-      "description": "Fixed by the reviewer in 1ae0f6a7294c: 'Component-built Kubernetes providers' said gcp:Dispatch always requires gcp and random and always builds a Kubernetes provider; it now says clusterOnly requires gcp alone and builds none."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/infra/gcp/dispatch.go",
-      "description": "Fixed by the reviewer in 1ae0f6a7294c: dispatchClusterOnlyInput's comment credited newDispatchAzure with string and slice rules it does not have; it now cites newDispatchAzure for the pointer and Input rule alone."
+      "description": "Fixed in 5d65f97b: the entailed assertions and the duplicate test deleted. Threads PRRT_kwDORFy7ds6xy5Da and PRRT_kwDORFy7ds6xy5Df answered (replies 4419382496, 4419382695)."
     }
   ],
   "verification": {
-    "ci": "Required set lint, typecheck, test, pr-title (ruleset; no branch protection). The CI head 546423e234e9 has run 40969927402 (CI) and 40970296960 (PR Title) queued with no conclusion at 23:35Z; the compare 546423e2...5fb7eede is handoffs-only, 2 files. A request for changes does not wait on CI.",
-    "tests": "At 5fb7eede: go vet ./gcp/ ./provider/ clean, gofmt clean, go test ./gcp/ ./provider/ -count=1 -run 'TestDispatch|TestConstruct|TestSchema' ok for both packages.",
-    "thermonuclear": "Deep review at 5fb7eede: approve, no critical or important finding; it swapped the base's dispatch.go, dispatch_cloud.go and dispatch_kube.go into a scratch copy and dumped every default-path registration (type, name, parent, provider, dependencies, property dependencies, options, inputs) and the Construct outputs for a preview and an update, 176 lines each, byte-identical to the head's. Its two minors are the AGENTS.md and changelog prose fixed here. Code quality at 5fb7eede: the dispatchKubeconfig placement and the redundant test assertions above, a declined file-size note (dispatch.go was over 1000 lines before this change; the cluster-only resolver shares its helpers with the full resolver), and the comment fixed here.",
-    "threads": "No review threads on the pull request."
+    "ci": "Required set lint, typecheck, test, pr-title (ruleset; no branch protection). CI head 5d65f97b: run 40976133800 completed success; lint, envoy-infra-go, ci-filters and changes success, typecheck and test skipped by path filter, pr-title success (run 40976591812). Compare 5d65f97b...26298862 is handoffs-only, 2 files.",
+    "thermonuclear": "Round 2 at 26298862: deep review approve, no finding. It compared every registration (with its dependencies, options and inputs) and the Construct outputs for seven argument sets, at the base and at the code head: 4,561 lines each, no difference. It also mutated the head three times (re-added GlobalAddress, a Kubernetes provider, an unconditional random requirement), and the remaining cluster-only test failed each time. Code quality approve, no finding; no dead helper is left.",
+    "threads": "Three threads, all mine, each answered with my acceptance and already resolved by the implementer."
   }
 }
