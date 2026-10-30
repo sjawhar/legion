@@ -1,6 +1,0 @@
-kind: Added
-body: |-
-    The Dispatch types carry comment and message blocks: `ReplyBlock` and `reply_block` on `Comment` and `Message` and their event payloads, `reply_to_block` and `in_reply_to_block` on the reply inputs, `blocks` and `base_revision` on `EditCommentInput`, `ItemBlocks`, and the shared reference tables' comment and message block forms.
-time: 2026-10-28T12:34:46.000000000Z
-custom:
-    Issue: pr2463

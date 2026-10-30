@@ -14042,6 +14042,13 @@ var CommentDeliverySchema = object({
   reply_id: string2().nullable(),
   created_at: string2()
 });
+var ReplyBlockSchema = object({
+  node: string2(),
+  ref: string2().optional(),
+  block_id: string2(),
+  text: string2(),
+  removed: boolean2()
+});
 var CommentEventPayloadSchema = object({
   id: string2().optional(),
   artifact_name: string2().optional(),
@@ -14067,6 +14074,7 @@ var CommentEventPayloadSchema = object({
   created_at: string2().optional(),
   mentions: array(CommentMentionSchema).optional(),
   deliveries: array(CommentDeliverySchema).optional(),
+  reply_block: ReplyBlockSchema.nullish(),
   thread_logins: array(string2()).optional()
 }).passthrough();
 var MessageEventPayloadSchema = object({
@@ -14077,6 +14085,7 @@ var MessageEventPayloadSchema = object({
   reply_body: string2().optional(),
   thread_target: string2().optional(),
   author: object({ kind: string2(), id: string2() }).optional(),
+  reply_block: ReplyBlockSchema.nullish(),
   thread_logins: array(string2()).optional()
 });
 var DispatchTargetedResourceIDSchema = uuid2();
@@ -14631,7 +14640,7 @@ var dispatchToolSpecs = [
       quote: z.string().describe("Optional exact quoted document text.").optional(),
       occurrence: z.number({ int: true, min: 0 }).describe("Optional zero-based occurrence of quote.").optional(),
       body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Review comment, at most ${DISPATCH_BODY_MAX} characters.`),
-      reply_to: z.string().describe("A comment id (uuid); replying to any comment in a thread continues that thread (an " + "ask's clarification thread included). To reply to an ask, use reply_to_ask with the " + "ask id instead.").optional(),
+      reply_to: z.string().describe("A comment id (uuid); replying to any comment in a thread continues that thread (an " + "ask's clarification thread included). A block reference to one block of the comment " + "(dispatch://KEY/comment/<id>#b-<block id>) replies to that comment and names the " + "passage the reply answers. To reply to an ask, use reply_to_ask with the " + "ask id instead.").optional(),
       reply_to_ask: z.string().describe("Optional ask id to reply to, threading this comment under that question. Mutually " + "exclusive with reply_to.").optional(),
       turn: z.enum(["agent", "human"]).describe("Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " + "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " + "you need the human to act - the ask returns to 'Waiting on you'.").optional(),
       images: imagesArgument(z, "the issue (or the project document's project)", `the ${DISPATCH_BODY_MAX}-character body limit`)
@@ -14666,7 +14675,7 @@ var dispatchToolSpecs = [
     arguments: (z) => ({
       issue: z.string().describe(`${ISSUE_REFERENCE} Omit it only when in_reply_to answers a human's direct message to this session.`).optional(),
       body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Update text, at most ${DISPATCH_BODY_MAX} characters.`),
-      in_reply_to: z.string().describe("Optional message id or dispatch://KEY/message/<id> reference to reply to, threading " + "this message under it so the reply stays with the original in the Conversation. " + "A bare id with no issue answers a human's direct message to this session; a " + "dispatch://KEY/message/<id> names the issue its message lives on, so that form is a " + "reply on that issue.").optional(),
+      in_reply_to: z.string().describe("Optional message id or dispatch://KEY/message/<id> reference to reply to, threading " + "this message under it so the reply stays with the original in the Conversation. " + "A block reference to one block of the message (dispatch://KEY/message/<id>#b-<block id>) " + "replies to that message and names the passage the reply answers. " + "A bare id with no issue answers a human's direct message to this session; a " + "dispatch://KEY/message/<id> names the issue its message lives on, so that form is a " + "reply on that issue.").optional(),
       images: imagesArgument(z, "the issue (a reply to a direct message: your own conversation, dispatch://agent/<your session id>)", `the ${DISPATCH_BODY_MAX}-character body limit`)
     }),
     validation: messageValidation
@@ -16220,6 +16229,12 @@ class DispatchClient {
   async artifactBlocks(id) {
     return this.#json("GET", ["api", "v1", "artifacts", id, "blocks"]);
   }
+  async commentBlocks(id) {
+    return this.#json("GET", ["api", "v1", "comments", id, "blocks"]);
+  }
+  async messageBlocks(id, session) {
+    return this.#json("GET", ["api", "v1", "messages", id, "blocks"], undefined, session === undefined ? undefined : { session });
+  }
   async docEdit(id, input) {
     return this.#json("POST", ["api", "v1", "artifacts", id, "edits"], input);
   }
@@ -16520,10 +16535,26 @@ function dispatchDocumentRef(owner, slug) {
 function dispatchChildRef(ownerRef, kind, id) {
   return `${ownerRef}/${kind}/${id}`;
 }
-function parseBlockRef(document, fragment) {
-  const target = parseBlockFragment(fragment);
-  const parsed = parseDispatchRef(document);
-  if (target === undefined || parsed === null || parsed.version !== undefined || parsed.kind !== "spec" && parsed.kind !== "artifact") {
+function parseBlockRef(holder, fragment) {
+  const target = holder.includes("@") ? undefined : parseBlockFragment(fragment);
+  const parsed = parseDispatchRef(holder);
+  if (target === undefined || parsed === null) {
+    return null;
+  }
+  const pin = target.pin === undefined ? {} : { pin: target.pin };
+  const artifact = parsed.artifact === undefined ? {} : { artifact: parsed.artifact };
+  if (parsed.kind === "comment" || parsed.kind === "message" && target.pin === undefined) {
+    return {
+      owner: parsed.owner,
+      kind: "block",
+      id: parsed.id,
+      block: target.block,
+      item: { kind: parsed.kind, id: parsed.id },
+      ...artifact,
+      ...pin
+    };
+  }
+  if (parsed.kind !== "spec" && parsed.kind !== "artifact") {
     return null;
   }
   return {
@@ -16531,9 +16562,9 @@ function parseBlockRef(document, fragment) {
     kind: "block",
     id: parsed.id,
     block: target.block,
-    document,
+    document: holder,
     ...parsed.owner.kind === "project" ? { artifact: parsed.id } : {},
-    ...target.pin === undefined ? {} : { pin: target.pin }
+    ...pin
   };
 }
 function parseDispatchRef(ref) {
@@ -17620,7 +17651,7 @@ function normalizeUUID(value) {
 }
 var askIdProblem = "ask must be a bare ask id or a dispatch://.../ask/<id> reference";
 var commentIdProblem = "comment must be a bare comment id or a dispatch://.../comment/<id> reference";
-var messageIdProblem = "in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference";
+var messageIdProblem = "in_reply_to must be a full message id (uuid), a dispatch://KEY/message/<id> reference, or a block of one (dispatch://KEY/message/<id>#b-<block id>)";
 function askId(args) {
   const ask = stringArg(args, "ask");
   return ask.startsWith("dispatch://") ? parseDispatchRef(ask)?.id ?? ask : ask;
@@ -17631,6 +17662,28 @@ function messageIdOf(value) {
     return reference?.kind === "message" ? reference.id : undefined;
   })() : value;
   return id === undefined ? undefined : normalizeUUID(id);
+}
+function itemBlockOf(value) {
+  const ref = parseDispatchRef(value);
+  return ref?.item === undefined || ref.block === undefined ? undefined : { ...ref, item: ref.item, block: ref.block };
+}
+function replyBlockProblem(field, kind, value) {
+  if (!/^dispatch:\/\/[^#]*#b-/.test(value))
+    return;
+  const form = `dispatch://KEY/${kind}/<id>#b-<block id>`;
+  const ref = parseDispatchRef(value);
+  if (ref?.kind !== "block") {
+    return `${field} ${value} names no block; a block of a ${kind} reads ${form}`;
+  }
+  const other = ref.item?.kind;
+  if (other !== kind) {
+    const answer = other === "comment" ? `; answer it with ${commandLine("dispatch_comment", { reply_to: value })}` : other === "message" ? `; answer it with ${commandLine("dispatch_message", { in_reply_to: value })}` : "";
+    return `${field} ${value} names a block of ${other === undefined ? "a document" : `a ${other}`}, but a ${kind} reply answers a block of a ${kind} (${form})${answer}`;
+  }
+  if (ref.pin !== undefined) {
+    return `${field} ${value} names revision ${ref.pin} of the block, but a reply answers the block whatever its text becomes: drop @v${ref.pin}`;
+  }
+  return;
 }
 var idPrefixPattern = /^[0-9a-f][0-9a-f-]{7,}$/i;
 function refOwnerName(ref) {
@@ -17741,7 +17794,20 @@ async function resolveAskArgument(tool, args, client, sessionId) {
 }
 function messageInReplyTo(args) {
   const inReplyTo = optionalString(args, "in_reply_to");
-  return inReplyTo === undefined ? undefined : messageIdOf(inReplyTo);
+  if (inReplyTo === undefined)
+    return;
+  const block = itemBlockOf(inReplyTo);
+  if (block !== undefined && block.item.kind !== "message")
+    return;
+  const id = messageIdOf(block?.item.id ?? inReplyTo);
+  return id === undefined ? undefined : { id, ...block === undefined ? {} : { block: block.block } };
+}
+function commentReplyTo(args) {
+  const replyTo = optionalString(args, "reply_to");
+  if (replyTo === undefined)
+    return;
+  const block = itemBlockOf(replyTo);
+  return block === undefined ? { id: replyTo } : { id: block.item.id, block: block.block };
 }
 function argumentProblems(tool, args) {
   const problems = [];
@@ -17776,15 +17842,21 @@ function argumentProblems(tool, args) {
       if (optionalString(args, "quote") !== undefined && optionalString(args, "artifact") === undefined) {
         problems.push("artifact is required when quote is supplied");
       }
-      if (optionalString(args, "reply_to") !== undefined && optionalString(args, "reply_to_ask") !== undefined) {
+      const replyTo = optionalString(args, "reply_to");
+      if (replyTo !== undefined && optionalString(args, "reply_to_ask") !== undefined) {
         problems.push("reply_to and reply_to_ask cannot both be set");
       }
+      const replyBlock = replyTo === undefined ? undefined : replyBlockProblem("reply_to", "comment", replyTo);
+      if (replyBlock !== undefined)
+        problems.push(replyBlock);
       break;
     }
     case "dispatch_message": {
       const inReplyTo = optionalString(args, "in_reply_to");
-      if (inReplyTo !== undefined && messageIdOf(inReplyTo) === undefined) {
-        problems.push(messageIdProblem);
+      if (inReplyTo !== undefined) {
+        const problem = replyBlockProblem("in_reply_to", "message", inReplyTo) ?? (messageInReplyTo(args) === undefined ? messageIdProblem : undefined);
+        if (problem !== undefined)
+          problems.push(problem);
       }
       break;
     }
@@ -17864,7 +17936,7 @@ function dispatchRefFromUrl(value, serverUrl) {
   };
   const blockOf = (versionName) => {
     const id = url.hash.startsWith("#b-") ? decodeBlockId(url.hash.slice(3)) : undefined;
-    return id === undefined || url.searchParams.get(versionName) ? "" : `#b-${encodeBlockId(id)}`;
+    return id === undefined || versionName !== undefined && url.searchParams.get(versionName) ? "" : `#b-${encodeBlockId(id)}`;
   };
   const issuePage = url.pathname.match(/^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/);
   if (issuePage) {
@@ -17890,9 +17962,9 @@ function dispatchRefFromUrl(value, serverUrl) {
     if (ask !== undefined)
       return `dispatch://${key}/ask/${ask}`;
     if (comment !== undefined)
-      return `dispatch://${key}/comment/${comment}`;
+      return `dispatch://${key}/comment/${comment}${blockOf()}`;
     if (message !== undefined)
-      return `dispatch://${key}/message/${message}`;
+      return `dispatch://${key}/message/${message}${blockOf()}`;
     return `dispatch://${key}`;
   }
   const agentArtifactPage = url.pathname.match(/^\/agents\/([^/]+)\/artifacts\/([^/]+)\/?$/);
@@ -17915,7 +17987,7 @@ function dispatchRefFromUrl(value, serverUrl) {
     return;
   return item === undefined ? `${document}${versionOf("version")}${blockOf("version")}` : `${document}/${item.kind}/${item.id}`;
 }
-var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), " + "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " + "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " + "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " + "dispatch read), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
+var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), " + "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " + "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " + "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " + "dispatch read), dispatch://KEY-1/comment/<uuid>#b-<block id>, " + "dispatch://PROJECT/artifact/<slug>/comment/<uuid>#b-<block id> or " + "dispatch://KEY-1/message/<uuid>#b-<block id> (one block of a comment or message, a " + "comment's optionally pinned to a revision of the comment with @v<N> after it; for dispatch " + "read), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
 var ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSUE";
 function innerRefProblem(tool, ref, refText) {
   if (ref.kind !== "ask" && ref.kind !== "comment" && ref.kind !== "message" && ref.kind !== "log" && ref.kind !== "children" && ref.kind !== "block") {
@@ -17924,10 +17996,11 @@ function innerRefProblem(tool, ref, refText) {
   if (tool === "dispatch_read" || tool === "dispatch_ask")
     return;
   const owner = refOwnerName(ref);
-  const documentArgument = ref.kind === "block" && tool !== "dispatch_comment" ? ` and artifact ${ref.id}` : tool === "dispatch_suggest" ? " and artifact <the document's slug>" : "";
+  const itemKind = ref.item?.kind ?? ref.kind;
+  const documentArgument = ref.kind === "block" && ref.item === undefined && tool !== "dispatch_comment" ? ` and artifact ${ref.id}` : tool === "dispatch_suggest" ? " and artifact <the document's slug>" : "";
   const ownerArguments = ref.owner.kind === "issue" ? `issue ${ref.owner.issue}${documentArgument}` : `project ${ref.owner.project} and artifact ${ref.artifact}`;
-  const fix = tool === "dispatch_comment" && ref.kind === "ask" ? `reply under it with reply_to_ask ${ref.id} and ${ownerArguments}` : tool === "dispatch_comment" && ref.kind === "comment" ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}` : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
-  const item = ref.kind === "ask" ? "an ask" : ref.kind === "log" ? "the event log" : ref.kind === "children" ? "the children" : ref.kind === "block" ? `block ${ref.block}` : `a ${ref.kind}`;
+  const fix = tool === "dispatch_comment" && itemKind === "ask" ? `reply under it with reply_to_ask ${ref.id} and ${ownerArguments}` : tool === "dispatch_comment" && itemKind === "comment" ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}` : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
+  const item = ref.kind === "ask" ? "an ask" : ref.kind === "log" ? "the event log" : ref.kind === "children" ? "the children" : ref.kind === "block" ? `block ${ref.block}${ref.item === undefined ? "" : ` of a ${ref.item.kind}`}` : `a ${ref.kind}`;
   return `ref ${refText} names ${item} on ${owner}; dispatch ${commandName(tool)} would act on ${owner} and drop the ${ref.kind}: ${fix}`;
 }
 var documentItemPattern = /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)\/artifact\/[^/@]+(?:@v\d+)?\/(ask|comment)\/([^/]+)$/;
@@ -17954,7 +18027,7 @@ function ownerConflictProblems(tool, args, parsedRef, refText) {
   const artifact = optionalString(args, "artifact");
   const version = optionalNumber(args, "version");
   const ref = tool === "dispatch_ask" && (issue !== undefined || project !== undefined) ? null : parsedRef;
-  const refDocument = ref === null ? undefined : ref.owner.kind === "project" ? ref.artifact ?? ref.id : ref.kind === "spec" || ref.kind === "artifact" || ref.kind === "block" ? ref.id : undefined;
+  const refDocument = ref === null ? undefined : ref.owner.kind === "project" ? ref.artifact ?? ref.id : ref.kind === "spec" || ref.kind === "artifact" || ref.kind === "block" && ref.item === undefined ? ref.id : undefined;
   if (ref !== null && refText !== undefined) {
     const refOwner = refOwnerName(ref);
     if (issue !== undefined && (ref.owner.kind !== "issue" || nativeIssueKeyPattern.test(issue) && issue !== ref.owner.issue)) {
@@ -18361,9 +18434,12 @@ function referenceLines(read) {
   if (read.edges.length === 0)
     return ["- none"];
   return read.edges.map((edge) => {
+    const { node } = edge;
     const excerpt = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} \xB7 `;
     const block = edge.block === undefined ? "" : ` (block ${edge.block.ref ?? edge.block.id})`;
-    return `- ${edge.kind} ${edge.node.kind} ${edge.node.ref ?? edge.node.id} (${excerpt}${edge.created_at})${block}`;
+    const item = node.kind === "block" && node.document === undefined && (node.parent?.kind === "comment" || node.parent?.kind === "message") ? node.parent : undefined;
+    const source = item === undefined ? `${node.kind} ${node.ref ?? node.id}` : `${item.kind} ${item.ref ?? item.id} block ${node.block_id ?? node.id}`;
+    return `- ${edge.kind} ${source} (${excerpt}${edge.created_at})${block}`;
   });
 }
 function unavailableReason(error) {
@@ -18406,27 +18482,32 @@ function nodeLine(node) {
   const made = fact(node.made_by, node.made_at);
   const changed = fact(node.changed_by, node.changed_at);
   const { parent } = node;
-  const partOf = parent == null ? "" : ` \xB7 part of ${parent.ref ?? `${parent.kind} ${parent.id}`}${node.parent_version == null ? "" : ` (version ${node.parent_version})`}`;
+  const partOf = parent == null ? "" : ` \xB7 part of ${parent.ref ?? `${parent.kind} ${parent.id}`}${node.parent_version == null ? "" : ` (${parent.kind === "comment" ? "revision" : "version"} ${node.parent_version})`}`;
   return [
     `Node: ${node.kind} ${node.ref ?? node.id} \xB7 made by ${made} \xB7 changed by ${changed}${partOf}`
   ];
 }
 function blockLines(node, ref) {
-  const head = [
-    `Block: ${node.block_id ?? ref.block}`,
+  const unit = ref.item === undefined ? "version" : "revision";
+  const blockID = node.block_id ?? ref.block;
+  const head = ref.item === undefined ? [
+    `Block: ${blockID}`,
     `Document: ${node.document ?? ref.document}`,
     ...node.changed_version === undefined ? [] : [`Changed in version: ${node.changed_version}`],
     ...node.text === undefined ? [] : ["Text:", node.text]
+  ] : [
+    `Block ${blockID} of ${ref.item.kind} ${ref.item.id}${node.changed_version === undefined ? "" : ` (changed in revision ${node.changed_version})`}:`,
+    ...node.text === undefined ? [] : [node.text]
   ];
   const { pin } = node;
   if (pin === undefined)
     return head;
-  const state = pin.state === "unchanged" ? `Unchanged since version ${pin.version}.` : pin.state === "changed" ? `Changed since version ${pin.version}; last changed in version ${node.changed_version}.` : `Removed in version ${pin.removed_version}.`;
+  const state = pin.state === "unchanged" ? `Unchanged since ${unit} ${pin.version}.` : pin.state === "changed" ? `Changed since ${unit} ${pin.version}; last changed in ${unit} ${node.changed_version}.` : `Removed in ${unit} ${pin.removed_version}.`;
   return [
     ...head,
-    `Pinned to version: ${pin.version}`,
+    `Pinned to ${unit}: ${pin.version}`,
     state,
-    `Text at version ${pin.version}:`,
+    `Text at ${unit} ${pin.version}:`,
     pin.text
   ];
 }
@@ -18573,11 +18654,13 @@ function commentSummary({ comment, replies }, graph) {
   const root = [
     `${comment.id} \xB7 ${actorText(comment.author)}`,
     ...anchorLines(comment),
+    ...replyBlockLines(comment),
     `Body: ${comment.body}`
   ];
   const chain = replies.flatMap((reply) => [
     `${reply.id} \xB7 ${actorText(reply.author)}`,
     ...anchorLines(reply),
+    ...replyBlockLines(reply),
     `Body: ${reply.body}`
   ]);
   return [
@@ -18588,6 +18671,14 @@ function commentSummary({ comment, replies }, graph) {
     ...graph
   ].join(`
 `);
+}
+function replyBlockLines(record) {
+  const block = record.reply_block;
+  if (block === undefined || block === null)
+    return [];
+  return [
+    block.removed ? `Re: block ${block.block_id} (removed)` : `Re: block ${block.block_id}: ${textHead(block.text)}`
+  ];
 }
 function anchorLines(record) {
   return [
@@ -18612,9 +18703,14 @@ function positionText(block) {
   ].join(" \u203A ");
 }
 function messageSummary({ message, replies }, graph) {
-  const root = [`${message.id} \xB7 ${actorText(message.author)}`, `Body: ${message.body}`];
+  const root = [
+    `${message.id} \xB7 ${actorText(message.author)}`,
+    ...replyBlockLines(message),
+    `Body: ${message.body}`
+  ];
   const chain = replies.flatMap((reply) => [
     `${reply.id} \xB7 ${actorText(reply.author)}`,
+    ...replyBlockLines(reply),
     `Body: ${reply.body}`
   ]);
   return [
@@ -19472,7 +19568,7 @@ async function executeDispatchTool(input) {
       const owner = documentOwner();
       const resolved = owner.kind === "project" || artifactReference === undefined ? owner.kind === "project" ? await resolveDocument(owner, artifactReference) : undefined : await resolveDocument(owner, artifactReference);
       const anchored = resolved ? anchor(resolved.artifact, args) : undefined;
-      const replyTo = optionalString(args, "reply_to");
+      const replyTo = commentReplyTo(args);
       const replyToAskReference = optionalString(args, "reply_to_ask");
       const replyToAsk = replyToAskReference === undefined ? undefined : normalizeUUID(replyToAskReference);
       if (replyToAskReference !== undefined && replyToAsk === undefined) {
@@ -19489,7 +19585,8 @@ async function executeDispatchTool(input) {
       const commentInput = {
         body,
         ...anchored === undefined ? {} : { anchor: anchored },
-        ...replyTo === undefined ? {} : { reply_to: replyTo },
+        ...replyTo === undefined ? {} : { reply_to: replyTo.id },
+        ...replyTo?.block === undefined ? {} : { reply_to_block: replyTo.block },
         ...replyToAsk === undefined ? {} : { ask_id: replyToAsk },
         ...requestedTurn === undefined ? {} : { turn: requestedTurn },
         actor
@@ -19549,7 +19646,8 @@ async function executeDispatchTool(input) {
       };
     }
     case "dispatch_message": {
-      const inReplyTo = messageInReplyTo(args);
+      const target = messageInReplyTo(args);
+      const inReplyTo = target?.id;
       const written = stringArg(args, "body");
       const bodyLimit = {
         cap: DISPATCH_BODY_MAX,
@@ -19596,6 +19694,7 @@ async function executeDispatchTool(input) {
       const message = await client.message(issueKey, {
         body,
         ...inReplyTo === undefined ? {} : { in_reply_to: inReplyTo },
+        ...target?.block === undefined ? {} : { in_reply_to_block: target.block },
         actor
       });
       const messageRef = dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id);
@@ -19890,10 +19989,11 @@ Document token: ${listed.token}`,
       if (ownerArguments.ref?.kind === "block") {
         const ref = ownerArguments.ref;
         const blockRef = stringArg(args, "ref");
+        const holder = blockRef.slice(0, blockRef.indexOf("#"));
         const [incoming, outgoing] = await Promise.all([
           client.getReferences({ to: blockRef }).catch((error) => {
             if (ref.pin === undefined && dispatchAnswered(error, 404)) {
-              throw new Error(`No block ${ref.block} in ${ref.document}.`);
+              throw new Error(`No block ${ref.block} in ${holder}.`);
             }
             throw error;
           }),
