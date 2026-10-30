@@ -93,48 +93,36 @@ func CurrentItemBlock(ctx context.Context, q Queryer, kind ItemKind, itemID, blo
 
 // ReplyBlocks reads the block each of the replies replyIDs names in replies_to_block, keyed by
 // reply id, in one query; a reply that names no block has no entry. kind is the kind of item the
-// block belongs to: a comment's and a message's replies are of its own kind, where an ask's
-// replies are comments, so an ask's reply is read from comments and its block from ask_blocks. A
+// block belongs to, which names the table its blocks are in and the column keying them
+// (itemTables); the replies are read from the table of the kind that answers such a block
+// (repliesFrom): a comment's and an ask's replies are comments, a message's are messages. A
 // block belongs to an item in its reply's own thread, so its reference is addressed under the
-// reply's owner (as itemBlockParent addresses the reply's parent); a direct message's block has
-// none. Text is the block's stored excerpt, which a removal keeps, so a removed block reads the
-// last text it held.
+// reply's owner (as itemBlockParent addresses the reply's parent); a message is owned by its
+// issue alone, so a message reply needs neither project nor slug, and a direct message's block
+// has no reference. Text is the block's stored excerpt, which a removal keeps, so a removed
+// block reads the last text it held.
 func ReplyBlocks(ctx context.Context, q Queryer, kind ItemKind, replyIDs []string) (map[string]*model.ReplyBlock, error) {
 	blocks := make(map[string]*model.ReplyBlock)
 	if len(replyIDs) == 0 {
 		return blocks, nil
 	}
-	var query string
-	switch kind {
-	case ItemComment:
-		query = `
-			select r.id::text, b.node_id, b.block_id, b.excerpt, b.position is null, b.comment_id::text,
-			       r.issue_key, coalesce(i.project_key, a.project_key, ''), coalesce(a.slug, '')
-			from comments r
-			join comment_blocks b on b.node_id = r.replies_to_block
-			left join issues i on i.key = r.issue_key
-			left join artifacts a on a.id = r.artifact_id
-			where r.id = any($1::uuid[]) and r.replies_to_block is not null`
-	case ItemMessage:
-		// A message has an address only under its issue, so it needs neither project nor slug.
-		query = `
-			select r.id::text, b.node_id, b.block_id, b.excerpt, b.position is null, b.message_id::text,
-			       r.issue_key, '', ''
-			from messages r
-			join message_blocks b on b.node_id = r.replies_to_block
-			where r.id = any($1::uuid[]) and r.replies_to_block is not null`
-	case ItemAsk:
-		query = `
-			select r.id::text, b.node_id, b.block_id, b.excerpt, b.position is null, b.ask_id::text,
-			       r.issue_key, coalesce(i.project_key, a.project_key, ''), coalesce(a.slug, '')
-			from comments r
-			join ask_blocks b on b.node_id = r.replies_to_block
-			left join issues i on i.key = r.issue_key
-			left join artifacts a on a.id = r.artifact_id
-			where r.id = any($1::uuid[]) and r.replies_to_block is not null`
-	default:
+	tables, err := kind.tables()
+	if err != nil {
 		return nil, fmt.Errorf("read reply blocks of %s: not an item kind", kind)
 	}
+	replies, _ := repliesFrom(kind).tables()
+	owner, joins := `coalesce(i.project_key, a.project_key, ''), coalesce(a.slug, '')`, `
+			left join issues i on i.key = r.issue_key
+			left join artifacts a on a.id = r.artifact_id`
+	if repliesFrom(kind) == ItemMessage {
+		owner, joins = `'', ''`, ``
+	}
+	query := `
+		select r.id::text, b.node_id, b.block_id, b.excerpt, b.position is null, b.` + tables.item + `::text,
+		       r.issue_key, ` + owner + `
+		from ` + replies.items + ` r
+		join ` + tables.blocks + ` b on b.node_id = r.replies_to_block` + joins + `
+		where r.id = any($1::uuid[]) and r.replies_to_block is not null`
 	rows, err := q.Query(ctx, query, replyIDs)
 	if err != nil {
 		return nil, fmt.Errorf("read the blocks %s replies name: %w", kind, err)

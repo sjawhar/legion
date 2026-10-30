@@ -245,7 +245,7 @@ func TestIndexingAnAskWritesItsPartsAtRevisionOne(t *testing.T) {
 		t.Fatalf("the parts of the ask = %v, want %v", got, want)
 	}
 	for _, part := range readAskParts(t, tx, ask.ID) {
-		if node := "ask/" + ask.ID + "#" + part.blockID; part.nodeID != node {
+		if node := ItemBlockNode(ItemAsk, ask.ID, part.blockID); part.nodeID != node {
 			t.Errorf("the node id of part %s = %q, want %q", part.blockID, part.nodeID, node)
 		}
 	}
@@ -358,6 +358,32 @@ func TestASecondAnswerReplacesTheAnswerPart(t *testing.T) {
 	}
 	if revision, next := askPartState(t, tx, ask.ID); revision != 3 || next != 5 {
 		t.Errorf("the twice-answered ask's state = revision %d, next_block %d; want 3 and 5", revision, next)
+	}
+}
+
+// The same answer from another person is another answer: an answer part's identity carries its
+// maker, so the second answerer's answer is a part of its own and the first answerer's is
+// removed, and no part records a maker who did not make it.
+func TestASecondAnswererGetsAnAnswerPartOfTheirOwn(t *testing.T) {
+	tx := askPartFixture(t)
+	ask := insertAsk(t, tx, "CORE-1", "Which transport?", model.AskOption{Label: "REST"})
+	indexAskPartsAt(t, tx, ask, 1)
+	writeAskAnswer(t, tx, &ask, "alice", []string{"REST"}, "Ship it.")
+	indexAskPartsAt(t, tx, ask, 2)
+	writeAskAnswer(t, tx, &ask, "bob", []string{"REST"}, "Ship it.")
+	indexAskPartsAt(t, tx, ask, 3)
+
+	want := []string{
+		"b1 question 0 r1 Which transport?",
+		"b2 option 1 r1 REST",
+		"b4 answer 2 r3 REST - Ship it. by user:bob",
+		"b3 answer -1 r2 REST - Ship it. by user:alice",
+	}
+	if got := askPartSummaries(t, tx, ask.ID); !slices.Equal(got, want) {
+		t.Fatalf("the parts of the ask answered twice with one text = %v, want %v", got, want)
+	}
+	if revision, next := askPartState(t, tx, ask.ID); revision != 3 || next != 5 {
+		t.Errorf("the ask's state = revision %d, next_block %d; want 3 and 5", revision, next)
 	}
 }
 

@@ -12,19 +12,36 @@ export interface BlockTarget {
   block?: { id: string; pin?: string };
 }
 
+/** The kinds of item whose blocks are its own: an ask, whose parts are its question, its options
+ *  and its answer, a comment and an issue message. One set, so every surface that reads a block
+ *  as its item - the card a reference opens (`BLOCK_HOLDER_LABELS`, `RefPreview.tsx`), the
+ *  backlink panel's source (`blockItem`, `ReferencedBy.tsx`) and `itemOfBlock` below - shows a
+ *  part of an ask as it shows a block of a comment, and a fourth kind reaches all of them. */
+export const BLOCK_ITEM_KINDS = ["ask", "comment", "message"] as const;
+
+export type BlockItemKind = (typeof BLOCK_ITEM_KINDS)[number];
+
+/** Whether `kind` - a route's, or the kind of the parent of a block node - is such an item. */
+export function isBlockItemKind(kind: string | undefined): kind is BlockItemKind {
+  return BLOCK_ITEM_KINDS.some((item) => item === kind);
+}
+
 /** The ask, comment or issue message whose block `route` names, or undefined when it names a
  *  block of a document or no block: an issue's ask, comment or message, or a project document's
  *  ask or comment. */
 export function itemOfBlock(
   route: DispatchReferenceRoute
-): { kind: "ask" | "comment" | "message"; id: string } | undefined {
+): { kind: BlockItemKind; id: string } | undefined {
   if (!("block" in route) || route.block === undefined) {
     return undefined;
   }
-  if (route.kind === "ask" || route.kind === "comment" || route.kind === "message") {
-    return { id: route.id, kind: route.kind };
+  if (route.kind === "document") {
+    return route.item;
   }
-  return route.kind === "document" ? route.item : undefined;
+  // Every other route that names an item carries its id; a document's or a spec's does not.
+  return "id" in route && isBlockItemKind(route.kind)
+    ? { id: route.id, kind: route.kind }
+    : undefined;
 }
 
 /** `route` naming its block `id`, pinned to `pin` when one is given, as the server's

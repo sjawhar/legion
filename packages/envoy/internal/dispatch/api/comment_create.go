@@ -258,7 +258,7 @@ func (s *server) normalizeCommentThreadTarget(
 		if err != nil || input.ReplyToBlock == nil {
 			return target, err
 		}
-		target.ReplyBlock, err = s.replyBlockInThread(ctx, tx, target, parent.ID, *input.ReplyToBlock)
+		target.ReplyBlock, err = s.namedReplyBlock(ctx, tx, refs.ItemComment, parent.ID, *input.ReplyToBlock)
 		if err != nil {
 			return commentThreadTarget{}, err
 		}
@@ -277,25 +277,23 @@ func (s *server) normalizeCommentThreadTarget(
 	if err != nil || input.ReplyToBlock == nil {
 		return target, err
 	}
-	target.ReplyBlock, err = s.replyBlockInThread(ctx, tx, target, "", *input.ReplyToBlock)
+	target.ReplyBlock, err = s.namedReplyBlock(ctx, tx, refs.ItemAsk, *input.AskID, *input.ReplyToBlock)
 	if err != nil {
 		return commentThreadTarget{}, err
 	}
 	return target, nil
 }
 
-// replyBlockInThread is the block a reply names, read from the item that holds it: a reply whose
-// thread hangs under an ask names one of that ask's parts, and every other reply a block of the
-// comment reply_to named, which the climb left locked after the owner. The ask is ordered against
-// a write of its own by the owner row, which this transaction took before it read either
-// (lockCommentOwner, asks.go's lockAskForTransition).
-func (s *server) replyBlockInThread(
-	ctx context.Context, tx pgx.Tx, target commentThreadTarget, commentID, blockID string,
+// namedReplyBlock is the block reply_to_block names, read from the item the same request named:
+// the comment reply_to names, which the thread climb left locked after the owner, or the ask
+// ask_id names. It is never read from the thread's head: a reply to a comment in an ask's thread
+// names a block of that comment, as the client and the tool that write it mean, where only a
+// reply naming the ask names one of the ask's parts. The ask is ordered against a write of its
+// own by the owner row, which this transaction took before it read either (lockCommentOwner,
+// asks.go's lockAskForTransition).
+func (s *server) namedReplyBlock(
+	ctx context.Context, tx pgx.Tx, kind refs.ItemKind, itemID, blockID string,
 ) (*namedBlock, error) {
-	kind, itemID := refs.ItemComment, commentID
-	if target.AskID != nil {
-		kind, itemID = refs.ItemAsk, *target.AskID
-	}
 	return s.replyBlockOf(ctx, tx, kind, itemID, blockID, "reply_to_block", "INVALID_COMMENT")
 }
 

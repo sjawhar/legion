@@ -5877,6 +5877,93 @@ describe("executeDispatchTool", () => {
           [`Part b2 of ask ${ask} (changed in revision 2):`, "Yes", ...sections].join("\n")
         );
       });
+
+      // The ask's read only chooses the heading's word, so a server that cannot answer it leaves
+      // the part under the general heading rather than failing the read of the part.
+      test("a part whose ask the server cannot read is named a part, with the rest of the read unchanged", async () => {
+        const node = part("b2", {
+          text: "Yes",
+          made_by: [{ kind: "session", id: "author-1" }],
+          changed_by: [{ kind: "session", id: "author-1" }],
+        });
+        const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+          const target = new URL(String(url));
+          if (target.pathname === `/api/v1/asks/${ask}`) {
+            return response({ error: "internal server error", code: "INTERNAL" }, 500);
+          }
+          if (target.pathname === "/api/v1/references") return response({ node, edges: [] });
+          throw new Error(`unexpected request: ${target.pathname}`);
+        };
+        const result = await executeDispatchTool({
+          tool: "dispatch_read",
+          args: { ref: `${askRef}#b-b2` },
+          cwd: "/workspace",
+          host: "omp",
+          config,
+          env: {},
+          exec: repoExec("owner/repo"),
+          fetchImpl: fetchImpl as typeof fetch,
+        });
+
+        expect(result.text).toBe(
+          [
+            `Part b2 of ask ${ask} (changed in revision 2):`,
+            "Yes",
+            `Node: block ${askRef}#b-b2 · made by session author-1 · changed by session author-1 · part of ${askRef} (revision 2)`,
+            ...sections,
+          ].join("\n")
+        );
+        expect(result.details).toEqual({ issue: "CORE-1", block: "b2" });
+      });
+
+      // A part that cites a node shows in that node's read as its ask, then the part, as a block
+      // of a comment shows as its comment: `blockItem`'s rule, one set of item kinds.
+      test("a part of an ask citing a block shows as its ask, then the part", async () => {
+        const { result } = readBlock(blockRef, () =>
+          response({
+            node: blockNode,
+            edges: [
+              {
+                kind: "mentions",
+                direction: "in",
+                node: part("b1"),
+                excerpt: { text: "Ship on Friday?" },
+                created_at: "2026-10-21T00:00:00Z",
+                source_seq: 9,
+              },
+            ],
+          })
+        );
+        expect((await result).text).toContain(
+          `Referenced by:\n- mentions ask ${askRef} block b1 (Ship on Friday? · 2026-10-21T00:00:00Z)\nLinks:`
+        );
+      });
+
+      // `reply_to_ask` answers a part, so the refusal hands it the whole reference rather than
+      // the ask's id, which would drop the part.
+      test("a tool that would act on the part's owner refuses it, naming the part reply_to_ask answers", async () => {
+        const refused = await executeDispatchTool({
+          tool: "dispatch_comment",
+          args: { ref: `${askRef}#b-b2`, body: "Yes, Friday." },
+          cwd: "/workspace",
+          host: "omp",
+          config,
+          env: {},
+          exec: repoExec("owner/repo"),
+          fetchImpl: (() => {
+            throw new Error("network must not be called");
+          }) as unknown as typeof fetch,
+        }).then(
+          () => [],
+          (error: unknown) => {
+            if (!(error instanceof ToolInputError)) throw error;
+            return error.problems;
+          }
+        );
+        expect(refused).toEqual([
+          `ref ${askRef}#b-b2 names block b2 of an ask on CORE-1; dispatch comment would act on CORE-1 and drop the block: reply under it with reply_to_ask ${askRef}#b-b2 and issue CORE-1`,
+        ]);
+      });
     });
   });
 
@@ -6470,7 +6557,10 @@ describe("executeDispatchTool", () => {
         "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " +
         "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " +
         "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " +
-        "dispatch read), dispatch://KEY-1/comment/<uuid>#b-<block id>, " +
+        "dispatch read), dispatch://KEY-1/ask/<uuid>#b-<part id> or " +
+        "dispatch://PROJECT/artifact/<slug>/ask/<uuid>#b-<part id> (one part of an ask: its question, " +
+        "one of its options or its answer, optionally pinned to a revision of the ask's parts with " +
+        "@v<N> after it; for dispatch read), dispatch://KEY-1/comment/<uuid>#b-<block id>, " +
         "dispatch://PROJECT/artifact/<slug>/comment/<uuid>#b-<block id> or " +
         "dispatch://KEY-1/message/<uuid>#b-<block id> (one block of a comment or message, a " +
         "comment's optionally pinned to a revision of the comment with @v<N> after it; for dispatch " +
@@ -9416,9 +9506,11 @@ describe("executeDispatchTool", () => {
     expect(await problems(`dispatch://DSP-1/comment/${parent}#b-b2@v1`)).toEqual([
       `reply_to dispatch://DSP-1/comment/${parent}#b-b2@v1 names revision 1 of the block, but a reply answers the block whatever its text becomes: drop @v1`,
     ]);
-    // An ask's parts are blocks of their own, so a part names a block - of the wrong item.
-    expect(await problems(`dispatch://DSP-1/ask/${parent}#b-b3`)).toEqual([
-      `reply_to dispatch://DSP-1/ask/${parent}#b-b3 names a block of an ask, but a comment reply answers a block of a comment (dispatch://KEY/comment/<id>#b-<block id>)`,
+    // An ask's parts are blocks of their own, so a part names a block - of the wrong item, and
+    // the refusal names the field that answers a part.
+    const part = `dispatch://DSP-1/ask/${parent}#b-b3`;
+    expect(await problems(part)).toEqual([
+      `reply_to ${part} names a block of an ask, but a comment reply answers a block of a comment (dispatch://KEY/comment/<id>#b-<block id>); answer it with dispatch comment --reply-to-ask '${part}'`,
     ]);
   });
 

@@ -35,9 +35,11 @@ const (
 // ask row's own text: the question, an option as "<label> — <description>" or its label alone,
 // and the answer as askAnswerText renders it.
 //
-// A part's identity hash, which the ids align on (itemblocks.AlignReplaced), is salted with the
-// part's type: itemblocks.matchKey matches on the hash alone, so an option whose text is the
-// question's would otherwise take the question's id.
+// A part's identity hash, which the ids align on (itemblocks.Align), is salted with the part's
+// type: itemblocks.matchKey matches on the hash alone, so an option whose text is the question's
+// would otherwise take the question's id. An answer part's hash is salted with the answerer as
+// well, since its maker is part of what it is: the same answer from another person is another
+// answer, which takes a part of its own (askAnswerPart).
 //
 // A part is a text of its own, not a span of one body, since an ask has no body to take offsets
 // into: every part's From and To are zero, a range no offset falls in (innermostBlocks), and
@@ -50,7 +52,7 @@ func AskParts(ask model.Ask) []itemblocks.Block {
 		parts = append(parts, askPart(AskOptionPart, askOptionText(option)))
 	}
 	if ask.Answer != nil {
-		parts = append(parts, askPart(AskAnswerPart, askAnswerText(*ask.Answer)))
+		parts = append(parts, askAnswerPart(*ask.Answer))
 	}
 	return parts
 }
@@ -69,6 +71,16 @@ func AskPartsAt(ask model.Ask) time.Time {
 // askPart is one part of an ask, its identity hash salted with its type.
 func askPart(partType, partText string) itemblocks.Block {
 	return itemblocks.Block{Type: partType, Text: partText, Hash: itemblocks.Hash(partType + "\n" + partText)}
+}
+
+// askAnswerPart is the ask's answer part: its text is the answer alone (askAnswerText), where its
+// identity hash is salted with the answerer too, so an answer another person gives is a part of
+// its own and no part records a maker who did not make it. The maker the part row keeps is
+// askPartMakers'.
+func askAnswerPart(answer model.AskAnswer) itemblocks.Block {
+	part := askPart(AskAnswerPart, askAnswerText(answer))
+	part.Hash = itemblocks.Hash(AskAnswerPart + "\n" + answer.User + "\n" + part.Text)
+	return part
 }
 
 // askOptionText is an option's part text: its label and its description, or its label alone when
@@ -148,7 +160,7 @@ func askPartPairs(parts []itemblocks.Block, ids []string, serverURL string) []bl
 // edited_at of an edit, the time of the answer), as the current revision of its blocks, in the
 // caller's transaction, through the core every item kind's blocks go through
 // (indexItemBlocks): it takes the ask's state row after the ask row the caller holds, gives each
-// part an id (itemblocks.AlignReplaced, where an answer is replaced rather than reworded), writes
+// part an id (itemblocks.Align, where an answer is replaced rather than reworded), writes
 // the part rows and the text of each at the new revision, reconciles the links the parts hold,
 // and stores the state. It bumps the revision only when the parts changed.
 //
@@ -196,7 +208,7 @@ func indexAskParts(ctx context.Context, tx pgx.Tx, ask model.Ask, parts []itembl
 		bodySum: sum,
 		madeBy:  makers,
 		ids: func(stored []itemblocks.Stored, next []itemblocks.Block, _, counter int) ([]string, int, error) {
-			ids, counter := itemblocks.AlignReplaced(stored, next, counter, AskAnswerPart)
+			ids, counter := itemblocks.Align(stored, next, counter, AskAnswerPart)
 			return ids, counter, nil
 		},
 		pairs: func(next []itemblocks.Block, ids []string) []blockPair {

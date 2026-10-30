@@ -5,11 +5,13 @@ import { resetDatabase } from "./seed";
 import { signIn } from "./users";
 
 // A part of an ask - its question, each of its options and its answer - is a block of the
-// reference graph, named `dispatch://KEY/ask/<ask id>#b-<part id>`. This row drives the surface a
-// person reaches one through: a reference written in a comment, which the dashboard renders as a
-// link carrying the part's own text, the card that link opens, and the ask's page the link opens
-// at that part. Every part id comes from the ask's own read, never from a guess, so the row fails
-// against a server whose asks have no parts rather than citing an id that server never minted.
+// reference graph, named `dispatch://KEY/ask/<ask id>#b-<part id>`. These rows drive the surfaces
+// a person reaches one through: a reference written in a comment, which the dashboard renders as
+// a link carrying the part's own text, the card that link opens, and the ask's page the link
+// opens at that part; and the Referenced by panel of a node an option links to, where the part is
+// the source and reads as the ask it belongs to. Every part id comes from the ask's own read,
+// never from a guess, so a row fails against a server whose asks have no parts rather than citing
+// an id that server never minted.
 
 const agent = {
   actor: { id: "e2e-ask-parts", kind: "session" as const },
@@ -97,4 +99,57 @@ test("a reference to an ask's option in a comment is a link that opens the ask a
   // with an em dash: the part the link named is the option the reader lands on.
   await expect(turn).toContainText("Tuesday");
   await expect(turn).toContainText("Ship once the review lands.");
+});
+
+test("the backlink an ask's option writes names the ask as its source, not an artifact", async ({
+  page,
+}) => {
+  const target = await createIssue({ project: "CORE", title: "Target of an option's link" });
+  const source = await createIssue({ project: "CORE", title: "Asking issue" });
+  const ask = await createAsk(
+    source.key,
+    {
+      options: [
+        { description: "Ship the reference graph now.", label: "Ship" },
+        { description: `Hold until dispatch://${target.key} ships.`, label: "Wait" },
+      ],
+      question:
+        "The reference graph ships this week, and the issue it depends on has not landed. Ship " +
+        "now and backfill, or wait for it? Recommendation: ship now, so the graph is readable " +
+        "while the reviews run.",
+    },
+    agent
+  );
+  // The option's stored text, which the panel shows as the row's excerpt: its label, an em dash
+  // and its description.
+  const optionText = `Wait — Hold until dispatch://${target.key} ships.`;
+
+  await page.goto(`/issues/${target.key}`);
+  const header = page.getByTestId("issue-header");
+  await header.getByRole("button", { name: /^Referenced by/ }).click();
+  const references = header.getByRole("region", { name: "Referenced by" });
+
+  // The source is the ask the part belongs to, as a block of a comment reads as its comment, and
+  // it links to the ask at that part. A part of an ask is no document, so nothing here reads
+  // "Artifact", the label a block of a document carries - linked or as the plain text a build
+  // that cannot place the part's reference writes.
+  const askSource = references.getByRole("link", { name: `Ask · ${source.key}` });
+  await expect(askSource).toBeVisible();
+  await expect(references.getByText(/^Artifact · /)).toHaveCount(0);
+  await expect(references.getByText(optionText, { exact: true })).toBeVisible();
+  // One row, not two: an ask's own links are its question's, so the option's citation is the
+  // part's edge alone.
+  await expect(askSource).toHaveCount(1);
+
+  // It opens the ask at the part the option is stored as, which the ask's own read names.
+  const read = await getAsk(ask.id);
+  const option = read.ask.options[1];
+  expect(
+    option?.id,
+    "the ask's read names the part each of its options is stored as"
+  ).toBeDefined();
+  await expect(askSource).toHaveAttribute(
+    "href",
+    `/issues/${source.key}/asks/${ask.id}#b-${encodeURIComponent(option?.id ?? "")}`
+  );
 });

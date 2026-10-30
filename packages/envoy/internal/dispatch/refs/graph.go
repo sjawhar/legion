@@ -57,7 +57,8 @@ type Query struct {
 	// drew a lower id and committed later.
 	Through *int64
 	// WholeDocuments, on a document's "in" read, lists the items and documents that cite it or
-	// one of its current blocks, and no block: a citing document is listed by its own edges.
+	// one of its current blocks, and no block: a citing document is listed by its own edges,
+	// and an ask that cites it from a part by its ask row (asksCitingTheDocument).
 	WholeDocuments bool
 }
 
@@ -133,14 +134,36 @@ type edgeRow struct {
 	otherID   string
 	createdAt time.Time
 	sourceSeq *int64
-	// atBlock is the node id of the queried document's, comment's or message's block at the
-	// queried end, on such a read of an edge at one of its blocks.
+	// atBlock is the node id of the queried document's, comment's, message's or ask's block at
+	// the queried end — a part, for an ask — on such a read of an edge at one of its blocks.
 	atBlock *string
 }
 
 // itemKinds is every item kind whose blocks the graph reads, in the order a predicate over all
 // three writes them.
 var itemKinds = []ItemKind{ItemComment, ItemMessage, ItemAsk}
+
+// itemBlockKinds is the SQL list of the storage kind of every item kind's blocks
+// (ItemKind.BlockKind), and blockNodeKinds that list with a document's block kind too, the kinds
+// a block node of any kind is stored under. A predicate over them is written from these, so an
+// item kind a later build adds reaches every one of them at once.
+var (
+	itemBlockKinds = blockKindList()
+	blockNodeKinds = blockKindList("block")
+)
+
+// blockKindList is the parenthesised SQL list of kinds, each item kind's block kind after the
+// ones it is given.
+func blockKindList(kinds ...string) string {
+	quoted := make([]string, 0, len(kinds)+len(itemKinds))
+	for _, kind := range kinds {
+		quoted = append(quoted, `'`+kind+`'`)
+	}
+	for _, item := range itemKinds {
+		quoted = append(quoted, `'`+item.BlockKind()+`'`)
+	}
+	return `(` + strings.Join(quoted, ", ") + `)`
+}
 
 // heldByABlock is true of a document's, comment's, message's or ask's mention edge (graph_edges
 // row alias) when a block of that item holds a link of the same kind to the same target: that
@@ -169,6 +192,27 @@ func blockHolds(alias, fromKind, table, column string) string {
 // block has no row, so the edges at it drop out of every list until a version holds its id again.
 func documentBlockIDs(param string) string {
 	return `(select d.node_id from document_blocks d join artifacts a on a.id = d.artifact_id where a.ref_key = ` + param + `)`
+}
+
+// asksCitingTheDocument lists, as the ask itself, every ask holding a current part that cites
+// the document whose ref_key is the numbered parameter param, or one of that document's current
+// blocks: the arms a whole-document "in" read adds (readEdgeRows). An ask's own refs row holds
+// the links of its question alone, so a link written in an option or in the answer is in
+// ask_block_refs and in no edge of the ask's row, where a comment's or a message's row holds
+// every link its blocks hold. Each ask is listed once per target it cites, at the latest time
+// one of its parts took that link; the read's own dedupe (ReferencedBy) keeps it once overall,
+// as it does for a comment citing the document from two blocks.
+func asksCitingTheDocument(param string) string {
+	tables, _ := ItemAsk.tables()
+	source := `
+		from ` + tables.refs + ` r
+		join ` + tables.blocks + ` b on b.` + tables.item + ` = r.` + tables.item + ` and b.block_id = r.block_id
+		where b.position is not null and r.to_kind = `
+	return `select r.kind, '` + string(ItemAsk) + `', r.ask_id::text, max(r.created_at), max(r.source_seq), null::text` + source + `'artifact' and r.to_id = ` + param + `
+		group by r.kind, r.ask_id
+		union all
+		select r.kind, '` + string(ItemAsk) + `', r.ask_id::text, max(r.created_at), max(r.source_seq), r.to_id` + source + `'block' and r.to_id in ` + documentBlockIDs(param) + `
+		group by r.kind, r.ask_id, r.to_id`
 }
 
 // itemBlockIDs is the node id of every current block of the item of kind whose uuid is the
@@ -296,8 +340,10 @@ func resolveEdges(ctx context.Context, q Queryer, query Query) ([]resolvedEdge, 
 }
 
 // readEdgeRows reads the rows a query lists, as arms over graph_edges that its filters then
-// narrow. A document's, comment's or message's read adds the edges at its blocks (see Query),
-// and every inbound read lists an item's mention from the block holding it (heldByABlock).
+// narrow. A document's, comment's, message's or ask's read adds the edges at its blocks — an
+// ask's parts among them (see Query) — and every inbound read lists an item's mention from the
+// block holding it (heldByABlock). A whole-document read lists each citer by its item instead,
+// an ask citing the document from a part included (asksCitingTheDocument).
 func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error) {
 	args := []any{query.Kind, query.ID}
 	document := query.Kind == "artifact"
@@ -313,7 +359,7 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 		if document && query.WholeDocuments {
 			// The document's citers, each by its own edges: a document's, an ask's, a comment's
 			// or a message's blocks are listed by their item.
-			source = `g.from_kind not in ('block', 'comment_block', 'message_block', 'ask_block')`
+			source = `g.from_kind not in ` + blockNodeKinds
 		}
 		own := source
 		if itemBlocks {
@@ -327,6 +373,13 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 			union all
 			select g.kind, g.from_kind, g.from_id, g.created_at, g.source_seq, g.to_id
 			from graph_edges g where g.to_kind = 'block' and g.to_id in ` + documentBlockIDs("$2") + ` and ` + source
+			if query.WholeDocuments {
+				// An ask's row holds its question's links alone, so the only edge from an ask
+				// that cites the document in an option or in its answer is that part's.
+				arms += `
+			union all
+			` + asksCitingTheDocument("$2")
+			}
 		case itemBlocks:
 			arms += `
 			union all

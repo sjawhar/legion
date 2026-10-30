@@ -17,7 +17,7 @@ import {
 } from "../../theme/classes";
 import { type IssueStatus, statusLabel } from "../project/board-model";
 import { AgentName } from "./AgentName";
-import { itemOfBlock } from "./block-reference";
+import { type BlockItemKind, itemOfBlock } from "./block-reference";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-preview-timing";
 import {
@@ -338,8 +338,9 @@ function DocumentPreview({ route }: { route: DispatchReferenceRoute }): ReactNod
   );
 }
 
-/** The holder a block's card heads with, for the item kinds `itemOfBlock` names. */
-const BLOCK_HOLDER_LABELS: Record<"ask" | "comment" | "message", string> = {
+/** The holder a block's card heads with, one label for each kind of item `itemOfBlock` names
+ *  (`BLOCK_ITEM_KINDS`). */
+const BLOCK_HOLDER_LABELS: Record<BlockItemKind, string> = {
   ask: "Ask",
   comment: "Comment",
   message: "Message",

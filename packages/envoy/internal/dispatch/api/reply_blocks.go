@@ -4,7 +4,6 @@ import (
 	"context"
 	"maps"
 	"net/http"
-	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -13,11 +12,13 @@ import (
 )
 
 // replyBlockOwner is the kind of item the block a reply names belongs to, read from the node id
-// replies_to_block stores: `ask/<id>#<part>` is a part of an ask, which a reply in that ask's
-// thread names, and `comment/<id>#<block>` a block of the comment the reply answers.
+// replies_to_block stores (refs.ParseItemBlockNode): `ask/<id>#<part>` is a part of an ask,
+// which a reply naming that ask names, and `comment/<id>#<block>` a block of the comment the
+// reply answers. A node id of no shape this build knows is read as a comment's, the kind every
+// reply written before ask parts named.
 func replyBlockOwner(nodeID string) refs.ItemKind {
-	if strings.HasPrefix(nodeID, string(refs.ItemAsk)+"/") {
-		return refs.ItemAsk
+	if kind, _, _, ok := refs.ParseItemBlockNode(nodeID); ok {
+		return kind
 	}
 	return refs.ItemComment
 }
@@ -29,11 +30,13 @@ type namedBlock struct {
 	excerpt string
 }
 
-// replyBlockOf checks that blockID is a current block of item itemID, the comment or message a
-// reply answers, and returns it. The caller holds the item's owner row (when it has one) and the
-// item row; an item an older build wrote, or wrote after its last index, is indexed first, in the
-// caller's transaction (refs.IndexItemIfOwed), so the block named is one of the item's current
-// body. A block the item does not hold now answers 400 with code, naming field and the block.
+// replyBlockOf checks that blockID is a current block of item itemID — the comment or the
+// message a reply answers, or the ask a reply names, whose blocks are the parts of its question,
+// its options and its answer — and returns it. The caller holds the item's owner row (when it
+// has one) and the item row; an item an older build wrote, or wrote after its last index, is
+// indexed first, in the caller's transaction (refs.IndexItemIfOwed), so the block named is one
+// of the item's current body. A block the item does not hold now answers 400 with code, naming
+// field and the block.
 func (s *server) replyBlockOf(
 	ctx context.Context, tx pgx.Tx, kind refs.ItemKind, itemID, blockID, field, code string,
 ) (*namedBlock, error) {

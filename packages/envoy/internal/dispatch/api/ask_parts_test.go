@@ -299,6 +299,7 @@ func TestARestoredDecidedWordingMovesTheAsksPartRevision(t *testing.T) {
 	}
 	requireAskParts(t, database, ask.ID, "the earlier release's rewording", "b1@3 b2@3 b3@1 b4@2", 3)
 
+	restoring := time.Now().UTC()
 	restored, copies, err := documentService.RestoreDecidedWordings(context.Background())
 	if err != nil || restored != 1 || copies != 0 {
 		t.Fatalf("the boot's restoration restored %d asks and marked %d copies owed (%v), want the one ask", restored, copies, err)
@@ -307,15 +308,34 @@ func TestARestoredDecidedWordingMovesTheAsksPartRevision(t *testing.T) {
 	if text := askPartText(t, database, ask.ID, "b1", 4); text == nil || *text != "Ship on Monday?" {
 		t.Fatalf("the restored question part = %v, want the wording the answer was given on", text)
 	}
+	// The restoration is the change the restored parts record, so they take its own time, not
+	// the time of the edit it undoes, which it leaves on the row (edited_at).
+	if changed := askPartChangedAt(t, database, ask.ID, "b1"); changed.Before(restoring) {
+		t.Fatalf("the restored question part changed at %v, want the restoration's own time, at or after %v", changed, restoring)
+	}
 	if edits := askEditedEvents(t, database, ask.ID); edits != 1 {
 		t.Fatalf("the ask has %d ask.edited events after the restoration, want only the earlier release's", edits)
 	}
 }
 
+// askPartChangedAt is when the part's text last changed (changed_at), the time of the revision
+// that moved it.
+func askPartChangedAt(t *testing.T, database *store.Store, askID, blockID string) time.Time {
+	t.Helper()
+	var changed time.Time
+	if err := database.Pool.QueryRow(context.Background(), `
+		select changed_at from ask_blocks where ask_id = $1::uuid and block_id = $2
+	`, askID, blockID).Scan(&changed); err != nil {
+		t.Fatalf("read the change time of %s of ask %s: %v", blockID, askID, err)
+	}
+	return changed.UTC()
+}
+
 // rewordAsAnEarlierRelease writes wording into the decided ask's row, as a task of the release
 // before LEGION-651 did when its settlement found the block reworded: the row takes the question
-// and the options with edited_at, and an ask.edited records the wording it replaced. That release
-// indexed no parts, so none are written here either.
+// and the options with edited_at, and an ask.edited records the wording it replaced and the
+// settlement that wrote it, as every ask.edited does (model.NewAskEditEventPayload). That
+// release indexed no parts, so none are written here either.
 func rewordAsAnEarlierRelease(t *testing.T, database *store.Store, issueKey string, ask model.Ask, question string, options []model.AskOption) {
 	t.Helper()
 	ctx := context.Background()
@@ -328,7 +348,11 @@ func rewordAsAnEarlierRelease(t *testing.T, database *store.Store, issueKey stri
 	`, ask.ID, question, encoded); err != nil {
 		t.Fatalf("reword the decided ask's row: %v", err)
 	}
-	payload, err := json.Marshal(map[string]any{"id": ask.ID, "previous": model.NewAskEditPrevious(ask)})
+	payload, err := json.Marshal(map[string]any{
+		"id":        ask.ID,
+		"previous":  model.NewAskEditPrevious(ask),
+		"edited_by": model.Actor{Kind: "session", ID: "session-0123456789abcdef"},
+	})
 	if err != nil {
 		t.Fatalf("encode the rewording's payload: %v", err)
 	}
@@ -750,6 +774,96 @@ func TestAWriteCannotMintOrMoveAnAskPartID(t *testing.T) {
 	}
 }
 
+// An ask whose stored parts are behind its row carries no id for an option no part stands for,
+// rather than the id of the part that stood in its place: a part is matched to an option by its
+// own text and type, never by its place among them. The option the rewording left alone keeps
+// its part, and the revision the ask's parts have reached is still its own.
+func TestAnAskWhoseIndexIsBehindItsRowCarriesNoWrongPartIDs(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Parts behind the row", "A spec")
+	ask := createPartAsk(t, handler, issue.Key, "Ship on Monday?",
+		map[string]string{"label": "Yes", "description": "Monday."},
+		map[string]string{"label": "No", "description": "Later."})
+	if got := askOptionIDs(readPartAsk(t, handler, ask.ID)); !reflect.DeepEqual(got, []string{"b2", "b3"}) {
+		t.Fatalf("the opened ask's option ids = %v, want b2 and b3", got)
+	}
+
+	// A task of an earlier release writes the row and indexes no part, so the stored parts stand
+	// for the options the row no longer holds.
+	rewordAsAnEarlierRelease(t, database, issue.Key, ask, "Ship on Tuesday?",
+		[]model.AskOption{{Label: "Tuesday", Description: "Ship it."}, {Label: "No", Description: "Later."}})
+
+	behind := readPartAsk(t, handler, ask.ID)
+	if got := askOptionIDs(behind); !reflect.DeepEqual(got, []string{"", "b3"}) {
+		t.Fatalf("the option ids of an ask whose index is behind its row = %v, want none for the option no part stands for and b3 for the one the rewording left", got)
+	}
+	if behind.Revision != 1 {
+		t.Fatalf("the ask's revision = %d, want 1, the revision its parts have reached", behind.Revision)
+	}
+}
+
+// An event payload names the parts its own options stand for, and no others: an ask.opened of an
+// ask whose options an edit has reworded carries no id, the text it shows being no part's now,
+// where the edit's own event, whose options are the ask's, carries each option's part id. Both
+// carry the revision the ask's parts have reached, which is the ask's own fact.
+func TestAnAskEventPayloadNamesOnlyThePartsItsOwnOptionsStandFor(t *testing.T) {
+	handler, _ := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Ask event part ids", "A spec")
+	ask := createPartAsk(t, handler, issue.Key, "Which day do we ship?",
+		map[string]string{"label": "Monday"}, map[string]string{"label": "Tuesday"})
+	editPartAskOptions(t, handler, ask.ID, "reword both options",
+		map[string]string{"label": "Wednesday"}, map[string]string{"label": "Thursday"})
+	current := readPartAsk(t, handler, ask.ID)
+	if got := askOptionIDs(current); !reflect.DeepEqual(got, []string{"b2", "b3"}) {
+		t.Fatalf("the edited ask's option ids = %v, want the reworded parts b2 and b3", got)
+	}
+
+	opened, openedRevision := askEventOptions(t, handler, issue.Key, "ask.opened", ask.ID)
+	if !reflect.DeepEqual(opened, []string{"Monday:", "Tuesday:"}) {
+		t.Fatalf("the ask.opened payload's options = %v, want the options it opened with, carrying no part id", opened)
+	}
+	if openedRevision != current.Revision {
+		t.Fatalf("the ask.opened payload's revision = %d, want the ask's %d", openedRevision, current.Revision)
+	}
+	edited, editedRevision := askEventOptions(t, handler, issue.Key, "ask.edited", ask.ID)
+	if !reflect.DeepEqual(edited, []string{"Wednesday:b2", "Thursday:b3"}) {
+		t.Fatalf("the ask.edited payload's options = %v, want each with the part it stands for", edited)
+	}
+	if editedRevision != current.Revision {
+		t.Fatalf("the ask.edited payload's revision = %d, want the ask's %d", editedRevision, current.Revision)
+	}
+}
+
+// askEventOptions is each option the payload of the issue's event of eventType about the ask
+// shows, as "<label>:<part id>" with the id empty where the payload carries none, and the
+// payload's part revision.
+func askEventOptions(t *testing.T, handler http.Handler, issueKey, eventType, askID string) ([]string, int) {
+	t.Helper()
+	for _, event := range issueEvents(t, handler, issueKey) {
+		if event.Type != eventType {
+			continue
+		}
+		var payload struct {
+			ID       string            `json:"id"`
+			Revision int               `json:"revision"`
+			Options  []model.AskOption `json:"options"`
+		}
+		if err := json.Unmarshal(event.Payload, &payload); err != nil {
+			t.Fatalf("decode the %s payload: %v", eventType, err)
+		}
+		if payload.ID != askID {
+			continue
+		}
+		options := make([]string, len(payload.Options))
+		for index, option := range payload.Options {
+			options[index] = option.Label + ":" + option.ID
+		}
+		return options, payload.Revision
+	}
+	t.Fatalf("no %s event about %s on %s", eventType, askID, issueKey)
+	return nil, 0
+}
+
 // An ask carries the same part ids wherever it is listed: the issue detail's open_asks and the
 // human Inbox name each option as the ask's own read names it, so a reader cites an option from
 // the list in front of it.
@@ -884,14 +998,74 @@ func TestAReplyToAnAskNamesThePartItAnswers(t *testing.T) {
 	requireReplyBlock(t, "the older reply", replies[1].ReplyBlock, nil)
 	requireReplyBlock(t, "GET the older reply", readCommentThread(t, handler, older).Comment.ReplyBlock, nil)
 
-	// The thread climb reaches the ask too: a reply to a comment under it names a part of the
-	// ask, never a block of that comment, which holds no b3 at all.
+	// The thread climb reaches the ask, which gives the reply its ask_id, but the block is read
+	// from the item the request named: a reply naming reply_to names a block of that comment,
+	// even in an ask's thread (TestAReplyNamesABlockOfTheItemTheRequestNamed).
 	climbed := createThreadComment(t, handler, issue.Key, map[string]any{
-		"body": "Tuesday then.", "reply_to": reply.ID, "reply_to_block": "b3",
+		"body": "On that.", "reply_to": reply.ID, "reply_to_block": "b1",
 	}, "bob")
-	requireReplyBlock(t, "a reply whose climb reaches the ask", climbed.ReplyBlock,
-		&model.ReplyBlock{Node: "ask/" + ask.ID + "#b3", Ref: askPartRef(issue.Key, ask.ID, "b3"), BlockID: "b3", Text: "Tuesday"})
-	requireRefusal(t, "a climb to the ask naming no part of it",
+	requireReplyBlock(t, "a reply naming a block of a comment in the ask's thread", climbed.ReplyBlock,
+		&model.ReplyBlock{
+			Node: "comment/" + reply.ID + "#b1", Ref: "dispatch://" + issue.Key + "/comment/" + reply.ID + "#b-b1",
+			BlockID: "b1", Text: "Monday works for us.",
+		})
+	requireRefusal(t, "a block the comment the reply answers does not hold",
 		post(map[string]any{"body": "On b9.", "reply_to": reply.ID, "reply_to_block": "b9"}),
+		"INVALID_COMMENT", "reply_to_block b9 is not a block of comment "+reply.ID)
+}
+
+// A reply names a block of the item its own request named, never of the item at the head of its
+// thread: with reply_to, a block of that comment, which a reply in an ask's thread names as any
+// other reply does; with ask_id, a part of that ask. The comment the reply joins is the same
+// either way - the thread hangs under the ask - and each refusal names the item the request
+// named.
+func TestAReplyNamesABlockOfTheItemTheRequestNamed(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Blocks in an ask's thread", "A spec")
+	ask := createPartAsk(t, handler, issue.Key, "Which day do we ship?",
+		map[string]string{"label": "Monday"}, map[string]string{"label": "Tuesday"})
+	under := createThreadComment(t, handler, issue.Key, map[string]any{
+		"body": "Monday works.\n\nTuesday is tight.", "ask_id": ask.ID,
+	}, "alice")
+
+	commentRef := "dispatch://" + issue.Key + "/comment/" + under.ID
+	tight := &model.ReplyBlock{Node: "comment/" + under.ID + "#b2", Ref: commentRef + "#b-b2", BlockID: "b2", Text: "Tuesday is tight."}
+	onComment := createThreadComment(t, handler, issue.Key, map[string]any{
+		"body": "It is.", "reply_to": under.ID, "reply_to_block": "b2",
+	}, "bob")
+	if onComment.AskID == nil || *onComment.AskID != ask.ID {
+		t.Fatalf("the reply's ask_id = %v, want the thread's ask %s", onComment.AskID, ask.ID)
+	}
+	requireReplyBlock(t, "the write's answer", onComment.ReplyBlock, tight)
+	requireReplyBlock(t, "GET the reply", readCommentThread(t, handler, onComment.ID).Comment.ReplyBlock, tight)
+	var stored *string
+	if err := database.Pool.QueryRow(context.Background(),
+		`select replies_to_block from comments where id = $1`, onComment.ID).Scan(&stored); err != nil ||
+		stored == nil || *stored != tight.Node {
+		t.Fatalf("replies_to_block = %v (%v), want the comment's block %s", stored, err, tight.Node)
+	}
+	if edges := readGraph(t, handler, url.Values{"to": {tight.Ref}, "kind": {"replies_to"}}).Edges; len(edges) != 1 ||
+		edges[0].Node.ID != onComment.ID {
+		t.Fatalf("?to= the comment's block lists %#v, want the reply", edges)
+	}
+
+	part := &model.ReplyBlock{Node: "ask/" + ask.ID + "#b3", Ref: askPartRef(issue.Key, ask.ID, "b3"), BlockID: "b3", Text: "Tuesday"}
+	onPart := createThreadComment(t, handler, issue.Key, map[string]any{
+		"body": "Tuesday then.", "ask_id": ask.ID, "reply_to_block": "b3",
+	}, "bob")
+	requireReplyBlock(t, "the write's answer naming a part", onPart.ReplyBlock, part)
+	requireReplyBlock(t, "GET the reply naming a part", readCommentThread(t, handler, onPart.ID).Comment.ReplyBlock, part)
+
+	post := func(input map[string]any) *httptest.ResponseRecorder {
+		return dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", input, "alice")
+	}
+	requireRefusal(t, "a block the named comment does not hold",
+		post(map[string]any{"body": "On b9.", "reply_to": under.ID, "reply_to_block": "b9"}),
+		"INVALID_COMMENT", "reply_to_block b9 is not a block of comment "+under.ID)
+	requireRefusal(t, "a part the named ask does not hold",
+		post(map[string]any{"body": "On b9.", "ask_id": ask.ID, "reply_to_block": "b9"}),
 		"INVALID_COMMENT", "reply_to_block b9 is not a block of ask "+ask.ID)
+	requireRefusal(t, "a block with neither reply_to nor ask_id",
+		post(map[string]any{"body": "On b2.", "reply_to_block": "b2"}),
+		"INVALID_COMMENT", "reply_to_block requires reply_to")
 }

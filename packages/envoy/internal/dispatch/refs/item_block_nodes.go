@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -213,13 +212,12 @@ func messageBlockText(blocks []itemblocks.Block, position int, sum, excerpt stri
 	return excerpt
 }
 
-// itemBlockParent is the block node nodeID, a reply's replies_to_block ('<item kind>/<item
-// id>#<block id>'), as the reply's parent: a block of an item in the reply's own thread, so
-// addressed under the reply's owner.
+// itemBlockParent is the block node nodeID, a reply's replies_to_block (ItemBlockNode's
+// '<item kind>/<item id>#<block id>'), as the reply's parent: a block of an item in the reply's
+// own thread, so addressed under the reply's owner.
 func itemBlockParent(issueKey *string, project, slug, nodeID string) *model.NodeParent {
-	item, blockID, _ := strings.Cut(nodeID, "#")
-	kind, id, _ := strings.Cut(item, "/")
-	return &model.NodeParent{Kind: "block", ID: nodeID, Ref: BlockRef(itemRef(kind, issueKey, project, slug, id), blockID)}
+	kind, itemID, blockID, _ := ParseItemBlockNode(nodeID)
+	return &model.NodeParent{Kind: "block", ID: nodeID, Ref: BlockRef(itemRef(string(kind), issueKey, project, slug, itemID), blockID)}
 }
 
 // ItemBlockRevision is what the index recorded of one block of an item at one revision: a

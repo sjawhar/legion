@@ -5,6 +5,7 @@ import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { GraphEdge, GraphReferences } from "../../api/types";
+import type { BlockItemKind } from "./block-reference";
 import { ReferencedBy } from "./ReferencedBy";
 
 const createdAt = "2026-10-20T10:00:00Z";
@@ -202,10 +203,10 @@ test("one source citing two blocks of the shown document is two rows, each linke
   expect(consoleError.mock.calls.some((call) => String(call[0]).includes("same key"))).toBeFalse();
 });
 
-/** An edge from block `blockId` of comment or message `id` on OPS-1, as the graph lists a mention
- *  a comment's or message's block holds: its node is the block, naming no document, and its parent
- *  the item. */
-function itemBlockEdge(kind: "comment" | "message", id: string, blockId: string, text: string) {
+/** An edge from block `blockId` of the ask, comment or message `id` on OPS-1, as the graph lists
+ *  a mention a part of an ask, or a block of a comment or message, holds: its node is the block,
+ *  naming no document, and its parent the item. */
+function itemBlockEdge(kind: BlockItemKind, id: string, blockId: string, text: string) {
   const item = `dispatch://OPS-1/${kind}/${id}`;
   return {
     created_at: createdAt,
@@ -266,6 +267,41 @@ test("blocks of one comment citing the node are rows under that comment, labelle
     `/issues/OPS-1/messages/${message}#b-b1`
   );
   expect(messageSource.getByText("The message cites dispatch://CORE-1.")).toBeTruthy();
+});
+
+test("parts of one ask citing the node are rows under that ask, named as the ask rather than as an artifact", async () => {
+  const ask = "22222222-2222-4222-8222-222222222222";
+  const { getReferences, view } = renderPanel({
+    edges: [
+      itemBlockEdge("ask", ask, "b1", "Ship it once dispatch://CORE-1 lands?"),
+      itemBlockEdge("ask", ask, "b3", "Hold — dispatch://CORE-1 is not ready."),
+    ],
+    node: { id: "CORE-1", issue_key: "CORE-1", kind: "issue", ref: "dispatch://CORE-1" },
+  });
+  restore = () => {
+    getReferences.mockRestore();
+    view.unmount();
+  };
+
+  const panel = await screen.findByRole("region", { name: "Referenced by" });
+  await within(panel).findByText("Hold — dispatch://CORE-1 is not ready.");
+  const sources = panel.querySelectorAll<HTMLElement>(":scope > ul > li");
+  expect(sources).toHaveLength(1);
+  // The ask is the source: the question and the option are its rows, each linked to its part.
+  expect(within(panel).getByRole("link", { name: "Ask · OPS-1" }).getAttribute("href")).toBe(
+    `/issues/OPS-1/asks/${ask}`
+  );
+  expect(within(panel).queryByRole("link", { name: /^Artifact/ })).toBeNull();
+  const rows = (sources[0] as HTMLElement).querySelectorAll(":scope > ul > li");
+  expect(
+    [...rows].map((row) => [
+      row.querySelector("p")?.textContent,
+      row.querySelector("a")?.getAttribute("href"),
+    ])
+  ).toEqual([
+    ["Ship it once dispatch://CORE-1 lands?", `/issues/OPS-1/asks/${ask}#b-b1`],
+    ["Hold — dispatch://CORE-1 is not ready.", `/issues/OPS-1/asks/${ask}#b-b3`],
+  ]);
 });
 
 // A project document's comment opens on its document's page (`?comment=`), where a `#b-`

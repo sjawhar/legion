@@ -282,7 +282,11 @@ func (s *server) attachAskEventFields(ctx context.Context, events []model.Event)
 		if !ok || askID == "" {
 			return fmt.Errorf("decode %s payload: ask id missing", events[index].Type)
 		}
-		asks = append(asks, askEventShell(askID, payload))
+		shell, err := askEventShell(askID, raw)
+		if err != nil {
+			return err
+		}
+		asks = append(asks, shell)
 		payloads = append(payloads, decodedAskEventPayload{event: &events[index], payload: payload})
 	}
 	askPointers := make([]*model.Ask, len(asks))
@@ -313,26 +317,29 @@ func (s *server) attachAskEventFields(ctx context.Context, events []model.Event)
 	return nil
 }
 
-// askEventShell is the ask attachAskPartIDs matches the payload's parts against: its id, one
-// option per option the payload lists, and an answer when the payload carries one. A part is
-// matched to an option by position and type alone, so no label or text is read, and the payload's
-// own options and answer stay as the write recorded them.
-func askEventShell(askID string, payload map[string]any) model.Ask {
-	ask := model.Ask{ID: askID}
-	if options, listed := payload["options"].([]any); listed {
-		ask.Options = make([]model.AskOption, len(options))
+// askEventShell is the ask attachAskPartIDs matches the stored parts against: its id and the
+// options and the answer this payload itself carries, as the write recorded them. Their text is
+// what identifies a part, so a payload the ask has moved past - an ask.opened whose options an
+// edit has since replaced, an ask.answered superseded by another answer - matches no part of the
+// ask now and carries no id. The payload's own fields are never rewritten from the ask's row;
+// only the ids attachAskEventPartIDs writes are added.
+func askEventShell(askID string, raw json.RawMessage) (model.Ask, error) {
+	var shell struct {
+		Options []model.AskOption `json:"options"`
+		Answer  *model.AskAnswer  `json:"answer"`
 	}
-	if _, answered := payload["answer"].(map[string]any); answered {
-		ask.Answer = &model.AskAnswer{}
+	if err := json.Unmarshal(raw, &shell); err != nil {
+		return model.Ask{}, fmt.Errorf("decode the options and answer of ask %s: %w", askID, err)
 	}
-	return ask
+	return model.Ask{ID: askID, Options: shell.Options, Answer: shell.Answer}, nil
 }
 
 // attachAskEventPartIDs writes the part ids attachAskPartIDs read onto the payload's own options
-// and answer, with the ask's part revision beside them, so a payload names each option it shows as
-// every other read of the ask names it. A payload the ask has moved past - an ask.opened of an ask
-// whose options an edit has since replaced - carries no id, and an ask whose parts are not indexed
-// yet no revision either: attachAskPartIDs filled neither.
+// and answer, with the ask's part revision beside them, so a payload names each option it shows
+// as every other read of the ask names it. An option or an answer no part of the ask stands for
+// now - an ask.opened of an ask whose options an edit has since replaced, a superseded answer -
+// carries no id, and an ask whose parts are not indexed yet no revision either: attachAskPartIDs
+// filled neither.
 func attachAskEventPartIDs(payload map[string]any, ask model.Ask) {
 	if ask.Revision > 0 {
 		payload["revision"] = ask.Revision

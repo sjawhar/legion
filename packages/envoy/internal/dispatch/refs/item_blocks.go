@@ -60,6 +60,33 @@ func (kind ItemKind) BlockKind() string {
 	return string(kind) + "_block"
 }
 
+// ItemBlockNode is the node id of block blockID of the item of kind whose uuid is itemID, the
+// one shape every block table's node_id column holds and every reference to one resolves
+// through: `comment/<uuid>#b2`, `message/<uuid>#b1`, `ask/<uuid>#b3` for a part of an ask. A
+// document's block is addressed by its ref_key instead (`KEY/slug#b2`), which this never writes.
+func ItemBlockNode(kind ItemKind, itemID, blockID string) string {
+	return string(kind) + "/" + itemID + "#" + blockID
+}
+
+// ParseItemBlockNode reads an item block's node id (ItemBlockNode): the kind of item it is a
+// block of, that item's uuid and the block's id. ok is false for any other text — a document
+// block's node id, which names no item kind, and a kind this build does not know among them.
+func ParseItemBlockNode(nodeID string) (kind ItemKind, itemID, blockID string, ok bool) {
+	item, blockID, found := strings.Cut(nodeID, "#")
+	if !found {
+		return "", "", "", false
+	}
+	name, itemID, found := strings.Cut(item, "/")
+	if !found {
+		return "", "", "", false
+	}
+	kind = ItemKind(name)
+	if _, err := kind.tables(); err != nil {
+		return "", "", "", false
+	}
+	return kind, itemID, blockID, true
+}
+
 // CarriedEdit is the block ids an edit of a comment carries (PATCH /api/v1/comments/{id}'s
 // `blocks` and `base_revision`): the comment's revision the editor read its blocks at, and each
 // carried block's id with its From in UTF-16 code units into the body the edit writes, in body

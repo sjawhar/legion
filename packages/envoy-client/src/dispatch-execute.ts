@@ -669,14 +669,17 @@ function messageIdOf(value: string): string | undefined {
   return id === undefined ? undefined : normalizeUUID(id);
 }
 
-/** A block reference to a comment's or message's block: the item and the block's id. */
+/** A block reference to a part of an ask, or to a block of a comment or message: the item and
+ *  the block's id. */
 type ItemBlockRef = ParsedDispatchRef & {
   readonly item: NonNullable<ParsedDispatchRef["item"]>;
   readonly block: string;
 };
 
-/** The comment or message block a block reference (`dispatch://KEY/comment/<id>#b-<block id>`)
- *  names, or undefined for any other value. */
+/** The part of an ask, or the block of a comment or message, a block reference names
+ *  (`dispatch://KEY/ask/<id>#b-<part id>`, `dispatch://KEY/comment/<id>#b-<block id>`), or
+ *  undefined for any other value: the block `reply_to` or `in_reply_to` answers, and the part
+ *  `reply_to_ask` answers under its ask. */
 function itemBlockOf(value: string): ItemBlockRef | undefined {
   const ref = parseDispatchRef(value);
   return ref?.item === undefined || ref.block === undefined
@@ -692,9 +695,9 @@ function article(kind: string): string {
 /**
  * Why `value`, given to `field` of a `kind` reply, names no block that reply can answer: a block
  * of another kind of item (a document's included), or one pinned to a revision, since a reply
- * answers the block whatever its text becomes. An ask's part is what `reply_to_ask` answers, as a
- * comment's block is what `reply_to` answers. Undefined for a block of a `kind` and for a value
- * that is no block reference at all.
+ * answers the block whatever its text becomes. A part of an ask is what `reply_to_ask` answers,
+ * as a comment's block is what `reply_to` answers. Undefined for a block of a `kind` and for a
+ * value that is no block reference at all.
  */
 function replyBlockProblem(
   field: "reply_to" | "in_reply_to" | "reply_to_ask",
@@ -714,9 +717,17 @@ function replyBlockProblem(
         ? `; answer it with ${commandLine("dispatch_comment", { reply_to: value })}`
         : other === "message"
           ? `; answer it with ${commandLine("dispatch_message", { in_reply_to: value })}`
-          : "";
+          : other === "ask"
+            ? `; answer it with ${commandLine("dispatch_comment", { reply_to_ask: value })}`
+            : "";
     const named = other === undefined ? "a document" : article(other);
-    return `${field} ${value} names a block of ${named}, but ${article(kind)} reply answers a block of ${article(kind)} (${form})${answer}`;
+    // A reply to an ask is a comment in the ask's thread, not a comment of its own that a block
+    // of the ask holds: it answers the part its ask places.
+    const answers =
+      kind === "ask"
+        ? "a reply in an ask's thread answers a part of that ask"
+        : `${article(kind)} reply answers a block of ${article(kind)}`;
+    return `${field} ${value} names a block of ${named}, but ${answers} (${form})${answer}`;
   }
   if (ref.pin !== undefined) {
     return `${field} ${value} names revision ${ref.pin} of the block, but a reply answers the block whatever its text becomes: drop @v${ref.pin}`;
@@ -912,8 +923,9 @@ async function resolveAskArgument(
   return { id: resolved, read };
 }
 
-/** A reply's target: the comment or message it answers and the block of that item it names, if
- *  any. */
+/** A reply's target: the ask, comment or message it answers and the part or block of that item
+ *  it names, if any - a part of the ask a reply threads under (`reply_to_ask`), or a block of
+ *  the comment or message it answers. */
 interface ReplyTarget {
   readonly id: string;
   readonly block?: string;
@@ -1184,7 +1196,10 @@ const refGrammarProblem =
   "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " +
   "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " +
   "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " +
-  "dispatch read), dispatch://KEY-1/comment/<uuid>#b-<block id>, " +
+  "dispatch read), dispatch://KEY-1/ask/<uuid>#b-<part id> or " +
+  "dispatch://PROJECT/artifact/<slug>/ask/<uuid>#b-<part id> (one part of an ask: its question, " +
+  "one of its options or its answer, optionally pinned to a revision of the ask's parts with " +
+  "@v<N> after it; for dispatch read), dispatch://KEY-1/comment/<uuid>#b-<block id>, " +
   "dispatch://PROJECT/artifact/<slug>/comment/<uuid>#b-<block id> or " +
   "dispatch://KEY-1/message/<uuid>#b-<block id> (one block of a comment or message, a " +
   "comment's optionally pinned to a revision of the comment with @v<N> after it; for dispatch " +
@@ -1196,11 +1211,12 @@ const ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSU
 
 /**
  * An ask, comment or message link names an item inside its issue or document, a log or
- * children link names one of its issue's lists, and a block link names one block of a document,
- * a comment or a message. `dispatch read` reads each of them and `dispatch ask` cites the link in
- * its question; the other tools that take `ref` (comment, suggest, doc-edit, doc-read) take it as
- * the owner they act on, so they would act on the owner and drop the item without a word. Such a
- * ref is refused, naming what acts on it; a block of a comment or message as its item is.
+ * children link names one of its issue's lists, and a block link names one block of a document
+ * or of a comment or message, or one part of an ask. `dispatch read` reads each of them and
+ * `dispatch ask` cites the link in its question; the other tools that take `ref` (comment,
+ * suggest, doc-edit, doc-read) take it as the owner they act on, so they would act on the owner
+ * and drop the item without a word. Such a ref is refused, naming what acts on it; a part of an
+ * ask, or a block of a comment or message, is named as its item.
  */
 function innerRefProblem(
   tool: string,
@@ -1236,7 +1252,9 @@ function innerRefProblem(
       : `project ${ref.owner.project} and artifact ${ref.artifact}`;
   const fix =
     tool === "dispatch_comment" && itemKind === "ask"
-      ? `reply under it with reply_to_ask ${ref.id} and ${ownerArguments}`
+      ? // A part of an ask is what `reply_to_ask` answers, so a part's hint hands it the whole
+        // reference; the ask's own id would drop the part it names.
+        `reply under it with reply_to_ask ${ref.item === undefined ? ref.id : refText} and ${ownerArguments}`
       : tool === "dispatch_comment" && itemKind === "comment"
         ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}`
         : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
@@ -2070,17 +2088,29 @@ function referenceLines(read: GraphReferences | string): string[] {
   return read.edges.map(edgeLine);
 }
 
-/** One edge of a graph read. A block of a comment or message (a block node naming no document)
- *  shows as its item, then the block: `comment <item ref> block <id>`. */
+/** The kinds of item whose blocks are its own, and are numbered by its own revisions rather than
+ *  a document's versions: an ask, whose parts are its question, its options and its answer, a
+ *  comment and an issue message. They are the parents a block node naming no document has, and
+ *  one set serves every read of such a node (`edgeLine`, `nodeLine`), so a part of an ask reads
+ *  as its ask, as a block of a comment reads as its comment. */
+const ITEM_KINDS = ["ask", "comment", "message"] as const satisfies readonly GraphNode["kind"][];
+
+/** Whether `kind`, a graph node's, is one of those items. */
+function isItemKind(kind: GraphNode["kind"] | undefined): kind is (typeof ITEM_KINDS)[number] {
+  return ITEM_KINDS.some((item) => item === kind);
+}
+
+/** One edge of a graph read. A part of an ask, or a block of a comment or message (a block node
+ *  naming no document), shows as its item, then the block: `ask <item ref> block <part id>`,
+ *  `comment <item ref> block <id>`. */
 function edgeLine(edge: GraphEdge): string {
   const { node } = edge;
   const excerpt = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} · `;
   const block = edge.block === undefined ? "" : ` (block ${edge.block.ref ?? edge.block.id})`;
+  const parent = node.parent ?? undefined;
   const item =
-    node.kind === "block" &&
-    node.document === undefined &&
-    (node.parent?.kind === "comment" || node.parent?.kind === "message")
-      ? node.parent
+    node.kind === "block" && node.document === undefined && isItemKind(parent?.kind)
+      ? parent
       : undefined;
   const source =
     item === undefined
@@ -2152,9 +2182,9 @@ function graphSectionLines(
 /**
  * The read node's facts on one line: `Node: <kind> <ref> · made by <actors> at <time> · changed
  * by <actors> at <time> · part of <parent> (version <N>)`, the parent's version a revision when
- * the parent is a comment or an ask, whose parts are numbered by revision. An empty actor list is
- * "nobody recorded"; a null time, version or parent leaves its part out. A server older than the
- * facts sends no `made_by`, and the read prints no line.
+ * the parent is an item of its own blocks (`ITEM_KINDS`) rather than a document. An empty actor
+ * list is "nobody recorded"; a null time, version or parent leaves its part out. A server older
+ * than the facts sends no `made_by`, and the read prints no line.
  */
 function nodeLine(node: GraphNode): string[] {
   if (node.made_by === undefined) return [];
@@ -2166,7 +2196,7 @@ function nodeLine(node: GraphNode): string[] {
   const partOf =
     parent == null
       ? ""
-      : ` · part of ${parent.ref ?? `${parent.kind} ${parent.id}`}${node.parent_version == null ? "" : ` (${parent.kind === "comment" || parent.kind === "ask" ? "revision" : "version"} ${node.parent_version})`}`;
+      : ` · part of ${parent.ref ?? `${parent.kind} ${parent.id}`}${node.parent_version == null ? "" : ` (${isItemKind(parent.kind) ? "revision" : "version"} ${node.parent_version})`}`;
   return [
     `Node: ${node.kind} ${node.ref ?? node.id} · made by ${made} · changed by ${changed}${partOf}`,
   ];
@@ -4666,8 +4696,11 @@ export async function executeDispatchTool(
         // The document, ask, comment or message the block is in: the reference before its `#b-`.
         const holder = blockRef.slice(0, blockRef.indexOf("#"));
         // A part of an ask is named by what it is — the question, an option or the answer — and
-        // no node carries a part's type, so the ask's own read is read beside the graph.
-        const askOfPart = ref.item?.kind === "ask" ? client.getAsk(ref.item.id) : undefined;
+        // no node carries a part's type, so the ask's own read is read beside the graph. That
+        // read only chooses the heading's word, so it is advisory: a failure of it leaves the
+        // part under the general `Part` heading and the rest of the read unchanged.
+        const askOfPart =
+          ref.item?.kind === "ask" ? client.getAsk(ref.item.id).catch(() => undefined) : undefined;
         // The read names the block's node, so a 404 is the block's own answer: an unpinned ref
         // names a block no current version holds, and a pinned one's answer says which of its
         // version, that version's record or the block the server could not find.
@@ -4682,8 +4715,14 @@ export async function executeDispatchTool(
           askOfPart,
         ]);
         const blockID = incoming.node.block_id ?? ref.block ?? "";
+        // A part whose ask the read could not name reads as a `Part`, as a part the ask does not
+        // place does.
         const noun =
-          partOf === undefined ? undefined : askPartNoun(partOf.ask, incoming.node, blockID);
+          ref.item?.kind !== "ask"
+            ? undefined
+            : partOf === undefined
+              ? "Part"
+              : askPartNoun(partOf.ask, incoming.node, blockID);
         return {
           text: [
             ...blockLines(incoming.node, ref, noun),

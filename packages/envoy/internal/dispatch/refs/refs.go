@@ -176,10 +176,11 @@ func scanTargets(rows pgx.Rows, err error) ([]Target, error) {
 }
 
 // TargetOf is the graph target a parsed reference names, the kind and id refs and graph_edges
-// store an edge to it under; an external URL names none. A block of a comment or a message is
-// stored under its item's block kind, comment_block or message_block (ItemKind.BlockKind), not
-// block: a build that predates item blocks skips a kind it does not know (resolveNodes), where it
-// would count a block row and resolve it through document_blocks.
+// store an edge to it under; an external URL names none. A block of a comment, of a message or
+// of an ask — a part of its question, its options and its answer — is stored under its item's
+// block kind, comment_block, message_block or ask_block (ItemKind.BlockKind), not block: a build
+// that predates item blocks skips a kind it does not know (resolveNodes), where it would count a
+// block row and resolve it through document_blocks.
 func TargetOf(ref text.Ref) (Target, bool) {
 	if ref.Kind == "url" {
 		return Target{}, false
@@ -278,10 +279,11 @@ func CountedChanges(ctx context.Context, q Queryer, changed []Target) (model.Ref
 	seen := make(map[[2]string]struct{}, len(changed))
 	for _, target := range changed {
 		if target.Kind == ItemAsk.BlockKind() {
-			// A part is counted as its ask, named between the 'ask/' prefix and the '#', so two
-			// parts of one ask, or a part and the ask's own row, name that ask once.
-			item, _, _ := strings.Cut(target.ID, "#")
-			target = Target{Kind: string(ItemAsk), ID: strings.TrimPrefix(item, string(ItemAsk)+"/")}
+			// A part is counted as its ask, the item its node id names, so two parts of one ask,
+			// or a part and the ask's own row, name that ask once.
+			if kind, askID, _, ok := ParseItemBlockNode(target.ID); ok && kind == ItemAsk {
+				target = Target{Kind: string(ItemAsk), ID: askID}
+			}
 		}
 		if _, duplicate := seen[[2]string{target.Kind, target.ID}]; duplicate {
 			continue
@@ -488,8 +490,9 @@ func resolveArtifactTargets(ctx context.Context, q Queryer, refKeys []string) (m
 
 // ReferencedBy lists Dispatch items and artifacts that mention an artifact reference key or one
 // of its current blocks, once per source, in the shape the document surfaces read (kind, id
-// order). A citing document, comment or message is listed itself, not by the block holding its
-// link.
+// order). A citing document, comment, message or ask is listed itself, not by the block holding
+// its link: an ask that cites the document from one of its parts alone — an option, or the
+// answer it was given — is listed as that ask, once.
 func ReferencedBy(ctx context.Context, q Queryer, refKey string) ([]model.ReferencedBy, error) {
 	edges, err := resolveEdges(ctx, q, Query{Direction: "in", Kind: "artifact", ID: refKey, Kinds: []string{"mentions"}, WholeDocuments: true})
 	if err != nil {
@@ -542,7 +545,7 @@ func Outgoing(ctx context.Context, q Queryer, artifactID string) ([]model.Outgoi
 		left join artifacts a on a.ref_key = case e.to_kind when 'artifact' then e.to_id when 'block' then split_part(d.node_id, '#', 1) end
 		left join artifact_versions v on v.artifact_id = a.id
 		where e.from_kind = 'artifact' and e.from_id = $1 and e.kind = 'mentions' and e.to_kind = any($2)
-		  and e.to_kind not in ('comment_block', 'message_block', 'ask_block')
+		  and e.to_kind not in `+itemBlockKinds+`
 		  and (e.to_kind <> 'block' or d.node_id is not null)
 		order by e.to_kind, e.to_id, v.number
 	`, artifactID, nodeKinds)

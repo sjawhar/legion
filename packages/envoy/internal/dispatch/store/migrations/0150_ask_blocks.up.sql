@@ -1,11 +1,14 @@
 -- 0150_ask_blocks.up.sql
 --
--- An ask is a collection of blocks too, as 0142's comments and messages are: its question, each
--- of its options and its answer are parts, split as the document parser reads them
--- (internal/dispatch/itemblocks). A part is a graph node: its node id is `ask/<ask id>#<part id>`
--- (`ask/<uuid>#b2`), its storage kind in graph_edges and refs.to_kind is `ask_block`, a kind a
--- build without these tables skips as unknown. A part is part_of its ask, a mention written
--- inside it is an edge out of it, and a reply in the ask's thread can name the part it answers.
+-- An ask is a collection of blocks too, as 0142's comments and messages are, but its blocks are
+-- not a body split by the document parser: each part is a text of its own, read from the ask's
+-- row by refs.AskParts — its question, then each of its options as "<label> — <description>",
+-- then the answer it holds now — and its id is kept across writes by the same alignment a
+-- comment's blocks take (internal/dispatch/itemblocks). A part is a graph node: its node id is
+-- `ask/<ask id>#<part id>` (`ask/<uuid>#b2`), its storage kind in graph_edges and refs.to_kind
+-- is `ask_block`, a kind a build without these tables skips as unknown. A part is part_of its
+-- ask, a mention written inside it is an edge out of it, and a reply naming the ask names the
+-- part it answers.
 -- Additive while the previous build serves: new tables, no column of an existing table, and the
 -- view restated with two more arms and one existing arm split in two (below).
 --
