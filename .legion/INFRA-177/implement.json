@@ -2,32 +2,23 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-177",
-  "completed": "2026-10-30T22:56:02Z",
+  "completed": "2026-10-30T23:13:15Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2354",
   "proof": [
     {
-      "criterion": "The tester's failure: every active docs/solutions note that taught the removed handoff mechanism as today's rule is corrected in place or superseded, the INFRA-92 gh-run-list note by name",
-      "surface": "docs/solutions at the head, searched as the architect named (skip-checks, .legion/-only, push the handoff) and wider (.legion/, handoff-only, handoff commit, the handoff file names, retro's removal)",
-      "command": "sup=$(sed -n '/^supersedes:/,/^---/p' docs/solutions/legion/handoffs-are-dispatch-records-and-the-notes-that-teach-handoff-commits-are-superseded-pr2354.md | grep '^  - ' | sed 's/  - //'); for p in $(grep -rl '^status: active' docs/solutions); do echo \"$sup\" | grep -qx \"$p\" && continue; grep -nHE 'skip-checks|\\.legion/`?-only|push the handoff|handoff-only' $p; done",
-      "observed": "38 notes taught it: 4 (title or whole rule is the mechanism) are added under supersedes: and marked status: superseded, as are the 6 earlier superseded notes; 34 plus INFRA-521 and LEGION-781 are corrected in place and listed in the superseding note. Every remaining hit of the three terms in an active note is past tense, dated evidence, or still true (a code push with no skip-checks line; GitHub's own trailer rule)",
-      "headSha": "286a15f556f1",
-      "negativeControl": "at 4e5e6c50 the same search returned the INFRA-92 note's present-tense 'A branch whose head is a handoff-only commit — which carries skip-checks: true by design' and 'the daemon carries the code head's verdict to the handoff head', and the INFRA-521 and LEGION-781 steps"
-    },
-    {
-      "criterion": "The notes change touches only docs/solutions, keeps every superseded path real, and passes the repository's text checks",
-      "surface": "the working tree at the head",
-      "command": "jj diff --summary -r 286a15f5 | grep -cv '^M docs/solutions/'; every supersedes: path tested with test -f; bash .github/scripts/check-private-names.sh; bunx biome check docs",
-      "observed": "0 paths outside docs/solutions (47 notes changed); all 15 supersedes: paths exist; check-private-names passes; biome exit 0",
-      "headSha": "286a15f556f1",
-      "negativeControl": "none needed for a docs-only change: no code, test or workflow file moved"
+      "criterion": "The tester's round-18 failure: the pr2542 note main added no longer teaches the inherited handoff trailer, the rewrite it guarded, or the handoff-only cause of zero runs as today's rule, and keeps its general rule (GitHub reads the tip's message; read the tip before a code push; the cure is a further push)",
+      "surface": "docs/solutions at the head: the census search over every active note",
+      "command": "note=docs/solutions/legion/handoffs-are-dispatch-records-and-the-notes-that-teach-handoff-commits-are-superseded-pr2354.md; for p in $(grep -rl '^status: active' docs/solutions); do [ \"$p\" = \"$note\" ] && continue; grep -nHE 'skip-checks|\\.legion/`?-only|push the handoff|handoff-only|handoff commit' $p; done | grep -v 'efore sjawhar/legion#2354'",
+      "observed": "every remaining hit is past tense, dated evidence, a tag, or still true; the two INFRA-825-era notes main added use the trailer on scratch proof commits, which is not the handoff mechanism and stays true. Every path the pr2542 note cites now exists (two of main's paths were wrong: the LEGION-631 note's name lacked 'cite-the-tips-runs', and the gh-run-list note is under legion/, not github/)",
+      "headSha": "ca1e146a51c4",
+      "negativeControl": "at 1064e218 the same search returned pr2542's present-tense 'a push whose tip is another role's handoff commit starts no run at all' and 'A role resuming a round inherits the previous role's trailered handoff commit as @-'"
     }
   ],
   "filesChanged": [
-    "286a15f5: 34 notes corrected in place (handoff clauses in the past tense beside what holds now), plus the INFRA-521 and LEGION-781 notes; 4 notes added under the superseding note's supersedes: and 10 superseded notes marked status: superseded naming it; the superseding note's rule 3 and its corrected-in-place list"
+    "ca1e146a: the pr2542 note corrected in place and its two wrong paths fixed; the superseding note lists pr2542 and pr2512 as corrected in place, and pr2512 leaves supersedes:"
   ],
   "deviations": [
-    "Two corrected notes had their title and H1 changed (the INFRA-212 decision note and fixing-a-defect-that-is-live-in-your-own-pane), and the LEGION-781 note too: each title stated the removed mechanism as today's rule. No file was renamed.",
-    "pr2512 stays under supersedes: as round 13 asked, and stays status: active because its rule stands and is corrected in place.",
-    "No merge with main: #2354 was MERGEABLE and main took none of this PR's numbers."
+    "No merge with main: #2354 is MERGEABLE, and git merge-tree with main 010a67a4 finds no conflict.",
+    "For retro, as the INFRA-138 architect asked: before READY, rerun this census search at the head after the last merge with main, and correct in place any active note main added since."
   ]
 }
