@@ -2528,7 +2528,10 @@ in octal digits after a leading `0` or `0o`, from 0 to 0777:
 the same, and so does the string `"0440"`, the one spelling a pod block written as JSON can carry.
 Left out, Kubernetes' default stands, 0644, which every user in the pod can read; Legion mounts
 its own Secrets, the providers Secret among them, at 0440. Every pod runs as user 1000 with group
-1000 as its `fsGroup`, so every role still reads a 0440 file. Load refuses a mode written in
+1000 as its `fsGroup`, so every role still reads a 0440 file. Under that `fsGroup` the kubelet
+adds group read to every file such a volume writes, so a mode below 0440 (`0400`, `0`) reaches the
+files as 0440, root-owned with group 1000: no mode makes them readable by user 1000 alone, and the
+narrowest a pod gets is 0440. Load refuses a mode written in
 decimal, quoted or not (`440` would be 0670), one above 0777, and a `default_mode` on a projected
 volume's source. A change of a mode replaces no running pod, which keeps the mode its files were
 written with: the mode reaches each pod made after the change. A daemon of

@@ -237,14 +237,16 @@ func TestLoadForValidationSetsAShareReadOnlyAtItsSourceUnlessAMountWritesIt(t *t
 // octal digits with YAML 1.1's leading 0 (kubectl's spelling) or YAML 1.2's 0o, unquoted or as a
 // string ("0440", the one octal spelling a block written as JSON can carry). It is what keeps a key
 // file at Legion's own 0440 rather than Kubernetes' default 0644, which every user in the pod may
-// read. Left out, the source carries none and Kubernetes' default stands.
+// read. Left out, the source carries none and Kubernetes' default stands. The loader keeps the mode
+// as written; in a pod the kubelet adds group read under the pod's fsGroup, so 0400 and 0 reach the
+// files as 0440.
 func TestLoadForValidationReadsAVolumesDefaultModeInOctal(t *testing.T) {
 	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile+`    pod:
       volumes:
         - {name: key, secret: {name: legion-acme-providers, items: [{key: MODEL_KEY, path: key}], default_mode: 0440}}
-        - {name: owner-only, secret: {name: legion-operator-creds, default_mode: 0o400}}
+        - {name: mode-0400, secret: {name: legion-operator-creds, default_mode: 0o400}}
         - {name: route, config_map: {name: legion-operator-route, default_mode: 0444}}
-        - {name: closed, config_map: {name: legion-operator-roles, default_mode: 0}}
+        - {name: mode-0, config_map: {name: legion-operator-roles, default_mode: 0}}
         - {name: json, secret: {name: legion-operator-json, default_mode: "0440"}}
         - {name: single, config_map: {name: legion-operator-single, default_mode: '0o640'}}
         - {name: tagged, secret: {name: legion-operator-tagged, default_mode: !!int 0440}}
@@ -271,7 +273,7 @@ func TestLoadForValidationReadsAVolumesDefaultModeInOctal(t *testing.T) {
 		}
 	}
 	want := map[string]string{
-		"key": "0440", "owner-only": "0400", "route": "0444", "closed": "0", "json": "0440", "single": "0640", "tagged": "0440",
+		"key": "0440", "mode-0400": "0400", "route": "0444", "mode-0": "0", "json": "0440", "single": "0640", "tagged": "0440",
 		"ca": "unset", "roles": "unset", "null-mode": "unset",
 	}
 	if !reflect.DeepEqual(got, want) {
