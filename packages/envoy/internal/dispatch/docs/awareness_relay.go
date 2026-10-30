@@ -213,13 +213,14 @@ type awarenessRelay struct {
 	inbound map[string]map[uint64]int
 	// local is, per room, the awareness clients of this process's own peers that the relay is
 	// sending to the other processes, each with the clock its last state stood at: every client
-	// the room's observer has seen a state of and not since a removal, less the ones another
-	// process's notification brought (inbound). The room's sockets hold the list to
-	// maxAwarenessClientsPerSocket clients each (awareness_limit.go). It is what a query is
-	// answered with, what a close of a room removes (localRemoval), and the clock a removal the
-	// room's own observer relays stands at, which is read from here rather than from the room's
-	// awareness because a purge may have freed the departing client's tombstone by then
-	// (touched).
+	// the room's observer has seen a state of and not since a removal it relayed - a client the
+	// room holds again by the time the observer reads it is relayed none and stays on the list
+	// (touched) - less the ones another process's notification brought (inbound). The room's
+	// sockets hold the list to maxAwarenessClientsPerSocket clients each (awareness_limit.go).
+	// It is what a query is answered with, what a close of a room removes (localRemoval), and
+	// the clock a removal the room's own observer relays stands at, which is read from here
+	// rather than from the room's awareness because a purge may have freed the departing
+	// client's tombstone by then (touched).
 	local map[string]map[uint64]uint64
 	// closed refuses every later send; Close sets it.
 	closed bool
@@ -654,9 +655,9 @@ func (r *awarenessRelay) watchRoomAwareness(room string, aw *awareness.Awareness
 
 // touched is what the relay is to send of event, the change room's awareness has just made: an
 // entry each of the clients it added or updated, left for the flush to read their state as it
-// stands then (resolve), and the removal of each client it took away, encoded here. A client
-// another process's notification is being applied for is left to the process it came from
-// (inbound, received).
+// stands then (resolve), and the removal of each client it took away and the room does not hold
+// again, encoded here. A client another process's notification is being applied for is left to
+// the process it came from (inbound, received).
 //
 // A removal stands at the clock the relay holds for that client (local), raised to the clock of
 // the tombstone the room still holds, and never at what the room's awareness would encode now:
@@ -667,6 +668,17 @@ func (r *awarenessRelay) watchRoomAwareness(room string, aw *awareness.Awareness
 // (awareness/awareness.go:477-480), which every other process drops as older than the state it
 // holds (awareness/awareness.go:566-581) - the departed reader's cursor would then sit in every
 // other process's rooms until it expired, thirty seconds later (awarenessExpiry).
+//
+// The clock is raised only where the room answers for a tombstone, which is what the client the
+// removal is of must be: ygo's Meta answers for a live client as readily as for a tombstone
+// (awareness/awareness.go:361-375), and the observer reads the room after the change, so a
+// client removed at one clock and announcing itself again at the next - its own tab's frame
+// landing between the removal's apply and this encode - would have its removal raised to the
+// clock of the state it is live at. Every other process would take that removal, since it is no
+// older than what it holds, and drop the cursor of a reader who is in the room. So a client the
+// room holds a state of (GetStates, which leaves tombstones out) is relayed no removal at all:
+// its own entry carries its state, and it stays on the list of clients this process relays and
+// answers queries from (local, record), which only a relayed removal takes it off.
 func (r *awarenessRelay) touched(room string, aw *awareness.Awareness, event awareness.UpdateEvent) []awarenessEntry {
 	entries := make([]awarenessEntry, 0, len(event.Added)+len(event.Updated)+len(event.Removed))
 	left := make([]awarenessEntry, 0, len(event.Removed))
@@ -692,7 +704,14 @@ func (r *awarenessRelay) touched(room string, aw *awareness.Awareness, event awa
 			entries[i].clock = meta.Clock
 		}
 	}
+	if len(left) == 0 {
+		return entries
+	}
+	held := aw.GetStates()
 	for _, gone := range left {
+		if _, back := held[gone.client]; back {
+			continue
+		}
 		if meta, known := aw.Meta(gone.client); known && meta.Clock > gone.clock {
 			gone.clock = meta.Clock
 		}

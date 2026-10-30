@@ -152,6 +152,11 @@ type Service struct {
 	// version takes its document lock and reads it. Nil outside tests; tests use it to evict the
 	// warmed room or edit it in that window.
 	afterReadWarm func(room string)
+	// afterReadCopy runs once a read of a room has copied the room's document (holdLive) and
+	// before that copy is offered to the room's replica (startFromRead). Nil outside tests;
+	// tests use it to commit into the room, and to leave the room's replica recovered, in the
+	// one window where the copy no longer stands for the room.
+	afterReadCopy func(room string)
 	// afterCaptureAuthorsTake runs after a room-backed version capture takes its authors and before
 	// it copies the document. Nil outside tests; tests use it to edit the room in that window.
 	afterCaptureAuthorsTake func(room string)

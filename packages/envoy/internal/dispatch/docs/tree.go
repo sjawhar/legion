@@ -366,6 +366,8 @@ type renderedReplica struct {
 	// starts again, so it is unique in the process. No replica of another room instance - the one
 	// a reload leaves behind has a replica of its own - and no run of this replica before a
 	// recover ever stands at the epoch this one does. It is written under mu and read without it.
+	// It is what a fork read's rendering is keyed on (mark, standsAt) and what tells a read's
+	// copy of the room from one a recover has left behind (startFromRead).
 	epoch atomic.Uint64
 	// foreign counts the logged updates the replica has consumed - applied, or handed to recover -
 	// whose origin is not a published live write's (*liveWriteOrigin). observe adds to it while it
@@ -599,17 +601,28 @@ func (r *renderedReplica) start(room string, base []byte) {
 //
 // The copy stands for the room only while the room has committed nothing the replica has yet to
 // take: a replica holding no document whose log holds no update, read here after the copy was
-// taken. The copy encodes under the room's own document lock, so a transaction committing while
-// it is taken either logged its update, which this read of the log sees, or had not reached the
-// lock when the encode read the room. So a copy this starts the replica from is the room as of
-// its last commit, which is the state the log's own base would start the replica from: the first
+// taken, and standing at epoch, the epoch the read found before it took the copy. The copy
+// encodes under the room's own document lock, so a transaction committing while it is taken
+// either logged its update, which this read of the log sees, or had not reached the lock when
+// the encode read the room. So a copy this starts the replica from is the room as of its last
+// commit, which is the state the log's own base would start the replica from: the first
 // transaction to commit after this records that same state as the base, which observe then
 // passes over.
-func (r *renderedReplica) startFromRead(doc *crdt.Doc) *crdt.Doc {
+//
+// The epoch is what tells that state from the one a recover leaves, which is the same state and
+// means the opposite: a commit the replica could not place emptied the log (crdt.UpdateLog.Reset)
+// and dropped the document, so the room holds commits the copy was taken before. recover draws a
+// fresh epoch for every such restart, under mu, so a replica still at the epoch the read found
+// has recovered neither since that read nor while this call waited for mu. Installed across a
+// recover, the copy would answer every later read of the room as the room without those commits:
+// the room's next commit records a fresh base that observe passes over, the replica holding a
+// document again, and the updates built on what it lost wait in its pending set until the room
+// unloads.
+func (r *renderedReplica) startFromRead(doc *crdt.Doc, epoch uint64) *crdt.Doc {
 	if r.waiting.Load() > 0 || !r.mu.TryLock() {
 		return nil
 	}
-	if r.doc != nil || r.log.Pending() > 0 {
+	if r.doc != nil || r.log.Pending() > 0 || r.epoch.Load() != epoch {
 		r.mu.Unlock()
 		return nil
 	}
@@ -702,22 +715,32 @@ func (s *Service) readLive(room string, live *crdt.Doc, read func(doc *crdt.Doc)
 // (startFromRead) and is then held under that lock too. A caller that must take the room as of
 // one moment under a lock of its own takes it here under that lock and walks it once it has
 // released that lock (captureLiveTextAndAuthors).
+//
+// The replica's epoch is read before the copy is taken, and the copy may start the replica only
+// while the replica still stands at it: a recover between the two leaves the replica holding no
+// document and an empty log, which is what a copy is taken for, while the room holds commits the
+// copy was taken before (startFromRead).
 func (s *Service) holdLive(room string, live *crdt.Doc) (doc *crdt.Doc, release func(), err error) {
 	if live == nil {
 		return nil, nil, errDocUnloaded
 	}
+	var epoch uint64
 	replica := s.replicaOf(live)
 	if replica != nil {
 		if doc := replica.hold(); doc != nil {
 			return doc, replica.mu.Unlock, nil
 		}
+		epoch = replica.epoch.Load()
 	}
 	copied, err := snapshotDocument(live)
 	if err != nil {
 		return nil, nil, err
 	}
+	if s.afterReadCopy != nil {
+		s.afterReadCopy(room)
+	}
 	if replica != nil {
-		if doc := replica.startFromRead(copied); doc != nil {
+		if doc := replica.startFromRead(copied, epoch); doc != nil {
 			return doc, replica.mu.Unlock, nil
 		}
 	}
