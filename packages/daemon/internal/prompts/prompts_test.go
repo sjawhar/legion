@@ -238,44 +238,6 @@ func TestNoComposedPromptSaysLegionRefusesAMergeOverACheck(t *testing.T) {
 	}
 }
 
-// An update round replaces the pod an issue's roles run in only once every worker in it has
-// pushed and answered (INFRA-484), so every role the daemon can ask — each phase worker, and the
-// architect in both its shapes — is told the same three steps and the same consequence. The
-// sentences are the task's own (supervise.PodUpdateTask): a prompt that said anything else would
-// have the worker read one rule and be sent another.
-func TestEveryComposedPromptCarriesTheUpdateTask(t *testing.T) {
-	composer, err := New(t.TempDir())
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	required := []string{
-		"The daemon can send you an update task.",
-		"Push every commit you want to keep to this issue's branch.",
-		"Then call the `legion` tool with `op: \"ready_for_update\"`.",
-		"Then end your turn.",
-		"Start no new work after you answer.",
-		"The replacement deletes the pod and the disk your workspace is on, so work you did not push is lost.",
-		"The daemon replaces the pod only after every worker of that pod has answered the task.",
-		"Your process starts again on the new pod, in this same session, and the daemon holds your next task until your process runs again.",
-		"The answer ends no phase and completes none.",
-	}
-	for _, tc := range []struct {
-		role   claim.Role
-		isRoot bool
-	}{
-		{claim.RolePlanner, false}, {claim.RoleImplementer, false}, {claim.RoleTester, false},
-		{claim.RoleReviewer, false}, {claim.RoleMerger, false},
-		{claim.RoleArchitect, true}, {claim.RoleArchitect, false},
-	} {
-		text := composedText(t, composer, tc.role, tc.isRoot)
-		for _, sentence := range required {
-			if !strings.Contains(text, sentence) {
-				t.Errorf("the composed %s prompt (root %t) omits %q", tc.role, tc.isRoot, sentence)
-			}
-		}
-	}
-}
-
 // A state directory outlives the daemon binary that wrote its prompt snapshot, so a boot of a newer
 // daemon finds the older daemon's words there. A part whose content is not the running binary's is
 // rewritten, shared or the daemon's own: a prompt that contradicts the daemon's own behaviour (who

@@ -1917,11 +1917,18 @@ worker in the pod to push its work and answer `ready_for_update`, and ends the p
 answered. So pinning such a release reaches a running issue pod without draining its tree, and
 without ending a turn or deleting a disk under work nobody pushed. The drain stays the operator's
 move for a round that cannot finish, which the daemon reports as `update-stalled`: a worker whose
-plugin predates the contract that added the op can never answer, and a `failed` or
-operator-suspended worker waits for the operator. **This release's own roll is the last that needs
-a drain**: every worker alive at it runs the plugin before this contract, so every round the first
-sweep opens stalls on that one case, and each tree is drained once. From the release after it, a
-pinned-image change is a round.
+running plugin predates the contract that added the op can never answer, and a `failed` or
+operator-suspended worker waits for the operator. **At this release's own roll almost nothing
+needs a drain.** Every worker alive at it runs the plugin before this contract, and the daemon's
+first boot relaunches each one onto this release's plugin ("Contract discipline" below) — a
+relaunch that keeps the pod and the disk, and that the stale-plugin lane makes for a claim in a
+round too, exactly because that round can never finish without it (`refreshStalePlugins`). The
+relaunched worker registers at this contract and answers the round it is in. What stays a drain
+is a worker whose plugin no install reaches: a role on Claude Code, whose plugin is its pod
+image's own, in a pod built from an image before this contract. The daemon writes the steps on
+that issue, and the operator deletes the issue's Sandbox ([Upgrading a deployment with running
+trees](#upgrading-a-deployment-with-running-trees)). From the release after it, a pinned-image
+change is a round.
 
 The daemon-launched controller's pod is in scope for the warning and in no round: it has no issue
 workspace and nothing to push, so `PodDrift` answers nothing for it
@@ -2182,13 +2189,17 @@ interrupted turn rather than a workspace, so holding a contract bump behind ever
 pod would buy nothing. Opening it logs
 `supervise: the process speaks another plugin contract; its worker is asked to push its work
 before the process is replaced`, and the round is asked again every `pod_update_retask_hours` and
-reported `update-stalled` to the controller `pod_update_notice_hours` after it opened — except a
-round over the project controller's own claim, which has no issue to tell and is logged alone.
+reported `update-stalled` to the controller `pod_update_notice_hours` after it opened.
 
-Two cases keep the immediate relaunch, each costing the one turn in flight and no disk: a claim
-whose recorded contract is below that contract, whose plugin has no op to answer with, and a
+Three cases keep the immediate relaunch, each costing the one turn in flight and no disk: a claim
+whose recorded contract is below that contract, whose plugin has no op to answer with; a
 registration that still differs from the daemon's, whose own agent is refused and whose process
-exits on that refusal, so no running turn could ever send the signal. Each is relaunched once,
+exits on that refusal, so no running turn could ever send the signal; and the project
+controller's own claim, whatever contract it records, because the controller's `legion` tool has
+`read_state` and `set_status` and no `ready_for_update` at all
+(`packages/pi-legion/src/tools.ts`), so a round over it would wait for an answer no controller
+turn can give. The controller loses nothing by it: its pod holds no issue workspace, so it has
+nothing to push. Each is relaunched once,
 uncharged, through the moved-address relaunch path (`interrupted` → `launch`; the task of a turn
 in flight goes back to waiting and is delivered again; a claim whose suspension is held for its
 turn is suspended instead of relaunched, and its next resume launches on the current plugin; a
@@ -4999,13 +5010,22 @@ A round that is not finishing is told to the project's controller as an `update-
 `pod_update_notice_hours` after it opened (a `legion.yaml` key, a decimal number of hours, 4 by
 default), naming the issue, the round, the pod, the drift and every claim it waits on with that
 claim's state (`skill://legion-controller/references/escalation.md`). One round is told once,
-however many sweeps find it open. A claim whose plugin predates the contract that added
+however many sweeps find it open. A round whose workers have all answered is told the same way
+when it still cannot replace the pod: a turn that never ends, or a `ReplacePod` the cluster keeps
+refusing, each holds every answered worker's next task, and the notice names what it waits on. A
+claim whose *running* process speaks a plugin that predates the contract that added
 `ready_for_update` can never answer: that round is told at the sweep after it opens rather than at
-the bound, and the daemon writes on the issue the three steps an operator drains the pod by — tell
-each role of the issue to push its work, suspend each role, then start each role again. A pod that
+the bound, and the daemon writes on the issue the three steps an operator replaces the pod by —
+tell each role of the issue to push its work, confirm the pushes on the issue branch at origin,
+then delete the issue's Sandbox, which ends the pod and its disk ([Upgrading a deployment with
+running trees](#upgrading-a-deployment-with-running-trees)). Suspending each role and starting it
+again is not that step: a suspension never changes the issue Sandbox's own mode, and a resume
+into a live pod keeps that pod, so the message says so. A pod that
 goes before its round is over, replaced where it stood for a failure of its own, has the daemon
 write on the issue which roles had not answered and that the work they did not push went with the
-disk.
+disk. What says the pod went is the claims recording another pod in its place. While no claim of
+the issue records a pod at all — every role suspended, or the one live role relaunching — the
+round waits, because no locator is evidence either way.
 
 What a pod's disk carries is therefore the issue's work in progress and nothing more: the clone
 and the jj workspace, the issue's scratch and caches, uv's Pythons and packages, the workspace's

@@ -380,7 +380,7 @@ func TestPodUpdateReplacesEachIssuesPodOnlyAfterItsOwnWorkersAnswer(t *testing.T
 		if got.UpdateReasons != fleetDrift {
 			t.Errorf("%s's %s was tasked for %q, want the one template change %q", c.issue, c.role, got.UpdateReasons, fleetDrift)
 		}
-		if got.Pending == nil || got.Pending.ID != "update:"+rig.round(c.issue) {
+		if got.Pending == nil || !strings.HasPrefix(got.Pending.ID, "update:"+rig.round(c.issue)+":") {
 			t.Errorf("%s's %s holds %+v, want its own round's task", c.issue, c.role, got.Pending)
 		}
 	}

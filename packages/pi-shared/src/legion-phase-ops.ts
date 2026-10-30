@@ -187,7 +187,9 @@ export interface PhaseOpRuntime {
    * environment): throws naming the remedy when the handoff is not committed and pushed. */
   readonly handoffCommit: (phase: LegionPhase, role: LegionRole) => Promise<string>;
   /** The head of `legion/<issue>@origin` the `ready_for_update` signal reports
-   * (`findPushedBranchHead` with the pane's environment): `""` when the branch is not there. */
+   * (`findPushedBranchHead` with the pane's environment): `""` when the branch is not there. A
+   * throw leaves the head out of the signal, which is still sent, and the throw's message goes
+   * to the agent in the answer's `note`. */
   readonly branchHead: () => Promise<string>;
   /** How `handoff_complete` waits out a daemon restart (`retryWhileDaemonRestarts`): the host's
    * sentence to the agent, and a test's clock. */
@@ -220,7 +222,8 @@ const ROOT_COMPLETION_REFUSAL =
 
 /**
  * Runs one phase op and answers its JSON result: `{ record }` for `read_record`, the daemon's
- * answer for `handoff_complete`, `{}` for `request_backward_move` and for `ready_for_update`. A
+ * answer for `handoff_complete`, `{}` for `request_backward_move`, and `{}` for
+ * `ready_for_update`, or `{ note }` when its branch-head lookup failed. A
  * refusal throws before any write, minting nothing and posting nothing: each problem
  * `PhaseOpArguments` finds, joined by `; `, a field the operation does not take named first,
  * then a root architect's completion, then each problem with the operation's own fields in the
@@ -299,8 +302,18 @@ export async function executePhaseOp(
     }
     case "ready_for_update": {
       // The claim authenticates the signal, as it does `claims/ready`: no grant is minted. The
-      // head is the plugin's to resolve, and a branch not yet on the remote is left out.
-      const head = await runtime.branchHead();
+      // head is the plugin's to resolve, and a branch not yet on the remote is left out. A
+      // workspace whose jj cannot answer leaves it out too, and is told so: the round waits for
+      // every claim of the pod and only an operator's drain ends one that waits for ever, so a
+      // worker whose lookup fails must still be able to answer. The daemon verifies no head, so
+      // the missing one costs the record a line and the round nothing.
+      let head = "";
+      let failure: string | undefined;
+      try {
+        head = await runtime.branchHead();
+      } catch (error) {
+        failure = error instanceof Error ? error.message : String(error);
+      }
       await daemon.readyForUpdate({
         claimToken: claim.claimToken,
         sessionId: claim.sessionID,
@@ -308,7 +321,17 @@ export async function executePhaseOp(
         generation: claim.generation,
         ...(head === "" ? {} : { head }),
       });
-      return {};
+      // The answer names the signal the daemon has and the head it misses, and carries the
+      // lookup's own message, so the worker can repair what it names.
+      return failure === undefined
+        ? {}
+        : {
+            note:
+              "The daemon has your ready_for_update signal. The signal reports no branch head, " +
+              "because the branch-head lookup failed. The daemon checks no head, so your signal " +
+              "counts without one. Repair what the lookup's message names before your next jj " +
+              `command. The lookup said: ${failure}`,
+          };
     }
   }
 }

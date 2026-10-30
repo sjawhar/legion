@@ -1211,19 +1211,26 @@ func (s *supervision) start(boot context.Context, settle func() error) error {
 // without waiting for the next restart. refreshPlugin's own re-check makes a re-post for a claim a
 // prior attempt already moved on — relaunched, or registered current — a no-op. A claim still
 // launching is left to its own registration, which decides the comparison the moment it arrives,
-// so only the four states whose process has registered are read. A claim already in an update
-// round is skipped whatever its contract: the round is carrying it, and it is replaced when that
-// round ends (reconcilePodUpdates) — a StalePlugin post would start the round's clock again at
-// every sweep, or relaunch mid-turn a claim the round is waiting on. A daemon that cannot relaunch
-// onto a plugin (PluginRelaunchable false, LEGION-164's degraded Kubernetes mode) posts nothing;
-// it logs one Error line per stale claim at boot only — a sweep's finding would only repeat a line
-// the boot already wrote, since nothing relaunchable has changed in between.
+// so only the four states whose process has registered are read.
+//
+// A claim in an update round is skipped only while its worker can answer that round
+// (supervise.CanAnswerUpdate): the round is carrying it, and the process is replaced when the
+// round ends (reconcilePodUpdates), so a StalePlugin post would start the round's clock again at
+// every sweep, or relaunch mid-turn a claim the round is waiting on. A claim whose plugin cannot
+// answer is posted all the same, round or no round: the round can never finish on it, and the
+// relaunch is what puts its process on a plugin that has the op — it keeps the pod and the disk,
+// so the pod round it is in loses nothing by it and gains the one worker it was blocked on.
+//
+// A daemon that cannot relaunch onto a plugin (PluginRelaunchable false, LEGION-164's degraded
+// Kubernetes mode) posts nothing; it logs one Error line per stale claim at boot only — a sweep's
+// finding would only repeat a line the boot already wrote, since nothing relaunchable has changed
+// in between.
 func (s *supervision) refreshStalePlugins(claims []supervise.Claim, trigger string) {
 	for _, c := range claims {
 		if c.Session == "" || c.PluginContract == api.DaemonAPIVersion || !supervise.HoldsCapability(c.State) {
 			continue
 		}
-		if c.UpdateRound != "" {
+		if c.UpdateRound != "" && supervise.CanAnswerUpdate(c) {
 			continue
 		}
 		if !s.plan.pluginRelaunchable {

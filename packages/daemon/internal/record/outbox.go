@@ -215,17 +215,23 @@ type Notice struct {
 // answered ready_for_update, so the controller can retry one claim or ask the operator to drain
 // the pod rather than read the whole claims list to find out which worker the round waits on.
 // The notice's issue is the outbox row's own.
+//
+// Reasons is one string, never a list: a single reason carries ", " inside it already — a moved
+// address reads `<where> <held>, now <handed>`, a pod-shape drift `image <was>, now <now>`, and a
+// plugin round's reason names both contracts — so a list built by splitting what the claim
+// records (supervise.Claim.UpdateReasons, one string) would cut each reason into pieces that read
+// as reasons of their own. It is the drift exactly as the round's task states it to the worker.
 type UpdateStalled struct {
 	Round   string          `json:"round"`
 	Pod     string          `json:"pod,omitempty"`
-	Reasons []string        `json:"reasons"`
+	Reasons string          `json:"reasons"`
 	Waiting []UpdateWaiting `json:"waiting"`
 }
 
 // UpdateWaiting is one claim an update round waits on: its token, the role it holds, the state it
 // is in (supervise.ClaimState — a `failed` or operator-suspended claim waits for the operator),
-// and CannotAnswer for a claim whose plugin predates supervise.PodUpdateContract, which can never
-// answer and which only an operator's drain releases.
+// and CannotAnswer for a claim whose running process holds a plugin that predates
+// supervise.PodUpdateContract, which can never answer and which only an operator's drain releases.
 type UpdateWaiting struct {
 	Claim        string     `json:"claim"`
 	Role         claim.Role `json:"role,omitempty"`
@@ -233,14 +239,11 @@ type UpdateWaiting struct {
 	CannotAnswer bool       `json:"cannotAnswer,omitempty"`
 }
 
-// MarshalJSON keeps `reasons` and `waiting` arrays on the wire, empty rather than `null`: the
-// plugin's strict reader refuses a null.
+// MarshalJSON keeps `waiting` an array on the wire, empty rather than `null`: the plugin's strict
+// reader refuses a null.
 func (u UpdateStalled) MarshalJSON() ([]byte, error) {
 	type wire UpdateStalled
 	out := wire(u)
-	if out.Reasons == nil {
-		out.Reasons = []string{}
-	}
 	if out.Waiting == nil {
 		out.Waiting = []UpdateWaiting{}
 	}

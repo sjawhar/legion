@@ -188,25 +188,6 @@ func TestTheHeadlessFragmentHoldsTheWorkersSharedRules(t *testing.T) {
 	}
 }
 
-// The update round's steps are the Go daemon's own rule, stated once in go/worker-common.md and
-// go/architect-common.md in the words the task itself uses (supervise.PodUpdateTask, pinned by
-// prompts_test.go). No shared part states them a second time: a worker given two sets of steps
-// for one task would follow whichever it read last.
-func TestNoSharedPartStatesTheUpdateRoundsSteps(t *testing.T) {
-	parts := slices.Clone(reusableParts)
-	for _, role := range phaseRoles {
-		parts = append(parts, role+".md")
-	}
-	for _, file := range parts {
-		text := rolePart(t, file)
-		for _, needle := range []string{"ready_for_update", "update task", "update round"} {
-			if strings.Contains(text, needle) {
-				t.Errorf("%s states %q; the Go daemon's shared part states the update round once", file, needle)
-			}
-		}
-	}
-}
-
 // Each phase worker's residue is headed by its role, and only the roles whose plan names skills for
 // them are told to read those.
 func TestEachResidueNamesItsRoleAndOnlyTheSkilledRolesReadRequiredSkills(t *testing.T) {

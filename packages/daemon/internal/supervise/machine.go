@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -185,10 +187,29 @@ type Claim struct {
 // the field, because a round is written in this package (openPluginUpdate, the daemon's
 // openPodUpdate) and matched in internal/daemon's sweep, which recognises the rounds it must
 // carry by them.
+//
+// The round's id is the one record of its kind: PodRound and PluginRound are how one is written,
+// InPodRound and InPluginRound how a claim's is read. Nothing else carries the kind beside the
+// id, so nothing can disagree with it — UpdateTask words the task from it, and endPodUpdate
+// decides from it whether the round ends in a relaunch.
 const (
 	PodRoundPrefix    = "pod:"
 	PluginRoundPrefix = "plugin:"
 )
+
+// PodRound is the round id of the drift round of the pod with this uid, which every claim of that
+// pod shares.
+func PodRound(pod string) string { return PodRoundPrefix + pod }
+
+// PluginRound is the round id of the per-claim round for a process to be started again on the
+// daemon contract given.
+func PluginRound(contract int) string { return PluginRoundPrefix + strconv.Itoa(contract) }
+
+// InPodRound and InPluginRound say which kind of round this claim is in; both are false for a
+// claim in no round at all.
+func (c Claim) InPodRound() bool { return strings.HasPrefix(c.UpdateRound, PodRoundPrefix) }
+
+func (c Claim) InPluginRound() bool { return strings.HasPrefix(c.UpdateRound, PluginRoundPrefix) }
 
 // RuleMayResume says whether the rule may resume this suspended claim: every suspension but the
 // operator's, which holds until an operator resumes the claim.
@@ -1181,9 +1202,14 @@ func (m *Machine) endProcess(ctx context.Context) error {
 	return m.suspendProcess(ctx)
 }
 
-// retire ends the claim: nothing of it runs any more and nothing relaunches it.
+// retire ends the claim: nothing of it runs any more and nothing relaunches it. The round it was
+// in goes with it (clearUpdate): a retired claim runs nothing on the pod a round is opened over,
+// so a round left recorded on it would be read against whatever pod the replacement makes — the
+// daemon's sweep would find a round nothing can answer, and tell the issue its work was lost at
+// every tick for the rest of the tree's life.
 func (m *Machine) retire(ctx context.Context) error {
 	m.letGo()
+	m.clearUpdate()
 	m.claim.State = StateRetired
 	return m.persist(ctx)
 }

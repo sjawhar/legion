@@ -440,3 +440,49 @@ test("ready_for_update answers with the claim and the branch head, and leaves th
   ).rejects.toThrow(new Error('ready_for_update does not accept field "head"'));
   expect(posted).toHaveLength(2);
 });
+
+test("ready_for_update signals without a head when the branch-head lookup fails, and says so", async () => {
+  const posted: { route: string; body: unknown }[] = [];
+  const stub = (async (input, init) => {
+    posted.push({
+      route: new URL(input.toString()).pathname,
+      body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined,
+    });
+    return new Response(null, { status: 204 });
+  }) as typeof fetch;
+  const failure =
+    'jj log -r remote_bookmarks(exact:"legion/LEGION-208", exact:"origin") failed: Error: The lockfile at \'/workspace/.jj/working_copy/working_copy.lock\' might need manual deletion';
+  // A workspace whose jj cannot answer still signals: the round waits for every claim of the pod,
+  // and the daemon verifies no head. The answer carries the lookup's own message.
+  await expect(
+    executePhaseOp(
+      {
+        daemon: createLegionDaemonClient("http://daemon.test", stub),
+        claim: implementer,
+        handoffCommit: async () => {
+          throw new Error("no handoff-commit lookup expected");
+        },
+        branchHead: async () => {
+          throw new Error(failure);
+        },
+      },
+      { op: "ready_for_update" }
+    )
+  ).resolves.toEqual({
+    note:
+      "The daemon has your ready_for_update signal. The signal reports no branch head, because " +
+      "the branch-head lookup failed. The daemon checks no head, so your signal counts without " +
+      `one. Repair what the lookup's message names before your next jj command. The lookup said: ${failure}`,
+  });
+  expect(posted).toEqual([
+    {
+      route: "/legion/v1/claims/ready-for-update",
+      body: {
+        claimToken: "legion-legion-legion-208-implementer",
+        sessionId: "ses_implementer",
+        secret: "U2VjcmV0",
+        generation: 5,
+      },
+    },
+  ]);
+});
