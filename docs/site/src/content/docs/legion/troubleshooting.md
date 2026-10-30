@@ -272,8 +272,8 @@ Check, in order:
 ## A tree waits on a person
 
 When a root's architect asked a person a question on the root and nothing else of its tree runs,
-its phase is `awaiting_person`: it returned its admission slot and its architect's session is
-suspended until the answer. Read the wait:
+its phase is `awaiting_person`: it returned its admission slot while its architect stays live to
+read the person's comments and replies. Read the wait:
 
 ```sh
 legion state --config legion.yaml --json |
@@ -398,8 +398,8 @@ architect by its admission; a notice to an architect with no process waits for i
 starting it. A suspended worker of its issue's current phase that the daemon suspended is resumed
 by the daemon at boot. One an operator suspended (`legion claims suspend`, one claim at a time or a
 whole fleet before a restart), or whose suspension predates the release that records who suspended
-it (`suspendedBy: unknown`), is not; neither is a tree's architect, whoever suspended it, nor a
-claim whose launches ran out. Each of those is woken by nothing: the daemon looks healthy and the
+it (`suspendedBy: unknown`), is not; neither is an operator-suspended or failed tree architect, nor
+a claim whose launches ran out. Each of those is woken by nothing: the daemon looks healthy and the
 state shows the tree active, but the tree stops for good at the worker's phase, or at the first
 decision that needs its architect. Once a boot has re-adopted its claims, the daemon names every
 such claim in one error line, under the move that brings it back:
@@ -482,12 +482,12 @@ is `legion-<project>-<issue, lowercased>-<role>`, as `legion claims list` shows.
 
 The list names only claims of trees that hold an admission slot, and leaves out claims that
 something will still start: a worker whose phase is not its own is started again when its phase
-comes, a parked tree's claims wait for its re-admission, the architect of a tree re-admitted
-while every slot was taken waits for admission to start it once one frees, and the architect of a
-root in `awaiting_person` waits for the person's answer, after which admission resumes it at the
-next free slot. Never resume or retry by hand a claim of a lingering tree or of an issue parked out
-of the workflow, nor those waiting architects: they would run outside the admission cap, and
-re-admission, the answer, or the issue's return to `todo` starts it.
+comes, a parked tree's claims wait for its re-admission, and the architect of a tree re-admitted
+while every slot was taken waits for admission to start it once one frees. A root in
+`awaiting_person` is different: its architect stays live while it waits for the person's answer,
+and the answer's task is delivered once the root takes a slot. Never resume or retry by hand a
+claim of a lingering tree or of an issue parked out of the workflow; re-admission or the issue's
+return to `todo` starts it.
 A claim an operator suspended is listed even when a workflow start is queued for it: that start
 waits for the operator's resume. One whose `suspendedBy` is `unknown` is listed only while no start
 is queued for it, since the next phase start or re-admission resumes it as before.

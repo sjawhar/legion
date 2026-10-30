@@ -28,6 +28,7 @@ import { buildIssuePath, routeProjectOf } from "../refs/routes";
 import { useDialog } from "../shell/useDialog";
 import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
+import { RelatedItems } from "./RelatedItems";
 
 const createIssue = (input: CreateIssueInput, bounds: WriteBounds): Promise<Issue> =>
   api.createIssue(input, bounds);
@@ -37,7 +38,9 @@ const createIssue = (input: CreateIssueInput, bounds: WriteBounds): Promise<Issu
  * title, and an optional first spec line. Mounted only while open, so its draft and error state
  * start fresh each time and `useDialog` restores focus to the caller on close. A server
  * `POSSIBLE_DUPLICATE` answer is shown with its candidate and can be overridden with
- * **Create anyway** (`force`), the same path an agent takes. Success opens the new issue.
+ * **Create anyway** (`force`), the same path an agent takes. Success opens the new issue. While
+ * a person types a title, the dialog lists the related items the check finds for it, so a
+ * duplicate is seen before it is filed.
  */
 export function CreateIssueDialog({
   onClose,
@@ -112,10 +115,14 @@ export function CreateIssueDialog({
     <>
       <div aria-hidden="true" className={`fixed inset-0 z-40 ${backdrop50}`} onClick={onClose} />
       <div className="pointer-events-none fixed inset-0 z-50 flex items-start justify-center xl:p-4 xl:pt-20">
+        {/* The dialog scrolls: the related section grows with what the check finds, and below
+            `xl` the dialog is a full-bleed sheet, so without this the Create row - and the
+            refusal's Create anyway with it - paints past the bottom edge of a phone window with
+            nothing to scroll. The cap at `xl` leaves the wrapper's own `p-4 pt-20` outside it. */}
         <form
           aria-label="Create issue"
           aria-modal="true"
-          className={`pointer-events-auto w-full space-y-3 border p-4 shadow-2xl xl:max-w-lg xl:rounded-lg ${card} ${borderDefault}`}
+          className={`pointer-events-auto max-h-[100dvh] w-full space-y-3 overflow-y-auto border p-4 shadow-2xl xl:max-h-[calc(100dvh-6rem)] xl:max-w-lg xl:rounded-lg ${card} ${borderDefault}`}
           onSubmit={handleSubmit}
           ref={dialog.containerRef}
           role="dialog"
@@ -174,6 +181,7 @@ export function CreateIssueDialog({
               value={spec}
             />
           </label>
+          <RelatedItems project={selectedProject} title={title} />
           {mutation.unanswered === undefined ? null : (
             <LandedWithoutAnswer what={`The issue “${mutation.unanswered.variables.title}”`} />
           )}
