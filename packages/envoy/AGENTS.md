@@ -1817,6 +1817,19 @@ definition among them, so conversion refuses no block; `TestParseNamesTheFirstRe
 that order for every pair of block refusals. Spacing refusals (`browserListSpacing`) come before
 the walk, and inline ones, such as a footnote reference, in conversion after it.
 
+A document opens at most `maxNesting` (100) blocks inside one another - a quote, a list, a list
+item, a typed block and a footnote definition each count one (`pmdoc/nesting.go`) - and a write
+whose markdown goes past it is refused naming the line, `line N opens a block inside 100 blocks`.
+The browser editor's parser is now held to the same number, counting the same blocks
+(`maxBlockNesting` in proof-editor's `src/block-nesting.ts`, whose comment names `maxNesting` and
+which `maxNesting`'s comment names back), as it was already held to `maxTypedNesting` (32,
+`maxDirectiveNesting`) for `:::` openers: a list or quote opener standing past the bound opens no
+block there and its line reads as the text it is. So every document this accepts draws in a
+browser as it reads here, and a list or quote this refuses reads in a comment as its own text
+rather than costing the reader the page, which a few hundred `- ` markers on one line did by
+overflowing that parser's stack (sjawhar/legion#2403). The browser counts no footnote definition,
+which only lets it draw deeper than this accepts, never shallower.
+
 Typed document blocks are declared only in `internal/dispatch/pmdoc/schema/blocks.json`. The
 embedded file is the server-owned schema, `GET /api/v1/schema/blocks` returns its exact JSON, and
 the fixture generator reads that checked-in file. A typed block is CommonMark generic-directive
