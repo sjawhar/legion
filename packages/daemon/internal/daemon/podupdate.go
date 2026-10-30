@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -119,10 +120,16 @@ func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string,
 		return
 	}
 	joined := strings.Join(reasons, ", ")
-	if open != "" && s.completePodUpdate(ctx, issue, group, open, pod, joined, now) {
+	// One live read, given to both decisions below. Read live by the replacement and from the
+	// snapshot by the post, the two would disagree exactly where it costs most: a snapshot every
+	// claim of which has answered, beside a live read that finds one answer taken back, leaves
+	// the replacement waiting and builds the post's late notice with an empty waiting list, which
+	// the store refuses (record.UpdateStalled) and which every tick after it refuses again.
+	live := s.liveGroup(group)
+	if open != "" && s.completePodUpdate(ctx, issue, group, live, open, pod, joined, now) {
 		return
 	}
-	s.openPodUpdate(ctx, issue, group, pod, joined, now)
+	s.openPodUpdate(ctx, issue, live, pod, joined, now)
 }
 
 // completePodUpdate replaces the pod and ends the round when the round is over: every claim that
@@ -130,7 +137,7 @@ func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string,
 // working is what keeps the promise that no worker is stopped mid-turn — a worker answers from
 // inside a turn, and that turn ends a moment later. It reports whether it decided the round.
 //
-// Both waits are read from the claims as their machines hold them now (liveGroup), never from the
+// Both waits are read from the claims as their machines hold them now (live), never from the
 // sweep's snapshot, because this is where a disk is deleted. The snapshot is the orphan sweep's,
 // read once at the start of the tick, and every earlier issue's replacement in that same tick can
 // take up to one sweep interval, so after a fleet-wide roll it is minutes old by the time this
@@ -138,11 +145,21 @@ func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string,
 // machine alone (takeBackSignal); a sweep deciding from the snapshot would see neither the turn
 // nor the answer going, and would end that turn and delete its disk. A round the fresh read finds
 // unanswered is simply not complete: this returns false, and the post below asks that worker
-// again.
+// again. The snapshot is kept for one thing only: saying, in the log line, that this is the race
+// rather than a worker that never answered.
 //
-// ReplacePod is called once, with the process of the first claim that records one; a round whose
-// pod is already gone replaces nothing and only ends. A failed ReplacePod is logged and retried at
-// the next tick: nothing is ended, so the round still holds every worker's next task.
+// Even that read is a read before the act, so the replacement carries its own last word into the
+// runtime (replacementDue): ReplacePod takes the pod's launch turn and waits it out, and a round
+// complete when this call began is a round a worker can start a turn in while it waits. The
+// runtime asks one statement before the write that ends every process in the pod, and a
+// replacement no longer due is refused there, ends nothing and leaves the round open for the next
+// sweep to decide from claims it reads afresh.
+//
+// ReplacePod is called once, with the process of a claim that records this round's own pod; a
+// round whose pod is already gone replaces nothing and only ends, and a group whose claims now
+// run in two pods is left to the tick that reads the replacement in flight settled. A failed
+// ReplacePod is logged and retried at the next tick: nothing is ended, so the round still holds
+// every worker's next task.
 //
 // Neither wait is silent past the round's notice bound. A turn that never ends and a ReplacePod
 // that keeps failing each hold every answered worker's next task for as long as they last, which
@@ -156,10 +173,9 @@ func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string,
 // displaces the pod has already landed when it hits, so the next tick finds the Sandbox
 // suspended, ReplacePod answers nil and the round ends there; nothing is deleted earlier than it
 // would have been, and the round stays open until the call succeeds.
-func (s *supervision) completePodUpdate(ctx context.Context, issue string, group []supervise.Claim, round, pod, reasons string, now time.Time) bool {
-	live := s.liveGroup(group)
+func (s *supervision) completePodUpdate(ctx context.Context, issue string, snapshot, live []supervise.Claim, round, pod, reasons string, now time.Time) bool {
 	if waiting := waitingClaims(live, round); len(waiting) > 0 {
-		if len(waitingClaims(group, round)) == 0 {
+		if len(waitingClaims(snapshot, round)) == 0 {
 			s.log.Info("supervise: a worker of this update round answered and then started a turn of its own; the replacement waits for its next answer",
 				"issue", issue, "round", round, "waiting", namesOf(waiting))
 		}
@@ -173,10 +189,20 @@ func (s *supervision) completePodUpdate(ctx context.Context, issue string, group
 				strings.Join(working, ", ")))
 		return true
 	}
-	if k, running := podProcess(live); running {
+	if _, split := groupPod(live); split {
+		s.log.Info("supervise: the claims of this issue run in two pods now; this round's replacement waits for the one in flight",
+			"issue", issue, "round", round, "pod", pod)
+		return true
+	}
+	if k, running := podProcess(live, round); running {
 		bounded, done := context.WithTimeout(ctx, s.plan.orphanSweep)
 		defer done()
-		if err := s.runtime.ReplacePod(bounded, k); err != nil {
+		if err := s.runtime.ReplacePod(bounded, k, s.replacementDue(issue, round)); err != nil {
+			if errors.Is(err, errReplacementNotDue) {
+				s.log.Info("supervise: this update round's replacement was no longer due when its pod's launch turn came; nothing was replaced and the round stays open",
+					"issue", issue, "round", round, "pod", pod, "reason", err)
+				return true
+			}
 			if ctx.Err() == nil {
 				s.log.Error("supervise: replace the pod of a finished update round; retrying at the next sweep",
 					"issue", issue, "round", round, "pod", pod, "error", err)
@@ -190,6 +216,70 @@ func (s *supervision) completePodUpdate(ctx context.Context, issue string, group
 		"issue", issue, "round", round, "pod", pod)
 	s.endPodUpdates(live)
 	return true
+}
+
+// errReplacementNotDue is every answer replacementDue gives that is not "go on": the round the
+// sweep found complete is not complete now, or the claims could not be read to say that it is.
+// The runtime hands it back from inside ReplacePod having written nothing (runtime.Runtime), and
+// completePodUpdate tells it from a replacement that failed by this error alone — a failure is a
+// stall the operator's side is told of, and this is the daemon's own refusal, which costs the
+// round one sweep and nothing else.
+var errReplacementNotDue = errors.New("the pod replacement is no longer due")
+
+// replacementDue is the daemon's last word on a replacement, which the runtime asks under the
+// pod's launch turn and one statement before the write that ends every process in that pod. It
+// re-runs the round's own two blocking checks — every claim that blocks the round has answered,
+// and no claim of the issue runs a turn — over the issue's claims as they are at that instant,
+// and refuses the replacement when either fails.
+//
+// Which claims exist is read from the store, not from the group this sweep carries: a claim
+// created after the sweep's snapshot is a claim the group never held, and the next phase's role,
+// launched into the very pod this round keeps, is exactly that claim. Ending the pod under it
+// would cut a turn the round never asked anything of.
+//
+// What each claim holds is read from its machine's published view (Machine.View), never from
+// Machine.Claim: Claim waits out the decision in flight, and the decision in flight can be the
+// launch or the suspension that is waiting on the very pod lock this call is made under, which
+// would deadlock the daemon's sweep against its own runtime. The view is at least as fresh as the
+// store for a claim a machine holds — it is what the latest decision left, or what the decision
+// in flight last tried to write — and the store's row stands for a claim no machine of this
+// daemon holds.
+func (s *supervision) replacementDue(issue, round string) func(context.Context) error {
+	return func(ctx context.Context) error {
+		claims, err := s.supervisor.Claims(ctx)
+		if err != nil {
+			return fmt.Errorf("%w: the claims of %s cannot be read: %w", errReplacementNotDue, issue, err)
+		}
+		group := s.viewedGroup(claims, issue)
+		if waiting := waitingClaims(group, round); len(waiting) > 0 {
+			return fmt.Errorf("%w: %s has not answered it", errReplacementNotDue, strings.Join(namesOf(waiting), ", "))
+		}
+		if working := workingClaims(group); len(working) > 0 {
+			return fmt.Errorf("%w: the turn of %s runs now", errReplacementNotDue, strings.Join(working, ", "))
+		}
+		return nil
+	}
+}
+
+// viewedGroup is every claim of the issue a round weighs, as the store names them and as each
+// machine last published it: the store says which claims there are, and the view says what each
+// holds now. A retired claim is left out as the sweep's own grouping leaves it out
+// (reconcilePodUpdates): it runs nothing in any pod and blocks no round.
+func (s *supervision) viewedGroup(claims []supervise.Claim, issue string) []supervise.Claim {
+	var group []supervise.Claim
+	for _, c := range claims {
+		if c.Issue != issue {
+			continue
+		}
+		if m, ok := s.supervisor.Machine(c.Token); ok {
+			c = m.View().Claim
+		}
+		if c.State == supervise.StateRetired {
+			continue
+		}
+		group = append(group, c)
+	}
+	return group
 }
 
 // liveGroup is the group as its claims' own machines hold them now, in the group's order. A claim
@@ -241,25 +331,34 @@ func (s *supervision) tellLateRound(ctx context.Context, issue string, group []s
 }
 
 // tellPodlessRound tells the operator's side of a round whose issue records no pod at all, once
-// that round is older than the notice bound. Nothing of the round can move there: no drift can be
-// read, no pod can be replaced, and the round waits for one of the issue's workers to run again.
-// Where every claim of the issue is suspended — a lone worker an operator suspended is the common
-// shape, since a suspension lets the process go (letGo clears the locator) — only that operator
-// can end the wait, and no other path here would ever tell them: the pod round's own notice is
-// written where a pod is recorded, and this round reaches neither it nor a replacement.
+// that round is older than the notice bound and a worker of it has still not answered. Nothing
+// of such a round can move: no drift can be read, no pod can be replaced, and it waits for one of
+// the issue's workers to run again. Where every claim of the issue is suspended — a lone worker
+// an operator suspended is the common shape, since a suspension lets the process go (letGo clears
+// the locator) — only that operator can end the wait, and no other path here would ever tell
+// them: the pod round's own notice is written where a pod is recorded, and this round reaches
+// neither it nor a replacement.
 //
-// The claims are listed as the notice lists any round's, with what each has answered, so the
-// controller reads which worker it waits on and asks the operator to resume it.
+// A round every claim of which has answered is told nothing, and that is the ordinary end of a
+// phase rather than a stall: the workers answered, the daemon suspended each of them, and letGo
+// took the last locator with the last process. Nobody has to do anything about such a round —
+// the pod it was opened over is replaced at the next launch into the issue, which provisions a
+// fresh one — so telling the controller only opens a finding ask over an operator's ordinary
+// suspension. The notice is for the workers that have not answered, and lists those alone.
 func (s *supervision) tellPodlessRound(ctx context.Context, issue string, group []supervise.Claim, round string, now time.Time) {
+	waiting := waitingClaims(group, round)
+	if len(waiting) == 0 {
+		return
+	}
 	opened := roundOpenedAt(group, round)
 	if opened == nil || now.Sub(*opened) < s.cfg.PodUpdateNotice {
 		return
 	}
 	s.tellUpdateStalled(ctx, updateStall{
 		issue: issue, round: round, reasons: roundReasons(group, round), group: group,
-		waiting: waitingOf(round, blockingClaims(group)),
-		reason: fmt.Sprintf("no claim of this issue records a pod, so the update round has waited %s for one of its workers to run again",
-			now.Sub(*opened).Round(time.Minute)),
+		waiting: waitingOf(round, waiting),
+		reason: fmt.Sprintf("no claim of this issue records a pod, so the update round has waited %s for %s to run again and answer",
+			now.Sub(*opened).Round(time.Minute), strings.Join(namesOf(waiting), ", ")),
 	})
 }
 
@@ -351,14 +450,22 @@ func (s *supervision) reconcilePluginUpdates(ctx context.Context, group []superv
 // and the claim's next launch installs this daemon's plugin itself. Relaunching such a claim
 // would start a process an operator's suspension had stopped, which only the operator's resume
 // may do.
+//
+// An answered round that does not end is the pod round's own late stall, one claim wide, and is
+// told the same way (tellLateRound): the turn the relaunch waits for may never end, and the
+// relaunch the end posts may be refused for as long as the refusal lasts (a reserved tree
+// cleanup, a moved epoch), which leaves the round open, the claim's next task held behind it and
+// nothing but a log line per tick to show for it. The bound runs from the answer, as the pod
+// round's does, and one round is told once.
 func (s *supervision) reconcilePluginUpdate(ctx context.Context, c supervise.Claim, now time.Time) {
 	round := c.UpdateRound
 	if c.UpdateSignalledAt != nil {
+		waits := "its process is not replaced"
 		switch {
 		case c.State == supervise.StateWorking:
 			s.log.Info("supervise: this claim's plugin round has its answer; the relaunch waits for the turn still running",
 				"claim", c.Token, "round", round)
-			return
+			waits = "its turn has not ended"
 		case !supervise.HoldsCapability(c.State):
 			s.log.Info("supervise: this claim's plugin round has its answer, and its process is gone; the round ends and launches nothing",
 				"claim", c.Token, "round", round, "state", c.State)
@@ -366,7 +473,11 @@ func (s *supervision) reconcilePluginUpdate(ctx context.Context, c supervise.Cla
 			s.log.Info("supervise: this claim's plugin round has its answer; its process is replaced onto this daemon's plugin",
 				"claim", c.Token, "round", round)
 		}
-		s.supervisor.post(c.Token, supervise.PodUpdateEnded{Claim: c.Token})
+		if c.State != supervise.StateWorking {
+			s.supervisor.post(c.Token, supervise.PodUpdateEnded{Claim: c.Token})
+		}
+		s.tellLateRound(ctx, c.Issue, []supervise.Claim{c}, round, "", c.UpdateReasons, now,
+			"the worker of the plugin round has answered, and "+waits)
 		return
 	}
 	s.supervisor.post(c.Token, supervise.PodUpdateOpen{
@@ -576,21 +687,32 @@ func roundOpenedAt(group []supervise.Claim, round string) *time.Time {
 	return opened
 }
 
+// answered is whether c has answered this round: the round it records is this one, and it
+// signalled in that round. It is the one statement of "answered this round", read by every place
+// the round's completeness is weighed — the claims it still waits on (waitingClaims), when the
+// last answer came in (roundAnsweredAt) and the mark the controller's notice carries per claim
+// (waitingOf). An answer a claim gave to another round says nothing of this one: the claim's
+// recorded answer goes with the round that ends (clearUpdate), and a round that replaced another
+// promises something else of the pod and the disk.
+func answered(c supervise.Claim, round string) bool {
+	return c.UpdateRound == round && c.UpdateSignalledAt != nil
+}
+
 // roundAnsweredAt is when this round's last answer came in, the latest its claims record, and nil
 // when no claim of the group has answered it. It is what the late-round notice's bound runs from
 // (tellLateRound): the stall that notice reports — a turn that will not end, a replacement that
 // will not run — begins at the answer that completed the round, not at the round's opening.
 func roundAnsweredAt(group []supervise.Claim, round string) *time.Time {
-	var answered *time.Time
+	var last *time.Time
 	for _, c := range group {
-		if c.UpdateRound != round || c.UpdateSignalledAt == nil {
+		if !answered(c, round) {
 			continue
 		}
-		if answered == nil || c.UpdateSignalledAt.After(*answered) {
-			answered = c.UpdateSignalledAt
+		if last == nil || c.UpdateSignalledAt.After(*last) {
+			last = c.UpdateSignalledAt
 		}
 	}
-	return answered
+	return last
 }
 
 // roundTold is whether this round was already told to the operator's side.
@@ -622,7 +744,7 @@ func blockingClaims(group []supervise.Claim) []supervise.Claim {
 func waitingClaims(group []supervise.Claim, round string) []supervise.Claim {
 	var waiting []supervise.Claim
 	for _, c := range blockingClaims(group) {
-		if c.UpdateRound != round || c.UpdateSignalledAt == nil {
+		if !answered(c, round) {
 			waiting = append(waiting, c)
 		}
 	}
@@ -654,10 +776,13 @@ func cannotAnswer(claims []supervise.Claim) []supervise.Claim {
 }
 
 // podProcess is the process the round's pod is ended through: the first claim of the group that
-// records one.
-func podProcess(group []supervise.Claim) (runtime.Known, bool) {
+// records a process in that round's own pod. The pod is what the filter is on, not merely a
+// recorded process: a claim the sweep relaunched while the round ran records the pod that
+// replaced this one, and ending that pod would delete a pod no round covers, which has drifted
+// from nothing and which the round's own replacement has just built.
+func podProcess(group []supervise.Claim, round string) (runtime.Known, bool) {
 	for _, c := range group {
-		if c.Locator != nil {
+		if c.Locator != nil && supervise.PodRound(podOf(c.Locator)) == round {
 			return runtime.Known{Claim: c.Token, Locator: c.Locator}, true
 		}
 	}
@@ -679,7 +804,7 @@ func waitingOf(round string, claims []supervise.Claim) []record.UpdateWaiting {
 		waiting[i] = record.UpdateWaiting{
 			Claim: string(c.Token), Role: c.Role, State: string(c.State),
 			CannotAnswer: supervise.CannotAnswerUpdate(c),
-			Answered:     c.UpdateRound == round && c.UpdateSignalledAt != nil,
+			Answered:     answered(c, round),
 		}
 	}
 	return waiting

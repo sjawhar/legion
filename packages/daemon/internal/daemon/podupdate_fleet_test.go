@@ -223,7 +223,7 @@ func (r *fleetRig) signal(issue string, role claim.Role, head string) {
 	c := r.claimOf(issue, role)
 	m, _ := r.sup.Machine(c.Token)
 	if err := m.Handle(r.ctx, supervise.PodUpdateSignalled{
-		Claim: c.Token, Generation: c.Generation, Session: c.Session, Head: head,
+		Claim: c.Token, Generation: c.Generation, Session: c.Session, Round: c.UpdateRound, Head: head,
 	}); err != nil {
 		r.t.Fatalf("%s's %s answered the update round: %v", issue, role, err)
 	}

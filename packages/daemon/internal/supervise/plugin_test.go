@@ -100,11 +100,15 @@ func TestAStaleControllerPluginMidTurnInterruptsTheTaskChargingNothing(t *testin
 	}
 }
 
-// A held suspension — the workflow asked to suspend a working claim, and the machine is waiting for
-// its turn to end before it acts — is not waited out for a process found on a stale plugin: it ends
-// the hold as a death or a stale address does (endHeld), suspended at once and charged nothing. Its
-// next resume launches on the current plugin.
-func TestAStalePluginWithAHeldSuspensionSuspendsTheClaimChargingNothing(t *testing.T) {
+// A held suspension — the workflow asked to suspend a working claim, and the machine is waiting
+// for its turn to end before it acts — no longer sends a stale process to its relaunch where it
+// stands. The relaunch waits for the turn as every other worker's does (holdStaleRelaunch), and
+// the turn's end runs the suspension rather than the relaunch (turnEnded): the process the
+// relaunch would have replaced is stopped there anyway, and the claim's next resume launches on
+// the current plugin. So the hold costs the suspension nothing and keeps the turn the relaunch
+// would have cut, which is the one thing this lane waits for a turn to protect. Nothing is
+// charged either way.
+func TestAStalePluginWithAHeldSuspensionSuspendsTheClaimAtItsTurnsEndChargingNothing(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateReady)
 	h.must(RequestDeliver{Claim: testToken, Task: "implement the plan"})
@@ -119,6 +123,15 @@ func TestAStalePluginWithAHeldSuspensionSuspendsTheClaimChargingNothing(t *testi
 		t.Fatalf("StalePlugin while held = %v, want nil", err)
 	}
 
+	h.wantState(StateWorking)
+	h.wantCalls("Suspend", 0)
+	h.wantCalls("Resume", 0)
+	if h.m.staleRelaunch == nil {
+		t.Fatal("no relaunch waits for the turn: the stale process was decided where it stood")
+	}
+
+	h.must(StreamTurnEnd{Claim: testToken})
+
 	h.wantState(StateSuspended)
 	h.wantBudgets(Budgets{})
 	if suspend := h.wantCalls("Suspend", 1)[0]; suspend.Locator != loc {
@@ -126,7 +139,7 @@ func TestAStalePluginWithAHeldSuspensionSuspendsTheClaimChargingNothing(t *testi
 	}
 	h.wantCalls("Resume", 0)
 	if claim := h.claim(); claim.SuspensionHeld {
-		t.Fatalf("claim %+v after the stale-plugin event, want the held suspension ended", claim)
+		t.Fatalf("claim %+v after the turn's end, want the held suspension ended", claim)
 	}
 }
 

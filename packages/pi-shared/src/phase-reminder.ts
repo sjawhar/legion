@@ -9,6 +9,7 @@ import {
   type PhaseStallEntry,
   type PhaseStallInput,
   type PhaseStallState,
+  recordedPhaseStall,
   reminderText,
   stepPhaseStall,
 } from "./phase-stall";
@@ -150,15 +151,6 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
    * continuation per run: the run then settles, the daemon sees the turn end, and the next
    * reminder comes from the timer with its delay. */
   let continued = false;
-  /** Whether the wait the machine is in is the one a `ready_for_update` answer created, rather
-   * than the one a WAITING reply bought. The two are the same state and differ in who ends them:
-   * a WAITING wait is the reminder's own, and the timer it arms is what ends it, where the wait
-   * the answer creates is the daemon's update round to end, and a timer that fired in it would
-   * steer a new turn into the worker — which the daemon reads as a turn that retracts the answer
-   * (`takeBackSignal`), so the round would restart at every `waitingMs` and never converge
-   * (INFRA-484). A round that does not end is the daemon's own stall notice to report, with the
-   * `ReplacePod` error or the turn that will not end in it, which a retracted answer would hide. */
-  let awaitingUpdate = false;
   /** The head of what the worker said as its last turn settled: the architect notice quotes it,
    * and it rides the record, so a notice the resume reminder of a relaunched worker earns still
    * names what the worker said before the relaunch. */
@@ -167,7 +159,9 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
   let recorded = "";
 
   const entryOf = (): PhaseStallEntry => ({
-    state: stall.state,
+    // The machine's own wait that the record does not hold (`recordedPhaseStall`): a session
+    // restores a record only after a relaunch, which is the round that wait belonged to ending.
+    state: recordedPhaseStall(stall.state),
     count: stall.count,
     reported,
     ...(reportKey === undefined ? {} : { reportKey }),
@@ -186,10 +180,6 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
   const advance = (input: PhaseStallInput): string | undefined => {
     const step = stepPhaseStall(stall, input);
     stall = step.state;
-    // The answer's own wait, and nothing else: anything that takes the machine out of `waiting`
-    // ends it, and a WAITING reply that begins one of its own is the reminder's to time out.
-    awaitingUpdate =
-      stall.state === "waiting" && (input.kind === "update-answered" || awaitingUpdate);
     // A count back at zero is a worker that has done something: the next run of reminders reports
     // afresh, under a key of its own.
     if (stall.count === 0) {
@@ -365,14 +355,13 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
           ? { state: "closed", count: 0 }
           : { state: entry.state, count: entry.count };
       // The run of reminders the restored count belongs to keeps its notice: a relaunch mid-run
-      // neither repeats one the listener accepted nor mints a second key for one it refused. The
-      // answer's wait is not restored: the round that wait belonged to ended in the relaunch this
-      // session resumed on, so a restored `waiting` is a WAITING reply's, which the reminder times
-      // out as it always did (`awaitingUpdate`).
+      // neither repeats one the listener accepted nor mints a second key for one it refused. No
+      // record holds `awaiting-update` (`recordedPhaseStall`): the relaunch this session resumed
+      // on is the update round ending, so a restored `waiting` is a WAITING reply's, which the
+      // reminder times out as it always did.
       reported = entry?.reported ?? false;
       reportKey = entry?.reportKey;
       lastMessage = entry?.lastMessage ?? "";
-      awaitingUpdate = false;
       recorded = JSON.stringify(entryOf());
     },
     armResumeReminder: () => {
@@ -396,14 +385,20 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
       const before = stall.count;
       const reminder = advance({ kind: "settle", lastAssistantText: text });
       // Every outcome but the continuation ends the run here, so the next one may continue again.
-      if (stall.state === "waiting") {
-        // The machine sends no reminder into a quiet wait, so the timer carries the one this
-        // settling message earned, for when the wait has been long enough. The wait a
-        // `ready_for_update` answer created gets no timer at all: its watchdog is the daemon's
-        // update round, whose own stall notice covers a replacement that never comes, and the turn
-        // a fired reminder would steer is the turn that retracts the answer (`awaitingUpdate`).
+
+      // The wait a `ready_for_update` answer created is the daemon's to end, so nothing is armed
+      // in it: the daemon sends the task it held behind the round, or the one saying the round
+      // ended having replaced nothing, and a reminder steered in meanwhile is the turn the daemon
+      // reads as the answer retracted (`awaiting-update` in `./phase-stall`).
+      if (stall.state === "awaiting-update") {
         continued = false;
-        if (!awaitingUpdate) armReminder(reminderText(text), deps.limits.waitingMs);
+        return undefined;
+      }
+      // The machine sends no reminder into a quiet wait, so the timer carries the one this
+      // settling message earned, for when the wait has been long enough.
+      if (stall.state === "waiting") {
+        continued = false;
+        armReminder(reminderText(text), deps.limits.waitingMs);
         return undefined;
       }
       // A closed phase earns none.

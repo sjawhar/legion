@@ -272,7 +272,14 @@ func (r *Runtime) PodDrift(_ context.Context, k runtime.Known) ([]string, error)
 // provisions a fresh pod from the current configuration, which is the launch path a replacement
 // has always taken. It is a no-op when the Sandbox is absent or already suspended, or when the pod
 // the locator records is no longer the Sandbox's own: there is then no pod of that round to end.
-func (r *Runtime) ReplacePod(ctx context.Context, k runtime.Known) error {
+//
+// due is asked last of all, under the pod's launch turn and one statement before the suspension,
+// and its error is returned having written nothing. That is where it belongs rather than at the
+// top: taking the launch turn waits out whatever launch holds it, which under a fleet-wide roll
+// is a pod boot of minutes, and a round the caller found complete before that wait is exactly a
+// round a worker can start a turn in during it. Asked here, the caller reads the claims one
+// statement before the write that ends their processes, and nothing it refuses is ever cut.
+func (r *Runtime) ReplacePod(ctx context.Context, k runtime.Known, due func(context.Context) error) error {
 	if err := k.Validate(); err != nil {
 		return fmt.Errorf("sandbox runtime: replace pod: %w", err)
 	}
@@ -300,6 +307,11 @@ func (r *Runtime) ReplacePod(ctx context.Context, k runtime.Known) error {
 	v := r.viewOf(name, s)
 	if v.pod == nil || string(v.pod.UID) != k.Locator.Sandbox.PodUID {
 		return nil
+	}
+	if due != nil {
+		if err := due(ctx); err != nil {
+			return err
+		}
 	}
 	if _, err := r.suspendDisplacing(ctx, s, v.pod.UID); err != nil {
 		return fmt.Errorf("replace %s's pod: suspend its sandbox: %w", k.Claim, err)

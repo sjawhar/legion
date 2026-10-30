@@ -70,12 +70,18 @@ func CannotAnswerUpdate(c Claim) bool { return HoldsCapability(c.State) && !CanA
 // no round open, nothing else of its pod waits on it, and the machine already waits a turn out
 // this way for a held suspension and for a plugin round's own end (endPodUpdate). It is not
 // unbounded either: the turn ends, or the process dies or is suspended, and letGo drops the mark
-// with it. A claim whose suspension is already held is relaunched where it stands as before,
-// since replaceProcess ends that hold in a suspension rather than a launch (endHeld) and the
-// suspension, not this lane, decides what happens to the turn. The other caller of relaunchStale
-// is the stale registration (staleRegistration), which calls it rather than this: that agent is
-// refused and its process exits on the refusal, so a round there would wait for a signal no
-// running turn could send, and its claim is registering rather than in a turn.
+// with it. A suspension already held for that same turn (holdSuspension) changes none of this:
+// the relaunch waits as it does for any other turn, and the turn's end runs the suspension rather
+// than the relaunch (turnEnded), which stops the process this lane would have replaced and
+// launches nothing in its place. Nothing is lost by waiting — the claim's next resume comes up on
+// this daemon's plugin by itself — and what the wait keeps is the turn the hold would otherwise
+// have cut, which is the whole point of the lane. A held suspension outside a turn, one a launch
+// retained, is relaunched where it stands: replaceProcess ends that hold in a suspension rather
+// than a launch (endHeld), and the suspension, not this lane, decides what follows. The other
+// caller of relaunchStale is the stale registration (staleRegistration), which calls it rather
+// than this: that agent is refused and its process exits on the refusal, so a round there would
+// wait for a signal no running turn could send, and its claim is registering rather than in a
+// turn.
 //
 // The project controller's own claim keeps the immediate relaunch too, whatever contract it
 // records, and it keeps it mid-turn: the `legion` tool its session holds is the controller's,
@@ -115,7 +121,7 @@ func (m *Machine) refreshPlugin(ctx context.Context, trigger string) error {
 	if !CannotAnswerUpdate(m.claim) && !controller {
 		return m.openPluginUpdate(ctx)
 	}
-	if m.claim.State == StateWorking && m.held == nil && !controller {
+	if m.claim.State == StateWorking && !controller {
 		m.holdStaleRelaunch(trigger)
 		return nil
 	}
@@ -125,9 +131,11 @@ func (m *Machine) refreshPlugin(ctx context.Context, trigger string) error {
 // holdStaleRelaunch leaves the relaunch waiting for the agent's turn to end (turnEnded), which
 // re-decides it through refreshPlugin as it stands then: by that point the claim is idle, so the
 // relaunch runs, and a registration that recorded this daemon's contract meanwhile leaves it
-// alone. trigger is the pass that found the claim, carried so the line the relaunch logs names
-// the pass that asked for it. A sweep finds the same claim every tick while its turn runs, so
-// only the first of them logs; the rest replace the trigger and say nothing.
+// alone — as does a suspension held for that same turn, which the turn's end runs first and which
+// ends the process this relaunch was for. trigger is the pass that found the claim, carried so
+// the line the relaunch logs names the pass that asked for it. A sweep finds the same claim every
+// tick while its turn runs, so only the first of them logs; the rest replace the trigger and say
+// nothing.
 func (m *Machine) holdStaleRelaunch(trigger string) {
 	if m.staleRelaunch == nil {
 		m.log.Info("supervise: the process speaks another plugin contract; its relaunch waits for the agent's turn to end",
@@ -138,10 +146,11 @@ func (m *Machine) holdStaleRelaunch(trigger string) {
 }
 
 // relaunchStale replaces the claim's process now, onto this daemon's plugin: the stale lane for a
-// claim no update round can wait for. Its two callers are refreshPlugin, for a claim whose plugin
-// cannot answer a round at all, and staleRegistration, whose own registration is refused in the
-// same decision. trigger names the pass that found the claim ("boot", "sweep", "registration"),
-// for the line it logs. refreshPlugin states what the relaunch does and what refuses it.
+// claim no update round can wait for and no turn is running on. Its two callers are refreshPlugin,
+// for a claim whose plugin cannot answer a round at all — in no turn, or the controller's, whose
+// turn is never waited out — and staleRegistration, whose own registration is refused in the same
+// decision. trigger names the pass that found the claim ("boot", "sweep", "registration"), for
+// the line it logs. refreshPlugin states what the relaunch does and what refuses it.
 func (m *Machine) relaunchStale(ctx context.Context, trigger string) error {
 	if m.held == nil {
 		if err := m.checkLaunch(ctx); err != nil {
@@ -214,9 +223,26 @@ func refreshStalePlugin(m *Machine, ctx context.Context, ev Event) error {
 // A daemon with nothing to relaunch onto (PluginRelaunchable false, LEGION-164's degraded
 // Kubernetes mode) relaunches nothing and refuses nothing: the registration stands, accepted, and
 // one Error line records the gap for the operator to close with runtime.kubernetes.plugins.
+//
+// A registration no relaunch can take past the daemon's contract is accepted and charged
+// nothing, exactly as that one is: a claim whose launch installs no plugin (Deps.NoPluginInstall
+// — a Claude Code role's plugin is its pod image's own claude-envoy) and whose process speaks a
+// contract below PodUpdateContract. Relaunching it would keep the pod, bring the same plugin
+// back, and land here again with PluginRelaunchFor already naming this daemon, which is the
+// charged path: the claim would walk its launch budget down to failed for a plugin no launch of
+// this deployment can change. A failed claim cannot push its work, and pushing is step 1 of the
+// drain an operator must run for such a pod, so the process is left running and answered as any
+// other. What replaces it is a new image, which the update round over its pod is opened for: the
+// round marks the claim as unable to answer and names it to the operator (internal/daemon's
+// cannotAnswer, refreshStalePlugins, which posts no relaunch for it either).
 func (m *Machine) staleRegistration(ctx context.Context, got int) error {
 	if got == m.deps.PluginContract {
 		return m.endCurrentPluginRound(ctx)
+	}
+	if m.deps.NoPluginInstall != nil && m.deps.NoPluginInstall(m.claim) && got < PodUpdateContract {
+		m.log.Warn("supervise: this claim's launch installs no plugin, and its process speaks a contract with no ready_for_update; the registration stands and an operator's drain replaces the pod",
+			"pluginContract", got, "daemonApiVersion", m.deps.PluginContract, "updateContract", PodUpdateContract)
+		return nil
 	}
 	if !m.deps.PluginRelaunchable {
 		m.log.Error(NoPluginSourceMessage,

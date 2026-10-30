@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -382,7 +383,7 @@ func TestReplacePodNamesTheDisplacedPodAndWaitsItOut(t *testing.T) {
 	testerLoc, reviewerLoc := g.spawn(tester), g.spawn(reviewer)
 	name := testerLoc.Sandbox.Name
 
-	if err := g.r.ReplacePod(g.ctx, runtime.Known{Claim: workerToken, Locator: &testerLoc}); err != nil {
+	if err := g.r.ReplacePod(g.ctx, runtime.Known{Claim: workerToken, Locator: &testerLoc}, nil); err != nil {
 		t.Fatalf("ReplacePod: %v", err)
 	}
 	if named := g.sandbox(name).Annotations[displacedAnnotation]; named != testerLoc.Sandbox.PodUID {
@@ -416,6 +417,50 @@ func TestReplacePodNamesTheDisplacedPodAndWaitsItOut(t *testing.T) {
 	}
 }
 
+// The caller's last word is taken under the pod's launch turn and one statement before the
+// suspension: the Sandbox is still as the caller left it when due is asked, and a due that
+// refuses leaves the pod running and the Sandbox unwritten, with its own error handed back. That
+// ordering is the whole point of asking here — the launch turn is where this call waits minutes,
+// and a round that completed before the wait is a round a worker can start a turn in during it.
+func TestReplacePodAsksWhetherItIsStillDueBeforeItSuspends(t *testing.T) {
+	g := newRig(t, nil)
+	loc := g.spawn(workerSpec(t))
+	name := loc.Sandbox.Name
+	known := runtime.Known{Claim: workerToken, Locator: &loc}
+
+	refused := errors.New("a worker of the round started a turn")
+	asked := 0
+	if err := g.r.ReplacePod(g.ctx, known, func(context.Context) error {
+		asked++
+		if mode := g.sandbox(name).mode(); mode == modeSuspended {
+			t.Errorf("the Sandbox is already %s when the replacement is asked whether it is due", mode)
+		}
+		return refused
+	}); !errors.Is(err, refused) {
+		t.Fatalf("ReplacePod of a replacement no longer due = %v, want %v", err, refused)
+	}
+	if asked != 1 {
+		t.Fatalf("the replacement asked whether it was due %d times, want once", asked)
+	}
+	if mode := g.sandbox(name).mode(); mode == modeSuspended {
+		t.Fatalf("the Sandbox is %s after a replacement that was no longer due", mode)
+	}
+	if named := g.sandbox(name).Annotations[displacedAnnotation]; named != "" {
+		t.Fatalf("the Sandbox names %q as a pod the daemon replaced, want none", named)
+	}
+	if pod := g.pod(name); pod == nil || string(pod.UID) != loc.Sandbox.PodUID {
+		t.Fatalf("the pod of a replacement that was no longer due is %+v, want %s still running", pod, loc.Sandbox.PodUID)
+	}
+
+	// A due that answers nil replaces the pod as every other caller's does.
+	if err := g.r.ReplacePod(g.ctx, known, func(context.Context) error { return nil }); err != nil {
+		t.Fatalf("ReplacePod of a replacement still due: %v", err)
+	}
+	if mode := g.sandbox(name).mode(); mode != modeSuspended {
+		t.Fatalf("the Sandbox is %s after a replacement that was still due, want it suspended", mode)
+	}
+}
+
 // ReplacePod has nothing to end for a claim that runs nowhere, for a Sandbox that is absent or
 // already suspended, or for a locator whose pod is no longer the Sandbox's own: each answers nil
 // having written nothing, so a round whose pod went on its own finishes rather than failing.
@@ -423,13 +468,13 @@ func TestReplacePodIsANoOpWithoutThePodTheLocatorRecords(t *testing.T) {
 	g := newRig(t, nil)
 	loc := g.spawn(workerSpec(t))
 	name := loc.Sandbox.Name
-	if err := g.r.ReplacePod(g.ctx, runtime.Known{Claim: workerToken}); err != nil {
+	if err := g.r.ReplacePod(g.ctx, runtime.Known{Claim: workerToken}, nil); err != nil {
 		t.Fatalf("ReplacePod of a claim running nowhere: %v", err)
 	}
 
 	suspendSandbox(t, g, g.r, name)
 	g.clearActions()
-	if err := g.r.ReplacePod(g.ctx, runtime.Known{Claim: workerToken, Locator: &loc}); err != nil {
+	if err := g.r.ReplacePod(g.ctx, runtime.Known{Claim: workerToken, Locator: &loc}, nil); err != nil {
 		t.Fatalf("ReplacePod of a suspended sandbox: %v", err)
 	}
 	if wrote := g.writes(); len(wrote) > 0 {
@@ -448,7 +493,7 @@ func TestReplacePodIsANoOpWithoutThePodTheLocatorRecords(t *testing.T) {
 		s, err := gone.r.storedSandbox(goneLoc.Sandbox.Name)
 		return err == nil && s == nil
 	})
-	if err := gone.r.ReplacePod(gone.ctx, runtime.Known{Claim: workerToken, Locator: &goneLoc}); err != nil {
+	if err := gone.r.ReplacePod(gone.ctx, runtime.Known{Claim: workerToken, Locator: &goneLoc}, nil); err != nil {
 		t.Fatalf("ReplacePod of an absent sandbox: %v", err)
 	}
 }
@@ -466,7 +511,7 @@ func TestPodDriftAndReplacePodRefuseALocatorTheRuntimeDidNotMint(t *testing.T) {
 	if _, err := g.r.PodDrift(g.ctx, known); err == nil {
 		t.Error("PodDrift of a locator in another namespace was answered")
 	}
-	if err := g.r.ReplacePod(g.ctx, known); err == nil {
+	if err := g.r.ReplacePod(g.ctx, known, nil); err == nil {
 		t.Error("ReplacePod of a locator in another namespace acted")
 	}
 }

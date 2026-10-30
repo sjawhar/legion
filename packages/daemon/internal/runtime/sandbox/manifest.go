@@ -260,7 +260,7 @@ type keptPod struct {
 	// own launcher writes (sessionDSNFile). A pod created before the store was configured carries
 	// none, and its role is told neither of Oh My Pi's two session variables rather than a URL
 	// file it cannot read.
-	store ompsessions.Store
+	store ompsessions.StoreKind
 }
 
 // enrollsIn is the one decision whether a generation of role started now in a pod holds the
@@ -307,19 +307,21 @@ func (l launch) overlays(r *Runtime) []string {
 	return r.roleConfigFiles[l.spec.Role]
 }
 
-// sessionStore is the store this launch's generation keeps its session in: the one the kept pod
-// was built under, which is the only one its role can reach (keptPod.store), and the
-// configuration's for a launch that builds the pod itself. Oh My Pi refuses to start on a URL
-// file it cannot read, so a role of a kept pod told the configuration's store — a key the pod's
-// providers volume does not project, a proxy its launcher does not serve — would never register
-// and never answer the round that is to replace that pod (INFRA-484). What it costs is that such
-// a role writes its session into the store its pod has until the round replaces the pod, which a
-// role that never started could not do at all.
-func (l launch) sessionStore(r *Runtime) ompsessions.Store {
+// sessionStore is the kind of store this launch's generation keeps its session in: the one the
+// kept pod was built under, which is the only one its role can reach (keptPod.store), and the
+// configuration's for a launch that builds the pod itself. The kind is all of a store a start
+// command names, since the URL itself is in the file the pod projects or its own launcher writes
+// (sessionDSNFile). Oh My Pi refuses to start on a URL file it cannot read, so a role of a kept
+// pod told the configuration's store — a key the pod's providers volume does not project, a
+// proxy its launcher does not serve — would never register and never answer the round that is to
+// replace that pod (INFRA-484). What it costs is that such a role writes its session into the
+// store its pod has until the round replaces the pod, which a role that never started could not
+// do at all.
+func (l launch) sessionStore(r *Runtime) ompsessions.StoreKind {
 	if l.kept != nil {
 		return l.kept.store
 	}
-	return r.sessionStore
+	return r.sessionStore.Kind
 }
 
 // claudeInputs are the parts of a Claude Code launch that are decided before the pod is touched:
@@ -803,7 +805,7 @@ func (r *Runtime) sessionDSNPointer() []corev1.EnvVar {
 // store is the one the pod that generation runs in was built under, which is the configuration's
 // for a launch that builds the pod and the kept pod's own otherwise (launch.sessionStore).
 func (r *Runtime) sessionDSNFile(l launch) string {
-	if l.sessionStore(r).Kind == ompsessions.StoreCloudSQLIAM {
+	if l.sessionStore(r) == ompsessions.StoreCloudSQLIAM {
 		return generationDir(l.spec.Generation) + "/" + ompsessions.DSNFileName
 	}
 	return providersDSNFile

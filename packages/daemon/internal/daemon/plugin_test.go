@@ -331,10 +331,13 @@ func TestBootLeavesALaunchingClaimToItsRegistration(t *testing.T) {
 }
 
 // A stale claim found working with a suspension held for its turn (the workflow asked to suspend
-// it, and the machine is waiting for the turn to end) is suspended instead of relaunched when the
-// boot pass reaches it: nothing is left to hold the suspension for, so it ends there, charged
-// nothing, rather than launch a pod only to suspend it on the hold's own retry.
-func TestBootSuspendsAStaleClaimWhoseSuspensionIsHeld(t *testing.T) {
+// it, and the machine is waiting for the turn to end) is left running by the boot pass, and the
+// turn's end runs that suspension rather than a relaunch: the process the relaunch would have
+// replaced is stopped there anyway, charged nothing, and no pod is launched only to be suspended
+// on the hold's own retry. The boot pass must not cut the turn to get there — a worker below the
+// contract that introduced ready_for_update cannot be asked to push first, so what it had not
+// pushed would go with the turn (supervise's holdStaleRelaunch).
+func TestBootSuspendsAStaleClaimWhoseSuspensionIsHeldAtItsTurnsEnd(t *testing.T) {
 	sup, rt := newPluginSupervisor(t, 24, true)
 	project, _ := claim.ProjectToken("legion")
 	token, _ := claim.NewToken(project, "LEGION-1", claim.RoleImplementer)
@@ -358,6 +361,16 @@ func TestBootSuspendsAStaleClaimWhoseSuspensionIsHeld(t *testing.T) {
 	s := &supervision{log: quietLogger(), supervisor: sup, claims: []supervise.Claim{c}, plan: plan{pluginRelaunchable: true}}
 
 	s.refreshStalePlugins(s.claims, "boot")
+
+	m.Wait()
+	if held := m.Claim(); held.State != supervise.StateWorking {
+		t.Fatalf("the claim after the boot pass = %s, want it left %s: its turn is not the boot pass's to cut",
+			held.State, supervise.StateWorking)
+	}
+
+	if err := m.Handle(context.Background(), supervise.StreamTurnEnd{Claim: token}); err != nil {
+		t.Fatalf("the turn ended: %v", err)
+	}
 
 	testwait.Eventually(t, "the held suspension to end the stale claim", func() bool {
 		return m.Claim().State == supervise.StateSuspended

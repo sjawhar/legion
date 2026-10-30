@@ -202,7 +202,7 @@ func TestAddingARoleOverlaysMountDriftsAnIssuePodMadeWithoutIt(t *testing.T) {
 		t.Fatalf("Resume replaced the pod %s, which the tester's own update round replaces", testerLoc.Sandbox.PodUID)
 	}
 
-	if err := r2.ReplacePod(g.ctx, runtime.Known{Claim: workerToken, Locator: &kept}); err != nil {
+	if err := r2.ReplacePod(g.ctx, runtime.Known{Claim: workerToken, Locator: &kept}, nil); err != nil {
 		t.Fatalf("ReplacePod: %v", err)
 	}
 	tester.Generation, tester.BootToken = 3, "boot-tester-g3"

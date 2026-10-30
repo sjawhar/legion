@@ -4,6 +4,7 @@ import {
   assistantText,
   LAST_MESSAGE_LIMIT,
   phaseStallEntryFrom,
+  recordedPhaseStall,
   stepPhaseStall,
 } from "./phase-stall";
 
@@ -76,28 +77,48 @@ test("a record's last message reads back no longer than the notice quotes", () =
 });
 
 // INFRA-484: the worker has answered the daemon's update task (`ready_for_update`), so it is to
-// start nothing until the process its claim runs in comes back. A reminder here would continue
-// the answering turn in the same run: the work that continuation did would go with the pod, and
-// the daemon would see no turn end.
-test("a worker that answered the update task waits: the phase stays open and the settle earns no reminder", () => {
+// start nothing until the daemon comes back to it. A reminder here would continue the answering
+// turn in the same run: the work that continuation did would go with the pod, and the daemon
+// would see no turn end.
+test("a worker that answered the update task stands in awaiting-update, where a settle earns no reminder", () => {
   const answered = stepPhaseStall({ state: "open", count: 2 }, { kind: "update-answered" });
-  expect(answered).toEqual({ state: { state: "waiting", count: 0 } });
+  expect(answered).toEqual({ state: { state: "awaiting-update", count: 0 } });
   expect(
     stepPhaseStall(answered.state, { kind: "settle", lastAssistantText: "Pushed and answered." })
-  ).toEqual({ state: { state: "waiting", count: 0 } });
+  ).toEqual({ state: { state: "awaiting-update", count: 0 } });
   // The answering tool call itself, which the host reports from its own hook, leaves the wait as
   // it is, whichever of the two the host applies first.
   expect(stepPhaseStall(answered.state, { kind: "tool-call" })).toEqual({
-    state: { state: "waiting", count: 0 },
+    state: { state: "awaiting-update", count: 0 },
   });
-  // The reminding never stops: the quiet wait's own reminder ends the wait, as a WAITING reply's
-  // does, so a replacement that never comes is asked about again.
+  // What ends this wait is the daemon: the task it held behind the round, or the one saying the
+  // round ended having replaced nothing, arrives as its own prompt and opens the phase again.
+  expect(stepPhaseStall(answered.state, { kind: "assignment" })).toEqual({
+    state: { state: "open", count: 0 },
+  });
+  // Anything else arriving from outside is something happening too, and the wait is over.
+  expect(stepPhaseStall(answered.state, { kind: "inbound-event" })).toEqual({
+    state: { state: "open", count: 0 },
+  });
+  // Nothing reminds into this wait, so `reminded` can only be a timer armed before the answer;
+  // it is counted and the phase is open again, as it is out of a WAITING reply's wait.
   expect(stepPhaseStall(answered.state, { kind: "reminded" })).toEqual({
     state: { state: "open", count: 1 },
   });
-  // Whatever arrives from outside is something happening, and the wait is over.
-  expect(stepPhaseStall(answered.state, { kind: "inbound-event" })).toEqual({
-    state: { state: "open", count: 0 },
+});
+
+// The record holds no `awaiting-update`: a record is read only by the process a relaunch starts,
+// and that relaunch is the round the wait belonged to ending, so what is restored is the plain
+// wait the reminder times out — and a build that knows only the three states still reads it.
+test("awaiting-update is recorded as the waiting it is a kind of", () => {
+  expect(recordedPhaseStall("awaiting-update")).toBe("waiting");
+  for (const state of ["closed", "open", "waiting"] as const) {
+    expect(recordedPhaseStall(state)).toBe(state);
+  }
+  expect(phaseStallEntryFrom({ state: "waiting", count: 0 })).toEqual({
+    state: "waiting",
+    count: 0,
+    reported: false,
   });
 });
 

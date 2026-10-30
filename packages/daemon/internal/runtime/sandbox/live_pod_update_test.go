@@ -161,7 +161,7 @@ func (r *liveRig) checkPodUpdate() error {
 	}
 	note("harness", "update round %s: %s answered, reporting %s as the head of %s; the round waits on nobody", round, second.name, short(headSecond), dir.Bookmark)
 
-	if err := r.rt.ReplacePod(r.ctx, runtime.Known{Claim: first.token, Locator: first.loc}); err != nil {
+	if err := r.rt.ReplacePod(r.ctx, runtime.Known{Claim: first.token, Locator: first.loc}, nil); err != nil {
 		return fmt.Errorf("ReplacePod, which ends the round over pod %s: %w", short(old.Sandbox.PodUID), err)
 	}
 	note("runtime", "ReplacePod(%s): the round is over, so pod %s is ended", first.name, short(old.Sandbox.PodUID))
@@ -609,7 +609,7 @@ func (r *liveRig) checkPodUpdateFleet() error {
 // into the one new pod, which reads no drift. It answers that new pod's locator.
 func (r *liveRig) replaceFleetPod(round *liveFleetRound, mark int) (runtime.Locator, error) {
 	first := round.workers[0]
-	if err := r.rt.ReplacePod(r.ctx, runtime.Known{Claim: first.token, Locator: first.loc}); err != nil {
+	if err := r.rt.ReplacePod(r.ctx, runtime.Known{Claim: first.token, Locator: first.loc}, nil); err != nil {
 		return runtime.Locator{}, fmt.Errorf("ReplacePod, which ends the round over %s's pod %s: %w", round.issue, short(round.uid), err)
 	}
 	note("runtime", "ReplacePod(%s): %s's round is over, so pod %s is ended", first.name, round.issue, short(round.uid))

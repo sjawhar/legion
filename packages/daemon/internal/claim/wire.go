@@ -72,15 +72,19 @@ type CapabilityRow struct {
 // round over a pod whose configuration has drifted, and over a claim whose plugin is behind the
 // daemon's contract, tasks every claim of the round to push and answer here, and replaces the
 // process only once every claim of the round has answered — so nothing unpushed dies with a disk
-// the replacement deletes. `Head` is the commit the worker reports as the head of its issue
-// branch at `origin`, empty when the branch is not there (a planner before its first push). The
-// daemon records the worker's word and verifies nothing, exactly as
-// `api.HandoffCompleteRequest.Commit` is the worker's report of the commit it completed at.
+// the replacement deletes. `Round` is the round the worker answers for, as the task it read named
+// it: an answer counts only for the round whose task the worker has in front of it, so the daemon
+// refuses one that names any other round (supervise.ErrForeignUpdateRound). `Head` is the commit
+// the worker reports as the head of its issue branch at `origin`, empty when the branch is not
+// there (a planner before its first push). The daemon records the worker's word and verifies
+// nothing, exactly as `api.HandoffCompleteRequest.Commit` is the worker's report of the commit it
+// completed at.
 type ReadyForUpdateRequest struct {
 	ClaimToken Token  `json:"claimToken"`
 	SessionID  string `json:"sessionId"`
 	Secret     string `json:"secret"`
 	Generation uint64 `json:"generation"`
+	Round      string `json:"round"`
 	Head       string `json:"head,omitempty"`
 }
 

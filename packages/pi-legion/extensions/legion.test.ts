@@ -2059,7 +2059,7 @@ describe("Legion OMP extension", () => {
       const before = worker.requests.length;
       const result = await worker.legionTool.execute(
         "call-update",
-        { op: "ready_for_update" },
+        { op: "ready_for_update", round: "pod:9d3f0c7a-2b41-4a39-9f6b-6c1d0a7e5b22" },
         undefined,
         undefined,
         worker.context
@@ -2081,8 +2081,9 @@ describe("Legion OMP extension", () => {
       // The wait the answer created arms no timer: the daemon's update round is its watchdog, and
       // a reminder fired here would steer a real `agent_start`, which the daemon reads as a new
       // turn and so as the answer retracted — the round would restart at every wait and never
-      // converge (INFRA-484, `awaitingUpdate` in `@legion/pi-shared/phase-reminder`). The WAITING
-      // reply's own wait keeps its timer, which the case above holds.
+      // converge (INFRA-484, the `awaiting-update` state of `@legion/pi-shared/phase-stall`,
+      // which a record holds as the plain `waiting`). The WAITING reply's own wait keeps its
+      // timer, which the case above holds.
       expect(worker.timers).toEqual([]);
       expect(recorded(worker).at(-1)).toEqual({
         state: "waiting",

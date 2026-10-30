@@ -118,3 +118,40 @@ func TestAStalePluginBelowTheUpdateContractDropsTheHeldRelaunchWithItsProcess(t 
 	}
 	h.wantCalls("Resume", 0)
 }
+
+// A held relaunch that decides nothing at the turn's end still sends the task that waited behind
+// it. refreshPlugin decides the relaunch again as the claim stands then, and by then a
+// registration may have recorded this daemon's own contract — the case holdStaleRelaunch's own
+// rule allows — so nothing is relaunched and nothing is launching. The queued task must go then:
+// the turn's end is what sends it, no relaunch is coming to send it instead, and a claim left
+// holding a task nobody sends waits for an event nothing posts.
+func TestAStalePluginRelaunchThatDecidesNothingStillSendsTheWaitingTask(t *testing.T) {
+	h := updateHarness(t, PodUpdateContract-2)
+	h.reach(StateIdle)
+	// A turn of the agent's own — an Envoy notice, a person's steer — with the next task queued
+	// behind it: what holds that task back here is the turn, not a round.
+	h.must(StreamTurnStart{Claim: h.token})
+	h.wantState(StateWorking)
+	h.m.deps.PluginContract = PodUpdateContract
+	h.must(StalePlugin{Claim: h.token, Trigger: "sweep"})
+	if h.m.staleRelaunch == nil {
+		t.Fatal("no relaunch is held for the turn")
+	}
+	h.must(RequestDeliver{Claim: h.token, Task: "review the pull request"})
+	sent := len(h.prompts())
+	// The claim's process registers again, at this daemon's own contract, while its turn runs, so
+	// the relaunch the turn's end re-decides has nothing left to do.
+	h.must(RequestRegister{
+		Claim: h.token, Generation: h.generation(), Session: session, SessionFile: sessionFile,
+		CapabilityHash: []byte("capability"), PluginContract: PodUpdateContract,
+	})
+
+	h.must(StreamTurnEnd{Claim: h.token})
+
+	h.wantState(StateIdle)
+	h.wantCalls("Resume", 0)
+	released := h.wantPrompts(sent + 1)[sent]
+	if released.Message != "review the pull request" {
+		t.Errorf("the task sent after the turn = %q, want the one that waited behind the relaunch", released.Message)
+	}
+}

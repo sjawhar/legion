@@ -129,7 +129,17 @@ type Runtime interface {
 	// of the first of them builds the place again from the current configuration. It is a no-op
 	// returning nil for a claim with no process, for a place already gone or already stopped, and
 	// for a runtime with no such place to replace.
-	ReplacePod(ctx context.Context, k Known) error
+	//
+	// due is the caller's own last word on whether the replacement is still due, asked under
+	// whatever the runtime holds the place with and immediately before it ends anything: a
+	// runtime that waits for the place's launch turn waits first and asks after, because what the
+	// caller decided before the wait is exactly what the wait can outlive — a worker of the round
+	// starting a turn, or a claim of the issue the caller had never read. nil from due is a
+	// replacement still due, and the runtime goes on; any error is a replacement no longer due,
+	// which the runtime returns having changed nothing, so the caller tells its own refusal from
+	// a failure by the error it handed over. A nil due is always due, which is what a caller with
+	// nothing to re-read passes.
+	ReplacePod(ctx context.Context, k Known, due func(context.Context) error) error
 	// CleanupTree deletes what the runtime holds for tree beyond its claims' processes, once every
 	// claim of the tree has retired and the tree's cleanup is reserved (store.CleanupReservedTree);
 	// nil once nothing of it remains. A runtime that holds nothing per tree returns nil at once.

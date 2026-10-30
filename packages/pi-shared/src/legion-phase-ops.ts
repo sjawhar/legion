@@ -91,9 +91,10 @@ export const PhaseOpArguments = z.discriminatedUnion(
       }),
       reason: requiredString("request_backward_move", "reason"),
     }),
-    // The signal carries no field of the agent's: the claim says who answers, and the plugin
+    // The signal carries one field of the agent's: the round its update task named, which the
+    // daemon takes the answer for and no other. The claim says who answers, and the plugin
     // resolves the branch head it reports.
-    operation("ready_for_update", {}),
+    operation("ready_for_update", { round: requiredString("ready_for_update", "round") }),
   ],
   {
     error: (issue) =>
@@ -174,7 +175,8 @@ export function legionToolDescription(host: {
     "naming a closed pull request is the architect's to decide) and, for READY, each " +
     "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " +
     "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " +
-    "ready_for_update answers the daemon's update task on this issue's pod. Push every commit you want kept to the issue branch " +
+    "ready_for_update answers the daemon's update task on this issue's pod: `round` is the round id that task names, and the " +
+    "daemon takes your answer for that round alone. Push every commit you want kept to the issue branch " +
     "first, because the pod and its disk are replaced after every worker of the pod has answered. The call ends no phase. The " +
     "daemon holds your next task until your process comes back on the new pod, in this same session. " +
     (host.after ?? "") +
@@ -304,11 +306,13 @@ export async function executePhaseOp(
     }
     case "ready_for_update": {
       // The claim authenticates the signal, as it does `claims/ready`: no grant is minted. The
-      // head is the plugin's to resolve, and a branch not yet on the remote is left out. A
-      // workspace whose jj cannot answer leaves it out too, and is told so: the round waits for
-      // every claim of the pod and only an operator's drain ends one that waits for ever, so a
-      // worker whose lookup fails must still be able to answer. The daemon verifies no head, so
-      // the missing one costs the record a line and the round nothing.
+      // round is the agent's own word, read from the update task it answers, and the daemon takes
+      // the answer for that round alone — an answer for a round its claim has left is refused
+      // naming both. The head is the plugin's to resolve, and a branch not yet on the remote is
+      // left out. A workspace whose jj cannot answer leaves it out too, and is told so: the round
+      // waits for every claim of the pod and only an operator's drain ends one that waits for
+      // ever, so a worker whose lookup fails must still be able to answer. The daemon verifies no
+      // head, so the missing one costs the record a line and the round nothing.
       let head = "";
       let failure: string | undefined;
       try {
@@ -321,6 +325,7 @@ export async function executePhaseOp(
         sessionId: claim.sessionID,
         secret: claim.secret,
         generation: claim.generation,
+        round: args.round,
         ...(head === "" ? {} : { head }),
       });
       // The answer names the signal the daemon has and the head it misses, and carries the

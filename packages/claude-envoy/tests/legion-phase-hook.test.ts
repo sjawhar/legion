@@ -298,11 +298,12 @@ test("a ready_for_update answer blocks no Stop: the answering turn ends, with th
     // Nothing is written into the wait the answer created, and nothing ever will be: it arms no
     // timer at all. The daemon's update round is its watchdog, and a reminder fired here would be
     // a prompt, which starts a turn the daemon reads as the answer retracted — the round would
-    // restart at every wait and never converge (INFRA-484, `awaitingUpdate` in
-    // `@legion/pi-shared/phase-reminder`). A case asserting that nothing happens has no condition
-    // to wait for, so this is one of the file's fixed waits, over the quiet wait itself and so
-    // over every wait this endpoint arms, and the endpoint's own `setTimeout` is what runs on the
-    // real clock. The WAITING reply's own wait keeps its reminder, which its own case holds.
+    // restart at every wait and never converge (INFRA-484, the `awaiting-update` state of
+    // `@legion/pi-shared/phase-stall`, which a record holds as the plain `waiting`). A case
+    // asserting that nothing happens has no condition to wait for, so this is one of the file's
+    // fixed waits, over the quiet wait itself and so over every wait this endpoint arms, and the
+    // endpoint's own `setTimeout` is what runs on the real clock. The WAITING reply's own wait
+    // keeps its reminder, which its own case holds.
     await Bun.sleep(200)
     expect(inbox).toEqual([])
     expect(await record()).toEqual({ state: "waiting", count: 0, ...said })

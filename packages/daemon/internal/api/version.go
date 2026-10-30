@@ -429,10 +429,12 @@ package api
 //
 // 44: INFRA-484 -- the update round, which replaces a pod only once the work on it is pushed.
 // `POST /legion/v1/claims/ready-for-update` is a new claim route in the shape of `claims/ready`
-// (`claim.ReadyForUpdateRequest`: `claimToken`, `sessionId`, `secret`, `generation`, and an
-// optional `head`), answering 204: it is the worker's answer to the update task — everything it
-// wants kept is pushed, and its process may now be replaced — and `head` is the commit the worker
-// reports as the head of its issue branch at `origin`, empty when the branch is not there. Both
+// (`claim.ReadyForUpdateRequest`: `claimToken`, `sessionId`, `secret`, `generation`, `round`, and
+// an optional `head`), answering 204: it is the worker's answer to the update task — everything
+// it wants kept is pushed, and its process may now be replaced. `round` is the round the task it
+// read named, and the daemon takes the answer only for the round that claim stands in, refusing
+// any other with 409 and a sentence naming both rounds. `head` is the commit the worker reports
+// as the head of its issue branch at `origin`, empty when the branch is not there. Both
 // plugins gain the `ready_for_update` op that posts it, so a worker under either one can end its
 // round. A claim whose update round is open is served on its contract of before the round, on
 // every route: the claim routes, the grants route's claim form and every grant-bearing route,

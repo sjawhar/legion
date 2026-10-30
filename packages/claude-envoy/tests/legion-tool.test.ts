@@ -81,6 +81,7 @@ test("declares the four phase-worker operations under one op, and names the Envo
       verdict: { enum: ["pass", "pending", "fail"] },
       ready: { type: "boolean" },
       reason: { type: "string" },
+      round: { type: "string" },
     },
     required: ["op"],
   })
@@ -88,7 +89,7 @@ test("declares the four phase-worker operations under one op, and names the Envo
     "this tool cannot spawn workers. read_record returns the record of `issue` from the daemon's state. handoff_complete",
   )
   expect(definition.description).toContain(
-    "arm nothing. ready_for_update answers the daemon's update task on this issue's pod. Push every commit you want kept to the issue branch first, because the pod and its disk are replaced after every worker of the pod has answered. The call ends no phase. The daemon holds your next task until your process comes back on the new pod, in this same session. request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. What a later phase needs",
+    "arm nothing. ready_for_update answers the daemon's update task on this issue's pod: `round` is the round id that task names, and the daemon takes your answer for that round alone. Push every commit you want kept to the issue branch first, because the pod and its disk are replaced after every worker of the pod has answered. The call ends no phase. The daemon holds your next task until your process comes back on the new pod, in this same session. request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. What a later phase needs",
   )
   expect(definition.description).toContain("with mcp__legion__envoy_publish.")
 })

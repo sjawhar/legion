@@ -561,14 +561,16 @@ func TestReadyRequestGolden(t *testing.T) {
 }
 
 // The ready-for-update request is the worker's answer to its pod's update task: the claim it
-// holds, the generation it answers for, and the head of `legion/<issue>@origin` it reports, which
-// the daemon records and verifies nothing of.
+// holds, the generation it answers for, the round the task it read named — the one round the
+// answer counts for — and the head of `legion/<issue>@origin` it reports, which the daemon
+// records and verifies nothing of.
 func TestReadyForUpdateRequestGolden(t *testing.T) {
 	golden(t, "ready-for-update.json", claim.ReadyForUpdateRequest{
 		ClaimToken: "legion-legion-legion-208-implementer",
 		SessionID:  "ses_implementer_208",
 		Secret:     "U3VwZXJ2aXNlZEJ5TGVnaW9u",
 		Generation: 5,
+		Round:      "pod:9d3f0c7a-2b41-4a39-9f6b-6c1d0a7e5b22",
 		Head:       "9f1c0a7d4b2e6f8a3c5d1e7b9a0f2c4d6e8b1a35",
 	})
 }

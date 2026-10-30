@@ -1107,6 +1107,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		},
 		PluginContract:     api.DaemonAPIVersion,
 		PluginRelaunchable: p.pluginRelaunchable,
+		NoPluginInstall:    func(c supervise.Claim) bool { return noPluginInstall(cfg, c) },
 		PodUpdateRetask:    cfg.PodUpdateRetask,
 	}
 	stopping, beginStop := context.WithCancel(context.Background())
@@ -1214,21 +1215,28 @@ func (s *supervision) start(boot context.Context, settle func() error) error {
 // launching is left to its own registration, which decides the comparison the moment it arrives,
 // so only the four states whose process has registered are read.
 //
-// A claim in an update round is skipped while its worker can answer that round
-// (supervise.CannotAnswerUpdate false): the round is carrying it, and the process is replaced
-// when the round ends (reconcilePodUpdates), so a StalePlugin post would start the round's clock
-// again at every sweep, or relaunch mid-turn a claim the round is waiting on.
+// A claim whose launch installs no plugin and whose process is below the contract that
+// introduced ready_for_update is never posted, round or no round (noPluginInstall,
+// supervise.CannotAnswerUpdate). A relaunch is the lane's whole act, and for such a claim the
+// relaunch cannot work: a Claude Code role's plugin is the worker image's own claude-envoy,
+// which no install reaches, so the launch keeps the pod the claim already runs in, the process
+// comes back on that same plugin, registers the old contract again, and the next registration is
+// the second relaunch in a row — which staleRegistration charges, until the launch budget fails
+// the claim. A failed claim cannot push, and pushing is step 1 of the drain the daemon itself
+// writes on the issue. Nothing here can take such a worker past the contract; a new image can,
+// which is what the pod round replaces the pod for. So it is left running, and the round that
+// covers it is what carries it: the round marks it as unable to answer and names it in the
+// update-stalled notice, which is the drain (reconcilePodUpdates' cannotAnswer). Outside a round
+// there is nothing to post either — the relaunch would loop exactly the same way — and a drifted
+// pod opens the round that tells the operator at the next sweep. staleRegistration accepts such
+// a registration and charges it nothing, for the same reason (supervise.Deps.NoPluginInstall).
 //
-// A claim in a round whose worker cannot answer is posted only where a relaunch would put it on
-// a plugin that has the op — that is, where its launch installs one (noPluginInstall false). The
-// relaunch keeps the pod and the disk, so for such a claim the round loses nothing by it and
-// gains the one worker it was blocked on. For a Claude Code role it installs nothing at all: the
-// launch keeps the drifted pod the round is open over, the process comes back on that image's
-// own claude-envoy, registers the old contract again, and staleRegistration then charges a
-// relaunch after a relaunch until the budget fails the claim — a failed claim cannot push, which
-// is step 1 of the drain the daemon writes on that issue. It is left running for that drain
-// instead, and the round's own notice is what tells the operator (reconcilePodUpdates'
-// cannotAnswer). Outside a round it is posted as before: there is no round to drain.
+// A claim in an update round whose worker can answer is skipped too: the round is carrying it,
+// and the process is replaced when the round ends (reconcilePodUpdates), so a StalePlugin post
+// would start the round's clock again at every sweep, or relaunch mid-turn a claim the round is
+// waiting on. A claim in a round that cannot answer and whose launch does install a plugin is
+// posted: the relaunch keeps the pod and the disk, so the round loses nothing by it and gains
+// the one worker it was blocked on.
 //
 // A daemon that cannot relaunch onto a plugin (PluginRelaunchable false, LEGION-164's degraded
 // Kubernetes mode) posts nothing; it logs one Error line per stale claim at boot only — a sweep's
@@ -1239,7 +1247,10 @@ func (s *supervision) refreshStalePlugins(claims []supervise.Claim, trigger stri
 		if c.Session == "" || c.PluginContract == api.DaemonAPIVersion || !supervise.HoldsCapability(c.State) {
 			continue
 		}
-		if c.UpdateRound != "" && (!supervise.CannotAnswerUpdate(c) || s.noPluginInstall(c)) {
+		if supervise.CannotAnswerUpdate(c) && s.noPluginInstall(c) {
+			continue
+		}
+		if c.UpdateRound != "" && !supervise.CannotAnswerUpdate(c) {
 			continue
 		}
 		if !s.plan.pluginRelaunchable {
@@ -1258,9 +1269,15 @@ func (s *supervision) refreshStalePlugins(claims []supervise.Claim, trigger stri
 // install reaches (specs.stalePluginInstall installs none for that backend, and no workflow
 // releases claude-envoy). A plugin-contract change for such a role is answered by a new image,
 // which is what the pod round replaces the pod for.
-func (s *supervision) noPluginInstall(c supervise.Claim) bool {
-	return runtime.Of(s.cfg.BackendFor(c.Role)) == runtime.BackendClaude
+//
+// It is one rule read in two places: this package's own stale-plugin pass, and the machine's
+// stale registration, which supervise cannot decide for itself because a role's backend is the
+// daemon's configuration (supervise.Deps.NoPluginInstall, handed the same function below).
+func noPluginInstall(cfg config.Config, c supervise.Claim) bool {
+	return runtime.Of(cfg.BackendFor(c.Role)) == runtime.BackendClaude
 }
+
+func (s *supervision) noPluginInstall(c supervise.Claim) bool { return noPluginInstall(s.cfg, c) }
 
 // reconcileBootOrphans retries only the boot reconciliation, boundedly. A listing error does not
 // prove an unrecorded launch's pane is gone, so callers must not launch the claim again until this

@@ -70,16 +70,17 @@ type Runtime struct {
 	// clock of its own replaces it before use.
 	Now func() time.Time
 
-	mu       sync.Mutex
-	pending  *sync.Cond
-	calls    []Call
-	spawns   []SpawnResult
-	resumes  []SpawnResult
-	probes   []ProbeResult
-	failures map[string]error
-	drift    map[claim.Token][]string
-	queue    []runtime.Observation
-	minted   int
+	mu          sync.Mutex
+	pending     *sync.Cond
+	calls       []Call
+	spawns      []SpawnResult
+	resumes     []SpawnResult
+	probes      []ProbeResult
+	failures    map[string]error
+	drift       map[claim.Token][]string
+	holdReplace func()
+	queue       []runtime.Observation
+	minted      int
 }
 
 // NewRuntime is a fake ready to record: no script, controller launched by the daemon, real time.
@@ -171,6 +172,17 @@ func (r *Runtime) FailPodDrift(err error) { r.fail("PodDrift", err) }
 
 // FailReplacePod makes every later ReplacePod return err; nil clears it.
 func (r *Runtime) FailReplacePod(err error) { r.fail("ReplacePod", err) }
+
+// HoldReplacePod makes every later ReplacePod run hold before it asks whether the replacement is
+// still due, which is where the Sandbox runtime waits out the pod's launch turn. A test holds
+// there to do what that wait lets happen — a worker of the round starting a turn, a claim of the
+// issue being launched into the kept pod — and then lets the call go on. nil clears it; the hook
+// runs with none of the fake's own locks held, so it may drive the fake again.
+func (r *Runtime) HoldReplacePod(hold func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.holdReplace = hold
+}
 
 func (r *Runtime) fail(method string, err error) {
 	r.mu.Lock()
@@ -394,10 +406,28 @@ func (r *Runtime) PodDrift(_ context.Context, k runtime.Known) ([]string, error)
 	return append([]string(nil), r.drift[k.Claim]...), nil
 }
 
-// ReplacePod records its call, forgets the claim's drift — the place it named is gone, and the one
-// built in its stead is built from the configuration the runtime has now — and answers what
-// FailReplacePod set, nil by default.
-func (r *Runtime) ReplacePod(_ context.Context, k runtime.Known) error {
+// ReplacePod plays the Sandbox runtime's own order: it waits where that runtime waits for the
+// pod's launch turn (HoldReplacePod), asks due whether the replacement is still due, and only
+// then replaces anything. A due that refuses records a ReplacePodNotDue call and changes nothing
+// — no replacement was made, so no ReplacePod call stands for one — and its error is returned as
+// the runtime hands it back. Otherwise the call is recorded, the claim's drift forgotten — the
+// place it named is gone, and the one built in its stead is built from the configuration the
+// runtime has now — and what FailReplacePod set is answered, nil by default.
+func (r *Runtime) ReplacePod(ctx context.Context, k runtime.Known, due func(context.Context) error) error {
+	r.mu.Lock()
+	hold := r.holdReplace
+	r.mu.Unlock()
+	if hold != nil {
+		hold()
+	}
+	if due != nil {
+		if err := due(ctx); err != nil {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			r.calls = append(r.calls, Call{Method: "ReplacePodNotDue", Pod: copyKnown(k)})
+			return err
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, Call{Method: "ReplacePod", Pod: copyKnown(k)})

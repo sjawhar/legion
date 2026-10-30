@@ -278,7 +278,7 @@ func TestEnrollingWithTheSecretsBrokerDriftsAnIssuePodMadeWithoutIt(t *testing.T
 		t.Fatalf("Resume replaced the pod %s, which the tester's own update round replaces", testerLoc.Sandbox.PodUID)
 	}
 
-	if err := r2.ReplacePod(g.ctx, runtime.Known{Claim: workerToken, Locator: &kept}); err != nil {
+	if err := r2.ReplacePod(g.ctx, runtime.Known{Claim: workerToken, Locator: &kept}, nil); err != nil {
 		t.Fatalf("ReplacePod: %v", err)
 	}
 	tester.Generation, tester.BootToken = 3, "boot-tester-g3"
@@ -361,7 +361,7 @@ func TestChangingTheBrokersAudienceDriftsEveryRoleOfThePodTogether(t *testing.T)
 	}
 
 	// The round is over: the pod is ended once, for every role in it at once.
-	if err := r2.ReplacePod(g.ctx, runtime.Known{Claim: workerToken, Locator: &testerLoc}); err != nil {
+	if err := r2.ReplacePod(g.ctx, runtime.Known{Claim: workerToken, Locator: &testerLoc}, nil); err != nil {
 		t.Fatalf("ReplacePod: %v", err)
 	}
 	ends := map[claim.Token]runtime.Observation{}

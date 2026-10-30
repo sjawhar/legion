@@ -380,8 +380,12 @@ func (r *Runtime) LaunchBound() time.Duration { return 0 }
 func (r *Runtime) PodDrift(context.Context, runtime.Known) ([]string, error) { return nil, nil }
 
 // ReplacePod does nothing and returns nil: this runtime has no pod to replace, and a pane is
-// ended by the claim's own Suspend and Release.
-func (r *Runtime) ReplacePod(context.Context, runtime.Known) error { return nil }
+// ended by the claim's own Suspend and Release. due is never asked, because nothing here waits
+// and nothing here is ended: there is no write for a caller's re-read to come one statement
+// before.
+func (r *Runtime) ReplacePod(context.Context, runtime.Known, func(context.Context) error) error {
+	return nil
+}
 
 // CleanupTree holds nothing per tree: each pane is one claim's process, ended by its Release, and
 // each workspace is the outbox's to remove (workspace_remove).

@@ -2250,10 +2250,16 @@ A role on Claude Code installs neither plugin. That install is `@sjawhar/pi-legi
 `@sjawhar/pi-envoy` from npm, and a phase worker `worker_backends` puts on `claude` loads neither:
 its plugin is the image's own `/opt/legion/claude-envoy`, which no workflow releases. So a
 stale-plugin relaunch of such a claim carries no plugin install (`stalePluginInstall`,
-`packages/daemon/internal/daemon/specs.go`); the claim still relaunches — its start script
-installing the pinned Claude Code as every Claude launch's does — and comes up on the
-image's plugin, which the image probe already held to the daemon's contract. A plugin-contract
-change for a Claude Code role is answered by a new image, never by an install, and
+`packages/daemon/internal/daemon/specs.go`) and could not take the claim onto this daemon's
+contract at all: the process would come up on the same image's plugin, register the same contract
+again, and be relaunched for it until its launch budget failed it — and a failed claim cannot
+push, which is the first step of the drain the daemon itself writes. Such a claim is therefore
+relaunched by nothing: no `StalePlugin` is posted for a Claude Code claim below
+`supervise.PodUpdateContract`, round or no round (`refreshStalePlugins`), and a registration of
+that claim still on the old contract is accepted, uncharged, rather than relaunched
+(`staleRegistration`). What carries it is the round, which marks it `cannotAnswer` and names it in
+the `update-stalled` notice the controller reads, so the operator drains the pod. A
+plugin-contract change for a Claude Code role is answered by a new image, never by an install, and
 `legion start --check-config` says so after its plugin line, naming each role this deployment runs
 on Claude Code: `Claude Code runs <roles>, whose plugin is the worker image's: a plugin-contract
 change for such a role is answered by a new image, not by an install.`
@@ -5011,16 +5017,28 @@ would replace pods the operator never changed.
 What the sweep then opens is one round per issue, since every role of an issue shares its one pod
 (`reconcilePodUpdates`, `packages/daemon/internal/daemon/podupdate.go`). Every claim of the issue
 that has a session and has not retired holds the round back, since its agent has run and may hold
-unpushed work, and each one that can answer is given a task naming the drift and asking it to push
-its work to the issue branch and answer `ready_for_update`. A suspended claim is revived for the
-task, unless the operator's own suspension holds it, which takes the task on the operator's
-resume. A claim that has not answered is asked again every `pod_update_retask_hours` (a
+unpushed work, and each one that can answer is given a task naming the drift, the round's own id
+and asking it to push its work to the issue branch and answer `ready_for_update` with that id. The
+id is what makes the answer that round's: the daemon takes an answer only for the round the claim
+is in now and refuses any other, naming both ids, so an answer given to a task the worker read
+before the round changed counts for nothing and the worker is asked again. A suspended claim is
+revived for the task, unless the operator's own suspension holds it, which takes the task on the
+operator's resume. A claim that has not answered is asked again every `pod_update_retask_hours` (a
 `legion.yaml` key, a decimal number of hours, 1 by default), and never while it holds a task of
 its own. Once every such claim has answered and none is in a turn, the daemon ends the pod
 (`ReplacePod`), each role in it is reported displaced and resumed uncharged on its own session,
-and the first of those resumes provisions a fresh pod from the current configuration. Nothing the
+and the first of those resumes provisions a fresh pod from the current configuration. The
+replacement asks once more, under the pod's own lock and immediately before it suspends anything,
+whether it is still due: the daemon reads the issue's claims from the store again — which is how a
+claim created since the sweep read its list, such as the next phase's role launched into the kept
+pod, is counted — and runs the same waiting and working checks. A claim that has not answered, or
+a turn that started while the replacement waited for the pod's launch turn, aborts it: nothing is
+suspended, the round stays open, and the next sweep decides again. Nothing the
 round decides is held in memory: it is all claim columns, so a daemon restart resumes a round
-where it stood, and each claim shows it as `updateRound` and `updateHead` on every claim view.
+where it stood, and each claim shows it as `updateRound` and `updateHead` on every claim view. A
+round that ends having replaced nothing — the drift returned to nothing, because an operator
+rolled the release back — releases each worker that answered: the task the round held back goes,
+or, when none waits, a short task saying the round is over and that the worker continues its work.
 
 A round that is not finishing is told to the project's controller as an `update-stalled` notice
 `pod_update_notice_hours` after it opened (a `legion.yaml` key, a decimal number of hours, 4 by

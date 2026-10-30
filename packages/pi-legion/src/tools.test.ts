@@ -131,7 +131,8 @@ const OMP_LEGION_TOOL_DESCRIPTION =
   "naming a closed pull request is the architect's to decide) and, for READY, each " +
   "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " +
   "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " +
-  "ready_for_update answers the daemon's update task on this issue's pod. Push every commit you want kept to the issue branch " +
+  "ready_for_update answers the daemon's update task on this issue's pod: `round` is the round id that task names, and the " +
+  "daemon takes your answer for that round alone. Push every commit you want kept to the issue branch " +
   "first, because the pod and its disk are replaced after every worker of the pod has answered. The call ends no phase. The " +
   "daemon holds your next task until your process comes back on the new pod, in this same session. " +
   "request_backward_move returns an issue to an earlier phase (`to`, `reason`): " +
@@ -225,6 +226,7 @@ const OMP_LEGION_TOOL_SCHEMA = JSON.stringify({
     summary: { type: "string" },
     verdict: { type: "string", enum: ["pass", "pending", "fail"] },
     ready: { type: "boolean" },
+    round: { type: "string" },
     status: { type: "string", enum: ["todo", "backlog", "icebox"] },
   },
   required: ["op"],

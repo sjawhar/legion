@@ -99,6 +99,7 @@ function toolSchema(pi: PiApi): unknown {
     summary: phase.summary,
     verdict: phase.verdict,
     ready: phase.ready,
+    round: phase.round,
     status: z.enum(ISSUE_STATUSES).optional(),
   });
 }

@@ -153,12 +153,16 @@ does not answer, stands between it and a reminder telling it to complete again.
 
 **What the update task's answer does.** The same CallTool handler tells the endpoint
 (`updateAnswered`) once the `legion` tool's `ready_for_update` returned without throwing
-(INFRA-484). It closes no phase — answering is not completing — and moves the record to
-`waiting`, the state a WAITING reply buys: the `Stop` of the turn the worker answered in blocks
+(INFRA-484). It closes no phase — answering is not completing — and moves the machine to
+`awaiting-update`, the wait the daemon ends: the `Stop` of the turn the worker answered in blocks
 nothing, so that turn ends and the daemon, which replaces the pod only once every worker of it
 has answered, sees it end. A blocked `Stop` would instead continue that turn, and the work it did
-would go with the pod. A replacement that never comes is reminded about once the quiet wait is
-over, as a WAITING reply's wait is.
+would go with the pod. Nothing is written into that wait and no timer is armed in it, because the
+daemon is what wakes the worker: it replaces the process, or, where the round ends having
+replaced nothing, it sends the task it held behind the round or the short task saying the round
+is over. The record holds the wait as the plain `waiting` a WAITING reply buys
+(`recordedPhaseStall`): only a relaunched process reads a record, and that relaunch is the round
+over.
 
 **The state file.** This host has no transcript entry to record in, so the record is
 `<CLAUDE_CONFIG_DIR>/legion-phase-stall-<session id>.json` (`phaseStallFile`), written whole

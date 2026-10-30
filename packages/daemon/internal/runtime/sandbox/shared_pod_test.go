@@ -89,7 +89,7 @@ func TestReplacingADriftedPodResumesItsOtherLiveRoleOnItsSessionUncharged(t *tes
 	}
 
 	// The round is over: the pod is ended, and with it the architect's process.
-	if err := r2.ReplacePod(g.ctx, runtime.Known{Claim: implementerToken, Locator: &kept}); err != nil {
+	if err := r2.ReplacePod(g.ctx, runtime.Known{Claim: implementerToken, Locator: &kept}, nil); err != nil {
 		t.Fatalf("ReplacePod: %v", err)
 	}
 	implementer.Generation, implementer.BootToken = 3, "boot-implementer-g3"

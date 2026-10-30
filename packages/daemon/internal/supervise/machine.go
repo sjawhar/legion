@@ -189,9 +189,10 @@ type Claim struct {
 // carry by them.
 //
 // The round's id is the one record of its kind: PodRound and PluginRound are how one is written,
-// InPodRound and InPluginRound how a claim's is read. Nothing else carries the kind beside the
-// id, so nothing can disagree with it — UpdateTask words the task from it, and endPodUpdate
-// decides from it whether the round ends in a relaunch.
+// InPodRound and InPluginRound how a claim's is read, and IsPluginRound how a round a claim does
+// not hold yet is read. Nothing else carries the kind beside the id, so nothing can disagree with
+// it — UpdateTask words the task from it, and endPodUpdate decides from it whether the round ends
+// in a relaunch.
 const (
 	PodRoundPrefix    = "pod:"
 	PluginRoundPrefix = "plugin:"
@@ -206,10 +207,14 @@ func PodRound(pod string) string { return PodRoundPrefix + pod }
 func PluginRound(contract int) string { return PluginRoundPrefix + strconv.Itoa(contract) }
 
 // InPodRound and InPluginRound say which kind of round this claim is in; both are false for a
-// claim in no round at all.
+// claim in no round at all. IsPluginRound asks the same of a round id on its own, for the one
+// caller that has the round before any claim holds it (UpdateTask, wording the ask the round
+// sends), so the words and the claim's own reading can never part company.
 func (c Claim) InPodRound() bool { return strings.HasPrefix(c.UpdateRound, PodRoundPrefix) }
 
-func (c Claim) InPluginRound() bool { return strings.HasPrefix(c.UpdateRound, PluginRoundPrefix) }
+func (c Claim) InPluginRound() bool { return IsPluginRound(c.UpdateRound) }
+
+func IsPluginRound(round string) bool { return strings.HasPrefix(round, PluginRoundPrefix) }
 
 // RuleMayResume says whether the rule may resume this suspended claim: every suspension but the
 // operator's, which holds until an operator resumes the claim.
@@ -369,6 +374,20 @@ type Deps struct {
 	// means a stale claim is recorded and reported, never relaunched or refused — relaunching
 	// nothing it cannot build, and refusing nothing a relaunch is not already under way to fix.
 	PluginRelaunchable bool
+	// NoPluginInstall is whether a launch of this claim installs no plugin at all: its role runs
+	// on a backend whose plugin is the worker image's own, which no install reaches (a Claude
+	// Code role's claude-envoy). Only the daemon knows a role's backend — this package cannot
+	// read the configuration a role is launched from — so it states the fact here, as it states
+	// its plugin contract and whether it can relaunch at all. nil is a daemon whose every launch
+	// installs a plugin, which is what every caller that states nothing means.
+	//
+	// A claim it answers true for and whose process is below PodUpdateContract is never
+	// relaunched by the stale-plugin lane and never charged for its stale registration
+	// (staleRegistration): the relaunch would keep the pod, bring the same plugin back and charge
+	// the claim toward failed, and a failed claim cannot push its work. Such a claim is left
+	// running for the operator's drain, which the update round over its pod asks for
+	// (internal/daemon's refreshStalePlugins, cannotAnswer).
+	NoPluginInstall func(c Claim) bool
 	// TaskConfirmed is told of each claim whose pending delivery a turn has just confirmed: the
 	// agent took the work the daemon gave it. The workflow decides what a root still owes its
 	// architect from that (admission's ReconcileAwaiting), so without it a root whose wait was
@@ -457,6 +476,13 @@ var ErrDeliveryPending = wait.New("a delivery is already pending")
 // state: the root ends only with its tree. The refusal adds what stops the root's process instead,
 // where one runs.
 var ErrRootStop = errors.New("the tree's root claim ends only when its tree closes")
+
+// ErrForeignUpdateRound is a ready_for_update that names a round the claim is not in: the round
+// it answers for was replaced while its worker worked, or the claim is in no round at all. The
+// answer counts for the round whose task the worker read and for no other, so it is refused
+// rather than recorded against a round nobody asked this worker about (podUpdateSignalled). The
+// refusal adds both rounds and what the worker does next.
+var ErrForeignUpdateRound = errors.New("the answer names an update round this claim is not in")
 
 // ErrRetryArchitectOnly is the operator's retry of a failed claim that is not an architect's: a
 // phase worker and the daemon's controller each have their own retry (operatorRetry). The refusal

@@ -7,7 +7,9 @@ import { LOCAL_ENVOY_NOTICE } from "./envoy-notice";
  * anyone: in Stage 3 at 1ee62d31 the round-2 implementer wrote its final `legion handoff complete`
  * as text instead of a tool call, so it never ran, and two trees later waited six hours each on a
  * worker that had had its one follow-up. So the worker is reminded at the end of every turn, for as
- * long as its phase stays open. `extensions/legion.ts` feeds this state machine from the session's
+ * long as its phase stays open, except in the one state the daemon itself ends: the wait a
+ * `ready_for_update` answer creates (`awaiting-update`), where the daemon is what wakes the worker
+ * rather than a reminder. `extensions/legion.ts` feeds this state machine from the session's
  * own hooks and `src/phase-reminder.ts` delivers each reminder: the first of a run from
  * `session_stop`, Oh My Pi's hook for a top-level run about to settle, which the host turns into one
  * more turn in the same session, and every one after it from a timer, so the run settles and the
@@ -19,12 +21,21 @@ import { LOCAL_ENVOY_NOTICE } from "./envoy-notice";
  * `handoff_complete`:
  * - `closed`: no assignment since the last successful completion, or none seen yet;
  * - `open`: assigned and not completed, so a turn that settles now earns a reminder;
- * - `waiting`: still open, and the worker is waiting rather than working: its last reply said
- *   with a WAITING line what it waits on, or it has answered the daemon's update task and waits
- *   for the process its claim runs in to be replaced. Either buys the longer quiet wait
- *   `LEGION_STALL_WAITING_MS` before the next reminder.
- * The reminding never stops: a reminder that changes nothing is followed by another. */
-export type PhaseStall = "closed" | "open" | "waiting";
+ * - `waiting`: still open, and the worker's last reply said with a WAITING line what it waits on,
+ *   which buys the longer quiet wait `LEGION_STALL_WAITING_MS` before the next reminder;
+ * - `awaiting-update`: still open, and the worker has answered the daemon's update task
+ *   (`ready_for_update`), so it is to start nothing until the daemon comes back to it. This wait
+ *   earns no reminder and no wait of any length, because the daemon is what wakes the worker: it
+ *   replaces the process, or, where the round ends having replaced nothing — the drift it was
+ *   opened for went away — it sends the task it held behind the round, or the short task saying
+ *   the round is over and the worker is to carry on (`endPodUpdate`, `tellRoundIsOver` in
+ *   `packages/daemon/internal/supervise/table.go`). Either arrives as the daemon's own prompt,
+ *   which is an `assignment` and opens the phase again. A reminder steered into this wait would
+ *   instead be a turn the daemon reads as the answer retracted (`takeBackSignal`), so the round
+ *   would restart at every wait and never converge (INFRA-484).
+ * The reminding never stops where a reminder is the worker's only wake: one that changes nothing
+ * is followed by another. */
+export type PhaseStall = "closed" | "open" | "waiting" | "awaiting-update";
 
 /** The state and how many reminders the worker has done nothing about: `count` climbs by one on
  * every reminder the host actually put in front of the worker and drops to 0 as soon as the worker,
@@ -89,7 +100,8 @@ export function reminderText(lastAssistantText: string): string {
  * The next state, and the reminder the worker has earned by settling. The count moves only on
  * `reminded`, which the host applies once it has actually put the reminder in front of the worker,
  * so a reminder dropped because a task arrived first counts for nothing; `settle` never changes it.
- * `reminded` from `waiting` goes back to `open`, because the wait is over.
+ * `reminded` from either wait goes back to `open`, because the wait is over, and a settle in
+ * either earns no reminder: the reminding is what ends one of them and the daemon the other.
  */
 export function stepPhaseStall(state: PhaseStallState, input: PhaseStallInput): PhaseStallStep {
   switch (input.kind) {
@@ -98,14 +110,16 @@ export function stepPhaseStall(state: PhaseStallState, input: PhaseStallInput): 
     case "phase-closed":
       return { state: { state: "closed", count: 0 } };
     case "update-answered":
-      // The worker has answered the update task and is to start nothing until its process comes
-      // back, so a turn ending now has earned no reminder: a reminder here would continue that
-      // turn in the same run, with work the replacement would throw away and no new turn for the
-      // daemon to see. The phase stays open — answering is not completing — and the worker waits
-      // on the daemon as a WAITING reply waits on CI, so a replacement that never comes is
-      // reminded about once the quiet wait is over. A closed phase is not reopened by one: a
-      // worker between phases is told nothing, and `handoff_complete` would refuse it anyway.
-      return state.state === "closed" ? { state } : { state: { state: "waiting", count: 0 } };
+      // The worker has answered the update task and is to start nothing until the daemon comes
+      // back to it, so a turn ending now has earned no reminder: a reminder here would continue
+      // that turn in the same run, with work a replacement would throw away and no new turn for
+      // the daemon to see. The phase stays open — answering is not completing — and the wait this
+      // begins is the daemon's to end, never a timer's (`awaiting-update`). A closed phase is not
+      // reopened by one: a worker between phases is told nothing, and `handoff_complete` would
+      // refuse it anyway.
+      return state.state === "closed"
+        ? { state }
+        : { state: { state: "awaiting-update", count: 0 } };
     case "inbound-event":
       // A delivery may be what the worker waited on, and it is something happening: an open phase
       // starts its count again. A closed phase is not reopened by one.
@@ -118,6 +132,8 @@ export function stepPhaseStall(state: PhaseStallState, input: PhaseStallInput): 
         ? { state }
         : { state: { state: "open", count: state.count + 1 } };
     case "settle": {
+      // Only an open phase earns a reminder: a closed one has nothing to remind about, and either
+      // wait stands as it is until whatever ends that wait ends it.
       if (state.state !== "open") return { state };
       if (WAITING_REPLY.test(input.lastAssistantText)) {
         return { state: { state: "waiting", count: state.count } };
@@ -201,10 +217,24 @@ export function assistantRanTool(message: unknown): boolean {
   );
 }
 
+/** The states a record holds. The wait a `ready_for_update` answer creates is not one of them: a
+ * record is read only by the process a relaunch starts, and that relaunch is the round the wait
+ * belonged to ending, so the wait is over before anything restores it. It is recorded as the
+ * `waiting` it is a kind of, which a restored session times out as it always did, and which the
+ * build now in the pods — whose states are these and the two below — reads as a state it knows. */
+export type RecordedPhaseStall = Exclude<PhaseStall, "awaiting-update">;
+
+/** The state as a record holds it (`RecordedPhaseStall`). */
+export function recordedPhaseStall(state: PhaseStall): RecordedPhaseStall {
+  return state === "awaiting-update" ? "waiting" : state;
+}
+
 /** The state one recorded entry holds, or undefined when it holds none this build understands.
  * `quiet` and `text-call` are the build now in the pods: both mean the phase is open and nothing
  * has been reminded about it yet, so a session resumed on one is reminded rather than left alone. */
-function phaseStallFrom(data: object): PhaseStallState | undefined {
+function phaseStallFrom(
+  data: object
+): { readonly state: RecordedPhaseStall; readonly count: number } | undefined {
   if (!("state" in data) || typeof data.state !== "string") return undefined;
   const recorded = "count" in data ? data.count : undefined;
   const count =
@@ -256,7 +286,7 @@ export const LAST_MESSAGE_LIMIT = 500;
  * accepted notice, nor loses the key a refused one is retried under, nor sends one that has
  * forgotten what the worker last said. */
 export interface PhaseStallEntry {
-  readonly state: PhaseStall;
+  readonly state: RecordedPhaseStall;
   readonly count: number;
   readonly reported: boolean;
   readonly reportKey?: string;

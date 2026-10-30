@@ -303,7 +303,7 @@ func TestPodDriftAnswersTheScriptAndReplacePodEndsIt(t *testing.T) {
 		t.Fatalf("a claim running nowhere has drifted: %q, %v", got, err)
 	}
 
-	if err := fake.ReplacePod(ctx, known); err != nil {
+	if err := fake.ReplacePod(ctx, known, nil); err != nil {
 		t.Fatalf("replace pod: %v", err)
 	}
 	if got, err := fake.PodDrift(ctx, known); err != nil || len(got) > 0 {
@@ -319,7 +319,7 @@ func TestPodDriftAnswersTheScriptAndReplacePodEndsIt(t *testing.T) {
 	if _, err := fake.PodDrift(ctx, known); !errors.Is(err, refused) {
 		t.Fatalf("pod drift: got %v, want %v", err, refused)
 	}
-	if err := fake.ReplacePod(ctx, known); !errors.Is(err, refused) {
+	if err := fake.ReplacePod(ctx, known, nil); !errors.Is(err, refused) {
 		t.Fatalf("replace pod: got %v, want %v", err, refused)
 	}
 }
