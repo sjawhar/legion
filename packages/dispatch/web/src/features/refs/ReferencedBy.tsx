@@ -20,7 +20,8 @@ import { Timestamp } from "./Timestamp";
 const NODE_LABELS: Record<GraphEdge["node"]["kind"], string> = {
   artifact: "Artifact",
   ask: "Ask",
-  // A block that cites a node shows as the document holding it, linked to the block.
+  // A block of a document that cites a node shows as the document holding it, linked to the
+  // block; a block of a comment or message shows as its item (`blockItem`).
   block: "Artifact",
   comment: "Comment",
   component: "Component",
@@ -44,8 +45,18 @@ const STRUCTURAL_LABELS: Partial<Record<GraphEdge["kind"], string>> = {
 const CLAMP_LINES = 3;
 const CLAMP_CHARACTERS = 240;
 
+/** The comment or message a graph node is a block of: its parent, for a block node naming no
+ *  document (`comment/<uuid>#b2`, `message/<uuid>#b1`); undefined for any other node. */
+function blockItem(node: GraphEdge["node"]): GraphEdge["node"]["parent"] {
+  return node.kind === "block" &&
+    node.document === undefined &&
+    (node.parent?.kind === "comment" || node.parent?.kind === "message")
+    ? node.parent
+    : undefined;
+}
+
 function edgeLabel(edge: GraphEdge): string {
-  return STRUCTURAL_LABELS[edge.kind] ?? NODE_LABELS[edge.node.kind];
+  return STRUCTURAL_LABELS[edge.kind] ?? NODE_LABELS[blockItem(edge.node)?.kind ?? edge.node.kind];
 }
 
 function sourceLabel(edge: GraphEdge): string {
@@ -80,21 +91,25 @@ interface SourceGroup {
   readonly edges: GraphEdge[];
   readonly key: string;
   readonly label: string;
-  /** How many citing nodes the group holds: more than one only when blocks of one document cite
-   *  the node, each then shown as a row linked to its own block. */
+  /** How many citing nodes the group holds: more than one only when blocks of one document, or of
+   *  one comment or message, cite the node, each then shown as a row linked to its own block. */
   readonly nodes: number;
   readonly path: SourcePath | undefined;
 }
 
 /** One entry per citing source, in the server's newest-first order: a document that both holds
  *  an ask's anchor and mentions it is one source with two rows, not two cards, and the blocks of
- *  one document that cite the node are that document's rows. A source of one node links to that
- *  node (a block at the block); a document whose blocks are its rows links to the document, and
- *  each row to its own block. */
+ *  one document, or of one comment or message, that cite the node are that document's or item's
+ *  rows. A source of one node links to that node (a block at the block); a document or item whose
+ *  blocks are its rows links to itself, and each row to its own block. */
 function groupBySource(edges: readonly GraphEdge[]): SourceGroup[] {
   const groups = new Map<string, { edges: GraphEdge[]; nodes: Set<string> }>();
   for (const edge of edges) {
-    const key = edge.node.document ?? edge.node.ref ?? `${edge.node.kind}:${edge.node.id}`;
+    const key =
+      edge.node.document ??
+      blockItem(edge.node)?.ref ??
+      edge.node.ref ??
+      `${edge.node.kind}:${edge.node.id}`;
     const group = groups.get(key) ?? { edges: [], nodes: new Set<string>() };
     group.edges.push(edge);
     group.nodes.add(`${edge.node.kind}:${edge.node.id}`);

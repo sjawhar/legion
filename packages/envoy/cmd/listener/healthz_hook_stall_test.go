@@ -1,22 +1,16 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
-	"github.com/sjawhar/envoy/internal/session"
-	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -43,6 +37,22 @@ func (c *hookStallClock) Advance(d time.Duration) {
 // errHookStallRewatch is what the test's reconnect hook always fails with, written as the listener's
 // own rewatch failure reads, so the answer is checked against the text an operator would see.
 var errHookStallRewatch = errors.New("rewatch interest cache: watch role claims KV bucket: context deadline exceeded")
+
+// failReconnectHooks makes every later run of client's reconnect hooks fail and reconnects it in
+// place, waiting until the bus has recorded the failed run. The hook stands for the listener's own
+// rewatch of its caches, failing however often it is run, as a rewatch whose bucket read never
+// answers does.
+func failReconnectHooks(t *testing.T, client *bus.Client) {
+	t.Helper()
+	client.AddReconnectHook(func(*natsgo.Conn) error { return errHookStallRewatch })
+	if err := client.Conn.ForceReconnect(); err != nil {
+		t.Fatalf("reconnect in place: %v", err)
+	}
+	waitFor(t, 30*time.Second, "the failed run of the reconnect hooks to be recorded", func() bool {
+		_, hookErr := client.HookStall()
+		return hookErr != nil
+	})
+}
 
 // /healthz answers 200 "degraded", naming "KV watch rebuild", once the bus's reconnect hooks have
 // been due a whole bus.RepairGrace without a run that succeeded, and 200 "healthy" while the
@@ -75,16 +85,7 @@ func TestHealthzAnswersAHookStallPastTheRepairGrace(t *testing.T) {
 		t.Fatalf("/healthz a whole bus.RepairGrace after the first connection = %d %v, want 200 healthy", code, body)
 	}
 
-	// The hook stands for the listener's own rewatch of its caches, failing however often it is
-	// run, as a rewatch whose bucket read never answers does.
-	client.AddReconnectHook(func(*natsgo.Conn) error { return errHookStallRewatch })
-	if err := client.Conn.ForceReconnect(); err != nil {
-		t.Fatalf("reconnect in place: %v", err)
-	}
-	waitFor(t, 30*time.Second, "the failed run of the reconnect hooks to be recorded", func() bool {
-		_, hookErr := client.HookStall()
-		return hookErr != nil
-	})
+	failReconnectHooks(t, client)
 	if code, body := get(); code != http.StatusOK || body["status"] != "healthy" {
 		t.Fatalf("/healthz with the rebuild failing under bus.RepairGrace = %d %v, want 200 healthy", code, body)
 	}
@@ -102,10 +103,10 @@ func TestHealthzAnswersAHookStallPastTheRepairGrace(t *testing.T) {
 }
 
 // hookStallFixture is the listener a hook stall is tested against, on the package's shared NATS
-// server: a bus client whose reconnect reporting reads the clock the test moves, the durable bound
-// under consumer, both registries with their caches ready, and the listenerDeps /healthz reads. It
-// returns the client, that clock and a get() serving one /healthz request, which is every piece
-// the tests in this file share.
+// server: a bus client whose reconnect reporting reads the clock the test moves, and over it the
+// listener every other /healthz test is served by (setupUnboundDurableFixture). It returns the
+// client, that clock and a get() serving one /healthz request, which is every piece the tests in
+// this file share.
 func hookStallFixture(t *testing.T, consumer string) (*bus.Client, *hookStallClock, func() (int, map[string]any)) {
 	t.Helper()
 	clock := &hookStallClock{now: time.Now()}
@@ -116,38 +117,7 @@ func hookStallFixture(t *testing.T, consumer string) (*bus.Client, *hookStallClo
 		t.Fatalf("connect the listener's bus: %v", err)
 	}
 	t.Cleanup(client.Close)
-	durable, err := startListenerSubscription(client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
-	if err != nil {
-		t.Fatalf("bind the durable: %v", err)
-	}
-	t.Cleanup(func() { _ = durable.Unsubscribe() })
-	registry, err := store.Open(client.Conn, store.WithReplicas(1))
-	if err != nil {
-		t.Fatalf("open the interest registry: %v", err)
-	}
-	t.Cleanup(registry.StopWatch)
-	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
-	if err != nil {
-		t.Fatalf("open the session registry: %v", err)
-	}
-	t.Cleanup(sessions.StopWatch)
-	ready, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := registry.WaitForCacheReady(ready); err != nil {
-		t.Fatalf("wait for the interest cache: %v", err)
-	}
-	if err := sessions.WaitForCacheReady(ready); err != nil {
-		t.Fatalf("wait for the session cache: %v", err)
-	}
-	deps := &atomic.Pointer[listenerDeps]{}
-	deps.Store(&listenerDeps{client: client, registry: registry, sessions: sessions, caches: listenerCaches(registry, sessions, nil), consumer: consumer})
-	get := func() (int, map[string]any) {
-		recorder := httptest.NewRecorder()
-		healthzHandler(deps).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-		var body map[string]any
-		_ = json.Unmarshal(recorder.Body.Bytes(), &body)
-		return recorder.Code, body
-	}
+	get := setupUnboundDurableFixture(t, client, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() })
 	return client, clock, get
 }
 
@@ -162,14 +132,7 @@ func TestHealthzReportsARecreatedDurableThroughAHookStall(t *testing.T) {
 	consumer := "listener-healthz-hook-stall-unbound"
 	client, clock, get := hookStallFixture(t, consumer)
 
-	client.AddReconnectHook(func(*natsgo.Conn) error { return errHookStallRewatch })
-	if err := client.Conn.ForceReconnect(); err != nil {
-		t.Fatalf("reconnect in place: %v", err)
-	}
-	waitFor(t, 30*time.Second, "the failed run of the reconnect hooks to be recorded", func() bool {
-		_, hookErr := client.HookStall()
-		return hookErr != nil
-	})
+	failReconnectHooks(t, client)
 	clock.Advance(bus.RepairGrace)
 	if code, body := get(); code != http.StatusOK || body["status"] != "degraded" {
 		t.Fatalf("/healthz a whole bus.RepairGrace into the stall, durable still bound = %d %v, want 200 degraded", code, body)
@@ -178,7 +141,7 @@ func TestHealthzReportsARecreatedDurableThroughAHookStall(t *testing.T) {
 	recreateListenerDurable(t, client, consumer)
 
 	code, body := get()
-	want := "durable consumer unavailable: not bound to this listener's subscription"
+	want := "durable consumer unavailable: " + errDurableUnbound.Error()
 	if code != http.StatusServiceUnavailable || body["status"] != "unhealthy" || fmt.Sprint(body["error"]) != want {
 		t.Fatalf("/healthz with the durable recreated a whole bus.RepairGrace into the stall = %d %v, want 503 unhealthy with error %q", code, body, want)
 	}

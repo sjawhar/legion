@@ -401,7 +401,7 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 // probes act on /healthz: the ECS container health check is curl -sf /healthz, every 30 s with 3
 // retries (infra/aws/rendering/listener.go:202-203), on a service of one task
 // (infra/aws/webhooklistener.go:227), and GKE's readiness probe reads it too
-// (infra/gcp/dispatch_kube.go:516). A 503 would replace, or unroute, the only listener there is,
+// (infra/gcp/dispatch_kube.go, readyProbe). A 503 would replace, or unroute, the only listener there is,
 // and its replacement rebuilds into the same failing rewatch with cold caches that warm up empty,
 // whose fanout then acknowledges general-topic messages as unmatched and loses them (delivery.go,
 // fanoutDelivery), while the running task still serves from the caches it holds, stale but not
@@ -459,17 +459,6 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 				return
 			}
 		}
-		response := map[string]interface{}{"status": "healthy"}
-		for k, v := range sessionHealthFields(d.sessions) {
-			response[k] = v
-		}
-		if d.ciStore == nil {
-			response["ci_cache"] = "not_applicable"
-		}
-		response["live_topics"] = "not_applicable"
-		if d.live != nil {
-			response["live_topics"] = "subscribed"
-		}
 		consumerInfo, err := d.client.JS().ConsumerInfo(bus.Stream, d.consumer, nats.Context(ctx))
 		if err != nil {
 			// A read ctx ended did not answer, the info read's own form of healthzPing's unanswered.
@@ -494,6 +483,17 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			}
 			writeDependencyHealth(w, "KV watch rebuild", rebuild, false)
 			return
+		}
+		response := map[string]interface{}{"status": "healthy"}
+		for k, v := range sessionHealthFields(d.sessions) {
+			response[k] = v
+		}
+		if d.ciStore == nil {
+			response["ci_cache"] = "not_applicable"
+		}
+		response["live_topics"] = "not_applicable"
+		if d.live != nil {
+			response["live_topics"] = "subscribed"
 		}
 		response["num_pending"] = consumerInfo.NumPending
 		response["num_ack_pending"] = consumerInfo.NumAckPending

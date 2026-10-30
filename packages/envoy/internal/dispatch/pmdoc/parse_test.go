@@ -460,6 +460,53 @@ func TestParseJoinsAParagraphsLinesOnce(t *testing.T) {
 	}
 }
 
+// Each top-level block starts where its own markdown does: front matter at 0, a heading at its
+// marker, a paragraph at its first line, a fenced code block at its opening fence, a table at its
+// header row and a callout at its opener. The tree is the one Parse reads, and the empty paragraph
+// of a document with no blocks starts nowhere.
+func TestParseWithSourceStartsPlacesEveryTopLevelBlock(t *testing.T) {
+	openings := []string{
+		"---\ntitle: x\n---",
+		"# Heading",
+		"A paragraph\nsecond line.",
+		"```go\ncode\n```",
+		"| a | b |\n|---|---|\n| 1 | 2 |",
+		":::callout{kind=\"note\"}\nInside.\n:::",
+	}
+	markdown := strings.Join(openings, "\n\n") + "\n"
+	doc, starts, err := ParseWithSourceStarts(markdown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := Parse(markdown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !doc.Equal(parsed) {
+		got, _ := doc.JSON()
+		want, _ := parsed.JSON()
+		t.Fatalf("tree differs from Parse\n got: %s\nwant: %s", got, want)
+	}
+	types := []string{"frontmatter", "heading", "paragraph", "code_block", "table", "callout"}
+	if len(doc.Children) != len(types) || len(starts) != len(types) {
+		t.Fatalf("children = %d, starts = %v, want %d of each", len(doc.Children), starts, len(types))
+	}
+	for index, opening := range openings {
+		want := strings.Index(markdown, opening)
+		if doc.Children[index].Type != types[index] || starts[index] != want {
+			t.Errorf("child %d = %s at %d, want %s at %d", index, doc.Children[index].Type, starts[index], types[index], want)
+		}
+	}
+
+	_, starts, err = ParseWithSourceStarts(" \n\n\t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(starts) != 1 || starts[0] != -1 {
+		t.Errorf("starts of a body of whitespace = %v, want [-1]", starts)
+	}
+}
+
 func tablePaddingBomb(width int) string {
 	return strings.Repeat("| header ", width) + "|\n" +
 		strings.Repeat("| --- ", width) + "|\n" +
