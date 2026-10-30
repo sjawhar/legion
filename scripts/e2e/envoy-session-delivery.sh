@@ -60,7 +60,7 @@
 #
 #   bash scripts/e2e/envoy-session-delivery.sh [--disruptions a,b,c,d,e,f]
 #       [--build-from <rev> [--expect-lost <agent,issue,role>]] [--plugins-from <rev>]
-#       [--listener-grant current|before-session-consumers]
+#       [--listener-grant current|before-session-consumers] [--resume-plugins-from <rev>]
 #
 # --build-from <rev> builds the listener, pi-envoy, claude-envoy and the `legion` bridge from <rev>
 # instead, extracted with `git archive <rev> | tar -x` into the run's directory; natsd and Dispatch
@@ -77,6 +77,14 @@
 # stays this checkout's. It is the pair a release meets first, a hub already updated and a session
 # still running the plugins of the release before it. The two flags name one tree each and are not
 # given together.
+#
+# --resume-plugins-from <rev> is the upgrade, and it runs only with disruption a: both sessions
+# start on the plugins built from <rev>, and the resume after the SIGKILL starts them on this
+# checkout's, so one session's own life crosses the release. It is the move every Legion worker
+# makes when its image is re-pinned: the session registered on the old plugin's path, went away,
+# the stream stored its events, and the new plugin opens its first consumer. The run judges the
+# table as it always does, so every event of every window must still be counted once. The flag
+# names one tree, as --plugins-from and --build-from do, and is not given with either.
 #
 # --listener-grant before-session-consumers runs both listeners as a NATS user whose grant is the
 # listener grant from before session consumers (packages/envoy-client/test/listener-grant.ts
@@ -150,6 +158,7 @@ usage() {
 # ---- arguments and inputs ---------------------------------------------------------------------
 build_from=""
 plugins_from=""
+resume_plugins_from=""
 listener_grant=current
 expect_lost=""
 disruptions="a,b,c,d,e,f"
@@ -157,6 +166,7 @@ while (($#)); do
   case $1 in
   --build-from) [ $# -ge 2 ] || refuse "--build-from needs a revision"; build_from=$2; shift 2 ;;
   --plugins-from) [ $# -ge 2 ] || refuse "--plugins-from needs a revision"; plugins_from=$2; shift 2 ;;
+  --resume-plugins-from) [ $# -ge 2 ] || refuse "--resume-plugins-from needs a revision"; resume_plugins_from=$2; shift 2 ;;
   --listener-grant) [ $# -ge 2 ] || refuse "--listener-grant needs current or before-session-consumers"; listener_grant=$2; shift 2 ;;
   --expect-lost) [ $# -ge 2 ] || refuse "--expect-lost needs a list of kinds"; expect_lost=$2; shift 2 ;;
   --disruptions) [ $# -ge 2 ] || refuse "--disruptions needs a list"; disruptions=$2; shift 2 ;;
@@ -171,6 +181,10 @@ done
 [[ -z "$expect_lost" || ",$disruptions," == *",a,"* ]] || refuse "--expect-lost judges disruption a, which --disruptions leaves out"
 [[ -z "$plugins_from" || -z "$build_from" ]] ||
   refuse "--plugins-from and --build-from each name the tree the plugins are built from; give one"
+[[ -z "$resume_plugins_from" || ( -z "$build_from" && -z "$plugins_from" ) ]] ||
+  refuse "--resume-plugins-from names the tree the sessions start on; do not give it with --build-from or --plugins-from"
+[[ -z "$resume_plugins_from" || ",$disruptions," == *",a,"* ]] ||
+  refuse "--resume-plugins-from upgrades the sessions at disruption a, which --disruptions leaves out"
 [[ "$listener_grant" == current || "$listener_grant" == before-session-consumers ]] ||
   refuse "--listener-grant takes current or before-session-consumers, not '$listener_grant'"
 
@@ -425,6 +439,46 @@ else
   claude_plugin="$plugins_tree/packages/claude-envoy"
 fi
 [ -r "$claude_plugin/dist/envoy-channel.js" ] || fail "$claude_plugin has no dist/envoy-channel.js"
+# use_plugins PI_JS CLAUDE_DIR: what the next start_pi and start_cc load. The Claude Code plugin
+# directories and the MCP config name the directory, so both follow it.
+use_plugins() {
+  pi_plugin=$1
+  claude_plugin=$2
+  plugin_dirs=(--plugin-dir "$claude_plugin")
+  [ -d "$claude_plugin/legion" ] && plugin_dirs+=(--plugin-dir "$claude_plugin/legion")
+  return 0
+}
+# --resume-plugins-from: the sessions start on <rev>'s plugins and are resumed on this run's, so
+# one session's own life crosses the release. Both sets are built before anything starts, since a
+# build between the SIGKILL and the resume would hold the sessions down for minutes.
+pi_plugin_after=$pi_plugin
+claude_plugin_after=$claude_plugin
+upgrade_label=""
+if [[ -n "$resume_plugins_from" ]]; then
+  before_rev=$(git -C "$repo_root" rev-parse --verify --quiet "${resume_plugins_from}^{commit}") ||
+    refuse "--resume-plugins-from $resume_plugins_from names no commit git can read"
+  before_tree="$work/plugins-before-${before_rev:0:12}"
+  mkdir -p "$before_tree"
+  git -C "$repo_root" archive "$before_rev" | tar -x -C "$before_tree" ||
+    fail "git archive $before_rev | tar -x failed"
+  (cd "$before_tree" && bun install --frozen-lockfile) >"$work/logs/bun-install-before.log" 2>&1 ||
+    fail "bun install in $before_tree failed; see $work/logs/bun-install-before.log"
+  before_tarball=$(bash "$before_tree/scripts/e2e/lib/pack-plugin.sh" pi-envoy "$work/pack-before" 2>"$work/logs/pack-pi-envoy-before.log") ||
+    fail "pi-envoy did not pack from $before_tree; see $work/logs/pack-pi-envoy-before.log"
+  mkdir -p "$work/pi-envoy-before"
+  tar xzf "$before_tarball" -C "$work/pi-envoy-before" --strip-components=1
+  [ -r "$work/pi-envoy-before/dist/envoy.js" ] || fail "the packed pi-envoy of $before_rev holds no dist/envoy.js"
+  if grep -q -- '--out <dir>' "$before_tree/packages/claude-envoy/scripts/build.ts"; then
+    claude_plugin_before="$work/claude-envoy-before"
+    (cd "$before_tree" && bun packages/claude-envoy/scripts/build.ts --out "$claude_plugin_before") >"$work/logs/build-claude-envoy-before.log" 2>&1 ||
+      fail "claude-envoy did not build from $before_tree; see $work/logs/build-claude-envoy-before.log"
+  else
+    claude_plugin_before="$before_tree/packages/claude-envoy"
+  fi
+  [ -r "$claude_plugin_before/dist/envoy-channel.js" ] || fail "$claude_plugin_before has no dist/envoy-channel.js"
+  use_plugins "$work/pi-envoy-before/dist/envoy.js" "$claude_plugin_before"
+  upgrade_label="pi-envoy $(jq -r .version "$work/pi-envoy-before/package.json") and claude-envoy $(jq -r .version "$claude_plugin_before/package.json") from ${before_rev:0:12} until the resume of window a, then this run's"
+fi
 # The bridge argv Legion builds: claudelaunch.Argv since main moved it there, tmux/claude.go before.
 replay_flag=()
 for argv_source in packages/daemon/internal/claudelaunch/claudelaunch.go packages/daemon/internal/runtime/tmux/claude.go; do
@@ -432,8 +486,7 @@ for argv_source in packages/daemon/internal/claudelaunch/claudelaunch.go package
     replay_flag=(--replay-user-messages)
   fi
 done
-plugin_dirs=(--plugin-dir "$claude_plugin")
-[ -d "$claude_plugin/legion" ] && plugin_dirs+=(--plugin-dir "$claude_plugin/legion")
+use_plugins "$pi_plugin" "$claude_plugin"
 printf '#!/bin/sh\nexec bunx --package @anthropic-ai/claude-code@%s claude "$@"\n' "$claude_version" >"$work/bin/claude"
 chmod +x "$work/bin/claude"
 bun_bin=$(command -v bun)
@@ -445,7 +498,8 @@ listener_held=0
 if grep -rqs --include='*.go' --exclude='*_test.go' ENVOY_LISTEN_FD "$tree/packages/envoy/cmd/listener"; then listener_held=1; fi
 listener_ports="serve on kept ports (ENVOY_LISTEN_FD)"
 ((listener_held == 1)) || listener_ports="take no ENVOY_LISTEN_FD: each binds a picked port, again on its restart"
-note "pi-envoy $(jq -r .version "$work/pi-envoy/package.json"); claude-envoy $(jq -r .version "$claude_plugin/package.json"); Claude Code ${claude_reported}; omp $("$omp" --version 2>/dev/null | head -n 1); bridge argv ${replay_flag[*]:-without --replay-user-messages}; the listeners ${listener_ports}"
+note "pi-envoy $(jq -r .version "$work/pi-envoy/package.json"); claude-envoy $(jq -r .version "$work/claude-envoy/package.json" 2>/dev/null || jq -r .version "$claude_plugin_after/package.json"); Claude Code ${claude_reported}; omp $("$omp" --version 2>/dev/null | head -n 1); bridge argv ${replay_flag[*]:-without --replay-user-messages}; the listeners ${listener_ports}"
+[[ -z "$upgrade_label" ]] || note "upgrade: the sessions start on ${upgrade_label}"
 
 # ---- services ---------------------------------------------------------------------------------
 begin services
@@ -605,9 +659,15 @@ prepare_session() {
 prepare_session pi
 prepare_session cc
 [ -d "$natives" ] && ln -sfT "$natives" "${home[pi]}/home/.omp/natives"
-jq -n --arg bun "$bun_bin" --arg entry "$claude_plugin/dist/envoy-channel.js" --arg data "${home[cc]}/config/envoy-plugin-data" \
-  '{mcpServers: {legion: {command: $bun, args: [$entry], env: {CLAUDE_PLUGIN_DATA: $data}}}}' >"${home[cc]}/config/mcp.json"
-chmod 600 "${home[cc]}/config/mcp.json"
+# write_mcp_config: the one MCP server Claude Code loads, naming the claude-envoy the run uses now
+# (use_plugins). The upgrade rewrites it before the resume, so the resumed Claude Code loads the
+# new plugin's channel server rather than the one it started on.
+write_mcp_config() {
+  jq -n --arg bun "$bun_bin" --arg entry "$claude_plugin/dist/envoy-channel.js" --arg data "${home[cc]}/config/envoy-plugin-data" \
+    '{mcpServers: {legion: {command: $bun, args: [$entry], env: {CLAUDE_PLUGIN_DATA: $data}}}}' >"${home[cc]}/config/mcp.json"
+  chmod 600 "${home[cc]}/config/mcp.json"
+}
+write_mcp_config
 
 rpc_send() { printf '%s\n' "$2" >&"${fd[$1]}"; }
 rpc_log() { printf '%s/rpc-%s.log' "${home[$1]}" "${launches[$1]}"; }
@@ -936,6 +996,11 @@ run_window() {
     publish_dispatch a
     publish_rest a "$via"
     sleep 3
+    if [[ -n "$resume_plugins_from" ]]; then
+      use_plugins "$pi_plugin_after" "$claude_plugin_after"
+      write_mcp_config
+      note "upgrade: both sessions resume on this run's pi-envoy and claude-envoy, after the window's events were stored"
+    fi
     start_pi "${transcript[pi]}"
     start_cc resume
     ;;

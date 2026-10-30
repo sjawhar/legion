@@ -2946,6 +2946,11 @@ LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:<port>/postgres?sslmode=disabl
 # carries, and this checkout's hub with the plugins of the release before it.
 … bash scripts/e2e/envoy-session-delivery.sh --listener-grant before-session-consumers
 … bash scripts/e2e/envoy-session-delivery.sh --plugins-from origin/main
+
+# The upgrade: the sessions start on the plugins of <rev> and are resumed on this checkout's, so
+# one session's own life crosses the release — the move every Legion worker makes when its image
+# is re-pinned. Only with disruption a, which is the window it upgrades in.
+… bash scripts/e2e/envoy-session-delivery.sh --disruptions a --resume-plugins-from origin/main
 ```
 
 It runs in an issue pod: no Docker, tmux or root. It needs `go`, `bun`, `jq`, `curl`, `socat`
