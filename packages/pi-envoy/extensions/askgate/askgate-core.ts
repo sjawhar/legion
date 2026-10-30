@@ -225,12 +225,14 @@
 // what ends that wait is the cut the entry owns (`askgate.ts`, `RECORD_CUT_DELAY_MS`). The records
 // of one session are written one at a time, and each carries the time the gate made it, which is
 // what the reader counts by.
-// The order after the decision settles, per call: the halt count, the rules count, the block reset,
-// the entry, that record started, the override put back as a comment, the marker, the notes. The
-// mint comes last and only where the decision does not block, so no refused call ever leaves a
-// marker; a call whose own tool ended while the gate still held it — its review is the await such
-// an end falls in — is minted none either, since nothing of it runs any more, and its entry says
-// `mintSkipped: "call-ended"`.
+// The order, per call: the override is put back as a comment before the review, so the
+// acknowledgement the review renders says where it went and the mint reads the command that
+// finally runs; then, once the decision settles, the halt count, the rules count, the block
+// reset, the entry, the marker, that record started, the notes. The mint comes only where the
+// decision does not block, so no refused call ever leaves a marker; a call whose own tool ended
+// while the gate still held it — its review is the await such an end falls in — is minted none
+// either, since nothing of it runs any more, and its entry says `mintSkipped: "call-ended"`. The
+// record starts after the mint, so it carries the decision the call finally got.
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -244,6 +246,7 @@ import {
   operandPath,
   uploadIsDocument,
 } from "@legion/envoy-client/askgate-marker";
+import type { DispatchSession } from "../../src/dispatch-session";
 import requestTemplate from "./askgate-request.md" with { type: "text" };
 import systemTemplate from "./askgate-system.md" with { type: "text" };
 import uploadRule from "./askgate-upload.md" with { type: "text" };
@@ -254,7 +257,6 @@ import ruleCheckSystem from "./rule-check-system.md" with { type: "text" };
 import rules from "./rules.md" with { type: "text" };
 import {
   type Answer,
-  type DispatchSession,
   matchLines,
   RULE_FAILURE_OUTCOMES,
   type RuleName,
@@ -1040,11 +1042,15 @@ function scanWord(text: string, from: number): { end: number; value: string; unr
  * a `2>&1` and a `| head` or `| tail` stage, each with the blanks before it, since the dry-run's
  * stdout must be the CLI's JSON alone. `leadingCd` is that `cd`'s path when the `cd` opens the
  * whole call, which is where Oh My Pi's bash tool looks for one to take as the call's directory
- * (`extractLeadingCdTarget` at the pin). `lineEnd` is where the command's own line ends as the
- * tokenizer reads it: after its last word and after any `2>&1`, here-document opener and
- * `| head` or `| tail` stage, never inside a quoted value (a quoted newline is no line end to
- * bash) and never in a here-document's body. That is the one place bash reads a comment as a
- * comment, so it is where the grammar takes one and where `keepOverrideVisible` writes one.
+ * (`extractLeadingCdTarget` at the pin). `lineEnd` is where the command's own line ends as bash
+ * reads it: after its last word and after any `2>&1`, here-document opener and `| head` or
+ * `| tail` stage. It is the end of the line bash reads, not of the line of text: a newline inside
+ * a quoted value is part of a word, and a line continuation between two tokens is removed before
+ * bash reads the line, so a head written over several lines of text still ends in one place, and
+ * never inside a here-document's body. That one place is where bash reads a comment as a comment,
+ * and the head decides it once, here: it is where `keepOverrideVisible` writes the override
+ * comment and where this reads one back (`comment`), so writer and reader never disagree about
+ * where a comment may stand.
  * `comment` is that one override comment (`overrideComment`): where it starts, with the blanks
  * before it, where it ends, and its words, which `scopedCommand` reads as overrides and no part
  * of the command runs. */
@@ -1060,37 +1066,19 @@ interface DispatchHead {
   comment?: { span: [number, number]; words: Word[] };
 }
 
-/** Whether a newline bash reads as one stands between `from` and `at`: a newline inside quotes is
- * part of a word and ends no line, and a line continuation's newline, which bash removes before it
- * reads words, is one all the same — the gate writes its comment where the tokenizer's line ends
- * and never past a continuation, so a comment after one is another line's and is not the gate's. */
-function newlineOutsideQuotes(text: string, from: number, at: number): boolean {
-  let quote: '"' | "'" | undefined;
-  for (let index = from; index < at; index++) {
-    const char = text[index];
-    if (quote !== undefined) {
-      if (char === quote) quote = undefined;
-    } else if (char === "'" || char === '"') quote = char;
-    else if (char === "\n") return true;
-  }
-  return false;
-}
-
 /**
  * The comment that ends a command's own line when it holds override flags alone, the form
  * `keepOverrideVisible` hands a rebutted command back in (`# --advisor-rebuttal '<line>'`), so the
  * gate reads its own output again as the rebuttal it carries. Its words must be literal, and each
  * one part of an override `splitRebuttal` takes. Returns where the comment starts, with the blanks
- * before it, where it ends, and its words; undefined for any other comment, and for one on a later
- * line of the call (`from` is where the call's own text starts), which is a here-document's body
- * or another line's: neither is a form the gate writes or reads.
+ * before it, where it ends, and its words; undefined for any other comment. Where a comment may
+ * stand is `dispatchCommandHead`'s one answer, and this is asked for the comment standing there
+ * alone.
  */
 function overrideComment(
   command: string,
-  token: { start: number; end: number },
-  from: number
+  token: { start: number; end: number }
 ): DispatchHead["comment"] | undefined {
-  if (newlineOutsideQuotes(command, from, token.start)) return undefined;
   const words: Word[] = [];
   for (const inner of shellTokens(command.slice(token.start + 1, token.end))) {
     if (!isWord(inner) || inner.unread.length > 0) return undefined;
@@ -1110,10 +1098,8 @@ function dispatchCommandHead(command: string): DispatchHead | undefined {
   if (hasControlCharacter(command)) return undefined;
   const tokens = shellTokens(command);
   let index = 0;
+  // The blank lines before the call, which bash runs as no command.
   while (isOp(tokens[index], "\n")) index++;
-  // Where the call's own text starts, after the blank lines bash runs as no command: a comment
-  // before this is on another line, and none of those lines is the command's.
-  const headAt = tokens[index]?.start ?? 0;
   let cdEnd: number | undefined;
   let leadingCd: string | undefined;
   const cd = tokens[index];
@@ -1177,14 +1163,15 @@ function dispatchCommandHead(command: string): DispatchHead | undefined {
   }
   // One shell comment may stand where the command's line ends (`lineEnd`), and only when its
   // words are override flags alone (`overrideComment`), the form a rebutted command is handed
-  // back in. That is where bash reads one as a comment: after the command's last word and after
-  // every `2>&1`, here-document opener and `| head` or `| tail` stage on that line. A `#`
+  // back in. The token the head ends on is that comment or nothing of the gate's: a `#` on a
+  // later line has the newline operator that ends the head before it, while a line continuation
+  // between the head's tokens ends no line and leaves what follows it on the head's own. A `#`
   // anywhere else is no override comment, and the call is then outside the grammar. The comment
   // is no word of the command, so `commandArgv` and the dry run leave it out, as bash does.
   let comment: DispatchHead["comment"] | undefined;
   const commented = tokens[index];
   if (commented?.kind === "comment") {
-    comment = overrideComment(command, commented, headAt);
+    comment = overrideComment(command, commented);
     if (comment === undefined) return undefined;
     index++;
   }
@@ -1963,10 +1950,9 @@ const SECOND_REVISE =
  * How the agent overrides a revise on each surface: a key in the device JSON, or a flag on the
  * command. `how` completes a charter revise; `again` completes the rules refusal's "send the call
  * again with"; `fate` completes both refusals' "an override is always sent and recorded, and",
- * saying what becomes of the override on that surface; `note` follows either refusal. `removed`
- * is set where the override does not survive the call the agent reads back: a device's field
- * always, and a command's flag when the gate could not write it as a comment it reads back
- * (`keepOverrideVisible`), which the acknowledgement then says.
+ * saying what becomes of the override on that surface; `note` follows either refusal. Whether the
+ * override survived the call the agent reads back is no fact of the surface but of the one call,
+ * and the acknowledgement is told it (`kept`).
  */
 type Override = {
   how: string;
@@ -1974,14 +1960,12 @@ type Override = {
   again: string;
   fate: string;
   note?: string;
-  removed?: true;
 };
 const DEVICE_OVERRIDE: Override = {
   how: `"${REBUTTAL_KEY}": "<one line>" added to the JSON`,
   what: "field",
   again: `\`"${REBUTTAL_KEY}": "<one line>"\` in its JSON`,
   fate: "the field is removed before the call runs",
-  removed: true,
 };
 const COMMAND_OVERRIDE: Override = {
   how: `${REBUTTAL_FLAG} '<one line>' added to its flags`,
@@ -2043,11 +2027,11 @@ const renderWarn = (reason: string) =>
 // So a command keeps its flag as a shell comment (`keepOverrideVisible`), and the acknowledgement
 // says where; a device's JSON cannot carry the field, and neither can a command whose override
 // the gate could not write as a comment it reads back, so those say AskGate removed it.
-const renderRebuttalAck = ({ line, sent }: Rebuttal, override: Override) =>
+const renderRebuttalAck = ({ line, sent }: Rebuttal, override: Override, kept: boolean) =>
   `<advisor-gate advisor="AskGate" outcome="rebuttal">\nYou sent this call with ${agentFacing(sent)}. AskGate recorded your rebuttal "${agentFacing(line)}", and the call was sent without review. ${
-    override.removed === true
-      ? `${override.what === "flag" ? "dispatch" : "The device"} does not take that ${override.what}, so AskGate removed it before the call ran: your record of the call lacks it because AskGate removed it, not because you left it out.`
-      : "dispatch does not take that flag, so it stays a shell comment where the command's line ends, after everything that runs: it is in your record of the call, and dispatch never saw it."
+    kept
+      ? "dispatch does not take that flag, so it stays a shell comment where the command's line ends, after everything that runs: it is in your record of the call, and dispatch never saw it."
+      : `${override.what === "flag" ? "dispatch" : "The device"} does not take that ${override.what}, so AskGate removed it before the call ran: your record of the call lacks it because AskGate removed it, not because you left it out.`
   }\n</advisor-gate>`;
 /**
  * A value written as one quoted word of the literal grammar: single-quoted, in which bash takes
@@ -2056,10 +2040,12 @@ const renderRebuttalAck = ({ line, sent }: Rebuttal, override: Override) =>
  * both a `'` and one of those (`'\''` is a backslash, which the grammar refuses to read), or a
  * newline, which would end the comment and leave what follows to run.
  *
- * Every word is quoted, the flag's own name included, so that the quotes stay paired through the
- * comment: were it ever written where a single-quoted value is still open, the first quote of the
- * first word would close that value and the next would open one around the agent's line, which
- * is the only part of the comment the agent writes. Nothing it holds can expand or run.
+ * Every word is quoted, the flag's own name included, so that bash takes every character of the
+ * comment as text where the comment stands. The quoting is no safety of its own: written where a
+ * single-quoted value is still open, the first quote of the first word would close that value and
+ * the next would open one around the agent's line, which would then stand outside every quote and
+ * run. What makes the comment safe is the place it is written in, the end of the command's line
+ * (`lineEnd`), which is the one place bash reads it as a comment at all.
  */
 function literalWord(value: string): string | undefined {
   if (value.includes("\n")) return undefined;
@@ -2068,10 +2054,10 @@ function literalWord(value: string): string | undefined {
 }
 /**
  * The override the agent sent, as the words of the comment that carries it: each word quoted so
- * that bash takes every character of it as text, whatever the comment's own place turns out to be,
- * and in a form the gate's own grammar reads back as the same override. Only the quoting changes;
- * the words the CLI would have seen are the agent's own. Undefined when one of them cannot be
- * written that way, and the override is then removed instead of kept.
+ * that bash takes every character of it as text where the comment stands, at the end of the
+ * command's line, and in a form the gate's own grammar reads back as the same override. Only the
+ * quoting changes; the words the CLI would have seen are the agent's own. Undefined when one of
+ * them cannot be written that way, and the override is then removed instead of kept.
  */
 function overrideWords(sent: string): string | undefined {
   const words: string[] = [];
@@ -2083,24 +2069,21 @@ function overrideWords(sent: string): string | undefined {
   }
   return words.length === 0 ? undefined : words.join(" ");
 }
-const sameArgv = (one: string[] | undefined, two: string[] | undefined): boolean =>
-  one !== undefined &&
-  two !== undefined &&
-  one.length === two.length &&
-  one.every((word, index) => word === two[index]);
 /**
  * The command with the override the gate took out put back as a shell comment, and whether it went
- * in, which the acknowledgement says. The comment stands where the command's line ends as the
- * tokenizer reads it (`lineEnd`): after the last word, any `2>&1`, any here-document opener and
- * any `| head` or `| tail` stage. Only there does bash read it as a comment, and nowhere else is
- * it safe — inside a multi-line quoted value its own first quote would close that value's, handing
- * the CLI other arguments and leaving what the rebuttal holds to the shell.
+ * in, which the acknowledgement says. The comment stands where the command's line ends
+ * (`lineEnd`), the one place the head takes a comment of the call as well: after the last word,
+ * any `2>&1`, any here-document opener and any `| head` or `| tail` stage. Only there does bash
+ * read it as a comment, and nowhere else is it safe — inside a multi-line quoted value its own
+ * first quote would close that value's, handing the CLI other arguments and leaving what the
+ * rebuttal holds to the shell.
  *
- * So the gate reads its own output back before it hands it over: the commented command must be the
- * same command, word for word (`commandArgv`) and text for text, carrying the same rebuttal and
- * nothing the shell expands (every word of the grammar is literal). Where it is not, the command
- * goes back without the comment rather than changed, and the acknowledgement says the flag was
- * removed.
+ * So the gate reads its own output back before it hands it over, through the same grammar it
+ * writes for: the commented command must read as the same command, text for text, carrying the
+ * same rebuttal. That is the gate's own tokenizer reading the gate's own output, so it proves the
+ * grammar takes back what was written, not that bash and the tokenizer agree. Where it does not,
+ * the command goes back without the comment rather than changed, and the acknowledgement says the
+ * flag was removed.
  */
 function keepOverrideVisible(
   input: Input,
@@ -2110,15 +2093,10 @@ function keepOverrideVisible(
   if (rebuttal === undefined || typeof command !== "string") return { input, kept: false };
   const head = dispatchCommandHead(command);
   const words = overrideWords(rebuttal.sent);
-  if (head === undefined || head.comment !== undefined || words === undefined)
-    return { input, kept: false };
+  if (head === undefined || words === undefined) return { input, kept: false };
   const commented = `${command.slice(0, head.lineEnd)} # ${words}${command.slice(head.lineEnd)}`;
   const read = scopedCommand(commented);
-  if (
-    read?.command !== command ||
-    read.rebuttal?.line !== rebuttal.line ||
-    !sameArgv(commandArgv(commented), commandArgv(command))
-  )
+  if (read?.command !== command || read.rebuttal?.line !== rebuttal.line)
     return { input, kept: false };
   return { input: { ...input, command: commented }, kept: true };
 }
@@ -2316,7 +2294,8 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     /** Why a waiting gate was given up: its own deadline, the user or the runner ending its call or run, or the session shutting down. */
     type Cause = "timeout" | "abandoned" | "shutdown";
     /** Why a waiting gate was given up by something other than its own deadline. */
-    type Abandon = (cause: Exclude<Cause, "timeout">, graceMs?: number) => void;
+    type GivenUpCause = Exclude<Cause, "timeout">;
+    type Abandon = (cause: GivenUpCause, graceMs?: number) => void;
     /** Each waiting gated call's one stop, by its tool call id. */
     const inflight = new Map<string, Abandon>();
     /**
@@ -2769,9 +2748,10 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     /**
      * One gated call, as the review and each of its branches read it: the call and the session it
      * came from, when the handler took it, what its entry already holds, its breaker key, the
-     * rebuttal it carries and the surface an override is written on, the one stop everything the
-     * call waits on is raced against, the directory its command runs in, and whether its dry run
-     * showed an upload (which the charter request names).
+     * rebuttal it carries, the surface an override is written on and whether this call's override
+     * stayed on the command the agent reads back (`keepOverrideVisible`; a device's field never
+     * does), the one stop everything the call waits on is raced against, the directory its command
+     * runs in, and whether its dry run showed an upload (which the charter request names).
      */
     type GatedCall = {
       event: ToolCallEvent;
@@ -2781,6 +2761,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       key: string;
       rebuttal: Rebuttal | undefined;
       override: Override;
+      kept: boolean;
       stop: Stop;
       directory: () => Promise<string | undefined>;
       upload: boolean;
@@ -2847,7 +2828,8 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     };
 
     const decide = async (call: GatedCall): Promise<Decision> => {
-      const { event, ctx, started, base, key, rebuttal, override, stop, directory, upload } = call;
+      const { event, ctx, started, base, key, rebuttal, override, kept, stop, directory, upload } =
+        call;
       // Before any path that lets the write out: a session with no model role refuses in both
       // modes, and a rebuttal, a halt, a breaker trip or a shutdown is no exception, since none
       // of them is a review and the gate cannot review anything at all here.
@@ -2857,7 +2839,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         breaker.reset(key);
         return {
           fields: { decision: "allow", outcome: "rebuttal", rebuttal: rebuttal.line },
-          result: { additionalContext: renderRebuttalAck(rebuttal, override) },
+          result: { additionalContext: renderRebuttalAck(rebuttal, override, kept) },
           effect: "none",
         };
       }
@@ -3049,7 +3031,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         }
       | { failure: string }
       | { unreadable: UnreadableCommand }
-      | { cause: Exclude<Cause, "timeout"> }
+      | { cause: GivenUpCause }
       | { unscoped: true };
     const readArgs = async (
       scoped: ScopedCommand,
@@ -3071,14 +3053,21 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       const { CDPATH: _cdpath, ...env } = deps.env;
       /**
        * Why this call was given up, as a read here can see it: its tool's end or the session's
-       * shutdown. Never its own deadline, which `decide` arms once every read below has returned.
+       * shutdown, and undefined while it was not given up. Never its own deadline, which `decide`
+       * arms once every read below has returned: a deadline here would mean the gate had armed it
+       * over a read it still waits on, and a read that took that for "not stopped" would hand the
+       * call's own arguments to a review whose time is already spent. So it throws, and the
+       * handler records the call as an error and lets it run.
        */
-      const abandoned = (): Exclude<Cause, "timeout"> | undefined =>
-        stop.cause === undefined || stop.cause === "timeout" ? undefined : stop.cause;
+      const abandoned = (): GivenUpCause | undefined => {
+        if (stop.cause === "timeout")
+          throw new Error("the gate's deadline fired while its dry run was still reading");
+        return stop.cause;
+      };
       /** Runs one script as the dry run runs: in `cwd`, under the limit, stopped with the call. */
       const runScript = async (
         script: string
-      ): Promise<{ run: DryRunResult } | { cause: Exclude<Cause, "timeout"> }> => {
+      ): Promise<{ run: DryRunResult } | { cause: GivenUpCause }> => {
         // Stopped like a waiting model call: the run's stop or the session's shutdown kills it.
         const run = await deps.dryRun(script, {
           cwd,
@@ -3090,10 +3079,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         return cause === undefined ? { run } : { cause };
       };
       /** The script's stdout, or why it gave none: a stop, the limit, or an exit other than 0. */
-      type Ran =
-        | { stdout: string; stderr: string }
-        | { failure: string }
-        | { cause: Exclude<Cause, "timeout"> };
+      type Ran = { stdout: string; stderr: string } | { failure: string } | { cause: GivenUpCause };
       const stdoutOf = async (script: string, what: string): Promise<Ran> => {
         const ran = await runScript(script);
         if ("cause" in ran) return ran;
@@ -3335,9 +3321,6 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       // A `dispatch` command with its override flag removed and put back as a shell comment,
       // which runs whatever the gate decides.
       let revised: Input | undefined;
-      // The override the call carried, and the surface it went back on: the acknowledgement says
-      // the flag stayed as a comment, or that AskGate removed it where it could not.
-      let override: Override | undefined;
       // What the call's dry run printed and the digests of the files the gate read, which a
       // marker for the command it ran binds.
       let dryRun: { args: Input; files: readonly FileDigest[] } | undefined;
@@ -3374,6 +3357,12 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         if (event.toolName === "bash") {
           const scoped = scopedCommand(event.input.command);
           if (scoped === undefined) return undefined;
+          // The surface an override of this call is written on, whether it carries one or not:
+          // both refusals say what becomes of one sent on it.
+          const override = scoped.readsFile ? FILE_OVERRIDE : COMMAND_OVERRIDE;
+          // Whether the override this call carries stayed on the command the agent reads back,
+          // which the acknowledgement says.
+          let kept = false;
           if (scoped.rebuttal !== undefined) {
             // The comment goes on before the review, so the acknowledgement the review renders
             // says where the override went, and the mint reads the command that finally runs.
@@ -3382,8 +3371,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
               scoped.rebuttal
             );
             revised = back.input;
-            const surface = scoped.readsFile ? FILE_OVERRIDE : COMMAND_OVERRIDE;
-            override = back.kept ? surface : { ...surface, removed: true as const };
+            kept = back.kept;
           }
           base = { ...identity(event, mode), tool: scoped.tool, path: scoped.label };
           // Before the dry run and before any path that lets the write out: with no model role
@@ -3430,7 +3418,8 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
                   base,
                   key,
                   rebuttal: scoped.rebuttal,
-                  override: override ?? (scoped.readsFile ? FILE_OVERRIDE : COMMAND_OVERRIDE),
+                  override,
+                  kept,
                   stop,
                   directory: run.directory,
                   upload: scoped.upload === true,
@@ -3463,6 +3452,8 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
               key,
               rebuttal,
               override: DEVICE_OVERRIDE,
+              // A device's field is removed before the call runs, always.
+              kept: false,
               stop,
               directory: async () => ctx.cwd,
               upload: false,

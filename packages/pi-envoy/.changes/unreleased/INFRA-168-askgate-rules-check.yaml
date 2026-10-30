@@ -15,9 +15,11 @@ body: |-
   dispatch never sees it and the agent's record of its call still shows it, and the acknowledgement
   quotes every override as the agent sent it and records every line: told only that the flag was
   removed, agents read their own call back without it and reported a rebuttal they never wrote.
-  Every word of that comment is quoted, so nothing a rebuttal holds can expand or run wherever the
-  comment stands, and AskGate reads the commented command back as the same call before it hands it
-  over: an override no word of the form it reads can carry is removed instead, and the
+  Every word of that comment is quoted, and the comment stands at the end of the command's line
+  because that is the one place bash reads it as a comment at all: written anywhere else, inside a
+  single-quoted value that is still open, the quotes would pair around the agent's own line and
+  leave it outside them. AskGate reads the commented command back as the same call before it hands
+  it over: an override no word of the form it reads can carry is removed instead, and the
   acknowledgement says so. That command sent again is
   read as the same rebuttal and comes back unchanged, any other comment leaves the command outside
   the form AskGate reads, and the run-end self-check counts it as the one `dispatch` command it is,

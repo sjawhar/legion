@@ -15,7 +15,7 @@ import {
   type DocumentTarget,
   readDocumentBlocks,
 } from "@legion/envoy-client/dispatch-execute";
-import type { DispatchClient } from "@legion/envoy-client/dispatch-http";
+import type { DispatchSession } from "../../src/dispatch-session";
 import requestTemplate from "./rule-check-request.md" with { type: "text" };
 import {
   byteLength,
@@ -116,12 +116,6 @@ export type Walked = {
   /** The walk's own time, the render of its request included. */
   elapsedMs: number;
 };
-
-/** A Dispatch client for one directory, and the addresses a dashboard-URL `ref` may be on. */
-export interface DispatchSession {
-  readonly client: DispatchClient;
-  readonly serverUrls: readonly string[];
-}
 
 /** What the core lends the rules check: its model walk, its stop's signal, and the session's Dispatch. */
 export interface RulesCheckDeps {

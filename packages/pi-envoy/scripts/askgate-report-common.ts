@@ -1,7 +1,8 @@
 // What both AskGate reports read and count with: the JSON field readers a session entry and a
 // decision record are read through, and the four counts they share. `askgate-report.ts` reports
 // over the session files on disk; `askgate-report-dispatch.ts` over a Dispatch project's decision
-// documents. Neither imports the other, so a count lives here or in the one report that has it.
+// documents, and the session report imports it for the Dispatch half of its own, so a count both
+// of them make lives here rather than in either report.
 
 /** A value and how many entries hold it. */
 export interface Count {

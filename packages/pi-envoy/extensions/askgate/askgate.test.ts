@@ -18,6 +18,7 @@ import { newAsks } from "@legion/envoy-client/askgate-new-asks";
 import { runDispatchCli } from "@legion/envoy-client/dispatch-cli";
 import { DispatchClient, DispatchServiceError } from "@legion/envoy-client/dispatch-http";
 import { sessionDirectory } from "@legion/envoy-client/dispatch-session-state";
+import type { DispatchSession } from "../../src/dispatch-session";
 import * as core from "./askgate-core";
 import {
   ADVISOR_GATE_ENTRY_TYPE,
@@ -40,7 +41,7 @@ import {
 } from "./askgate-core";
 import * as fx from "./askgate-fixtures";
 import { createDecisionRecorder, RECORD_CUT_DELAY_MS, type RecordClient } from "./decision-record";
-import type { DispatchSession, RuleMatch } from "./rules-check";
+import type { RuleMatch } from "./rules-check";
 import { renderTemplate } from "./text";
 
 /** Runs a `dispatch` command's --dry-run as the entry's binding does. */
@@ -2793,24 +2794,46 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
           }
         }, 30_000);
 
-    test("an override the gate cannot write where the line ends is removed, not written wrong", async () => {
-      // The call's own `cd` is continued over two lines, so the line the tokenizer ends is the
-      // text's second: a comment there is another line's, which the gate does not read as an
-      // override. It reads its own output back before it hands it over, finds the rebuttal gone,
-      // and hands the command over without the comment rather than changed.
+    // #2161, reviewer round 16: the call's own `cd` is continued over two lines, so the command's
+    // line ends on the text's second line. Bash removes the continuation before it reads the
+    // line, so a comment there is still the one place bash reads a comment, and the gate reads
+    // its own output back as the same call. The reader used to refuse any comment with a newline
+    // before it, continuations included, so the gate wrote a comment its own reader dropped and
+    // the agent was told AskGate had removed the flag — the very case the visible comment is for.
+    test("an override written where a continued command's line ends is kept, and bash reads it as a comment", async () => {
       const g = bind({
         env: { ...STUB, OMP_ASKGATE: "warn" },
         cwd: work,
         complete: async () => ({ text: REVISE }),
       });
+      const without = `cd ${work} \\\n  && dispatch comment --issue X-1 --body hi`;
       const result = await g.bash(
         "continued",
         `cd ${work} \\\n  && dispatch comment --issue X-1 --advisor-rebuttal 'the owner asked' --body hi`
       );
-      expect(result?.input?.command).toBe(
-        `cd ${work} \\\n  && dispatch comment --issue X-1 --body hi`
-      );
-      expect(result?.additionalContext).toContain("so AskGate removed it before the call ran");
+      const handed = result?.input?.command as string;
+      expect(handed).toBe(`${without} # '--advisor-rebuttal' 'the owner asked'`);
+      // What real bash does with the command the agent reads back and may resend.
+      const run = Bun.spawnSync({
+        cmd: ["bash", "-c", handed],
+        cwd: work,
+        env: { PATH: `${argvBin}:${process.env.PATH}` },
+        stdin: "ignore",
+      });
+      expect({ stderr: run.stderr.toString(), code: run.exitCode }).toEqual({
+        stderr: "",
+        code: 0,
+      });
+      const got = JSON.parse(run.stdout.toString()) as { argv: string[] };
+      // The CLI gets the call without its override: every word of the comment is comment text.
+      expect(got.argv).toEqual(["comment", "--issue", "X-1", "--body", "hi"]);
+      expect(core.commandArgv(handed)).toEqual(got.argv);
+      // And the gate reads its own output back as the same command and the same rebuttal.
+      expect(core.scopedCommand(handed)).toMatchObject({
+        command: without,
+        rebuttal: { line: "the owner asked" },
+      });
+      expect(result?.additionalContext).toContain("it stays a shell comment");
       expect(g.entries).toMatchObject([{ outcome: "rebuttal", rebuttal: "the owner asked" }]);
     });
   });
@@ -2935,14 +2958,12 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
     }
   });
   test("an override comment anywhere but the end of the command's line is no override", () => {
-    // Design 2: the gate reads back only what it writes, which stands where the tokenizer ends
-    // the line. A comment on a later line of the call is another line's, and a comment before a
-    // stage that still runs is one bash reads as text of the comment, not of the call: neither is
-    // a form the gate hands back, and reading either as an override would take a rebuttal from a
-    // call the agent never rebutted.
+    // Design 2: the gate reads back only what it writes, which stands where the command's line
+    // ends. A comment on a line of its own is another line's, and a comment before a stage that
+    // still runs is one bash reads as text of the comment, not of the call: neither is a form the
+    // gate hands back, and reading either as an override would take a rebuttal from a call the
+    // agent never rebutted.
     for (const command of [
-      // After a line continuation: the comment is on the call's second line.
-      "dispatch ask --issue X-1 \\\n  --question 'Ship?' # --advisor-rebuttal 'r'",
       // Before a pipe stage, where bash takes `| head -n 5` for comment text.
       "dispatch comment --issue X-1 --body hi # --advisor-rebuttal 'r' | head -n 5",
       // On the line after the command's own.
@@ -2953,14 +2974,25 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
         scoped: core.scopedCommand(command),
         argv: core.commandArgv(command),
       }).toEqual({ command, scoped: undefined, argv: undefined });
-    // A newline inside a quoted value ends no line, so the comment after that value is the
-    // gate's own, and the call is the same rebuttal.
-    const quoted =
-      "dispatch comment --issue X-1 --body 'See it.\nThanks.' # '--advisor-rebuttal' 'the owner asked'";
-    expect(core.scopedCommand(quoted)).toMatchObject({
-      command: "dispatch comment --issue X-1 --body 'See it.\nThanks.'",
-      rebuttal: { line: "the owner asked" },
-    });
+    // Neither a newline inside a quoted value nor a line continuation ends the line bash reads,
+    // so the comment after either stands where the gate writes one, and the call is the same
+    // rebuttal.
+    for (const [what, command, without] of [
+      [
+        "a quoted newline",
+        "dispatch comment --issue X-1 --body 'See it.\nThanks.' # '--advisor-rebuttal' 'the owner asked'",
+        "dispatch comment --issue X-1 --body 'See it.\nThanks.'",
+      ],
+      [
+        "a continuation between the command's words",
+        "dispatch ask --issue X-1 \\\n  --question 'Ship?' # '--advisor-rebuttal' 'the owner asked'",
+        "dispatch ask --issue X-1 --question 'Ship?'",
+      ],
+    ])
+      expect({ what, scoped: core.scopedCommand(command) }).toMatchObject({
+        what,
+        scoped: { command: without, rebuttal: { line: "the owner asked" } },
+      });
   });
   test("a device call and a command on one target share its breaker", async () => {
     const g = bind({
@@ -3389,7 +3421,7 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
 
     // The mint comes once, after every check and after the call's own entry: a write no review
     // stands behind whose entry fails is refused, and leaves no marker the CLI could spend.
-    test("a write no review stands behind whose record fails is refused, and mints no marker", async () => {
+    test("a write no review stands behind whose entry fails is refused, and mints no marker", async () => {
       const g = bind({ env: { ...STUB, OMP_ASKGATE: "warn" }, cwd: work, recordThrows: true });
       // The stub refuses `--fail` at its dry run: no review stands behind the call.
       const result = await g.bash("unrecorded", "dispatch message --issue X-1 --fail");
@@ -3518,18 +3550,21 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
     test("no marker is minted before both checks have answered", async () => {
       /** The markers the store held as each model call answered. */
       const atAnswer: number[] = [];
-      /** The same, and how many checks had answered, when the decision record was written. */
+      /**
+       * The same, and how many checks had answered, when the record first called Dispatch: the
+       * read of the document by name, which every record makes before it writes anything.
+       */
       let atRecord: { markers: number; answered: number } | undefined;
       const answer = (text: string) => async () => {
         atAnswer.push(markersIn(g.store).length);
         return { text, usage: USAGE };
       };
       const client = {
-        getProjectArtifact: () => Promise.reject(NO_DOCUMENT),
-        projectArtifact: async () => {
+        getProjectArtifact: () => {
           atRecord = { markers: markersIn(g.store).length, answered: atAnswer.length };
-          return { artifact: { id: "doc-1" } };
+          return Promise.reject(NO_DOCUMENT);
         },
+        projectArtifact: async () => ({ artifact: { id: "doc-1" } }),
         docEdit: async (_id: string, input: { ops: unknown[] }) => ({ applied: input.ops.length }),
       } satisfies RecordClient;
       const g = bind({
@@ -3545,7 +3580,7 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
       expect((await g.bash("ordered", ASK))?.block).toBeUndefined();
       // Neither check found a marker: the store was still empty when each answered.
       expect(atAnswer).toEqual([0, 0]);
-      // The record ran after the mint, with both checks answered.
+      // The record asked Dispatch for the first time after the mint, with both checks answered.
       expect(atRecord).toEqual({ markers: 1, answered: 2 });
       expect(markersIn(g.store)).toMatchObject([{ toolCallId: "ordered", outcome: "verdict" }]);
     });

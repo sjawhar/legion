@@ -456,9 +456,12 @@ anyway in one of three ways:
 A rebuttal sends the call with no review by either check, and the entry records the line. The
 CLI takes no such flag, so the gate moves it into a shell comment where the command's line ends,
 after everything that runs, where the agent's record of its call still shows it and dispatch never
-sees it; that command sent again is read as the same rebuttal and comes back unchanged. Every word
-of that comment is quoted, so nothing the rebuttal holds can expand or run wherever it stands, and
-the gate reads the commented command back as the same call before it hands it over: an override no
+sees it; that command sent again is read as the same rebuttal and comes back unchanged. The
+comment stands at the end of the command's line because that is the one place bash reads it as a
+comment at all: every word of it is quoted, which keeps the comment's own quotes paired, but
+nowhere else would that quoting hold — written where a single-quoted value is still open, the
+quotes would pair around the agent's line and leave it outside them. The gate reads the commented
+command back as the same call before it hands it over: an override no
 word of the grammar can carry — a line holding both a `'` and a `$`, or a newline — is removed
 instead, and the acknowledgement says so. A device takes no such field, so the gate removes it
 before the call runs and says so. Either way the acknowledgement

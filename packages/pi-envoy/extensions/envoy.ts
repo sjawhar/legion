@@ -594,6 +594,13 @@ process.env.DISPATCH_HOST = "omp";
 // nothing on and turns both sections off.
 const CONFIG_FILE = sessionConfigFile("omp", process.env);
 if (CONFIG_FILE.path !== null) process.env.ENVOY_CONFIG_FILE = CONFIG_FILE.path;
+/**
+ * The session's Dispatch for one request of this extension's own, which has `ms` to answer: the
+ * one builder (`sessionDispatchClient`), resolved again per call, so a Dispatch that moved takes
+ * effect without a reload. Undefined when the session has no Dispatch configuration.
+ */
+const timedDispatchClient = (ms: number) =>
+  sessionDispatchClient(CONFIG_FILE, process.cwd(), AbortSignal.timeout(ms))?.client;
 
 export default function envoyExtension(pi: PiApi): void {
   logger.debug("extension instance loaded", { extension: import.meta.url });
@@ -638,9 +645,10 @@ export default function envoyExtension(pi: PiApi): void {
   // session start; a gate that did not load refuses each write it would review.
   const askgateNotices: string[] = [];
   let askgateLoad: Promise<void> = Promise.resolve();
-  // The gate's registration, while it is bound: what publishes the Dispatch record of a write
-  // that reached the CLI outside the form the gate reads, and what cuts a record still in flight
-  // at shutdown.
+  // The gate's registration, while it is bound: the load, which the start notice reads, and what
+  // publishes the Dispatch record of a write that reached the CLI outside the form the gate reads
+  // (`recordUnmarked`). The records' shutdown is the recorder's own, registered where the gate
+  // binds (`askgate.ts`), so this entry holds no cut of its own.
   let askgateRecorder: AskGateRegistration | undefined;
   // The session's envoy.json as the gate's own reads go through it, set only where the switch is
   // on: the file object the session resolved, not a path rebuilt from it.
@@ -887,11 +895,7 @@ export default function envoyExtension(pi: PiApi): void {
     requestedSessionID: string,
     since?: string
   ): Promise<OpenAsksResponse | null> => {
-    const dispatch = sessionDispatchClient(
-      CONFIG_FILE,
-      process.cwd(),
-      AbortSignal.timeout(OPEN_ASKS_TIMEOUT_MS)
-    )?.client;
+    const dispatch = timedDispatchClient(OPEN_ASKS_TIMEOUT_MS);
     if (dispatch === undefined) return null;
     const snapshot = await dispatch.openAsks(requestedSessionID, since);
     availabilityWarningSessionIDs.delete(requestedSessionID);
@@ -1365,11 +1369,7 @@ export default function envoyExtension(pi: PiApi): void {
     handledDispatchAttempts.add(key);
     pi.appendEntry(HANDLED_ATTEMPT_ENTRY, { attempt: delivery.attempt, message_id: delivery.id });
     try {
-      const dispatch = sessionDispatchClient(
-        CONFIG_FILE,
-        process.cwd(),
-        AbortSignal.timeout(USER_TURN_ACCEPT_TIMEOUT_MS)
-      )?.client;
+      const dispatch = timedDispatchClient(USER_TURN_ACCEPT_TIMEOUT_MS);
       if (dispatch === undefined) return undefined;
       const accepted = await dispatch.acceptMessageDelivery(delivery.id, delivery.attempt, {
         actor: { id: acceptedSessionID, kind: "session" },
@@ -1525,12 +1525,7 @@ export default function envoyExtension(pi: PiApi): void {
             const card = await withDeliveredPictures(
               rendered.content,
               rendered.pictures ?? [],
-              () =>
-                sessionDispatchClient(
-                  CONFIG_FILE,
-                  process.cwd(),
-                  AbortSignal.timeout(DELIVERY_PICTURES_TIMEOUT_MS)
-                )?.client,
+              () => timedDispatchClient(DELIVERY_PICTURES_TIMEOUT_MS),
               true,
               shown
             );
@@ -1550,12 +1545,7 @@ export default function envoyExtension(pi: PiApi): void {
             const delivery = await withDeliveredPictures(
               turn.body,
               pictureAddresses(turn.body),
-              () =>
-                sessionDispatchClient(
-                  CONFIG_FILE,
-                  process.cwd(),
-                  AbortSignal.timeout(DELIVERY_PICTURES_TIMEOUT_MS)
-                )?.client,
+              () => timedDispatchClient(DELIVERY_PICTURES_TIMEOUT_MS),
               false,
               shown
             );
