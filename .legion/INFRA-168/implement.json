@@ -2,50 +2,49 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-168",
-  "completed": "2026-10-30T03:40:00Z",
-  "round": "the round answering the review of ca8969e1 (15 open threads, all fixed here; code commits 984933ef and 08ff93e8, code head 08ff93e8601c1b7cae5298e5fba3dc68e280d096)",
+  "completed": "2026-10-30T05:35:00Z",
+  "round": "the narrowed round answering the review of fb41159d (4 findings, the architect's Narrow decision; code commits c0d1d13e and 451e53fc, code head 451e53fcee72189100fb9da9a74bc354ac1c15ea)",
   "proof": [
     {
-      "criterion": "Decision records reach Dispatch under load (the review's correctness finding on A5's counts): every gated call's record lands once, or its loss is counted.",
-      "surface": "22 nested headless Oh My Pi sessions at once (11 OMP_ASKGATE=block, 11 warn), on this branch's build with the branch's dispatch CLI first on PATH, in this Legion pod, against the real model and production Dispatch, on the scratch issue dispatch://INFRA-814 (every ask retracted, issue closed after the run).",
-      "command": "$TMPDIR/i168/g7/run.sh L<i>-<mode> <mode> for i in 1..11, both modes in parallel, 03:18:23Z-03:20:17Z; each session runs a no-change `dispatch ask --issue INFRA-814 …` (refused by the rules check), resends it with --advisor-rebuttal, retracts the ask. Then per session: the advisor-gate entries' toolCallIds against `dispatch doc-read --project INFRA --artifact askgate-decisions-<session>-md` ids; `bun packages/pi-envoy/scripts/askgate-report.ts --dispatch-project INFRA --since 2026-10-30T03:18:23Z` and `--sessions $TMPDIR/i168/g7/sessions --since … --sample 0`.",
-      "observed": "43 advisor-gate entries in 22 sessions, 43 records in Dispatch, each carrying its call's id; 0 missing, 0 duplicate, 0 advisor-gate-record entries. Dispatch reader: sessions 22, duplicate records 0, rules calls 22, refusals 22, overrides 21 (one warn session's call was not refused, so no resend). Session-file report: gated calls 43, decision records lost 0. Under the same load at ca8969e1 the tester saw 13 of 31 records given up.",
-      "headSha": "08ff93e8601c1b7cae5298e5fba3dc68e280d096",
-      "negativeControl": "One block session (N1) with DISPATCH_URL at a local port where nothing answers: both its records failed (advisor-gate-record entries with recordError ECONNREFUSED), and the session-file report printed `decision records lost: 2` of `gated calls: 2`. Unit: 'a record Dispatch answers long after the old 5 s stop still lands, exactly once' and 'records queued behind a slow write all land…' fail with the 5 s stop restored."
+      "criterion": "Every decision reaches Dispatch once, or the session counts it as not confirmed, under load, with the session's document created once and every record appended (thread PRRT_kwDORFy7ds6x189x) and the unmarked write's record started after its entry and tool result (PRRT_kwDORFy7ds6x189z).",
+      "surface": "22 nested headless Oh My Pi sessions at once on this branch's build, its dispatch CLI first on PATH, in this Legion pod, against the real model and production Dispatch, on the scratch issue dispatch://INFRA-814 (reopened for the run, every ask retracted, closed after): 20 sessions sent a no-change dispatch ask (10 block, 10 warn) that the rules check refused and resent it with --advisor-rebuttal; 2 sessions (block, warn) sent an unmarked ask through `| cat`.",
+      "command": "$TMPDIR/i168/g7/run2.sh P<i>-<mode> <mode> (i 1..10) and PROMPT=prompt-u.txt run2.sh U1-<mode> <mode>, all in parallel 05:22:46Z-05:25:10Z; per session the advisor-gate entries' ids (recordId for an unmarked entry) against `dispatch doc-read --project INFRA --artifact askgate-decisions-<session>-md`; `bun packages/pi-envoy/scripts/askgate-report.ts --dispatch-project INFRA --since 2026-10-30T05:22:46Z` and `--sessions <the 22 sessions> --since … --sample 0`.",
+      "observed": "43 advisor-gate entries, 43 records in Dispatch, 0 missing, 0 duplicate, 0 advisor-gate-record follow-ups. Each document holds the fixed header with no record, then one appended block per record (U1-warn: the unmarked record with id `toolu_…#0`). Dispatch reader: sessions 22, duplicate records 0, rules calls 21, refusals 20, overrides 20, unmarked writes refused in block mode 1, posted in warn mode 1. Session-file report: gated calls 43, decision records not confirmed 0.",
+      "headSha": "451e53fcee72189100fb9da9a74bc354ac1c15ea",
+      "negativeControl": "Two sessions with DISPATCH_URL at a local port where nothing answers: N2-block (a gated ask and its rebuttal) wrote 2 advisor-gate-record follow-ups with recordError ECONNREFUSED; N2u-warn (an unmarked ask) wrote its advisor-gate entry first and then 1 follow-up keyed on its recordId `toolu_…#0`; the session-file report printed `decision records not confirmed: 3` of `gated calls: 3`. Unit red test 'a first create this side gave up on, committed late, cannot replace the records written since' fails on fb41159d's recorder (document holds [\"t1\"]); 'an unmarked write's tool result returns while its record still waits on Dispatch' times out on the awaiting handler; 'a gated call's unconfirmed record is counted once, not again on each unmarked entry of its tool call' gives 3 on the old join."
     },
     {
-      "criterion": "The review's other 14 findings: one definition of where the override comment stands, the read-back's one rule, one owner of the shutdown cut, an entry-write refusal recorded as revise, the mint-order assertion, and the wording, dead code, duplication and structure items.",
-      "surface": "pi-envoy's test suite, including the real-bash override table and the new continuation row, which run each handed command in bash against a stand-in dispatch and a sentinel file.",
-      "command": "cd packages/pi-envoy && bun run build && bunx tsc --noEmit && bun test && bun run lint; bun test extensions/askgate/askgate.test.ts -t 'byte for byte|the override comment, wherever'; cd packages/pi-legion && bun test scripts/skill-scenarios/score.test.ts; bunx biome check .",
-      "observed": "1668 pass, 0 fail; A1's pin and the override table 32 pass, 0 fail; score.test.ts 0 fail; biome clean. 'an override written where a continued command's line ends is kept, and bash reads it as a comment' gives dispatch the exact argv, no sentinel.",
-      "headSha": "08ff93e8601c1b7cae5298e5fba3dc68e280d096",
-      "negativeControl": "With newlineOutsideQuotes and the headAt guard restored, the continuation test fails (the comment is dropped); with startRecord moved before the mint, 'no marker is minted before both checks have answered' fails (markers 0, expected 1)."
+      "criterion": "The report counts each unconfirmed record once and names the figure as an upper bound (PRRT_kwDORFy7ds6x1893, PRRT_kwDORFy7ds6x189-).",
+      "surface": "pi-envoy and envoy-client test suites.",
+      "command": "cd packages/pi-envoy && bun run build && bunx tsc --noEmit && bun test && bun run lint; bun test extensions/askgate/askgate.test.ts -t 'byte for byte'; cd packages/envoy-client && bunx tsc --noEmit && bun test; bunx biome check .",
+      "observed": "pi-envoy 1678 pass, 0 fail; A1's pin 1 pass, unedited; envoy-client 0 fail; biome clean. The printed line is `decision records not confirmed: N`, and the reconciliation says the Dispatch report counts at most that many decisions fewer.",
+      "headSha": "451e53fcee72189100fb9da9a74bc354ac1c15ea",
+      "negativeControl": "With the join reverted to copy a gated follow-up onto every entry of its toolCallId, the reviewer's probe (one gated entry, two unmarked under the same id, one follow-up) counts 3, not 1."
     }
   ],
   "filesChanged": [
+    "packages/envoy-client/src/dispatch-http.ts",
+    "packages/envoy-client/src/__tests__/dispatch-keyed-writes.test.ts",
+    "packages/envoy-client/.changes/unreleased/INFRA-168-caller-idempotency-key.yaml",
     "packages/pi-envoy/extensions/askgate/decision-record.ts",
     "packages/pi-envoy/extensions/askgate/decision-record.test.ts",
     "packages/pi-envoy/extensions/askgate/askgate-core.ts",
     "packages/pi-envoy/extensions/askgate/askgate.ts",
     "packages/pi-envoy/extensions/askgate/askgate.test.ts",
-    "packages/pi-envoy/extensions/askgate/rules-check.ts",
     "packages/pi-envoy/extensions/envoy.ts",
     "packages/pi-envoy/extensions/envoy.test.ts",
     "packages/pi-envoy/scripts/askgate-report.ts",
     "packages/pi-envoy/scripts/askgate-report.test.ts",
-    "packages/pi-envoy/scripts/askgate-report-dispatch.ts",
     "packages/pi-envoy/scripts/askgate-report-dispatch.test.ts",
-    "packages/pi-envoy/scripts/askgate-report-common.ts",
     "packages/pi-envoy/README.md",
     "packages/pi-envoy/AGENTS.md",
-    "packages/pi-envoy/.changes/unreleased/INFRA-168-askgate-decision-record.yaml",
-    "packages/pi-envoy/.changes/unreleased/INFRA-168-askgate-rules-check.yaml",
-    "packages/pi-legion/scripts/skill-scenarios/score.ts"
+    "packages/pi-envoy/.changes/unreleased/INFRA-168-askgate-decision-record.yaml"
   ],
   "trickyParts": [
-    "A record write now has no stop of its own: it runs under the client's keyed retries (one Idempotency-Key per call) until Dispatch answers or the shutdown cut, 1,250 ms after shutdown begins, ends it. A record still lost is counted from the session file (`decision records lost`), and a copy Dispatch stored anyway is dropped by the reader on (session, id) and counted as `duplicate records`.",
-    "An unmarked write's record id is `<toolCallId>#<line>`, since one tool call can log several writes in the CLI ledger.",
-    "abandoned()'s throw on \"timeout\" has no test: that state is unreachable from the public API."
+    "Dispatch has no create-only upload: an upload of a known name replaces its text (artifacts.go:445-516). The rule 'never uploaded twice to effect' rests on Dispatch's Idempotency-Key, agreed with the architect: the create is a fixed header-only body for the session under the key askgate-doc.<sha256(project, name)>, and every record, the first included, is a doc-edit insert at the end under askgate-rec.<sha256(session, record id)>. A repeat create is replayed, 409 KEY_IN_FLIGHT (the client retries), 409 KEY_COMMITTED or 422 KEY_REUSED; the last two go to the read by name and the append, never a second upload.",
+    "Fact 1, the key's scope: Dispatch scopes a key to its login (requestKeyLogin, request_keys.go:465-476). Every Legion pod writes under the shared agent token (login `agent-token`; `dispatch whoami`: 'runs under the shared token: no owner'), and a session's document carries its session id, so every process writing it shares one scope. Residual: a session whose processes write under two different logins while a create is in flight, which one deployment does not produce.",
+    "Fact 2, the key's retention: IdempotencyKeyTTL is 24 h (contracts/generated.go:268) and a keyed handler's run is bounded by keyedHandlerLimit, 10 min (request_keys.go:103), so a create's late commit always lands while its key is remembered; past 24 h a create runs only on a 404, since the read by name comes first.",
+    "claude-envoy's check-dist reports its dist stale; it reports the same three files with this round's envoy-client change reverted, and main's rebuild workflow commits the dist after each merge."
   ],
   "deviations": [],
   "openQuestions": []
