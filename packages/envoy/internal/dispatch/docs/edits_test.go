@@ -755,7 +755,11 @@ func TestApplyOperationsExplainsBlockCascadeWithinBatch(t *testing.T) {
 	}
 	parentID, _ := tree.Children[0].Attrs[pmdoc.BlockIDAttr].(string)
 	childID, _ := tree.Children[0].Children[0].Attrs[pmdoc.BlockIDAttr].(string)
-	removed, err := pmdoc.BlockDescendantIDs(tree, parentID)
+	valid, err := pmdoc.ValidateDocument(tree, "BlockDescendantIDs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	removed, err := valid.BlockDescendantIDs(parentID)
 	if err != nil {
 		t.Fatalf("find delete cascade: %v", err)
 	}

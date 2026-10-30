@@ -585,13 +585,6 @@ func (t *batchTree) finder() (*pmdoc.QuoteFinder, error) {
 	return t.quotes, nil
 }
 
-// applyOperations applies each operation to its predecessor's tree so a following operation
-// resolves the structure created by the preceding one. It is the batch a caller holding a plain
-// tree applies (applyBatch, which the edit paths call with the tree and the token they hold).
-func applyOperations(tree *pmdoc.Node, ops []model.EditOp) (editBatch, error) {
-	return applyBatch(newBatchTree(tree), ops, nil, "")
-}
-
 // applyBatch applies ops to start's tree, each operation to its predecessor's output, running
 // validate before each. before is the token of start's tree when the caller has already encoded
 // that tree (checkEditPrecondition), and "" when it has not, where the batch encodes it itself:

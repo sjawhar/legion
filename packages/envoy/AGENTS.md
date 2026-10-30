@@ -589,19 +589,26 @@ again. A document outside the schema stores no rendering and keeps the tree/erro
 each read had before. Websocket admission still uses `loadTree`, because it needs the raw stored
 update to preload the room.
 
-Every read of a write transaction's fork goes the same way (`readFork`, `treeOfUnshared`): the
+A read of a write transaction's fork goes through one reader (`readFork`, `treeOfUnshared`): the
 fork has one reader at a time, the request goroutine that holds it, so `applyLive`'s reads before
-and after its write, `applyMargin`'s, `docTree`'s, `heldTree`'s and the version capture's each
-read it through `pmdoc.ReadUnshared` and hand back a `pmdoc.ValidDocument`, whose renders
-(`documentMarkdownValid`) do not validate the tree again. A document edit carries that one
-validation through its whole batch (`batchTree`): the first step that needs a validated tree pays
-for it, every later pmdoc call over the same tree takes it (`pmdoc.ValidDocument`'s `QuoteFinder`,
-`Splice`, `BlockIndex`, `BlockRange`, `DeleteBlock`, `DeleteTextblock`, `InsertTableRows`,
-`BlockBoundary`, `BlockDescendantIDs`), the blocks a write changed are found in one walk and
-passed to every refusal that reads them (`matchedBlocks`), and the batch's verdict validates the
-tree it wrote once and hands it to `pmdoc.UpdateDocument`. A conditional edit encodes its tree
-once: the token `checkEditPrecondition` computed is the batch's own `before`, which is exact
-because a document token carries no block identity, so the stamp between them cannot change it.
+and after its write, `applyMargin`'s, `docTree`'s, `heldTree`'s and the version capture's each read
+it through `pmdoc.ReadUnshared`, which hands back a `pmdoc.ValidDocument`. `applyLive` and
+`applyMargin` render that value (`documentMarkdownValid`), which does not validate the tree again;
+`docTree`, `heldTree` and the version capture take its `Node()` and go on as they did, so the
+version capture's own render still validates. Two reads inside a write are not this reader: the
+repair read an edit makes when the fork's tree needs its block ids stamped (`editTree`, `treeOf`)
+and `rewriteLive`'s read inside its own transaction (`treeOfTransaction`), both of which read
+through `pmdoc.Read`. A document edit carries one validation through its whole batch (`batchTree`):
+the first step that needs a validated tree pays for it, every later pmdoc call over the same tree
+takes it (`pmdoc.ValidDocument`'s `QuoteFinder`, `Splice`, `BlockIndexes`, `BlockBoundary`,
+`BlockRange`, `BlockDescendantIDs`, `DeleteBlock`, `DeleteTextblock`, `InsertTableRows`,
+`TokenJSON`), the blocks a write changed are found in one walk and read by every refusal that
+needs them (`matchedBlocks`), and the batch's verdict validates the tree it wrote once and hands
+it to `pmdoc.UpdateDocument`. Those reads have one form, the method: a caller holding a plain tree
+validates it first (`pmdoc.ValidateDocument`) and reads it through the value that gives. A
+conditional edit encodes its tree once: the token `checkEditPrecondition` computed is the batch's
+own `before`, which is exact because a document token carries no block identity, so the stamp
+between them cannot change it.
 
 A read of a resident room outside a write never walks the live tree. It reads the room as of one
 moment (`readLive`): the replica the room's update observer keeps (`renderedReplica`, below), when

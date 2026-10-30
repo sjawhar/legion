@@ -5,22 +5,10 @@ import (
 	"fmt"
 )
 
-// Splice returns a copy of doc with r replaced by with using Proof's
+// Splice returns a copy of d's tree with r replaced by with, using Proof's
 // ProseMirror-compatible range-fitting rules. It reads the splice's shape (spliceShape), then
-// validates doc and with, in that order.
-func Splice(doc *Node, r Range, with *Node) (*Node, error) {
-	if err := spliceShape(doc, r, with); err != nil {
-		return nil, err
-	}
-	if err := doc.Validate(); err != nil {
-		return nil, err
-	}
-	return ValidDocument{doc: doc}.spliceValidated(r, with)
-}
-
-// Splice is Splice of d's tree without validating that tree again. It still reads the splice's
-// shape (spliceShape) and validates with, the replacement, in that order, so a refusal is the one
-// Splice gives. The zero ValidDocument is Splice's error for a nil tree.
+// validates with, the replacement, in that order; the document itself was validated once, when the
+// ValidDocument was made. The zero ValidDocument is a splice whose shape cannot be read.
 func (d ValidDocument) Splice(r Range, with *Node) (*Node, error) {
 	if err := spliceShape(d.doc, r, with); err != nil {
 		return nil, err
@@ -37,8 +25,8 @@ func spliceShape(doc *Node, r Range, with *Node) error {
 	return nil
 }
 
-// spliceValidated is Splice's body for a document already validated and a shape already read: it
-// validates with, the last check either reader runs, and fits the replacement into the range.
+// spliceValidated is Splice's body for a shape already read: it validates with, the last check the
+// splice runs, and fits the replacement into the range.
 func (d ValidDocument) spliceValidated(r Range, with *Node) (*Node, error) {
 	doc := d.doc
 	if err := with.Validate(); err != nil {
@@ -73,21 +61,11 @@ var ErrReplacementDoesNotFit = errors.New("replacement does not fit document")
 // repaired.
 var ErrJoinEmptiesTypedBlock = errors.New("the range runs into a typed block from the text before it, and joining them would leave that block empty")
 
-// BlockBoundary returns the document-level boundary before or after the block
-// containing target. It validates doc first (ValidateDocument).
-func BlockBoundary(doc *Node, target Range, after bool) (int, error) {
-	valid, err := ValidateDocument(doc, "BlockBoundary")
-	if err != nil {
-		return 0, err
-	}
-	return valid.BlockBoundary(target, after)
-}
-
-// BlockBoundary is BlockBoundary of d's tree without validating it again; the zero ValidDocument
-// is BlockBoundary's error for a nil tree.
+// BlockBoundary is the document-level boundary before or after the block containing target, over
+// the tree d validated. The zero ValidDocument wants a document.
 func (d ValidDocument) BlockBoundary(target Range, after bool) (int, error) {
 	if d.doc == nil {
-		return BlockBoundary(nil, target, after)
+		return 0, wantsDocument("BlockBoundary")
 	}
 	_, start, end, err := documentBlock(d.doc, target)
 	if err != nil {
@@ -97,26 +75,6 @@ func (d ValidDocument) BlockBoundary(target Range, after bool) (int, error) {
 		return end, nil
 	}
 	return start, nil
-}
-
-// BlockIndex returns the index, among the document's children, of the block containing target. It
-// validates doc first (ValidateDocument).
-func BlockIndex(doc *Node, target Range) (int, error) {
-	valid, err := ValidateDocument(doc, "BlockIndex")
-	if err != nil {
-		return 0, err
-	}
-	return valid.BlockIndex(target)
-}
-
-// BlockIndex is BlockIndex of d's tree without validating it again; the zero ValidDocument is
-// BlockIndex's error for a nil tree.
-func (d ValidDocument) BlockIndex(target Range) (int, error) {
-	if d.doc == nil {
-		return BlockIndex(nil, target)
-	}
-	index, _, _, err := documentBlock(d.doc, target)
-	return index, err
 }
 
 // documentBlock is the index and the ProseMirror range of the document-level block holding target,
@@ -134,15 +92,14 @@ func documentBlock(doc *Node, target Range) (index, start, end int, err error) {
 }
 
 // BlockIndexes is the index of the document-level block holding target's start and of the one
-// holding its end, both by BlockIndex's rule - the first block whose range holds the position -
+// holding its end, both by documentBlock's rule - the first block whose range holds the position -
 // found in one pass over the document's children. A write reads the blocks it changed from the
 // two, so it walks the document once rather than once an endpoint. Either endpoint lying in no
-// block is ErrTargetNotFound, as the lookup of that endpoint alone gives it, and the zero
-// ValidDocument is BlockIndex's error for a nil tree.
+// block is ErrTargetNotFound, as a lookup of that endpoint alone gives it, and the zero
+// ValidDocument wants a document.
 func (d ValidDocument) BlockIndexes(target Range) (first, last int, err error) {
 	if d.doc == nil {
-		_, err := BlockIndex(nil, target)
-		return 0, 0, err
+		return 0, 0, wantsDocument("BlockIndex")
 	}
 	first, last = -1, -1
 	position := 0
@@ -165,32 +122,13 @@ func (d ValidDocument) BlockIndexes(target Range) (first, last int, err error) {
 	return first, last, nil
 }
 
-// insertTableRowsWantsDocument is the refusal of an insert of table rows into a tree that is no
-// document: both readers give it, so both give its words.
-func insertTableRowsWantsDocument() error {
-	return fmt.Errorf("%w: InsertTableRows wants a document", ErrSchema)
-}
-
 // InsertTableRows inserts a pipe-table row fragment beside the row containing target, its rows
 // padded to the table's width on budget, the caller write's. It reports inserted=false when target
 // is outside a table or markdown is not exclusively table rows.
-func InsertTableRows(doc *Node, target Range, markdown string, after bool, budget *WriteBudget) (*Node, bool, error) {
-	if doc == nil || doc.Type != "doc" {
-		return nil, false, insertTableRowsWantsDocument()
-	}
-	if err := doc.Validate(); err != nil {
-		return nil, false, err
-	}
-	return ValidDocument{doc: doc}.InsertTableRows(target, markdown, after, budget)
-}
-
-// InsertTableRows is InsertTableRows of d's tree without validating it again; the zero
-// ValidDocument is InsertTableRows' error for a nil tree. The tree it returns is a new one, which
-// it validates as InsertTableRows does.
 func (d ValidDocument) InsertTableRows(target Range, markdown string, after bool, budget *WriteBudget) (*Node, bool, error) {
 	doc := d.doc
 	if doc == nil {
-		return nil, false, insertTableRowsWantsDocument()
+		return nil, false, wantsDocument("InsertTableRows")
 	}
 
 	var tablePath []int

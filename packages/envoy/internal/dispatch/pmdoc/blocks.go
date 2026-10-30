@@ -25,21 +25,11 @@ func findBlock(doc *Node, blockID string) ([]int, Range, bool) {
 	return found, r, found != nil
 }
 
-// BlockRange returns the ProseMirror range covering the block carrying blockID. It validates doc
-// first (ValidateDocument).
-func BlockRange(doc *Node, blockID string) (Range, error) {
-	valid, err := ValidateDocument(doc, "BlockRange")
-	if err != nil {
-		return Range{}, err
-	}
-	return valid.BlockRange(blockID)
-}
-
-// BlockRange is BlockRange of d's tree without validating it again; the zero ValidDocument is
-// BlockRange's error for a nil tree.
+// BlockRange is the ProseMirror range covering the block carrying blockID, over the tree d
+// validated. The zero ValidDocument wants a document.
 func (d ValidDocument) BlockRange(blockID string) (Range, error) {
 	if d.doc == nil {
-		return BlockRange(nil, blockID)
+		return Range{}, wantsDocument("BlockRange")
 	}
 	_, r, ok := findBlock(d.doc, blockID)
 	if !ok {
@@ -48,21 +38,11 @@ func (d ValidDocument) BlockRange(blockID string) (Range, error) {
 	return r, nil
 }
 
-// BlockDescendantIDs returns the target block id followed by every block id
-// that deleting it would remove as a descendant. It validates doc first (ValidateDocument).
-func BlockDescendantIDs(doc *Node, blockID string) ([]string, error) {
-	valid, err := ValidateDocument(doc, "BlockDescendantIDs")
-	if err != nil {
-		return nil, err
-	}
-	return valid.BlockDescendantIDs(blockID)
-}
-
-// BlockDescendantIDs is BlockDescendantIDs of d's tree without validating it again; the zero
-// ValidDocument is BlockDescendantIDs' error for a nil tree.
+// BlockDescendantIDs is the target block id followed by every block id that deleting it would
+// remove as a descendant, over the tree d validated. The zero ValidDocument wants a document.
 func (d ValidDocument) BlockDescendantIDs(blockID string) ([]string, error) {
 	if d.doc == nil {
-		return BlockDescendantIDs(nil, blockID)
+		return nil, wantsDocument("BlockDescendantIDs")
 	}
 	path, _, ok := findBlock(d.doc, blockID)
 	if !ok {
@@ -149,12 +129,11 @@ func DeleteBlock(doc *Node, blockID string) (*Node, error) {
 	return valid.DeleteBlock(blockID)
 }
 
-// DeleteBlock is DeleteBlock of d's tree without validating it again; the zero ValidDocument is
-// DeleteBlock's error for a nil tree. The tree it returns is a new one, which it validates as
-// DeleteBlock does.
+// DeleteBlock is DeleteBlock of d's tree without validating it again; the zero ValidDocument wants
+// a document. The tree it returns is a new one, which it validates as DeleteBlock does.
 func (d ValidDocument) DeleteBlock(blockID string) (*Node, error) {
 	if d.doc == nil {
-		return DeleteBlock(nil, blockID)
+		return nil, wantsDocument("DeleteBlock")
 	}
 	path, _, ok := findBlock(d.doc, blockID)
 	if !ok {
@@ -517,21 +496,11 @@ var ErrListItemContent = errors.New("list item has content besides its text")
 // block delete that removes the item with its content. It reports
 // removed=false when r covers part of a textblock's text or the textblock is a
 // table cell's, whose content rule keeps the cell.
-// It validates doc first (ValidateDocument).
-func DeleteTextblock(doc *Node, r Range) (*Node, bool, error) {
-	valid, err := ValidateDocument(doc, "DeleteTextblock")
-	if err != nil {
-		return nil, false, err
-	}
-	return valid.DeleteTextblock(r)
-}
-
-// DeleteTextblock is DeleteTextblock of d's tree without validating it again; the zero
-// ValidDocument is DeleteTextblock's error for a nil tree. The tree it returns is a new one,
-// which it validates as DeleteTextblock does.
+// It reads the tree d validated; the zero ValidDocument wants a document. The tree it returns is a
+// new one, which it validates.
 func (d ValidDocument) DeleteTextblock(r Range) (*Node, bool, error) {
 	if d.doc == nil {
-		return DeleteTextblock(nil, r)
+		return nil, false, wantsDocument("DeleteTextblock")
 	}
 	doc := d.doc
 	var textblockPath []int

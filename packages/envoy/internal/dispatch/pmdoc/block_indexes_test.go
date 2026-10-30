@@ -6,7 +6,8 @@ import (
 )
 
 // BlockIndexes finds both endpoints of a range in one walk of a document's blocks, where a write
-// looked each one up on its own (BlockIndex). This test holds the walk to that lookup, over every
+// looked each one up on its own, each through documentBlock. This test holds the walk to that
+// lookup (blockIndex, plain_tree_test.go, which is documentBlock for one position), over every
 // document of the corpus and every position in it.
 func TestBlockIndexesAnswerTwoBlockIndexLookups(t *testing.T) {
 	for _, document := range corpusMarkdown(t) {
@@ -22,8 +23,8 @@ func TestBlockIndexesAnswerTwoBlockIndexLookups(t *testing.T) {
 				probes = append(probes, Range{From: from, To: from}, Range{From: from, To: from + 3})
 			}
 			for _, probe := range probes {
-				wantFirst, firstErr := BlockIndex(tree, Range{From: probe.From, To: probe.From})
-				wantLast, lastErr := BlockIndex(tree, Range{From: probe.To, To: probe.To})
+				wantFirst, firstErr := blockIndex(tree, Range{From: probe.From, To: probe.From})
+				wantLast, lastErr := blockIndex(tree, Range{From: probe.To, To: probe.To})
 				first, last, err := valid.BlockIndexes(probe)
 				if firstErr != nil || lastErr != nil {
 					if err == nil {
@@ -42,11 +43,5 @@ func TestBlockIndexesAnswerTwoBlockIndexLookups(t *testing.T) {
 				}
 			}
 		})
-	}
-	// The zero ValidDocument is BlockIndex's error for a nil tree.
-	_, wantErr := BlockIndex(nil, Range{})
-	_, _, gotErr := ValidDocument{}.BlockIndexes(Range{})
-	if diff := sameAnswer(nil, nil, wantErr, gotErr); diff != "" {
-		t.Fatalf("the zero ValidDocument's BlockIndexes %s", diff)
 	}
 }

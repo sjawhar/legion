@@ -378,7 +378,7 @@ func runWriteCorpus(t *testing.T, service *Service, specName, markdown string, o
 		)
 		// apply runs ops as the route runs them and records the outcome, or the refusal's words
 		// when refuse is true, in which case the transaction must leave the document as it was.
-		apply := func(step *writeCorpusStep, ops []model.EditOp, precondition *model.EditPrecondition, refuse bool) func(ctx context.Context, step *writeCorpusStep, op func(string)) error {
+		apply := func(ops []model.EditOp, precondition *model.EditPrecondition, refuse bool) func(ctx context.Context, step *writeCorpusStep, op func(string)) error {
 			return func(ctx context.Context, step *writeCorpusStep, op func(string)) error {
 				outcome, err := service.ApplyOps(ctx, artifactID, ops, writeCorpusEditor, precondition)
 				op("ApplyOps")
@@ -425,12 +425,12 @@ func runWriteCorpus(t *testing.T, service *Service, specName, markdown string, o
 
 		anchorBlock := firstBlock(t)
 		transaction("insert", func(ctx context.Context, step *writeCorpusStep, op func(string)) error {
-			return apply(step, []model.EditOp{
+			return apply([]model.EditOp{
 				{Op: "insert", After: "block:" + anchorBlock.ID, Markdown: inserted},
 			}, nil, false)(ctx, step, op)
 		})
 		transaction("batch", func(ctx context.Context, step *writeCorpusStep, op func(string)) error {
-			return apply(step, []model.EditOp{
+			return apply([]model.EditOp{
 				{Op: "replace", Find: inserted, With: edited},
 				{Op: "insert", After: edited, Markdown: second},
 			}, nil, false)(ctx, step, op)
@@ -442,32 +442,32 @@ func runWriteCorpus(t *testing.T, service *Service, specName, markdown string, o
 				return fmt.Errorf("TextWithToken: %w", err)
 			}
 			documentToken = token
-			return apply(step, []model.EditOp{
+			return apply([]model.EditOp{
 				{Op: "replace", Find: second, With: qualified},
 			}, &model.EditPrecondition{Document: token}, false)(ctx, step, op)
 		})
 		transaction("precondition-block", func(ctx context.Context, step *writeCorpusStep, op func(string)) error {
 			block := blockHolding(t, qualified)
-			return apply(step, []model.EditOp{
+			return apply([]model.EditOp{
 				{Op: "replace", Find: qualified, With: qualified + " Twice."},
 			}, &model.EditPrecondition{Blocks: []model.EditBlockPrecondition{{ID: block.ID, Token: block.Token}}}, false)(ctx, step, op)
 		})
 		transaction("precondition-stale", func(ctx context.Context, step *writeCorpusStep, op func(string)) error {
-			return apply(step, []model.EditOp{
+			return apply([]model.EditOp{
 				{Op: "replace", Find: edited, With: edited + " Again."},
 			}, &model.EditPrecondition{Document: documentToken}, true)(ctx, step, op)
 		})
 		transaction("refused-unreadable", func(ctx context.Context, step *writeCorpusStep, op func(string)) error {
-			return apply(step, []model.EditOp{
+			return apply([]model.EditOp{
 				{Op: "replace", Find: edited, With: "<div>x</div>"},
 			}, nil, true)(ctx, step, op)
 		})
 		transaction("delete-block", func(ctx context.Context, step *writeCorpusStep, op func(string)) error {
 			block := blockHolding(t, edited)
-			return apply(step, []model.EditOp{{Op: "delete", Block: block.ID}}, nil, false)(ctx, step, op)
+			return apply([]model.EditOp{{Op: "delete", Block: block.ID}}, nil, false)(ctx, step, op)
 		})
 		transaction("delete-found", func(ctx context.Context, step *writeCorpusStep, op func(string)) error {
-			return apply(step, []model.EditOp{{Op: "delete", Find: qualified + " Twice."}}, nil, false)(ctx, step, op)
+			return apply([]model.EditOp{{Op: "delete", Find: qualified + " Twice."}}, nil, false)(ctx, step, op)
 		})
 
 		_, blocks, err := service.TextWithBlocks(ctx, artifactID)
