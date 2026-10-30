@@ -256,6 +256,22 @@ export interface WriteAdvice {
    */
   readonly unparsed_openers?: { readonly count: number; readonly examples: readonly string[] };
   /**
+   * The approval a document write superseded: the version it stored replaced the one a person
+   * had approved, so that approval is stale until someone approves the new version. A Legion
+   * design gate is such an approval, so this write closed it. Set by a document edit and by an
+   * upload that replaced an existing document, and only on the write that superseded the
+   * approval: a write on a document nobody approved, one whose approval was already stale, and
+   * one whose version carried that approval forward (the approval carry) each omit it.
+   */
+  readonly superseded_approval?: {
+    /** The version a person approved, the one this write superseded. */
+    readonly approved_version: number;
+    /** The version this write stored. */
+    readonly version: number;
+    /** Who gave that approval. */
+    readonly approved_by: string;
+  };
+  /**
    * The related-item check (LEGION-550), set on an issue or ask creation: the items
    * most like what was just filed, any past decision that matches, and what the check did
    * (`outcome`). Never refuses the write; it waits at most five seconds, and a check that did not
