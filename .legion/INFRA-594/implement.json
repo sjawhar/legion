@@ -2,15 +2,15 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-594",
-  "completed": "2026-10-29T22:09:17Z",
+  "completed": "2026-10-30T06:45:25Z",
   "proof": [
     {
       "criterion": "Sessions take every event (agent, issue, role) once through restarts of the session, its NATS connection, either listener and a Dispatch pod; the plugin acks after the transcript write; an unacked message is redelivered",
       "surface": "Real Oh My Pi (omp 18.12.2, this checkout's pi-envoy) and real Claude Code 2.1.311 under this checkout's `legion claude-bridge` with claude-envoy built from the checkout; natsd with JetStream; two real envoy-listener processes; real envoy-dispatch on Postgres 17 with pgvector; in the issue pod",
-      "command": "LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' ANTHROPIC_API_KEY=$LEGION_MODEL_GATEWAY_KEY bash scripts/e2e/envoy-session-delivery.sh",
-      "observed": "ENVOY SESSION DELIVERY: PASS (every event once, the issue in order), exit 0: all 60 events of windows a-f (session kill and resume, NATS cut, listener shared killed, listener dispatch killed, Dispatch SIGKILLed after its writes, control) counted exactly 1 in each session they were meant for, the two Dispatch messages Dispatch refused in window d counted 0 as expected, and LIVE-1's comments appear in stream order in both transcripts. Table: .legion/INFRA-594/evidence/live/head-4dc7.table.txt",
-      "headSha": "4dc7ce76a57cdd9f7ae3d38e0f83da1eac28b6b5",
-      "negativeControl": "Same script with the listener and plugins of main before sjawhar/legion#2228 (`--build-from c3d09eec --expect-lost agent,issue,role`): every agent, issue and role event of window a counted 0 in both sessions (NEGATIVE CONTROL HOLDS); with #2228's head (`--build-from 926040d9 --expect-lost role`): every role event of window a counted 0. Also, the bridge run without --replay-user-messages (a script bug found at this head and fixed in 4dc7ce76) showed Claude Code each event 2-8 times: frames the session never answered done were redelivered, as designed."
+      "command": "LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:5433/postgres?sslmode=disable' bash scripts/e2e/envoy-session-delivery.sh",
+      "observed": "ENVOY SESSION DELIVERY: PASS (every event once, the issue in order), exit 0; bridge argv --replay-user-messages; 60 events x 6 windows, each counted 1 in its session. Table .legion/INFRA-594/evidence/live/head-a592.table.txt, output head-a592.out.",
+      "headSha": "a592ce7e88f1fb293e87adfa9a4230f325cc17b9",
+      "negativeControl": "--build-from c3d09eec --expect-lost agent,issue,role at a592ce7e: NEGATIVE CONTROL HOLDS: every agent,issue,role event of window a counted 0 in both sessions (evidence/live/c3d09eec-at-a592.out)."
     },
     {
       "criterion": "Replay after a reconnect is driven by the stored stream (session consumer and relay), not by polling; done-gated ack; restart at the ack floor keeps order",
@@ -75,6 +75,22 @@
       "observed": "ok cmd/listener 606.3s; ok serverchange soak 153.0s; ok bus/session/store/kvwatch/loadtest; envoy-infra all ok except the two gcp data-disk tests that need mkfs.ext4 (absent in the pod); bun 2,858 pass 0 fail; TestListenerHostPermissionsHoldTheConsumerCallsAndEveryTopic: the listenerMachineId kind carries the consumer calls and notifications.>, a plain host kind no consumer call. Resolutions named per file in the PR's diff-check comment.",
       "headSha": "a0629b4057dab26dee3f0fcb4df2071c0731131e",
       "negativeControl": "Before the merge GitHub answered the PR CONFLICTING/DIRTY and started no workflow; after it, MERGEABLE. The natslive listener-host test's body, run in-process on nats-server 2.10.29, registered with consumer mode on the new kind, while a host user is refused CONSUMER.INFO and CONSUMER.LIST."
+    },
+    {
+      "criterion": "Review round 1 (High, 4419621193): a session moving from the core path to consumer delivery loses nothing stored while it was away",
+      "surface": "envoy-client consumer delivery with the replay ledger; pi-envoy and claude-envoy hosts",
+      "command": "bun test packages/envoy-client packages/pi-envoy packages/claude-envoy",
+      "observed": "2871 pass, 49 skip, 0 fail in one process (envoy-client, pi-envoy, claude-envoy); consumer-delivery.test.ts 34 pass",
+      "headSha": "a592ce7e88f1fb293e87adfa9a4230f325cc17b9",
+      "negativeControl": "seededResume dropped from registration() at a592ce7e (restored after): 4 tests fail, among them 'consumer delivery > a session moving from the core path resumes at its replay cursors and is shown what was stored while it was away' and 'the move from the core path to consumer delivery > with no snapshot, the registration resumes at the lowest cursor the sweeps left'"
+    },
+    {
+      "criterion": "Review round 1 (Medium, 4419621200, 4419621204): a serving-port session gets one push per dedupe key, and a message stored below its consumer's start still reaches its port",
+      "surface": "listener binary with a session consumer and a serving port (real nats-server, real listener)",
+      "command": "cd packages/envoy && go test -p 2 -parallel 4 -count=1 -timeout 30m ./cmd/listener (DISPATCH_TEST_DATABASE_URL set); go test -race -run 'TestSessionConsumer|TestServePort|TestRoleLane' ./cmd/listener",
+      "observed": "ok cmd/listener 573.5s; race run ok 148.0s; ./internal/bus 300.6s ok; serverchange ok 140.6s; infra/core ok",
+      "headSha": "a592ce7e88f1fb293e87adfa9a4230f325cc17b9",
+      "negativeControl": "dedupeCache.Record removed from pushUntilAccepted: TestServePortRelayPushesOneDedupeKeyOnce fails (second copy pushed); ConsumerHoldsStored ignoring the sequence: TestServePortMessageStoredBelowTheConsumerStartReachesThePort fails (never reached the port)"
     }
   ],
   "filesChanged": [
@@ -92,7 +108,9 @@
     "changelog fragments: packages/{envoy,envoy-client,pi-envoy,claude-envoy}/.changes/unreleased/INFRA-594-*.yaml",
     "Round 2: packages/envoy/loadtest/{backlog.go,restartreport.go,restartreport_test.go,restart-step.sh,relay.go,guard.go,main.go,README.md}; packages/envoy-client/test/{listener-grant.ts,envoy-stack.ts,stall-scenario.ts}; pi-envoy and claude-envoy stall tests; scripts/e2e/envoy-session-delivery.sh (--listener-grant, --plugins-from) and README; packages/claude-envoy/src/envoy-channel-server.ts (replay claim) with its test; changelog fragments",
     "Round 3: packages/envoy/infra/core/{permissions.go,permissions_test.go,permissions_live_test.go}, gcp goldens, infra README/AGENTS/docs/nats-hub.md, packages/envoy/AGENTS.md, the listener-permissions fragment; packages/claude-envoy/tests/{envoy-channel-server.test.ts,envoy-channel-tools.test.ts,pane-environment.ts}",
-    "Round 4: forward merges of main (api.go, delivery.go, bus/nats.go, store/kv.go, session/registry.go, session/expiry.go, envoy-client tool-contract.ts, gcp/natshub.go and tests); envoy-infra listenerMachineId kind (core/permissions.go ListenerHostPermissions, gcp/natshub.go, goldens, tests, README, docs/nats-hub.md); the doc census files listed in the PR body"
+    "Round 4: forward merges of main (api.go, delivery.go, bus/nats.go, store/kv.go, session/registry.go, session/expiry.go, envoy-client tool-contract.ts, gcp/natshub.go and tests); envoy-infra listenerMachineId kind (core/permissions.go ListenerHostPermissions, gcp/natshub.go, goldens, tests, README, docs/nats-hub.md); the doc census files listed in the PR body",
+    "Round 1 review: packages/envoy-client/src/{consumer-delivery,transport}.ts, packages/pi-envoy/extensions/envoy.ts (+test), packages/claude-envoy/src/envoy-channel-server.ts (+tests)",
+    "Round 1 review: packages/envoy/cmd/listener/{session_relay,serve_port_workers,delivery,durable,role_lane,role_holder,main,session_delivery,unplaceable_delivery}.go, internal/bus/{session_consumers,session_pull,stream_state,stored,role_lane,nats,confirm}.go, internal/session/{registry,session,handler}.go, packages/envoy/{AGENTS.md,docs/architecture.md}, .github/workflows/ci.yaml comments"
   ],
   "trickyParts": [
     "nats-server 2.10.29 reports ack floor 0 for a fresh consumer, so every session consumer is created at a start sequence (stream last+1) and the floor is read never below it",
@@ -106,7 +124,10 @@
     "nats-server RSS grows over a 10-minute window on both sides (before and after); not caused by this change, and a 10-minute window cannot show whether it levels off",
     "The listener grant change (session-consumer entries, CONSUMER.LIST, envoy-roles) reaches a hub only at its next replacement or reload; until then the listener answers core and the old path runs",
     "Mixed rollout and core path keep today's loss of role events a session misses while killed or cut off; closed only when sessions run the new plugin on a hub with the grant",
-    "Who keeps consumer delivery: the hub's own listener (machine id envoy-hub, ListenerPermissions, only example-hub in the golden) and any listener on a listenerMachineId user (the in-cluster gke listener once INFRA-7 sets listenerMachineId: gke after the envoy-infra release); sessions on a plain host-user (machineId) or Dispatch listener stay on the core path"
+    "Who keeps consumer delivery: the hub's own listener (machine id envoy-hub, ListenerPermissions, only example-hub in the golden) and any listener on a listenerMachineId user (the in-cluster gke listener once INFRA-7 sets listenerMachineId: gke after the envoy-infra release); sessions on a plain host-user (machineId) or Dispatch listener stay on the core path",
+    "Round 1: the inline durable push to serving ports and its push_failed deferral are deleted (dead since the serve-port workers); three unplaceable tests were rewritten or deleted accordingly (TestAPushFailureIsDeferredOnce... deleted; give-up counter test now covers its two causes).",
+    "Round 1: storedOnly kept on PendingForward (declined split into a two-mode Wait: it moves one branch into three call sites).",
+    "Round 1: pi-envoy's test afterEach forgets the keyed-layer memory, since bun test of envoy-client and pi-envoy in one process failed dispatch-execute's gateway test after a pi-envoy test taught the process its Dispatch origin."
   ],
   "openQuestions": []
 }
