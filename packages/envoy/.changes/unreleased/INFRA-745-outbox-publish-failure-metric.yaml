@@ -1,0 +1,12 @@
+kind: Added
+body: |-
+    `envoy-dispatch` serves `GET /metrics`, unauthenticated beside `/healthz` and `/livez`, so
+    whoever reaches Dispatch's HTTP port can read it, carrying `envoy_dispatch_outbox_publish_failures_total`: one count
+    per destination of an outbox publish attempt that did not reach NATS, labelled `reason` over
+    `denied` (the server refused the publish under the connection's own publish permissions),
+    `refused` (NATS refuses the envelope or its subject however often it is retried) and `failed`
+    (every other failure). The counter is registered whether or not the process has a bus, so the
+    endpoint answers from the moment the server does and a process with no bus reports zero.
+time: 2026-10-29T06:00:04.000000000Z
+custom:
+    Issue: INFRA-745

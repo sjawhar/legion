@@ -1,0 +1,24 @@
+kind: Fixed
+body: |-
+    A JetStream publish NATS denies is now named a denial rather than reported as an unreachable
+    NATS, on both the windowed publishes Dispatch's event outbox makes and the synchronous ones
+    every other caller makes, the Envoy listener's HTTP publishes among them. The server
+    acknowledges such a publish with nothing, so the denial is read from the violation the server
+    reports on the connection, recorded under the subject it names (`bus.ErrPublishDenied`), where
+    the publish's own answer is a publish-window timeout or a no-responders error. Every refused
+    message is named its own denial: the server refuses each message and reports a violation of
+    each, while the connection keeps one last error, so one batch's several destinations - a
+    notifying event's owner topic and its route - and its several messages to one subject - two
+    comments on one issue a moment apart - used to leave every publish but one reading as an
+    outage of the bus. An operator sees the difference on Dispatch's outbox: such a publish was
+    released at INFO with no attempt counted, logged as `NATS is unreachable`, and the rest of
+    that scan's backlog was abandoned; now the attempt is counted and backed off by its retry
+    delay, and the ERROR line `dispatch outbox: publish event` names the subject and the server's
+    permissions violation, so a missing grant reads as a missing grant and the events behind it
+    still publish. On the Envoy listener, a `/v1/messages/send` or a `/v1/messages/publish` to a
+    topic the stream captures that the listener's own grant denies is now the `403` with no
+    `Retry-After`, recorded `outcome=publish_denied`, that a denied core publish already was,
+    where it was a `503` with `Retry-After: 1` that a client retried until its attempts ran out.
+time: 2026-10-29T06:00:03.000000000Z
+custom:
+    Issue: INFRA-745

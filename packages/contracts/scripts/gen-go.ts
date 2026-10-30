@@ -42,7 +42,7 @@ import {
   SEARCH_QUERY_MAX,
 } from "../src/dispatch-tools";
 import { MINTED_DEDUPE_KEY_PATTERN } from "../src/envelope";
-import { SUBJECT_SEGMENT_REPLACED } from "../src/subject";
+import { SUBJECT_MAX_BYTES, SUBJECT_SEGMENT_REPLACED } from "../src/subject";
 
 type ScalarKind = "string" | "integer" | "boolean";
 
@@ -290,8 +290,32 @@ func SlackThreadSubject(team, channel, threadTs, kind string) string {
 	return "notifications.slack." + team + "." + channel + ".thread." + SanitizeSubjectSegment(threadTs) + "." + kind
 }
 
+// SubjectMaxBytes is the longest subject the bus publishes on, in bytes: bus's maxSubjectBytes, the
+// NATS server's 4 KiB max control line less the rest of the longest protocol line nats.go sends.
+// The bus refuses a longer subject before sending it, since the server would close the connection
+// over it. Generated from SUBJECT_MAX_BYTES in packages/contracts.
+const SubjectMaxBytes = ${SUBJECT_MAX_BYTES}
+
+// GithubPushSubject names a push by its ref name, one segment, sanitized. The ref is the one part of
+// a GitHub subject that GitHub bounds only as git does, which is not at all, so a subject past
+// SubjectMaxBytes keeps of the segment what fits, cut between runes, followed by ~ and the first 16
+// hex digits of the SHA-256 of the whole ref name, and is then at most SubjectMaxBytes: the bus
+// publishes it, and two refs that share the kept text still have two subjects. Git refuses ~ in a
+// ref, so a cut segment is never another ref's whole one. A consumer that needs the exact ref reads
+// the payload's ref. Mirrored on the TS side as \`githubPushSubject\`.
 func GithubPushSubject(owner, repo, refType, refName string) string {
-	return githubRepositoryPrefix(owner, repo) + ".push." + refType + "." + SanitizeSubjectSegment(refName)
+	prefix := githubRepositoryPrefix(owner, repo) + ".push." + refType + "."
+	segment := SanitizeSubjectSegment(refName)
+	if len(prefix)+len(segment) <= SubjectMaxBytes {
+		return prefix + segment
+	}
+	digest := sha256.Sum256([]byte(refName))
+	suffix := "~" + hex.EncodeToString(digest[:8])
+	keep := max(SubjectMaxBytes-len(prefix)-len(suffix), 0)
+	for keep > 0 && !utf8.RuneStart(segment[keep]) {
+		keep--
+	}
+	return prefix + segment[:keep] + suffix
 }
 
 func GithubWorkflowSubject(owner, repo, workflowFilename, action string) string {
@@ -484,10 +508,13 @@ function renderContracts(envelope: Schema) {
   return `package contracts
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 ${renderEnvelope(envelope)}

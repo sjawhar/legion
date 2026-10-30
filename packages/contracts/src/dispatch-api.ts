@@ -2491,6 +2491,9 @@ interface DispatchEventBase {
   readonly project?: string;
   readonly seq: number;
   readonly actor: Actor;
+  /** Whether the event wakes the issue's route, claimant and authors (`events.Notify`), so an
+   *  agent's own event is not a wake. A reader following an owner topic on the bus skips on the
+   *  published copy's `quiet` instead (`PublishedDispatchEvent`). */
   readonly notify: boolean;
   readonly created_at: string;
 }
@@ -3175,6 +3178,21 @@ export const DispatchEventSchema = z.object({
 });
 
 export type InboundDispatchEvent = z.infer<typeof DispatchEventSchema>;
+
+/**
+ * One event as Dispatch's outbox publishes it to NATS: the event this API serves, plus `quiet`.
+ *
+ * `quiet` is whether the event carries nothing for a reader following its owner topic
+ * (`events.Quiet` in envoy): a delivery receipt, an anchor refresh, settings or per-viewer
+ * bookkeeping, a targeted message its session already had, an ask edit that only moved a version,
+ * or a version nobody named. That is what such a reader skips on, where `notify` answers only
+ * whether the event wakes the issue's route, claimant and authors - false for every event an agent
+ * wrote, so a reader skipping on it drops the activity a session subscribed to the issue asked
+ * for. It is optional because a frame published before Dispatch stated it carries none, and such a
+ * frame is judged by `notify` instead. The API's own event shape carries no `quiet`: the outbox
+ * adds it to the copy it publishes.
+ */
+export type PublishedDispatchEvent = DispatchEvent & { readonly quiet?: boolean };
 
 export const IssueEventPayloadSchema = z.object({
   title: z.string().optional(),
