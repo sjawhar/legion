@@ -65,10 +65,8 @@ const (
 )
 
 // submitted is the enable or merge the fake records for #42 at head, with the squash commit message
-// Submit asked for: the pull request's title and its number, and an empty body. The message matters:
-// GitHub's own COMMIT_MESSAGES default joins every commit message of the branch into the squash
-// body, which is how a branch commit's Omp-Session: line, its skip-checks: true line and its
-// Dispatch key would reach the base branch's public history.
+// Submit asked for: the pull request's title and its number, and an empty body (why is on the
+// enable and merge mutations in ghautomerge.go).
 func submitted(verb, pullTitle string) string {
 	return fmt.Sprintf("%s PR_42 head SQUASH headline=%q body=%q", verb, pullTitle+" (#42)", "")
 }

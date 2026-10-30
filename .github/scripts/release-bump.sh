@@ -15,12 +15,10 @@
 # COMMIT_MESSAGES default, so its squash body carries the branch's own commit
 # messages as "* type: summary" bullet lines and a squash-merged PR with a
 # non-conventional title still releases from them. A merge the Legion daemon
-# submits writes the squash message itself, the PR title and number as the
-# subject and an empty body, so there the title is the only thing classified
-# and a breaking change marked only by a footer in a branch commit body earns
-# no major bump: the same two branch commits, one with a "BREAKING CHANGE:"
-# footer, printed "none" merged by the daemon and "2.0.0" merged with GitHub's
-# default.
+# submits writes the squash message itself (packages/daemon/internal/ghautomerge),
+# the PR title and number as the subject and an empty body, so there the title
+# is the only thing classified: a "type!:" title still bumps the major version,
+# and a "BREAKING CHANGE:" footer written only in a branch commit body does not.
 #
 # --patch-path <path> (repeatable) names a path whose commits bump at least the
 # patch version whatever their type: a path the package ships as runtime rather
