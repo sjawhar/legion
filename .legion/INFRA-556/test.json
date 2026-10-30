@@ -2,46 +2,30 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-556",
-  "completed": "2026-10-30T05:05:00Z",
-  "round": 6,
-  "testedCodeHead": "65dccc7c0612",
-  "scope": "INFRA-63 architect, 2026-10-30T04:16Z: the awareness fix only. Both red tests, unmodified, on real binaries; memory stays flat under repeated floods; a reader joining after a flood is seen on the other process within a second; freeing a departed client's entry does not drop a live client's presence (reconnect, delayed update)",
+  "completed": "2026-10-30T07:45:00Z",
+  "round": 7,
+  "testedCodeHead": "3b94b7c21d06",
+  "scope": "INFRA-63 architect, 2026-10-30T06:39Z: the per-socket bound of four awareness clients only. The three flood tests unmodified on real binaries; flat memory under the 400k flood and a live flood held open; a reader joining during a live flood seen on both processes within a second; real browsers (several tabs, a reconnecting tab, the editor's own awareness) never dropped; census entry 4 through its own client",
   "implementerProof": {
-    "verdict": "verified",
-    "how": "Re-ran both red tests unmodified at 65dccc7c, 3 of 3 each: TestAReaderJoiningAfterAnAwarenessFloodIsSeenOnTheOtherProcess on real binaries, and TestRepeatedAwarenessFloodsDoNotGrowARoomsAwarenessWithoutLimit with 256 entries per room. The docs package's awareness tests and TestTwoEditorsOnTwoProcessesSeeEachOthersEditsAndCursorsLive also passed 3 of 3."
+    "verdict": "rejected",
+    "how": "The three flood tests pass at 3b94b7c2, but not because of the per-socket bound. In the repository's build the filter never reads a frame, and the tests pass on the raised room bound (4,000). The implementer's unit tests feed awarenessLimitConn a scripted net.Conn and never go through a websocket upgrade."
   },
   "failures": [
     {
-      "criterion": "A reader joining after (here: during) an awareness flood is seen on the other process within a second, as on one pod (architect's scope; spec item 1)",
-      "evidence": "Red test TestAReaderJoiningDuringALiveAwarenessFloodIsSeenOnTheOtherProcess in packages/envoy/cmd/dispatch/awareness_flood_multiprocess_test.go (commit 57348fc7). Command: cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<url> go test -tags multiprocess -run TestAReaderJoiningDuringALiveAwarenessFloodIsSeenOnTheOtherProcess ./cmd/dispatch. Setup: one tab on A keeps 2,048 invented awareness clients alive by re-announcing them every 10 s. At 65dccc7c it fails 2 of 2: alice, joining A, 'was seen at once by carol on A but not by bob on B within 1s'. A probe found bob still had not seen her 76 s later while the tab kept re-announcing. At 1d55e48f, before the room bound, it passes 2 of 2. d7ceabb4 also fails this case (alice seen after 1 min 44 s, once a non-heartbeating flood expired). Cause: maxAwarenessClientsPerRoom (256) counts every client the room holds. A's room is full of the tab's clients, so it refuses alice's client id and never relays it, while A still sends her frame to its own peers. The next fix must pass all three red tests. One way: bound the client ids one socket may hold, rather than the room as a whole."
+      "criterion": "Each document socket holds at most four awareness clients (architect's scope for this round; the fix's own claim)",
+      "evidence": "Red test TestADocumentSocketHoldsItsAwarenessBoundThroughARealUpgrade in packages/envoy/internal/dispatch/docs/awareness_limit_upgrade_test.go (commit da4bb1a5). Command: cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<url> go test -run TestADocumentSocketHoldsItsAwarenessBoundThroughARealUpgrade ./internal/dispatch/docs. In workspace mode, which is how CI's envoy-go job and every local and browser-harness build run, it fails 2 of 2: 'carol on task A holds 10 of them, bob on task B 1; want at most 4 each'. With GOWORK=off it passes 2 of 2. Cause: the root go.work resolves github.com/gorilla/websocket v1.5.4-0.20250319132907-e064f32e3674 (packages/envoy/go.mod says v1.5.3). That version's Upgrade reads through the hijacked brw.Reader without resetting it onto the returned connection (server.go:192-195), so awarenessLimitConn.Read is never called. Temporary prints showed Hijack called for every socket and Read never. On two real binaries in workspace mode: one socket's 2,048-client frame reaches every reader on A and B; a 600-byte first message is not closed; 200 flooding sockets fill A's 4,000-client room, and a joining reader is seen by nobody within 1 s. The image build (Dockerfile, no go.work, gorilla v1.5.3) has the filter working. One possible fix: in awarenessLimitWriter.Hijack, reset buffers.Reader onto the filter connection, as keepAliveWriter.Hijack does for the writer."
     }
   ],
   "failed": 1,
-  "proof": [
-    {
-      "criterion": "Memory stays flat under repeated awareness floods on both processes",
-      "surface": "two real envoy-dispatch binaries on one Postgres 17. One tab on A sends 40 frames of 10,000 new client ids; VmRSS read from /proc",
-      "command": "go test -tags multiprocess -run 'TestProbeR6Memory(Live|Null)' -v ./cmd/dispatch (throwaway)",
-      "observed": "Live states: A 59 to 67 MB, B 59 to 59 MB, still the same 50 s after the flood began. Null states: A 58 to 66 MB, B 58 MB. Evidence: https://github.com/sjawhar/legion/pull/2414#issuecomment-6515227723",
-      "headSha": "65dccc7c0612",
-      "negativeControl": "At b0a2d131 the same live-state flood grew A to 404 MB and B to 108 MB (round 5)"
-    },
-    {
-      "criterion": "A reader joining after a flood that ended is seen on the other process within a second",
-      "surface": "two real envoy-dispatch binaries",
-      "command": "go test -tags multiprocess -run 'TestProbeR6ReaderAfterFlood|TestAReaderJoiningAfterAnAwarenessFloodIsSeenOnTheOtherProcess' -v ./cmd/dispatch",
-      "observed": "Seen within 1 s on both processes for each of: live states then a null-state removal frame; null states only on A; null states only on B; live states with the flooding tab closed.",
-      "headSha": "65dccc7c0612",
-      "negativeControl": "The round-4 red test fails at d7ceabb4 (3 of 3)"
-    },
-    {
-      "criterion": "Freeing a departed client's entry at once does not drop a live client's presence (reconnect, delayed update)",
-      "surface": "Chromium on main's two-process harness (bob pinned to B, alice to A, bob's socket cut with the e2e transport's sever), and two real binaries driven by Go peers",
-      "command": "cd packages/dispatch && DATABASE_URL=… bun run e2e:multiprocess -- zz-reconnect.multiprocess --repeat-each=4 (throwaway spec); go test -tags multiprocess -run TestProbeR6LiveStaysWhileOthersLeave -count=2 ./cmd/dispatch (throwaway)",
-      "observed": "Browser: bob, reconnected on B, was shown again on alice's page within 146-276 ms every time over 15 reconnects (5 runs of 3). Go: bob stayed shown on A through ten other readers leaving, five on each process, each departure freeing every tombstone. His cursor move 2 s later reached A within 1 s, and no departed reader was left shown. A late stale state of a departed client did not bring it back. coedit.multiprocess passed 2 of 2.",
-      "headSha": "65dccc7c0612",
-      "negativeControl": "The drop-and-reconnect really happened: the page reconnected each time (its connection dot read 'connected' again after the sever) before the 1 s check started."
-    }
+  "proof": [],
+  "observedWithTheFilterActive": [
+    "GOWORK=off (gorilla v1.5.3, as the image builds), two real binaries. All three flood tests pass unmodified. 400,000 invented ids in 6 s: A 58 to 63 MB (live) and 54 to 62 MB (null), B unchanged. A live flood re-announced every 10 s from one socket: A 57 to 59 MB, B holds 4 of the socket's clients. From 200 sockets: B holds 92, and a joining reader is seen on both processes within 1 s.",
+    "Real browsers on main's two-process harness with a GOWORK=off harness binary (go version -m: gorilla v1.5.3): six tabs, three per process, place carets at once and each page shows the other five within 1 s, 4 rounds (also 3x under workspace mode); a tab on B whose socket is cut is shown on A again within 166-235 ms over 6 reconnects; coedit.multiprocess passes.",
+    "Census entry 4 through its own client: the web client's first message on each document socket is its Auth message (type 2), naming the document in a 38-byte header (41 bytes total), on A and B. A 600-byte name is closed; a well-formed awareness or sync message is kept. A 3-byte message naming nothing is passed to ygo and the socket stays open, which the census text ('a document socket whose first message names no document and type within 512 bytes is closed') does not say: text or code needs to change."
   ],
-  "ci": "No CI at 65dccc7c: PR #2414 conflicts with main and waits for the merge queue (architect, 2026-10-30T00:58Z and 04:16Z)."
+  "notes": [
+    "Outside this round's scope, in the relay since round 1: ygo's relay lane keeps one awareness blob per room, latest only (internal/relaylane/lane.go:22-23, 111-115). Each blob encodes only the clients its change touched, so concurrent cursor changes from several sockets are lost until each client's next heartbeat (15 s for a browser). A Go probe with five readers on A setting cursors at once left bob on B missing some in 6 of 6 runs at 3b94b7c2 and 2 of 3 at d7ceabb4. Real browsers did not hit it in 15 rounds. Sent to the architect for a decision.",
+    "The repeated-flood test's text is unchanged, but its limit rose from 512 to 8,000 because maxAwarenessClientsPerRoom is now maxRoomConnections x 4."
+  ],
+  "ci": "No CI at 3b94b7c2: PR #2414 conflicts with main and waits for the merge queue (architect, 2026-10-30T00:58Z, 06:39Z)."
 }
