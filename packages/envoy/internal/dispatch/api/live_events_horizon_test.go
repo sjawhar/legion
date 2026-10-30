@@ -322,7 +322,7 @@ func TestTheFirstColdSubscriptionOfAFreshProcessIsSentAnEventCommittedWhileTheRe
 func TestTheFirstColdSubscriptionIsSentAnEventCommittedWhileAWriteFromBeforeBootHoldsTheStart(t *testing.T) {
 	var release func()
 	// persistence runs on the test's database before register takes the boot mark.
-	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: 100 * time.Millisecond, persistence: func(database *store.Store) docs.VersionedStore {
+	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: liveHorizonHeartbeat, persistence: func(database *store.Store) docs.VersionedStore {
 		release = holdEventWriterTransactionID(t, database)
 		return nil
 	}}, nil)
@@ -375,7 +375,7 @@ func eventsTuplesRead(t *testing.T, database *store.Store) int64 {
 // sequential scan or through the primary key, while the first cold subscription starts.
 func TestTheRelaysFirstStartDoesNotReadTheWholeEventLog(t *testing.T) {
 	const logSize = 200_000
-	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: 100 * time.Millisecond}, nil)
+	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: liveHorizonHeartbeat}, nil)
 	createInteractionIssue(t, rig.handler, "TEST", "Issue", "A spec")
 	if _, err := rig.database.Pool.Exec(t.Context(), `
 		insert into events (seq, type, actor, payload, notify, published_at)
@@ -410,7 +410,7 @@ func TestTheRelaysFirstStartDoesNotReadTheWholeEventLogWhileAWriterFromBeforeBoo
 	var release func()
 	// persistence runs on the test's database before register takes the boot mark: the writer's
 	// transaction id is older than the mark, as a write open across a restart's boot is.
-	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: 100 * time.Millisecond, persistence: func(database *store.Store) docs.VersionedStore {
+	rig := newLiveSocketRig(t, testServerOptions{streamHeartbeat: liveHorizonHeartbeat, persistence: func(database *store.Store) docs.VersionedStore {
 		release = holdEventWriterTransactionID(t, database)
 		return nil
 	}}, nil)
