@@ -132,7 +132,8 @@ and the tester's proof below are both this proof.
   `E2E` line's head to the new SHA with
   `forward-merge re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only`. The
   real-surface verification is not repeated, except in a parent's last round, which the architect
-  names to you: then run a full test round. Different: a full test round.
+  or the implementer's forward-merge comment names to you: then run a full test round. Different:
+  a full test round.
 - **The implementer runs `skill://ce-simplify-code` once per pull request, in its first
   implementing round, after its own proof and before it completes that round, when the diff
   touches runtime code; a docs-only diff gets none.** The daemon starts no implementing round

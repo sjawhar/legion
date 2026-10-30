@@ -8,8 +8,8 @@ Every path it cites is in sjawhar/legion.
 
 ## Reintegrating the base
 
-- **Merge the base forward only on a real conflict, a need only the base meets, or a retarget, and
-  never with `jj rebase`.**
+- **Merge the base forward only on a real conflict, a need only the base meets, a retarget, or a
+  parent's last round, and never with `jj rebase`.**
   The implementer merges the base into the issue branch only when GitHub reports it `CONFLICTING`, the controller asks
   because of a conflict, the architect's backward move names a parent's last round,
   the change needs something that exists only on the base (a fix for its

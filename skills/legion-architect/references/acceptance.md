@@ -52,17 +52,20 @@ only on an approved head that carries the merges of every child those criteria n
 criterion needs tester evidence at that head, or, for a criterion in another repository, on that
 repository's default branch. Nothing in the tree builds on the parent's own merge, because that
 merge comes last: a child that waits for it waits forever, so work another child builds on is a
-first-wave child of its own. While the approved head does not carry those merges, leave the issue
-in `accepting` until each of those children has closed (`child-closed`) or been parked for good
-(`child-status`). Move a parked child's criterion to other work first; never downgrade it. Then,
+first-wave child of its own. While the approved head does not carry those merges, or the tester's
+evidence of a criterion in another repository is older than the close of a child it needs, leave
+the issue in `accepting` until each of those children has closed (`child-closed`) or been parked
+for good (`child-status`). Move a parked child's criterion to other work first; never downgrade
+it. Then,
 in one turn:
 
 1. `envoy_publish` to the tester's role topic: "The next round of <KEY> is its last round: a full
    test round of every acceptance criterion, not the forward-merge re-check." The backward move's
    reason reaches only the implementer.
 2. `request_backward_move` to `implementing`, with the reason "Last round: merge the default
-   branch your addressing line names into the branch, push, and complete." Never use a hard-coded
-   `main`. The move counts a review round.
+   branch your addressing line names into the branch, push, end your forward-merge comment with
+   `parent's last round: full test round`, and complete." Never use a hard-coded `main`. The move
+   counts a review round.
 
 A criterion proven on a deployed system is proven there after that child's deploy, as the
 repository's deploy skill says.
