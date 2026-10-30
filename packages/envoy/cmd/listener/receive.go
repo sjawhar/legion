@@ -93,9 +93,10 @@ import (
 // that cap, 1.25 s after the release, and 12.25 s in all. The 10 s the shutdown gives the receive
 // stop and the HTTP stop together bounds none of that: it is how long the shutdown waits for the
 // receive stop. Past it the shutdown goes on to the HTTP stop with no time left, then to the NATS
-// drains and os.Exit(1), while the hand-back may still be draining or writing its mark; that exit
-// cuts the hand-back off, and the next holder then settles at its 7 s cap, as it does after any
-// stop that wrote no mark. The record a stop releases
+// drains and os.Exit(1), while the hand-back may still be running; client.Drain ends the
+// subscription of a hand-back still lingering or draining, and os.Exit(1) ends only a mark write
+// still in flight, and the next holder then settles at its 7 s cap, as it does after any stop that
+// wrote no mark. The record a stop releases
 // carries the ack wait its term still owes (lease.ackWaitOwed): a term that must settle owes one
 // until its settle hold ends, so a stop before that leaves the next holder's hold to wait an ack
 // wait. A release the lease's loop outlasts records that debt before it gives up (lease.Release),

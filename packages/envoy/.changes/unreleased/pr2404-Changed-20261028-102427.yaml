@@ -21,8 +21,9 @@ body: |-
     flush and release both run to their bounds takes 12.25 s rather than the 11 s a stop takes
     otherwise, and its 10 s budget bounds none of that: it is how long the shutdown waits for the
     stop. Past it the shutdown goes on to the HTTP stop with no time left, then to the NATS drains
-    and the listener's own exit, which cuts off a hand-back still draining or writing its mark;
-    the next holder then settles at its 7 s cap),
+    and the listener's own exit: the drain of its NATS connection ends a hand-back still lingering
+    or draining, and the exit ends a mark write still in flight; the next holder then settles at its
+    7 s cap),
     handing back what still reaches it, since nats-server loses a message whose
     first delivery is still queued when a push consumer's last subscriber goes. Once it has
     drained, a stop whose hand-over went through every step - its own release wrote the record,
