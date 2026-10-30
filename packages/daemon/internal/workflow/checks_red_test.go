@@ -111,6 +111,61 @@ func TestASettlementThatSaysNothingNewTellsNobodyAgain(t *testing.T) {
 	}
 }
 
+// A check that failed and was run again settles the same head twice, and what the three roles are
+// told is the latest attempt of each check: GitHub gives a re-run its own check runs, so the
+// second settlement's runs outrank the first's (classify.CompareAttemptSets) and the conclusions
+// it reports replace the ones they outrank (classify.EffectiveOutcome). On sjawhar/legion#2395 the
+// required check failed at the code head in one attempt of a run and passed in the next, and a
+// handoff-only push followed; the three roles are told the red, then the green, and the handoff
+// head carries that green forward, whichever of the re-run and the push arrives first. The rule
+// this replaced carried the first settlement's red to the handoff head and sent the issue back on
+// it, hours after the re-run had passed.
+func TestTheLatestAttemptOfEachCheckIsWhatTheRolesAreTold(t *testing.T) {
+	handoffPush := pushedFromTo("code", "handoff", ".legion/LEGION-208/test.json", "legion-tester[bot]")
+	for _, tc := range []struct {
+		name string
+		// after are the facts that followed the first attempt's red, in the order they arrived:
+		// the re-run's settlement of the same code head, and the handoff-only push that replaced
+		// it with a head GitHub runs nothing on.
+		after []intake.Fact
+	}{
+		{"the re-run settles before the handoff push", []intake.Fact{settledAt("code", 2), handoffPush, syncedTo("handoff")}},
+		{"the handoff push lands before the re-run settles", []intake.Fact{handoffPush, syncedTo("handoff"), settledAt("code", 2)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "code"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim"})
+			engine := mergingEngine()
+			applyRefusingNothing(t, pool, engine, settledAt("code", 1, "unit"))
+			applyRefusingNothing(t, pool, engine, tc.after...)
+
+			var want []record.RoleMessage
+			for _, settled := range []string{"CI settled at code: build succeeded, unit failed", "CI settled at code: build succeeded, unit succeeded"} {
+				for _, role := range []claim.Role{claim.RoleArchitect, claim.RoleTester, claim.RoleImplementer} {
+					want = append(want, record.RoleMessage{Role: roleToken(t, role), Body: toldBody(settled)})
+				}
+			}
+			assertRoleMessages(t, pool, "LEGION-208", want)
+			if got := recordedPR(t, pool, "LEGION-208"); got.HeadSHA != "handoff" || got.CheckedHead != "code" || len(got.Failing) != 0 {
+				t.Fatalf("the handoff head %q carries the settlement of %q with %v failing, want it carrying the code head's re-run with nothing failing",
+					got.HeadSHA, got.CheckedHead, got.Failing)
+			}
+			if got := issuePhase(t, pool); got != phase.Testing {
+				t.Fatalf("the issue is in %s, want it left in testing: no settlement moves it", got)
+			}
+			assertOutboxCount(t, pool, "supervise", 0)
+			if got := noticeKinds(t, pool, "LEGION-208"); len(got) != 0 {
+				t.Fatalf("the architect was told %v, want nothing but the role messages", got)
+			}
+		})
+	}
+}
+
 // A check GitHub produced no run for - an aggregate job whose needs: never ran, so it never
 // started - reaches the three roles like any other conclusion, and moves nothing, because nothing
 // classifies it (dispatch://INFRA-622). The settlement reports its runs and names that check as
