@@ -4,17 +4,23 @@ name: CI
 # Its first job, `changes`, reads the paths the change touched and selects, through one
 # dorny/paths-filter filter per job, the jobs that read those paths; each job runs only when its
 # filter matches (lint runs on every change, and typecheck and test also run when `changes` itself
-# failed). The last job, `ci-ok`, condenses every job's result into one check, the one main's
-# ruleset requires beside pr-title: it fails when a job `changes` selected did not succeed. The
-# docs site's build on a push to main, and its GitHub Pages deploy, are docs-pages.yaml's, a
-# workflow of its own whose header says why; its paths are held to the docs filter below.
+# failed). The last job, `ci-ok`, condenses every job's result into one check: it fails when a job
+# `changes` selected did not succeed. What main's ruleset requires of a pull request is read from
+# `gh api repos/sjawhar/legion/rules/branches/main`, and on 2026-10-30 that was `lint`,
+# `typecheck`, `test` and `pr-title`, not ci-ok. The docs site's build on a push to main, and its
+# GitHub Pages deploy, are docs-pages.yaml's, a workflow of its own whose header says why; its
+# paths are held to the docs filter below.
 #
 # A new job joins the router in six places: a filter in `changes` that names every file the job
 # reads, an output of `changes` for that filter, the job's `needs: changes` and an `if:` on that
 # output, an entry in `ci-ok`'s `needs:`, an entry in `ci-ok`'s SELECTED_BY mapping the job to
 # that output (and in PULL_REQUEST_ONLY when its `if:` admits only pull_request), and a gate in
 # .github/scripts/ci_job_reads.py. A job that runs on no push gets its output set false there,
-# in `changes`' outputs, as docs does. The ci-filters job's
+# in `changes`' outputs, as docs does, and one that runs on no pull request the same way, as
+# dispatch and envoy-go-race do. Before a job leaves the pull-request path, check what it is the
+# only runner of: dispatch's typecheck and unit halves moved into dispatch-units, which stays
+# there, because nothing else in this workflow checks packages/dispatch or packages/proof-editor
+# on a pull request. The ci-filters job's
 # .github/scripts/check-ci-filters.sh holds the filter to that gate and SELECTED_BY to the `if:`s.
 # docs/solutions/github/join-a-job-to-the-ci-router.md walks through it.
 #
@@ -41,7 +47,8 @@ name: CI
 # `closed`: tests-closed.yaml cancels a closed pull request's run (the concurrency comment below).
 # merge_group runs the router on the merge queue's commit of each queued group: `changes` selects
 # by what the queued change touches against the queue base (the group's base_sha..head_sha), and
-# ci-ok reports there, so the required checks pass on the merged tree before anything lands.
+# lint, typecheck, test and pr-title report there, so main's required checks pass on the merged
+# tree before anything lands, and ci-ok reports beside them.
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
@@ -58,7 +65,8 @@ on:
 # tests-closed.yaml says what happens and what to do. A push to main is a group of its own per
 # commit and is never cancelled: `changes` selects by that push's own diff, and no later push's
 # diff contains the jobs a dropped merge's run would have selected. A merge group is likewise a
-# group of its own per commit (its head) and is never cancelled: the queue waits for its ci-ok.
+# group of its own per commit (its head) and is never cancelled: the queue waits for the checks
+# main requires of its group.
 concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -89,12 +97,29 @@ jobs:
       pi_shared: ${{ steps.filter.outputs.pi_shared }}
       pi_envoy: ${{ steps.filter.outputs.pi_envoy }}
       pi_legion: ${{ steps.filter.outputs.pi_legion }}
-      dispatch: ${{ steps.filter.outputs.dispatch }}
+      # dispatch and envoy_go_race below are false on a pull request, as docs is on a push: those
+      # two jobs run on the merge queue and on a push to main, and not on every push to a pull
+      # request. ci-ok reads each skip there as one changes chose, and each job still runs only
+      # when its own filter matched. In the day to 2026-10-30T00:10Z the two took 7,503 of the
+      # 20,818 runner-minutes this workflow's pull-request jobs spent, dispatch alone averaging
+      # 42 minutes a run, of which its browser suite is 56 of 60 minutes; no check main's ruleset
+      # requires gates on either, and 91% of the pull-request jobs that got a runner had waited
+      # more than ten minutes for it. What a pull request loses with them: the browser suite, and
+      # the race-detector run of suites that envoy-go still runs without it.
+      #
+      # What a pull request must not lose is the only run of a suite. dispatch_units below keeps
+      # the dispatch job's typecheck and unit halves on every pull request, in a job of about two
+      # and a half minutes, and envoy_go is not gated at all: envoy-go is the only pull-request
+      # job that runs the packages/envoy module's untagged unit tests, and release-envoy-listener
+      # .yaml publishes the Envoy and Dispatch image on every push to main that touches those
+      # paths without waiting for this workflow.
+      dispatch: ${{ github.event_name != 'pull_request' && steps.filter.outputs.dispatch || 'false' }}
+      dispatch_units: ${{ steps.filter.outputs.dispatch_units }}
       dispatch_browser_multiprocess: ${{ steps.filter.outputs.dispatch_browser_multiprocess }}
       claude_envoy: ${{ steps.filter.outputs.claude_envoy }}
       envoy_go: ${{ steps.filter.outputs.envoy_go }}
       envoy_infra_go: ${{ steps.filter.outputs.envoy_infra_go }}
-      envoy_go_race: ${{ steps.filter.outputs.envoy_go_race }}
+      envoy_go_race: ${{ github.event_name != 'pull_request' && steps.filter.outputs.envoy_go_race || 'false' }}
       envoy_go_race_docs: ${{ steps.filter.outputs.envoy_go_race_docs }}
       dispatch_memory: ${{ steps.filter.outputs.dispatch_memory }}
       dispatch_multiprocess: ${{ steps.filter.outputs.dispatch_multiprocess }}
@@ -684,6 +709,30 @@ jobs:
               - 'packages/envoy/scripts/fixtures/shell-quote.json'
               # The SPA build writes dist/THIRD_PARTY_NOTICES.txt (web/vite.config.ts:11).
               - 'scripts/third-party-notices.ts'
+            # The dispatch job's typecheck and unit halves, in a job of their own that runs on
+            # every pull request (dispatch-units). Narrower than `dispatch`: it builds no SPA,
+            # starts no server and runs no browser, so it names neither the Go workspace nor the
+            # Dispatch server's closure.
+            dispatch_units:
+              - '.github/workflows/ci.yaml'
+              - *bun_install
+              - *biome
+              - 'packages/dispatch/**'
+              - 'packages/proof-editor/**'
+              - 'packages/contracts/src/**'
+              # web/src/features/delivery/lib/applyDelta.test.ts:2-4,
+              # e2e/__tests__/delivery-live-probe.test.ts:8-12 and
+              # web/src/features/doc/decision-blocks.test.ts:10.
+              - 'packages/contracts/fixtures/delivery-live/**'
+              - 'packages/contracts/fixtures/decision-blocks/**'
+              - 'packages/envoy-client/src/**'
+              # web/src/__tests__/setup.ts:7 reads the block schema,
+              # e2e/__tests__/local-instance-support.test.ts:153-154 holds shellQuote to that
+              # table, and e2e/__tests__/round-robin-proxy.test.ts:376 runs run-server.sh, which
+              # holds its port through held-port.py (run-server.sh:37).
+              - 'packages/envoy/internal/dispatch/pmdoc/schema/blocks.json'
+              - 'packages/envoy/scripts/fixtures/shell-quote.json'
+              - 'scripts/e2e/lib/held-port.py'
             # The browser suite's two-process mode (dispatch-browser-multiprocess): what the dispatch
             # filter names, and the dev OIDC issuer its sign-in step signs the browser in at
             # (e2e/run-signin-issuer.sh:34 builds it) with the packages it compiles beyond the
@@ -786,6 +835,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/duty/*'
               - 'packages/envoy/internal/dispatch/events/*'
               - 'packages/envoy/internal/dispatch/identity/*'
+              - 'packages/envoy/internal/dispatch/itemblocks/*'
               - 'packages/envoy/internal/dispatch/model/*'
               - 'packages/envoy/internal/dispatch/pmdoc/*'
               # internal/dispatch/pmdoc embeds schema/blocks.json; history_fold_test.go:478 reads
@@ -1309,7 +1359,8 @@ jobs:
             ~/.cache/legion
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
-  # lint, typecheck and test keep the names main's ruleset required before ci-ok existed. Each
+  # lint, typecheck and test are three of the four names main's ruleset requires, pr-title in
+  # pr-title.yaml the fourth; ci-ok is not one of them (the header's dated read). Each
   # covers the shipped daemon (packages/daemon, the Go `legion`). Fail-open: when `changes` did not
   # succeed, typecheck and test run rather than skip, since a skipped job reports success and a
   # failed selector must never turn a required check into a passing skip.
@@ -1928,6 +1979,41 @@ jobs:
             ~/.cache/go-build
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
+  # The dispatch job's typecheck and unit halves, on every pull request. They are the only run of
+  # packages/dispatch's and packages/proof-editor's Biome check, tsc and unit tests anywhere in
+  # this workflow, and the dispatch job they came out of now runs on no pull request, so they are
+  # a job of their own rather than a skip. It needs no Postgres (the tests that name a database
+  # URL never open one), no Go, no browser and no built SPA: about two and a half minutes against
+  # that job's sixty, of which its browser suite is fifty-six.
+  dispatch-units:
+    needs: changes
+    if: needs.changes.outputs.dispatch_units == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-bun
+      - run: bun install --frozen-lockfile
+      - name: Lint proof editor
+        run: bun run lint
+        working-directory: packages/proof-editor
+      - name: Typecheck proof editor
+        run: bun run typecheck
+        working-directory: packages/proof-editor
+      - name: Test proof editor
+        run: bun run test
+        working-directory: packages/proof-editor
+      - name: Lint dispatch dashboard
+        run: bun run lint
+        working-directory: packages/dispatch
+      - name: Typecheck dispatch dashboard
+        run: bun run typecheck
+        working-directory: packages/dispatch
+      - name: Test dispatch dashboard
+        run: bun run test
+        working-directory: packages/dispatch
+
   dispatch:
     needs: changes
     if: needs.changes.outputs.dispatch == 'true'
@@ -1962,24 +2048,6 @@ jobs:
         # TS source directly through the workspace's "bun" export condition).
         run: bun run build
         working-directory: packages/contracts
-      - name: Lint proof editor
-        run: bun run lint
-        working-directory: packages/proof-editor
-      - name: Typecheck proof editor
-        run: bun run typecheck
-        working-directory: packages/proof-editor
-      - name: Test proof editor
-        run: bun run test
-        working-directory: packages/proof-editor
-      - name: Lint dispatch dashboard
-        run: bun run lint
-        working-directory: packages/dispatch
-      - name: Typecheck dispatch dashboard
-        run: bun run typecheck
-        working-directory: packages/dispatch
-      - name: Test dispatch dashboard
-        run: bun run test
-        working-directory: packages/dispatch
       # The build writes dist/THIRD_PARTY_NOTICES.txt, failing on a bundled package whose license
       # cannot be determined; the listing shows the build shipped it.
       - name: Build dispatch dashboard
@@ -2956,6 +3024,7 @@ jobs:
       - pi-envoy
       - pi-legion
       - dispatch
+      - dispatch-units
       - dispatch-browser-multiprocess
       - claude-envoy
       - envoy-go
@@ -2994,6 +3063,7 @@ jobs:
               "pi-envoy": "pi_envoy",
               "pi-legion": "pi_legion",
               "dispatch": "dispatch",
+              "dispatch-units": "dispatch_units",
               "dispatch-browser-multiprocess": "dispatch_browser_multiprocess",
               "claude-envoy": "claude_envoy",
               "envoy-go": "envoy_go",

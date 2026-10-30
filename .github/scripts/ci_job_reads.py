@@ -533,19 +533,31 @@ GATES = [
         script_run(RUN_SERVER, DISPATCH_SERVER_BUILD, f"started by packages/dispatch/e2e/harness-listeners.ts:74, which e2e/run.ts starts in "
                    f"{at('dispatch', 'Browser-test dispatch dashboard')}", ENVOY, ["./cmd/dispatch"], mode="build"),
     ], reads=reads(
-        ("packages/dispatch/**", f"{at('dispatch', 'Lint dispatch dashboard')}, typecheck, test, build, check:classes, check:asset-sizes and Playwright in packages/dispatch"),
-        ("packages/proof-editor/**", f"{at('dispatch', 'Lint proof editor')}, typecheck and test; packages/dispatch/web/vite.config.ts:73-87"),
+        ("packages/dispatch/**", f"{at('dispatch', 'Build dispatch dashboard')}, check:classes, check:asset-sizes and Playwright in packages/dispatch"),
+        ("packages/proof-editor/**", "packages/dispatch/web/vite.config.ts:73-87 (build:web)"),
         (CONTRACTS_SRC, f"{at('dispatch', 'Build contracts for dispatch e2e')}; packages/dispatch/web/vite.config.ts:63-72 aliases"),
-        (f"{FIX}/delivery-live/**", "packages/dispatch/web/src/features/delivery/lib/applyDelta.test.ts:2-4, e2e/__tests__/delivery-live-probe.test.ts:8-12"),
-        (f"{FIX}/decision-blocks/**", "packages/dispatch/web/src/features/doc/decision-blocks.test.ts:10, features/inbox/AskCard.test.tsx:393"),
         ("packages/envoy-client/bin/dispatch.ts", "packages/dispatch/e2e/cli-body-cap.e2e.ts:27 spawns ../../envoy-client/bin/dispatch.ts"),
         (ENVOY_CLIENT_SRC, "imported by packages/envoy-client/bin/dispatch.ts, which cli-body-cap.e2e.ts:27 runs"),
-        (f"{ENVOY}/internal/dispatch/pmdoc/schema/blocks.json", "packages/dispatch/web/src/__tests__/setup.ts:7, features/refs/markdown-engine.test.ts:3, e2e/engine-tables.ts:9-10"),
-        (f"{ENVOY}/scripts/fixtures/shell-quote.json", "packages/dispatch/e2e/__tests__/local-instance-support.test.ts:153-154"),
+        (f"{ENVOY}/internal/dispatch/pmdoc/schema/blocks.json", "packages/dispatch/e2e/engine-tables.ts:9-10"),
         (f"{ENVOY}/internal/tests3/seaweedfs.go", f"{at('dispatch', 'Start an S3-compatible server for uploaded files')} reads const Image"),
         ("scripts/e2e/lib/held-port.py", "packages/dispatch/e2e/run-server.sh:37 holds the server's port through it"),
         ("scripts/third-party-notices.ts", "packages/dispatch/web/vite.config.ts:11 (build:web writes dist/THIRD_PARTY_NOTICES.txt)"),
-    ) + setup_go("dispatch", f"{ENVOY}/go.mod") + biome(at("dispatch", "Lint dispatch dashboard")) + bun_job("dispatch") + CI_SELF),
+    ) + setup_go("dispatch", f"{ENVOY}/go.mod") + bun_job("dispatch") + CI_SELF),
+
+    # The dispatch job's typecheck and unit halves, which run on every pull request where that
+    # job no longer does. It starts no server and builds no SPA, so it reads neither the Dispatch
+    # server's closure nor the notices script.
+    gate("dispatch_units", "dispatch-units", reads=reads(
+        ("packages/dispatch/**", f"{at('dispatch-units', 'Lint dispatch dashboard')}, typecheck and test in packages/dispatch"),
+        ("packages/proof-editor/**", f"{at('dispatch-units', 'Lint proof editor')}, typecheck and test in packages/proof-editor"),
+        (CONTRACTS_SRC, "packages/dispatch/web/src and e2e/__tests__ import @legion/contracts through its \"types\" and \"bun\" conditions, which name src/"),
+        (f"{FIX}/delivery-live/**", "packages/dispatch/web/src/features/delivery/lib/applyDelta.test.ts:2-4, e2e/__tests__/delivery-live-probe.test.ts:8-12"),
+        (f"{FIX}/decision-blocks/**", "packages/dispatch/web/src/features/doc/decision-blocks.test.ts:10, features/inbox/AskCard.test.tsx:393"),
+        (ENVOY_CLIENT_SRC, "packages/dispatch/web/src and e2e/__tests__ import @legion/envoy-client through its source"),
+        (f"{ENVOY}/internal/dispatch/pmdoc/schema/blocks.json", "packages/dispatch/web/src/__tests__/setup.ts:7, features/refs/markdown-engine.test.ts:3"),
+        (f"{ENVOY}/scripts/fixtures/shell-quote.json", "packages/dispatch/e2e/__tests__/local-instance-support.test.ts:153-154"),
+        ("scripts/e2e/lib/held-port.py", "packages/dispatch/e2e/__tests__/round-robin-proxy.test.ts:376 runs e2e/run-server.sh, which holds the server's port through it (run-server.sh:37)"),
+    ) + biome(at("dispatch-units", "Lint dispatch dashboard")) + bun_job("dispatch-units") + CI_SELF),
 
     # Its "Build the Dispatch server" step names an output (-o), which the simple form does not
     # reduce, so the step is pinned whole.

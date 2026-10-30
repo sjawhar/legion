@@ -41,11 +41,23 @@ router guide for its own workflows; this page covers this repository only.
    (`"<job>": "<filter>"`), and in `PULL_REQUEST_ONLY` too when its `if:` also admits only
    `github.event_name == 'pull_request'`. A job that runs on no push gets its `changes` output
    set false on a push instead (`github.event_name != 'push' && steps.filter.outputs.<filter> ||
-   'false'`), so `ci-ok` reads its skip there as unselected. `ci-ok` fails a needed job `SELECTED_BY` does not name, and
+   'false'`), so `ci-ok` reads its skip there as unselected, and a job that runs on no pull
+   request the same way (`github.event_name != 'pull_request' && steps.filter.outputs.<filter> ||
+   'false'`): that is how `dispatch` and `envoy-go-race` run on the merge queue and
+   on main alone. `ci-ok` fails a needed job `SELECTED_BY` does not name, and
    `check-ci-filters.sh` fails when the map or a list is not exactly what the `if:`s test (the
    section on `ci-ok` below says why).
 6. **A gate in `.github/scripts/ci_job_reads.py`** that says what the job reads, which
    `.github/scripts/check-ci-filters.sh` holds the filter to (the section on the check below).
+
+Before you take a job off the pull-request path, ask what it is the only runner of. `dispatch`
+was the only pull-request job that ran Biome, `tsc` and the unit tests of `packages/dispatch` and
+`packages/proof-editor`, so those steps moved into `dispatch-units`, a job of about two and a half
+minutes that stays on pull requests, and only the SPA build, the asset checks and the browser
+suite went to main. `envoy-go` stayed on the pull-request path for the same reason: it is the only
+pull-request job that runs `packages/envoy`'s untagged unit tests, and the required `test` job
+does not compile that module. A race-detector variant whose plain suite still runs on pull
+requests, as `envoy-go-race` is, loses no coverage class by moving.
 
 A Go job also restores its caches the way the section on caches below says.
 
@@ -62,7 +74,8 @@ job its filters gate is skipped. GitHub's "Re-run failed jobs" then re-runs `cha
 accepted those skips would pass with nothing tested. So `ci-ok.sh` decides what `changes`
 selected from its outputs, through `SELECTED_BY`: a job is selected when the output it maps to is
 `'true'`, and for a job in `PULL_REQUEST_ONLY` the run must also be a pull request's (docs,
-whose main build is docs-pages.yaml's, has its output set false on a push). A re-run that
+whose main build is docs-pages.yaml's, has its output set false on a push, and `dispatch` and
+`envoy-go-race` have theirs set false on a pull request). A re-run that
 leaves a selected job skipped fails naming the job; re-run the whole workflow instead.
 
 `check-ci-filters.sh` fails when `SELECTED_BY` is not exactly {job: the output its `if:` tests}

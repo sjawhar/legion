@@ -1215,6 +1215,14 @@ bun run test
 bun run dispatch:local
 ```
 
+CI splits these in two. `bun run lint`, `bun run typecheck` and `bun run test`, here and in
+`packages/proof-editor`, run in the `dispatch-units` job of `.github/workflows/ci.yaml` on every
+pull request. `bun run build:web`, `check:classes`, `check:asset-sizes` and the Playwright suite
+run in the `dispatch` job, which runs on the merge queue and on a push to main and **not** on a
+pull request: its browser suite is 56 minutes of that job's 60. So a change to shown text, a
+locator, an asset or a CSS class gets no browser verdict until after the merge — run
+`bun run e2e` yourself (`## End-to-end tests` below) before you ask for a review.
+
 `bun run test` loads `web/src/__tests__/setup.ts` first (`bunfig.toml`), which registers happy-dom
 and guards the network: a unit test has no Dispatch, so a write (anything but `GET` and `HEAD`)
 that reaches it was answered by nothing the test set up, and whatever the page then made of the
