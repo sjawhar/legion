@@ -2786,9 +2786,11 @@ export interface CreateCommentInput {
   readonly body: string;
   readonly anchor?: AnchorInput;
   readonly reply_to?: string;
-  /** The id of the block of the comment `reply_to` names that the reply answers (`b2`), checked
-   *  against that comment before `reply_to` climbs to its thread's head. `400 INVALID_COMMENT`
-   *  without `reply_to`, for a block that comment does not hold now, and in an ask's thread. */
+  /** The id of the block the reply answers (`b2`): a block of the comment `reply_to` names,
+   *  checked against that comment before `reply_to` climbs to its thread's head, or, when the
+   *  thread it joins is an ask's (`ask_id`, or a `reply_to` the climb takes to one), a part of
+   *  that ask. `400 INVALID_COMMENT` without `reply_to` or `ask_id`, and for a block the item it
+   *  is checked against does not hold now. */
   readonly reply_to_block?: string;
   readonly ask_id?: string;
   readonly mentions?: Array<{ readonly target: string }>;

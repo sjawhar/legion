@@ -8964,6 +8964,40 @@ describe("executeDispatchTool", () => {
     expect(toBlock.text).toBe("Posted comment comment-2");
   });
 
+  test("a comment reply to an ask's part names the part", async () => {
+    const askID = "01234567-0000-4000-8000-000000000042";
+    const bodies: unknown[] = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname !== "/api/v1/issues/DSP-1/comments") {
+        throw new Error(`unexpected request: ${target.pathname}`);
+      }
+      bodies.push(JSON.parse(init?.body as string));
+      return response({ id: "comment-2", issue_key: "DSP-1", ask_id: askID, reply_to: null });
+    };
+    const reply = (replyToAsk: string) =>
+      executeDispatchTool({
+        tool: "dispatch_comment",
+        args: { issue: "DSP-1", body: "Monday works", reply_to_ask: replyToAsk },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+    const toPart = await reply(`dispatch://DSP-1/ask/${askID}#b-b2`);
+    // A reply to the ask itself names no part.
+    await reply(askID);
+
+    expect(bodies).toEqual([
+      { body: "Monday works", ask_id: askID, reply_to_block: "b2", actor: expect.anything() },
+      { body: "Monday works", ask_id: askID, actor: expect.anything() },
+    ]);
+    expect(toPart.details).toMatchObject({ issue: "DSP-1", comment: "comment-2", ask: askID });
+  });
+
   test("a comment reply refuses a block reference that names no block of a comment", async () => {
     const parent = "11111111-1111-4111-8111-111111111111";
     const fetchImpl = (() => {

@@ -782,15 +782,11 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	// A block the reply names is one of the comment it answers, which lockedComment holds after
-	// its owner.
+	// A reply under an ask names a part of that ask; every other reply names a block of the
+	// comment it answers, which lockedComment holds after its owner.
 	var block *namedBlock
 	if input.ReplyToBlock != nil {
-		if thread.AskID != nil {
-			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, replyBlockInAskThread)
-			return
-		}
-		block, err = s.replyBlockOf(r.Context(), tx, refs.ItemComment, comment.ID, *input.ReplyToBlock, "reply_to_block", "INVALID_COMMENT")
+		block, err = s.replyBlockInThread(r.Context(), tx, thread, comment.ID, *input.ReplyToBlock)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return

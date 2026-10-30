@@ -682,19 +682,21 @@ function itemBlockOf(value: string): ItemBlockRef | undefined {
 /**
  * Why `value`, given to `field` of a `kind` reply, names no block that reply can answer: a block
  * of another kind of item (a document's included), or one pinned to a revision, since a reply
- * answers the block whatever its text becomes. Undefined for a block of a `kind` and for a value
+ * answers the block whatever its text becomes. An ask's part is what `reply_to_ask` answers, as a
+ * comment's block is what `reply_to` answers. Undefined for a block of a `kind` and for a value
  * that is no block reference at all.
  */
 function replyBlockProblem(
-  field: "reply_to" | "in_reply_to",
-  kind: "comment" | "message",
+  field: "reply_to" | "in_reply_to" | "reply_to_ask",
+  kind: "comment" | "message" | "ask",
   value: string
 ): string | undefined {
   if (!/^dispatch:\/\/[^#]*#b-/.test(value)) return undefined;
+  const article = (item: string) => (item === "ask" ? "an ask" : `a ${item}`);
   const form = `dispatch://KEY/${kind}/<id>#b-<block id>`;
   const ref = parseDispatchRef(value);
   if (ref?.kind !== "block") {
-    return `${field} ${value} names no block; a block of a ${kind} reads ${form}`;
+    return `${field} ${value} names no block; a block of ${article(kind)} reads ${form}`;
   }
   const other = ref.item?.kind;
   if (other !== kind) {
@@ -704,8 +706,8 @@ function replyBlockProblem(
         : other === "message"
           ? `; answer it with ${commandLine("dispatch_message", { in_reply_to: value })}`
           : "";
-    const named = other === undefined ? "a document" : other === "ask" ? "an ask" : `a ${other}`;
-    return `${field} ${value} names a block of ${named}, but a ${kind} reply answers a block of a ${kind} (${form})${answer}`;
+    const named = other === undefined ? "a document" : article(other);
+    return `${field} ${value} names a block of ${named}, but ${article(kind)} reply answers a block of ${article(kind)} (${form})${answer}`;
   }
   if (ref.pin !== undefined) {
     return `${field} ${value} names revision ${ref.pin} of the block, but a reply answers the block whatever its text becomes: drop @v${ref.pin}`;
@@ -931,6 +933,16 @@ function commentReplyTo(args: ToolArguments): ReplyTarget | undefined {
   return block === undefined ? { id: replyTo } : { id: block.item.id, block: block.block };
 }
 
+/** The ask a `reply_to_ask` names: a part reference splits into the ask's id and the part's;
+ *  `argumentProblems` refused any other block reference, and Dispatch checks any other value as
+ *  the ask's id. */
+function askReplyTo(args: ToolArguments): ReplyTarget | undefined {
+  const replyToAsk = optionalString(args, "reply_to_ask");
+  if (replyToAsk === undefined) return undefined;
+  const block = itemBlockOf(replyToAsk);
+  return block === undefined ? { id: replyToAsk } : { id: block.item.id, block: block.block };
+}
+
 /**
  * Cross-field checks the schema cannot express, run as predicates over the (possibly
  * unparsed) arguments so every problem is reported in the same refusal.
@@ -972,12 +984,18 @@ function argumentProblems(tool: string, args: ToolArguments): string[] {
         problems.push("artifact is required when quote is supplied");
       }
       const replyTo = optionalString(args, "reply_to");
-      if (replyTo !== undefined && optionalString(args, "reply_to_ask") !== undefined) {
+      const replyToAsk = optionalString(args, "reply_to_ask");
+      if (replyTo !== undefined && replyToAsk !== undefined) {
         problems.push("reply_to and reply_to_ask cannot both be set");
       }
-      const replyBlock =
-        replyTo === undefined ? undefined : replyBlockProblem("reply_to", "comment", replyTo);
-      if (replyBlock !== undefined) problems.push(replyBlock);
+      for (const problem of [
+        replyTo === undefined ? undefined : replyBlockProblem("reply_to", "comment", replyTo),
+        replyToAsk === undefined
+          ? undefined
+          : replyBlockProblem("reply_to_ask", "ask", replyToAsk),
+      ]) {
+        if (problem !== undefined) problems.push(problem);
+      }
       break;
     }
     case "dispatch_message": {
@@ -3780,14 +3798,17 @@ export async function executeDispatchTool(
           : await resolveDocument(owner, artifactReference);
       const anchored = resolved ? anchor(resolved.artifact, args) : undefined;
       const replyTo = commentReplyTo(args);
-      const replyToAskReference = optionalString(args, "reply_to_ask");
+      const replyToAskTarget = askReplyTo(args);
       const replyToAsk =
-        replyToAskReference === undefined ? undefined : normalizeUUID(replyToAskReference);
-      if (replyToAskReference !== undefined && replyToAsk === undefined) {
+        replyToAskTarget === undefined ? undefined : normalizeUUID(replyToAskTarget.id);
+      if (replyToAskTarget !== undefined && replyToAsk === undefined) {
         throw new ToolInputError(input.tool, [
           await invalidReplyToAskProblem(client, owner, resolved),
         ]);
       }
+      // reply_to and reply_to_ask are mutually exclusive, so at most one names a block: a block
+      // of the comment reply_to answers, or the part of the ask reply_to_ask threads under.
+      const replyToBlock = replyTo?.block ?? replyToAskTarget?.block;
       // The schema already refused reply_to alongside reply_to_ask, turn without reply_to_ask,
       // and a turn outside agent|human, so the value is the contract's shape.
       const requestedTurn = optionalString(args, "turn") as CreateCommentInput["turn"];
@@ -3800,7 +3821,7 @@ export async function executeDispatchTool(
         body,
         ...(anchored === undefined ? {} : { anchor: anchored }),
         ...(replyTo === undefined ? {} : { reply_to: replyTo.id }),
-        ...(replyTo?.block === undefined ? {} : { reply_to_block: replyTo.block }),
+        ...(replyToBlock === undefined ? {} : { reply_to_block: replyToBlock }),
         ...(replyToAsk === undefined ? {} : { ask_id: replyToAsk }),
         ...(requestedTurn === undefined ? {} : { turn: requestedTurn }),
         actor,

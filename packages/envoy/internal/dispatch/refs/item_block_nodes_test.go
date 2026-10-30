@@ -221,3 +221,39 @@ func TestAnItemBlocksLinkReachesItsItem(t *testing.T) {
 		t.Errorf("referenced-by = %#v; want the comment alone", citers)
 	}
 }
+
+// An ask's own refs rows are its question's alone, so a document linked only from one of its
+// options is an edge of ask_block_refs and of nothing else. The closure reads that table too, so
+// the document joins its issue's closure at the depth an item's own link has, with the ask as its
+// via - the rule every item's blocks follow.
+func TestAnAskOptionsLinkJoinsItsIssuesClosure(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin fixture transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	createReferenceProject(t, tx, "CORE")
+	createReferenceIssue(t, tx, "CORE-1", "CORE")
+	_, handbook := createReferenceArtifact(t, tx, "", "CORE", "handbook-md")
+	ask := insertAsk(t, tx, "CORE-1", "Which rollout do we take?",
+		model.AskOption{Label: "Staged", Description: "As dispatch://CORE/artifact/handbook-md lays out."})
+	indexAskPartsAt(t, tx, ask, 1)
+
+	var own int
+	if err := tx.QueryRow(ctx, `select count(*) from refs where from_kind = 'ask' and from_id = $1`, ask.ID).Scan(&own); err != nil {
+		t.Fatalf("count the ask's own refs rows: %v", err)
+	}
+	if own != 0 {
+		t.Fatalf("the ask holds %d refs rows of its own; the link is meant to be its option's alone", own)
+	}
+
+	members, truncated, err := Closure(ctx, tx, "CORE-1")
+	if err != nil {
+		t.Fatalf("read closure: %v", err)
+	}
+	if want := []Member{{RefKey: handbook, Depth: 1, Via: model.ReferenceVia{Kind: "ask", ID: ask.ID}}}; truncated || !reflect.DeepEqual(members, want) {
+		t.Errorf("closure = %#v (truncated %t); want %#v", members, truncated, want)
+	}
+}

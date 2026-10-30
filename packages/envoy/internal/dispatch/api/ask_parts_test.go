@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"reflect"
 	"strconv"
@@ -784,4 +785,113 @@ func TestAListedAskCarriesThePartIDsItsOwnReadCarries(t *testing.T) {
 		t.Fatalf("the inbox rows = %#v, want the ask's option ids %v at revision %d",
 			rows, askOptionIDs(want), want.Revision)
 	}
+}
+
+// A reply in an ask's thread names the part it answers: `reply_to_block` is checked against the
+// ask's own parts, the reply stores that part's node id, every read of the reply carries it and
+// ?to= the part lists the reply. The ask's referenced-by count leaves the reply out, since a
+// clarification thread is never what "referenced by" means (refs.AskBacklinkExclusions); an edit
+// that drops the option leaves the reply reading the part removed, with the last text it held, as
+// a removed comment block's reply reads; a part the ask does not hold is refused; and a reply an
+// older build wrote under the ask, with no block at all, still reads under it naming none.
+func TestAReplyToAnAskNamesThePartItAnswers(t *testing.T) {
+	const monday = "Monday — Ship at the start of the week."
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Ask thread replies", "A spec")
+	ask := createPartAsk(t, handler, issue.Key, "Which day do we ship?",
+		map[string]string{"label": "Monday", "description": "Ship at the start of the week."},
+		map[string]string{"label": "Tuesday"})
+	optionRef := askPartRef(issue.Key, ask.ID, "b2")
+	option := &model.ReplyBlock{Node: "ask/" + ask.ID + "#b2", Ref: optionRef, BlockID: "b2", Text: monday}
+
+	reply := createThreadComment(t, handler, issue.Key, map[string]any{
+		"body": "Monday works for us.", "ask_id": ask.ID, "reply_to_block": "b2",
+	}, "alice")
+	if reply.AskID == nil || *reply.AskID != ask.ID {
+		t.Fatalf("the reply's ask_id = %v, want %s", reply.AskID, ask.ID)
+	}
+	requireReplyBlock(t, "the write's answer", reply.ReplyBlock, option)
+	var stored *string
+	if err := database.Pool.QueryRow(context.Background(), `select replies_to_block from comments where id = $1`, reply.ID).Scan(&stored); err != nil ||
+		stored == nil || *stored != option.Node {
+		t.Fatalf("replies_to_block = %v (%v), want %s", stored, err, option.Node)
+	}
+	requireReplyBlock(t, "GET the reply", readCommentThread(t, handler, reply.ID).Comment.ReplyBlock, option)
+
+	// The ask's own read lists the reply under it, carrying the part it answers.
+	askReplies := func(step string) []model.Comment {
+		t.Helper()
+		response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+ask.ID, nil, "alice")
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s: status=%d body=%s", step, response.Code, response.Body.String())
+		}
+		return decodeBody[struct {
+			Replies []model.Comment `json:"replies"`
+		}](t, response).Replies
+	}
+	if replies := askReplies("read the ask"); len(replies) != 1 || replies[0].ID != reply.ID {
+		t.Fatalf("the ask's replies = %#v, want the reply", replies)
+	} else {
+		requireReplyBlock(t, "the ask's replies", replies[0].ReplyBlock, option)
+	}
+
+	// ?to= the part lists the reply, and the ask's card does not count it as a reference.
+	if edges := readGraph(t, handler, url.Values{"to": {optionRef}, "kind": {"replies_to"}}).Edges; len(edges) != 1 ||
+		edges[0].Node.Kind != "comment" || edges[0].Node.ID != reply.ID {
+		t.Fatalf("?to= the option with kind=replies_to lists %#v, want the reply", edges)
+	}
+	askRead := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+ask.ID, nil, "alice")
+	if askRead.Code != http.StatusOK {
+		t.Fatalf("read the ask: status=%d body=%s", askRead.Code, askRead.Body.String())
+	}
+	counted := decodeBody[struct {
+		Ask askBacklinkCount `json:"ask"`
+	}](t, askRead).Ask
+	requireAskBacklinkCount(t, map[string]*int{counted.ID: counted.ReferencedByCount}, ask.ID, 0)
+
+	// The edit drops Monday: the reply still names the part, removed, with its last text.
+	editPartAskOptions(t, handler, ask.ID, "drop Monday", map[string]string{"label": "Tuesday"})
+	removed := *option
+	removed.Removed = true
+	requireReplyBlock(t, "GET the reply after the edit dropped the option",
+		readCommentThread(t, handler, reply.ID).Comment.ReplyBlock, &removed)
+	if replies := askReplies("read the ask after the edit"); len(replies) != 1 {
+		t.Fatalf("the ask's replies after the edit = %#v, want the reply", replies)
+	} else {
+		requireReplyBlock(t, "the ask's replies after the edit", replies[0].ReplyBlock, &removed)
+	}
+
+	post := func(input map[string]any) *httptest.ResponseRecorder {
+		return dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", input, "alice")
+	}
+	requireRefusal(t, "a part the ask does not hold", post(map[string]any{"body": "On b9.", "ask_id": ask.ID, "reply_to_block": "b9"}),
+		"INVALID_COMMENT", "reply_to_block b9 is not a block of ask "+ask.ID)
+	requireRefusal(t, "a part the edit dropped", post(map[string]any{"body": "On Monday.", "ask_id": ask.ID, "reply_to_block": "b2"}),
+		"INVALID_COMMENT", "reply_to_block b2 is not a block of ask "+ask.ID)
+
+	// A reply an older build wrote names no block, and still reads under the ask.
+	var older string
+	if err := database.Pool.QueryRow(context.Background(), `
+		insert into comments (issue_key, author, body, ask_id)
+		values ($1, '{"kind":"user","id":"alice"}', $2, $3::uuid) returning id::text
+	`, issue.Key, "Written before the parts were blocks.", ask.ID).Scan(&older); err != nil {
+		t.Fatalf("insert a reply as an older build: %v", err)
+	}
+	replies := askReplies("read the ask with the older reply")
+	if len(replies) != 2 || replies[1].ID != older {
+		t.Fatalf("the ask's replies = %#v, want the reply and the older one", replies)
+	}
+	requireReplyBlock(t, "the older reply", replies[1].ReplyBlock, nil)
+	requireReplyBlock(t, "GET the older reply", readCommentThread(t, handler, older).Comment.ReplyBlock, nil)
+
+	// The thread climb reaches the ask too: a reply to a comment under it names a part of the
+	// ask, never a block of that comment, which holds no b3 at all.
+	climbed := createThreadComment(t, handler, issue.Key, map[string]any{
+		"body": "Tuesday then.", "reply_to": reply.ID, "reply_to_block": "b3",
+	}, "bob")
+	requireReplyBlock(t, "a reply whose climb reaches the ask", climbed.ReplyBlock,
+		&model.ReplyBlock{Node: "ask/" + ask.ID + "#b3", Ref: askPartRef(issue.Key, ask.ID, "b3"), BlockID: "b3", Text: "Tuesday"})
+	requireRefusal(t, "a climb to the ask naming no part of it",
+		post(map[string]any{"body": "On b9.", "reply_to": reply.ID, "reply_to_block": "b9"}),
+		"INVALID_COMMENT", "reply_to_block b9 is not a block of ask "+ask.ID)
 }

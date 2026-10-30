@@ -1704,18 +1704,20 @@ A reply can name the block it answers. `reply_to_block` on `POST /api/v1/issues/
 and `POST /api/v1/artifacts/{id}/comments` names a block of the comment `reply_to` names, checked
 before `reply_to` climbs to its thread's head, so a reply naming a block of a nested reply stores
 that block while `reply_to` is the head; on the delivery callback `POST /api/v1/comments/{id}/reply`
-it names a block of comment `{id}`. `in_reply_to_block` names a block of the message `in_reply_to`
-names on `POST /api/v1/issues/{key}/messages` and `POST /api/v1/agents/{session_id}/messages`, and
+it names a block of comment `{id}`. A reply whose thread is an ask (`ask_id`, a `reply_to` the
+climb takes to an ask, or a delivery callback on a comment in one) names a part of that ask
+instead, checked against the ask's own parts, since an ask's thread answers the question, its
+options and its answer rather than any comment's paragraphs. `in_reply_to_block` names a block of
+the message `in_reply_to` names on `POST /api/v1/issues/{key}/messages` and
+`POST /api/v1/agents/{session_id}/messages`, and
 of message `{id}` on `POST /api/v1/messages/{id}/reply`. The reply stores the block's node id in
 `replies_to_block`, `graph_edges` lists its `replies_to` edge to that block, its graph node's
 `parent` is the block, and a `?to=` read of the item lists the reply once, under that block, its
 `replies_to` edge to the item itself left out. A block the item does not hold now is
 `400 INVALID_COMMENT` (`INVALID_MESSAGE` for a message) `<field> <block> is not a block of <kind>
-<id>`, and so is `reply_to_block` without `reply_to` or `in_reply_to_block` without
-`in_reply_to`, a delivery callback's error report naming a block, and a message follow-up
-(`?follow_up=true` once the attempt is answered) naming one; a reply in an ask's thread (`ask_id`,
-a `reply_to` whose thread's head is an ask, or a delivery callback on a comment in one) naming a
-block is `400 INVALID_COMMENT` `a reply in an ask's thread names no block yet`. When the named
+<id>`, and so is `reply_to_block` with neither `reply_to` nor `ask_id`, `in_reply_to_block`
+without `in_reply_to`, a delivery callback's error report naming a block, and a message follow-up
+(`?follow_up=true` once the attempt is answered) naming one. When the named
 item is owed an index, or was indexed from another body than it stores, the reply's transaction
 indexes it first under the locks it already
 holds (`refs.IndexItemIfOwed`; a message parent is taken `for no key update` after its issue,

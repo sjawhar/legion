@@ -825,15 +825,17 @@ export const dispatchToolSpecs = [
           "A comment id (uuid); replying to any comment in a thread continues that thread (an " +
             "ask's clarification thread included). A block reference to one block of the comment " +
             "(dispatch://KEY/comment/<id>#b-<block id>) replies to that comment and names the " +
-            "passage the reply answers. To reply to an ask, use reply_to_ask with the " +
-            "ask id instead."
+            "passage the reply answers. To reply to an ask, use reply_to_ask with the ask id, or " +
+            "with a reference to one of its parts, instead."
         )
         .optional(),
       reply_to_ask: z
         .string()
         .describe(
-          "Optional ask id to reply to, threading this comment under that question. Mutually " +
-            "exclusive with reply_to."
+          "Optional ask id to reply to, threading this comment under that question. A block " +
+            "reference to one part of the ask (dispatch://KEY/ask/<id>#b-<part id>, the id an " +
+            "option or the answer carries) threads under that ask and names the part the reply " +
+            "answers. Mutually exclusive with reply_to."
         )
         .optional(),
       turn: z

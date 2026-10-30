@@ -27,8 +27,10 @@ const (
 // block: a deleted block's links drop out of the closure until a version holds its id again. A
 // block of a comment or message reaches its item, as a document's block reaches its document: a
 // link one holds is read from its item's own refs row, which every comment and message keeps
-// beside its blocks' mentions, so the member's via is the item. A reference to an item block, as
-// one to its item, reaches no document.
+// beside its blocks' mentions, so the member's via is the item. An ask keeps no such row - its
+// refs are its question's alone - so the links its parts hold are read from ask_block_refs, by
+// the same rule: the member's via is the ask, at the depth the ask's own link has. A reference to
+// an item block, as one to its item, reaches no document.
 func Closure(ctx context.Context, q Queryer, issueKey string) ([]Member, bool, error) {
 	rows, err := q.Query(ctx, `
 		with recursive closure as (
@@ -40,6 +42,13 @@ func Closure(ctx context.Context, q Queryer, issueKey string) ([]Member, bool, e
 				or (r.from_kind = 'message'  and r.from_id in (select id::text from messages  where issue_key = $1))
 				or (r.from_kind = 'artifact' and r.from_id in (select id::text from artifacts where issue_key = $1))
 			)
+			union
+			select `+documentOfTarget+`, 1, 'ask', r.ask_id::text
+			from ask_block_refs r
+			join ask_blocks b on b.ask_id = r.ask_id and b.block_id = r.block_id
+			where b.position is not null
+			  and r.ask_id in (select id from asks where issue_key = $1)
+			  and `+documentTarget+`
 			union
 			select `+documentOfTarget+`, c.depth + 1, 'artifact', a.id::text
 			from closure c
