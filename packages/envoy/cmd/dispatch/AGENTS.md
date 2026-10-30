@@ -489,7 +489,7 @@ write identity errors with `identity.WriteError`.
   projected ServiceAccount token every broker call presents, read at call time)
   and `DISPATCH_SERVER_URL` (the origin a proof's `htu` is checked against,
   never a forwarded header). Spent proofs go in Dispatch's own `dpop_proofs`
-  (migration `0139`), swept beside the idempotency keys. A verified caller is
+  (migration `0148`), swept beside the idempotency keys. A verified caller is
   `{kind: "session", id: <the token's session>}` carrying `owner`, the person it
   acts for, and `project`, the one project a named-scope token may write, both
   set from the token and never from a body as `service` is; a person-scoped
@@ -499,6 +499,10 @@ write identity errors with `identity.WriteError`.
   other writer `403 ACTOR_SESSION_MISMATCH` naming the session the token
   carries. Its refusals are `401 BROKER_TOKEN_NOT_ACTIVE`,
   `401 BROKER_TOKEN_PROOF_INVALID`, `401 BROKER_TOKEN_KEY_MISMATCH`,
+  `401 BROKER_TOKEN_NOT_A_SESSION` for a live token that is no session's
+  credential — one naming no session or no person, or issued to a client other
+  than the exchange, which a machine login's own access token is, so a body
+  cannot name a session for a credential that proves none —
   `429 BROKER_TOKEN_RATE_LIMITED` and `503 BROKER_UNAVAILABLE`, which is a 503
   for the reason `OIDC_ISSUER_UNAVAILABLE` is: the broker answered nothing, so
   the token was never judged. A proof is single use by its `jti` and `htu`, so
@@ -710,7 +714,7 @@ caller that resolves to nobody keeps the route's own `401` (`refuseChangedLogin`
 | `/api/v1/projects/{key}/artifacts/{slug}/versions/{n}` | GET | user or bearer | Read an unlinked project document version or download its blob, as `/api/v1/artifacts/{id}/versions/{n}` does. |
 | `/api/v1/projects/{key}/artifacts/{slug}/versions` | POST | user or bearer | Create a named project-document version. |
 | `/api/v1/projects/{key}/artifacts/{slug}/edits` | POST | user or bearer | Apply project-document edit operations. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. |
-| `/api/v1/agents/{session_id}/artifacts` | POST | user or bearer | Upload a file or image to an agent's conversation (multipart, an issue upload's caps, errors, kind read from the bytes and file-store write; no event). There is no list route: the conversation's pictures are read by the references the messages carry. A markdown document is `400 ARTIFACT_INPUT`: an agent's conversation holds files and images, and a document belongs to an issue or a project. Such a file's comments, asks, events and subscribers under `/api/v1/artifacts/{id}/...` are `400 ARTIFACT_AGENT_OWNED`. A `session_id` `text.IsSessionID` refuses is `400 INVALID_SESSION_ID` on every agent artifact route. |
+| `/api/v1/agents/{session_id}/artifacts` | POST | user or bearer | Upload a file or image to an agent's conversation (multipart, an issue upload's caps, errors, kind read from the bytes and file-store write; no event). There is no list route: the conversation's pictures are read by the references the messages carry. A caller whose credential proves a session of its own uploads only into that session: any other `session_id` is `403 SESSION_SCOPE` (`api.withinSessionScope`). A markdown document is `400 ARTIFACT_INPUT`: an agent's conversation holds files and images, and a document belongs to an issue or a project. Such a file's comments, asks, events and subscribers under `/api/v1/artifacts/{id}/...` are `400 ARTIFACT_AGENT_OWNED`. A `session_id` `text.IsSessionID` refuses is `400 INVALID_SESSION_ID` on every agent artifact route. |
 | `/api/v1/agents/{session_id}/artifacts/{slug}` | GET | user or bearer | Read an agent's conversation's file or image and its versions by slug. |
 | `/api/v1/agents/{session_id}/artifacts/{slug}/versions/{n}` | GET | user or bearer | Download one version of it, as `/api/v1/artifacts/{id}/versions/{n}` does. |
 | `/api/v1/me/state` | GET | identity | Read the user's issue UI state. |

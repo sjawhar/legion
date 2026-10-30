@@ -517,8 +517,10 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 		}
 		if route.Method != http.MethodGet {
 			// Outside the keyed layer and the upload's spool, so a write to another project's
-			// object claims no idempotency key and costs no body (withinProjectScope).
+			// object, or into another session's own rows, claims no idempotency key and costs
+			// no body (withinProjectScope, withinSessionScope).
 			handler = s.withinProjectScope(route, handler)
+			handler = s.withinSessionScope(route, handler)
 			handler = s.refuseChangedLogin(handler)
 		}
 		handler = s.refuseUnstorableParameters(route.Pattern, handler)
@@ -572,7 +574,7 @@ func (s *server) whileCallerResolves(handler http.HandlerFunc) http.HandlerFunc 
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, closeConnection := context.WithCancel(r.Context())
 		defer closeConnection()
-		check := r.WithContext(reresolving(store.WithTransactionTracking(accesslog.Detached(ctx))))
+		check := r.WithContext(store.WithTransactionTracking(accesslog.Detached(ctx)))
 		go func() {
 			heartbeat := time.NewTicker(s.deps.StreamHeartbeat)
 			defer heartbeat.Stop()
@@ -582,15 +584,11 @@ func (s *server) whileCallerResolves(handler http.HandlerFunc) http.HandlerFunc 
 					return
 				case <-heartbeat.C:
 					// The check resolves the credential the request was admitted with, from a
-					// detached copy of that request. For a broker-issued token that copy still
-					// carries the DPoP proof the upgrade presented, and a proof is single use by
-					// its 'jti' and 'htu': checking it again would be a replay and would close a
-					// sound socket every heartbeat. The proof authenticated the upgrade, so what
-					// a re-resolution asks is only whether the token is still live, which is the
-					// broker's introspection answer, cached or fresh (brokerTokenActor reads this
-					// mark and takes brokertoken.Verifier.Live). Every other credential is
-					// resolved exactly as it is on a request.
-					if _, _, err := s.optionalActor(check); err != nil {
+					// detached copy of that request, which for a broker-issued token asks the
+					// broker's answer alone rather than the proof the upgrade already spent
+					// (callerStillResolves). Every other credential is resolved exactly as it
+					// is on a request.
+					if err := s.callerStillResolves(check); err != nil {
 						closeConnection()
 						return
 					}
@@ -601,57 +599,14 @@ func (s *server) whileCallerResolves(handler http.HandlerFunc) http.HandlerFunc 
 	}
 }
 
-// reresolvedKey marks a context as a re-resolution of a caller already admitted on a request of
-// its own, rather than the authentication of a fresh request.
-type reresolvedKey struct{}
-
-// reresolving marks ctx as such a re-resolution. It masks any decision the admitting request
-// carried, since that decision is not an answer to whether the caller still resolves now.
-func reresolving(ctx context.Context) context.Context {
-	return context.WithValue(context.WithValue(ctx, brokerDecisionKey{}, nil), reresolvedKey{}, true)
-}
-
-// reresolved reports whether ctx carries that mark.
-func reresolved(ctx context.Context) bool {
-	marked, _ := ctx.Value(reresolvedKey{}).(bool)
-	return marked
-}
-
-// brokerDecisionKey carries what a request's DPoP presentation was decided to be, so it is
-// decided once a request.
-type brokerDecisionKey struct{}
-
-// brokerDecision is that decision: the caller, or the refusal.
-type brokerDecision struct {
-	actor model.Actor
-	err   error
-}
-
-// decideBrokerToken decides a request's DPoP presentation before its handler runs and carries the
-// decision on the request, because a DPoP proof is single use by its 'jti' and 'htu': a route
-// that resolves its caller more than once (an issue create is requireAuthenticated and then
-// requireActor, and a keyed write resolves before its handler) would present one proof twice and
-// refuse the second as the replay it would be. The refusal is carried too, so a caller is told
-// why it was refused rather than told its sound proof was spent.
-//
-// It answers nothing itself: each route refuses a caller that does not resolve in its own way —
-// a JSON error, a closed socket — and reaches this decision through optionalActor as it always
-// has. A request presenting no such token passes straight through.
-func (s *server) decideBrokerToken(handler http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if _, presented := brokertoken.Presented(r); !presented {
-			handler(w, r)
-			return
-		}
-		actor, _, err := s.brokerTokenActor(r)
-		handler(w, r.WithContext(context.WithValue(r.Context(), brokerDecisionKey{}, brokerDecision{actor: actor, err: err})))
-	}
-}
-
 type apiError struct {
 	status  int
 	code    string
 	message string
+	// retryAfter is the Retry-After the answer carries, in whole seconds, and 0 for an answer
+	// that carries none. Only a refusal that knows when the caller may come back sets it
+	// (brokerTokenActor's 429); writeHandlerError writes the header.
+	retryAfter int
 }
 
 func (e *apiError) Error() string { return e.message }
@@ -718,6 +673,10 @@ func documentErrorCode(err error) string {
 func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 	var apiErr *apiError
 	if errors.As(err, &apiErr) {
+		if apiErr.retryAfter > 0 {
+			// Before the body: writeError writes the status and the headers go with it.
+			w.Header().Set("Retry-After", strconv.Itoa(apiErr.retryAfter))
+		}
 		writeError(w, apiErr.code, apiErr.status, apiErr.message)
 		// A 500 the handler named is a server fault like any other, so the operator's log shows it.
 		if apiErr.status == http.StatusInternalServerError {
@@ -914,10 +873,12 @@ func (s *server) refuseChangedLogin(handler http.HandlerFunc) http.HandlerFunc {
 // access-log line (accesslog.Note), which costs the line what the authentication already
 // resolved and never a lookup of its own.
 func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
-	// A keyed write resolved its caller before its handler ran (keyedWrites); a bearer is verified
-	// once a request, and the line named the caller at that resolution.
+	// The caller may already be decided: a keyed write resolves before its handler
+	// (keyedWrites), and a DPoP presentation is decided once a request however many layers
+	// resolve it (decideBrokerToken), which is why a refusal rides along — a proof spent on
+	// the first resolution cannot answer the second.
 	if caller, ok := r.Context().Value(resolvedCallerKey{}).(resolvedCaller); ok {
-		return caller.actor, caller.human, nil
+		return caller.actor, caller.human, caller.err
 	}
 	if _, presented := brokertoken.Presented(r); presented {
 		return s.brokerTokenActor(r)
@@ -979,74 +940,6 @@ func (s *server) serviceTokenActor(r *http.Request, token string) (model.Actor, 
 	}
 	accesslog.Note(r.Context(), accesslog.KindService, claims.Subject)
 	return model.Actor{Service: &claims.Subject}, false, nil
-}
-
-// brokerTokenActor authenticates a caller presenting an access token the secrets broker issued,
-// under the DPoP scheme: the broker is asked whether the token is live and the caller is held to
-// the key that token is bound to (internal/brokertoken). A verified caller is the session the
-// token names, acting for the person it names, and is never retried as another credential.
-//
-// Each refusal is its own code, and none of them repeats the token the caller presented:
-//
-//   - 401 BROKER_TOKEN_NOT_ACTIVE — the broker answered that the token is not live (unknown,
-//     revoked or expired).
-//   - 401 BROKER_TOKEN_PROOF_INVALID — the proof did not meet RFC 9449 Section 4.3: a bad
-//     signature, a method or target URI that is not this request's, an 'iat' outside the window,
-//     a missing or wrong 'ath', or a proof already spent.
-//   - 401 BROKER_TOKEN_KEY_MISMATCH — a sound proof signed by a key that is not the token's
-//     'jkt', which is what makes a stolen token useless.
-//   - 429 BROKER_TOKEN_RATE_LIMITED — this source address has no introspection left in its
-//     bucket; nothing was asked of the broker.
-//   - 503 BROKER_UNAVAILABLE — the broker produced no answer, so the token was never judged. It
-//     is a 503 for the reason OIDC_ISSUER_UNAVAILABLE is: a caller told its token was refused
-//     would discard a token that may be perfectly live, where a 503 asks it to come back.
-func (s *server) brokerTokenActor(r *http.Request) (model.Actor, bool, error) {
-	if decided, carried := r.Context().Value(brokerDecisionKey{}).(brokerDecision); carried {
-		// Decided once a request, by decideBrokerToken; the proof cannot be presented twice.
-		return decided.actor, false, decided.err
-	}
-	if s.deps.BrokerTokens == nil {
-		// No broker is configured, so Dispatch has no such credential kind and this is what an
-		// Authorization header that is not a bearer has always been here (auth.BearerToken reads
-		// no token from it).
-		return model.Actor{}, false, errorf(http.StatusUnauthorized, "UNAUTHORIZED", "invalid bearer token")
-	}
-	decide := s.deps.BrokerTokens.Verify
-	if reresolved(r.Context()) {
-		// An open connection's heartbeat, whose proof already authenticated the upgrade and
-		// cannot be presented twice; see whileCallerResolves.
-		decide = s.deps.BrokerTokens.Live
-	}
-	caller, err := decide(r.Context(), r)
-	switch {
-	case err == nil:
-	case errors.Is(err, brokertoken.ErrNotActive):
-		return model.Actor{}, false, errorf(http.StatusUnauthorized, "BROKER_TOKEN_NOT_ACTIVE",
-			"the secrets broker does not hold this access token as live")
-	case errors.Is(err, brokertoken.ErrKeyMismatch):
-		return model.Actor{}, false, errorf(http.StatusUnauthorized, "BROKER_TOKEN_KEY_MISMATCH",
-			"the DPoP proof's key is not the key this access token is bound to")
-	case errors.Is(err, brokertoken.ErrProofInvalid), errors.Is(err, brokertoken.ErrNotPresented):
-		return model.Actor{}, false, errorf(http.StatusUnauthorized, "BROKER_TOKEN_PROOF_INVALID",
-			"the DPoP proof did not verify")
-	case errors.Is(err, brokertoken.ErrRateLimited):
-		return model.Actor{}, false, errorf(http.StatusTooManyRequests, "BROKER_TOKEN_RATE_LIMITED",
-			"too many access tokens checked from this address; try again in %s", s.deps.BrokerTokens.RetryAfter())
-	default:
-		// The class only, as serviceTokenActor logs one: this runs before any authorization, so
-		// anything the caller chose would be theirs to write into the operator's log.
-		slog.Warn("dispatch: the secrets broker could not be reached to check an access token", "error", err)
-		return model.Actor{}, false, errorf(http.StatusServiceUnavailable, "BROKER_UNAVAILABLE",
-			"the secrets broker cannot be reached; try again in a minute")
-	}
-	actor := model.Actor{Kind: "session", ID: caller.Session, Owner: &caller.Person}
-	// Only a named scope names one project. A dev box session's token is scoped to its person,
-	// who may write wherever they may, so it carries no project at all.
-	if caller.ProjectScope == brokertoken.ProjectScopeNamed && caller.Project != "" {
-		actor.Project = &caller.Project
-	}
-	accesslog.Note(r.Context(), accesslog.KindBrokerToken, caller.Person)
-	return actor, false, nil
 }
 
 func (s *server) actorFrom(r *http.Request, supplied *model.Actor) (model.Actor, error) {

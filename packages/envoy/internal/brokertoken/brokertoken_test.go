@@ -107,6 +107,7 @@ func newRig(t *testing.T, options ...func(*brokertoken.Options)) *rig {
 		Account:   brokertoken.NewAccountToken(accountTokenFile(t, accountToken)),
 		Origin:    dispatchOrigin,
 		Replay:    store.NewDPoPProofs(database.Pool),
+		Address:   sourceAddress,
 		Now:       tick.now,
 	}
 	for _, option := range options {
@@ -119,6 +120,11 @@ func newRig(t *testing.T, options ...func(*brokertoken.Options)) *rig {
 	return &rig{broker: broker, clock: tick, verifier: verifier}
 }
 
+// sourceAddress is the deployment's rule for which address a bucket is keyed on, as Options
+// takes it: every request of this suite comes from callerAddress, so one bucket serves a test.
+// Dispatch passes auth.ForwardedAddress here, which this package no longer reads for itself.
+func sourceAddress(r *http.Request) string { return r.RemoteAddr }
+
 // accountTokenFile writes token to a file of the test's own directory, as a pod's projected
 // ServiceAccount token is mounted.
 func accountTokenFile(t *testing.T, token string) string {
@@ -130,7 +136,9 @@ func accountTokenFile(t *testing.T, token string) string {
 	return path
 }
 
-// liveToken is the broker's answer for a token it issued to jkt, expiring in life.
+// liveToken is the broker's answer for a token it issued to jkt for acting as a session,
+// expiring in life. Its client is the exchange every such token comes from, which the check
+// holds an answer to: a token issued to any other client is no session's credential.
 func liveToken(jkt string, life time.Duration) brokertoken.Introspection {
 	return brokertoken.Introspection{
 		Active:       true,
@@ -140,8 +148,71 @@ func liveToken(jkt string, life time.Duration) brokertoken.Introspection {
 		Project:      "INFRA",
 		Scope:        "dispatch.write",
 		ExpiresAt:    time.Now().Add(life).Unix(),
-		ClientID:     "machine-login",
+		ClientID:     brokertoken.ExchangeClientID,
 		Thumbprint:   jkt,
+	}
+}
+
+// machineLoginToken is the answer a machine login's own access token gets: the credential the
+// agent-secrets helper holds to ask the broker for everything else. It is live and DPoP-bound
+// like any other, and no exchange decided a session, a person or a project scope for it, so
+// the broker names none.
+func machineLoginToken(jkt string, life time.Duration) brokertoken.Introspection {
+	return brokertoken.Introspection{
+		Active:     true,
+		Scope:      "machine",
+		ExpiresAt:  time.Now().Add(life).Unix(),
+		ClientID:   "agent-secrets-helper",
+		Thumbprint: jkt,
+	}
+}
+
+// TestATokenThatIsNoSessionsCredentialIsRefused: a live, DPoP-bound token the broker issued for
+// something other than acting as a session names no session to record writes as, so it is
+// refused with an outcome of its own rather than handed back as a Caller for whoever mounts
+// this check to fill in. Each leg of the rule is its own token: a machine login's own, one the
+// exchange issued that names no person, and one that names a session and a person but comes
+// from another client. The proof-checked Verify and the answer-only Live refuse all three, so
+// an open connection cannot keep one alive either.
+func TestATokenThatIsNoSessionsCredentialIsRefused(t *testing.T) {
+	rig := newRig(t)
+	caller := newSigner(t)
+	noPerson := liveToken(caller.jkt, time.Hour)
+	noPerson.Person = ""
+	anotherClient := liveToken(caller.jkt, time.Hour)
+	anotherClient.ClientID = "agent-secrets-helper"
+	for name, answer := range map[string]brokertoken.Introspection{
+		"a machine login's own token": machineLoginToken(caller.jkt, time.Hour),
+		"a token naming no person":    noPerson,
+		"a token of another client":   anotherClient,
+	} {
+		t.Run(name, func(t *testing.T) {
+			token := "a-token-that-is-" + strings.ReplaceAll(name, " ", "-")
+			rig.broker.Says(token, answer)
+
+			decided, err := rig.verifier.Verify(t.Context(), caller.at(resourcePath, token))
+			if !errors.Is(err, brokertoken.ErrNotASession) {
+				t.Fatalf("Verify answered %v, want ErrNotASession", err)
+			}
+			if decided != (brokertoken.Caller{}) {
+				t.Fatalf("Verify = %+v, want no caller at all", decided)
+			}
+			live, err := rig.verifier.Live(t.Context(), caller.at(resourcePath, token))
+			if !errors.Is(err, brokertoken.ErrNotASession) {
+				t.Fatalf("Live answered %v, want ErrNotASession", err)
+			}
+			if live != (brokertoken.Caller{}) {
+				t.Fatalf("Live = %+v, want no caller at all", live)
+			}
+		})
+	}
+
+	// The negative control: the same shape with every claim a session's token carries is the
+	// caller it has always been.
+	const sound = "a-token-the-exchange-issued"
+	rig.broker.Says(sound, liveToken(caller.jkt, time.Hour))
+	if _, err := rig.verifier.Verify(t.Context(), caller.at(resourcePath, sound)); err != nil {
+		t.Fatalf("a session's own token was refused: %v", err)
 	}
 }
 
@@ -157,17 +228,35 @@ func TestALiveTokenWithASoundProofIsAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Verify refused a live token with a sound proof: %v", err)
 	}
-	if decided.Session != "ses_a1b2c3" || decided.Person != "sjawhar" || decided.Project != "INFRA" {
-		t.Fatalf("Verify = %+v, want the broker's session, person and project", decided)
-	}
-	if decided.ProjectScope != brokertoken.ProjectScopeNamed || decided.Scope != "dispatch.write" || decided.Thumbprint != caller.jkt {
-		t.Fatalf("Verify = %+v, want the broker's scope and the caller's key", decided)
+	if decided != (brokertoken.Caller{Session: "ses_a1b2c3", Person: "sjawhar", Project: "INFRA"}) {
+		t.Fatalf("Verify = %+v, want the session, the person and the project and nothing else of the answer", decided)
 	}
 	if rig.broker.Count() != 1 {
 		t.Fatalf("the broker was asked %d times, want once", rig.broker.Count())
 	}
 	if want := "Bearer " + accountToken; rig.broker.Bearers()[0] != want {
 		t.Fatalf("the broker was presented %q, want Dispatch's own %q", rig.broker.Bearers()[0], want)
+	}
+}
+
+// TestAPersonScopedTokenNamesNoProject: the broker's two project scopes are read where the
+// Caller is built, so a reader takes Project as it stands. A token scoped to its person writes
+// wherever that person may, which is no one project, and carries none even where the answer
+// still names one.
+func TestAPersonScopedTokenNamesNoProject(t *testing.T) {
+	rig := newRig(t)
+	caller := newSigner(t)
+	const token = "a-dev-box-sessions-token"
+	answer := liveToken(caller.jkt, time.Hour)
+	answer.ProjectScope = brokertoken.ProjectScopePerson
+	rig.broker.Says(token, answer)
+
+	decided, err := rig.verifier.Verify(t.Context(), caller.at(resourcePath, token))
+	if err != nil {
+		t.Fatalf("Verify refused a person-scoped token: %v", err)
+	}
+	if decided != (brokertoken.Caller{Session: "ses_a1b2c3", Person: "sjawhar"}) {
+		t.Fatalf("Verify = %+v, want the session and the person with no project", decided)
 	}
 }
 
@@ -493,10 +582,35 @@ func TestNewRefusesAnOriginItCannotCheckAProofAgainst(t *testing.T) {
 				Account:   brokertoken.NewAccountToken(accountTokenFile(t, accountToken)),
 				Origin:    origin,
 				Replay:    store.NewDPoPProofs(database.Pool),
+				Address:   sourceAddress,
 			})
 			if err == nil {
 				t.Fatalf("New accepted the origin %q", origin)
 			}
 		})
+	}
+}
+
+// TestNewRefusesAVerifierWithNoSourceAddress: which address an introspection bucket is keyed on
+// is the deployment's rule and this package has none of its own, so a Verifier built without
+// one is refused at the build rather than left bounding the broker by some default nobody
+// chose. The negative control is the same options with the function supplied.
+func TestNewRefusesAVerifierWithNoSourceAddress(t *testing.T) {
+	database := storetest.Open(t)
+	options := func() brokertoken.Options {
+		return brokertoken.Options{
+			BrokerURL: "https://broker.test",
+			Account:   brokertoken.NewAccountToken(accountTokenFile(t, accountToken)),
+			Origin:    dispatchOrigin,
+			Replay:    store.NewDPoPProofs(database.Pool),
+		}
+	}
+	if _, err := brokertoken.New(options()); err == nil {
+		t.Fatal("New built a verifier with no source address function")
+	}
+	supplied := options()
+	supplied.Address = sourceAddress
+	if _, err := brokertoken.New(supplied); err != nil {
+		t.Fatalf("New refused the same options with the address function supplied: %v", err)
 	}
 }

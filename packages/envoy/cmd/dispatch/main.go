@@ -1276,6 +1276,10 @@ func brokerTokenVerifier(boot bootConfig, database *store.Store, serverURL strin
 		Account:   brokertoken.NewAccountToken(boot.AgentSecretsTokenFile),
 		Origin:    strings.TrimSuffix(serverURL, "/"),
 		Replay:    store.NewDPoPProofs(database.Pool),
+		// Dispatch's own rule for which address a request came from, the one its access log and
+		// its other buckets read; the check itself has none, so this says whose proxy header is
+		// trusted here (auth.ForwardedAddress).
+		Address: auth.ForwardedAddress,
 	})
 }
 

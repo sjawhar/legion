@@ -38,14 +38,34 @@ const (
 	// refused, naming both projects.
 	scopeProject writeScope = "project"
 	// scopeSession is a write that belongs to the calling session rather than to any project:
-	// an agent conversation's own artifact and messages, the two routes a session answers its
-	// own delivery on, and the caller-private `me` rows. There is no project to compare, and
-	// each of those routes already holds its caller to its own session.
+	// an agent conversation's own artifact, messages and stream frames, the two routes a
+	// session answers its own delivery on, and the caller-private `me` rows. There is no
+	// project to compare, and each row is held to its caller another way, each one read:
+	//
+	//   - The rows whose path names a session — the `agents/{session_id}` writes and
+	//     `PUT /api/v1/me/agents/{session_id}/state` — are held to it by withinSessionScope,
+	//     which refuses a credential that proved another session (project_scope.go). Only a
+	//     broker-issued token proves one; `POST /api/v1/agents/{session_id}/messages`, the
+	//     stream publish and the `me` state row are human-only besides, since a person writing
+	//     to a session is writing to someone else's conversation by design.
+	//   - `POST /api/v1/messages/{id}/deliveries/{attempt}/accept` and
+	//     `POST /api/v1/messages/{id}/reply` take the session from the caller's own credential
+	//     or `actor` and refuse an attempt that is not that session's, `403 ACCEPT_FORBIDDEN`
+	//     and `403 REPLY_FORBIDDEN`.
+	//   - The `me` token rows name no session at all: they are the calling person's, read and
+	//     written under requireHuman and keyed on that person.
 	scopeSession writeScope = "session"
 	// scopeDeployment is a write that belongs to the deployment rather than to any project: a
 	// credential that may write one project may not create another or change a deployment-wide
 	// setting, so a project-scoped caller is refused these by name.
 	scopeDeployment writeScope = "deployment"
+	// scopeProjectInBody is a write that belongs to one project the request's body names rather
+	// than its path: the issue create, whose project comes from the body, or from the
+	// repository an external ref names. There is no object to resolve before the handler runs,
+	// so createIssue makes the check itself once that project is settled
+	// (refuseWriteOutsideProjectScope), and withinProjectScope passes the row through by this
+	// class rather than by a name it compares.
+	scopeProjectInBody writeScope = "project-in-body"
 )
 
 // writeClasses is the class of every mutating route, by "<method> <pattern>". It stands beside
@@ -57,8 +77,9 @@ const (
 // TestEveryMutatingRouteIsClassed and refuse to mount (register).
 var writeClasses = map[string]writeScope{
 	// The rows that write an object belonging to one project: its issue, its project, its
-	// document, its ask, its comment, or a message on one of its issues.
-	"POST /api/v1/issues":                                  scopeProject,
+	// document, its ask, its comment, or a message on one of its issues. The issue create
+	// leads them by path and is the one of them whose project its address does not name.
+	"POST /api/v1/issues":                                  scopeProjectInBody,
 	"PATCH /api/v1/issues/{key}":                           scopeProject,
 	"POST /api/v1/issues/{key}/claim":                      scopeProject,
 	"DELETE /api/v1/issues/{key}/claim":                    scopeProject,
@@ -146,10 +167,8 @@ var writeClasses = map[string]writeScope{
 	"POST /api/v1/writes/_test/slow":                       scopeDeployment,
 }
 
-// routeRow is a row as the table writes it: the five columns every route has. The write class
-// is not among them because Go leaves no field out of a positional composite literal, so a
-// sixth column would have to be written on all 146 rows, every GET row included, and a GET row
-// needs no class; routes() stamps it from writeClasses instead.
+// routeRow is a row as the table writes it: the five columns every route has, written as a
+// positional literal, which is why the write class is not among them (writeClasses).
 type routeRow struct {
 	Method      string
 	Pattern     string
@@ -158,17 +177,13 @@ type routeRow struct {
 	Handler     http.HandlerFunc
 }
 
-// apiRoute is one mounted route. Register mounts the table and GET /api/v1 lists it, so the
-// two can never disagree about what the server serves. Scope is what the row's write belongs
-// to, stamped from writeClasses: every mutating row carries one, and a GET row carries none
-// (project_scope.go).
+// apiRoute is one mounted route: the table's row and the class routes() stamps onto it from
+// writeClasses. Register mounts the table and GET /api/v1 lists it, so the two can never
+// disagree about what the server serves. Every mutating row carries a Scope, and a GET row
+// carries none (project_scope.go); the row's own five columns are read through it by promotion.
 type apiRoute struct {
-	Method      string
-	Pattern     string
-	Auth        routeAuth
-	Description string
-	Handler     http.HandlerFunc
-	Scope       writeScope
+	routeRow
+	Scope writeScope
 }
 
 // routeIndexEntry is the public shape of a route in GET /api/v1.
@@ -260,7 +275,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodGet, "/api/v1/agents/{session_id}/answers", authAny, "What people wrote that Dispatch delivered to one session, newest first by at, then by id: each ask's current answer (replaced when it changed an earlier answer), each comment at its current body (edited_at when edited; a resolved comment stays) and each message, once however it arrived. It reads the ask.answered, comment.created, message.created and message.answered events a person wrote whose published_destinations hold the session's own topic, the session's sent message deliveries (targeted and broadcast messages) and its sent comment deliveries (mentions); it never lists an agent's or the system's words, an ask's resolution or hand-back, or a delivery to a role: route's topic. Each item names its relation to the session (mentioned_you over replied_on_your_ask over replied_in_a_comment_thread over commented_on_a_document over commented_on_an_issue for a comment; replied_to_your_message over sent_you_a_message for a message; answered_your_ask for an answer), the ask and its whole question on an answer and on a reply in an ask's thread, its owner, dispatch:// ref and href (null owner and ref, and /agents/<session_id>/live, for a direct message). ?since= (RFC3339, default 72 hours ago; older than 7 days or in the future is 400 INVALID_QUERY) starts the window; ?max_chars= (1-100000, else 400 INVALID_QUERY) stops the list after the item whose text takes the running sum of text lengths (UTF-16 units) past it, while total counts every item in the window; {session_id, since, total, items}. A session_id that is not a session id is 400 INVALID_SESSION_ID, as on the agent artifact routes. Not an authorization boundary: direct-message text already reaches every authenticated caller through GET /api/v1/events, and a person may read any session's list.", s.listSessionAnswers},
 		{http.MethodGet, "/api/v1/agents/{session_id}/messages", authHuman, "A session's targeted messages, newest first.", s.listAgentMessages},
 		{http.MethodPost, "/api/v1/agents/{session_id}/messages", authHuman, "Send an issue-less targeted message to a session: {body, delivery, in_reply_to?}, answered once its own delivery attempt has settled, on past a client that gives up. Under an Idempotency-Key header (as every POST and PATCH takes one), a repeat with the same request answers 201 with the message the key made and its deliveries as they stand, Idempotency-Replayed: ?1, first sending the one attempt it still owes (none yet, or one stranded past its claim) and nothing else; a listener it cannot reach is recorded on the attempt, so a repeat is answered while the listener is down. An attempt a stopped process left owed is resumed by the server's delivery sweep whether anyone asks again or not.", s.createAgentMessage},
-		{http.MethodPost, "/api/v1/agents/{session_id}/artifacts", authAny, "Upload a file or image to an agent's conversation (multipart, as an issue upload, its kind read from its bytes): ref_key agent/<session_id>/<slug>, addressed dispatch://agent/<session_id>/artifact/<slug>. It holds files and images only: a markdown document (JSON content or a text/markdown file) is 400 ARTIFACT_INPUT, since a document belongs to an issue or a project. No event is appended. A session_id that is empty or holds /, ?, #, whitespace, a control character or a character that ends a reference in text (<>\"'`[]|) is 400 INVALID_SESSION_ID on every agent artifact route.", s.uploadAgentArtifact},
+		{http.MethodPost, "/api/v1/agents/{session_id}/artifacts", authAny, "Upload a file or image to an agent's conversation (multipart, as an issue upload, its kind read from its bytes): ref_key agent/<session_id>/<slug>, addressed dispatch://agent/<session_id>/artifact/<slug>. It holds files and images only: a markdown document (JSON content or a text/markdown file) is 400 ARTIFACT_INPUT, since a document belongs to an issue or a project. No event is appended. A caller whose credential proves a session of its own uploads only into that session: any other session_id is 403 SESSION_SCOPE. A session_id that is empty or holds /, ?, #, whitespace, a control character or a character that ends a reference in text (<>\"'`[]|) is 400 INVALID_SESSION_ID on every agent artifact route.", s.uploadAgentArtifact},
 		{http.MethodGet, "/api/v1/agents/{session_id}/artifacts/{slug}", authAny, "Read an agent's conversation's file or image and its versions by slug.", s.getArtifact},
 		{http.MethodGet, "/api/v1/agents/{session_id}/artifacts/{slug}/versions/{number}", authAny, "Download one version of an agent's conversation's file or image, as the issue form serves it (Cache-Control: private, max-age=31536000, immutable).", s.getArtifactVersion},
 		{http.MethodPost, "/api/v1/broadcasts", authHuman, "Send one message to many sessions: {body, delivery, session_ids}, one targeted message per recipient under a shared broadcast, answered once it is committed while each recipient's delivery runs behind the answer. A selected session that is not live or does not advertise the mode is excluded and named in the response, never switched to another mode. Under an Idempotency-Key header (as every POST and PATCH takes one), a repeat with the same request answers 201 at once with the broadcast the key made, every recipient's attempts as they stand and the first answer's exclusions, Idempotency-Replayed: ?1, and puts every recipient it still owes on its way behind the answer. A recipient a stopped process left owed is resumed by the server's delivery sweep whether anyone asks again or not.", s.createBroadcast},
@@ -347,7 +362,7 @@ func (s *server) routes() []apiRoute {
 	}
 	routes := make([]apiRoute, len(rows))
 	for index, row := range rows {
-		routes[index] = apiRoute{row.Method, row.Pattern, row.Auth, row.Description, row.Handler, writeClasses[row.Method+" "+row.Pattern]}
+		routes[index] = apiRoute{row, writeClasses[row.Method+" "+row.Pattern]}
 	}
 	return routes
 }

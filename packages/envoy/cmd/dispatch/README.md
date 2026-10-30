@@ -72,9 +72,14 @@ any token, so such a presentation is never retried as a bearer, and a bearer is
 never sent to this check. The server asks the broker what the token is (RFC
 7662 introspection on `/v1/oauth/introspect`, presenting the same projected
 ServiceAccount token `DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE` names as the
-approval relays do, one affirmative answer reused for five seconds) and checks
+approval relays do, one affirmative answer reused for five seconds from the
+broker's answer) and checks
 the proof against the `jkt` that answer carries, with `DISPATCH_SERVER_URL` as
 the origin the proof's `htu` must name. No setting of its own configures it.
+A revoked token therefore stops resolving within five seconds of the
+introspection that last called it live, not of the revocation: an
+introspection already in flight when the token is revoked is remembered from
+the moment it completes, and it may take up to five seconds to complete.
 A verified caller acts as the session the token names, for the person it names,
 and `actor` in the body does not decide that session: absent is accepted, one
 naming the same session is accepted and its `origin` kept, and one naming any
@@ -86,48 +91,79 @@ and none repeats the token: `401 BROKER_TOKEN_NOT_ACTIVE` (the broker does not
 hold the token live), `401 BROKER_TOKEN_PROOF_INVALID` (the proof did not meet
 RFC 9449 Section 4.3, a proof presented twice included — a proof is single use
 by its `jti` and target URI), `401 BROKER_TOKEN_KEY_MISMATCH` (a sound proof
-signed by a key that is not the token's), `429 BROKER_TOKEN_RATE_LIMITED` (this
-source address's introspection bucket is empty; nothing was asked of the
-broker) and `503 BROKER_UNAVAILABLE` (the broker answered nothing, so the token
-was never judged — a 503 for the reason `OIDC_ISSUER_UNAVAILABLE` is one). A
-websocket re-resolves its caller every heartbeat from the request that opened
-it, and for this credential that re-resolution is the broker's introspection
-answer alone: the upgrade's proof authenticated it and cannot be presented a
-second time. Without `DISPATCH_AGENT_SECRETS_URL` there is no such credential,
-and a `DPoP` presentation is the `401 UNAUTHORIZED` `invalid bearer token` any
+signed by a key that is not the token's), `401 BROKER_TOKEN_NOT_A_SESSION` (the
+token is live but is no session's credential: it names no session or no person,
+or it was issued to a client other than the exchange a session's token comes
+from, which a machine login's own access token is — Dispatch records a write
+under the session its credential proved, so it acts on none of these rather
+than letting a body name a session for a credential that names none),
+`429 BROKER_TOKEN_RATE_LIMITED` (this source address's introspection bucket is
+empty; nothing was asked of the broker) and `503 BROKER_UNAVAILABLE` (the
+broker answered nothing, so the token was never judged — a 503 for the reason
+`OIDC_ISSUER_UNAVAILABLE` is one). A websocket re-resolves its caller every
+heartbeat from the request that opened it, and for this credential that
+re-resolution is the broker's introspection answer alone: the upgrade's proof
+authenticated it and cannot be presented a second time. Without
+`DISPATCH_AGENT_SECRETS_URL` there is no such credential, and a `DPoP`
+presentation is the `401 UNAUTHORIZED` `invalid bearer token` any
 Authorization header that is not a bearer has always been.
 
 A credential that names one project may write that project and nothing else.
 Every mutating row of the route table declares what its write belongs to
 (`internal/dispatch/api/routes_table.go`, `writeClasses`; a `GET` row declares
-nothing), in three classes: *a project's* — the issue-key rows, the
+nothing), in four classes: *a project's* — the issue-key rows, the
 project-key rows, the artifact-id rows, the ask-id rows, the comment-id rows,
-and the message rows that carry an issue; *the calling session's* — an agent
+and the message rows that carry an issue; *a project the body names* — the
+issue create alone, whose project its address does not name, so `createIssue`
+makes the same check itself once that project is settled; *the calling
+session's* — an agent
 conversation's own artifact and messages, the two routes a session answers its
 own delivery on, and the caller-private `me` rows; and *the deployment's* — the
 project create, the repository-to-project map, the delivery settings and
 session groups, the broadcast, and the credential and machine-login decisions.
-`Register` wraps every mutating route in one check
-(`internal/dispatch/api/project_scope.go`), which runs after the caller is
-resolved and before the handler, so no route is left to check this for itself:
-it resolves the project the addressed object belongs to — an issue key, a
-project key, an artifact id, an ask id, a comment id or a message id, each by
-one read — and refuses a caller whose credential names another with
-`403 PROJECT_SCOPE`, naming the project the credential covers and the project
-the write belongs to, and nothing of the credential. A deployment-wide write is
-`403 PROJECT_SCOPE_DEPLOYMENT`, naming the credential's project and the route:
-a credential that may write one project may not create another or change a
-setting that is not any project's. A target that does not exist resolves to no
-project and keeps the `404` its handler has always answered, so an unknown id
-never becomes an answer about which projects exist. `POST /api/v1/issues` takes
-its project from the body rather than its address, so its handler makes the
-same check, with the same refusal, before the create does any work.
+`Register` wraps every mutating route in two checks
+(`internal/dispatch/api/project_scope.go`), which run after the caller is
+resolved and before the handler, so no route is left to check either for
+itself.
 
-The check is a no-op for a credential that carries no project — a browser
-cookie, a personal agent token, a Kubernetes service-account token, the shared
-token, and an access token the broker scoped to a person rather than to one
-project. That is the rule and not a transitional measure: every caller that
-exists today writes exactly what it wrote before.
+The project check resolves the project the addressed object belongs to — an
+issue key, a project key, an artifact id, an ask id, a comment id or a message
+id, each by one read — and lets through only a target that resolves to the
+caller's own project. It fails closed, so a target that resolves to another
+project, to no project at all (an object belonging to none), or to nothing at
+all (no such row, or an id Postgres will not read as a uuid) is
+`403 PROJECT_SCOPE`, naming the project the credential covers and the project
+the write belongs to where one resolved, and nothing of the credential. That
+also closes an existence oracle: a scoped caller used to read `403` for another
+project's object and the handler's `404` for an id nobody holds. Each resolver
+sends the raw path value to Postgres, as the handler behind it does, so the
+check reads a path exactly as the handler then addresses its row by it —
+Postgres's uuid parser takes a hyphen after any group of four digits, and a
+check that parsed ids in Go admitted those spellings unjudged. A
+deployment-wide write is `403 PROJECT_SCOPE_DEPLOYMENT`, naming the
+credential's project and the route: a credential that may write one project may
+not create another or change a setting that is not any project's.
+`POST /api/v1/issues` takes its project from the body, or from the repository
+an external ref names, rather than from its address, so its handler makes the
+same check, with the same refusal, the moment that project is settled — before
+the ref is resolved to an issue already imported, and before anything is
+written.
+
+The session check holds the rows classed *the calling session's* whose path
+names a session — the `agents/{session_id}` writes and
+`PUT /api/v1/me/agents/{session_id}/state` — to the session the caller's
+credential proved: addressing another session's conversation is
+`403 SESSION_SCOPE`, naming the session the credential acts for, the route and
+the session addressed. Only a broker-issued token proves a session; a cookie, a
+personal token, a Kubernetes service-account token and the shared token prove
+none and are untouched, so a person still uploads into the conversation they
+name.
+
+Both checks are a no-op for a credential that carries no project and proves no
+session — a browser cookie, a personal agent token, a Kubernetes
+service-account token, the shared token, and an access token the broker scoped
+to a person rather than to one project. That is the rule and not a transitional
+measure: every caller that exists today writes exactly what it wrote before.
 
 GitHub App credentials come either from the `DISPATCH_APP_*` variables or from
 `~/.local/share/dispatch/app.json`; the variables take precedence. Two of them
@@ -2197,7 +2233,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/projects/{key}/artifacts/{slug}/versions/{n}` | GET | cookie, trusted header, or bearer | Read an unlinked project document version or download its blob, as `/api/v1/artifacts/{id}/versions/{n}` does. |
 | `/api/v1/projects/{key}/artifacts/{slug}/versions` | POST | cookie, trusted header, or bearer | Create a named project-document version. |
 | `/api/v1/projects/{key}/artifacts/{slug}/edits` | POST | cookie, trusted header, or bearer | Apply project-document edit operations. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. |
-| `/api/v1/agents/{session_id}/artifacts` | POST | cookie, trusted header, or bearer | Upload a file or image to an agent's conversation: a multipart `file` (+ `name`, `summary?`, `actor?`) with an issue upload's caps, errors and file-store write, its kind read from its bytes as an issue upload's is (an `image` only for a PNG, JPEG, GIF or WebP, stored under the type its bytes are; any other file a `file` under its declared type), stored with `session_id` set, `issue_key` null, `project` `""` and `ref_key` `agent/<session_id>/<slug>`, addressed `dispatch://agent/<session_id>/artifact/<slug>`; it appends no event, since every event belongs to an issue, a document or a project. There is no list route: a conversation's pictures are reached through the references its messages carry, never enumerated. An agent's conversation holds files and images only, so a markdown document (JSON `content` or a `text/markdown` file) is `400 ARTIFACT_INPUT` ("an agent's conversation holds files and images; a document belongs to an issue or a project"). A `session_id` that is empty or holds `/`, `?`, `#`, whitespace, a control character or a character that ends a reference in text (`<>"'` and a backtick, `[`, `]`, `\|`) is `400 INVALID_SESSION_ID` on all three agent routes. Such a file takes no comment, ask, event read or subscriber through `/api/v1/artifacts/{id}/...`, which is `400 ARTIFACT_AGENT_OWNED`. |
+| `/api/v1/agents/{session_id}/artifacts` | POST | cookie, trusted header, or bearer | Upload a file or image to an agent's conversation: a multipart `file` (+ `name`, `summary?`, `actor?`) with an issue upload's caps, errors and file-store write, its kind read from its bytes as an issue upload's is (an `image` only for a PNG, JPEG, GIF or WebP, stored under the type its bytes are; any other file a `file` under its declared type), stored with `session_id` set, `issue_key` null, `project` `""` and `ref_key` `agent/<session_id>/<slug>`, addressed `dispatch://agent/<session_id>/artifact/<slug>`; it appends no event, since every event belongs to an issue, a document or a project. There is no list route: a conversation's pictures are reached through the references its messages carry, never enumerated. A caller whose credential proves a session of its own — an access token the secrets broker issued, the one that does — uploads only into that session's conversation; any other `session_id` is `403 SESSION_SCOPE`, naming the session the credential acts for and the session addressed. A person's cookie proves no session and uploads into the conversation it names. An agent's conversation holds files and images only, so a markdown document (JSON `content` or a `text/markdown` file) is `400 ARTIFACT_INPUT` ("an agent's conversation holds files and images; a document belongs to an issue or a project"). A `session_id` that is empty or holds `/`, `?`, `#`, whitespace, a control character or a character that ends a reference in text (`<>"'` and a backtick, `[`, `]`, `\|`) is `400 INVALID_SESSION_ID` on all three agent routes. Such a file takes no comment, ask, event read or subscriber through `/api/v1/artifacts/{id}/...`, which is `400 ARTIFACT_AGENT_OWNED`. |
 | `/api/v1/agents/{session_id}/artifacts/{slug}` | GET | cookie, trusted header, or bearer | Read an agent's conversation's file or image and its versions by slug. |
 | `/api/v1/agents/{session_id}/artifacts/{slug}/versions/{n}` | GET | cookie, trusted header, or bearer | Download one version of an agent's conversation's file or image, as `/api/v1/artifacts/{id}/versions/{n}` does, with its cache header. |
 | `/...` | GET | none | Serve the dashboard static files. |

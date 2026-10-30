@@ -35,6 +35,12 @@ const (
 	ProjectScopePerson = oauthwire.ProjectScopePerson
 )
 
+// ExchangeClientID is the OAuth client every token issued for acting as a session is issued to:
+// the RFC 8693 exchange a pod, a workflow run or a dev box session asks for a Dispatch access
+// token through (internal/broker/oauthwire). It is carried here for the same reason the project
+// scopes are: a reader of a Caller this package decides reads one package.
+const ExchangeClientID = oauthwire.ExchangeClientID
+
 // Introspection is what the broker knows about one of its access tokens, the RFC 7662 answer this
 // package reads a presented token back through: the broker's own declaration of that answer,
 // which its route serialises (internal/broker/oauthwire). The two ends share one struct rather
@@ -53,18 +59,15 @@ func expiryOf(answer Introspection) time.Time {
 	return time.Unix(answer.ExpiresAt, 0)
 }
 
-// callerOf is the Caller a live answer names, the one shape both checks hand back.
+// callerOf is the Caller a live answer names, the one shape both checks hand back. The named
+// scope is read here rather than left to a reader: Project is the project a named-scope answer
+// names, and nothing at all for an answer scoped to its person, who writes wherever they may.
 func callerOf(answer Introspection) Caller {
-	return Caller{
-		Session:      answer.Session,
-		Person:       answer.Person,
-		ProjectScope: answer.ProjectScope,
-		Project:      answer.Project,
-		Scope:        answer.Scope,
-		ClientID:     answer.ClientID,
-		Thumbprint:   answer.Thumbprint,
-		ExpiresAt:    expiryOf(answer),
+	caller := Caller{Session: answer.Session, Person: answer.Person}
+	if answer.ProjectScope == ProjectScopeNamed {
+		caller.Project = answer.Project
 	}
+	return caller
 }
 
 // introspect asks the broker what token is, presenting Dispatch's own projected ServiceAccount

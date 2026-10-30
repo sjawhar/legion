@@ -2,18 +2,25 @@ kind: Added
 body: |-
     Dispatch: a credential that names one project now writes that project and nothing else. Every
     mutating route declares what its write belongs to — a project's (the issue-key, project-key,
-    artifact-id, ask-id and comment-id rows, and the message rows that carry an issue), the
+    artifact-id, ask-id and comment-id rows, and the message rows that carry an issue), a project
+    the body names (the issue create, the one write whose address names no project, whose handler
+    makes the same check the moment it has read one), the
     calling session's (an agent conversation's own artifact and messages, the two routes a session
     answers its own delivery on, and the caller-private `me` rows), or the deployment's (the
     project create, the repository-to-project map, the delivery settings and session groups, the
-    broadcast, and the credential and machine-login decisions) — and one check in front of every
-    one of them resolves the project the addressed object belongs to and refuses a caller whose
-    credential names another: `403 PROJECT_SCOPE`, naming the project the credential covers and
-    the project the write belongs to and nothing of the credential, or `403
-    PROJECT_SCOPE_DEPLOYMENT` for a deployment-wide write, naming that project and the route. A
-    target that does not exist keeps the `404` its handler already answered, so an unknown id
-    never says which projects exist. The check is a no-op for every credential that carries no
-    project — a browser cookie, a personal agent token, a Kubernetes service-account token, the
+    broadcast, and the credential and machine-login decisions) — and two checks in front of every
+    one of them decide it. The project check resolves the project the addressed object belongs to
+    and lets through only a target of the caller's own project: another project's, one that
+    belongs to no project, and one that resolves to nothing at all (no such row, or an id
+    Postgres will not read as a uuid) are each `403 PROJECT_SCOPE`, naming the project the
+    credential covers and the project the write belongs to where one resolved, and nothing of the
+    credential; a deployment-wide write is `403 PROJECT_SCOPE_DEPLOYMENT`, naming that project and
+    the route. Refusing a target it cannot resolve is what keeps the check closed, and it says
+    nothing about which ids exist outside the caller's project. The session check holds the rows
+    whose path names a session — an agent conversation's writes and the caller's own agent view
+    state — to the session the caller's credential proved: another session's is
+    `403 SESSION_SCOPE`. Both are a no-op for every credential that carries no project and proves
+    no session — a browser cookie, a personal agent token, a Kubernetes service-account token, the
     shared token, and an access token the secrets broker scoped to a person rather than to one
     project — so no caller that exists today is affected; that is the rule and not a transitional
     measure.

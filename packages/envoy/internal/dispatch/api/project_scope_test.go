@@ -33,8 +33,8 @@ func TestEveryMutatingRouteIsClassed(t *testing.T) {
 
 	t.Run("a mutating row with no class fails this walk", func(t *testing.T) {
 		undecidable := served.undecidableWrites([]apiRoute{
-			{Method: http.MethodGet, Pattern: "/api/v1/widgets", Auth: authAny},
-			{Method: http.MethodPost, Pattern: "/api/v1/widgets", Auth: authAny},
+			{routeRow: routeRow{Method: http.MethodGet, Pattern: "/api/v1/widgets", Auth: authAny}},
+			{routeRow: routeRow{Method: http.MethodPost, Pattern: "/api/v1/widgets", Auth: authAny}},
 		})
 		if len(undecidable) != 1 || !strings.HasPrefix(undecidable[0], "POST /api/v1/widgets:") {
 			t.Fatalf("the walk answered %q, want the unclassed POST named and the GET left alone", undecidable)
@@ -43,7 +43,7 @@ func TestEveryMutatingRouteIsClassed(t *testing.T) {
 
 	t.Run("a project row whose address names no object fails it too", func(t *testing.T) {
 		undecidable := served.undecidableWrites([]apiRoute{
-			{Method: http.MethodPost, Pattern: "/api/v1/widgets/{id}/paint", Auth: authAny, Scope: scopeProject},
+			{routeRow: routeRow{Method: http.MethodPost, Pattern: "/api/v1/widgets/{id}/paint", Auth: authAny}, Scope: scopeProject},
 		})
 		if len(undecidable) != 1 || !strings.Contains(undecidable[0], "names no object") {
 			t.Fatalf("the walk answered %q, want the unresolvable project row named", undecidable)
@@ -130,62 +130,120 @@ func seededID(t *testing.T, rig *brokerTokenRig, kind, path string, body any) st
 }
 
 // addressedWrite is one write of one addressing kind, built against whichever project's objects
-// it is pointed at.
+// it is pointed at, each id written in whichever spelling the matrix is running.
 type addressedWrite struct {
 	kind   string
 	method string
-	path   func(projectFixture) string
+	path   func(p projectFixture, spell func(string) string) string
 	body   any
 	// handlerAnswer is the status the handler itself answers for the caller's own project, where
 	// this check lets the request through. 0 means any answer that is not this check's refusal.
 	handlerAnswer int
+	// uuidAddressed is whether the path names its object by uuid, which is what gives the
+	// matrix a second spelling to run (uuidSpellings).
+	uuidAddressed bool
 }
 
 func addressedWrites() []addressedWrite {
 	return []addressedWrite{
 		{
 			kind: "issue key", method: http.MethodPatch,
-			path:          func(p projectFixture) string { return "/api/v1/issues/" + p.issue },
+			path:          func(p projectFixture, _ func(string) string) string { return "/api/v1/issues/" + p.issue },
 			body:          map[string]any{"title": "Retitled by a scoped token"},
 			handlerAnswer: http.StatusOK,
 		},
 		{
 			kind: "project key", method: http.MethodPost,
-			path:          func(p projectFixture) string { return "/api/v1/projects/" + p.key + "/artifacts" },
+			path: func(p projectFixture, _ func(string) string) string {
+				return "/api/v1/projects/" + p.key + "/artifacts"
+			},
 			body:          map[string]any{"name": "scoped.md", "content": "# Written by a scoped token"},
 			handlerAnswer: http.StatusCreated,
 		},
 		{
 			kind: "artifact id", method: http.MethodPost,
-			path:          func(p projectFixture) string { return "/api/v1/artifacts/" + p.document + "/asks" },
+			path: func(p projectFixture, spell func(string) string) string {
+				return "/api/v1/artifacts/" + spell(p.document) + "/asks"
+			},
 			body:          map[string]any{"question": "Is this document right?"},
 			handlerAnswer: http.StatusCreated,
+			uuidAddressed: true,
 		},
 		{
 			kind: "ask id", method: http.MethodPost,
-			path:          func(p projectFixture) string { return "/api/v1/asks/" + p.ask + "/resolve" },
+			path: func(p projectFixture, spell func(string) string) string {
+				return "/api/v1/asks/" + spell(p.ask) + "/resolve"
+			},
 			body:          map[string]any{"kind": "resolved", "reason": "Answered elsewhere."},
 			handlerAnswer: http.StatusOK,
+			uuidAddressed: true,
 		},
 		{
 			kind: "comment id", method: http.MethodPost,
-			path: func(p projectFixture) string { return "/api/v1/comments/" + p.comment + "/resolve" },
-			body: map[string]any{},
+			path: func(p projectFixture, spell func(string) string) string {
+				return "/api/v1/comments/" + spell(p.comment) + "/resolve"
+			},
+			body:          map[string]any{},
+			uuidAddressed: true,
 		},
 		{
 			// A message on an issue that targets nobody: the handler's own 404 proves the request
 			// reached it, where another project's message never does.
 			kind: "message id", method: http.MethodPost,
-			path:          func(p projectFixture) string { return "/api/v1/messages/" + p.message + "/deliveries" },
+			path: func(p projectFixture, spell func(string) string) string {
+				return "/api/v1/messages/" + spell(p.message) + "/deliveries"
+			},
 			body:          map[string]any{"delivery": "btw"},
 			handlerAnswer: http.StatusNotFound,
+			uuidAddressed: true,
 		},
 	}
 }
 
+// uuidSpelling is one way of writing a uuid in a path, and what the handler behind the check
+// answers for it where the write is the caller's own to make.
+type uuidSpelling struct {
+	name string
+	// spell writes the id as this spelling.
+	spell func(string) string
+	// handlerAnswered is whether the handler's own answer is the one the write declares. Only
+	// the canonical spelling is every handler's: a route that parses its id in Go before it
+	// reads the row (requireUUIDPath) refuses an alternate spelling 400, which is its answer to
+	// make and not this check's.
+	handlerAnswered bool
+}
+
+// uuidSpellings are the spellings of one uuid a path may carry, which this check and the
+// handler behind it must read the same way. Postgres's uuid parser takes a hyphen after any
+// group of four digits, so `a061-e3f2-…` is the same id as `a061e3f2-…` to every query a
+// handler makes, while Go's uuid.Parse refuses it: a check that read ids with the second
+// admitted a write to an object it had resolved to nothing (INFRA-264).
+func uuidSpellings(write addressedWrite) []uuidSpelling {
+	canonical := uuidSpelling{name: "canonical", spell: func(id string) string { return id }, handlerAnswered: true}
+	if !write.uuidAddressed {
+		return []uuidSpelling{canonical}
+	}
+	return []uuidSpelling{canonical, {name: "hyphens every four digits", spell: hyphenatedEveryFour}}
+}
+
+// hyphenatedEveryFour writes a uuid with a hyphen after each group of four digits, one of the
+// spellings Postgres reads as that uuid and Go's parser does not.
+func hyphenatedEveryFour(id string) string {
+	digits := strings.ReplaceAll(id, "-", "")
+	var spelled strings.Builder
+	for group := 0; group*4 < len(digits); group++ {
+		if group > 0 {
+			spelled.WriteByte('-')
+		}
+		spelled.WriteString(digits[group*4 : min(group*4+4, len(digits))])
+	}
+	return spelled.String()
+}
+
 // TestAProjectScopedTokenWritesOnlyItsOwnProject: one real token, two projects. Every addressing
 // kind the check resolves is refused across projects, naming both, and the same call against the
-// token's own project is answered by the handler.
+// token's own project is answered by the handler. Each id-addressed kind runs under both
+// spellings of its uuid, since the check and the handler have to read a path the same way.
 func TestAProjectScopedTokenWritesOnlyItsOwnProject(t *testing.T) {
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
@@ -195,68 +253,100 @@ func TestAProjectScopedTokenWritesOnlyItsOwnProject(t *testing.T) {
 	other := seedProject(t, rig, "OTH", "Other")
 
 	for _, write := range addressedWrites() {
-		t.Run(write.kind, func(t *testing.T) {
-			refused := rig.serve(caller.presenting(t, write.method, write.path(other), token, write.body))
-			if refused.Code != http.StatusForbidden {
-				t.Fatalf("a write to %s: status=%d body=%s, want 403", other.key, refused.Code, refused.Body.String())
-			}
-			refusal := decodeBody[refusalAnswer](t, refused)
-			if refusal.Code != codeProjectScope {
-				t.Fatalf("refusal = %+v, want %s", refusal, codeProjectScope)
-			}
-			if !strings.Contains(refusal.Error, own.key) || !strings.Contains(refusal.Error, other.key) {
-				t.Fatalf("refusal %q names neither the project the credential covers (%s) nor the project the write belongs to (%s)",
-					refusal.Error, own.key, other.key)
-			}
-			if strings.Contains(refusal.Error, token) {
-				t.Fatalf("the refusal repeats the token: %q", refusal.Error)
-			}
-
-			answered := rig.serve(caller.presenting(t, write.method, write.path(own), token, write.body))
-			if write.handlerAnswer != 0 && answered.Code != write.handlerAnswer {
-				t.Fatalf("the same write to %s: status=%d body=%s, want %d from the handler",
-					own.key, answered.Code, answered.Body.String(), write.handlerAnswer)
-			}
-			if answered.Code == http.StatusForbidden {
-				if blocked := decodeBody[refusalAnswer](t, answered); blocked.Code == codeProjectScope {
-					t.Fatalf("the token's own project was refused: %+v", blocked)
+		for _, spelling := range uuidSpellings(write) {
+			t.Run(write.kind+", "+spelling.name, func(t *testing.T) {
+				refused := rig.serve(caller.presenting(t, write.method, write.path(other, spelling.spell), token, write.body))
+				if refused.Code != http.StatusForbidden {
+					t.Fatalf("a write to %s: status=%d body=%s, want 403", other.key, refused.Code, refused.Body.String())
 				}
-			}
-		})
+				refusal := decodeBody[refusalAnswer](t, refused)
+				if refusal.Code != codeProjectScope {
+					t.Fatalf("refusal = %+v, want %s", refusal, codeProjectScope)
+				}
+				if !strings.Contains(refusal.Error, own.key) || !strings.Contains(refusal.Error, other.key) {
+					t.Fatalf("refusal %q names neither the project the credential covers (%s) nor the project the write belongs to (%s)",
+						refusal.Error, own.key, other.key)
+				}
+				if strings.Contains(refusal.Error, token) {
+					t.Fatalf("the refusal repeats the token: %q", refusal.Error)
+				}
+
+				answered := rig.serve(caller.presenting(t, write.method, write.path(own, spelling.spell), token, write.body))
+				if spelling.handlerAnswered && write.handlerAnswer != 0 && answered.Code != write.handlerAnswer {
+					t.Fatalf("the same write to %s: status=%d body=%s, want %d from the handler",
+						own.key, answered.Code, answered.Body.String(), write.handlerAnswer)
+				}
+				if answered.Code == http.StatusForbidden {
+					if blocked := decodeBody[refusalAnswer](t, answered); blocked.Code == codeProjectScope {
+						t.Fatalf("the token's own project was refused: %+v", blocked)
+					}
+				}
+			})
+		}
 	}
 }
 
-// TestAnUnknownTargetKeepsTheHandlersAnswer: a target that does not exist resolves to no
-// project, so the caller gets the 404 it has always got rather than a refusal that would say
-// whether some other project holds that id.
-func TestAnUnknownTargetKeepsTheHandlersAnswer(t *testing.T) {
+// TestATargetThatResolvesToNoProjectIsRefusedToAProjectScopedToken: the check fails closed, so
+// a target it cannot resolve to the caller's own project is refused whether another project
+// holds it, no project does, or nothing does — an id nobody has, and an id that is no uuid in
+// any spelling. A refusal names the project the credential covers and no other, so it says
+// nothing about what exists outside it, and that is what closes the existence oracle the
+// earlier behaviour had: a scoped caller read 403 for another project's object and the
+// handler's 404 for an id nobody holds, which told it which ids exist.
+//
+// This replaces the assertion that such a target kept its handler's answer for every caller.
+// It still does for a caller that names no project, which is every credential but a
+// project-scoped broker token, and the second half holds that.
+func TestATargetThatResolvesToNoProjectIsRefusedToAProjectScopedToken(t *testing.T) {
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
 	const token = "a-token-addressing-nothing"
 	rig.broker.Says(token, liveNamedToken(caller.jkt))
 	seedProject(t, rig, brokerTestProject, "Broker")
 
+	const unknownUUID = "5d4a3b2c-1e0f-4a9b-8c7d-6e5f4a3b2c1d"
 	for name, request := range map[string]struct {
 		method string
 		path   string
 		body   any
 	}{
 		"an issue nobody has":   {http.MethodPatch, "/api/v1/issues/NONE-1", map[string]any{"title": "x"}},
-		"an ask nobody has":     {http.MethodPost, "/api/v1/asks/5d4a3b2c-1e0f-4a9b-8c7d-6e5f4a3b2c1d/resolve", map[string]any{"kind": "resolved", "reason": "x"}},
+		"an ask nobody has":     {http.MethodPost, "/api/v1/asks/" + unknownUUID + "/resolve", map[string]any{"kind": "resolved", "reason": "x"}},
 		"an id that is no uuid": {http.MethodPost, "/api/v1/comments/not-a-uuid/resolve", map[string]any{}},
 		"a project nobody has":  {http.MethodPost, "/api/v1/projects/NONE/artifacts", map[string]any{"name": "n.md", "content": "# N"}},
-		"a document nobody has": {http.MethodPost, "/api/v1/artifacts/5d4a3b2c-1e0f-4a9b-8c7d-6e5f4a3b2c1d/asks", map[string]any{"question": "?"}},
-		"a message nobody has":  {http.MethodPost, "/api/v1/messages/5d4a3b2c-1e0f-4a9b-8c7d-6e5f4a3b2c1d/deliveries", map[string]any{"delivery": "btw"}},
+		"a document nobody has": {http.MethodPost, "/api/v1/artifacts/" + unknownUUID + "/asks", map[string]any{"question": "?"}},
+		"a message nobody has":  {http.MethodPost, "/api/v1/messages/" + unknownUUID + "/deliveries", map[string]any{"delivery": "btw"}},
+		"a comment nobody has, spelled with hyphens every four digits": {
+			http.MethodPost, "/api/v1/comments/" + hyphenatedEveryFour(unknownUUID) + "/resolve", map[string]any{},
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			response := rig.serve(caller.presenting(t, request.method, request.path, token, request.body))
-			if response.Code == http.StatusForbidden {
-				if refusal := decodeBody[refusalAnswer](t, response); refusal.Code == codeProjectScope {
-					t.Fatalf("an unknown target was refused by project scope: %+v", refusal)
-				}
+			refused := rig.serve(caller.presenting(t, request.method, request.path, token, request.body))
+			if refused.Code != http.StatusForbidden {
+				t.Fatalf("status=%d body=%s, want 403 from the project check", refused.Code, refused.Body.String())
 			}
-			if response.Code < http.StatusBadRequest {
-				t.Fatalf("status=%d body=%s, want the handler's own refusal", response.Code, response.Body.String())
+			refusal := decodeBody[refusalAnswer](t, refused)
+			if refusal.Code != codeProjectScope {
+				t.Fatalf("refusal = %+v, want %s", refusal, codeProjectScope)
+			}
+			if !strings.Contains(refusal.Error, brokerTestProject) {
+				t.Fatalf("refusal %q does not name the project the credential covers (%s)", refusal.Error, brokerTestProject)
+			}
+			if strings.Contains(refusal.Error, token) {
+				t.Fatalf("the refusal repeats the token: %q", refusal.Error)
+			}
+
+			// A caller that names no project is untouched: the handler answers for itself, as it
+			// always has.
+			answered := rig.asPerson(t, request.method, request.path, request.body)
+			if answered.Code < http.StatusBadRequest {
+				t.Fatalf("a person's same call: status=%d body=%s, want the handler's own refusal",
+					answered.Code, answered.Body.String())
+			}
+			if answered.Code == http.StatusForbidden {
+				if blocked := decodeBody[refusalAnswer](t, answered); blocked.Code == codeProjectScope {
+					t.Fatalf("a caller that names no project was refused by project scope: %+v", blocked)
+				}
 			}
 		})
 	}

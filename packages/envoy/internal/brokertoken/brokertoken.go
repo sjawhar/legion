@@ -27,7 +27,6 @@ import (
 	"authelia.com/provider/oauth2/token/jose"
 	"golang.org/x/sync/singleflight"
 
-	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/ratelimit"
 )
 
@@ -57,6 +56,16 @@ var (
 	// ErrRateLimited is a source address with no introspection left in its bucket
 	// (DefaultAddressLimit). Nothing was asked of the broker.
 	ErrRateLimited = errors.New("brokertoken: too many introspections from this source address")
+	// ErrNotASession is a live token that is not a session's credential: the broker's answer
+	// names no session, or no person, or the token was issued to a client other than the
+	// exchange every Dispatch access token comes from (ExchangeClientID). A machine login's own
+	// access token is exactly that — the credential a dev box holds to ask the broker for other
+	// credentials, DPoP-bound and perfectly live, for which no exchange ever decided a session,
+	// a person or a project scope — and so is any other token the broker issued for something
+	// other than acting as a session. Whoever mounts this check acts as the session a token
+	// names, so a token that names none is refused here rather than admitted for a request body
+	// to name one in its place.
+	ErrNotASession = errors.New("brokertoken: the access token is not a session's credential")
 )
 
 // AffirmativeCacheTTL is how long one live token's introspection answer is reused, so a caller
@@ -74,6 +83,12 @@ var (
 //
 // Shortening it costs broker requests in that proportion; lengthening it leaves a revoked token
 // accepted for longer, which is the other half of the trade and why the window is seconds.
+//
+// The window runs from the broker's answer, not from the revocation: an answer is remembered
+// when the introspection that produced it completes, and an introspection already in flight
+// when the token is revoked may take up to introspectTimeout to complete. So a revoked token
+// stops resolving within this window of the last introspection that called it live, which is up
+// to introspectTimeout later than the revocation itself.
 const AffirmativeCacheTTL = 5 * time.Second
 
 // AffirmativeCacheSize bounds how many answers are remembered at once, so a flood of distinct
@@ -83,7 +98,7 @@ const AffirmativeCacheTTL = 5 * time.Second
 const AffirmativeCacheSize = 4096
 
 // DefaultAddressLimit bounds the introspections one source address can make Dispatch send, in a
-// bucket of its own per address (auth.ForwardedAddress): a burst of 20 and five a second, per
+// bucket of its own per address (Options.Address): a burst of 20 and five a second, per
 // process. A caller holding one token spends one token of this bucket per AffirmativeCacheTTL,
 // since every request inside that window is answered from the cache, so an honest caller never
 // meets it; a stranger presenting tokens the broker has never issued meets it at once, before
@@ -129,29 +144,21 @@ var proofAlgorithmNames = func() []string {
 	return names
 }()
 
-// Caller is who a verified token names: everything the broker's answer carries that a request's
-// writes are recorded under. It never carries the token.
+// Caller is who a verified token names: what a writer is recorded under, and nothing else the
+// broker's answer carries. It never carries the token.
 type Caller struct {
-	// Session is the session the writes are recorded as.
+	// Session is the session the writes are recorded as, which a Caller always names: an answer
+	// naming none is ErrNotASession and never reaches one.
 	Session string
-	// Person is the person that session acts for.
+	// Person is the person that session acts for, which a Caller always names too.
 	Person string
-	// ProjectScope is what Project means: ProjectScopeNamed or ProjectScopePerson, or empty for a
-	// machine login's own token, which no exchange decided a scope for.
-	ProjectScope string
-	// Project is the one project key a ProjectScopeNamed caller may write.
+	// Project is the one project key this caller may write, and is empty for a caller that is
+	// held to no single project. callerOf applies the broker's named-scope rule, so a reader
+	// takes this field as it stands rather than reading the scope beside it.
 	Project string
-	// Scope is the OAuth scope the token was granted, space-separated as RFC 7662 spells it.
-	Scope string
-	// ClientID is the OAuth client the token was issued to.
-	ClientID string
-	// Thumbprint is the key the token is bound to, which the proof was checked against.
-	Thumbprint string
-	// ExpiresAt is when the token expires, zero where the broker named no expiry.
-	ExpiresAt time.Time
 }
 
-// Options is what a Verifier needs. BrokerURL, Account, Origin and Replay are required.
+// Options is what a Verifier needs. BrokerURL, Account, Origin, Replay and Address are required.
 type Options struct {
 	// BrokerURL is the secrets broker's base URL (DISPATCH_AGENT_SECRETS_URL), the origin
 	// IntrospectPath is asked on.
@@ -166,6 +173,14 @@ type Options struct {
 	// Replay is where a spent proof is recorded, so a captured one cannot be presented twice
 	// (store.DPoPProofs for Dispatch).
 	Replay rfc9449.DPoPReplayStorage
+	// Address is the source address one introspection bucket is keyed on (DefaultAddressLimit),
+	// read from the request as the deployment's own proxy-trust rule reads it — Dispatch passes
+	// auth.ForwardedAddress. It is required and has no default: a default would either carry
+	// one caller's proxy-trust rule into another's listener, or key every request behind a
+	// proxy on one bucket, and both stop the bucket bounding what reaches the broker per
+	// caller. New refuses a Verifier without one rather than letting a release lose the bound
+	// quietly.
+	Address func(r *http.Request) string
 	// HTTP sends the introspection; nil is a client bounded at introspectTimeout.
 	HTTP *http.Client
 	// AddressLimit is each source address's introspection bucket; the zero value is
@@ -190,6 +205,7 @@ type Verifier struct {
 	originTLS *tls.ConnectionState
 	http      *http.Client
 	strategy  *rfc9449.DefaultStrategy
+	address   func(r *http.Request) string
 	addresses *ratelimit.Keyed
 	cache     *answerCache
 	flight    singleflight.Group
@@ -208,6 +224,9 @@ func New(options Options) (*Verifier, error) {
 	}
 	if options.Replay == nil {
 		return nil, errors.New("brokertoken: the DPoP replay store is required")
+	}
+	if options.Address == nil {
+		return nil, errors.New("brokertoken: the source address function is required")
 	}
 	origin, err := url.Parse(options.Origin)
 	if err != nil {
@@ -243,6 +262,7 @@ func New(options Options) (*Verifier, error) {
 		originTLS: originTLS,
 		http:      client,
 		strategy:  rfc9449.NewDefaultStrategy(proofConfig{}, withoutNonces{options.Replay}),
+		address:   options.Address,
 		addresses: ratelimit.NewKeyed(limit),
 		cache:     newAnswerCache(),
 		now:       now,
@@ -307,8 +327,8 @@ func (v *Verifier) Live(ctx context.Context, r *http.Request) (Caller, error) {
 	return callerOf(answer), nil
 }
 
-// live is the broker's half of both checks: the token r presents and an answer saying it is live
-// and bound to a key.
+// live is the broker's half of both checks: the token r presents and an answer saying it is
+// live, bound to a key, and issued for acting as a session.
 func (v *Verifier) live(ctx context.Context, r *http.Request) (string, Introspection, error) {
 	token, ok := Presented(r)
 	if !ok {
@@ -323,6 +343,9 @@ func (v *Verifier) live(ctx context.Context, r *http.Request) (string, Introspec
 	}
 	if answer.Thumbprint == "" {
 		return "", Introspection{}, ErrKeyMismatch
+	}
+	if answer.Session == "" || answer.Person == "" || answer.ClientID != ExchangeClientID {
+		return "", Introspection{}, ErrNotASession
 	}
 	return token, answer, nil
 }
@@ -352,7 +375,7 @@ func (v *Verifier) known(ctx context.Context, r *http.Request, token string) (In
 		if answer, ok := v.cache.lookup(key, v.now()); ok {
 			return answer, nil
 		}
-		if !v.addresses.AllowAt(auth.ForwardedAddress(r), v.now()) {
+		if !v.addresses.AllowAt(v.address(r), v.now()) {
 			return Introspection{}, ErrRateLimited
 		}
 		answer, err := v.introspect(ctx, token)
