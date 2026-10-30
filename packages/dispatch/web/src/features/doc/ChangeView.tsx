@@ -1,4 +1,3 @@
-import { diffArrays, diffWordsWithSpace } from "diff";
 import { type ReactNode, useMemo, useState } from "react";
 
 import { DisclosureToggle } from "../../components/DisclosureToggle";
@@ -10,10 +9,14 @@ import {
   diffRemovedText,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import {
+  type ChangeKind,
+  type ChangePair,
+  changedWords,
+  pairBlocks,
+  type WordPart,
+} from "./change-set";
 import { type DocumentBlock, splitBlocks } from "./document-blocks";
-
-/** How a block stands between the two versions. */
-type ChangeKind = "unchanged" | "changed" | "removed" | "added";
 
 /**
  * One block of the change: the block as it stands in `before`, in `after`, or in both, and the
@@ -27,16 +30,15 @@ interface ChangeEntry {
   heading: string | undefined;
 }
 
-/** A word run of a changed block: `same` is unmarked, `removed` a `del`, `added` an `ins`. */
-interface WordPart {
+/** A word run of a changed block, under the key its mark renders with: `same` is unmarked,
+ *  `removed` a `del`, `added` an `ins`. */
+interface KeyedWordPart extends WordPart {
   key: string;
-  kind: "same" | "removed" | "added";
-  value: string;
 }
 
 /** One rendered row: a block, a folded run's control, or a heading drawn for context. */
 type ChangeRow =
-  | { key: string; kind: "block"; change: ChangeKind; source: string; words: WordPart[] }
+  | { key: string; kind: "block"; change: ChangeKind; source: string; words: KeyedWordPart[] }
   | { key: string; kind: "fold"; run: number; count: number; open: boolean }
   | { key: string; kind: "heading"; source: string };
 
@@ -48,78 +50,33 @@ function sectionHeading(blocks: readonly DocumentBlock[], index: number): string
   return undefined;
 }
 
-/**
- * The two block lists paired up, one entry per block of the change. `diffArrays` pairs them on
- * the block's whole source, and a run it reports as removed and added at one place is read as
- * blocks that changed there: the first removed block pairs with the first added one and so on,
- * and whichever side is longer leaves its remainder removed or added on its own.
- */
-function pairBlocks(
+/** The heading of the section a changed, removed or added block sits in: the one of the version
+ *  that holds it. An unchanged block draws no heading of its own. */
+function entryHeading(
+  pair: ChangePair,
+  beforeBlocks: readonly DocumentBlock[],
+  afterBlocks: readonly DocumentBlock[]
+): string | undefined {
+  if (pair.kind === "unchanged") return undefined;
+  if (pair.after !== undefined) return sectionHeading(afterBlocks, pair.after);
+  return pair.before === undefined ? undefined : sectionHeading(beforeBlocks, pair.before);
+}
+
+/** The two block lists paired up on their whole source (`change-set.ts`, which the reading pane's
+ *  approval marks pair their rendered text with), each pair carrying its blocks and its heading. */
+function changeEntries(
   beforeBlocks: readonly DocumentBlock[],
   afterBlocks: readonly DocumentBlock[]
 ): ChangeEntry[] {
-  const parts = diffArrays(
+  return pairBlocks(
     beforeBlocks.map((block) => block.source),
     afterBlocks.map((block) => block.source)
-  );
-  const entries: ChangeEntry[] = [];
-  let beforeIndex = 0;
-  let afterIndex = 0;
-  let part = 0;
-  while (part < parts.length) {
-    const current = parts[part];
-    if (!current.added && !current.removed) {
-      for (let i = 0; i < current.value.length; i += 1) {
-        entries.push({
-          kind: "unchanged",
-          before: beforeBlocks[beforeIndex],
-          after: afterBlocks[afterIndex],
-          heading: undefined,
-        });
-        beforeIndex += 1;
-        afterIndex += 1;
-      }
-      part += 1;
-      continue;
-    }
-    let removedCount = 0;
-    let addedCount = 0;
-    while (part < parts.length && (parts[part].added || parts[part].removed)) {
-      if (parts[part].added) addedCount += parts[part].value.length;
-      else removedCount += parts[part].value.length;
-      part += 1;
-    }
-    const paired = Math.min(removedCount, addedCount);
-    for (let i = 0; i < paired; i += 1) {
-      entries.push({
-        kind: "changed",
-        before: beforeBlocks[beforeIndex],
-        after: afterBlocks[afterIndex],
-        heading: sectionHeading(afterBlocks, afterIndex),
-      });
-      beforeIndex += 1;
-      afterIndex += 1;
-    }
-    for (let i = paired; i < removedCount; i += 1) {
-      entries.push({
-        kind: "removed",
-        before: beforeBlocks[beforeIndex],
-        after: undefined,
-        heading: sectionHeading(beforeBlocks, beforeIndex),
-      });
-      beforeIndex += 1;
-    }
-    for (let i = paired; i < addedCount; i += 1) {
-      entries.push({
-        kind: "added",
-        before: undefined,
-        after: afterBlocks[afterIndex],
-        heading: sectionHeading(afterBlocks, afterIndex),
-      });
-      afterIndex += 1;
-    }
-  }
-  return entries;
+  ).map((pair) => ({
+    kind: pair.kind,
+    before: pair.before === undefined ? undefined : beforeBlocks[pair.before],
+    after: pair.after === undefined ? undefined : afterBlocks[pair.after],
+    heading: entryHeading(pair, beforeBlocks, afterBlocks),
+  }));
 }
 
 /**
@@ -149,12 +106,12 @@ function foldedEntries(entries: readonly ChangeEntry[]): boolean[] {
   return folded;
 }
 
-/** A changed block's words: what `before` lost in a `del`, what `after` gained in an `ins`. */
-function changedWords(before: string, after: string, key: string): WordPart[] {
-  return diffWordsWithSpace(before, after).map((part, index) => ({
+/** A changed block's words under the keys their marks render with: what `before` lost in a `del`,
+ *  what `after` gained in an `ins`. */
+function keyedWords(before: string, after: string, key: string): KeyedWordPart[] {
+  return changedWords(before, after).map((part, index) => ({
+    ...part,
     key: `${key}:word:${index}`,
-    kind: part.added ? "added" : part.removed ? "removed" : "same",
-    value: part.value,
   }));
 }
 
@@ -166,7 +123,7 @@ function blockRow(entry: ChangeEntry, key: string): ChangeRow {
       kind: "block",
       change: "changed",
       source: entry.after.source,
-      words: changedWords(entry.before.source, entry.after.source, key),
+      words: keyedWords(entry.before.source, entry.after.source, key),
     };
   }
   const block = entry.after ?? entry.before;
@@ -251,7 +208,7 @@ const DELETED = `line-through ${diffRemovedBg} ${diffRemovedText}`;
 export function ChangeView({ after, before, fold = true }: ChangeViewProps): ReactNode {
   const [opened, setOpened] = useState<ReadonlySet<number>>(() => new Set<number>());
   const entries = useMemo(
-    () => pairBlocks(splitBlocks(before), splitBlocks(after)),
+    () => changeEntries(splitBlocks(before), splitBlocks(after)),
     [after, before]
   );
   const rows = useMemo(() => buildRows(entries, fold, opened), [entries, fold, opened]);

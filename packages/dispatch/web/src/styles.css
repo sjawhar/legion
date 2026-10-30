@@ -246,6 +246,48 @@ a {
   }
 }
 
+/* What an approval request changed since the last approved version, drawn over the rendered
+   document by editor decorations (`features/doc/change-marks.ts` names these four classes; a
+   host that writes classes into mark or block DOM makes ProseMirror read that DOM back as a
+   document edit, so they reach the page as decorations). A changed block is marked by a bar
+   beside it, which hides no word of its text; the words it gained are drawn as the change view's
+   `ins`, and as its `del`, struck through where it stood, both a block removed since the baseline
+   and a run of words a changed block lost, which stands inside that block's surviving text.
+   `theme/classes.ts`'s `diffAdded*` and `diffRemoved*` are those two swatch pairs. */
+.dispatch-doc .dispatch-change-block {
+  box-shadow: inset 2px 0 0 var(--color-emerald-500);
+  padding-left: 0.5rem;
+}
+
+.dispatch-doc .dispatch-change-added {
+  background-color: var(--color-emerald-100);
+  color: var(--color-emerald-950);
+}
+
+.dispatch-doc .dispatch-change-removed,
+.dispatch-doc .dispatch-change-removed-words {
+  background-color: var(--color-rose-100);
+  color: var(--color-rose-950);
+  text-decoration: line-through;
+}
+
+@media (prefers-color-scheme: dark) {
+  .dispatch-doc .dispatch-change-block {
+    box-shadow: inset 2px 0 0 var(--color-emerald-400);
+  }
+
+  .dispatch-doc .dispatch-change-added {
+    background-color: var(--color-emerald-900);
+    color: var(--color-emerald-100);
+  }
+
+  .dispatch-doc .dispatch-change-removed,
+  .dispatch-doc .dispatch-change-removed-words {
+    background-color: var(--color-rose-900);
+    color: var(--color-rose-100);
+  }
+}
+
 /* Proof's mark decorations are document DOM. Class rules avoid Dark Reader rewriting inline
    colours into ProseMirror-observed attribute mutations. */
 .dispatch-doc .mark-comment {
