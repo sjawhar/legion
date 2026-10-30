@@ -348,3 +348,40 @@ func TestACommentEditRefusedForItsInputWaitsOnNoWriterGate(t *testing.T) {
 		<-answered
 	}
 }
+
+// An anchored comment that carries a turn names no ask and no reply, so no row can make it an
+// ask's reply: its 400 TURN_REQUIRES_ASK is the request's own, answered before it queues for the
+// anchored document's writer gate, like the other refusals the request decides alone.
+func TestAnAnchoredCommentWithATurnIsRefusedBeforeTheWriterGate(t *testing.T) {
+	handler, service, _ := writerGateHandler(t, 8, nil, nil)
+	issue := createInteractionIssue(t, handler, "TEST", "Refused turn", "alpha bravo charlie")
+	_, hold, err := service.AcquireDocumentWriter(context.Background(), issue.PrimaryArtifactID)
+	if err != nil {
+		t.Fatalf("hold the document's writer gate: %v", err)
+	}
+	var held sync.Once
+	releaseHold := func() { held.Do(hold) }
+	defer releaseHold()
+
+	answered := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		answered <- dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+			"anchor": map[string]string{"artifact": "spec", "quote": "bravo"},
+			"body":   "Anchored note.",
+			"turn":   "agent",
+		}, "alice")
+	}()
+	select {
+	case refused := <-answered:
+		if refused.Code != http.StatusBadRequest || decodeBody[struct {
+			Code string `json:"code"`
+		}](t, refused).Code != "TURN_REQUIRES_ASK" {
+			t.Errorf("an anchored comment with a turn: status=%d body=%s, want 400 TURN_REQUIRES_ASK", refused.Code, refused.Body.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Errorf("an anchored comment with a turn is still unanswered 2 s into another writer's hold of the document's gate (%d writers queued), want its 400 at once",
+			service.QueuedDocumentWriters())
+		releaseHold()
+		<-answered
+	}
+}
