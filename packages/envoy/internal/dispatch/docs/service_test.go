@@ -1108,10 +1108,11 @@ func TestEditAskOfAnEmptyQuestionNamesTheStep(t *testing.T) {
 		err := sendAskOptions(service, artifactID, AskBlockEdit{Question: new("Should we ship?")})
 		want := `block: ask block "ask-lists" has an empty question, and writing a question into it would delete ` +
 			`what one of its paragraphs holds, which is no text: block ` + strconv.Quote(photo) +
-			` (paragraph) reads "![a photo](/photo.png)"; upload the document again as a new version with ` +
-			`the question written beside that paragraph (dispatch artifact --name <the document> ` +
-			`--content-file -), which is accepted for such a block, or write the question beside it in the ` +
-			`document editor; either keeps what the paragraph holds`
+			` (paragraph) reads "![a photo](/photo.png)"; no document edit writes a paragraph into a decision, ` +
+			`so this is the one case a document edit cannot reach - upload the document again as a new version ` +
+			`with the question written beside that paragraph (dispatch artifact --issue <KEY> ` +
+			`--name <the document> --content-file -), or write the question beside it in the document editor; ` +
+			`either keeps what the paragraph holds`
 		if err == nil || err.Error() != want {
 			t.Fatalf("refusal =\n%v\nwant\n%s", err, want)
 		}
@@ -3109,6 +3110,64 @@ func TestRestoringADecidedWordingDropsAnOptionTheDecisionNeverHeld(t *testing.T)
 	if !slices.Equal(block.options, want) {
 		t.Fatalf("the restored block asks %#v, want the wording the ask was decided on", block.options)
 	}
+}
+
+// An option line a caller sends is the caller's own text, so one write may make no more of it
+// than of any other text it sends: an ask edit writes its question and its options on one budget
+// (askBlockChildren), and the items the caller sent are charged to it (editedOptionList). What
+// the document already holds under an option is no caller's text, and is charged to the merged
+// list's own budget, so an edit of one option's line is taken beside a preserved sub-list of
+// thousands of items whatever the question sent with it took of the write's.
+func TestAskOptionsEditChargesTheItemsItSendsToTheWritesBudget(t *testing.T) {
+	// A paragraph weighs 3 elements and the line of text in it 1; a list item weighs that
+	// paragraph, its own 3 and the item's text. So this question makes half of what one write may
+	// make (pmdoc.MaxDocumentElements), and leaves the other half for the options beside it.
+	const paragraphElements, itemElements = 4, 7
+	question := strings.TrimSuffix(strings.Repeat("Should we ship?\n\n", pmdoc.MaxDocumentElements/2/paragraphElements), "\n\n")
+	// Past the half the question leaves, counting the list the items are written in.
+	count := pmdoc.MaxDocumentElements/2/itemElements + 50
+
+	t.Run("the new items it sends are charged to the write", func(t *testing.T) {
+		block, err := parseAskBlock(parsedBlock(t, ":::ask{#ask-lists urgency=\"med\" multiple=\"false\" state=\"open\"}\n"+
+			"Should we ship?\n\n- Ship: Release it\n:::\n"))
+		if err != nil {
+			t.Fatalf("parse the ask: %v", err)
+		}
+		options := make([]model.AskOption, 0, count)
+		for index := range count {
+			options = append(options, model.AskOption{Label: fmt.Sprintf("Option %d", index), Description: "Pick it"})
+		}
+		_, err = askBlockChildren(block, AskBlockEdit{Question: &question, Options: &options}, pmdoc.NewWriteBudget())
+		if !errors.Is(err, pmdoc.ErrTooManyElements) || !strings.Contains(err.Error(), "this write's markdown makes more than") {
+			t.Fatalf("an edit sending %d new options beside its question = %v, want the refusal of what one write may make", count, err)
+		}
+	})
+
+	t.Run("the content it preserves is not", func(t *testing.T) {
+		var markdown strings.Builder
+		markdown.WriteString(":::ask{#ask-lists urgency=\"med\" multiple=\"false\" state=\"open\"}\n" +
+			"Should we ship?\n\n- Ship: Release it\n- Hold: Wait for review\n\n")
+		for index := range count {
+			fmt.Fprintf(&markdown, "  - note %d\n", index)
+		}
+		markdown.WriteString(":::\n")
+		block, err := parseAskBlock(parsedBlock(t, markdown.String()))
+		if err != nil {
+			t.Fatalf("parse the ask holding a sub-list of %d items: %v", count, err)
+		}
+		options := []model.AskOption{
+			{Label: "Ship", Description: "Release it today"},
+			{Label: "Hold", Description: "Wait for review"},
+		}
+		children, err := askBlockChildren(block, AskBlockEdit{Question: &question, Options: &options}, pmdoc.NewWriteBudget())
+		if err != nil {
+			t.Fatalf("an edit of one option's line beside a preserved sub-list of %d items: %v", count, err)
+		}
+		held := children[len(children)-1].Children[1]
+		if len(held.Children) != 2 || held.Children[1].Type != "bullet_list" || len(held.Children[1].Children) != count {
+			t.Fatalf("the Hold option's item after the edit = %#v, want its line and the sub-list of %d items", held, count)
+		}
+	})
 }
 
 // sendAskOptions sends edit to the ask-lists block as alice (sendAskBlockEdit).
