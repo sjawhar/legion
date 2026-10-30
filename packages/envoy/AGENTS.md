@@ -201,8 +201,13 @@ transaction runs on the settlements pool (`store.Pool.Settlements`, one connecti
 resumption's query runs on the background pool. A timer's settlement, and the last browser's,
 runs under `settlementTimeout` (60 s). One that passes that deadline, or finds no connection free
 within its pool's acquire bound, rolls back, keeps the row and counts no failure toward
-`maxSettleFailures`, so overload fails no room: the resumption settles it. A cold room's load is
-the one part the deadline cannot stop, since ygo loads a room with no context of its own.
+`maxSettleFailures`, so overload fails no room: the resumption settles it. Two parts the deadline
+does not stop: a cold room's load, since ygo loads a room with no context of its own, and what a
+pass has left to do once it has written into the room - its broadcast, its append, and the rows
+and events it commits with them - which runs apart from the deadline under `settlementFinishBound`
+(30 s), as a commit runs apart from its caller's deadline (`store.CommitContext`). The room and its
+browsers hold that update by then, so a deadline falling there would fail the room, close every
+editor's socket and reload the document over work the pass had all but committed.
 `docs.Service.Shutdown` runs the settlement of each loaded room whose document has
 that row, and no other, inside its 9 s drain budget (`docs.ShutdownDrainBudget`, within the
 caller's deadline); a settled document's repeat would spend the budget for nothing. Each loaded

@@ -158,6 +158,9 @@ type Pool struct {
 	// acquireBounds replaces defaultAcquireBound for the separate pools it names, read as each
 	// one opens: a test shortens a bound with it, so a full pool refuses in milliseconds.
 	acquireBounds map[string]time.Duration
+	// openFailures is the error each separate pool it names fails to open with, in place of
+	// opening (SetOpenFailureForTest): a test sees what its caller does when a pool cannot open.
+	openFailures map[string]error
 }
 
 // openedPool is one pgx pool a Pool has open, under its name, with its acquire tracer.
@@ -436,6 +439,20 @@ func (p *Pool) SetAcquireBoundForTest(name string, bound time.Duration) {
 	p.acquireBounds[name] = bound
 }
 
+// SetOpenFailureForTest makes the separate pool named name fail to open with err, in place of
+// opening it. It is for tests outside this package alone, which see what a caller does when the
+// pool it works through cannot be opened; nothing in production calls it, since a pool opens from
+// this pool's own configuration. A pool already open fails the same way, so what the test sees
+// does not depend on what opened the pool first.
+func (p *Pool) SetOpenFailureForTest(name string, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.openFailures == nil {
+		p.openFailures = make(map[string]error)
+	}
+	p.openFailures[name] = err
+}
+
 // separate is the pgx pool of the separate pool named name (open).
 func (p *Pool) separate(name string, size int32) (*pgxpool.Pool, error) {
 	opened, err := p.open(name, size)
@@ -455,6 +472,9 @@ func (p *Pool) open(name string, size int32) (openedPool, error) {
 	defer p.mu.Unlock()
 	if p.closed {
 		return openedPool{}, ErrPoolClosed
+	}
+	if err, failing := p.openFailures[name]; failing {
+		return openedPool{}, err
 	}
 	if opened, ok := p.separates[name]; ok {
 		return opened, nil

@@ -124,6 +124,14 @@ func (s *Service) lockExistingState(room string) *roomState {
 	return s.lookUpState(room, false)
 }
 
+// roomGone reports whether room's state is no longer this service's to write into: the service is
+// stopping, or the room has been closed or has failed. Whoever closed or failed it - or the
+// shutdown - answers for the work left on it, so a settlement that meets it writes nothing more
+// and ends. The caller holds state.mu.
+func (s *Service) roomGone(state *roomState) bool {
+	return s.stopping.Load() || state.closed || state.failed != nil
+}
+
 // newRoomState is a document's record with nothing of a room on it yet.
 func newRoomState() *roomState {
 	return &roomState{

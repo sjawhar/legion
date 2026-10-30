@@ -2,7 +2,10 @@ package docs
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -11,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -225,6 +229,152 @@ func settlementTimeouts(service *Service) uint64 {
 		}
 	}
 	return 0
+}
+
+// A settlement that cannot open the settlements pool stops short before it warms its cold room.
+// Every read a settlement makes goes through that pool - one through the request pool would take a
+// connection admission counts for requests - so a settlement that has no settlements pool warms
+// nothing, takes no request connection, and reports the pool's error with the document left owed.
+func TestASettlementWithoutItsPoolWarmsNoColdRoomThroughTheRequestPool(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	ctx := context.Background()
+	seedServiceText(t, service, artifactID, "Cold.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	editLiveTree(t, service, artifactID, replaceRun("Cold.", "Cold again."))
+	settleCurrentGeneration(t, service, artifactID)
+	// The document's room, left cold with a settlement owed: the settlement below has to warm it
+	// before it can read anything.
+	if err := service.srv.CloseRoom(artifactID, true); err != nil {
+		t.Fatalf("close the document's room: %v", err)
+	}
+	waitForNoLiveDocument(t, service, artifactID)
+	if _, err := service.store.Pool.Exec(ctx, `
+		insert into doc_settlements_pending (artifact_id) values ($1) on conflict (artifact_id) do nothing
+	`, artifactID); err != nil {
+		t.Fatalf("mark the cold document owed: %v", err)
+	}
+	state := service.room(artifactID)
+	state.mu.Lock()
+	generation := state.roomGeneration
+	state.mu.Unlock()
+	refused := errors.New("test: the settlements pool cannot open")
+	service.store.Pool.SetOpenFailureForTest(store.SettlementsPool, refused)
+
+	// What the request pool has handed out, before and after: the settlement must take none of it,
+	// neither for the room's load nor for the issue read its warm-up's injection makes.
+	before := service.store.Pool.Stat().AcquireCount()
+	outcome := service.settleRoomWithin(ctx, artifactID, generation)
+
+	if outcome.next != settleRetry || !errors.Is(outcome.err, refused) {
+		t.Fatalf("the settlement ended as %+v, want a stop short carrying the settlements pool's own error", outcome)
+	}
+	if took := service.store.Pool.Stat().AcquireCount() - before; took != 0 {
+		t.Fatalf("the settlement took %d request-pool connection(s), want none: settlement work reads through the settlements pool", took)
+	}
+	if service.srv.GetDoc(artifactID) != nil {
+		t.Fatal("the settlement warmed the cold room, want it left cold: it has no pool to warm it through")
+	}
+	owes, err := settlementPending(ctx, service.store.Pool, artifactID)
+	if err != nil {
+		t.Fatalf("read the document's pending settlement: %v", err)
+	}
+	if !owes {
+		t.Fatal("the document's pending-settlement row is gone, want it kept for the resumption")
+	}
+}
+
+// A settlement whose deadline passes once it has written into its room finishes what it started.
+// The room and its browsers hold the repair, so failing the room there would close every editor's
+// socket and reload the document over work the settlement had all but committed. The room stays
+// resident with its editor connected and counts no failure, the document stays owed rather than
+// failed, and the settlement after it writes the version.
+func TestASettlementPastItsDeadlineAfterWritingIntoTheRoomKeepsTheRoomResident(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n\nContext before.\n")
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	editor := connectPeer(t, httpServer.URL, artifactID, "alice")
+	settleCurrentGeneration(t, service, artifactID)
+	answer := answerBlockAsk(t, service, artifactID)
+	editAsPeer(t, service, artifactID, replaceRun("Context before.", "Context after."))
+	versions := latestVersionNumber(t, service, artifactID)
+	room := service.srv.GetDoc(artifactID)
+	if room == nil {
+		t.Fatal("the document's room is not resident")
+	}
+	// The first settlement stamped every block id, so the one write the held settlement makes into
+	// the room is the repair of the ask block answered above.
+	tree, err := service.liveTree(artifactID, room)
+	if err != nil {
+		t.Fatalf("read the room's tree: %v", err)
+	}
+	if unstamped := pmdoc.BlockIDRepairCount(tree); unstamped != 0 {
+		t.Fatalf("%d block(s) still want an id, so the held settlement would stamp before it repairs", unstamped)
+	}
+
+	const deadline = 2 * time.Second
+	service.settleTimeout = deadline
+	// When the settlement's deadline has certainly passed: its context is made just before the
+	// settlement starts, so a hold until here outlives it.
+	var passed atomic.Int64
+	service.beforeSettleStart = func(room string) {
+		if room == artifactID {
+			passed.Store(time.Now().Add(deadline + 100*time.Millisecond).UnixNano())
+		}
+	}
+	var held atomic.Bool
+	service.afterSettleRepairAppend = func(room string) {
+		if room != artifactID || !held.CompareAndSwap(false, true) {
+			return
+		}
+		// The repair is in the room and its browsers, and appended; hold the pass here until the
+		// settlement's deadline has passed, so what it has left to do meets a deadline gone.
+		for until := time.Unix(0, passed.Load()); time.Now().Before(until); {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	service.beforeSettleStart, service.afterSettleRepairAppend = nil, nil
+	service.settleTimeout = settlementTimeout
+
+	if !held.Load() {
+		t.Fatal("the settlement wrote no repair into the room, so its deadline never passed after a write")
+	}
+	state := service.room(artifactID)
+	state.mu.Lock()
+	failed, failures := state.failed, state.settleFailures
+	state.mu.Unlock()
+	if failed != nil || failures != 0 {
+		t.Fatalf("the room failed with %v and counted %d settlement failure(s), want neither: the deadline passed after the settlement had written into the room", failed, failures)
+	}
+	if resident := service.srv.GetDoc(artifactID); resident != room {
+		t.Fatalf("the room instance is %p, want the resident %p: the settlement evicted the room it wrote into", resident, room)
+	}
+	select {
+	case <-editor.Ended:
+		t.Fatal("the editor's socket was closed, want it open: the room it edits never failed")
+	default:
+	}
+	owes, err := settlementPending(context.Background(), service.store.Pool, artifactID)
+	if err != nil {
+		t.Fatalf("read the document's pending settlement: %v", err)
+	}
+	if !owes {
+		t.Fatal("the document's pending-settlement row is gone, want it kept: the settlement ended at its deadline before its version")
+	}
+
+	// The repair the held settlement committed is in the store, and the settlement after it writes
+	// the version that holds it.
+	settleCurrentGeneration(t, service, artifactID)
+	want := ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\"" +
+		answer.At.Format(time.RFC3339Nano) + "\" selected=\"[]\"}\nShip it?\n:::\n\nContext after.\n"
+	requireLatestVersionMarkdown(t, service, artifactID, want)
+	if latest := latestVersionNumber(t, service, artifactID); latest != versions+1 {
+		t.Fatalf("latest version = %d, want %d", latest, versions+1)
+	}
+	requireNoSuppressedSlots(t, service, artifactID, "after the settlement held past its deadline")
 }
 
 // A settlement renders its document before it locks the document's owner row: while its render is
