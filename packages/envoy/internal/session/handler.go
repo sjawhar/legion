@@ -31,9 +31,11 @@ const (
 	// ReasonPushFailed is a record that named a serve port the push did not land on: an
 	// unreachable peer, a session process restarting, a connection refused, or a server that
 	// answered with anything but 204. The attempt failed and cannot tell whether the session
-	// took the prompt, so a caller may ask again only at the cost of repeating it; the
-	// listener's delivery retries it once (pushFailedDeferrals,
-	// cmd/listener/unplaceable_delivery.go).
+	// took the prompt, so a caller may ask again only at the cost of repeating it. The listener's
+	// delivery never reaches its unplaceable policy with it: on the durable path a serving-port
+	// session's push is its worker's, which pushes until the port accepts it
+	// (cmd/listener/serve_port_workers.go), and on the live and core lanes a failed push comes
+	// back through the interest path, which reports it delivery_failed and NAKs.
 	ReasonPushFailed
 )
 
@@ -95,17 +97,23 @@ func HandleAgentMessage(
 	return handleAgentMessage(item, sessionID, machineID, interest, entry, deliverer.DeliverWithResultForEntry)
 }
 
-// ResolveAgentMessage is HandleAgentMessage without the push to a serving port: a session it would
-// push to comes back with Push set and its entry, for the caller to push to.
-func ResolveAgentMessage(
+// ResolveStoredAgentMessage is HandleAgentMessage for the durable path's copy of a stored message
+// of stream sequence storedSeq, without the push to a serving port: a session it would push to
+// comes back with Push set and its entry, for the caller to push to. The sequence decides whether
+// a session on consumer delivery is already held this message by its own consumer
+// (Deliverer.Resolve).
+func ResolveStoredAgentMessage(
 	item contracts.Envelope,
 	sessionID string,
 	machineID string,
 	interest *store.Interest,
 	entry *SessionEntry,
 	deliverer *Deliverer,
+	storedSeq uint64,
 ) HandleAgentResult {
-	return handleAgentMessage(item, sessionID, machineID, interest, entry, deliverer.Resolve)
+	return handleAgentMessage(item, sessionID, machineID, interest, entry, func(item contracts.Envelope, interest store.Interest, entry *SessionEntry) (DeliveryResult, error) {
+		return deliverer.Resolve(item, interest, entry, storedSeq)
+	})
 }
 
 func handleAgentMessage(

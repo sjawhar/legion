@@ -137,10 +137,11 @@ func observe(conn *nats.Conn) connState {
 // connections that publish on core subjects carry subscriptions: Dispatch's carries its JetStream
 // reply inboxes and the webhook sweeper's KV watch, and the listener's carries its notification
 // stream consumer and the receipt inboxes of its role forwards. The role-lane subscription whose
-// handler forwards runs on a connection of its own with its pending limits off (ConnectRoleLane),
-// so it never reports a slow consumer; every other subscription keeps nats.go's defaults (500,000
-// messages, 64 MiB per subscription), at which one that falls far enough behind to report a slow
-// consumer, twice around one publish, is rare. So it is accepted.
+// handler forwards runs on a connection of its own under limits far above any backlog its handler
+// can build (ConnectRoleLane), so it reports a slow consumer only under a flood no measured load
+// comes near; every other subscription keeps nats.go's defaults (500,000 messages, 64 MiB per
+// subscription), at which one that falls far enough behind to report a slow consumer, twice around
+// one publish, is rare. So it is accepted.
 func confirmPublished(conn *nats.Conn, subject string, before connState) error {
 	after := observe(conn)
 	if !after.connected || after.reconnects != before.reconnects {

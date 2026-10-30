@@ -154,7 +154,10 @@ type sessionRelays struct {
 	registry  *store.Registry
 	deliverer *session.Deliverer
 	// client publishes the exception of a stored message a serving-port relay refuses to push.
-	client    *bus.Client
+	client *bus.Client
+	// rules are the refusals a message on a topic the session follows is judged by
+	// (judgeFollowedTopic), the durable path's fan-out and this relay alike.
+	rules     followedTopicRules
 	machineID string
 	logger    *logging.Logger
 	// replyPrefix is the listener's reply inbox and a dot: a frame's reply subject is
@@ -278,16 +281,17 @@ type relayFrame struct {
 // startSessionRelays starts the relay of delivery's session consumers and makes it delivery's
 // relay, serving-port sessions included (sessionDelivery.relay). It relays nothing until
 // setOwned(true).
-func startSessionRelays(delivery *sessionDelivery, sessions *session.SessionRegistry, registry *store.Registry, deliverer *session.Deliverer, client *bus.Client, machineID string, logger *logging.Logger) (*sessionRelays, error) {
+func startSessionRelays(delivery *sessionDelivery, cfg listenerDeliveryHandlerConfig) (*sessionRelays, error) {
 	inbox := nats.NewInbox()
 	m := &sessionRelays{
 		delivery:    delivery,
-		sessions:    sessions,
-		registry:    registry,
-		deliverer:   deliverer,
-		client:      client,
-		machineID:   machineID,
-		logger:      logger,
+		sessions:    cfg.sessions,
+		registry:    cfg.registry,
+		deliverer:   cfg.deliverer,
+		client:      cfg.client,
+		rules:       cfg.followedTopicRules(),
+		machineID:   cfg.machineID,
+		logger:      cfg.logger,
 		replyPrefix: inbox + ".",
 		pauseFirst:  relayPauseFirst,
 		pauseMax:    relayPauseMax,
@@ -302,7 +306,7 @@ func startSessionRelays(delivery *sessionDelivery, sessions *session.SessionRegi
 		return nil, err
 	}
 	m.ctx, m.cancel = context.WithCancel(context.Background())
-	m.stopChange = sessions.OnChange(m.onChange)
+	m.stopChange = cfg.sessions.OnChange(m.onChange)
 	delivery.relay = m
 	go m.loop()
 	return m, nil
@@ -850,14 +854,15 @@ func (m *sessionRelays) relayServingPort(ctx context.Context, run *relayRun) rel
 	}
 }
 
-// pushUntilAccepted pushes msg to the session's serving port until the port answers 204, then acks
-// it. Any other answer, a transport error or a timeout keeps it at the head of the session's
-// messages: it is pushed again after a wait that doubles from pushRetryFirst to pushRetryMax, kept
-// in progress so its ack wait never runs out. It returns false when the relay was stopped first.
+// pushUntilAccepted pushes msg to the session's serving port until the port answers 204, then
+// records the dedupe key and acks it. Any other answer, a transport error or a timeout keeps it at
+// the head of the session's messages: it is pushed again after a wait that doubles from
+// pushRetryFirst to pushRetryMax (pushWithBackoff, the durable path's worker pushing likewise),
+// kept in progress so its ack wait never runs out. It returns false when the relay was stopped
+// first.
 //
 // A message on a topic a session follows (not its own agent subject or a role) is refused as the
-// durable path's fan-out refuses it: one the session published itself is acked unpushed, and one
-// whose delivery mode the session does not advertise is acked with a delivery_failed exception.
+// durable path's fan-out refuses it (refuseFollowedTopic).
 func (m *sessionRelays) pushUntilAccepted(ctx context.Context, sessionID string, msg bus.SessionMessage) bool {
 	var item contracts.Envelope
 	if err := decodeStoredEnvelope(msg.Data, &item); err != nil {
@@ -869,27 +874,21 @@ func (m *sessionRelays) pushUntilAccepted(ctx context.Context, sessionID string,
 		_ = msg.Ack()
 		return true
 	}
-	retry := pushRetryFirst
-	for attempt := 1; ; attempt++ {
-		err := m.push(ctx, sessionID, item, msg)
-		if err == nil {
-			if ackErr := msg.Ack(); ackErr != nil {
-				m.logger.Warn("session relay could not ack a pushed message", slog.String("session_id", sessionID), slog.String("event_id", item.EventID), slog.String("error", ackErr.Error()))
-			}
-			m.logger.DeliveryLog(slog.LevelInfo, "session relay pushed", sessionID, item.Topic, item.EventID, "delivered", slog.Int("attempts", attempt))
-			return true
+	return pushWithBackoff(ctx, m.logger, sessionID, item, func(attempt int) (bool, error) {
+		if err := m.push(ctx, sessionID, item, msg); err != nil {
+			_ = msg.InProgress()
+			return false, err
 		}
-		if ctx.Err() != nil {
-			return false
+		// The port took it, so the key is recorded as a delivery of the durable path records it
+		// (applyDeliveryOutcome's recordDedupe): another copy of the same event, stored on another
+		// topic this session follows, is refused rather than pushed again.
+		m.rules.dedupeCache.Record(item.DedupeKey, sessionID)
+		if ackErr := msg.Ack(); ackErr != nil {
+			m.logger.Warn("session relay could not ack a pushed message", slog.String("session_id", sessionID), slog.String("event_id", item.EventID), slog.String("error", ackErr.Error()))
 		}
-		m.logger.DeliveryLog(slog.LevelWarn, "session relay push refused; the message waits at the head of the session's queue", sessionID, item.Topic, item.EventID, "retrying",
-			slog.Int("attempt", attempt), slog.String("retry_in", retry.String()), slog.String("error", err.Error()))
-		_ = msg.InProgress()
-		if waitUnlessDone(ctx, retry) != nil {
-			return false
-		}
-		retry = min(retry*2, pushRetryMax)
-	}
+		m.logger.DeliveryLog(slog.LevelInfo, "session relay pushed", sessionID, item.Topic, item.EventID, "delivered", slog.Int("attempts", attempt))
+		return true, nil
+	})
 }
 
 // push makes one prompt_async push of item to the session's port at the address its current entry
@@ -903,27 +902,26 @@ func (m *sessionRelays) push(ctx context.Context, sessionID string, item contrac
 	return m.deliverer.Push(ctx, item, sessionID, entry)
 }
 
-// refuseFollowedTopic applies the durable path's fan-out refusals (fanoutDelivery) to item, a
-// message on a topic the session follows, and reports whether item is refused: the session
-// published it (an echo), or its delivery mode cannot be read or is one the session does not
-// advertise, which is reported as a delivery_failed exception. A message on the session's agent
-// subject, a role forward included, is never refused here.
+// refuseFollowedTopic applies the durable path's refusals (judgeFollowedTopic) to item, a message
+// on a topic the session follows, and reports whether item is refused: a copy the session already
+// took or is already being sent, an echo of its own message, or a delivery mode it does not
+// advertise or that cannot be read, which is reported as a delivery_failed exception as the
+// fan-out reports it. A message on the session's agent subject, a role forward included, is
+// addressed to this session alone and is never refused here.
 func (m *sessionRelays) refuseFollowedTopic(sessionID string, item contracts.Envelope) bool {
 	if isControlTopic(item.Topic) {
 		return false
 	}
-	if item.SourceSession == sessionID {
+	verdict, _, err := judgeFollowedTopic(m.rules, sessionID, item, envelopeTargetedMode(item))
+	switch verdict {
+	case takeFollowedTopic:
+		return false
+	case followedTopicEcho:
 		m.logger.DeliveryLog(slog.LevelInfo, "session relay skipped an echo", sessionID, item.Topic, item.EventID, "skipped")
 		return true
-	}
-	mode, err := envelopeDeliveryMode(item)
-	if err == nil && mode != "" {
-		if entry, lookupErr := m.sessions.Get(sessionID); lookupErr == nil && !hasCapability(entry.Capabilities, mode) {
-			err = errors.New("the session does not advertise delivery mode " + mode)
-		}
-	}
-	if err == nil {
-		return false
+	case followedTopicDeduped, followedTopicAttempted:
+		m.logger.DeliveryLog(slog.LevelInfo, "session relay skipped a copy the session already has", sessionID, item.Topic, item.EventID, "dedupe", slog.String("dedupe_key", item.DedupeKey))
+		return true
 	}
 	m.logger.DeliveryLog(slog.LevelWarn, "session relay refused a message the session cannot take", sessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
 	if publishErr := publishDeliveryException(m.client, item, "delivery_failed", sessionID, true, ""); publishErr != nil {

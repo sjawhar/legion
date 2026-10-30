@@ -65,7 +65,7 @@ type subscribeResume struct {
 
 // sessionEntryFromSubscribe is the session entry a registration writes: the body's fields, the
 // registering listener's machine id, and, when delivery says the listener holds the session's
-// consumer for it, consumer delivery and the plugin's epoch.
+// consumer for it, consumer delivery, the plugin's epoch and the sequence that consumer starts at.
 func sessionEntryFromSubscribe(body subscribeBody, machineID string, delivery sessionDeliveryOutcome) session.SessionEntry {
 	entry := session.SessionEntry{
 		Port:           body.Port,
@@ -82,6 +82,7 @@ func sessionEntryFromSubscribe(body subscribeBody, machineID string, delivery se
 	if delivery.relayed {
 		entry.Delivery = session.DeliveryConsumer
 		entry.Epoch = delivery.epoch
+		entry.ConsumerStart = delivery.consumerStart
 	}
 	return entry
 }

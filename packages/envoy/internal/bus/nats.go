@@ -273,10 +273,11 @@ type recoverableSubscription struct {
 	// a refused subscription valid, so without it a lane the server will not deliver to would read
 	// as subscribed. Only the core registration is ever marked.
 	refused bool
-	// unlimitedPending switches the pending limits of a core subscription off on every bind, so
-	// nats.go queues whatever the server delivers rather than dropping it as a slow consumer
-	// (ConnectRoleLane).
-	unlimitedPending bool
+	// pendingMsgs and pendingBytes, when set, are the pending limits of a core subscription,
+	// applied on every bind: the role lane's are far above any backlog its handler can build
+	// (ConnectRoleLane), so nats.go queues what the server delivers rather than dropping it as a
+	// slow consumer, and the connection's buffer is still bounded. Zero keeps nats.go's defaults.
+	pendingMsgs, pendingBytes int
 }
 
 // Client is a NATS connection that publishes notifications and holds at most one JetStream
@@ -684,10 +685,10 @@ func bind(registration recoverableSubscription, conn *nats.Conn, js nats.JetStre
 	} else {
 		sub, err = conn.QueueSubscribe(registration.subject, registration.queue, registration.handler)
 	}
-	if err != nil || !registration.unlimitedPending {
+	if err != nil || registration.pendingMsgs == 0 {
 		return sub, err
 	}
-	if err := sub.SetPendingLimits(-1, -1); err != nil {
+	if err := sub.SetPendingLimits(registration.pendingMsgs, registration.pendingBytes); err != nil {
 		_ = sub.Unsubscribe()
 		return nil, err
 	}
@@ -800,8 +801,9 @@ func (c *Client) onAsyncError(nc *nats.Conn, err error) {
 }
 
 // SlowConsumers is how many slow-consumer errors the client's connections have reported: one each
-// time a subscription fell past its pending limits and nats.go began dropping its messages. A
-// subscription whose pending limits are off (ConnectRoleLane) never reports one.
+// time a subscription fell past its pending limits and nats.go began dropping its messages. The
+// role lane's limits are set far above any backlog its handler can build (ConnectRoleLane), so it
+// reports one only under a flood no measured load comes near.
 func (c *Client) SlowConsumers() uint64 {
 	return c.slowConsumers.Load()
 }

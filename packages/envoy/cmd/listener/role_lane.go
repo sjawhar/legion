@@ -3,18 +3,20 @@ package main
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/session"
 )
 
 // roleForwardWaitLimit bounds the role forwards the role lane holds at once, queued behind their
 // holder's earlier forwards or waiting for their outcome. When it is reached the role lane's
 // handler waits for one to end, which only holds role messages in the lane's subscription, whose
-// pending limits are off (bus.ConnectRoleLane).
+// pending limits are far above any backlog that wait can build (bus.ConnectRoleLane).
 const roleForwardWaitLimit = 4096
 
 // roleLaneSlowConsumerInterval is how often the role lane's slow-consumer count is read for a change
@@ -52,20 +54,6 @@ type roleForwarder struct {
 
 func newRoleForwarder(cfg listenerDeliveryHandlerConfig) *roleForwarder {
 	return &roleForwarder{cfg: cfg, slots: make(chan struct{}, roleForwardWaitLimit), queues: map[string][]roleForward{}}
-}
-
-// forwardRoleMessage forwards a resolved role message: through cfg.roleForwards when the listener
-// runs one, and otherwise inline, the forward and its outcome both done before it returns.
-func forwardRoleMessage(cfg listenerDeliveryHandlerConfig, forward roleForward) {
-	if cfg.roleForwards != nil {
-		cfg.roleForwards.enqueue(forward)
-		return
-	}
-	wait, err := cfg.forwardRole(contracts.AgentSubject(forward.sessionID), forward.forwarded(), roleReceiptTimeout, forward.storedOnly)
-	if err == nil {
-		err = wait()
-	}
-	finishRoleForward(cfg, forward, err)
 }
 
 // forwarded is the envelope published on the holder's agent subject: the message under the
@@ -178,8 +166,9 @@ func (l roleLane) drain(logger *logging.Logger, timeout time.Duration) {
 }
 
 // watchRoleLaneSlowConsumers logs each change of the role lane's slow-consumer count until ctx ends.
-// The lane's pending limits are off, so the count stays 0 unless nats.go reports a slow consumer
-// anyway; the count is also the envoy_role_lane_slow_consumers metric.
+// The lane's pending limits are far above any backlog its handler can build, so the count stays 0
+// unless nats.go reports a slow consumer anyway; the count is also the
+// envoy_role_lane_slow_consumers metric.
 func watchRoleLaneSlowConsumers(ctx context.Context, lane *bus.Client, logger *logging.Logger, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -195,4 +184,58 @@ func watchRoleLaneSlowConsumers(ctx context.Context, lane *bus.Client, logger *l
 			seen = count
 		}
 	}
+}
+
+// roleForwardStoredOnly reports whether holder answers no receipt for a role forward: a session on a
+// serving port has no NATS subscriber. The stream's copy of the forward reaches its port with
+// acknowledgement and redelivery: from its session consumer, which the listener's relay pushes,
+// when its entry records consumer delivery, else from the owning listener's durable
+// (roleForwardCopyDelivery). Its forward counts as delivered once the stream acknowledges storing it.
+func roleForwardStoredOnly(holder session.SessionEntry) bool {
+	return holder.Port > 0
+}
+
+// storedForwardCopyIsDelivery reports whether the stored copy of a forward on sessionID's agent
+// subject, stored at stream sequence storedSeq, is that session's own delivery rather than a copy
+// of one it already has (listenerDeliveryHandler). Only a serving-port session of this listener's
+// is: it answers no receipt, and its consumer does not hold this copy, so the copy pushed to its
+// port is how it receives the message (roleForwardCopyDelivery). Every other recipient took the
+// forward on its own NATS connection or takes the stored copy another way
+// (takesStoredMessagesItself), and a session with no entry, or one on another listener, is nobody
+// here to push to.
+func storedForwardCopyIsDelivery(cfg listenerDeliveryHandlerConfig, sessionID string, storedSeq uint64) bool {
+	entry, err := cfg.sessions.Get(sessionID)
+	if err != nil || takesStoredMessagesItself(entry, storedSeq) {
+		return false
+	}
+	return ownsServingPortSession(cfg, sessionID, entry)
+}
+
+// roleForwardCopyDelivery handles the stored copy of a role forward (roleForward.forwarded), which
+// the durable reads on its holder's agent subject. A holder on NATS took the forward over its own
+// subscription, a holder on consumer delivery takes the copy from its consumer, and a holder another
+// listener owns is that listener's, so the copy is acknowledged. A serving-port holder this listener
+// owns has no subscriber: the copy is pushed to its port and acknowledged only on the port's 204,
+// by the holder's serving-port worker on the durable path, so its order behind the holder's earlier
+// messages holds; a copy the workers cannot take goes back to the durable.
+func roleForwardCopyDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
+	holder, ok := "", false
+	if message.mode == durableDelivery {
+		holder, ok = strings.CutPrefix(message.msg.Subject, contracts.AgentTopicPrefix)
+	}
+	if !ok {
+		message.finalize(false)
+		return
+	}
+	entry, err := cfg.sessions.Get(holder)
+	if err != nil || entry.Delivery == session.DeliveryConsumer {
+		message.finalize(false)
+		return
+	}
+	if !ownsServingPortSession(cfg, holder, entry) || cfg.dedupeCache.Seen(item.DedupeKey, holder) || cfg.attemptCache.Seen(item.DedupeKey, holder) {
+		message.finalize(false)
+		return
+	}
+	cfg.attemptCache.Record(item.DedupeKey, holder)
+	handOverOrRetry(cfg, message, servePortPush{item: item, sessionID: holder, settle: message.settle, storedSeq: message.storedSeq(), forward: true, logLine: "listener role forward pushed"})
 }

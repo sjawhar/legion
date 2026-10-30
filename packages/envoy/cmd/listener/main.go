@@ -959,12 +959,24 @@ func main() {
 	// be answered, so a relay that cannot subscribe one leaves every session on core delivery too.
 	var relays *sessionRelays
 	if delivery.consumers != nil {
-		relays, err = startSessionRelays(delivery, sessions, registry, &deliver, client, cfg.MachineID, logger)
+		relays, err = startSessionRelays(delivery, deliveryConfig)
 		if err != nil {
 			logger.Error("session relay reply subscription failed; every session stays on core delivery", slog.String("error", err.Error()))
 			delivery.close()
 			delivery = &sessionDelivery{logger: logger, now: time.Now}
 		}
+	}
+	// The parts a shutdown ends, gathered once: every end of a start that serves /v1 passes them
+	// to shutdownListener.
+	parts := listenerParts{
+		server:     server,
+		client:     client,
+		lane:       lane,
+		live:       live,
+		delivery:   delivery,
+		relays:     relays,
+		servePorts: servePorts,
+		caches:     caches,
 	}
 
 	// From here a SIGTERM or SIGINT is an ordered shutdown: /v1 serves from the next step, and the
@@ -1018,7 +1030,7 @@ func main() {
 				slog.Int64("waited_ms", bind.waited.Milliseconds()),
 			)
 		}
-		shutdownListener(logger, server, client, lane, live, delivery, relays, servePorts, caches, listenerLoops{})
+		shutdownListener(logger, parts, listenerLoops{})
 	}
 	deps.Store(ready)
 	logger.Info("envoy-listener ready (NATS connected)")
@@ -1108,7 +1120,7 @@ func main() {
 	case <-stopping.Done():
 		logger.Info("received signal, shutting down", slog.String("signal", context.Cause(stopping).Error()))
 	}
-	shutdownListener(logger, server, client, lane, live, delivery, relays, servePorts, caches, listenerLoops{
+	shutdownListener(logger, parts, listenerLoops{
 		stop: func() {
 			monitorCancel()
 			summaryCancel()
@@ -1129,13 +1141,26 @@ type listenerLoops struct {
 	kvLoopsDone []<-chan struct{}
 }
 
+// listenerParts are the parts of a started listener that shut down: server is the /v1 HTTP server,
+// client the main bus connection, lane the role lane, live the live topics lane's client (nil when
+// the lane is off), delivery the session-consumer connection, relays the relay of its consumers
+// (nil when it does not run), servePorts the workers that push the durable path's messages to
+// serving ports, and caches the KV caches whose watchers are retired last.
+type listenerParts struct {
+	server     *http.Server
+	client     *bus.Client
+	lane       roleLane
+	live       *bus.Client
+	delivery   *sessionDelivery
+	relays     *sessionRelays
+	servePorts *servePortWorkers
+	caches     []listenerCache
+}
+
 // shutdownListener is the ordered shutdown every end of a start that serves /v1 comes to, a
 // signal, a fatal error or a bind that did not complete, and exits non-zero so the runtime's
-// restart policy restores the listener. lane is the role lane; live is the live topics lane's
-// client, nil when the lane is off; delivery holds the session-consumer connection, and relays
-// relays its consumers (nil when it does not run); servePorts pushes the durable path's messages to
-// serving ports.
-func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.Client, lane roleLane, live *bus.Client, delivery *sessionDelivery, relays *sessionRelays, servePorts *servePortWorkers, caches []listenerCache, loops listenerLoops) {
+// restart policy restores the listener.
+func shutdownListener(logger *logging.Logger, parts listenerParts, loops listenerLoops) {
 	// Stop background loops before draining NATS.
 	if loops.stop != nil {
 		loops.stop()
@@ -1147,15 +1172,15 @@ func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.C
 	// 2. HTTP server — stop accepting new requests, drain in-flight.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	relays.stop(shutdownCtx)
-	servePorts.stop(shutdownCtx)
-	if err := server.Shutdown(shutdownCtx); err != nil {
+	parts.relays.stop(shutdownCtx)
+	parts.servePorts.stop(shutdownCtx)
+	if err := parts.server.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("http shutdown error", slog.String("error", err.Error()))
 	}
 	// The session-consumer connection carries the consumer calls registrations make, which the HTTP
 	// server has stopped serving, and the relays' acks, which its drain lets reach the server,
 	// within what is left of the HTTP stop's budget.
-	delivery.drain(shutdownCtx)
+	parts.delivery.drain(shutdownCtx)
 
 	// 3. NATS — wait (within the HTTP deadline) for a self-health rebuild the monitor may still be
 	// running, so nothing re-subscribes or re-watches during the drain, and for a pass of a loop
@@ -1186,22 +1211,22 @@ func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.C
 	// nothing, so a delivery still blocked at the deadline is lost, as one sent while no listener
 	// runs is.
 	var lanes sync.WaitGroup
-	if live != nil {
+	if parts.live != nil {
 		lanes.Go(func() {
-			if err := live.Drain(3 * time.Second); err != nil {
+			if err := parts.live.Drain(3 * time.Second); err != nil {
 				logger.Warn("live topics drain error", slog.String("error", err.Error()))
 			}
 		})
 	}
-	lanes.Go(func() { lane.drain(logger, 3*time.Second) })
+	lanes.Go(func() { parts.lane.drain(logger, 3*time.Second) })
 	lanes.Wait()
-	for _, c := range caches {
+	for _, c := range parts.caches {
 		c.cache.StopWatch()
 	}
 	// 10 s for the deliveries in their handlers, as before the drain hooks, and the hooks' 3 s on
 	// top (bus's drainHookReserve): with the HTTP stop's 10 s and the role lane's 5 s, 28 s, inside
 	// every runtime's 30 s.
-	if err := client.Drain(13 * time.Second); err != nil {
+	if err := parts.client.Drain(13 * time.Second); err != nil {
 		logger.Warn("nats drain error", slog.String("error", err.Error()))
 	}
 

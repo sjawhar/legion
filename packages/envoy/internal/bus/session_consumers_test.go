@@ -223,10 +223,11 @@ func TestEnsureCreatesTheConsumerWithTheSessionSettings(t *testing.T) {
 		t.Errorf("filters = %q, want %q", config.FilterSubjects, want)
 	}
 
-	// The same settings again change nothing and create nothing.
+	// The same settings again create nothing and change nothing, and report the start the
+	// consumer already has, which its session's entry records (SessionConsumerStart).
 	again, err := consumers.Ensure(ctx, "ses_settings", []string{contracts.AgentSubject("ses_settings"), "notifications.github.o.r.>"}, 0)
-	if err != nil || again != (SessionConsumerStart{}) {
-		t.Fatalf("Ensure of a consumer as it stands = %+v, %v; want nothing done", again, err)
+	if err != nil || again != (SessionConsumerStart{StartSeq: config.OptStartSeq}) {
+		t.Fatalf("Ensure of a consumer as it stands = %+v, %v; want nothing done and its start %d", again, err, config.OptStartSeq)
 	}
 }
 
@@ -722,27 +723,19 @@ func TestNakWithDelayRedelivers(t *testing.T) {
 	}
 }
 
-// Delete removes the consumer, and a second delete of it is no error; a session id that names no
-// consumer is refused before anything is sent.
-func TestDeleteAndSessionsWithoutAConsumer(t *testing.T) {
+// A session the stream holds no consumer for: its info, a restart of it and a pull of it all
+// report it missing; a session id that names no consumer is refused before anything is sent.
+func TestSessionsWithoutAConsumer(t *testing.T) {
 	_, consumers := sessionConsumersOnStream(t)
 	ctx := context.Background()
-	if _, err := consumers.Ensure(ctx, "ses_delete", []string{contracts.AgentSubject("ses_delete")}, 0); err != nil {
-		t.Fatalf("ensure: %v", err)
+	if _, err := consumers.Info(ctx, "ses_absent"); !errors.Is(err, ErrSessionConsumerNotFound) {
+		t.Fatalf("info of a session with no consumer = %v, want ErrSessionConsumerNotFound", err)
 	}
-	for range 2 {
-		if err := consumers.Delete(ctx, "ses_delete"); err != nil {
-			t.Fatalf("delete: %v", err)
-		}
-	}
-	if _, err := consumers.Info(ctx, "ses_delete"); !errors.Is(err, ErrSessionConsumerNotFound) {
-		t.Fatalf("info after delete = %v, want ErrSessionConsumerNotFound", err)
-	}
-	if _, err := consumers.RestartAtFloor(ctx, "ses_delete", []string{contracts.AgentSubject("ses_delete")}); !errors.Is(err, ErrSessionConsumerNotFound) {
+	if _, err := consumers.RestartAtFloor(ctx, "ses_absent", []string{contracts.AgentSubject("ses_absent")}); !errors.Is(err, ErrSessionConsumerNotFound) {
 		t.Fatalf("RestartAtFloor of a missing consumer = %v, want ErrSessionConsumerNotFound", err)
 	}
 	// A pull reads nothing before it starts: its first Next reports the consumer missing.
-	pull := pullSession(t, consumers, "ses_delete")
+	pull := pullSession(t, consumers, "ses_absent")
 	nextCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if msg, err := pull.Next(nextCtx); !errors.Is(err, ErrSessionConsumerNotFound) {

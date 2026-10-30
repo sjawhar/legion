@@ -174,7 +174,6 @@ writes, and a request the starting gate turns away while the routes are still op
 | `receipt_timeout` | A role forward reached the server and its live holder sent no receipt within two seconds |
 | `unplaceable_no_record` | An agent delivery given up: no session record this listener could read |
 | `unplaceable_no_push_target` | An agent delivery given up: a record that names nothing to push to |
-| `unplaceable_push_failed` | An agent delivery given up: a record named a serve port and the push did not land on it — an unreachable peer, a session process restarting, a connection refused, or a server that answered with anything but 204 |
 
 `envoy_delivery_duration_seconds` carries the same label for the attempts it times.
 
@@ -321,8 +320,8 @@ subscriber) expires 125 s after the deferral that took it, the 5 s delay plus tw
 the longest a deferred message can legitimately stay pending, so such slots cannot hold the budget
 for longer than that. Each deferral logs
 `listener agent delivery deferred` with `reason`, `attempt` and `window_deferrals`, the deferrals
-that message's cause is allowed (1 for `push_failed`); only the give-up counts
-`unplaceable_no_record`, `unplaceable_no_push_target` or `unplaceable_push_failed`, logs WARN
+that message's cause is allowed; only the give-up counts
+`unplaceable_no_record` or `unplaceable_no_push_target`, logs WARN
 `listener agent delivery given up`, and then publishes the exception. A notice that cannot be
 published — it embeds the original payload, so an envelope near the server's max payload has its
 notice refused as too large on every attempt — logs ERROR `listener exception publish failed`

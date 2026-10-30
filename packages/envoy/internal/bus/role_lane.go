@@ -9,17 +9,33 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 )
 
+// The role lane's pending limits: what nats.go queues for the lane's subscription before it drops
+// a message as a slow consumer. They are finite, so a publisher flood on notifications.role.> can
+// never grow the client's buffer without bound, and far above any backlog the lane's handler can
+// build: the handler hands each forward over and blocks only once 4,096 are open
+// (cmd/listener/role_lane.go roleForwardWaitLimit), and every open forward ends within its receipt
+// window of 2 seconds, so at the measured 40 role messages a second a blocked handler leaves about
+// 80 messages queued, and the 400-message silent-holder test never blocks it at all. Reaching
+// RoleLanePendingMsgs would take seven hours of arrivals at that rate with the handler blocked
+// throughout; RoleLanePendingBytes, 1 GiB, is the same bound in memory for messages larger than a
+// kilobyte. Client.SlowConsumers counts any slow-consumer error the connection reports.
+const (
+	RoleLanePendingMsgs  = 1_000_000
+	RoleLanePendingBytes = 1 << 30
+)
+
 // errRoleLaneRefused is wrapped by openRoleLane's error when the server refused the role-lane
 // subscription in the queue group it asked for.
 var errRoleLaneRefused = errors.New("bus: NATS refused the role-lane subscription")
 
 // ConnectRoleLane opens the listener's role lane: a Client of its own, named "envoy-role-lane"
 // unless options name it, holding one core subscription to every role lane
-// (contracts.RoleTopicPrefix + ">") with its pending limits off, so nats.go queues every role
-// message the server delivers however far the handler falls behind, and drops none as a slow
-// consumer (Client.SlowConsumers counts any slow-consumer error the connection still reports). It
-// connects as Connect does, as the NATS user, through the proxy and under the remote-NATS rule the
-// environment names, and it reconnects, re-subscribes and keeps the pending limits off on its own.
+// (contracts.RoleTopicPrefix + ">") under the role lane's pending limits (RoleLanePendingMsgs,
+// RoleLanePendingBytes), so nats.go queues every role message the server delivers however far the
+// handler falls behind and drops none under any load the lane meets, while the buffer it may grow
+// to stays bounded. It connects as Connect does, as the NATS user, through the proxy and under the
+// remote-NATS rule the environment names, and it reconnects, re-subscribes and applies the limits
+// again on its own.
 //
 // It subscribes in the shared queue group RoleLaneQueue, so NATS hands each role message to one
 // listener of all of them. A server whose grant predates that group refuses the subscription,
@@ -57,11 +73,12 @@ func openRoleLane(urls []string, queue string, handler nats.MsgHandler, options 
 	subject := contracts.RoleTopicPrefix + ">"
 	before := client.Conn.LastError()
 	if _, err := client.subscribeCore(recoverableSubscription{
-		transport:        coreSubscription,
-		subject:          subject,
-		queue:            queue,
-		handler:          handler,
-		unlimitedPending: true,
+		transport:    coreSubscription,
+		subject:      subject,
+		queue:        queue,
+		handler:      handler,
+		pendingMsgs:  RoleLanePendingMsgs,
+		pendingBytes: RoleLanePendingBytes,
 	}); err != nil {
 		client.Close()
 		return nil, fmt.Errorf("subscribe: %w", err)

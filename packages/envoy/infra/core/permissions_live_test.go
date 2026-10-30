@@ -751,10 +751,11 @@ func sessionConsumerCall(subject string) bool {
 
 // The hub's grants for session consumers, as the listener's bus client manages them: the listener's
 // user creates a session's consumer, pulls a stored message from it and acks it, restarts it at its
-// floor (its info, delete and create again) and deletes it; the credential-free session user is
-// refused a consumer create; and the listener's user still subscribes its role lanes in its
-// machine's queue group, as a listener of an earlier release does, beside the group every listener
-// shares. Those refusals are all the server refused.
+// floor with nothing awaiting an ack (its info and an update in place) and restarts it again with a
+// message awaiting one (its info, delete and create); the credential-free session user is refused a
+// consumer create; and the listener's user still subscribes its role lanes in its machine's queue
+// group, as a listener of an earlier release does, beside the group every listener shares. Those
+// refusals are all the server refused.
 func TestListenerPermissionsManageSessionConsumersOnRealServers(t *testing.T) {
 	for _, image := range testnats.Images {
 		t.Run(image.Name, func(t *testing.T) {
@@ -810,7 +811,23 @@ func TestListenerPermissionsManageSessionConsumersOnRealServers(t *testing.T) {
 			restarted, err := consumers.RestartAtFloor(ctx, liveSession, filters)
 			require.NoError(t, err)
 			require.Equal(t, msg.StreamSeq+1, restarted.StartSeq)
-			require.NoError(t, consumers.Delete(ctx, liveSession))
+			// A restart with a message awaiting an ack deletes the consumer and creates it again at
+			// the floor, which is the one call of the set that needs the delete grant.
+			unacked := item
+			unacked.EventID = "evt-session-consumer-unacked"
+			unacked.SourceEventID = unacked.EventID
+			unacked.DedupeKey = "permissions-live-test." + unacked.EventID
+			require.NoError(t, owner.Publish(unacked))
+			pull, err = consumers.Pull(ctx, liveSession)
+			require.NoError(t, err)
+			held, err := pull.Next(ctx)
+			require.NoError(t, err)
+			require.Equal(t, msg.StreamSeq+1, held.StreamSeq)
+			pull.Stop()
+			recreated, err := consumers.RestartAtFloor(ctx, liveSession, filters)
+			require.NoError(t, err)
+			require.True(t, recreated.Created)
+			require.Equal(t, msg.StreamSeq+1, recreated.StartSeq)
 
 			// The listener's role lanes: the shared queue group, and its machine's, which a listener of
 			// an earlier release subscribes in.

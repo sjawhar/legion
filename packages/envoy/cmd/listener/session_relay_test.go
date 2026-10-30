@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"slices"
@@ -47,7 +48,7 @@ func newRelayRigPausing(t *testing.T, first, max time.Duration) *relayRig {
 	}
 	t.Cleanup(client.Close)
 	rig := newSessionConsumerRigOn(t, client, url)
-	relays, err := startSessionRelays(rig.deps.consumers, rig.harness.sessions, rig.harness.registry, rig.harness.config.deliverer, client, "test-machine", rig.harness.config.logger)
+	relays, err := startSessionRelays(rig.deps.consumers, rig.harness.config)
 	if err != nil {
 		t.Fatalf("start the session relays: %v", err)
 	}
@@ -799,6 +800,121 @@ func TestServePortHolderGetsTheStoredRoleForwardUntilThePortAccepts(t *testing.T
 	requirePromptCarries(t, accepted.text, item)
 	awaitAcked(t, consumers, sessionID, info.Delivered.Stream)
 	port.noPush(t, 3*time.Second)
+}
+
+// One upstream event published on two topics a serving-port session follows under one dedupe key —
+// a mentioning GitHub comment goes on the pull request's mention topic and the repository's
+// (internal/contracts/normalize.go) — reaches its port once: the relay refuses the second stored
+// copy by the dedupe key the accepted push recorded, as the durable path's fan-out refuses it, and
+// acks it unpushed, so nothing waits in the consumer.
+func TestServePortRelayPushesOneDedupeKeyOnce(t *testing.T) {
+	rig := newRelayRig(t)
+	const sessionID = "ses_one_key"
+	pushes := make(chan string, 8)
+	rig.harness.config.deliverer.HTTPClient = &http.Client{Transport: listenerTransport(func(request *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			return nil, err
+		}
+		pushes <- string(body)
+		return listenerDeliveryResponse(http.StatusNoContent), nil
+	})}
+	pull, repo := "notifications.github.acme.repo.pr.1.mention", "notifications.github.acme.repo.mention"
+	rig.subscribe(t, `{"session_id":"`+sessionID+`","port":4096,"host":"127.0.0.1","topics":["`+pull+`","`+repo+`"]}`)
+
+	key := "one-event-" + id.New()
+	onThePull := listenerTestEnvelope(pull, key)
+	onTheRepo := listenerTestEnvelope(repo, key)
+	var last uint64
+	for _, item := range []contracts.Envelope{onThePull, onTheRepo} {
+		ack, err := rig.harness.client.JS().Publish(item.Topic, marshalListenerEnvelope(t, item))
+		if err != nil {
+			t.Fatalf("store the copy on %s: %v", item.Topic, err)
+		}
+		last = ack.Sequence
+	}
+
+	select {
+	case body := <-pushes:
+		if !strings.Contains(body, onThePull.EventID) {
+			t.Fatalf("the port was pushed:\n%s\nwant the copy stored first, %s", body, onThePull.EventID)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the port was never pushed the event")
+	}
+	select {
+	case body := <-pushes:
+		t.Fatalf("the port was pushed a second copy of one dedupe key:\n%s", body)
+	case <-time.After(2 * time.Second):
+	}
+	awaitAcked(t, rig.consumers, sessionID, last)
+}
+
+// A message stored before a serving-port session's first consumer is in no consumer: its consumer
+// starts at the stream's end, above it. The durable path still delivers it, so a push NAKed back
+// to the durable, or a message deferred as unplaceable, before the consumer was created and
+// redelivered after it reaches the port, once.
+func TestServePortMessageStoredBelowTheConsumerStartReachesThePort(t *testing.T) {
+	rig := newRelayRig(t)
+	sessionID := "ses_below_start_" + id.New()
+	agent := contracts.AgentSubject(sessionID)
+	pushes := make(chan string, 8)
+	rig.harness.config.deliverer.HTTPClient = &http.Client{Transport: listenerTransport(func(request *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			return nil, err
+		}
+		pushes <- string(body)
+		return listenerDeliveryResponse(http.StatusNoContent), nil
+	})}
+
+	// Stored while the session has no consumer and nothing is bound to the durable: the message
+	// waits for the durable's delivery, as one NAKed back to it does.
+	early := listenerTestEnvelope(agent, "below-start-"+id.New())
+	ack, err := rig.harness.client.JS().Publish(agent, marshalListenerEnvelope(t, early))
+	if err != nil {
+		t.Fatalf("store the message: %v", err)
+	}
+	rig.subscribe(t, `{"session_id":"`+sessionID+`","port":4096,"host":"127.0.0.1","topics":[]}`)
+	if start := rig.entry(t, sessionID).ConsumerStart; start <= ack.Sequence {
+		t.Fatalf("the session's consumer starts at %d, want above the message stored at %d", start, ack.Sequence)
+	}
+
+	// The durable delivers it now, as the server redelivers a NAKed message. It is bound on this
+	// session's subject alone: the package's NATS server is shared, and this message is the one
+	// the durable must deliver here.
+	durable := "listener-below-start-" + id.New()
+	config := natsgo.ConsumerConfig{
+		Durable:        durable,
+		DeliverSubject: natsgo.NewInbox(),
+		FilterSubject:  agent,
+		AckPolicy:      natsgo.AckExplicitPolicy,
+		AckWait:        consumerAckWait,
+		MaxAckPending:  consumerMaxAckPending,
+		MaxDeliver:     consumerMaxDeliver,
+	}
+	if _, err := rig.harness.client.JS().AddConsumer(bus.Stream, &config); err != nil {
+		t.Fatalf("create the listener's durable: %v", err)
+	}
+	subscription, err := rig.harness.client.Subscribe(agent, jetStreamDeliveryHandler(rig.harness.config), natsgo.Bind(bus.Stream, durable), natsgo.ManualAck())
+	if err != nil {
+		t.Fatalf("bind the listener's durable: %v", err)
+	}
+	t.Cleanup(func() { _ = subscription.Unsubscribe() })
+
+	select {
+	case body := <-pushes:
+		if !strings.Contains(body, early.EventID) {
+			t.Fatalf("the port was pushed:\n%s\nwant the message stored below the consumer's start, %s", body, early.EventID)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the message stored below the consumer's start never reached the port")
+	}
+	select {
+	case body := <-pushes:
+		t.Fatalf("the port was pushed the message a second time:\n%s", body)
+	case <-time.After(2 * time.Second):
+	}
 }
 
 // A serving-port session's messages reach its port in stream order: the second waits behind the

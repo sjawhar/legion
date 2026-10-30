@@ -68,9 +68,12 @@ type DeliveryResult struct {
 
 // DeliverWithResultForEntry delivers through the session entry resolved for
 // this attempt. A nil entry produces ErrNoSessionRecord, the same result a
-// failed lookup produces, so a caller can avoid a second registry read.
+// failed lookup produces, so a caller can avoid a second registry read. It is
+// the live and core paths' delivery: the message it pushes is not the durable's copy of a stored
+// one, so a session on consumer delivery is left its consumer's copy whatever its sequence
+// (Resolve's storedSeq 0).
 func (d Deliverer) DeliverWithResultForEntry(item contracts.Envelope, interest store.Interest, entry *SessionEntry) (DeliveryResult, error) {
-	result, err := d.Resolve(item, interest, entry)
+	result, err := d.Resolve(item, interest, entry, 0)
 	if err != nil || !result.Push {
 		return result, err
 	}
@@ -81,16 +84,21 @@ func (d Deliverer) DeliverWithResultForEntry(item contracts.Envelope, interest s
 // without making its push: a result with Push set is a serving-port session this listener owns,
 // for the caller to push to (Push); one with Skipped set needs nothing pushed; an error is the
 // delivery's failure, ErrWrongMachine included.
-func (d Deliverer) Resolve(item contracts.Envelope, interest store.Interest, entry *SessionEntry) (DeliveryResult, error) {
+//
+// storedSeq is the stream sequence of the durable path's copy of a stored message, and 0 for any
+// other delivery: it decides whether a session on consumer delivery is already held this message
+// by its own consumer (SessionEntry.ConsumerHoldsStored).
+func (d Deliverer) Resolve(item contracts.Envelope, interest store.Interest, entry *SessionEntry, storedSeq uint64) (DeliveryResult, error) {
 	if entry == nil {
 		return DeliveryResult{}, fmt.Errorf("%w for session %s", ErrNoSessionRecord, interest.SessionID)
 	}
-	if entry.Delivery == DeliveryConsumer && bus.StreamCaptures(item.Topic) {
+	if entry.ConsumerHoldsStored(storedSeq) && bus.StreamCaptures(item.Topic) {
 		// The session's consumer holds this stored message, and the listener that owns the session
 		// relays it from there, serving port or not: the durable path pushes nothing and reports
 		// nothing for it. A topic the stream does not store reaches the session as before (the
 		// live lane's push to a serving port; a session's own subscription, which is where a team
-		// or other ad-hoc topic still arrives).
+		// or other ad-hoc topic still arrives). A durable message stored below the consumer's
+		// start is in no consumer, so it is pushed below as for a session with none.
 		return DeliveryResult{Skipped: true}, nil
 	}
 	if entry.SelfSubscribed && entry.Port == 0 {

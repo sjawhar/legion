@@ -71,61 +71,6 @@ func sessionConsumerNameOf(sessionID string) (string, error) {
 	return name, nil
 }
 
-// ReduceFilterSubjects returns subjects as a set of consumer filters no two of which overlap, which
-// JetStream requires of one consumer's filters, matching every subject any of them matched: a
-// subject another contains (SubjectContains) is dropped, and two that overlap without either
-// containing the other are replaced by their longest common prefix of whole tokens followed by `>`
-// (`>` alone when the first tokens differ), until no two overlap. `X` and `X.>` do not overlap (one
-// matches X alone, the other only what lies under X), so both stay. The result is sorted and holds
-// each subject once, so the same set always reduces to the same list.
-func ReduceFilterSubjects(subjects []string) []string {
-	reduced := slices.Clone(subjects)
-	for {
-		slices.Sort(reduced)
-		reduced = slices.Compact(reduced)
-		next, changed := reduceFilterPair(reduced)
-		if !changed {
-			return reduced
-		}
-		reduced = next
-	}
-}
-
-// reduceFilterPair applies ReduceFilterSubjects's rule to the first pair of subjects that overlap,
-// reporting false when none do.
-func reduceFilterPair(subjects []string) ([]string, bool) {
-	for i, a := range subjects {
-		for j := i + 1; j < len(subjects); j++ {
-			b := subjects[j]
-			switch {
-			case SubjectContains(a, b):
-				return slices.Delete(slices.Clone(subjects), j, j+1), true
-			case SubjectContains(b, a):
-				return slices.Delete(slices.Clone(subjects), i, i+1), true
-			case subjectsOverlap(a, b):
-				merged := commonTokenPrefix(a, b) + ">"
-				rest := slices.DeleteFunc(slices.Clone(subjects), func(s string) bool { return s == a || s == b })
-				return append(rest, merged), true
-			}
-		}
-	}
-	return subjects, false
-}
-
-// commonTokenPrefix is the tokens a and b begin with alike, up to the first that differs or is `>`,
-// with the dot after the last of them, or "" when their first tokens differ.
-func commonTokenPrefix(a, b string) string {
-	aTokens, bTokens := strings.Split(a, "."), strings.Split(b, ".")
-	var prefix strings.Builder
-	for index := 0; index < len(aTokens) && index < len(bTokens); index++ {
-		if aTokens[index] != bTokens[index] || aTokens[index] == ">" {
-			break
-		}
-		prefix.WriteString(aTokens[index] + ".")
-	}
-	return prefix.String()
-}
-
 // SessionConsumers manages the stream's session consumers, one durable pull consumer per session
 // (SessionConsumerName), and pulls their messages, on a connection of its own (ConnectSessionConsumers).
 //
@@ -214,7 +159,11 @@ func (s *SessionConsumers) SubscribeReplies(subject string, handler nats.MsgHand
 type SessionConsumerStart struct {
 	// Created is set when the call created the consumer.
 	Created bool
-	// StartSeq is the stream sequence a consumer the call created starts at.
+	// StartSeq is the stream sequence the consumer starts at: the one a consumer the call created
+	// starts at, and, for one it found and updated, the one it was created at (an update may not
+	// change it, and a restart that recreated it reports where it started again). Every message at
+	// or after it is the consumer's to deliver, so the listener records it on the session's entry
+	// (session.SessionEntry.ConsumerStart).
 	StartSeq uint64
 	// Gap is set when StartSeq is below the stream's first sequence: messages the consumer would
 	// have delivered from StartSeq have aged out of the stream or been discarded.
@@ -266,9 +215,10 @@ func (s *SessionConsumers) Ensure(ctx context.Context, sessionID string, subject
 			return SessionConsumerStart{}, err
 		}
 		// The consumer exists, so it holds its own position: the delete of a restart's call that
-		// failed never reached the server, or its create did.
+		// failed never reached the server, or its create did. Its start is the sequence it was
+		// created at, which the caller records for the durable path (SessionConsumerStart).
 		s.setPendingStart(name, 0)
-		return SessionConsumerStart{}, s.update(ctx, name, info.Config, filters)
+		return SessionConsumerStart{StartSeq: info.Config.OptStartSeq}, s.update(ctx, name, info.Config, filters)
 	}
 }
 
@@ -309,8 +259,8 @@ func (s *SessionConsumers) UpdateFilter(ctx context.Context, sessionID string, s
 // than returning ErrSessionConsumerNotFound, and so does an Ensure (Ensure). A consumer still there
 // (a delete the server never applied, a create it applied whose answer was lost) restarts at its
 // own floor, which is the pending start or past it. A consumer missing with no pending start (never
-// created, deleted with Delete, or removed after SessionConsumerInactiveThreshold) is
-// ErrSessionConsumerNotFound, as before.
+// created, or removed after SessionConsumerInactiveThreshold) is ErrSessionConsumerNotFound, as
+// before.
 //
 // The pending start is this SessionConsumers' own, in memory. Its rule holds only while every call
 // for one session through it waits for the one before (the listener holds a lock per session
@@ -484,20 +434,6 @@ func (s *SessionConsumers) KeepListed(ctx context.Context, sessionID string, sub
 	return SessionConsumerStart{StartSeq: startSeq, Gap: startSeq < state.firstSeq, StreamID: state.id}, true, nil
 }
 
-// Delete deletes sessionID's consumer, and drops its pending start (RestartAtFloor): the session is
-// meant to have none. One the stream does not hold is no error.
-func (s *SessionConsumers) Delete(ctx context.Context, sessionID string) error {
-	name, err := sessionConsumerNameOf(sessionID)
-	if err != nil {
-		return err
-	}
-	if err := s.delete(ctx, name); err != nil {
-		return err
-	}
-	s.setPendingStart(name, 0)
-	return nil
-}
-
 // StreamID returns the stream's identity, its StreamIDMetadataKey metadata, which a relay frame
 // carries and a session's resume point names.
 func (s *SessionConsumers) StreamID(ctx context.Context) (string, error) {
@@ -510,245 +446,6 @@ func (s *SessionConsumers) StreamID(ctx context.Context) (string, error) {
 	}
 	return state.id, nil
 }
-
-// SessionAcker answers one pulled message (SessionMessage).
-type SessionAcker interface {
-	// Ack removes the message from the consumer: it is done.
-	Ack() error
-	// InProgress restarts the message's ack wait.
-	InProgress() error
-	// NakWithDelay has the server deliver the message again once delay has passed.
-	NakWithDelay(delay time.Duration) error
-}
-
-// SessionMessage is one message a session consumer delivered: the stored message and its delivery.
-type SessionMessage struct {
-	// Subject is the subject the message was stored on.
-	Subject string
-	Header  nats.Header
-	Data    []byte
-	// StreamSeq is the message's stream sequence.
-	StreamSeq uint64
-	// Delivered is how many times the consumer has delivered the message, this time included.
-	Delivered uint64
-	// StoredAt is when the stream stored the message.
-	StoredAt time.Time
-	SessionAcker
-}
-
-// The pull requests of a SessionPull.
-const (
-	// sessionPullBatch is how many messages one pull request asks for: the consumer's
-	// MaxAckPending, the most it delivers before an ack anyway.
-	sessionPullBatch = SessionConsumerMaxAckPending
-	// sessionPullExpires is how long a pull request waits at the server; the pull sends the next
-	// once it expires.
-	sessionPullExpires = 30 * time.Second
-	// sessionPullHeartbeat is how often the server signals a pull request that waits with nothing
-	// to deliver. A pull that hears nothing from the server for twice as long ends with
-	// ErrSessionPullStalled.
-	sessionPullHeartbeat = 15 * time.Second
-)
-
-// ErrSessionPullStalled ends a pull (SessionPull.Next) that heard nothing from the server, no
-// message and no heartbeat, for twice sessionPullHeartbeat: its pull request is lost, as on a
-// connection nats.go replaced.
-var ErrSessionPullStalled = errors.New("bus: the session consumer's pull heard nothing from the server")
-
-// SessionPull is a pull of one session consumer's messages, which arrive in stream order, a
-// redelivery included. It sends the consumer's pull requests ($JS.API.CONSUMER.MSG.NEXT) itself,
-// one at a time, each for sessionPullBatch messages, and the next once the server has delivered
-// them all or the request expired, so starting it is one publish and no API call. The server
-// answers on the pull's own inbox, which holds one subscription.
-type SessionPull struct {
-	conn *nats.Conn
-	sub  *nats.Subscription
-	// name is the consumer's, next its pull request subject, inbox the subject the server answers
-	// on, and request the pull request's body.
-	name, next, inbox string
-	request           []byte
-	// remaining is how many messages the pull request in flight may still deliver; 0 when none is.
-	// Only Next reads or writes it.
-	remaining int
-	// heartbeat is the pull requests' idle heartbeat (sessionPullHeartbeat).
-	heartbeat time.Duration
-	// wake holds a token once receive has queued a message for Next.
-	wake chan struct{}
-
-	// mu guards queue and heard.
-	mu sync.Mutex
-	// queue holds what the server sent on the inbox, heartbeats aside, until Next reads it.
-	queue []*nats.Msg
-	// heard is when the server last sent anything on the inbox, or the pull last sent a request.
-	heard time.Time
-}
-
-// Pull starts pulling sessionID's consumer on the connection, without reading it first: the first
-// Next returns ErrSessionConsumerNotFound when the stream holds no such consumer. Pulled messages
-// wait in the pull for Next; Stop ends it, and the server delivers any message it delivered and
-// was not acked for again once its ack wait has passed, or at a restart (RestartAtFloor).
-func (s *SessionConsumers) Pull(ctx context.Context, sessionID string) (*SessionPull, error) {
-	name, err := sessionConsumerNameOf(sessionID)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.client.ensureConnWithContext(ctx); err != nil {
-		return nil, err
-	}
-	request, err := json.Marshal(struct {
-		Batch     int           `json:"batch"`
-		Expires   time.Duration `json:"expires"`
-		Heartbeat time.Duration `json:"idle_heartbeat"`
-	}{Batch: sessionPullBatch, Expires: s.pullExpires, Heartbeat: s.pullHeartbeat})
-	if err != nil {
-		return nil, err
-	}
-	conn := s.client.currentConn()
-	p := &SessionPull{conn: conn, name: name, next: consumerAPI("MSG.NEXT", name), inbox: conn.NewInbox(), request: request, heartbeat: s.pullHeartbeat, wake: make(chan struct{}, 1)}
-	if p.sub, err = conn.Subscribe(p.inbox, p.receive); err != nil {
-		return nil, err
-	}
-	if err := p.pull(); err != nil {
-		p.Stop()
-		return nil, err
-	}
-	return p, nil
-}
-
-// receive takes what the server sends on the pull's inbox: a heartbeat only marks it heard, and
-// anything else is queued for Next.
-func (p *SessionPull) receive(msg *nats.Msg) {
-	p.mu.Lock()
-	p.heard = time.Now()
-	if status, _ := pullStatus(msg); status != pullStatusHeartbeat {
-		p.queue = append(p.queue, msg)
-	}
-	p.mu.Unlock()
-	select {
-	case p.wake <- struct{}{}:
-	default:
-	}
-}
-
-// The status codes the server answers a pull request with, beside the messages it delivers.
-const (
-	pullStatusHeartbeat    = "100"
-	pullStatusExpired      = "408"
-	pullStatusConflict     = "409"
-	pullStatusNoResponders = "503"
-	// pullLeadershipChange is the description of the 409 that ends a waiting pull request when the
-	// consumer's leader changes; the consumer still exists.
-	pullLeadershipChange = "Leadership Change"
-)
-
-// pullStatus is the status code and description of msg, a status the server sent on a pull's
-// inbox, or "" for a message the consumer delivered, which carries its ack subject as its reply
-// subject (and may carry any header of its own).
-func pullStatus(msg *nats.Msg) (status, description string) {
-	if msg.Reply != "" {
-		return "", ""
-	}
-	return msg.Header.Get("Status"), msg.Header.Get("Description")
-}
-
-// pull sends a pull request for sessionPullBatch messages.
-func (p *SessionPull) pull() error {
-	p.mu.Lock()
-	p.heard = time.Now()
-	p.mu.Unlock()
-	if err := p.conn.PublishRequest(p.next, p.inbox, p.request); err != nil {
-		return err
-	}
-	p.remaining = sessionPullBatch
-	return nil
-}
-
-// Next returns the next message the pull holds, waiting for one until ctx ends. It returns
-// ErrSessionConsumerNotFound once the stream holds no such consumer, and ErrSessionPullStalled
-// once the server has sent nothing for twice sessionPullHeartbeat.
-func (p *SessionPull) Next(ctx context.Context) (SessionMessage, error) {
-	for {
-		if p.remaining == 0 {
-			if err := p.pull(); err != nil {
-				return SessionMessage{}, err
-			}
-		}
-		msg, err := p.take(ctx)
-		if err != nil {
-			return SessionMessage{}, err
-		}
-		switch status, description := pullStatus(msg); {
-		case status == "":
-			p.remaining--
-			return sessionMessageOf(msg)
-		case status == pullStatusExpired, status == pullStatusConflict && description == pullLeadershipChange:
-			// The request ended; the next round sends another.
-			p.remaining = 0
-		case status == pullStatusNoResponders:
-			return SessionMessage{}, fmt.Errorf("%w: %s", ErrSessionConsumerNotFound, p.name)
-		default:
-			return SessionMessage{}, fmt.Errorf("bus: pull of session consumer %s: %s %s", p.name, status, description)
-		}
-	}
-}
-
-// take returns the first message the server sent that Next has not read, waiting until one comes,
-// ctx ends, or the server has sent nothing for twice sessionPullHeartbeat.
-func (p *SessionPull) take(ctx context.Context) (*nats.Msg, error) {
-	for {
-		p.mu.Lock()
-		if len(p.queue) > 0 {
-			msg := p.queue[0]
-			p.queue[0] = nil
-			p.queue = p.queue[1:]
-			p.mu.Unlock()
-			return msg, nil
-		}
-		stalled := time.Until(p.heard.Add(2 * p.heartbeat))
-		p.mu.Unlock()
-		if stalled <= 0 {
-			return nil, ErrSessionPullStalled
-		}
-		timer := time.NewTimer(stalled)
-		select {
-		case <-p.wake:
-		case <-timer.C:
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
-		}
-		timer.Stop()
-	}
-}
-
-// sessionMessageOf is the message the server delivered as msg, whose reply subject carries its
-// delivery (the JetStream ack subject).
-func sessionMessageOf(msg *nats.Msg) (SessionMessage, error) {
-	meta, err := msg.Metadata()
-	if err != nil {
-		return SessionMessage{}, err
-	}
-	return SessionMessage{
-		Subject:      msg.Subject,
-		Header:       msg.Header,
-		Data:         msg.Data,
-		StreamSeq:    meta.Sequence.Stream,
-		Delivered:    meta.NumDelivered,
-		StoredAt:     meta.Timestamp,
-		SessionAcker: sessionAck{msg},
-	}, nil
-}
-
-// sessionAck answers a pulled message on the connection it arrived on, by publishing to its reply
-// subject; Ack and NakWithDelay are sent once.
-type sessionAck struct{ msg *nats.Msg }
-
-func (a sessionAck) Ack() error                             { return a.msg.Ack() }
-func (a sessionAck) InProgress() error                      { return a.msg.InProgress() }
-func (a sessionAck) NakWithDelay(delay time.Duration) error { return a.msg.NakWithDelay(delay) }
-
-// Stop ends the pull; the messages it held and Next had not returned are delivered again later.
-func (p *SessionPull) Stop() { _ = p.sub.Unsubscribe() }
 
 // sessionConsumerTarget names sessionID's consumer and reduces subjects to its filters, refusing a
 // session that can have no consumer and a filter set that is empty, which would deliver the whole
@@ -911,108 +608,4 @@ func (s *SessionConsumers) consumerRequest(ctx context.Context, subject string, 
 		return fmt.Errorf("bus: read the answer of %s: %w", subject, err)
 	}
 	return nil
-}
-
-// sessionStreamState is what SessionConsumers reads of the stream: its identity, the first sequence
-// it still holds and the last it stored.
-type sessionStreamState struct {
-	id                string
-	firstSeq, lastSeq uint64
-}
-
-// sessionStreamReadWait bounds one read of the stream's state (streamState).
-const sessionStreamReadWait = 5 * time.Second
-
-// streamRead is one read of the stream's state, which every streamState call waiting on it shares.
-type streamRead struct {
-	// done is closed once state and err are set.
-	done  chan struct{}
-	state sessionStreamState
-	err   error
-}
-
-// streamState reads the stream's identity and sequences with its info. Calls made at once share a
-// read: a call waits for the next read to begin, after the one in flight answers, and every call
-// waiting when it begins gets its answer. So no call gets a state read before it was made, and a
-// burst of calls, such as the restarts of every session at a listener's start, sends one stream
-// info per round trip rather than one per call. A call returns ctx's error if ctx ends first.
-func (s *SessionConsumers) streamState(ctx context.Context) (sessionStreamState, error) {
-	return s.joinStreamRead().wait(ctx)
-}
-
-// joinStreamRead returns the next read of the stream's state to begin (streamState), starting the
-// goroutine that sends the reads when none runs.
-func (s *SessionConsumers) joinStreamRead() *streamRead {
-	s.streamMu.Lock()
-	read := s.streamNext
-	if read == nil {
-		read = &streamRead{done: make(chan struct{})}
-		s.streamNext = read
-	}
-	start := !s.streamReading
-	s.streamReading = true
-	s.streamMu.Unlock()
-	if start {
-		go s.readStreamStates()
-	}
-	return read
-}
-
-// wait returns what the read read, once it has answered, or ctx's error if ctx ends first.
-func (r *streamRead) wait(ctx context.Context) (sessionStreamState, error) {
-	select {
-	case <-r.done:
-		return r.state, r.err
-	case <-ctx.Done():
-		return sessionStreamState{}, ctx.Err()
-	}
-}
-
-// readStreamStates sends the stream reads streamState calls wait for, one at a time, each within
-// sessionStreamReadWait, until none waits.
-func (s *SessionConsumers) readStreamStates() {
-	for {
-		s.streamMu.Lock()
-		read := s.streamNext
-		s.streamNext = nil
-		if read == nil {
-			s.streamReading = false
-			s.streamMu.Unlock()
-			return
-		}
-		s.streamMu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), sessionStreamReadWait)
-		read.state, read.err = s.readStreamState(ctx)
-		cancel()
-		close(read.done)
-	}
-}
-
-// readStreamState reads the stream's identity and sequences with one stream info.
-func (s *SessionConsumers) readStreamState(ctx context.Context) (sessionStreamState, error) {
-	reply, err := s.client.requestConfirmed(ctx, "$JS.API.STREAM.INFO."+Stream, nil)
-	if err != nil {
-		return sessionStreamState{}, err
-	}
-	var response struct {
-		Config struct {
-			Metadata map[string]string `json:"metadata"`
-		} `json:"config"`
-		State struct {
-			FirstSeq uint64 `json:"first_seq"`
-			LastSeq  uint64 `json:"last_seq"`
-		} `json:"state"`
-		Error *jetstream.APIError `json:"error"`
-	}
-	if err := json.Unmarshal(reply.Data, &response); err != nil {
-		return sessionStreamState{}, fmt.Errorf("bus: read the info of %s: %w", Stream, err)
-	}
-	if response.Error != nil {
-		return sessionStreamState{}, fmt.Errorf("bus: read the info of %s: %w", Stream, response.Error)
-	}
-	return sessionStreamState{
-		id:       response.Config.Metadata[StreamIDMetadataKey],
-		firstSeq: response.State.FirstSeq,
-		lastSeq:  response.State.LastSeq,
-	}, nil
 }

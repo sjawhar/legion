@@ -106,6 +106,9 @@ type servePortPush struct {
 	item      contracts.Envelope
 	sessionID string
 	settle    *durableSettle
+	// storedSeq is the stream sequence of the message, which says whether the session's consumer
+	// has come to hold it while this push waited (target).
+	storedSeq uint64
 	forward   bool
 	// logLine is the line a delivered push logs, "" for none.
 	logLine string
@@ -204,13 +207,40 @@ func (w *servePortWorkers) work(sessionID string) {
 	}
 }
 
+// pushRefusedLine is the line a push to a serving port logs when the port refused it and it waits
+// to be pushed again. The durable path's worker (pushUntilSettled) and the relay of a session's
+// consumer (sessionRelays.pushUntilAccepted) push the same way and log it alike.
+const pushRefusedLine = "listener serving-port push refused; the message waits at the head of the session's queue"
+
+// pushWithBackoff runs try until it reports the push settled, waiting pushRetryFirst between tries
+// and doubling to pushRetryMax, and logging each refusal under pushRefusedLine. try reports the
+// error the port, or the transport, refused the push with. It returns false when ctx ended before
+// the push settled: the message is left unsettled, for a later delivery of it.
+func pushWithBackoff(ctx context.Context, logger *logging.Logger, sessionID string, item contracts.Envelope, try func(attempt int) (settled bool, err error)) bool {
+	wait := pushRetryFirst
+	for attempt := 1; ; attempt++ {
+		settled, err := try(attempt)
+		if settled {
+			return true
+		}
+		if ctx.Err() != nil {
+			return false
+		}
+		logger.DeliveryLog(slog.LevelWarn, pushRefusedLine, sessionID, item.Topic, item.EventID, "retrying",
+			slog.Int("attempt", attempt), slog.String("retry_in", wait.String()), slog.String("error", err.Error()))
+		if waitUnlessDone(ctx, wait) != nil {
+			return false
+		}
+		wait = min(wait*2, pushRetryMax)
+	}
+}
+
 // pushUntilSettled pushes push until its port answers 204, or until its session is no longer a
 // serving port this listener owns, and reports the outcome: whether the message needs a retry, and
 // whether the push ended at all (false when the workers stopped first).
 func (w *servePortWorkers) pushUntilSettled(push servePortPush) (retry, ended bool) {
 	cfg := w.cfg
-	wait := pushRetryFirst
-	for attempt := 1; ; attempt++ {
+	ended = pushWithBackoff(w.ctx, cfg.logger, push.sessionID, push.item, func(attempt int) (bool, error) {
 		entry, verdict := w.target(push)
 		switch verdict {
 		case servePortSkip:
@@ -219,7 +249,7 @@ func (w *servePortWorkers) pushUntilSettled(push servePortPush) (retry, ended bo
 				metricStatus: push.metricStatus("skipped"),
 				recordDedupe: true,
 			})
-			return false, true
+			return true, nil
 		case servePortGone:
 			applyDeliveryOutcome(cfg, push.item, deliveryOutcome{
 				sessionID: push.sessionID,
@@ -229,33 +259,26 @@ func (w *servePortWorkers) pushUntilSettled(push servePortPush) (retry, ended bo
 				clearAttempt: true,
 			})
 			cfg.messagesNAKed.Inc()
-			return true, true
+			retry = true
+			return true, nil
 		}
-		err := cfg.deliverer.Push(w.ctx, push.item, push.sessionID, entry)
-		if err == nil {
-			applyDeliveryOutcome(cfg, push.item, deliveryOutcome{
-				sessionID:    push.sessionID,
-				metricStatus: push.metricStatus("delivered"),
-				duration:     push.duration(),
-				log: func(logger *logging.Logger) {
-					if push.logLine != "" {
-						logger.DeliveryLog(slog.LevelInfo, push.logLine, push.sessionID, push.item.Topic, push.item.EventID, "delivered", slog.Int("attempts", attempt))
-					}
-				},
-				recordDedupe: true,
-			})
-			return false, true
+		if err := cfg.deliverer.Push(w.ctx, push.item, push.sessionID, entry); err != nil {
+			return false, err
 		}
-		if w.ctx.Err() != nil {
-			return false, false
-		}
-		cfg.logger.DeliveryLog(slog.LevelWarn, "listener serving-port push refused; the message waits at the head of the session's queue", push.sessionID, push.item.Topic, push.item.EventID, "retrying",
-			slog.Int("attempt", attempt), slog.String("retry_in", wait.String()), slog.String("error", err.Error()))
-		if waitUnlessDone(w.ctx, wait) != nil {
-			return false, false
-		}
-		wait = min(wait*2, pushRetryMax)
-	}
+		applyDeliveryOutcome(cfg, push.item, deliveryOutcome{
+			sessionID:    push.sessionID,
+			metricStatus: push.metricStatus("delivered"),
+			duration:     push.duration(),
+			log: func(logger *logging.Logger) {
+				if push.logLine != "" {
+					logger.DeliveryLog(slog.LevelInfo, push.logLine, push.sessionID, push.item.Topic, push.item.EventID, "delivered", slog.Int("attempts", attempt))
+				}
+			},
+			recordDedupe: true,
+		})
+		return true, nil
+	})
+	return retry, ended
 }
 
 // metricStatus is status for the delivery metrics, or "" for a role forward's stored copy, whose
@@ -290,13 +313,15 @@ const (
 )
 
 // target reads push's session's current state: its entry, and what to do with the push. A message
-// on the durable path is stored, so a session that takes stored messages itself has it.
+// on the durable path is stored, so a session whose consumer holds it, or that takes stored
+// messages itself another way, has it; one stored below that consumer's start is in no consumer,
+// and this push is how the session gets it.
 func (w *servePortWorkers) target(push servePortPush) (session.SessionEntry, servePortVerdict) {
 	entry, err := w.cfg.sessions.Get(push.sessionID)
 	if err != nil {
 		return session.SessionEntry{}, servePortGone
 	}
-	if takesStoredMessagesItself(entry) {
+	if takesStoredMessagesItself(entry, push.storedSeq) {
 		return entry, servePortSkip
 	}
 	if !ownsServingPortSession(w.cfg, push.sessionID, entry) {

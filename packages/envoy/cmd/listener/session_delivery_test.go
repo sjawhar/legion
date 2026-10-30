@@ -55,6 +55,7 @@ func newSessionConsumerRigOn(t *testing.T, client *bus.Client, url string) *sess
 		t.Fatalf("connect the test's view of the session consumers: %v", err)
 	}
 	t.Cleanup(observer.Close)
+	delivery.relay = &recordingRelay{}
 	deps := &listenerDeps{client: client, registry: harness.registry, sessions: harness.sessions, consumers: delivery}
 	mux := http.NewServeMux()
 	registerV1Routes(mux, deps, "test-machine", harness.config.logger)
