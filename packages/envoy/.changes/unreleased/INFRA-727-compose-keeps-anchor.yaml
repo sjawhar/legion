@@ -1,0 +1,17 @@
+kind: Fixed
+body: |-
+    A comment, suggestion or ask written on a document keeps its anchor however long the composer
+    stays open. The provisional mark a composer writes is no longer swept while its author still
+    has the document open — its one-minute life starts again at the author's last presence, so a
+    tab that closes or goes offline still loses a stray mark a minute later — and Send writes the
+    mark again over the selected words when it is gone anyway, then sends once more under a key of
+    its own. That covers a tab that was offline past the minute, another writer rewriting the
+    sentence around the selection, and a second server process that cannot see the author's
+    connection. Words that read in two places with no tracked position attach nothing, and text
+    that is gone leaves the draft where it is and asks the reader to select again; an agent's
+    client still reads the server's `ANCHOR_MISSING` wording unchanged. A send whose anchor the
+    server cannot see is read once more when its wait ends, which finds a mark written into a room
+    instance that replaced the one the wait watched.
+time: 2026-10-30T10:00:00.000000000Z
+custom:
+    Issue: INFRA-727
