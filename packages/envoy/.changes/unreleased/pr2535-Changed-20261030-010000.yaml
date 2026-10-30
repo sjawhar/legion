@@ -1,0 +1,15 @@
+kind: Changed
+body: |-
+    `GET /api/v1/issues/{key}` reads the database in two pgx batches, one round trip each on one
+    pooled connection, instead of one statement at a time: 6 statements, plus one per artifact,
+    plus 2 when the issue has documents and 2 when it has open asks. An issue with no artifact and
+    no open ask takes one round trip. The answer is unchanged byte for byte. Every route that
+    lists an issue's artifacts (`loadArtifacts`) now reads all their versions in one statement. In
+    the load test's route mix the issue route's p50 latency fell from 44.5 ms to 17.3 ms
+    (browser) and its share of Dispatch's CPU from 1.84% to 0.72%. The markdown renderer writes
+    U+0000 in its own pass after its merge decisions. `pmdoc.StripAnchorMarks` is a copy of the
+    renderer's own written tree, and `sortMarks` is pmdoc's one mark sort. Rendered output does
+    not change.
+time: 2026-10-30T01:00:00Z
+custom:
+    Issue: pr2535
