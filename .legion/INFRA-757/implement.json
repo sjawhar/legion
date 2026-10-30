@@ -2,35 +2,35 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-757",
-  "completed": "2026-10-30T18:05:00Z",
+  "completed": "2026-10-30T19:45:00Z",
   "proof": [
     {
-      "criterion": "The head no longer conflicts with main, and the branch's own change is unchanged except where this merge required it.",
-      "surface": "GitHub's own mergeability for pull request 2517, and the unchanged-diff fingerprint at each head.",
-      "command": "jj diff --from 'fork_point(main@origin | <head>)' --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, at 049c4718 and at a4b9f4c5; gh pr view 2517 -R sjawhar/legion --json mergeStateStatus,mergeable",
-      "observed": "2cd180755f5e8a366cf575911261cde3b922021e5d8f9cdc736fc039267c36cf -> 1d4192963fe7b129728ea76468a7c2cc2d68105a5a0228434083fbfb7147f7f7, changed, for the four conflicted paths alone, each named with its resolution in https://github.com/sjawhar/legion/pull/2517#issuecomment-6530066312. GitHub reported CONFLICTING/DIRTY at 049c4718 and MERGEABLE at a4b9f4c5.",
-      "headSha": "a4b9f4c5ca3b",
-      "negativeControl": "The merge was made with jj new against main@origin, never a rebase, so the branch's own commits are untouched and the push was a fast-forward (jj reported 'move forward from 049c471826e9'). jj named exactly four conflicted paths and no other file of the merge was edited by hand."
+      "criterion": "The tester's one defect is fixed: envoy-go-race-api's Postgres service names the ghcr.io/sjawhar/legion/ci copy a row of .github/ci-images.yaml names, so the lint and test checks main's #2512 added are satisfied at this head.",
+      "surface": "The gate that refused it, .github/scripts/check-ci-images.sh in the tree mode the lint job runs, over the merged workflow in this pod.",
+      "command": "uv run --with pyyaml==6.0.2 --no-project bash .github/scripts/check-ci-images.sh tree; uv run --with pyyaml==6.0.2 --no-project bash .github/scripts/check-ci-images.test.sh",
+      "observed": "'.github/ci-images.yaml holds 12 row(s); 37 reference(s) in 32 file(s) of CI's reach name one of those rows; of 6590 text file(s) swept, the 28 that name mirror.gcr.io are all in the exception list', exit 0; its suite 99 passed, 0 failed. grep for mirror.gcr.io over .github/workflows/*.yaml now returns nothing.",
+      "headSha": "c92ffe5886dd",
+      "negativeControl": "The same script in the lint job of run 41104365691 (job 124233792975) refused .github/workflows/ci.yaml:2551 by file and line at 0f245bb4, with the test job (124233792837) red beside it; that red is the control for this one line, and the digest is unchanged, so the service runs the same image it ran before."
     },
     {
-      "criterion": "ci-ok's red at 89ce0fbf, the Dispatch API route pin, is green at this head without correcting the pin in this pull request.",
-      "surface": "The Go test the envoy-go and envoy-go-race-api jobs run, at the merged head.",
-      "command": "cd packages/envoy && go test ./internal/dispatch/api/ -count=1 -run '^TestRoutesTablePinsEveryRegisteredRoute$' -timeout 20m",
-      "observed": "ok github.com/sjawhar/envoy/internal/dispatch/api 0.052s. At 89ce0fbf the same test read routes_table_test.go:111: routes() has 147 rows, want 146; main's own commit carried the 147th route and its pin together, so the merge alone closes it.",
-      "headSha": "a4b9f4c5ca3b",
-      "negativeControl": "The failure it answers is main's drift against the old head, recorded by ci-ok at 89ce0fbf; no line of routes_table_test.go or of the routes table is touched by this pull request (jj diff names neither file)."
+      "criterion": "Every other gate main now has at the head is green over this change, not only the filter drift check.",
+      "surface": "The repository's own scripts, each run as one foreground command in this pod.",
+      "command": "check-bun-version, check-bun-workspace-manifests, check-zod-version, check-body-embed-limit, check-heartbeat-margin, check-gh-version, check-image-trigger-paths (+ its suite), check-ci-images tree (+ its suite), check-action-pins, check-private-names, check-plugin-names, check-release-credentials, check-ci-filters.sh (+ its suite)",
+      "observed": "Every one exit 0: bun 1.4.4; 11 workspace manifests across 4 frozen installs; zod 4.3.6 across 12 manifests; the body limit 32000 fits the embedder's; the heartbeat margin holds; gh 2.98.0; image triggers cover every input (5 builds) with its suite 991 of 991; ci-images tree with its suite 99 of 99; every remote action across 21 files pinned; private names clean; no pre-split plugin name over 6,638 files; 7 credentialed and 10 build jobs keep credentials out; check-ci-filters.sh 'every ci.yaml filter matches every file its job reads (28 gates)' with its suite 139 of 139.",
+      "headSha": "c92ffe5886dd",
+      "negativeControl": "check-ci-filters.test.sh and check-ci-images.test.sh are each a suite of red cases over a scratch copy, among them a service image that names a third-party registry; both ran here and both report their red cases failing as they must."
     },
     {
-      "criterion": "The drift check and the race lane's own packages pass at the merged head, so the merge undid nothing of this change.",
-      "surface": "The repository's own checks and the race lane's packages, run in this pod against a rootless PostgreSQL 17 with an ICU template1.",
-      "command": ".github/scripts/check-ci-filters.sh; bash .github/scripts/check-ci-filters.test.sh; bash .github/scripts/check-private-names.sh; (cd packages/envoy && go build ./... && go vet ./internal/kvwatch/... ./internal/store/... ./cmd/listener/ ./internal/dispatch/api/ && DISPATCH_TEST_DATABASE_URL=... go test ./internal/kvwatch/... ./internal/store/ ./internal/session/ ./cmd/listener/ ./internal/dispatch/delivery/... ./internal/bus/ -count=1)",
-      "observed": "check-ci-filters.sh green: every ci.yaml filter matches every file its job reads (28 gates, 0 uncovered) and docs-pages.yaml equals filter docs (166 patterns); its suite 139 of 139; check-private-names clean over 6,638 files; go build and go vet VET_OK; kvwatch 63.733s ok, store 31.828s ok, session 10.429s ok, cmd/listener 477.581s ok, delivery 114.256s ok, measures 0.031s ok, bus 321.834s ok.",
-      "headSha": "a4b9f4c5ca3b",
-      "negativeControl": "cmd/listener's run carries this change's two regression tests (TestHealthzReportsARoleClaimViewThatCompletesNoScanDegraded and TestHealthzStillReportsALostDurableWhileTheRoleClaimViewIsIncomplete), each of which failed against main's own main.go through the -overlay device in the earlier rounds; their passing here is what shows the merge kept the product fix."
+      "criterion": "The product change and the branch's own diff are untouched by this round: one line of one workflow moved.",
+      "surface": "jj's own diff of the commit this round pushed.",
+      "command": "jj -R \"$LEGION_WORKSPACE\" diff --stat (at the working copy before the commit); jj log -r legion/INFRA-757",
+      "observed": "'.github/workflows/ci.yaml | 3 ++-, 1 file changed, 2 insertions(+), 1 deletion(-)' - the image line and the comment above it. No Go file, no handoff and no document is in this round's commit c92ffe58.",
+      "headSha": "c92ffe5886dd",
+      "negativeControl": "The stat is the control: a round that had touched the product would list a .go file, and none is listed. The tester's round-6 evidence for flakes A and B stands unchanged at this head, since no file it read moved."
     }
   ],
   "filesChanged": [
-    ".github/workflows/ci.yaml - the race-lane jobs and their filters; this round only the listener_server_change conflict, resolved to main's line",
+    ".github/workflows/ci.yaml - envoy-go-race-api's Postgres service image and the comment above it",
     ".github/scripts/ci_job_reads.py - the gate table; this round only the two conflicted blocks, main's with this branch's live-fixtures correction",
     "docs/site/src/content/docs/dispatch/envoy.md - the 200 degraded row, carrying main's KV watch rebuild answer and this branch's role claim view",
     "packages/envoy/AGENTS.md - the health bullet, the same two answers",
@@ -39,8 +39,7 @@
     "packages/envoy/.changes/unreleased/pr2517-Fixed-20261029-183000.yaml - the changelog fragment"
   ],
   "trickyParts": [
-    "All four conflicts were prose or list lines both sides edited, never a semantic clash: main had taken this branch's listener_server_change finding into its own line, so the resolution there is to drop this branch's duplicate rather than to keep both.",
-    "The envoy.md and AGENTS.md rows now state two different degraded answers in one sentence each; the ordering is the product's own (the key-value answer carries status and error alone and precedes the durable checks, the role claim view is checked last and keeps the healthy body's fields)."
+    "Main's #2512 landed in the previous round's forward merge and converted envoy-go-race's service under the merge, leaving this pull request's own new job on mirror.gcr.io: a merge can satisfy a new gate for the lines it touches and leave a sibling line the branch owns, so after a merge that brings a new check, run that check and not only the ones the branch already passed."
   ],
   "deviations": [],
   "openQuestions": []
