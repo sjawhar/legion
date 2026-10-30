@@ -152,6 +152,7 @@ on:
       - 'packages/envoy/internal/dispatch/text/*'
       - 'packages/envoy/internal/githubappjwt/*'
       - 'packages/envoy/internal/id/*'
+      - 'packages/envoy/internal/metrics/*'
       - 'packages/envoy/internal/oidc/*'
       - 'packages/envoy/internal/pglisten/*'
       - 'packages/envoy/internal/pgmigrate/*'
