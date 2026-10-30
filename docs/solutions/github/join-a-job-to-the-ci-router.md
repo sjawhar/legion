@@ -51,11 +51,12 @@ A Go job also restores its caches the way the section on caches below says.
 
 ## ci-ok fails a selected job that did not succeed
 
-`ci-ok` runs `.github/scripts/ci-ok.sh`. It passes only when `changes` succeeded, lint and
-ci-images succeeded (both run on every change), every job `changes` selected succeeded, and
-every job it did not select succeeded or was skipped. A selected job that was skipped, cancelled
-or is absent from `ci-ok`'s `needs:` fails it, and it prints every job's result and whether
-`changes` selected it.
+`ci-ok` runs `.github/scripts/ci-ok.sh`. It passes only when `changes` succeeded, lint
+succeeded (it runs on every change), every job `changes` selected succeeded, and every job it
+did not select succeeded or was skipped. ci-images is one of the selected jobs: the `ci_images`
+filter selects it, and `SELECTED_BY` maps it. A selected job that was skipped, cancelled or is
+absent from `ci-ok`'s `needs:` fails it, and it prints every job's result and whether `changes`
+selected it.
 
 A skipped job reports success, so accepting any skip is not enough. When `changes` fails, every
 job its filters gate is skipped. GitHub's "Re-run failed jobs" then re-runs `changes` and
@@ -67,8 +68,8 @@ whose main build is docs-pages.yaml's, has its output set false on a push). A re
 leaves a selected job skipped fails naming the job; re-run the whole workflow instead.
 
 `check-ci-filters.sh` fails when `SELECTED_BY` is not exactly {job: the output its `if:` tests}
-for every job in `ci-ok`'s `needs:` but `changes`, lint and ci-images, when `PULL_REQUEST_ONLY`
-is not exactly the jobs whose `if:` restricts to `github.event_name == 'pull_request'`. A wrong
+for every job in `ci-ok`'s `needs:` but `changes` and lint, when `PULL_REQUEST_ONLY` is not
+exactly the jobs whose `if:` restricts to `github.event_name == 'pull_request'`. A wrong
 entry would fail a job its `if:` rightly skipped, or pass one a re-run left skipped.
 
 A job whose main half must run in push order, as the docs site's Pages deploy must, cannot be a

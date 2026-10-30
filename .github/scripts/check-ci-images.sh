@@ -20,7 +20,8 @@
 #   package  the one refusal that reads the package, over the network. ci.yaml's ci-images job
 #            runs it, after the copy of that same job. The ci_images filter selects that job and
 #            names every file that decides what the copy and this read do: .github/ci-images.yaml,
-#            the two scripts, .github/actions/install-crane and ci.yaml itself. The package can
+#            the two scripts, .github/scripts/ci_images.py (the reference grammar both read a row
+#            with), .github/actions/install-crane and ci.yaml itself. The package can
 #            also change under a run that touches none of them, and a re-run reads it again.
 #
 # Both modes read .github/ci-images.yaml, because the package mode asks ghcr.io about each row's

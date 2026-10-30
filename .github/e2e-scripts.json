@@ -2,7 +2,7 @@
   "comment": [
     "Every entry point under scripts/e2e/, in one of two lists, read by .github/workflows/e2e.yaml.",
     "`hosted` is the set a GitHub-hosted runner can run: each row says what the job must give that",
-    "script, and `why_hosted` quotes the line of the script's own header that says so. `elsewhere`",
+    "script, and `why_hosted` is a note on why a hosted runner can run it, read by no job. `elsewhere`",
     "is every other script, each with the `needs` its own header states; e2e.yaml refuses one by",
     "name with that text, and the refusal is a failed job. Both lists together must name every",
     "scripts/e2e/*.sh of the tree, and e2e.yaml's select job fails when one is missing or extra.",

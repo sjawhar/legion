@@ -22,13 +22,16 @@
 # a right one. It would fail the second one on every run until a person rewrote the row. The
 # two paragraphs below bind a row's label to its bytes, and neither reads a tag.
 #
-# THE GO CHECK, ON EVERY LIBRARY/GOLANG ROW. Everywhere else, which Go a row carries is the
+# THE GO CHECK, ON EVERY TAGGED LIBRARY/GOLANG ROW. Everywhere else, which Go a row carries is the
 # text of that row's upstream tag (.github/scripts/check-ci-images.sh rules 3 and 7), so a row
 # labelled with one Go and holding the digest of another passes every other gate. library/golang
 # writes its own version into the image config, so the bytes themselves say which Go they are:
 # `crane config --platform linux/amd64 <a reference at the row's digest>` answers a config whose
-# `.config.Env` holds GOLANG_VERSION. This run reads it for every library/golang row, held or
-# copied, and fails when it is not the version the row's upstream tag names. Where it reads it
+# `.config.Env` holds GOLANG_VERSION. This run reads it for every library/golang row whose
+# upstream names a tag, held or copied, and fails when it is not the version that tag names. A
+# library/golang row whose upstream names a digest alone carries no version to compare, so this
+# run skips it; rule 7 of check-ci-images.sh refuses any reference on such a row, and rule 3 asks
+# for a tagged row at the pin. Where it reads it
 # is wherever those bytes are: `crane copy` keeps the manifest digest, so the package's copy and
 # the upstream are the same bytes under the same digest, and the answer is the same from either.
 # A row the package holds is read in the package, `<registry>@<the row's digest>`, so a run that
