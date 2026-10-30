@@ -29,9 +29,11 @@ async function pauseClock(page: Page): Promise<void> {
  * scrolls the board while a card is held near either edge (`IssueBoard.tsx` turns the mandatory
  * snapping off for a lift for that very reason), and how far it scrolls is how long the hold
  * lasts: the Todo column sits inside the right-hand zone at 1280 px, so a hold that outlives one
- * frame - every hold on a loaded machine - runs the board to its far end and drops the card into
- * whichever column has arrived under the pointer. With the card centred no hold scrolls the
- * board at all, and the drop lands where it was picked up however long the gesture takes. */
+ * frame - every hold on a loaded machine - scrolls the board under the held card, by 121 to 249 px
+ * in most measured runs and by 1312 px in two of them, and drops it in whichever column has
+ * arrived under the pointer: the next one over at a few hundred pixels, further along than that
+ * once the board has run. With the card centred no hold scrolls the board at all, and the drop
+ * lands where it was picked up however long the gesture takes. */
 async function centreInBoard(page: Page, key: string): Promise<void> {
   await page.evaluate((cardKey) => {
     const scroller = document.querySelector<HTMLElement>('[data-testid="board-scroll-container"]');

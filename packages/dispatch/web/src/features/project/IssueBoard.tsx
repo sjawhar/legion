@@ -355,6 +355,10 @@ export function IssueBoard({
   const boardRef = useRef<HTMLElement>(null);
   const clickBelongsToDrop = useRef(false);
   useEffect(() => {
+    // `capture: true` on `window` is load-bearing, not decoration: the keymap listens for keys on
+    // window's bubble phase (`shell/KeymapProvider.tsx`), and `o` and Enter open the focused card
+    // by clicking its link, so this has to have dropped the mark before that key is acted on. In
+    // the bubble phase it would run after the click it is meant to let through.
     const forgetDrop = () => {
       clickBelongsToDrop.current = false;
     };

@@ -798,6 +798,86 @@ test("a drop that draws no click leaves the next press on the board working", as
   }
 });
 
+// Escape cancels a drag, and that key drops the mark like any other press, so the cancel has to
+// put it back: the button is still down, and its release draws the same trailing click a drop
+// does (`onDragCancel` on the board's `DndContext`).
+test("a drag cancelled with Escape keeps its own release off the card's link", async () => {
+  const patchIssue = answerIssuePatches().mockResolvedValue(patched);
+  const { cleanup } = renderBoard({}, undefined, keyboardIssues);
+  try {
+    const board = await screen.findByRole("region", { name: "Project board" });
+    const alpha = within(board).getByRole("article", { name: "CORE-1 Alpha" });
+    await act(async () => {
+      fireEvent.mouseDown(alpha, { button: 0, clientX: 10, clientY: 10 });
+    });
+    await act(async () => {
+      fireEvent.mouseMove(document, { clientX: 10, clientY: 40 });
+    });
+    await act(async () => {
+      // dnd-kit's own cancel reads `code`, not `key` (`core.esm.js` `handleKeydown`).
+      fireEvent.keyDown(document, { code: "Escape", key: "Escape" });
+    });
+    await act(async () => {
+      fireEvent.mouseUp(document, { clientX: 10, clientY: 40 });
+    });
+    // The cancel landed: the lifted card is no longer the one dnd-kit is dragging.
+    expect(board.querySelector(".opacity-50")).toBeNull();
+    let followed = true;
+    await act(async () => {
+      followed = fireEvent.click(within(await droppedCard()).getByRole("link"), { button: 0 });
+    });
+    expect(followed).toBe(false);
+    expect(screen.getByTestId("current-route").textContent).toBe("/projects/CORE");
+  } finally {
+    cleanup();
+    patchIssue.mockRestore();
+  }
+});
+
+// The press of a pointer drops the mark as a key press does. `fireEvent.mouseDown` emits no
+// `pointerdown`, so the drag above cannot reach that listener; this row presses one itself.
+test("a pointer press on a card after a drop that drew no click follows its link", async () => {
+  const patchIssue = answerIssuePatches().mockResolvedValue(patched);
+  const { cleanup } = renderBoard({}, undefined, keyboardIssues);
+  try {
+    const board = await screen.findByRole("region", { name: "Project board" });
+    await dropInPlace(within(board).getByRole("article", { name: "CORE-1 Alpha" }));
+    const link = within(await droppedCard()).getByRole("link");
+    await pastDndKitClickGuard();
+    await act(async () => {
+      fireEvent.pointerDown(link, { button: 0 });
+      fireEvent.click(link, { button: 0 });
+    });
+    expect(screen.getByTestId("current-route").textContent).toBe("/issues/CORE-1");
+  } finally {
+    cleanup();
+    patchIssue.mockRestore();
+  }
+});
+
+// The mark is the board's own: a link anywhere else on the page follows itself while one is
+// pending, which is the whole point of the containment test on the click's target.
+test("a drop's mark never cancels a click outside the board", async () => {
+  const patchIssue = answerIssuePatches().mockResolvedValue(patched);
+  const { cleanup } = renderBoard({}, undefined, keyboardIssues);
+  const elsewhere = document.createElement("a");
+  elsewhere.href = "/issues/CORE-2";
+  document.body.append(elsewhere);
+  try {
+    const board = await screen.findByRole("region", { name: "Project board" });
+    await dropInPlace(within(board).getByRole("article", { name: "CORE-1 Alpha" }));
+    let followed = false;
+    await act(async () => {
+      followed = fireEvent.click(elsewhere, { button: 0 });
+    });
+    expect(followed).toBe(true);
+  } finally {
+    elsewhere.remove();
+    cleanup();
+    patchIssue.mockRestore();
+  }
+});
+
 // The strip's filters on the board: Todo holds Alpha, Bravo, Charlie; only Alpha and Charlie
 // contain an "h", so `?q=h` hides Bravo (and In progress's Delta).
 test("the strip's search hides board cards, counts the visible column, and drags name visible neighbours", async () => {
