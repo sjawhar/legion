@@ -32,6 +32,7 @@ import {
   type DispatchWriteRetry,
 } from "../dispatch-http";
 import { followedAsk } from "../dispatch-subscribe";
+import { renderSessionAnswersList } from "../session-answers";
 import { ToolInputError } from "../tool-input-errors";
 import { fakeSearchResponse } from "./fake-search-response";
 
@@ -2154,6 +2155,99 @@ describe("executeDispatchTool", () => {
       code: "SERVICE_UNAVAILABLE",
       status: 503,
     });
+  });
+
+  test("dispatch_answers prints every item of the 72 hours newest first, in full and uncapped", async () => {
+    const requests: string[] = [];
+    const at = (hours: number) => new Date(Date.now() - hours * 3_600_000).toISOString();
+    const items = Array.from({ length: 10 }, (_, index) => ({
+      kind: "message" as const,
+      relation: "sent_you_a_message" as const,
+      id: `m-${index}`,
+      at: at(index + 1),
+      author: { kind: "user" as const, id: "ana@example.com" },
+      text: `${index} ${"w".repeat(1_000)}`,
+      owner: { issue: { key: "DSP-42", title: "Native workspace" } },
+      ref: `dispatch://DSP-42/message/m-${index}`,
+      href: `/issues/DSP-42#message-m-${index}`,
+    }));
+    const since = at(72);
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      return response({ session_id: "session-1", since, total: 10, items });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_answers",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(requests).toEqual(["/api/v1/agents/session-1/answers"]);
+    expect(result.text).toBe(renderSessionAnswersList(items, { now: Date.now() }));
+    expect(result.text.length).toBeGreaterThan(10_000);
+    expect(result.text.split("\n")[0]).toBe(
+      "10 items people wrote to this session in the last 72 hours, newest first, word for word:"
+    );
+    for (const item of items) expect(result.text).toContain(item.text);
+    expect(result.details).toEqual({ session: "session-1", since, total: 10 });
+  });
+
+  test("dispatch_answers against a Dispatch without the route says its build is older than the answers route", async () => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> =>
+      response(
+        { code: "NOT_FOUND", error: `no route for GET ${new URL(String(url)).pathname}` },
+        404
+      );
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_answers",
+        args: {},
+        cwd: "/workspace",
+        host: "omp",
+        sessionId: "session-1",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).rejects.toThrow(
+      "This Dispatch (http://dispatch.test) has no answers route yet: its build is older than the answers route."
+    );
+  });
+
+  test("dispatch_answers against a proxy's 404 page reports that page, never an old Dispatch build", async () => {
+    const fetchImpl = async (_url: RequestInfo | URL): Promise<Response> =>
+      new Response("<html><body><h1>404 Not Found</h1><hr>nginx</body></html>", {
+        status: 404,
+        statusText: "Not Found",
+        headers: { "Content-Type": "text/html" },
+      });
+
+    const error: unknown = await executeDispatchTool({
+      tool: "dispatch_answers",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    }).catch((thrown: unknown) => thrown);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(
+      /answered 404 Not Found with a body that is not Dispatch's error JSON .*which looks like a proxy or gateway page rather than Dispatch's own answer/
+    );
+    expect((error as Error).message).not.toContain("no answers route");
   });
 
   test("dispatch_claim claims for the calling session and releases with release: true", async () => {
