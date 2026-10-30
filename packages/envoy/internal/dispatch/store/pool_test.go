@@ -724,6 +724,137 @@ func TestSeparatePoolsAnswerErrPoolBusyWhenFull(t *testing.T) {
 	}
 }
 
+// The raw pools - the ones handed out whole, rooms and leases among them - answer a full pool
+// with ErrPoolBusy too, through every way their callers take a connection: a document load's
+// transaction and read on the rooms pool, a maintenance pass's Acquire on the leases pool. A
+// caller that cannot tell a pool with nothing free from a deadline of its own has to guess, and
+// the guess reads a commit cut off at its bound as a pool that refused before anything ran.
+func TestTheRawPoolsAnswerErrPoolBusyWhenFull(t *testing.T) {
+	pool := smallRequestPool(t, 1, testAcquireBound)
+	pool.acquireBounds = map[string]time.Duration{RoomsPool: testAcquireBound, LeasesPool: testAcquireBound}
+
+	rooms, err := pool.Rooms()
+	if err != nil {
+		t.Fatalf("open the rooms pool: %v", err)
+	}
+	holdEvery(t, rooms.Stat().MaxConns(), rooms.Acquire)
+	for _, call := range []struct {
+		name string
+		call func(context.Context) error
+	}{
+		{"BeginTx", func(ctx context.Context) error {
+			tx, err := rooms.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+			if err == nil {
+				_ = tx.Rollback(ctx)
+			}
+			return err
+		}},
+		{"QueryRow", func(ctx context.Context) error {
+			var one int
+			return rooms.QueryRow(ctx, "select 1").Scan(&one)
+		}},
+		{"Query", func(ctx context.Context) error {
+			rows, err := rooms.Query(ctx, "select 1")
+			if err == nil {
+				rows.Close()
+			}
+			return err
+		}},
+		{"Exec", func(ctx context.Context) error {
+			_, err := rooms.Exec(ctx, "select 1")
+			return err
+		}},
+	} {
+		started := time.Now()
+		err := call.call(context.Background())
+		if waited := time.Since(started); !IsPoolBusy(err) || waited > testAcquireBound+busySlack {
+			t.Errorf("%s on the full rooms pool: %v after %v, want ErrPoolBusy within %v",
+				call.name, err, waited, testAcquireBound+busySlack)
+		}
+	}
+
+	leases, err := pool.Leases()
+	if err != nil {
+		t.Fatalf("open the leases pool: %v", err)
+	}
+	holdEvery(t, leases.Stat().MaxConns(), leases.Acquire)
+	started := time.Now()
+	conn, err := leases.Acquire(context.Background())
+	if conn != nil {
+		conn.Release()
+	}
+	if waited := time.Since(started); !IsPoolBusy(err) || waited > testAcquireBound+busySlack {
+		t.Errorf("an acquire on the full leases pool: %v after %v, want ErrPoolBusy within %v",
+			err, waited, testAcquireBound+busySlack)
+	}
+
+	// A caller whose own deadline came first keeps its own error on a raw pool too.
+	caller, cancel := context.WithTimeout(context.Background(), testAcquireBound/3)
+	defer cancel()
+	if _, err := rooms.Exec(caller, "select 1"); !errors.Is(err, context.DeadlineExceeded) || IsPoolBusy(err) {
+		t.Errorf("a rooms acquire under a sooner caller deadline: %v, want the caller's context.DeadlineExceeded and not ErrPoolBusy", err)
+	}
+}
+
+// commitHoldKey is the advisory lock the commit-holding trigger waits on.
+const commitHoldKey = 592006
+
+// A commit the database does not answer within the commit's own bound is ErrCommitTimeout and
+// not a busy pool: nothing says whether the transaction committed, so no caller may take it for
+// a refusal that ran nothing. A deferred constraint trigger runs when its transaction commits,
+// so a trigger waiting on a lock another session holds makes the COMMIT itself wait, and the
+// bound is the test's (WithCommitBoundForTest) rather than production's ten seconds.
+func TestACommitCutOffAtItsBoundIsACommitTimeout(t *testing.T) {
+	database := openEmptyTestStore(t)
+	ctx := context.Background()
+	if _, err := database.Pool.Exec(ctx, `
+		create table commit_timeout_test (value int primary key);
+		create function hold_commit_timeout_test() returns trigger language plpgsql as $$
+		begin
+			perform pg_advisory_xact_lock_shared(592006);
+			return null;
+		end $$;
+		create constraint trigger hold_commit_timeout_test after insert on commit_timeout_test
+			deferrable initially deferred for each row execute function hold_commit_timeout_test();
+	`); err != nil {
+		t.Fatalf("create the commit-holding trigger: %v", err)
+	}
+
+	holder, err := database.Pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("hold a connection for the commit-holding lock: %v", err)
+	}
+	defer holder.Release()
+	if _, err := holder.Exec(ctx, `select pg_advisory_lock($1)`, commitHoldKey); err != nil {
+		t.Fatalf("take the commit-holding lock: %v", err)
+	}
+	defer func() { _, _ = holder.Exec(context.Background(), `select pg_advisory_unlock($1)`, commitHoldKey) }()
+
+	writing := WithCommitBoundForTest(WithTransactionTracking(ctx), 300*time.Millisecond)
+	tx, err := database.Pool.Begin(writing)
+	if err != nil {
+		t.Fatalf("open the write's transaction: %v", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+	if _, err := tx.Exec(writing, `insert into commit_timeout_test (value) values (1)`); err != nil {
+		t.Fatalf("write the row whose commit is held: %v", err)
+	}
+	started := time.Now()
+	err = tx.Commit(writing)
+	if waited := time.Since(started); waited > time.Second {
+		t.Errorf("the held commit answered after %v, want within its 300 ms bound and a little", waited)
+	}
+	if !IsCommitTimeout(err) {
+		t.Fatalf("a commit held past its bound: %v, want ErrCommitTimeout", err)
+	}
+	if IsPoolBusy(err) {
+		t.Fatalf("a commit cut off at its bound reads as a busy pool: %v", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a commit cut off at its bound: %v, want it to wrap context.DeadlineExceeded too", err)
+	}
+}
+
 // A tracer the configuration already carried keeps every call it took, and the acquire bound
 // still applies beside it.
 func TestThePoolsAcquireTracerKeepsATracerAlreadyConfigured(t *testing.T) {
@@ -787,9 +918,9 @@ func TestEachPoolNamesItsConnectionsInPgStatActivity(t *testing.T) {
 		}
 		holdOne(t, opened.Acquire)
 	}
-	for _, open := range []func() (*pgxpool.Pool, error){
+	for _, open := range []func() (*RawPool, error){
 		pool.Rooms, pool.Leases,
-		func() (*pgxpool.Pool, error) { return pool.separate(HealthPool, healthPoolSize) },
+		func() (*RawPool, error) { return pool.separate(HealthPool, healthPoolSize) },
 	} {
 		opened, err := open()
 		if err != nil {

@@ -6,8 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -27,7 +25,7 @@ func (d *countingDocs) CompactAll(context.Context) error {
 }
 
 // leasesOf is the pool a compaction takes its lease on, the one cmd/dispatch gives the outbox.
-func leasesOf(t *testing.T, database *store.Store) *pgxpool.Pool {
+func leasesOf(t *testing.T, database *store.Store) *store.RawPool {
 	t.Helper()
 	leases, err := database.Pool.Leases()
 	if err != nil {

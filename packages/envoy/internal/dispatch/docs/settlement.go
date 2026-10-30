@@ -159,8 +159,8 @@ type settlementPass struct {
 // transaction rolls back, and nothing retries it or counts it as a failure: the document's
 // pending-settlement row leaves it to resume (onLoadDocument, RunSettlementResumption). That is how
 // a shutdown that cannot settle every room within its budget leaves the rest to the next process. A
-// settlement refused a connection for overload (store.Overloaded: the settlements pool's
-// ErrPoolBusy, or the rooms pool's acquire bound) is left to resume the same way, so overload fails
+// settlement refused a connection for overload (store.IsPoolBusy: the settlements pool's or the
+// rooms pool's acquire bound) is left to resume the same way, so overload fails
 // no room (maxSettleFailures). So is a settlement that has to write into a room Shutdown has begun
 // closing, which refuses the write (allowInject).
 //
@@ -189,7 +189,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			next = settlePastDeadline
 		case parent.Err() != nil:
 			next = settleOutOfBudget
-		case store.Overloaded(parent, err):
+		case store.IsPoolBusy(err):
 			next = settleOverloaded
 		case s.shuttingDown(room) && errors.Is(err, ErrServiceUnavailable):
 			next = settleRefusedInShutdown

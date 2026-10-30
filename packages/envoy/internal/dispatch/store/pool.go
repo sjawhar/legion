@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"runtime"
 	"runtime/debug"
@@ -506,11 +507,13 @@ func (t *trackedTx) Commit(ctx context.Context) error {
 	defer cancel()
 	if t.beforeCommit != nil && t.Tx.Conn().PgConn().TxStatus() == 'T' {
 		if err := t.beforeCommit(ctx, t.Tx); err != nil {
+			// The COMMIT was never sent, so this transaction rolled back and its outcome is
+			// known, whatever ended the step: the error is the step's own.
 			_ = t.Tx.Rollback(ctx)
 			return err
 		}
 	}
-	return t.Tx.Commit(ctx)
+	return commitTimedOut(ctx, t.Tx.Commit(ctx))
 }
 
 func (t *trackedTx) Rollback(ctx context.Context) error {
@@ -521,16 +524,55 @@ func (t *trackedTx) Rollback(ctx context.Context) error {
 // commitTimeout bounds a commit CommitContext has detached from its caller.
 const commitTimeout = 10 * time.Second
 
+// ErrCommitTimeout is a commit the bound of its own context cut off (CommitContext): the database
+// did not answer the COMMIT within commitTimeout. Its outcome is unknown - the transaction may
+// have committed, and nothing the server holds says whether it did - so it is neither a pool that
+// refused before anything ran (ErrPoolBusy) nor a failure that rolled back: a request answers it
+// 500, naming the unknown outcome, and a client must read what it wrote before sending it again
+// (api.writeHandlerError, cmd/dispatch/README.md "Load errors"). The error wraps
+// context.DeadlineExceeded too, so errors.Is finds both.
+var ErrCommitTimeout = errors.New("the commit ran out its bound; its outcome is unknown")
+
+// IsCommitTimeout reports whether err is a commit cut off at its bound (ErrCommitTimeout).
+func IsCommitTimeout(err error) bool { return errors.Is(err, ErrCommitTimeout) }
+
+// commitTimedOut names err ErrCommitTimeout when ctx, the commit's own context, is the bound that
+// ended it: pgx answers a statement its context cut off with that context's error and not with
+// its cause, so the cause is read here instead. A commit that failed for any other reason, and
+// one that did not fail at all, is returned as it is.
+func commitTimedOut(ctx context.Context, err error) error {
+	if err == nil || !errors.Is(context.Cause(ctx), ErrCommitTimeout) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", ErrCommitTimeout, err)
+}
+
+// commitBoundKey carries the bound a test puts on the commits made under a context
+// (WithCommitBoundForTest).
+type commitBoundKey struct{}
+
+// WithCommitBoundForTest returns ctx with bound as the bound of every commit made under it, in
+// place of commitTimeout. It is for tests outside this package alone, which make a commit run out
+// its bound in milliseconds rather than in production's ten seconds; nothing in production calls
+// it, and a context carrying none commits under commitTimeout.
+func WithCommitBoundForTest(ctx context.Context, bound time.Duration) context.Context {
+	return context.WithValue(ctx, commitBoundKey{}, bound)
+}
+
 // CommitContext is the context a transaction commits on: ctx's values without its cancellation
-// or deadline, bounded at commitTimeout. A commit cut short by its caller - a client that went
-// away, a caller's deadline that passed - has an unknown outcome, since the server may have
-// committed it, and the document service fails every room such a transaction wrote, which then
-// reload the durable document (docs.Ledger.Commit); a request that ended mid-commit would take its
-// rooms down with it. So a commit in flight runs to its end, and only its own bound, ten seconds,
-// keeps one the database never answers from holding its connection for good. Every transaction
-// this pool opens commits on it.
+// or deadline, bounded at commitTimeout with ErrCommitTimeout as the cause. A commit cut short by
+// its caller - a client that went away, a caller's deadline that passed - has an unknown outcome,
+// since the server may have committed it, and the document service fails every room such a
+// transaction wrote, which then reload the durable document (docs.Ledger.Commit); a request that
+// ended mid-commit would take its rooms down with it. So a commit in flight runs to its end, and
+// only its own bound, ten seconds, keeps one the database never answers from holding its
+// connection for good. Every transaction this pool opens commits on it.
 func CommitContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(ctx), commitTimeout)
+	bound, ok := ctx.Value(commitBoundKey{}).(time.Duration)
+	if !ok {
+		bound = commitTimeout
+	}
+	return context.WithTimeoutCause(context.WithoutCancel(ctx), bound, ErrCommitTimeout)
 }
 
 // end clears the caller's mark, when the pool tracks one.

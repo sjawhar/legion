@@ -2320,8 +2320,12 @@ touches the websockets, which are mounted outside the routes.
 
 Each answer below carries `Retry-After` in seconds, and all but `EDIT_QUEUE_FULL` carry
 `Cache-Control: no-store`; none is logged above DEBUG, and a request whose client went away is
-answered nothing. The `dispatch` command waits out `Retry-After` and asks again, at most twice and
-within its 60-second deadline: any method on a 429, a read only on a 503.
+answered nothing and recorded in the access log as `status=499`, nginx's client-closed code,
+rather than as the 200 of a handler that wrote nothing. The `dispatch` command waits out
+`Retry-After` and asks again, at most twice and within its 60-second deadline: any method on a
+429, a read only on a 503. The one failure below that carries no `Retry-After` is
+`500 COMMIT_OUTCOME_UNKNOWN`, which must not be sent again without reading what the write may
+have done.
 
 | Status / code | Meaning |
 | --- | --- |
@@ -2329,6 +2333,7 @@ within its 60-second deadline: any method on a 429, a read only on a 503.
 | `429 EDIT_QUEUE_FULL` | 32 writes were already waiting for a document this write changes. Every write to a live document waits for that document's writer gate, one write at a time, before its transaction opens: an edit, an upload, a rebuild, an anchored comment or ask, a reply that writes into its document, a comment edited, resolved, reopened, accepted or rejected, an ask answered, resolved or edited. Nothing ran; send it again after `Retry-After: 1`. |
 | `503 DATABASE_BUSY` | No database connection came free within its pool's bound (`store.ErrPoolBusy`). A read may be sent again after `Retry-After: 1`; a write may have committed part of its work before the wait that failed it, so read what it wrote before sending it again. `dispatch_db_pool_acquire_timeouts_total` counts the waits. |
 | `503 REQUEST_TIMEOUT` | A read ran past its deadline: 20 seconds, 5 minutes for a file version download. Send it again after `Retry-After: 1`. |
+| `500 COMMIT_OUTCOME_UNKNOWN` | The database did not answer this write's commit within the commit's bound (10 seconds). The outcome is unknown: the transaction may have committed, and the server cannot tell. Read what the write would have written before sending it again, or send it again under the same `Idempotency-Key`, which answers a replay rather than writing twice. It carries no `Retry-After`, and the server logs it at ERROR. |
 
 ## Input errors
 

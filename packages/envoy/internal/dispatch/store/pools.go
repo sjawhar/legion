@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -16,11 +17,105 @@ import (
 // through, the opening itself and what the metrics read off every pool that is open. The guard,
 // the pin and the statement wrappers are in pool.go.
 
-// openedPool is one pgx pool a Pool has open, under its name, with its acquire tracer.
+// openedPool is one pgx pool a Pool has open, under its name, with its acquire tracer and the raw
+// pool its callers reach it through where it is handed out whole (RawPool).
 type openedPool struct {
 	name    string
 	pool    *pgxpool.Pool
 	acquire *acquireTracer
+	raw     *RawPool
+}
+
+// RawPool is a separate pool handed out whole, as the pgx pool it is: the rooms pool a document
+// load opens its own transaction on, the leases pool a maintenance pass holds its lease on for a
+// whole pass, the listen pool whose connection is hijacked, the registry's and the health probe's.
+// Each needs what only a pgx pool gives, which is why these are not wrapped (Pool.wrapped) and why
+// their callers stand outside the nested-acquire guard: a separate pool cannot close the cycle the
+// guard prevents.
+//
+// Every way it hands out a connection answers an acquire that ran out the pool's bound with
+// ErrPoolBusy, as a wrapped pool does (Pool.busy), so its callers tell a pool with nothing free
+// from a deadline of their own by IsPoolBusy. Its other methods - Close, Config, Stat - are the
+// pgx pool's own and take no connection.
+type RawPool struct {
+	*pgxpool.Pool
+	name string
+}
+
+// busy maps an acquire that ran out this pool's bound to ErrPoolBusy (poolBusy).
+func (r *RawPool) busy(ctx context.Context, err error) error { return poolBusy(ctx, r.name, err) }
+
+// Acquire takes a connection the caller holds until it releases it: the lease a maintenance pass
+// holds for its whole pass, and the connection Listener hijacks.
+func (r *RawPool) Acquire(ctx context.Context) (*pgxpool.Conn, error) {
+	conn, err := r.Pool.Acquire(ctx)
+	return conn, r.busy(ctx, err)
+}
+
+// AcquireFunc runs fn with a connection of the pool. Only the acquire's error is mapped: fn's own
+// is returned as fn returned it.
+func (r *RawPool) AcquireFunc(ctx context.Context, fn func(*pgxpool.Conn) error) error {
+	conn, err := r.Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Release()
+	return fn(conn)
+}
+
+// Query runs a query on a connection of the pool, which the rows hold until they close.
+func (r *RawPool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	rows, err := r.Pool.Query(ctx, sql, args...)
+	return rows, r.busy(ctx, err)
+}
+
+// QueryRow runs a single-row query on a connection of the pool. pgxpool defers an acquire's error
+// to the row's Scan, so the row maps it there.
+func (r *RawPool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	return busyRow{Row: r.Pool.QueryRow(ctx, sql, args...), ctx: ctx, pool: r.name}
+}
+
+// Exec runs a statement on a connection of the pool.
+func (r *RawPool) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	tag, err := r.Pool.Exec(ctx, sql, args...)
+	return tag, r.busy(ctx, err)
+}
+
+// SendBatch runs a batch on a connection of the pool. pgxpool defers an acquire's error to the
+// results, so the results map it there.
+func (r *RawPool) SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults {
+	return busyBatchResults{BatchResults: r.Pool.SendBatch(ctx, batch), ctx: ctx, pool: r.name}
+}
+
+// CopyFrom streams rows into a table on a connection of the pool.
+func (r *RawPool) CopyFrom(
+	ctx context.Context,
+	table pgx.Identifier,
+	columns []string,
+	source pgx.CopyFromSource,
+) (int64, error) {
+	copied, err := r.Pool.CopyFrom(ctx, table, columns, source)
+	return copied, r.busy(ctx, err)
+}
+
+// Begin opens a transaction of its own on a connection of the pool. Unlike a wrapped pool's it is
+// the pgx transaction itself: it commits on its caller's context, not apart from it
+// (CommitContext), since these pools' transactions are the loads and registrations that belong to
+// no request.
+func (r *RawPool) Begin(ctx context.Context) (pgx.Tx, error) {
+	tx, err := r.Pool.Begin(ctx)
+	return tx, r.busy(ctx, err)
+}
+
+// BeginTx opens a transaction with options, as Begin opens one.
+func (r *RawPool) BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error) {
+	tx, err := r.Pool.BeginTx(ctx, options)
+	return tx, r.busy(ctx, err)
+}
+
+// Ping takes a connection and asks the database to answer on it.
+func (r *RawPool) Ping(ctx context.Context) error {
+	return r.busy(ctx, r.Pool.Ping(ctx))
 }
 
 // sharedPoolSize bounds the shared pool - the request pool - deliberately and in code. pgx's
@@ -95,9 +190,8 @@ var ErrPoolClosed = errors.New("connection pool is closed")
 // second connection from the shared pool is exactly what deadlocks it (ErrNestedAcquire), so
 // the loads have their own, opened on demand and closed with this pool: one per store, not one
 // per caller who wants to read a document. Its acquires are bounded at requestAcquireBound like
-// the request pool's; a caller of this raw pgx pool sees the bound as context.DeadlineExceeded
-// with its own context still live.
-func (p *Pool) Rooms() (*pgxpool.Pool, error) {
+// the request pool's, and a load that waits that bound out is refused with ErrPoolBusy (RawPool).
+func (p *Pool) Rooms() (*RawPool, error) {
 	return p.separate(RoomsPool, roomsPoolSize)
 }
 
@@ -151,7 +245,7 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 	}
 	conn, err := listen.Acquire(ctx)
 	if err != nil {
-		return nil, poolBusy(ctx, ListenPool, err)
+		return nil, err
 	}
 	return conn.Hijack(), nil
 }
@@ -184,9 +278,9 @@ const leasePoolSize = leaseNameCount + 2
 // it lives on one connection for the length of the pass and dies with it; a connection of the
 // shared pool held that long would be one fewer for every request, and a pass that then read
 // through the shared pool - which is what a pass does - would be a caller holding two of its
-// connections (ErrNestedAcquire). Its acquires are bounded at leaseAcquireBound, which a caller of
-// this raw pgx pool sees as context.DeadlineExceeded with its own context still live.
-func (p *Pool) Leases() (*pgxpool.Pool, error) {
+// connections (ErrNestedAcquire). Its acquires are bounded at leaseAcquireBound, and a pass that
+// waits that bound out is refused with ErrPoolBusy (RawPool), which makes it skip its tick.
+func (p *Pool) Leases() (*RawPool, error) {
 	return p.separate(LeasesPool, leasePoolSize)
 }
 
@@ -295,13 +389,14 @@ func (p *Pool) SetOpenFailureForTest(name string, err error) {
 	p.openFailures[name] = err
 }
 
-// separate is the pgx pool of the separate pool named name (open).
-func (p *Pool) separate(name string, size int32) (*pgxpool.Pool, error) {
+// separate is the raw pool of the separate pool named name (open): its pgx pool with the acquires
+// its callers make mapped to ErrPoolBusy.
+func (p *Pool) separate(name string, size int32) (*RawPool, error) {
 	opened, err := p.open(name, size)
 	if err != nil {
 		return nil, err
 	}
-	return opened.pool, nil
+	return opened.raw, nil
 }
 
 // open opens the pool named name on demand, sized at size (newSeparate), and closes it with this
@@ -349,7 +444,7 @@ func (p *Pool) newSeparate(ctx context.Context, name string, size int32) (opened
 	if err != nil {
 		return openedPool{}, fmt.Errorf("open %s pool: %w", name, err)
 	}
-	return openedPool{name: name, pool: pool, acquire: acquire}, nil
+	return openedPool{name: name, pool: pool, acquire: acquire, raw: &RawPool{Pool: pool, name: name}}, nil
 }
 
 // recordLocked keeps opened among this pool's separate pools, in place of one already under its
@@ -385,7 +480,7 @@ func (p *Pool) Close() {
 // with the others, replacing one an earlier registration opened, so Stats and the metrics report
 // the heartbeat's connection and its waits as they report every other pool's, and Close closes it
 // with them; closing it twice is harmless, since a pgx pool closes once.
-func (p *Pool) OpenRegistry(ctx context.Context) (*pgxpool.Pool, error) {
+func (p *Pool) OpenRegistry(ctx context.Context) (*RawPool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
@@ -396,7 +491,7 @@ func (p *Pool) OpenRegistry(ctx context.Context) (*pgxpool.Pool, error) {
 		return nil, err
 	}
 	p.recordLocked(opened)
-	return opened.pool, nil
+	return opened.raw, nil
 }
 
 // opened lists this pool and every separate pool it has opened, in poolNames order.

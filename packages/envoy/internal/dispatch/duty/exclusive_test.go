@@ -20,7 +20,7 @@ import (
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 
 // leasesOf is the pool Exclusive takes its lease connections from, the one the server gives it.
-func leasesOf(t *testing.T, database *store.Store) *pgxpool.Pool {
+func leasesOf(t *testing.T, database *store.Store) *store.RawPool {
 	t.Helper()
 	leases, err := database.Pool.Leases()
 	if err != nil {

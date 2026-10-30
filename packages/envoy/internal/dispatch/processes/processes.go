@@ -25,7 +25,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -138,7 +137,7 @@ type Registration struct {
 	instance Instance
 	// pool is the registry's own one-connection pool, which Register opens and Deregister closes
 	// (Register says why it is not the shared pool).
-	pool    *pgxpool.Pool
+	pool    *store.RawPool
 	stop    context.CancelFunc
 	stopped chan struct{}
 	// lost carries the heartbeat's refusal (Lost); it holds one value and is sent at most once.
@@ -203,7 +202,7 @@ func Register(ctx context.Context, pool *store.Pool, instance Instance) (*Regist
 // process, or until LiveWindow and one HeartbeatInterval have passed since its first refusal, when
 // that last refusal is returned. A refusal naming another process than the one before is logged
 // again, so the log names every process the wait was on.
-func waitForAdmission(ctx context.Context, pool *pgxpool.Pool, id string, instance Instance) error {
+func waitForAdmission(ctx context.Context, pool *store.RawPool, id string, instance Instance) error {
 	var giveUp time.Time
 	logged := ""
 	for {
@@ -235,7 +234,7 @@ func waitForAdmission(ctx context.Context, pool *pgxpool.Pool, id string, instan
 
 // tryRegister is one admission of Register, in its own transaction under registryLock: admit's
 // refusal, nil once the row is written, and an error when no decision was reached.
-func tryRegister(ctx context.Context, pool *pgxpool.Pool, id string, instance Instance) (refusal error, err error) {
+func tryRegister(ctx context.Context, pool *store.RawPool, id string, instance Instance) (refusal error, err error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return nil, err

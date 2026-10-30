@@ -105,19 +105,18 @@ func defaultAcquireBound(name string) time.Duration {
 // caller may retry; a request answers it as busy rather than as a failure. The error wraps
 // context.DeadlineExceeded too, so errors.Is finds both, and IsPoolBusy tells it from a deadline
 // of the caller's own.
+//
+// Every pool answers a bound it ran out with it, the wrapped pools (Pool) and the raw ones
+// (RawPool: rooms, leases, listen, registry, health) alike, so a caller tells a pool with nothing
+// free from its own deadline by IsPoolBusy rather than by guessing from a bare
+// context.DeadlineExceeded - a guess that read a commit cut off at its bound (ErrCommitTimeout),
+// whose outcome is unknown, as a pool that refused before anything ran.
 var ErrPoolBusy = errors.New("no connection of the pool came free within its acquire bound")
 
 // IsPoolBusy reports whether err is an acquire that ran out its pool's bound (ErrPoolBusy), as
-// opposed to the caller's own deadline or cancellation.
+// opposed to the caller's own deadline or cancellation. Nothing of what the caller asked for ran,
+// so it may be retried whatever it was.
 func IsPoolBusy(err error) bool { return errors.Is(err, ErrPoolBusy) }
-
-// Overloaded reports whether err is the server's want of room rather than a failure, with ctx,
-// the caller's own context, still live: ErrPoolBusy from a guarded pool, or a deadline other than
-// ctx's - the context.DeadlineExceeded a raw pgx pool (Rooms) reports for its acquire bound among
-// them. The caller may retry it.
-func Overloaded(ctx context.Context, err error) bool {
-	return IsPoolBusy(err) || errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil
-}
 
 // poolBusy wraps err as ErrPoolBusy when it is an acquire bound: a deadline exceeded while the
 // caller's own context is still live can only be the bound acquireTracer put on the acquire,

@@ -785,6 +785,14 @@ const (
 	codeDocServiceUnavailable = "DOC_SERVICE_UNAVAILABLE"
 	codeDocumentUnloadable    = "DOCUMENT_UNLOADABLE"
 	codeInternal              = "INTERNAL"
+	// codeCommitOutcomeUnknown is a commit the database did not answer within its bound
+	// (store.ErrCommitTimeout), answered 500. It is not a 503: a 503 with Retry-After tells a
+	// client to send the request again, and this one may have committed - the server does not
+	// know - so a blind retry would write it twice. A code of its own tells it from the
+	// INTERNAL of a failure that wrote nothing, so a client reads what the write would have
+	// written, or sends it again under its idempotency key, which answers a replay rather than
+	// writing again.
+	codeCommitOutcomeUnknown = "COMMIT_OUTCOME_UNKNOWN"
 )
 
 // documentErrorCode names an error a document operation returns when it could not read or serve
@@ -816,12 +824,22 @@ func documentErrorCode(err error) string {
 }
 
 // writeHandlerError answers r, whose handler failed with err. A request the server could not serve
-// - its deadline passed, its client went away, or no database connection came free in time - is
-// answered first, as admission.WriteUnserved answers it: a retryable 503, or nothing for a client
-// that is gone, and never an ERROR line, since under load every request may meet one. Only then is
-// err mapped to the failure it names.
+// - its deadline passed, its client went away, or no connection of a pool came free within its
+// acquire bound - is answered first, as admission.WriteUnserved answers it: a retryable 503, or
+// nothing for a client that is gone, and never an ERROR line, since under load every request may
+// meet one. A commit the database did not answer within its bound comes next, since its outcome,
+// unlike every other failure's, is unknown. Only then is err mapped to the failure it names.
 func (s *server) writeHandlerError(w http.ResponseWriter, r *http.Request, err error) {
 	if admission.WriteUnserved(w, r.Context(), err) {
+		return
+	}
+	// The transaction may have committed: the server sent the COMMIT and never heard back. The
+	// operator's log says so at ERROR, since a database that takes ten seconds to answer a commit
+	// is a fault, not load the server is meant to absorb.
+	if store.IsCommitTimeout(err) {
+		writeError(w, codeCommitOutcomeUnknown, http.StatusInternalServerError,
+			"the database did not answer this write's commit in time; its outcome is unknown, so read what it wrote before sending it again")
+		slog.Error("dispatch: API write commit ran out its bound; its outcome is unknown and the transaction may have committed", "error", err)
 		return
 	}
 	// A write that waited for a document's writer gate gave its admission units back while it

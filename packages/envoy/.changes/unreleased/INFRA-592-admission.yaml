@@ -18,8 +18,16 @@ body: |-
   version downloads, and past it is `503 REQUEST_TIMEOUT`; a write has none and runs to completion
   once admitted, and every transaction commits apart from its caller's cancellation, within 10
   seconds. A request whose handler waited its pool's bound for a database connection is `503
-  DATABASE_BUSY`; both 503s carry `Retry-After: 1` and `Cache-Control: no-store`. A request whose
-  client went away is answered nothing and logged at DEBUG, where it was a `500` and an ERROR line,
-  and none of these answers is logged above DEBUG (`cmd/dispatch/README.md`, "Load errors"). An
+  DATABASE_BUSY`, which now means exactly that: every pool, the document loads' and the leases'
+  among them, answers a bound it ran out with one error of its own, where a deadline on a live
+  request used to be read as a busy pool. A commit the database does not answer within its 10
+  seconds is `500 COMMIT_OUTCOME_UNKNOWN` with an ERROR line naming the unknown outcome, where it
+  was `503 DATABASE_BUSY` at DEBUG telling the client nothing had run: the transaction may have
+  committed, so the write is not to be sent again until what it wrote has been read, or sent again
+  under its `Idempotency-Key`. Both 503s carry `Retry-After: 1` and `Cache-Control: no-store`. A
+  request whose client went away is answered nothing and logged at DEBUG, where it was a `500` and
+  an ERROR line, and its access-log line now records `status=499`, nginx's client-closed code,
+  where a write that rolled back because its client left read as a `200`; none of these answers is
+  logged above DEBUG (`cmd/dispatch/README.md`, "Load errors"). An
   admitted read of weight one runs on one connection for its whole length, where an issue read
   took twelve one after another (INFRA-592).

@@ -1268,8 +1268,8 @@ const (
 	// errSettlementTimeout). The pending-settlement row leaves it to resume too, so a settlement that
 	// cannot finish gives its slot and its connection back and fails no room.
 	settlePastDeadline
-	// settleOverloaded is a settlement refused a connection for overload (store.Overloaded: the
-	// settlements pool's ErrPoolBusy, or the rooms pool's acquire bound). The pending-settlement row
+	// settleOverloaded is a settlement refused a connection for overload (store.IsPoolBusy: the
+	// settlements pool's or the rooms pool's acquire bound). The pending-settlement row
 	// leaves it to resume, so overload fails no room (maxSettleFailures).
 	settleOverloaded
 	// settleRefusedInShutdown is a settlement that had to write into a room Shutdown has begun

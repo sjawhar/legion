@@ -246,8 +246,9 @@ var errLeaseNotHeld = errors.New("the unlock reports this session did not hold t
 //
 // name must be on leaseNames: any other is refused with an ERROR line, and its pass does not run,
 // because the lease pool has no connection counted for it. A connection the pool does not hand
-// over within its acquire bound (store.leaseAcquireBound, which a raw pool reports as a deadline
-// exceeded with ctx still live) is a skip too, and not a queue: every listed lease has a
+// over within its acquire bound (store.leaseAcquireBound, which the lease pool reports as its
+// store.ErrPoolBusy, wrapping a deadline exceeded with ctx still live - what this package, which
+// depends on no store, reads it by) is a skip too, and not a queue: every listed lease has a
 // connection and two are spare, so a pool with none free is held by something else, and the next
 // tick tries again. That skip logs a WARN line rather than an ERROR, once per tick it costs.
 func Exclusive(ctx context.Context, leases Leases, name string, due time.Time, period time.Duration, pass func(context.Context)) bool {

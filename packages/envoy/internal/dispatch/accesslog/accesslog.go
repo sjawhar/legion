@@ -63,8 +63,8 @@ type callerKey struct{}
 // copy.
 type recorder struct {
 	http.ResponseWriter
-	// mu guards kind, id and credential alone: Note may run on another goroutine than the
-	// handler's while the handler is still writing.
+	// mu guards kind, id, credential and clientGone alone: Note and ClientGone may run on another
+	// goroutine than the handler's while the handler is still writing.
 	mu   sync.Mutex
 	kind string
 	id   string
@@ -72,6 +72,9 @@ type recorder struct {
 	// names a session (which is text the caller wrote), so the line still says whose credential
 	// acted. Empty when the caller is that credential itself, a person, or the shared token.
 	credential string
+	// clientGone records that the request ended because its client went away (ClientGone), which
+	// is the line's status where the handler wrote none.
+	clientGone bool
 	status     int
 	written    int64
 }
@@ -189,18 +192,42 @@ func Detached(ctx context.Context) context.Context {
 	return context.WithValue(ctx, callerKey{}, (*recorder)(nil))
 }
 
+// StatusClientClosedRequest is the status the line carries for a request whose client went away
+// before anything was written for it (ClientGone). It is nginx's 499: no status reached the
+// client, since there was nobody left to read one, and 200 - what a handler that writes nothing
+// is otherwise logged as - would read as a request served.
+const StatusClientClosedRequest = 499
+
+// ClientGone records that this request ended because its client went away, so its line carries
+// StatusClientClosedRequest rather than the 200 of a handler that wrote nothing. The admission
+// layer calls it where it answers such a request with nothing (admission.WriteUnserved); a
+// handler that had already written a status keeps that status on the line.
+func ClientGone(ctx context.Context) {
+	rec, _ := ctx.Value(callerKey{}).(*recorder)
+	if rec == nil {
+		return
+	}
+	rec.mu.Lock()
+	rec.clientGone = true
+	rec.mu.Unlock()
+}
+
 func (rec *recorder) write(route string, r *http.Request, elapsed time.Duration, aborted bool) {
 	rec.mu.Lock()
-	kind, id, credential := rec.kind, rec.id, rec.credential
+	kind, id, credential, clientGone := rec.kind, rec.id, rec.credential, rec.clientGone
 	rec.mu.Unlock()
 	status := rec.status
 	if status == 0 {
 		// A handler that wrote nothing answered 200 with an empty body. One that panicked is
 		// logged as 500, though net/http writes no status: it closes the connection (HTTP/1)
-		// or resets the stream (HTTP/2).
+		// or resets the stream (HTTP/2). One whose client went away is 499: nothing was written
+		// because nobody was left to read it.
 		status = http.StatusOK
-		if aborted {
+		switch {
+		case aborted:
 			status = http.StatusInternalServerError
+		case clientGone:
+			status = StatusClientClosedRequest
 		}
 	}
 	attrs := []any{

@@ -7,8 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -18,7 +16,7 @@ import (
 
 // excerptLeases is the pool a reconciliation tick takes its lease on, the one cmd/dispatch gives
 // the loop.
-func excerptLeases(t *testing.T, database *store.Store) *pgxpool.Pool {
+func excerptLeases(t *testing.T, database *store.Store) *store.RawPool {
 	t.Helper()
 	leases, err := database.Pool.Leases()
 	if err != nil {

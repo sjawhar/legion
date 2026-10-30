@@ -32,13 +32,16 @@ var sqlFunctionDefinition = regexp.MustCompile(
 const sharedPool = "github.com/sjawhar/envoy/internal/dispatch/store.Pool"
 
 // poolStatementReceivers are the types whose statement methods run SQL outside any transaction of
-// the shared pool, so outside the commit step: the shared pool's own bare statements, and every
-// pool or connection handed out beside it, whose transactions the step never joins either.
+// the shared pool, so outside the commit step: the shared pool's own bare statements, the raw
+// pools a caller works through as pgx pools (store.RawPool: the rooms and leases pools, which
+// wrap the pgx pool to name a full pool's acquire ErrPoolBusy), and every pool or connection
+// handed out beside them, whose transactions the step never joins either.
 var poolStatementReceivers = map[string]bool{
-	sharedPool:                             true,
-	"github.com/jackc/pgx/v5/pgxpool.Pool": true,
-	"github.com/jackc/pgx/v5/pgxpool.Conn": true,
-	"github.com/jackc/pgx/v5.Conn":         true,
+	sharedPool: true,
+	"github.com/sjawhar/envoy/internal/dispatch/store.RawPool": true,
+	"github.com/jackc/pgx/v5/pgxpool.Pool":                     true,
+	"github.com/jackc/pgx/v5/pgxpool.Conn":                     true,
+	"github.com/jackc/pgx/v5.Conn":                             true,
 }
 
 // keyedWriteGuardStops are the functions the guard does not follow, each with the reason what it
@@ -49,9 +52,13 @@ var keyedWriteGuardStops = map[string]string{
 	// request's caller before its key is claimed and hands the handler that resolution
 	// (resolvedCallerKey), so none of it runs under the key.
 	"api.server.optionalActor": "the caller is resolved before the key is claimed",
-	// The pool itself: its statement methods are what the guard looks for at their call sites.
+	// The pools themselves: their statement methods are what the guard looks for at their call
+	// sites, and a raw pool's own body is the pgx pool's statement of the SQL its caller gave it.
 	"store.Pool.Exec": "", "store.Pool.Query": "", "store.Pool.QueryRow": "", "store.Pool.SendBatch": "",
 	"store.Pool.CopyFrom": "", "store.Pool.Begin": "", "store.Pool.BeginTx": "", "store.Pool.begin": "",
+	"store.RawPool.Exec": "", "store.RawPool.Query": "", "store.RawPool.QueryRow": "",
+	"store.RawPool.SendBatch": "", "store.RawPool.CopyFrom": "", "store.RawPool.Begin": "",
+	"store.RawPool.BeginTx": "",
 }
 
 // keyedWriteGuardAllowed are the bare writes a keyed route may make, each with the reason the

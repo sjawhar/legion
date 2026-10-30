@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -60,10 +61,16 @@ func WriteRefused(w http.ResponseWriter, refusal *Refusal) {
 //
 //   - the read's deadline passed (DeadlinePassed): 503 REQUEST_TIMEOUT, whatever err says,
 //     since every failure after the deadline is the deadline's;
-//   - the client went away (ctx cancelled): nothing is written, since nobody reads it;
-//   - a database connection did not come free within its pool's bound, or a deadline other than
-//     the request's ran out while the request was still live (store.Overloaded): 503
-//     DATABASE_BUSY.
+//   - the client went away (ctx cancelled): nothing is written, since nobody reads it, and the
+//     access log records the request as 499 rather than as the 200 a handler that wrote nothing
+//     would otherwise be logged as (accesslog.ClientGone);
+//   - no connection of a pool came free within its acquire bound (store.IsPoolBusy): 503
+//     DATABASE_BUSY. Nothing ran on the connection that never came, so the wait is all that
+//     failed.
+//
+// A failure of the server's own is none of these and is left to the caller, a commit cut off at
+// its bound among them (store.ErrCommitTimeout), which was once answered DATABASE_BUSY by a guess
+// from its deadline: its outcome is unknown, where a busy pool's is that nothing ran.
 //
 // None of these is a fault of the server's to alarm an operator over, and under load every
 // request meets one, so each is logged at debug and never at error.
@@ -74,7 +81,8 @@ func WriteUnserved(w http.ResponseWriter, ctx context.Context, err error) bool {
 		writeRetryable(w, http.StatusServiceUnavailable, CodeRequestTimeout, "the read ran past its deadline; retry after Retry-After")
 	case errors.Is(ctx.Err(), context.Canceled):
 		slog.Debug("dispatch: request's client went away", "error", err)
-	case store.Overloaded(ctx, err):
+		accesslog.ClientGone(ctx)
+	case store.IsPoolBusy(err):
 		slog.Debug("dispatch: request found the database busy", "error", err)
 		writeRetryable(w, http.StatusServiceUnavailable, CodeDatabaseBusy, "the database had no connection free in time; retry after Retry-After")
 	default:

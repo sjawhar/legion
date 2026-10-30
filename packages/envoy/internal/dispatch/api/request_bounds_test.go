@@ -418,6 +418,45 @@ func TestAWriteWhoseClientDisconnectsMidCommitKeepsItsRoom(t *testing.T) {
 	}
 }
 
+// A write whose commit the database does not answer within the commit's bound is answered 500
+// COMMIT_OUTCOME_UNKNOWN with an ERROR line naming the unknown outcome, and never 503
+// DATABASE_BUSY at DEBUG: the transaction may have committed, where a busy pool means nothing
+// ran and the client may send the write again. The commit waits on the test's lock, and the
+// bound is the test's (store.WithCommitBoundForTest) rather than production's ten seconds.
+func TestAWriteWhoseCommitRunsOutItsBoundIsNotAnsweredDatabaseBusy(t *testing.T) {
+	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
+	issue := createInteractionIssue(t, handler, "TEST", "Commit past its bound", "Before.")
+	release := holdCommits(t, database)
+	defer release()
+	logs := captureLogs(t)
+
+	data, err := json.Marshal(map[string]any{"ops": []map[string]string{
+		{"op": "insert", "markdown": "Written while the commit is held.", "after": "end"},
+	}})
+	if err != nil {
+		t.Fatalf("encode the edit: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", bytes.NewReader(data)).
+		WithContext(store.WithCommitBoundForTest(context.Background(), 300*time.Millisecond))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Dispatch-User", "alice")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusInternalServerError || !strings.Contains(response.Body.String(), `"code":"COMMIT_OUTCOME_UNKNOWN"`) {
+		t.Fatalf("the write whose commit ran out its bound: status=%d body=%s, want 500 COMMIT_OUTCOME_UNKNOWN",
+			response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), admission.CodeDatabaseBusy) || response.Header().Get("Retry-After") != "" {
+		t.Fatalf("the write was answered as a busy pool: status=%d headers=%v body=%s",
+			response.Code, response.Header(), response.Body.String())
+	}
+	logged := logs.String()
+	if !strings.Contains(logged, "level=ERROR") || !strings.Contains(logged, "its outcome is unknown") {
+		t.Fatalf("the commit that ran out its bound logged:\n%s\nwant an ERROR line naming the unknown outcome", logged)
+	}
+}
+
 // The delivery timeline runs its reads side by side, at most two at once, so one timeline holds
 // at most two of the request pool's connections, the weight admission counts it at. Every read is
 // held on a table lock the test takes, so each read in flight holds its connection until the
