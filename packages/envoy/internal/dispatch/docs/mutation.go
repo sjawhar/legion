@@ -44,9 +44,11 @@ func mergeInto[K comparable, V any](dst *map[K]V, src map[K]V) {
 	maps.Copy(*dst, src)
 }
 
-// recoverMutation, deferred around a document mutation, turns its panic into *err and logs it.
-func recoverMutation(room string, err *error) {
+// recoverMutation, deferred around a document mutation, turns its panic into *err and logs it, and
+// reports through *panicked that the mutation panicked.
+func recoverMutation(room string, err *error, panicked *bool) {
 	if recovered := recover(); recovered != nil {
+		*panicked = true
 		*err = fmt.Errorf("document mutation panicked: %v\n%s", recovered, debug.Stack())
 		slog.Error("dispatch: document mutation panicked", "room", room, "error", *err)
 	}
@@ -68,6 +70,9 @@ type liveOperation struct {
 	read     forkReadMark
 	updates  [][]byte
 	recorded bool
+	// panicked is whether the operation's change panicked (change), which abandon releases the
+	// fork for whatever updates holds.
+	panicked bool
 }
 
 // openLiveOperation opens an operation on artifactID's document inside the transaction the
@@ -98,9 +103,13 @@ func (s *Service) openLiveOperation(ctx context.Context, artifactID string) (liv
 // abandon, deferred once the operation is open, undoes what an operation that changed the fork but
 // does not reach its record leaves on its write: the fork holds changes its transaction never
 // recorded, so it goes, and the next operation rebuilds it. One that changed nothing leaves the
-// fork as it was, so the next operation keeps it.
+// fork as it was, so the next operation keeps it. One whose change panicked goes whatever updates
+// holds: ygo emits a panicking transaction's update, except when its phase 2 fails before handing
+// the update on (buildPhase2, or a type observer it fires first), which leaves the fork holding a
+// change no update carries, so neither the fork nor the rendering a joined read takes of it
+// (liveWrite.rendering) describes what the transaction records.
 func (op *liveOperation) abandon() {
-	if op.recorded || len(op.updates) == 0 {
+	if !op.panicked && (op.recorded || len(op.updates) == 0) {
 		return
 	}
 	// The rendering describes that fork, so it goes with it (releaseFork). forkLive's rebuild
@@ -115,14 +124,15 @@ func (op *liveOperation) abandon() {
 
 // change runs mutate, which writes the operation's fork, and captures every update it makes, for
 // the record to append, and the margin records it changes (watchMargin), for the growth weigh. A
-// panic in mutate is its error (recoverMutation).
+// panic in mutate is its error (recoverMutation), and marks the operation panicked, so abandon
+// drops the fork.
 func (op *liveOperation) change(mutate func() error) (*marginWatch, error) {
 	unsubscribe := op.fork.OnUpdate(func(update []byte, _ any) {
 		op.updates = append(op.updates, append([]byte(nil), update...))
 	})
 	margin, stopMargin := watchMargin(op.fork)
 	err := func() (err error) {
-		defer recoverMutation(op.write.artifactID, &err)
+		defer recoverMutation(op.write.artifactID, &err, &op.panicked)
 		return mutate()
 	}()
 	stopMargin()
@@ -245,7 +255,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	// (above), and is then picked up here, before mutate moves the fork it describes; only beside
 	// a readable tree, since one the reader refuses is the refusal, whatever else is known. The
 	// path it took is counted once, when it is first needed (renderPathCounts).
-	before, startErr := treeOf(fork)
+	before, startErr := s.readFork(fork)
 	if startErr != nil && !errors.Is(startErr, ErrDocOutsideSchema) {
 		return startErr
 	}
@@ -295,7 +305,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	if len(op.updates) == 0 {
 		return websocket.ErrNoChanges
 	}
-	tree, err := treeOf(fork)
+	tree, err := s.readFork(fork)
 	var markdown string
 	var offsets []pmdoc.BlockOffset
 	if err == nil {
@@ -383,13 +393,14 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 //     same fragment: the update changes no content, adds no ask block, and credits actor with
 //     nothing (creditLiveWrite).
 //   - The tree and rendering it records are the ones the transaction's last operation left on its
-//     write (liveWrite.tree), when this operation's own forkLive kept them: forkLive drops them
-//     whenever the fork moves (buildFork, releaseFork), and so does a refused operation
-//     (abandon), so kept, they describe the fork's fragment exactly, and this write does not move
-//     it. Otherwise it reads and renders the fork once. A tree the reader or only the renderer
-//     refuses is then the document's OutsideSchemaError (treeOf, documentMarkdownWithOffsets), the
-//     one applyLive answers from the tree it started from (joinedSchemaError), which is this same
-//     fragment, and it comes before any growth refusal, as there.
+//     write (liveWrite.rendering, taken through reuseRendering), when this operation's own forkLive
+//     kept them: forkLive drops them whenever the fork moves (buildFork, releaseFork), and so does
+//     a refused operation (abandon), so kept, they describe the fork's fragment exactly, and this
+//     write does not move it. Otherwise it reads and renders the fork once (readFork). A tree the
+//     reader or only the renderer refuses is then the document's OutsideSchemaError (treeOf,
+//     documentMarkdownWithOffsets), the one applyLive answers from the tree it started from
+//     (joinedSchemaError), which is this same fragment, and it comes before any growth refusal, as
+//     there.
 //   - Of the growth weigh (refuseGrowth) only the margin bound applies (marginWatch). The anchor
 //     marks the weigh counts (anchorWatch) are on the unchanged tree, so they carry what they
 //     carried and their weigh never refuses - it walks every mark of the tree to say so
@@ -420,9 +431,9 @@ func (s *Service) applyMargin(ctx context.Context, artifactID string, actor mode
 	if err != nil {
 		return err
 	}
-	rendered := renderedTree{tree: op.write.tree, markdown: op.write.markdown, offsets: op.write.offsets}
-	if rendered.tree == nil {
-		if rendered.tree, err = treeOf(op.fork); err != nil {
+	rendered, reused := s.reuseRendering(op.write, op.fork, "margin")
+	if !reused {
+		if rendered.tree, err = s.readFork(op.fork); err != nil {
 			return err
 		}
 		if rendered.markdown, rendered.offsets, err = documentMarkdownWithOffsets(rendered.tree); err != nil {
@@ -746,7 +757,7 @@ func (s *Service) heldTree(ctx context.Context, artifactID string) (tree *pmdoc.
 		return nil, false, err
 	}
 	if fork != nil {
-		tree, err := treeOf(fork)
+		tree, err := s.readFork(fork)
 		return tree, true, err
 	}
 	if live := s.srv.GetDoc(artifactID); live != nil {
@@ -1606,10 +1617,10 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 		if write.cold {
 			capture = capture.withoutInflight(write, actor)
 		}
-		if write.tree != nil && write.fork == fork {
-			return renderedTree{tree: write.tree, markdown: write.markdown, offsets: write.offsets}, capture, nil
+		if rendering, reused := s.reuseRendering(write, fork, "capture"); reused {
+			return rendering, capture, nil
 		}
-		if tree, err = treeOf(fork); err != nil {
+		if tree, err = s.readFork(fork); err != nil {
 			return renderedTree{}, authorCapture{}, err
 		}
 	} else {

@@ -186,7 +186,9 @@ func TestEncodeBlockIDMatchesTheSharedTable(t *testing.T) {
 
 // A dashboard page's `#b-` fragment names the block the page lands on, read with any
 // percent-encoding. A pin is written only as a `dispatch://` reference, so a raw `@` in a page's
-// fragment names no block; an item in the query or a version page is what it names today.
+// fragment names no block; an item in the query or a version page is what it names today. The
+// dashboard writes a document block's fragment beside a `?comment=`, so the fragment there names
+// no block of the comment, on any version of the page.
 func TestExtractReadsADashboardPageBlockFragment(t *testing.T) {
 	const server = "https://dispatch.test"
 	cases := []struct {
@@ -201,11 +203,87 @@ func TestExtractReadsADashboardPageBlockFragment(t *testing.T) {
 		{"/issues/CORE-1/spec?v=2#b-ship-it", Ref{Kind: "artifact", IssueKey: "CORE-1", ID: "spec"}},
 		{"/projects/CORE/documents/handbook-md?version=3#b-ship-it", Ref{Kind: "artifact", Project: "CORE", ID: "handbook-md"}},
 		{"/issues/CORE-1/spec?comment=c1#b-ship-it", Ref{Kind: "comment", IssueKey: "CORE-1", ID: "c1"}},
+		{"/issues/CORE-1/spec?v=2&comment=c1#b-ship-it", Ref{Kind: "comment", IssueKey: "CORE-1", ID: "c1"}},
+		{"/projects/CORE/documents/handbook-md?comment=c1#b-b2", Ref{Kind: "comment", Project: "CORE", ID: "c1"}},
+		{"/issues/CORE-1/spec?ask=a1#b-ship-it", Ref{Kind: "ask", IssueKey: "CORE-1", ID: "a1"}},
 	}
 	for _, tc := range cases {
 		got := Extract(server+tc.href, server)
 		if len(got) != 1 || got[0] != tc.want {
 			t.Errorf("Extract(%s) = %#v; want %#v", tc.href, got, tc.want)
+		}
+	}
+}
+
+// A block of a comment or an issue message is addressed under its item, by a `dispatch://`
+// reference or the item's dashboard page, and its target id is `<item kind>/<item id>#<block
+// id>`. A comment block can be pinned to a revision of its comment; a message never changes, so a
+// pinned message block names nothing, nor does a block of an ask or of a project document's
+// message, which no reference addresses. A page's raw `@` is no pin: the page names the item. A
+// project document's page names its comment, never the comment's block: the fragment beside a
+// `?comment=` is the document's.
+func TestExtractParsesItemBlockReferences(t *testing.T) {
+	const server = "https://dispatch.test"
+	const comment, message = "11111111-1111-4111-8111-111111111111", "33333333-3333-4333-8333-333333333333"
+	commentBlock := Ref{Kind: "block", Item: "comment", IssueKey: "CORE-1", ID: comment, Block: "b2"}
+	pinned := commentBlock
+	pinned.Pin = 1
+	messageBlock := Ref{Kind: "block", Item: "message", IssueKey: "CORE-1", ID: message, Block: "b2"}
+	projectBlock := Ref{Kind: "block", Item: "comment", Project: "CORE", ID: comment, Block: "b2"}
+	projectPinned := projectBlock
+	projectPinned.Pin = 3
+	for _, test := range []struct {
+		reference string
+		want      []Ref
+		target    string
+	}{
+		{"dispatch://CORE-1/comment/" + comment + "#b-b2", []Ref{commentBlock}, "comment/" + comment + "#b2"},
+		{"dispatch://CORE-1/comment/" + comment + "#b-b2@v1", []Ref{pinned}, "comment/" + comment + "#b2"},
+		{"dispatch://CORE-1/message/" + message + "#b-b2", []Ref{messageBlock}, "message/" + message + "#b2"},
+		{"dispatch://CORE-1/message/" + message + "#b-b2@v1", []Ref{}, ""},
+		{"dispatch://CORE/artifact/handbook-md/comment/" + comment + "#b-b2", []Ref{projectBlock}, "comment/" + comment + "#b2"},
+		{"dispatch://CORE/artifact/handbook-md/comment/" + comment + "#b-b2@v3", []Ref{projectPinned}, "comment/" + comment + "#b2"},
+		{"dispatch://CORE/artifact/handbook-md/message/" + message + "#b-b2", []Ref{}, ""},
+		{"dispatch://CORE-1/ask/" + comment + "#b-b2", []Ref{}, ""},
+		{"dispatch://CORE-1/comment/" + comment + "#b-", []Ref{}, ""},
+		{"dispatch://CORE-1/comment/" + comment + "#c-b2", []Ref{}, ""},
+		{server + "/issues/CORE-1/comments/" + comment + "#b-b2", []Ref{commentBlock}, "comment/" + comment + "#b2"},
+		{server + "/issues/CORE-1/messages/" + message + "#b-b2", []Ref{messageBlock}, "message/" + message + "#b2"},
+		{server + "/projects/CORE/documents/handbook-md?comment=" + comment + "#b-b2", []Ref{{Kind: "comment", Project: "CORE", ID: comment}}, comment},
+		{server + "/issues/CORE-1/comments/" + comment + "#b-b2@v1", []Ref{{Kind: "comment", IssueKey: "CORE-1", ID: comment}}, comment},
+		{server + "/issues/CORE-1/asks/" + comment + "#b-b2", []Ref{{Kind: "ask", IssueKey: "CORE-1", ID: comment}}, comment},
+	} {
+		t.Run(test.reference, func(t *testing.T) {
+			got := Extract("See "+test.reference+".", server)
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("Extract() = %#v; want %#v", got, test.want)
+			}
+			if len(got) == 1 && TargetID(got[0]) != test.target {
+				t.Fatalf("TargetID(%#v) = %q; want %q", got[0], TargetID(got[0]), test.target)
+			}
+		})
+	}
+}
+
+// A comment block's id past MaxBlockIDBytes is cited by no text: the `dispatch://` text names
+// nothing and the comment's page names the comment. A request (ParseRef) reads the block whatever
+// the length of its id.
+func TestAnItemBlockIDPastTheBoundIsCitedByNoText(t *testing.T) {
+	const server = "https://dispatch.test"
+	const comment = "11111111-1111-4111-8111-111111111111"
+	long := strings.Repeat("a", MaxBlockIDBytes+1)
+	block := Ref{Kind: "block", Item: "comment", IssueKey: "CORE-1", ID: comment, Block: long}
+	reference := "dispatch://CORE-1/comment/" + comment + "#b-" + long
+	page := server + "/issues/CORE-1/comments/" + comment + "#b-" + long
+	if got := Extract(reference, server); len(got) != 0 {
+		t.Errorf("the dispatch:// reference cites %#v; want nothing", got)
+	}
+	if got := Extract(page, server); !reflect.DeepEqual(got, []Ref{{Kind: "comment", IssueKey: "CORE-1", ID: comment}}) {
+		t.Errorf("the comment's page cites %#v; want the comment", got)
+	}
+	for _, request := range []string{reference, page} {
+		if got, ok := ParseRef(request, server); !ok || got != block {
+			t.Errorf("ParseRef(%.60s…) = %#v, %t; want the block", request, got, ok)
 		}
 	}
 }
