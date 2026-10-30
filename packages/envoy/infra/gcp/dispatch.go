@@ -247,6 +247,19 @@ type DispatchArgs struct {
 	// the one it has (bus.ParseStreamMaxBytes).
 	StreamMaxBytes *int `pulumi:"streamMaxBytes,optional"`
 
+	// SigningKeyGenerations is the ordered key set the server holds, the shape
+	// auth.ParseSigningKeys reads DISPATCH_SIGNING_KEY into: the first entry signs every new
+	// cookie and seals every new refresh token, and every entry verifies a cookie and opens a
+	// seal. Each entry is a generation, which names one generated key: generation 0 is
+	// <hostname>-signing-key, the key a running deployment already holds, and generation n above
+	// 0 is <hostname>-signing-key-<n>. Unset is [0], the single key this component has always
+	// registered. Only the generations the list names are registered, so one it drops is
+	// destroyed and that key cannot come back. A rotation is three applies, nobody signed out:
+	// [0] to [0, 1] adds the new key, which every process then verifies; [0, 1] to [1, 0] makes
+	// it the key every new cookie and seal is made with; and [1, 0] to [1] drops the old key once
+	// nothing made under it is left.
+	SigningKeyGenerations []int `pulumi:"signingKeyGenerations,optional"`
+
 	// AppCpu and appMemory size the app Deployment's envoy-dispatch container, as Kubernetes
 	// quantities set as both its request and its limit: 1 CPU and 4Gi by default. The pod's
 	// cloud-sql-proxy sidecar is sized by proxyCpu and proxyMemory, and the front door and the
@@ -419,12 +432,14 @@ type Dispatch struct {
 // preview. images.tools is frontDoorToolsImage. With clusterOnly set only hostname, region and
 // deletionProtection are resolved: no other field is read by the cluster the mode builds.
 // natsReplicas and streamMaxBytes are 0 when their inputs are unset, where the component renders
-// neither setting. frontDoor and signInOn are the two groups of inputs a consumer sets together or
-// not at all: frontDoor is set when any tailnet input is, where the component builds the front
-// door and Dispatch is reached at its tailnet name, and signInOn when any sign-in input is, where
-// the app runs browser sign-in. With neither the component is the sandbox: Dispatch is reached in
-// the cluster alone, by readers the app's NetworkPolicy admits, and tailnetDNSName, tags, the
-// tailscale and tools images and signIn are empty, since nothing reads them.
+// neither setting, and signingKeyGenerations is the generations the component registers a signing
+// key for, in the order the server holds them, [0] when its input is unset. frontDoor and
+// signInOn are the two groups of inputs a consumer sets together or not at all: frontDoor is set
+// when any tailnet input is, where the component builds the front door and Dispatch is reached at
+// its tailnet name, and signInOn when any sign-in input is, where the app runs browser sign-in.
+// With neither the component is the sandbox: Dispatch is reached in the cluster alone, by readers
+// the app's NetworkPolicy admits, and tailnetDNSName, tags, the tailscale and tools images and
+// signIn are empty, since nothing reads them.
 type dispatchSettings struct {
 	clusterOnly                                 bool
 	frontDoor, signInOn                         bool
@@ -442,6 +457,7 @@ type dispatchSettings struct {
 	frontDoorReplicas, listenerReplicas         int
 	natsInCluster                               bool
 	natsReplicas, streamMaxBytes                int
+	signingKeyGenerations                       []int
 	appResources                                dispatchAppResources
 	pprofPort                                   int
 	disruption                                  dispatchDisruption
@@ -648,6 +664,7 @@ func dispatchClusterOnlyRefusals(args *DispatchArgs) []dispatchInput {
 		{"natsInCluster", args.NatsInCluster != nil},
 		{"natsReplicas", args.NatsReplicas != nil},
 		{"streamMaxBytes", args.StreamMaxBytes != nil},
+		{"signingKeyGenerations", len(args.SigningKeyGenerations) > 0},
 		{"appCpu", args.AppCpu != nil},
 		{"appMemory", args.AppMemory != nil},
 		{"proxyCpu", args.ProxyCpu != nil},
@@ -1003,6 +1020,9 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 		}
 		s.streamMaxBytes = *args.StreamMaxBytes
 	}
+	if s.signingKeyGenerations, err = newDispatchSigningKeyGenerations(args); err != nil {
+		return dispatchSettings{}, err
+	}
 	if s.appResources, err = newDispatchAppResources(args); err != nil {
 		return dispatchSettings{}, err
 	}
@@ -1086,6 +1106,45 @@ func newDispatchPprofPort(args *DispatchArgs) (int, error) {
 		return 0, fmt.Errorf("pprofPort %d is the cloud-sql-proxy sidecar's port in the same pod; choose another, such as 6060", port)
 	}
 	return port, nil
+}
+
+// newDispatchSigningKeyGenerations resolves signingKeyGenerations, the generations the component
+// registers a signing key for and the order the server holds them in: [0] when the input is unset
+// or empty, which is the single key this component has always registered, since generation 0
+// keeps the name <hostname>-signing-key and is never replaced. A generation above 0 is a key of
+// its own, <hostname>-signing-key-<n>, and only the generations the list names are registered, so
+// one the list drops is destroyed and that key cannot come back.
+//
+// Two refusals, both before any resource is registered. A negative generation names no resource.
+// A repeated generation would render the same key twice, which parseSettingEntries refuses at the
+// server's boot, so it is refused here rather than shipped as a Secret no pod can start on.
+//
+// The resolver sees one state and never the one before it, so the rest is what an operator keeps
+// and the component cannot refuse:
+//   - [0] to [1] with no add step. Every process refuses to start beside a live one whose key set
+//     does not share its current key both ways (processes.keySetsShared), and at one replica,
+//     whose Deployment strategy is Recreate, the running pod is gone before the new one starts,
+//     so that apply signs everyone out rather than being refused.
+//   - [0, 1] to [1], the same skip from the other end: the old key is dropped in the very apply
+//     that promotes the new one.
+//   - dropping the old generation sooner than 30 days after the promote, a session cookie's life
+//     (auth's sessionMaxAgeSeconds): every cookie and every refresh token still under that key
+//     dies with it.
+//   - a rollback to a generation the list already dropped, whose key the random provider
+//     destroyed and which no later apply brings back.
+func newDispatchSigningKeyGenerations(args *DispatchArgs) ([]int, error) {
+	if len(args.SigningKeyGenerations) == 0 {
+		return []int{0}, nil
+	}
+	for i, generation := range args.SigningKeyGenerations {
+		switch {
+		case generation < 0:
+			return nil, core.InputErrorf("signingKeyGenerations", "signingKeyGenerations[%d] is generation %d, which names no resource: a generation is 0, the key a running deployment already holds, or a number above it", i, generation)
+		case slices.Contains(args.SigningKeyGenerations[:i], generation):
+			return nil, core.InputErrorf("signingKeyGenerations", "signingKeyGenerations[%d] repeats generation %d, which would render the same key twice; the server refuses a repeated DISPATCH_SIGNING_KEY entry at boot", i, generation)
+		}
+	}
+	return args.SigningKeyGenerations, nil
 }
 
 // dispatchReplicas resolves one Deployment's replica count, input, to fallback when it is unset,

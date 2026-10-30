@@ -143,6 +143,7 @@ func dispatchClusterOnlyRefusals() []dispatchInput {
 		{"natsInCluster", func(a *gcp.DispatchArgs) { a.NatsInCluster = pulumi.BoolRef(true) }},
 		{"natsReplicas", func(a *gcp.DispatchArgs) { a.NatsReplicas = pulumi.IntRef(dispatchNatsReplicas) }},
 		{"streamMaxBytes", func(a *gcp.DispatchArgs) { a.StreamMaxBytes = pulumi.IntRef(dispatchStreamMaxBytes) }},
+		{"signingKeyGenerations", func(a *gcp.DispatchArgs) { a.SigningKeyGenerations = []int{0, 1} }},
 		{"appCpu", func(a *gcp.DispatchArgs) { a.AppCpu = pulumi.StringRef("1") }},
 		{"appMemory", func(a *gcp.DispatchArgs) { a.AppMemory = pulumi.StringRef("4Gi") }},
 		{"proxyCpu", func(a *gcp.DispatchArgs) { a.ProxyCpu = pulumi.StringRef("1") }},

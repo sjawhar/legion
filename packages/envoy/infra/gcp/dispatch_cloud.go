@@ -3,6 +3,7 @@ package gcp
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"github.com/pulumi/pulumi-gcp/sdk/v10/go/gcp/compute"
 	"github.com/pulumi/pulumi-gcp/sdk/v10/go/gcp/container"
@@ -35,9 +36,12 @@ type dispatchCluster struct {
 // instance, the generated secrets, and the pods' principal with the grants it holds. clusterOnly
 // registers none of them, so that mode builds no dispatchDatabase at all.
 type dispatchDatabase struct {
-	instance      *sql.DatabaseInstance
-	password      *random.RandomPassword
-	signing       *random.RandomPassword
+	instance *sql.DatabaseInstance
+	password *random.RandomPassword
+	// signing is the signing-key set, one generated key per generation of
+	// signingKeyGenerations and in that order: the first signs every new cookie, every one
+	// verifies.
+	signing       []*random.RandomPassword
 	agentToken    *random.RandomPassword
 	listenerToken *random.RandomPassword
 	principal     pulumi.StringOutput
@@ -195,9 +199,21 @@ func newDispatchDatabase(ctx *pulumi.Context, comp *Dispatch, name string, args 
 	if err != nil {
 		return nil, err
 	}
-	signing, err := random.NewRandomPassword(ctx, s.hostname+"-signing-key", &random.RandomPasswordArgs{Length: pulumi.Int(64), Special: pulumi.Bool(false)}, child)
-	if err != nil {
-		return nil, err
+	// One key per generation the list names, in its order. Generation 0 keeps the name and the
+	// arguments the single signing key always had, so the key a running deployment already has
+	// is the one it is and no apply of this release replaces it; a generation above 0 is a key
+	// of its own, which the operator adds and later drops by changing the list alone.
+	signing := make([]*random.RandomPassword, 0, len(s.signingKeyGenerations))
+	for _, generation := range s.signingKeyGenerations {
+		keyName := s.hostname + "-signing-key"
+		if generation > 0 {
+			keyName += "-" + strconv.Itoa(generation)
+		}
+		key, err := random.NewRandomPassword(ctx, keyName, &random.RandomPasswordArgs{Length: pulumi.Int(64), Special: pulumi.Bool(false)}, child)
+		if err != nil {
+			return nil, err
+		}
+		signing = append(signing, key)
 	}
 	agentToken, err := random.NewRandomPassword(ctx, s.hostname+"-agent-token", &random.RandomPasswordArgs{Length: pulumi.Int(48), Special: pulumi.Bool(false)}, child)
 	if err != nil {

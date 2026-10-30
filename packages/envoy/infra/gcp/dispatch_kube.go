@@ -345,10 +345,31 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	}
 	dispatchSecretName := s.hostname + "-dispatch"
 	databaseURL := pulumi.Sprintf("postgres://dispatch:%s@127.0.0.1:5432/dispatch?sslmode=disable", database.password.Result)
+	// DISPATCH_SIGNING_KEY is the key set auth.ParseSigningKeys reads: the generations' results
+	// in the list's order, one space between them. With one generation it is that result alone,
+	// no join and no Sprintf wrapper that could change a byte, so a deployment already running
+	// one key keeps the exact Secret data it has and this release's first apply plans no change
+	// to it.
+	signingKey := database.signing[0].Result
+	if len(database.signing) > 1 {
+		results := make([]any, 0, len(database.signing))
+		labels := make([]string, 0, len(database.signing))
+		for i, key := range database.signing {
+			results = append(results, key.Result)
+			labels = append(labels, fmt.Sprintf("the signing key at signingKeyGenerations[%d]", i))
+		}
+		signingKey = pulumi.All(results...).ApplyT(func(values []any) (string, error) {
+			keys, err := outputStrings(dispatch, values, labels...)
+			if err != nil {
+				return "", err
+			}
+			return strings.Join(keys, " "), nil
+		}).(pulumi.StringOutput)
+	}
 	// The sign-in client secret is one key of this Secret only where sign-in is on: without the
 	// sign-in inputs signInClientSecret is nil, which refuseDispatchSeedInSecret cannot take, and
 	// the app reads no such variable anyway.
-	dispatchData := pulumi.StringMap{"DATABASE_URL": databaseURL, "DISPATCH_AGENT_TOKEN": database.agentToken.Result, "DISPATCH_SIGNING_KEY": database.signing.Result}
+	dispatchData := pulumi.StringMap{"DATABASE_URL": databaseURL, "DISPATCH_AGENT_TOKEN": database.agentToken.Result, "DISPATCH_SIGNING_KEY": signingKey}
 	if s.signInOn {
 		dispatchData["DISPATCH_SIGNIN_CLIENT_SECRET"] = refuseDispatchSeedInSecret(args.SignInClientSecret, dispatch, "signInClientSecret")
 	}

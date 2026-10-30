@@ -913,6 +913,141 @@ func TestDispatchListenerSecretHoldsOnlyItsAPIToken(t *testing.T) {
 	require.Equal(t, map[string]any{"ENVOY_API_TOKEN": "example-dispatch-listener-token-result"}, normalizedProperty(data))
 }
 
+// dispatchSigningKeySets are the four states of a rotation, in the order an operator applies
+// them: today's one key, the add, the promote and the drop. Each is a whole state of the input,
+// since the component sees one state and never the one before it.
+var dispatchSigningKeySets = [][]int{{0}, {0, 1}, {1, 0}, {1}}
+
+// signingKeyName is the RandomPassword a generation is registered under: generation 0 keeps the
+// name the single signing key always had, so a running deployment's key is never replaced, and a
+// generation above 0 carries its number.
+func signingKeyName(generation int) string {
+	if generation == 0 {
+		return "example-dispatch-signing-key"
+	}
+	return "example-dispatch-signing-key-" + strconv.Itoa(generation)
+}
+
+// signingKeyResults is the exact DISPATCH_SIGNING_KEY generations must render: the mock engine
+// computes a RandomPassword's result as <name>-result, so the expected bytes are written from the
+// names alone, and one generation renders its result with nothing around it.
+func signingKeyResults(generations []int) string {
+	results := make([]string, 0, len(generations))
+	for _, generation := range generations {
+		results = append(results, signingKeyName(generation)+"-result")
+	}
+	return strings.Join(results, " ")
+}
+
+// dispatchSigningKey is the DISPATCH_SIGNING_KEY of the <hostname>-dispatch Secret, with every
+// output and secret wrapper off.
+func dispatchSigningKey(t *testing.T, m *pulumitest.Mocks) string {
+	t.Helper()
+	value := unwrappedProperty(dispatchSecretData(t, m)["DISPATCH_SIGNING_KEY"])
+	require.True(t, value.IsString(), "DISPATCH_SIGNING_KEY resolved to a %s", value.TypeString())
+	return value.StringValue()
+}
+
+// registeredSigningKeys is every RandomPassword whose name begins the signing key's, in
+// registration order: the set the component holds, and nothing else it generates.
+func registeredSigningKeys(m *pulumitest.Mocks) []pulumitest.Registration {
+	var out []pulumitest.Registration
+	for _, registration := range registrationsOf(m, "random:index/randomPassword:RandomPassword") {
+		if strings.HasPrefix(registration.Name, "example-dispatch-signing-key") {
+			out = append(out, registration)
+		}
+	}
+	return out
+}
+
+// The Secret carries the key set the server reads: the named generations' results in the list's
+// order with one space between them, which is what auth.ParseSigningKeys splits back into the
+// keys, the first of them signing. One generation renders that result alone, no separator and no
+// wrapper, so the Secret's bytes are what a deployment running one key already has.
+func TestDispatchRendersItsSigningKeySetInOrder(t *testing.T) {
+	for _, generations := range dispatchSigningKeySets {
+		t.Run(fmt.Sprint(generations), func(t *testing.T) {
+			args := dispatchArgs()
+			args.SigningKeyGenerations = generations
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+			require.Equal(t, signingKeyResults(generations), dispatchSigningKey(t, m))
+		})
+	}
+}
+
+// Exactly the generations the list names are registered, under exactly their names, and no other
+// signing key is. A generation the list drops registers nothing, so the random provider destroys
+// that key and no later apply brings it back; a generation it keeps is the key it always was. The
+// mock engine records a registration when the SDK's goroutine reaches it, so the set is what is
+// asserted here and the order the server reads the keys in is the Secret's, pinned by
+// TestDispatchRendersItsSigningKeySetInOrder.
+func TestDispatchRegistersASigningKeyPerGeneration(t *testing.T) {
+	for _, generations := range dispatchSigningKeySets {
+		t.Run(fmt.Sprint(generations), func(t *testing.T) {
+			args := dispatchArgs()
+			args.SigningKeyGenerations = generations
+			m, err := runDispatch(t, args, true)
+			require.NoError(t, err)
+
+			want := make([]string, 0, len(generations))
+			for _, generation := range generations {
+				want = append(want, signingKeyName(generation))
+				m.Named(t, "random:index/randomPassword:RandomPassword", signingKeyName(generation))
+			}
+			got := make([]string, 0, len(want))
+			for _, registration := range registeredSigningKeys(m) {
+				got = append(got, registration.Name)
+			}
+			require.ElementsMatch(t, want, got, "exactly the named generations are registered, and no other signing key is")
+		})
+	}
+}
+
+// With the default inputs the component registers the one signing key it always registered, under
+// the name and the arguments it always had, and the Secret carries that one result with nothing
+// around it. This is what says the first apply of this release plans no change to a running
+// deployment's key, so the release signs nobody out; only a live pulumi preview against the real
+// stack can prove what that stack would plan.
+func TestDispatchDefaultSigningKeySetIsTodaysOneKey(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	keys := registeredSigningKeys(m)
+	require.Len(t, keys, 1)
+	require.Equal(t, "example-dispatch-signing-key", keys[0].Name)
+	// The whole input map, so a keeper, another length or a special-character setting fails here.
+	require.Equal(t, map[string]any{"length": float64(64), "special": false},
+		normalizedProperty(resource.NewProperty(keys[0].Inputs)))
+	require.Equal(t, "example-dispatch-signing-key-result", dispatchSigningKey(t, m))
+}
+
+// Two refusals, each a core.InputError naming signingKeyGenerations and naming the generation and
+// its position: a negative generation, which names no resource, and a repeated one, which would
+// render the same key twice and which the server refuses at its boot, so the component refuses it
+// here rather than shipping a Secret no pod can start on.
+func TestDispatchRefusesABadSigningKeyGeneration(t *testing.T) {
+	rows := []struct {
+		name        string
+		generations []int
+		want        string
+	}{
+		{"negative", []int{0, -1}, "signingKeyGenerations[1] is generation -1, which names no resource: a generation is 0, the key a running deployment already holds, or a number above it"},
+		{"repeated", []int{0, 1, 0}, "signingKeyGenerations[2] repeats generation 0, which would render the same key twice; the server refuses a repeated DISPATCH_SIGNING_KEY entry at boot"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			args := dispatchArgs()
+			args.SigningKeyGenerations = row.generations
+			_, err := gcp.ResolveDispatch(args)
+			require.EqualError(t, err, row.want)
+			var input *core.InputError
+			require.ErrorAs(t, err, &input)
+			require.Equal(t, "signingKeyGenerations", input.Input)
+		})
+	}
+}
+
 // dispatchWorkloads are the component's three Deployments, each with the input that sets its
 // replica count and the one that sets its PodDisruptionBudget.
 var dispatchWorkloads = []struct {
