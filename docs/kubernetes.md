@@ -5831,13 +5831,18 @@ issue's pod (every role of it alike) and the image probe's.
 - **AskGate's time limit** is the operator's too. Every pod loads pi-envoy, whose AskGate reviews
   each Dispatch write of a role's main agent before it posts. Its review must finish inside Oh My
   Pi's limit for one `tool_call` handler, `extensionHandlers.toolCallTimeoutMs`, and the gate holds
-  its deadline 5 s under that limit. The limit is 30 s by default, so the deadline is then 25 s. A
-  review of a long session often takes longer, a review that times out lets the write post
+  its deadline 5,000 ms under that limit: the room its handler still needs for an aborted call's
+  usage report and its entry. The Dispatch decision record is no part of it, since it runs after
+  the handler has returned. The limit is 30 s by default, so the deadline is then
+  25,000 ms. A
+  review of a long session can take longer, a review that times out lets the write post
   unreviewed, and three timeouts in a row stop the gate for the rest of that session. Set
   `extensionHandlers.toolCallTimeoutMs: 120000` in the operator's `overlay.yml`, as the example
   overlay does (pi-envoy's README, "The time limit"). Legion's own turn-scoping overlay does not set
   it. Without it, the gate logs one warning at start, `AskGate: the review deadline is 25000 ms`,
-  through Oh My Pi's logger. The gate binds in a pod because the pod has Dispatch; one without it
+  through Oh My Pi's logger. A limit under 15,000 ms leaves no room for a verdict: the gate does
+  not bind there, and a gate that did not load refuses every Dispatch write it would have
+  reviewed. The gate binds in a pod because the pod has Dispatch; one without it
   gets no gate. The pod's `dispatch` command enforces the review: while the gate is bound, a
   gated write that is not one literal `dispatch` call the gate reviewed (a pipe other than one
   trailing `head` or `tail`, a script, `python3 -c`, an eval cell's process) is refused by the

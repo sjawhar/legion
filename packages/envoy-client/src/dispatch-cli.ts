@@ -8,6 +8,7 @@ import {
   gatedWrite,
   operandPath,
 } from "./askgate-marker";
+import { newAsks } from "./askgate-new-asks";
 import {
   commandHelp,
   commandName,
@@ -363,6 +364,20 @@ export async function runDispatchCli(
           if (file.flag === "--path" && file.operand === parsed.args.path) uploadBytes = bytes;
         }
         const spent = consumeMarker(gate.stores, argv, parsed.args, files, Date.now());
+        // The asks this write would open for a person, counted from the write's own text: the
+        // one number pi-envoy's record of an unmarked write carries, so a session holding a
+        // Dispatch token alone can count the asks that went out, or were refused, unreviewed.
+        // The ledger carries the count and never the ask text. An upload's asks are in its file,
+        // whose bytes are already read above, and which the dry run's arguments name only by
+        // path. A re-upload's blocks are counted again: the write carries them.
+        const asksCarried = spent.ok
+          ? 0
+          : newAsks(
+              parsed.tool,
+              uploadBytes === undefined
+                ? parsed.args
+                : { ...parsed.args, content: new TextDecoder().decode(uploadBytes) }
+            ).length;
         if (!spent.ok && gate.mode === "block") {
           return refuse(
             spent.changed === undefined
@@ -370,7 +385,7 @@ export async function runDispatchCli(
               : `${notCalled} AskGate is on for this session, and ${spent.why}. ${SAME_MESSAGE} Send the call again in a later message.`,
             REFUSED,
             parsed.tool,
-            { mode: "block", why: spent.why }
+            { mode: "block", why: spent.why, asksCarried }
           );
         }
         if (!spent.ok) {
@@ -378,7 +393,10 @@ export async function runDispatchCli(
           // the write is sent, on its own: a ledger that cannot take it stops the write here, so
           // no unreviewed write posts unrecorded.
           try {
-            appendResult(dir, { tool: parsed.tool, askgate: { mode: "warn", why: spent.why } });
+            appendResult(dir, {
+              tool: parsed.tool,
+              askgate: { mode: "warn", why: spent.why, asksCarried },
+            });
           } catch (error) {
             return refuse(
               `${notCalled} AskGate is on for this session in warn mode, and ${spent.why}. A write that posts unreviewed is first recorded in this session's ledger, and the ledger could not be written: ${messageFor(error)}.`,

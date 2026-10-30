@@ -198,6 +198,42 @@ describe("DispatchClient's writes", () => {
     expect(keys.slice(5)).toEqual([undefined, undefined, undefined]);
   });
 
+  // A caller whose intent outlives the call names the key itself: AskGate's decision document is
+  // created once per session, whatever process reaches for it and however many times, and each of
+  // its records is appended once (packages/pi-envoy/extensions/askgate/decision-record.ts). The
+  // key it gives goes on every attempt of that write, and on every call it is given to, so
+  // Dispatch runs that intent once and replays it rather than writing a second time.
+  test("send a caller's own key on every attempt of its write, and mint one only where it gives none", async () => {
+    const { fetchImpl, sent } = scripted([
+      new TypeError("fetch failed"),
+      refusal(503, "UNAVAILABLE", "dispatch is restarting"),
+      json({ artifact: { id: "doc-1" } }),
+      json({ applied: 1 }),
+      json({}),
+    ]);
+    const dispatch = client(fetchImpl, pacing().retry);
+    const create = "askgate-doc.3f7a91";
+    const append = "askgate-rec.0c5e22";
+
+    await dispatch.projectArtifact(
+      "DSP",
+      { name: "askgate-decisions-sess-1.md", content: "# Decisions", actor },
+      create
+    );
+    await dispatch.docEdit(
+      "doc-1",
+      { ops: [{ op: "insert", markdown: "```json\n{}\n```", after: "end" }], actor },
+      append
+    );
+    await dispatch.comment("DSP-1", comment);
+
+    const keys = sent.map((request): string | undefined => request.headers["Idempotency-Key"]);
+    // The three attempts of the create are one intent, and the key the caller chose is each one's.
+    expect(keys.slice(0, 4)).toEqual([create, create, create, append]);
+    expect(keys[4]).toMatch(IDEMPOTENCY_KEY_PATTERN);
+    expect(keys[4]).not.toBe(create);
+  });
+
   test("ask again under the same key through a transport failure, a 5xx, a 429 and 409 KEY_IN_FLIGHT, answering the first definitive answer", async () => {
     const { fetchImpl, sent } = scripted([
       new TypeError("fetch failed"),

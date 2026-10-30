@@ -470,6 +470,7 @@ GATES = [
         (CONTRACTS_SRC, f"{at('envoy-client', 'Build contracts for Envoy client')}; tsconfig paths @legion/contracts -> ../contracts/src/index.ts"),
         (f"{FIX}/dispatch-targeted-delivery.json", "packages/envoy-client/src/__tests__/delivery.test.ts:16-17, dispatch-text.test.ts:117-118"),
         (f"{FIX}/dispatch-public-url.json", "packages/envoy-client/src/__tests__/dispatch-config.test.ts:5"),
+        (f"{ENVOY}/internal/dispatch/api/testdata/**", "packages/envoy-client/src/__tests__/askgate-new-asks.test.ts:14-21 reads the Dispatch server's table of decision-block inserts, which packages/envoy/internal/dispatch/api's TestDocumentEditAdviceCountsTheAskBlocksTheEditAdded reads too"),
         ("skills/**", "packages/envoy-client/src/__tests__/dispatch-advice.test.ts:683-690 reads skills/<skill>/SKILL.md for every skill a notice cites"),
     ) + biome(at("envoy-client", "Lint Envoy client")) + bun_job("envoy-client") + CI_SELF),
 
