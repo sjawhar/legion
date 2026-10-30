@@ -2,74 +2,26 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-148",
-  "completed": "2026-10-30T00:30:00Z",
-  "headTested": "aeaa05747cf8757bcaeb380c9e569edd9aae7d6b",
-  "round": "final: every 'Acceptance, before the merge' line of dispatch://INFRA-148/spec on the merged head, all children (INFRA-568 #2397, INFRA-569 #2363, INFRA-570 #2511, INFRA-571, INFRA-572) merged",
+  "completed": "2026-10-30T02:07:00Z",
+  "headTested": "5e5c1a28e90c73153b002e57b0ee40ae121e4090",
+  "rebaseCheck": "Fingerprint changed (32277bbccd71cff6 at aeaa0574 -> c61a114fe273dcf0 at 5e5c1a28): migrations renumbered 0145-0147, sessionanswers comments, ci.yaml filter, routes_table_test.go, README, a changelog fragment, and the implementer's answers-hook.test.ts fix. Full round run on the merged head.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's surfaces at aeaa0574 (code 7ff7de30) against my own build of the head's Dispatch: a cluster pgvector Postgres 18.6 Job through a loopback proxy, nats-server 2.10.29, and a stand-in Azure embedder over TLS. A1 on real omp: the answer is carried verbatim, no cache_control, 0 of 3 self-checks carry the list. Real omp file: 14 of 14. Real Claude Code: 4 of 4 in each of 3 runs, with the plugin built as CI builds it (verify-build, then extract-built), since this head commits main's dist. doc-read and the decision-block check also pass. Every acceptance line is in the proof below with its command, output and time; the same table is in the PR body."
+    "how": "Re-ran the A1 driver on my own build of 5e5c1a28's Dispatch (cluster Postgres 18.6, NATS 2.10.29) with real omp 18.12.2: turn 3 ended with the list, answer byte for byte, no cache_control, 0 of 3 self-checks carrying it."
   },
-  "failures": [
-    {
-      "criterion": "Architect's rule, re-asked at b6079d1b: packages/claude-envoy/tests/answers-hook.test.ts must not flake on a loaded host; each check accepts every outcome the design allows",
-      "evidence": "Under CPU load (4 busy processes on this 2-CPU pod, 3 copies of the file at once, 6 rounds, 2026-10-29T23:49Z–23:52Z), `TMPDIR=/legion/scratch/tmp bun test tests/answers-hook.test.ts` failed 2 of 18 runs (logs/load-6b.log, load-6c.log). Both failed the implementer's test 'with Dispatch hanging after a read gave an empty list, the failure line names the wait rather than nothing', at its setup (answers-hook.test.ts:399): `expect(await runHook(env, sessionStart(\"startup\", home))).toMatchObject({ exitCode: 0, stdout: \"\" })`. It received stdout `[Dispatch: people's answers from the last 72 hours could not be read (Dispatch did not answer within 150 ms); run \\`dispatch answers\\`.]` with timing began 736.8 / printed 1156.9 ms. The design allows that outcome (the least wait missed), and the later `answers.json` read (line 403) depends on the first read landing. Fix the setup so that it reaches an empty cached list whatever the first hook printed, for example by retrying until answers.json holds `items: []`. A second loaded session of 18 runs (00:15:30Z–00:20:01Z) did not hit this test. No deterministic red test is possible for a load-timing race in the implementer's own test; the evidence is these two logs. My own slow-start test flaked 1 of 18 in that second session (load2-3c.log: the exact fresh list was expected, the 150 ms failure line was received). I fixed my test myself in commit 0bf0229e: it now accepts the fresh list or the failure line naming a wait of at least 150 ms, never `within 0 ms`. With ANSWERS_LEAST_WAIT_MS = 0 (built with verify-build) it still fails (0 pass, 1 fail)."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
-    {
-      "criterion": "L1: with the related-item search made to fail, `dispatch issue --force` with an existing issue's title prints that key and the 'no check was made' form; a server that sends no check result prints the same form",
-      "surface": "the checkout's dispatch CLI as an agent session against the head's Dispatch (127.0.0.1:18866) and, for the second half, through a proxy (18867) that drops advice.suggestions from POST /api/v1/issues",
-      "command": "psql: begin; lock table search_term_totals in access exclusive mode; select pg_sleep(8) — then dispatch issue --project ACX --force --title 'Zeppelin turbine flange gasket leaks' --spec … (2026-10-29T23:25:4xZ); the same through DISPATCH_URL=http://127.0.0.1:18867 (23:26:36Z)",
-      "observed": "`No related-item check was made: the search behind it did not answer within 5s. Search before you rely on this being new: dispatch search --project ACX --query 'Zeppelin turbine flange'`, and `Title overlaps you forced past: ACX-31 [triage] Zeppelin turbine flange gasket leaks → …`. related_checks recorded not_made / timeout / total_ms 5000. Through the proxy: `No related-item check was made: the server sent no check result. Search before you rely on this being new: …`.",
-      "headSha": "aeaa05747cf8757bcaeb380c9e569edd9aae7d6b",
-      "negativeControl": "The same --force filing with no lock and no stripping (ACX-48, 23:24:52Z) printed `Related items (searched by meaning and keywords):` with ACX-45, ACX-39 and ACX-31."
-    },
-    {
-      "criterion": "L2: precision (one common word vs distinctive words), at most 25 keywords for a 10,000-word spec, meaning configured and failing, recall on copied production duplicates, a 300 ms–5 s search completes, a no-match check says it found nothing",
-      "surface": "the dispatch CLI against the head's Dispatch with the stand-in Azure embedder; the Go recall benchmarks on a corpus copied from production Dispatch by packages/envoy/scripts/related-recall.sh INFRA (GET only, file mode 600, not committed)",
-      "command": "accept.ts precision/meaning/slow/nomatch (ACY, ACX); long-spec.ts + dispatch issue --project ACZ --spec-file spec-10000-corpus.txt (23:35:23Z); DISPATCH_TEST_DATABASE_URL=<PG18> DISPATCH_RECALL_CORPUS=recall-infra.jsonl go test ./internal/dispatch/api -run 'TestRelatedRecallOnDuplicates|TestRelatedCheckLatencyOnRecallCorpus' -v (23:27:01Z–23:34:11Z, ok 416 s)",
-      "observed": "Precision, meaning off and stats fresh: terms {seat,warp,flang,gasket,zeppelin,warn}; listed ACY-31 and ACY-35 (an earlier filing of the same text) and no Dashboard tile issue. 10,000 words: 25 terms recorded, keyword 59 ms, total 75 ms; benchmark 10,000-word spec 25 terms, p95 117 ms; INFRA-131 25 terms, p95 60 ms. Meaning configured: `Related items (searched by meaning and keywords):` lists ACX-32 'Login page unreachable after deploy' for 'Users cannot authenticate', with no shared word — wiring only. Meaning failing (embedder 400): `Related items (searched by keywords only: the text could not be embedded for meaning search):`. Recall: `every pair: old 40-word OR query 9 of 28, the check's keyword query 11 of 28`. Lock for 2.6 s: keyword stage 1884 ms, total 1901 ms, outcome found, 3 items. No match: `Related-item check searched (meaning and keywords) and found nothing.`",
-      "headSha": "aeaa05747cf8757bcaeb380c9e569edd9aae7d6b",
-      "negativeControl": "An 8 s lock (past the 5 s allowance) gives the not-made line instead (L1). The embedder answering 400 drops to keywords only."
-    },
-    {
-      "criterion": "L3: a dispatch search hit, and a related item of dispatch issue and dispatch ask, for an ask whose answer replaced an earlier one prints the latest answer, who gave it and the options chosen",
-      "surface": "the dispatch CLI against the head's Dispatch; alice through the dev sign-in",
-      "command": "dispatch ask on ACX-33; alice answers Fixed, then re-answers Exponential with expected_answer_at; dispatch search --project ACX --query 'webhook exponential backoff jitter'; dispatch issue --title 'Webhook exponential backoff jitter policy'; dispatch ask --issue ACX-31 --question 'Do webhook deliveries use exponential backoff with jitter now?' (23:24:5xZ–23:26:4xZ)",
-      "observed": "All three printed `Answered by alice at 2026-10-29T23:24:53.94626599Z · options chosen: Exponential` and `Answer text: WEBHOOK-LATEST-ANSWER: exponential with jitter, capped at one hour.` (search hit; issue related item; ask's past-decision item). WEBHOOK-FIRST-ANSWER and `Fixed` as chosen never appear.",
-      "headSha": "aeaa05747cf8757bcaeb380c9e569edd9aae7d6b",
-      "negativeControl": "An open ask in the same search shows `Open: no answer yet.`"
-    },
-    {
-      "criterion": "L4: session answers in the next model request, after compaction, in a subagent, on Oh My Pi and Claude Code; reply, document comment and message; 72 h; the cap; Dispatch unreachable within one second",
-      "surface": "real omp 18.12.2 with the checkout's pi-envoy against the head's Dispatch; real Claude Code 2.1.311 with the plugin built from the head as CI builds it; the CLI for item kinds",
-      "command": "bun driver.ts (23:38:28Z); bun probe-kinds.ts (23:39:30Z); LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/session-answers-omp.test.ts (23:39:52Z); bun run verify-build + extract-built, then LEGION_TEST_CLAUDE=… bun test tests/answers-claude.test.ts ×3 (23:47:17Z–23:47:44Z) and tests/answers-hook.test.ts (23:47:56Z); cache-rig.ts original 3 on the pod's model gateway (00:24:09Z)",
-      "observed": "The ask.answered event was published to notifications.agent.<session>. The next request's last message was the list with the answer byte for byte and no cache_control (anchors 5 and 7); 0 of 3 self-checks carried a list. `dispatch answers` listed: a replaced answer (latest only); a direct message; a mention once; a doc-thread reply; an edited doc comment; a thread reply; and a 71 h answer. Real omp: 14 of 14 (compaction, subagent, cap, hang under 1 s, cache prefix). Claude Code: 4 of 4 in each of 3 runs. Hook file: 16 of 16 unloaded. Cache: turn 3 read 26057 = 25927 + 130.",
-      "headSha": "aeaa05747cf8757bcaeb380c9e569edd9aae7d6b",
-      "negativeControl": "0 of 4 requests before the answer carried a list. Not listed: a 73 h answer, another agent's reply, a resolved unanswered ask, the replaced first answer. The route answers 400 for a bad session id, since 8 days back, since in the future and max_chars=0, and 401 with no bearer. A changed first message (altered) read 0 cached and wrote 27207."
-    },
-    {
-      "criterion": "L5: dispatch doc-read on a document with an open anchored comment prints its author, time and full text, and its help says so",
-      "surface": "the dispatch CLI against the head's Dispatch",
-      "command": "dispatch doc-read --issue SMK-2; dispatch doc-read --help (23:38:33Z)",
-      "observed": "`Open anchored threads:` / `comment 8a57a991-… · user alice · 2026-10-29T23:38:32.39994Z` / `> The retry budget stays at three attempts` / `Body: SMOKE-COMMENT-OPEN: …` with the full body / `reply f631bb52-… · user alice · …`. The help says `After the markdown it prints every open thread anchored on the document in full: … a comment thread with its root's id, author, quote and text and each reply's author, time and text …` (main's #2366 now carries this point, as the implementer's deviation says).",
-      "headSha": "aeaa05747cf8757bcaeb380c9e569edd9aae7d6b",
-      "negativeControl": "A resolved anchored comment (SMOKE-COMMENT-RESOLVED) is not printed."
-    },
-    {
-      "criterion": "L6: a dispatch doc-edit that writes a new decision block reports its related items; browser-suite tests for the web search's answered ask and the new-issue dialog's related items fail before each change and pass at the head",
-      "surface": "the dispatch CLI; Dispatch's own browser suite (packages/dispatch, bun run e2e, Playwright chromium) on a fresh Postgres 18 database per run",
-      "command": "dispatch doc-edit --issue ACX-34 --ops-json '[{\"op\":\"insert\",\"after\":\"end\",\"markdown\":\":::ask{urgency=\\\"low\\\"}\\nShould webhook deliveries retry with exponential backoff and jitter, capped at one hour?\\n:::\\n\"}]' (23:26:4xZ); e2e-runs*.sh: bun run e2e -- e2e/search.e2e.ts --project chromium -g '<the #2363 test>' and e2e/create-issue-related.e2e.ts -g '.' at the head and at 4e55b2e0 / dfd128f1 with the change's test file (and #2511's related-timing constants) copied in",
-      "observed": "doc-edit: `Applied 1 ops (version 2)` / `Decision block cfa17610-…:` / `Related items (searched by meaning and keywords):` with ACX-33's ask (`Answered by alice … options chosen: Exponential` / `Answer text: WEBHOOK-LATEST-ANSWER…`); related_checks recorded decision_block / found / 2. Browser at the head: search `1 passed` (23:38:58Z), dialog `5 passed` (23:41:21Z).",
-      "headSha": "aeaa05747cf8757bcaeb380c9e569edd9aae7d6b",
-      "negativeControl": "Before #2363: the search test failed `Expected substring: \"Answered\"`, receiving the hit with no answered marking (23:31:48Z). Before #2511: the dialog tests failed 5 of 5 (`toBeVisible` and `Expected: 3, Received: 0`) (23:48:01Z)."
-    }
+    {"criterion": "L1a search made to fail", "command": "accept.ts slow (ACCESS EXCLUSIVE on search_term_totals 8 s), dispatch issue --force, 2026-10-30T01:32Z", "observed": "Created ACX-38; 'No related-item check was made: the search behind it did not answer within 5s' plus 'Title overlaps you forced past: ACX-31'", "headSha": "5e5c1a28", "negativeControl": "L1b: through a proxy stripping advice.suggestions, 'No related-item check was made: the server sent no check result'"},
+    {"criterion": "L2a/L2b/L2c/L2d/L2f/L2g related-item check forms", "command": "accept.ts precision/meaning/fail/slow/nomatch on ACX/ACY; 10,000-word spec via dispatch issue on ACZ", "observed": "Only the distinctive-words issue listed (no Dashboard tile issue); 10,000-word spec used 4 terms (<=25); stand-in-embedder same-meaning item listed (wiring only); embed failure says keywords only; 2.6 s hold completes and lists; no match prints 'searched (meaning and keywords) and found nothing'", "headSha": "5e5c1a28"},
+    {"criterion": "L2e duplicates copied from production", "command": "go test ./internal/dispatch/api -run 'TestRelatedRecallOnDuplicates|TestRelatedCheckLatencyOnRecallCorpus' with DISPATCH_RECALL_CORPUS (INFRA, 28 pairs)", "observed": "check's keyword query 11 of 28 vs old query 9 of 28; stage 1 p95 64 ms (INFRA-131), 191 ms (10,000 words)", "headSha": "5e5c1a28"},
+    {"criterion": "L3 answered ask in search, dispatch issue and dispatch ask", "command": "accept.ts reanswer", "observed": "each shows only WEBHOOK-LATEST-ANSWER, alice, options chosen: Exponential", "headSha": "5e5c1a28"},
+    {"criterion": "L4/L5 session answers and doc-read", "command": "driver.ts, probe-kinds.ts, session-answers-omp.test.ts (real omp), answers-claude.test.ts x3 (Claude Code 2.1.311, plugin built as CI does), cache-rig.ts on the gateway", "observed": "omp 14/14; Claude 4/4 in 3 of 3; 7 item kinds, 71 h item in, 73 h/other agent/resolved out; route 400/400/400/400/401; doc-read prints the open thread in full and its help says so; A9 turn 3 cacheRead 26206 = 25926 + 280", "headSha": "5e5c1a28"},
+    {"criterion": "L6 doc-edit decision block and browser suite", "command": "accept.ts block; e2e search.e2e.ts and create-issue-related.e2e.ts at the head (Chromium 1248)", "observed": "decision block lists its related items; browser search 1 passed, dialog 5 passed (before-change runs failed in the earlier round)", "headSha": "5e5c1a28"},
+    {"criterion": "answers-hook.test.ts under CPU load", "command": "4 sha256sum burners, 3 copies at once, 6 rounds", "observed": "first run 17/18 (my own slow-start case asserted one request when the read had missed); fixed in de23fa69; second run 18/18; the implementer's empty-list hang fix passed in all 36 loaded runs; a zero least wait still fails the fixed case", "headSha": "de23fa69"}
   ],
-  "observations": [
-    "This head commits main's packages/claude-envoy/dist, as the repository now requires; CI builds the plugin from source before its tests. Until main's rebuild lands after the merge, the committed hooks.json runs `session-hook.js answers`, which main's bundle refuses (`unknown mode`). Recorded under the PR's Not proven / risk.",
-    "Term statistics: a project whose statistics were first built while it held 2 items (the on-demand refresh the check triggers) kept them for up to 10 minutes (SearchTermStatsInterval). In that window `dashboard` was not known to be common, so 'Dashboard tile' items were listed beside the distinctive match. Once refreshed, precision held. This only matters for a project's first minutes.",
-    "The meaning-configured line is wiring only before the merge, as the architect decided. It is proven on production after deploy by the production check, with a pair that shares no rare word.",
-    "CI at aeaa0574 when read: changes and pr-title succeeded; every other job was queued. Not read as green."
+  "notes": [
+    "CI at 5e5c1a28 when read: changes and pr-title queued; not read as green.",
+    "PR body E2E (tester) line not yet updated for this round: the worker-image drain at 02:10Z came first."
   ]
 }
