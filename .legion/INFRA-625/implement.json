@@ -2,8 +2,24 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-625",
-  "completed": "2026-10-30T11:40:00Z",
+  "completed": "2026-10-30T13:45:00Z",
   "proof": [
+    {
+      "criterion": "Round 2, the tester's first failure: the pull request is mergeable, so CI can read this change's code at all. A1's browser and write halves hold at the merged head.",
+      "surface": "GitHub's own mergeability for #2519, and the Dispatch Conversation tab, the Inbox's ask card and a hover card in Chromium, WebKit and Firefox against the real Go server and Postgres (the pod harness).",
+      "command": "jj git fetch && jj new legion/INFRA-625 main@origin -m 'merge: ...' (three conflicts resolved) && gh pr view 2519 --json mergeable,mergeStateStatus; then source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && for p in chromium webkit firefox; do bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts heavy-bodies.e2e.ts --project=$p; done",
+      "observed": "MERGEABLE (mergeStateStatus BLOCKED, which is the required checks not yet reported, where before the merge it was CONFLICTING / DIRTY with check-runs total_count 0 at every head this change had). At the merged head 37a00f76: chromium 17 passed (1.2m), webkit 17 passed (1.7m), firefox 15 passed and 2 skipped (1.2m), on the Playwright 1248 browsers the merge moved to. The three conflicts - pmdoc/parse.go's doc comment, pmdoc/fixtures_test.go's fixture list, proof-editor/AGENTS.md's table and count - were each resolved keeping both sides, and the fixtures were regenerated rather than hand-merged: 142 documents, 43 splice cases.",
+      "headSha": "37a00f765f559bfc2a51d44adb9b41d6f8611f01",
+      "negativeControl": "The fingerprint says the merge changed this pull request's own lines rather than confirming them: 1c3b37709b05d346e39f877ac4f5c748fe552e7e3d9615390669beab3c5766f9 at ac1f26de to cb1fe5879f0bcc0d1feafab69b976bdf4627f6293c88f3c4a4c72731f32d4f14 at 37a00f76, so this is a full test round and not a bare re-check. And `differential.sh --base main` at the merged head reports every gate 0 and PASS, which fails on any byte a stored tree gains or loses."
+    },
+    {
+      "criterion": "Round 2, the tester's second failure: the repository's dispatch-browser-multiprocess lane stays green - every .js a build emits is answered 200 during the two-builds walk, the parse worker's chunk among them.",
+      "surface": "packages/dispatch/e2e/two-builds.multiprocess.e2e.ts: a reader's page served by one build while its assets come from another, which is what a rolling deploy gives them.",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web && DISPATCH_BUILD=e2e-b bunx vite build --config web/vite.config.ts --outDir dist-b && DISPATCH_E2E_PROCESSES=2 DISPATCH_E2E_WEB_DIST_B=../dispatch/web/dist-b bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts two-builds.multiprocess.e2e.ts",
+      "observed": "5 passed (1.2m), both walk rows among them, where before this round both failed naming the unanswered markdown-parse.worker chunk. The walk's issue message now carries 300 list items under its diagram, so the Conversation draws a body past the 4,000-character threshold, the page asks for the worker's chunk, and the visit asserts the formatted list - the row proves a long body formats when its code came from the other build, rather than excusing the chunk as unreachable.",
+      "headSha": "37a00f765f559bfc2a51d44adb9b41d6f8611f01",
+      "negativeControl": "The first attempt put the long body on the comment and failed, `locator('#issue-conversation-panel li:nth-child(300)') is not visible`: the Conversation shows a comment card's preview until its thread is opened, so the list never drew. Moving the body to the message, which the Conversation draws whole, is what made the row pass - a row that cannot pass unless the formatted list is really in the page."
+    },
     {
       "criterion": "A1 (spec): a comment holding each list shape draws on the Conversation tab in under 1 s, on every read-only surface, in every engine the spec's testMatch names.",
       "surface": "The Dispatch Conversation tab, the Inbox's ask card and a hover card, in a real browser against the real Go Dispatch server and a real Postgres 17 with pgvector (the pod harness at /legion/harness).",
