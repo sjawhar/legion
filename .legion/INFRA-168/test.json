@@ -2,61 +2,52 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-168",
-  "completed": "2026-10-30T06:05:00Z",
-  "round": 17,
-  "headSha": "647491a8f5e532b2b5178e3cfa8e7aee9a5be7e3",
-  "codeHead": "451e53fcee72189100fb9da9a74bc354ac1c15ea",
-  "handoffHead": "647491a8f5e532b2b5178e3cfa8e7aee9a5be7e3",
-  "scope": "The architect's brief (05:41Z): narrowed round at 647491a8 (451e53fc plus a forward merge of main, fingerprint unchanged). Main question: can any record write erase another; try a create retried while the first runs, a create committing after a record was appended, two processes of one session creating at once, a shutdown cut mid-create, a retried append, reading the document back each time. Then the unmarked entry before its record with the tool result not waiting, a lost record counted once, the renamed figure, and the five cases in warn and block.",
-  "provider": "The round's 25 nested sessions had 95 assistant turns: 93 anthropic/claude-opus-5 and 2 its fallback anthropic/claude-opus-4-8, read from each session's own turns; one review call fell back after a provider refusal (infrastructure). The race harness asks no model.",
-  "fingerprint": "e3d8026e5a209… at 451e53fc, at the merge's other parent c320611a and at 647491a8: the forward merge changed nothing of this change.",
-  "fixture": "dispatch://INFRA-766, closed when the round began; the first regression wave ran against it closed (gate decisions valid, posts refused 'issue is closed'), so it was reopened for a second wave of the posting cases (R17b-*) and closed again (message b53a3683), every ask retracted. The race harness writes only INFRA project documents.",
+  "completed": "2026-10-30T08:45:00Z",
+  "round": 18,
+  "headSha": "a8d5f2545e02ceb60a92f6ece23f77fe4f8f7a2f",
+  "mergeHead": "9dba31164887",
+  "scope": "The architect's brief (08:23Z): narrowed round at the forward merge of main 71e31498. Judge the dispatch-http.ts join (main's trailing signal, then this change's caller key, in #json/#jsonAnswer/#send): keyed create and append still replay on retry, main's abort signal still cancels; then the five cases in warn and block once. Bare gates: not re-run by the tester (role rule: CI's work, read on GitHub); CI read below.",
+  "fingerprint": "e3d8026e (647491a8) -> f82d132b at 9dba3116 and a8d5f254 (tester's command); changed, by the join and the reviewer's docs commit 69212987 (README, changelog fragment, comments in askgate-core.ts and decision-record.ts).",
+  "provider": "14 nested sessions, 71 assistant turns, all anthropic/claude-opus-5, read from each session's own turns. Three charter calls (c1-block, c3-warn, c5-block) were refused by the provider (Refusal reasoning_extraction), fell back to anthropic/claude-opus-4-8 and timed out at the deadline: infrastructure. The race and signal harnesses ask no model.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove its design claims against production Dispatch with faults it did not inject: the real recorder and client of 647491a8 behind a proxy that holds, delays, duplicates and fails requests (six scenarios, every record once, one header); its unmarked-stall fix behind a 40 s proxy; its single-count fix on a crafted session file; each against the pre-fix tree fb41159d as control."
+    "how": "Read the join line by line in the diff against main (every call passes signal in slot 5 and key in slot 6; docEdit and #upload pass undefined, undefined, key) and drove it live against production Dispatch on an isolated archive copy of a8d5f254, with swapped-slot mutants as controls."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Main question: no record write can erase another.",
-      "surface": "The real decision-record.ts and dispatch-session.ts of 647491a8 (git archive under $TMPDIR/adv17), production Dispatch through an in-process fault proxy; each session document read back with dispatch doc-read.",
-      "command": "cd $TMPDIR/adv17/packages/pi-envoy && TREE=$TMPDIR/adv17 bun /legion/scratch/tmp/t8/race.ts (scenarios parallelCreate, lateCreateAfterAppend, createAnswerLost, createRetriedInFlight, appendRetried, resumed); dispatch doc-read --project INFRA --artifact askgate-decisions-<session>-md",
-      "observed": "parallelCreate (two recorders, first create held 3 s): both creates under askgate-doc.<hash>, the late one 201 with the same artifact id; doc = header + B1, A1. lateCreateAfterAppend (A's create held, A cut -> RECORD_SHUT_DOWN; B creates and appends B1, B2; then A's held create forwarded): late create 201, same id, nothing replaced; doc = header + B1, B2 (versions 3). createAnswerLost (A's create forwarded, answer held past A's cut): B reads by name, appends; doc = header + B1. createRetriedInFlight (first create answered 502 to the client and forwarded 1.5 s late): doc = header + A1, A2. appendRetried (each append forwarded twice, client told 502): 409 KEY_IN_FLIGHT then replays; doc = header + A1, A2, A3, each once (versions 4). resumed: A1, B1. Header exactly once in every document; no second document under the name.",
-      "headSha": "647491a8f5e532b2b5178e3cfa8e7aee9a5be7e3",
-      "negativeControl": "lateCreateAfterAppend on the pre-fix recorder fb41159d through the same proxy: the late upload (its own fresh key) replaced the document; read back = header + A1 only, B1 and B2 erased, with no error to either writer."
+      "criterion": "The join keeps the caller's key on the keyed create and append: both still replay on retry, and no write erases or duplicates a record.",
+      "surface": "git archive of a8d5f254 under $TMPDIR/adv18 with its pi-envoy node_modules rebuilt so @legion/envoy-client resolves to the copy (bun require.resolve printed $TMPDIR/adv18/packages/envoy-client/src/dispatch-http.ts); real decision-record.ts and DispatchClient; production Dispatch via the in-process fault proxy; each document read back with dispatch doc-read.",
+      "command": "cd $TMPDIR/adv18/packages/pi-envoy && TREE=$TMPDIR/adv18 bun /legion/scratch/tmp/t8/race.ts [parallelCreate lateCreateAfterAppend createAnswerLost createRetriedInFlight appendRetried resumed sameIdSameBody sameIdOtherBody]",
+      "observed": "All 8 OK, one header, one document each. Creates carry askgate-doc.<sha>, appends askgate-rec.<sha>. lateCreateAfterAppend: late create 201 same id, doc B1,B2. appendRetried: 409 KEY_IN_FLIGHT then 200 replays under one key per record; A1,A2,A3 once. sameIdSameBody: second append replayed; A1 once. sameIdOtherBody: second append 422 KEY_REUSED; A1 once.",
+      "headSha": "a8d5f2545e02ceb60a92f6ece23f77fe4f8f7a2f",
+      "negativeControl": "Key moved into the signal slot at the JSON upload site (#upload): creates carry minted UUIDs; lateCreateAfterAppend leaves no record (B1,B2 erased) and parallelCreate keeps only A1. At docEdit: appends carry minted UUIDs; sameIdSameBody and sameIdOtherBody each land A1 twice. envoy-client's 'send a caller's own key on every attempt of its write' test fails under each swap."
     },
     {
-      "criterion": "An unmarked write's entry is written before its record and its tool result does not wait on the record.",
-      "surface": "Nested headless sessions (warn, block) behind a proxy holding every artifact request 40 s (past the host's 30 s handler limit); this head and the pre-fix tree.",
-      "command": "run-case.sh U-new-<warn|block> <mode> p/ustall.txt DISPATCH_URL=http://127.0.0.1:18767 (echo x | dispatch ask …, then sleep 60); EXT=$TMPDIR/old17/packages/pi-envoy run-case.sh U-old-warn …",
-      "observed": "This head: the unmarked advisor-gate entry and the tool result 0.4 s after the call started (warn 05:53:10.028Z -> 05:53:10.425Z; block likewise); the record, past the client's 60 s deadline, became an advisor-gate-record follow-up keyed on recordId toolu_…#0 at +60 s. Pre-fix: tool result at +30.6 s (the handler limit), the unmarked entry written 30 s after that, carrying recordError on itself.",
-      "headSha": "647491a8f5e532b2b5178e3cfa8e7aee9a5be7e3",
-      "negativeControl": "The pre-fix run is the control."
+      "criterion": "Main's per-call abort signal still cancels a request after the join.",
+      "surface": "DispatchClient.sessionAnswers of the archive copy, production Dispatch through a proxy holding the answers route 10 s.",
+      "command": "cd $TMPDIR/adv18/packages/envoy-client && TREE=$TMPDIR/adv18 bun /legion/scratch/tmp/t8/signal.ts",
+      "observed": "AbortSignal.timeout(800): TimeoutError at 803 ms. Controller aborted at 1.5 s: the caller's reason at 1524 ms. No signal: the 10 s hold, then Dispatch's answer. Production Dispatch answers that route 404 (its build predates the route), so only the cancel is observable, not a successful read.",
+      "headSha": "a8d5f2545e02ceb60a92f6ece23f77fe4f8f7a2f",
+      "negativeControl": "The no-signal call waited the full 10 s."
     },
     {
-      "criterion": "A lost record is counted once, and the figure is named as records not confirmed.",
-      "surface": "askgate-report.ts --sessions on a crafted session file built from U-new-warn's real one.",
-      "command": "(cd <tree> && bun packages/pi-envoy/scripts/askgate-report.ts --sessions /legion/scratch/tmp/t8/crafted --since 2026-10-30T05:00:00Z --sample 0 --out <dir>) for this head and fb41159d",
-      "observed": "Entries: unmarked #0 lost by its own follow-up, a gated call on the same toolCallId lost by a gated follow-up, unmarked #1 with no follow-up. This head: 'gated calls: 3', 'decision records not confirmed: 2'. Pre-fix: 'decision records lost: 3'.",
-      "headSha": "647491a8f5e532b2b5178e3cfa8e7aee9a5be7e3",
-      "negativeControl": "The pre-fix count of 3 for two losses."
-    },
-    {
-      "criterion": "Regression: the five cases, charter-only call and unmarked write, warn and block.",
-      "surface": "Nested sessions, branch build and CLI, production Dispatch, dispatch://INFRA-766.",
-      "command": "run-case.sh R17-<c0..c5,u1>-<mode> (fixture closed) and R17b-<c0,c2,c5,u1>-<mode> (fixture reopened); reconcile.py R17b-",
-      "observed": "c1 refused no_change, marker store empty after; c2 rebuttal opened and its recorded commented form resent read as the same rebuttal (R17b, both asks retracted); c3 refused naming #log-retention; c4 refused untried_access; c5 rules none and the ask opened (block: charter timeout; warn: the agent wrote it in an unmarked form, which posted with the CLI warning); c0 posted; u1 refused in block, posted in warn. R17b records 7 of 7 by id, 0 duplicate.",
-      "headSha": "647491a8f5e532b2b5178e3cfa8e7aee9a5be7e3",
-      "negativeControl": "c2's rebuttal opened where c1 was refused; c5's tried read answered none where c4 matched."
+      "criterion": "Regression: the five cases, the charter-only comment and the unmarked write, warn and block.",
+      "surface": "14 nested headless Oh My Pi sessions on the head's build (bun run build in the workspace; the CLI first on PATH), production Dispatch, dispatch://INFRA-766 reopened and closed after.",
+      "command": "run-case.sh R18-<c0..c5,u1>-<warn|block> <mode> p/<case>.txt; reconcile.py R18-",
+      "observed": "c0 allowed and posted; c1 refused no_change (block: charter timeout after fallback, rules match refused), marker store empty; c2 rebuttal opened, resent commented form read as the same rebuttal, asks retracted; c3 refused no_change; c4 refused untried_access; c5 rules none and the ask opened (block after the agent's first unmarked form was refused; warn in an unmarked form that posted with the warning); u1 refused in block, posted in warn. 15 of 15 records on Dispatch by id, 0 missing, 0 duplicate.",
+      "headSha": "a8d5f2545e02ceb60a92f6ece23f77fe4f8f7a2f",
+      "negativeControl": "c2 opened where c1 was refused; c5's tried read answered none where c4 matched."
     }
   ],
   "observations": [
-    "The first regression wave ran with INFRA-766 closed (my oversight); gate decisions stand, posts were refused by Dispatch, and the posting cases were re-run with the issue open.",
-    "Under the 40 s proxy the record of the unmarked write could not land inside the client's 60 s deadline; the late create still reached Dispatch, leaving a header-only document for that session. Expected, and counted as not confirmed.",
-    "I ran bun run build; no file of the workspace changed."
+    "The #form (multipart) join site is not on the recorder's path: the recorder's create goes through #upload's JSON branch, so a swap at #form changed nothing live. The site reads correctly (key in slot 6).",
+    "From main's #2376, now on this branch: production Dispatch lacks the answers route, so every model request carries the answers failure line 'run `dispatch answers`', and 16 times in 14 sessions an agent ran it and got 'This Dispatch ... has no answers route yet'. Some agents called the notice suspicious or self-contradicting. It is not this change's code; sent to the controller with the evidence.",
+    "envoy-client's suite on the archive copy: 1180 pass, 1 unhandled error that is my archive's (it omits packages/envoy, whose testdata askgate-new-asks.test.ts reads). Run only to judge the tests against the mutants, not as a gate.",
+    "bun install rewrote bun.lock in the working copy; restored, not pushed."
   ],
-  "ci": "Read at 05:56Z, nothing re-run: at 647491a8, CI run 41009467293 queued (pi-envoy not started), PR Title 41009674575 pending.",
+  "ci": "Read at 08:41Z, nothing re-run: at a8d5f254, CI run 41025858944 queued (pi-envoy not started), PR Title 41025953784 pending; mergeable UNKNOWN.",
   "priorRounds": [
     {
       "round": 1,
@@ -167,6 +158,13 @@
       "fixture": "dispatch://INFRA-766",
       "verdict": "pass",
       "summary": "45 sessions: 43/43 records by id under 22 concurrent sessions; queued records behind 7 s writes landed; refused, hung and shutdown-cut losses counted; continuation comment kept 18/18. Full record in commit aa1383be's test.json."
+    },
+    {
+      "round": 17,
+      "headSha": "647491a8f5e532b2b5178e3cfa8e7aee9a5be7e3",
+      "fixture": "dispatch://INFRA-766",
+      "verdict": "pass",
+      "summary": "Six record-race scenarios against production Dispatch through a fault proxy: every record once; pre-fix late create erased B1,B2. Unmarked write's tool result unblocked; lost record counted once. Full record in commit da3d38aa's test.json."
     }
   ]
 }
