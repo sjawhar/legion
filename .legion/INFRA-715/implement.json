@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-715",
-  "completed": "2026-10-30T02:07:00Z",
+  "completed": "2026-10-30T04:25:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2480",
-  "codeHead": "b0a59b0b5c6a808af33504d9dabfaf39e7299e56",
+  "codeHead": "2670904e2fc3d82888a1cae2bce583065fc8b055",
   "proof": [
     {
       "criterion": "A2: on the cluster copy, an hour at ten times grows Dispatch's memory by no more than the documents' stored growth plus a stated constant (1 GiB); the curve is quoted against the 2026-10-28 baseline",
@@ -93,6 +93,14 @@
       "observed": "Locally: tsc is clean and the block-references file passes 5 of 5. Under -race the three room-memory tests SKIP, and docs takes 2,255 s at the head against 2,186 s at main 1489a445 on this pod. Without -race they pass (200 uploads retained 135,432 B against a bound of 2,273,178 B). go build and go vet are clean. CI at b0a59b0b: envoy-go-race, envoy-go-race-docs, envoy-go, lint, test, pr-title, dispatch-memory, dispatch-multiprocess, dispatch-browser-multiprocess and the other lanes are green; dispatch was still running at 02:06Z.",
       "headSha": "b0a59b0b5c6a808af33504d9dabfaf39e7299e56",
       "negativeControl": "Before the import was restored, CI run 40942207302 at 37f334f0 failed dispatch typecheck with TS2552 Cannot find name getArtifactText. Before the skip, envoy-go-race timed out the docs package at 30m."
+    },
+    {
+      "criterion": "Review round 8: merge main forward past #2463, keep both sides' tests in block-references.e2e.ts, and check that parse.go still carries block ids",
+      "surface": "packages/dispatch typecheck, and the real pmdoc parser and docs.Service on Postgres 16, at the forward merge of main 49e23926",
+      "command": "cd packages/dispatch && bunx tsc --noEmit && bunx biome check e2e/block-references.e2e.ts; cd packages/envoy && go build ./... && go vet -p 2 ./internal/dispatch/... && go test -p 2 -parallel 4 ./internal/dispatch/pmdoc/ -run 'TestAnUploadKeepsTheIDsOfTheBlocksItLeavesUnchanged|TestAMarkNotAllowed|TestNearestFirst|TestMarkWriter|TestQuoteFinder|Parse' -count=1 && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres go test -p 2 -parallel 4 ./internal/dispatch/docs/ -run 'TestAnUpload|TestAReanchorError|TestReplaceText|KeepMemoryWithinTheBound|KeepsMemoryWithinTheBound' -count=1",
+      "observed": "tsc and biome are clean, and build and vet are clean. pmdoc ok (427 s) and docs ok (68 s). parseForWrite is untouched by #2463, and still runs RepeatedBlockID, then carryBlockIDs, then EnsureBlockIDs. The fingerprint differs only by where one blank line falls in the e2e file. GitHub reports the PR MERGEABLE, and Tests is queued at 2670904e.",
+      "headSha": "2670904e2fc3d82888a1cae2bce583065fc8b055",
+      "negativeControl": "Before the merge, GitHub reported #2480 CONFLICTING (mergeStateStatus DIRTY) against main e4c9ab85, with a content conflict in block-references.e2e.ts."
     }
   ],
   "filesChanged": [
@@ -131,10 +139,11 @@
     "Round 6 answers review round 4: threads PRRT_kwDORFy7ds6xqDFj, PRRT_kwDORFy7ds6xqDFu and PRRT_kwDORFy7ds6xqDF1, each replied to and resolved at e0629eed. The reviewer's prose commit 4cd42dff stays.",
     "Round 7 answers review round 5: threads PRRT_kwDORFy7ds6xsYkA, PRRT_kwDORFy7ds6xsYkH, PRRT_kwDORFy7ds6xsYkM, PRRT_kwDORFy7ds6xsYkV and PRRT_kwDORFy7ds6xsYkY, each replied to and resolved at 4be0d238. The census row now matches the 400 text, multi-place form included. The reviewer's prose commit 63abb711 stays.",
     "Round 8 answers review round 6: thread PRRT_kwDORFy7ds6xuR36, replied to and resolved at 37f334f0. The change is a test only. The reviewer's comment commit 8ca80716 stays.",
-    "Round 9 answers review round 7 with no new threads: 92abb6c4 is a forward merge of main 1489a445 that restores the getArtifactText import; 61efae41 adds the race skip; b0a59b0b is a forward merge of main de546ed2 for the envoy-go-race-docs job, with the fingerprint unchanged. Completed before the 02:10Z worker-image drain, while CI dispatch was still running at b0a59b0b; its typecheck is clean locally."
+    "Round 9 answers review round 7 with no new threads: 92abb6c4 is a forward merge of main 1489a445 that restores the getArtifactText import; 61efae41 adds the race skip; b0a59b0b is a forward merge of main de546ed2 for the envoy-go-race-docs job, with the fingerprint unchanged. Completed before the 02:10Z worker-image drain, while CI dispatch was still running at b0a59b0b; its typecheck is clean locally.",
+    "Round 10 is the forward merge only: 2670904e merges main 49e23926 (merge note in comment 6514826943). Threads PRRT_kwDORFy7ds6xwou5 and PRRT_kwDORFy7ds6xwovG are replied to and resolved. The new pod had no Postgres or node_modules, so I set up both again, outside the repository."
   ],
   "openQuestions": [
     "The literal bound holds for an hour because the 1 GiB constant absorbs comment growth; the measured proportional factor is k ~ 19 (working-set growth per stored byte). INFRA-179's room byte budget caps the unbounded case."
   ],
-  "round": 9
+  "round": 10
 }
