@@ -244,7 +244,9 @@ func (w *window) current() bool {
 // sequence (ErrNotStored) has the envelope sent once more without its MsgId, as publishJetStream
 // does, while the window's connection is still current and its deadline has not passed: the answer
 // is that send's, under its own send time, and a failure of it still wraps ErrNotStored. The
-// resend goes out after the window's later sends, so the stream stores it after them.
+// resend goes out after the window's later sends, so the stream stores it after them, and the
+// stream does not deduplicate a copy sent without its MsgId: it stores that copy as a message of
+// its own.
 func (w *window) sendJetStream(item contracts.Envelope, data []byte) (func() error, error) {
 	var options []nats.PubOpt
 	if contracts.DedupeKeyNamesTheUpstreamEvent(item) {

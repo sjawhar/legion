@@ -69,6 +69,20 @@ func headerIdentityEnvironment(overrides map[string]string) map[string]string {
 	return values
 }
 
+// noSignInEnvironment is a cookie-identity boot environment with no sign-in setting: the sandbox
+// deployment, which has no sign-in client and asks nobody to sign in. What is left is what every
+// boot takes, the database and the agent token.
+func noSignInEnvironment(overrides map[string]string) map[string]string {
+	values := map[string]string{
+		"DATABASE_URL":         "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN": "agent-token",
+	}
+	for name, value := range overrides {
+		values[name] = value
+	}
+	return values
+}
+
 func TestResolveBootConfigReadsTheFourSignInSettings(t *testing.T) {
 	boot, err := resolveBootConfig(envGetter(signInEnvironment(nil)))
 	if err != nil {
@@ -106,14 +120,11 @@ func TestResolveBootConfigReadsTheDomainSignIn(t *testing.T) {
 	}
 }
 
-// Cookie identity is Google sign-in: without the sign-in settings, or with only some of them, the
-// server refuses to boot and names what is missing.
-func TestResolveBootConfigRefusesCookieIdentityWithoutTheWholeSignIn(t *testing.T) {
-	_, err := resolveBootConfig(envGetter(map[string]string{"DATABASE_URL": "postgres://dispatch", "DISPATCH_AGENT_TOKEN": "agent-token"}))
-	if want := "cookie identity signs people in: DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET and one of DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN are required"; err == nil || err.Error() != want {
-		t.Fatalf("cookie identity without sign-in: err = %v, want %q", err, want)
-	}
-	_, err = resolveBootConfig(envGetter(signInEnvironment(map[string]string{"DISPATCH_SIGNIN_GROUP": ""})))
+// Sign-in set in part refuses the boot and names the whole shortfall in one run: the settings it
+// was given, and the ones it still misses. The case below is the issuer, the client and the
+// secret with neither a group nor a domain, which admits nobody.
+func TestResolveBootConfigRefusesAPartialSignIn(t *testing.T) {
+	_, err := resolveBootConfig(envGetter(signInEnvironment(map[string]string{"DISPATCH_SIGNIN_GROUP": ""})))
 	if want := "Google sign-in needs DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET and one of DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN: DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET set, DISPATCH_SIGNIN_GROUP and DISPATCH_SIGNIN_DOMAIN missing"; err == nil || err.Error() != want {
 		t.Fatalf("sign-in with neither a group nor a domain: err = %v, want %q", err, want)
 	}

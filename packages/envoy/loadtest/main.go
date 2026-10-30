@@ -27,6 +27,21 @@ commands:
   series-sessions  print the session count of the series step at a load factor
   trigger-sql      print the commit-time trigger SQL (commit-trigger.sql)
   box-busy         print the box's busy fraction over the next 5 s, from /proc/stat
+  replay-fetch     read a project's state at -at and its writes to -until from a Dispatch, read-only;
+                   writes a replay bundle (DISPATCH_URL, DISPATCH_TOKEN_FILE)
+  replay-pack      pack a replay bundle as deterministic zstd tar parts
+  replay-unpack    unpack replay-pack's parts into a directory
+  replay-verify-bundle
+                   check every file of a bundle against bundle.meta.json's sha256; print counts
+  replay-seed      recreate a replay bundle's state on the stack through Dispatch's API, resumably
+                   (loadtest.replay_ids maps each logged id to the local one)
+  replay-check-seed
+                   compare a replay seed's documents with the bundle; exit 1 on a difference
+  replay-checksum  print row counts and an md5 of every version's markdown and comment body
+  replay-logical-dump
+                   write a replay seed's documents and comments with every uuid and timestamp masked
+  replay-plan      print, without a stack, the actions and requests a replay run would send (run's
+                   -replay-* flags and -rng-seed), as JSON counts
 
 Run "loadgen <command> -h" for a command's flags.
 `
@@ -54,6 +69,24 @@ func main() {
 		err = runTables(os.Args[2:])
 	case "series-sessions":
 		err = runSeriesSessions(os.Args[2:])
+	case "replay-fetch":
+		err = runReplayFetch(os.Args[2:])
+	case "replay-pack":
+		err = runReplayPack(os.Args[2:])
+	case "replay-unpack":
+		err = runReplayUnpack(os.Args[2:])
+	case "replay-verify-bundle":
+		err = runReplayVerifyBundle(os.Args[2:])
+	case "replay-seed":
+		err = runReplaySeed(os.Args[2:])
+	case "replay-check-seed":
+		err = runReplayCheckSeed(os.Args[2:])
+	case "replay-checksum":
+		err = runReplayChecksum(os.Args[2:])
+	case "replay-logical-dump":
+		err = runReplayLogicalDump(os.Args[2:])
+	case "replay-plan":
+		err = runReplayPlan(os.Args[2:])
 	case "trigger-sql":
 		fmt.Print(commitTriggerSQL)
 	case "box-busy":

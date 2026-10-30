@@ -365,9 +365,10 @@ func issueSubjectOrder(t *testing.T, url string) (map[string][]int, []int64) {
 // across a remote hub's round trip - keeps the backlog's order. The window sends nothing on the
 // connection that comes back, a send that met the cut stops its chain, and every event that met the
 // cut is released, not backed off, so a later scan sends them again, each destination's in id
-// order, and the stream's MsgId drops the copies of those that had landed: once the backlog is
-// published, the stream holds every destination once, each issue's events in id order on each, and
-// no event counted an attempt.
+// order, and the stream's MsgId drops the copies of those that had landed. A copy the window had
+// to send again without its id is the exception, which the stream stores as a message of its own.
+// Once the backlog is published, the stream holds every destination once, each issue's events in
+// id order on each, and no event counted an attempt.
 func TestABatchCutOffInFlightKeepsItsOrder(t *testing.T) {
 	const issues, count = 4, 2 * batchSize
 	_, url := testnats.Start(t)
