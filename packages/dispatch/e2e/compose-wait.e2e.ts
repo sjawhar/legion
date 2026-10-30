@@ -440,3 +440,98 @@ test("an ask whose selected text another writer deleted is not called a comment"
     await alice.close();
   }
 });
+
+/** A spec whose one paragraph reads the selected words twice, with a word before each that tells
+ *  the two apart, so a row can say which reading a mark covers. */
+const TWO_READINGS_SPEC = ["## Review", "", "Alpha the lazy dog. Beta the lazy dog.", ""].join(
+  "\n"
+);
+
+/** Where `REPEATED_QUOTE` reads in the paragraph that holds it, in characters from that
+ *  paragraph's start, in the order it reads them. */
+function readingOffsets(page: Page): Promise<number[]> {
+  return documentEditor(page).evaluate((root, quote) => {
+    const paragraph = Array.from(root.querySelectorAll("p")).find((node) =>
+      (node.textContent ?? "").includes(quote)
+    );
+    const text = paragraph?.textContent ?? "";
+    const found: number[] = [];
+    for (let at = text.indexOf(quote); at !== -1; at = text.indexOf(quote, at + 1)) found.push(at);
+    return found;
+  }, REPEATED_QUOTE);
+}
+
+/** Another writer puts a reading of the same words in front of the reader's, inside the block the
+ *  reader selected in, and takes the provisional mark with the same edit. The reader's own words
+ *  are still there - they are the paragraph's third reading now, where they were its second - so
+ *  Send either attaches the comment to them or tells the reader it cannot and keeps the draft.
+ *  What it must never do is attach the comment to a reading the reader never selected, which no
+ *  refusal tells them about (dispatch://INFRA-727 acceptance 2; the INFRA-512 architect's decision
+ *  of 2026-10-30T09:49:42Z rests on it: "a record on the wrong passage is worse than a refusal"). */
+test("a comment keeps its own reading when another writer adds an earlier one", async ({
+  browser,
+}) => {
+  test.setTimeout(240_000);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: TWO_READINGS_SPEC,
+    title: "Review the spec",
+  });
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await openSpec(page, issue.key, "Alpha");
+    await expect(connectedDot(page)).toHaveText("connected");
+    await selectSecondReading(page, REPEATED_QUOTE);
+    await barAction(page, "Comment");
+    await expect(documentEditor(page).locator('span[data-proof="comment"][data-id]')).toHaveCount(
+      1
+    );
+    // The reader's own reading, the second of the two the paragraph then holds.
+    expect((await markOffsets(page)).map((mark) => mark.offset)).toEqual([
+      (await readingOffsets(page))[1],
+    ]);
+    await composer(page).getByLabel("Comment").fill("Which dog is this?");
+
+    await editArtifact(
+      issue.primary_artifact_id,
+      {
+        ops: [
+          {
+            find: "Alpha the lazy dog. Beta the lazy dog.",
+            op: "replace",
+            with: "Zero the lazy dog. Alpha the lazy dog. Beta the lazy dog.",
+          },
+        ],
+      },
+      { actor: { id: "e2e-compose-wait", kind: "session" }, as: "agent" }
+    );
+    await expect(documentEditor(page)).toContainText("Zero the lazy dog");
+
+    await send(page);
+    // Either outcome is settled: the comment is on the page, or the composer says why not.
+    await expect
+      .poll(async () => {
+        if ((await listComments(issue.key, issue.primary_artifact_id)).length > 0) return "sent";
+        const shown = (await composer(page).textContent()) ?? "";
+        return shown.includes("Your draft is kept") ? "refused" : "waiting";
+      })
+      .not.toBe("waiting");
+
+    const rows = await listComments(issue.key, issue.primary_artifact_id);
+    if (rows.length === 0) {
+      await expect(composer(page).getByLabel("Comment")).toHaveValue("Which dog is this?");
+      return;
+    }
+    // "Beta the lazy dog" is the paragraph's third reading now that "Zero the lazy dog" stands
+    // in front of it.
+    const readings = await readingOffsets(page);
+    expect(readings).toHaveLength(3);
+    expect(await markOffsets(page)).toEqual([
+      { id: rows[0]?.anchor?.mark_id ?? "", offset: readings[2] },
+    ]);
+  } finally {
+    await alice.close();
+  }
+});
