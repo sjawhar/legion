@@ -1,0 +1,12 @@
+kind: Added
+body: |-
+    `fileValue`, `fileBearer`, `dispatchSettings` and `sessionDispatchSettings` take
+    `commands: "kept"`, which never runs a `!` token command: it takes the outcome another call
+    already kept in the process, and with none Dispatch reads as off with an error saying the
+    command has not run. Every existing caller keeps running the command as before.
+    `dispatchUrl(env, config)` and `sessionDispatchUrl(file, env, { cwd })` return the URL alone,
+    resolved as `dispatchSettings` resolves it but without reading the token, so no `!` command runs:
+    undefined when Dispatch is off before its token is read.
+time: 2026-10-28T10:08:19.427565313Z
+custom:
+    Issue: pr2376

@@ -690,7 +690,7 @@ and nothing due they hold no timer and send no statement. The four that run pass
 replaced, so under load each runs no more often than that ticker did.
 
 - The embedding queue (`embedqueue.Run`) scans when `embeddings_enqueue`, which every embedding
-  trigger calls, writes a row: it notifies `dispatch_embeddings` (migration `0145`) for a new item
+  trigger calls, writes a row: it notifies `dispatch_embeddings` (migration `0148`) for a new item
   or a text whose hash changed, and an update that leaves the text as it was notifies nothing. The
   rows the coverage pass writes wake it in process. Scans start at least 5 s apart. After each
   scan it reads when the earliest pending row falls due (a failed row's retry, or another
@@ -698,11 +698,11 @@ replaced, so under load each runs no more often than that ticker did.
   away. A throttled batch waits 5 s plus its backoff before the next. It takes no lease: its claim
   keeps two processes' scans off each other's rows.
 - The reference excerpt reconciliation (`docs.Service.RunReferenceExcerptReconciliation`, lease
-  `reference-excerpts`) is woken by a row trigger on `refs` (`0147`) that notifies
+  `reference-excerpts`) is woken by a row trigger on `refs` (`0150`) that notifies
   `dispatch_excerpts_owed` for each document mention left owed an excerpt, whichever build or
   command wrote it (`rebuild-refs` included). Batches of 20 documents start at least 2 s apart, the
   next as soon as that allows while a full batch leaves documents it can still record. A document
-  it cannot read or record is deferred in `reference_excerpt_backoff` (`0146`), keyed by the
+  it cannot read or record is deferred in `reference_excerpt_backoff` (`0149`), keyed by the
   version that failed: one minute after the first failure, doubling to at most six hours, plus up
   to a fifth again of jitter; a success deletes the row, and a newer version starts again from
   one. A deferred document stays out of the batches until it falls due, so documents that keep
@@ -710,7 +710,7 @@ replaced, so under load each runs no more often than that ticker did.
   earliest due time is the loop's only timer. Each process's first pass also marks owed the
   excerpts a pre-`0092` build left stale (`refs.MarkStaleExcerpts`), once.
 - The edit notice sweep (`docs.Service.RunEditNotices`, lease `edit-notices`) is woken by a row
-  trigger on `document_edit_notices` (`0151`) that notifies `dispatch_edit_notices` each time a
+  trigger on `document_edit_notices` (`0154`) that notifies `dispatch_edit_notices` each time a
   writer gives a notice a due time: a person's settled version opening or moving its quiet
   window, from either build. A sweep sends the notices that are due, each as one
   `artifact.human_edited` event, and then reads the earliest due time left
@@ -722,8 +722,8 @@ replaced, so under load each runs no more often than that ticker did.
 - The suggestion outcome sweep (`api.RunSuggestionOutcomeSweep`) is woken by `dispatch_events`
   (`0107`), which every event commit notifies whichever process made it. Passes start at least
   60 s apart. A pass reads the events after its cursor
-  (`suggestion_outcome_cursor`, `0148`) and the suggestions no pass has judged yet
-  (`write_suggestions.swept`, `0149`), in pages of 1,000, each page in a transaction that holds the
+  (`suggestion_outcome_cursor`, `0151`) and the suggestions no pass has judged yet
+  (`write_suggestions.swept`, `0152`), in pages of 1,000, each page in a transaction that holds the
   cursor row `for update`, and judges only the pending suggestions those can resolve: the newly
   recorded ones, against all their events, and those whose source issue, source document or
   suggested issue a page's event names. An event or suggestion less than 60 s old waits for a
@@ -732,12 +732,12 @@ replaced, so under load each runs no more often than that ticker did.
   suggestion once, as every pass of the release before it did. A failed pass is retried a minute
   later. Like the embedding queue, it takes no lease: the cursor row each page holds is what
   serialises two processes woken by one commit, the first pass included, since the row is there
-  from `0148` with a null `event_id`. The second process's page waits on the row and then reads
+  from `0151` with a null `event_id`. The second process's page waits on the row and then reads
   the cursor the first advanced, so it judges what the first did not rather than the same page
   twice, and no wake is given up to another process's pass.
 - The delivery settings both GitHub intakes route by are one cache per process
   (`delivery.SettingsCache`), read at start and again when `delivery_settings` changes:
-  `delivery_settings_changed` notifies `dispatch_delivery_settings` (`0150`) for a change to any
+  `delivery_settings_changed` notifies `dispatch_delivery_settings` (`0153`) for a change to any
   column but the freshness ones every GitHub event and reconcile pass rewrite. A settings change
   reaches a running intake without a restart, and neither intake reads the row per message or on
   a timer; a read that fails is tried again 30 s later. The release before this one polls the row
@@ -1439,6 +1439,43 @@ EXCLUSIVE` on `broadcasts` too, because the table's foreign key puts triggers th
 read or send waits for the instant the migration's transaction lasts. Its census answers `0`. It
 follows `0139_related_checks` and `0140_issue_embedding_spec`, which already use the preceding
 migration numbers.
+Migrations `0145_events_person_words` and `0146_comment_deliveries_session` add two partial
+indexes for `GET /api/v1/agents/{session_id}/answers` (`sessionanswers.List`, Routes below), which
+every agent host reads on every model request. `0145` creates `events_person_words` on `events
+(created_at desc, id desc)` where the actor is a person and the type is `ask.answered`,
+`comment.created`, `message.created` or `message.answered`: the route reads the window's human
+events of those types through it, newest first, and keeps those whose `published_destinations`
+hold the session's own topic. A GIN index on `published_destinations` would find the session's
+events directly, but the outbox appends each topic it published an event to that array, and every
+such append would then also write the new element's entry into the index: a write load every
+outbox append would pay for a read only this route makes. `0146` creates
+`comment_deliveries_session` on `comment_deliveries (session_id, created_at desc)` where
+`session_id` is not null: the route reads the session's mentions created since an hour before its
+window as one range of it. Each is a plain `create index` inside the runner's
+transaction, so it holds `SHARE` on its table while it builds: writes to it wait, reads do not. On
+a local Postgres 17 (two CPUs, `maintenance_work_mem` 64 MB) with `events` seeded to 1,000,000
+rows (421 MB with its indexes, 126,541 of them in the index), `0145` built in 0.66-1.13 s over
+three runs and `0146` in 0.11-0.14 s on 50,003 deliveries. Both censuses answer `0`: an index
+build refuses and rewrites no row, and the census report already counts and sizes each table it
+reads.
+
+Migration `0147_message_deliveries_session_created` creates `message_deliveries_session_created`
+on `message_deliveries (session_id, created_at desc) include (message_id)` where `state` is
+`sent`, for the same route's read of the session's sent message deliveries created since an hour
+before its window. `message_deliveries_session` (`0051`) keys `session_id` alone, so through it
+that read fetched the session's whole delivery history and filtered it by time: a long-lived
+session that receives every broadcast copy read all of its deliveries on every model request.
+The new index holds only the read's sent rows and carries the one column it returns, so the read
+is an index-only scan of the window's range, and a cached generic plan, which knows neither the
+session nor the window, chooses it too: costed as a plain `(session_id, created_at desc)` index it
+came within a percent of `0051`, which the generic plan kept. `0051` stays for the conversation
+window, which reads every delivery a session ever received. On the seeded database above, with one
+session given 60,003 sent deliveries (1,019 since an hour before its window), the read of them
+went from 58,984 rows fetched and discarded (798 buffers, 20-22 ms) to an index-only scan of the
+1,019 (11 buffers, 0.3-0.4 ms), in the custom and the generic plan alike; the index built in
+0.34-0.52 s over three runs on 110,003 deliveries. A plain `create index` inside the runner's
+transaction, it holds `SHARE` on `message_deliveries` while it builds: writes to it wait, reads do
+not. Its census answers `0`.
 
 Migration `0142_item_blocks` creates the tables behind the blocks of a comment or message as graph
 nodes (`packages/envoy/AGENTS.md`, "References form one graph"): `comment_blocks`,
@@ -1474,36 +1511,36 @@ message included (a message is never edited), and owes an index to every message
 reading `messages` once. Its trigger takes `SHARE ROW EXCLUSIVE` on `messages` alone, so a message
 write waits behind it while a read does not. Its census answers `0` for the same reasons.
 
-Migrations `0145`–`0151` let the background loops wait for a change instead of polling for one
+Migrations `0148`–`0154` let the background loops wait for a change instead of polling for one
 (Background loops, above). Each is additive: the release before them never reads the new tables
 or column, its writes reach the two replaced functions through the same triggers as before, it
 never listens on the new channels, and it keeps polling beside them during the roll. Every census
 answers `0`.
 
-- `0145_embeddings_notify` and `0150_delivery_settings_notify` each replace a function's body and
+- `0148_embeddings_notify` and `0153_delivery_settings_notify` each replace a function's body and
   lock no table. `embeddings_enqueue` (0118's body otherwise unchanged) also notifies
   `dispatch_embeddings` when its upsert writes a row, and `delivery_settings_changed` (0100's,
   which 0106's trigger keeps calling by name) also notifies `dispatch_delivery_settings` in the
   branch that logs a settings change.
-- `0146_reference_excerpt_backoff` creates `reference_excerpt_backoff`, one row per document the
+- `0149_reference_excerpt_backoff` creates `reference_excerpt_backoff`, one row per document the
   excerpt reconciliation failed on: its version, the failures in a row there, and when it is tried
   again.
-- `0147_refs_excerpts_owed_notify` adds a row trigger on `refs`, after an insert or an update of
+- `0150_refs_excerpts_owed_notify` adds a row trigger on `refs`, after an insert or an update of
   `excerpt_version` that leaves a document mention owed an excerpt, which notifies
   `dispatch_excerpts_owed`. It is a trigger rather than a notify in Go so that what the release
   before it writes, and `rebuild-refs` from either build, wakes the loop too; a migration of its
   own, so its transaction holds `refs`' lock alone, for milliseconds.
-- `0148_suggestion_outcome_cursor` creates `suggestion_outcome_cursor`, a one-row table holding the
+- `0151_suggestion_outcome_cursor` creates `suggestion_outcome_cursor`, a one-row table holding the
   highest event id the outcome sweep has judged by, inserted null so that the first pass judges
   every pending suggestion once.
-- `0149_write_suggestions_swept` adds `write_suggestions.swept`, whether a pass has judged the row
+- `0152_write_suggestions_swept` adds `write_suggestions.swept`, whether a pass has judged the row
   against all its events, with the constant default `true`, so the column is added without
   rewriting the table and every existing row counts as swept, and then sets the default to `false`
   for the rows inserted after it, the release before's included. It also creates two partial
   indexes: `write_suggestions_unswept`, the pass's read of the rows not yet swept, and
   `write_suggestions_pending_artifact`, its lookup of the pending suggestions by a new event's
   document.
-- `0151_document_edit_notices_notify` adds a row trigger on `document_edit_notices`, after an
+- `0154_document_edit_notices_notify` adds a row trigger on `document_edit_notices`, after an
   insert or an update that leaves a notice with a due time, which notifies
   `dispatch_edit_notices`. Every writer of such a row — a settlement, a named or snapshot version,
   a person's rebuild — writes a version and appends its event in the same transaction, which
@@ -2226,6 +2263,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/me/replies?limit=&offset=&issue=\|artifact=` | GET | cookie or trusted header (human only) | List the threads the caller wrote in where someone else has written since the caller last read them, newest reply first, less an open ask the Inbox lists. A row names the thread, its owner, its subject, its root's deep link and the newest reply's author, first line and time. `issue` or `artifact` narrows to one owner (both is `400 INVALID_QUERY`); `limit` is 1–200 (default 50). |
 | `/api/v1/me/threads/{id}/read` | PUT | cookie or trusted header (human only) | Move the caller's read mark on one thread forward to `{read_through}`; it never moves back, a value more than a minute ahead of the server is `400 INVALID_STATE`, and a non-uuid id is `400 THREAD_ID_INPUT`. Answers `204`, writing nothing for a thread the caller never wrote in. |
 | `/api/v1/agents` | GET | cookie, trusted header, or bearer | List live Envoy sessions (`session_id`, `title`, `dir`, `machine_id`, `roles`, `capabilities`, `last_seen`), newest first, from Dispatch's copy of the listener's session list, at most 5 s old; `503 ENVOY_UNAVAILABLE` when the listener cannot be reached, and for up to 5 s after a failed listener read without asking the listener again. |
+| `/api/v1/agents/{session_id}/answers?since=&max_chars=` | GET | cookie, trusted header, or bearer | What people wrote that Dispatch delivered to one session, newest first: each ask's current answer (`replaced` when it changed an earlier one), each comment at its current body (`edited_at` when edited) and each message, once however it arrived: a person's `ask.answered`, `comment.created`, `message.created` or `message.answered` event whose `published_destinations` hold the session's own topic, its sent message deliveries, and its sent comment deliveries (mentions). Never an agent's or the system's words, an ask's resolution or hand-back, or a delivery to a `role:` route. Each item carries its `relation`, the `ask` and its question where it answers or replies in one, and its `owner`, `ref` and `href`. `since` defaults to 72 hours ago (older than 7 days or in the future is `400 INVALID_QUERY`); `max_chars` (1–100,000) stops the list after the item whose text takes the running sum past it, `total` still counting every item; a bad `session_id` is `400 INVALID_SESSION_ID`. Not an authorization boundary: direct-message text already reaches every caller through `GET /api/v1/events`, and a person may read any session's list. |
 | `/api/v1/projects` | GET | cookie, trusted header, or bearer | List projects (`key`, `name`, `open_asks`, `created_at`), ordered by key. |
 | `/api/v1/projects` | POST | cookie, trusted header, or bearer | Create a project from `key` and `name`, for a person or an agent session alike; rejects a key that is not a project key, an empty name, a name holding a control character or a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069), and a name with no visible character (a letter, number, punctuation or symbol other than the blank fillers U+115F, U+1160, U+3164, U+FFA0 and U+2800, or a code point Go's Unicode tables leave unassigned, such as an emoji newer than them, other than a noncharacter (U+FDD0-U+FDEF and each code point ending in FFFE or FFFF) or a reserved default-ignorable (U+2065, U+FFF0-U+FFF8, U+E0000-U+E0FFF); combining marks, format characters, private-use characters and whitespace don't count) with `400 INVALID_PROJECT`, a name over 80 characters (`contracts.ProjectNameMax`, UTF-16 units after the trim) with `400 CAP_EXCEEDED`, and a duplicate key with `409 PROJECT_EXISTS`. |
 | `/api/v1/settings/repo-projects` | GET | cookie, trusted header, or bearer | List repository-to-project mappings, each with `default`, whether it is its project's default repository. |
