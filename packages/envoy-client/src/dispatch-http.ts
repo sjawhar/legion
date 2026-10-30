@@ -227,7 +227,7 @@ function answerPayload(response: Response, text: string): unknown {
 /** Whether `error` is a server's answer that it has no route for the request (`404 NOT_FOUND`,
  *  "no route for …"), as a server older than a route answers it; a `404 NOT_FOUND` for a
  *  resource the server does not know says "not found" instead. */
-function isNoRoute(error: unknown): boolean {
+export function isNoRoute(error: unknown): boolean {
   return (
     error instanceof DispatchServiceError &&
     error.status === 404 &&
@@ -855,11 +855,18 @@ export class DispatchClient {
     );
   }
 
+  /**
+   * `POST /api/v1/projects/{key}/artifacts`: an upload the project owns. `key` is the caller's own
+   * `Idempotency-Key` for the upload, where the caller has one intent across calls and processes —
+   * AskGate's decision document, created once per session however many processes reach for it — and
+   * replaces the key this call would mint for itself. It must match `IDEMPOTENCY_KEY_PATTERN`.
+   */
   async projectArtifact(
     project: string,
-    input: CreateArtifactInput
+    input: CreateArtifactInput,
+    key?: string
   ): Promise<ArtifactUploadResponse> {
-    return this.#upload(["api", "v1", "projects", project, "artifacts"], input);
+    return this.#upload(["api", "v1", "projects", project, "artifacts"], input, key);
   }
 
   async getProjectArtifact(project: string, slug: string): Promise<Artifact> {
@@ -1381,8 +1388,21 @@ export class DispatchClient {
     );
   }
 
-  async docEdit(id: string, input: EditArtifactInput): Promise<EditArtifactResponse> {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "edits"], input);
+  /**
+   * `POST /api/v1/artifacts/{id}/edits`: an edit of a document's text. `key` is the caller's own
+   * `Idempotency-Key` for the edit, where the caller has one intent across calls and processes —
+   * AskGate's one append per decision, which a resumed session must not write twice — and replaces
+   * the key this call would mint for itself. It must match `IDEMPOTENCY_KEY_PATTERN`.
+   */
+  async docEdit(id: string, input: EditArtifactInput, key?: string): Promise<EditArtifactResponse> {
+    return this.#json(
+      "POST",
+      ["api", "v1", "artifacts", id, "edits"],
+      input,
+      undefined,
+      undefined,
+      key
+    );
   }
 
   async nameArtifactVersion(id: string, input: CreateVersionInput): Promise<Version> {
@@ -1463,9 +1483,10 @@ export class DispatchClient {
     path: readonly string[],
     body?: unknown,
     query?: object,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    key?: string
   ): Promise<T> {
-    return (await this.#jsonAnswer<T>(method, path, body, query, signal)).payload;
+    return (await this.#jsonAnswer<T>(method, path, body, query, signal, key)).payload;
   }
 
   /** `#json` with the status Dispatch answered, for a route whose status says what it did.
@@ -1475,7 +1496,8 @@ export class DispatchClient {
     path: readonly string[],
     body?: unknown,
     query?: object,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    key?: string
   ): Promise<{ readonly status: number; readonly payload: T }> {
     const url = this.#url(path, query);
     const response = await this.#send(
@@ -1483,20 +1505,21 @@ export class DispatchClient {
       url,
       body === undefined ? undefined : { content: JSON.stringify(body), type: "application/json" },
       undefined,
-      signal
+      signal,
+      key
     );
     return { status: response.status, payload: await this.#response<T>(method, url, response) };
   }
 
   /** An upload to an owner's artifact route: inline content as JSON, a file as multipart. */
-  async #upload<T>(path: readonly string[], input: CreateArtifactInput): Promise<T> {
-    if ("content" in input) return this.#json("POST", path, input);
+  async #upload<T>(path: readonly string[], input: CreateArtifactInput, key?: string): Promise<T> {
+    if ("content" in input) return this.#json("POST", path, input, undefined, undefined, key);
     const form = new FormData();
     form.set("name", input.name);
     if (input.summary !== undefined) form.set("summary", input.summary);
     if (input.actor !== undefined) form.set("actor", JSON.stringify(input.actor));
     form.set("file", input.file, input.name);
-    return this.#form("POST", path, form);
+    return this.#form("POST", path, form, key);
   }
 
   /**
@@ -1504,12 +1527,17 @@ export class DispatchClient {
    * boundary, and a retry whose bytes differ from its first attempt's is a different request to
    * Dispatch, which refuses a key reused for one (`422 KEY_REUSED`).
    */
-  async #form<T>(method: string, path: readonly string[], form: FormData): Promise<T> {
+  async #form<T>(
+    method: string,
+    path: readonly string[],
+    form: FormData,
+    key?: string
+  ): Promise<T> {
     const url = this.#url(path);
     const encoded = new Response(form);
     const type = encoded.headers.get("Content-Type") ?? "multipart/form-data";
     const content = new Uint8Array(await encoded.arrayBuffer());
-    const response = await this.#send(method, url, { content, type });
+    const response = await this.#send(method, url, { content, type }, undefined, undefined, key);
     return this.#response<T>(method, url, response);
   }
 
@@ -1525,17 +1553,20 @@ export class DispatchClient {
    *
    * A write repeated here is a new intent and carries a key of its own: Dispatch answers
    * `429 OVERLOADED` before the keyed layer runs and releases the key behind a
-   * `429 EDIT_QUEUE_FULL`, so neither leaves a key for the repeat to replay.
+   * `429 EDIT_QUEUE_FULL`, so neither leaves a key for the repeat to replay. Where the caller
+   * named its own key, that key is the repeat's too: the refusal left none behind to replay, and
+   * the caller's one intent across calls and processes is one key, however many sends carry it.
    */
   async #send(
     method: string,
     url: string,
     body?: EncodedBody,
     accept = "application/json",
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    callerKey?: string
   ): Promise<Response> {
     for (let attempt = 1; ; attempt++) {
-      const response = await this.#sendOnce(method, url, body, accept, signal);
+      const response = await this.#sendOnce(method, url, body, accept, signal, callerKey);
       if (response.status !== 429 && response.status !== 503) return response;
       const text = await response.text();
       const refusal = asErrorShape(answerPayload(response, text));
@@ -1579,15 +1610,17 @@ export class DispatchClient {
 
   /**
    * One send of `#send`'s: a read, a PUT or a DELETE goes once, and `signal` aborts it beside the
-   * client's own signal. A write (POST or PATCH) carries an `Idempotency-Key` minted here for this
+   * client's own signal. A write (POST or PATCH) carries an `Idempotency-Key`: the caller's own
+   * `callerKey`, where it has one intent across calls and processes, else one minted here for this
    * send alone, so all its attempts are one intent to Dispatch, which runs it once and answers a
-   * repeat with the answer it stored, while two sends are two writes. Each attempt sends the same
-   * encoded body. While an attempt gets no definitive answer (`writeAnswer`, a transport failure,
-   * or `writeRetry.silenceMs` without progress, `#attempt`) the write asks again under its key,
-   * paced by `writeRetry`, and the first definitive answer is the send's: a 2xx, a replay of one
-   * included, or a refusal. The call's deadline and its caller's cancellation end the attempts at
-   * once, whether a fetch or a pause is under way (`#ended`). An answer `#send` waits out is
-   * definitive here, so one wait-out path handles it for every method.
+   * repeat with the answer it stored, while two sends are two writes unless one `callerKey` makes
+   * them the one intent it names. Each attempt sends the same encoded body. While an attempt gets
+   * no definitive answer (`writeAnswer`, a transport failure, or `writeRetry.silenceMs` without
+   * progress, `#attempt`) the write asks again under its key, paced by `writeRetry`, and the first
+   * definitive answer is the send's: a 2xx, a replay of one included, or a refusal. The call's
+   * deadline and its caller's cancellation end the attempts at once, whether a fetch or a pause is
+   * under way (`#ended`). An answer `#send` waits out is definitive here, so one wait-out path
+   * handles it for every method.
    *
    * It asks again only against a Dispatch this process has lately seen run the keyed layer: a
    * Dispatch without the layer would run a repeat as a second write, so its 5xx — which can come
@@ -1604,7 +1637,8 @@ export class DispatchClient {
     url: string,
     body?: EncodedBody,
     accept = "application/json",
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    callerKey?: string
   ): Promise<Response> {
     const headers: Record<string, string> = {
       Accept: accept,
@@ -1619,7 +1653,7 @@ export class DispatchClient {
         ...(body === undefined ? {} : { body: body.content }),
       });
     }
-    const key = crypto.randomUUID();
+    const key = callerKey ?? crypto.randomUUID();
     headers[IDEMPOTENCY_KEY_HEADER] = key;
     const { pausesMs, withinMs, silenceMs, pause = pauseFor } = this.writeRetry;
     const request = `${method} ${url}`;

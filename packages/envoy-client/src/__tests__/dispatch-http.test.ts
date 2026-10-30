@@ -1338,6 +1338,42 @@ describe("DispatchClient waits out Retry-After", () => {
     expect(state.waits[0]).toBeLessThanOrEqual(3_250);
   });
 
+  // A send repeated here is a new intent, so a write that mints its own key mints a fresh one for
+  // it. A caller's own key is that caller's one intent across calls and processes, and the refusal
+  // was answered before Dispatch's keyed layer ran, leaving no key behind to replay, so the repeat
+  // carries the caller's key again.
+  test("repeats a write under the caller's own key, and under a new one where it gave none", async () => {
+    const uploaded = { artifact: { id: "doc-1" } };
+    const { fetchImpl, requests } = fakeFetch([
+      refusal(429, "EDIT_QUEUE_FULL", "1"),
+      jsonResponse(uploaded),
+      refusal(429, "OVERLOADED", "1"),
+      jsonResponse({ id: "message-1", issue_key: "DSP-1" }),
+    ]);
+    const { clock } = fakeClock();
+    const client = retryClient(fetchImpl, clock);
+    const callerKey = "askgate-doc.3f7a91";
+
+    await expect(
+      client.projectArtifact(
+        "DSP",
+        { name: "decisions.md", content: "# Decisions", actor },
+        callerKey
+      )
+    ).resolves.toMatchObject(uploaded);
+    await expect(client.message("DSP-1", { body: "Shipped.", actor })).resolves.toMatchObject({
+      id: "message-1",
+    });
+
+    const keys = requests.map(
+      (request) => (request.init.headers as Record<string, string>)["Idempotency-Key"]
+    );
+    expect(keys.slice(0, 2)).toEqual([callerKey, callerKey]);
+    expect(keys[2]).toBeString();
+    expect(keys[3]).toBeString();
+    expect(keys[3]).not.toBe(keys[2]);
+  });
+
   test.each([
     "DATABASE_BUSY",
     "REQUEST_TIMEOUT",

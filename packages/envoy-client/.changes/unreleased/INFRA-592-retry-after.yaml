@@ -9,5 +9,7 @@ body: |-
   refusal's message adds how many attempts Dispatch refused and the wait it asks for, e.g. `busy;
   Dispatch refused 3 attempts with 429 OVERLOADED, waiting out its Retry-After between them, so
   wait 1 s (Retry-After) and try again`, or that the wait would pass the deadline. Every other
-  answer comes back as before. The constructor takes an optional `RetryClock` after the signal
-  (INFRA-592).
+  answer comes back as before. A write sent again is a new intent under a key of its own, except
+  where the caller named that key (`projectArtifact`, `docEdit`): neither refusal leaves a key
+  behind to replay, so the caller's one intent across calls and processes keeps its one key. The
+  constructor takes an optional `RetryClock` after the signal (INFRA-592).
