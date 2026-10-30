@@ -9,9 +9,9 @@ type Phase string
 const (
 	Admitted Phase = "admitted"
 	// AwaitingPerson is a root admitted tree that waits only on a person: its architect asked a
-	// question and handed it to the person. It holds no admission slot and its architect is
-	// suspended; the person's answer puts it at the front of the waiting line, and its slot resumes
-	// the architect in its own session.
+	// question and handed it to the person. It holds no admission slot, and its architect stays
+	// live in its own session, reading and answering the person's comments; the person's answer
+	// puts the root at the front of the waiting line, and its slot delivers the architect its task.
 	AwaitingPerson Phase = "awaiting_person"
 	Planning       Phase = "planning"
 	Implementing   Phase = "implementing"

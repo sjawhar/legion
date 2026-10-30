@@ -24,7 +24,11 @@ const (
 
 // Closure follows artifact references from an issue's own content to eight hops. A reference to
 // a block reaches the block's document, while a current version of the document holds that
-// block: a deleted block's links drop out of the closure until a version holds its id again.
+// block: a deleted block's links drop out of the closure until a version holds its id again. A
+// block of a comment or message reaches its item, as a document's block reaches its document: a
+// link one holds is read from its item's own refs row, which every comment and message keeps
+// beside its blocks' mentions, so the member's via is the item. A reference to an item block, as
+// one to its item, reaches no document.
 func Closure(ctx context.Context, q Queryer, issueKey string) ([]Member, bool, error) {
 	rows, err := q.Query(ctx, `
 		with recursive closure as (
