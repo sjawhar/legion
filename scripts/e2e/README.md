@@ -2977,7 +2977,7 @@ model provider and is never wired into CI.
 
 ```bash
 LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:<port>/postgres?sslmode=disable' \
-  ANTHROPIC_API_KEY=… bash scripts/e2e/envoy-session-delivery.sh     # → "ENVOY SESSION DELIVERY: PASS …", exit 0
+  bash scripts/e2e/envoy-session-delivery.sh     # → "ENVOY SESSION DELIVERY: PASS …", exit 0
 
 # Negative controls: the listener and both plugins of an earlier revision.
 … bash scripts/e2e/envoy-session-delivery.sh --build-from c3d09eec --expect-lost agent,issue,role
@@ -2993,6 +2993,14 @@ LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:<port>/postgres?sslmode=disabl
 # is re-pinned. Only with disruption a, which is the window it upgrades in.
 … bash scripts/e2e/envoy-session-delivery.sh --disruptions a --resume-plugins-from origin/main
 ```
+
+The sessions' model key is read from a file, `/var/run/model-gateway-key/key` by default, where
+every role pod mounts the model gateway's key (no process of the pod carries it in its
+environment); `SESSION_DELIVERY_MODEL_KEY_FILE` names another. The script reads it into a shell
+variable it never exports and hands it to the two sessions alone, as their `ANTHROPIC_API_KEY`,
+beside `ANTHROPIC_BASE_URL` when the caller sets it; it never prints it, and refuses (exit 2) a
+file it cannot read or one that is empty. A caller's own `ANTHROPIC_API_KEY` reaches nothing the
+run starts.
 
 It runs in an issue pod: no Docker, tmux or root. It needs `go`, `bun`, `jq`, `curl`, `socat`
 1.8.0 or later (its `ACCEPT-FD` address), `setsid`, `psql`, `git`, `tar`, `pgrep`, `mkfifo` and
@@ -3126,8 +3134,8 @@ The role lane falls back to the machine groups, since that grant carries no shar
 | input | default | meaning |
 | :--- | :--- | :--- |
 | `LEGION_TEST_PG_DSN` | required | a loopback Postgres with pgvector; the run creates and drops a database of its own |
-| `ANTHROPIC_API_KEY` | required | passed to Oh My Pi and Claude Code only, never printed |
-| `ANTHROPIC_BASE_URL` | unset | when set, passed to Oh My Pi and Claude Code only, beside the key: a model gateway whose key `ANTHROPIC_API_KEY` is. An issue pod has no Anthropic key of its own; its `ANTHROPIC_BASE_URL` names its model gateway, and `ANTHROPIC_API_KEY="$LEGION_MODEL_GATEWAY_KEY"` is that gateway's key |
+| `SESSION_DELIVERY_MODEL_KEY_FILE` | `/var/run/model-gateway-key/key` | the file holding the sessions' model key, handed to Oh My Pi and Claude Code alone as their `ANTHROPIC_API_KEY` and never printed; the default is where every role pod mounts its model gateway's key |
+| `ANTHROPIC_BASE_URL` | unset | when set, passed to Oh My Pi and Claude Code only, beside the key: a model gateway whose key the key file holds. An issue pod has no Anthropic key of its own; its `ANTHROPIC_BASE_URL` names its model gateway, and `/var/run/model-gateway-key/key` holds that gateway's key |
 | `SESSION_DELIVERY_OMP` | `omp` on `PATH`, else `/opt/omp/bin/omp` | the Oh My Pi to run |
 | `SESSION_DELIVERY_MODEL` | `claude-haiku-4-5` | both sessions' model (Oh My Pi gets `anthropic/<model>`) |
 | `SESSION_DELIVERY_CLAUDE_CODE` | `2.1.311` | the Claude Code version `bunx` runs |

@@ -110,7 +110,10 @@
 #   LEGION_TEST_PG_DSN            required: a loopback Postgres with pgvector, as
 #                                 postgres://<user>@127.0.0.1:<port>/<db>?sslmode=disable; the run
 #                                 creates a database of its own there and drops it on exit
-#   ANTHROPIC_API_KEY             required: passed to Oh My Pi and Claude Code only, never printed
+#   SESSION_DELIVERY_MODEL_KEY_FILE  the model key's file (default /var/run/model-gateway-key/key,
+#                                 where every role pod mounts the model gateway's key); the run
+#                                 reads it into no variable it exports, hands it to Oh My Pi and
+#                                 Claude Code alone as their ANTHROPIC_API_KEY, and never prints it
 #   ANTHROPIC_BASE_URL            when set, passed to Oh My Pi and Claude Code only, beside the key
 #                                 (a model gateway, such as an issue pod's, whose key it is)
 #   SESSION_DELIVERY_OMP          Oh My Pi (default: omp on PATH, else /opt/omp/bin/omp)
@@ -123,8 +126,8 @@
 #
 # No DISPATCH_*, ENVOY_*, NATS_*, OMP*, PI_*, LEGION_* or CLAUDE_* variable of the caller reaches
 # anything the run starts. Every service and session gets PATH, what the script sets, and, for the
-# sessions alone, ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL when the caller sets it (and
-# BUN_INSTALL_CACHE_DIR for bunx when the caller sets it).
+# sessions alone, ANTHROPIC_API_KEY (read from SESSION_DELIVERY_MODEL_KEY_FILE), ANTHROPIC_BASE_URL
+# when the caller sets it, and BUN_INSTALL_CACHE_DIR for bunx when the caller sets it.
 # Everything started is stopped on exit by the pid it was started as; the database is dropped; the
 # evidence directory is kept. Manual only, never CI: it needs a model provider.
 #
@@ -138,8 +141,7 @@ for variable in $(compgen -e); do
     [ "$variable" = LEGION_TEST_PG_DSN ] || unset "$variable" ;;
   esac
 done
-anthropic_key=${ANTHROPIC_API_KEY:-}
-unset ANTHROPIC_API_KEY
+model_key_file=${SESSION_DELIVERY_MODEL_KEY_FILE:-/var/run/model-gateway-key/key}
 
 readonly me=envoy-session-delivery
 refuse() {
@@ -202,7 +204,12 @@ done
   refuse "LEGION_TEST_PG_DSN is not a postgres:// URL with a database path"
 pg_server=${BASH_REMATCH[1]}
 pg_params=${BASH_REMATCH[4]}
-[ -n "$anthropic_key" ] || refuse "ANTHROPIC_API_KEY is required: both sessions run their turns on it"
+[ -r "$model_key_file" ] ||
+  refuse "the model key file $model_key_file is not readable: both sessions run their turns on it (SESSION_DELIVERY_MODEL_KEY_FILE names another)"
+# Read into a shell variable that is never exported: isolated_exec hands it to the two sessions'
+# own environment alone. Its contents are never printed; only its being empty is checked.
+anthropic_key=$(<"$model_key_file")
+[ -n "$anthropic_key" ] || refuse "the model key file $model_key_file is empty"
 for tool in go bun jq curl socat setsid psql git tar pgrep mkfifo python3; do
   command -v "$tool" >/dev/null 2>&1 || refuse "$tool is required and is not on PATH"
 done
