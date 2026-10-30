@@ -120,6 +120,10 @@ export interface ReadingPaneProps {
   ask: InboxRow;
   /** The reader's own answer landed; the list selects the next row. */
   onAnswered: (askId: string) => void;
+  /** The head's Snooze write is in flight or refused, or has stopped being either: the Inbox
+   *  keeps a live row listed, which is what keeps this column on it long enough for a refusal
+   *  to be read. */
+  onSnoozeLive: (askId: string, live: boolean) => void;
   viewer: string | undefined;
 }
 
@@ -134,7 +138,12 @@ export interface ReadingPaneProps {
  * document, show the card the Inbox has always drawn, and so does a question whose document
  * could not be opened: the column never shows the document page's rebuild or repair prompts.
  */
-export function ReadingPane({ ask, onAnswered, viewer }: ReadingPaneProps): ReactNode {
+export function ReadingPane({
+  ask,
+  onAnswered,
+  onSnoozeLive,
+  viewer,
+}: ReadingPaneProps): ReactNode {
   const askId = ask.id;
   const subject = subjectOf(ask);
   const artifactId =
@@ -383,6 +392,7 @@ export function ReadingPane({ ask, onAnswered, viewer }: ReadingPaneProps): Reac
           subject.kind === "approval" && changeBaseline !== undefined ? nextChange : undefined
         }
         onSkipToAnswer={showsDocument ? skipToAnswer : undefined}
+        onSnoozeLive={onSnoozeLive}
         sectionBlockId={sectionBlockId}
         viewer={viewer}
       />

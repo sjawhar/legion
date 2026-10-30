@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, expect, type Mock, spyOn, test } from "bun:test";
 import type { BlockWidget, TextDecoration } from "@legion/proof-editor";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { MemoryRouter } from "react-router-dom";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { ApiError, api } from "../../api/client";
-import type { Artifact, InboxRow, IssueDetails, Version } from "../../api/types";
+import type { Artifact, AskSnooze, InboxRow, IssueDetails, Version } from "../../api/types";
 import { changeMarksAgainst } from "../doc/change-marks";
 import type { CreateEditor, EditorHandle } from "../doc/editor";
 import { DocumentRuntime } from "../doc/runtime";
@@ -169,12 +169,19 @@ function renderPane({
   client.setQueryData(["whoami"], { event_head: "0", kind: "user", login: "alice" });
   seed(client);
   const answered: string[] = [];
+  /** Every registration the head's Snooze made, in order: `[askId, live]`. */
+  const snoozeLiveness: (readonly [string, boolean])[] = [];
   const tree = (row: InboxRow) => (
     <MemoryRouter>
       <QueryClientProvider client={client}>
         <DocumentRuntime.Provider value={runtime}>
           <MarginProvider>
-            <ReadingPane ask={row} onAnswered={(id) => answered.push(id)} viewer="alice" />
+            <ReadingPane
+              ask={row}
+              onAnswered={(id) => answered.push(id)}
+              onSnoozeLive={(askId, live) => snoozeLiveness.push([askId, live])}
+              viewer="alice"
+            />
           </MarginProvider>
         </DocumentRuntime.Provider>
       </QueryClientProvider>
@@ -187,6 +194,7 @@ function renderPane({
     opened,
     rerender: (row: InboxRow) => view.rerender(tree(row)),
     runtime: fake,
+    snoozeLiveness,
     view,
   };
 }
@@ -420,6 +428,25 @@ test("a question in no document is today's card", async () => {
     expect(opened).toEqual([]);
   } finally {
     view.unmount();
+  }
+});
+
+test("the head's Snooze registers its write, so the list keeps the row the column is on", async () => {
+  const held = Promise.withResolvers<AskSnooze>();
+  const snoozeAsk = spyOn(api, "snoozeAsk").mockImplementation(() => held.promise);
+  const { snoozeLiveness, view } = renderPane({ ask: issueAsk() });
+
+  try {
+    fireEvent.change(await screen.findByLabelText("Snooze CORE-1: Which approach?"), {
+      target: { value: "tomorrow" },
+    });
+    // The optimistic snooze folds the row into Later and the column follows the list, so a
+    // head that kept its write to itself would be unmounted with the row it wrote about.
+    await waitFor(() => expect(snoozeLiveness).toEqual([["ask-a", true]]));
+  } finally {
+    held.resolve({ snoozed_until: "2026-10-31T09:00:00Z" });
+    view.unmount();
+    snoozeAsk.mockRestore();
   }
 });
 

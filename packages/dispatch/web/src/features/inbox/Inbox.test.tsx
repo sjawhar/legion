@@ -2554,3 +2554,195 @@ test("the keys act on the selected row and the pane: Enter, 1-9, x, h and Escape
     getIssue.mockRestore();
   }
 });
+
+test("Enter pressed inside the column belongs to the control holding it, and still leaves the list for the answer box", async () => {
+  const narrow = widenToReadingPane();
+  const rows = [
+    inboxIssue("ask-a", "CORE-1", "Which approach?", {
+      options: [{ label: "Ship" }, { label: "Hold" }],
+    }),
+  ];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const { unmount } = renderInbox();
+
+  try {
+    const pane = await screen.findByTestId("inbox-pane");
+    // A control inside the card, holding the focus the card gave it: Enter is that control's,
+    // and the Inbox's own binding - which would move the focus to the answer box and swallow
+    // the key with `preventDefault` - stands down.
+    const option = within(pane).getByRole("radio", { name: "Ship" });
+    option.focus();
+    fireEvent.keyDown(option, { key: "Enter" });
+    expect(document.activeElement).toBe(option);
+
+    // From the list it does its own job: the row hands the focus to the column's answer box.
+    shortRow("ask-a").focus();
+    fireEvent.keyDown(shortRow("ask-a"), { key: "Enter" });
+    expect(document.activeElement).toBe(pane.querySelector("[data-ask-answer]"));
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
+test("a bulk snooze of the selected row keeps the list and the picker the reader is holding", async () => {
+  const narrow = widenToReadingPane();
+  const rows = [
+    inboxIssue("ask-a", "CORE-1", "Which approach?"),
+    inboxIssue("ask-b", "CORE-2", "Which format?"),
+  ];
+  let served: InboxRow[] = rows;
+  const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
+  // Held open, so the renders under test are the ones the pick leaves behind.
+  const landing = Promise.withResolvers<void>();
+  const snoozeAsk = answerAskSnoozes().mockImplementation(async (id, { snoozed_until: until }) => {
+    await landing.promise;
+    served = served.map((each) => (each.id === id ? { ...each, snoozed_until: until } : each));
+    return { snoozed_until: until };
+  });
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const { unmount } = renderInbox();
+
+  try {
+    await screen.findByTestId("inbox-pane");
+    // `x` marks the selected row, `j` moves on, `x` marks that one: the whole list.
+    fireEvent.keyDown(document.body, { key: "x" });
+    fireEvent.keyDown(document.body, { key: "j" });
+    fireEvent.keyDown(document.body, { key: "x" });
+    await screen.findByText("2 selected");
+    fireEvent.keyDown(document.body, { key: "h" });
+    const list = screen.getByTestId("inbox-list");
+    const picker = screen.getByLabelText("Snooze selected asks");
+    expect(document.activeElement).toBe(picker);
+
+    fireEvent.change(picker, { target: { value: "tomorrow" } });
+    // Every marked row folds into Later at once, so the selection - the row the column was
+    // showing among them - has nothing to fall to and the column goes.
+    await waitFor(() => expect(rowIds()).toEqual([]));
+    expect(screen.queryByTestId("inbox-pane")).toBeNull();
+    // The list and the picker are the same nodes: the column left, the list stayed, and the
+    // keyboard is still in the bar it was in.
+    expect(screen.getByTestId("inbox-list")).toBe(list);
+    expect(screen.getByLabelText("Snooze selected asks")).toBe(picker);
+    expect(document.activeElement).toBe(picker);
+
+    await act(async () => {
+      landing.resolve();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(screen.queryByText("Snoozing 2…")).toBeNull());
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+    snoozeAsk.mockRestore();
+  }
+});
+
+test("a snooze the column's head writes keeps that column on its row, in flight and refused", async () => {
+  const narrow = widenToReadingPane();
+  const rows = [
+    inboxIssue("ask-a", "CORE-1", "Which approach?"),
+    inboxIssue("ask-b", "CORE-2", "Which format?"),
+  ];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const refusal = Promise.withResolvers<never>();
+  const snoozeAsk = answerAskSnoozes().mockImplementation(() => refusal.promise);
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const { unmount } = renderInbox();
+
+  try {
+    const pane = await screen.findByTestId("inbox-pane");
+    fireEvent.change(within(pane).getByLabelText("Snooze CORE-1: Which approach?"), {
+      target: { value: "tomorrow" },
+    });
+
+    // The optimistic snooze has folded the row into Later, and the row is listed inside that
+    // fold while its write is out - which is what keeps the column, and the control that
+    // wrote, on the page.
+    await waitFor(() => expect(headings()).toEqual(["Waiting on you", "Later (1)"]));
+    expect(selectedIds()).toEqual(["ask-a"]);
+    expect(shortRow("ask-a").getAttribute("data-inbox-section")).toBe("later");
+    expect(within(screen.getByTestId("inbox-pane")).getByText("Snoozing…")).toBeTruthy();
+
+    await act(async () => {
+      refusal.reject(
+        new ApiError(400, { code: "SNOOZE_INPUT", error: "snoozed_until must be in the future" })
+      );
+      await Promise.resolve();
+    });
+
+    // The reason and its Retry are in the head that wrote, on the row the reader is still on.
+    const head = await waitFor(() => within(screen.getByTestId("inbox-pane")).getByRole("alert"));
+    expect(head.textContent).toContain("snoozed_until must be in the future");
+    expect(
+      within(screen.getByTestId("inbox-pane")).getByRole("button", { name: "Retry" })
+    ).toBeTruthy();
+    expect(selectedIds()).toEqual(["ask-a"]);
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+    snoozeAsk.mockRestore();
+  }
+});
+
+test("a row the reader defers hands the selection to the next one, and the last leaves no ?item=", async () => {
+  const narrow = widenToReadingPane();
+  const rows = [
+    inboxIssue("ask-a", "CORE-1", "Which approach?"),
+    inboxIssue("ask-b", "CORE-2", "Which format?"),
+  ];
+  let served: InboxRow[] = rows;
+  const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
+  const snoozeAsk = answerAskSnoozes().mockImplementation(async (id, { snoozed_until: until }) => {
+    served = served.map((row) => (row.id === id ? { ...row, snoozed_until: until } : row));
+    return { snoozed_until: until };
+  });
+  const getAsk = mockAskReads(rows);
+  const getIssue = mockIssueReads();
+  const { unmount } = renderInbox();
+
+  try {
+    const pane = await screen.findByTestId("inbox-pane");
+    expect(address()).toBe("/?item=ask-a");
+    fireEvent.change(within(pane).getByLabelText("Snooze CORE-1: Which approach?"), {
+      target: { value: "tomorrow" },
+    });
+
+    // A row the reader defers is a row they have dealt with: the next one takes its place and
+    // the address follows, as it does for a row they answer.
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
+    expect(address()).toBe("/?item=ask-b");
+
+    fireEvent.change(
+      within(screen.getByTestId("inbox-pane")).getByLabelText("Snooze CORE-2: Which format?"),
+      { target: { value: "tomorrow" } }
+    );
+
+    // With the last row deferred the address names none at all: a reload reads it, and one
+    // naming a deferred row would open the folded band in front of the reader again.
+    await waitFor(() => expect(address()).toBe("/"));
+    expect(selectedIds()).toEqual([]);
+    expect(screen.queryByTestId("inbox-pane")).toBeNull();
+    expect(headings()).toEqual(["Later (2)"]);
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+    snoozeAsk.mockRestore();
+  }
+});

@@ -50,6 +50,11 @@ export interface ReadingPaneHeadProps {
   onNextChange: (() => void) | undefined;
   /** Moves the column to the decision block; undefined when the question is not one. */
   onSkipToAnswer: (() => void) | undefined;
+  /** Registers the question while this head's Snooze write is in flight or failed, exactly as
+   *  a row's own control registers its own: the Inbox keeps a live row listed, so the control
+   *  holding `Snoozing…`, a refusal and its Retry is not unmounted by the fold the optimistic
+   *  snooze causes - the column follows that row, so the fold would take this head with it. */
+  onSnoozeLive: (askId: string, live: boolean) => void;
   /** The heading of the section the column scrolled to, once the document has drawn. */
   sectionBlockId: string | undefined;
   viewer: string | undefined;
@@ -72,6 +77,7 @@ export function ReadingPaneHead({
   onAnswered,
   onNextChange,
   onSkipToAnswer,
+  onSnoozeLive,
   sectionBlockId,
   viewer,
 }: ReadingPaneHeadProps): ReactNode {
@@ -107,7 +113,7 @@ export function ReadingPaneHead({
       <SnoozeControl
         askId={ask.id}
         label={name}
-        onLive={noSnoozeLiveness}
+        onLive={onSnoozeLive}
         snoozedUntil={isSnoozed(ask) ? ask.snoozed_until : null}
       />
       {reference === undefined ? null : <CopyRefButton route={reference} />}
@@ -134,7 +140,3 @@ export function ReadingPaneHead({
     </header>
   );
 }
-
-/** The column shows the one question the reader selected, and keeps showing it while a snooze is
- *  out: there is no list here to hold a row in, so the control's liveness is nobody's to record. */
-function noSnoozeLiveness(): void {}

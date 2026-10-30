@@ -565,24 +565,29 @@ export function Inbox({
   const select = (askId: string | undefined) => {
     setSelectedId(askId);
     shownItem.current = askId;
-    if (askId !== undefined && askId !== filter.item) {
+    if (askId !== filter.item) {
       // Replace, never push: a reader walking the list with `j` would otherwise have to press
       // Back once per row to leave the page, the rule the assignee filter already holds to.
+      // Selecting nothing clears `?item=` rather than leaving it on the row that has just
+      // left: a reload reads the address, and an address naming a row the reader deferred
+      // would open the folded band and put that question back in front of them.
       navigate(buildInboxPath({ ...filter, item: askId }), { replace: true });
     }
   };
+  // Where the selection goes when the row it is on leaves the bands: the next row the reader
+  // can see after it, else the nearest above it, so the column always shows a question they
+  // can answer. One rule for both ways a row leaves by the reader's own hand - their answer,
+  // which takes it at once below, and their snooze, which takes it once the write lands - and
+  // read on every commit rather than when it is wanted, because a snooze folds its row into
+  // `Later` the moment they pick: while that write is out the read is held, so where they are
+  // sent is read off the list as it stood when they deferred.
+  const nextAfterSelected = useRef<string | undefined>(undefined);
   // The refetch a recorded answer triggers returns the list the optimistic removal already
   // produced, so it re-renders nothing on its own; release explicitly. The reader's own answer
-  // is also the one thing that moves the selection for them: the next row still on the page
-  // takes the answered row's place, the last row falling back to the one above it, so the
-  // column always shows a question they can answer.
+  // is also one of the two things that move the selection for them.
   const recordAnswered = (id: string) => {
     answered.current = id;
-    if (paneShown && selectedId === id) {
-      const at = presented.current.findIndex((placed) => placed.ask.id === id);
-      const next = at === -1 ? undefined : (presented.current[at + 1] ?? presented.current[at - 1]);
-      select(next?.ask.id);
-    }
+    if (paneShown && selectedId === id) select(nextAfterSelected.current);
     release();
   };
   const rows = () => [...(listRef.current?.querySelectorAll<HTMLElement>(ROW_SELECTOR) ?? [])];
@@ -666,9 +671,16 @@ export function Inbox({
         }
         inPane("[data-ask-answer]")?.focus();
       },
+      // Enter is the list's key: it carries the reader from the row they are on into the
+      // column's answer box. Inside the column the key is already somebody's - the card's own
+      // `Ask back instead`, a link in the head, an option - and the registry's handler calls
+      // `preventDefault`, so pressing it there would press nothing. `h` stands down inside an
+      // ask card for the same reason (`outsideAskCard`); Enter's own is the whole column,
+      // since the head's controls take it too.
       when: () =>
         paneShown
-          ? inPane("[data-ask-answer]") !== null || inPane(NOTE_DISCLOSURE_SELECTOR) !== null
+          ? !focusInPane() &&
+            (inPane("[data-ask-answer]") !== null || inPane(NOTE_DISCLOSURE_SELECTOR) !== null)
           : inFocusedRow("[data-ask-answer]") != null,
     },
     {
@@ -834,8 +846,11 @@ export function Inbox({
       if (selectedId !== filter.item) select(selectedId);
       return;
     }
-    const first = visible[0]?.ask.id;
-    if (first !== undefined) select(first);
+    // The row the selection was on has left the bands - the reader deferred it, the server
+    // took it away - so the selection goes where that row was heading and the address follows
+    // it, down to naming no row at all when the list has none left to show.
+    const next = nextAfterSelected.current;
+    select(visible.some((placed) => placed.ask.id === next) ? next : visible[0]?.ask.id);
   });
   // The selected row is kept on screen as the reader walks the list: the column beside it shows
   // the row they cannot see otherwise.
@@ -989,6 +1004,14 @@ export function Inbox({
   const selectedAsk = paneShown
     ? presented.current.find(({ ask }) => ask.id === selectedId)?.ask
     : undefined;
+  // Read here, where the rows stand as the reader sees them, and held while a snooze of the
+  // selected row is out: that write folds its row into `Later` on the pick, so a read taken
+  // after it would answer with the row above rather than the row that took its place.
+  if (selectedId === undefined || (!snoozing.has(selectedId) && bulkSnoozing === 0)) {
+    const at = presented.current.findIndex(({ ask }) => ask.id === selectedId);
+    nextAfterSelected.current =
+      at === -1 ? undefined : (presented.current[at + 1] ?? presented.current[at - 1])?.ask.id;
+  }
 
   // One list, keyed by ask id, with the section headings as items between the rows: a row that
   // changes section moves within the same parent, so React moves its node instead of remounting
@@ -1068,17 +1091,31 @@ export function Inbox({
     </div>
   );
 
-  if (selectedAsk === undefined) {
+  if (!paneShown) {
     return list;
   }
   // Two columns, the reading column to the right of the list, each scrolling in itself inside
   // the height the page gives them (`app.tsx` makes the Inbox page fill the viewport here).
+  //
+  // One root, selection or none: the column is what appears and disappears beside the list,
+  // never the list itself. A selection empties for a commit whenever the selected row leaves
+  // the rendered bands - the reader's own bulk snooze of that row does it, before the effect
+  // above hands the selection on - and a root that changed shape there would have React
+  // unmount the whole list, taking the keyboard's focus, the bulk bar and every row's state
+  // with it and mounting a fresh one a commit later.
   return (
     <div className="flex min-h-0 flex-1 gap-6">
       {list}
-      <div className="min-w-0 flex-1" ref={paneRef}>
-        <ReadingPane ask={selectedAsk} onAnswered={recordAnswered} viewer={viewer} />
-      </div>
+      {selectedAsk === undefined ? null : (
+        <div className="min-w-0 flex-1" ref={paneRef}>
+          <ReadingPane
+            ask={selectedAsk}
+            onAnswered={recordAnswered}
+            onSnoozeLive={onSnoozeLive}
+            viewer={viewer}
+          />
+        </div>
+      )}
     </div>
   );
 }
