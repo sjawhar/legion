@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-264",
+  "completed": "2026-10-30T10:58:00Z",
+  "round": 1,
+  "reviewedHead": "e7e4a6afbf16447bccf648f4a0b0962c19ea0610 (code head 74797a9e58580fef0eb2ee98ac802f910dc7113f)",
+  "decision": "changes_requested",
+  "critical": 1,
+  "important": 2,
+  "minor": 9,
+  "ci": "Not green at review time: run 41037809875 (CI) queued at 74797a9e since 10:02Z behind the repository's run backlog; the required lint, typecheck and test checks have not run. A request for changes does not wait on it.",
+  "thermonuclear": {
+    "deepReview": "Verdict: CHANGES at e7e4a6af (one High, two Medium, minors)",
+    "codeQuality": "Verdict: CHANGES at e7e4a6af (six structural findings, one stale citation)"
+  },
+  "keyFindings": [
+    {
+      "severity": "critical",
+      "file": "packages/envoy/internal/dispatch/api/project_scope.go",
+      "description": "The project check parses a uuid path id with Go's uuid.Parse (canonicalUUID) and lets the handler run when it does not parse, but the comment and message handlers send the raw text to Postgres, whose uuid parser also accepts a hyphen after any group of four digits. Reproduced by the reviewer with the PR's own rig: a BRK-scoped token resolving OTH's comment by its canonical id is 403 PROJECT_SCOPE; the same comment as a061-e3f2-c3a0-41f0-80b2-3339-e0cc-3a57 is 200 and the OTH comment is resolved by the BRK session."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/api/server.go",
+      "description": "A live broker token that names no session and no person (a machine login's own access token: introspect.go sets session and person only from the exchange's claims) is accepted as {kind session, id '', owner ''}; bearerSessionActor then takes the session from the body. Reproduced: whoami 200 {owner:'', session:null, project:null}; POST /api/v1/issues with body actor ses-chosen-by-the-body is 201, created_by {id ses-chosen-by-the-body, owner ''}, unscoped."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/api/routes_table.go",
+      "description": "POST /api/v1/agents/{session_id}/artifacts is classed scopeSession on the claim that each such route holds its caller to its own session, but uploadAgentArtifact checks only requireAuthenticated: a BRK-scoped token uploads into any session's conversation (deep review's probe: 201 for oth-worker-session)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/issue_create.go",
+      "description": "The scope check runs after the External branch, so a scoped caller naming an external ref mapped to another project gets that issue back and records a related-check outcome on it (respondWithExistingExternalIssue, record: true)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/server.go",
+      "description": "429 BROKER_TOKEN_RATE_LIMITED carries no Retry-After header, though Verifier.RetryAfter's doc says it is for one."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/brokertoken/brokertoken.go",
+      "description": "An introspection in flight when a token is revoked is cached five seconds from its completion, so 'refused within five seconds' is up to introspectTimeout longer; say so where the window is stated."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/server.go",
+      "description": "brokerDecisionKey is a second per-request caller cache beside resolvedCallerKey, and reresolving's mask of it never fires in production (whileCallerResolves wraps decideBrokerToken); fold the decision into resolvedCaller and choose Live in whileCallerResolves directly."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/project_scope.go",
+      "description": "issueCreateRoute is a string special case in two functions; give the row its own write class."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/brokertoken/brokertoken.go",
+      "description": "Caller copies Introspection with four fields no production code reads and leaves the named-scope rule to its reader; and the package imports internal/dispatch/auth while its doc says it reaches Dispatch only through Options."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/broker/exchange/exchange.go",
+      "description": "Registration copies Pod's pod-uid and account-entry refusals word for word; extract one helper both call."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/routes_table.go",
+      "description": "apiRoute repeats routeRow's five fields and copies them positionally; embed routeRow."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/store/dpop_proofs.go",
+      "description": "Stale citation 'migration 0139' after the renumber to 0148, here and in 0148_dpop_proofs.census.sql: fixed by the reviewer in its own commit."
+    }
+  ]
+}
