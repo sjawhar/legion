@@ -49,7 +49,7 @@ No notice marks the last child's close. The root can reach `accepting` before an
 ## 4. Integration verification
 
 - Prove every criterion of your issue in its own pull request, never in a child: a child that proves its parent defers the tree's own verification. Its last round: `skill://legion-architect/references/acceptance.md`, "The last round".
-- Read its tester evidence, not a child pull request's check status. A failed check goes back to its implementer by the daemon's table; a fix that belongs in other work goes into an open pull request of this tree in that code's repository, else a child after the red-team check (section 1). Never downgrade a parent criterion or carry the failure forward.
+- Read the issue's own tester evidence, not a child pull request's check status. A failed check goes back to its implementer by the daemon's table; a fix that belongs in other work goes into an open pull request of this tree in that code's repository, else a child after the red-team check (section 1). Never downgrade a parent criterion or carry the failure forward.
 
 ## 5. Retro
 

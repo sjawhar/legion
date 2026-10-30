@@ -60,7 +60,10 @@ revival, the delivered `catch-up` notice is the authoritative wake-equivalent: w
 is `open`, the daemon is already running the tree's phases, and you start none. The one thing a
 catch-up leaves to you is acceptance: an issue its `reason` names as waiting for your acceptance is
 in `accepting`, where no worker runs and the notice that moved it there may never have reached you,
-so read its evidence and `sign_off`, or send it back with `request_backward_move`.
+so read its evidence and `sign_off` it — a parent only on an approved head that carries the merges
+of every child its criteria need, and otherwise run its last round
+(`skill://legion-architect/references/acceptance.md`, "The last round") — or send it back with
+`request_backward_move`.
 During a live session, react only to delivered wakes; do not poll.
 
 When a `catch-up` says `carried`, this root is a child handed over from a finished tree, carrying
@@ -73,8 +76,9 @@ the old document at the carried version or a later one, releasing any READY it r
 told so with `carried-gate-opened`, never `design-approved`, and start nothing for it. Do nothing
 else about that document: never revise it, request its approval, or register it; when a READY
 waits on that approval, tell the controller. Resume the tree from there; a root carried in
-`accepting` is yours to accept with `sign_off`, or to send back with `request_backward_move`, once
-you have read its evidence.
+`accepting` is yours to accept with `sign_off`, after its last round when it has children whose
+merges its criteria need (`skill://legion-architect/references/acceptance.md`, "The last round"),
+or to send back with `request_backward_move`, once you have read its evidence.
 
 A `catch-up` that says `handed_over` but not `carried` is a child handed over from a tree that had
 no design gate to carry (a root reopened in its linger loses its gate, and its second close hands
@@ -119,8 +123,9 @@ for its last round, `skill://legion-architect`, section 4), then
 `implementing` or `testing`, `reason`). A tester completion that rejects the implementer's proof goes back to the implementer by the
 daemon's table; a worker that reports no surface reaches the changed path gets the surface built
 in this tree (`skill://legion-architect`, wake routing, `phase-finished`), and waits, idle and not
-suspended, until you tell it to continue
-(`envoy_publish` to its role topic) once that child closes.
+suspended, until you tell it to continue (`envoy_publish` to its role topic): once that child
+closes, or at once when the surface folds into an open pull request of this tree and a backward
+move to `implementing` builds it there.
 
 A merge is never a human to-do: open no `dispatch ask` for it. The daemon submits the usual READY's
 merge itself once it accepts READY, under the repository's own rules; a by-hand READY tells you

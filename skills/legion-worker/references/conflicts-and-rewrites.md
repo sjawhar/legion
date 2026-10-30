@@ -27,6 +27,9 @@ Every path it cites is in sjawhar/legion.
   the fingerprint at the current tip; after pushing the merged branch, record it at the new
   tip; post one PR comment (Legion footer):
   `forward merge <old-tip-sha> → <new-tip-sha>; fingerprint <before> → <after>; unchanged|changed`.
+  In a parent's last round, end that comment with `parent's last round: full test round`, the line
+  the tester reads for a full round (`skill://legion-architect/references/acceptance.md`,
+  "The last round").
   On the tmux runtime, where issue workspaces are still jj workspaces of one shared clone,
   `jj undo`, `jj abandon` and `jj op restore` rewrite the shared operation log, so a mistake there
   is recovered forward (`jj -R "$LEGION_WORKSPACE" new`, or `jj -R "$LEGION_WORKSPACE" restore

@@ -29,9 +29,10 @@ legion({ op: "sign_off", issue: "LEGION-40" })
 - A `catch-up` whose `reason` names an issue as waiting for your acceptance is the wake for it: it
   is in `accepting`, and the `phase-finished` notice that moved it there may never have reached you
   (the daemon drops a notice to a failed architect, so a retried one learns of the wait from its
-  catch-up alone). Accept it as above.
+  catch-up alone). Accept it as this section says, a parent only after its last round (below).
 - The daemon lets nothing beneath the issue hold `sign_off`. A parent: sign off only after its
-  last round (below).
+  last round (below). The daemon then closes a parent that is not the root at its own merge, which
+  under this rule comes after its children's, and those children carry on under the root.
 - `request_backward_move` names the issue, because your grant serves the tree; the daemon starts
   that phase's role with your reason in its task.
 - `handoff_complete` from you in `accepting` is refused `ACCEPTANCE_IS_SIGN_OFF`. CI red at the head
@@ -66,6 +67,10 @@ in one turn:
    branch your addressing line names into the branch, push, end your forward-merge comment with
    `parent's last round: full test round`, and complete." Never use a hard-coded `main`. The move
    counts a review round.
+
+While the parent waits in `accepting`, a conflict on its head or a child's merge needs no move of
+its own: the last round's forward merge resolves them all, so spend no backward move per child,
+because every backward move counts toward `review_round_cap`.
 
 A criterion proven on a deployed system is proven there after that child's deploy, as the
 repository's deploy skill says.

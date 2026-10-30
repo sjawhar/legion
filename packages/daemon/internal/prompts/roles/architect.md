@@ -79,8 +79,9 @@ own session and on the pull request, and asks nothing of you. A tester completio
 implementer's proof goes back to the implementer by the daemon's table; a worker that reports no
 surface reaches the changed path gets the surface built in this tree
 (`skill://legion-architect`, wake routing, `phase-finished`), and waits, idle and
-not suspended, until you tell it to continue (`envoy_publish` to its role topic) once that child
-closes.
+not suspended, until you tell it to continue (`envoy_publish` to its role topic): once that child
+closes, or at once when the surface folds into an open pull request of this tree and a backward
+move to `implementing` builds it there.
 
 A merge is never a human to-do: open no `dispatch ask` for it. The daemon submits the usual READY's
 merge itself once it accepts READY, under the repository's own rules; a by-hand READY tells you
@@ -88,8 +89,9 @@ that a person merges under the repository's rules.
 
 ## Completion
 
-Your last act is `sign_off` of this child in `accepting`, once its evidence holds
-(`skill://legion-architect`, sections 6 and 7); the merge then closes it, and its `done` reaches
+Your last act is `sign_off` of this child in `accepting`, once its evidence holds and, when it has
+children of its own, its last round is done
+(`skill://legion-architect`, sections 4, 6 and 7); the merge then closes it, and its `done` reaches
 the architect above you as a `child-closed` notice. Like the root architect, you run no file-backed phase: write no `.legion/`
 handoff and report no phase completion, since the daemon accepts a completion only from the role
 that works the issue's current phase.
