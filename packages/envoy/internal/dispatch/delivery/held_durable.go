@@ -57,17 +57,10 @@ func intakeHoldName(durable string) string { return "delivery-intake-" + durable
 //     next holder whether a binding it finds is a holder's (heldDurable.boundElsewhere);
 //   - start, the stream sequence a take-over that deleted the durable creates it again at, or 0
 //     for none. A take-over records it before its delete and clears it once its create succeeds.
-//     A create that fails after the delete is tried again inside the same consumer lease
-//     (heldDurable.finishTakeOver). A take-over that gives up the lease before its create
-//     succeeds -- its process killed between the delete and the create, its hold lost, every try
-//     failed within takeOverFinishWithin -- leaves the start in the row. The next take-over of
-//     this build, of this intake or of the process that takes the hold next, then creates the
-//     durable at the old ack floor rather than at the default start (deliveryConsumerConfig names
-//     none, so the stream's first message). A process of the build before holds never reads the
-//     row: when it takes the consumer lease first, it creates the durable at its own default
-//     start, the stream's first message for the events durable and the next new message for the
-//     jobs durable. A holder that stops with the start set lapses its hold rather than deleting
-//     the row (heldDurable.stop), so the next holder still reads it.
+//     What a take-over that never creates the durable again leaves in the row, and who reads
+//     that start next, is on heldDurable.finishTakeOver. A holder that stops with the start set
+//     lapses its hold rather than deleting the row (heldDurable.stop), so the next holder still
+//     reads it.
 //
 // The token is the subject alone, or the subject followed by intakeHoldTokenStart and the
 // sequence in decimal. A deliver subject holds no space, so the two never mix. A token of any
@@ -365,13 +358,8 @@ func (d *heldDurable) holds() bool {
 // subject alone as the hold's token, still under the lease.
 //
 // From the delete on -- or from the lookup, when it finds no durable -- the take-over runs to its
-// end inside this one lease (finishTakeOver): each step that fails is tried again while this
-// intake holds its hold, on a context of its own (takeOverFinishWithin) rather than ctx, so a stop
-// does not cut it short. The lease is given up with the durable absent only when the process dies
-// before the create, when it loses its hold first, or when every try fails within
-// takeOverFinishWithin. The build before holds reconciles the durable under the same lease and
-// never reads the recorded start: a process of it that finds the durable absent creates it at its
-// own default start (TestATakeOverWhoseCreateFailsCreatesTheDurableBeforeAPreviousBuildReconciles).
+// end inside this one lease (finishTakeOver, which says what a lease given up with the durable
+// absent leaves behind).
 func (d *heldDurable) takeOver(ctx context.Context) {
 	js := d.nats.JS()
 	wanted := d.config()
@@ -402,16 +390,50 @@ func (d *heldDurable) takeOver(ctx context.Context) {
 		d.recorded = pending
 		deleteFirst = true
 	}
-	d.finishTakeOver(js, create, deleteFirst)
+	d.finishTakeOver(create, deleteFirst)
+}
+
+// takeOverConfig is the config a take-over recreates the durable deployed describes with: the
+// deployed config when a newer build stamped it with a higher generation, this build's (wanted)
+// otherwise, on a fresh deliver subject, starting at the stream sequence after the durable's ack
+// floor. Starting there, the recreated durable redelivers at once every message the durable had
+// not acknowledged -- what a dead holder had been handed, what a stopped one handed back --
+// replays nothing it had, and skips nothing (TestBindReplacesAPluralFilterDurableAtItsOwnAckFloor).
+// The take-over records that start in its hold's token before it deletes the durable, and
+// finishTakeOver says what a create that fails after the delete leaves behind.
+// The deployed metadata keeps its own keys and drops the ones nats-server sets itself (the
+// `_nats.` prefix), which the server sets again on create.
+func takeOverConfig(deployed *natsgo.ConsumerInfo, wanted natsgo.ConsumerConfig) natsgo.ConsumerConfig {
+	config := wanted
+	if bus.MetadataGeneration(deployed.Config.Metadata, consumerGenerationKey) > consumerConfigGeneration {
+		config = deployed.Config
+		config.DeliverSubject = natsgo.NewInbox()
+		config.OptStartTime = nil
+		config.Metadata = bus.OwnMetadata(deployed.Config.Metadata, 0)
+	}
+	return startingAt(config, deployed.AckFloor.Stream+1)
+}
+
+// startingAt is config delivering from stream sequence start on.
+func startingAt(config natsgo.ConsumerConfig, start uint64) natsgo.ConsumerConfig {
+	config.DeliverPolicy = natsgo.DeliverByStartSequencePolicy
+	config.OptStartSeq = start
+	return config
 }
 
 // The bounds on finishTakeOver, the part of a take-over that runs after it has recorded the
 // durable's start, and that must not give up the consumer lease with the durable deleted.
 //
 // takeOverFinishWithin bounds the whole of it, from its first step to its last try. It is under
-// intakeHoldTTL - intakeHoldMargin, how long a hold lasts on its last renewal, so a holder whose
-// renewals fail as the steps begin still holds through them; and well inside stopGrace
-// (cmd/dispatch), since a stop that comes meanwhile waits for it to end.
+// intakeHoldTTL - intakeHoldMargin (13 s), how long a hold lasts on its last renewal: a hold taken
+// just before the take-over (takeHold) therefore holds through all 10 s of the steps, even when
+// every renewal after it fails. A take-over that runs again after a check found the durable
+// delivering elsewhere (check) begins at any point in the renewal cycle of a hold this intake
+// already held, so up to intakeHoldRenew (5 s) after its last renewal: with the renewals from
+// there on failing, about 8 s of the hold are left against the 10 s bound, and retryHeld stops at
+// the hold's deadline. That exit is the safe one -- no step acts once another process can take the
+// hold, and the next attempt takes the durable over again. takeOverFinishWithin is also well
+// inside stopGrace (cmd/dispatch), since a stop that comes meanwhile waits for it to end.
 //
 // takeOverCallTimeout bounds each try of each step, so that one call that draws no answer -- a
 // JetStream request during a leader change, or one the server denies and never answers -- leaves
@@ -434,49 +456,57 @@ const (
 // rather than the run's, so a stop that comes while the durable is deleted does not leave it so.
 // Every step is safe to try again: a delete of a durable already gone succeeds, and a create of
 // a durable that a timed-out try did create, with this same config, returns that durable.
-func (d *heldDurable) finishTakeOver(js natsgo.JetStreamContext, create natsgo.ConsumerConfig, deleteFirst bool) {
-	name := create.Durable
+//
+// A create that fails after the delete is therefore tried again inside the one consumer lease, so
+// among builds that take holds such a create loses neither the durable nor its start. The lease is
+// given up with the durable absent only when this process is killed between the delete and the
+// create, when it loses its hold, or when every try fails within takeOverFinishWithin. The start
+// then stays in the hold's token (intakeHoldToken), and the next take-over of this build -- by
+// this intake, or by the process that takes the hold next -- creates the durable at that old ack
+// floor rather than at the default start (deliveryConsumerConfig names none, so the stream's first
+// message). A process of the build before holds reconciles the durable under the same lease and
+// never reads the token: finding the durable absent, it creates it at its own default start, the
+// stream's first message for the events durable and the next new message for the jobs durable
+// (TestATakeOverWhoseCreateFailsCreatesTheDurableBeforeAPreviousBuildReconciles).
+func (d *heldDurable) finishTakeOver(create natsgo.ConsumerConfig, deleteFirst bool) {
+	js := d.nats.JS()
 	finish, cancel := context.WithTimeout(context.Background(), takeOverFinishWithin)
 	defer cancel()
 	if deleteFirst {
-		if err := d.retryHeld(finish, "delete NATS consumer to take it over", name, func(call context.Context) error {
-			if err := js.DeleteConsumer(bus.Stream, name, natsgo.Context(call)); err != nil && !errors.Is(err, natsgo.ErrConsumerNotFound) {
+		if d.retryHeld(finish, "delete NATS consumer to take it over", func(call context.Context) error {
+			if err := js.DeleteConsumer(bus.Stream, d.name, natsgo.Context(call)); err != nil && !errors.Is(err, natsgo.ErrConsumerNotFound) {
 				return err
 			}
 			return nil
-		}); err != nil {
-			slog.Error("dispatch delivery: delete NATS consumer to take it over", "name", name, "error", err)
+		}) != nil {
 			return
 		}
 	}
-	if err := d.retryHeld(finish, "bind NATS consumer", name, func(context.Context) error {
+	if d.retryHeld(finish, "bind NATS consumer", func(context.Context) error {
 		_, err := d.subscribe(create.DeliverSubject)
 		return err
-	}); err != nil {
-		slog.Error("dispatch delivery: bind NATS consumer", "name", name, "subject", create.FilterSubject, "error", err)
+	}, "subject", create.FilterSubject) != nil {
 		return
 	}
-	if err := d.retryHeld(finish, "create NATS consumer", name, func(call context.Context) error {
+	if d.retryHeld(finish, "create NATS consumer", func(call context.Context) error {
 		_, err := createDurable(js, &create, natsgo.Context(call))
 		return err
-	}); err != nil {
-		slog.Error("dispatch delivery: create NATS consumer", "name", name, "subject", create.FilterSubject, "start_seq", create.OptStartSeq, "error", err)
+	}, "subject", create.FilterSubject, "start_seq", create.OptStartSeq) != nil {
 		d.stopDelivering()
 		return
 	}
 	bound := intakeHoldToken{subject: create.DeliverSubject}
-	if err := d.retryHeld(finish, "record the intake's deliver subject", name, func(call context.Context) error {
+	if d.retryHeld(finish, "record the intake's deliver subject", func(call context.Context) error {
 		return d.hold.SetToken(call, bound.String())
-	}); err != nil {
+	}) != nil {
 		// The durable delivers here, but the hold does not say so: the next holder would take
 		// the binding for a process that holds nothing and wait for it. Stop, and take the
 		// durable over again on the next attempt.
-		slog.Error("dispatch delivery: record the intake's deliver subject", "name", name, "error", err)
 		d.stopDelivering()
 		return
 	}
 	d.recorded, d.subject = bound, create.DeliverSubject
-	slog.Info("dispatch delivery: NATS consumer bound", "name", name, "subject", create.FilterSubject,
+	slog.Info("dispatch delivery: NATS consumer bound", "name", d.name, "subject", create.FilterSubject,
 		"start_seq", create.OptStartSeq, "generation", bus.MetadataGeneration(create.Metadata, consumerGenerationKey))
 }
 
@@ -487,13 +517,15 @@ var errHoldNotHeld = errors.New("the intake no longer holds its hold")
 // ended, waiting takeOverFirstRetry after the first failed try and twice as long after each one
 // after it, up to takeOverLastRetry. Each try runs on a context that ends takeOverCallTimeout
 // after it starts, or at the hold's loss deadline if that comes first, so no step acts once
-// another process can hold the hold. A failed try is logged at WARN as doing what names. It
-// returns nil once step succeeds, and otherwise the last try's error, or errHoldNotHeld.
-func (d *heldDurable) retryHeld(finish context.Context, doing, name string, step func(context.Context) error) error {
+// another process can hold the hold. A failed try is logged at WARN as doing what names, and the
+// failure it gives up on at ERROR by failedStep, so a caller writes no step's text a second time
+// and keeps only what it does next. It returns nil once step succeeds, and otherwise the last
+// try's error, or errHoldNotHeld. attributes are the caller's own on that ERROR line.
+func (d *heldDurable) retryHeld(finish context.Context, doing string, step func(context.Context) error, attributes ...any) error {
 	wait := takeOverFirstRetry
 	for {
 		if !d.holds() {
-			return errHoldNotHeld
+			return d.failedStep(doing, errHoldNotHeld, attributes)
 		}
 		deadline := time.Now().Add(takeOverCallTimeout)
 		if lost := d.hold.Deadline(); lost.Before(deadline) {
@@ -505,16 +537,23 @@ func (d *heldDurable) retryHeld(finish context.Context, doing, name string, step
 		if err == nil {
 			return nil
 		}
-		slog.Warn("dispatch delivery: take-over step failed; trying it again", "name", name, "step", doing, "retry_in", wait, "error", err)
+		slog.Warn("dispatch delivery: take-over step failed; trying it again", "name", d.name, "step", doing, "retry_in", wait, "error", err)
 		timer := time.NewTimer(wait)
 		select {
 		case <-finish.Done():
 			timer.Stop()
-			return err
+			return d.failedStep(doing, err, attributes)
 		case <-timer.C:
 		}
 		wait = min(2*wait, takeOverLastRetry)
 	}
+}
+
+// failedStep logs the take-over step retryHeld gave up on at ERROR, as "dispatch delivery: " and
+// doing, with the durable's name, the caller's own attributes and err, and answers err.
+func (d *heldDurable) failedStep(doing string, err error, attributes []any) error {
+	slog.Error("dispatch delivery: "+doing, append(append([]any{"name", d.name}, attributes...), "error", err)...)
+	return err
 }
 
 // createDurable creates the durable config describes on the notification stream. A var so a test

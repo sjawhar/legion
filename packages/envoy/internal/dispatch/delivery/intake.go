@@ -311,39 +311,6 @@ func consumerGenerationMetadata() map[string]string {
 	return map[string]string{consumerGenerationKey: strconv.Itoa(consumerConfigGeneration)}
 }
 
-// takeOverConfig is the config a take-over recreates the durable deployed describes with: the
-// deployed config when a newer build stamped it with a higher generation, this build's (wanted)
-// otherwise, on a fresh deliver subject, starting at the stream sequence after the durable's ack
-// floor. Starting there, the recreated durable redelivers at once every message the durable had
-// not acknowledged -- what a dead holder had been handed, what a stopped one handed back --
-// replays nothing it had, and skips nothing (TestBindReplacesAPluralFilterDurableAtItsOwnAckFloor).
-// The take-over records that start in its hold's token before it deletes the durable, and tries
-// a failed create again inside the same consumer lease (heldDurable.finishTakeOver), so among
-// builds that take holds a create that fails after the delete loses neither (intakeHoldToken). A
-// process of the build before holds reconciles under the same lease and never reads the token. It
-// finds the durable absent only when the take-over gave up the lease before its create succeeded:
-// the process was killed between the delete and the create, lost its hold, or failed every try
-// within takeOverFinishWithin. It then creates the durable at its own default start.
-// The deployed metadata keeps its own keys and drops the ones nats-server sets itself (the
-// `_nats.` prefix), which the server sets again on create.
-func takeOverConfig(deployed *natsgo.ConsumerInfo, wanted natsgo.ConsumerConfig) natsgo.ConsumerConfig {
-	config := wanted
-	if bus.MetadataGeneration(deployed.Config.Metadata, consumerGenerationKey) > consumerConfigGeneration {
-		config = deployed.Config
-		config.DeliverSubject = natsgo.NewInbox()
-		config.OptStartTime = nil
-		config.Metadata = bus.OwnMetadata(deployed.Config.Metadata, 0)
-	}
-	return startingAt(config, deployed.AckFloor.Stream+1)
-}
-
-// startingAt is config delivering from stream sequence start on.
-func startingAt(config natsgo.ConsumerConfig, start uint64) natsgo.ConsumerConfig {
-	config.DeliverPolicy = natsgo.DeliverByStartSequencePolicy
-	config.OptStartSeq = start
-	return config
-}
-
 // acknowledge acks msg. An acknowledgement that does not reach the server is never discarded: it
 // leaves the message outstanding, and intakeMaxAckPending of those stop the consumer being given
 // anything until the ack wait expires. The Nak gives the slot back at once; when it fails too (the
