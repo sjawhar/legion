@@ -116,10 +116,10 @@ func TestReplayDecodePayloadNamesTheEvent(t *testing.T) {
 	}
 }
 
-// TestReplayPlannerHandlesEveryTypeItNames sends one event of every type planWrite handles, named
-// by the constant the planner switches on, through planReplay: a constant spelt otherwise than
-// Dispatch's log spells it no longer matches the bundle's events, which the planner counts as
-// unhandled instead of planning.
+// TestReplayPlannerHandlesEveryTypeItNames sends one event of every type planWrite handles through
+// planReplay and requires each to be planned, none counted unhandled. It builds the events from the
+// same constants the planner switches on, so it does not catch a constant spelt otherwise than
+// Dispatch's log spells it; the tests whose fixtures carry the literal types do.
 func TestReplayPlannerHandlesEveryTypeItNames(t *testing.T) {
 	size := len(rpDocText) + 16
 	payloads := []struct {
