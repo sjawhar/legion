@@ -289,10 +289,11 @@ func TestAProjectScopedTokenWritesOnlyItsOwnProject(t *testing.T) {
 // TestATargetThatResolvesToNoProjectIsRefusedToAProjectScopedToken: the check fails closed, so
 // a target it cannot resolve to the caller's own project is refused whether another project
 // holds it, no project does, or nothing does — an id nobody has, and an id that is no uuid in
-// any spelling. A refusal names the project the credential covers and no other, so it says
-// nothing about what exists outside it, and that is what closes the existence oracle the
-// earlier behaviour had: a scoped caller read 403 for another project's object and the
-// handler's 404 for an id nobody holds, which told it which ids exist.
+// any spelling. The refusal for a target this check resolved to no project names the
+// credential's own project and no other; one for an object of another project names that
+// project, so the two answers still read differently and a scoped caller can tell them apart.
+// Nothing is read out that way: no GET route is project-scoped, so what it learns is which of
+// its own refused writes addressed something that exists.
 //
 // This replaces the assertion that such a target kept its handler's answer for every caller.
 // It still does for a caller that names no project, which is every credential but a

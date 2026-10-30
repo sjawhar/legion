@@ -119,3 +119,11 @@ type Bucket struct {
 func NewBucket(limit Limit) *Bucket {
 	return &Bucket{limit: limit, bucket: rate.NewLimiter(rate.Every(limit.Every), limit.Burst)}
 }
+
+// RetryAfterSeconds is the Retry-After a bucket refilled one every `every` names: whole seconds
+// rounded up, and never 0, which would invite an immediate retry the bucket would refuse again.
+// Every refusal of a bucket in this package carries it, the broker's and Dispatch's alike, so
+// the two cannot drift apart.
+func RetryAfterSeconds(every time.Duration) int {
+	return max(int((every+time.Second-1)/time.Second), 1)
+}

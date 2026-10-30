@@ -62,9 +62,11 @@ var (
 	// access token is exactly that — the credential a dev box holds to ask the broker for other
 	// credentials, DPoP-bound and perfectly live, for which no exchange ever decided a session,
 	// a person or a project scope — and so is any other token the broker issued for something
-	// other than acting as a session. Whoever mounts this check acts as the session a token
-	// names, so a token that names none is refused here rather than admitted for a request body
-	// to name one in its place.
+	// other than acting as a session; so is one whose project scope is neither named nor person,
+	// since the scope says what Project means and a word this package does not know is a token
+	// it cannot read rather than one that names no project. Whoever mounts this check acts as
+	// the session a token names, so a token that names none is refused here rather than
+	// admitted for a request body to name one in its place.
 	ErrNotASession = errors.New("brokertoken: the access token is not a session's credential")
 )
 
@@ -345,6 +347,12 @@ func (v *Verifier) live(ctx context.Context, r *http.Request) (string, Introspec
 		return "", Introspection{}, ErrKeyMismatch
 	}
 	if answer.Session == "" || answer.Person == "" || answer.ClientID != ExchangeClientID {
+		return "", Introspection{}, ErrNotASession
+	}
+	// The scope says what Project means, so a scope this package does not know is a token it
+	// cannot read rather than one that names no project: reading it as unscoped would hand a
+	// caller every project the moment the broker learns a third word.
+	if answer.ProjectScope != ProjectScopeNamed && answer.ProjectScope != ProjectScopePerson {
 		return "", Introspection{}, ErrNotASession
 	}
 	return token, answer, nil

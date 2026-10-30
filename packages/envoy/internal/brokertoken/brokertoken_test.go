@@ -171,9 +171,12 @@ func machineLoginToken(jkt string, life time.Duration) brokertoken.Introspection
 // something other than acting as a session names no session to record writes as, so it is
 // refused with an outcome of its own rather than handed back as a Caller for whoever mounts
 // this check to fill in. Each leg of the rule is its own token: a machine login's own, one the
-// exchange issued that names no person, and one that names a session and a person but comes
-// from another client. The proof-checked Verify and the answer-only Live refuse all three, so
-// an open connection cannot keep one alive either.
+// exchange issued that names no person, one that names a session and a person but comes from
+// another client, and one whose project scope is a word this package does not know, including
+// the empty one — the scope says what Project means, so reading an unknown one as unscoped
+// would hand a caller every project the moment the broker learns a third word. The
+// proof-checked Verify and the answer-only Live refuse them all, so an open connection cannot
+// keep one alive either.
 func TestATokenThatIsNoSessionsCredentialIsRefused(t *testing.T) {
 	rig := newRig(t)
 	caller := newSigner(t)
@@ -181,10 +184,16 @@ func TestATokenThatIsNoSessionsCredentialIsRefused(t *testing.T) {
 	noPerson.Person = ""
 	anotherClient := liveToken(caller.jkt, time.Hour)
 	anotherClient.ClientID = "agent-secrets-helper"
+	noScope := liveToken(caller.jkt, time.Hour)
+	noScope.ProjectScope = ""
+	unknownScope := liveToken(caller.jkt, time.Hour)
+	unknownScope.ProjectScope = "everything"
 	for name, answer := range map[string]brokertoken.Introspection{
 		"a machine login's own token": machineLoginToken(caller.jkt, time.Hour),
 		"a token naming no person":    noPerson,
 		"a token of another client":   anotherClient,
+		"a token naming no scope":     noScope,
+		"a token of an unknown scope": unknownScope,
 	} {
 		t.Run(name, func(t *testing.T) {
 			token := "a-token-that-is-" + strings.ReplaceAll(name, " ", "-")

@@ -35,9 +35,11 @@ package api
 // the handler then addresses its row by, and the two cannot disagree about which object a path
 // names: Go's uuid.Parse refuses spellings Postgres accepts (a hyphen after any group of four
 // digits), and a check that resolved nothing where the handler resolves a row would be a write
-// nothing judged. Failing closed also closes the existence oracle the older behaviour had,
-// where a scoped caller got 403 for another project's object and 404 for one that does not
-// exist, and so could read off which ids exist outside its project.
+// nothing judged. The two refusals still read differently — one names the project the target
+// belongs to, the other says it resolved to none — so a scoped caller can still tell an object
+// of another project from an id nobody holds. Nothing is read out that way: no GET route is
+// project-scoped, so what this tells such a caller is which of its own refused writes addressed
+// something that exists.
 
 import (
 	"context"
@@ -146,17 +148,10 @@ func (s *server) projectOfIssue(ctx context.Context, q queryer, r *http.Request)
 	return scanProjectKey(q.QueryRow(ctx, `select project_key from issues where key = $1`, r.PathValue("key")))
 }
 
-// projectOfProject is loadProject: a project's own key is the project it belongs to, and a key
-// no project has resolves to none.
+// projectOfProject reads the projects row the path names: a project's own key is the project it
+// belongs to, and a key no project has resolves to none.
 func (s *server) projectOfProject(ctx context.Context, q queryer, r *http.Request) (string, error) {
-	project, err := s.loadProject(ctx, q, r.PathValue("key"))
-	if unaddressed(err) {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	return project.Key, nil
+	return scanProjectKey(q.QueryRow(ctx, `select key from projects where key = $1`, r.PathValue("key")))
 }
 
 // projectOfArtifact reads the project_key every artifact carries (artifactColumns), which is
@@ -222,18 +217,17 @@ func scanProjectKey(row pgx.Row) (string, error) {
 	return project, nil
 }
 
-// unaddressed answers whether err means the target resolves to no row at all, which is the
-// handler's answer to make for an unscoped caller and a refusal for a scoped one.
+// unaddressed answers whether err means the target resolves to no row at all: no such row, or a
+// path value Postgres refuses to read as a uuid as it binds the parameter (SQLSTATE 22P02).
+// That is the handler's answer to make for an unscoped caller and a refusal for a scoped one.
+// Every resolver reaches this through one of its own reads, so there is no handler refusal to
+// unwrap here.
 func unaddressed(err error) bool {
 	if errors.Is(err, pgx.ErrNoRows) {
 		return true
 	}
 	var malformed *pgconn.PgError
-	if errors.As(err, &malformed) && malformed.Code == "22P02" {
-		return true
-	}
-	var refusal *apiError
-	return errors.As(err, &refusal) && refusal.status == http.StatusNotFound
+	return errors.As(err, &malformed) && malformed.Code == "22P02"
 }
 
 // withinProjectScope runs the project check in front of one mutating route's handler. For a
@@ -241,24 +235,41 @@ func unaddressed(err error) bool {
 // header read and calls the handler. For one that names a project it fails closed: only a
 // target this check resolved to that same project reaches the handler.
 func (s *server) withinProjectScope(route apiRoute, handler http.HandlerFunc) http.HandlerFunc {
-	// Every mounted scopeProject row has one: undecidableWrites names a row that does not and
-	// register refuses to mount that table, so this is read once here rather than per request.
-	resolve, _ := s.projectResolverFor(route.Pattern)
-	return func(w http.ResponseWriter, r *http.Request) {
-		covers, scoped := s.callerProject(r)
-		if !scoped {
-			handler(w, r)
-			return
-		}
-		if route.Scope == scopeDeployment {
+	if route.Scope == scopeSession || route.Scope == scopeProjectInBody {
+		// A write that belongs to the calling session, and the issue create, whose project its
+		// handler reads from the body: this check decides neither, and deciding that at mount
+		// leaves no class to read on the request.
+		return handler
+	}
+	if route.Scope == scopeDeployment {
+		return func(w http.ResponseWriter, r *http.Request) {
+			covers, scoped := s.callerProject(r)
+			if !scoped {
+				handler(w, r)
+				return
+			}
 			writeError(w, codeProjectScopeDeployment, http.StatusForbidden, fmt.Sprintf(
 				"this request's credential may write project %s and nothing else; %s %s belongs to the deployment rather than to a project",
 				covers, route.Method, route.Pattern))
-			return
 		}
-		if route.Scope != scopeProject {
-			// A write that belongs to the calling session, and the issue create, whose project
-			// its handler reads from the body (scopeProjectInBody).
+	}
+	resolve, addressed := s.projectResolverFor(route.Pattern)
+	if !addressed {
+		// undecidableWrites names such a row and register refuses to mount that table, so this
+		// is unreachable; refusing here rather than trusting that keeps the check closed even
+		// if a later caller mounts the table another way.
+		return func(w http.ResponseWriter, r *http.Request) {
+			covers, scoped := s.callerProject(r)
+			if !scoped {
+				handler(w, r)
+				return
+			}
+			refuseWriteOutsideProjectScope(w, covers, "")
+		}
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		covers, scoped := s.callerProject(r)
+		if !scoped {
 			handler(w, r)
 			return
 		}
@@ -270,9 +281,7 @@ func (s *server) withinProjectScope(route apiRoute, handler http.HandlerFunc) ht
 		if belongsTo != covers {
 			// Including a target that resolved to no project at all: an object belonging to
 			// none, a row that is not there, and an id Postgres will not read. Refusing those
-			// too is what makes the check fail closed, and it closes the existence oracle the
-			// older behaviour had, where this caller got 403 for another project's object and
-			// the handler's 404 for an id nobody holds.
+			// too is what makes the check fail closed.
 			refuseWriteOutsideProjectScope(w, covers, belongsTo)
 			return
 		}

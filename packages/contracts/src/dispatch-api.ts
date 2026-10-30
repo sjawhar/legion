@@ -30,6 +30,10 @@ export type Actor =
       /** The subject of the verified service token that authenticated the write
        *  (`system:serviceaccount:<namespace>:<name>`); absent under any other bearer. */
       readonly service?: string;
+      /** The one project key the credential that authenticated the write may write, which the
+       *  server reads from an access token the secrets broker issued and never from a body;
+       *  absent under every credential that names none, which is every other one. */
+      readonly project?: string;
     }
   /** A server-owned writer, such as the architecture importer
    *  (`{kind: "system", id: "architecture-importer"}`). */
