@@ -238,12 +238,10 @@ const approvedHeadLabel = "Approved head"
 const testerVerdictLabel = "Tester's verdict"
 
 // start starts the phase worker of the issue's current phase, a start stamped with that phase. A
-// start that takes the phase over from a role still at work in it names that role, quiesce, so it
-// waits for that role's turn to end (record.SuperviseRequest's Quiesce); every other start names
-// none. A merger is told the head the review round approved (withApprovedHead), the one head its
-// READY may name, so it never chooses among the pull request's reviews itself. A phase with no
-// worker, and accepting, whose architect admission started with the tree, start nobody.
-func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, task string, quiesce claim.Role) error {
+// merger is told the head the review round approved (withApprovedHead), the one head its READY may
+// name, so it never chooses among the pull request's reviews itself. A phase with no worker, and
+// accepting, whose architect admission started with the tree, start nobody.
+func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, task string) error {
 	if role == "" || role == claim.RoleArchitect {
 		return nil
 	}
@@ -252,7 +250,7 @@ func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue record.Issue, role 
 		return err
 	}
 	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: role, Task: task,
-		Generation: issue.Generation, Phase: issue.Phase, Quiesce: quiesce})
+		Generation: issue.Generation, Phase: issue.Phase})
 }
 
 // withApprovedHead is a merger's task with the head the issue's review round approved appended

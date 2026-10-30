@@ -330,14 +330,6 @@ type SuperviseRequest struct {
 	// budget, the runner finishes this row rather than retrying it as RequestRetry with fresh
 	// budgets: the failed claim stays failed for the boot report to name.
 	RuleResume bool `json:"ruleResume,omitempty"`
-	// Quiesce is the role whose phase a start takes over without that role's completion: CI settled
-	// red while it tested, reviewed a round it had not completed, or worked toward its READY as the
-	// merger (workflow's TriggerChecksRed). The start acts only once that role's claim is out of its
-	// turn (supervise.Machine.Quiesce), so the two never write the shared workspace together. It is
-	// empty for every other start, which a completion or a person's move hands the phase, for a move
-	// between two phases of one role (retro back to implementing on a red, where the implementer
-	// keeps its turn and is handed the new task once it ends), and for every other operation.
-	Quiesce claim.Role `json:"quiesce,omitempty"`
 	// Linger is the root generation whose linger a tree close expires. A member keeps its
 	// generation across re-admission, so the close acts only while its tree lingers at that root
 	// generation: never in the tree's next run, nor in a later linger of it.
@@ -714,9 +706,6 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		}
 		if value.ResumeTask && (value.Op != "start" || value.Task == "" || value.Phase == "") {
 			return fmt.Errorf("a supervise resume task requires a start with a task and a phase")
-		}
-		if value.Quiesce != "" && (value.Op != "start" || value.Quiesce == value.Role) {
-			return fmt.Errorf("a supervise quiesce names another role than its start's, and only a start carries one")
 		}
 		if value.CheckLook != 0 && (value.CheckLook < 0 || value.Op != "start" || value.Role != claim.RoleImplementer || value.Phase != "") {
 			return fmt.Errorf("a supervise check look names a start of the implementer with no phase, and only a start carries one")

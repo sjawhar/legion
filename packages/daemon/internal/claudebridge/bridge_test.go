@@ -39,11 +39,9 @@ func TestMain(m *testing.M) {
 }
 
 // fakeClaude answers Claude Code's stream-json the way the probes recorded it: each user message
-// gets a system/init, then its script's lines, then a result; an interrupt gets a control_response
-// and ends the user message being answered with error_during_execution. A user message's text picks
-// its script:
+// gets a system/init, then its script's lines, then a result. A user message's text picks its
+// script:
 //   - "/rename <title>": no init, an assistant line naming the title, a success result;
-//   - "hang": nothing until an interrupt;
 //   - "handoff ok": a `legion` handoff_complete call and its result;
 //   - "say <text>": an assistant message of text;
 //   - "inbox <text>": writes one delivery to LEGION_CLAUDE_INBOX and reads its answer;
@@ -69,7 +67,6 @@ func fakeClaude() int {
 	result := func(subtype string, isError bool) {
 		emit(map[string]any{"type": "result", "subtype": subtype, "is_error": isError})
 	}
-	hanging := false
 	reader := bufio.NewReader(os.Stdin)
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -78,9 +75,7 @@ func fakeClaude() int {
 		}
 		fmt.Fprintf(record, "in %s", line)
 		var msg struct {
-			Type      string `json:"type"`
-			RequestID string `json:"request_id"`
-			Message   struct {
+			Message struct {
 				Content []struct {
 					Text string `json:"text"`
 				} `json:"content"`
@@ -88,14 +83,6 @@ func fakeClaude() int {
 		}
 		if json.Unmarshal(line, &msg) != nil {
 			return 3
-		}
-		if msg.Type == "control_request" {
-			emit(map[string]any{"type": "control_response", "response": map[string]any{"subtype": "success", "request_id": msg.RequestID}})
-			if hanging {
-				hanging = false
-				result("error_during_execution", true)
-			}
-			continue
 		}
 		body := msg.Message.Content[0].Text
 		if title, ok := strings.CutPrefix(body, "/rename "); ok {
@@ -109,9 +96,6 @@ func fakeClaude() int {
 		}
 		emit(map[string]any{"type": "system", "subtype": "init", "session_id": "s"})
 		switch {
-		case body == "hang":
-			hanging = true
-			continue
 		case body == "handoff ok":
 			assistant(map[string]any{"type": "tool_use", "id": "tu1", "name": "mcp__legion__legion", "input": map[string]any{"op": "handoff_complete", "summary": "s"}})
 			emit(map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": []map[string]any{
@@ -368,49 +352,29 @@ func TestATurnIsOneUserMessageWhenTheHandoffSucceeds(t *testing.T) {
 }
 
 // A prompt during a turn is acknowledged and then refused in Oh My Pi's busy words, so the daemon
-// takes the task back uncharged and sends it again at the turn's end.
+// takes the task back uncharged and sends it again at the turn's end. The gate holds the turn's
+// own result back, so the turn is still running when the second prompt arrives.
 func TestAPromptDuringATurnIsRefusedBusy(t *testing.T) {
 	r := newRig(t, "-p", "--resume", sessionID)
-	r.prompt("p1", "hang")
+	r.prompt("p1", backgroundDuringPrompt)
 	r.expect("agent_start", nil)
+	if !r.state("g1") {
+		t.Error("isStreaming during the turn is false")
+	}
 	r.prompt("p2", "say again")
 	refusal := r.expect("response", map[string]any{"id": "p2", "command": "prompt", "success": false})
 	if !strings.HasPrefix(refusal["error"].(string), "Agent is already processing") {
 		t.Errorf("the refusal %q is not Oh My Pi's busy answer", refusal["error"])
 	}
-	r.send(shimwire.Abort{ID: "a1"})
-	r.expect("response", map[string]any{"id": "a1", "command": "abort", "success": true})
+	r.open()
 	r.expect("agent_end", nil)
 	if strings.Contains(r.recorded(), "say again") {
 		t.Errorf("Claude Code read the refused prompt: %s", r.recorded())
 	}
 }
 
-// An abort becomes an interrupt; its answer is Claude Code's acknowledgement, and the interrupted
-// user message's result ends the turn. Until then the turn is streaming: the
-// "hang" turn cannot end before the abort, so the state asked during it is the turn's own.
-func TestAnAbortInterruptsAndEndsTheTurn(t *testing.T) {
-	r := newRig(t, "-p", "--resume", sessionID)
-	r.prompt("p1", "hang")
-	r.expect("agent_start", nil)
-	if !r.state("g1") {
-		t.Error("isStreaming during the turn is false")
-	}
-	r.send(shimwire.Abort{ID: "a1"})
-	r.expect("response", map[string]any{"id": "a1", "command": "abort", "success": true})
-	r.expect("agent_end", nil)
-	if !strings.Contains(r.recorded(), `"subtype":"interrupt"`) {
-		t.Errorf("no interrupt reached Claude Code: %s", r.recorded())
-	}
-	// An abort with no turn running is answered at once.
-	r.send(shimwire.Abort{ID: "a2"})
-	r.expect("response", map[string]any{"id": "a2", "command": "abort", "success": true})
-	r.quiet()
-}
-
 // A step Claude Code ends in error reaches the daemon as Oh My Pi reports a failed step: the
-// assistant message_end with stopReason "error" and the failure as its errorMessage. An interrupted
-// step is not a failure, and TestAnAbortInterruptsAndEndsTheTurn holds that it sends none.
+// assistant message_end with stopReason "error" and the failure as its errorMessage.
 func TestAFailedStepIsOhMyPisFailedMessage(t *testing.T) {
 	r := newRig(t, "-p", "--resume", sessionID)
 	r.prompt("p1", "fail WAITING on the provider")

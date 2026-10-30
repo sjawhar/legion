@@ -856,27 +856,15 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				return err
 			}
 		}
-		// An operator's suspension holds its claim until the operator resumes
-		// it: the start, and the task it gives, wait on the row's backoff, before a quiesce
-		// interrupts the role whose phase it would take over. StartedBy refuses the same in the
-		// claim's own decision. A check start does not wait: its look cannot run, and ends
-		// (checkLookHeld).
+		// An operator's suspension holds its claim until the operator resumes it: the start, and the
+		// task it gives, wait on the row's backoff. StartedBy refuses the same in the claim's own
+		// decision. A check start does not wait: its look cannot run, and ends (checkLookHeld).
 		if found {
 			if held := machine.Claim(); held.RuleHolds() {
 				if payload.CheckLook > 0 {
 					return r.checkLookHeld(ctx, row, payload, *check)
 				}
 				return fmt.Errorf("start %s of %s: %w", payload.Role, issue.Key, held.RuleHoldError())
-			}
-		}
-		// A start that takes the phase over from a role still at work in it (CI settled red before
-		// that role completed) does nothing — no claim, no working-copy adoption, no task — until
-		// that role's turn is over (supervise.Machine.Quiesce), so the two never write the shared
-		// workspace together. A retry of a start that has already run against its claim (the claim's
-		// newest start, which StartedBy persists) is past that wait.
-		if payload.Quiesce != "" && (!found || machine.Claim().LastStartRow < row.ID) {
-			if err := r.quiesce(ctx, row, issue.Key, payload.Quiesce); err != nil {
-				return err
 			}
 		}
 		if !found {
@@ -1164,27 +1152,6 @@ func (r *outbox) stopWithoutMachine(ctx context.Context, row record.OutboxRow, t
 	}
 	if pending {
 		return wait.Errorf("stop claim %s: waiting for its stored claim's supervising machine", token)
-	}
-	return nil
-}
-
-// quiesce asks the claim of role on issue, whose phase the start row takes over, to be out of its
-// turn (supervise.Machine.Quiesce): nil once it is, supervise.ErrQuiesceHeld while it is not, which
-// the runner retries on its backoff. A role with no claim runs nothing.
-func (r *outbox) quiesce(ctx context.Context, row record.OutboxRow, issue string, role claim.Role) error {
-	token, err := claim.NewToken(r.project, issue, role)
-	if err != nil {
-		return fmt.Errorf("derive the claim outbox row %d takes over from: %w", row.ID, err)
-	}
-	outgoing, found := r.supervisor.Machine(token)
-	if !found {
-		return nil
-	}
-	if err := outgoing.Quiesce(ctx, row.ID); err != nil {
-		return err
-	}
-	if row.Attempts > 0 {
-		r.log.Info("outbox start goes on: the claim it takes the phase from is out of its turn", "row", row.ID, "issue", issue, "role", role)
 	}
 	return nil
 }
