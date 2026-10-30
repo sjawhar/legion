@@ -107,7 +107,12 @@
 # before the down command it then gives; (u) a run whose state.json records another PID namespace
 # refuses every command that would drive it, registering nothing and starting no daemon, while
 # status still reads it and down still deletes it, saying that the daemons it cannot see stop on
-# their own.
+# their own; (v) up applies a Postgres claim of its --pg-volume and refuses one above what the
+# namespace's quota leaves beside NATS's claims, a step that starts under the free-space
+# threshold sends no load, one whose free space falls under it mid-run has its runner job stopped
+# by the disk watcher, both are marked failed with kind pg_disk, and each step writes pg-disk.json
+# with the volume's size, the used bytes around the load, the peak, the least free and the
+# readings.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -220,7 +225,8 @@ case $verb in
         fi
         ;;
       "sh -c name="*) printf '%s\n' "${cmd[*]:4}" >>"$FAKE_DIR/runner-starts" ;;
-      "sh -c kill"*) ;;
+      # The job a stop names (runner_stop, runner_wait's bound, typing_stop).
+      "sh -c kill"*) printf '%s\n' "${cmd[4]}" >>"$FAKE_DIR/runner-stops" ;;
       # replay-prepare: the dump streamed into the Postgres pod, its sha256 there, the restore.
       'sh -c cat >"$1" sh '*) cat >"$FAKE_DIR/pod-dump" ;;
       "sha256sum "*) sha256sum "$FAKE_DIR/pod-dump" ;;
@@ -291,6 +297,16 @@ case $verb in
       *cpuinfo*) printf 'model name\t: Fake CPU @ 2.00GHz\n' ;;
       # Dispatch's container keeps its 16-core limit; Postgres's reads FAKE_DIR/cpu.max.
       "cat /sys/fs/cgroup/cpu.max") if [ "$ctr" = envoy-dispatch ]; then echo '1600000 100000'; else cat "$FAKE_DIR/cpu.max"; fi ;;
+      # The Postgres data volume (pg_disk). FAKE_PG_DF_SEQ names a file of `size used avail`
+      # lines, one per read, the last repeated; with none, a 100Gi volume a tenth used.
+      "df -B1 --output=size,used,avail /var/lib/postgresql/copy")
+        df_line='107374182400 10737418240 96636764160'
+        if [ -n "${FAKE_PG_DF_SEQ:-}" ] && [ -s "$FAKE_PG_DF_SEQ" ]; then
+          df_line=$(head -n1 "$FAKE_PG_DF_SEQ")
+          [ "$(wc -l <"$FAKE_PG_DF_SEQ")" -le 1 ] || sed -i 1d "$FAKE_PG_DF_SEQ"
+        fi
+        printf '%s %s %s\n%s\n' 1B-blocks Used Avail "$df_line"
+        ;;
       # browsertype's exit status (FAKE_TYPING_RC, default 0) and its peer lines: with exit 1, a
       # third peer that failed to connect.
       "cat /work/logs/typing-"*.rc) echo "${FAKE_TYPING_RC:-0}" ;;
@@ -298,7 +314,21 @@ case $verb in
         printf 'artifact=a peer=0 sent=40 skipped=1 errors=0 error=""\nartifact=a peer=1 sent=38 skipped=0 errors=0 error=""\n'
         [ "${FAKE_TYPING_RC:-0}" = 0 ] || printf 'artifact=b peer=0 sent=0 skipped=0 errors=1 error="websocket: bad handshake"\n'
         ;;
-      "cat /work/logs/"*.rc) echo 0 ;;
+      "cat /work/logs/"*.rc)
+        # FAKE_RC_UNTIL_STOP: the job has no exit status until something stops it (the disk
+        # watcher), as a job that still runs has none. At most 200 reads, so a watcher that never
+        # fires fails the test instead of hanging it.
+        if [ -n "${FAKE_RC_UNTIL_STOP:-}" ] && [ ! -s "$FAKE_DIR/runner-stops" ]; then
+          polls=0
+          [ ! -f "$FAKE_DIR/rc-polls" ] || polls=$(cat "$FAKE_DIR/rc-polls")
+          if [ "$polls" -lt 200 ]; then
+            echo $((polls + 1)) >"$FAKE_DIR/rc-polls"
+            echo 'cat: /work/logs: No such file or directory' >&2
+            exit 1
+          fi
+        fi
+        echo 0
+        ;;
       "cat /work/logs/"*) echo 'fake runner log' ;;
       "cat /work/seed.json") echo '{"projects": ["LGA"]}' ;;
       "tar -C /work/steps/"*)
@@ -614,12 +644,13 @@ cat >"$bin/hostname" <<'EOF'
 echo test-worker-0
 EOF
 
-# The fake sleep: apply_manifest's 3 s wait between tries, and a wait of FAKE_FAST_SLEEP seconds
-# (kube_read's 5 s, where a test sets it), are recorded and return at once; every other sleep (the
+# The fake sleep: apply_manifest's 3 s wait between tries, and a wait of any of FAKE_FAST_SLEEP's
+# seconds (space-separated: kube_read's 5 s, the daemons' 60 s, runner_wait's 15 s and the disk
+# watcher's 30 s, where a test sets them), are recorded and return at once; every other sleep (the
 # daemons' loops, their start waits) is the real one.
 cat >"$bin/sleep" <<EOF
 #!/usr/bin/env bash
-if [ "\$*" = 3 ] || [ "\$*" = "\${FAKE_FAST_SLEEP:-none}" ]; then
+if [ "\$*" = 3 ] || [[ " \${FAKE_FAST_SLEEP:-none} " == *" \$* "* ]]; then
   printf '%s\n' "\$*" >>"\$FAKE_DIR/sleep.log"
   exit 0
 fi
@@ -632,7 +663,8 @@ export LOADTEST_CLUSTER_ROOT=$tmp/root
 export POD_UID=00000000-1111-2222-3333-444444444444 LEGION_ISSUE=TEST-1
 export PATH="$bin:$PATH"
 unset FAKE_EXEC_FAIL FAKE_SAMPLE FAKE_PROD_MAJOR FAKE_LOADGEN_FAIL FAKE_APPLY_FAIL FAKE_QUIET FAKE_STORED_ORDER \
-  FAKE_EXEC_ERRORS FAKE_FAST_SLEEP FAKE_TYPING_RC FAKE_DISPATCH_BUILD_ERROR FAKE_COPY_BACK_FAIL
+  FAKE_EXEC_ERRORS FAKE_FAST_SLEEP FAKE_TYPING_RC FAKE_DISPATCH_BUILD_ERROR FAKE_COPY_BACK_FAIL \
+  FAKE_PG_DF_SEQ FAKE_RC_UNTIL_STOP
 export DISPATCH_URL=http://dispatch.invalid DISPATCH_TOKEN_FILE=$fake/token
 echo fake-token >"$fake/token"
 
@@ -731,6 +763,7 @@ write_pods() {
 
 reset_fake() {
   rm -f -- "$fake/lock.json" "$fake/applied.yaml" "$fake/kubectl.log" "$fake/seeded" "$fake/runner-starts" "$fake/dispatch.log" "$fake/loadgen.log" "$fake"/refine.[0-9]* \
+    "$fake/runner-stops" "$fake/rc-polls" "$fake/df-seq" \
     "$fake/sleep.log" "$fake/apply-errors" "$fake/replay-template" "$fake/restores" "$fake/pod-dump" \
     "$fake/stored-order.log" "$fake/go-dispatch.log" "$fake/go-browsertype.log" "$fake/git.log" \
     "$fake/go-dispatch-tree.log" "$fake/go-subcommands.go"
@@ -1635,7 +1668,7 @@ pass "up stops after five quota races in a row on one manifest"
     "RUNNER_IMAGE=mirror.gcr.io/library/debian@$digest")
   mapfile -t -O "${#values[@]}" values < <(pg_tier 16 60 | jq -r '"PG_TIER=\(.tier)", "PG_CPU=\(.cpu)", "PG_MEMORY=\(.memory)",
     (.settings | to_entries[] | "PG_\(.key | ascii_upcase)=\(.value)")')
-  values+=("PG_PASSWORD=$(random_hex 24)" "DISPATCH_TOKEN=$(random_hex 32)" "LISTENER_TOKEN=$(random_hex 32)" "SIGNING_KEY=$(random_hex 32)")
+  values+=(PG_VOLUME=100Gi "PG_PASSWORD=$(random_hex 24)" "DISPATCH_TOKEN=$(random_hex 32)" "LISTENER_TOKEN=$(random_hex 32)" "SIGNING_KEY=$(random_hex 32)")
   for m in secrets.yaml.tmpl postgres.yaml nats.yaml listener.yaml dispatch.yaml runner.yaml; do
     out=$(render_manifest "$MANIFESTS/$m" "${values[@]}") || fail "$m did not render"
     ! grep -qE '__[A-Z][A-Z0-9_]*__' <<<"$out" || fail "$m keeps a placeholder once rendered"
@@ -2213,3 +2246,96 @@ run_cluster down --namespace "$ns"
 grep -q 'PID namespace pid:\[1\]' "$tmp/out" ||
   fail "down does not say that it cannot stop the daemons of a run another PID namespace started: $(cat "$tmp/out")"
 pass "a command of a run another PID namespace started is refused before it registers anything or starts a daemon, while status still reads the run and down still deletes it"
+
+# (v) The Postgres data volume. On a 20Gi volume, a live replay with browser typing on the
+# reference seed filled it mid-run: Postgres crash-looped with `FATAL: could not write to file
+# "pg_wal/xlogtemp.49": No space left on device`, and the step's stored-order check could not even
+# connect, so the step and every later one of that run measured nothing. up now sizes the claim
+# (--pg-volume, refused above what the namespace's quota leaves beside NATS's three 20Gi claims),
+# and every step reads the volume before its load and every 30 s while the load runs: too little
+# free space is a failed step (kind pg_disk) that sends no load, or whose load the watcher stops,
+# never a Postgres that fills its volume.
+reset_fake
+export LOADTEST_CLUSTER_ROOT=$tmp/root-pgdisk
+# A 150Gi volume, as the fake df reports it: a tenth used, a fifth used, and 10% free.
+readonly pg_size=161061273600 pg_used_low=16106127360 pg_used_mid=32212254720 pg_used_high=144955146240
+readonly pg_free_low=144955146240 pg_free_mid=128849018880 pg_free_high=16106127360
+# df_seq LINE...: the readings the fake kubectl answers with, in order, the last repeated.
+df_seq() {
+  printf '%s\n' "$@" >"$fake/df-seq"
+  rm -f -- "$fake/rc-polls" "$fake/runner-stops"
+}
+
+run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok" --pg-volume 300Gi
+((RC != 0)) || fail "up accepted --pg-volume 300Gi, which the namespace's quota cannot hold beside NATS"
+grep -q -- '--pg-volume 300Gi is more than the 240Gi' "$tmp/out" ||
+  fail "up's refusal of --pg-volume 300Gi does not name what the quota leaves: $(cat "$tmp/out")"
+no_create || fail "up created something before refusing --pg-volume 300Gi"
+run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok" --pg-volume 150
+{ ((RC != 0)) && grep -q -- "--pg-volume '150' is not a whole number of Gi" "$tmp/out"; } ||
+  fail "up accepted a --pg-volume that is not a whole number of Gi: $(cat "$tmp/out")"
+no_create || fail "up created something before refusing a --pg-volume that is not Gi"
+run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok" --pg-volume 150Gi
+((RC == 0)) || fail "up --pg-volume 150Gi exited $RC: $(cat "$tmp/out")"
+pg_run=$(jq -r .data.run "$fake/lock.json")
+pg_dir=$LOADTEST_CLUSTER_ROOT/$pg_run
+[ "$(grep -c '^ *storage: 150Gi$' "$fake/applied.yaml")" = 1 ] ||
+  fail "the Postgres claim is not the --pg-volume 150Gi it was given: $(grep -n 'storage:' "$fake/applied.yaml")"
+[ "$(jq -r .postgres.volume "$pg_dir/state.json")" = 150Gi ] ||
+  fail "state.json does not record the data volume: $(jq -c .postgres "$pg_dir/state.json")"
+grep -q 'data volume (claim data-postgres-0 on premium-rwo): 150Gi' "$tmp/out" ||
+  fail "up did not print the Postgres data volume with the other sizes: $(cat "$tmp/out")"
+run_cluster seed --namespace "$ns"
+((RC == 0)) || fail "seed exited $RC: $(cat "$tmp/out")"
+
+# A step that starts with less than 15% of the volume free sends no load at all.
+df_seq "$pg_size $pg_used_high $pg_free_high"
+FAKE_PG_DF_SEQ=$fake/df-seq run_cluster step --namespace "$ns" pgfull 1 --duration 1m
+((RC != 0)) || fail "a step that started under the free-space threshold exited 0"
+! grep -q '^step-pgfull ' "$fake/runner-starts" ||
+  fail "a step that started under the free-space threshold still sent load: $(grep '^step-pgfull ' "$fake/runner-starts")"
+jq -e '[.reasons[] | select(.kind == "pg_disk")] | length == 1' "$pg_dir/steps/pgfull/step-failed.json" >/dev/null 2>&1 ||
+  fail "a step refused for free space holds no step-failed.json reason of kind pg_disk: $(cat "$pg_dir/steps/pgfull/step-failed.json" 2>/dev/null)"
+for want in '/var/lib/postgresql/copy is 150.0 GiB' '135.0 GiB used' '15.0 GiB free (10% of it)' 'under the 15% (22.5 GiB)' '--pg-volume'; do
+  grep -qF -- "$want" "$tmp/out" || fail "the refusal does not name '$want': $(cat "$tmp/out")"
+done
+jq -e --argjson u "$pg_used_high" '.samples | length == 1 and (.[0].used_bytes == $u)' "$pg_dir/steps/pgfull/pg-disk.json" >/dev/null ||
+  fail "a refused step's pg-disk.json does not hold its one reading: $(cat "$pg_dir/steps/pgfull/pg-disk.json" 2>/dev/null)"
+
+# A step whose free space falls under the threshold mid-run: the watcher stops its runner job and
+# marks the step failed, and pg-disk.json keeps the peak it reached.
+df_seq "$pg_size $pg_used_low $pg_free_low" "$pg_size $pg_used_high $pg_free_high"
+FAKE_PG_DF_SEQ=$fake/df-seq FAKE_RC_UNTIL_STOP=1 FAKE_FAST_SLEEP="15 30" \
+  run_cluster step --namespace "$ns" pgmid 1 --duration 1m
+((RC == 0)) || fail "a step whose volume filled mid-run exited $RC: $(cat "$tmp/out")"
+grep -q '^step-pgmid ' "$fake/runner-starts" || fail "the step sent no load, so it tests no watcher"
+jq -e '[.reasons[] | select(.kind == "pg_disk")] | length == 1' "$pg_dir/steps/pgmid/step-failed.json" >/dev/null 2>&1 ||
+  fail "a step whose volume filled mid-run holds no step-failed.json reason of kind pg_disk: $(cat "$pg_dir/steps/pgmid/step-failed.json" 2>/dev/null)"
+grep -qx 'step-pgmid' "$fake/runner-stops" ||
+  fail "the disk watcher did not stop the step's runner job: $(cat "$fake/runner-stops" 2>/dev/null)"
+jq -e --argjson peak "$pg_used_high" --argjson before "$pg_used_low" --argjson free "$pg_free_high" '
+  .used_peak == $peak and .used_before == $before and .free_min == $free and .threshold_pct == 15' \
+  "$pg_dir/steps/pgmid/pg-disk.json" >/dev/null ||
+  fail "pg-disk.json does not hold the peak the step reached: $(cat "$pg_dir/steps/pgmid/pg-disk.json" 2>/dev/null)"
+grep -q 'cgroup-merge .*/steps/pgmid ' "$fake/loadgen.log" ||
+  fail "the step's after-work did not run after the watcher stopped its load"
+
+# A step that keeps its room: no failure, and pg-disk.json holds the readings around the load.
+df_seq "$pg_size $pg_used_low $pg_free_low" "$pg_size $pg_used_mid $pg_free_mid"
+FAKE_PG_DF_SEQ=$fake/df-seq run_cluster step --namespace "$ns" pgok 1 --duration 1m
+((RC == 0)) || fail "a step with room on the volume exited $RC: $(cat "$tmp/out")"
+[ ! -f "$pg_dir/steps/pgok/step-failed.json" ] ||
+  fail "a step with room on the volume was marked failed: $(cat "$pg_dir/steps/pgok/step-failed.json")"
+jq -e --argjson size "$pg_size" --argjson before "$pg_used_low" --argjson after "$pg_used_mid" --argjson free "$pg_free_mid" '
+  .size_bytes == $size and .used_before == $before and .used_after == $after and .used_peak == $after
+  and .free_min == $free and .threshold_pct == 15 and (.samples | length) == 2
+  and (.samples | map(has("at")) | all)' "$pg_dir/steps/pgok/pg-disk.json" >/dev/null ||
+  fail "a normal step's pg-disk.json is wrong: $(cat "$pg_dir/steps/pgok/pg-disk.json" 2>/dev/null)"
+[ "$(jq -r .postgres.volume "$pg_dir/steps/pgok/copy-meta.json")" = 150Gi ] ||
+  fail "copy-meta.json does not record the data volume: $(jq -c .postgres "$pg_dir/steps/pgok/copy-meta.json")"
+! grep -qx 'step-pgok' "$fake/runner-stops" 2>/dev/null ||
+  fail "a step with room on the volume had its runner job stopped: $(cat "$fake/runner-stops")"
+[ -z "$(find "$pg_dir/steps" -name '.pg-disk.jsonl')" ] || fail "a step left its readings file beside pg-disk.json"
+unset FAKE_FAST_SLEEP
+run_cluster down --namespace "$ns"
+pass "up sizes the Postgres claim with --pg-volume and refuses one the quota cannot hold; a step under the free-space threshold sends no load, one that falls under it mid-run has its load stopped, both failed with kind pg_disk, and each step writes pg-disk.json"

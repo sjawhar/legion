@@ -5,8 +5,9 @@
 # runner pod inside it, samples every copy container's cgroup, collects, and removes the copy.
 #
 #   cluster.sh up --namespace NS --storage-class SC --dispatch-commit SHA --pg-major 16|18
-#                 --production-repo OWNER/REPO [--listener-image REF] [--stored-order-source SHA |
-#                 --stored-order-checker-commit SHA] [--browsertype-commit SHA]
+#                 --production-repo OWNER/REPO [--pg-volume 100Gi] [--listener-image REF]
+#                 [--stored-order-source SHA | --stored-order-checker-commit SHA]
+#                 [--browsertype-commit SHA]
 #       Refuses, before it creates anything, a commit with no ghcr.io envoy:<commit> image (naming
 #       the newest first-parent ancestor that has one), a --pg-major other than the production
 #       repository's dispatch/main.go databaseVersion, an image tag that does not resolve to a
@@ -16,12 +17,15 @@
 #       INFRA-707's files or registration; a dispatch subcommand table without the registration's
 #       anchor; a build failure, naming the commits and the compiler's first error), and a
 #       --browsertype-commit that the git store does not hold or whose tree has no
-#       packages/envoy/loadtest/browsertype. Refuses with exit 2 while the lock ConfigMap
+#       packages/envoy/loadtest/browsertype, and a --pg-volume that is not a whole number of Gi
+#       or is above the 240Gi the namespace's quota leaves beside NATS's three 20Gi claims.
+#       Refuses with exit 2 while the lock ConfigMap
 #       dispatch-loadtest-lock exists. Then takes the lock, installs the copy (Postgres 16 CPU /
-#       60Gi, Dispatch 16 / 32Gi, listener 500m / 512Mi, NATS 3 × 2 / 4Gi, runner 8 / 16Gi), builds
+#       60Gi on a --pg-volume data volume, default 100Gi, Dispatch 16 / 32Gi, listener 500m /
+#       512Mi, NATS 3 × 2 / 4Gi, runner 8 / 16Gi), builds
 #       loadgen and (with --browsertype-commit) a static browsertype of that commit for browser
 #       typing (below), starts the heartbeat and the sampler, and prints each copy container's
-#       requests and limits.
+#       requests and limits and the size of the Postgres data volume.
 #   cluster.sh seed --namespace NS            loadgen seed, seed-refs and seed-finish, then the template
 #                                             database dispatch_seed.
 #   cluster.sh step --namespace NS NAME FACTOR [--duration 10m] [--reads-only] [--typing
@@ -143,6 +147,19 @@
 # <step>/browsertype.txt, and its exit and per-peer sums into <step>/browsertype.json; a peer
 # error is reported, never a step failure.
 #
+# The Postgres data volume (up --pg-volume, default 100Gi; db-size keeps the same claim): a
+# replay with browser typing on the reference seed filled a 20Gi volume, and Postgres crash-looped
+# with "No space left on device" with the step's load still running. So each step and each replay
+# reads the volume (df -B1 of /var/lib/postgresql/copy in the Postgres pod, a read) after its
+# reset and before its load, every PG_DISK_POLL_SECONDS (30 s) while the load runs, and once more
+# when the load ends. Free space below PG_DISK_MIN_FREE_PCT (15 percent of the volume;
+# LOADTEST_PG_DISK_MIN_FREE_PCT overrides it) refuses the step before any load, or, from the
+# watcher, stops the step's loadgen run and its browser typing. Either way the step is a failed
+# one (step-failed.json kind pg_disk, with the reading), never a crash, so the series goes on and
+# shows it, and the step's after-work still runs. Each step and replay writes <step>/pg-disk.json:
+# size_bytes, used_before, used_after, used_peak, free_min, samples (each reading with its time)
+# and threshold_pct; a read that failed is a sample with error and no number.
+#
 # A read-only kubectl exec (psql reads, nats-box reads, the runner's file reads) that fails on a
 # transient API server error (error dialing backend, a refused or reset connection to the API
 # server) is retried once, 5 s later; a write is never retried.
@@ -190,6 +207,28 @@ RUNNER_IMAGE=mirror.gcr.io/library/debian:bookworm-slim
 MANIFEST_TYPES='application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json'
 # The copy containers the sampler reads and the crash check compares, by role (cgroup.go).
 SAMPLE_ROLES=(dispatch pprof postgres nats-0 nats-1 nats-2 listener runner)
+# The Postgres data volume: where postgres.yaml mounts the claim (PGDATA is under it), the
+# default and the largest --pg-volume, and what the namespace's ResourceQuota leaves for it.
+# The quota allows requests.storage 300Gi over 10 claims, and NATS takes three claims of 20Gi, so
+# the Postgres claim may ask for at most 300 - 60 = 240Gi. db-size keeps the claim it finds.
+PG_DATA_MOUNT=/var/lib/postgresql/copy
+PG_VOLUME_DEFAULT=100Gi
+PG_QUOTA_STORAGE_GI=300
+NATS_VOLUME_GI=60
+PG_VOLUME_MAX_GI=$((PG_QUOTA_STORAGE_GI - NATS_VOLUME_GI))
+# The disk guard (pg_disk): the free space, as a percent of the volume, that a step needs before
+# it sends load and keeps while it does (LOADTEST_PG_DISK_MIN_FREE_PCT overrides it), and how
+# often the watcher reads the volume while the load runs. A step with less is a failed step
+# (kind pg_disk) that sends no load, or whose load the watcher stops: a Postgres that fills its
+# volume crash-loops, which loses the step and every later one until the copy is reset.
+PG_DISK_MIN_FREE_PCT=${LOADTEST_PG_DISK_MIN_FREE_PCT:-15}
+[[ $PG_DISK_MIN_FREE_PCT =~ ^[1-9][0-9]?$ ]] ||
+  { printf 'cluster.sh: LOADTEST_PG_DISK_MIN_FREE_PCT must be a whole percent from 1 to 99, not %s\n' "$PG_DISK_MIN_FREE_PCT" >&2; exit 2; }
+PG_DISK_POLL_SECONDS=30
+# The last reading of the volume (pg_disk_sample), in bytes, each empty when that read failed,
+# and the pid of the step's watcher while one runs (pg_disk_watch_stop ends it).
+PG_DISK_SIZE="" PG_DISK_USED="" PG_DISK_FREE=""
+PG_DISK_WATCHER=""
 # The LINUX replay: INFRA-639's manifest, the template database replay-prepare makes,
 # where the dump goes in the Postgres pod (on its claim), and the outage's Dispatch figures that
 # loadgen codepaths sets a replay beside (production profile §5: 11.1-13.8 cores, 13.8 GiB).
@@ -308,6 +347,7 @@ valid() {
     hex) re='^[0-9a-f]{32,128}$' ;;
     cpu) re='^[1-9][0-9]?$' ;;
     memory) re='^[1-9][0-9]{0,2}Gi$' ;;
+    volume) re='^[1-9][0-9]{0,3}Gi$' ;;
     tier) re='^db-custom-[1-9][0-9]*-[1-9][0-9]*$' ;;
     pg_setting) re='^[1-9][0-9]*(kB|MB|GB)?$' ;;
     duration) re='^[1-9][0-9]*(s|m|h)$' ;;
@@ -460,7 +500,7 @@ production_file() {
 declare -A PLACEHOLDER_KIND=(
   [NAMESPACE]=namespace [RUN_ID]=run [STORAGE_CLASS]=storage_class
   [ENVOY_IMAGE]=image [LISTENER_IMAGE]=image [PG_IMAGE]=image [SOCAT_IMAGE]=image [RUNNER_IMAGE]=image
-  [PG_TIER]=tier [PG_CPU]=cpu [PG_MEMORY]=memory
+  [PG_TIER]=tier [PG_CPU]=cpu [PG_MEMORY]=memory [PG_VOLUME]=volume
   [PG_MAX_CONNECTIONS]=pg_setting [PG_SHARED_BUFFERS]=pg_setting [PG_EFFECTIVE_CACHE_SIZE]=pg_setting
   [PG_WORK_MEM]=pg_setting [PG_MAINTENANCE_WORK_MEM]=pg_setting [PG_MAX_WAL_SIZE]=pg_setting
   [PG_PASSWORD]=hex [DISPATCH_TOKEN]=hex [LISTENER_TOKEN]=hex [SIGNING_KEY]=hex
@@ -494,6 +534,7 @@ manifest_values() {
     "ENVOY_IMAGE=\(.images.dispatch)", "LISTENER_IMAGE=\(.images.listener)",
     "PG_IMAGE=\(.images.postgres)", "SOCAT_IMAGE=\(.images.socat)", "RUNNER_IMAGE=\(.images.runner)",
     "PG_TIER=\(.postgres.tier)", "PG_CPU=\(.postgres.cpu)", "PG_MEMORY=\(.postgres.memory)",
+    "PG_VOLUME=\(.postgres.volume)",
     "PG_MAX_CONNECTIONS=\(.postgres.settings.max_connections)",
     "PG_SHARED_BUFFERS=\(.postgres.settings.shared_buffers)",
     "PG_EFFECTIVE_CACHE_SIZE=\(.postgres.settings.effective_cache_size)",
@@ -1027,6 +1068,123 @@ pg_stats() {
   fi
 }
 
+# ---- the Postgres data volume -----------------------------------------------------------------
+
+# pg_disk: the Postgres data volume's size, used and free bytes, as one line "SIZE USED FREE",
+# from df in the Postgres pod (a read, so kube_read retries a transient API server error). When
+# the read or its parse fails it prints why, in one line, and returns 1, so the caller records a
+# reading with that error and no number.
+pg_disk() {
+  local out rc=0
+  out=$(kube_read exec postgres-0 -c postgres -- df -B1 --output=size,used,avail "$PG_DATA_MOUNT" 2>&1) || rc=$?
+  if ((rc != 0)); then
+    printf 'df of %s in postgres-0 failed (exit %s): %s\n' "$PG_DATA_MOUNT" "$rc" "$(tr '\n' ' ' <<<"$out")"
+    return 1
+  fi
+  if awk '$1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ { print $1, $2, $3; found = 1; exit }
+    END { exit !found }' <<<"$out"; then
+    return 0
+  fi
+  printf 'df of %s in postgres-0 gave no size, used and free bytes: %s\n' "$PG_DATA_MOUNT" "$(tr '\n' ' ' <<<"$out")"
+  return 1
+}
+
+# pg_disk_sample FILE: one reading of the volume, into the step's readings FILE (one JSON object
+# per line) and into PG_DISK_SIZE, PG_DISK_USED and PG_DISK_FREE. A read that failed is a sample
+# with error and no number (never 0), leaves the three empty, is said, and returns 1.
+pg_disk_sample() {
+  local file=$1 out
+  PG_DISK_SIZE="" PG_DISK_USED="" PG_DISK_FREE=""
+  if out=$(pg_disk); then
+    read -r PG_DISK_SIZE PG_DISK_USED PG_DISK_FREE <<<"$out"
+    jq -nc --arg at "$(utc_now)" --argjson size "$PG_DISK_SIZE" --argjson used "$PG_DISK_USED" --argjson free "$PG_DISK_FREE" \
+      '{at: $at, size_bytes: $size, used_bytes: $used, free_bytes: $free}' >>"$file"
+    return 0
+  fi
+  jq -nc --arg at "$(utc_now)" --arg why "$out" '{at: $at, error: $why}' >>"$file"
+  note "reading the Postgres data volume failed: $out"
+  return 1
+}
+
+# pg_disk_low: the last reading leaves less than PG_DISK_MIN_FREE_PCT of the volume free. A
+# reading that failed holds no number, and is never low: a read that did not happen measures
+# nothing.
+pg_disk_low() {
+  [ -n "$PG_DISK_SIZE" ] && ((PG_DISK_SIZE > 0)) || return 1
+  ((PG_DISK_FREE * 100 < PG_DISK_SIZE * PG_DISK_MIN_FREE_PCT))
+}
+
+# pg_disk_gib BYTES: BYTES in GiB with one decimal, for a message.
+pg_disk_gib() { awk -v b="$1" 'BEGIN { printf "%.1f GiB", b / 1073741824 }'; }
+
+# pg_disk_detail: the last reading as one phrase, for the step failure it is the detail of: the
+# volume and its size, what is used and what is free, the threshold, and the flag that gives a
+# bigger volume.
+pg_disk_detail() {
+  printf '%s is %s, %s used, %s free (%s%% of it), under the %s%% (%s) a step needs; up --pg-volume SIZE gives a bigger volume (default %s, at most %sGi)' \
+    "$PG_DATA_MOUNT" "$(pg_disk_gib "$PG_DISK_SIZE")" "$(pg_disk_gib "$PG_DISK_USED")" "$(pg_disk_gib "$PG_DISK_FREE")" \
+    "$((PG_DISK_FREE * 100 / PG_DISK_SIZE))" "$PG_DISK_MIN_FREE_PCT" "$(pg_disk_gib $((PG_DISK_SIZE * PG_DISK_MIN_FREE_PCT / 100)))" \
+    "$PG_VOLUME_DEFAULT" "$PG_VOLUME_MAX_GI"
+}
+
+# pg_disk_write DIR FILE: DIR/pg-disk.json from the step's readings FILE: the volume's size, the
+# used bytes before and after the load and the highest of them, the least free, every reading with
+# its time, and the threshold the step held to. A reading that failed is a sample with error and
+# no number, and counts for none of the figures, which are null (never 0) when no reading gave a
+# number. FILE is removed once the file is written.
+pg_disk_write() {
+  local dir=$1 file=$2
+  [ -f "$file" ] || return 0
+  # shellcheck disable=SC2016 # $read and $pct are jq's variables
+  if jq -s --argjson pct "$PG_DISK_MIN_FREE_PCT" '[.[] | select(has("error") | not)] as $read
+    | {size_bytes: ($read | last | .size_bytes), used_before: ($read | first | .used_bytes),
+      used_after: ($read | last | .used_bytes), used_peak: ($read | map(.used_bytes) | max),
+      free_min: ($read | map(.free_bytes) | min), samples: ., threshold_pct: $pct}' "$file" >"$dir/pg-disk.json.tmp"; then
+    mv -- "$dir/pg-disk.json.tmp" "$dir/pg-disk.json"
+    rm -f -- "$file"
+  else
+    rm -f -- "$dir/pg-disk.json.tmp"
+    note "step ${dir##*/}: summing the Postgres data volume's readings failed; no pg-disk.json"
+  fi
+}
+
+# pg_disk_watch NAME DIR JOB FILE: a reading of the volume into FILE every PG_DISK_POLL_SECONDS
+# while the step's loadgen run JOB runs in the runner. The first reading under the threshold stops
+# JOB and the step's browser typing, records the step failed (kind pg_disk) with the reading, and
+# ends the watch: Postgres never reaches a full volume with load still arriving, and the step's
+# after-work runs as it does for any step. run_in_runner starts it in the background, and
+# pg_disk_watch_stop ends it on every path out of the step.
+pg_disk_watch() {
+  local name=$1 dir=$2 job=$3 file=$4 nap=""
+  # Its own TERM ends the nap it is in, so the step leaves no sleep of its own behind.
+  trap '[ -z "$nap" ] || kill -- "$nap" 2>/dev/null; exit 0' TERM
+  while :; do
+    sleep "$PG_DISK_POLL_SECONDS" &
+    nap=$!
+    wait "$nap" || true
+    nap=""
+    pg_disk_sample "$file" || continue
+    pg_disk_low || continue
+    # From here the watcher records and stops; a TERM of a step that ends at this moment
+    # (pg_disk_watch_stop) waits for that instead of cutting it in half.
+    trap '' TERM
+    record_failure "$dir" pg_disk postgres "$(pg_disk_detail); the step's loadgen run was stopped before Postgres filled the volume"
+    runner_stop "$job"
+    typing_stop "$name" "$dir" || note "step $name: stopping browser typing after the disk watcher fired failed"
+    return 0
+  done
+}
+
+# pg_disk_watch_stop: the step's disk watcher ended and reaped, with the nap it is in; nothing
+# when none runs, so every path out of a step may call it.
+pg_disk_watch_stop() {
+  local pid=$PG_DISK_WATCHER
+  [ -n "$pid" ] || return 0
+  PG_DISK_WATCHER=""
+  kill -- "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+
 # nats_box ARGS: the nats CLI in the run's nats-box pod: NATS_BOX_POD when reset_copy has looked it
 # up, else the one running now.
 nats_box() {
@@ -1208,7 +1366,14 @@ runner_start() {
     sh "$name" "$@" || die "kubectl exec could not start $name in the runner"
 }
 
-# runner_wait NAME SECONDS [LOG_DIR]: NAME's exit status once it has one; past SECONDS it kills
+# runner_stop NAME: the runner job NAME stopped, by the pid it recorded. It never fails: the job
+# may have ended already. runner_wait's bound and the disk watcher both end a job this way.
+runner_stop() {
+  # shellcheck disable=SC2016 # expanded by the runner's sh
+  kube exec runner -c runner -- sh -c 'kill "$(cat "/work/logs/$1.pid")"' sh "$1" >/dev/null 2>&1 || true
+}
+
+# runner_wait NAME SECONDS [LOG_DIR]: NAME's exit status once it has one; past SECONDS it stops
 # NAME and prints "timeout". Its log is copied to LOG_DIR (default the run's logs/).
 runner_wait() {
   local name=$1 deadline=$((EPOCHSECONDS + $2)) log_dir=${3:-$RUN_DIR/logs} rc
@@ -1217,8 +1382,7 @@ runner_wait() {
       break
     fi
     if ((EPOCHSECONDS >= deadline)); then
-      # shellcheck disable=SC2016 # expanded by the runner's sh
-      kube exec runner -c runner -- sh -c 'kill "$(cat "/work/logs/$1.pid")"' sh "$name" >/dev/null 2>&1 || true
+      runner_stop "$name"
       rc=timeout
       break
     fi
@@ -1837,7 +2001,7 @@ typing_chosen() {
 # file, never printed), the document list, then browsertype for SECONDS, the stored-order check's
 # bound and 600 s more, which outlasts loadgen's window, grace, the after-work and the check;
 # typing_stop ends it before that. A step that dies before typing_stop stops it on its way out
-# (an EXIT trap of the shell the step runs in), so no browsertype types into a later step.
+# (step_at_exit, the EXIT trap run_in_runner sets), so no browsertype types into a later step.
 typing_start() {
   local name=$1 dir=$2 seconds=$3 docs
   [ -n "$TYPING" ] || return 0
@@ -1854,12 +2018,14 @@ typing_start() {
     -duration "$((seconds + STORED_ORDER_SECONDS + 600))s" -seed 1 -protect "$TYPING_PROTECT"
   note "step $name: browsertype (commit $(state '.browsertype.commit[0:12]')) started: $TYPING_PEERS peers on each of ${#TYPING_LIST[@]} documents at $TYPING_RATE keystroke updates/s, until the stored-order check ends"
   TYPING_STEP=("$name" "$dir")
-  trap typing_stop_at_exit EXIT
 }
 
-# typing_stop_at_exit: typing_start's EXIT trap: typing_stop of the step it started, which does
-# nothing once that step has stopped its typing.
-typing_stop_at_exit() { typing_stop "${TYPING_STEP[@]}" || true; }
+# typing_stop_at_exit: step_at_exit's part: typing_stop of the step typing_start started, which
+# does nothing once that step has stopped its typing, and nothing at all before any step typed.
+typing_stop_at_exit() {
+  ((${#TYPING_STEP[@]} == 2)) || return 0
+  typing_stop "${TYPING_STEP[@]}" || true
+}
 
 # typing_summary TXT EXIT: browsertype.json from browsertype's output TXT: the commit it was built
 # from, the documents (TYPING_LIST), the versions a load step plans for each of them
@@ -1989,7 +2155,7 @@ write_copy_meta() {
   jq --arg version "$version" --arg sha "$sha" --arg cpu_d "$cpu_d" --arg cpu_p "$cpu_p" --argjson pods "$pods" \
     --arg phase "$phase" --argjson reads "$reads" \
     '{namespace, run_id: .run, phase: $phase, reads_only: $reads, dispatch_commit, production_repo, pg_major, images,
-      postgres: {version: $version, settings_sha256: $sha, settings_file: "postgres-settings.txt", tier: .postgres.tier, cpu: .postgres.cpu, memory: .postgres.memory, settings: .postgres.settings},
+      postgres: {version: $version, settings_sha256: $sha, settings_file: "postgres-settings.txt", tier: .postgres.tier, cpu: .postgres.cpu, memory: .postgres.memory, volume: .postgres.volume, settings: .postgres.settings},
       node_cpu_model: {dispatch: $cpu_d, postgres: $cpu_p}, pods: $pods}' "$STATE" >"$file"
 }
 
@@ -2103,23 +2269,46 @@ runner_copy_back() {
   return 1
 }
 
+# step_at_exit: the EXIT trap run_in_runner sets before the step's load: the step's disk watcher
+# ended and its browser typing stopped, so neither outlives the step that started it.
+step_at_exit() {
+  pg_disk_watch_stop
+  typing_stop_at_exit
+}
+
 # run_in_runner NAME DIR JOB SECONDS CMD...: a step's loadgen run CMD as the runner job JOB (at
-# most SECONDS), with Postgres's write-out counters before and after it (pg-stats-before.json,
-# pg-stats-after.json) and, with --typing, browser typing from just before it (typing_start) until
-# the stored-order command ends (typing_stop, and at the latest when the step ends); then the
-# after-work of every step: /work/steps/NAME copied back into DIR (and, once copied, removed from
-# the runner with /work/meta/NAME.json; a copy-back that failed is a step failure, kind copy_back,
+# most SECONDS), with the Postgres data volume read before the load and refusing it with too
+# little free space (pg_disk_low: the step fails with kind pg_disk and sends nothing), a watcher
+# reading it while the load runs, Postgres's write-out counters before and after it
+# (pg-stats-before.json, pg-stats-after.json) and, with --typing, browser typing from just before
+# it (typing_start) until the stored-order command ends (typing_stop, and at the latest when the
+# step ends); then the
+# after-work of every step: DIR/pg-disk.json, /work/steps/NAME copied back into DIR (and, once
+# copied, removed from the runner with /work/meta/NAME.json; a copy-back that failed is a step
+# failure, kind copy_back,
 # and leaves the files in the runner), the crash check, the container logs, a non-zero exit
 # recorded, the stored-order check while Dispatch still runs (one that dies leaves the step
 # going), cgroup-merge and tables.
 run_in_runner() {
-  local name=$1 dir=$2 job=$3 seconds=$4 started rc
+  local name=$1 dir=$2 job=$3 seconds=$4 started rc readings=$2/.pg-disk.jsonl
   shift 4
+  trap step_at_exit EXIT
+  pg_disk_sample "$readings" || true
+  if pg_disk_low; then
+    record_failure "$dir" pg_disk postgres "$(pg_disk_detail); the step sent no load, so Postgres keeps the room it has left"
+    pg_disk_write "$dir" "$readings"
+    return 1
+  fi
   pg_stats "$dir/pg-stats-before.json"
   started=$(utc_now)
   typing_start "$name" "$dir" "$seconds"
   runner_start "$job" "$@"
+  pg_disk_watch "$name" "$dir" "$job" "$readings" &
+  PG_DISK_WATCHER=$!
   rc=$(runner_wait "$job" "$seconds" "$dir")
+  pg_disk_watch_stop
+  pg_disk_sample "$readings" || true
+  pg_disk_write "$dir" "$readings"
   pg_stats "$dir/pg-stats-after.json"
   [ ! -f "$dir/$job.log" ] || mv -- "$dir/$job.log" "$dir/loadgen.out"
   if runner_copy_back "$name" "$dir"; then
@@ -2230,12 +2419,13 @@ refine_run() {
 }
 
 # resize_postgres CPU GI: the Postgres StatefulSet at the tier of CPU and GI (resources and
-# settings), restarted on the same PVC; cpu.max must then read CPU × 100000 per 100000.
+# settings), restarted on the same PVC, whose size (up --pg-volume) the new tier keeps; cpu.max
+# must then read CPU × 100000 per 100000.
 resize_postgres() {
   local cpu=$1 gi=$2 tier got want
   tier=$(pg_tier "$cpu" "$gi")
   # shellcheck disable=SC2016 # $tier is jq's variable
-  state_set '.postgres = $tier' --argjson tier "$tier"
+  state_set '.postgres = $tier + {volume: .postgres.volume}' --argjson tier "$tier"
   # Dispatch and the listener hold Postgres connections; the next step's reset starts both again.
   stop_copy
   apply_manifest postgres.yaml
@@ -2702,7 +2892,7 @@ down_run() {
 # ---- subcommands ----------------------------------------------------------------------------------
 
 cmd_up() {
-  parse "namespace storage-class dispatch-commit pg-major production-repo listener-image stored-order-source stored-order-checker-commit browsertype-commit" "" "$@"
+  parse "namespace storage-class dispatch-commit pg-major production-repo pg-volume listener-image stored-order-source stored-order-checker-commit browsertype-commit" "" "$@"
   positional 0 "no positional arguments"
   trap up_exit EXIT
   up_run
@@ -2723,6 +2913,7 @@ up_exit() {
 up_run() {
   local sc=${OPT[storage-class]:-} commit=${OPT[dispatch-commit]:-} major=${OPT[pg-major]:-}
   local so_source=${OPT[stored-order-source]:-} so_checker=${OPT[stored-order-checker-commit]:-} bt_commit=${OPT[browsertype-commit]:-}
+  local pg_volume=${OPT[pg-volume]:-$PG_VOLUME_DEFAULT}
   PRODUCTION_REPO=${OPT[production-repo]:-}
   local tool
   for tool in kubectl jq curl gh go git setsid timeout sha256sum awk tar gzip base64; do
@@ -2730,6 +2921,10 @@ up_run() {
   done
   [ -n "$sc" ] || die "up: --storage-class is required (for GKE: premium-rwo)"
   valid storage_class "$sc" || die "up: --storage-class '$sc' is not a storage class name"
+  valid volume "$pg_volume" ||
+    die "up: --pg-volume '$pg_volume' is not a whole number of Gi (for example $PG_VOLUME_DEFAULT)"
+  ((${pg_volume%Gi} <= PG_VOLUME_MAX_GI)) ||
+    die "up: --pg-volume $pg_volume is more than the ${PG_VOLUME_MAX_GI}Gi the namespace's quota leaves for the Postgres claim (requests.storage ${PG_QUOTA_STORAGE_GI}Gi, of which NATS's three claims take ${NATS_VOLUME_GI}Gi)"
   [ -n "$commit" ] || die "up: --dispatch-commit is required: the 40-hex commit whose envoy image Dispatch runs"
   valid commit "$commit" || die "up: --dispatch-commit '$commit' is not a full 40-hex commit sha"
   case $major in
@@ -2794,6 +2989,7 @@ up_run() {
   checker_tmp_remove
   local tier
   tier=$(pg_tier 16 60)
+  tier=$(jq -c --arg v "$pg_volume" '. + {volume: $v}' <<<"$tier")
   (umask 077 && jq -n --arg ns "$NS" --arg run "$RUN" --arg sc "$sc" --arg commit "$commit" --arg major "$major" \
     --argjson stored_order "$STORED_ORDER_STATE" \
     --arg repo "$PRODUCTION_REPO" --arg created "$(utc_now)" --arg holder "$HOLDER_POD" --arg pidns "$(pid_ns)" \
@@ -2854,8 +3050,11 @@ nats_manifest_images() {
   jq -n --arg n "${nats#image: }" --arg r "${reloader#image: }" --arg b "${box#image: }" '{nats: $n, nats_reloader: $r, nats_box: $b}'
 }
 
+# print_resources: each copy container's requests and limits, and the size of the Postgres data
+# volume, which is the claim's and no container's.
 print_resources() {
   local jp='{range .items[*]}{.metadata.name}{range .spec.containers[*]}{"\t"}{.name}{": requests "}{.resources.requests}{", limits "}{.resources.limits}{end}{"\n"}{end}'
+  printf 'postgres-0\tdata volume (claim data-postgres-0 on %s): %s\n' "$(state .storage_class)" "$(state .postgres.volume)"
   printf '$ kubectl -n %s get pod -l %s=%s -o jsonpath='"'"'%s'"'"'\n' "$NS" "$RUN_LABEL" "$RUN" "$jp"
   kube get pod -l "$RUN_LABEL=$RUN" -o jsonpath="$jp" || die "kubectl could not read the copy's pods"
 }
@@ -3071,7 +3270,7 @@ cmd_hold() {
 }
 
 cmd_all() {
-  parse "namespace storage-class dispatch-commit pg-major production-repo listener-image stored-order-source stored-order-checker-commit browsertype-commit profile manifest upload-issue keep-for" "keep" "$@"
+  parse "namespace storage-class dispatch-commit pg-major production-repo pg-volume listener-image stored-order-source stored-order-checker-commit browsertype-commit profile manifest upload-issue keep-for" "keep" "$@"
   positional 0 "no positional arguments"
   local step_d hour_d replay_to refine collect_rc issue=${OPT[upload-issue]:-} manifest=${OPT[manifest]:-$REPLAY_MANIFEST} why
   case ${OPT[profile]:-} in

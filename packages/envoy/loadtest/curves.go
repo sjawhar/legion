@@ -812,7 +812,7 @@ func renderCurves(steps []*curveStep) string {
 	md.line("# Scaling curves\n")
 	md.line("One row per step: the knee series (the grid and refinement steps) in factor order, then the reads-only control, the hour and the 4 vCPU database. A step's factor is its requests/s target ÷ 60 (events/s ÷ 4 without requests). `-` is a number the step did not measure or that could not be read, never 0.")
 	if slices.ContainsFunc(steps, func(s *curveStep) bool { return s.failed }) {
-		md.line("\n(failed: <kinds>), in every table: the step failed, so its row shows no number. The kinds are step-failed.json's `reasons[].kind` (`restart`: a container of the copy restarted during the step; `loadgen_exit`: loadgen run exited non-zero; `copy_back`: the step's files could not be copied back from the runner, so they are missing here; `sampler_gap`: a role went over %s without a good cgroup sample in the window), `%s` (cgroup.json is marked failed) and `%s` (the step directory holds none).",
+		md.line("\n(failed: <kinds>), in every table: the step failed, so its row shows no number. The kinds are step-failed.json's `reasons[].kind` (`restart`: a container of the copy restarted during the step; `loadgen_exit`: loadgen run exited non-zero; `copy_back`: the step's files could not be copied back from the runner, so they are missing here; `pg_disk`: the Postgres data volume had less free space than the step needs, so the step sent no load or its load was stopped; `sampler_gap`: a role went over %s without a good cgroup sample in the window), `%s` (cgroup.json is marked failed) and `%s` (the step directory holds none).",
 			seconds(cgroupMaxGap), failedKindCgroup, failedKindNoSummary)
 	}
 	for _, t := range curveTables {

@@ -10,11 +10,14 @@ body: |-
   (`all --keep --keep-for`, `cluster.sh hold`) holds it, so a killed run's lock goes stale, and
   `up` then names the holder's issue to confirm with before the `down` that clears it. Only the PID
   namespace that ran `up` drives a run. It stands
-  up Postgres at the 16-vCPU Cloud SQL tier's size, Dispatch at production's pod size, the
+  up Postgres at the 16-vCPU Cloud SQL tier's size on a `--pg-volume` data volume (default 100Gi),
+  Dispatch at production's pod size, the
   listener, a three-pod NATS JetStream hub and a runner pod; seeds it; resets it before each step;
   runs 1x to 10x, the reads-only control, the hour at 10x and 1x on a 4-vCPU Postgres; samples
   every container's cgroup every 5 s; marks a step failed when a container restarts, loadgen
-  exits non-zero or the sampler has a gap over 30 s; and tears the copy down on any exit unless
+  exits non-zero, the sampler has a gap over 30 s, or the Postgres data volume has less than 15%
+  free before the step's load or while it runs, which sends no load or stops it before Postgres
+  fills the volume; and tears the copy down on any exit unless
   `--keep`. Profile full adds the refinement: `loadgen curves` names each knee and a factor that
   narrows its bracket, and each such factor runs as one more step until none is left.
   `cluster.sh collect` writes, with the steps in the order they ran, the cross-step `TABLES.md`,

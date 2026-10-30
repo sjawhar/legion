@@ -1544,9 +1544,12 @@ credential: every token and password is random and made for the run.
   their own (the heartbeat once the lock is gone, the sampler once that heartbeat is). A
   `state.json` from before `pid_ns` is not checked.
 - **The quota.** The copy at the 16-vCPU tier requests 47.2 CPUs, 121.25Gi of memory, 14.25Gi of
-  ephemeral storage, 8 pods, 6 Services, and 4 claims of 20Gi (80Gi) on `--storage-class`. At the
-  4-vCPU tier (`db-size 4 15Gi`) Postgres requests 12 CPUs and 45Gi less. No Service is a
-  LoadBalancer or a NodePort, and no pod has a priority class.
+  ephemeral storage, 8 pods, 6 Services, and 4 claims on `--storage-class`: NATS's three of 20Gi
+  (60Gi) and Postgres's data volume, `up --pg-volume` (default `100Gi`), 160Gi in all. The
+  namespace's quota allows `requests.storage` 300Gi over 10 claims, so `up` refuses a
+  `--pg-volume` above 240Gi. At the
+  4-vCPU tier (`db-size 4 15Gi`) Postgres requests 12 CPUs and 45Gi less, on the same claim. No
+  Service is a LoadBalancer or a NodePort, and no pod has a priority class.
 - **The tools on the worker's `PATH`:** `kubectl`, `jq`, `curl`, `gh`, `go`, `git` (`up`'s
   stored-order checker and `--browsertype-commit`), `setsid`, `timeout`, `tar`, `gzip` and
   `base64` (the stored-order evidence), `sha256sum`, `uv` (collect's zstd compression) and
@@ -1594,6 +1597,7 @@ hold `cluster.sh hold --namespace <ns> --for <duration>` extends while you type 
 | `--dispatch-commit` | The full 40-hex commit whose envoy image Dispatch runs. Required. |
 | `--pg-major` | `16` or `18`. Required. It must equal production's major (`databaseVersion` in the deployment repository), else `up` refuses and names both. |
 | `--production-repo` | The deployment repository, `owner/repo`. Required. |
+| `--pg-volume` | The size of the Postgres data volume, a whole number of Gi (`100Gi`). Default `100Gi`. `up` refuses more than `240Gi`, which is what the namespace's quota leaves beside NATS's three 20Gi claims. `db-size` keeps the claim, so one run has one volume size. |
 | `--listener-image` | The listener's image. Default: production's `listenerImage` from the deployment repository. |
 | `--stored-order-source` | The full 40-hex commit whose INFRA-707 files (`internal/dispatch/docs/storedorder.go`, `cmd/dispatch/storedorder.go`) and `stored-order` registration are added to the `--dispatch-commit` tree to build the stored-order checker (The stored-order check, below). Required when that tree has no `cmd/dispatch/storedorder.go`; refused when it has one. For INFRA-598's 9b92ac14: INFRA-707's head. |
 | `--stored-order-checker-commit` | The escape: the full 40-hex commit the stored-order checker is built from wholly, in place of the `--dispatch-commit` tree. `up` warns that its renderer may differ from Dispatch's and records `renderer_matches: false`. Refused beside `--stored-order-source`. |
@@ -1615,15 +1619,15 @@ so. A write (`drop database`, a `kubectl cp`, a start in the runner) is never re
 
 | Subcommand | What it does |
 | --- | --- |
-| `up <up's flags>` | Refuses, before it creates anything, a commit with no image, a `--pg-major` other than production's, an image tag that does not resolve to a digest, stored-order flags it cannot build the checker from (The stored-order check, below: a `--dispatch-commit` the git store does not hold; a tree without `cmd/dispatch/storedorder.go` and no `--stored-order-source`, or one with it and a `--stored-order-source`; a source or checker commit the git store does not hold or whose tree lacks INFRA-707's files or registration), an overlay whose subcommand table lacks the registration's anchor, a checker that does not compile (naming the dispatch commit, the source commit and the compiler's first error), and a `--browsertype-commit` that the git store does not hold or whose tree has no `loadtest/browsertype`. Refuses with exit status 2 while the lock exists. Then takes the lock, installs the copy, builds `loadgen` and (with `--browsertype-commit`) `browsertype`, starts the heartbeat and the sampler, and prints each container's requests and limits. |
+| `up <up's flags>` | Refuses, before it creates anything, a commit with no image, a `--pg-major` other than production's, a `--pg-volume` that is not a whole number of Gi or is above 240Gi, an image tag that does not resolve to a digest, stored-order flags it cannot build the checker from (The stored-order check, below: a `--dispatch-commit` the git store does not hold; a tree without `cmd/dispatch/storedorder.go` and no `--stored-order-source`, or one with it and a `--stored-order-source`; a source or checker commit the git store does not hold or whose tree lacks INFRA-707's files or registration), an overlay whose subcommand table lacks the registration's anchor, a checker that does not compile (naming the dispatch commit, the source commit and the compiler's first error), and a `--browsertype-commit` that the git store does not hold or whose tree has no `loadtest/browsertype`. Refuses with exit status 2 while the lock exists. Then takes the lock, installs the copy, builds `loadgen` and (with `--browsertype-commit`) `browsertype`, starts the heartbeat and the sampler, and prints each container's requests and limits and the size of the Postgres data volume. |
 | `seed` | `loadgen seed` from the runner through Dispatch's Service, then `loadgen seed-finish`. Then it stops Dispatch and the listener and renames the database to the template `dispatch_seed`. |
-| `step NAME FACTOR [--duration 10m] [--reads-only] [--typing [--typing-peers 2] [--typing-rate 5] [--typing-docs 20]]` | The reset, then one `loadgen run` at FACTOR × (4 events/s, 60 requests/s) with the `series-sessions` count, then the crash check, the stored-order check, `cgroup-merge` and `tables`. FACTOR can be fractional (`8.5`). `--reads-only` sends 0 events, and is refused with `--typing`. Postgres's write-out counters go into `pg-stats-before.json` and `pg-stats-after.json`. `--typing` adds browser typing (below), into the documents `loadgen plan-docs` says the step's own writes plan the most versions for. |
+| `step NAME FACTOR [--duration 10m] [--reads-only] [--typing [--typing-peers 2] [--typing-rate 5] [--typing-docs 20]]` | The reset, the Postgres data volume read (The Postgres data volume, below), then one `loadgen run` at FACTOR × (4 events/s, 60 requests/s) with the `series-sessions` count, then the crash check, the stored-order check, `cgroup-merge` and `tables`. FACTOR can be fractional (`8.5`). `--reads-only` sends 0 events, and is refused with `--typing`. Postgres's write-out counters go into `pg-stats-before.json` and `pg-stats-after.json`. `--typing` adds browser typing (below), into the documents `loadgen plan-docs` says the step's own writes plan the most versions for. |
 | `series [--duration 10m]` | 1x, 2x, 3x, 5x, 7x, 10x and `10x-reads`, then the refinement (below). |
 | `soak [--duration 60m]` | The step `10x-hour`. |
 | `db-size CPU MEMORY` | Postgres at the Cloud SQL tier of CPU and MEMORY (for example `4 15Gi`), restarted on the same claim. Postgres's `cpu.max` must then read the new limit. |
 | `redeploy --dispatch-commit SHA` | Dispatch on the image of another commit, then a reset. A before-and-after pair runs on one copy. |
 | `replay-prepare [--manifest FILE] [--from-dir DIR]` | The replay's template `dispatch_replay` (The replay on the copy, below). It refuses, before it touches the copy, a manifest whose seed is null or whose seed check failed. |
-| `replay NAME [--from 0] [--to 39m] [--typing [--typing-peers 2] [--typing-rate 5] [--typing-docs 20]]` | One replay step from `dispatch_replay` (refused without it) over the sub-window FROM to TO after 22:55, then the step's after-work and `loadgen codepaths` beside the outage. `--typing` adds browser typing (below). |
+| `replay NAME [--from 0] [--to 39m] [--typing [--typing-peers 2] [--typing-rate 5] [--typing-docs 20]]` | One replay step from `dispatch_replay` (refused without it) over the sub-window FROM to TO after 22:55, with the same Postgres data volume guard as a step (below), then the step's after-work and `loadgen codepaths` beside the outage. `--typing` adds browser typing (below). |
 | `collect [--upload-issue KEY]` | The cross-step outputs, with every step in the order the steps ran (`meta.json` `start`): `STORED-ORDER.md` (with each step's typing), `TABLES.md`, `loadgen curves` into `curves/` over every step but the phase `replay`'s and those that ran browser typing, and `loadgen codepaths` in each step directory that holds `summary.json` (a replay step's with the flags `replay` gives it). Then it packs each phase and the phase `results`. A failed command is reported, the rest still runs, and `collect` exits with status 1. |
 | `status` | The lock, the run, its PID namespace when it is not this one, its hold, its heartbeat and sampler, and its pods. It runs from any PID namespace. |
 | `down [--run ID]` | Removes the run's hold, stops the heartbeat and the sampler, deletes everything labelled with the run id (the claims, the Secrets and the lock too), waits until nothing of the run is left, and prints that listing. It removes the lock of another run only when `--run` names that run. It runs from any PID namespace: a run another one started keeps its daemons, which `down` says and which then stop on their own. |
@@ -1635,6 +1639,33 @@ and of the refinement writes `refine.txt`. Each line is one factor at which a re
 narrows a knee's bracket. `cluster.sh` runs each factor F as the step `<F>x` (for example `8.5x`)
 for the grid's duration, then runs `curves` again. It stops when `refine.txt` is empty. `curves`
 gives at most two refinement steps per knee.
+
+### The Postgres data volume
+
+The copy's Postgres keeps its data, its WAL among it, on one claim of `up --pg-volume` (default
+`100Gi`) on `--storage-class`, mounted at `/var/lib/postgresql/copy` with `PGDATA` under it.
+`db-size` renders the StatefulSet again and keeps that claim, so one run has one volume size.
+
+A full volume is not a slow step but a lost one: on a 20Gi volume, a replay with browser typing
+on the reference seed filled it mid-run, and Postgres crash-looped with `FATAL: could not write
+to file "pg_wal/xlogtemp.49": No space left on device`, so the step's stored-order check could
+not even connect. So every step and every replay guards the volume with `df -B1
+--output=size,used,avail` of that mount in the Postgres pod:
+
+- After its reset and before any load. With less than `15%` of the volume free
+  (`LOADTEST_PG_DISK_MIN_FREE_PCT`, a whole percent from 1 to 99, overrides it), the step sends no
+  load: it is a failed step (`step-failed.json` kind `pg_disk`) whose one message names the
+  volume's size, what is used, what is free, the threshold and `--pg-volume`. The series goes on
+  and shows the failed row.
+- Every 30 s while `loadgen run` runs. The first reading under the threshold stops that runner job
+  and the step's browser typing and records the same failed step with the reading, so Postgres
+  never reaches a full volume with load still arriving. The step's after-work (the copy back, the
+  crash check, the stored-order check, `cgroup-merge`, `tables`) still runs.
+- When the load ends.
+
+Each step and replay writes `<step>/pg-disk.json` from those readings (Output files, below). A
+read that failed is a sample with `error` and no number, and is never 0: it is no measurement, so
+it never refuses a step by itself.
 
 ### The replay on the copy
 
@@ -1926,7 +1957,7 @@ the worker pod.
 
 | File | What it holds |
 | --- | --- |
-| `state.json` | Mode 600. The namespace, the run id, the storage class, the commit, the Postgres major, the deployment repository, the start time, the holder pod, the holder's PID namespace (`pid_ns`, which every subcommand but `status` and `down` must run in), every image by digest, the Postgres tier and its settings, `stored_order` (the stored-order checker: `dispatch_commit`, `built_from`, `overlay_source`, `overlay_files`, `registration`, `renderer_matches` and the sha256 of its `envoy-dispatch`), `browsertype` (the `--browsertype-commit` and the sha256 of its `browsertype`, or `null` without the flag), and the run's random credentials. |
+| `state.json` | Mode 600. The namespace, the run id, the storage class, the commit, the Postgres major, the deployment repository, the start time, the holder pod, the holder's PID namespace (`pid_ns`, which every subcommand but `status` and `down` must run in), every image by digest, the Postgres tier, its data volume (`postgres.volume`, `up --pg-volume`) and its settings, `stored_order` (the stored-order checker: `dispatch_commit`, `built_from`, `overlay_source`, `overlay_files`, `registration`, `renderer_matches` and the sha256 of its `envoy-dispatch`), `browsertype` (the `--browsertype-commit` and the sha256 of its `browsertype`, or `null` without the flag), and the run's random credentials. |
 | `loadgen` | The static `loadgen` of this checkout, which the runner also gets. |
 | `envoy-dispatch` | The stored-order checker: the static `envoy-dispatch` of `--dispatch-commit`'s tree (with `--stored-order-source`'s overlay, or of `--stored-order-checker-commit`), which the runner also gets (The stored-order check, above). |
 | `browsertype` | Only with `--browsertype-commit`: the static `browsertype` of that commit, which the runner also gets (Browser typing, above). |
@@ -1954,13 +1985,14 @@ its cores and working set from `cgroup.json`. It also holds:
 | File | What it holds |
 | --- | --- |
 | `meta.json` | Also `copy` (`copy-meta.json`, as given) and `pg_clock`: at the start and after the window, the reads, `rtt_ms_min`, `rtt_ms_p50` and `offset_ms` (Postgres's clock minus `loadgen`'s), or `error`. The delivery latency from commit spans the two clocks. |
-| `copy-meta.json` | The copy at the step's start: the namespace, the run id, the step's phase (`phase`) and whether it sent reads alone (`reads_only`, which with `phase` places the step in the curves), the commit, the deployment repository, the Postgres major, the images, Postgres's version, the SHA-256 of its `SHOW ALL`, its tier and settings, the node CPU model in the Dispatch and Postgres containers, and each pod's node and each container's image and resources. |
+| `copy-meta.json` | The copy at the step's start: the namespace, the run id, the step's phase (`phase`) and whether it sent reads alone (`reads_only`, which with `phase` places the step in the curves), the commit, the deployment repository, the Postgres major, the images, Postgres's version, the SHA-256 of its `SHOW ALL`, its tier, data volume (`postgres.volume`) and settings, the node CPU model in the Dispatch and Postgres containers, and each pod's node and each container's image and resources. |
 | `postgres-settings.txt` | Postgres's `SHOW ALL` at the step's start. |
 | `reset.json` | The reset before the step: `started`, `ended`, `seconds`, the template, the stream `ENVOY_NOTIFICATIONS` on 3 replicas, each KV bucket's replicas, and in a replay step `checksum` (`loadgen replay-checksum` of the new database before Dispatch started). |
 | `pg-stats-before.json`, `pg-stats-after.json` | Postgres's write-out counters just before and just after `loadgen run`: `at`, `bgwriter` (`pg_stat_bgwriter`) and, on Postgres 17 and later, `checkpointer` (`pg_stat_checkpointer`). The difference shows a disk-bound step: checkpoints, their write and sync times, and the buffers written. A failed read leaves no file. |
+| `pg-disk.json` | The Postgres data volume over the step (The Postgres data volume, above): `size_bytes`, `used_before` and `used_after` (the readings around the load), `used_peak`, `free_min`, `samples` (each reading with its `at`, or with `error` and no number when that read failed) and `threshold_pct`. A figure no reading gave is `null`, never 0. |
 | `replay-prepared.json`, `last-reset.json`, `envoy-dispatch.json` | Only in a replay step: `replay-prepare`'s record, and the two files written into the runner's `LOADTEST_ROOT` for `loadgen run` (above). |
 | `containers-before.tsv`, `containers-after.tsv` | Each sampled container's role, pod, container, `restartCount` and `lastState.terminated.reason`, before and after the step. |
-| `step-failed.json` | Only when the step failed: `reasons`, each with `kind`, `role` and `detail`. `restart`: a container of the copy restarted during the step. `loadgen_exit`: `loadgen run` exited non-zero. `copy_back`: the step's files could not be copied back from the runner, so they are missing here and stay in the runner at `/work/steps/<name>`. `sampler_gap`: a container had no good cgroup read for more than 30 s in the window. |
+| `step-failed.json` | Only when the step failed: `reasons`, each with `kind`, `role` and `detail`. `restart`: a container of the copy restarted during the step. `loadgen_exit`: `loadgen run` exited non-zero. `copy_back`: the step's files could not be copied back from the runner, so they are missing here and stay in the runner at `/work/steps/<name>`. `pg_disk`: the Postgres data volume had less than `threshold_pct` free, so the step sent no load, or the watcher stopped its load; the detail names the reading and `--pg-volume` (The Postgres data volume, above). `sampler_gap`: a container had no good cgroup read for more than 30 s in the window. |
 | `cgroup.json` | `loadgen cgroup-merge` of `cgroup.jsonl` over the window: `window_start`, `window_end`, `window_s`, `failed` and `failures`, and for each role `pods`, `container`, `samples`, `failed_reads`, `restarts`, `cpu_max`, `limit_cores`, `cores_mean`, `cores_peak_5s`, `cpu_s`, `throttled_s`, `working_set_bytes_mean` and `working_set_bytes_max` (`memory.current` less `inactive_file`), `max_gap_s`, and `minutes` (each whole minute's cores and mean working set; `null` for a minute with a gap over 30 s). A figure the reads cannot give is `null`, never 0. |
 | `loadgen.out` | The output of `loadgen run` in the runner. |
 | `stored-order.txt`, `stored-order.json`, `stored-order-evidence/` | The output of `envoy-dispatch stored-order --since <window_start>` over every document after the step, and the checker's fields (`dispatch_commit`, `built_from`, `overlay_source`, `overlay_files`, `registration`, `renderer_matches`, `sha256`), `exit`, `since` and the counts of its summary line (`null` without one, never 0) and `evidence`; and the rows of each mismatched or refused document, never uploaded (The stored-order check, above). A non-zero exit is a correctness finding, not a `step-failed.json` reason. |
@@ -2015,7 +2047,8 @@ its cores and working set from `cgroup.json`. It also holds:
   where the logged quote is gone; not the 22:47Z restart's cold rooms; not other projects' writes
   (2.6% of the window); not browser tabs beyond 2 streams; no embeddings. `cluster/replay-residual.md`
   lists every difference, and `codepaths` prints it under the residual of each replay.
-- The database's disk is a 20Gi claim on `--storage-class` (`premium-rwo` for GKE). Production's
+- The database's disk is a claim of `up --pg-volume` (default `100Gi`) on `--storage-class`
+  (`premium-rwo` for GKE). Production's
   Cloud SQL disk is 14.7 GiB of PD_SSD. So the IOPS ceiling differs. Each step and replay records
   Postgres's write-out counters before and after it (`pg-stats-before.json`, `pg-stats-after.json`:
   `pg_stat_bgwriter`, and `pg_stat_checkpointer` on Postgres 17 and later), so a disk-bound step

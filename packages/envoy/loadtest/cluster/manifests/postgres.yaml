@@ -148,4 +148,7 @@ spec:
         storageClassName: __STORAGE_CLASS__
         resources:
           requests:
-            storage: 20Gi
+            # cluster.sh up --pg-volume (default 100Gi): the data this copy's Postgres holds,
+            # its WAL among it. db-size renders this file again and keeps the claim it finds,
+            # since a StatefulSet's volumeClaimTemplates cannot be patched.
+            storage: __PG_VOLUME__
