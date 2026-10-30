@@ -2,43 +2,90 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-168",
-  "completed": "2026-10-29T21:34:00Z",
+  "completed": "2026-10-30T00:53:00Z",
   "decision": "changes_requested",
-  "round": "Generation 5, a full round at code head bd250c480ce4 (handoff e272addd): the port onto main's merged marker gate under plan rev 11, reviewed against main (git diff a1a134a35e1f bd250c480, 49 files) beside the previously approved change (git diff 868594990ca5 2ac8abe5c966). The workspace was recreated before this turn; it held every push, including the last review handoff (approved at 4c4f1c67).",
+  "round": "The round answering the review at a43bfa38, at code head e061d9edfc2e (handoff 5ffea41f): the 20 previous findings and what their fixes add; the thermonuclear pair ran once at this head.",
   "critical": 0,
-  "important": 6,
-  "minor": 18,
+  "important": 3,
+  "minor": 11,
+  "previousFindings": "19 of 20 fixed, each with a test that fails when its fix is reverted (both reviews' mutation probes). The override-comment fix holds by construction: each value is quoted on its own and the comment goes in at lineEnd, after the words, 2>&1, the here-document opener and a head/tail stage; 39 shapes run through bash 5.2 and brush-core gave the reviewed argv and stdin and no sentinel file. Partly: the renamed record-order test's 'markers: 1 at record' assertion survives moving startRecord back before the mint (askgate.test.ts:3483).",
   "keyFindings": [
-    {"severity": "important", "file": "packages/pi-envoy/extensions/askgate/askgate-core.ts:2019", "description": "keepOverrideVisible inserts the comment at command.indexOf('\\n'), which is inside a quoted multi-line value or after a `| head`/`| tail` stage. A multi-line --body is cut (bash hands the CLI other args: block refuses, warn posts a changed comment); a piped rebutted call goes unmarked though recorded as a rebuttal; and a `$(...)` inside the rebuttal, once its opening quote closes the body's quote, runs (Security[untrusted-input], reproduced by the deep review: PWNED file created)."},
-    {"severity": "important", "file": "packages/pi-envoy/extensions/askgate/decision-record.ts:24,212-248", "description": "A second upload of a session's decision document (a cut upload that Dispatch stored, or a new process for the same session id) stores a new version under the same name, dropping the earlier records from what the reader reads; the comments claim it makes a second document. Reproduced at the recorder."},
-    {"severity": "important", "file": "packages/pi-envoy/extensions/askgate/decision-record.ts:252 with askgate-core.ts:2200-2208,2412-2461 and askgate.ts:177-193", "description": "The record's stop and shutdown cut exist twice (core and host) and disagree: an unmarked record cut at shutdown reports 'did not answer within 5000 ms' (reproduced). Plan G2 step 10's 'record timeout owned by decision-record.ts' is not done; recordDeadline is untested (mutant survives)."},
-    {"severity": "important", "file": "packages/pi-envoy/extensions/askgate/askgate.test.ts:3188", "description": "The test claims no mint before the decision record settles; since bd250c48 the record runs after the call returns, and the test passes with a never-settling record."},
-    {"severity": "important", "file": "packages/pi-envoy/extensions/askgate/askgate.test.ts:6198", "description": "Rules test 20 never shows that a rules verdict resets the failure count: deleting the reset leaves the suite green."},
-    {"severity": "important", "file": "packages/pi-envoy/extensions/askgate/askgate-core.ts:2376,1070", "description": "Two design-point guards are untested: callEnded on tool_result (design 9) and overrideComment's later-line guard (design 2); each mutant survives, and the second is reachable through a backslash-continued command."},
-    {"severity": "minor", "file": "askgate-core.ts:3428", "description": "The Dispatch record starts before mintFor, which can still refuse the call (UNKEYED_REFUSAL, mint failure), so the record can say allow/rebuttal for a call that never posted."},
-    {"severity": "minor", "file": "askgate-core.ts:3289", "description": "The unreachable dry-run timeout branch (plan G2 step 10) is still there; replacing it with a throw leaves 445 tests green."},
-    {"severity": "minor", "file": "askgate-core.ts:220,2408-2410; README.md:609-610; .changes INFRA-168-askgate-decision-record.yaml:22", "description": "Wording: one session's records are said to keep their order; only the first upload is serialised, and later docEdits land in arrival order (reproduced)."},
-    {"severity": "minor", "file": "askgate-core.ts:2762", "description": "Wording: 'rendered and sent before this returns' claims an HTTP send the code cannot promise; 'rendered and started first' is what holds."},
-    {"severity": "minor", "file": "scripts/askgate-report.ts:613", "description": "Structure: the --dispatch-project reader (~430 lines) is a second program in a file grown from 414 to 1,059 lines; move it to its own module with the shared tally helpers."},
-    {"severity": "minor", "file": "askgate-core.ts:2826", "description": "Structure: decide doubled to ~220 lines with 10 positional parameters; the ~60-line rules-refusal branch belongs in its own function and the per-call values in one object."},
-    {"severity": "minor", "file": "scripts/askgate-report.ts:317; pi-legion score.ts:391,398", "description": "Duplication: rule names, rule outcomes and the refusal's first line restated outside rules-check.ts, unchecked for completeness."},
-    {"severity": "minor", "file": "askgate-core.ts:385,1897", "description": "Re-exports: Usage re-exported from the core (plan's 'exported once' item not met) and renderTemplate re-exported only for a test."},
-    {"severity": "minor", "file": "askgate-core.ts:592", "description": "Deps.recordDecision is optional only for tests, leaving the core a second way to build the recorder the shared-recorder fix said must be one."},
-    {"severity": "minor", "file": "askgate.ts:104", "description": "Duplication: sessionDispatchClient restates envoy.ts's timedDispatchClient."},
-    {"severity": "minor", "file": "askgate.ts:63", "description": "Type restated inline: AskGateHost.configFile re-spells SessionConfigFile's success arm."},
-    {"severity": "minor", "file": "packages/envoy-client/src/askgate-new-asks.ts:39", "description": "Boundary: NewAsk.textMissing is a rules-check field on the shared envoy-client type, and readAsks mutates the scan's objects."},
-    {"severity": "minor", "file": "breaker.ts:16,146", "description": "Naming: GATE_BREAKER_REVISES and revised() count refusals only."},
-    {"severity": "minor", "file": "breaker.ts:30", "description": "targetLabel parses the key back from JSON with a cast; build the label with the key."},
-    {"severity": "minor", "file": "PR body lines 8, 12, 17", "description": "Stale: line 8's comment claim (false under the first finding), line 12's order (the entry precedes the record), line 17's recordError on the advisor-gate entry (now an advisor-gate-record entry)."},
-    {"severity": "minor", "file": "G3 inventory", "description": "Five of #2161's 193 test titles were renamed with no commit or PR-body line naming the old title and its reason (four shutdown/record titles changed by bd250c48's recorded design change, and score.test.ts's 'an unreadable first attempt is no review'); list each in the PR body's inventory with its reason."}
+    {
+      "severity": "important",
+      "file": "packages/pi-envoy/extensions/askgate/decision-record.ts:300 (A5)",
+      "description": "Decision records are lost under load, and A5 counts from Dispatch. A process holding no id for a session lists every project document (GET /projects/INFRA/artifacts: 2.1 s, 4.5 MB, 2,153 documents, growing one per session) inside the record's 5 s stop; the tester saw 13 of 31 records given up under about 22 sessions, and 13 of 15 of those sessions were on their first record. Since bd250c48 the record runs after the call returns, so nothing needs the 5 s bound. Fix: read the document by name (getProjectArtifact, 0.07 s; upload only on 404); let one record write run under the client's own keyed retries (one Idempotency-Key per write, so a late first attempt is replayed, not doubled) until it is written or the shutdown cut; give each record an id (the tool call id, or the ledger line's id for an unmarked write) the reader de-duplicates on; and have the session-file report count the advisor-gate-record entries and the unmarked entries' recordError, so a record still lost at shutdown shows in a count."
+    },
+    {
+      "severity": "important",
+      "file": "packages/pi-envoy/extensions/askgate/decision-record.ts:279",
+      "description": "The stop is armed when a record is queued, not when its write starts: queued records share one budget and are told Dispatch did not answer when Dispatch never got them, and the write still starts with an aborted signal. Reproduced: three records, 3 s per docEdit, records 2 and 3 'did not answer within 5000 ms'. New in 2d7d78a4."
+    },
+    {
+      "severity": "important",
+      "file": "packages/pi-envoy/extensions/askgate/askgate-core.ts:1092 with :1040-1066 and :2114",
+      "description": "Two definitions of where the override comment may stand disagree on a line continuation: keepOverrideVisible writes at lineEnd past a continuation and overrideComment rejects it, so the read-back drops the comment and the agent is told AskGate removed the flag, the case the visible comment exists for (askgate.test.ts:2771). One fact from dispatchCommandHead should serve both."
+    },
+    {
+      "severity": "minor",
+      "file": "askgate-core.ts:2058,2070; README.md:459-460; rules-check fragment :18-19",
+      "description": "Wording, Security[untrusted-input]: 'every word quoted, so nothing can run wherever it stands' is false (reproduced in bash inside a single-quoted value); safety rests on lineEnd."
+    },
+    {
+      "severity": "minor",
+      "file": "askgate-core.ts:2112-2121",
+      "description": "Read-back: head.comment !== undefined can never be true, and sameArgv and the rebuttal-line clause follow from the text comparison; each survives deletion. Keep one check that states the rule, or test each clause."
+    },
+    {
+      "severity": "minor",
+      "file": "askgate.test.ts:3483,3367",
+      "description": "Previous finding 8 partly: the 'record ran after the mint' assertion survives the record moved before the mint; and 'whose record fails' names the session entry."
+    },
+    {
+      "severity": "minor",
+      "file": "askgate-core.ts:3526-3531",
+      "description": "A refusal caused by a failed entry write is still recorded as decision allow; only a mint refusal is rewritten."
+    },
+    {
+      "severity": "minor",
+      "file": "decision-record.ts:31; README.md:621-622; fragment :26; askgate-core.ts:2503",
+      "description": "Wording: 'they land in the order the gate made them' fails once a stop fires (Dispatch finishes a given-up keyed write while the next is sent)."
+    },
+    {
+      "severity": "minor",
+      "file": "envoy.ts:890,1368,1528,1553; rules-check.ts:121",
+      "description": "Duplication: four copies of the timed-client line where one helper was, and DispatchSession declared twice."
+    },
+    {
+      "severity": "minor",
+      "file": "decision-record.ts:327",
+      "description": "Dead code: the rejection arm of queued.then(write, write); its comment credits it with :330-333's guarantee."
+    },
+    {
+      "severity": "minor",
+      "file": "askgate-core.ts:3074-3075",
+      "description": "abandoned() maps an impossible 'timeout' to success; name Exclude<Cause,'timeout'> once (written five times) and throw on timeout."
+    },
+    {
+      "severity": "minor",
+      "file": "askgate.ts:144-151",
+      "description": "The shutdown cut has two owners depending on whether the gate loaded; one bind-time handler should own the cut and its delay."
+    },
+    {
+      "severity": "minor",
+      "file": "askgate-report-common.ts:4; askgate-core.ts:226-228; envoy.ts:641-643",
+      "description": "Stale wording: 'neither imports the other' (askgate-report.ts imports the reader), the per-call order, and cutRecords, which is gone."
+    },
+    {
+      "severity": "minor",
+      "file": "askgate-core.ts:3338,3383-3384,3431; score.ts:402-404",
+      "description": "The override surface computed twice with a fallback, kept-or-removed stored in the per-surface table; a tombstone comment where RULE_REFUSED was."
+    }
   ],
-  "designPoints": "1 holds (the order is entry, then record, then mint by the recorded change; see the record-before-mint finding); 2 broken by keepOverrideVisible (the tokenizer itself agrees with bash on 16 forms); 3, 5, 6, 7, 9, 11, 12 hold; 4 holds in order; 8 holds per the recorded change (5,000 ms margin, record off the deadline); 10 holds but for the host's cut reason.",
-  "architectQuestions": {
-    "a_charter_timeouts": "Not caused by this change. The one differing request line is main's own envoy_publish description (PR #2370, after the merge-base; 3 tokens), which the no-rules control also carries; nothing serial is added before the charter starts (the transcript renders once, the breaker keys only when the breaker holds something, the directory is lazy); measured generation speed is the same with and without the concurrent rules call (63-70 vs 58-66 tok/s); the M14 split reversed in D14. On the timeout path the branch reviews more than main: a rules match still refuses when the charter times out (seen live in 14-c3-block).",
-    "b_provider_refusals": "Not caused by this change, medium confidence. Every reasoning_extraction refusal on an l-ask, on both trees, followed the agent reading a SKILL.md before the command (a larger transcript with a second thinking block); given that, round 14's l4 refusal rate is branch 3 of 7 and main 2 of 5; S14's 5 vs 0 follows the agents' choice to read the skill first. The rules call shares the session id but no cache key or request id, and was never refused itself. The decisive measurement, if wanted: one refused charter request sent N times alone and N times with its rules request in flight under the same session id."
-  },
-  "planConformance": "G1 step 4: ten paths outside the plan's lists, each a real #2161 change explained in the PR comment (envoy-client package.json, dispatch-session-state.ts, dispatch-askgate.test.ts, the test's __tests__ path, six .changes fragments); no CHANGELOG.md edited and no #2159 bullet in a fragment. G3: 193 titles, 188 kept verbatim, 5 renamed without a named reason (finding above); the four envoy.test.ts strings present; A1's pin green, MEASURED and the three rule-check*.md unchanged since 2ac8abe5.",
-  "ci": "Read at 21:32Z at 38b5846d (only .legion/ between bd250c48 and the head): lint success, pi-envoy (A1's pin) success, pr-title success, test in progress, typecheck queued. Not all green; a request for changes does not wait on it.",
-  "provider": "Every assistant turn of this round was anthropic/claude-opus-5-5, read from each session's own turns in the session store: this reviewer session 18 turns since 2026-10-29, DeepReview14 76, QualityReview14 65, PlanConformance14 13, LatencyRefusal14 47.",
-  "threads": "All 15 existing threads resolved; this round opens new ones with the review."
+  "judgedNotDefects": [
+    "Tester round 15, s7: a rebuttal holding a newline cannot be a comment, so the gate removes it and says so; that agent resent to check and posted twice. One session, a newline in a rebuttal is rare, and the acknowledgement says plainly that AskGate removed it; recorded in Not proven / risk."
+  ],
+  "architectQuestion": "Records lost under load break A5's count source: requested as a correctness finding (first key finding), with the design: a by-name read, keyed client retries until written or the shutdown cut, a record id the reader de-duplicates on, and the loss at shutdown counted from the session file.",
+  "ci": "Read at 00:51Z at f1905acb (the newest pull_request run; only .legion/ above e061d9ed): lint, typecheck, test, pi-envoy queued; pr-title 2 success, 22 cancelled. Not green; a request for changes does not wait on it.",
+  "provider": "Every assistant turn of this round was anthropic/claude-opus-5-5, read from each session's own turns in the session store: this reviewer session 13 turns since 2026-10-30, DeepReview15 91, QualityReview15 48.",
+  "threads": "Each of the 20 threads of the review at a43bfa38 gets one reply; PRRT_kwDORFy7ds6xw3FW is unresolved (finding 8 partly fixed)."
 }
