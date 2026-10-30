@@ -14,6 +14,10 @@ import { z } from "zod"
 export interface ChannelBrokerMessage {
   readonly subject: string
   readonly data: Uint8Array
+  /**
+   * The frame's reply subject, which only a relay frame carries anything useful in: the relay's
+   * own answer token (`RelayMessage`, consumer delivery). No frame of the forwarder's is answered.
+   */
   readonly reply?: string
   /** The message's NATS headers; only a relay frame (consumer delivery) carries any read here. */
   readonly headers?: RelayHeaders
@@ -25,12 +29,12 @@ export interface ChannelInboundMessage extends ChannelBrokerMessage {
   readonly raw: string
   /**
    * The event already reached the channel queue, or its relayed copy is the one shown
-   * (`ChannelForwarderOptions.relayed`); direct request-reply still needs its receipt.
+   * (`ChannelForwarderOptions.relayed`), so it is not queued again.
    */
   readonly duplicate?: true
   /**
    * The topic the envelope itself names. It differs from `subject` when the listener forwarded
-   * a lane (a role topic) onto the direct subject and is waiting for a receipt.
+   * a lane (a role topic) onto the direct subject.
    */
   readonly envelopeTopic?: string
 }
@@ -103,8 +107,8 @@ export interface ChannelForwarderOptions {
   /**
    * Whether the listener relays the subscription `topic`'s subject from the session's consumer
    * (consumer delivery), which shows its frames: a core frame on it claims nothing and goes on as
-   * a duplicate, only to answer a lane's receipt. Read before the claim, so the core copy never
-   * holds the claim its relayed copy needs.
+   * a duplicate, which is queued nowhere. Read before the claim, so the core copy never holds the
+   * claim its relayed copy needs.
    */
   readonly relayed?: (topic: string) => boolean
 }
@@ -165,22 +169,20 @@ export function createChannelForwarder(
       for await (const { message, receivedAt } of readArrivals(subscription)) {
         const raw = decoder.decode(message.data)
         const identity = deliveryIdentity(raw)
-        // The relay shows this subject's frames: the core copy answers only a lane's receipt.
+        // The relay shows this subject's frames: the core copy is dropped.
         let claim = options.relayed?.(topic) === true ? undefined : dedupe.claim(identity)
         // A repeat of a frame the session was shown before this process started, which only the
-        // replay ledger knows of: it goes on as a duplicate, which still answers a lane's receipt.
+        // replay ledger knows of: it goes on as a duplicate, which is shown nowhere.
         if (claim !== undefined && identity !== undefined && options.ledger?.delivered(identity)) {
           claim.settle()
           claim = undefined
         }
-        // A nats.js Msg exposes subject/data/reply through prototype getters,
-        // which an object spread would silently drop; copy the fields by name.
+        // A nats.js Msg exposes subject/data through prototype getters, which an object spread
+        // would silently drop; copy the fields by name.
         const inbound: ChannelInboundMessage = {
           subject: message.subject,
           data: message.data,
           raw,
-          // nats.js MsgImpl.reply is a getter returning "" when unset; absent means no reply address.
-          ...(message.reply ? { reply: message.reply } : {}),
           ...(identity?.topic === undefined ? {} : { envelopeTopic: identity.topic }),
           ...(claim === undefined ? { duplicate: true } : {}),
         }
@@ -190,7 +192,7 @@ export function createChannelForwarder(
         } catch (error) {
           claim?.release()
           report(`could not deliver a message on ${message.subject}`, error)
-          // A duplicate was never being shown; only its receipt can have failed.
+          // A duplicate was never being shown, so nothing of it can have failed.
           if (claim !== undefined) options.failed?.(inbound, topic, error, receivedAt)
           continue
         }

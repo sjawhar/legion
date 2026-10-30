@@ -18,20 +18,19 @@ import (
 // publishDeliveryWindow bounds a confirmed send through POST /v1/messages/publish, counted from the
 // request's arrival: every read, forward and pause of the send happens inside it. It keeps the
 // answer inside envoy-client's 5 s attempt, the Legion daemon's 10 s client and the listener's 10 s
-// write timeout, and leaves room for two forwards of roleReceiptTimeout, which covers a recipient
-// whose connection is moving to another server.
+// write timeout, and leaves room for two forwards of roleForwardTimeout, so a forward the stream
+// did not acknowledge storing is made again.
 const publishDeliveryWindow = 4 * time.Second
 
 // publishRetryPause is the wait between one failed attempt of a confirmed send and the next, so a
 // recipient whose connection is down is not sent a burst of forwards that reach nobody.
 const publishRetryPause = 100 * time.Millisecond
 
-// roleSendFailure is the 504 of a role send whose window ended without its holder's receipt.
-// Reason is receipt_timeout when the last forward reached the server and drew no receipt
-// (bus.ErrReceiptTimeout), else delivery_failed: no live holder to forward to, a read that failed
-// or ran out of time, or a forward not shown to have reached the server. Holder is the holder the
-// send last resolved, empty when none was; Attempts counts the forwards it made, every one the same
-// envelope under one event_id.
+// roleSendFailure is the 504 of a role send whose window ended with no forward the stream stored
+// for its holder. Reason is delivery_failed: no live holder to forward to, a read that failed or
+// ran out of time, or a forward the stream did not acknowledge storing. Holder is the holder the
+// send last resolved, empty when none was; Attempts counts the forwards it made, every one the
+// same envelope under one event_id.
 type roleSendFailure struct {
 	Error     string      `json:"error"`
 	Reason    sendOutcome `json:"reason"`
@@ -58,20 +57,19 @@ type capabilityRefusal struct {
 type sendOutcome string
 
 const (
-	// sendDelivered is a send whose recipient's receipt arrived through this route.
+	// sendDelivered is a send the stream stored for its recipient, which reads it from its own
+	// session consumer.
 	sendDelivered sendOutcome = "delivered"
-	// sendDedupe is a recipient that had confirmed this dedupe key through the route already, so
-	// it was not sent the message again.
+	// sendDedupe is a recipient this route had already stored this dedupe key for, so it was not
+	// sent the message again.
 	sendDedupe sendOutcome = "dedupe"
 	// sendSkipped is a role send from the role's own holder, the role lane's echo skip.
 	sendSkipped sendOutcome = "skipped"
 	// sendUnclaimed and sendHolderLapsed are a role send with no live claim, answered 404.
 	sendUnclaimed    sendOutcome = sendOutcome(roleHolderUnclaimed)
 	sendHolderLapsed sendOutcome = sendOutcome(roleHolderLapsed)
-	// sendReceiptTimeout is a recipient whose last forward reached the server and drew no receipt.
-	sendReceiptTimeout sendOutcome = "receipt_timeout"
-	// sendDeliveryFailed is a recipient that no forward was shown to reach: none live to forward
-	// to, a read that failed or ran out of time, or a forward not shown to have reached the server.
+	// sendDeliveryFailed is a recipient the stream stored no forward for: none live to forward to,
+	// a read that failed or ran out of time, or a forward it did not acknowledge storing.
 	sendDeliveryFailed sendOutcome = "delivery_failed"
 	// sendCapability is a role holder that cannot take the payload's delivery mode, answered 403.
 	sendCapability sendOutcome = "capability"
@@ -83,11 +81,11 @@ const (
 
 // deliveryStatus is the label the role lane gives the same outcome, which the route counts under
 // messagesDelivered and logs as delivery_status, so the route's counts and lines read as the
-// lane's: an unclaimed role is skipped, and every outcome that is neither taken, skipped nor a
-// receipt timeout is failed.
+// lane's: an unclaimed role is skipped, and every outcome that is neither taken nor skipped is
+// failed.
 func (o sendOutcome) deliveryStatus() string {
 	switch o {
-	case sendDelivered, sendDedupe, sendSkipped, sendReceiptTimeout:
+	case sendDelivered, sendDedupe, sendSkipped:
 		return string(o)
 	case sendUnclaimed:
 		return string(sendSkipped)
@@ -96,11 +94,11 @@ func (o sendOutcome) deliveryStatus() string {
 	}
 }
 
-// receiptWindow is the receipt wait of one forward: roleReceiptTimeout, or what is left of the send
-// when that is less.
-func receiptWindow(ctx context.Context) time.Duration {
+// forwardWindow is one forward's wait for the stream's acknowledgement that it stored it:
+// roleForwardTimeout, or what is left of the send when that is less.
+func forwardWindow(ctx context.Context) time.Duration {
 	deadline, _ := ctx.Deadline()
-	return min(roleReceiptTimeout, time.Until(deadline))
+	return min(roleForwardTimeout, time.Until(deadline))
 }
 
 // pauseBeforeRetry waits publishRetryPause, or until ctx ends, and reports whether the send has time
@@ -111,12 +109,11 @@ func pauseBeforeRetry(ctx context.Context) bool {
 
 // forwardAndWait forwards item to subject through the delivery configuration's forwardRole and
 // waits for its outcome, which is the form a route needs: it answers its sender with what the
-// forward did, where the role lane hands the wait over and reports it later. storedOnly asks for a
-// forward that counts as delivered once the stream acknowledges storing it, with no receipt
-// (roleForwardStoredOnly): a holder served on a port has no NATS subscriber to answer one, and
-// takes the stored copy through its listener instead.
-func (d *listenerDeps) forwardAndWait(subject string, item contracts.Envelope, window time.Duration, storedOnly bool) error {
-	wait, err := d.delivery.forwardRole(subject, item, window, storedOnly)
+// forward did, where the role lane hands the wait over and reports it later. The outcome is the
+// stream's acknowledgement that it stored the forward, nothing more: the holder answers no
+// receipt and reads the stored copy from its session consumer (startRoleForward).
+func (d *listenerDeps) forwardAndWait(subject string, item contracts.Envelope, window time.Duration) error {
+	wait, err := d.delivery.forwardRole(subject, item, window)
 	if err != nil {
 		return err
 	}
@@ -131,20 +128,9 @@ func forwardRefused(err error) bool {
 	return errors.Is(err, bus.ErrRefused) || errors.Is(err, bus.ErrPublishDenied)
 }
 
-// unconfirmedReason is the outcome a send gives a recipient that never sent its receipt, from the
-// last forward made to it: receipt_timeout when that forward reached the server and drew no
-// receipt, delivery_failed for anything else — a forward the stream did not store
-// (bus.ErrForwardNotStored), and no forward at all, among them.
-func unconfirmedReason(lastForward error) sendOutcome {
-	if errors.Is(lastForward, bus.ErrReceiptTimeout) {
-		return sendReceiptTimeout
-	}
-	return sendDeliveryFailed
-}
-
-// confirm records that sessionID's receipt for the message under dedupeKey arrived through the
+// confirm records that the stream stored the message under dedupeKey for sessionID through the
 // route. The route's own record (listenerDeps.confirmed) is what a later send of the same key
-// reads, so envoy-client's retry of a send skips a recipient the first attempt confirmed; the
+// reads, so envoy-client's retry of a send skips a recipient the first attempt stored it for; the
 // delivery handlers' cache is told too, so they do not push the same key to it again.
 func (d *listenerDeps) confirm(dedupeKey, sessionID string) {
 	d.confirmed.Record(dedupeKey, sessionID)
@@ -152,11 +138,13 @@ func (d *listenerDeps) confirm(dedupeKey, sessionID string) {
 }
 
 // roleSend is one role message through the publish route. The route does not publish on the role
-// lane: it forwards the envelope to the holder's agent subject itself and answers once the holder's
-// receipt arrived, or with the failure once publishDeliveryWindow from arrived has passed, so its
-// sender learns whether the message was taken. It publishes no delivery exception: the sender has
-// the answer. Every answer goes through record, the route's one line per request
-// (request_record.go), and is then settled: counted, and logged on the send's own delivery line.
+// lane: it forwards the envelope to the holder's agent subject itself and answers 200 once the
+// stream stored that forward for the holder's session consumer, or with the failure once
+// publishDeliveryWindow from arrived has passed, so its sender learns whether the message was kept
+// for its holder. No holder answers a receipt (startRoleForward), so the 200 is the stream's word
+// rather than the holder's. It publishes no delivery exception: the sender has the answer. Every
+// answer goes through record, the route's one line per request (request_record.go), and is then
+// settled: counted, and logged on the send's own delivery line.
 type roleSend struct {
 	w        http.ResponseWriter
 	record   *requestRecord
@@ -185,7 +173,7 @@ func (s *roleSend) settle(outcome sendOutcome) {
 		slog.String("elapsed", time.Since(s.arrived).String()))
 }
 
-// delivered answers 200 with the envelope and the holder that took it.
+// delivered answers 200 with the envelope and the holder it was stored for.
 func (s *roleSend) delivered(outcome sendOutcome) {
 	s.record.holder = s.holder
 	s.record.accept(s.w, publishResponse{Envelope: s.item, Holder: s.holder})
@@ -230,38 +218,33 @@ func (s *roleSend) refused(err error) {
 	s.settle(sendFailed)
 }
 
-// timedOut answers the 504 of a send whose window ended without a receipt, recorded under its
-// reason.
-func (s *roleSend) timedOut(lastForward error) {
-	outcome := unconfirmedReason(lastForward)
-	recorded := outcomeDeliveryFailed
-	if outcome == sendReceiptTimeout {
-		recorded = outcomeReceiptTimeout
-	}
+// timedOut answers the 504 of a send whose window ended with no forward the stream stored for its
+// holder, recorded delivery_failed.
+func (s *roleSend) timedOut() {
 	s.record.holder = s.holder
-	s.record.refuseWith(s.w, http.StatusGatewayTimeout, recorded, roleSendFailure{
-		Error: fmt.Sprintf("role %s: event %s was not confirmed by its holder %s within %s (%s)",
-			s.role, s.item.EventID, cmp.Or(s.holder, "(none)"), publishDeliveryWindow, outcome),
-		Reason:    outcome,
+	s.record.refuseWith(s.w, http.StatusGatewayTimeout, outcomeDeliveryFailed, roleSendFailure{
+		Error: fmt.Sprintf("role %s: event %s was not stored for its holder %s within %s (%s)",
+			s.role, s.item.EventID, cmp.Or(s.holder, "(none)"), publishDeliveryWindow, sendDeliveryFailed),
+		Reason:    sendDeliveryFailed,
 		EventID:   s.item.EventID,
 		DedupeKey: s.item.DedupeKey,
 		Holder:    s.holder,
 		Attempts:  s.attempts,
 	})
-	s.settle(outcome)
+	s.settle(sendDeliveryFailed)
 }
 
 // settledBeforeForward judges the message to a holder the send has not checked yet, whose session
 // entry is entry, by beforeForward, the rules the role lane applies before it forwards, and reports
-// whether it answered: an echo (the source session holds the role) or a holder that already
-// confirmed this dedupe key through the route, both answered 200 with nothing forwarded; a holder
-// that cannot take the payload's delivery mode, answered 403 with the refusal sendHandler gives,
+// whether it answered: an echo (the source session holds the role) or a holder this route already
+// stored this dedupe key for, both answered 200 with nothing forwarded; a holder that cannot take
+// the payload's delivery mode, answered 403 with the refusal sendHandler gives,
 // recorded capability_refused as sendHandler records it.
 //
 // The dedupe check reads the route's own record (listenerDeps.confirmed), not the delivery
 // handlers' cache: agentSubjectDelivery and fanoutDelivery record a key there for a self-subscribed
 // session whose push they skipped, having heard nothing from it, so a role send under a key one of
-// them saw would be answered 200 for a holder that never confirmed it.
+// them saw would be answered 200 for a holder the route never forwarded it to.
 func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 	verdict := beforeForward(s.item, s.holder, entry, s.d.confirmed.Seen)
 	switch verdict.kind {
@@ -295,10 +278,13 @@ func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 // unclaimed role, or a lapsed holder whose claim was released or already absent, is answered 404 as
 // the first resolution answers it; a lapsed holder whose claim was retained, a read that failed and
 // a claim that churned fail that attempt only. Each attempt forwards the same envelope, under the
-// role forward's dedupe key, with a receipt window of what is left of the send, at most
-// roleReceiptTimeout. Every forward carries the same Nats-Msg-Id (bus.Client.RequestCoreTo), so the
-// stream, which captures agent subjects, keeps one copy however many attempts there are. Every read
-// takes ctx, the send's window, so none outlasts it: a send whose window ends is answered 504.
+// role forward's dedupe key, and waits what is left of the send, at most roleForwardTimeout, for
+// the stream's acknowledgement that it stored it; that acknowledgement is the send's 200, since
+// the holder answers nothing and reads the stored copy from its session consumer
+// (startRoleForward). Every forward carries the same Nats-Msg-Id (bus.ForwardMsgID), so the
+// stream, which captures agent subjects, keeps one copy however many attempts there are. Every
+// read takes ctx, the send's window, so none outlasts it: a send whose window ends is answered
+// 504.
 func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecord, d *listenerDeps, item contracts.Envelope, role string, arrived time.Time) {
 	send := &roleSend{w: w, record: record, d: d, item: item, role: role, arrived: arrived}
 	firstCtx, cancelFirst := context.WithDeadline(ctx, arrived.Add(sendRequestBudget))
@@ -320,7 +306,6 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecor
 	checked := send.holder
 	forwarded := send.item
 	forwarded.DedupeKey = roleForwardDedupePrefix + item.DedupeKey
-	var lastForward error
 	resolved := first
 	for pass := 0; ; pass++ {
 		if pass > 0 || !laneHolderFresh(first.entry) {
@@ -349,13 +334,13 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecor
 					return
 				}
 			}
-			window := receiptWindow(ctx)
+			window := forwardWindow(ctx)
 			if window <= 0 {
-				send.timedOut(lastForward)
+				send.timedOut()
 				return
 			}
 			send.attempts++
-			err := d.forwardAndWait(contracts.AgentSubject(send.holder), forwarded, window, roleForwardStoredOnly(resolved.entry))
+			err := d.forwardAndWait(contracts.AgentSubject(send.holder), forwarded, window)
 			if err == nil {
 				d.confirm(item.DedupeKey, send.holder)
 				send.delivered(sendDelivered)
@@ -365,7 +350,6 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecor
 				send.refused(err)
 				return
 			}
-			lastForward = err
 		}
 		// Any resolution not answered above (a holder that has not heartbeated within
 		// session.ClaimStaleAfter and keeps its claim, a read that failed, a claim that churned)
@@ -374,5 +358,5 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecor
 			break
 		}
 	}
-	send.timedOut(lastForward)
+	send.timedOut()
 }

@@ -262,8 +262,8 @@ var liveLaneEnv = []string{"ENVOY_SUBSCRIBE_ALL_TOPICS=1", "ENVOY_HOST_BRIDGE=12
 const liveLaneLine = "live topics subscribed"
 
 // holdRole registers a session that takes its own messages off the bus, as Oh My Pi does, has it
-// claim role through listener, and subscribes on its agent subject for it, answering each role
-// forward's receipt. It returns the session id and every envelope the session receives there.
+// claim role through listener, and subscribes on its agent subject for it. It returns the session
+// id and every envelope the session receives there.
 func holdRole(t *testing.T, listener *listenerProcess, uri, role string) (string, <-chan contracts.Envelope) {
 	t.Helper()
 	sessionID := "ses_holder_" + id.New()
@@ -278,7 +278,6 @@ func holdRole(t *testing.T, listener *listenerProcess, uri, role string) (string
 			t.Errorf("decode what %s received: %v", sessionID, err)
 			return
 		}
-		_ = msg.Respond(nil)
 		received <- item
 	}); err != nil {
 		t.Fatalf("subscribe for %s: %v", sessionID, err)

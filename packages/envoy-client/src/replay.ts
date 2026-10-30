@@ -358,10 +358,11 @@ export interface ReplayEngine {
    * call since the last failed one answered `followed` without refusing it, `followed` has a
    * cursor, and that cursor did not start after the frame was received: a cursor starts at the
    * stream's end, which can be at or past a frame the live path still held, so no sweep reads that
-   * frame. Any other frame (a role forward after its receipt, a subject the stream does not keep,
-   * a listener that does not replay or refuses the subject, a subject with no cursor yet, or one
-   * whose cursor started, or started again after a stream recreation, since the frame arrived)
-   * gets its notice at once instead of being dropped silently. It never rejects.
+   * frame. Any other frame (a role forward, whose stored copy the listener delivers itself, a
+   * subject the stream does not keep, a listener that does not replay or refuses the subject, a
+   * subject with no cursor yet, or one whose cursor started, or started again after a stream
+   * recreation, since the frame arrived) gets its notice at once instead of being dropped
+   * silently. It never rejects.
    */
   liveFailed(
     followed: string,
@@ -624,7 +625,7 @@ export function createReplayEngine(options: ReplayEngineOptions): ReplayEngine {
       log(`replay: skipping stored message ${seq} on ${message.subject}: not an Envoy envelope`);
       return "done";
     }
-    // Role messages stay live only: the holder answered the forward's receipt, or it went on.
+    // Role messages stay live only: the listener delivers the forward's stored copy itself.
     if (isRoleForward(envelope)) return "done";
     const identity = replayLedgerIdentity(envelope);
     if (ledger.has(identity)) {

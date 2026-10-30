@@ -364,7 +364,7 @@ test("a late BTW is passed over and answered done, and the frame after it is sho
   }
 })
 
-test("consumer mode asks no replay, shows no stored-subject core frame but answers its lane receipt, and keeps unstored topics core", async () => {
+test("consumer mode asks no replay and shows no core frame of a relayed subject, answering nothing", async () => {
   const directory = await scratchState()
   const nats = new FakeNats()
   const notifier = heldNotifier()
@@ -382,17 +382,17 @@ test("consumer mode asks no replay, shows no stored-subject core frame but answe
   )
   try {
     await session.follow(["notifications.team.deploy"])
-    // A role lane's forward onto the agent subject, waiting for its receipt.
+    // A role lane's forward onto the agent subject, and a frame on a followed topic the stream
+    // stores: the relay shows the stream's copy of each, so both core copies are dropped. Nothing
+    // is answered on the bus either - a role forward counts as delivered once the stream stored
+    // it, and no other frame on these subjects expects an answer.
     const forward = peerMessage("forward", "notifications.role.reviewer")
-    nats.emit(DIRECT, forward.raw, "_INBOX.lane")
-    await waitFor(async () => nats.repliesOn("_INBOX.lane").length === 1, "the lane receipt")
-    expect(nats.repliesOn("_INBOX.lane")).toEqual([""])
-
-    // A team topic the stream does not store reaches the session on its core subscription only.
+    nats.emit(DIRECT, forward.raw)
     const team = peerMessage("team", "notifications.team.deploy")
     nats.emit("notifications.team.deploy", team.raw)
-    await waitFor(async () => notifier.written.length === 1, "the team topic's write")
-    expect(notifier.written.map((written) => written.params.meta["event_id"])).toEqual([team.id])
+    await settled()
+    expect(nats.published).toEqual([])
+    expect(notifier.written).toEqual([])
 
     // Heartbeats ran meanwhile, each sweeping after it registered, and none of them asked the
     // listener's replay route.
@@ -400,7 +400,7 @@ test("consumer mode asks no replay, shows no stored-subject core frame but answe
     await waitFor(async () => registrations.length >= ticks + 3, "three more heartbeats")
     await settled()
     expect(replays()).toBe(0)
-    expect(notifier.written.map((written) => written.params.meta["event_id"])).toEqual([team.id])
+    expect(notifier.written).toEqual([])
   } finally {
     for (const write of notifier.pending) write.resolve()
     await session.shutdown()

@@ -74,14 +74,13 @@ func withPublishRoute(t *testing.T, d *listenerDeps) *listenerDeps {
 
 // startStandIn is a session process on a NATS connection of its own to the test's server, as
 // pi-envoy and claude-envoy hold one: it subscribes to its agent subject and hands over every frame
-// it receives. It answers a frame with an empty receipt when answer reports true for the frame's
-// ordinal (1 for the first), as those hosts do for a frame whose topic is not their agent subject.
-func startStandIn(t *testing.T, uri, sessionID string, answer func(n int) bool) <-chan contracts.Envelope {
+// it receives. It answers nothing, as those hosts answer nothing: a role forward counts as
+// delivered once the stream acknowledged storing it (startRoleForward).
+func startStandIn(t *testing.T, uri, sessionID string) <-chan contracts.Envelope {
 	t.Helper()
 	conn := testnats.Connect(t, uri)
 	t.Cleanup(conn.Close)
 	frames := make(chan contracts.Envelope, 16)
-	var received atomic.Int32
 	subscription, err := conn.Subscribe(contracts.AgentSubject(sessionID), func(message *natsgo.Msg) {
 		var frame contracts.Envelope
 		if err := json.Unmarshal(message.Data, &frame); err != nil {
@@ -89,9 +88,6 @@ func startStandIn(t *testing.T, uri, sessionID string, answer func(n int) bool) 
 			return
 		}
 		frames <- frame
-		if answer(int(received.Add(1))) && message.Reply != "" {
-			_ = message.Respond(nil)
-		}
 	})
 	if err != nil {
 		t.Fatalf("stand-in %s subscribe: %v", sessionID, err)
@@ -102,10 +98,6 @@ func startStandIn(t *testing.T, uri, sessionID string, answer func(n int) bool) 
 	}
 	return frames
 }
-
-func always(int) bool { return true }
-
-func never(int) bool { return false }
 
 // claimRoleFor registers sessionID as a live self-subscribed session advertising capabilities and
 // gives it role.
@@ -171,16 +163,16 @@ func exceptionProbe(t *testing.T, client *bus.Client) *natsgo.Subscription {
 	return probe
 }
 
-// A holder whose first forward draws no receipt, as one whose connection is moving to another
-// server, gets the same envelope again, and the sender's answer is the 200 of its receipt.
-func TestPublishRouteForwardsARoleMessageAgainUntilItsHolderConfirms(t *testing.T) {
+// A live holder answers no receipt, so its forward counts as delivered once the stream stored it:
+// the sender is answered 200 after the one forward, and the holder is not sent the envelope again.
+func TestPublishRouteAnswersStoredOnceTheHoldersForwardIsKept(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
-	const role = "second-attempt"
+	const role = "stored-forward"
 	claimRoleFor(t, harness.registry, harness.sessions, "ses_holder", role, nil)
-	frames := startStandIn(t, testnats.URL(t), "ses_holder", func(n int) bool { return n >= 2 })
+	frames := startStandIn(t, testnats.URL(t), "ses_holder")
 	probe := exceptionProbe(t, harness.client)
 
-	recorder, elapsed := publishThrough(harness.publishDeps(t), `{"topic":"`+contracts.RoleTopicPrefix+role+`","message":"take this","idempotency_key":"retry-1"}`)
+	recorder, elapsed := publishThrough(harness.publishDeps(t), `{"topic":"`+contracts.RoleTopicPrefix+role+`","message":"take this","idempotency_key":"stored-1"}`)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status %d after %s, want 200; body %s", recorder.Code, elapsed, recorder.Body.String())
 	}
@@ -188,43 +180,53 @@ func TestPublishRouteForwardsARoleMessageAgainUntilItsHolderConfirms(t *testing.
 	if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
 		t.Fatalf("decode the answer %s: %v", recorder.Body.String(), err)
 	}
-	if answer.Holder != "ses_holder" || answer.DedupeKey != "publish.retry-1" {
-		t.Fatalf("answer %s, want holder ses_holder and dedupe key publish.retry-1", recorder.Body.String())
+	if answer.Holder != "ses_holder" || answer.DedupeKey != "publish.stored-1" {
+		t.Fatalf("answer %s, want holder ses_holder and dedupe key publish.stored-1", recorder.Body.String())
 	}
-	got := expectFrames(t, frames, 2, 300*time.Millisecond)
-	for i, frame := range got {
-		if frame.EventID != answer.EventID || frame.DedupeKey != roleForwardDedupePrefix+"publish.retry-1" || frame.Topic != contracts.RoleTopicPrefix+role {
-			t.Fatalf("frame %d: event %s dedupe key %s topic %s, want the answered event %s under %s on its role topic", i+1, frame.EventID, frame.DedupeKey, frame.Topic, answer.EventID, roleForwardDedupePrefix+"publish.retry-1")
+	for i, frame := range expectFrames(t, frames, 1, 300*time.Millisecond) {
+		if frame.EventID != answer.EventID || frame.DedupeKey != roleForwardDedupePrefix+"publish.stored-1" || frame.Topic != contracts.RoleTopicPrefix+role {
+			t.Fatalf("frame %d: event %s dedupe key %s topic %s, want the answered event %s under %s on its role topic", i+1, frame.EventID, frame.DedupeKey, frame.Topic, answer.EventID, roleForwardDedupePrefix+"publish.stored-1")
 		}
 	}
 	noException(t, probe)
 }
 
-// A holder that never confirms leaves the sender a 504 naming receipt_timeout once the send's
-// window has passed, rather than a 200 for a message nobody took.
-func TestPublishRouteAnswersReceiptTimeoutWhenTheHolderNeverConfirms(t *testing.T) {
+// A holder whose session holds no NATS connection - its process is down, or it reads its messages
+// from its own JetStream consumer - is answered 200 all the same: the stream holds the forward on
+// the holder's agent subject, where the holder's consumer delivers it with acknowledgement and
+// redelivery. Nothing answers a receipt there, and the send waits for none.
+func TestPublishRouteStoresTheForwardForAHolderThatIsNotConnected(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
-	const role = "silent-holder"
-	claimRoleFor(t, harness.registry, harness.sessions, "ses_silent", role, nil)
-	frames := startStandIn(t, testnats.URL(t), "ses_silent", never)
+	const role = "offline-holder"
+	claimRoleFor(t, harness.registry, harness.sessions, "ses_offline", role, nil)
 	probe := exceptionProbe(t, harness.client)
 
-	recorder, elapsed := publishThrough(harness.publishDeps(t), `{"topic":"`+contracts.RoleTopicPrefix+role+`","message":"anyone there","idempotency_key":"silent-1"}`)
-	if recorder.Code != http.StatusGatewayTimeout || elapsed > 4500*time.Millisecond {
-		t.Fatalf("status %d after %s, want 504 inside 4.5s; body %s", recorder.Code, elapsed, recorder.Body.String())
+	recorder, elapsed := publishThrough(harness.publishDeps(t), `{"topic":"`+contracts.RoleTopicPrefix+role+`","message":"while nobody listens","idempotency_key":"offline-1"}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status %d after %s, want 200; body %s", recorder.Code, elapsed, recorder.Body.String())
 	}
-	var failure roleSendFailure
-	if err := json.Unmarshal(recorder.Body.Bytes(), &failure); err != nil {
+	var answer publishResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &answer); err != nil {
 		t.Fatalf("decode the answer %s: %v", recorder.Body.String(), err)
 	}
-	if failure.Reason != "receipt_timeout" || failure.Holder != "ses_silent" || failure.DedupeKey != "publish.silent-1" ||
-		failure.EventID == "" || failure.Attempts != 2 || failure.Error == "" {
-		t.Fatalf("answer %s, want receipt_timeout for ses_silent after two forwards of publish.silent-1", recorder.Body.String())
+	if answer.Holder != "ses_offline" || answer.DedupeKey != "publish.offline-1" {
+		t.Fatalf("answer %s, want holder ses_offline and dedupe key publish.offline-1", recorder.Body.String())
 	}
-	for _, frame := range expectFrames(t, frames, 2, 300*time.Millisecond) {
-		if frame.EventID != failure.EventID {
-			t.Fatalf("the holder received event %s, want only the answered %s", frame.EventID, failure.EventID)
-		}
+	subject := contracts.AgentSubject("ses_offline")
+	stored, err := harness.client.JS().GetLastMsg(bus.Stream, subject)
+	if err != nil {
+		t.Fatalf("read the stream's forward on %s: %v", subject, err)
+	}
+	var forwarded contracts.Envelope
+	if err := json.Unmarshal(stored.Data, &forwarded); err != nil {
+		t.Fatalf("decode the stored forward %s: %v", stored.Data, err)
+	}
+	if forwarded.EventID != answer.EventID || forwarded.DedupeKey != roleForwardDedupePrefix+"publish.offline-1" || forwarded.Topic != contracts.RoleTopicPrefix+role {
+		t.Fatalf("the stream holds event %s dedupe key %s topic %s on %s, want the answered event %s under %s on its role topic",
+			forwarded.EventID, forwarded.DedupeKey, forwarded.Topic, subject, answer.EventID, roleForwardDedupePrefix+"publish.offline-1")
+	}
+	if count := storedForwards(t, harness.client, subject); count != 1 {
+		t.Fatalf("the stream holds %d messages on %s, want the one forward", count, subject)
 	}
 	noException(t, probe)
 }
@@ -250,7 +252,7 @@ func TestPublishRouteAnswersBusUnavailableWhenTheClaimReadStalls(t *testing.T) {
 	}
 	const role = "frozen-hub"
 	claimRoleFor(t, registry, sessions, "ses_holder", role, nil)
-	startStandIn(t, uri, "ses_holder", always)
+	startStandIn(t, uri, "ses_holder")
 	deps := withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
 
 	thaw := srv.Freeze(t)
@@ -277,7 +279,7 @@ func TestPublishRouteRefusesADeliveryModeTheHolderDoesNotAdvertise(t *testing.T)
 	harness := newListenerDeliveryHarness(t, nil)
 	const role = "no-steer"
 	claimRoleFor(t, harness.registry, harness.sessions, "ses_aside_only", role, []string{"aside"})
-	frames := startStandIn(t, testnats.URL(t), "ses_aside_only", always)
+	frames := startStandIn(t, testnats.URL(t), "ses_aside_only")
 
 	recorder, _ := publishThrough(harness.publishDeps(t), `{"topic":"`+contracts.RoleTopicPrefix+role+`","message":"steer now","payload":"{\"delivery\":{\"mode\":\"steer\"}}"}`)
 	if recorder.Code != http.StatusForbidden {
@@ -295,7 +297,7 @@ func TestPublishRouteSendsNothingToASenderHoldingTheRole(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	const role = "self-held"
 	claimRoleFor(t, harness.registry, harness.sessions, "ses_self", role, nil)
-	frames := startStandIn(t, testnats.URL(t), "ses_self", always)
+	frames := startStandIn(t, testnats.URL(t), "ses_self")
 	lane, err := harness.client.Conn.SubscribeSync(contracts.RoleTopicPrefix + role)
 	if err != nil {
 		t.Fatalf("subscribe to the role lane: %v", err)
@@ -325,7 +327,7 @@ func TestPublishRouteDoesNotForwardARepeatKeyItsHolderConfirmed(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	const role = "repeat-key"
 	claimRoleFor(t, harness.registry, harness.sessions, "ses_holder", role, nil)
-	frames := startStandIn(t, testnats.URL(t), "ses_holder", always)
+	frames := startStandIn(t, testnats.URL(t), "ses_holder")
 	deps := harness.publishDeps(t)
 	body := `{"topic":"` + contracts.RoleTopicPrefix + role + `","message":"once","idempotency_key":"repeat-1"}`
 

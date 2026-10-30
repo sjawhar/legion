@@ -1121,7 +1121,7 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 	})
 
 	t.Run("live holder is returned", func(t *testing.T) {
-		startStandIn(t, uri, "ses_holder", always)
+		startStandIn(t, uri, "ses_holder")
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"notifications.role.reviewer","message":"please review"}`))
 		handler.ServeHTTP(recorder, request)

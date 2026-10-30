@@ -577,15 +577,6 @@ func TestPublishHandler_RoleMessageReachesTheCurrentHolderWithoutTheRoleLane(t *
 		t.Fatalf("subscribe B agent subject: %v", err)
 	}
 	t.Cleanup(func() { _ = probeB.Unsubscribe() })
-	receiptResponder, err := harness.client.Conn.Subscribe(contracts.AgentSubject("ses_role_b"), func(message *natsgo.Msg) {
-		if message.Reply != "" {
-			_ = message.Respond(nil)
-		}
-	})
-	if err != nil {
-		t.Fatalf("subscribe B receipt responder: %v", err)
-	}
-	t.Cleanup(func() { _ = receiptResponder.Unsubscribe() })
 	laneProbe, err := harness.client.Conn.SubscribeSync(contracts.RoleTopicPrefix + ">")
 	if err != nil {
 		t.Fatalf("subscribe to the role lane: %v", err)
@@ -685,9 +676,10 @@ func TestPublishHandler_RoleMessageReachesTheCurrentHolderWithoutTheRoleLane(t *
 	}
 }
 
-// A holder registered and holding the role with nothing subscribed to its agent subject leaves the
-// sender a 504 receipt_timeout, logged once, and no delivery exception: the sender has the answer.
-func TestPublishHandler_RoleFreshDeafHolderAnswersReceiptTimeout(t *testing.T) {
+// A holder registered and holding the role with nothing subscribed to its agent subject is
+// answered 200: the stream stored the forward for the holder's session consumer. The send is
+// logged once and raises no delivery exception, since the sender has the answer.
+func TestPublishHandler_RoleFreshDeafHolderIsAnsweredStored(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	role := "fresh-deaf-holder"
 	roleTopic := contracts.RoleTopicPrefix + role
@@ -712,15 +704,15 @@ func TestPublishHandler_RoleFreshDeafHolderAnswersReceiptTimeout(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+roleTopic+`","message":"deaf role event","payload":"{\"type\":\"worker-queued\"}","source":"agent"}`))
 	publishHandler(state, logging.New("test")).ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusGatewayTimeout {
-		t.Fatalf("publish role event: status = %d, want 504; body = %s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("publish role event: status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
 	}
-	var failure roleSendFailure
-	if err := json.NewDecoder(recorder.Body).Decode(&failure); err != nil {
+	var answer publishResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&answer); err != nil {
 		t.Fatalf("decode the answer: %v", err)
 	}
-	if failure.Reason != "receipt_timeout" || failure.Holder != "ses_deaf" {
-		t.Fatalf("answer %+v, want receipt_timeout from ses_deaf", failure)
+	if answer.Holder != "ses_deaf" {
+		t.Fatalf("answer %+v, want the forward stored for ses_deaf", answer)
 	}
 	noException(t, probe)
 	logs := harness.logs.String()
@@ -730,15 +722,15 @@ func TestPublishHandler_RoleFreshDeafHolderAnswersReceiptTimeout(t *testing.T) {
 			lines = append(lines, candidate)
 		}
 	}
-	if len(lines) != 1 || !strings.Contains(lines[0], `"delivery_status":"receipt_timeout"`) || !strings.Contains(lines[0], `"event_id":"`+failure.EventID+`"`) {
-		t.Fatalf("listener log does not name receipt_timeout once for %s:\n%s", failure.EventID, logs)
+	if len(lines) != 1 || !strings.Contains(lines[0], `"delivery_status":"delivered"`) || !strings.Contains(lines[0], `"event_id":"`+answer.EventID+`"`) {
+		t.Fatalf("listener log does not name the delivered send once for %s:\n%s", answer.EventID, logs)
 	}
 	t.Logf("listener log line: %s", lines[0])
 }
 
-// A re-send under the key of a message its holder never confirmed is forwarded again, and one under
-// the key of a message it confirmed is not: the route answers each and publishes no exception.
-func TestPublishHandler_ExplicitDedupeKeyForwardsAgainAfterReceiptTimeoutOnly(t *testing.T) {
+// A re-send under the key of a message the stream already stored for its holder is not forwarded
+// again: the route answers each send and publishes no exception.
+func TestPublishHandler_ExplicitDedupeKeyIsNotForwardedAgainOnceStored(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	const role = "slow-holder"
 	roleTopic := contracts.RoleTopicPrefix + role
@@ -748,15 +740,11 @@ func TestPublishHandler_ExplicitDedupeKeyForwardsAgainAfterReceiptTimeoutOnly(t 
 	if _, err := harness.registry.SetRole("ses_slow", "test-machine", role, false); err != nil {
 		t.Fatalf("claim role: %v", err)
 	}
-	var acknowledge atomic.Bool
 	forwards := make(chan contracts.Envelope, 8)
 	responder, err := harness.client.Conn.Subscribe(contracts.AgentSubject("ses_slow"), func(message *natsgo.Msg) {
 		var forwarded contracts.Envelope
 		if err := json.Unmarshal(message.Data, &forwarded); err == nil {
 			forwards <- forwarded
-		}
-		if acknowledge.Load() && message.Reply != "" {
-			_ = message.Respond(nil)
 		}
 	})
 	if err != nil {
@@ -801,16 +789,12 @@ func TestPublishHandler_ExplicitDedupeKeyForwardsAgainAfterReceiptTimeoutOnly(t 
 		}
 	}
 
-	// 1. The holder swallows every forward: the route answers receipt_timeout after two of them.
-	publish("first publish", http.StatusGatewayTimeout)
-	expectForwards("first publish", 2)
+	// 1. The first send: the holder is forwarded the message once, and the sender is answered 200
+	// as soon as the stream stored the forward.
+	publish("first publish", http.StatusOK)
+	expectForwards("first publish", 1)
 
-	// 2. Same dedupe_key after the timeout: forwarded again; the holder now acknowledges.
-	acknowledge.Store(true)
-	publish("re-publish after receipt_timeout", http.StatusOK)
-	expectForwards("re-publish after receipt_timeout", 1)
-
-	// 3. Same dedupe_key after a delivered forward: dedupe skip, nothing forwarded.
+	// 2. Same dedupe_key after a stored forward: dedupe skip, nothing forwarded.
 	publish("re-publish after delivery", http.StatusOK)
 	expectForwards("re-publish after delivery", 0)
 	noException(t, probe)
@@ -2888,8 +2872,8 @@ func TestListenerDeliveryHandler_RoleForwardPublishErrorEmitsDeliveryFailed(t *t
 	if got := forwards.Load(); got != 2 {
 		t.Fatalf("forward attempts = %d, want 2: a failed forward must clear the attempt cache", got)
 	}
-	if logs := harness.logs.String(); strings.Contains(logs, "receipt_timeout") || !strings.Contains(logs, `"msg":"listener role forward failed"`) {
-		t.Fatalf("a forward publish error must log as a failed forward, never as a receipt timeout:\n%s", logs)
+	if logs := harness.logs.String(); !strings.Contains(logs, `"msg":"listener role forward failed"`) {
+		t.Fatalf("a forward publish error must log as a failed forward:\n%s", logs)
 	}
 }
 
@@ -3029,12 +3013,12 @@ func TestListenerDeliveryHandler_RoleForwardDedupeSkipsCapabilityRecheckOnRedeli
 	}
 }
 
-// The reason is chosen by which error the forward returns, not by the fact that
-// it failed: only bus.ErrReceiptTimeout (the forward left this process and drew
-// no receipt) is receipt_timeout. A raw nats.ErrTimeout is what the client's
-// flush returns while a reconnecting or stalled connection still buffers the
-// forward, and that forward is not known to have reached anyone.
-func TestListenerDeliveryHandler_RoleForwardErrorSelectsTheReason(t *testing.T) {
+// Every failed forward is delivery_failed, whatever the error: the stream did
+// not acknowledge storing it (bus.ErrForwardNotStored), or the forward never
+// left this process -- a raw nats.ErrTimeout is what the client's flush returns
+// while a reconnecting or stalled connection still buffers it. No forward draws
+// a receipt (startRoleForward), so none is reported receipt_timeout.
+func TestListenerDeliveryHandler_RoleForwardFailureIsAlwaysDeliveryFailed(t *testing.T) {
 	cases := []struct {
 		name       string
 		forwardErr error
@@ -3043,8 +3027,8 @@ func TestListenerDeliveryHandler_RoleForwardErrorSelectsTheReason(t *testing.T) 
 	}{
 		{"raw nats.ErrTimeout from the flush", natsgo.ErrTimeout, "delivery_failed", "listener role forward failed"},
 		{"flush timeout wrapped by the client", fmt.Errorf("bus: flush publish to \"agent.x\": %w", natsgo.ErrTimeout), "delivery_failed", "listener role forward failed"},
-		{"bus.ErrReceiptTimeout", bus.ErrReceiptTimeout, "receipt_timeout", "listener role receipt timed out"},
-		{"bus.ErrReceiptTimeout wrapped", fmt.Errorf("forward: %w", bus.ErrReceiptTimeout), "receipt_timeout", "listener role receipt timed out"},
+		{"bus.ErrForwardNotStored", bus.ErrForwardNotStored, "delivery_failed", "listener role forward failed"},
+		{"bus.ErrForwardNotStored wrapped", fmt.Errorf("forward: %w", bus.ErrForwardNotStored), "delivery_failed", "listener role forward failed"},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -3077,11 +3061,11 @@ func TestListenerDeliveryHandler_RoleForwardErrorSelectsTheReason(t *testing.T) 
 			assertDeliveryException(t, probe, item, tc.reason)
 
 			logs := harness.logs.String()
-			if !strings.Contains(logs, `"msg":"`+tc.logMessage+`"`) || !strings.Contains(logs, `"delivery_status":"`+map[string]string{"delivery_failed": "failed", "receipt_timeout": "receipt_timeout"}[tc.reason]+`"`) {
+			if !strings.Contains(logs, `"msg":"`+tc.logMessage+`"`) || !strings.Contains(logs, `"delivery_status":"failed"`) {
 				t.Fatalf("log does not carry %q for %s:\n%s", tc.logMessage, tc.reason, logs)
 			}
-			if tc.reason == "delivery_failed" && strings.Contains(logs, "receipt_timeout") {
-				t.Fatalf("a forward that never left this process must not be logged as a receipt timeout:\n%s", logs)
+			if strings.Contains(logs, "receipt") {
+				t.Fatalf("a failed forward must not be logged as a receipt outcome:\n%s", logs)
 			}
 		})
 	}
@@ -3892,9 +3876,9 @@ func (l *pushLog) all() []string {
 }
 
 // inlineForward is a role forward seam (listenerDeliveryHandlerConfig.forwardRole) whose publish
-// always succeeds and whose wait is forward: a test that stands in for the holder's answer.
-func inlineForward(forward func(subject string, item contracts.Envelope, timeout time.Duration) error) func(string, contracts.Envelope, time.Duration, bool) (func() error, error) {
-	return func(subject string, item contracts.Envelope, timeout time.Duration, _ bool) (func() error, error) {
+// always succeeds and whose wait is forward: a test that stands in for the stream's answer.
+func inlineForward(forward func(subject string, item contracts.Envelope, timeout time.Duration) error) func(string, contracts.Envelope, time.Duration) (func() error, error) {
+	return func(subject string, item contracts.Envelope, timeout time.Duration) (func() error, error) {
 		return func() error { return forward(subject, item, timeout) }, nil
 	}
 }

@@ -64,10 +64,10 @@ type listenerDeps struct {
 	// (request_record.go). The route never reads that dedupeCache, since the handlers also
 	// record a self-subscribed session whose push they skipped without hearing from it.
 	delivery *listenerDeliveryHandlerConfig
-	// confirmed is the publish route's own record of each (dedupe key, session) whose receipt arrived
-	// through the route, which only the route writes. A send skips a holder or recipient recorded
-	// there, so envoy-client's retry of a send does not forward again to one the first attempt
-	// confirmed, and no one is counted as confirming a message without having sent its receipt.
+	// confirmed is the publish route's own record of each (dedupe key, session) the route stored a
+	// forward for, which only the route writes. A send skips a holder or recipient recorded there,
+	// so envoy-client's retry of a send does not forward again to one the first attempt already
+	// had the stream store the message for.
 	confirmed *dedupe.Cache
 }
 
@@ -1242,7 +1242,7 @@ func shutdownListener(logger *logging.Logger, parts listenerParts, loops listene
 	// The live lane and the role lane drain before the main client, side by side: a delivery still
 	// in a lane's handler, and each role forward, publishes through the main client and reads the
 	// caches stopped below. The live lane gets 3 s; the role lane 3 s for its handler and the
-	// receipt window on top for the forwards it handed over (roleLane.drain), 5 s. Core NATS retries
+	// forward window on top for the forwards it handed over (roleLane.drain), 5 s. Core NATS retries
 	// nothing, so a delivery still blocked at the deadline is lost, as one sent while no listener
 	// runs is.
 	var lanes sync.WaitGroup

@@ -91,12 +91,12 @@ func (st *step) subscribeSessions() (*natsSessions, error) {
 // handler records each envelope as a receipt of the event id in its payload, on an agent topic
 // or an issue topic, and offers it as its event type's sample envelope. For a session the listener
 // relays (its last registration answered consumer), the relay frame is the receipt, as in the pi
-// plugin: the core copy only answers its lane receipt, on the agent topic, and is not counted.
+// plugin: the core copy is counted, answered nowhere, and dropped.
 func (ns *natsSessions) handler(session int, agent bool, nonce int64) nats.MsgHandler {
 	return func(m *nats.Msg) {
 		now := time.Now().UnixNano()
 		if ns.relay != nil && ns.relay.relayed(session) {
-			ns.relay.coreCopy(m, agent)
+			ns.relay.coreCopy()
 			return
 		}
 		var env contracts.Envelope

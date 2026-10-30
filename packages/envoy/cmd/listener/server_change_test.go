@@ -197,9 +197,9 @@ type serverChangeRun struct {
 // It runs twice. With the live topics lane off, the senders publish through the sender's listener
 // S, so every message crosses the hub. With the lane on in both listeners (liveLaneEnv), the
 // senders publish through H, so the publish route runs on the machine whose live lane receives
-// each ad-hoc publish and records the stand-in in its delivery handlers' dedupe cache as a push it
-// skipped; a route that counted that record as the stand-in's receipt would answer 200 for an
-// ad-hoc message sent while the stand-in is held off, and fail assertion 1.
+// each ad-hoc publish and records the stand-in in its delivery handlers' dedupe cache as a push
+// it skipped; a route that counted that record as the stand-in's own confirmation would answer
+// 200 for an ad-hoc message sent while the stand-in is held off, and fail assertion 1.
 func TestServerChange(t *testing.T) {
 	runs := []serverChangeRun{
 		{name: "live lane off, senders through S"},
@@ -402,9 +402,8 @@ func (s *serverChangeSoak) awaitStandInSeenBySenders(t *testing.T) {
 	})
 }
 
-// receive is the stand-in's handler on every subscription. A frame on its agent subject whose
-// envelope topic is another topic is a forward awaiting the session's receipt, answered empty as
-// envoy-client's expectsLaneReceipt says; then the frame is recorded as a live copy.
+// receive is the stand-in's handler on every subscription: it records the frame as a live copy
+// and answers nothing, as a session answers no frame of its own.
 func (s *serverChangeSoak) receive(msg *natsgo.Msg) {
 	at := time.Now()
 	var envelope contracts.Envelope
@@ -413,10 +412,6 @@ func (s *serverChangeSoak) receive(msg *natsgo.Msg) {
 		s.strays = append(s.strays, fmt.Sprintf("live frame on %s is no envelope: %v", msg.Subject, err))
 		s.mu.Unlock()
 		return
-	}
-	agentSubject := contracts.AgentSubject(serverChangeSession)
-	if msg.Subject == agentSubject && msg.Reply != "" && envelope.Topic != "" && envelope.Topic != agentSubject {
-		_ = msg.Respond(nil)
 	}
 	s.record(envelope, msg.Subject, at, false)
 }

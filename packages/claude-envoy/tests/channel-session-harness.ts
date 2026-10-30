@@ -82,7 +82,7 @@ export class FakeNats implements ChannelForwarderConnection {
   }
 
   publish(subject: string, data: Uint8Array): void {
-    this.order.push("receipt")
+    this.order.push("publish")
     this.published.push({ subject, data })
   }
 
@@ -125,18 +125,17 @@ export class FakeNats implements ChannelForwarderConnection {
     }
   }
 
-  emit(subject: string, raw: string, reply?: string): void {
-    this.emitOn(subject, subject, raw, reply)
+  emit(subject: string, raw: string): void {
+    this.emitOn(subject, subject, raw)
   }
 
   /** A message published on `subject` reaches the subscription `pattern`, which matches it. */
-  emitOn(pattern: string, subject: string, raw: string, reply?: string): void {
+  emitOn(pattern: string, subject: string, raw: string): void {
     const queue = this.subscriptions.get(pattern)
     if (queue === undefined) throw new Error(`no subscription for ${pattern}`)
     const message = {
       subject,
       data: new TextEncoder().encode(raw),
-      ...(reply === undefined ? {} : { reply }),
     }
     if (queue.waiter === undefined) {
       queue.messages.push(message)

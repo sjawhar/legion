@@ -15,7 +15,6 @@ import {
 import {
   createDeliveryDedupe,
   type DispatchDelivery,
-  expectsLaneReceipt,
   inboundTimestamp,
   postDeliveryReply,
   type RenderInboundResult,
@@ -139,7 +138,6 @@ const CHANNEL_NOTIFICATION_METHOD = "notifications/claude/channel" as const
 const CHANNEL_INSTRUCTIONS =
   "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay."
 const CHANNEL_INBOX_LIMIT = 50
-const EMPTY_RECEIPT = new Uint8Array()
 const encoder = new TextEncoder()
 const ChannelMetaKey = /^[A-Za-z_][A-Za-z0-9_]*$/
 /** How often the handoff file is checked for a `/clear`. */
@@ -516,29 +514,18 @@ export function createChannelDelivery(input: {
 }
 
 /**
- * Queues a channel event, then answers a forwarded lane's receipt, and resolves whether Claude
- * Code was handed the event. The receipt is answered at once, before the write: it proves only
- * that this process took the request off the bus. Which frames wait for one is
- * `expectsLaneReceipt`'s rule. A duplicate, which includes a core copy of a frame the listener
- * relays (consumer delivery), answers the receipt and queues nothing.
+ * Queues a channel event and resolves whether Claude Code was handed it. Nothing is answered on
+ * the bus: a role forward counts as delivered once the stream stored it, and every other frame on
+ * the direct subject is a JetStream publish whose reply inbox belongs to the server's PubAck. A
+ * duplicate, which includes a core copy of a frame the listener relays (consumer delivery),
+ * queues nothing.
  */
 export async function enqueueChannelMessage(
   delivery: ChannelDelivery,
-  connection: ChannelForwarderConnection,
-  directSubject: string,
   message: ChannelInboundMessage,
 ): Promise<boolean> {
-  const queued = message.duplicate
-    ? Promise.resolve(false)
-    : delivery.enqueue({ subject: message.subject, raw: message.raw })
-  const lane = {
-    subject: message.subject,
-    directSubject,
-    envelopeTopic: message.envelopeTopic,
-    reply: message.reply,
-  }
-  if (expectsLaneReceipt(lane)) connection.publish(lane.reply, EMPTY_RECEIPT)
-  return queued
+  if (message.duplicate) return false
+  return delivery.enqueue({ subject: message.subject, raw: message.raw })
 }
 
 /**
@@ -716,8 +703,8 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
    * for consumer delivery (the relay's epoch and resume point). Answered `consumer`, the listener
    * relays the session's durable consumer on that subject: its agent subject and every followed
    * topic the stream stores, each frame handed to the channel's write queue in stream order and
-   * answered `done` once written (`deliverRelayed`). The core copies of those subjects then answer
-   * only a lane's receipt (`relaysCoreTopic`), and the replay engine makes no `/v1/replay` call.
+   * answered `done` once written (`deliverRelayed`). The core copies of those subjects are then
+   * dropped (`relaysCoreTopic`), and the replay engine makes no `/v1/replay` call.
    * Answered `core`, or not at all, the core path runs as before.
    */
   interface Relay {
@@ -890,16 +877,16 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     ledger: replay,
     relayed: relaysCoreTopic,
     failed: (message, topic, error, receivedAt) => {
-      // A frame no sweep will show again gets its notice at once: a role forward, already
-      // acknowledged, one on a subscription the replay does not read (refused, not started, or
-      // the listener's replay failing), or one received before its subject's cursor started.
-      // The stream's copy of any other waits for a sweep.
+      // A frame no sweep will show again gets its notice at once: a role forward, which the
+      // listener delivers from the stream itself, one on a subscription the replay does not read
+      // (refused, not started, or the listener's replay failing), or one received before its
+      // subject's cursor started. The stream's copy of any other waits for a sweep.
       const envelope = renderInbound(message.raw, identity.id, message.subject).envelope
       if (envelope !== undefined) void replay.liveFailed(topic, envelope, error, receivedAt)
     },
     deliver: async (message) => {
       takeRemovals(message.raw)
-      return enqueueChannelMessage(delivery, options.connection, directSubject, message)
+      return enqueueChannelMessage(delivery, message)
     },
   })
 

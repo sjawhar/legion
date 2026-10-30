@@ -34,8 +34,8 @@ import { isolatePaneEnvironment } from "./pane-environment"
 isolatePaneEnvironment()
 
 /**
- * A role-lane envelope the listener forwarded to the direct subject and awaits a receipt for,
- * under the key the listener minted for the publish behind the arbiter's forward mark.
+ * A role-lane envelope the listener forwarded to the direct subject, under the key the listener
+ * minted for the publish behind the arbiter's forward mark.
  */
 const roleForwardRaw = JSON.stringify({
   event_id: "evt-role-7",
@@ -118,7 +118,11 @@ test("strips unsafe channel meta keys before notifying Claude Code", () => {
   ).toEqual({ producer: "envoy", event_id: "evt-1" })
 })
 
-test("enqueues a forwarded role-lane event before publishing its adapter receipt", async () => {
+test("queues a forwarded role-lane event and answers nothing on the bus", async () => {
+  // Nothing answers a frame: the listener's role forward counts as delivered once the stream
+  // stored it, and every other frame on the direct subject is a JetStream publish whose reply
+  // subject is the publisher's acknowledgement inbox, where an empty answer fails the publish
+  // (`invalid jetstream publish response`).
   const nats = new FakeNats()
   const delivery = {
     enqueue: async () => {
@@ -128,45 +132,18 @@ test("enqueues a forwarded role-lane event before publishing its adapter receipt
     inbox: () => [],
   }
 
-  await enqueueChannelMessage(delivery, nats, directSubject, {
+  await enqueueChannelMessage(delivery, {
     subject: directSubject,
     data: new TextEncoder().encode(roleForwardRaw),
     raw: roleForwardRaw,
-    reply: "_INBOX.receipt",
     envelopeTopic: "notifications.role.reviewer",
-  })
-
-  expect(nats.order).toEqual(["enqueue", "receipt"])
-})
-
-test("never answers the reply inbox of a JetStream publish to the direct subject", async () => {
-  // /v1/messages/send publishes through JetStream; the reply subject on that
-  // message is the publisher's acknowledgement inbox, and an empty receipt
-  // there fails the publish (`invalid jetstream publish response`) even though
-  // the event was delivered. Only the listener's forwarded role lane, which
-  // keeps its role topic, waits for a receipt.
-  const nats = new FakeNats()
-  const delivery = {
-    enqueue: async () => {
-      nats.order.push("enqueue")
-      return true
-    },
-    inbox: () => [],
-  }
-
-  await enqueueChannelMessage(delivery, nats, directSubject, {
-    subject: directSubject,
-    data: new TextEncoder().encode(deliveryRaw),
-    raw: deliveryRaw,
-    reply: "_INBOX.jetstream-ack",
-    envelopeTopic: directSubject,
   })
 
   expect(nats.order).toEqual(["enqueue"])
   expect(nats.published).toEqual([])
 })
 
-test("delivers each dedupe key once while acknowledging every forwarded request after enqueue", async () => {
+test("delivers each dedupe key once and answers no forwarded request", async () => {
   const nats = new FakeNats()
   const notifier = new FakeNotifier(nats.order)
   const stateDirectory = await scratchState()
@@ -178,16 +155,13 @@ test("delivers each dedupe key once while acknowledging every forwarded request 
   )
 
   try {
-    nats.emit(directSubject, roleForwardRaw, "_INBOX.receipt")
-    nats.emit(directSubject, roleForwardRaw, "_INBOX.receipt")
+    nats.emit(directSubject, roleForwardRaw)
+    nats.emit(directSubject, roleForwardRaw)
     await settled()
 
-    expect(nats.order).toEqual(["receipt", "notification", "receipt"])
+    expect(nats.order).toEqual(["notification"])
     expect(notifier.notifications).toHaveLength(1)
-    expect(nats.published.map(({ subject, data }) => [subject, data.byteLength])).toEqual([
-      ["_INBOX.receipt", 0],
-      ["_INBOX.receipt", 0],
-    ])
+    expect(nats.published).toEqual([])
   } finally {
     await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })

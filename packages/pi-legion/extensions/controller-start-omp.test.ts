@@ -649,10 +649,10 @@ interface Card {
   readonly frame: Uint8Array;
 }
 
-/** A card in flight: the card, and its lane receipt once the session acknowledges it. */
+/** A card in flight: the card, and the server's acknowledgement that it took the frame. */
 interface SentCard {
   readonly card: Card;
-  readonly receipt: Promise<unknown>;
+  readonly taken: Promise<unknown>;
 }
 
 /**
@@ -664,16 +664,16 @@ interface SentCard {
  */
 interface ControllerInbound {
   /**
-   * Publishes one card to session `sid` and returns it with its lane receipt: the forwarded
-   * envelope keeps the role topic, so the session acknowledges it on the request's reply inbox
-   * (`expectsLaneReceipt`, packages/envoy-client/src/delivery.ts) before it delivers the card.
+   * Publishes one card to session `sid` and returns it with the server's acknowledgement of the
+   * frame: the forwarded envelope keeps the role topic, and the session answers it nowhere, since
+   * the listener's forward counts as delivered once the stream stored it.
    */
   card(sid: string, label: string): SentCard;
   /**
-   * Sends `card`'s frame to `sid` again, as the listener re-sends a card whose receipt it missed,
-   * and resolves on its receipt. The session acknowledges a frame before it checks for a repeat
-   * (pi-envoy's envoy.ts `deliver`) and delivers a repeat nowhere, so this adds no message: it only
-   * shows that the session's NATS connection has taken everything published before it.
+   * Sends `card`'s frame to `sid` again, as the listener re-sends a card it could not store, and
+   * resolves once the server took the repeat. The session delivers a repeat nowhere (its dedupe),
+   * so this adds no message: it only puts another frame behind the ones published before it, which
+   * the session's one connection takes in that order.
    */
   repeat(sid: string, card: Card): Promise<unknown>;
   /**
@@ -688,8 +688,10 @@ async function controllerInbound(nats: string): Promise<ControllerInbound> {
   cleanup.push(() => connection.close());
   const codec = StringCodec();
   const noticeSubject = legionControllerNoticeSubject(PROJECT);
-  const receipt = (sid: string, frame: Uint8Array): Promise<unknown> =>
-    connection.request(`notifications.agent.${sid}`, frame, { timeout: 5_000 });
+  const sendFrame = (sid: string, frame: Uint8Array): Promise<unknown> => {
+    connection.publish(`notifications.agent.${sid}`, frame);
+    return connection.flush();
+  };
   return {
     card(sid, label) {
       const summary = `CARD-${label}-${randomUUID().slice(0, 8)}`;
@@ -707,9 +709,9 @@ async function controllerInbound(nats: string): Promise<ControllerInbound> {
           trace_id: `trace-${key}`,
         })
       );
-      return { card: { summary, frame }, receipt: receipt(sid, frame) };
+      return { card: { summary, frame }, taken: sendFrame(sid, frame) };
     },
-    repeat: (sid, card) => receipt(sid, card.frame),
+    repeat: (sid, card) => sendFrame(sid, card.frame),
     notice() {
       const text = `triage on LEGION-${100_000 + Math.floor(Math.random() * 900_000)}`;
       connection.publish(
@@ -837,8 +839,8 @@ test.skipIf(skip)(
 // takes the role (which can reach the session before the role claim's answer does), and a notice
 // published the moment the controller topic is registered, both find the start turn already
 // queued: the first request carries the start message, and each of them reaches the model after
-// it, as a steer into the start turn or in a later turn. The card's lane receipt shows the session
-// took it, and the repeat's receipt that its connection took the notice published before it.
+// it, as a steer into the start turn or in a later turn. The card's frame and the repeat behind it
+// are taken by the session's one connection in the order they were published.
 test.skipIf(skip)(
   "a card published as soon as the role is claimed comes after the start turn",
   async () => {
@@ -855,8 +857,8 @@ test.skipIf(skip)(
         notice = inbound.notice();
       },
     });
-    const { card, receipt } = await session.until("the controller role's claim", () => sent);
-    await receipt;
+    const { card, taken } = await session.until("the controller role's claim", () => sent);
+    await taken;
     const published = await session.until("the controller topic's registration", () => notice);
     await inbound.repeat(sid ?? "", card);
 
@@ -1157,8 +1159,8 @@ test.skipIf(skip)(
 // role and subscribes to the controller topic, so a card the listener forwards on the role's lane
 // and a daemon notice on the topic reach the session while the start turn runs. The stand-in holds
 // the registration that follows the topic's subscription, which the claim awaits, and the start
-// turn's model request, until both have reached the session: the card's receipt shows the session
-// took it, and the repeat's receipt that its connection took the notice published before it. The
+// turn's model request, until both have reached the session: the card's frame and the repeat
+// behind it are taken by the session's one connection in the order they were published. The
 // start turn's first request carries the start message alone; the card and the notice wait for it
 // and each reaches the model in a request after it, behind the start message.
 test.skipIf(skip)(
@@ -1178,8 +1180,8 @@ test.skipIf(skip)(
     const claimed = await session.until("the controller role's claim", () => sid);
     const start = await session.nextTurn("the start turn's model request");
     const inbound = await controllerInbound(setup().nats);
-    const { card, receipt } = inbound.card(claimed, "claim");
-    await receipt;
+    const { card, taken } = inbound.card(claimed, "claim");
+    await taken;
     const notice = inbound.notice();
     await inbound.repeat(claimed, card);
     expect(session.turns).toHaveLength(1);
@@ -1250,8 +1252,8 @@ test.skipIf(skip)(
     await session.until("the controller's ready", () => (ready.reached() ? true : undefined));
     const claimed = await session.until("the controller role's claim", () => sid);
     const inbound = await controllerInbound(setup().nats);
-    const { card, receipt } = inbound.card(claimed, "daemon-startup");
-    await receipt;
+    const { card, taken } = inbound.card(claimed, "daemon-startup");
+    await taken;
     await inbound.repeat(claimed, card);
     expect(session.turns).toHaveLength(0);
     ready.release();
@@ -1303,8 +1305,8 @@ test.skipIf(skip)(
     await session.until("the controller's ready", () => (ready.reached() ? true : undefined));
     const claimed = await session.until("the controller role's claim", () => sid);
     const inbound = await controllerInbound(setup().nats);
-    const { card, receipt } = inbound.card(claimed, "interrupted-start");
-    await receipt;
+    const { card, taken } = inbound.card(claimed, "interrupted-start");
+    await taken;
     await inbound.repeat(claimed, card);
     ready.release();
 
@@ -1354,8 +1356,8 @@ test.skipIf(skip)(
 // `handleSessionStart`), so the card goes into the context with no turn and its wake waits for the
 // start turn. The stand-in holds `STARTUP_HOLD_EXTENSION`'s request, after both plugins'
 // `session_start`, while the card arrives on the session's agent subject, forwarded as the listener
-// forwards a card on the role's lane so that the session's lane receipt shows it took the card,
-// and the repeat's receipt that its delivery, one frame at a time, has handed the card to the host.
+// forwards a card on the role's lane, and the repeat behind it shows that its delivery, one frame
+// at a time, has handed the card to the host.
 test.skipIf(skip)(
   "a card that reaches the operator's controller while Oh My Pi starts, before /legion-controller-start runs, waits for the start turn",
   async () => {
@@ -1370,8 +1372,8 @@ test.skipIf(skip)(
     await session.until("the startup hold", () => (startupHold.reached() ? true : undefined));
     const opened = await session.until("the session's listener registration", () => sid);
     const inbound = await controllerInbound(setup().nats);
-    const { card, receipt } = inbound.card(opened, "startup");
-    await receipt;
+    const { card, taken } = inbound.card(opened, "startup");
+    await taken;
     await inbound.repeat(opened, card);
     expect(session.turns).toHaveLength(0);
     startupHold.release();
@@ -1418,14 +1420,14 @@ test.skipIf(skip)(
     const opened = await session.until("the session's listener registration", () => sid);
     const inbound = await controllerInbound(setup().nats);
     const early = inbound.card(opened, "startup");
-    await early.receipt;
+    await early.taken;
     await inbound.repeat(opened, early.card);
     startupHold.release();
 
     const start = await session.nextTurn("the start turn's model request");
     expect(lastMessage(start.request)).toContain(START_MESSAGE_JSON);
     const during = inbound.card(opened, "during-start");
-    await during.receipt;
+    await during.taken;
     await inbound.repeat(opened, during.card);
     start.reply("Start procedure done.");
 
@@ -1475,8 +1477,8 @@ for (const variant of ["the start claim never answers", "the start command never
       await session.until("the startup hold", () => (startupHold.reached() ? true : undefined));
       const opened = await session.until("the session's listener registration", () => sid);
       const inbound = await controllerInbound(setup().nats);
-      const { card, receipt } = inbound.card(opened, "held");
-      await receipt;
+      const { card, taken } = inbound.card(opened, "held");
+      await taken;
       await inbound.repeat(opened, card);
       startupHold.release();
 

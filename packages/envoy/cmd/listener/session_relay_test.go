@@ -1052,9 +1052,9 @@ func requireRelayedPush(t *testing.T, pushes <-chan string, item contracts.Envel
 // The stored copy of a role forward to a serving-port holder, stored below that holder's consumer
 // start, reaches its port: the copy is in no consumer -- it was stored while the holder had none,
 // and the holder's consumer starts above it -- so the durable path pushes it, as it does for any
-// other message stored below the start. The forward was stored-only (roleForwardStoredOnly), so
-// its sender was already told it was delivered: acknowledging the copy on the holder's delivery
-// mode alone loses the message with no exception (INFRA-594).
+// other message stored below the start. The forward counted as delivered once the stream stored
+// it (startRoleForward), so its sender was already told so: acknowledging the copy on the
+// holder's delivery mode alone loses the message with no exception (INFRA-594).
 func TestServePortRoleForwardStoredBelowTheConsumerStartReachesThePort(t *testing.T) {
 	rig := newRelayRig(t)
 	sessionID := "ses_below_start_forward_" + id.New()
@@ -1069,13 +1069,12 @@ func TestServePortRoleForwardStoredBelowTheConsumerStartReachesThePort(t *testin
 		return listenerDeliveryResponse(http.StatusNoContent), nil
 	})}
 
-	// The forward as the role lane publishes it to a holder that answers no receipt: the role
-	// message under the role-forward dedupe key, stored on the holder's agent subject while the
-	// holder has no consumer, as a listener restart with the copy unacked leaves it.
+	// The forward as the role lane publishes it: the role message under the role-forward dedupe
+	// key, stored on the holder's agent subject while the holder has no consumer, as a listener
+	// restart with the copy unacked leaves it.
 	forward := roleForward{
-		item:       listenerTestEnvelope(contracts.RoleTopicPrefix+"below-start-"+id.New(), "below-start-forward-"+id.New()),
-		sessionID:  sessionID,
-		storedOnly: true,
+		item:      listenerTestEnvelope(contracts.RoleTopicPrefix+"below-start-"+id.New(), "below-start-forward-"+id.New()),
+		sessionID: sessionID,
 	}.forwarded()
 	ack, err := rig.harness.client.JS().Publish(agent, marshalListenerEnvelope(t, forward))
 	if err != nil {

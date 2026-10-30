@@ -37,7 +37,6 @@ import {
   DedupeIdentitySchema,
   type DeliveryClaim,
   type DispatchDelivery,
-  expectsLaneReceipt,
   inboundTimestamp,
   postDeliveryReply,
   type RenderInboundResult,
@@ -1432,43 +1431,12 @@ export default function envoyExtension(pi: PiApi): void {
     topic: string,
     subject: string,
     raw: string,
-    reply: string,
     receivedAt: number,
     relayed?: ConsumerFrame
   ): Promise<void> => {
     const rendered = renderInbound(raw, sessionID, subject);
-    // Acknowledge first. The listener waits two seconds for this receipt: its
-    // publish route, which forwards a role message or an ad-hoc topic's copy
-    // here, forwards again until a receipt arrives within its four-second window
-    // and answers a miss to the sender as an error, which the daemon answers by
-    // re-sending the message; its role lane, for a role topic published straight
-    // onto NATS, reports a miss as a failed delivery (LEGION-101). Everything
-    // below — the inbox update, a Dispatch round trip, the injection — can
-    // outlast that window under load. A frame renderInbound throws on never
-    // reaches this line, so an undecodable frame is still not acknowledged. A
-    // receipt that cannot be published is logged and delivery goes on: the
-    // message must not be lost locally because the acknowledgement was.
-    const directSubject = agentSubject(sessionID);
-    if (
-      expectsLaneReceipt({
-        subject,
-        directSubject,
-        envelopeTopic: rendered.envelope?.topic,
-        reply,
-      })
-    ) {
-      try {
-        (await ensureConnection()).publish(reply);
-      } catch (error) {
-        console.warn(
-          `[envoy] failed to acknowledge envelope ${rendered.envelope?.event_id ?? "unknown"}`,
-          error
-        );
-      }
-    }
     // The listener relays this subscription's subject from the session's consumer
-    // (`relaysCoreTopic`): the relay's frame is the one shown, and this core copy answered only its
-    // lane receipt above.
+    // (`relaysCoreTopic`): the relay's frame is the one shown, and this core copy is dropped.
     if (relayed === undefined && relaysCoreTopic(topic)) return;
     // A human unsubscribed one of our topics: drop it locally too, the same
     // way envoy_unsubscribe does, so the resubscribe-on-drop recovery path
@@ -1794,13 +1762,7 @@ export default function envoyExtension(pi: PiApi): void {
           continue;
         }
         try {
-          await deliver(
-            topic,
-            message.subject,
-            codec.decode(message.data),
-            message.reply ?? "",
-            receivedAt
-          );
+          await deliver(topic, message.subject, codec.decode(message.data), receivedAt);
         } catch {
           // A failed injection is logged by deliver and must not tear down the subscription; the
           // next sweep shows the stream's copy, or deliver reported one no sweep can show. A BTW
@@ -2011,8 +1973,8 @@ export default function envoyExtension(pi: PiApi): void {
   // `consumer`, the listener relays the session's durable consumer on that subject: its agent
   // subject and every followed topic the stream stores, each frame handed to `deliver` in stream
   // order and answered `done` once written. The core copies of those subjects are then shown
-  // nothing (`relays`), the agent subject's lane receipt still answered, and the replay
-  // engine makes no `/v1/replay` call. Answered `core`, or not at all, the core path runs as before.
+  // nothing (`relays`), and the replay engine makes no `/v1/replay` call. Answered `core`, or not
+  // at all, the core path runs as before.
   interface Relay {
     readonly sessionID: string;
     readonly delivery: ConsumerDelivery;
@@ -2032,7 +1994,7 @@ export default function envoyExtension(pi: PiApi): void {
       frame.nak();
       return;
     }
-    await deliver(frame.subject, frame.subject, frame.data, "", Date.now(), frame);
+    await deliver(frame.subject, frame.subject, frame.data, Date.now(), frame);
   };
 
   // The relay of session `id`, its snapshot restored from `entries` (before any `setFollowed`),

@@ -10,7 +10,6 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
-	"github.com/sjawhar/envoy/internal/session"
 )
 
 // roleForwardWaitLimit bounds the role forwards the role lane holds at once, queued behind their
@@ -24,20 +23,18 @@ const roleForwardWaitLimit = 4096
 const roleLaneSlowConsumerInterval = 5 * time.Second
 
 // roleForward is one role message the role lane resolved to its holder, every guard passed: item is
-// the message as it arrived, sessionID its holder, and storedOnly set for a holder that answers no
-// receipt (roleForwardStoredOnly).
+// the message as it arrived and sessionID its holder.
 type roleForward struct {
-	item       contracts.Envelope
-	sessionID  string
-	storedOnly bool
+	item      contracts.Envelope
+	sessionID string
 }
 
-// roleForwarder runs the role lane's forwards off its NATS handler, so a holder slow to answer, or
-// one that never does, holds up no other role message. Forwards to one holder are published in the
-// order the handler handed them over, by a worker per holder with forwards queued; each forward's
-// wait for its outcome runs on a goroutine of its own, and the outcome becomes the forward's
-// delivery status and exception as it always has (finishRoleForward). Forwards queued and waiting
-// together are bounded by roleForwardWaitLimit.
+// roleForwarder runs the role lane's forwards off its NATS handler, so a forward the stream is slow
+// to acknowledge holds up no other role message. Forwards to one holder are published in the order
+// the handler handed them over, by a worker per holder with forwards queued; each forward's wait
+// for its outcome runs on a goroutine of its own, and the outcome becomes the forward's delivery
+// status and exception as it always has (finishRoleForward). Forwards queued and waiting together
+// are bounded by roleForwardWaitLimit.
 type roleForwarder struct {
 	// cfg is the delivery configuration the forwards are published (forwardRole) and reported
 	// through.
@@ -95,7 +92,7 @@ func (f *roleForwarder) publish(sessionID string) {
 		f.queues[sessionID] = queue[1:]
 		f.mu.Unlock()
 
-		wait, err := f.cfg.forwardRole(subject, forward.forwarded(), roleReceiptTimeout, forward.storedOnly)
+		wait, err := f.cfg.forwardRole(subject, forward.forwarded(), roleForwardTimeout)
 		if err != nil {
 			f.finish(forward, err)
 			continue
@@ -124,16 +121,14 @@ func (f *roleForwarder) wait(ctx context.Context) bool {
 	return waitWithin(ctx, &f.pending)
 }
 
-// startRoleForward is forwardRole over client: a forward to a holder that answers receipts waits
-// for the stream's acknowledgement and the receipt (bus.Client.StartRequestCoreTo), and one to a
-// holder that answers none for the acknowledgement alone (bus.Client.StartRequestStoredTo).
-func startRoleForward(client *bus.Client) func(subject string, item contracts.Envelope, timeout time.Duration, storedOnly bool) (func() error, error) {
-	return func(subject string, item contracts.Envelope, timeout time.Duration, storedOnly bool) (func() error, error) {
-		start := client.StartRequestCoreTo
-		if storedOnly {
-			start = client.StartRequestStoredTo
-		}
-		forward, err := start(subject, item, timeout)
+// startRoleForward is forwardRole over client: every forward is stored-only
+// (bus.Client.StartRequestStoredTo), so it counts as delivered once the stream acknowledges
+// storing it. No session holds a core subscription any more, so no holder answers a receipt: the
+// stream's copy on the holder's agent subject is how the forward reaches it, from its session
+// consumer, with acknowledgement and redelivery (roleForwardCopyDelivery).
+func startRoleForward(client *bus.Client) func(subject string, item contracts.Envelope, timeout time.Duration) (func() error, error) {
+	return func(subject string, item contracts.Envelope, timeout time.Duration) (func() error, error) {
+		forward, err := client.StartRequestStoredTo(subject, item, timeout)
 		if err != nil {
 			return nil, err
 		}
@@ -151,14 +146,14 @@ type roleLane struct {
 
 // drain ends the role lane at shutdown: it drains the lane's client within timeout, so the handler
 // takes every role message the server already delivered and no more, then waits for the forwards it
-// handed over, the receipt window after that at most, since a forward published by then has its
+// handed over, the forward window after that at most, since a forward published by then has its
 // outcome within it. A forward still waiting then is logged and left to the main client's drain.
 func (l roleLane) drain(logger *logging.Logger, timeout time.Duration) {
 	l.stopWatch()
 	if err := l.client.Drain(timeout); err != nil {
 		logger.Warn("role lane drain error", slog.String("error", err.Error()))
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), roleReceiptTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), roleForwardTimeout)
 	defer cancel()
 	if !l.forwards.wait(ctx) {
 		logger.Warn("role forwards still waiting at shutdown", slog.Int("outstanding", l.forwards.outstanding()))
@@ -186,21 +181,12 @@ func watchRoleLaneSlowConsumers(ctx context.Context, lane *bus.Client, logger *l
 	}
 }
 
-// roleForwardStoredOnly reports whether holder answers no receipt for a role forward: a session on a
-// serving port has no NATS subscriber. The stream's copy of the forward reaches its port with
-// acknowledgement and redelivery: from its session consumer, which the listener's relay pushes,
-// when its entry records consumer delivery, else from the owning listener's durable
-// (roleForwardCopyDelivery). Its forward counts as delivered once the stream acknowledges storing it.
-func roleForwardStoredOnly(holder session.SessionEntry) bool {
-	return holder.Port > 0
-}
-
 // storedForwardCopyIsDelivery reports whether the stored copy of a forward on sessionID's agent
 // subject, stored at stream sequence storedSeq, is that session's own delivery rather than a copy
 // of one it already has (listenerDeliveryHandler). Only a serving-port session of this listener's
-// is: it answers no receipt, and its consumer does not hold this copy, so the copy pushed to its
-// port is how it receives the message (roleForwardCopyDelivery). Every other recipient took the
-// forward on its own NATS connection or takes the stored copy another way
+// is: it has no NATS subscriber, and its consumer does not hold this copy, so the copy pushed to
+// its port is how it receives the message (roleForwardCopyDelivery). Every other recipient took
+// the forward on its own NATS connection or takes the stored copy another way
 // (takesStoredMessagesItself), and a session with no entry, or one on another listener, is nobody
 // here to push to.
 func storedForwardCopyIsDelivery(cfg listenerDeliveryHandlerConfig, sessionID string, storedSeq uint64) bool {
@@ -223,8 +209,8 @@ func storedForwardCopyIsDelivery(cfg listenerDeliveryHandlerConfig, sessionID st
 // (takesStoredMessagesItself), as every other path reads it: a copy stored below that consumer's
 // start - one stored while the holder had no consumer, NAKed or left unacked, and redelivered
 // after the holder registered again - is in no consumer, and this push is how the holder gets it.
-// Acknowledging it on the holder's delivery mode alone loses it, and the forward was stored-only
-// (roleForwardStoredOnly), so its sender was already told it was delivered.
+// Acknowledging it on the holder's delivery mode alone loses it, and the forward counted as
+// delivered once the stream stored it (startRoleForward), so its sender was already told so.
 func roleForwardCopyDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
 	holder, ok := "", false
 	if message.mode == durableDelivery {

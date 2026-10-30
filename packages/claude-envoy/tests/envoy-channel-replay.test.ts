@@ -880,7 +880,7 @@ test("a live frame whose write is held is shown once when a sweep reads the stre
   }
 })
 
-test("a role forward the channel fails to take after its receipt gets its notice at once and is never replayed", async () => {
+test("a role forward the channel fails to take gets its notice at once and is never replayed", async () => {
   const directory = await scratchState()
   const model = new StreamModel()
   const frame = roleForward("role-lost")
@@ -890,9 +890,9 @@ test("a role forward the channel fails to take after its receipt gets its notice
   try {
     // The stream captures the agent subject, so it stores the forward too.
     model.store(agentSubject(SESSION), frame.raw)
-    running.nats.emit(agentSubject(SESSION), frame.raw, "_INBOX.receipt")
+    running.nats.emit(agentSubject(SESSION), frame.raw)
     await waitFor(async () => notices(sink, frame.eventId).length === 1, "the failure notice")
-    expect(running.nats.published.map(({ subject }) => subject)).toEqual(["_INBOX.receipt"])
+    expect(running.nats.published).toEqual([])
     await running.reconnect()
     await running.reconnect()
     expect(cards(sink, frame.eventId)).toHaveLength(0)
@@ -912,7 +912,7 @@ test("a failure notice keeps a sender's multi-line summary inside its own field"
   const sink = channelSink((shown) => shown.eventId === forward.eventId)
   const running = await boot(model, sink, directory)
   try {
-    running.nats.emit(agentSubject(SESSION), raw, "_INBOX.receipt")
+    running.nats.emit(agentSubject(SESSION), raw)
     await waitFor(async () => notices(sink, forward.eventId).length === 1, "the failure notice")
     const lines = notices(sink, forward.eventId)[0]?.content.split("\n") ?? []
     // One line per field under `envoy:`, the summary quoted whole on its own.

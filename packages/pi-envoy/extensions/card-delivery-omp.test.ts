@@ -85,9 +85,9 @@ function text(reply: string): Block {
 
 /**
  * A role-lane card as the listener forwards it to the role holder's agent subject: the envelope
- * keeps the role topic, so the session acknowledges it on the request's reply inbox
- * (`expectsLaneReceipt`, packages/envoy-client/src/delivery.ts), under a key minted per label as
- * envoy.test.ts's `forwardedRoleEnvelope` builds it.
+ * keeps the role topic, and the session answers it nowhere, since the listener's forward counts
+ * as delivered once the stream stored it. Its key is minted per label as envoy.test.ts's
+ * `forwardedRoleEnvelope` builds it.
  */
 function forwardedRoleEnvelope(summary: string, label: string): string {
   const minted = createHash("sha256").update(label).digest("hex").slice(0, 32);
@@ -170,7 +170,7 @@ interface CardSession {
   readonly frames: readonly object[];
   /** The next Messages request after the ones already taken, once it arrives. */
   nextTurn(what: string): Promise<Turn>;
-  /** Publishes a card and resolves once the session has acknowledged it (its lane receipt). */
+  /** Publishes a card and resolves once the session's subscription has taken its frame. */
   card(label: string): Promise<string>;
   /** Publishes a person's Send and resolves once the session asked Dispatch to accept it. */
   send(label: string): Promise<string>;
@@ -372,16 +372,21 @@ async function startSession(
       const summary = `CARD-${label}-${randomUUID().slice(0, 8)}`;
       const envelope = codec.encode(forwardedRoleEnvelope(summary, `${label}-${randomUUID()}`));
       // The session opens its agent subject after it registers: until then a request finds no
-      // responder, and nothing took it, so it is sent again.
+      // responder, and nothing took it, so it is sent again. A request that reaches the session
+      // times out instead, since no session answers a frame (`startRoleForward`): the frame was
+      // taken, which is what the caller waits on.
       await until(
-        `the session's receipt for card ${label}`,
+        `the session to take card ${label}`,
         async () => {
           try {
-            await connection.request(subject, envelope, { timeout: 5_000 });
+            await connection.request(subject, envelope, { timeout: 1_000 });
             return true;
           } catch (error) {
             if (error instanceof NatsError && error.code === ErrorCode.NoResponders) {
               return undefined;
+            }
+            if (error instanceof NatsError && error.code === ErrorCode.Timeout) {
+              return true;
             }
             throw error;
           }

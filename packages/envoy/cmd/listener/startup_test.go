@@ -267,15 +267,14 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 	replacement.WaitForOutput(t, "durable bound")
 }
 
-// receiveAsSession stands in for session sessionID's agent pump on its agent subject: it answers
-// each frame with the empty receipt the pump returns and hands the frame's envelope to the channel.
+// receiveAsSession stands in for session sessionID's agent pump on its agent subject: it hands
+// each frame's envelope to the channel and answers nothing, as the pump answers nothing.
 func receiveAsSession(t *testing.T, client *bus.Client, sessionID string) <-chan contracts.Envelope {
 	t.Helper()
 	frames := make(chan contracts.Envelope, 256)
 	subscription, err := client.Conn.Subscribe(contracts.AgentSubject(sessionID), func(msg *natsgo.Msg) {
 		var envelope contracts.Envelope
 		_ = json.Unmarshal(msg.Data, &envelope)
-		_ = msg.Respond(nil)
 		frames <- envelope
 	})
 	if err != nil {

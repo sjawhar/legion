@@ -47,10 +47,8 @@ const (
 	// REPLAY_UNAVAILABLE and records nothing. It is not outcomeBusUnavailable: the bus answered,
 	// with a denial no retry can get past.
 	outcomePublishDenied requestOutcome = "publish_denied"
-	// outcomeReceiptTimeout and outcomeDeliveryFailed are the publish route's role send answered
-	// 504 (confirmed.go), each under the reason its body names: a holder's receipt that did not
-	// arrive after a forward reached the server, or a send no forward was shown to reach.
-	outcomeReceiptTimeout requestOutcome = "receipt_timeout"
+	// outcomeDeliveryFailed is the publish route's role send answered 504 (confirmed.go): its
+	// window ended with no forward the stream stored for the holder.
 	outcomeDeliveryFailed requestOutcome = "delivery_failed"
 	// outcomeStreamFull is a send or publish the stream refused because it holds its byte limit
 	// (bus.ErrStreamFull). It is not outcomeBusUnavailable: the bus answered, that the stream is

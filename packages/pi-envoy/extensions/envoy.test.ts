@@ -9087,17 +9087,15 @@ console.log(JSON.stringify(args));
   });
 
   for (const reason of ["new", "resume"] as const) {
-    test(`after a ${reason === "new" ? "/new" : "resume"} completes, a frame on the new session's agent subject arrives and is acknowledged`, async () => {
+    test(`after a ${reason === "new" ? "/new" : "resume"} completes, a frame on the new session's agent subject arrives`, async () => {
       const { fixture, live, context } = await gatedRoleFixture(`frame-after-${reason}`, "ses_ac");
       await fixture.handlers.get("session_before_switch")?.({ reason }, context);
       const moved = live("ses_ac_next", { fresh: reason === "new" });
       await fixture.handlers.get("session_switch")?.({ reason }, moved);
       const subject = natsState.controls.get("notifications.agent.ses_ac_next");
       if (subject === undefined) throw new Error("the new agent subject was not subscribed");
-      const inbox = `_INBOX.after-${reason}`;
       subject.push(
-        forwardedRoleEnvelope("legion-controller", `frame after ${reason}`, `after-${reason}`),
-        inbox
+        forwardedRoleEnvelope("legion-controller", `frame after ${reason}`, `after-${reason}`)
       );
       for (let drain = 0; drain < 5; drain += 1) {
         await new Promise<void>((resolve) => setImmediate(resolve));
@@ -9105,7 +9103,7 @@ console.log(JSON.stringify(args));
       expect(fixture.messages.some((message) => message.includes(`frame after ${reason}`))).toBe(
         true
       );
-      expect(natsState.published.some((each) => each.subject === inbox)).toBe(true);
+      expect(natsState.published).toEqual([]);
     });
   }
 
@@ -9304,9 +9302,7 @@ console.log(JSON.stringify(args));
           await new Promise<void>((resolve) => setImmediate(resolve));
         }
         expect(fixture.messages.some((message) => message.includes(`frame ${slug}`))).toBe(arrives);
-        if (channel === "agent subject") {
-          expect(natsState.published.some((each) => each.subject === inbox)).toBe(arrives);
-        }
+        expect(natsState.published).toEqual([]);
       });
     }
   }
@@ -10853,8 +10849,8 @@ console.log(JSON.stringify(args));
       },
     ]);
     expect(registrations).toMatchObject([{ capabilities: ["aside", "btw", "steer"] }]);
-    // A targeted Dispatch frame is a JetStream publish to the direct subject: its
-    // reply inbox belongs to the server's PubAck, so no receipt is published —
+    // A targeted Dispatch frame is a JetStream publish to the direct subject: nothing is
+    // answered on its reply inbox, which belongs to the server's PubAck —
     // the frame goes straight to the ephemeral question and the Dispatch reply.
     expect(calls).toEqual([
       "runEphemeralTurn",
@@ -15158,13 +15154,9 @@ console.log(JSON.stringify(args));
         expect.stringContaining("evt-retry-after-failure"),
         expect.any(Error)
       );
-      // The failed attempt was acknowledged before its injection threw: the receipt does
-      // not depend on injection, and the unrecorded dedupe key lets the re-send inject.
-      expect(natsState.published.map((message) => message.subject)).toEqual([
-        "_INBOX.failed",
-        "_INBOX.retried",
-        "_INBOX.after",
-      ]);
+      // Nothing was answered on the bus, and the failed attempt left its dedupe key unrecorded,
+      // which is what lets the re-send inject.
+      expect(natsState.published).toEqual([]);
     } finally {
       warning.mockRestore();
     }
@@ -15208,13 +15200,8 @@ console.log(JSON.stringify(args));
 
     expect(fixture.messages).toHaveLength(2);
     expect(fixture.messages[0]).toContain("only the first delivery injects");
-    // The duplicate is acknowledged — the listener must not report it undelivered —
-    // without a second injection.
-    expect(natsState.published.map((message) => message.subject)).toEqual([
-      "_INBOX.first",
-      "_INBOX.duplicate",
-      "_INBOX.next",
-    ]);
+    // Nothing is answered on the bus, and the duplicate is not injected twice.
+    expect(natsState.published).toEqual([]);
   });
 
   // Following a pull request's thread and its checks holds two subscriptions for the checks
@@ -15280,54 +15267,13 @@ console.log(JSON.stringify(args));
     expect(fixture.deliveries[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: true });
   });
 
-  test("acknowledges an agent-subject request before any Dispatch call or the injection", async () => {
-    // The listener waits two seconds for this receipt and reports a miss as a failed
-    // delivery, which the daemon answers by re-sending the message (LEGION-101). The
-    // receipt therefore precedes every other step of deliver(); the recorded call
-    // sequence is the proof — a fetch recorded here would be a Dispatch call made
-    // before the acknowledgement.
-    const calls: string[] = [];
-    let recording = false;
-    globalThis.fetch = async (input, init) => {
-      if (recording) calls.push(`fetch ${new URL(input.toString()).pathname}`);
-      return responseWithRegistration(input, init, []);
-    };
-    const { default: envoyExtension } = await import("./envoy.ts?agent-receipt");
-    const fixture = createPi();
-    const injected = Promise.withResolvers<void>();
-    envoyExtension({
-      ...fixture.pi,
-      sendMessage: (message, options) => {
-        calls.push("sendMessage");
-        fixture.pi.sendMessage(message, options);
-        injected.resolve();
-      },
-    });
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_receipt"));
-    const controls = natsState.controls.get("notifications.agent.ses_receipt");
-    if (controls === undefined) throw new Error("agent subject was not subscribed");
-    natsState.onPublish = (subject) => calls.push(`publish ${subject}`);
-    recording = true;
-
-    controls.push(
-      forwardedRoleEnvelope("legion-controller", "receipt event", "agent-receipt"),
-      "_INBOX.receipt"
-    );
-    await injected.promise;
-
-    expect(calls).toEqual(["publish _INBOX.receipt", "sendMessage"]);
-    expect(fixture.messages[0]).toContain("receipt event");
-  });
-
-  test("a JetStream publish to the direct subject gets no receipt in its reply inbox", async () => {
-    // Only the listener's role lane makes a receipt-backed core request: a role
-    // frame forwarded to the holder keeps the role topic in its envelope. Every
-    // other frame on the direct subject — a Dispatch author route, a peer
-    // envoy_send — is a JetStream publish whose reply inbox expects the server's
-    // PubAck; an empty receipt there makes the publisher fail with
-    // `nats: invalid jetstream publish response`.
+  test("no frame on the agent subject is answered on the bus", async () => {
+    // Nothing answers a frame any more: a role forward counts as delivered once the stream
+    // stored it, and every other frame on the direct subject — a Dispatch author route, a peer
+    // envoy_send — is a JetStream publish whose reply inbox expects the server's PubAck, where
+    // an empty answer makes the publisher fail with `nats: invalid jetstream publish response`.
     globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
-    const { default: envoyExtension } = await import("./envoy.ts?jetstream-no-receipt");
+    const { default: envoyExtension } = await import("./envoy.ts?agent-no-answer");
     const fixture = createPi();
     const injected = Promise.withResolvers<void>();
     envoyExtension({
@@ -15337,8 +15283,8 @@ console.log(JSON.stringify(args));
         if (fixture.messages.length === 2) injected.resolve();
       },
     });
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_jetstream"));
-    const controls = natsState.controls.get("notifications.agent.ses_jetstream");
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_unanswered"));
+    const controls = natsState.controls.get("notifications.agent.ses_unanswered");
     if (controls === undefined) throw new Error("agent subject was not subscribed");
 
     controls.push(
@@ -15346,7 +15292,7 @@ console.log(JSON.stringify(args));
         event_id: "dispatch-author-route",
         source: "dispatch",
         source_event_id: "8341",
-        topic: "notifications.agent.ses_jetstream",
+        topic: "notifications.agent.ses_unanswered",
         dedupe_key: "dispatch-author-route",
         issued_at: 1,
         payload_summary: "CORE-1 comment created",
@@ -15356,58 +15302,13 @@ console.log(JSON.stringify(args));
     );
     controls.push(
       forwardedRoleEnvelope("legion-controller", "role frame after", "role-after-jetstream"),
-      "_INBOX.role-receipt"
+      "_INBOX.role-forward"
     );
     await injected.promise;
 
     expect(fixture.messages[0]).toContain("CORE-1 comment created");
     expect(fixture.messages[1]).toContain("role frame after");
-    expect(natsState.published.map((message) => message.subject)).toEqual(["_INBOX.role-receipt"]);
-  });
-
-  test("a failed receipt publish is logged with the event id and the message is still injected", async () => {
-    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
-    const { default: envoyExtension } = await import("./envoy.ts?receipt-publish-failure");
-    const fixture = createPi();
-    const secondDelivery = Promise.withResolvers<void>();
-    const warning = spyOn(console, "warn").mockImplementation(() => {});
-    envoyExtension({
-      ...fixture.pi,
-      sendMessage: (message, options) => {
-        fixture.pi.sendMessage(message, options);
-        if (fixture.messages.length === 2) secondDelivery.resolve();
-      },
-    });
-    try {
-      await fixture.handlers.get("session_start")?.({}, sessionContext("ses_receipt_fail"));
-      const controls = natsState.controls.get("notifications.agent.ses_receipt_fail");
-      if (controls === undefined) throw new Error("agent subject was not subscribed");
-
-      natsState.failPublishes = 1;
-      controls.push(
-        forwardedRoleEnvelope("legion-controller", "receipt lost", "receipt-lost"),
-        "_INBOX.lost"
-      );
-      controls.push(
-        forwardedRoleEnvelope("legion-controller", "receipt kept", "receipt-kept"),
-        "_INBOX.kept"
-      );
-      await secondDelivery.promise;
-
-      // The message whose receipt could not be published is still injected — the
-      // acknowledgement is best-effort, the local delivery is not — and the pump
-      // acknowledges the next one normally.
-      expect(fixture.messages[0]).toContain("receipt lost");
-      expect(fixture.messages[1]).toContain("receipt kept");
-      expect(natsState.published.map((message) => message.subject)).toEqual(["_INBOX.kept"]);
-      expect(warning).toHaveBeenCalledTimes(1);
-      expect(warning).toHaveBeenCalledWith(
-        expect.stringContaining("evt-receipt-lost"),
-        expect.any(Error)
-      );
-    } finally {
-      warning.mockRestore();
-    }
+    expect(natsState.published).toEqual([]);
   });
 
   test("an ended subscription iterator resubscribes instead of going deaf", async () => {
@@ -17187,7 +17088,7 @@ describe("messages missed while the subscription was down", () => {
       expect(session.notices("evt-fail-notice")).toHaveLength(1);
     });
 
-    test("a live role forward that fails after its receipt gets the notice at once and is never replayed", async () => {
+    test("a live role forward that fails gets the notice at once and is never replayed", async () => {
       const model = new StreamModel();
       const session = await bootReplay("replay-fail-role-forward", model, {
         beforeSend: (content) => {
@@ -17201,9 +17102,7 @@ describe("messages missed while the subscription was down", () => {
       session.live(session.agentSubject).push(forward, "_INBOX.role-forward");
       await until(() => session.notices("evt-role-forward").length > 0, "the notice");
 
-      expect(natsState.published.map((message) => message.subject)).toContain(
-        "_INBOX.role-forward"
-      );
+      expect(natsState.published).toEqual([]);
       await session.tick();
       await session.tick();
       expect(session.notices("evt-role-forward")).toHaveLength(1);
@@ -17664,7 +17563,7 @@ describe("consumer delivery", () => {
    * (with a relay on `RELAY`), `core`, or no `delivery` at all, as an earlier listener does. The
    * host is `idle` (writes each card it is handed, then ends its message) or `streaming` (holds
    * every card until `take`). `events` lists, in order, each card handed and written and each
-   * NATS publish (a relay reply as `<inbox> <word>`, a lane receipt as its subject).
+   * NATS publish (a relay reply as `<inbox> <word>`).
    */
   async function bootConsumer(
     query: string,
@@ -18069,7 +17968,7 @@ describe("consumer delivery", () => {
     expect(session.replays()).toBe(0);
   });
 
-  test("a core frame on a relayed subject is not shown but its lane receipt is answered; an unstored topic stays on core", async () => {
+  test("no core frame of a relayed subject is shown, and none is answered", async () => {
     const session = await bootConsumer("consumer-core-drop");
     await session.follow("notifications.team.alpha");
     await settle();
@@ -18082,12 +17981,16 @@ describe("consumer delivery", () => {
     session.core(AGENT, peer("dropped"));
     const team = JSON.stringify({ ...JSON.parse(peer("team")), topic: "notifications.team.alpha" });
     session.core("notifications.team.alpha", team);
-    await until(() => session.cards("evt-team").length > 0, "the team topic's card");
+    // The relay's own frame is the barrier: once its card is shown, every core copy pushed
+    // before it has been read and dropped.
+    const inbox = session.relay(11, peer("relayed"));
+    await until(() => session.cards("evt-relayed").length > 0, "the relayed card");
 
-    expect(session.events).toContain("_INBOX.lane.1");
+    expect(session.events).not.toContain("_INBOX.lane.1");
+    expect(session.replies(inbox)).toContain("done");
     expect(session.cards("evt-lane")).toHaveLength(0);
     expect(session.cards("evt-dropped")).toHaveLength(0);
-    expect(session.cards("evt-team")).toHaveLength(1);
+    expect(session.cards("evt-team")).toHaveLength(0);
   });
 
   test("a late BTW is shown as a card that starts no turn, and runs no side turn", async () => {
