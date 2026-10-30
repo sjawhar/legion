@@ -502,10 +502,15 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	}
 	// What the request refuses itself, before any lookup and before the documents' writer gates:
 	// the thread it names, the turn it carries and the shape of its anchor all read no row, so a
-	// comment that can never be written waits on nothing (normalizeCommentThreadTarget answers
-	// whether the thread is an ask's, which is what TURN_REQUIRES_ASK needs).
+	// comment that can never be written waits on nothing. A turn with neither ask_id nor reply_to
+	// is one of those: only ask_id, or reply_to climbing to an ask's thread, ever makes the thread
+	// an ask's, so no row could make this comment an ask's reply.
 	if err := validateCommentThreadInput(input); err != nil {
 		s.writeHandlerError(w, r, err)
+		return
+	}
+	if input.Turn != nil && input.AskID == nil && input.ReplyTo == nil {
+		writeError(w, "TURN_REQUIRES_ASK", http.StatusBadRequest, "turn is only valid on a reply to an ask")
 		return
 	}
 	if input.Turn != nil && *input.Turn != "human" && *input.Turn != "agent" {
@@ -565,7 +570,8 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		s.writeHandlerError(w, r, err)
 		return
 	}
-	// The turn's value was refused before the gate; whether the thread is an ask's is this
+	// The turn's value was refused before the gate, as was a turn on a comment that names no
+	// thread at all; whether the reply_to this one names climbs to an ask's thread is this
 	// transaction's to say.
 	if input.Turn != nil && threadTarget.AskID == nil {
 		writeError(w, "TURN_REQUIRES_ASK", http.StatusBadRequest, "turn is only valid on a reply to an ask")
