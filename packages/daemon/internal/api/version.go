@@ -407,4 +407,23 @@ package api
 // refuses either pair. This change adds no store migration. (This branch took 36 through 41 in
 // turn; main landed each of those numbers first, the controller start command last at 41, so this
 // branch takes the number above them, as the collision note says.)
-const DaemonAPIVersion = 42
+//
+// 43: api.State gains `consumers`, the lag of the daemon's three durable consumers
+// (api.ConsumerLagView), read from NATS after the state's transaction commits: each consumer's
+// `name`, `waiting` (JetStream's NumPending plus NumAckPending), `oldestAt` and
+// `oldestAgeSeconds` (the stream time of the first message after its ack floor on one of its
+// filter subjects, and that message's age in whole seconds; both null when nothing waits or the
+// message could not be read), `lastHandledAt` (when the daemon last acknowledged one of its
+// messages or terminated one as poison, null before the first; a nak is not handled), `stalled`
+// (messages waiting and none handled for 60 seconds, counted from the consumer's open before the
+// first) and `unavailable` (what NATS did not answer within the read's 2-second bound or refused,
+// absent when every read answered: a failed CONSUMER.INFO leaves `waiting` 0 and `stalled` false,
+// a failed STREAM.MSG.GET only the oldest null). Never null, so a 42 plugin's strict reader
+// refuses the state, and the boot gate and `legion probe-image` refuse the mixed pair. The state's
+// `repositories` gains `withoutWebhookApp` in the same contract: each served repository, as
+// Dispatch maps it, that Dispatch's GitHub App (the one GitHub sends its webhook events through)
+// is not known to be installed on, `{repo, reason}` sorted by repo, the reason naming whether the
+// App is not installed, the check failed, or Dispatch does not answer the check; never null, and
+// the repository is served all the same. (This branch took 41, then 42; 42 is declared by main's
+// stalled-worker reminder, so this change takes the number above it, as the collision note says.)
+const DaemonAPIVersion = 43
