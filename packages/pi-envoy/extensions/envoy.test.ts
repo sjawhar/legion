@@ -13162,8 +13162,9 @@ console.log(JSON.stringify(args));
   });
 
   // Oh My Pi drops everything a `context` handler returns when it throws: whatever Dispatch
-  // answers, the skill stays and the request says the list could not be read.
-  test("a Dispatch answering 200 with no list keeps the dispatch-first skill and carries the failure line", async () => {
+  // answers, the skill stays. A 200 that is no answers list is no answers route the session could
+  // read, `dispatch answers` included, so the request carries no line about it.
+  test("a Dispatch answering 200 with no list keeps the dispatch-first skill and adds no line", async () => {
     process.env.DISPATCH_URL = "http://dispatch.test";
     process.env.DISPATCH_TOKEN = "answers-token";
     globalThis.fetch = async (input, init) =>
@@ -13182,10 +13183,8 @@ console.log(JSON.stringify(args));
     );
 
     expect(JSON.stringify(messages[0])).toContain("<dispatch-first-skill>");
-    expect(messages.slice(1, -1)).toEqual([prompt]);
-    expect(JSON.stringify(messages.at(-1))).toContain(
-      "[Dispatch: people's answers from the last 72 hours could not be read ("
-    );
+    expect(messages.slice(1)).toEqual([prompt]);
+    expect(JSON.stringify(messages)).not.toContain("dispatch answers");
   });
 
   test("a task subagent's context handler reads its parent's list", async () => {

@@ -828,17 +828,19 @@ strict prefix with a left-out line naming `dispatch answers`; one read in flight
 Dispatch URL for the whole process, the parent's and every subagent's requests joining it; each
 request waits at most `SESSION_ANSWERS_DEADLINE_MS` (800 ms), then carries the last list read
 from that Dispatch (memory, then `answers.json` in the session's state directory) with its read
-time and why this read failed, or, when that renders nothing, the failure line naming why; a read
-that already passed its deadline is not waited on again; a 404 keeps that Dispatch URL from being
-asked for 5 minutes. The pinned host hands a `context` handler no abort signal: it races the
+time and why this read failed, or, when that renders nothing, the failure line naming why; a
+Dispatch with no usable answers route (a 404, or a 200 with no answers list) carries no line
+then (`source: "unavailable"`), since the failure line's `dispatch answers` fails there too; a
+read that already passed its deadline is not waited on again; a 404 keeps that Dispatch URL from
+being asked for 5 minutes. The pinned host hands a `context` handler no abort signal: it races the
 handler against the run's own and drops an aborted handler's result. A handler that throws loses
 everything it returns, the skill included, so a read that throws rather than answering carries
 the failure line naming the error. `src/session-answers-context.test.ts` holds the insertion
 rules, the requests that carry no list and the two-copy cases, `extensions/envoy.test.ts` the
-handler, a subagent reading its parent's id and a Dispatch that answers no list, and
+handler, a subagent reading its parent's id and a Dispatch that answers no list (no line), and
 `extensions/session-answers-omp.test.ts` the real binary: a new answer in the next turn, after a
 compaction and in a subagent's first request; every kind of item word for word; the cap; a route
-that never answers costing a request under one second; a route that answers 404; the cache
+that never answers costing a request under one second; a route that answers 404 (no line); the cache
 prefix byte for byte with no `cache_control` on the list; a `/btw` side turn and the handoff
 ending with their own prompts, with no list and no read; a remote compaction request ending at
 its cut, after a question and after a delivered message, and one that keeps no tail carrying no

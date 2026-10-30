@@ -1,0 +1,13 @@
+kind: Fixed
+body: |-
+    `readSessionAnswers` returns no text, with the new `source: "unavailable"` and the read's
+    `reason`, when the Dispatch has no usable answers route and no list read before from that URL
+    renders: it answered 404 (`this Dispatch build has no answers route`, also for the 5 minutes
+    that URL is not asked again), or 200 with a body that is no answers list. Before, it returned
+    the failure line, which sends the agent to `dispatch answers`, a command that fails against
+    that same Dispatch. A list read before from that URL is still carried, its header naming why
+    this read failed. Every other failure (a timeout, the network, a 401, a 5xx, a cancelled
+    request, a read still waiting, Dispatch off with an error) still returns the failure line.
+time: 2026-10-30T09:08:26.929143037Z
+custom:
+    Issue: answers-line-on-old-dispatch

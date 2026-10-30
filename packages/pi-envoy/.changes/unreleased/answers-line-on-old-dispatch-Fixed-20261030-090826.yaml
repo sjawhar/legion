@@ -1,0 +1,12 @@
+kind: Fixed
+body: |-
+    A model request against a Dispatch that has no answers route (it answers 404, or 200 with a
+    body that is no answers list) carries no line about people's answers when no list read before
+    from that Dispatch has an item to show. Before, every request carried a line saying the answers
+    could not be read and telling the agent to run `dispatch answers`, a command that fails against
+    that same Dispatch; agents ran it again and again. A list read before from that Dispatch is
+    still carried, and every other failed read (a timeout, the network, a 401, a 5xx) still carries
+    the line naming why.
+time: 2026-10-30T09:08:26.929143037Z
+custom:
+    Issue: answers-line-on-old-dispatch

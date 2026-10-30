@@ -26,9 +26,12 @@ afterEach(async () => {
 type Route =
   | { readonly kind: "list"; readonly items: readonly SessionAnswer[] }
   | { readonly kind: "hang" }
+  | { readonly kind: "missing" }
+  | { readonly kind: "not-a-list" }
 
 /** The stand-in Dispatch: its answers route answers as `route.kind` says at the time of each
- *  request; every request is recorded with its bearer. */
+ *  request (`missing` as a Dispatch build without the route, `not-a-list` with a 200 that is no
+ *  answers list); every request is recorded with its bearer. */
 function standinDispatch(): {
   readonly base: string
   readonly requests: string[]
@@ -50,6 +53,18 @@ function standinDispatch(): {
       }
       const { route } = state
       if (route.kind === "hang") return new Promise<Response>(() => {})
+      if (route.kind === "missing") {
+        // What a Dispatch build without the route answers (its router's fallback).
+        return Response.json(
+          {
+            code: "NOT_FOUND",
+            error: `no route for GET ${url.pathname}`,
+            hint: "GET /api/v1 lists every route",
+          },
+          { status: 404 },
+        )
+      }
+      if (route.kind === "not-a-list") return Response.json({ session_id: SESSION, topics: [] })
       return Response.json({
         session_id: SESSION,
         since: new Date(Date.now() - 72 * 3_600_000).toISOString(),
@@ -531,6 +546,32 @@ test("adds nothing when the list is empty or Dispatch is not configured", async 
   // nothing.
   const expectedRequests = empty.stdout === "" ? [1] : [0, 1]
   expect(expectedRequests).toContain(dispatch.requests.length)
+}, 20_000)
+
+test("adds nothing for a Dispatch with no answers route or one whose answer is no answers list", async () => {
+  for (const kind of ["missing", "not-a-list"] as const) {
+    const dispatch = standinDispatch()
+    dispatch.route = { kind }
+    const { home, state } = await scratch()
+    const run = await runHook(
+      {
+        HOME: home,
+        DISPATCH_STATE_DIR: state,
+        DISPATCH_URL: dispatch.base,
+        DISPATCH_TOKEN: "hook-token",
+      },
+      sessionStart("startup", home),
+    )
+    expect(run.exitCode).toBe(0)
+    // `dispatch answers` fails against that Dispatch too, so the hook names neither it nor the
+    // missing route. A read that missed the hook's wait, with no list read before, still says so.
+    if (run.stdout !== "") {
+      expect(allowedOutcome(contextOf(run, "SessionStart"), [], READ_MISSED)).toBe("failure")
+    }
+    expect(run.stdout).not.toContain("answers route")
+    expect(run.stdout).not.toContain("not an answers list")
+    expect(existsSync(join(state, "sessions", SESSION, "answers.json"))).toBe(false)
+  }
 }, 20_000)
 
 test("a `!` token command runs outside the hook: a quick one gives the bearer, a slow one cannot hold the hook", async () => {

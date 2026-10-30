@@ -20,8 +20,10 @@ body: |-
     a session id that is no plain path segment keeps it in memory only), a list read from one
     Dispatch never carried for another, the failure line ``[Dispatch: people's answers from the last
     72 hours could not be read (<reason>); run `dispatch answers`.]`` when no cached list renders
-    (none read, an empty list, or every item past 72 hours), and a Dispatch that answers 404 (`this
-    Dispatch build has no answers route`) not asked again for 5 minutes. With Dispatch off with an
+    (none read, an empty list, or every item past 72 hours), no text (`source: "unavailable"`) then
+    instead when the Dispatch has no usable answers route (a 404, or a 200 with no answers list),
+    and a Dispatch that answers 404 (`this Dispatch build has no answers route`) not asked again
+    for 5 minutes. With Dispatch off with an
     error, which names no URL, only a list read from the URL the caller names as `dispatchUrl` (the
     configured one, `sessionDispatchUrl`) stands in, and with none named the failure line does: a list
     another Dispatch answered is never carried.

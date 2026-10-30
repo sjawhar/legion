@@ -1,0 +1,11 @@
+kind: Fixed
+body: |-
+    The `answers` hook adds nothing to the context when the Dispatch has no answers route (it
+    answers 404, or 200 with a body that is no answers list) and no list read before from that
+    Dispatch has an item to show. Before, it added a line saying the answers could not be read and
+    telling the agent to run `dispatch answers`, a command that fails against that same Dispatch.
+    A list read before from that Dispatch is still carried, and every other failed read still adds
+    the line naming why.
+time: 2026-10-30T09:08:26.929143037Z
+custom:
+    Issue: answers-line-on-old-dispatch

@@ -35,7 +35,8 @@
 // answers (every SessionStart, and SubagentStart): puts what people wrote to the session in the
 // last 72 hours into the model's context, as
 // `hookSpecificOutput.additionalContext` under the event that ran it: `readSessionAnswers`' list,
-// or its failure line naming why when a read failed and no list read before has an item to show.
+// or its failure line naming why when a read failed and no list read before has an item to show,
+// and nothing when the Dispatch has no usable answers route (`source: "unavailable"`).
 // The session is the hook input's `session_id`, which at SubagentStart is the parent's, the
 // session a subagent's `dispatch` command writes as.
 // The hook prints by `ANSWERS_BY_MS` after its process started (bun's start-up included), or

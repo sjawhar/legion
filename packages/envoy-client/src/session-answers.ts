@@ -205,7 +205,15 @@ export interface SessionAnswersCache {
   readonly items: readonly SessionAnswer[];
 }
 
-type ReadOutcome = { readonly cache: SessionAnswersCache } | { readonly failure: string };
+/** Why a read gave no list. `unavailable`: the Dispatch has no usable answers route (it answered
+ *  404, or 200 with a body that is no answers list), so a request with no list read before to
+ *  carry adds nothing, since `dispatch answers` fails against that Dispatch too. `failed`: any
+ *  other reason, which the failure line names. */
+type ReadFailureKind = "unavailable" | "failed";
+
+type ReadOutcome =
+  | { readonly cache: SessionAnswersCache }
+  | { readonly failure: string; readonly kind: ReadFailureKind };
 
 /** One session's read state for one Dispatch URL. */
 interface SessionEntry {
@@ -302,15 +310,19 @@ export interface ReadSessionAnswersOptions {
 
 export interface SessionAnswersRead {
   /** The message to carry: the list, the list as last read, or the failure line; undefined when
-   *  there is nothing to show or Dispatch is not configured. */
+   *  there is nothing to show, Dispatch has no usable answers route, or Dispatch is not
+   *  configured. */
   readonly text: string | undefined;
   /** `fresh`: this request's read answered. `cache`: it did not, and the last list read stands
    *  in. `failure`: it did not and no list read has an item inside the 72 hours, so `text` is the
-   *  failure line. `off`: nothing configures Dispatch. */
-  readonly source: "fresh" | "cache" | "failure" | "off";
+   *  failure line. `unavailable`: Dispatch has no usable answers route (it answered 404, or 200
+   *  with a body that is no answers list) and no list read has an item inside the 72 hours, so
+   *  the request carries nothing. `off`: nothing configures Dispatch. */
+  readonly source: "fresh" | "cache" | "failure" | "unavailable" | "off";
   /** When the list shown was read (`fresh` and `cache`). */
   readonly readAt?: string;
-  /** Why the read gave no list (`cache`, `failure`), or the notice that turns Dispatch off. */
+  /** Why the read gave no list (`cache`, `failure`, `unavailable`), or the notice that turns
+   *  Dispatch off. */
   readonly reason?: string;
 }
 
@@ -350,8 +362,10 @@ async function settleWithin<T>(
  * the 72 hours again. When no cached list renders (none was read, it was empty, or every item is
  * now past 72 hours), a failed read carries the failure line naming why. Dispatch off with an
  * error names no URL: only a list read from `dispatchUrl` stands in, and with none given the
- * failure line does. A Dispatch that answers 404 has no answers route: no request goes to its URL
- * for 5 minutes, process-wide.
+ * failure line does. A Dispatch with no usable answers route (it answers 404, or 200 with a body
+ * that is no answers list) carries no line at all when no cached list renders: the failure line
+ * would send the agent to `dispatch answers`, which fails against that Dispatch too. A Dispatch
+ * that answers 404 has no answers route: no request goes to its URL for 5 minutes, process-wide.
  */
 export async function readSessionAnswers(
   options: ReadSessionAnswersOptions
@@ -369,7 +383,11 @@ export async function readSessionAnswers(
   }
   const entries = state.sessions.get(session) ?? new Map<string, SessionEntry>();
   state.sessions.set(session, entries);
-  const carry = (cache: SessionAnswersCache | undefined, reason: string): SessionAnswersRead => {
+  const carry = (
+    cache: SessionAnswersCache | undefined,
+    reason: string,
+    kind: ReadFailureKind
+  ): SessionAnswersRead => {
     const text =
       cache === undefined
         ? undefined
@@ -378,20 +396,21 @@ export async function readSessionAnswers(
             total: cache.total,
             cached: { readAt: cache.read_at, reason },
           });
-    // A cache that renders nothing is no list to show: the failure line keeps a read that failed
-    // from looking like no person wrote.
     if (cache === undefined || text === undefined) {
+      if (kind === "unavailable") return { text: undefined, source: "unavailable", reason };
+      // A cache that renders nothing is no list to show: the failure line keeps a read that failed
+      // from looking like no person wrote.
       return { text: sessionAnswersFailureLine(reason), source: "failure", reason };
     }
     return { text, source: "cache", readAt: cache.read_at, reason };
   };
   if (!dispatch.enabled) {
     const url = options.dispatchUrl;
-    if (url === undefined) return carry(undefined, dispatch.error);
+    if (url === undefined) return carry(undefined, dispatch.error, "failed");
     const cache =
       entries.get(url)?.cache ??
       (directory === undefined ? undefined : readCacheFile(directory, url));
-    return carry(cache, dispatch.error);
+    return carry(cache, dispatch.error, "failed");
   }
   const { url } = dispatch;
   const current: SessionEntry = entries.get(url) ?? {
@@ -404,10 +423,10 @@ export async function readSessionAnswers(
     current.cache = readCacheFile(directory, url);
   }
   if ((state.noRouteUntil.get(url) ?? 0) > now()) {
-    return carry(current.cache, NO_ANSWERS_ROUTE_REASON);
+    return carry(current.cache, NO_ANSWERS_ROUTE_REASON, "unavailable");
   }
   if (current.inFlight !== undefined && current.overdue) {
-    return carry(current.cache, "an earlier read is still waiting on Dispatch");
+    return carry(current.cache, "an earlier read is still waiting on Dispatch", "failed");
   }
   let read = current.inFlight;
   if (read === undefined) {
@@ -419,10 +438,13 @@ export async function readSessionAnswers(
       })
       .then(
         (response): ReadOutcome => {
-          // A 200 whose body is no answers list (a proxy's page, another service on the URL) is a
-          // failed read, never a cache: rendering it would throw on the request path.
+          // A 200 whose body is no answers list (a proxy's page, another service on the URL) is no
+          // usable answers route: never a cache, since rendering it would throw on the request path.
           if (!Array.isArray(response?.items) || typeof response.total !== "number") {
-            return { failure: "Dispatch answered with something that is not an answers list" };
+            return {
+              failure: "Dispatch answered with something that is not an answers list",
+              kind: "unavailable",
+            };
           }
           const cache: SessionAnswersCache = {
             dispatch_url: url,
@@ -444,9 +466,9 @@ export async function readSessionAnswers(
         (error: unknown): ReadOutcome => {
           if (isNoAnswersRoute(error)) {
             state.noRouteUntil.set(url, now() + NO_ROUTE_BACKOFF_MS);
-            return { failure: NO_ANSWERS_ROUTE_REASON };
+            return { failure: NO_ANSWERS_ROUTE_REASON, kind: "unavailable" };
           }
-          return { failure: messageFor(error) };
+          return { failure: messageFor(error), kind: "failed" };
         }
       );
     read = started.finally(() => {
@@ -462,12 +484,12 @@ export async function readSessionAnswers(
   const outcome = await settleWithin(read, deadlineMs, options.signal);
   if (outcome === "deadline") {
     if (current.inFlight === read) current.overdue = true;
-    return carry(current.cache, `Dispatch did not answer within ${deadlineMs} ms`);
+    return carry(current.cache, `Dispatch did not answer within ${deadlineMs} ms`, "failed");
   }
   if (outcome === "aborted") {
-    return carry(current.cache, "the request was cancelled before Dispatch answered");
+    return carry(current.cache, "the request was cancelled before Dispatch answered", "failed");
   }
-  if ("failure" in outcome) return carry(current.cache, outcome.failure);
+  if ("failure" in outcome) return carry(current.cache, outcome.failure, outcome.kind);
   return {
     text: renderSessionAnswers(outcome.cache.items, {
       now: now(),
