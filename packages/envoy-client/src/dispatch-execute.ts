@@ -332,7 +332,7 @@ function renderAdvice(
   ) {
     const middle =
       writesSinceHuman >= 6
-        ? "Stop posting here until a human replies."
+        ? "Stop posting here until a human replies. Their reply ends this: post then what you held back."
         : "Progress ledger or scratchpad? If so, stop.";
     lines.push(
       `Posted. You've sent ${writesSinceHuman} messages on ${key} with no human response. ${middle} See the \`dispatch\` skill, "Structure over stream".`
