@@ -1353,7 +1353,22 @@ message included (a message is never edited), and owes an index to every message
 reading `messages` once. Its trigger takes `SHARE ROW EXCLUSIVE` on `messages` alone, so a message
 write waits behind it while a read does not. Its census answers `0` for the same reasons.
 
-Migration `0148_comment_fallback_copies` creates `comment_fallback_copies`, the copies of a new
+Migration `0148_asks_anchor_artifact_id` creates `asks_anchor_artifact_id`, an index over the asks
+whose `anchor` is set of `case when anchor->>'artifact_id' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (anchor->>'artifact_id')::uuid end`:
+the uuid cast `comments_anchor_artifact` (`0032`) indexes, guarded by the form every
+server-written anchor carries, since an unguarded cast would fail the boot over an anchor an
+earlier release could store. Settlement's sweep reads through it the marks a document's asks
+record, by the anchor's document alone, so an ask that also names an ask block on another document
+(`block_artifact_id`) keeps its mark on the document its anchor names. Building it takes `SHARE`
+on `asks`, so ask writes wait for the build; it rewrites no row and refuses none, so its census
+answers `0`. An anchor whose artifact id is not a lower-case document id is left out of the index,
+which costs the read nothing — its text comparison never matched such a spelling either — and
+each boot logs the count of those asks with a warning when there are any. The release before it
+never reads the index and serves beside it unchanged, except that its sweep still drops the mark
+of an ask holding both columns (no such row is written today), and rolling Dispatch back past
+`0148` is an image rollback alone: the index is left for the next release that reads it.
+
+Migration `0149_comment_fallback_copies` creates `comment_fallback_copies`, the copies of a new
 comment the outbox held back for a mention it waits on no longer - one the delivery sweep resends,
 one a sender still holds queued behind a lane held past a claim lease, and one a Retry overtook
 while its sender holds it - one row per comment and destination topic, which the outbox's fallback
@@ -1364,7 +1379,7 @@ runner's transaction lock only the new table, and the release before it neither 
 it, so that release runs over the new schema unchanged and the census answers `0`. That release
 does not publish a `comment_fallback_copies` row either: it has no fallback pass, and its outbox
 skips an event already published, so a copy a row holds is never sent once it serves alone.
-Before rolling back past `0148`, run
+Before rolling back past `0149`, run
 `select count(*) from comment_fallback_copies where settled_at is null` and roll back only when it
 answers `0`, or let this build drain the rows first.
 
