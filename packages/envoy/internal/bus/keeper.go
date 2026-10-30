@@ -118,8 +118,10 @@ func (c *Client) awaitKeeper() {
 // read it, with copies below cfg's count raised to it, a byte limit below cfg's, or none, raised to
 // cfg's when cfg sets one, a missing StreamIDMetadataKey added, the age, the duplicate window and
 // discard set to cfg's (the same in every release, ownedStream), and each of cfg's subjects the
-// stream lacks added unless it captures a role lane or overlaps a deployed subject (keptSubjects).
-// It never lowers the copies or the byte limit, so an operator's raise of either stands, and never
+// stream lacks added unless it overlaps a deployed subject (keptSubjects). It does not check cfg's
+// subjects for one that captures a role lane, because no subject this binary compiles captures
+// one, which TestStreamConfigExcludesRoleLanes in stream_config_test.go guarantees. It never
+// lowers the copies or the byte limit, so an operator's raise of either stands, and never
 // removes or replaces a subject: only a start does, since two releases with different subject lists
 // would otherwise switch the stream back and forth every period. Its write still carries every
 // other field as it read it, the other subjects included, so a concurrent write that lands between
