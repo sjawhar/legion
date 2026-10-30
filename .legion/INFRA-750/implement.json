@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-750",
+  "completed": "2026-10-30T06:40:00Z",
+  "generation": 2,
+  "round": 1,
+  "pullRequest": "sjawhar/legion#2542",
+  "head": "725e26a83afa",
+  "plan": "dispatch://INFRA-750/artifact/plan-md@v4, with the architect's decision of 2026-10-30 that put the daemon in scope (roll-call line 4)",
+  "proof": [
+    {
+      "criterion": "The listener notices a dead hub in seconds (roll call 3, the spec's own acceptance): a test stops answering the listener's pings without closing its socket, and the listener reports the connection lost within 5 seconds; the test fails at the base.",
+      "surface": "The real envoy-listener binary, started as production starts it, against an in-process NATS whose relay stops moving bytes in both directions with both sides' connections kept (testnats.Server.Freeze).",
+      "command": "From packages/envoy: `go test -count=3 -timeout 10m -run 'TestBothOfTheListenersNATSClientsReportASilentCutWithinSeconds$' ./cmd/listener/` at the head; the same test file over a clean copy of the base's cmd/listener/main.go and live_topics.go at base e4c9ab85.",
+      "observed": "Head: 3 of 3 runs passed, each client's `envoy nats disconnected` line 2.79 to 2.85 s after the freeze, for both client names (`envoy` and `envoy-live-topics`), which is what pins both call sites. Base: FAIL after 7.032 s, `no disconnect line for envoy and envoy-live-topics 5.021s into a silent cut`.",
+      "headSha": "725e26a83afa",
+      "negativeControl": "The base run above is the control for the change, and the test's own shape is the control for the test: it goes through listenerStreamOptions and openLiveTopics rather than passing bus.WithSilentCutDetection itself, so a copy of the existing bus-level test would have passed at the base and proven nothing. A run with the option removed from both call sites fails the same way as the base."
+    },
+    {
+      "criterion": "The daemon notices a dead hub in seconds (roll call 4, the architect's decision of 2026-10-30): the same ping settings at its one NATS connection, with a frozen-server test inside the same bound.",
+      "surface": "The daemon's own natsauth.Connect, called as internal/daemon/workflow.go calls it (LogEvents and ReconnectForever), against a server that answers the handshake PING and then answers nothing with the socket open.",
+      "command": "From packages/daemon: `CGO_ENABLED=1 go test -race -count=2 -timeout 10m -run 'TestAHubThatStopsAnsweringIsNoticedWithinSeconds$' ./internal/natsauth/` at the head; the same test file over the base's natsauth.go at base e4c9ab85.",
+      "observed": "Head: 2 of 2 passed under -race, the cut noticed 3.01 s after the server went quiet, with `NATS connection lost` in the captured log and IsConnected false. Base: FAIL after 5.030 s, `the connection was not reported lost within 5.014592798s of the server going quiet: IsConnected = true, the warning logged = false`.",
+      "headSha": "725e26a83afa",
+      "negativeControl": "The base run. The pings are set inside Connect rather than by its caller, so the test covers the production path: a caller-passed option would have left workflow.go's one call untested."
+    },
+    {
+      "criterion": "Item 1.8: startDispatchStream waits for this client's own reconcile, so a check that the next start wrote nothing cannot pass before that start wrote anything.",
+      "surface": "The dispatch start on one in-process NATS server, through the helper production's own test uses, and the bus client's new accessor.",
+      "command": "From packages/envoy: `go test -count=5 -timeout 10m -run 'TestADefaultDispatchStartOnASingleServerCreatesEverythingAtOneCopyAndTheNextWritesNothing$' ./cmd/dispatch/` and the same under `CGO_ENABLED=1 … -race`; `CGO_ENABLED=1 go test -race -count=1 -run 'TestHookedConnectionEventsCountsTheFirstReconcileOfABackgroundClient$' ./internal/bus/`.",
+      "observed": "All green at the head. The accessor's meaning was proven before the helper used it: 0 hooked connection events before a background owning client's first connection, at least 1 once its first reconcile had run, after which the stream reads back.",
+      "headSha": "725e26a83afa",
+      "negativeControl": "With the new wait in place and ensureStreamWithConfig's write-nothing short circuit removed, the dispatch test fails: `the second start wrote [$JS.API.STREAM.UPDATE.ENVOY_NOTIFICATIONS], want nothing`. With the break reverted it passes again."
+    },
+    {
+      "criterion": "Acceptance 6: the Go suites of packages/envoy, the claude-envoy tests and the dist-freshness check, and (the plan's addition) the envoy-client stall suites and the packages/daemon suite, pass at the head.",
+      "surface": "The repository's own suites and checks, run as CI runs them, in the issue pod.",
+      "command": "From packages/envoy: `go test -count=1 -timeout 20m ./internal/bus/... ./internal/webhook/ ./internal/dispatch/outbox/`, the same under -race, `go test -count=1 -timeout 30m ./cmd/listener/ ./cmd/dispatch/` and the same under -race, `(cd infra && go test -count=1 ./...)`, `gofmt -l .`. From packages/daemon: the natsauth package under -race against a local nats-server. From the root: `bash .github/scripts/check-private-names.sh`, `bunx biome check packages/envoy-client packages/claude-envoy`, both typechecks, `bun run test` and `bun run verify-build` in packages/claude-envoy, and both stall suites with LEGION_E2E_ENVOY_STACK=1.",
+      "observed": "Every command green. cmd/listener ok 457.742s and 478.299s under -race; cmd/dispatch ok 51.473s and 98.658s; claude-envoy 260 tests, 0 fail; verify-build `holds a build main's rebuild accepts` with jj status clean of dist/ and legion/; the stall suites 3 pass and 2 pass with the live stack; check-private-names green over 6442 files; gofmt silent in both modules.",
+      "headSha": "725e26a83afa",
+      "negativeControl": "verify-build is itself the control for the TypeScript build: it builds twice into scratch directories and compares them byte for byte, and refuses a tree whose dist/ or legion/ differs from what the source builds to."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/cmd/listener/main.go and live_topics.go: both production clients take bus.WithSilentCutDetection, with the reason in each doc comment; the lane's client name is now the constant liveTopicsClientName.",
+    "packages/envoy/cmd/listener/silent_cut_test.go: the real-binary freeze test for both clients.",
+    "packages/daemon/internal/natsauth/natsauth.go and silentcut_test.go: the ping settings inside Connect, documented as internal/bus documents them, with the frozen-server test.",
+    "packages/envoy/internal/bus/nats.go, connect_background_test.go and cmd/dispatch/stream_replicas_test.go: HookedConnectionEvents, its meaning test, and the helper's new wait (item 1.8).",
+    "packages/envoy/internal/bus/stream.go, keeper.go, keeper_test.go, settings.go and infra/render/render.go: the dead role-lane clause dropped, the settings move, the flag help folded (items 1.2 to 1.4).",
+    "packages/envoy/docs/architecture.md, cmd/listener/full_stream_answer_test.go (item 1.7), internal/bus/bustest/bustest.go and its three callers (item 1.5).",
+    "packages/envoy/internal/bus/async.go, internal/dispatch/outbox/publisher.go and window_test.go, cmd/dispatch/settings.go, AGENTS.md, docs/solutions/envoy/nats-jetstream-stream-ensure-only-adds-subjects.md: the doc corrections (items 1.1, 1.6, 1.9, 1.10).",
+    "packages/envoy-client/test/stall-proxy.ts, test/stall-scenario.ts, src/__tests__/nats-stall.test.ts, README.md and packages/claude-envoy/tests/envoy-channel-stall.test.ts: list 2 (items 2.1 to 2.3).",
+    "packages/envoy/.changes/unreleased/pr-2542-listener-silent-cut.yaml and packages/daemon/.changes/unreleased/pr-2542-daemon-silent-cut.yaml."
+  ],
+  "trickyParts": [
+    "The listener's disconnect records are not JSON: the listener keeps internal/bus on Go's text handler, which cmd/listener/startup_test.go asserts, so the test matches the `name=` field as a whole whitespace field, since `envoy` is a prefix of `envoy-live-topics`.",
+    "The live lane opens only under ENVOY_SUBSCRIBE_ALL_TOPICS, so the test starts the listener with liveLaneEnv; without it the second client never exists and the test would pass at the base and the head alike.",
+    "The daemon is another Go module and cannot import internal/bus, so its ping option is its own symbol with the same numbers and the same reason; the code comment says so.",
+    "HookedConnectionEvents was proven to cover a background client's first connection before the helper used it. Had it not, the plan's fallback shape (a ConnectOption appending a caller hook at construction) would have been a change of shape for the architect to take.",
+    "The two in-package copies of the folded test helpers stay, because internal/bus/bustest imports internal/bus; the bustest package doc records that."
+  ],
+  "deviations": [
+    "Item 1.5 folds three of finding 9's five duplications and names 9c and 9d not done with their reasons, as the architect accepted under Acceptance 6.",
+    "No CHANGELOG.md is edited: the repository's rule is that a workflow writes it, so the corrections land in the live docs and the two fragments.",
+    "Item 1.10's `Rollout paragraph` does not exist: a case-insensitive grep of packages/envoy/AGENTS.md for `rollout` finds none, and the roll call says so.",
+    "Items 2.1 to 2.3 are in packages/envoy-client, not packages/claude-envoy, which the architect accepted as the plan states it."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "This pod has no container runtime, so four cmd/listener tests that start a Postgres container and three natsauth tests that need an authorized-server container are skipped by name, and infra/gcp's two data-disk tests fail here for a missing mkfs.ext4 — the same failure at the base e4c9ab85. CI's envoy-go, envoy-go-race, envoy-infra-go and test jobs run all of them.",
+    "The daemon's suite runs in the pod against a local nats-server on the issue volume with LEGION_TEST_NATS_URL and LEGION_TEST_NATS_MONITOR_URL, as docs/solutions/testing/the-daemons-nats-tests-run-in-a-docker-less-pod-against-a-local-nats-server-named-by-two-variables-INFRA-388.md prescribes; the server was stopped by pid afterwards."
+  ]
+}
