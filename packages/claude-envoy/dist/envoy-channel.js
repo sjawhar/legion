@@ -39978,6 +39978,7 @@ function parseDispatchFrame(rawPayload) {
       return {
         event: targeted.data.event,
         notify: wireFrame.event.notify,
+        quiet: wireFrame.event.quiet,
         delivery: targeted.data.delivery
       };
     }
@@ -40011,6 +40012,7 @@ function parseDispatchFrame(rawPayload) {
   return {
     event: parsed.data,
     notify: wireEvent.notify,
+    quiet: wireEvent.quiet,
     delivery: undefined
   };
 }
@@ -40067,7 +40069,8 @@ function renderInbound(raw, sessionID, subject) {
     } else {
       const frame = parseDispatchFrame(envelope.payload);
       if ("event" in frame) {
-        if (frame.notify === false && topic?.startsWith(DISPATCH_TOPIC_PREFIX) === true) {
+        const quiet = frame.quiet === undefined ? frame.notify === false : frame.quiet === true;
+        if (quiet && topic?.startsWith(DISPATCH_TOPIC_PREFIX) === true) {
           return { skip: true, content: "", envelope };
         }
         if (frame.event.actor.kind === "session" && frame.event.actor.id === sessionID) {

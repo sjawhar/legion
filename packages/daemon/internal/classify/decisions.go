@@ -34,7 +34,7 @@ func AdvancePullRequestHead(pr record.PullRequest, arrival Arrival, headSHA stri
 		}
 		pr.Run = &record.HeadRun{Anchor: judgementOf(pr), Pushes: withoutApprovalCarriers(pr.Pushes), Since: pr.HeadUpdatedAt}
 	}
-	pr = runStep(pr, record.RunStep{Head: headSHA, Before: arrival.Before, Sender: arrival.Sender, SyncedAt: arrival.At})
+	pr, _ = runStep(pr, record.RunStep{Head: headSHA, Before: arrival.Before, Sender: arrival.Sender, SyncedAt: arrival.At})
 	pr.Pushes = unspentPushes(pr.Pushes, pr.Moves, true)
 	return pr
 }
@@ -68,7 +68,8 @@ func NameMove(pr record.PullRequest, named record.Named) record.PullRequest {
 		run.Names = run.Names[len(run.Names)-maxMoves:]
 	}
 	pr.Run = &run
-	return replayRun(pr)
+	pr, _ = replayRun(pr)
+	return pr
 }
 
 // namedAlready is whether names holds named (sameName): a synchronize delivered again names
@@ -691,12 +692,13 @@ func chainOf(pushes []record.ClassifiedPush, from, to string) []record.Classifie
 	return nil
 }
 
-// settled says whether a CI settlement stands for the pull request's current head: one recorded
+// Settled says whether a CI settlement stands for the pull request's current head: one recorded
 // for the head itself, or for a head the current one replaced through pushes that each changed
 // only .legion/ and said which head they replaced (a handoff push can carry GitHub's skip-checks
 // trailer and start no CI of its own). A checked head is recorded only with a settlement
 // (SettlementFor, then ApplySettlement), and cleared with it (a new generation, migration 0028).
-func settled(pr record.PullRequest) bool {
+// The daemon's pass reads a head's check runs only while none stands (PassGeneration).
+func Settled(pr record.PullRequest) bool {
 	return pr.CheckedHead != "" && carriedBack(pr.Pushes, pr.HeadSHA, pr.CheckedHead)
 }
 
@@ -716,7 +718,7 @@ func SettlementFor(pr record.PullRequest, candidate SettlementCandidate) (record
 	if head == pr.CheckedHead {
 		return pr, true
 	}
-	if head != pr.HeadSHA && settled(pr) && carriedBack(pr.Pushes, pr.CheckedHead, head) {
+	if head != pr.HeadSHA && Settled(pr) && carriedBack(pr.Pushes, pr.CheckedHead, head) {
 		return pr, false
 	}
 	pr.CheckedHead = head
@@ -935,18 +937,21 @@ func arrivalPlan(pushes []record.ClassifiedPush, from, to string) (planned, deci
 // the same two heads, so a redelivered handoff push - the webhook's, or the daemon's own read of
 // GitHub's compare (daemon's handoffPush) - is recorded once; every other push is recorded in
 // delivery order beside any earlier push of the same two heads, a delivery being applied once
-// (intake.ApplyFact). A push whose own move the record has made is spent as it arrives
-// (unspentPushes), the move keeping it as its own push or as a repeat (pushedMoves); and the
-// pushes waiting for a link are bounded (boundedPushes). A push delivered late, after its head
-// arrived and the branch moved on, is that move's: it is taken for the same two heads pushed again
-// only by a head's next arrival by that move (arrivalPushes). While a head run is open - a head
-// arrived before every push of its move was recorded - the push joins the run's pushes, the run
-// drops what the record's bound let go, and the run is replayed (replayRun): the count, its mark,
-// the planned mark and the CI settlement become those every push arriving before every head would
-// have given. With no run open no head waits for a push of its move - or the run that held one
-// was cut to its bound (maxRunSteps) - and a push changes no judgement until a head arrives: a
-// push that reached the recorded head from another head - the required-checks pass's compare from
-// an approved head - says nothing about the move the count counted.
+// (intake.ApplyFact). A push whose changed paths are unknown takes those of a recorded push of the
+// same two heads that knows them (knownPaths), so the webhook's copy of a push the daemon rebuilt
+// with its whole list, arriving later cut short, changes nothing that list showed. A push whose
+// own move the record has made is spent as it arrives (unspentPushes), the move keeping it as its
+// own push or as a repeat (pushedMoves); and the pushes waiting for a link are bounded
+// (boundedPushes). A push delivered late, after its head arrived and the branch moved on, is that
+// move's: it is taken for the same two heads pushed again only by a head's next arrival by that
+// move (arrivalPushes). While a head run is open - a head arrived before every push of its move
+// was recorded - the push joins the run's pushes, the run drops what the record's bound let go, and
+// the run is replayed (replayRun): the count, its mark, the planned mark and the CI settlement
+// become those every push arriving before every head would have given. With no run open no head
+// waits for a push of its move - or the run that held one was cut to its bound (maxRunSteps) - and
+// a push changes no judgement until a head arrives: a push that reached the recorded head from
+// another head - the required-checks pass's compare from an approved head - says nothing about the
+// move the count counted.
 func ApplyPush(pr record.PullRequest, push record.ClassifiedPush) record.PullRequest {
 	pr, _ = ApplyPushDropping(pr, push)
 	return pr
@@ -963,6 +968,7 @@ type Dropped struct {
 
 // ApplyPushDropping is ApplyPush, and what it let go (Dropped).
 func ApplyPushDropping(pr record.PullRequest, push record.ClassifiedPush) (record.PullRequest, Dropped) {
+	push = knownPaths(pr.Pushes, push)
 	var dropped Dropped
 	pr.Moves, dropped.Repeat = pushedMoves(pr.Moves, push)
 	unspent, copied := cappedCopies(unspentPushes(withPush(pr.Pushes, push), pr.Moves, false), push)
@@ -983,7 +989,8 @@ func ApplyPushDropping(pr record.PullRequest, push record.ClassifiedPush) (recor
 		run.Pushes = withoutCopies(run.Pushes, []record.ClassifiedPush{*dropped.Repeat})
 	}
 	pr.Run = &run
-	return replayRun(pr), dropped
+	pr, _ = replayRun(pr)
+	return pr, dropped
 }
 
 // maxCopies bounds the code pushes of the same two heads a pull request keeps on their way, before
@@ -1009,6 +1016,28 @@ func cappedCopies(pushes []record.ClassifiedPush, push record.ClassifiedPush) ([
 	}
 	gone := pushes[at[1]]
 	return append(append(make([]record.ClassifiedPush, 0, len(pushes)-1), pushes[:at[1]]...), pushes[at[1]+1:]...), &gone
+}
+
+// knownPaths is push with the changed paths of a recorded push of the same two heads when push's
+// own are unknown (Unknown: GitHub's limit cut the list, the push listed none, or the listener sent
+// none) and the recorded push's are known and describe the two heads - it did not rewrite history,
+// whose paths list only the commits it added. What a push changed between two commits is a fact
+// about them, true whenever it is learned: the push webhook arriving after the required-checks
+// pass rebuilt the same push from GitHub's compare (daemon's lostPushes) must not unlearn a
+// handoff-only push, which an approval and a CI settlement are carried across. Only the paths are
+// taken; the rest of push is its own, so a forced copy may still change code, and a push whose
+// paths are known is recorded as it came.
+func knownPaths(pushes []record.ClassifiedPush, push record.ClassifiedPush) record.ClassifiedPush {
+	if push.Unknown == "" {
+		return push
+	}
+	for _, p := range pushes {
+		if pushKey(p) == pushKey(push) && p.Unknown == "" && !p.Forced {
+			push.HandoffOnly, push.Unknown = p.HandoffOnly, ""
+			return push
+		}
+	}
+	return push
 }
 
 // withPush is pushes with push recorded, after every earlier push. A push that carries an approval
@@ -1103,12 +1132,21 @@ func boundedPushes(pushes []record.ClassifiedPush, head string) ([]record.Classi
 	return withoutKeys(pushes, gone), gone
 }
 
-// ApplySettlement applies a listener CI settlement only when ClassifySettlement says it is newer,
-// merging its attempt set into the fence. It returns false for stale, duplicate, and conflicting
-// observations.
-func ApplySettlement(pr record.PullRequest, candidate SettlementCandidate) (record.PullRequest, bool) {
-	if ClassifySettlement(pr, candidate) != SettlementNewer {
-		return pr, false
+// ApplySettlement applies a CI settlement only when ClassifySettlement says it is newer, merging
+// its attempt set into the fence, or, when either settlement is the pass's (PassGeneration),
+// merging it check by check (mergeWithPass). It returns false for stale, duplicate, and conflicting
+// observations. Its third result says the fence was adopted: for the listener's duplicate of the
+// pass's settlement (adoptsFence) it returns pr with the listener's generation and snapshot as its
+// fence, and every check's run and outcome as they were, applied false.
+func ApplySettlement(pr record.PullRequest, candidate SettlementCandidate) (record.PullRequest, bool, bool) {
+	switch classification := ClassifySettlement(pr, candidate); {
+	case classification == SettlementDuplicate && adoptsFence(pr, candidate):
+		pr.Generation, pr.Snapshot = candidate.Generation, candidate.Snapshot
+		return pr, false, true
+	case classification != SettlementNewer:
+		return pr, false, false
+	case pr.CheckRuns != nil && (pr.Generation == PassGeneration || candidate.Generation == PassGeneration):
+		return mergeWithPass(pr, candidate), true, false
 	}
 	outcome := EffectiveOutcome(pr, candidate)
 	pr.CheckRuns = mergeAttemptSets(pr.CheckRuns, candidate.CheckRuns)
@@ -1116,7 +1154,7 @@ func ApplySettlement(pr record.PullRequest, candidate SettlementCandidate) (reco
 	pr.Snapshot = candidate.Snapshot
 	pr.Failing = append([]string(nil), outcome.Failing...)
 	pr.Cancelled = append([]string(nil), outcome.Cancelled...)
-	return pr, true
+	return pr, true, false
 }
 
 // LateLifecycle reports whether a pull request lifecycle observation (opened, reopened,

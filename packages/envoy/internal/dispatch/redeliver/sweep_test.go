@@ -3,6 +3,7 @@ package redeliver_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -102,20 +104,7 @@ type harness struct {
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	database := storetest.Open(t)
-	_, natsURL := testnats.Start(t)
-	nc, err := natsgo.Connect(natsURL)
-	if err != nil {
-		t.Fatalf("connect NATS: %v", err)
-	}
-	t.Cleanup(nc.Close)
-	js, err := nc.JetStream()
-	if err != nil {
-		t.Fatalf("JetStream: %v", err)
-	}
-	state, err := redeliver.OpenState(js, 1)
-	if err != nil {
-		t.Fatalf("open redelivery state: %v", err)
-	}
+	state := openState(t)
 	key, pemText := githubapptest.Key(t)
 	webhook := githubapptest.NewWebhook(t, &key.PublicKey, clientID, nil)
 	c := &clock{now: time.Now().UTC().Truncate(time.Second)}
@@ -126,6 +115,27 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("App client: %v", err)
 	}
 	return &harness{t: t, webhook: webhook, client: client, state: state, database: database, limits: limits, logs: &lockedBuffer{}, clock: c}
+}
+
+// openState opens the sweep's state bucket on a NATS server of the test's own, since the package's
+// TestMain is storetest.Main and not testnats.Main (main_test.go).
+func openState(tb testing.TB) bus.KeyValue {
+	tb.Helper()
+	_, natsURL := testnats.Start(tb)
+	nc, err := natsgo.Connect(natsURL)
+	if err != nil {
+		tb.Fatalf("connect NATS: %v", err)
+	}
+	tb.Cleanup(nc.Close)
+	js, err := nc.JetStream()
+	if err != nil {
+		tb.Fatalf("JetStream: %v", err)
+	}
+	state, err := redeliver.OpenState(js, 1)
+	if err != nil {
+		tb.Fatalf("open redelivery state: %v", err)
+	}
+	return state
 }
 
 func (h *harness) sweeper() *redeliver.Sweeper {
@@ -212,68 +222,244 @@ func TestSweepRedeliversAServerFailureOnce(t *testing.T) {
 	}
 }
 
-// A 4xx is the receiver refusing the request itself (a bad signature, a body over its cap): the
-// same bytes fail the same way, so the sweep never asks for them again and says so once.
-func TestSweepNeverRedeliversAClientError(t *testing.T) {
+// The listener answers a delivery it cannot take now with a 4xx as plainly as with a 5xx (401 for
+// a signature it cannot check, 400 for a body it cannot use, 422 for a publish NATS refused), and
+// what it cannot take now it may take later. So every failed attempt is asked for again on the
+// doubling backoff, past five requests, until GitHub records one OK; the sweep then says once, at
+// INFO, how many requests the delivery took.
+func TestSweepAsksAgainForEveryFailedDeliveryUntilGitHubRecordsItOK(t *testing.T) {
 	h := newHarness(t)
-	h.fail("guid-refused", http.StatusBadRequest, time.Minute)
+	answers := []int{
+		http.StatusBadRequest, http.StatusUnprocessableEntity, http.StatusUnauthorized,
+		http.StatusBadRequest, http.StatusServiceUnavailable, http.StatusUnprocessableEntity, http.StatusOK,
+	}
+	var redeliveries atomic.Int64
+	h.webhook.SetRedeliver(func(githubapptest.Attempt) int {
+		return answers[min(int(redeliveries.Add(1)), len(answers))-1]
+	})
+	h.fail("guid-refused", http.StatusUnauthorized, 0)
 
-	for range 2 {
-		h.sweep(redeliver.Options{})
-		h.clock.advance(5 * time.Minute)
+	if got := outcome(h.sweep(redeliver.Options{}), "guid-refused"); got != redeliver.Redelivered {
+		t.Fatalf("first sweep: outcome %q, want %q", got, redeliver.Redelivered)
 	}
-	if got := h.requests(); len(got) != 0 {
-		t.Fatalf("redelivery requests %v, want none for a 4xx", got)
-	}
-	if got := h.logs.count("webhook delivery refused terminally", "guid=guid-refused", "level=ERROR"); got != 1 {
-		t.Fatalf("terminal refusal logged %d times, want once:\n%s", got, h.logs)
-	}
-}
-
-// A redelivery the receiver fails again is retried after a doubling backoff, at most MaxAttempts
-// times; then the sweep gives up and says so once.
-func TestSweepRetriesWithBackoffThenGivesUp(t *testing.T) {
-	h := newHarness(t)
-	h.webhook.SetRedeliver(func(githubapptest.Attempt) int { return http.StatusServiceUnavailable })
-	h.fail("guid-down", http.StatusServiceUnavailable, 0)
-
-	h.sweep(redeliver.Options{})
-	if got := len(h.requests()); got != 1 {
-		t.Fatalf("requests after the first sweep = %d, want 1", got)
-	}
-	h.clock.advance(time.Minute)
-	if got := outcome(h.sweep(redeliver.Options{}), "guid-down"); got != redeliver.Waiting {
-		t.Fatalf("a sweep inside the first backoff: outcome %q, want %q", got, redeliver.Waiting)
-	}
-	h.clock.advance(time.Minute + time.Second) // the first backoff, two minutes, has passed
-	h.sweep(redeliver.Options{})
-	if got := len(h.requests()); got != 2 {
-		t.Fatalf("requests after the first backoff = %d, want 2", got)
-	}
-	for i, backoff := range []time.Duration{4 * time.Minute, 8 * time.Minute, 16 * time.Minute} {
+	for i, backoff := range []time.Duration{2 * time.Minute, 4 * time.Minute, 8 * time.Minute, 16 * time.Minute, 32 * time.Minute, time.Hour} {
 		h.clock.advance(backoff - time.Second)
-		if got := outcome(h.sweep(redeliver.Options{}), "guid-down"); got != redeliver.Waiting {
+		if got := outcome(h.sweep(redeliver.Options{}), "guid-refused"); got != redeliver.Waiting {
 			t.Fatalf("a second before backoff %s: outcome %q, want %q", backoff, got, redeliver.Waiting)
 		}
 		h.clock.advance(time.Second)
-		h.sweep(redeliver.Options{})
-		if got, want := len(h.requests()), i+3; got != want {
+		if got := outcome(h.sweep(redeliver.Options{}), "guid-refused"); got != redeliver.Redelivered {
+			t.Fatalf("after backoff %s (the redelivery before it answered %d): outcome %q, want %q", backoff, answers[i], got, redeliver.Redelivered)
+		}
+		if got, want := len(h.requests()), i+2; got != want {
 			t.Fatalf("requests after backoff %s = %d, want %d", backoff, got, want)
 		}
 	}
-	if got := len(h.requests()); got != redeliver.MaxAttempts {
-		t.Fatalf("requests = %d, want MaxAttempts (%d)", got, redeliver.MaxAttempts)
-	}
 
+	// The seventh redelivery was answered 200, so GitHub recorded it OK.
+	h.clock.advance(time.Minute)
+	if got := outcome(h.sweep(redeliver.Options{}), "guid-refused"); got != redeliver.Delivered {
+		t.Fatalf("after the redelivery answered 200: outcome %q, want %q", got, redeliver.Delivered)
+	}
+	h.clock.advance(time.Hour)
+	h.sweep(redeliver.Options{})
+	if got := len(h.requests()); got != 7 {
+		t.Fatalf("requests %d, want 7: a delivered delivery was asked for again", got)
+	}
+	recovered := []string{"level=INFO", "guid=guid-refused", "event=pull_request_review", "action=submitted", "repository_id=7", "requests=7"}
+	if got := h.logs.count("webhook delivery recovered", recovered...); got != 1 {
+		t.Fatalf("recovery logged %d times with %v, want once:\n%s", got, recovered, h.logs)
+	}
+}
+
+// GitHub keeps a delivery 72 hours. One still failing 72 hours after its first failed attempt is
+// expired: the sweep says so once, at ERROR, and never asks for it again.
+func TestSweepExpiresADeliveryStillFailingAfter72Hours(t *testing.T) {
+	h := newHarness(t)
+	h.webhook.SetRedeliver(func(githubapptest.Attempt) int { return http.StatusServiceUnavailable })
+	first := h.fail("guid-down", http.StatusServiceUnavailable, 0)
+
+	h.sweep(redeliver.Options{})
+	for hour := range 71 {
+		h.clock.advance(time.Hour)
+		if got := outcome(h.sweep(redeliver.Options{}), "guid-down"); got != redeliver.Redelivered {
+			t.Fatalf("%d hours after the first failed attempt: outcome %q, want %q", hour+1, got, redeliver.Redelivered)
+		}
+	}
+	if got := len(h.requests()); got != 72 {
+		t.Fatalf("requests in the 72 hours = %d, want 72", got)
+	}
+	h.clock.advance(time.Hour - time.Second)
+	if got := outcome(h.sweep(redeliver.Options{}), "guid-down"); got != redeliver.Waiting {
+		t.Fatalf("a second before 72 hours: outcome %q, want %q", got, redeliver.Waiting)
+	}
+	h.clock.advance(time.Second)
+	if got := outcome(h.sweep(redeliver.Options{}), "guid-down"); got != redeliver.Expired {
+		t.Fatalf("72 hours after the first failed attempt: outcome %q, want %q", got, redeliver.Expired)
+	}
 	for range 3 {
-		h.clock.advance(20 * time.Minute)
+		h.clock.advance(time.Hour)
 		h.sweep(redeliver.Options{})
 	}
-	if got := len(h.requests()); got != redeliver.MaxAttempts {
-		t.Fatalf("requests after giving up = %d, want %d", got, redeliver.MaxAttempts)
+	if got := len(h.requests()); got != 72 {
+		t.Fatalf("requests %d, want 72: an expired delivery was asked for again", got)
 	}
-	if got := h.logs.count("webhook redelivery exhausted", "guid=guid-down", "level=ERROR"); got != 1 {
-		t.Fatalf("exhaustion logged %d times, want once:\n%s", got, h.logs)
+	expired := []string{
+		"level=ERROR", "guid=guid-down", "event=pull_request_review", "action=submitted", "repository_id=7", "requests=72",
+		"first_delivered_at=" + first.DeliveredAt.Format(time.RFC3339), `reason="GitHub keeps a delivery 72 hours"`,
+	}
+	if got := h.logs.count("webhook delivery expired undelivered", expired...); got != 1 {
+		t.Fatalf("expiry logged %d times with %v, want once:\n%s", got, expired, h.logs)
+	}
+}
+
+// An earlier build closed a delivery for good when the listener answered it 4xx (terminal) or
+// after five failed requests (exhausted). Such a record reads as open, so a delivery lost before
+// the deploy, and still inside GitHub's 72 hours, is asked for again.
+func TestSweepAsksAgainForALegacyTerminalOrExhaustedRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		record func(failed githubapptest.Delivery, lastRequest time.Time) string
+	}{
+		{"terminal", http.StatusBadRequest, func(githubapptest.Delivery, time.Time) string {
+			return `{"attempts":0,"refusals":0,"terminal":true,"delivery":{"id":0,"guid":"","delivered_at":"0001-01-01T00:00:00Z","redelivery":false,"status":"","status_code":0,"event":"","action":"","repository_id":0}}`
+		}},
+		{"exhausted", http.StatusServiceUnavailable, func(failed githubapptest.Delivery, lastRequest time.Time) string {
+			return fmt.Sprintf(`{"attempts":5,"refusals":0,"last_attempt_at":%q,"answered":[%d],"exhausted":true,`+
+				`"delivery":{"id":%d,"guid":"guid-legacy","delivered_at":%q,"redelivery":false,"status":%q,"status_code":503,"event":"pull_request_review","action":"submitted","repository_id":7}}`,
+				lastRequest.Format(time.RFC3339), failed.ID, failed.ID, failed.DeliveredAt.Format(time.RFC3339), failed.Status)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			failed := h.fail("guid-legacy", tc.status, 30*time.Minute)
+			if _, err := h.state.Create("guid.guid-legacy", []byte(tc.record(failed, h.clock.Now().Add(-10*time.Minute)))); err != nil {
+				t.Fatalf("write the legacy record: %v", err)
+			}
+			if got := outcome(h.sweep(redeliver.Options{}), "guid-legacy"); got != redeliver.Redelivered {
+				t.Fatalf("outcome %q, want %q", got, redeliver.Redelivered)
+			}
+			if got, want := h.requests(), []int64{failed.ID}; !slices.Equal(got, want) {
+				t.Fatalf("requests %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// acceptingGitHub accepts every redelivery request and never makes the redelivery: GitHub answered
+// 202, and its log shows no new attempt.
+type acceptingGitHub struct {
+	redeliver.GitHub
+	mu       sync.Mutex
+	requests []int64
+}
+
+func (g *acceptingGitHub) Redeliver(_ context.Context, deliveryID int64) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.requests = append(g.requests, deliveryID)
+	return nil
+}
+
+func (g *acceptingGitHub) requested() []int64 {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return slices.Clone(g.requests)
+}
+
+// GitHub answers a redelivery request 202 and makes the redelivery afterwards. A request whose
+// redelivery never appears in the log delivered nothing, so the delivery is asked for again when
+// its next request is due.
+func TestSweepAsksAgainWhenDueForAnAcceptedRequestWithNoNewAttempt(t *testing.T) {
+	h := newHarness(t)
+	failed := h.fail("guid-dropped", http.StatusServiceUnavailable, time.Minute)
+	github := &acceptingGitHub{GitHub: h.client}
+	sweeper := h.sweeper()
+	sweeper.GitHub = github
+	sweep := func() redeliver.Outcome {
+		t.Helper()
+		report, err := sweeper.Sweep(context.Background(), redeliver.Options{})
+		if err != nil {
+			t.Fatalf("sweep: %v", err)
+		}
+		return outcome(report, "guid-dropped")
+	}
+
+	if got := sweep(); got != redeliver.Redelivered {
+		t.Fatalf("first sweep: outcome %q, want %q", got, redeliver.Redelivered)
+	}
+	for _, backoff := range []time.Duration{2 * time.Minute, 4 * time.Minute} {
+		h.clock.advance(backoff - time.Second)
+		if got := sweep(); got != redeliver.Waiting {
+			t.Fatalf("a second before backoff %s: outcome %q, want %q", backoff, got, redeliver.Waiting)
+		}
+		h.clock.advance(time.Second)
+		if got := sweep(); got != redeliver.Redelivered {
+			t.Fatalf("after backoff %s with no new attempt: outcome %q, want %q", backoff, got, redeliver.Redelivered)
+		}
+	}
+	if got, want := github.requested(), []int64{failed.ID, failed.ID, failed.ID}; !slices.Equal(got, want) {
+		t.Fatalf("requests %v, want %v", got, want)
+	}
+}
+
+// A failed attempt leaves the running sweep's hour long before GitHub's 72 hours are up. A delivery
+// whose record is open is decided from that record when the listing no longer returns its
+// attempts: here an operator's sweep asked for a failure two hours old, GitHub accepted and never
+// made the redelivery, and the next running sweep asks again.
+func TestSweepDecidesAnOpenDeliveryWhoseAttemptsLeftTheWindowFromItsRecord(t *testing.T) {
+	h := newHarness(t)
+	github := &acceptingGitHub{GitHub: h.client}
+	sweeper := h.sweeper()
+	sweeper.GitHub = github
+	sweep := func(opts redeliver.Options) redeliver.Report {
+		t.Helper()
+		report, err := sweeper.Sweep(context.Background(), opts)
+		if err != nil {
+			t.Fatalf("sweep: %v", err)
+		}
+		return report
+	}
+	sweep(redeliver.Options{}) // the cursor
+	failed := h.fail("guid-old", http.StatusServiceUnavailable, 2*time.Hour)
+	if got := outcome(sweep(redeliver.Options{Since: h.clock.Now().Add(-72 * time.Hour)}), "guid-old"); got != redeliver.Redelivered {
+		t.Fatalf("the operator's sweep: outcome %q, want %q", got, redeliver.Redelivered)
+	}
+
+	h.clock.advance(2*time.Minute + time.Second)
+	report := sweep(redeliver.Options{})
+	if report.Listed != 0 {
+		t.Fatalf("the running sweep listed %d failed attempts, want none inside its hour", report.Listed)
+	}
+	if got := outcome(report, "guid-old"); got != redeliver.Redelivered {
+		t.Fatalf("the running sweep: outcome %q, want %q", got, redeliver.Redelivered)
+	}
+	if got, want := github.requested(), []int64{failed.ID, failed.ID}; !slices.Equal(got, want) {
+		t.Fatalf("requests %v, want %v", got, want)
+	}
+}
+
+// GitHub answers a redelivery request 404 when it no longer has the delivery. No later request can
+// succeed, so the delivery is expired with that reason, logged once, and never asked for again.
+func TestSweepExpiresADeliveryWhoseRequestIsAnswered404(t *testing.T) {
+	h := newHarness(t)
+	failed := h.fail("guid-gone", http.StatusServiceUnavailable, time.Minute)
+	h.webhook.Refuse(failed.ID, http.StatusNotFound)
+
+	if got := outcome(h.sweep(redeliver.Options{}), "guid-gone"); got != redeliver.Expired {
+		t.Fatalf("outcome %q, want %q", got, redeliver.Expired)
+	}
+	h.clock.advance(2*time.Minute + time.Second)
+	if got := outcome(h.sweep(redeliver.Options{}), "guid-gone"); got != redeliver.Closed {
+		t.Fatalf("the next sweep: outcome %q, want %q", got, redeliver.Closed)
+	}
+	if got, want := h.requests(), []int64{failed.ID}; !slices.Equal(got, want) {
+		t.Fatalf("requests %v, want %v", got, want)
+	}
+	expired := []string{"level=ERROR", "guid=guid-gone", "requests=1", `reason="GitHub no longer has the delivery"`}
+	if got := h.logs.count("webhook delivery expired undelivered", expired...); got != 1 {
+		t.Fatalf("expiry logged %d times with %v, want once:\n%s", got, expired, h.logs)
 	}
 }
 
@@ -329,8 +515,8 @@ func TestADeliveryThatGotNoAnswerIsRedelivered(t *testing.T) {
 
 // A refused request adds no attempt to GitHub's log, so a delivery the sweep acted on from a
 // window wider than its hour (a gap resume, or an operator's --since) is not listed again. It is
-// still asked again after the backoff, and a delivery GitHub keeps refusing ends exhausted with
-// its ERROR line, like one listed every time.
+// still asked again after the backoff, and a delivery GitHub keeps refusing is asked for at every
+// due time, past five requests, like one listed every time.
 func TestARefusedDeliveryOutsideTheWindowIsAskedAgain(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -364,21 +550,18 @@ func TestARefusedDeliveryOutsideTheWindowIsAskedAgain(t *testing.T) {
 				t.Fatalf("requests %v, want %v", got, want)
 			}
 		})
-		t.Run(tc.name+" then refused to the end", func(t *testing.T) {
+		t.Run(tc.name+" then refused past five requests", func(t *testing.T) {
 			h := newHarness(t)
 			opts := tc.first(h)
 			old := h.fail("guid-old", http.StatusServiceUnavailable, 2*time.Hour)
 			h.webhook.Refuse(old.ID, http.StatusUnprocessableEntity)
 			h.sweep(opts)
 			for range 8 {
-				h.clock.advance(17 * time.Minute) // past every backoff
+				h.clock.advance(time.Hour) // past every backoff
 				h.sweep(redeliver.Options{})
 			}
-			if got := len(h.requests()); got != redeliver.MaxAttempts {
-				t.Fatalf("requests %d, want MaxAttempts (%d)", got, redeliver.MaxAttempts)
-			}
-			if got := h.logs.count("webhook redelivery exhausted", "guid=guid-old", "level=ERROR"); got != 1 {
-				t.Fatalf("exhaustion logged %d times, want once:\n%s", got, h.logs)
+			if got := len(h.requests()); got != 9 {
+				t.Fatalf("requests %d, want 9: the first and one at each of eight due times", got)
 			}
 		})
 	}
@@ -747,6 +930,7 @@ func TestADeliveryWhoseSweeperDiedBeforeItsRequestIsRequestedPastTheClaimDeadlin
 // longer returns it, and the dead sweeper's claim is all that brings it back.
 func TestADeliveryWhoseSweeperDiedBeforeItsRequestIsRequestedOutsideTheWindow(t *testing.T) {
 	h := newHarness(t)
+	h.sweep(redeliver.Options{}) // the cursor, so the sweeps below look back an hour and not 72
 	failed := h.fail("guid-orphaned", http.StatusServiceUnavailable, 50*time.Minute)
 	h.sweepAndDie(false)
 
@@ -870,23 +1054,24 @@ func TestADryRunReportsAClaimByItsDeadline(t *testing.T) {
 	}
 }
 
-// With no cursor the sweep looks back one hour and no further: older failures are the backlog an
-// operator decides about. After a gap it resumes from its cursor, so a failure while it was not
-// running is still caught.
-func TestFirstSweepLooksBackOneHourThenResumesFromItsCursor(t *testing.T) {
+// With no cursor the sweep looks back the 72 hours GitHub keeps, so the first failed attempt of
+// every delivery GitHub still has is in its listing. After a gap it resumes from its cursor, so a
+// failure while it was not running is still caught.
+func TestFirstSweepLooksBack72HoursThenResumesFromItsCursor(t *testing.T) {
 	h := newHarness(t)
-	h.fail("guid-backlog", http.StatusServiceUnavailable, 2*time.Hour)
+	h.fail("guid-gone", http.StatusServiceUnavailable, 73*time.Hour)
+	backlog := h.fail("guid-backlog", http.StatusServiceUnavailable, 50*time.Hour)
 	recent := h.fail("guid-recent", http.StatusServiceUnavailable, 30*time.Minute)
 
 	h.sweep(redeliver.Options{})
-	if got, want := h.requests(), []int64{recent.ID}; !slices.Equal(got, want) {
-		t.Fatalf("first sweep requested %v, want only the failure inside the hour %v", got, want)
+	if got, want := h.requests(), []int64{recent.ID, backlog.ID}; !slices.Equal(got, want) {
+		t.Fatalf("first sweep requested %v, want the failures inside the 72 hours %v", got, want)
 	}
 
 	h.clock.advance(3 * time.Hour)
 	inGap := h.fail("guid-in-gap", http.StatusServiceUnavailable, 2*time.Hour)
 	h.sweep(redeliver.Options{})
-	if got, want := h.requests(), []int64{recent.ID, inGap.ID}; !slices.Equal(got, want) {
+	if got, want := h.requests(), []int64{recent.ID, backlog.ID, inGap.ID}; !slices.Equal(got, want) {
 		t.Fatalf("after a gap requested %v, want %v", got, want)
 	}
 	if h.logs.count("webhook redelivery sweep resuming after a gap") != 1 {
@@ -932,18 +1117,22 @@ func TestOneDeliveryFailedTwiceIsRequestedOnce(t *testing.T) {
 }
 
 // A dry run reports what a sweep over the window would do and changes nothing: no request, no
-// state, no alarm line. The continuous sweep that follows still looks back only one hour.
+// state, no alarm line, no cursor. The continuous sweep that follows is a first sweep.
 func TestDryRunReportsWithoutActing(t *testing.T) {
 	h := newHarness(t)
+	h.fail("guid-expiring", http.StatusServiceUnavailable, 72*time.Hour)
 	h.fail("guid-backlog", http.StatusServiceUnavailable, 2*time.Hour)
 	h.fail("guid-refused", http.StatusBadRequest, 10*time.Minute)
 
 	report := h.sweep(redeliver.Options{Since: h.clock.Now().Add(-72 * time.Hour), DryRun: true})
-	if got := outcome(report, "guid-backlog"); got != redeliver.WouldRedeliver {
-		t.Fatalf("backlog outcome %q, want %q", got, redeliver.WouldRedeliver)
-	}
-	if got := outcome(report, "guid-refused"); got != redeliver.Terminal {
-		t.Fatalf("refused outcome %q, want %q", got, redeliver.Terminal)
+	for guid, want := range map[string]redeliver.Outcome{
+		"guid-expiring": redeliver.Expired,
+		"guid-backlog":  redeliver.WouldRedeliver,
+		"guid-refused":  redeliver.WouldRedeliver,
+	} {
+		if got := outcome(report, guid); got != want {
+			t.Fatalf("%s outcome %q, want %q", guid, got, want)
+		}
 	}
 	if got := h.requests(); len(got) != 0 {
 		t.Fatalf("a dry run requested %v", got)
@@ -951,13 +1140,16 @@ func TestDryRunReportsWithoutActing(t *testing.T) {
 	if keys, err := h.state.Keys(); err == nil && len(keys) != 0 {
 		t.Fatalf("a dry run wrote state %v", keys)
 	}
-	if h.logs.count("webhook delivery refused terminally") != 0 {
+	if h.logs.count("webhook delivery expired undelivered") != 0 {
 		t.Fatalf("a dry run logged the alarm line:\n%s", h.logs)
 	}
 
 	h.sweep(redeliver.Options{})
-	if got := h.requests(); len(got) != 0 {
-		t.Fatalf("the continuous sweep requested %v, want nothing outside its hour", got)
+	if got := len(h.requests()); got != 2 {
+		t.Fatalf("the continuous sweep made %d requests, want 2: a first sweep over the 72 hours", got)
+	}
+	if got := h.logs.count("webhook delivery expired undelivered", "guid=guid-expiring"); got != 1 {
+		t.Fatalf("the continuous sweep logged the expiry %d times, want once:\n%s", got, h.logs)
 	}
 }
 
@@ -997,11 +1189,72 @@ func TestTheSweepSummaryCountsEveryOutcome(t *testing.T) {
 	want := []string{
 		" failed_attempts=1", " deliveries=1",
 		" redelivered=0", " would_redeliver=0", " request_refused=0", " rate_limited=0",
-		" waiting=0", " pending=0", " delivered=0", " terminal=0", " exhausted=0",
+		" waiting=0", " delivered=0", " expired=0",
 		" closed=1", " claimed_elsewhere=0", " complete=true",
 	}
 	if h.logs.count("webhook redelivery sweep", want...) != 1 {
 		t.Fatalf("summary line does not carry %v:\n%s", want, h.logs)
+	}
+}
+
+// listingGitHub lists the same failed attempts on every call and counts the redelivery requests
+// made.
+type listingGitHub struct {
+	listed   []githubapp.Delivery
+	requests atomic.Int64
+}
+
+func (g *listingGitHub) Deliveries(context.Context, time.Time, func() error) ([]githubapp.Delivery, error) {
+	return g.listed, nil
+}
+
+func (g *listingGitHub) Redeliver(context.Context, int64) error {
+	g.requests.Add(1)
+	return nil
+}
+
+// BenchmarkSweepWithLongPendingRecords is one running sweep over n open deliveries, each listed,
+// each with a record whose last request was refused a minute ago, so none is due: the sweep reads
+// every record and asks GitHub for nothing.
+func BenchmarkSweepWithLongPendingRecords(b *testing.B) {
+	for _, n := range []int{1_000, 10_000} {
+		b.Run(fmt.Sprintf("records=%d", n), func(b *testing.B) {
+			state := openState(b)
+			now := time.Now().UTC().Truncate(time.Second)
+			github := &listingGitHub{}
+			for i := range n {
+				delivery := githubapp.Delivery{
+					ID: int64(i + 1), GUID: fmt.Sprintf("guid-%05d", i), DeliveredAt: now.Add(-time.Hour),
+					Status: "Invalid HTTP Response: 503", StatusCode: http.StatusServiceUnavailable,
+					Event: "pull_request", Action: "opened", RepositoryID: 7,
+				}
+				github.listed = append(github.listed, delivery)
+				data, err := json.Marshal(map[string]any{
+					"attempts": 1, "refusals": 1, "last_attempt_at": now.Add(-time.Minute),
+					"next_attempt_at": now.Add(time.Hour), "first_delivered_at": delivery.DeliveredAt,
+					"delivery": delivery,
+				})
+				if err != nil {
+					b.Fatalf("encode record: %v", err)
+				}
+				if _, err := state.Create("guid."+delivery.GUID, data); err != nil {
+					b.Fatalf("write record %d: %v", i, err)
+				}
+			}
+			sweeper := &redeliver.Sweeper{GitHub: github, Open: func() (bus.KeyValue, error) { return state, nil }, Logger: slog.New(slog.DiscardHandler), Now: func() time.Time { return now }}
+			for b.Loop() {
+				report, err := sweeper.Sweep(context.Background(), redeliver.Options{})
+				if err != nil {
+					b.Fatalf("sweep: %v", err)
+				}
+				if got := report.Count(redeliver.Waiting); got != n {
+					b.Fatalf("%d of %d deliveries waiting", got, n)
+				}
+			}
+			if got := github.requests.Load(); got != 0 {
+				b.Fatalf("the sweeps made %d redelivery requests, want none", got)
+			}
+		})
 	}
 }
 

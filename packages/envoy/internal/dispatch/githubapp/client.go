@@ -385,6 +385,19 @@ func (c *Client) DeliveryPermissions(ctx context.Context, owner, repo string) (I
 	return installation, nil
 }
 
+// Installed says whether the App is installed on owner/repo, from the same installation lookup
+// Installation and DeliveryPermissions make, with no permission check: GitHub's 404 is false. A
+// nil client is ErrNoAppKey; any other failure of the lookup is returned as it is.
+func (c *Client) Installed(ctx context.Context, owner, repo string) (bool, error) {
+	if _, err := c.installation(ctx, owner, repo); err != nil {
+		if errors.Is(err, ErrNoInstallation) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
 func (c *Client) installation(ctx context.Context, owner, repo string) (Installation, error) {
 	if c == nil {
 		return Installation{}, ErrNoAppKey
