@@ -12,6 +12,7 @@ import {
   RELAY_PROGRESS_INTERVAL_MS,
   type RelayMessage,
   type RelayReply,
+  registeredWithoutRelay,
 } from "../consumer-delivery";
 import {
   createReplayEngine,
@@ -574,6 +575,43 @@ describe("gaps", () => {
     expect(delivery.answered({ mode: "core", reason: "no_grant" }, [AGENT])).toBe("core");
     expect(gaps).toEqual([]);
   });
+
+  // A session moving from the core path registers the resume its ledger's cursors seed
+  // (`seededResume`), which names the stream those cursors were read on. When the listener
+  // answers on another stream, that one was replaced: its consumer starts at the new stream's
+  // end, and the messages the cursors still owed it are gone.
+  test("an answer naming another stream than the seeded resume's is told once", () => {
+    const { delivery, gaps } = setup({
+      state: { stream_id: "stream-old", subjects: { [AGENT]: { since: 2, after: 9 } } },
+    });
+    const answer = (stream: string) =>
+      ({
+        mode: "consumer",
+        subject: deliverSubject(SESSION),
+        stream_id: stream,
+        gap: false,
+      }) as const;
+
+    expect(delivery.registration().resume).toEqual({ stream_id: "stream-old", seq: 9 });
+    delivery.answered(answer("stream-new"), [AGENT]);
+    delivery.answered(answer("stream-new"), [AGENT]);
+
+    expect(gaps.map((notice) => notice.kind)).toEqual(["stream_recreated"]);
+  });
+
+  test("an answer naming the seeded resume's own stream tells nothing", () => {
+    const { delivery, gaps } = setup({
+      state: { stream_id: "stream-old", subjects: { [AGENT]: { since: 2, after: 9 } } },
+    });
+
+    delivery.registration();
+    delivery.answered(
+      { mode: "consumer", subject: deliverSubject(SESSION), stream_id: "stream-old", gap: false },
+      [AGENT]
+    );
+
+    expect(gaps).toEqual([]);
+  });
 });
 
 describe("the move from the core path to consumer delivery", () => {
@@ -772,5 +810,35 @@ describe("persisting the snapshot", () => {
     delivery.setFollowed([AGENT, ISSUE_TOPIC]);
 
     expect(delivery.snapshot().follows).toEqual({ [ISSUE_TOPIC]: T0 });
+  });
+});
+
+describe("a registration that asked for no relay", () => {
+  test("leaves the core path on through the delivery open for it", () => {
+    const { delivery, consumerMode } = setup();
+    const modes: boolean[] = [];
+    delivery.answered(
+      { mode: "consumer", subject: deliverSubject(SESSION), stream_id: STREAM, gap: false },
+      [AGENT, ISSUE_TOPIC]
+    );
+
+    registeredWithoutRelay({ setConsumerMode: (on) => modes.push(on) }, delivery, [
+      AGENT,
+      ISSUE_TOPIC,
+    ]);
+
+    expect(delivery.relaying()).toBe(false);
+    expect(delivery.relays(ISSUE_TOPIC)).toBe(false);
+    // The delivery is the one that tells its own ledger; the caller's is not written past it.
+    expect(consumerMode).toEqual([true, false]);
+    expect(modes).toEqual([]);
+  });
+
+  test("with no delivery open, the ledger alone leaves consumer mode", () => {
+    const modes: boolean[] = [];
+
+    registeredWithoutRelay({ setConsumerMode: (on) => modes.push(on) }, undefined, [AGENT]);
+
+    expect(modes).toEqual([false]);
   });
 });

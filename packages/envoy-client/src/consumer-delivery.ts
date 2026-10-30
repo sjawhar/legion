@@ -225,7 +225,7 @@ export interface ConsumerDeliveryOptions {
    * host keeps it where it keeps the session's state, and answers whether it stored it. A `false`
    * leaves the snapshot unstored, so the next change offers it again.
    */
-  readonly persist?: (snapshot: ConsumerDeliverySnapshot) => boolean;
+  readonly persist: (snapshot: ConsumerDeliverySnapshot) => boolean;
   readonly now?: () => number;
   /** Runs `callback` every `ms` until the returned stop runs; `setInterval` by default. */
   readonly every?: (ms: number, callback: () => void) => () => void;
@@ -264,7 +264,8 @@ export interface ConsumerDelivery {
   /**
    * Takes the registration's answer and the topics that registration carried, and returns the
    * answer's mode. A consumer answer that reports a gap, or names another stream than the resume
-   * point's, tells the session once; its stored topics (`streamStores`) become the ones the
+   * the registration sent (its own point, or the one seeded from the ledger's cursors), tells the
+   * session once; its stored topics (`streamStores`) become the ones the
    * listener relays (`relays`), and the ledger is put in consumer mode. Any other answer leaves
    * the core path running. Persists the snapshot when it changed.
    */
@@ -312,6 +313,14 @@ function parseIdentity(data: string) {
   return event_id === undefined && dedupe_key === undefined ? undefined : identity.data;
 }
 
+/**
+ * Whether a followed topic, expanded as the subscription it stands for, reaches `subject`: the
+ * one "does this topic reach this frame" check the follow filter asks.
+ */
+function reaches(topic: string, subject: string): boolean {
+  return expandSubscriptionTopics([topic]).some((pattern) => subjectsOverlap(pattern, subject));
+}
+
 function every(ms: number, callback: () => void): () => void {
   const timer = setInterval(callback, ms);
   return () => clearInterval(timer);
@@ -342,6 +351,10 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
   let streamID: string | undefined;
   let held = new Set<number>();
   let written: number | undefined;
+  // The resume the last `registration()` sent, its own point or the seeded one (`seededResume`):
+  // a session moving from the core path has no resume point of its own, so this is what the
+  // answer's stream is compared with (`answered`).
+  let registeredResume: ResumePoint | undefined;
   // A retention gap the registration answer told: the next frame's `Envoy-Gap` is the same one.
   let gapTold = false;
   let closed = false;
@@ -386,9 +399,7 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
     if (subject === ownSubject) return Number.NEGATIVE_INFINITY;
     let earliest: number | undefined;
     for (const [topic, at] of follows) {
-      if (!expandSubscriptionTopics([topic]).some((pattern) => subjectsOverlap(pattern, subject))) {
-        continue;
-      }
+      if (!reaches(topic, subject)) continue;
       if (earliest === undefined || at < earliest) earliest = at;
     }
     return earliest;
@@ -407,10 +418,7 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
     if (state.stream_id !== frame.streamID) return false;
     for (const [topic, cursor] of Object.entries(state.subjects)) {
       if (cursor.since === undefined || frame.streamSeq <= cursor.since) continue;
-      const reaches = expandSubscriptionTopics([topic]).some((pattern) =>
-        subjectsOverlap(pattern, frame.subject)
-      );
-      if (reaches) return true;
+      if (reaches(topic, frame.subject)) return true;
     }
     return false;
   };
@@ -607,7 +615,6 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
   };
 
   const persist = (): void => {
-    if (options.persist === undefined) return;
     const current = snapshot();
     const serialized = JSON.stringify(current);
     if (serialized === persisted) return;
@@ -625,6 +632,7 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
     },
     registration() {
       const resume = resumePoint() ?? seededResume();
+      registeredResume = resume;
       return {
         consumer: true,
         epoch: currentEpoch.id,
@@ -633,9 +641,16 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
     },
     answered(answer, topics) {
       if (answer.mode === "consumer") {
-        const resume = resumePoint();
         if (answer.stream_id !== "" && answer.stream_id !== streamID) {
-          if (resume !== undefined) tellGap("stream_recreated");
+          // The stream the registration asked to resume on — the session's own resume point, or
+          // the one seeded from the ledger's cursors — is not the one the listener answered: that
+          // stream was replaced, the consumer starts at the new stream's end, and what the old
+          // one held is gone. Told once: the switch below makes the answer's stream the current
+          // one, so a later answer naming it tells nothing.
+          const asked = resumePoint() ?? registeredResume;
+          if (asked !== undefined && asked.stream_id !== answer.stream_id) {
+            tellGap("stream_recreated");
+          }
           switchStream(answer.stream_id);
         }
         if (answer.gap) {
@@ -686,4 +701,26 @@ export function createConsumerDelivery(options: ConsumerDeliveryOptions): Consum
       blocking = undefined;
     },
   };
+}
+
+/** The answer a registration that asked the listener for no relay reads as. */
+const NOT_ASKED: DeliveryAnswer = { mode: "core", reason: "not_asked" };
+
+/**
+ * Takes the answer to a registration that asked for no relay, for the topics it carried: nothing
+ * is relayed whatever the listener answered, so the session's delivery — when one is open since
+ * the registration went out — takes none of the topics and the ledger leaves consumer mode, and
+ * the core path's sweeps run on. With no delivery open the ledger alone is told, so this module
+ * stays the one writer of its consumer mode.
+ */
+export function registeredWithoutRelay(
+  ledger: Pick<ReplayEngine, "setConsumerMode">,
+  delivery: ConsumerDelivery | undefined,
+  topics: readonly string[]
+): void {
+  if (delivery === undefined) {
+    ledger.setConsumerMode(false);
+    return;
+  }
+  delivery.answered(NOT_ASKED, topics);
 }

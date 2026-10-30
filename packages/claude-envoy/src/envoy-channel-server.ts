@@ -53,6 +53,7 @@ import {
   EnvoyToolOperation,
   envoyToolSpecs,
   sendConfirmationText,
+  sessionsOnMachine,
   type ToolArgumentsByOperation,
   type ToolSpec,
   toMessageMetadata,
@@ -866,16 +867,13 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     })
   }
 
-  /** The relay takes the topics the session follows now, before a registration carries them. */
-  const refollow = (owner: Relay | undefined, topics: readonly string[]): void => {
-    owner?.delivery.setFollowed(topics)
-  }
-
   /**
    * What a registration's answer says of consumer delivery, for the id it registered with the
    * topics it carried, and the relay it asked for. One that asked nothing (no relay open) is
-   * answered `core` by the listener, and nothing is relayed. An answer for an id this process has
-   * left, or for a relay since closed, changes nothing.
+   * answered `core` by the listener, and nothing is relayed: the core path is on already, since
+   * `closeRelay` is the one place a relay is dropped and `delivery.close()` left consumer mode
+   * there. An answer for an id this process has left, or for a relay since closed, changes
+   * nothing.
    */
   const takeDeliveryAnswer = (
     sessionID: string,
@@ -884,11 +882,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     result: SubscribeResult,
   ): void => {
     if (sessionID !== identity.id || relay !== asked) return
-    if (asked === undefined) {
-      replay.setConsumerMode(false)
-      return
-    }
-    asked.delivery.answered(result.delivery, topics)
+    asked?.delivery.answered(result.delivery, topics)
   }
 
   const forwarder: ChannelForwarder = createChannelForwarder(options.connection, {
@@ -957,7 +951,8 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     readonly unsubscribing: Promise<void>
   } {
     const dropping = forwarder.unfollow(topics)
-    refollow(relay?.sessionID === identity.id ? relay : undefined, registeredTopics())
+    // The relay takes the topics the session follows now, before a registration carries them.
+    if (relay?.sessionID === identity.id) relay.delivery.setFollowed(registeredTopics())
     return {
       dropping,
       unsubscribing: serialized(() =>
@@ -1011,7 +1006,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     const sessionID = identity.id
     const topics = registeredTopics()
     const asking = relay?.sessionID === identity.id ? relay : undefined
-    refollow(asking, topics)
+    asking?.delivery.setFollowed(topics)
     const result = await options.client.subscribe({
       sessionID,
       directory: identity.directory,
@@ -1588,14 +1583,7 @@ export async function executeEnvoyTool(
         ...(args.dir === undefined ? {} : { directory: args.dir }),
         ...(args.title === undefined ? {} : { title: args.title }),
       })
-      // A session answers for two machines: `host`, where its process runs, and `machine_id`, the
-      // listener it registered through. A filter naming either one is that machine's filter, so a
-      // hub's id (`envoy-hub`, `gke`) lists the sessions registered through it.
-      return args.machine
-        ? sessions.filter(
-            (session) => session.host === args.machine || session.machine_id === args.machine,
-          )
-        : sessions
+      return sessionsOnMachine(sessions, args.machine)
     }
     case EnvoyToolOperation.setRole: {
       const args = parseArguments(spec, input)

@@ -29,6 +29,7 @@ import {
   type ConsumerDelivery,
   type ConsumerFrame,
   createConsumerDelivery,
+  registeredWithoutRelay,
 } from "@legion/envoy-client/consumer-delivery";
 import {
   createDeliveryDedupe,
@@ -104,6 +105,7 @@ import {
   type MessageMetadataArguments,
   parseEnvoyToolArguments,
   sendConfirmationText,
+  sessionsOnMachine,
   toMessageMetadata,
 } from "@legion/envoy-client/tool-contract";
 import {
@@ -2155,9 +2157,9 @@ export default function envoyExtension(pi: PiApi): void {
   // What a registration's answer says of consumer delivery, for the session it registered with
   // the topics it carried, and the relay it asked for. One that asked nothing (no relay subject
   // open) relays nothing, whatever the listener answered, so the relay takes none of the topics
-  // and the replay engine sweeps again. An answer for a session this instance has left, or for a
-  // relay since closed, changes nothing.
-  const NOT_ASKED = { mode: "core", reason: "not_asked" } as const;
+  // and the replay engine sweeps again (`registeredWithoutRelay`, the module that owns the
+  // ledger's consumer mode). An answer for a session this instance has left, or for a relay since
+  // closed, changes nothing.
   const takeDeliveryAnswer = (
     registeredSession: string,
     topics: readonly string[],
@@ -2165,12 +2167,13 @@ export default function envoyExtension(pi: PiApi): void {
     result: SubscribeResult
   ): void => {
     if (sessionID !== registeredSession || (asked !== undefined && relay !== asked)) return;
-    const owner = asked ?? (relay?.sessionID === registeredSession ? relay : undefined);
-    if (owner === undefined) {
-      replay?.setConsumerMode(false);
+    if (asked !== undefined) {
+      asked.delivery.answered(result.delivery, topics);
       return;
     }
-    owner.delivery.answered(asked === undefined ? NOT_ASKED : result.delivery, topics);
+    if (replay === undefined) return;
+    const open = relay?.sessionID === registeredSession ? relay : undefined;
+    registeredWithoutRelay(replay, open?.delivery, topics);
   };
 
   // The live agent conversation stream (LEGION-232). This session's own turns, tool calls and
@@ -4402,15 +4405,7 @@ export default function envoyExtension(pi: PiApi): void {
           const directory = optionalStringFor(parameters, "dir");
           const title = optionalStringFor(parameters, "title");
           const sessions = await client.listSessions({ directory, title });
-          // A session answers for two machines: `host`, where its process runs, and `machine_id`,
-          // the listener it registered through. A filter naming either one is that machine's
-          // filter, so a hub's id (`envoy-hub`, `gke`) lists the sessions registered through it.
-          const result =
-            machine === undefined
-              ? sessions
-              : sessions.filter(
-                  (session) => session.host === machine || session.machine_id === machine
-                );
+          const result = sessionsOnMachine(sessions, machine);
           return toolSuccess(JSON.stringify(result, null, 2), {
             count: result.length,
             machine,

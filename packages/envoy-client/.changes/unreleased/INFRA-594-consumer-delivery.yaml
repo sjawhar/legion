@@ -15,7 +15,8 @@ body: |-
   so a host never starts a side turn for it. The resume point (the lowest sequence held unwritten
   minus one, else the highest written) and each topic's follow time are a snapshot the host
   persists through the delivery's `persist` option, which offers it only when it changed, and a
-  registration answer that reports a gap or names another stream tells the session once. A
+  registration answer that reports a gap, or names another stream than the resume that
+  registration sent (its own point or the seeded one), tells the session once. A
   session with no resume point of its own — one moving from the core path, whose consumer has
   never relayed it a frame — registers the lowest cursor the replay ledger holds over its agent
   subject and the followed topics the stream stores, so its first consumer starts there instead
@@ -23,9 +24,15 @@ body: |-
   has no follow times either, so the ledger's cursors are what say it followed each topic before
   the resume, and its stored frames are shown rather than dropped. `answered`
   also records the stored topics the listener relays (`relays`, `relaying`) and puts the replay
-  engine in consumer mode, which `close` leaves again. `transport` gains the registration's
+  engine in consumer mode, which `close` leaves again; `registeredWithoutRelay` is what a host
+  calls for a registration that asked for no relay, so this module is the one writer of that
+  mode. `transport` gains the registration's
   `delivery` field (`DeliveryRequest`, with `epoch` and `resume`) and the answer's
   (`DeliveryAnswer`, always read: a missing or unreadable field is `core`).
   `@legion/envoy-client/stream-topics`' `streamStores` says whether the stream stores a topic, as
   the listener's `bus.StreamCaptures` does. The replay engine's `setConsumerMode(true)` stops its
-  `POST /v1/replay` calls while the listener relays the session's consumer (INFRA-594).
+  `POST /v1/replay` calls while the listener relays the session's consumer.
+  `@legion/envoy-client/tool-contract` gains `sessionsOnMachine`, the `envoy_sessions` machine
+  filter both plugins ran a copy of: it matches the machine a session's process runs on (`host`)
+  and the listener it registered through (`machine_id`), and lists every session when the
+  argument is absent or empty (INFRA-594).

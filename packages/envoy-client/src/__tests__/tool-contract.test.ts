@@ -6,6 +6,7 @@ import {
   MessageMetadataSchema,
   messageMetadataShape,
   parseEnvoyToolArguments,
+  sessionsOnMachine,
   toMessageMetadata,
 } from "../tool-contract";
 import { ToolInputError } from "../tool-input-errors";
@@ -209,5 +210,48 @@ describe("message metadata", () => {
       `text is 1 characters over the ${SLACK_POST_TEXT_MAX}-character limit (${SLACK_POST_TEXT_MAX + 1}/${SLACK_POST_TEXT_MAX})`,
     ]);
     expect(failure.message).toContain("slack_post was not called: 2 problems");
+  });
+});
+
+describe("sessionsOnMachine", () => {
+  const session = (id: string, machineID: string, host: string) => ({
+    session_id: id,
+    machine_id: machineID,
+    host,
+    dir: "/work",
+    port: 0,
+    title: "",
+    topics: [],
+    self_subscribed: true,
+  });
+  const onHub = session("ses_on_hub", "envoy-hub", "gke-node-7");
+  const onDevbox = session("ses_on_devbox", "devbox", "devbox");
+  const sessions = [onHub, onDevbox];
+
+  test("finds a session by the machine it runs on and by the listener it registered through", () => {
+    expect(sessionsOnMachine(sessions, "envoy-hub")).toEqual([onHub]);
+    expect(sessionsOnMachine(sessions, "gke-node-7")).toEqual([onHub]);
+    expect(sessionsOnMachine(sessions, "devbox")).toEqual([onDevbox]);
+    expect(sessionsOnMachine(sessions, "other")).toEqual([]);
+  });
+
+  test("no filter lists every session", () => {
+    expect(sessionsOnMachine(sessions, undefined)).toEqual(sessions);
+    expect(sessionsOnMachine(sessions, "")).toEqual(sessions);
+  });
+
+  test("a session an earlier listener reported with no host still matches its listener", () => {
+    const hostless = {
+      session_id: "ses_old",
+      machine_id: "devbox",
+      dir: "/work",
+      port: 0,
+      title: "",
+      topics: [],
+      self_subscribed: true,
+    };
+
+    expect(sessionsOnMachine([hostless], "devbox")).toEqual([hostless]);
+    expect(sessionsOnMachine([hostless], "gke-node-7")).toEqual([]);
   });
 });

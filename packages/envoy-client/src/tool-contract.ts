@@ -8,7 +8,7 @@ import {
 } from "@legion/contracts";
 import { z } from "zod";
 import { formatZodIssues, ToolInputError } from "./tool-input-errors";
-import type { MessageMetadataInput } from "./transport";
+import type { MessageMetadataInput, SessionInfo } from "./transport";
 
 const DELIVERY_CONTRACT =
   "Delivery is at-least-once, possibly out of order across topics; use id for dedupe and at for freshness.";
@@ -249,6 +249,21 @@ export function sendConfirmationText(result: {
   readonly confirmed: boolean;
 }): string {
   return `sent ${result.envelope.event_id} to ${result.recipient}${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`;
+}
+
+/**
+ * The sessions an `envoy_sessions` call's `machine` argument names, which both hosts filter for
+ * themselves: the listener's `/v1/sessions` takes no machine. A session answers for two machines:
+ * `host`, where its process runs, and `machine_id`, the listener it registered through. A filter
+ * naming either one is that machine's filter, so a hub's id (`envoy-hub`, `gke`) lists the
+ * sessions registered through it. No filter — the argument absent or empty — lists them all.
+ */
+export function sessionsOnMachine(
+  sessions: readonly SessionInfo[],
+  machine: string | undefined
+): readonly SessionInfo[] {
+  if (machine === undefined || machine === "") return sessions;
+  return sessions.filter((session) => session.host === machine || session.machine_id === machine);
 }
 
 // The specs are frozen module constants, so each operation's schema is built once and shared;
