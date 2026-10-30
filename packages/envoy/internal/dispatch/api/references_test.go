@@ -3,7 +3,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -51,7 +50,18 @@ func createReferenceAPIComment(t *testing.T, handler http.Handler, issueKey, bod
 
 func issueReferencesRequest(t *testing.T, handler http.Handler, issueKey, etag string) *httptest.ResponseRecorder {
 	t.Helper()
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/issues/"+issueKey+"/references", nil)
+	return issueReferencesQueryRequest(t, handler, issueKey, "", etag)
+}
+
+// issueReferencesQueryRequest reads an issue's references as alice with query as the raw query
+// string ("" for none) and etag, when set, as If-None-Match.
+func issueReferencesQueryRequest(t *testing.T, handler http.Handler, issueKey, query, etag string) *httptest.ResponseRecorder {
+	t.Helper()
+	target := "/api/v1/issues/" + issueKey + "/references"
+	if query != "" {
+		target += "?" + query
+	}
+	request := httptest.NewRequest(http.MethodGet, target, nil)
 	request.Header.Set("X-Dispatch-User", "alice")
 	if etag != "" {
 		request.Header.Set("If-None-Match", etag)
@@ -170,164 +180,37 @@ func TestIssueReferencesTruncateBeyondDepthEight(t *testing.T) {
 	}
 }
 
-// referenceAuthorLists is the cycle of stored author lists the members' versions carry: JSON null
-// and an empty list kept apart, several actors in one list, and actors with an origin, an owner
-// and a service.
-var referenceAuthorLists = []string{
-	`null`,
-	`[]`,
-	`[{"kind":"human","id":"alice"}]`,
-	`[{"kind":"human","id":"alice"},{"kind":"session","id":"session-a"}]`,
-	`[{"kind":"session","id":"session-b","origin":{"host":"example-host-a","machine":"example-machine-a","cwd":"/work/example","session_title":"Example session"}}]`,
-	`[{"kind":"human","id":"bob"}]`,
-	`[{"kind":"human","id":"carol","owner":"alice"}]`,
-	`[{"kind":"service","id":"service-a","service":"example-service"}]`,
-	`[{"kind":"session","id":"session-c"}]`,
-	`[{"kind":"human","id":"bob"},{"kind":"human","id":"alice"}]`,
-	`[{"kind":"session","id":"session-a"}]`,
-	`[{"kind":"human","id":"dave"}]`,
-}
-
-// seedReferenceDocumentHistory gives a document versions 2 through versions, rewrites version 1's
-// authors, and sets its creator. Version n stores referenceAuthorLists[((n-1)/2+offset) mod len],
-// so consecutive versions repeat a list. Every version keeps version 1's markdown, so the live
-// document still matches its latest version and a settlement writes no version of its own.
-func seedReferenceDocumentHistory(t *testing.T, database *store.Store, artifactID string, versions, offset int, createdBy string) {
-	t.Helper()
-	ctx := context.Background()
-	if _, err := database.Pool.Exec(ctx, `update artifacts set created_by = $2::jsonb where id = $1`, artifactID, createdBy); err != nil {
-		t.Fatalf("set document creator: %v", err)
-	}
-	if _, err := database.Pool.Exec(ctx, `
-		update artifact_versions set authors = (($2::text[])[($3::int % cardinality($2::text[])) + 1])::jsonb
-		where artifact_id = $1 and number = 1
-	`, artifactID, referenceAuthorLists, offset); err != nil {
-		t.Fatalf("set first version authors: %v", err)
-	}
-	if _, err := database.Pool.Exec(ctx, `
-		insert into artifact_versions (artifact_id, number, markdown, authors, named, summary, created_at, doc_update_version)
-		select first.artifact_id, n, first.markdown,
-		       (($2::text[])[(((n - 1) / 2 + $3::int) % cardinality($2::text[])) + 1])::jsonb,
-		       n % 7 = 0, case when n % 3 = 0 then 'Summary ' || n end,
-		       first.created_at + n * interval '1 millisecond', first.doc_update_version
-		from artifact_versions first, generate_series(2, $4::int) n
-		where first.artifact_id = $1 and first.number = 1
-	`, artifactID, referenceAuthorLists, offset, versions); err != nil {
-		t.Fatalf("insert document versions: %v", err)
-	}
-}
-
-func TestIssueReferencesMembersCarryTheirDocumentsOwnCreatorAndVersionAuthors(t *testing.T) {
-	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})
-	ctx := context.Background()
+// ?versions=all is the full answer, byte for byte and under the same ETag, as no parameter is;
+// any value but all and latest is refused, and so is a versions given more than once.
+func TestIssueReferencesVersionsAllIsTheFullAnswerAndOtherValuesAreRefused(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
 	createReferenceAPIProject(t, handler, "CORE")
-	createReferenceAPIProject(t, handler, "OPS")
 	issue := createReferenceAPIIssue(t, handler, "CORE")
-	documents := []struct {
-		name      string
-		versions  int
-		offset    int
-		createdBy string
-	}{
-		{"Single version", 1, 3, `{"kind":"human","id":"creator-human"}`},
-		{"Forty versions", 40, 0, `{"kind":"session","id":"creator-session","origin":{"host":"example-host-b","machine":"example-machine-b","cwd":"/work/example-b","session_title":"Creator session"}}`},
-		{"Long history", 3217, 5, `{"kind":"service","id":"creator-service","service":"example-service-b"}`},
-	}
-	wantVersions := map[string]int{}
-	var forty model.Artifact
-	var citations []string
-	for _, document := range documents {
-		artifact := createProjectDocument(t, handler, "OPS", document.name, "# "+document.name+"\n")
-		seedReferenceDocumentHistory(t, database, artifact.ID, document.versions, document.offset, document.createdBy)
-		wantVersions[artifact.ID] = document.versions
-		if document.versions == 40 {
-			forty = artifact
-		}
-		citations = append(citations, "dispatch://OPS/artifact/"+artifact.Slug)
-	}
-	createReferenceAPIComment(t, handler, issue.Key, strings.Join(citations, "\n"))
+	design := createProjectDocument(t, handler, "CORE", "Design notes", "# Design notes\n")
+	seedReferenceDocumentHistory(t, database, design.ID, 4, 0, `{"kind":"human","id":"alice"}`)
+	createReferenceAPIComment(t, handler, issue.Key, "dispatch://CORE/artifact/"+design.Slug)
 
-	response := issueReferencesRequest(t, handler, issue.Key, "")
-	if response.Code != http.StatusOK {
-		t.Fatalf("get issue references: status=%d body=%s", response.Code, response.Body.String())
+	plain := issueReferencesRequest(t, handler, issue.Key, "")
+	if plain.Code != http.StatusOK {
+		t.Fatalf("get issue references: status=%d body=%s", plain.Code, plain.Body.String())
 	}
-	value := decodeBody[struct {
-		Members []struct {
-			Artifact struct {
-				ID        string          `json:"id"`
-				CreatedBy json.RawMessage `json:"created_by"`
-				Versions  json.RawMessage `json:"versions"`
-			} `json:"artifact"`
-		} `json:"members"`
-	}](t, response)
-	if len(value.Members) != len(documents) {
-		t.Fatalf("issue references members = %d; want %d", len(value.Members), len(documents))
+	if members := decodeBody[model.IssueReferences](t, plain).Members; len(members) != 1 || len(members[0].Artifact.Versions) != 4 {
+		t.Fatalf("issue references members = %#v; want Design notes with 4 versions", members)
 	}
-	for _, member := range value.Members {
-		artifact := member.Artifact
-		want, found := wantVersions[artifact.ID]
-		if !found {
-			t.Fatalf("unexpected reference member %q", artifact.ID)
-		}
-		delete(wantVersions, artifact.ID)
+	all := issueReferencesQueryRequest(t, handler, issue.Key, "versions=all", "")
+	if all.Code != plain.Code ||
+		all.Header().Get("ETag") != plain.Header().Get("ETag") ||
+		all.Header().Get("Content-Type") != plain.Header().Get("Content-Type") ||
+		!bytes.Equal(all.Body.Bytes(), plain.Body.Bytes()) {
+		t.Fatalf("versions=all: status=%d etag=%q type=%q body=%s\nwant status=%d etag=%q type=%q body=%s",
+			all.Code, all.Header().Get("ETag"), all.Header().Get("Content-Type"), all.Body.String(),
+			plain.Code, plain.Header().Get("ETag"), plain.Header().Get("Content-Type"), plain.Body.String())
+	}
 
-		versions, err := served.loadVersions(ctx, database.Pool, artifact.ID)
-		if err != nil {
-			t.Fatalf("load versions of %q: %v", artifact.ID, err)
-		}
-		if len(versions) != want {
-			t.Fatalf("stored versions of %q = %d; want %d", artifact.ID, len(versions), want)
-		}
-		wantVersionsJSON, err := json.Marshal(versions)
-		if err != nil {
-			t.Fatalf("encode versions: %v", err)
-		}
-		gotVersionsJSON, err := json.Marshal(artifact.Versions)
-		if err != nil {
-			t.Fatalf("encode member versions: %v", err)
-		}
-		if !bytes.Equal(gotVersionsJSON, wantVersionsJSON) {
-			t.Fatalf("member %q versions differ from the per-version load:\n got %.600s\nwant %.600s", artifact.ID, gotVersionsJSON, wantVersionsJSON)
-		}
-
-		var storedCreator []byte
-		if err := database.Pool.QueryRow(ctx, `select created_by from artifacts where id = $1`, artifact.ID).Scan(&storedCreator); err != nil {
-			t.Fatalf("read creator of %q: %v", artifact.ID, err)
-		}
-		var creator model.Actor
-		if err := json.Unmarshal(storedCreator, &creator); err != nil {
-			t.Fatalf("decode creator of %q: %v", artifact.ID, err)
-		}
-		wantCreatorJSON, err := json.Marshal(creator)
-		if err != nil {
-			t.Fatalf("encode creator: %v", err)
-		}
-		gotCreatorJSON, err := json.Marshal(artifact.CreatedBy)
-		if err != nil {
-			t.Fatalf("encode member creator: %v", err)
-		}
-		if !bytes.Equal(gotCreatorJSON, wantCreatorJSON) {
-			t.Fatalf("member %q created_by = %s; want %s", artifact.ID, gotCreatorJSON, wantCreatorJSON)
-		}
-
-		if artifact.ID != forty.ID {
-			continue
-		}
-		var fortyVersions []struct {
-			Number  int             `json:"number"`
-			Authors json.RawMessage `json:"authors"`
-		}
-		if err := json.Unmarshal(artifact.Versions, &fortyVersions); err != nil {
-			t.Fatalf("decode member versions: %v", err)
-		}
-		// Offset 0: versions 1-2 store JSON null and versions 3-4 an empty list.
-		for _, check := range []struct {
-			number  int
-			authors string
-		}{{1, `null`}, {2, `null`}, {3, `[]`}, {4, `[]`}} {
-			if got := string(fortyVersions[check.number-1].Authors); fortyVersions[check.number-1].Number != check.number || got != check.authors {
-				t.Fatalf("version %d authors in the response = %s (number %d); want %s", check.number, got, fortyVersions[check.number-1].Number, check.authors)
-			}
+	for _, query := range []string{"versions=bogus", "versions=latest&versions=bogus", "versions=all&versions=latest"} {
+		refused := issueReferencesQueryRequest(t, handler, issue.Key, query, "")
+		if refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"INVALID_QUERY"`) {
+			t.Fatalf("%s: status=%d body=%s; want 400 INVALID_QUERY", query, refused.Code, refused.Body.String())
 		}
 	}
 }
@@ -356,10 +239,14 @@ func TestArtifactReferencesListOutgoingAndReferencedBy(t *testing.T) {
 
 func TestIssueReferencesRejectUnauthenticatedRequest(t *testing.T) {
 	handler := newTestHandler(t)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/issues/CORE-1/references", nil))
-	if response.Code != http.StatusUnauthorized || !strings.Contains(response.Body.String(), `"code":"NO_IDENTITY"`) {
-		t.Fatalf("unauthenticated issue references: status=%d body=%s", response.Code, response.Body.String())
+	// Authentication comes before the versions parameter: a value the route refuses still
+	// answers 401 to a caller with no identity.
+	for _, target := range []string{"/api/v1/issues/CORE-1/references", "/api/v1/issues/CORE-1/references?versions=bogus"} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+		if response.Code != http.StatusUnauthorized || !strings.Contains(response.Body.String(), `"code":"NO_IDENTITY"`) {
+			t.Fatalf("unauthenticated %s: status=%d body=%s", target, response.Code, response.Body.String())
+		}
 	}
 }
 
@@ -378,9 +265,10 @@ func graphEdges(t *testing.T, handler http.Handler, query url.Values) model.Grap
 }
 
 // A message on an ACME issue that cites a LEGION ask is a backlink on that ask: the edge names
-// the message with its own issue, project, and dispatch:// address, carries the message body as
-// excerpt, and is stamped with the events.id of the message.created write. Read from the
-// message, the same edge points out at the ask. Filters narrow it and malformed input is 400.
+// the message's block holding the link (R7), under the message's own issue, project, and
+// dispatch:// address, carries the block's text as excerpt, and is stamped with the events.id of
+// the message.created write. Read from the message, the same edge points out at the ask. Filters
+// narrow it and malformed input is 400.
 func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	createReferenceAPIProject(t, handler, "LEGION")
@@ -423,16 +311,19 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 	}
 	edge := incoming.Edges[0]
 	acmeKey := acme.Key
+	messageRef := "dispatch://" + acme.Key + "/message/" + message.ID
+	// An edge's block node carries no text, only the node a reference read names does; the edge's
+	// excerpt holds the block's text.
 	wantNode := model.GraphNode{
-		Kind: "message", ID: message.ID, IssueKey: &acmeKey, Project: "ACME", Ref: "dispatch://" + acme.Key + "/message/" + message.ID,
+		Kind: "block", ID: "message/" + message.ID + "#b1", BlockID: "b1", IssueKey: &acmeKey, Project: "ACME", Ref: messageRef + "#b-b1",
 		MadeBy: []model.Actor{message.Author}, MadeAt: &message.CreatedAt, ChangedBy: []model.Actor{message.Author}, ChangedAt: &message.CreatedAt,
-		Parent: &model.NodeParent{Kind: "issue", ID: acme.Key, Ref: "dispatch://" + acme.Key},
+		Parent: &model.NodeParent{Kind: "message", ID: message.ID, Ref: messageRef},
 	}
 	if edge.Kind != "mentions" || edge.Direction != "in" || !reflect.DeepEqual(edge.Node, wantNode) {
 		t.Fatalf("backlink edge = %#v; want mentions in from %#v", edge, wantNode)
 	}
-	if edge.Excerpt == nil || edge.Excerpt.BlockID != "" || edge.Excerpt.Text != message.Body {
-		t.Fatalf("backlink excerpt = %#v; want the message body", edge.Excerpt)
+	if edge.Excerpt == nil || edge.Excerpt.BlockID != "b1" || edge.Excerpt.Text != message.Body {
+		t.Fatalf("backlink excerpt = %#v; want the message's one block", edge.Excerpt)
 	}
 	if edge.SourceSeq == nil || *edge.SourceSeq != messageEventID || !edge.CreatedAt.Equal(message.CreatedAt) {
 		t.Fatalf("backlink provenance = seq %v at %v; want event %d at %v", edge.SourceSeq, edge.CreatedAt, messageEventID, message.CreatedAt)
@@ -574,8 +465,8 @@ func TestReferencesAnswerAroundAnEdgeOfAKindThisBuildCannotAddress(t *testing.T)
 		{"comment", comment.ID, "future", "x#y"},
 	})
 
-	// The target's own spec is attached to it and the comment cites it: two edges this build
-	// can address, and the header counts the same edges the panel lists.
+	// The target's own spec is attached to it and the comment cites it, from its block: two edges
+	// this build can address, and the header counts the same edges the panel lists.
 	incoming := graphRequest(t, handler, url.Values{"to": {"dispatch://" + target.Key}})
 	if incoming.Code != http.StatusOK {
 		t.Errorf("GET references to %s: status=%d body=%s", target.Key, incoming.Code, incoming.Body.String())
@@ -586,8 +477,8 @@ func TestReferencesAnswerAroundAnEdgeOfAKindThisBuildCannotAddress(t *testing.T)
 			byKind[edge.Kind] = edge
 		}
 		mention, attached := byKind["mentions"], byKind["attached_to"]
-		if len(edges) != 2 || mention.Node.Kind != "comment" || mention.Node.ID != comment.ID || attached.Node.Kind != "artifact" || attached.Node.ID != target.PrimaryArtifactID {
-			t.Errorf("backlinks of %s = %#v; want the comment's mention and the attached spec, nothing of kind future", target.Key, edges)
+		if len(edges) != 2 || !blockOf(mention.Node, "comment", comment.ID) || attached.Node.Kind != "artifact" || attached.Node.ID != target.PrimaryArtifactID {
+			t.Errorf("backlinks of %s = %#v; want the comment's mention, from its block, and the attached spec, nothing of kind future", target.Key, edges)
 		}
 	}
 
@@ -789,6 +680,9 @@ func TestRebuildRefsConvergesOnTheLiveIndex(t *testing.T) {
 		{`delete from refs where from_kind = 'comment' and to_kind = 'artifact' and to_id = $1`, []any{issue.Key + "/spec"}},
 		{`insert into refs (from_kind, from_id, to_kind, to_id, source_seq) values ('artifact', $1, 'issue', 'ZZZ-9', 1)`, []any{design.ID}},
 		{`insert into refs (from_kind, from_id, to_kind, to_id) values ('message', '00000000-0000-0000-0000-000000000000', 'issue', $1)`, []any{issue.Key}},
+		// A message whose state row is gone, as one stored before the item-block state seeded it
+		// would be: the rebuild inserts it owed.
+		{`delete from message_block_state`, nil},
 	} {
 		if _, err := database.Pool.Exec(context.Background(), statement.sql, statement.args...); err != nil {
 			t.Fatalf("doctor refs: %v", err)
@@ -803,8 +697,9 @@ func TestRebuildRefsConvergesOnTheLiveIndex(t *testing.T) {
 		t.Fatalf("rebuild refs: %v", err)
 	}
 	// Every document has a version (three, counting the two specs); the planted row from a message
-	// that does not exist is the one orphan. Each of the three is marked owed a block index.
-	if report != (refs.Rebuild{Documents: 3, Asks: 1, Comments: 1, Messages: 1, Orphans: 1, Edges: 6, BlocksOwed: 3}) {
+	// that does not exist is the one orphan. Each of the three is marked owed a block index, and
+	// the comment and the message are marked owed a block index of their own blocks.
+	if report != (refs.Rebuild{Documents: 3, Asks: 1, Comments: 1, Messages: 1, Orphans: 1, Edges: 6, BlocksOwed: 3, ItemsOwed: 2}) {
 		t.Fatalf("rebuild report = %#v", report)
 	}
 	var documents, owed int
@@ -817,6 +712,17 @@ func TestRebuildRefsConvergesOnTheLiveIndex(t *testing.T) {
 	}
 	if documents != 3 || owed != documents {
 		t.Fatalf("after rebuild-refs %d of %d documents are owed a block index, want every one", owed, documents)
+	}
+	var items, owedItems int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select (select count(*) from comments) + (select count(*) from messages),
+		       (select count(*) from comments c join comment_block_state s on s.comment_id = c.id where s.owed_at is not null) +
+		       (select count(*) from messages m join message_block_state s on s.message_id = m.id where s.owed_at is not null)
+	`).Scan(&items, &owedItems); err != nil {
+		t.Fatalf("read the block state of every comment and message: %v", err)
+	}
+	if items != 2 || owedItems != items {
+		t.Fatalf("after rebuild-refs %d of %d comments and messages are owed a block index, want every one", owedItems, items)
 	}
 	rebuilt := readRefRows(t, database)
 	if len(rebuilt) != len(live) {

@@ -58,6 +58,11 @@ func TestListenerConfigCheck(t *testing.T) {
 			input: "listenHost", err: "listenHost holds an nkey seed (not echoed)",
 		},
 		{name: "the allowed hosts an operator writes", in: core.ListenerConfig{MachineID: "m", Port: 9020, AllowedHosts: acceptedAllowedHosts}},
+		{name: "the most NATS replicas, five", in: core.ListenerConfig{MachineID: "m", Port: 9020, NATSReplicas: 5}},
+		{name: "a negative NATS replicas", in: core.ListenerConfig{MachineID: "m", Port: 9020, NATSReplicas: -1}, input: "natsReplicas", err: "natsReplicas -1 is outside 0-5"},
+		{name: "more NATS replicas than NATS keeps", in: core.ListenerConfig{MachineID: "m", Port: 9020, NATSReplicas: 6}, input: "natsReplicas", err: "natsReplicas 6 is outside 0-5"},
+		{name: "a stream byte limit", in: core.ListenerConfig{MachineID: "m", Port: 9020, StreamMaxBytes: 1}},
+		{name: "a negative stream byte limit", in: core.ListenerConfig{MachineID: "m", Port: 9020, StreamMaxBytes: -1}, input: "streamMaxBytes", err: "streamMaxBytes -1 is below 0"},
 	}
 	// The listener refuses each of these at boot, so a config carrying one deploys a listener
 	// that never serves; the entry is refused by its index, beside an entry that is fine.
@@ -143,6 +148,30 @@ func TestListenerConfigEnv(t *testing.T) {
 			in:   core.ListenerConfig{MachineID: "m", Port: 9020, ListenHost: "0.0.0.0", AllowedHosts: []string{"hub.internal.example"}, SOCKS5Proxy: "127.0.0.1:1055", HostBridge: "127.0.0.1", SubscribeAllTopics: true},
 			urls: []string{"nats://hub.internal.example:4222"},
 			want: []string{"PORT=9020", "ENVOY_LISTEN_HOST=0.0.0.0", "ENVOY_ALLOWED_HOSTS=hub.internal.example", "ENVOY_MACHINE_ID=m", "NATS_URLS=nats://hub.internal.example:4222", "ENVOY_ALLOW_REMOTE_NATS=1", "ENVOY_NATS_SOCKS5_PROXY=127.0.0.1:1055", "ENVOY_HOST_BRIDGE=127.0.0.1", "ENVOY_SUBSCRIBE_ALL_TOPICS=1"},
+		},
+		{
+			name: "no NATS replicas and no stream byte limit render neither variable",
+			in:   core.ListenerConfig{MachineID: "m", Port: 9020, NATSReplicas: 0, StreamMaxBytes: 0},
+			urls: []string{"nats://127.0.0.1:4222"},
+			want: []string{"PORT=9020", "ENVOY_MACHINE_ID=m", "NATS_URLS=nats://127.0.0.1:4222"},
+		},
+		{
+			name: "NATS replicas alone renders ENVOY_NATS_REPLICAS last",
+			in:   core.ListenerConfig{MachineID: "m", Port: 9020, NATSReplicas: 3},
+			urls: []string{"nats://127.0.0.1:4222"},
+			want: []string{"PORT=9020", "ENVOY_MACHINE_ID=m", "NATS_URLS=nats://127.0.0.1:4222", "ENVOY_NATS_REPLICAS=3"},
+		},
+		{
+			name: "a stream byte limit alone renders ENVOY_STREAM_MAX_BYTES last",
+			in:   core.ListenerConfig{MachineID: "m", Port: 9020, StreamMaxBytes: 21474836480},
+			urls: []string{"nats://127.0.0.1:4222"},
+			want: []string{"PORT=9020", "ENVOY_MACHINE_ID=m", "NATS_URLS=nats://127.0.0.1:4222", "ENVOY_STREAM_MAX_BYTES=21474836480"},
+		},
+		{
+			name: "NATS replicas then the stream byte limit, after the opt-in",
+			in:   core.ListenerConfig{MachineID: "m", Port: 9020, ListenHost: "0.0.0.0", AllowedHosts: []string{"hub.internal.example"}, SOCKS5Proxy: "127.0.0.1:1055", HostBridge: "127.0.0.1", SubscribeAllTopics: true, NATSReplicas: 3, StreamMaxBytes: 1073741824},
+			urls: []string{"nats://hub.internal.example:4222"},
+			want: []string{"PORT=9020", "ENVOY_LISTEN_HOST=0.0.0.0", "ENVOY_ALLOWED_HOSTS=hub.internal.example", "ENVOY_MACHINE_ID=m", "NATS_URLS=nats://hub.internal.example:4222", "ENVOY_ALLOW_REMOTE_NATS=1", "ENVOY_NATS_SOCKS5_PROXY=127.0.0.1:1055", "ENVOY_HOST_BRIDGE=127.0.0.1", "ENVOY_SUBSCRIBE_ALL_TOPICS=1", "ENVOY_NATS_REPLICAS=3", "ENVOY_STREAM_MAX_BYTES=1073741824"},
 		},
 		{name: "no URL", in: core.ListenerConfig{MachineID: "m", Port: 9020}, err: "natsUrls needs at least one URL"},
 		{name: "a comma in a URL", in: core.ListenerConfig{MachineID: "m", Port: 9020}, urls: []string{"nats://a:1,nats://b:2"}, err: "natsUrls[0] contains a comma"},

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ArchitectureSource, IssueSummary } from "@legion/contracts";
+import type { ArchitectureSource, IssueSummary, ItemBlocks } from "@legion/contracts";
 import { DISPATCH_WRITE_RETRY, DispatchClient, DispatchGatewayError } from "../dispatch-http";
 import { fakeSearchResponse } from "./fake-search-response";
 
@@ -285,7 +285,7 @@ describe("DispatchClient", () => {
       "/api/v1/artifacts/artifact-1/comments",
       "/api/v1/artifacts/artifact-1/comments",
       "/api/v1/artifacts/artifact-1/events?after=0&limit=200",
-      "/api/v1/issues/CORE-1/references",
+      "/api/v1/issues/CORE-1/references?versions=latest",
       "/api/v1/artifacts/artifact-1/references",
       "/api/v1/references?to=dispatch%3A%2F%2FCORE-1%2Fask%2Fask-1",
       "/api/v1/references?from=dispatch%3A%2F%2FCORE%2Fartifact%2Frunbook-md&kind=mentions%2Cattached_to&since=918",
@@ -981,6 +981,32 @@ describe("DispatchClient", () => {
     expect(
       requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
     ).toEqual(["/api/v1/comments/comment-1"]);
+  });
+
+  test("maps a comment's and a message's blocks reads to the API", async () => {
+    const blocks: ItemBlocks = {
+      item: { kind: "comment", id: "comment-1" },
+      revision: 1,
+      indexed: true,
+      blocks: [{ id: "b1", type: "paragraph", text: "Alpha.", from: 0, to: 6 }],
+    };
+    const { fetchImpl, requests } = fakeFetch([
+      jsonResponse(blocks),
+      jsonResponse({ ...blocks, item: { kind: "message", id: "message-1" } }),
+      jsonResponse({ ...blocks, item: { kind: "message", id: "message-2" } }),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    expect(await client.commentBlocks("comment-1")).toEqual(blocks);
+    await client.messageBlocks("message-1");
+    await client.messageBlocks("message-2", "s1");
+    expect(
+      requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
+    ).toEqual([
+      "/api/v1/comments/comment-1/blocks",
+      "/api/v1/messages/message-1/blocks",
+      "/api/v1/messages/message-2/blocks?session=s1",
+    ]);
   });
 });
 
