@@ -1,10 +1,10 @@
 name: Fold Changelog Fragments
 
 # A pull request writes its changelog entry as a fragment, packages/<pkg>/.changes/unreleased/
-# <ISSUE KEY>-<slug>.yaml, never into CHANGELOG.md itself, so two pull requests never conflict
-# over the top of the same file. This workflow folds the fragments into each package's
-# CHANGELOG.md on main and removes them, in one commit, "chore: fold changelog fragments [skip
-# ci]". A fragment's entry lands under the version of the release that first shipped it: the
+# pr<number>-<Kind>-<YYYYMMDD-HHMMSS>.yaml, never into CHANGELOG.md itself, so two pull requests
+# never conflict over the top of the same file. This workflow folds the fragments into each
+# package's CHANGELOG.md on main and removes them, in one commit, "chore: fold changelog fragments
+# [skip ci]". A fragment's entry lands under the version of the release that first shipped it: the
 # lowest <tag-prefix>X.Y.Z tag that contains the commit which first added it, following renames,
 # so a fragment no release has shipped yet waits for a later run. claude-envoy, contracts and
 # envoy-client have no release of their own, so their fragments land under main@<the first 12 hex

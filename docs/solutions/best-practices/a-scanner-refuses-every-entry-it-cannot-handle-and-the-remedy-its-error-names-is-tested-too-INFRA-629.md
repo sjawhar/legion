@@ -35,7 +35,9 @@ related_issues:
   `.changes/unreleased/` that was not a regular `*.yaml` file, so `unreleased/sjawhar/fix-thing.yaml`
   and `INFRA-1-a.yml` stayed on main for ever with exit 0. The root `AGENTS.md` told authors to use
   the branch name in place of the issue key, which makes such a subdirectory. Fixed in
-  6b255451bb62: fold-plan refuses them by name, and `AGENTS.md` says to write each `/` as `-`.
+  6b255451bb62: fold-plan refuses them by name, and `AGENTS.md` then said to write each `/` as
+  `-`. `AGENTS.md` now names a fragment by the pull request number, so no branch name reaches a
+  fragment's path.
 - Review round 2: the refusal told the author to rename the entry. No pull-request check reads
   fragments, so the entry reaches main, and its release is cut, before anyone sees the refusal; a
   later rename then dated the fragment by the rename commit and gave it the next release. Fixed in
