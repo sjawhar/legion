@@ -223,6 +223,7 @@ func (s *server) repairIssueAsksOf(ctx context.Context, issueKey string) (IssueA
 	if err != nil {
 		return repair, err
 	}
+	// The gates end at the commit below; the defer is the error paths' release.
 	defer release()
 	ctx = gatedCtx
 	tx, closed := opened.tx, opened.closed
@@ -305,6 +306,7 @@ func (s *server) repairIssueAsksOf(ctx context.Context, issueKey string) (IssueA
 		return IssueAskRepair{}, err
 	}
 	s.publish(events...)
+	release()
 	if repair.Changed() {
 		slog.Info("dispatch: repaired the asks of an issue", append([]any{"issue", issueKey}, repair.LogArgs()...)...)
 	}

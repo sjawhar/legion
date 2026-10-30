@@ -559,6 +559,9 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		s.writeHandlerError(w, r, err)
 		return
 	}
+	// The gates end at the commit below, before the mention deliveries: a later writer of these
+	// documents waits on this comment's transaction, never on the listener. The defer is the
+	// error paths' release.
 	defer start.release()
 	r = r.WithContext(start.ctx)
 	tx, status, route := start.tx, start.status, start.route
@@ -823,6 +826,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		return
 	}
 	s.publish(events...)
+	start.release()
 	// Each mention is delivered before the comment is answered, as a send to one session is, on a
 	// context the client cannot cancel: a page that gives up on the comment, or retries it under
 	// its key, never cuts off a frame in flight or strands its attempt pending. A keyed request's

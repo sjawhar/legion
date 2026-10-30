@@ -160,7 +160,9 @@ func holdsDocumentWriter(ctx context.Context, artifactID string) bool {
 // artifactIDs for one write, and returns ctx carrying them, which the write opens its transaction
 // and joins its documents under (joinLiveWrite refuses a document whose gate the context does not
 // carry), and the release that hands each gate to its next writer, which the caller runs once its
-// transaction has committed and published, or rolled back.
+// transaction has committed and published, or rolled back, and before any post-commit work of
+// its own. The release runs once however often it is called, so a caller that releases at its
+// commit can defer it for its earlier returns too.
 //
 // The documents are deduplicated and taken in sorted order, so two writes to overlapping documents
 // never each hold one the other waits for. A document whose gate already has

@@ -293,6 +293,10 @@ type server struct {
 	// (newFailingAdviceHandler, and the check's bound tests), so a case's outcome is its own choice
 	// rather than its machine's speed.
 	suggestionTimeout time.Duration
+	// relatedCheckEntered runs at the start of every related-item check, before any of its work.
+	// Nil outside tests, and set by a test before the requests it drives, so that a test can hold
+	// a write's post-commit check where production has only a slow one.
+	relatedCheckEntered func()
 	// broadcastResolveBudget overrides the budget a broadcast's recipient resolution runs under;
 	// zero, which every server the deployment builds leaves it, means broadcastResolveTimeout.
 	// Only a test sets it, so a budget that ends before every selected session is read is the

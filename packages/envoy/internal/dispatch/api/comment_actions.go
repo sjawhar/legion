@@ -52,6 +52,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, r, err)
 		return
 	}
+	// The gate ends at the commit below; the defer is the error paths' release.
 	defer release()
 	tx, err := s.begin(r.Context())
 	if err != nil {
@@ -127,6 +128,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publish(event)
+	release()
 	WriteJSON(w, http.StatusOK, comment)
 }
 
@@ -168,6 +170,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, r, err)
 		return
 	}
+	// The gate ends at the commit below; the defer is the error paths' release.
 	defer release()
 	tx, err := s.begin(r.Context())
 	if err != nil {
@@ -252,6 +255,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publish(event)
+	release()
 	WriteJSON(w, http.StatusOK, comment)
 }
 
@@ -284,6 +288,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		s.writeHandlerError(w, r, err)
 		return
 	}
+	// The gate ends at the commit below; the defer is the error paths' release.
 	defer release()
 	tx, err := s.begin(r.Context())
 	if err != nil {
@@ -468,6 +473,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		return
 	}
 	s.publish(events...)
+	release()
 	if action == "accept" {
 		// The accepted text may have gone the way an edit's can: removed by a concurrent browser
 		// change after this write's version was rendered and before it reached the room, which is

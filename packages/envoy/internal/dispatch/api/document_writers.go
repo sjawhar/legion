@@ -15,16 +15,24 @@ import (
 )
 
 // Every handler that writes a live document takes that document's writer gate
-// (docs.Service.AcquireDocumentWriter) before it opens its transaction, and holds it until it has
-// committed and published: writers queued for a busy document then wait in memory holding no
-// connection, instead of in Postgres and the writer slot each holding one. So the handler names
-// the documents it will write with no transaction open - read through the pool, or known from its
-// path - and, where what it read could have moved before its transaction locked it, names them
-// again under its locks and compares (gatedWrite).
+// (docs.Service.AcquireDocumentWriter) before it opens its transaction, and ends it once that
+// transaction has committed and published: writers queued for a busy document then wait in
+// memory holding no connection, instead of in Postgres and the writer slot each holding one. So
+// the handler names the documents it will write with no transaction open - read through the pool,
+// or known from its path - and, where what it read could have moved before its transaction locked
+// it, names them again under its locks and compares (gatedWrite).
+//
+// The release runs right after the commit and the publish, before the handler's post-commit work
+// - a related-item check, a comment's mention deliveries - so the next writer of the document
+// waits on this write's transaction alone. Only work that writes the same
+// documents keeps the gate past the commit: the close's final ask sweep (sweepClosedIssueAsks)
+// runs under the gates its PATCH took, since joinLiveWrite refuses a document whose gate the
+// context does not carry.
 
 // gateDocuments takes the writer gates of artifactIDs for r's write and returns r carrying them,
-// with their release. The caller defers the release before its transaction's rollback, so it runs
-// after the commit and the publish.
+// with their release. The caller releases them once its transaction has committed and published,
+// and defers the release before its transaction's rollback for the paths that answer before the
+// commit; the release is idempotent, so both may run.
 func (s *server) gateDocuments(r *http.Request, artifactIDs ...string) (*http.Request, func(), error) {
 	ctx, release, err := s.deps.Docs.AcquireDocumentWriter(r.Context(), artifactIDs...)
 	if err != nil {

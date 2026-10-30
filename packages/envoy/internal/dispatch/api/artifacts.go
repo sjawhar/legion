@@ -556,6 +556,7 @@ func (s *server) storeArtifact(
 		s.writeHandlerError(w, r, err)
 		return
 	}
+	// The gate ends at the commit below; the defer is the error paths' release.
 	defer release()
 	r = r.WithContext(gatedCtx)
 	tx, issueStatus, artifact, created := opened.tx, opened.issueStatus, opened.artifact, opened.created
@@ -692,6 +693,7 @@ func (s *server) storeArtifact(
 		s.deps.Docs.ScheduleSettlement(artifact.ID)
 	}
 	s.publish(published...)
+	release()
 	var blocks *documentBlocks
 	if kind == "doc" {
 		blocks = readDocumentBlocks(documentMarkdown)

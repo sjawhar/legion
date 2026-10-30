@@ -359,6 +359,9 @@ type relatedPick struct {
 // the search's own order. Unless record is false it then records what it offered and how it went
 // (recordRelatedChecks).
 func (s *server) relatedCheck(ctx context.Context, input relatedInput) *model.Suggestions {
+	if s.relatedCheckEntered != nil {
+		s.relatedCheckEntered()
+	}
 	started := time.Now()
 	suggestions, record := s.runRelatedCheck(ctx, input, started)
 	record.totalMS = int(time.Since(started).Milliseconds())

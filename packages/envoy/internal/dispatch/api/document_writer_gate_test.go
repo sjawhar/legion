@@ -385,3 +385,35 @@ func TestAnAnchoredCommentWithATurnIsRefusedBeforeTheWriterGate(t *testing.T) {
 		<-answered
 	}
 }
+
+// A close writes the blocks of the issue's open asks into every document of the issue, so it
+// names those documents and gates them before its transaction opens, and names them again under
+// the issue's row. One added while it waited for the gates leaves it writing a document it did
+// not gate: like every other gated write, it gates them once more and lands, rather than
+// refusing a close for a document somebody else created in between (gatedWrite).
+func TestAnIssueCloseWhoseDocumentsMovedWhileItWaitedIsGatedAgain(t *testing.T) {
+	handler, service, _ := writerGateHandler(t, 8, nil, nil)
+	issue := createInteractionIssue(t, handler, "TEST", "Close past a new document", "First line.")
+	_, hold, err := service.AcquireDocumentWriter(context.Background(), issue.PrimaryArtifactID)
+	if err != nil {
+		t.Fatalf("hold the document's writer gate: %v", err)
+	}
+	var held sync.Once
+	releaseHold := func() { held.Do(hold) }
+	defer releaseHold()
+
+	closed := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		closed <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key,
+			map[string]any{"status": "done"}, "alice")
+	}()
+	waitForQueuedWriters(t, service, 1)
+	// The issue's documents move while the close waits for the one it named.
+	createSecondDocument(t, handler, issue.Key)
+	releaseHold()
+
+	if response := <-closed; response.Code != http.StatusOK {
+		t.Errorf("a close whose issue gained a document while it waited for the writer gate: status=%d body=%s, want 200",
+			response.Code, response.Body.String())
+	}
+}

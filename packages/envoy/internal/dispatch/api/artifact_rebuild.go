@@ -42,6 +42,7 @@ func (s *server) rebuildArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, r, err)
 		return
 	}
+	// The gate ends at the commit below; the defer is the error paths' release.
 	defer release()
 	tx, err := s.begin(r.Context())
 	if err != nil {
@@ -78,6 +79,7 @@ func (s *server) rebuildArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publish(published...)
+	release()
 	WriteJSON(w, http.StatusOK, report)
 }
 

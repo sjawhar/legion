@@ -489,7 +489,13 @@ handlers name the documents a write changes with no transaction open and take ev
 sorted call (`api/document_writers.go`, `gatedWrite`, which names them again under the write's
 locks and takes the gates once more when they moved); `joinLiveWrite` refuses a write whose
 context does not carry its document's gate (`docs.ErrWriterGateNotHeld`), so an entry point added
-later cannot skip it. The gate is refused at once to a caller holding a pooled connection, a read's
+later cannot skip it. A write ends its gates once its transaction has committed and published,
+before its post-commit work - an ask's or a decision block's related-item check, a comment's
+mention deliveries, a settlement it queued - so the next writer of the document waits for that
+transaction alone; only post-commit work that writes the same documents keeps them, the close's
+final ask sweep (`sweepClosedIssueAsks`) being the one. The release runs once however often it
+is called, so a handler releases at its commit and defers the same release for the paths that
+answer before it. The gate is refused at once to a caller holding a pooled connection, a read's
 pinned one included (`docs.ErrGateWhileHoldingConnection`, checked by `store.ConnectionHeld`), so
 nothing that holds a connection or lock ever waits for it. At most 32 writers queue behind a
 document's holder (`maxQueuedDocumentWriters`); the next is `429 EDIT_QUEUE_FULL` with
@@ -538,8 +544,9 @@ lists each block the edit added, in document order (`docs.EditOutcome.AddedAskBl
 `{block_id, question, suggestions}`: the related-item check run on the block's question once the
 edit has committed (`decisionBlockChecks`), the first five checked at once under one 5 s
 allowance and each past them answered, and recorded, as not made; it is omitted when the edit
-added none. A conditional edit releases its document's edit gate at the commit, before those
-checks run, so they never hold the next conditional edit. Issue-state advice is computed in the
+added none. An edit releases its document's writer gate at the commit, before those checks run,
+as every gated write releases its gates before its post-commit work, so they never hold the next
+writer of the document. Issue-state advice is computed in the
 write transaction after its event is appended, so it includes that write. A stored document's
 decision blocks and unparsed openers are read from one parse of the canonical Markdown after the
 write transaction commits (`readDocumentBlocks`). Advice queries run

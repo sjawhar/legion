@@ -202,6 +202,8 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.writeHandlerError(w, r, err)
 		return
 	}
+	// The gate ends at the commit below, which is all a later writer of this document waits on;
+	// the defer is the error paths' release, and running twice is a no-op.
 	defer release()
 	r = r.WithContext(gatedCtx)
 	tx, status := start.tx, start.status
@@ -309,6 +311,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		return
 	}
 	s.publish(appended...)
+	release()
 	// The related-item check. An ask on an issue searches that issue's project and, normally, rides its check's
 	// result on the issue's own advice; one on an unlinked project document searches the
 	// document's and has no issue state to report, so its advice carries the result alone, as does
@@ -397,6 +400,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, r, err)
 		return
 	}
+	// The gate ends at the commit below; the defer is the error paths' release.
 	defer release()
 	tx, err := s.begin(r.Context())
 	if err != nil {
@@ -520,6 +524,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publish(event)
+	release()
 	WriteJSON(w, http.StatusOK, ask)
 }
 
