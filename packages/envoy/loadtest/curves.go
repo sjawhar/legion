@@ -141,16 +141,17 @@ func nameFactor(name string) (float64, bool) {
 // size of production's instance). A step whose copy has fewer is the 4 vCPU database step.
 const seriesPGCPUs = 16
 
-// classify is the step's kind. For a cluster step, meta.json's copy (cluster.sh's
-// write_copy_meta) says what the run did, so the kind comes from the run and not from the step's
-// name: the hour is the phase soak, or a window of an hour or more; the 4 vCPU database is a copy
-// whose Postgres has fewer than seriesPGCPUs vCPUs; the reads-only control is a step the run
-// marked reads-only, or one that offered no event; every other step is in the knee series.
-// Without copy (a local stack run, or a run from before cluster.sh recorded the phase) the name
-// says it, as it always did: a window of an hour or more or -hour, -db4, -reads. The name is the
-// row's label either way.
+// classify is the step's kind. For a cluster step whose copy names the phase, meta.json's copy
+// (cluster.sh's write_copy_meta) says what the run did, so the kind comes from the run and not
+// from the step's name: the hour is the phase soak, or a window of an hour or more; the 4 vCPU
+// database is a copy whose Postgres has fewer than seriesPGCPUs vCPUs; the reads-only control is
+// a step the run marked reads-only, or one that offered no event; every other step is in the knee
+// series. Without such a copy (a local stack run, or a run from before cluster.sh recorded the
+// phase, whose copy names the series' Postgres tier for every step) the name says it, as it
+// always did: a window of an hour or more or -hour, -db4, -reads. The name is the row's label
+// either way.
 func (s *curveStep) classify() curveKind {
-	if c, ok := readStepCopy(s.meta); ok {
+	if c, ok := readStepCopy(s.meta); ok && c.Phase != "" {
 		cpus, haveCPUs := c.pgCPUs()
 		switch {
 		case c.Phase == phaseSoak || s.sum.Config.DurationS >= 3600:

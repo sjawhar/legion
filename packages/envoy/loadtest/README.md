@@ -1660,7 +1660,11 @@ not even connect. So every step and every replay guards the volume with `df -B1
 - Every 30 s while `loadgen run` runs. The first reading under the threshold stops that runner job
   and the step's browser typing and records the same failed step with the reading, so Postgres
   never reaches a full volume with load still arriving. The step's after-work (the copy back, the
-  crash check, the stored-order check, `cgroup-merge`, `tables`) still runs.
+  crash check, the stored-order check, `cgroup-merge`, `tables`) still runs. A watcher whose step
+  is gone stops at its next reading, recording nothing and stopping no job: a step killed outright
+  runs neither its stop nor its `EXIT` trap, and step names, job names and pods repeat across
+  runs, so a watcher left behind would mark a dead step failed and stop a later run's job of the
+  same name.
 - When the load ends.
 
 Each step and replay writes `<step>/pg-disk.json` from those readings (Output files, below). A
@@ -1992,7 +1996,7 @@ its cores and working set from `cgroup.json`. It also holds:
 | `pg-disk.json` | The Postgres data volume over the step (The Postgres data volume, above): `size_bytes`, `used_before` and `used_after` (the readings around the load), `used_peak`, `free_min`, `samples` (each reading with its `at`, or with `error` and no number when that read failed) and `threshold_pct`. A figure no reading gave is `null`, never 0. |
 | `replay-prepared.json`, `last-reset.json`, `envoy-dispatch.json` | Only in a replay step: `replay-prepare`'s record, and the two files written into the runner's `LOADTEST_ROOT` for `loadgen run` (above). |
 | `containers-before.tsv`, `containers-after.tsv` | Each sampled container's role, pod, container, `restartCount` and `lastState.terminated.reason`, before and after the step. |
-| `step-failed.json` | Only when the step failed: `reasons`, each with `kind`, `role` and `detail`. `restart`: a container of the copy restarted during the step. `loadgen_exit`: `loadgen run` exited non-zero. `copy_back`: the step's files could not be copied back from the runner, so they are missing here and stay in the runner at `/work/steps/<name>`. `pg_disk`: the Postgres data volume had less than `threshold_pct` free, so the step sent no load, or the watcher stopped its load; the detail names the reading and `--pg-volume` (The Postgres data volume, above). `sampler_gap`: a container had no good cgroup read for more than 30 s in the window. |
+| `step-failed.json` | Only when the step failed: `reasons`, each with `kind`, `role` and `detail`. `restart`: a container of the copy restarted during the step. `loadgen_exit`: `loadgen run` exited non-zero. `copy_back`: the step's files could not be copied back from the runner, so they are missing here and stay in the runner at `/work/steps/<name>`; a `heap.txt` that alone did not come back is no failure, since the step is whole without it, but a note that says it stays in the runner at `/work/steps/<name>/heap.txt`. `pg_disk`: the Postgres data volume had less than `threshold_pct` free, so the step sent no load, or the watcher stopped its load; the detail names the reading and `--pg-volume` (The Postgres data volume, above). `sampler_gap`: a container had no good cgroup read for more than 30 s in the window. |
 | `cgroup.json` | `loadgen cgroup-merge` of `cgroup.jsonl` over the window: `window_start`, `window_end`, `window_s`, `failed` and `failures`, and for each role `pods`, `container`, `samples`, `failed_reads`, `restarts`, `cpu_max`, `limit_cores`, `cores_mean`, `cores_peak_5s`, `cpu_s`, `throttled_s`, `working_set_bytes_mean` and `working_set_bytes_max` (`memory.current` less `inactive_file`), `max_gap_s`, and `minutes` (each whole minute's cores and mean working set; `null` for a minute with a gap over 30 s). A figure the reads cannot give is `null`, never 0. |
 | `loadgen.out` | The output of `loadgen run` in the runner. |
 | `stored-order.txt`, `stored-order.json`, `stored-order-evidence/` | The output of `envoy-dispatch stored-order --since <window_start>` over every document after the step, and the checker's fields (`dispatch_commit`, `built_from`, `overlay_source`, `overlay_files`, `registration`, `renderer_matches`, `sha256`), `exit`, `since` and the counts of its summary line (`null` without one, never 0) and `evidence`; and the rows of each mismatched or refused document, never uploaded (The stored-order check, above). A non-zero exit is a correctness finding, not a `step-failed.json` reason. |
@@ -2014,12 +2018,13 @@ its cores and working set from `cgroup.json`. It also holds:
   and `KNEES.md` lists it as `not judged (failed: <kinds>)`. Its row still shows FAIL on (f) in
   the Pass table, and a refinement never asks for its factor again. The control, the hour and the
   4 vCPU step are judged, but are not in the series.
-- Where a step sits comes from the run, not from its name. With `meta.json`'s `copy` (the cluster
-  step's `copy-meta.json`): the hour is the phase `soak` or a window of an hour or more; the 4 vCPU
-  step is a copy whose Postgres has fewer than 16 vCPUs (`copy.postgres.cpu`, the knee series'
-  tier); the control is a step the run marked `reads_only` or one that offered no event; every
-  other step is in the knee series. Without `copy` (a `run-step.sh` run on the local stack, or a
-  run from before `cluster.sh` recorded the phase) the step's name says it: `-hour`, `-db4`,
+- Where a step sits comes from the run, not from its name. With a `meta.json` `copy` that names
+  the phase (the cluster step's `copy-meta.json`): the hour is the phase `soak` or a window of an
+  hour or more; the 4 vCPU step is a copy whose Postgres has fewer than 16 vCPUs
+  (`copy.postgres.cpu`, the knee series' tier); the control is a step the run marked `reads_only`
+  or one that offered no event; every other step is in the knee series. Without such a copy (a
+  `run-step.sh` run on the local stack, or a run from before `cluster.sh` recorded the phase,
+  whose `copy` names the series' tier for every step) the step's name says it: `-hour`, `-db4`,
   `-reads`. The name is the row's label either way.
 
 ### Differences from production

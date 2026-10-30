@@ -112,7 +112,11 @@
 # threshold sends no load, one whose free space falls under it mid-run has its runner job stopped
 # by the disk watcher, both are marked failed with kind pg_disk, and each step writes pg-disk.json
 # with the volume's size, the used bytes around the load, the peak, the least free and the
-# readings.
+# readings; (w) the disk watcher of a step killed outright stops at its next reading, recording
+# no failure in that step's directory and stopping no runner job, however little free space the
+# volume then shows; (x) a step whose heap.txt alone did not come back from the runner is no
+# failed step: its summary.json is here, it says in a note where heap.txt stayed, and the
+# runner's step directory is not removed.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -130,6 +134,10 @@ cleanup() {
     pid=$(<"$f")
     kill -TERM -- "-$pid" 2>/dev/null || true
   done
+  # (w) kills a step shell outright, which leaves its runner_wait (a command substitution of its
+  # own) polling the fake runner, and on a cluster.sh whose disk watcher has no liveness its
+  # watcher too.
+  pkill -f "$cluster step --namespace $ns " 2>/dev/null || true
   rm -rf -- "$tmp"
 }
 trap cleanup EXIT
@@ -275,7 +283,17 @@ case $verb in
       *"select version()"*) echo 'PostgreSQL 16.4 (fake)' ;;
       *"show all"*) echo 'max_connections|800|Sets the maximum number of concurrent connections.' ;;
       *"max(version)"*) echo 121 ;;
-      *json_build_object*) echo '{"projects": 4, "issues": 1000}' ;;
+      # The seed's counts: every key of common.sh's SEED_COUNTS_SQL (FAKE_DIR/seed-counts.sql) is
+      # answered only for exactly that query, so a cluster.sh that counts less than stack.sh does
+      # writes a seed.meta.json that lacks those counts; any other json_build_object read gets the
+      # short object.
+      *json_build_object*)
+        if [ "${cmd[-1]}" = "$(<"$FAKE_DIR/seed-counts.sql")" ]; then
+          echo '{"projects": 4, "issues": 1000, "comments": 2000, "artifacts": 300, "artifact_versions": 900, "ref_targets": 20, "ref_target_versions": 60, "ref_sources": 5, "artifact_refs": 40, "events": 8000}'
+        else
+          echo '{"projects": 4, "issues": 1000}'
+        fi
+        ;;
       # The stored-order evidence export: each table's CSV (a quoted field holding a line break and
       # quotes, so a record is not a line), doc_checkpoints with no row and failing for
       # 22222222-..., the issue's events, version 7's markdown as base64, and from a template
@@ -351,7 +369,13 @@ case $verb in
         tar -C "$FAKE_DIR/stepdir" --exclude=./heap.txt -czf - .
         ;;
       "sh -c if test -f "*) if [ -f "$FAKE_DIR/stepdir/heap.txt" ]; then echo yes; else echo no; fi ;;
+      # FAKE_HEAP_COPY_FAIL: the heap.txt stream alone fails (every try), while every other file
+      # of the step came back in the stream above.
       "gzip -1 -c /work/steps/"*)
+        if [ -n "${FAKE_HEAP_COPY_FAIL:-}" ]; then
+          echo 'error: unable to upgrade connection: error dialing backend: EOF' >&2
+          exit 1
+        fi
         gzip -1 -c "$FAKE_DIR/stepdir/heap.txt"
         ;;
       chmod* | mkdir*) ;;
@@ -664,9 +688,16 @@ export POD_UID=00000000-1111-2222-3333-444444444444 LEGION_ISSUE=TEST-1
 export PATH="$bin:$PATH"
 unset FAKE_EXEC_FAIL FAKE_SAMPLE FAKE_PROD_MAJOR FAKE_LOADGEN_FAIL FAKE_APPLY_FAIL FAKE_QUIET FAKE_STORED_ORDER \
   FAKE_EXEC_ERRORS FAKE_FAST_SLEEP FAKE_TYPING_RC FAKE_DISPATCH_BUILD_ERROR FAKE_COPY_BACK_FAIL \
-  FAKE_PG_DF_SEQ FAKE_RC_UNTIL_STOP
+  FAKE_PG_DF_SEQ FAKE_RC_UNTIL_STOP FAKE_HEAP_COPY_FAIL
 export DISPATCH_URL=http://dispatch.invalid DISPATCH_TOKEN_FILE=$fake/token
 echo fake-token >"$fake/token"
+# The seed's counts query, as common.sh holds it: the fake kubectl answers every count only for
+# exactly this query, so a cluster.sh seed that asks for less is seen.
+(
+  # shellcheck source=packages/envoy/loadtest/common.sh
+  source "$here/../common.sh"
+  printf '%s' "$SEED_COUNTS_SQL"
+) >"$fake/seed-counts.sql"
 
 readonly commit_ok=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 readonly commit_none=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
@@ -997,11 +1028,13 @@ pg_password=$(jq -r .secrets.pg_password "$run_dir/state.json")
 run_cluster seed --namespace "$ns"
 ((RC == 0)) || fail "seed exited $RC"
 [ -f "$run_dir/seed.json" ] || fail "seed kept no seed.json in the run directory"
-# seed.meta.json's counts are stack.sh's (common.sh SEED_COUNTS_SQL), the reference documents' among
-# them, so a seed with loadgen seed-refs is told from one without.
-seed_counts=$(tr '\n' ' ' <"$fake/kubectl.log" | grep -oE "select json_build_object\(.{0,1200}'events'" | head -n1)
-for k in artifact_versions ref_targets ref_target_versions ref_sources artifact_refs events; do
-  [[ $seed_counts == *"'$k'"* ]] || fail "seed's counts query does not count $k, as stack.sh's does: $seed_counts"
+# seed.meta.json's counts are stack.sh's (common.sh SEED_COUNTS_SQL), the reference documents'
+# among them, so a seed with loadgen seed-refs is told from one without. The fake kubectl answers
+# every count only for exactly that query, so counts that are missing here are counts the seed
+# did not ask Postgres for.
+for k in artifact_versions ref_targets ref_target_versions ref_sources artifact_refs; do
+  jq -e --arg k "$k" '.counts | has($k)' "$run_dir/seed.meta.json" >/dev/null ||
+    fail "seed.meta.json's counts lack $k, which common.sh's SEED_COUNTS_SQL counts: $(jq -c .counts "$run_dir/seed.meta.json" 2>/dev/null)"
 done
 
 run_cluster step --namespace "$ns" smoke 1 --duration 1m
@@ -2339,3 +2372,91 @@ jq -e --argjson size "$pg_size" --argjson before "$pg_used_low" --argjson after 
 unset FAKE_FAST_SLEEP
 run_cluster down --namespace "$ns"
 pass "up sizes the Postgres claim with --pg-volume and refuses one the quota cannot hold; a step under the free-space threshold sends no load, one that falls under it mid-run has its load stopped, both failed with kind pg_disk, and each step writes pg-disk.json"
+
+# (w) The disk watcher's liveness. A step killed outright (a SIGKILL, an OOM, a worker turn cut
+# short) runs neither pg_disk_watch_stop nor its EXIT trap, so its watcher read the volume every
+# 30 s for ever. Step names, job names and pods repeat across runs, so that watcher would later
+# record pg_disk in a dead step's directory and stop a new run's job of the same name.
+reset_fake
+export LOADTEST_CLUSTER_ROOT=$tmp/root-watchkill
+run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok" --pg-volume 150Gi
+((RC == 0)) || fail "up exited $RC: $(cat "$tmp/out")"
+kill_run=$(jq -r .data.run "$fake/lock.json")
+kill_dir=$LOADTEST_CLUSTER_ROOT/$kill_run/steps/pgkill
+run_cluster seed --namespace "$ns"
+((RC == 0)) || fail "seed exited $RC: $(cat "$tmp/out")"
+# The step's load never ends (FAKE_RC_UNTIL_STOP) and the volume has room, so the watcher polls
+# on. Only its own 30 s poll is a fast sleep, which it records in sleep.log: the step's shell sits
+# in runner_wait's real 15 s sleep when the kill arrives, as a step does while its load runs.
+df_seq "$pg_size $pg_used_low $pg_free_low"
+: >"$fake/sleep.log"
+FAKE_PG_DF_SEQ=$fake/df-seq FAKE_RC_UNTIL_STOP=1 FAKE_FAST_SLEEP=30 \
+  bash "$cluster" step --namespace "$ns" pgkill 1 --duration 1m >"$tmp/out" 2>&1 &
+kill_step=$!
+watching=no
+for ((i = 0; i < 600; i++)); do
+  if grep -qx 30 "$fake/sleep.log"; then
+    watching=yes
+    break
+  fi
+  sleep 0.1
+done
+[ "$watching" = yes ] || fail "the step read the volume through no 30 s watcher in 60 s: $(cat "$tmp/out")"
+kill -KILL "$kill_step"
+# The zombie reaped, so the pid the watcher holds names no process any more. A watcher that is
+# gone takes no 30 s nap and reads the volume no more; the step's runner_wait, in a command
+# substitution the kill leaves behind too, sleeps a real 15 s and reads no volume, and the fake
+# kubectl's df is the watcher's read alone. The wait below is the watcher's one poll, not an
+# assertion: a watcher that polls on fails the counts.
+wait "$kill_step" 2>/dev/null || true
+for ((i = 0; i < 100; i++)); do
+  if grep -q 'disk watcher' "$tmp/out"; then break; fi
+  sleep 0.1
+done
+# From here the volume is under the threshold: a watcher still polling records the dead step
+# failed and stops the job step-pgkill, which a later run of a step of that name would be.
+df_seq "$pg_size $pg_used_high $pg_free_high"
+: >"$fake/sleep.log"
+kill_dfs=$(grep -c -- 'df -B1 --output' "$fake/kubectl.log" || true)
+# 2 s, never 3, which the fake sleep returns from at once.
+sleep 2
+kill_dfs_after=$(grep -c -- 'df -B1 --output' "$fake/kubectl.log" || true)
+! grep -qx 'step-pgkill' "$fake/runner-stops" 2>/dev/null ||
+  fail "the disk watcher of a killed step stopped the runner job step-pgkill after the kill: $(cat "$fake/runner-stops")"
+[ ! -f "$kill_dir/step-failed.json" ] ||
+  fail "the disk watcher of a killed step recorded it failed: $(cat "$kill_dir/step-failed.json")"
+[ "$kill_dfs_after" = "$kill_dfs" ] ||
+  fail "the killed step's disk watcher made $((kill_dfs_after - kill_dfs)) more reads of the volume in the 2 s after it was reaped: it reads on for ever"
+! grep -qx 30 "$fake/sleep.log" ||
+  fail "the killed step's disk watcher took $(grep -cx 30 "$fake/sleep.log") more 30 s naps after it was reaped: it polls on for ever"
+unset FAKE_FAST_SLEEP
+run_cluster down --namespace "$ns"
+pass "the disk watcher of a step that was killed outright stops at its next reading, records nothing and stops no runner job"
+
+# (x) A copy-back where heap.txt alone did not come back. Every other file of the step is here,
+# so the step is a complete one: marking it failed (kind copy_back) would drop its row from the
+# curves and the tables for a heap profile they take no number from. It is a note instead, and
+# the runner keeps the step's directory, the heap.txt that stayed among it.
+reset_fake
+export LOADTEST_CLUSTER_ROOT=$tmp/root-heapback
+run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok"
+((RC == 0)) || fail "up exited $RC: $(cat "$tmp/out")"
+heap_dir=$LOADTEST_CLUSTER_ROOT/$(jq -r .data.run "$fake/lock.json")/steps/heapcut
+run_cluster seed --namespace "$ns"
+((RC == 0)) || fail "seed exited $RC: $(cat "$tmp/out")"
+FAKE_HEAP_COPY_FAIL=1 run_cluster step --namespace "$ns" heapcut 1 --duration 1m
+unset FAKE_HEAP_COPY_FAIL
+((RC == 0)) || fail "a step whose heap.txt alone did not come back exited $RC: $(cat "$tmp/out")"
+[ ! -f "$heap_dir/step-failed.json" ] ||
+  fail "a step whose heap.txt alone did not come back was marked failed, so the curves and the tables lose its row: $(cat "$heap_dir/step-failed.json")"
+[ -f "$heap_dir/summary.json" ] || fail "the step's summary.json did not come back: $(names "$heap_dir")"
+[ ! -e "$heap_dir/heap.txt" ] && [ ! -e "$heap_dir/heap.txt.part" ] ||
+  fail "the step directory holds a heap.txt the runner never sent whole: $(names "$heap_dir")"
+grep -qF 'step heapcut: heap.txt (the step-end heap profile in text) was not copied back; every other file is here, and codepaths shows - for the MemStats rows' "$tmp/out" ||
+  fail "the step does not say that heap.txt alone was not copied back: $(cat "$tmp/out")"
+grep -qF '/work/steps/heapcut/heap.txt' "$tmp/out" ||
+  fail "the note does not say where heap.txt stays in the runner: $(cat "$tmp/out")"
+! grep -q -- "exec runner -c runner -- rm -rf /work/steps/heapcut " "$fake/kubectl.log" ||
+  fail "the runner's step directory was removed although heap.txt did not come back"
+run_cluster down --namespace "$ns"
+pass "a step whose heap.txt alone did not come back is complete, says so in a note, and keeps the runner's step directory with it"

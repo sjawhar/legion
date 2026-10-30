@@ -614,22 +614,28 @@ use_run() {
 # pid_ns: this process's PID namespace (readlink /proc/self/ns/pid), empty where /proc gives none.
 pid_ns() { readlink /proc/self/ns/pid 2>/dev/null || true; }
 
+# pid_ns_foreign: the run was started in a PID namespace that is not this command's, so the pids
+# it recorded (its command files, its daemons' pidfiles) name nothing here. It sets
+# PID_NS_RECORDED (state.json's pid_ns, empty without state.json or without one in it) and
+# PID_NS_HERE (this process's), which its callers name in their messages, and returns 0 only when
+# both are set and differ: a state.json from before pid_ns (an older run) and a pod whose /proc
+# gives no namespace are never foreign.
+pid_ns_foreign() {
+  PID_NS_RECORDED=""
+  [ ! -f "$STATE" ] || PID_NS_RECORDED=$(jq -r '.pid_ns // ""' "$STATE")
+  PID_NS_HERE=$(pid_ns)
+  [ -n "$PID_NS_RECORDED" ] && [ -n "$PID_NS_HERE" ] && [ "$PID_NS_RECORDED" != "$PID_NS_HERE" ]
+}
+
 # pid_ns_check: refuse, before anything is registered or started, a command of a run that another
-# PID namespace started. A Legion pod runs each role in a PID namespace of its own over one
-# CLUSTER_ROOT, so the pids that role recorded (the run's command files, the daemons' pidfiles)
-# name nothing here, and a command from here would register itself as alive for a heartbeat it
-# cannot see. Only the role that ran up drives its run; another role runs a copy of its own. A
-# state.json from before pid_ns (an older run) and a pod whose /proc gives no namespace are not
-# checked, and status (read-only) and down (which deletes the run's objects and the lock without
-# reading a pid) never come through here.
+# PID namespace started (pid_ns_foreign). A Legion pod runs each role in a PID namespace of its
+# own over one CLUSTER_ROOT, so a command from here would register itself as alive for a heartbeat
+# it cannot see. Only the role that ran up drives its run; another role runs a copy of its own.
+# status (read-only) and down (which deletes the run's objects and the lock without reading a pid)
+# never come through here.
 pid_ns_check() {
-  local recorded here
-  recorded=$(jq -r '.pid_ns // ""' "$STATE")
-  [ -n "$recorded" ] || return 0
-  here=$(pid_ns)
-  [ -n "$here" ] || return 0
-  [ "$here" != "$recorded" ] || return 0
-  note "run $RUN was started in PID namespace $recorded by pod $(state '.holder_pod // "?"'), and this command runs in $here."
+  pid_ns_foreign || return 0
+  note "run $RUN was started in PID namespace $PID_NS_RECORDED by pod $(state '.holder_pod // "?"'), and this command runs in $PID_NS_HERE."
   die "$CMD: only the role that ran up can drive run $RUN: its pids mean nothing in this PID namespace, so a command from here would hold a heartbeat it cannot see. Run your own copy in another namespace, or ask that role's holder (issue $(lock_issue)) to run it. cluster.sh status and cluster.sh down work from here."
 }
 
@@ -1148,14 +1154,23 @@ pg_disk_write() {
   fi
 }
 
-# pg_disk_watch NAME DIR JOB FILE: a reading of the volume into FILE every PG_DISK_POLL_SECONDS
-# while the step's loadgen run JOB runs in the runner. The first reading under the threshold stops
-# JOB and the step's browser typing, records the step failed (kind pg_disk) with the reading, and
-# ends the watch: Postgres never reaches a full volume with load still arriving, and the step's
-# after-work runs as it does for any step. run_in_runner starts it in the background, and
-# pg_disk_watch_stop ends it on every path out of the step.
+# pg_disk_watch NAME DIR JOB FILE PID START: a reading of the volume into FILE every
+# PG_DISK_POLL_SECONDS while the step's loadgen run JOB runs in the runner. The first reading
+# under the threshold stops JOB and the step's browser typing, records the step failed (kind
+# pg_disk) with the reading, and ends the watch: Postgres never reaches a full volume with load
+# still arriving, and the step's after-work runs as it does for any step. run_in_runner starts it
+# in the background, and pg_disk_watch_stop ends it on every path out of the step.
+#
+# PID and START are the step shell's pid and its start time (proc_start), which give the watcher
+# the heartbeat's kind of liveness: a step killed outright (SIGKILL, an OOM) runs neither
+# pg_disk_watch_stop nor its EXIT trap, and a watcher left behind reads the volume for ever. Step
+# names, job names and pods repeat across runs, so such a watcher would later record pg_disk in a
+# dead step's directory and stop a new run's job of the same name. So each poll ends the watch,
+# recording nothing and stopping nothing, once that process is gone or is another process now, or
+# the run directory is gone; and the lock, which costs an exec, is read only when the watcher is
+# about to act, never once a poll.
 pg_disk_watch() {
-  local name=$1 dir=$2 job=$3 file=$4 nap=""
+  local name=$1 dir=$2 job=$3 file=$4 pid=$5 start=$6 nap="" lock
   # Its own TERM ends the nap it is in, so the step leaves no sleep of its own behind.
   trap '[ -z "$nap" ] || kill -- "$nap" 2>/dev/null; exit 0' TERM
   while :; do
@@ -1163,11 +1178,22 @@ pg_disk_watch() {
     nap=$!
     wait "$nap" || true
     nap=""
+    if [ "$(proc_start "$pid")" != "$start" ] || [ ! -d "$RUN_DIR" ]; then
+      note "step $name: the step that started this disk watcher is gone; it stops, recording nothing and stopping no job"
+      return 0
+    fi
     pg_disk_sample "$file" || continue
     pg_disk_low || continue
     # From here the watcher records and stops; a TERM of a step that ends at this moment
     # (pg_disk_watch_stop) waits for that instead of cutting it in half.
     trap '' TERM
+    # A lock that names another run is this run's end, whatever the step shell still looks like;
+    # a read that failed says nothing, and the step shell above is alive, so the watcher acts.
+    lock=$(kube_lock_get 2>/dev/null) || lock=""
+    if [ -n "$lock" ] && [ "$(jq -r '.data.run // ""' <<<"$lock")" != "$RUN" ]; then
+      note "step $name: the lock no longer names run $RUN; the disk watcher stops, recording nothing and stopping no job"
+      return 0
+    fi
     record_failure "$dir" pg_disk postgres "$(pg_disk_detail); the step's loadgen run was stopped before Postgres filled the volume"
     runner_stop "$job"
     typing_stop "$name" "$dir" || note "step $name: stopping browser typing after the disk watcher fired failed"
@@ -1366,11 +1392,12 @@ runner_start() {
     sh "$name" "$@" || die "kubectl exec could not start $name in the runner"
 }
 
-# runner_stop NAME: the runner job NAME stopped, by the pid it recorded. It never fails: the job
-# may have ended already. runner_wait's bound and the disk watcher both end a job this way.
+# runner_stop NAME: the runner job NAME sent SIGTERM, by the pid it recorded, so a job that ends
+# on it (browsertype writes its summary) does. It never fails: the job may have ended already.
+# runner_wait's bound, the disk watcher and typing_stop all end a job this way.
 runner_stop() {
   # shellcheck disable=SC2016 # expanded by the runner's sh
-  kube exec runner -c runner -- sh -c 'kill "$(cat "/work/logs/$1.pid")"' sh "$1" >/dev/null 2>&1 || true
+  kube exec runner -c runner -- sh -c 'kill -TERM "$(cat "/work/logs/$1.pid")"' sh "$1" >/dev/null 2>&1 || true
 }
 
 # runner_wait NAME SECONDS [LOG_DIR]: NAME's exit status once it has one; past SECONDS it stops
@@ -2051,9 +2078,7 @@ typing_summary() {
 typing_stop() {
   local name=$1 dir=$2 job=typing-$1 rc
   { [ -n "$TYPING" ] && [ ! -f "$dir/browsertype.json" ]; } || return 0
-  # shellcheck disable=SC2016 # expanded by the runner's sh
-  kube exec runner -c runner -- sh -c 'kill -TERM "$(cat "/work/logs/$1.pid")"' sh "$job" >/dev/null 2>&1 ||
-    note "step $name: SIGTERM to browsertype failed (it may have ended already)"
+  runner_stop "$job"
   rc=$(runner_wait "$job" 120 "$dir") || rc=timeout
   if [ -f "$dir/$job.log" ]; then mv -f -- "$dir/$job.log" "$dir/browsertype.txt"; else : >"$dir/browsertype.txt"; fi
   kube exec runner -c runner -- rm -f "$TYPING_DIR/token" "$TYPING_DIR/$name.docs" >/dev/null 2>&1 ||
@@ -2233,12 +2258,16 @@ run_step() {
 # streams: every file but heap.txt first, then heap.txt alone. With typing at 10x, heap.txt (the
 # step-end heap profile in text form) passed 1 GB, and one uncompressed tar stream of it through
 # kubectl exec ended early ("Unexpected EOF in archive", run lt-20261029t115927-655c, r16-typing),
-# which lost meta.json and summary.json with it. Each stream is tried twice; a failure of either
-# leaves the step in the runner, so nothing is removed there, and run_in_runner records the step
-# as failed (kind copy_back). The first stream is extracted into a scratch directory beside DIR
-# and its files are moved into DIR only once the stream ended cleanly, so a stream cut mid-file
-# never leaves a truncated summary.json in DIR for loadgen curves and tables to read; heap.txt
-# lands the same way, through heap.txt.part.
+# which lost meta.json and summary.json with it. Each stream is tried twice. A failure of the
+# first stream returns 1: the step's files are missing here, and run_in_runner records the step as
+# failed (kind copy_back). A failure of heap.txt alone, its existence check or both tries of its
+# stream, returns 2: every other file of the step is here, so the step is a complete one that
+# lacks the heap profile, which run_in_runner says in a note. Nothing is removed in the runner
+# unless everything came back, so the heap.txt that did not stays there with the step's other
+# files. The first stream is extracted into a scratch directory beside DIR and its files are moved
+# into DIR only once the stream ended cleanly, so a stream cut mid-file never leaves a truncated
+# summary.json in DIR for loadgen curves and tables to read; heap.txt lands the same way, through
+# heap.txt.part.
 runner_copy_back() {
   local name=$1 dir=$2 src="/work/steps/$1" try scratch copied
   for try in 1 2; do
@@ -2256,7 +2285,7 @@ runner_copy_back() {
   local has
   # shellcheck disable=SC2016 # expanded by the runner's sh
   has=$(kube_read exec runner -c runner -- sh -c 'if test -f "$1"; then echo yes; else echo no; fi' sh "$src/heap.txt") ||
-    return 1
+    return 2
   [ "$has" = yes ] || return 0
   for try in 1 2; do
     if kube exec runner -c runner -- gzip -1 -c "$src/heap.txt" | gzip -d >"$dir/heap.txt.part" &&
@@ -2266,7 +2295,7 @@ runner_copy_back() {
     rm -f -- "$dir/heap.txt.part"
     note "step $name: copying $src/heap.txt back failed (try $try of 2)"
   done
-  return 1
+  return 2
 }
 
 # step_at_exit: the EXIT trap run_in_runner sets before the step's load: the step's disk watcher
@@ -2279,18 +2308,21 @@ step_at_exit() {
 # run_in_runner NAME DIR JOB SECONDS CMD...: a step's loadgen run CMD as the runner job JOB (at
 # most SECONDS), with the Postgres data volume read before the load and refusing it with too
 # little free space (pg_disk_low: the step fails with kind pg_disk and sends nothing), a watcher
-# reading it while the load runs, Postgres's write-out counters before and after it
+# reading it while the load runs (pg_disk_watch, which this shell's pid and start time end when
+# this shell is killed outright), Postgres's write-out counters before and after it
 # (pg-stats-before.json, pg-stats-after.json) and, with --typing, browser typing from just before
 # it (typing_start) until the stored-order command ends (typing_stop, and at the latest when the
 # step ends); then the
 # after-work of every step: DIR/pg-disk.json, /work/steps/NAME copied back into DIR (and, once
-# copied, removed from the runner with /work/meta/NAME.json; a copy-back that failed is a step
-# failure, kind copy_back,
-# and leaves the files in the runner), the crash check, the container logs, a non-zero exit
-# recorded, the stored-order check while Dispatch still runs (one that dies leaves the step
-# going), cgroup-merge and tables.
+# every file of it came back, removed from the runner with /work/meta/NAME.json; a copy-back that
+# failed is a step failure, kind copy_back, and leaves the files in the runner, while a heap.txt
+# that alone did not come back is a note, not a failure: the step is whole without it), the crash
+# check, the container logs, a non-zero exit recorded, the stored-order check while Dispatch still
+# runs (one that dies leaves the step going), cgroup-merge and tables.
 run_in_runner() {
   local name=$1 dir=$2 job=$3 seconds=$4 started rc readings=$2/.pg-disk.jsonl
+  local shell_pid=$BASHPID shell_start copy_rc=0
+  shell_start=$(proc_start "$shell_pid")
   shift 4
   trap step_at_exit EXIT
   pg_disk_sample "$readings" || true
@@ -2303,7 +2335,7 @@ run_in_runner() {
   started=$(utc_now)
   typing_start "$name" "$dir" "$seconds"
   runner_start "$job" "$@"
-  pg_disk_watch "$name" "$dir" "$job" "$readings" &
+  pg_disk_watch "$name" "$dir" "$job" "$readings" "$shell_pid" "$shell_start" &
   PG_DISK_WATCHER=$!
   rc=$(runner_wait "$job" "$seconds" "$dir")
   pg_disk_watch_stop
@@ -2311,12 +2343,19 @@ run_in_runner() {
   pg_disk_write "$dir" "$readings"
   pg_stats "$dir/pg-stats-after.json"
   [ ! -f "$dir/$job.log" ] || mv -- "$dir/$job.log" "$dir/loadgen.out"
-  if runner_copy_back "$name" "$dir"; then
-    kube exec runner -c runner -- rm -rf "/work/steps/$name" "/work/meta/$name.json" ||
-      note "step $name: removing /work/steps/$name from the runner failed"
-  else
-    record_failure "$dir" copy_back "" "copying /work/steps/$name back from the runner failed, so the step's files are missing here; they stay in the runner at /work/steps/$name"
-  fi
+  runner_copy_back "$name" "$dir" || copy_rc=$?
+  case $copy_rc in
+    0)
+      kube exec runner -c runner -- rm -rf "/work/steps/$name" "/work/meta/$name.json" ||
+        note "step $name: removing /work/steps/$name from the runner failed"
+      ;;
+    2)
+      note "step $name: heap.txt (the step-end heap profile in text) was not copied back; every other file is here, and codepaths shows - for the MemStats rows. It stays in the runner at /work/steps/$name/heap.txt, with the rest of the step's files."
+      ;;
+    *)
+      record_failure "$dir" copy_back "" "copying /work/steps/$name back from the runner failed, so the step's files are missing here; they stay in the runner at /work/steps/$name"
+      ;;
+  esac
 
   container_snapshot "$dir/containers-after.tsv"
   crash_check "$dir/containers-before.tsv" "$dir/containers-after.tsv" "$dir"
@@ -2863,14 +2902,11 @@ collect_run() {
 # so, and they stop on their own, the heartbeat because the lock is gone and the sampler because
 # the heartbeat is.
 down_run() {
-  local name deadline listing recorded here
+  local name deadline listing
   if [ -d "$RUN_DIR" ]; then
     rm -f -- "$RUN_DIR/hold-until"
-    recorded=""
-    [ ! -f "$STATE" ] || recorded=$(jq -r '.pid_ns // ""' "$STATE")
-    here=$(pid_ns)
-    if [ -n "$recorded" ] && [ -n "$here" ] && [ "$recorded" != "$here" ]; then
-      note "down: run $RUN was started in PID namespace $recorded, not this one ($here), so this command can stop no daemon of it: it drops their pidfiles here, and they stop on their own, the heartbeat once the lock below is gone and the sampler once that heartbeat is."
+    if pid_ns_foreign; then
+      note "down: run $RUN was started in PID namespace $PID_NS_RECORDED, not this one ($PID_NS_HERE), so this command can stop no daemon of it: it drops their pidfiles here, and they stop on their own, the heartbeat once the lock below is gone and the sampler once that heartbeat is."
       rm -f -- "$RUN_DIR/heartbeat.pid" "$RUN_DIR/sampler.pid"
     else
       for name in sampler heartbeat; do stop_daemon "$name"; done
@@ -3195,7 +3231,7 @@ cmd_replay() {
 cmd_status() {
   parse "namespace run" "" "$@"
   positional 0 "no positional arguments"
-  local lock run=${OPT[run]:-} name hold recorded
+  local lock run=${OPT[run]:-} name hold
   lock=$(kube_lock_get)
   if [ -n "$lock" ]; then
     jq -r '.data | "lock: run \(.run), holder pod \(."holder-pod") (uid \(."holder-uid"), issue \(.issue)), started \(.started), heartbeat \(.heartbeat)"' <<<"$lock"
@@ -3210,9 +3246,8 @@ cmd_status() {
   if [ -f "$STATE" ]; then
     jq -r '"run \(.run): commit \(.dispatch_commit), Postgres \(.postgres.tier), created \(.created)"' "$STATE"
     printf 'run directory: %s\n' "$RUN_DIR"
-    recorded=$(jq -r '.pid_ns // ""' "$STATE")
-    if [ -n "$recorded" ] && [ -n "$(pid_ns)" ] && [ "$recorded" != "$(pid_ns)" ]; then
-      printf 'PID namespace: %s, not this one (%s): only the role that ran up can drive this run; status and down work from here\n' "$recorded" "$(pid_ns)"
+    if pid_ns_foreign; then
+      printf 'PID namespace: %s, not this one (%s): only the role that ran up can drive this run; status and down work from here\n' "$PID_NS_RECORDED" "$PID_NS_HERE"
     fi
     hold=$(hold_until)
     if [ -z "$hold" ]; then
@@ -3264,7 +3299,7 @@ cmd_hold() {
   local d=${OPT[for]:-$KEEP_FOR_DEFAULT}
   valid duration "$d" || die "hold: --for '$d' is not a whole number of s, m or h (for example 2h)"
   use_run
-  hold_set "$(duration_seconds "$d")" || die "hold: run $RUN has no directory in $CLUSTER_ROOT on this pod"
+  hold_set "$(duration_seconds "$d")"
   ensure_daemons
   note "run $RUN is held until $(hold_at "$(hold_until)") ($d from now): its heartbeat renews the lock with no command of it running. cluster.sh hold --namespace $NS --for DURATION extends it; cluster.sh down --namespace $NS --run $RUN removes the copy."
 }
@@ -3350,8 +3385,8 @@ all_exit() {
     isolated down_run
     ((ISOLATED_RC == 0)) || note "all: down failed; run: cluster.sh down --namespace $NS --run $RUN"
   elif [ -n "${RUN_TAKEN:-}" ]; then
-    if hold_set "$(duration_seconds "${ALL_KEEP_FOR:-$KEEP_FOR_DEFAULT}")"; then
-      note "all: --keep: run $RUN stays up, held until $(hold_at "$(hold_until)") (--keep-for ${ALL_KEEP_FOR:-$KEEP_FOR_DEFAULT}): until then its heartbeat renews the lock with no command running, so no other worker's up calls it stale. cluster.sh hold --namespace $NS --for DURATION extends the hold."
+    if hold_set "$(duration_seconds "$ALL_KEEP_FOR")"; then
+      note "all: --keep: run $RUN stays up, held until $(hold_at "$(hold_until)") (--keep-for $ALL_KEEP_FOR): until then its heartbeat renews the lock with no command running, so no other worker's up calls it stale. cluster.sh hold --namespace $NS --for DURATION extends the hold."
     else
       note "all: --keep: run $RUN stays up, with no hold: it has no directory in $CLUSTER_ROOT on this pod"
     fi

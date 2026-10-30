@@ -70,6 +70,19 @@ func withCopyMeta(t *testing.T, dir, phase string, readsOnly bool, pgCPUs string
 	return dir
 }
 
+// withCopyMetaNoPhase rewrites the step directory's meta.json with the copy a run recorded before
+// cluster.sh wrote the phase: the copy's Postgres tier and no phase. It returns dir.
+func withCopyMetaNoPhase(t *testing.T, dir, pgCPUs string) string {
+	t.Helper()
+	var m metaFile
+	if err := json.Unmarshal([]byte(readText(t, filepath.Join(dir, "meta.json"))), &m); err != nil {
+		t.Fatal(err)
+	}
+	m.Copy = json.RawMessage(fmt.Sprintf(`{"namespace":"loadtest","postgres":{"tier":"db-custom-%s","cpu":%q}}`, pgCPUs, pgCPUs))
+	writeFixtureJSON(t, filepath.Join(dir, "meta.json"), m)
+	return dir
+}
+
 // goodSummary is a 10-minute step at factor f that passes every criterion: all events committed
 // and delivered within 180 ms at p99, every request 2xx at its target, no pool waiter.
 func goodSummary(f float64) summary {
@@ -333,6 +346,34 @@ func TestCurvesTakeAStepsKindFromTheRun(t *testing.T) {
 	}
 	if knees := readText(t, filepath.Join(out, "KNEES.md")); !strings.Contains(knees, "knee series is the grid and refinement steps in factor order: 5x-db4.") {
 		t.Errorf("the knee series is not 5x-db4 alone:\n%s", knees)
+	}
+}
+
+// TestCurvesNameTheKindOfACopyWithoutAPhase: a copy from before cluster.sh recorded the phase
+// names the series' 16 vCPU Postgres for every step, so it says nothing about where a step sits;
+// the names do, as they always did. A quick 10x-hour is the hour, with TREND.md over it, and not
+// a second factor-10 step of the knee series, and 1x-db4 is the 4 vCPU database row.
+func TestCurvesNameTheKindOfACopyWithoutAPhase(t *testing.T) {
+	root := t.TempDir()
+	quickHour := goodSummary(10)
+	quickHour.Config.DurationS = 300
+	out := curves(t,
+		withCopyMetaNoPhase(t, curveFixture(t, root, "10x-hour", quickHour, fixtureCgroup(2)), "16"),
+		withCopyMetaNoPhase(t, curveFixture(t, root, "1x-db4", goodSummary(1), fixtureCgroup(2)), "16"),
+		withCopyMetaNoPhase(t, curveFixture(t, root, "10x", goodSummary(10), fixtureCgroup(2)), "16"))
+	order, rows := curvesCSV(t, out)
+	if rows["10x-hour"]["kind"] != "hour" || rows["1x-db4"]["kind"] != "db4" || rows["10x"]["kind"] != "grid" {
+		t.Errorf("kinds: 10x-hour %q, 1x-db4 %q, 10x %q; want hour, db4, grid",
+			rows["10x-hour"]["kind"], rows["1x-db4"]["kind"], rows["10x"]["kind"])
+	}
+	if got := strings.Join(order, ","); got != "10x,10x-hour,1x-db4" {
+		t.Errorf("row order %s, want the knee series, the hour, then the 4 vCPU step", got)
+	}
+	if knees := readText(t, filepath.Join(out, "KNEES.md")); !strings.Contains(knees, "knee series is the grid and refinement steps in factor order: 10x.") {
+		t.Errorf("the knee series is not 10x alone:\n%s", knees)
+	}
+	if _, err := os.Stat(filepath.Join(out, "TREND.md")); err != nil {
+		t.Errorf("the hour step left no TREND.md: %v", err)
 	}
 }
 

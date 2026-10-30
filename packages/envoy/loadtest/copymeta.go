@@ -29,6 +29,8 @@ func readCopyMeta(path string) (json.RawMessage, error) {
 // (curves.go, classify). The object's other fields (images, settings, nodes, pods) describe the
 // copy and no command reads them.
 type stepCopy struct {
+	// Phase is empty in a run recorded before cluster.sh wrote it; curves then takes the step's
+	// kind from its name, since such a copy names the series' Postgres tier for every step.
 	Phase     string `json:"phase"`
 	ReadsOnly bool   `json:"reads_only"`
 	Postgres  struct {
