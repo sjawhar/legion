@@ -68,6 +68,11 @@ type listenerDeliveryHandlerConfig struct {
 	messagesDelivered *metrics.Counter
 	messagesNAKed     *metrics.Counter
 	deliveryDuration  *metrics.Histogram
+	// roleKeptExpired counts the kept role messages a claim's drain dropped unforwarded because
+	// the stream had held them longer than roleKeepWindow (envoy_role_kept_expired_total,
+	// drainKeptRole). A reading that climbs says roles are being claimed long after the messages
+	// meant for them were sent, which is a routing problem rather than a delivery one.
+	roleKeptExpired *metrics.Counter
 	// unplaceableRetryWindow is how long an agent delivery this listener cannot place is held
 	// in the stream and redelivered before it is given up with a record of its own
 	// (agentSubjectDelivery). main.go reads it from ENVOY_UNPLACEABLE_RETRY_WINDOW, defaulting
@@ -424,10 +429,14 @@ func laneHolderFresh(entry session.SessionEntry) bool {
 }
 
 // resolveCoreRoleHolder resolves the current live holder for a role-lane delivery by role
-// delivery's rule (resolveRoleHolder with laneHolderFresh), applying the terminal
-// no_holder/delivery_failed outcome itself and reporting ok=false when there is nobody to deliver
-// to. An unclaimed role is no_holder; a lapsed holder and every failed read are delivery_failed,
-// each under a log line that names which it was. Role delivery answers no caller, so it resolves
+// delivery's rule (resolveRoleHolder with laneHolderFresh), applying the terminal outcome itself
+// and reporting ok=false when there is nobody to deliver to. Its two give-up branches - the
+// unclaimed role and the lapsed holder - keep the message for the role's next holder first
+// (keepRoleLaneMessage), and a copy that was kept publishes no delivery exception: the message is
+// not lost. A keep that failed leaves each branch exactly as it was: an unclaimed role is
+// no_holder, a lapsed holder delivery_failed. Every failed read is delivery_failed and keeps
+// nothing, since a read that did not answer is no evidence the role has no holder. Each branch
+// logs a line that names which it was. Role delivery answers no caller, so it resolves
 // under context.Background(): the holder's session read keeps roleHolderReadTimeout
 // (roleHolderSession's bound) as its own cap. Its first claim read is the registry's watched copy
 // of the role bucket (store.Registry.CachedRoleHolder, passed as the resolution's firstHolder), so
@@ -448,6 +457,9 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 		case roleHolderLive:
 			return sessionID, resolved.entry, true
 		case roleHolderUnclaimed:
+			if keepRoleLaneMessage(cfg, role, "", item, roleHolderUnclaimed) {
+				break
+			}
 			applyDeliveryOutcome(cfg, item, deliveryOutcome{
 				metricStatus: "skipped",
 				log: func(logger *logging.Logger) {
@@ -456,6 +468,9 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 				exceptionReason: "no_holder",
 			})
 		default:
+			if keepRoleLaneMessage(cfg, role, sessionID, item, roleHolderLapsed) {
+				break
+			}
 			applyDeliveryOutcome(cfg, item, deliveryOutcome{
 				sessionID:    sessionID,
 				metricStatus: "failed",

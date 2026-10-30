@@ -48,7 +48,7 @@ func newConfirmedRecord(t *testing.T) *dedupe.Cache {
 
 // withPublishRoute gives d what the publish route needs beyond its stores, as main wires it: a
 // delivery config over d's stores with a dedupe cache, startRoleForward(client) as the forward, a
-// logger and a delivered counter, and a confirmation record.
+// logger, a delivered counter and the drain's kept-expired counter, and a confirmation record.
 func withPublishRoute(t *testing.T, d *listenerDeps) *listenerDeps {
 	t.Helper()
 	cache := dedupe.New(10 * time.Minute)
@@ -67,6 +67,7 @@ func withPublishRoute(t *testing.T, d *listenerDeps) *listenerDeps {
 		dedupeCache:       cache,
 		logger:            logging.NewWithWriter("test", logs),
 		messagesDelivered: metrics.New().NewCounter("test_messages_delivered", "test"),
+		roleKeptExpired:   metrics.New().NewCounter("test_role_kept_expired", "test"),
 	}
 	d.confirmed = newConfirmedRecord(t)
 	return d

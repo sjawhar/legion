@@ -2733,7 +2733,9 @@ func TestIsControlTopic(t *testing.T) {
 	}
 }
 
-func TestListenerDeliveryHandler_RoleReleasedByReplacementHasNoHolder(t *testing.T) {
+// A role whose claim its replacement released has no holder, so the lane keeps the message for
+// the role's next holder and publishes no delivery exception.
+func TestListenerDeliveryHandler_RoleReleasedByReplacementIsKeptForItsNextHolder(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	const controller = "legion-controller"
 	if _, err := harness.registry.SetRole("ses_role", "test-machine", controller, false); err != nil {
@@ -2765,9 +2767,14 @@ func TestListenerDeliveryHandler_RoleReleasedByReplacementHasNoHolder(t *testing
 	if err := harness.client.PublishCore(item); err != nil {
 		t.Fatalf("publish released controller role: %v", err)
 	}
-	assertDeliveryException(t, probe, item, "no_holder")
+	kept := waitForKeptRoleMessage(t, harness.client, controller, item.EventID)
+	if kept.Topic != controllerTopic {
+		t.Fatalf("the kept copy's topic is %q, want the role topic %s it was published on", kept.Topic, controllerTopic)
+	}
+	noException(t, probe)
 }
-func TestListenerDeliveryHandler_ExpiredRoleDropsClaimAfterException(t *testing.T) {
+
+func TestListenerDeliveryHandler_ExpiredRoleDropsClaimAndKeepsTheMessage(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
 	const role = "expired-holder"
 	if _, err := harness.registry.SetRole("ses_expired", "test-machine", role, false); err != nil {
@@ -2791,7 +2798,11 @@ func TestListenerDeliveryHandler_ExpiredRoleDropsClaimAfterException(t *testing.
 	if err := harness.client.PublishCore(item); err != nil {
 		t.Fatalf("publish role delivery: %v", err)
 	}
-	assertDeliveryException(t, probe, item, "delivery_failed")
+	kept := waitForKeptRoleMessage(t, harness.client, role, item.EventID)
+	if kept.Topic != item.Topic {
+		t.Fatalf("the kept copy's topic is %q, want the role topic %s it was published on", kept.Topic, item.Topic)
+	}
+	noException(t, probe)
 	if holder, err := harness.registry.RoleHolder(role); err != nil || holder != "" {
 		t.Fatalf("expired role claim = %q, %v; want removed", holder, err)
 	}
@@ -3097,12 +3108,17 @@ func TestListenerDeliveryHandler_RoleForwardErrorSelectsTheReason(t *testing.T) 
 	}
 }
 
-func TestListenerDeliveryHandler_EmitsExceptionForControlTopicWithNoHolder(t *testing.T) {
+// A control topic with no holder: an agent subject nobody has is still the no_holder exception,
+// while a role nobody holds is kept for the role's next holder and raises none.
+func TestListenerDeliveryHandler_NoHolderKeepsARoleAndExceptsAnAgent(t *testing.T) {
 	cases := []struct {
 		name  string
 		topic string
+		// role is the role a kept copy is read back under; empty for the agent subject, which
+		// keeps nothing.
+		role string
 	}{
-		{name: "role", topic: contracts.RoleTopicPrefix + "unheld"},
+		{name: "role", topic: contracts.RoleTopicPrefix + "unheld", role: "unheld"},
 		{name: "agent", topic: contracts.AgentSubject("ses_unheld")},
 	}
 
@@ -3140,7 +3156,15 @@ func TestListenerDeliveryHandler_EmitsExceptionForControlTopicWithNoHolder(t *te
 			}
 
 			// Then
-			assertDeliveryException(t, probe, item, "no_holder")
+			if tc.role == "" {
+				assertDeliveryException(t, probe, item, "no_holder")
+				return
+			}
+			kept := waitForKeptRoleMessage(t, harness.client, tc.role, item.EventID)
+			if kept.Topic != tc.topic {
+				t.Fatalf("the kept copy's topic is %q, want the role topic %s it was published on", kept.Topic, tc.topic)
+			}
+			noException(t, probe)
 		})
 	}
 }
@@ -3688,6 +3712,7 @@ func newListenerDeliveryHarnessOn(t *testing.T, client *bus.Client, transport ht
 		messagesDelivered: met.NewCounter("test_messages_delivered", "test"),
 		messagesNAKed:     met.NewCounter("test_messages_naked", "test"),
 		deliveryDuration:  met.NewHistogram("test_delivery_duration", "test", metrics.DefaultBuckets),
+		roleKeptExpired:   met.NewCounter("test_role_kept_expired", "test"),
 		// The handler refuses a config without its deferral set, as main.go's always has one;
 		// the harness's two handlers share this one as main.go's do.
 		deferredUnplaceable: newUnplaceableDeferrals(),
