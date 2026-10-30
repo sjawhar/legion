@@ -2,30 +2,31 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-156",
-  "completed": "2026-10-30T04:18:00Z",
-  "decision": "changes_requested",
-  "round": 12,
-  "scope": "The architect scoped round 12 to the forward merge 0194ce2a (main cd5ca7c3) and its three additions: migration renumbered to 0145, #2463's graph_edges arms, and the block[] refusal of a comment or message block. ecf20c3a formats ProofDocument.tsx.",
-  "headReviewed": "7c1e099c744e7a626aa3ee904dc8d1c0a827422b",
-  "codeHead": "ecf20c3a152c",
-  "previousReview": "5688196203 (APPROVE at 1d2efef3)",
-  "fingerprint": "changed (diff-of-diffs 720 lines: CI file move to ci.yaml, item_blocks.go call, migration 0136 -> 0145 with 0142's arms, the item-block refusal, docs)",
+  "completed": "2026-10-30T05:55:00Z",
+  "decision": "approved",
+  "round": 13,
+  "scope": "The architect scoped round 13 to three items in one push: the pmdoctest CI filter with one merge of main to 49e23926 or later, narrowing the TS item-block reader to Go's two shapes with two corpus rows, and dropping blockHolds' anyKind flag. Approve once the four required checks are green.",
+  "headReviewed": "2d88496caf047be7c8ff2023282de35692e3d7e2",
+  "codeHead": "691cb8ab84b7",
+  "previousReview": "5708033128 (REQUEST_CHANGES at d4f98e38)",
   "critical": 0,
-  "important": 1,
-  "minor": 2,
-  "workspace": "Recreated after the pod replacement; it matches legion/INFRA-156 (round-11 review.json at 1d2efef3 present). My scratch Postgres was gone, so I started my own at 127.0.0.1:55499 under /legion/scratch/tmp/rvpg.",
-  "localRuns": "go build and vet clean; pmdoc and text (CI=1) and docs, api, refs, store filtered to the PR's and item-block areas pass; contracts 117, envoy-client dispatch-execute 288, proof-editor 209 pass; contracts tsc, dispatch typecheck and biome clean. Negative control: with the item guards removed (Go schema.go plus text.FormatBlockRef, and the TS blockPointersProblem branch), the shared corpus tests fail on the five new rows. .github/scripts/check-ci-filters.sh at the head (PyYAML installed under scratch): envoy-go-race-docs 7 uncovered, six itemblocks/* (main's, fixed on main by 49e23926/#2537) and pmdoc/pmdoctest/pmdoctest.go (this PR's).",
-  "merge": "Both sides kept in every conflicted hunk: applyLive keeps main's applyMargin split and still calls refuseBlockPointers on op.tx (a margin write touches only the marks map, so it cannot change a pointer); indexRenderedVersion keeps tree with main's replaceVersionRefs; blockPairs gets pointers; heldByABlock keeps main's item holders. 0145's graph_edges equals 0142_item_blocks's plus the block_refs filter. Item tables never hold a pointer row (itemBlockPairs passes nil). model.GraphEdgeKinds is unchanged and complete. CI filter additions moved into ci.yaml. No dist or legion change.",
-  "ci": "Required set lint, typecheck, test, pr-title. CI head a32b7eaf (compare to 7c1e099c: handoffsOnly true): typecheck and pr-title success, test in progress, lint and the rest queued at 04:15Z. A request for changes does not wait on CI.",
-  "threads": "18, all resolved; no new thread.",
-  "bodyEdit": "The reviewer corrected the census line naming migration 0135_block_pointer_links to 0145.",
+  "important": 0,
+  "minor": 1,
+  "items": "(1) ci.yaml envoy_go_race_docs lists pmdoc/pmdoctest/*; merge 691cb8ab brings main 49e23926 with no conflict; check-ci-filters.sh at the head exits 0 with no uncovered file. (2) ITEM_BLOCK_REFERENCE takes Go's two shapes (issue comment/message, project-document comment) and itemBlockKind decodes the id as decodeBlockId; two new corpus rows give Go's 'is not a block reference' wording in both languages; with the old reader restored, those two TS rows fail. (3) blockHolds has one any-kind rule; behaviour unchanged since item block refs hold only mentions.",
+  "localRuns": "contracts dispatch-block-ref.test.ts 119 pass, contracts tsc and biome clean; go build and vet clean; pmdoc and text pointer tests pass; refs, api and docs graph-reader tests pass on a scratch Postgres.",
+  "ci": "CI head ba17acf8 (compare to 2d88496c: handoffsOnly true). Required lint, typecheck, test and pr-title all success at 05:33Z. Other checks: contracts, docs, envoy-plugin, pi-envoy, pi-legion, pi-shared, worker-image build success; the rest still queued or running when approved; I read them when they settle.",
+  "migrations": "Main's highest is 0144; the PR's 0145_block_pointer_links is free.",
+  "threads": "20, all resolved. The two round-12 threads (PRRT_kwDORFy7ds6x2C2w, PRRT_kwDORFy7ds6x2C22) are fixed in 752d79ec; accepted in the approval.",
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at 7c1e099c (Opus 5.5). High: envoy_go_race_docs filter lacks pmdoc/pmdoctest/*, which docs/block_pointer_links_test.go imports, so ci-filters fails. Minor: TS itemBlockKind accepts more than Go's grammar (wording only). Minor: main's citedBlocks ignores block_ref_listed (an extra refresh only, no change).",
-    "codeQuality": "Verdict: CHANGES at 7c1e099c (Opus 5.5). blockHolds' anyKind flag never changes an answer (item tables hold only mentions) and contradicts cmd/dispatch/AGENTS.md:628. TS itemBlockKind regex wider than Go's parseDispatch."
+    "deepReview": "Verdict: APPROVE at 2d88496c (Opus 5.5). Dropping anyKind changes no result (item block refs are mentions only). itemBlockKind agrees with Go on every input class the diff targets; Minors: values holding a referenceEnd character, or a trimmed or cut fragment, get a different refusal reason than Go, though both refuse (older than this diff).",
+    "codeQuality": "Verdict: CHANGES at 2d88496c (Opus 5.5): the itemBlockKind doc claimed it reads the value as Go does, which the ParseRef span cut contradicts. Fixed by the reviewer as a prose-only commit (the doc now names the cut and that both refuse). graph.go, CI filter and corpus rows sound."
   },
   "keyFindings": [
-    {"severity": "important", "file": ".github/workflows/ci.yaml", "description": "envoy_go_race_docs (:781-817) does not match packages/envoy/internal/dispatch/pmdoc/pmdoctest/pmdoctest.go, which docs/block_pointer_links_test.go:16 imports; check-ci-filters.sh names it, so ci-filters (and ci-ok) fails on this PR's own file. Add 'packages/envoy/internal/dispatch/pmdoc/pmdoctest/*' beside :800. The six itemblocks/* misses are main's, fixed by #2537."},
-    {"severity": "minor", "file": "packages/contracts/src/dispatch-block-ref.ts", "description": ":131-152 ITEM_BLOCK_REFERENCE admits ISSUE_KEY in the artifact/<slug>/comment form and any [^/?#]+ item id; Go reads that form only for a project key and refuses a bad item id, so for such values TS says 'is a block of a comment' where Go says 'is not a block reference'. Both refuse. Narrow to Go's two shapes, decode the id as Go does, add corpus rows."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/refs/graph.go", "description": ":122-141 blockHolds' anyKind flag never gives a different answer (comment/message block refs hold only mentions) and its comment contradicts cmd/dispatch/AGENTS.md:628. Use one rule, any kind, for every holder."}
-  ]
+    {
+      "severity": "minor",
+      "file": "packages/contracts/src/dispatch-block-ref.ts",
+      "description": "For values holding ' \" < > ` [ ] | or whitespace, or a fragment Go trims or cuts, the TS refusal reason can differ from Go's; both refuse, and the gap is older than this round. Documented in the doc comment by the reviewer's prose fix; no behaviour change."
+    }
+  ],
+  "reviewerProseFix": "The reviewer's own commit corrects the itemBlockKind doc comment in packages/contracts/src/dispatch-block-ref.ts to describe what it does (Go's parseDispatch rules on the whole value; a value Go's ParseRef cuts at a referenceEnd character or trims may get a different refusal reason; both refuse). No code changed."
 }
