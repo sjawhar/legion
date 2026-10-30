@@ -17,6 +17,7 @@ import {
 } from "../../theme/classes";
 import { type IssueStatus, statusLabel } from "../project/board-model";
 import { AgentName } from "./AgentName";
+import { itemOfBlock } from "./block-reference";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-preview-timing";
 import {
@@ -427,31 +428,47 @@ function DocumentPreview({ route }: { route: DispatchReferenceRoute }): ReactNod
 /** A block of a document: its document, then for a pinned reference the version it pins and how
  *  the block stands since (`BlockPin.state`), then its text - the pinned version's for a pinned
  *  reference, its current text otherwise. The document's name is the card's own read of its
- *  summary, which no link to the block reads. */
+ *  summary, which no link to the block reads. A block of a comment or message heads with its item
+ *  and author in place of the document, and reads no summary (`useBlockDocument`), a comment's pin
+ *  naming a revision of the comment; its text is the one its graph node carries, as a document
+ *  block's is. */
 function BlockPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
   const { block } = useReferenceData(route, { text: false });
   const artifact = useBlockDocument(route);
-  if (artifact === undefined || block === undefined) {
+  const item = itemOfBlock(route);
+  const holder =
+    item === undefined ? artifact?.name : item.kind === "comment" ? "Comment" : "Message";
+  if (holder === undefined || block === undefined) {
     return <Heading>{shortForm(route)}</Heading>;
   }
   const { node } = block;
   const pin = node.pin;
   const text = blockText(node);
+  const author = item === undefined ? undefined : node.made_by?.[0];
+  const unit = item === undefined ? "version" : "revision";
   return (
     <>
       <Heading>
         <span className={`font-normal ${textMutedOnSurface}`}>{documentOwner(route)} · </span>
-        {artifact.name}
+        {holder}
+        {author === undefined ? null : (
+          <>
+            <span className={`font-normal ${textMutedOnSurface}`}> · </span>
+            <AgentName actor={author} kind="static" />
+          </>
+        )}
       </Heading>
       {pin === undefined ? null : (
         <span className={`mt-1 block text-xs ${textMutedOnSurface}`}>
-          <span className="block">Version {pin.version}</span>
+          <span className="block">
+            {item === undefined ? "Version" : "Revision"} {pin.version}
+          </span>
           <span className="block">
             {pin.state === "changed"
-              ? `Changed in version ${node.changed_version}`
+              ? `Changed in ${unit} ${node.changed_version}`
               : pin.state === "removed"
-                ? `Removed in version ${pin.removed_version}`
-                : `Unchanged since version ${pin.version}`}
+                ? `Removed in ${unit} ${pin.removed_version}`
+                : `Unchanged since ${unit} ${pin.version}`}
           </span>
         </span>
       )}
