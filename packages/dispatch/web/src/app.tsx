@@ -12,6 +12,7 @@ import { TextAskBlockCard } from "./features/doc/AskBlockCard";
 import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
 import { Inbox } from "./features/inbox/Inbox";
 import { InboxDrawer } from "./features/inbox/InboxDrawer";
+import { CreateIssueButton } from "./features/issue/CreateIssueButton";
 import { CreateIssueDialog } from "./features/issue/CreateIssueDialog";
 import { DEFAULT_MARGIN_WIDTH, Margin } from "./features/margin/Margin";
 import { MarginProvider } from "./features/margin/margin-context";
@@ -300,6 +301,7 @@ function NavigationContents({
   compact,
   onClose,
   onHideSidebar,
+  onCreateIssue,
   onOpenInboxDrawer,
   onSearch,
   onSignOut,
@@ -310,6 +312,7 @@ function NavigationContents({
   closeButtonRef: RefObject<HTMLButtonElement | null>;
   compact: boolean;
   onClose: () => void;
+  onCreateIssue: () => void;
   onHideSidebar: () => void;
   onOpenInboxDrawer: () => void;
   onSearch: () => void;
@@ -340,6 +343,12 @@ function NavigationContents({
         onOpen={() => {
           onClose();
           onSearch();
+        }}
+      />
+      <CreateIssueButton
+        onOpen={() => {
+          onClose();
+          onCreateIssue();
         }}
       />
       <Sidebar
@@ -580,6 +589,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       closeButtonRef={closeButtonRef}
       compact={isCompactViewport}
       onClose={() => setNavigationOpen(false)}
+      onCreateIssue={() => setCreateOpen(true)}
       onHideSidebar={() => setSidebarHidden(true)}
       onOpenInboxDrawer={() => setInboxDrawerOpen(true)}
       onSearch={() => setPaletteMode("all")}

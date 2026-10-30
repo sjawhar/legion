@@ -299,3 +299,24 @@ test("an answer that arrives after the title changed is not shown for the new ti
     await context.close();
   }
 });
+
+test("the rail's New issue button opens the create dialog, preselecting the page's project", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await page.goto("/projects/CORE");
+    await page
+      .getByRole("complementary", { name: "Navigation" })
+      .getByRole("button", { name: "New issue" })
+      .click();
+    const dialog = page.getByRole("dialog", { name: "Create issue" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("textbox", { name: "Title" })).toBeFocused();
+    await expect(dialog.getByRole("combobox", { name: "Project" })).toHaveValue("CORE");
+  } finally {
+    await context.close();
+  }
+});
