@@ -203,6 +203,8 @@ type server struct {
 	drained   context.Context
 	decisions *RouteDecisions
 	log       *slog.Logger
+	// beforeForgetSessionHandle pauses the route's preflight in its concurrency regression test.
+	beforeForgetSessionHandle func()
 }
 
 // NewServer builds the daemon's HTTP server on bind:port, the configured address: every interface

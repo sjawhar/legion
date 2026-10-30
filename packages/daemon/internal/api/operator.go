@@ -322,9 +322,12 @@ func (s *server) forgetSession(w http.ResponseWriter, r *http.Request) {
 			"forget-session refused: %s is %s; suspend, fail, or retire it before starting fresh", c.Token, c.State)))
 		return
 	}
+	if s.beforeForgetSessionHandle != nil {
+		s.beforeForgetSessionHandle()
+	}
 	ctx, decided := s.decision(r, token)
 	defer decided()
-	if err := m.Handle(ctx, supervise.RequestForgetSession{Claim: token}); err != nil {
+	if err := m.Handle(ctx, supervise.RequestForgetSession{Claim: token, Session: req.Session}); err != nil {
 		s.operatorFailure(w, "forget-session", token, err)
 		return
 	}

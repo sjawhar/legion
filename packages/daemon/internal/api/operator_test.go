@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -1124,5 +1125,70 @@ func TestForgetSessionRequiresTheRecordedSession(t *testing.T) {
 
 	if after := h.stored(architectToken); after.Session != before.Session || after.SessionFile != before.SessionFile || after.State != before.State {
 		t.Fatalf("forget-session without session moved the claim: %+v -> %+v", before, after)
+	}
+}
+
+func TestForgetSessionRechecksItsSessionInsideTheMachine(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	h.ready(architectToken, "ses_architect", 1)
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/suspend", nil); recorder.Code != http.StatusOK {
+		t.Fatalf("suspend = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+
+	snapshotted, resumeForget := make(chan struct{}), make(chan struct{})
+	testServer := &server{
+		supervisor: h.supervisor,
+		project:    testProject,
+		stopping:   context.Background(),
+		drained:    context.Background(),
+		decisions:  NewRouteDecisions(),
+		beforeForgetSessionHandle: func() {
+			close(snapshotted)
+			<-resumeForget
+		},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/forget-session", testServer.forgetSession)
+	h.handler = mux
+	response := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		response <- h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/forget-session",
+			map[string]string{"session": "ses_architect"})
+	}()
+	select {
+	case <-snapshotted:
+	case recorder := <-response:
+		t.Fatalf("forget-session completed before its snapshot hook: %d %s", recorder.Code, recorder.Body)
+	case <-time.After(time.Second):
+		t.Fatal("forget-session did not reach its snapshot hook")
+	}
+
+	machine, _ := h.supervisor.Machine(architectToken)
+	if err := machine.Handle(h.ctx, supervise.RequestForgetSession{Claim: architectToken, Session: "ses_architect"}); err != nil {
+		t.Fatalf("first forget after snapshot: %v", err)
+	}
+	if err := machine.Handle(h.ctx, supervise.RequestResume{Claim: architectToken}); err != nil {
+		t.Fatalf("resume after first forget: %v", err)
+	}
+	generation := machine.Claim().Generation
+	if err := machine.Handle(h.ctx, supervise.RequestRegister{
+		Claim: architectToken, Generation: generation, Session: "ses_replacement", SessionFile: "/sessions/ses_replacement.jsonl",
+		PluginContract: DaemonAPIVersion,
+	}); err != nil {
+		t.Fatalf("register replacement session: %v", err)
+	}
+	if err := machine.Handle(h.ctx, supervise.RequestReady{Claim: architectToken, Generation: generation, Session: "ses_replacement"}); err != nil {
+		t.Fatalf("ready replacement session: %v", err)
+	}
+	if err := machine.Handle(h.ctx, supervise.RequestSuspend{Claim: architectToken, By: supervise.SuspendedByOperator}); err != nil {
+		t.Fatalf("suspend replacement session: %v", err)
+	}
+	close(resumeForget)
+
+	wantRefusal(t, <-response, http.StatusConflict,
+		"forget-session refused: legion-legion-legion-208-architect records session ses_replacement; pass --session ses_replacement to start fresh")
+	if got := h.stored(architectToken); got.State != supervise.StateSuspended || got.Session != "ses_replacement" || got.SessionFile != "/sessions/ses_replacement.jsonl" {
+		t.Fatalf("paused forget changed the replacement claim to %+v", got)
 	}
 }

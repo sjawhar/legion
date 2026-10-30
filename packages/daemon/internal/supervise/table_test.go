@@ -308,7 +308,7 @@ func fenced(ev Event, c Claim) Event {
 	case RequestOperatorRetry:
 		return RequestOperatorRetry{Claim: c.Token}
 	case RequestForgetSession:
-		return RequestForgetSession{Claim: c.Token}
+		return RequestForgetSession{Claim: c.Token, Session: c.Session}
 	case RequestDeliver:
 		return RequestDeliver{Claim: c.Token, Task: "another task"}
 	case RequestExit:
@@ -415,7 +415,7 @@ func TestAnEventForAnotherClaimIsAnError(t *testing.T) {
 func wantsRefusal(ev Event) bool {
 	switch ev.(type) {
 	case RequestSpawn, RequestRegister, RequestReady, RequestSuspend, RequestResume, RequestStop,
-		RequestRetry, RequestOperatorRetry, RequestDeliver, RequestExit:
+		RequestRetry, RequestOperatorRetry, RequestForgetSession, RequestDeliver, RequestExit:
 		return true
 	}
 	return false

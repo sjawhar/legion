@@ -221,10 +221,13 @@ type RequestRetry struct{ Claim claim.Token }
 // caller's retry its own way.
 type RequestOperatorRetry struct{ Claim claim.Token }
 
-// RequestForgetSession drops the recorded session of a suspended, failed, or retired claim. Its
-// next resume, retry, or workflow start provisions a fresh session rather than resuming one the
-// operator determined must not be used.
-type RequestForgetSession struct{ Claim claim.Token }
+// RequestForgetSession drops the named recorded session of a suspended, failed, or retired claim.
+// Its next resume, retry, or workflow start provisions a fresh session rather than resuming one
+// the operator determined must not be used.
+type RequestForgetSession struct {
+	Claim   claim.Token
+	Session string
+}
 
 // RequestDeliver gives the claim a task. ID is a durable outbox delivery id when an outbox row
 // drives the request; an empty ID asks the machine to mint an ordinary operator delivery id.
@@ -392,6 +395,8 @@ func requestName(ev Event) (string, bool) {
 		return "close", true
 	case RequestRetry, RequestOperatorRetry:
 		return "retry", true
+	case RequestForgetSession:
+		return "forget-session", true
 	case RequestDeliver:
 		return "deliver", true
 	case RequestExit:
@@ -1203,9 +1208,16 @@ func issueCloseRetired(m *Machine, ctx context.Context, _ Event) error {
 	return m.persist(ctx)
 }
 
-// forgetSession drops the session record from a processless claim. The operator has named the
-// recorded session it is abandoning, so a later resume, retry, or workflow start must spawn fresh.
-func forgetSession(m *Machine, ctx context.Context, _ Event) error {
+// forgetSession drops the named session record from a processless claim. The comparison runs under
+// the machine lock, so a decision that changed the claim since an operator saw it cannot clear a
+// later session.
+func forgetSession(m *Machine, ctx context.Context, ev Event) error {
+	request := ev.(RequestForgetSession)
+	if request.Session != m.claim.Session {
+		return &RefusedError{Request: "forget-session", Err: fmt.Errorf(
+			"%s records session %s; pass --session %s to start fresh", m.claim.Token, m.claim.Session, m.claim.Session,
+		)}
+	}
 	m.forgetSession()
 	return m.persist(ctx)
 }

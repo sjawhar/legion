@@ -405,7 +405,9 @@ func TestReadmissionSpawnsAFreshArchitectAfterForgettingItsSession(t *testing.T)
 	if failed := architectMachine.Claim(); failed.State != supervise.StateFailed || failed.SessionFile == "" {
 		t.Fatalf("parked architect = %+v, want failed with its session still recorded", failed)
 	}
-	if err := architectMachine.Handle(context.Background(), supervise.RequestForgetSession{Claim: architect}); err != nil {
+	if err := architectMachine.Handle(context.Background(), supervise.RequestForgetSession{
+		Claim: architect, Session: architectMachine.Claim().Session,
+	}); err != nil {
 		t.Fatalf("forget the architect session: %v", err)
 	}
 	if cleared := architectMachine.Claim(); cleared.Session != "" || cleared.SessionFile != "" {
