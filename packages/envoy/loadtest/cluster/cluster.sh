@@ -1949,11 +1949,22 @@ run_step() {
 # step-end heap profile in text form) passed 1 GB, and one uncompressed tar stream of it through
 # kubectl exec ended early ("Unexpected EOF in archive", run lt-20261029t115927-655c, r16-typing),
 # which lost meta.json and summary.json with it. Each stream is tried twice; a failure of either
-# leaves the step in the runner, so nothing is removed there.
+# leaves the step in the runner, so nothing is removed there, and run_in_runner records the step
+# as failed (kind copy_back). The first stream is extracted into a scratch directory beside DIR
+# and its files are moved into DIR only once the stream ended cleanly, so a stream cut mid-file
+# never leaves a truncated summary.json in DIR for loadgen curves and tables to read; heap.txt
+# lands the same way, through heap.txt.part.
 runner_copy_back() {
-  local name=$1 dir=$2 src="/work/steps/$1" try
+  local name=$1 dir=$2 src="/work/steps/$1" try scratch copied
   for try in 1 2; do
-    if kube exec runner -c runner -- tar -C "$src" --exclude=./heap.txt -czf - . | tar -C "$dir" -xzf -; then break; fi
+    scratch=$(mktemp -d "$dir/.copy-back.XXXXXX") || return 1
+    copied=no
+    if kube exec runner -c runner -- tar -C "$src" --exclude=./heap.txt -czf - . | tar -C "$scratch" -xzf - &&
+      find "$scratch" -mindepth 1 -maxdepth 1 -exec mv -f -t "$dir" -- {} +; then
+      copied=yes
+    fi
+    rm -rf -- "$scratch"
+    [ "$copied" = no ] || break
     ((try < 2)) || return 1
     note "step $name: copying $src back failed (try $try of 2); retrying"
   done
@@ -1978,7 +1989,8 @@ runner_copy_back() {
 # pg-stats-after.json) and, with --typing, browser typing from just before it (typing_start) until
 # the stored-order command ends (typing_stop, and at the latest when the step ends); then the
 # after-work of every step: /work/steps/NAME copied back into DIR (and, once copied, removed from
-# the runner with /work/meta/NAME.json), the crash check, the container logs, a non-zero exit
+# the runner with /work/meta/NAME.json; a copy-back that failed is a step failure, kind copy_back,
+# and leaves the files in the runner), the crash check, the container logs, a non-zero exit
 # recorded, the stored-order check while Dispatch still runs (one that dies leaves the step
 # going), cgroup-merge and tables.
 run_in_runner() {
@@ -1995,7 +2007,7 @@ run_in_runner() {
     kube exec runner -c runner -- rm -rf "/work/steps/$name" "/work/meta/$name.json" ||
       note "step $name: removing /work/steps/$name from the runner failed"
   else
-    note "step $name: copying /work/steps/$name back from the runner failed; it stays in the runner"
+    record_failure "$dir" copy_back "" "copying /work/steps/$name back from the runner failed, so the step's files are missing here; they stay in the runner at /work/steps/$name"
   fi
 
   container_snapshot "$dir/containers-after.tsv"

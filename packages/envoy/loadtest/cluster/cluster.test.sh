@@ -97,7 +97,8 @@
 # or reset API server connection, never after another error, and a write is never retried; (o) the
 # heartbeat renews the lock only while a command of its run is alive, so an abandoned run's lock
 # goes stale; (p) stored_order_summary reads a summary line that ends with `unchecked=N` and one
-# without it.
+# without it; (q) a step whose copy-back from the runner failed is marked failed with kind
+# copy_back, keeps no truncated file of the cut stream, and leaves its files in the runner.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -295,6 +296,18 @@ case $verb in
         # Each step's meta.json starts now, so the steps' start order is the order they ran.
         jq --arg start "$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)" '.start = $start' "$FAKE_DIR/stepdir/meta.json" >"$FAKE_DIR/meta.tmp"
         mv "$FAKE_DIR/meta.tmp" "$FAKE_DIR/stepdir/meta.json"
+        # FAKE_COPY_BACK_FAIL: the stream is cut mid-file and the exec fails, as the API server's
+        # cut of a 1 GB heap.txt once did. meta.json is whole and summary.json is padded with
+        # incompressible bytes, so the cut falls inside it.
+        if [ -n "${FAKE_COPY_BACK_FAIL:-}" ]; then
+          cutdir=$FAKE_DIR/cut-stepdir
+          rm -rf "$cutdir" && mkdir -p "$cutdir"
+          cp "$FAKE_DIR/stepdir/meta.json" "$cutdir/meta.json"
+          { printf '{"config": {"step": "fake"}, "pad": "'; head -c 100000 /dev/urandom | base64 -w0; printf '"}\n'; } >"$cutdir/summary.json"
+          tar -C "$cutdir" -czf - ./meta.json ./summary.json | head -c 20000
+          echo 'error: unable to upgrade connection: error dialing backend: EOF' >&2
+          exit 1
+        fi
         # The copy-back streams everything but heap.txt, compressed; heap.txt comes separately.
         tar -C "$FAKE_DIR/stepdir" --exclude=./heap.txt -czf - .
         ;;
@@ -610,7 +623,7 @@ export LOADTEST_CLUSTER_ROOT=$tmp/root
 export POD_UID=00000000-1111-2222-3333-444444444444 LEGION_ISSUE=TEST-1
 export PATH="$bin:$PATH"
 unset FAKE_EXEC_FAIL FAKE_SAMPLE FAKE_PROD_MAJOR FAKE_LOADGEN_FAIL FAKE_APPLY_FAIL FAKE_QUIET FAKE_STORED_ORDER \
-  FAKE_EXEC_ERRORS FAKE_FAST_SLEEP FAKE_TYPING_RC FAKE_DISPATCH_BUILD_ERROR
+  FAKE_EXEC_ERRORS FAKE_FAST_SLEEP FAKE_TYPING_RC FAKE_DISPATCH_BUILD_ERROR FAKE_COPY_BACK_FAIL
 export DISPATCH_URL=http://dispatch.invalid DISPATCH_TOKEN_FILE=$fake/token
 echo fake-token >"$fake/token"
 
@@ -1998,3 +2011,35 @@ pass "the heartbeat stops once no command of its run is alive, so an abandoned r
     fail "stored-order.json of a summary line without unchecked is $(jq -c '{documents, clean, unchecked}' "$tmp/so-plain.json")"
 )
 pass "stored_order_summary reads a summary line that ends with unchecked=N, and one without it"
+
+# (q) A copy-back of a step's files from the runner that failed. The step's files are then missing
+# here, so the step is a failed one (step-failed.json kind copy_back), not a complete step whose
+# directory holds no summary.json; the cut stream leaves no truncated file behind, since a
+# truncated summary.json fails loadgen curves and tables for the whole run; and the files stay in
+# the runner, so nothing of the step is removed there.
+reset_fake
+export LOADTEST_CLUSTER_ROOT=$tmp/root-copyback
+run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok"
+((RC == 0)) || fail "up exited $RC"
+run=$(jq -r .data.run "$fake/lock.json")
+run_dir=$LOADTEST_CLUSTER_ROOT/$run
+run_cluster seed --namespace "$ns"
+((RC == 0)) || fail "seed exited $RC"
+FAKE_COPY_BACK_FAIL=1 run_cluster step --namespace "$ns" cut 1 --duration 1m
+unset FAKE_COPY_BACK_FAIL
+((RC == 0)) || fail "a step whose copy-back failed exited $RC"
+cut_dir=$run_dir/steps/cut
+jq -e '[.reasons[] | select(.kind == "copy_back")] | length == 1' "$cut_dir/step-failed.json" >/dev/null 2>&1 ||
+  fail "a step whose copy-back failed holds no step-failed.json reason of kind copy_back: $(cat "$cut_dir/step-failed.json" 2>/dev/null)"
+jq -e '[.reasons[] | select(.kind == "copy_back")][0].detail | test("/work/steps/cut")' "$cut_dir/step-failed.json" >/dev/null ||
+  fail "the copy_back reason does not say where the step's files stayed: $(cat "$cut_dir/step-failed.json")"
+for f in summary.json meta.json; do
+  [ ! -e "$cut_dir/$f" ] ||
+    fail "the cut stream left $f ($(stat -c %s "$cut_dir/$f") bytes) in the step directory: a truncated file fails loadgen curves and tables for the whole run"
+done
+[ -z "$(find "$cut_dir" -maxdepth 1 -name '.copy-back.*')" ] || fail "the copy-back left its scratch directory in $cut_dir"
+grep -qF 'step cut failed: copy_back' "$tmp/out" || fail "the step did not say that it failed because the copy-back did"
+! grep -q -- "exec runner -c runner -- rm -rf /work/steps/cut " "$fake/kubectl.log" ||
+  fail "the step directory was removed from the runner although the copy back failed"
+run_cluster down --namespace "$ns"
+pass "a step whose copy-back from the runner failed is marked failed with kind copy_back, keeps no truncated file of the cut stream, and leaves its files in the runner"
