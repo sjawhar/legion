@@ -77,11 +77,22 @@ const phrasingParents: Record<string, true> = { paragraph: true, heading: true, 
  * Each block of HTML in `nodes`, at any depth, replaced in place by a paragraph whose one child
  * is that block as an inline `html` node, keeping its position so a later transform reading the
  * source offsets (./typed-block-drawing) still finds the lines it was cut from.
+ *
+ * The up-to-three spaces a block of HTML may open with are block syntax, not content: micromark
+ * takes them into the block's own token (`resolveToHtmlFlow`), and a paragraph of the same text
+ * holds none of them, because a paragraph's leading whitespace is not its text. Keeping them
+ * would draw ` </script>` as a tag with a space before it where the Dispatch server, reading the
+ * line as the inline HTML it is, draws the tag alone. Only the first line's indentation goes; a
+ * later line's belongs to the block's text.
  */
 function drawHtmlBlocks(nodes: MdastNode[]): void {
   for (const [index, node] of nodes.entries()) {
-    if (node.type === 'html') nodes[index] = { type: 'paragraph', children: [node], position: node.position };
-    else if (node.children !== undefined && phrasingParents[node.type] !== true) drawHtmlBlocks(node.children);
+    if (node.type === 'html') {
+      const tag = { ...node, value: (node.value ?? '').replace(/^[ \t]+/, '') };
+      nodes[index] = { type: 'paragraph', children: [tag], position: node.position };
+    } else if (node.children !== undefined && phrasingParents[node.type] !== true) {
+      drawHtmlBlocks(node.children);
+    }
   }
 }
 

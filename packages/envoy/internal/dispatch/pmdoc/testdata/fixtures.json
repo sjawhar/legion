@@ -29696,7 +29696,7 @@
   },
   {
     "name": "lazy-lines-holding-only-an-html-tag",
-    "markdown": "A line holding only an HTML tag, without the prefix of the quote, list item or footnote definition around the paragraph it continues, in each container the line can end.\n\nNext.\n\n> A quote\n<b>\n\nNext.\n\n> > A nested quote\n> <br />\n\nNext.\n\n- An item\n</b>\n\nNext.\n\n1. An item\n<b>\n\nNext.\n\nA reference[^h1].\n\n[^h1]: note\n<b>\n\nNext.\n\nA reference[^h2].\n\n>[^h2]: note\n>    <b>\n\nNext.\n\nA reference[^h3].\n\n:::callout{#h1 kind=\"note\" title=\"\"}\n[^h3]: note\n<b class=\"x\">\n:::\n\nNext.\n\n> A heading\n<b>\n> ===\n",
+    "markdown": "A line holding only an HTML tag, without the prefix of the quote, list item or footnote definition around the paragraph it continues, in each container the line can end.\n\nNext.\n\n> A quote\n<b>\n\nNext.\n\n> > A nested quote\n> <br />\n\nNext.\n\n- An item\n</b>\n\nNext.\n\n1. An item\n<b>\n\nNext.\n\nA reference[^h1].\n\n[^h1]: note\n<b>\n\nNext.\n\nA reference[^h2].\n\n>[^h2]: note\n>    <b>\n\nNext.\n\nA reference[^h3].\n\n:::callout{#h1 kind=\"note\" title=\"\"}\n[^h3]: note\n<b class=\"x\">\n:::\n\nNext.\n\n> A heading\n<b>\n> ===\n\nNext.\n\n </script>\n\nNext.\n\n  </a\t>\n\nA reference[^h4].\n\n[^h4]: a\n\n      <b\t>\n",
     "pm_json": {
       "type": "doc",
       "content": [
@@ -30147,11 +30147,123 @@
               ]
             }
           ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000033"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000034"
+          },
+          "content": [
+            {
+              "type": "html",
+              "attrs": {
+                "value": "</script>",
+                "blockId": null
+              }
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000035"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Next."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000036"
+          },
+          "content": [
+            {
+              "type": "html",
+              "attrs": {
+                "value": "</a\t>",
+                "blockId": null
+              }
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000037"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A reference"
+            },
+            {
+              "type": "footnote_reference",
+              "attrs": {
+                "label": "h4"
+              }
+            },
+            {
+              "type": "text",
+              "text": "."
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "h4",
+            "blockId": "b-000038"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000039"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "a"
+                }
+              ]
+            },
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000040"
+              },
+              "content": [
+                {
+                  "type": "html",
+                  "attrs": {
+                    "value": "<b\t>",
+                    "blockId": null
+                  }
+                }
+              ]
+            }
+          ]
         }
       ]
     },
-    "yjs_update_v1_b64": "AZYBAQAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwABAAYEAAEBqQFBIGxpbmUgaG9sZGluZyBvbmx5IGFuIEhUTUwgdGFnLCB3aXRob3V0IHRoZSBwcmVmaXggb2YgdGhlIHF1b3RlLCBsaXN0IGl0ZW0gb3IgZm9vdG5vdGUgZGVmaW5pdGlvbiBhcm91bmQgdGhlIHBhcmFncmFwaCBpdCBjb250aW51ZXMsIGluIGVhY2ggY29udGFpbmVyIHRoZSBsaW5lIGNhbiBlbmQuKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADCXBhcmFncmFwaAcAAawBBgQAAa0BBU5leHQuKAABrAEHYmxvY2tJZAF3CGItMDAwMDAyhwGsAQMKYmxvY2txdW90ZQcAAbQBAwlwYXJhZ3JhcGgHAAG1AQYEAAG2AQhBIHF1b3RlIIcBtgEDBGh0bWwoAAG/AQV2YWx1ZQF3AzxiPigAAbUBB2Jsb2NrSWQBdwhiLTAwMDAwNCgAAbQBB2Jsb2NrSWQBdwhiLTAwMDAwM4cBtAEDCXBhcmFncmFwaAcAAcMBBgQAAcQBBU5leHQuKAABwwEHYmxvY2tJZAF3CGItMDAwMDA1hwHDAQMKYmxvY2txdW90ZQcAAcsBAwpibG9ja3F1b3RlBwABzAEDCXBhcmFncmFwaAcAAc0BBgQAAc4BD0EgbmVzdGVkIHF1b3RlIIcBzgEDBGh0bWwoAAHeAQV2YWx1ZQF3BjxiciAvPigAAc0BB2Jsb2NrSWQBdwhiLTAwMDAwOCgAAcwBB2Jsb2NrSWQBdwhiLTAwMDAwNygAAcsBB2Jsb2NrSWQBdwhiLTAwMDAwNocBywEDCXBhcmFncmFwaAcAAeMBBgQAAeQBBU5leHQuKAAB4wEHYmxvY2tJZAF3CGItMDAwMDA5hwHjAQMLYnVsbGV0X2xpc3QHAAHrAQMJbGlzdF9pdGVtBwAB7AEDCXBhcmFncmFwaAcAAe0BBgQAAe4BCEFuIGl0ZW0ghwHuAQMEaHRtbCgAAfcBBXZhbHVlAXcEPC9iPigAAe0BB2Jsb2NrSWQBdwhiLTAwMDAxMigAAewBBWxhYmVsAXcD4oCiKAAB7AEIbGlzdFR5cGUBdwZidWxsZXQoAAHsAQZzcHJlYWQBeSgAAewBB2Jsb2NrSWQBdwhiLTAwMDAxMSgAAesBBnNwcmVhZAF5KAAB6wEHYmxvY2tJZAF3CGItMDAwMDEwhwHrAQMJcGFyYWdyYXBoBwABgAIGBAABgQIFTmV4dC4oAAGAAgdibG9ja0lkAXcIYi0wMDAwMTOHAYACAwxvcmRlcmVkX2xpc3QHAAGIAgMJbGlzdF9pdGVtBwABiQIDCXBhcmFncmFwaAcAAYoCBgQAAYsCCEFuIGl0ZW0ghwGLAgMEaHRtbCgAAZQCBXZhbHVlAXcDPGI+KAABigIHYmxvY2tJZAF3CGItMDAwMDE2KAABiQIFbGFiZWwBdwPigKIoAAGJAghsaXN0VHlwZQF3BmJ1bGxldCgAAYkCBnNwcmVhZAF5KAABiQIHYmxvY2tJZAF3CGItMDAwMDE1KAABiAIFb3JkZXIBfQEoAAGIAgZzcHJlYWQBeSgAAYgCB2Jsb2NrSWQBdwhiLTAwMDAxNIcBiAIDCXBhcmFncmFwaAcAAZ4CBgQAAZ8CBU5leHQuKAABngIHYmxvY2tJZAF3CGItMDAwMDE3hwGeAgMJcGFyYWdyYXBoBwABpgIGBAABpwILQSByZWZlcmVuY2WHAacCAxJmb290bm90ZV9yZWZlcmVuY2UoAAGzAgVsYWJlbAF3AmgxhwGzAgYEAAG1AgEuKAABpgIHYmxvY2tJZAF3CGItMDAwMDE4hwGmAgMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAbgCAwlwYXJhZ3JhcGgHAAG5AgYEAAG6AgVub3RlIIcBugIDBGh0bWwoAAHAAgV2YWx1ZQF3AzxiPigAAbkCB2Jsb2NrSWQBdwhiLTAwMDAyMCgAAbgCBWxhYmVsAXcCaDEoAAG4AgdibG9ja0lkAXcIYi0wMDAwMTmHAbgCAwlwYXJhZ3JhcGgHAAHFAgYEAAHGAgVOZXh0LigAAcUCB2Jsb2NrSWQBdwhiLTAwMDAyMYcBxQIDCXBhcmFncmFwaAcAAc0CBgQAAc4CC0EgcmVmZXJlbmNlhwHOAgMSZm9vdG5vdGVfcmVmZXJlbmNlKAAB2gIFbGFiZWwBdwJoMocB2gIGBAAB3AIBLigAAc0CB2Jsb2NrSWQBdwhiLTAwMDAyMocBzQIDCmJsb2NrcXVvdGUHAAHfAgMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAeACAwlwYXJhZ3JhcGgHAAHhAgYEAAHiAgVub3RlIIcB4gIDBGh0bWwoAAHoAgV2YWx1ZQF3AzxiPigAAeECB2Jsb2NrSWQBdwhiLTAwMDAyNSgAAeACBWxhYmVsAXcCaDIoAAHgAgdibG9ja0lkAXcIYi0wMDAwMjQoAAHfAgdibG9ja0lkAXcIYi0wMDAwMjOHAd8CAwlwYXJhZ3JhcGgHAAHuAgYEAAHvAgVOZXh0LigAAe4CB2Jsb2NrSWQBdwhiLTAwMDAyNocB7gIDCXBhcmFncmFwaAcAAfYCBgQAAfcCC0EgcmVmZXJlbmNlhwH3AgMSZm9vdG5vdGVfcmVmZXJlbmNlKAABgwMFbGFiZWwBdwJoM4cBgwMGBAABhQMBLigAAfYCB2Jsb2NrSWQBdwhiLTAwMDAyN4cB9gIDB2NhbGxvdXQHAAGIAwMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAYkDAwlwYXJhZ3JhcGgHAAGKAwYEAAGLAwVub3RlIIcBiwMDBGh0bWwoAAGRAwV2YWx1ZQF3DTxiIGNsYXNzPSJ4Ij4oAAGKAwdibG9ja0lkAXcIYi0wMDAwMjkoAAGJAwVsYWJlbAF3AmgzKAABiQMHYmxvY2tJZAF3CGItMDAwMDI4KAABiAMEa2luZAF3BG5vdGUoAAGIAwV0aXRsZQF3ACgAAYgDB2Jsb2NrSWQBdwJoMYcBiAMDCXBhcmFncmFwaAcAAZkDBgQAAZoDBU5leHQuKAABmQMHYmxvY2tJZAF3CGItMDAwMDMwhwGZAwMKYmxvY2txdW90ZQcAAaEDAwdoZWFkaW5nBwABogMGBAABowMKQSBoZWFkaW5nIIcBowMDBGh0bWwoAAGuAwV2YWx1ZQF3AzxiPigAAaIDAmlkAXcAKAABogMFbGV2ZWwBfQEoAAGiAwdibG9ja0lkAXcIYi0wMDAwMzIoAAGhAwdibG9ja0lkAXcIYi0wMDAwMzEA",
-    "rendered_by_milkdown": "A line holding only an HTML tag, without the prefix of the quote, list item or footnote definition around the paragraph it continues, in each container the line can end.\n\nNext.\n\n> A quote <b>\n\nNext.\n\n> > A nested quote <br />\n\nNext.\n\n* An item </b>\n\nNext.\n\n1. An item <b>\n\nNext.\n\nA reference[^h1].\n\n[^h1]: note <b>\n\nNext.\n\nA reference[^h2].\n\n> [^h2]: note <b>\n\nNext.\n\nA reference[^h3].\n\n:::callout{#h1 kind=\"note\" title}\n[^h3]: note <b class=\"x\">\n:::\n\nNext.\n\n> # A heading <b>\n"
+    "yjs_update_v1_b64": "AbkBAQAHAQtwcm9zZW1pcnJvcgMJcGFyYWdyYXBoBwABAAYEAAEBqQFBIGxpbmUgaG9sZGluZyBvbmx5IGFuIEhUTUwgdGFnLCB3aXRob3V0IHRoZSBwcmVmaXggb2YgdGhlIHF1b3RlLCBsaXN0IGl0ZW0gb3IgZm9vdG5vdGUgZGVmaW5pdGlvbiBhcm91bmQgdGhlIHBhcmFncmFwaCBpdCBjb250aW51ZXMsIGluIGVhY2ggY29udGFpbmVyIHRoZSBsaW5lIGNhbiBlbmQuKAABAAdibG9ja0lkAXcIYi0wMDAwMDGHAQADCXBhcmFncmFwaAcAAawBBgQAAa0BBU5leHQuKAABrAEHYmxvY2tJZAF3CGItMDAwMDAyhwGsAQMKYmxvY2txdW90ZQcAAbQBAwlwYXJhZ3JhcGgHAAG1AQYEAAG2AQhBIHF1b3RlIIcBtgEDBGh0bWwoAAG/AQV2YWx1ZQF3AzxiPigAAbUBB2Jsb2NrSWQBdwhiLTAwMDAwNCgAAbQBB2Jsb2NrSWQBdwhiLTAwMDAwM4cBtAEDCXBhcmFncmFwaAcAAcMBBgQAAcQBBU5leHQuKAABwwEHYmxvY2tJZAF3CGItMDAwMDA1hwHDAQMKYmxvY2txdW90ZQcAAcsBAwpibG9ja3F1b3RlBwABzAEDCXBhcmFncmFwaAcAAc0BBgQAAc4BD0EgbmVzdGVkIHF1b3RlIIcBzgEDBGh0bWwoAAHeAQV2YWx1ZQF3BjxiciAvPigAAc0BB2Jsb2NrSWQBdwhiLTAwMDAwOCgAAcwBB2Jsb2NrSWQBdwhiLTAwMDAwNygAAcsBB2Jsb2NrSWQBdwhiLTAwMDAwNocBywEDCXBhcmFncmFwaAcAAeMBBgQAAeQBBU5leHQuKAAB4wEHYmxvY2tJZAF3CGItMDAwMDA5hwHjAQMLYnVsbGV0X2xpc3QHAAHrAQMJbGlzdF9pdGVtBwAB7AEDCXBhcmFncmFwaAcAAe0BBgQAAe4BCEFuIGl0ZW0ghwHuAQMEaHRtbCgAAfcBBXZhbHVlAXcEPC9iPigAAe0BB2Jsb2NrSWQBdwhiLTAwMDAxMigAAewBBWxhYmVsAXcD4oCiKAAB7AEIbGlzdFR5cGUBdwZidWxsZXQoAAHsAQZzcHJlYWQBeSgAAewBB2Jsb2NrSWQBdwhiLTAwMDAxMSgAAesBBnNwcmVhZAF5KAAB6wEHYmxvY2tJZAF3CGItMDAwMDEwhwHrAQMJcGFyYWdyYXBoBwABgAIGBAABgQIFTmV4dC4oAAGAAgdibG9ja0lkAXcIYi0wMDAwMTOHAYACAwxvcmRlcmVkX2xpc3QHAAGIAgMJbGlzdF9pdGVtBwABiQIDCXBhcmFncmFwaAcAAYoCBgQAAYsCCEFuIGl0ZW0ghwGLAgMEaHRtbCgAAZQCBXZhbHVlAXcDPGI+KAABigIHYmxvY2tJZAF3CGItMDAwMDE2KAABiQIFbGFiZWwBdwPigKIoAAGJAghsaXN0VHlwZQF3BmJ1bGxldCgAAYkCBnNwcmVhZAF5KAABiQIHYmxvY2tJZAF3CGItMDAwMDE1KAABiAIFb3JkZXIBfQEoAAGIAgZzcHJlYWQBeSgAAYgCB2Jsb2NrSWQBdwhiLTAwMDAxNIcBiAIDCXBhcmFncmFwaAcAAZ4CBgQAAZ8CBU5leHQuKAABngIHYmxvY2tJZAF3CGItMDAwMDE3hwGeAgMJcGFyYWdyYXBoBwABpgIGBAABpwILQSByZWZlcmVuY2WHAacCAxJmb290bm90ZV9yZWZlcmVuY2UoAAGzAgVsYWJlbAF3AmgxhwGzAgYEAAG1AgEuKAABpgIHYmxvY2tJZAF3CGItMDAwMDE4hwGmAgMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAbgCAwlwYXJhZ3JhcGgHAAG5AgYEAAG6AgVub3RlIIcBugIDBGh0bWwoAAHAAgV2YWx1ZQF3AzxiPigAAbkCB2Jsb2NrSWQBdwhiLTAwMDAyMCgAAbgCBWxhYmVsAXcCaDEoAAG4AgdibG9ja0lkAXcIYi0wMDAwMTmHAbgCAwlwYXJhZ3JhcGgHAAHFAgYEAAHGAgVOZXh0LigAAcUCB2Jsb2NrSWQBdwhiLTAwMDAyMYcBxQIDCXBhcmFncmFwaAcAAc0CBgQAAc4CC0EgcmVmZXJlbmNlhwHOAgMSZm9vdG5vdGVfcmVmZXJlbmNlKAAB2gIFbGFiZWwBdwJoMocB2gIGBAAB3AIBLigAAc0CB2Jsb2NrSWQBdwhiLTAwMDAyMocBzQIDCmJsb2NrcXVvdGUHAAHfAgMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAeACAwlwYXJhZ3JhcGgHAAHhAgYEAAHiAgVub3RlIIcB4gIDBGh0bWwoAAHoAgV2YWx1ZQF3AzxiPigAAeECB2Jsb2NrSWQBdwhiLTAwMDAyNSgAAeACBWxhYmVsAXcCaDIoAAHgAgdibG9ja0lkAXcIYi0wMDAwMjQoAAHfAgdibG9ja0lkAXcIYi0wMDAwMjOHAd8CAwlwYXJhZ3JhcGgHAAHuAgYEAAHvAgVOZXh0LigAAe4CB2Jsb2NrSWQBdwhiLTAwMDAyNocB7gIDCXBhcmFncmFwaAcAAfYCBgQAAfcCC0EgcmVmZXJlbmNlhwH3AgMSZm9vdG5vdGVfcmVmZXJlbmNlKAABgwMFbGFiZWwBdwJoM4cBgwMGBAABhQMBLigAAfYCB2Jsb2NrSWQBdwhiLTAwMDAyN4cB9gIDB2NhbGxvdXQHAAGIAwMTZm9vdG5vdGVfZGVmaW5pdGlvbgcAAYkDAwlwYXJhZ3JhcGgHAAGKAwYEAAGLAwVub3RlIIcBiwMDBGh0bWwoAAGRAwV2YWx1ZQF3DTxiIGNsYXNzPSJ4Ij4oAAGKAwdibG9ja0lkAXcIYi0wMDAwMjkoAAGJAwVsYWJlbAF3AmgzKAABiQMHYmxvY2tJZAF3CGItMDAwMDI4KAABiAMEa2luZAF3BG5vdGUoAAGIAwV0aXRsZQF3ACgAAYgDB2Jsb2NrSWQBdwJoMYcBiAMDCXBhcmFncmFwaAcAAZkDBgQAAZoDBU5leHQuKAABmQMHYmxvY2tJZAF3CGItMDAwMDMwhwGZAwMKYmxvY2txdW90ZQcAAaEDAwdoZWFkaW5nBwABogMGBAABowMKQSBoZWFkaW5nIIcBowMDBGh0bWwoAAGuAwV2YWx1ZQF3AzxiPigAAaIDAmlkAXcAKAABogMFbGV2ZWwBfQEoAAGiAwdibG9ja0lkAXcIYi0wMDAwMzIoAAGhAwdibG9ja0lkAXcIYi0wMDAwMzGHAaEDAwlwYXJhZ3JhcGgHAAG0AwYEAAG1AwVOZXh0LigAAbQDB2Jsb2NrSWQBdwhiLTAwMDAzM4cBtAMDCXBhcmFncmFwaAcAAbwDAwRodG1sKAABvQMFdmFsdWUBdwk8L3NjcmlwdD4oAAG8AwdibG9ja0lkAXcIYi0wMDAwMzSHAbwDAwlwYXJhZ3JhcGgHAAHAAwYEAAHBAwVOZXh0LigAAcADB2Jsb2NrSWQBdwhiLTAwMDAzNYcBwAMDCXBhcmFncmFwaAcAAcgDAwRodG1sKAAByQMFdmFsdWUBdwU8L2EJPigAAcgDB2Jsb2NrSWQBdwhiLTAwMDAzNocByAMDCXBhcmFncmFwaAcAAcwDBgQAAc0DC0EgcmVmZXJlbmNlhwHNAwMSZm9vdG5vdGVfcmVmZXJlbmNlKAAB2QMFbGFiZWwBdwJoNIcB2QMGBAAB2wMBLigAAcwDB2Jsb2NrSWQBdwhiLTAwMDAzN4cBzAMDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAHeAwMJcGFyYWdyYXBoBwAB3wMGBAAB4AMBYSgAAd8DB2Jsb2NrSWQBdwhiLTAwMDAzOYcB3wMDCXBhcmFncmFwaAcAAeMDAwRodG1sKAAB5AMFdmFsdWUBdwQ8Ygk+KAAB4wMHYmxvY2tJZAF3CGItMDAwMDQwKAAB3gMFbGFiZWwBdwJoNCgAAd4DB2Jsb2NrSWQBdwhiLTAwMDAzOAA=",
+    "rendered_by_milkdown": "A line holding only an HTML tag, without the prefix of the quote, list item or footnote definition around the paragraph it continues, in each container the line can end.\n\nNext.\n\n> A quote <b>\n\nNext.\n\n> > A nested quote <br />\n\nNext.\n\n* An item </b>\n\nNext.\n\n1. An item <b>\n\nNext.\n\nA reference[^h1].\n\n[^h1]: note <b>\n\nNext.\n\nA reference[^h2].\n\n> [^h2]: note <b>\n\nNext.\n\nA reference[^h3].\n\n:::callout{#h1 kind=\"note\" title}\n[^h3]: note <b class=\"x\">\n:::\n\nNext.\n\n> # A heading <b>\n\nNext.\n\n</script>\n\nNext.\n\n</a\t>\n\nA reference[^h4].\n\n[^h4]: a\n\n    <b\t>\n"
   },
   {
     "name": "link-delimiters",

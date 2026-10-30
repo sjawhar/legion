@@ -108,6 +108,28 @@ const documentLevel: Case[] = [
     `doc[paragraph["a"], ${htmlParagraph("<div>")}]`,
     "a\n\n<div>\n",
   ],
+  // The up-to-three spaces a block may open with are block syntax: micromark takes them into the
+  // block's token, and the Dispatch server, reading the same line as the inline HTML it is,
+  // reads a paragraph whose leading whitespace is not its text. The drawn paragraph holds the
+  // tag alone, so the two readers agree and the markdown writes back as it came.
+  [
+    "a block opening one space in",
+    " </script>\n",
+    `doc[${htmlParagraph("</script>")}]`,
+    "</script>\n",
+  ],
+  [
+    "a block opening three spaces in",
+    "   <b>\n",
+    `doc[${htmlParagraph("<b>")}]`,
+    "<b>\n",
+  ],
+  [
+    "a block of more than one line keeps every line after its first",
+    "  <div>\n  foo\n  </div>\n",
+    `doc[${htmlParagraph("<div>\n  foo\n  </div>")}]`,
+    "<div>\n  foo\n  </div>\n",
+  ],
 ];
 
 /**

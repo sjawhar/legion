@@ -48,3 +48,17 @@ Next.
 > A heading
 <b>
 > ===
+
+Next.
+
+ </script>
+
+Next.
+
+  </a	>
+
+A reference[^h4].
+
+[^h4]: a
+
+      <b	>
