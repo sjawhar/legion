@@ -39,21 +39,25 @@ report, a disclosure, and a reply to a maintainer who wrote first.
    question they answered last month, asked again, costs you the reader.
 2. **Write for that audience, in their conventions.** Use their template where they have one, their
    terms, their level of detail. Run `skill://asd-ste100` and `skill://plain-words` over the text.
+   Neither removes AI writing tells; where your session has a pass for those, run it as well.
 3. **Follow their conventions in form as well as words.** A pull request on their repository uses
    their pull-request template. An issue uses their issue template. A thread reply matches the
    thread.
 4. **A fresh reviewer reads it and cuts.** Dispatch a subagent that has not seen the drafting, give
    it the message and the research, and tell it to remove everything that is not needed to
-   understand the core message. A reviewer that only approves has not done step 4.
+   understand the core message. A reviewer that only approves has not done step 4. A subagent with
+   no model of its own runs on yours. Where your session can give the reviewer a different model,
+   do: a reader of the same model as the writer is the weaker check, though no measurement here
+   separates the two.
 
-**Step 4 ends with a list of what it removed, and that list goes in the ask.** Measured over 18
-drafts of three real messages: drafts written with this skill met the bar 9 times in 9, drafts with
-no guidance 8 times in 9, so the first three steps changed almost nothing — the research teaches
-them. The step that changed the message was the cut, and it is the step agents skip: 2 of 9 with the
-skill and 3 of 9 without had no cut at all. Only the cut drafts lost a promise about a future
-release, and they lost half their length. An instruction alone did not make the cut happen, so the
-list is what proves it did: three lines naming what came out, or the sentence "the reviewer removed
-nothing", which is itself an answer.
+**Step 4 ends with a list of what it removed, and that list goes in the ask.** Measured on
+2026-10-30 over 18 drafts of three real messages: drafts written with this skill met the bar 9
+times in 9, drafts with no guidance 8 times in 9, so the first three steps changed almost nothing
+— the research teaches them. The step that changed the message was the cut, and it is the step
+agents skip: 2 of 9 with the skill and 3 of 9 without had no cut at all. Only the cut drafts lost
+a promise about a future release, and they lost half their length. An instruction alone did not
+make the cut happen, so the list is what proves it did: three lines naming what came out, or the
+sentence "the reviewer removed nothing", which is itself an answer.
 
 The form of the text is not in this skill. Where the stream that owns the relationship keeps its own
 rules for writing to maintainers — in its project's `AGENTS.md`, in its skills, or in its brief —

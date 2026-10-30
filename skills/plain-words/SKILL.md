@@ -17,7 +17,7 @@ happens, you did not know, and the phrase hid it from you as well as from the re
 
 ## The phrases, in the order agents actually use them
 
-Counted in one day's 198,898 assistant messages across one fleet of agents:
+Counted on 2026-10-30, in one day's 198,898 assistant messages across one fleet of agents:
 
 | Never | Used that day | What to write |
 |---|---:|---|
@@ -83,5 +83,6 @@ collector collects, a sweep sweeps.
 ## Where this fits
 
 `skill://asd-ste100` constrains grammar and vocabulary for a reader whose first language may not be
-English. This skill removes verb phrases that carry no fact. Run both on an outside message
+English. This skill removes verb phrases that carry no fact. Neither removes AI writing tells, so
+where your session has a pass for those it is a third one. Run them all on an outside message
 (`skill://outside-message`); run this one on everything.
