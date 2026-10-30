@@ -16,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -417,6 +418,76 @@ func TestRelatedCheckBoundsARequestThatEndsFirstIsRecordedCancelled(t *testing.T
 			reasons[index] = deref(row.Reason)
 		}
 		t.Fatalf("not-made related_checks rows for %s have reasons %q, want one cancelled", source, reasons)
+	}
+}
+
+// An edit's decision blocks are all checked under one allowance of the edit's own, and that
+// context ends with the check's own cause (relatedBounds): a keyword stage held past it answers
+// every block that its check was not made for time, and records each as timeout. Were the cause
+// left off, each block's check would read its context's end as the request that ran it going away
+// and record cancelled, which the records route does not count as skipped for time.
+func TestRelatedCheckBoundsDecisionBlocksPastTheAllowanceAreRecordedTimeout(t *testing.T) {
+	handler, database, deps, served := newRegisteredTestServer(t, testServerOptions{})
+	createSuggestionProject(t, handler, "DBTO")
+	createSearchIssue(t, handler, "DBTO", "Quarterly zymurgy ledger drifts", "")
+	spec := "# Spec\n\nPlanning notes.\n"
+	issue := createAdviceIssue(t, handler, "DBTO", "Quarterly planning", &spec)
+	// The creates' own checks may have started a refresh of the statistics; wait it out and
+	// refresh them here, so the blocks' checks start none behind the lock below.
+	awaitTermStatsRefresh(t, served, "DBTO")
+	refreshTermStats(t, database, "DBTO")
+	srv := directServer(deps)
+	srv.suggestionTimeout = 500 * time.Millisecond
+
+	lockTx, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin lock tx: %v", err)
+	}
+	t.Cleanup(func() { _ = lockTx.Rollback(context.Background()) })
+	if _, err := lockTx.Exec(context.Background(), "lock table search_term_stats in access exclusive mode"); err != nil {
+		t.Fatalf("lock search_term_stats: %v", err)
+	}
+	blocks := []docs.AddedAskBlock{
+		{ID: "rounding", Question: "Should zymurgy ledger totals round down?"},
+		{ID: "window", Question: "Which zymurgy ledger drift closes the quarter?"},
+	}
+	artifact := model.Artifact{ID: issue.PrimaryArtifactID, IssueKey: &issue.Key, Project: "DBTO"}
+	checks := srv.decisionBlockChecks(context.Background(), artifact, blocks,
+		model.Actor{Kind: "user", ID: "alice"})
+	if err := lockTx.Rollback(context.Background()); err != nil {
+		t.Fatalf("release the lock: %v", err)
+	}
+	if len(checks) != len(blocks) {
+		t.Fatalf("decision block checks = %+v, want one per block", checks)
+	}
+	for index, check := range checks {
+		suggestions := check.Suggestions
+		if check.BlockID != blocks[index].ID {
+			t.Fatalf("check %d is of block %q, want %q", index, check.BlockID, blocks[index].ID)
+		}
+		if suggestions == nil || suggestions.Outcome != "not_made" ||
+			suggestions.Missing != "the search behind it did not answer within 500ms" ||
+			suggestions.Search != "" || len(suggestions.Related) != 0 {
+			t.Fatalf("block %s suggestions = %+v, want not made, the search not having answered within the allowance",
+				check.BlockID, suggestions)
+		}
+	}
+	// The rows are recorded as each check answers, in no order of the blocks', so each block's
+	// row is read by its id.
+	rows := map[string]decisionBlockRow{}
+	for _, row := range readDecisionBlockRows(t, database) {
+		rows[row.BlockID] = row
+	}
+	if len(rows) != len(blocks) {
+		t.Fatalf("decision block related_checks rows = %+v, want one per block", rows)
+	}
+	for _, block := range blocks {
+		row := rows[block.ID]
+		if row.IssueKey == nil || *row.IssueKey != issue.Key || row.ArtifactID != nil ||
+			row.Outcome != "not_made" || deref(row.Reason) != "timeout" || row.ActorID != "alice" {
+			t.Fatalf("block %s row = %+v (reason %q), want it recorded not made for time on %s",
+				block.ID, row, deref(row.Reason), issue.Key)
+		}
 	}
 }
 

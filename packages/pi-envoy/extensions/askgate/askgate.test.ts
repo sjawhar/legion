@@ -15,7 +15,7 @@ import {
   writeAskgateRecord,
 } from "@legion/envoy-client/askgate-marker";
 import { runDispatchCli } from "@legion/envoy-client/dispatch-cli";
-import { sessionDirectory } from "@legion/envoy-client/dispatch-session-state";
+import { sessionDirectory } from "@legion/envoy-client/dispatch-session-directory";
 import * as core from "./askgate-core";
 import {
   ADVISOR_GATE_ENTRY_TYPE,

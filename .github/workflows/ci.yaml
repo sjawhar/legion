@@ -245,6 +245,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/refs/*'
               - 'packages/envoy/internal/dispatch/retry/*'
               - 'packages/envoy/internal/dispatch/routes/*'
+              - 'packages/envoy/internal/dispatch/sessionanswers/*'
               - 'packages/envoy/internal/dispatch/startup/*'
               - 'packages/envoy/internal/dispatch/store/*'
               - 'packages/envoy/internal/dispatch/store/migrations/**'
@@ -422,6 +423,10 @@ jobs:
               # check-built, and the job puts it in place with release-push.sh extract-built.
               - '.github/scripts/check-private-names.sh'
               - '.github/scripts/release-push.sh'
+              # tests/answers-claude.test.ts runs the Claude Code release .claude-code-pin pins,
+              # which install-claude-code installs.
+              - '.claude-code-pin'
+              - '.github/actions/install-claude-code/**'
               - 'packages/contracts/src/**'
               # tests/daemon-api-version.test.ts:15 and its neighbours.
               - 'packages/contracts/fixtures/daemon-api/**'
@@ -862,6 +867,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/rank/*'
               - 'packages/envoy/internal/dispatch/refs/*'
               - 'packages/envoy/internal/dispatch/retry/*'
+              - 'packages/envoy/internal/dispatch/sessionanswers/*'
               - 'packages/envoy/internal/dispatch/store/*'
               - 'packages/envoy/internal/dispatch/store/migrations/**'
               - 'packages/envoy/internal/dispatch/text/**'
@@ -2136,6 +2142,10 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
+      # tests/answers-claude.test.ts runs the pinned Claude Code against a stand-in Messages
+      # endpoint and Dispatch, and refuses on GitHub Actions without one. The pin is read from
+      # .claude-code-pin, the repository's one copy of it (.github/actions/install-claude-code).
+      - uses: ./.github/actions/install-claude-code
       - run: bun install --frozen-lockfile
       - name: Lint Claude Envoy plugin
         run: bun run lint
