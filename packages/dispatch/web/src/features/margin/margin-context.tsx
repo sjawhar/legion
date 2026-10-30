@@ -1,4 +1,4 @@
-import { type MutationKey, partialMatchKey, useQueryClient } from "@tanstack/react-query";
+import { hashKey, type MutationKey, partialMatchKey, useQueryClient } from "@tanstack/react-query";
 import {
   createContext,
   type ReactNode,
@@ -17,6 +17,7 @@ import type {
   RecordMarkPlacement,
   RemarkOutcome,
   RemarkRefusal,
+  RetypedMark,
   RetypeOutcome,
   RetypeRefusal,
 } from "../doc/editor";
@@ -41,15 +42,40 @@ export interface DocumentBridge {
     markId: string,
     kind: ComposerKind,
     quote: string,
-    placement: RecordMarkPlacement | null
+    placement: RecordMarkPlacement | undefined
   ): RemarkOutcome;
   /** Replaces the provisional mark `markId` with one of `kind` over the same text. */
   retypeMark(markId: string, kind: ComposerKind): RetypeOutcome;
   setActiveBlocks(blockIds: readonly string[]): void;
   setActiveMarks(markIds: readonly string[]): void;
-  /** Whether this browser's edits of the document have all reached the server, within
-   *  `timeoutMs`: a mark written here is the server's to see before a send names it. */
-  whenSent(timeoutMs: number): Promise<boolean>;
+  /** Answers once this browser's edits of the document have reached the server, and at
+   *  `timeoutMs` whatever it reports: a mark written here is the server's to see before a send
+   *  names it, and the caller sends either way. */
+  whenSent(timeoutMs: number): Promise<void>;
+}
+
+/** A composer that holds the draft of a held send, as `MentionComposer` does: it writes what the
+ *  reader has typed into the store a short wait after each keystroke, and the margin asks it to
+ *  write it now before it sends that send again itself (`reanchor`). */
+export interface ComposerBridge {
+  /** Writes what the reader has typed into the held send's draft, as the composer's own
+   *  debounced write does. */
+  keepDraft(): void;
+  /** The held send this composer's draft belongs to (`MentionComposer`'s `mutationKey`). */
+  mutationKey: MutationKey;
+}
+
+/** The anchor `anchor` re-addressed to `mark`, the mark the editor has just written in place of
+ *  the one it names: the only place the two meet, so a field `RetypedMark` gains reaches both
+ *  the margin's re-anchor and the composer's kind switch. */
+export function anchorAt(anchor: ComposerAnchor, mark: RetypedMark): ComposerAnchor {
+  return {
+    ...anchor,
+    mark_id: mark.markId,
+    // The composer keeps no placement where the editor had none to give.
+    placement: mark.placement ?? undefined,
+    quote: mark.quote,
+  };
 }
 
 /** What the composer says when its kind cannot change, in the reader's words. */
@@ -67,13 +93,18 @@ const DRAFT_KEPT = "Your draft is kept — select the text again to attach it.";
 /** What the composer says in place of the server's `ANCHOR_MISSING` words when the margin could
  *  not write the mark again: what became of the words the send is anchored to, about the thing
  *  the reader is writing. A `ComposerKind` reads as its own word - comment, ask, suggestion -
- *  and this is the one place that puts it in a sentence. The four cases are four different
+ *  and this is the one place that puts it in a sentence. The five cases are five different
  *  things to be told: the words read nowhere in the document; the block the reader selected in
  *  still reads them, but the text around them changed, so nothing says which reading was theirs;
- *  they read somewhere else, but not in the block the reader selected in; or they cannot carry
- *  a suggestion's mark at all. The server's own message is unchanged - agents' clients read it -
+ *  that block reads them in two places with the same text around both, so they are where the
+ *  reader left them and nothing says which of the two the draft is about; they read somewhere
+ *  else, but not in the block the reader selected in; or they cannot carry a suggestion's mark
+ *  at all. Only `"unplaceable"` says the words are no longer where they were selected, because
+ *  only there is that true. The server's own message is unchanged - agents' clients read it -
  *  and this one is the reader's. */
 export const REANCHOR_REFUSALS: Record<RemarkRefusal["refused"], (kind: ComposerKind) => string> = {
+  ambiguous: (kind) =>
+    `The words you selected read in more than one place with the same text around them, so nothing says which one this ${kind} is about. ${DRAFT_KEPT}`,
   gone: (kind) =>
     `The text you selected was changed or deleted, so this ${kind} has nothing to attach to. ${DRAFT_KEPT}`,
   unmarkable: (kind) =>
@@ -83,6 +114,14 @@ export const REANCHOR_REFUSALS: Record<RemarkRefusal["refused"], (kind: Composer
   unsurrounded: (kind) =>
     `The text around the words you selected changed, so nothing is left to say which reading of them this ${kind} is about. ${DRAFT_KEPT}`,
 };
+
+/** What the composer says when the document the refused send is anchored to is not the one on
+ *  screen: no editor here holds that document, so nothing about the words can be read at all,
+ *  and nothing says they were touched. Opening the document is the way out of this one rather
+ *  than a fresh selection - the draft and its mark are waiting for that document - so it keeps
+ *  the promise `DRAFT_KEPT` makes in the words that fit it. */
+export const DOCUMENT_CLOSED_REFUSAL = (kind: ComposerKind): string =>
+  `The document you selected the text in is not open, so there is nothing here to attach this ${kind} to. Your draft is kept — open that document and send it again to attach it.`;
 
 /** How long the margin waits for the mark it wrote again to reach the server before it sends the
  *  draft again. The document's pending count holds every tab's rows, and this page cannot make
@@ -160,6 +199,10 @@ interface MarginContextValue {
    *  registered document withdraws a hidden layout. An empty map is still an answer - a document
    *  with no live mark and no typed block has one - so the maps cannot stand in for this. */
   placementsReported: boolean;
+  /** Takes the composer that holds the draft of a held send, for as long as it is mounted, and
+   *  answers what unregisters it. The margin asks the composer of the send it is about to send
+   *  again for what the reader has typed since the refusal (`reanchor`). */
+  registerComposer(composer: ComposerBridge): () => void;
   registerDocument(bridge: DocumentBridge | undefined): void;
   /** Shows the compose held for `artifact`, which the reader just came back to. */
   revealCompose(artifact: string): void;
@@ -200,6 +243,10 @@ const MarginContext = createContext<MarginContextValue>({
   markPlacements: new Map(),
   pendingCompose: undefined,
   placementsReported: false,
+  // A composer outside a margin - a test's bare one, a surface the provider does not wrap -
+  // registers with nobody, and nothing asks it for its draft; its own debounced write still
+  // keeps it.
+  registerComposer: () => () => {},
   registerDocument: unavailableMargin,
   revealCompose: unavailableMargin,
   retypeCompose: unavailableMargin,
@@ -242,6 +289,8 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   // (the editor holds `composeForMark` for the document's lifetime).
   const openCompose = useRef<OpenCompose | undefined>(undefined);
   const bridgeRef = useRef<DocumentBridge | undefined>(undefined);
+  // The composers on screen that hold a draft, by the name of the send that draft belongs to.
+  const composers = useRef(new Map<string, ComposerBridge>());
   const show = useCallback((artifact: string, turnedAway: boolean) => {
     sequence.current += 1;
     setShownCompose({ artifact, seq: sequence.current, turnedAway });
@@ -267,21 +316,18 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       if (anchor === undefined) return;
       const bridge = bridgeRef.current;
       const kind = held.request.kind;
-      // The compose's own document is not on screen, so there is no mark to write again: as far
-      // as this page can tell, the words the reader selected are gone.
+      // The compose's own document is not the one on screen, so there is no editor here to
+      // write its mark again. Nothing about the words is known from here - saying they were
+      // changed or deleted would send the reader looking for an edit nobody made - and opening
+      // that document is what lets the margin attach this draft.
       if (bridge === undefined || bridge.artifactId !== anchor.artifact) {
-        setAnchorRefusal({ markId: anchor.mark_id, text: REANCHOR_REFUSALS.gone(kind) });
+        setAnchorRefusal({ markId: anchor.mark_id, text: DOCUMENT_CLOSED_REFUSAL(kind) });
         return;
       }
       // What the refused send itself carries: the words the composer was opened over, and the
       // block and surrounding text the editor wrote its mark among. Both outlive the mark and
       // the editor state that wrote it, which is why the composer is the one that keeps them.
-      const outcome = bridge.remarkMark(
-        anchor.mark_id,
-        kind,
-        anchor.quote,
-        anchor.placement ?? null
-      );
+      const outcome = bridge.remarkMark(anchor.mark_id, kind, anchor.quote, anchor.placement);
       if ("refused" in outcome) {
         setAnchorRefusal({
           markId: anchor.mark_id,
@@ -291,16 +337,13 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       }
       remarked.current.add(outcome.markId);
       setAnchorRefusal(undefined);
-      store.readdress(held.mutationKey, {
-        ...held.request,
-        anchor: {
-          ...anchor,
-          mark_id: outcome.markId,
-          placement: outcome.placement ?? undefined,
-          quote: outcome.quote,
-        },
-      });
+      store.readdress(held.mutationKey, { ...held.request, anchor: anchorAt(anchor, outcome) });
       await bridge.whenSent(REANCHOR_SEND_WAIT_MS);
+      // The retry carries the draft the store holds, and the composer writes what the reader has
+      // typed there only a short wait after each keystroke (`KEEP_DRAFT_MS`): words typed while
+      // the margin waited would go nowhere, and the landed send would then clear the composer
+      // they are in. So the composer writes its draft now, before the retry takes it.
+      composers.current.get(hashKey(held.mutationKey))?.keepDraft();
       store.retry(held.mutationKey);
     },
     [store]
@@ -405,12 +448,7 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       if ("refused" in outcome) {
         return KIND_SWITCH_REFUSALS[outcome.refused];
       }
-      const retyped = {
-        ...anchor,
-        mark_id: outcome.markId,
-        placement: outcome.placement ?? undefined,
-        quote: outcome.quote,
-      };
+      const retyped = anchorAt(anchor, outcome);
       if (open !== undefined) {
         publishCompose({ ...open, request: { ...open.request, anchor: retyped, kind } });
       } else if (held !== undefined) {
@@ -458,6 +496,16 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
     },
     [withdrawPlacements]
   );
+  // A composer registers while it is mounted and takes itself back as it goes; the one that
+  // mounts next under the same name is this map's then. A send whose composer registered
+  // nothing - no composer is on screen for it - is sent again with the draft the store holds.
+  const registerComposer = useCallback((composer: ComposerBridge) => {
+    const name = hashKey(composer.mutationKey);
+    composers.current.set(name, composer);
+    return () => {
+      if (composers.current.get(name) === composer) composers.current.delete(name);
+    };
+  }, []);
   const publishBlockPlacements = useCallback((placements: ReadonlyMap<string, MarkPlacement>) => {
     setBlockPlacements(placements);
     setPlacementsReported(true);
@@ -491,6 +539,7 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       markPlacements,
       pendingCompose,
       placementsReported,
+      registerComposer,
       registerDocument,
       revealCompose,
       retypeCompose,
@@ -523,6 +572,7 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       placementsReported,
       publishBlockPlacements,
       publishMarkPlacements,
+      registerComposer,
       registerDocument,
       revealCompose,
       retypeCompose,

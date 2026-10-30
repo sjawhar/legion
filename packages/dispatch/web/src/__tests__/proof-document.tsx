@@ -97,7 +97,7 @@ export function renderProofDocument({
             | {
                 focusMark(markId: string): void;
                 setActiveMarks(markIds: string[]): void;
-                whenSent(timeoutMs: number): Promise<boolean>;
+                whenSent(timeoutMs: number): Promise<void>;
               }
             | undefined;
           focusRequest: { markId: string; seq: number } | undefined;

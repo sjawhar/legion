@@ -311,7 +311,7 @@ test("ProofDocument reports connection status and pending edits through the tool
   }
 });
 
-test("the margin's wait for this browser's edits ends when the document holds none, and at its bound", async () => {
+test("the margin's wait for this browser's edits is answered by a report taken after it, and by its bound", async () => {
   const { margin, pending, sync, view } = renderProofDocument();
 
   try {
@@ -320,17 +320,32 @@ test("the margin's wait for this browser's edits ends when the document holds no
     const bridge = margin.current?.documentBridge;
     if (bridge === undefined) throw new Error("expected a registered document");
 
-    act(() => pending({ count: 1, readOnly: false, rebuiltAt: undefined, stored: true }));
-    const waiting = bridge.whenSent(5000);
+    // The mark the margin has just written is an update of its own, and the store counts a local
+    // update only once its IndexedDB write is through. So the report that says this browser holds
+    // nothing has to be one taken after the wait began: the last report before it was taken
+    // without that mark in it, and on a quiet document it says nothing pending, which would send
+    // the retry straight back into the refusal it is recovering from.
     act(() => pending({ count: 0, readOnly: false, rebuiltAt: undefined, stored: true }));
-    await expect(waiting).resolves.toBe(true);
-    await expect(bridge.whenSent(5000)).resolves.toBe(true);
+    let answered = false;
+    const waiting = bridge.whenSent(5000).then(() => {
+      answered = true;
+    });
+    await Promise.resolve();
+    expect(answered).toBe(false);
+
+    act(() => pending({ count: 1, readOnly: false, rebuiltAt: undefined, stored: true }));
+    await Promise.resolve();
+    expect(answered).toBe(false);
+
+    act(() => pending({ count: 0, readOnly: false, rebuiltAt: undefined, stored: true }));
+    await waiting;
+    expect(answered).toBe(true);
 
     // A read-only admission cannot send the row it holds, and a row another tab holds is not
     // this page's to send either: the bound is what ends the wait, and the margin sends again
     // whatever it answers.
     act(() => pending({ count: 1, readOnly: true, rebuiltAt: undefined, stored: true }));
-    await expect(bridge.whenSent(0)).resolves.toBe(false);
+    await bridge.whenSent(0);
   } finally {
     view.unmount();
   }

@@ -62,7 +62,9 @@ export type MarkAction =
       from: number;
       to: number;
       /** Null where there is none to keep: a selection no one textblock's text reads as the
-       *  quote, which leaves a later re-mark the quote alone to go by. */
+       *  quote, every selection across a block break among them, which leaves a later re-mark
+       *  the quote alone to go by - matched against the document read as one text across its
+       *  blocks, the way the bar read the quote out of it (`remarkRecordMark`). */
       placement: RecordMarkPlacement | null;
     }
   | { kind: 'reply'; markId: string; text: string }

@@ -658,3 +658,86 @@ test("a comment is not moved to the block's other reading when its own words are
     await alice.close();
   }
 });
+
+/** A spec whose two paragraphs a reader can select across. */
+const ACROSS_BLOCKS_SPEC = [
+  "## Review",
+  "",
+  "The quick brown fox jumps.",
+  "",
+  "Over the lazy dog it goes.",
+  "",
+].join("\n");
+
+/** Selects from `from` in the first paragraph to `to` in the second, as a drag across the break
+ *  does: one DOM range over the two paragraphs' text nodes, and the selectionchange ProseMirror's
+ *  observer reads. The editor reads that selection as one quote with the break in it, which no
+ *  single block's text holds. */
+async function selectAcrossBlocks(page: Page, from: string, to: string): Promise<void> {
+  const editor = documentEditor(page);
+  await editor.waitFor();
+  await editor.focus();
+  await editor.evaluate(
+    (root, { from: start, to: end }) => {
+      const paragraphs = Array.from(root.querySelectorAll("p"));
+      const first = paragraphs.find((node) => (node.textContent ?? "").includes(start));
+      const last = paragraphs.find((node) => (node.textContent ?? "").includes(end));
+      const head = first?.firstChild;
+      const tail = last?.firstChild;
+      if (head === null || head === undefined || tail === null || tail === undefined) {
+        throw new Error(`the editor holds no paragraph pair for: ${start} / ${end}`);
+      }
+      const range = document.createRange();
+      range.setStart(head, (head.textContent ?? "").indexOf(start));
+      range.setEnd(tail, (tail.textContent ?? "").indexOf(end) + end.length);
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      document.dispatchEvent(new Event("selectionchange"));
+    },
+    { from, to }
+  );
+  await actionBar(page).waitFor({ state: "visible" });
+}
+
+/** A selection that runs across a paragraph break belongs to no one block, so the composer keeps
+ *  no block or surroundings for it and a re-anchor has only the words to go by. They still have
+ *  to be found: the editor reads the document as one text, break and all, and attaches where
+ *  those words read once. Here the sweep takes the mark while the author is away and the
+ *  document's own text never changes. */
+test("a comment on words that run across two paragraphs keeps its anchor", async ({ browser }) => {
+  test.setTimeout(240_000);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: ACROSS_BLOCKS_SPEC,
+    title: "Review the spec",
+  });
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const transport = await documentTransport(page);
+    await openSpec(page, issue.key, "quick brown fox");
+    await selectAcrossBlocks(page, "jumps.", "Over the lazy dog");
+    await barAction(page, "Comment");
+    const span = documentEditor(page).locator('span[data-proof="comment"][data-id]');
+    await expect(span).toHaveCount(2);
+    await composer(page).getByLabel("Comment").fill("Which sentence is this?");
+
+    transport.hold();
+    await transport.sever();
+    await page.waitForTimeout(PAST_THE_SWEEP_MS);
+    await transport.release();
+    await expect(connectedDot(page)).toHaveText("connected");
+
+    await send(page);
+    const comment = await theComment(issue.key, issue.primary_artifact_id);
+    expect(comment.body).toBe("Which sentence is this?");
+    expect(comment.anchor?.orphaned).toBe(false);
+    // One mark over both halves of the selection, which is how a mark across a break renders.
+    await expect(markSpan(page, comment.anchor?.mark_id ?? "")).toHaveCount(2);
+    await expect(composer(page)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});

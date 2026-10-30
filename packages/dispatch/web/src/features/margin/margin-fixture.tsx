@@ -144,7 +144,7 @@ export function stubDocumentBridge(
     retypeMark: () => ({ refused: "missing" }),
     setActiveBlocks: () => {},
     setActiveMarks: () => {},
-    whenSent: async () => true,
+    whenSent: async () => {},
     ...overrides,
   };
 }

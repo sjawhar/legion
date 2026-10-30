@@ -98,7 +98,7 @@ import { configureDispatchLinks } from './dispatch-links';
 import { trailingNewlineInputPlugin } from './trailing-newline-input';
 import { recordMarkHistoryPlugin } from './record-mark-history';
 import { editorHighlightsPlugin, pulseHighlight, setActiveHighlights } from './editor-highlights';
-import { removeRecordMark, recordMarkTrackingPlugin, remarkRecordMark, retypeMark as retypeRecordMark } from './record-mark-retype';
+import { removeRecordMark, remarkRecordMark, retypeMark as retypeRecordMark } from './record-mark-retype';
 import type { RemarkOutcome, RetypeOutcome } from './record-mark-retype';
 
 export type { MarkAction, RecordMarkPlacement, SelectionBarActionKind, PopoverActionKind } from './dispatch-marks';
@@ -379,10 +379,8 @@ export async function createProofEditor(
     .use(tableKeyboardPlugin)
     // Firefox puts text typed over a code block's last line before its newline
     .use(trailingNewlineInputPlugin)
-    // The composer's own record-mark writes are never undo steps, and where each one sits and
-    // what it was written over outlives the mark itself, for `remarkMark`
+    // The composer's own record-mark writes are never undo steps
     .use(recordMarkHistoryPlugin)
-    .use(recordMarkTrackingPlugin)
     .use(editorHighlightsPlugin)
     .use(placeholderPlugin)
     .use(keepUnselectedAskBlocks) // no read-back edit drops an unselected block of an off-rule ask (./ask-content.ts)

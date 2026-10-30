@@ -828,9 +828,11 @@ func (s *Service) recordedMarkRefs(ctx context.Context, artifactID string) (map[
 //
 // A mark whose author still has a browser on the room is the composer still open in front of
 // somebody, whose Send would be refused as a missing anchor were the mark taken from under it, so
-// it is kept and counted from this sweep instead. Its TTL therefore runs from the author's last
-// presence: a tab that closes or goes offline loses its stray mark one TTL later, as every other
-// unrecorded mark does.
+// it is kept and counted from this sweep instead. Once that browser has gone the mark ages from
+// the author's last presence (state.departed), not from the sweep that last saw them: the sweeps
+// of a quiet document are a TTL apart, so a drop a second before one - an idle reconnect - would
+// otherwise lose the mark a second after it rather than a TTL after it. A tab that closes or goes
+// offline therefore loses its stray mark one TTL later, as every other unrecorded mark does.
 func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 	recordedRefs, err := s.recordedMarkRefs(context.Background(), room)
 	if err != nil {
@@ -865,7 +867,14 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 			firstSeen = now
 			state.unrecorded[mark.MarkRef] = firstSeen
 		}
-		age := now.Sub(firstSeen)
+		since := firstSeen
+		// A mark written while its author was already away ages from its own first sighting: the
+		// later of the two is when it was last anybody's open composer. A mark with no author
+		// matches no departure, as it matches no connected browser.
+		if left, away := state.departed[mark.By]; away && left.After(since) {
+			since = left
+		}
+		age := now.Sub(since)
 		if age >= s.unrecordedMarkTTL {
 			expired = append(expired, mark.MarkRef)
 		} else if wait := s.unrecordedMarkTTL - age; next == 0 || wait < next {
@@ -875,6 +884,13 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 	for mark := range state.unrecorded {
 		if _, found := seen[mark]; !found {
 			delete(state.unrecorded, mark)
+		}
+	}
+	// A departure a TTL old answers nothing this sweep has not already decided: every mark of that
+	// author is at least that old too, so the first sighting alone expires it from here on.
+	for author, left := range state.departed {
+		if now.Sub(left) >= s.unrecordedMarkTTL {
+			delete(state.departed, author)
 		}
 	}
 	if next > 0 {
@@ -907,6 +923,35 @@ func connectedMarkAuthors(connected map[uint64]model.Actor) map[string]struct{} 
 		authors[ActorRef(actor)] = struct{}{}
 	}
 	return authors
+}
+
+// recordMarkAuthorDeparture records in state that actor's last browser left the room at now, from
+// when an unrecorded mark of theirs ages (sweepUnrecordedMarks). Another browser of the same
+// actor still on the room leaves nothing to record: the composer is still open in front of them.
+// Both spellings of a mark's `by` are recorded, the two connectedMarkAuthors answers, so the
+// sweep reads a departure with the one lookup it already makes. Its caller holds state.mu.
+func recordMarkAuthorDeparture(state *roomState, actor model.Actor, now time.Time) {
+	if actor.Kind != "user" || actor.ID == "" {
+		return
+	}
+	for _, other := range state.connected {
+		if other.Kind == actor.Kind && other.ID == actor.ID {
+			return
+		}
+	}
+	state.departed[actor.ID] = now
+	state.departed[ActorRef(actor)] = now
+}
+
+// forgetMarkAuthorDeparture takes actor's departure off state: a browser of theirs is on the room
+// again, so their marks are open composers once more and age from no earlier absence. Its caller
+// holds state.mu.
+func forgetMarkAuthorDeparture(state *roomState, actor model.Actor) {
+	if actor.Kind != "user" || actor.ID == "" {
+		return
+	}
+	delete(state.departed, actor.ID)
+	delete(state.departed, ActorRef(actor))
 }
 
 // unmarkExpired removes from room's live document each of expired that it still holds.

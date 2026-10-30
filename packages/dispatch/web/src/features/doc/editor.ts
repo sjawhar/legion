@@ -11,6 +11,7 @@ export type {
   RecordMarkPlacement,
   RemarkOutcome,
   RemarkRefusal,
+  RetypedMark,
   RetypeOutcome,
   RetypeRefusal,
   StoredMark,

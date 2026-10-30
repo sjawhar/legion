@@ -608,6 +608,88 @@ func TestAnUnrecordedMarkIsSweptOneTTLAfterItsAuthorDisconnects(t *testing.T) {
 	}
 }
 
+// The minute runs from the author's last presence, not from the sweep that last saw them. On a
+// quiet document the sweeps are a TTL apart, so bob's browser dropping a second before one - an
+// idle reconnect - must not cost him the composer he is writing in: the sweep that first misses
+// him keeps the mark, and the mark goes a TTL after the drop (at three TTL less a second), a
+// whole TTL after the sweep that last saw him (at one TTL).
+func TestAnUnrecordedMarkOutlivesASweepRunJustAfterItsAuthorDropped(t *testing.T) {
+	service, artifactID, age := newUnrecordedMarkService(t)
+	seedServiceText(t, service, artifactID, "The quick brown fox")
+	browserMarkWithAttrs(t, service, artifactID, "proofComment", "quick", pmdoc.Attrs{"id": "composing", "by": "bob"})
+	service.addConnection(artifactID, 1, model.Actor{Kind: "user", ID: "bob"})
+	age(markSweepTTL)
+	settleCurrentGeneration(t, service, artifactID)
+
+	age(2*markSweepTTL - time.Second)
+	service.removeConnection(artifactID, 1)
+	age(2 * markSweepTTL)
+	settleCurrentGeneration(t, service, artifactID)
+	if !markIsInTheDocument(t, service, artifactID, "composing") {
+		t.Fatal("the mark went a second after its author's browser dropped, a TTL after the sweep that last saw him")
+	}
+	age(3*markSweepTTL - 2*time.Second)
+	settleCurrentGeneration(t, service, artifactID)
+	if !markIsInTheDocument(t, service, artifactID, "composing") {
+		t.Fatal("the mark went a second short of a TTL after its author's browser dropped")
+	}
+	age(3*markSweepTTL - time.Second)
+	settleCurrentGeneration(t, service, artifactID)
+	if markIsInTheDocument(t, service, artifactID, "composing") {
+		t.Fatal("the mark outlived a TTL of its author's absence")
+	}
+}
+
+// The dropped browser comes back: bob is writing in the composer again, so the mark lives past
+// the deadline the drop set and is kept however long the room settles after it.
+func TestAnUnrecordedMarkOutlivesItsDropDeadlineWhenItsAuthorComesBack(t *testing.T) {
+	service, artifactID, age := newUnrecordedMarkService(t)
+	seedServiceText(t, service, artifactID, "The quick brown fox")
+	browserMarkWithAttrs(t, service, artifactID, "proofComment", "quick", pmdoc.Attrs{"id": "composing", "by": "bob"})
+	service.addConnection(artifactID, 1, model.Actor{Kind: "user", ID: "bob"})
+	settleCurrentGeneration(t, service, artifactID)
+
+	age(markSweepTTL / 2)
+	service.removeConnection(artifactID, 1)
+	age(markSweepTTL)
+	service.addConnection(artifactID, 2, model.Actor{Kind: "user", ID: "bob"})
+	for _, elapsed := range []time.Duration{2 * markSweepTTL, 3 * markSweepTTL} {
+		age(elapsed)
+		settleCurrentGeneration(t, service, artifactID)
+		if !markIsInTheDocument(t, service, artifactID, "composing") {
+			t.Fatalf("the mark was swept %v after it was written, its author back since half a TTL in", elapsed)
+		}
+	}
+}
+
+// Bob has the document open in two tabs. Closing one leaves the composer open in the other, so
+// the mark's minute starts only when the second goes: no settlement runs between the two closes,
+// so a minute counted from the first would have taken the mark by the check below.
+func TestAnUnrecordedMarkAgesFromItsAuthorsLastBrowserNotTheFirstToClose(t *testing.T) {
+	service, artifactID, age := newUnrecordedMarkService(t)
+	seedServiceText(t, service, artifactID, "The quick brown fox")
+	browserMarkWithAttrs(t, service, artifactID, "proofComment", "quick", pmdoc.Attrs{"id": "composing", "by": "bob"})
+	service.addConnection(artifactID, 1, model.Actor{Kind: "user", ID: "bob"})
+	service.addConnection(artifactID, 2, model.Actor{Kind: "user", ID: "bob"})
+	settleCurrentGeneration(t, service, artifactID)
+
+	age(markSweepTTL / 2)
+	service.removeConnection(artifactID, 1)
+	age(2 * markSweepTTL)
+	service.removeConnection(artifactID, 2)
+
+	age(2*markSweepTTL + markSweepTTL/2)
+	settleCurrentGeneration(t, service, artifactID)
+	if !markIsInTheDocument(t, service, artifactID, "composing") {
+		t.Fatal("the mark's minute ran from the first of its author's two tabs to close")
+	}
+	age(3 * markSweepTTL)
+	settleCurrentGeneration(t, service, artifactID)
+	if markIsInTheDocument(t, service, artifactID, "composing") {
+		t.Fatal("the mark outlived a TTL of its author's absence")
+	}
+}
+
 // A mark naming no author is nobody's open composer: it is swept at its TTL, whoever is in the
 // room.
 func TestAnUnrecordedMarkWithNoAuthorIsSweptAtItsTTL(t *testing.T) {

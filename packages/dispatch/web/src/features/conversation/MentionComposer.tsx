@@ -1,5 +1,5 @@
 import { ASK_QUESTION_MAX, DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
-import type { MutationKey } from "@tanstack/react-query";
+import { hashKey, type MutationKey } from "@tanstack/react-query";
 import {
   type ClipboardEvent,
   type DragEvent,
@@ -58,6 +58,7 @@ import {
 } from "../../theme/classes";
 import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/ArtifactUpload";
 import { ASK_URGENCIES_ASCENDING, URGENCY_LABELS } from "../inbox/ask-urgency";
+import { useMargin } from "../margin/margin-context";
 import { AgentName, type AgentText, useAgentText } from "../refs/AgentName";
 import { ReferencePicker } from "../refs/ReferencePicker";
 import { composerReferences } from "../refs/routes";
@@ -498,6 +499,9 @@ export function MentionComposer({
     landed: (sent) => landed(sent),
     refused: (held) => replaceDraft(held.draft.draft),
   });
+  const { registerComposer } = useMargin();
+  /** This composer's send by name, which is what the margin looks it up by. */
+  const composerName = mutationKey === undefined ? undefined : hashKey(mutationKey);
   // Only the mount reads it, so it is computed once rather than on every keystroke: the held
   // send's draft, or what the channel seeds.
   const [initial] = useState(() => {
@@ -753,6 +757,16 @@ export function MentionComposer({
     window.addEventListener("pagehide", keepNow);
     return () => window.removeEventListener("pagehide", keepNow);
   }, []);
+  // The margin sends a refused margin compose again itself, once it has written the mark it is
+  // anchored to again (`reanchor` in margin-context.tsx), and that retry carries the draft the
+  // store holds. The writes above are a keystroke's wait behind what the reader has typed, so
+  // the margin asks for it first: this is what answers. A composer with no name of its own
+  // holds no send another surface can send again, so it registers nothing.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the name's hash is its identity; the key array itself is rebuilt by some hosts on every render
+  useEffect(() => {
+    if (mutationKey === undefined) return;
+    return registerComposer({ keepDraft: () => keepDraft.current(), mutationKey });
+  }, [composerName, registerComposer]);
   useEffect(() => {
     const form = formRef.current;
     if (form === null || dormant) return;

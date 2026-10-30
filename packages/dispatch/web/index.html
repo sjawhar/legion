@@ -36,67 +36,67 @@
     -->
     <script>
       (() => {
-        var leaving = false;
-        function markLeaving() {
-          leaving = true;
-        }
-        window.addEventListener("beforeunload", markLeaving);
-        window.addEventListener("pagehide", markLeaving);
-        window.addEventListener("pageshow", () => {
-          leaving = false;
-        });
-        if (window.navigation) {
-          window.navigation.addEventListener("navigate", (event) => {
-            if (!event.destination.sameDocument && event.downloadRequest === null) {
-              leaving = true;
-            }
-          });
-        }
-        window.addEventListener(
-          "error",
-          (event) => {
-            var element = event.target;
-            var url;
-            if (element instanceof HTMLScriptElement) {
-              url = element.src;
-            } else if (
-              element instanceof HTMLLinkElement &&
-              (element.rel === "stylesheet" || element.rel === "modulepreload")
-            ) {
-              url = element.href;
-            } else {
-              return;
-            }
-            if (url.indexOf(`${window.location.origin}/assets/`) !== 0) {
-              return;
-            }
-            if (leaving || !navigator.onLine) {
-              return;
-            }
-            var now = Date.now();
-            var stored;
-            try {
-              stored = JSON.parse(window.sessionStorage.getItem("dispatch.chunk-reloads") || "[]");
-            } catch {
-              stored = [];
-            }
-            var recent = (Array.isArray(stored) ? stored : []).filter(
-              (time) => typeof time === "number" && now - time < 5 * 60 * 1000
-            );
-            if (recent.length >= 3) {
-              return;
-            }
-            recent.push(now);
-            try {
-              window.sessionStorage.setItem("dispatch.chunk-reloads", JSON.stringify(recent));
-            } catch {
-              return;
-            }
-            window.location.reload();
-          },
-          true
-        );
-      })();
+              var leaving = false;
+              function markLeaving() {
+                leaving = true;
+              }
+              window.addEventListener("beforeunload", markLeaving);
+              window.addEventListener("pagehide", markLeaving);
+              window.addEventListener("pageshow", () => {
+                leaving = false;
+              });
+              if (window.navigation) {
+                window.navigation.addEventListener("navigate", (event) => {
+                  if (!event.destination.sameDocument && event.downloadRequest === null) {
+                    leaving = true;
+                  }
+                });
+              }
+              window.addEventListener(
+                "error",
+                (event) => {
+                  var element = event.target;
+                  var url;
+                  if (element instanceof HTMLScriptElement) {
+                    url = element.src;
+                  } else if (
+                    element instanceof HTMLLinkElement &&
+                    (element.rel === "stylesheet" || element.rel === "modulepreload")
+                  ) {
+                    url = element.href;
+                  } else {
+                    return;
+                  }
+                  if (url.indexOf(`${window.location.origin}/assets/`) !== 0) {
+                    return;
+                  }
+                  if (leaving || !navigator.onLine) {
+                    return;
+                  }
+                  var now = Date.now();
+                  var stored;
+                  try {
+                    stored = JSON.parse(window.sessionStorage.getItem("dispatch.chunk-reloads") || "[]");
+                  } catch {
+                    stored = [];
+                  }
+                  var recent = (Array.isArray(stored) ? stored : []).filter(
+                    (time) => typeof time === "number" && now - time < 5 * 60 * 1000
+                  );
+                  if (recent.length >= 3) {
+                    return;
+                  }
+                  recent.push(now);
+                  try {
+                    window.sessionStorage.setItem("dispatch.chunk-reloads", JSON.stringify(recent));
+                  } catch {
+                    return;
+                  }
+                  window.location.reload();
+                },
+                true
+              );
+            })();
     </script>
   </head>
   <body>

@@ -882,3 +882,39 @@ test("edit Composer saves the text in the field at Save time, not the text of th
     editComment.mockRestore();
   }
 });
+
+// The composer writes what the reader types into the held-send store a keystroke's wait later
+// (`KEEP_DRAFT_MS`), and the margin's own re-send carries what that store holds. So a reader who
+// goes on typing while the margin waits for its new mark to reach the server would have that text
+// sent nowhere and then cleared off the screen by the send that lands. The margin asks the
+// composer for its draft first; this is the row that fails without that.
+test("the margin's own re-send carries what the reader typed while it waited", async () => {
+  const sent = Promise.withResolvers<void>();
+  const bridge = stubDocumentBridge(specArtifact.id, {
+    remarkMark: (_markId, _kind, quote, placement) => ({ markId: "m-2", placement, quote }),
+    whenSent: () => sent.promise,
+  });
+  let attempts = 0;
+  const createComment = spyOn(api, "createComment").mockImplementation(async () => {
+    attempts += 1;
+    if (attempts === 1) throw ANCHOR_MISSING;
+    return undefined as never;
+  });
+  const view = renderMarginCompose(bridge);
+
+  try {
+    const composer = await sendMarginComment("Please revise.");
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    // The mark is written again and the margin is waiting for it; the reader is still writing.
+    fireEvent.change(within(composer).getByLabelText("Comment"), {
+      target: { value: "Please revise. And say which dog." },
+    });
+    sent.resolve();
+
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
+    expect(createComment.mock.calls[1]?.[1].body).toBe("Please revise. And say which dog.");
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
