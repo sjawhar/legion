@@ -1337,6 +1337,8 @@ func claimOf(ev Event) claim.Token {
 		return ev.Claim
 	case RequestOperatorRetry:
 		return ev.Claim
+	case RequestForgetSession:
+		return ev.Claim
 	case RequestDeliver:
 		return ev.Claim
 	case RequestExit:

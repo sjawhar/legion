@@ -221,6 +221,11 @@ type RequestRetry struct{ Claim claim.Token }
 // caller's retry its own way.
 type RequestOperatorRetry struct{ Claim claim.Token }
 
+// RequestForgetSession drops the recorded session of a suspended, failed, or retired claim. Its
+// next resume, retry, or workflow start provisions a fresh session rather than resuming one the
+// operator determined must not be used.
+type RequestForgetSession struct{ Claim claim.Token }
+
 // RequestDeliver gives the claim a task. ID is a durable outbox delivery id when an outbox row
 // drives the request; an empty ID asks the machine to mint an ordinary operator delivery id.
 //
@@ -268,6 +273,7 @@ func (RequestIssueClose) isEvent()    {}
 func (RequestOperatorClose) isEvent() {}
 func (RequestRetry) isEvent()         {}
 func (RequestOperatorRetry) isEvent() {}
+func (RequestForgetSession) isEvent() {}
 func (RequestDeliver) isEvent()       {}
 func (RequestExit) isEvent()          {}
 
@@ -302,6 +308,7 @@ const (
 	onOperatorClose eventKind = "request_operator_close"
 	onRetry         eventKind = "request_retry"
 	onOperatorRetry eventKind = "request_operator_retry"
+	onForgetSession eventKind = "request_forget_session"
 	onDeliver       eventKind = "request_deliver"
 	onExit          eventKind = "request_exit"
 
@@ -356,6 +363,8 @@ func kindOf(ev Event) eventKind {
 		return onRetry
 	case RequestOperatorRetry:
 		return onOperatorRetry
+	case RequestForgetSession:
+		return onForgetSession
 	case RequestDeliver:
 		return onDeliver
 	case RequestExit:
@@ -616,6 +625,11 @@ func fillTable(t *builder) {
 	t.ignore(onOperatorRetry, "the claim has not failed", live...)
 	t.ignore(onOperatorRetry, "a suspended claim is resumed, not retried", StateSuspended)
 	t.ignore(onOperatorRetry, "a retired claim runs again only when the workflow starts it", StateRetired)
+
+	t.row(onForgetSession, "drop the session so the next launch is fresh", forgetSession, nil,
+		StateSuspended, StateFailed, StateRetired)
+	t.ignore(onForgetSession, "the claim has a live process or launch", StateQueued, StateLaunchUncertain, StateLaunching,
+		StateShimConnected, StateRegistered, StateReady, StateWorking, StateIdle)
 
 	t.row(onDeliver, "queue the task; it goes when the claim is next ready or idle", deliverLater, nil,
 		StateQueued, StateLaunching, StateShimConnected, StateRegistered, StateWorking)
@@ -1185,6 +1199,13 @@ func issueCloseRetired(m *Machine, ctx context.Context, _ Event) error {
 	if m.claim.Session == "" && m.claim.SessionFile == "" {
 		return nil
 	}
+	m.forgetSession()
+	return m.persist(ctx)
+}
+
+// forgetSession drops the session record from a processless claim. The operator has named the
+// recorded session it is abandoning, so a later resume, retry, or workflow start must spawn fresh.
+func forgetSession(m *Machine, ctx context.Context, _ Event) error {
 	m.forgetSession()
 	return m.persist(ctx)
 }

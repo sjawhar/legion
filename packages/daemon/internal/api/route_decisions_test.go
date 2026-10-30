@@ -17,9 +17,9 @@ import (
 )
 
 // Once the daemon's stop has begun, every operator request that would change a claim — spawn,
-// deliver, suspend, resume, stop, retry, close — is refused with 503 before it decides anything: one
-// decided then would run without its claim's worker stream connection, which the stop closes, and
-// under tmux its stop would end the agent without its shutdown frame. Nothing reaches the runtime,
+// deliver, suspend, resume, stop, retry, forget-session, close — is refused with 503 before it
+// decides anything: one decided then would run without its claim's worker stream connection. The
+// stop closes that connection, and under tmux its stop would end the agent without its shutdown frame. Nothing reaches the runtime,
 // nothing stays held, and the operator's listing, which changes nothing, still answers
 // (LEGION-650).
 func TestTheOperatorsRequestsThatWouldChangeAClaimAreRefusedOnceTheStopHasBegun(t *testing.T) {
@@ -54,6 +54,7 @@ func TestTheOperatorsRequestsThatWouldChangeAClaimAreRefusedOnceTheStopHasBegun(
 		{"resume", claims + "legion-legion-legion-209-implementer/resume", nil},
 		{"stop", claims + "legion-legion-legion-209-implementer/stop", nil},
 		{"retry", claims + "legion-legion-legion-209-implementer/retry", nil},
+		{"forget-session", claims + string(architectToken) + "/forget-session", ForgetSessionRequest{Session: "ses_architect"}},
 		{"close", claims + string(architectToken) + "/close", nil},
 	} {
 		recorder := h.operator(http.MethodPost, request.target, request.body)
