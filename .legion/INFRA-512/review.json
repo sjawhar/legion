@@ -2,53 +2,36 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-512",
-  "completed": "2026-10-30T07:20:00Z",
-  "round": 1,
+  "completed": "2026-10-30T11:05:00Z",
+  "round": 2,
   "decision": "changes_requested",
-  "reviewedCodeHead": "35f52a9ddd33",
+  "reviewedCodeHead": "0c454e5af31b",
   "critical": 0,
-  "important": 3,
-  "minor": 3,
+  "important": 1,
+  "minor": 1,
+  "roundOneFindings": "All six resolved in 2a19134e and verified at d89da45d: the missing-key callback returns nil and readIssue answers pgx.ErrNoRows after Close (TestMissingIssueReadKeepsTheConnectionsPreparedStatements, negative control reproduced by the tester); loadOpenAsks and loadChildren deleted; queueArtifactDetails and queueAskDetails used by the issue read, loadArtifacts, listProjectArtifacts, queryOwnerAsks, the Inbox and the event page; refs.QueueBacklinkCounts and events.QueueOpenedEventIDs the one export each; issueDetail the one response type; the round-trip count filtered by the request's context and the strip sample carrying an isInline hard break and a line feed. Each of the seven threads carries my reply.",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/issue_queries.go",
-      "description": "readIssue's issue-row callback returns pgx.ErrNoRows into batchResults.Close, so every 404 runs pgx 5.11's invalidateCachesOnBatchResultsError and drops all six batch statements (issueRowStatement among them, which loadIssue uses on other routes) from that connection's statement cache (the shared pool runs the default QueryExecModeCacheStatement, store.go:53). The old path ran one QueryRow and invalidated nothing. Fix: record the miss in the callback, return nil, and return pgx.ErrNoRows after Close."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/issue_queries.go",
-      "description": "loadOpenAsks (:509) and loadChildren (:680) have no production caller after this change; only issue_read_batch_test.go calls them. AGENTS.md:2693 says every other route still calls them, and AGENTS.md:2671 names loadChildren as the children read. Delete them and correct the docs; the test builds its reference from the shared statements and scans."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/issue_queries.go",
-      "description": "readIssueDetails re-implements loadArtifacts' versions-then-approvals sequence and the ask identity-event + backlink-count pair (a fourth copy), and refs/events now export a statement and its scan as separate symbols each caller must pair by hand (toKind twice, the empty-ids check, a size hint). Put queue-and-apply beside each lookup (artifact details, ask details, refs/events queue functions) and use them on both the batched and sequential paths."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/issue_queries.go",
-      "description": "issueRead mirrors getIssue's anonymous response struct, and the test declares it a third time; name the response type once."
+      "file": "packages/envoy/internal/dispatch/api/reviews.go",
+      "description": "The approval lookup still has two orchestrations: attachApprovals (reviews.go:204) runs approvalTargets, latestReviewsStatement, openApprovalAsksStatement and applyApprovals one statement at a time, and queueArtifactDetails' approval half (artifacts.go:1164) runs the same steps in a batch. They have already drifted (the batched copy's send failure lacks the prefix; the scans' leading rows.Err() exists only to imitate the other path). Split the approval half into one queue-and-apply that attachApprovals sends as a batch of its own, and have loadArtifactRow use loadArtifactDetails for its one artifact (two statements and three round trips become one batch)."
     },
     {
       "severity": "minor",
       "file": "packages/envoy/internal/dispatch/api/issue_read_batch_test.go",
-      "description": "TestIssueReadCostsTwoRoundTrips counts every statement on the traced pool; POST /issues in the new CITE project starts ensureSearchTermStats in the background (related_terms.go:445, not awaited) on that pool, which can land in the counted window. Count only the measured request's context. The sequential count asserts nothing."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/pmdoc/strip_anchor_marks_test.go",
-      "description": "stripSampleDoc holds no inline hard break and no line feed, so nothing pins writtenTree(node, false) in StripAnchorMarks; the tester showed true is unobservable on Parse output, but editor documents hold both."
+      "description": "singleConnectionStore (:426) repeats storetest.Traced's copy-config/open/cleanup with one change; move it into storetest beside Traced, both built on one helper that takes the config change."
     }
   ],
   "proseFixedByReviewer": [
-    "35f52a9d: AGENTS.md and getIssue's comment said the pool refuses a second connection taken while a batch holds one; Pool.SendBatch sets no hold mark, so it would not. AGENTS.md's 'about eleven' statements became the real count (six, two with documents, two with open asks, one per artifact). The changelog's latency and share figures now quote this head's round-2 medians, as the PR body does.",
-    "handoff commit: AGENTS.md:2097 named readBackReaders, which this change removes; it names the three readers and readBackReaderCount."
+    "0c454e5a: AGENTS.md's ask-row entry said attachOpenedEventIDs serves one ask or one inside a transaction and queueAskDetails lists; queryOwnerAsks sends queueAskDetails inside the comment-create transaction and readIssueAsks passes a list to attachOpenedEventIDs. It now splits by what the read carries.",
+    "0c454e5a: AGENTS.md's getIssue entry, getIssue's comment and the changelog say a batch is one round trip once the connection has prepared its statements (pgx v5.11 conn.go:1167-1235 prepares uncached statements in a round trip of its own first). The AGENTS.md entry and sequentialIssueRead's comment say the byte test checks how readIssue assembles its answer, since loadArtifacts and queryOwnerAsks now send the same detail batches.",
+    "0c454e5a: events.OpenedEventIDs, refs.BacklinkCounts and refs.QueueBacklinkCounts docs and applyAskBacklinkCounts named only the issue read as the batched caller; they name queueAskDetails too. scanBacklinkCounts' comment said a batched statement's own failure is wrapped exactly as the sequential Query error; only an error pgx recorded before the callback is, and one that arrives while the rows are read is the last rows.Err() unwrapped on both paths."
   ],
+  "proseLeftToImplementer": "reviews.go:110-113, 132 (the scans' wrap comments) and 156-157 (applyApprovals' callers): the approval change rewrites those functions.",
   "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at 35f52a9d (three Minor; the ErrNoRows cache invalidation is taken here as important because it is a clear fix in a file this pull request touches, on a performance change). Randomised 200,000-tree comparison of old and new StripAnchorMarks and asWritten: reflect.DeepEqual on every tree. 300,000 tie arrays: sort.Slice and slices.SortFunc order identically.",
-    "codeQuality": "Verdict: CHANGES at 35f52a9d (dead loaders, duplicated lookup sequence, exported statement/scan pairs, triplicated response struct, round-trip count open to background statements, strip sample without line breaks)."
+    "deepReview": "Verdict: APPROVE at d89da45d. All six round-1 fixes hold; four Minor findings, all prose or test strength (fixed in 0c454e5a except the grouped-versions test, which I do not require: the tester's round-2 mutation of the version order failed TestIssueSummaryCarriesTheIssueAndEveryDocumentsLatestVersion).",
+    "codeQuality": "Verdict: CHANGES at d89da45d: the approval lookup's two orchestrations, stale docs and comments (fixed in 0c454e5a but for reviews.go's), and the test pool helper repeated outside storetest."
   },
-  "ci": "At 9f3303df the CI run 41008318812 was cancelled by the reviewer's prose push; run 41013844145 at 35f52a9d was queued when this round was submitted. A request for changes does not wait on it.",
-  "threads": "No review threads on the pull request before this round."
+  "ci": "No CI run has completed on a code head since round 1: run 41025326804 at 2a19134e was cancelled, run 41031693920 at 411260c2 was still queued at 09:43Z, and my prose push supersedes it. A request for changes does not wait on it.",
+  "threads": "Seven threads, all mine from round 1, each answered by the implementer with its fixing commit and resolved; I replied on each accepting the fix."
 }
