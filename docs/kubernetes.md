@@ -1883,6 +1883,7 @@ runtime:
       retain_hours: 168         # default 168; how long a cache outlives its repository leaving the mapping
       resources: { cpu: 1, memory: 4Gi, ephemeral_storage: 2Gi, ephemeral_storage_request: 1Gi }   # the defaults
     setup: [/bin/sh, -c, '<command>']   # optional: run in every role's namespace before each start of its Oh My Pi (below)
+    test_postgres: true         # optional, default false: every issue pod's roles container serves its own PostgreSQL for tests (A test database in the pod, above)
 bind: <the daemon host's own address, or 0.0.0.0 once advertise_host names one>
 advertise_host: <optional: a stable Service name, e.g. legion-daemon-<project>.<namespace>.svc, every pod dials instead of bind, at worker_stream_port>
 worker_stream_port: <the port advertise_host or bind serves it on>
