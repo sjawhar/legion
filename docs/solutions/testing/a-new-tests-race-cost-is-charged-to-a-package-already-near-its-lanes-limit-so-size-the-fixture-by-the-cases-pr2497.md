@@ -16,8 +16,9 @@ related_issues:
 # A new test's race cost is charged to a package already near its lane's limit, so size the fixture by the cases
 
 - Before you add tests to a Go package, read that package's time in the `-race` lane on main
-  (`envoy-go-race` runs `go test -race -timeout 30m ./internal/dispatch/docs/ …`), and compare it
-  with the lane's `-timeout`. `docs` already took 1706–1746 s of 1800 s on main.
+  (`envoy-go-race-docs` runs `go test -race -timeout 60m ./internal/dispatch/docs/`), and compare
+  it with the lane's `-timeout`. `docs` took 1706–1746 s of 1800 s on main while it shared
+  `envoy-go-race`'s 30-minute step, before it got that job of its own.
 - Time your new tests under `-race` locally (`CGO_ENABLED=1 go test -race -run '<names>' -v`).
   Their sum is what they add to the package in that lane.
 - Build a permanent test's fixture as the smallest document that still exercises each case:

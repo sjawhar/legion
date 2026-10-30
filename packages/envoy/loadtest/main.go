@@ -19,6 +19,9 @@ const usage = `usage: loadgen <command> [flags]
 commands:
   proxy            TCP latency proxy toward Postgres
   seed             seed 4 projects, 1,000 issues and 8,000 comments through Dispatch; writes seed.json
+  seed-refs        add production-shaped dispatch:// references to that seed: 1,000 cited documents
+  refs-shape       check the references answers of the LGA issues against production's shape
+  refs-fetch       write a TSV of every seeded issue's references answer (status, ETag, sha256, bytes)
   run              one load step against the stack in stack.json; writes summary.json and profiles
   tables           render TABLES.md and pprof tops from step directories
   series-sessions  print the session count of the series step at a load factor
@@ -39,6 +42,12 @@ func main() {
 		err = runProxy(os.Args[2:])
 	case "seed":
 		err = runSeed(os.Args[2:])
+	case "seed-refs":
+		err = runSeedRefs(os.Args[2:])
+	case "refs-shape":
+		err = runRefsShape(os.Args[2:])
+	case "refs-fetch":
+		err = runRefsFetch(os.Args[2:])
 	case "run":
 		err = runLoad(os.Args[2:])
 	case "tables":

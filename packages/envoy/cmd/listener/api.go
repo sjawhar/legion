@@ -965,14 +965,38 @@ func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
 	}
 }
 
-// adminInterestsHandler lists, reads and removes persisted interests. GET /v1/interests/<session_id>
+// interestRow is one persisted interest as GET /v1/interests/ and GET /v1/interests/<session_id>
+// answer it: the stored record plus LastSeen, the session's last heartbeat (Unix ms) as this
+// listener's session cache knows it, omitted when unknown. The record's own UpdatedAt can lag that
+// heartbeat by up to store.InterestRefreshAge, since an unchanged row is rewritten only that often.
+type interestRow struct {
+	store.Interest
+	LastSeen int64 `json:"last_seen,omitempty"`
+}
+
+// interestRowFor answers item with its session's last heartbeat: the live entry's UpdatedAt while
+// the session is live, else the final heartbeat the cache still retains for it
+// (session.SessionRegistry.LastSeen), else none. A listener restart empties those records, so a
+// session that died before it reads as unknown.
+func interestRowFor(sessions *session.SessionRegistry, item store.Interest) interestRow {
+	row := interestRow{Interest: item}
+	if entry, err := sessions.Get(item.SessionID); err == nil {
+		row.LastSeen = entry.UpdatedAt
+	} else {
+		row.LastSeen = sessions.LastSeen(item.SessionID)
+	}
+	return row
+}
+
+// adminInterestsHandler lists, reads and removes persisted interests. Each row a GET answers
+// carries its session's last heartbeat (interestRowFor). GET /v1/interests/<session_id>
 // reads within sendRequestBudget of the request's own context: a cache miss is read through to the
 // bucket, the bucket's word that the key is absent is a 404, a record this build cannot decode is
 // the 500 writeInterestRecordUnreadable writes, and a read that did not answer is the
 // bus-unavailable 503 with Retry-After: 1 (a key NATS refuses is still the 413 or 400
 // writeBusUnavailable gives it). DELETE removes within the same budget, and answers store work that
 // did not answer with that 503 too (writeStoreError).
-func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
+func adminInterestsHandler(registry *store.Registry, sessions *session.SessionRegistry) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/interests/")
 
@@ -981,7 +1005,12 @@ func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 				writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 				return
 			}
-			writeJSON(w, http.StatusOK, registry.List())
+			items := registry.List()
+			rows := make([]interestRow, 0, len(items))
+			for _, item := range items {
+				rows = append(rows, interestRowFor(sessions, item))
+			}
+			writeJSON(w, http.StatusOK, rows)
 			return
 		}
 
@@ -1004,7 +1033,7 @@ func adminInterestsHandler(registry *store.Registry) http.HandlerFunc {
 				writeBusUnavailable(w, err)
 				return
 			}
-			writeJSON(w, http.StatusOK, item)
+			writeJSON(w, http.StatusOK, interestRowFor(sessions, item))
 		case http.MethodDelete:
 			ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 			defer cancel()
@@ -1442,7 +1471,7 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 	v1.HandleFunc("/v1/roles/", roleGetHandler(d))
 	v1.HandleFunc("/v1/registry/", sessionEntryHandler(d))
 
-	v1.Handle("/v1/interests/", adminInterestsHandler(d.registry))
+	v1.Handle("/v1/interests/", adminInterestsHandler(d.registry, d.sessions))
 	v1.Handle("/v1/sessions", sessionsHandler(d.registry, d.sessions))
 	v1.Handle("/v1/sessions/", deleteSessionHandler(d.sessions))
 	v1.HandleFunc("/v1/messages/send", sendHandler(d, logger))

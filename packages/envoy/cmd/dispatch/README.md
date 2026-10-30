@@ -559,9 +559,12 @@ earlier release brings the same hazard back, the other way: a tab still open, an
 client that saw this release keep keys within the last five minutes (`KEYED_LAYER_MEMORY_MS`),
 retry a write whose answer was lost against the earlier server, which runs it again. Fix forward
 instead; if you must roll back, stop this release first, knowing a write in flight at that moment
-may land twice. A tab opened before the deploy needs a reload: `GET /api/v1/events` is gone,
-so it shows `Live updates unavailable`, and its broadcast body still carries `idempotency_key`,
-which this release refuses as an unknown field (`400 INVALID_JSON`).
+may land twice. Once `0141_drop_broadcast_idempotency_keys` has applied, a rollback past this
+release also loses broadcasts: the earlier build's broadcast send reads and writes the table `0141`
+drops, so every broadcast send fails while the rest of that build keeps working. A tab opened
+before the deploy needs a reload: `GET /api/v1/events` is gone, so it shows
+`Live updates unavailable`, and its broadcast body still carries `idempotency_key`, which this
+release refuses as an unknown field (`400 INVALID_JSON`).
 
 What the two processes share, and what each keeps to itself:
 
@@ -1220,10 +1223,9 @@ release before it neither reads nor writes; its census answers `0`. It follows
 `0131_asks_written_version`, `0132_component_facts`,
 `0133_comments_written_version_backfill`, `0134_asks_written_version_backfill`,
 `0135_server_processes` and `0136_dashboard_assets`, which already use the preceding migration
-numbers. From its release on,
-nothing reads or writes `broadcast_idempotency_keys` (`0055`), the broadcast's own key table before
-it, and the table is kept: dropping it is a contracting migration, so it ships no earlier than the
-release after this one.
+numbers. From its release on, nothing reads or writes `broadcast_idempotency_keys` (`0055`), the
+broadcast's own key table before it; it was kept through that release so a deploy of it could roll
+back, and `0141_drop_broadcast_idempotency_keys` drops it in a later release.
 
 Migration `0138_pending_delivery_indexes` adds two partial indexes, `message_deliveries_pending`
 and `comment_deliveries_pending`, on the delivery attempts still pending, which the delivery sweep
@@ -1263,6 +1265,85 @@ its title and spec; nothing is re-embedded by the migration itself, and its cens
 While the release before it still serves, its coverage pass points those rows back at the title
 alone, and each pass of either release queues them again, so a roll that spans passes embeds some
 issues more than once; a deployment with no embedder runs no pass and sees none of this.
+
+Migration `0141_drop_broadcast_idempotency_keys` drops `broadcast_idempotency_keys`, the
+contracting half of `0137`: a deploy that carries it can no longer roll back to a build from before
+`0137`, whose broadcast send writes that table. It reads no row; dropping the table takes `ACCESS
+EXCLUSIVE` on `broadcasts` too, because the table's foreign key puts triggers there, so a broadcast
+read or send waits for the instant the migration's transaction lasts. Its census answers `0`. It
+follows `0139_related_checks` and `0140_issue_embedding_spec`, which already use the preceding
+migration numbers.
+Migrations `0145_events_person_words` and `0146_comment_deliveries_session` add two partial
+indexes for `GET /api/v1/agents/{session_id}/answers` (`sessionanswers.List`, Routes below), which
+every agent host reads on every model request. `0145` creates `events_person_words` on `events
+(created_at desc, id desc)` where the actor is a person and the type is `ask.answered`,
+`comment.created`, `message.created` or `message.answered`: the route reads the window's human
+events of those types through it, newest first, and keeps those whose `published_destinations`
+hold the session's own topic. A GIN index on `published_destinations` would find the session's
+events directly, but the outbox appends each topic it published an event to that array, and every
+such append would then also write the new element's entry into the index: a write load every
+outbox append would pay for a read only this route makes. `0146` creates
+`comment_deliveries_session` on `comment_deliveries (session_id, created_at desc)` where
+`session_id` is not null: the route reads the session's mentions created since an hour before its
+window as one range of it. Each is a plain `create index` inside the runner's
+transaction, so it holds `SHARE` on its table while it builds: writes to it wait, reads do not. On
+a local Postgres 17 (two CPUs, `maintenance_work_mem` 64 MB) with `events` seeded to 1,000,000
+rows (421 MB with its indexes, 126,541 of them in the index), `0145` built in 0.66-1.13 s over
+three runs and `0146` in 0.11-0.14 s on 50,003 deliveries. Both censuses answer `0`: an index
+build refuses and rewrites no row, and the census report already counts and sizes each table it
+reads.
+
+Migration `0147_message_deliveries_session_created` creates `message_deliveries_session_created`
+on `message_deliveries (session_id, created_at desc) include (message_id)` where `state` is
+`sent`, for the same route's read of the session's sent message deliveries created since an hour
+before its window. `message_deliveries_session` (`0051`) keys `session_id` alone, so through it
+that read fetched the session's whole delivery history and filtered it by time: a long-lived
+session that receives every broadcast copy read all of its deliveries on every model request.
+The new index holds only the read's sent rows and carries the one column it returns, so the read
+is an index-only scan of the window's range, and a cached generic plan, which knows neither the
+session nor the window, chooses it too: costed as a plain `(session_id, created_at desc)` index it
+came within a percent of `0051`, which the generic plan kept. `0051` stays for the conversation
+window, which reads every delivery a session ever received. On the seeded database above, with one
+session given 60,003 sent deliveries (1,019 since an hour before its window), the read of them
+went from 58,984 rows fetched and discarded (798 buffers, 20-22 ms) to an index-only scan of the
+1,019 (11 buffers, 0.3-0.4 ms), in the custom and the generic plan alike; the index built in
+0.34-0.52 s over three runs on 110,003 deliveries. A plain `create index` inside the runner's
+transaction, it holds `SHARE` on `message_deliveries` while it builds: writes to it wait, reads do
+not. Its census answers `0`.
+
+Migration `0142_item_blocks` creates the tables behind the blocks of a comment or message as graph
+nodes (`packages/envoy/AGENTS.md`, "References form one graph"): `comment_blocks`,
+`message_blocks`, `comment_block_texts`, `comment_block_state`, `message_block_state`,
+`comment_block_refs` and `message_block_refs`, each with a foreign key to `comments` or `messages`
+that cascades, with their indexes, among them the partial `comment_block_state_owed` and
+`message_block_state_owed` through which the block-index reconciliation reads what is owed. It
+adds the nullable `replies_to_block` to `comments` and to `messages`, a catalog change that
+rewrites and scans no row, with a partial index on each. It creates the trigger function
+`item_blocks_owe`, which no trigger calls until `0143`, and re-states the `graph_edges` view with
+six more arms: a current block's `part_of` edge to its comment or message, the links a current
+block holds, and a reply's `replies_to` edge to the block it names, under the storage kinds
+`comment_block` and `message_block`, which a build without them skips as unknown kinds. Adding the
+columns holds `comments` and `messages` `ACCESS EXCLUSIVE`, and re-stating the view holds
+`graph_edges` `ACCESS EXCLUSIVE`, for the migration's short transaction, so every read and write of
+a comment or message, and every reference read, waits behind it. It writes no row: the state rows
+are seeded by `0143` and `0144`, after their triggers. It refuses and rewrites no existing row;
+its census answers `0`.
+
+Migration `0143_comments_item_blocks_trigger` attaches `item_blocks_owe` to `comments`, `after
+insert or update of body`: a comment any build writes is owed a block index
+(`comment_block_state.owed_at`), which a block-aware build clears by indexing the comment in the
+same transaction, so a comment a build without the index writes during the roll, or after a
+rollback, stays owed until the reconciliation indexes it. In the same transaction it then owes an
+index to every comment already stored, reading `comments` once. The trigger takes
+`SHARE ROW EXCLUSIVE` on `comments` alone until the commit, so a comment write waits behind it,
+while a read does not, and no comment is written between the trigger and the seed. Its census
+answers `0`: the one table it writes is `0142`'s, which holds no row at deploy, and the rows it
+inserts are new work owed, not a rewrite.
+
+Migration `0144_messages_item_blocks_trigger` does the same for `messages`, `after insert`, a direct
+message included (a message is never edited), and owes an index to every message already stored,
+reading `messages` once. Its trigger takes `SHARE ROW EXCLUSIVE` on `messages` alone, so a message
+write waits behind it while a read does not. Its census answers `0` for the same reasons.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
@@ -1509,7 +1590,8 @@ percent-encoded as `encodeBlockId` (`@legion/contracts`) writes it:
 `dispatch://PROJECT/artifact/<slug>#b-<id>`. Text cites a block only while its id holds at most
 256 bytes decoded (`text.MaxBlockIDBytes`), and any node only while its target id, the id its
 edge is stored under (`text.TargetID`: an issue's key, a document's `<KEY or PROJECT>/<slug>`, a
-block's `<KEY or PROJECT>/<slug>#<id>`, an ask's, a comment's or a message's id), holds at most
+document block's `<KEY or PROJECT>/<slug>#<id>`, a comment's or message's block's
+`<item kind>/<item id>#<id>`, an ask's, a comment's or a message's id), holds at most
 2048 bytes (`text.MaxTargetBytes`), since `refs` and `block_refs` hold it in B-tree keys and
 neither a slug nor an item id has a bound of its own: text citing past either is written with no
 edge. The bounds decide only what the graph indexes. Every write is taken whatever the length of
@@ -1532,15 +1614,45 @@ lists the links from the blocks of one document to the blocks of another. Text s
 release, and text an earlier build writes during the roll, is indexed by the server's block-index
 reconciliation (lease `block-index`), with no command run.
 
+A comment and a message are blocks too (migrations `0142`-`0144`; `packages/envoy/AGENTS.md`,
+"References form one graph"). The server splits a body into its top-level blocks as the document
+parser reads them, each block the text as its author wrote it (a body the parser refuses, such as
+one holding block HTML, splits at blank lines into blocks of type `text`; a body of only
+whitespace has none), and names them `b1`, `b2`, …, never minting a number twice in one item. A
+block's reference is its item's with `#b-` and the id: `dispatch://KEY/comment/<id>#b-<id>`,
+`dispatch://PROJECT/artifact/<slug>/comment/<id>#b-<id>` or `dispatch://KEY/message/<id>#b-<id>`,
+and a comment's or message's dashboard page with a `#b-` fragment names it too. Its graph node is kind
+`block`, id `comment/<uuid>#<id>` or `message/<uuid>#<id>`, whose `parent` is the comment or
+message; `graph_edges` stores it under the kinds `comment_block` and `message_block`, which a build
+without item blocks skips as unknown kinds. A mention in a comment or issue message starts at the
+block holding it, so `?to=` a cited node names that block and counts each citing block once; a
+comment's or message's own read lists the links at its blocks, each naming its block as `block`.
+A direct message writes no mention. An edit of a comment keeps each block's id: with the ids the
+dashboard editor carried (`blocks` and `base_revision` on `PATCH /api/v1/comments/{id}`), a
+block keeps the id whose span starts in it, so a moved, reworded, split (the part holding the
+start), joined (the first) or restored block keeps it; without them, or against a revision another
+save replaced, ids follow the text. Each indexed edit of a comment is a revision, and a comment
+block reference pinned to revision N, `#b-<id>@v<N>`, reads the block as N held it, with `pin`
+saying `unchanged`, `changed` or `removed` since; a message never changes, so a message block
+takes no pin (`400 INVALID_REFERENCE` on a route, no reference in text). A reply names the block
+it answers with `reply_to_block` (a comment) or `in_reply_to_block` (a message), a `replies_to`
+edge to that block, and every comment and message a route or event returns carries
+`reply_block`, `null` when it names none. `GET /api/v1/comments/{id}/blocks` and
+`GET /api/v1/messages/{id}/blocks` list an item's current blocks. A comment or message an earlier
+build writes during the roll, or after a rollback, is owed its blocks (`owed_at`, set by the
+triggers of `0143` and `0144`), which the same block-index reconciliation indexes, at most 200 a
+tick, with no command run.
+
 ```bash
 DATABASE_URL=postgres://... envoy-dispatch rebuild-refs
 ```
 
 reparses every source and reconciles the index with the text (surviving edges keep their
-provenance, edges of deleted sources are removed), marks every document owed a block index, which
-the server's block-index reconciliation then indexes, and prints
-`rebuild-refs: documents=N asks=N comments=N messages=N orphans=N edges=N blocks_owed=N`,
-`blocks_owed` being the documents it marked. It reads
+provenance, edges of deleted sources are removed), marks every document owed a block index and
+every comment and message owed a block index of its own blocks, which the server's block-index
+reconciliation then indexes, and prints
+`rebuild-refs: documents=N asks=N comments=N messages=N orphans=N edges=N blocks_owed=N items_owed=N`,
+`blocks_owed` being the documents it marked and `items_owed` the comments and messages. It reads
 `dispatch.server_url` from the envoy config the same way the server does and refuses an empty
 value: dashboard-URL mentions are recognised only against it, so an empty URL would drop them all.
 
@@ -1558,13 +1670,17 @@ Every node the graph reads carries six facts, whatever its kind: `made_by` and `
 it and when), `changed_by` and `changed_at` (who last changed its own text or fields and when, its
 maker while nothing has changed it since), `parent` (`{kind, id, ref?}`, the node it belongs to,
 `id` that node's own id) and `parent_version` (the version of that parent it belongs to: for a
-block its changed version; for an ask or comment written on a document the version its anchor
+document's block its changed version, for a comment's block its changed revision; for an ask or
+comment written on a document the version its anchor
 names, for a block ask the version that first held its block, for an approval request the version
-it named when it opened, else the version current when it was written). A fact Dispatch never
+it named when it opened, else the version current when it was written). A reply that names a
+block is part of that block. A fact Dispatch never
 recorded is `[]` for an actor list and `null` otherwise: a session has none, a component's makers
-are never recorded and its times only from this release on, and a block's maker, and a block
+are never recorded and its times only from this release on, a document block's maker, and a block
 ask's version, are known only when the block is in the document's first version or Dispatch
-indexed the version before the one that first held it (`packages/envoy/AGENTS.md`, "References
+indexed the version before the one that first held it, and a comment block's making time is not
+known for a block found at the first indexing of a comment already edited by then
+(`packages/envoy/AGENTS.md`, "References
 form one graph", gives each kind's sources and what counts as a change). Migrations
 `0130`-`0134` (Database migrations above) add what the facts read: the version current when an
 unanchored comment or ask is written on a document, recorded at insert and filled for the rows
@@ -1937,6 +2053,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/me/replies?limit=&offset=&issue=\|artifact=` | GET | cookie or trusted header (human only) | List the threads the caller wrote in where someone else has written since the caller last read them, newest reply first, less an open ask the Inbox lists. A row names the thread, its owner, its subject, its root's deep link and the newest reply's author, first line and time. `issue` or `artifact` narrows to one owner (both is `400 INVALID_QUERY`); `limit` is 1–200 (default 50). |
 | `/api/v1/me/threads/{id}/read` | PUT | cookie or trusted header (human only) | Move the caller's read mark on one thread forward to `{read_through}`; it never moves back, a value more than a minute ahead of the server is `400 INVALID_STATE`, and a non-uuid id is `400 THREAD_ID_INPUT`. Answers `204`, writing nothing for a thread the caller never wrote in. |
 | `/api/v1/agents` | GET | cookie, trusted header, or bearer | List live Envoy sessions (`session_id`, `title`, `dir`, `machine_id`, `roles`, `capabilities`, `last_seen`), newest first, from Dispatch's copy of the listener's session list, at most 5 s old; `503 ENVOY_UNAVAILABLE` when the listener cannot be reached, and for up to 5 s after a failed listener read without asking the listener again. |
+| `/api/v1/agents/{session_id}/answers?since=&max_chars=` | GET | cookie, trusted header, or bearer | What people wrote that Dispatch delivered to one session, newest first: each ask's current answer (`replaced` when it changed an earlier one), each comment at its current body (`edited_at` when edited) and each message, once however it arrived: a person's `ask.answered`, `comment.created`, `message.created` or `message.answered` event whose `published_destinations` hold the session's own topic, its sent message deliveries, and its sent comment deliveries (mentions). Never an agent's or the system's words, an ask's resolution or hand-back, or a delivery to a `role:` route. Each item carries its `relation`, the `ask` and its question where it answers or replies in one, and its `owner`, `ref` and `href`. `since` defaults to 72 hours ago (older than 7 days or in the future is `400 INVALID_QUERY`); `max_chars` (1–100,000) stops the list after the item whose text takes the running sum past it, `total` still counting every item; a bad `session_id` is `400 INVALID_SESSION_ID`. Not an authorization boundary: direct-message text already reaches every caller through `GET /api/v1/events`, and a person may read any session's list. |
 | `/api/v1/projects` | GET | cookie, trusted header, or bearer | List projects (`key`, `name`, `open_asks`, `created_at`), ordered by key. |
 | `/api/v1/projects` | POST | cookie, trusted header, or bearer | Create a project from `key` and `name`, for a person or an agent session alike; rejects a key that is not a project key, an empty name, a name holding a control character or a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069), and a name with no visible character (a letter, number, punctuation or symbol other than the blank fillers U+115F, U+1160, U+3164, U+FFA0 and U+2800, or a code point Go's Unicode tables leave unassigned, such as an emoji newer than them, other than a noncharacter (U+FDD0-U+FDEF and each code point ending in FFFE or FFFF) or a reserved default-ignorable (U+2065, U+FFF0-U+FFF8, U+E0000-U+E0FFF); combining marks, format characters, private-use characters and whitespace don't count) with `400 INVALID_PROJECT`, a name over 80 characters (`contracts.ProjectNameMax`, UTF-16 units after the trim) with `400 CAP_EXCEEDED`, and a duplicate key with `409 PROJECT_EXISTS`. |
 | `/api/v1/settings/repo-projects` | GET | cookie, trusted header, or bearer | List repository-to-project mappings, each with `default`, whether it is its project's default repository. |
@@ -1955,8 +2072,8 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/search/coverage` | GET | cookie, trusted header, or bearer | Meaning search's coverage, counted in one statement ([Search](#search)): `{identity, place, model, total, kinds}`, the configured embedder's identity, its place (`bedrock` or `azure`) and its model, all three null with no embedder; then, in `total` and for each kind in `kinds` (`issue`, `document`, `comment`, `ask`, `message`), `items` (the searchable ones, a text with nothing to embed left out), `current` (embedded at the item's current text by that identity), `failed` (dead and not current), `lacking` (the rest) and `oldest_lacking_seconds`, how long the longest-waiting lacking item has waited (null when none lacks). With no embedder nothing is current. |
 | `/api/v1/projects/{key}/related?title=&text=&exclude_issue=&keywords_only=` | GET, POST | cookie, trusted header, or bearer | Run the related-item check an issue create runs ([Search](#search)) on a title and a text, checked as the title, a newline and the text (either alone is enough), and write nothing: no issue, ask, suggestion or `related_checks` row. `exclude_issue` leaves that issue of the project, and everything it holds, out of the results and out of the word statistics (`400 EXCLUDE_ISSUE_INPUT` when it is not an issue of the project); `keywords_only=true` skips meaning search. GET takes the fields in the query, title and text together at most 1,000 UTF-16 units (`400 CAP_EXCEEDED` past it); POST takes them as a JSON body `{title, text, exclude_issue, keywords_only}`, a title of at most 1,000 and a text as long as the body's 1 MiB bound. It waits at most 5 seconds and answers `200` with the create's `advice.suggestions` shape (`outcome`, `search`, `search_note`, `search_query`, `related`, `decision`, `missing`), a blank title and text included (`not_made`). `400 INVALID_PROJECT` for a key that is not a project key, `404 PROJECT_NOT_FOUND` for an unknown one. |
 | `/api/v1/related-checks?project=&source_kind=&from=&to=` | GET | cookie, trusted header, or bearer | Count the related-item checks recorded when an issue, an ask or a new decision block was written, within `[from, to)` (RFC3339, each optional) and of `project` and `source_kind` (`issue`, `ask` or `decision_block`; another is `400 INVALID_QUERY`) when given: `{project, source_kind, from, to}` echo the filters (null when absent), then `total`, `by_source_kind`, `by_outcome`, `by_search` (a check not made counted under `not_made`), `by_reason`, `completed` (found or none), `skipped_for_time` (reason `timeout`), and `keyword_ms` and `total_ms`, each `{count, p50, p95, max, over_300ms}` over the checks holding that time (`model.RelatedChecksReport`). |
-| `/api/v1/issues/{key}/references` | GET | cookie, trusted header, or bearer | Read the issue's eight-hop artifact reference closure; a reference to a block reaches the block's document while a current version holds the block. An `If-None-Match` value equal to the response ETag returns `304`. |
-| `/api/v1/references?to=\|from=&kind=&since=` | GET | cookie, trusted header, or bearer | Edges of one node in the reference graph, newest first and cross-project: exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference, read whatever its length (`text.ParseRef`); `kind` filters a csv of edge kinds; `since=<events.id>` keeps mentions introduced after it (structural edges excluded). The answer is `{node, edges}`, the node read and its edges. Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`. The node read, each edge's `node` and each edge's `block` carry the six facts of every node, `made_by`, `made_at`, `changed_by`, `changed_at`, `parent` and `parent_version` ([Reference graph](#reference-graph)). A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document); a document's own read also lists the edges at its blocks, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`. A block reference (`#b-<id>`) names a `block` node carrying its whole current `text`; pinned to a version (`#b-<id>@v<N>`) it also carries `pin` (`version`, `ref`, the block's `text` at that version, `state` `unchanged`, `changed` or `removed`, and `removed_version`), and a removed block answers no edges. `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`; `404` for a node that does not exist, a block no current version holds (unpinned) or whose id is past 256 bytes (no node), or a pinned version the document lacks, has no record of the blocks of, or did not hold the block at. |
+| `/api/v1/issues/{key}/references?versions=` | GET | cookie, trusted header, or bearer | Read the issue's eight-hop artifact reference closure; a reference to a block reaches the block's document while a current version holds the block. An `If-None-Match` value equal to the response ETag returns `304`. `versions=latest` leaves each member's `artifact.versions` holding only its latest version and carries its own ETag; absent, empty or `all` is the full answer; any other value, or `versions` given more than once, is `400 INVALID_QUERY`. |
+| `/api/v1/references?to=\|from=&kind=&since=` | GET | cookie, trusted header, or bearer | Edges of one node in the reference graph, newest first and cross-project: exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference, read whatever its length (`text.ParseRef`); `kind` filters a csv of edge kinds; `since=<events.id>` keeps mentions introduced after it (structural edges excluded). The answer is `{node, edges}`, the node read and its edges. Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`. The node read, each edge's `node` and each edge's `block` carry the six facts of every node, `made_by`, `made_at`, `changed_by`, `changed_at`, `parent` and `parent_version` ([Reference graph](#reference-graph)). A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document), and one a block of a comment or issue message holds from that block (`node.kind` `block`, id `comment/<uuid>#<block id>` or `message/<uuid>#<block id>`, `node.parent` the comment or message); a document's, comment's or message's own read also lists the edges at its blocks, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`, and a reply that names a block of the comment or message read is listed once, under that block. A block reference (`#b-<id>`) names a `block` node carrying its whole current `text`; pinned to a version (`#b-<id>@v<N>`; for a comment's block, a revision of the comment) it also carries `pin` (`version`, `ref`, the block's `text` at that version, `state` `unchanged`, `changed` or `removed`, and `removed_version`), and a removed block answers no edges. `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`, `INVALID_REFERENCE` too for a message block pinned with `@v<N>` (a message never changes); `404` for a node that does not exist, a block no current version or revision holds (unpinned) or whose id is past 256 bytes (no node), or a pinned version the document lacks, has no record of the blocks of, or did not hold the block at, or a revision past the comment's current one or that did not hold the block. |
 | `/api/v1/block-links?from=&to=` | GET | cookie, trusted header, or bearer | The links from blocks of the document `from` names to blocks of the document `to` names (an issue's spec or document, or a project's document; one document may be both), each reference read whatever its length: `{from, to, links}`, each link with its `kind`, both block nodes, and the `created_at` and `created_version` at which the source block first held it, newest first; `from`, `to` and every link's two blocks carry the six facts of every node ([Reference graph](#reference-graph)). A link is listed only while both blocks are current blocks of their documents. `400 INVALID_REFERENCE` when either is not a document reference; `404 NOT_FOUND` for a document that does not exist. |
 | `/api/v1/issues` | POST | cookie, trusted header, or bearer | Create an issue and its primary document. Omitting or leaving `spec` blank gives an empty primary document at version 1. `repo` (`owner/name`) is the issue's own repository and must be mapped to its project: `400 INVALID_ISSUE` when it is not `owner/name`, `400 REPO_NOT_MAPPED` when it is not mapped. A title over 1,000 characters (`contracts.IssueTitleMax`, UTF-16 units after trimming) is `400 CAP_EXCEEDED` before the duplicate check. Refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. A spec whose ask block breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`, and a spec whose markdown makes more than 65,536 elements (weighed as Element weights below lists) is `413 CAP_EXCEEDED`, naming the line that passes the limit; so is one whose markdown as stored (what `.../text` answers) would be longer than 1 MiB or make more than 65,536 elements. |
 | `/api/v1/issues/{key}` | PATCH | cookie, trusted header, or bearer | Update an issue's `title`, `status`, `priority`, `labels` (or `labels_add`, which adds to the labels the issue holds when the write commits; not with `labels`), `route`, `external_links`, `parent`, `rank`, `assignee`, `components` or `repo` (`null` clears it); `AGENTS.md` gives each field's rules. A title is trimmed, and one over 1,000 characters is `400 CAP_EXCEEDED`, as on creation. `expected_sequence` makes the write conditional: `409 ISSUE_CHANGED` when the issue's last event is no longer that sequence. A close (`status: done`) withdraws every open ask of the issue, whoever's turn it is: decision blocks in its documents, plain asks and requests to approve one of its documents. Each is recorded `resolved` with resolution kind `withdrawn`, naming the closer as the request's actor, with the reason `Withdrawn by the close of <KEY>.`, and gets one `ask.resolved` before `issue.closed`; its block is written `state="resolved"` in the live document, and no version is written. An ask answered or resolved before the close is left as it was, and the close records no answer and no approval. A reopening `status` (any but `done`) opens again exactly the asks the close withdrew, each with one `ask.opened` before `issue.updated`, and they return to the Inbox. |
@@ -1968,15 +2085,17 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/asks/{id}/answer` | POST | cookie or trusted header | Answer an open ask, or change the current answer with `expected_answer_at` set to that answer's `at`. Without it an answered ask is `409 ASK_CLOSED`. A stale value, or one sent for an open ask, is `409 ASK_ANSWER_CHANGED`; a different person is `403 NOT_ANSWERER`; an approval is `409 ASK_APPROVAL_REVIEW`. A change appends another `ask.answered` with `previous_answer`. An approval ask is moved to each document version before the human sees it, and an `ASK_EDITED` response means the question changed after the human reviewed it, so they reload and answer the moved request. On a block ask the answer is written into its block, and a changed answer without text removes the block's old `answer`. Its words and the options it chooses, whose labels are the asker's text, are weighed: where they would leave the document's markdown longer than 1 MiB and longer than it was, or making more than 65,536 elements and more than it did, the ask still takes the whole answer and the block is written without them, saying who answered and when. The answer's state and who gave it and when are not weighed, so the asks of a document already past those limits can still be answered. The answer is kept on the ask as well: a block that leaves the document and returns gets it back at settlement, which weighs each returning answer on its own in document order and keeps one on the ask alone, the block saying who answered and when, while writing it back would take the document past those limits and make it bigger. |
 | `/api/v1/asks/{id}/resolve` | POST | cookie, trusted header, or bearer | Retract or self-resolve an open ask with a recorded reason. On a block ask the block's `state` is written with it, and that is not weighed, so an ask on a document past what one upload may hold can still be resolved. A reason beginning `removed from the document in version`, which marks a retraction settlement wrote and would have the retract undone when the block returns, is `400 INVALID_RESOLUTION`. The kind is `retracted` or `resolved`, and any other is `400 INVALID_RESOLUTION`: `withdrawn` is written only by an issue's close. An ask on a closed issue is `409 ISSUE_CLOSED`; reopen the issue first. |
 | `/api/v1/issues/{key}/comments?artifact=` | GET | cookie, trusted header, or bearer | List comments, optionally limited to an artifact ID. |
-| `/api/v1/issues/{key}/comments` | POST | cookie, trusted header, or bearer | Create a comment, root-level reply, or suggestion. An anchored comment uses the same quote-or-mark-ID shape as an ask; replies inherit their root's anchor and send none. A comment's record in its document's margin - its body and replies, or a suggestion's and its replacement - holds at most 256 KiB of text, and a document's margin 1 MiB: a comment, reply or suggestion that would leave either past its bound and bigger is `413 CAP_EXCEEDED`, naming the bound and both sizes. A quote anchor that would leave the marks on the document's text carrying more than 1 MiB of ids and authors, and more than they carried, is `413 CAP_EXCEEDED` too, as for an ask's. |
-| `/api/v1/comments/{id}` | GET | cookie, trusted header, or bearer | Read a comment and its reply chain. |
-| `/api/v1/comments/{id}` | PATCH | cookie or trusted header | Edit a comment body. Human authors only. An edit that would leave the comment's margin record or its document's margin past its bound (above) and bigger is `413 CAP_EXCEEDED`. |
+| `/api/v1/issues/{key}/comments` | POST | cookie, trusted header, or bearer | Create a comment, root-level reply, or suggestion. An anchored comment uses the same quote-or-mark-ID shape as an ask; replies inherit their root's anchor and send none. A reply may name the block of the comment `reply_to` names that it answers, `reply_to_block` (`b2`), checked against that comment before `reply_to` climbs to its thread's head: `400 INVALID_COMMENT` without `reply_to`, for a block that comment does not hold now, and in an ask's thread. The delivery callback `POST /api/v1/comments/{id}/reply` takes `reply_to_block` for a block of comment `{id}` the same way. A comment's record in its document's margin - its body and replies, or a suggestion's and its replacement - holds at most 256 KiB of text, and a document's margin 1 MiB: a comment, reply or suggestion that would leave either past its bound and bigger is `413 CAP_EXCEEDED`, naming the bound and both sizes. A quote anchor that would leave the marks on the document's text carrying more than 1 MiB of ids and authors, and more than they carried, is `413 CAP_EXCEEDED` too, as for an ask's. |
+| `/api/v1/comments/{id}` | GET | cookie, trusted header, or bearer | Read a comment and its reply chain. Every comment a route or event returns carries `reply_block` (`{node, ref, block_id, text, removed}`), the block of the comment it answers, `null` when it names none: `text` the block's text cut to 480 characters, its last text once removed, and `removed` true while the comment's current revision no longer holds it. |
+| `/api/v1/comments/{id}/blocks` | GET | cookie, trusted header, or bearer | A comment's current blocks in body order: `{item, revision, indexed, blocks: [{id, type, text, ref, from, to, changed_revision, changed_at}]}`, `item` the comment's graph node, `revision` its indexed revision, `from` and `to` UTF-16 code units into its stored body. While the comment is owed a block index, or was indexed from another body than it stores, `indexed` is `false` and `blocks` empty; the read writes nothing. `400 COMMENT_ID_INPUT` for a non-uuid id. |
+| `/api/v1/comments/{id}` | PATCH | cookie or trusted header | Edit a comment body. Human authors only. An edit that would leave the comment's margin record or its document's margin past its bound (above) and bigger is `413 CAP_EXCEEDED`. `blocks` (`[{id, from}]`, each block id the editor carried and where its span starts in `body`, in UTF-16 code units, in body order) with `base_revision` (the revision `.../blocks` answered) keeps each id on the new block its span starts in; with a `base_revision` that is no longer the comment's, or without `blocks`, the new blocks take ids by their text. `400 INVALID_COMMENT` naming the field for `blocks` without `base_revision`, and, at the current revision, for an id that is not a current block of the comment, an id twice, or a `from` outside `body` or before the one ahead of it. |
 | `/api/v1/comments/{id}/resolve` | POST | cookie, trusted header, or bearer | Resolve a comment. |
 | `/api/v1/comments/{id}/reopen` | POST | cookie or trusted header | Reopen a resolved thread-root comment. |
 | `/api/v1/comments/{id}/accept` | POST | cookie or trusted header | Apply and accept an anchored suggestion. An accept that would leave the document's markdown (what `.../text` answers) longer than 1 MiB and longer than it was, or making more than 65,536 elements and more than it did, is `413 CAP_EXCEEDED` and leaves the suggestion open. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and leaves the suggestion open; one removed after it answers `200` with `lost: true`. |
 | `/api/v1/comments/{id}/reject` | POST | cookie or trusted header | Reject a suggestion. |
-| `/api/v1/issues/{key}/messages` | POST | cookie, trusted header, or bearer | Post an issue message. |
-| `/api/v1/issues/{key}/messages` | GET | cookie, trusted header, or bearer | List an issue's message threads: every root message, oldest first, unpaged, each with its delivery attempts and its replies. |
+| `/api/v1/issues/{key}/messages` | POST | cookie, trusted header, or bearer | Post an issue message. A reply may name the block of the message `in_reply_to` names that it answers, `in_reply_to_block` (`b2`), as may `POST /api/v1/agents/{session_id}/messages` and, for a block of message `{id}`, `POST /api/v1/messages/{id}/reply` (not on a follow-up): `400 INVALID_MESSAGE` without `in_reply_to` and for a block that message does not hold now. A reply naming a block carries that block's text as `reply_body`. |
+| `/api/v1/issues/{key}/messages` | GET | cookie, trusted header, or bearer | List an issue's message threads: every root message, oldest first, unpaged, each with its delivery attempts and its replies. Every message a route or event returns carries `reply_block`, the block of the message it answers, as a comment does. |
+| `/api/v1/messages/{id}/blocks` | GET | cookie, trusted header, or bearer | A message's current blocks in body order: `{item, indexed, blocks: [{id, type, text, ref, from, to}]}`, `item` the message's graph node, `from` and `to` UTF-16 code units into its stored body, `ref` absent for a direct message's block, which has no address. Read under `GET /api/v1/messages/{id}`'s rule: a bearer reading a direct message names its session in `?session=` (`400 SESSION_REQUIRED`, `403 THREAD_FORBIDDEN`). While the message is owed a block index, `indexed` is `false` and `blocks` empty; the read writes nothing. |
 | `/api/v1/issues/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List issue artifacts or create a version from a multipart `file` or JSON `{name, content, summary?, actor?}`. The JSON form requires `Content-Type: application/json`. A `text/markdown` file is a document. Any other file's kind is read from its bytes, never from the part's declared `Content-Type`: it is `image` only when its bytes are a PNG, JPEG, GIF or WebP, stored with `mime` the type its bytes are (a JPEG declared `image/png` is `image/jpeg`), and otherwise a `file` under its declared type, an SVG among them, so no client stores other bytes as an image. A version whose kind is not its artifact's is `400 ARTIFACT_KIND_MISMATCH`. A name no artifact has yet is `400 INVALID_ARTIFACT`, naming the bound, when it, or the reference key `<owner>/<slug>` it gives the new artifact, is over 2692 bytes, the most a B-tree entry of `artifacts_ref_key_key` holds of incompressible text; an upload under an existing artifact's name, one stored longer included, is never refused for its length. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose markdown makes more than 65,536 elements (weighed as Element weights below lists), naming the line that passes the limit; a document or version whose markdown as stored (what `.../text` answers) would be longer than 1 MiB and longer than the document's was, or make more than 65,536 elements and more than the document's did, or that would leave a live state ygo could not decode as one update; or whose formatting is more items than one document update can store (1,048,576), naming the count. A file the configured bucket refuses is `502 FILE_STORE_UNAVAILABLE`, with no version written. A fresh POST to a closed issue is `409 ISSUE_CLOSED` before its body is spooled, keyed or not, and claims no key; a repeat under a key Dispatch answers itself (a stored answer, a first still running, a write that committed and lost its answer) is answered as that key says whatever the issue's state now, so an upload that landed before the close is replayed its `201`; a malformed `Idempotency-Key` is `400 KEY_INVALID` first. |
 | `/api/v1/projects/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List non-primary project artifacts (or only unlinked documents with `?unlinked=true`), or create an unlinked project artifact, its kind read, and a new artifact's name held to 2692 bytes, as an issue upload's are. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose markdown makes more than 65,536 elements (weighed as Element weights below lists), naming the line that passes the limit; a document or version whose markdown as stored (what `.../text` answers) would be longer than 1 MiB and longer than the document's was, or make more than 65,536 elements and more than the document's did, or that would leave a live state ygo could not decode as one update; or whose formatting is more items than one document update can store (1,048,576), naming the count. A file the configured bucket refuses is `502 FILE_STORE_UNAVAILABLE`, with no version written. |
 | `/api/v1/artifacts/{id}` | GET | cookie, trusted header, or bearer | Read an artifact, its versions, and incoming references. `{id}` must be a UUID. Every version on every artifact read and list (this route, the issue and project artifact lists, the issue read, the reference reads, and each version write's answer and event) carries `size`: the bytes it stores, a file's or an image's bytes or a document's markdown, read from the row's own length without rendering the document or loading its history. |
@@ -2039,10 +2158,11 @@ body that changes the head of its text names every target the text still cites, 
 names each target whose stored excerpt it changed and each target a block it changed still cites,
 and a retitle names the issue's parent and the issues it is blocked by, whose panels show its
 title. A document version also names each block it changed or deleted that something cites, since
-every link to the block shows its text. An issue write that adds or removes a `blocked_by` entry
-names each blocker it added or removed, whose `referenced_by_count` counts the edge, and an
-`issue.created` names every blocker the new issue holds. Each field is absent from an event
-written before it existed.
+every link to the block shows its text, and a comment's or issue message's write names each target
+whose link it moved from one of the item's blocks to another. An issue write that adds or removes
+a `blocked_by` entry names each blocker it added or removed, whose `referenced_by_count` counts the
+edge, and an `issue.created` names every blocker the new issue holds. Each field is absent from an
+event written before it existed.
 
 ## Dispatch topics
 
