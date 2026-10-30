@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-598",
-  "completed": "2026-10-30T20:01:12Z",
+  "completed": "2026-10-30T21:58:24Z",
   "proof": [
+    {
+      "criterion": "Review round 4: no stop, start, write or removal path of cluster.sh acts on another run's copy; heap-missing.txt records the removal's real result",
+      "surface": "cluster.sh under cluster.test.sh's fakes (real processes, a real SIGKILL, the fake lock naming another run), and the repository's CI check scripts",
+      "command": "cd packages/envoy && timeout 1800 bash loadtest/cluster/cluster.test.sh && bash loadtest/run-step.test.sh && bash loadtest/common.test.sh; uvx --from shellcheck-py@0.10.0.1 shellcheck -x packages/envoy/loadtest/cluster/cluster.sh; uv run --no-project --with pyyaml==6.0.2 bash .github/scripts/check-ci-images.sh tree; audit https://github.com/sjawhar/legion/pull/2462#issuecomment-6534359964",
+      "observed": "cluster.test.sh 49 PASS, 0 FAIL: (w) the EXIT trap after the lock moved stops no typing job and removes no token; (x) a failed removal is recorded as failed in heap-missing.txt; (y) with the lock naming another run runner_stop, runner_step_remove, typing_stop and runner_put touch nothing, stop_copy and runner_start refuse, step --run <own run> is refused naming both runs; run-step, common, shellcheck, check-ci-images tree exit 0",
+      "headSha": "f7beb83311be",
+      "negativeControl": "against 7604610d's cluster.sh: 'the EXIT trap of a step that ended because the lock names run lt-20261028t080000-beef stopped the browser typing job typing-pgkill' and 'runner_stop returned 0 although the lock names run lt-20261028t080000-beef'; without runner_put's guard: 'runner_put returned 0 although the lock names run lt-20261028t080000-beef'"
+    },
     {
       "criterion": "Review round 3: a SIGKILLed step's runner_wait ends with its step and never stops a later run's job of the same name; runner_copy_back returns 0 or 1 with its own heap note; one failed-kinds text",
       "surface": "cluster.sh under cluster.test.sh's fakes (real processes, real SIGKILL), and the repository's CI check scripts",
