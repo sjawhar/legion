@@ -108,7 +108,7 @@ same step before and after its change, and compares the two rows.
 | `LOADTEST_PG_DIRECT` | unset (`1` for a `--replay` step) | `1` connects Dispatch to Postgres directly, without the proxy. Read when Dispatch starts, so set it on `run-step.sh`. `stack.json` and `meta.json` record it as `pg_direct`. |
 | `LOADTEST_DISPATCH_COMMIT` | unset | `stack.sh setup` builds `envoy-dispatch` alone from that commit (`run-step.sh --replay --dispatch-commit`). |
 | `LOADTEST_GOMAXPROCS` | nproc | Dispatch's `GOMAXPROCS` (`run-step.sh --replay --gomaxprocs`). |
-| `LOADTEST_REPLAY_ISSUE` | unset | The issue the replay's bundle and seed parts are file artifacts of. `stack.sh replay-get` and a `run-step.sh --replay` step require it and refuse before they start without it; the manifest names no issue. |
+| `LOADTEST_REPLAY_ISSUE` | unset | The issue the replay's bundle and seed parts are file artifacts of. `stack.sh replay-get` and a `run-step.sh --replay` step require it and refuse before they start without it; the manifest names no issue. To find it, search Dispatch for the bundle parts' name before `.tar.zst` (the manifest's `bundle.parts[].file`; for this manifest, `dispatch search --query 'linux-replay-2026-10-26'`): among the hits is that issue's comment naming the parts. A search for the manifest's file name does not find it. |
 | `DISPATCH_URL`, `DISPATCH_TOKEN_FILE` | unset | Read by `stack.sh replay-get` alone, in its own shell, to download the replay's parts. |
 
 Every process listens on `127.0.0.1`. The default ports follow `LOADTEST_ROOT`: the root's block
@@ -1022,8 +1022,8 @@ set, and null when neither hierarchy's files are there. The Dispatch that ran th
 `dispatch_commit` and `dispatch_binary_sha256` beside it, written once for every step, replay or
 not (The step directory, below); `replay.inputs.dispatch_commit` names the same commit.
 
-**Measuring a change.** This README states no merge rule; the rule is in the measuring change's
-own issue. It states how to run a comparison and what to compare.
+**Measuring a change.** This README states no merge rule: the work that asks for a measurement
+states its own. It states how to run a comparison and what to compare.
 
 A change to Dispatch's write path is measured with six runs of one bundle, one set of flags, one
 `--gomaxprocs` and one `--rng-seed`: three with `--dispatch-commit` at the commit before the change
