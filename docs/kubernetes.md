@@ -1708,7 +1708,8 @@ this order:
      runtime.kubernetes.resources.controller.cpu`, the same `members`);
    - every other key of the `runtime.kubernetes` block this release added, each refused by name
      the same way: `session_database`, `plugins`, `repository_cache`, `setup`,
-     `agent_secrets.token_file`, and a pod volume of kind `persistent_volume_claim` or `nfs`;
+     `agent_secrets.token_file`, a pod volume of kind `persistent_volume_claim` or `nfs`, and a
+     `secret` or `config_map` volume's `default_mode`;
    - a database session store: the file puts `session_store` back to `pvc`, or leaves it unset,
      and removes `session_dsn_secret` with it. The earlier release refuses `postgres`
      (`runtime.kubernetes.session_store postgres is not supported until Stage 6: a pod's session
@@ -2520,6 +2521,20 @@ exist in the daemon's namespace, with every key the volume asks of it: the image
 boot at once, naming it, when it does not, for every volume a `volume_mounts` entry mounts (the
 kubelet attempts no other)
 ([The image is probed before it publishes](#the-image-is-probed-before-it-publishes)).
+
+A `secret` or `config_map` volume may set `default_mode`, the mode of every file it projects,
+in octal digits after a leading `0` or `0o`, from 0 to 0777:
+`secret: {name: <Secret>, items: [{key: <key>, path: key}], default_mode: 0440}`. `0o440` reads
+the same, and so does the string `"0440"`, the one spelling a pod block written as JSON can carry.
+Left out, Kubernetes' default stands, 0644, which every user in the pod can read; Legion mounts
+its own Secrets, the providers Secret among them, at 0440. Every pod runs as user 1000 with group
+1000 as its `fsGroup`, so every role still reads a 0440 file. Load refuses a mode written in
+decimal, quoted or not (`440` would be 0670), one above 0777, and a `default_mode` on a projected
+volume's source. A change of a mode replaces no running pod, which keeps the mode its files were
+written with: the mode reaches each pod made after the change. A daemon of
+an earlier release refuses the key at boot (`unknown key
+runtime.kubernetes.pod.volumes[<n>].secret.default_mode`), so set it only once the daemon runs a
+release that reads it; `legion start --check-config` of that release says so first.
 
 A volume may also be an existing network share: [Network shares](#network-shares) lists the sources
 and what each runtime supports.
@@ -5589,7 +5604,9 @@ issue's pod (every role of it alike) and the image probe's.
 - **`runtime.kubernetes.pod`** has four keys. `env` is variables set in the agent's container.
   `volumes` are each one `secret`, `config_map`, `projected`, `persistent_volume_claim` (a claim of
   the daemon's namespace, by `name`) or `nfs` (`server` and `path`) source, never an inline `csi`
-  volume ([Network shares](#network-shares)); a projected
+  volume ([Network shares](#network-shares)); a `secret` or `config_map` source may set
+  `default_mode`, the octal mode of every file it projects, such as `0440` in place of
+  Kubernetes' default 0644 ([Configuration](#configuration)); a projected
   `service_account_token` must last at least 600 s, the least the API server issues, and its
   `audience` may not still hold a `${…}` placeholder, which nothing expands. `volume_mounts`
   are read-only unless `read_only: false`, and may use `sub_path`. `service_account` is the pods'
