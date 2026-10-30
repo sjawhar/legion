@@ -881,7 +881,15 @@ keep a room resident. A room that loads for a reader, and a reader that joins a 
 query the other processes, which answer with their local clients' states. Before the service
 closes a room itself, it removes its local clients' states, so the removal is relayed
 (`removeLocalAwareness`). `AwarenessExpiry` is 30 s, so a cursor relayed from a process that died
-without a word expires.
+without a word expires. A room tracks at most `maxAwarenessClientsPerRoom` (256) awareness
+clients, whoever sends them, the ones that have left included (ygo's
+`MaxAwarenessClientsPerRoom`, `docs/service.go`): past it a client id the room has not seen
+before is refused, which is what keeps a peer's frame of invented ids from growing a room's
+awareness map and the relay's fan-out. A client that leaves gives its entry back as it goes
+rather than two expiries later - the room's own departure watcher frees it
+(`watchAwarenessDepartures`, `reclaimAwarenessSlots`), as does a reader's admission and the
+arrival of another process's awareness - so the bound counts the clients a room holds now and a
+reader joining after such a frame is taken in at once.
 
 An issue's close and reopen reach every process through migration 0142's trigger, which notifies
 `dispatch_issue_open_changed` with the issue's key when `closed_at` changes, whoever wrote it. Each

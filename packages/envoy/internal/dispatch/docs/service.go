@@ -721,17 +721,18 @@ func New(deps Deps) *Service {
 	// A room forgets an awareness client it has not heard from in awarenessExpiry: a reader
 	// relayed from another process that died without removing it goes once its heartbeats stop.
 	srv.AwarenessExpiry = awarenessExpiry
-	// What a room's awareness may hold, whoever sent it: the bytes of the states it holds now
-	// (maxAwarenessBytesPerRoom). Unbounded, ygo's default, one peer's frame can claim client
-	// ids each with a state of up to 1 MiB. ygo's companion bound on how many client ids a room
-	// tracks (Server.MaxAwarenessClientsPerRoom) is deliberately left unset: it counts the
-	// tombstones of the clients that left as well as the ones present, and drops every client id
-	// the room has not seen before, so one frame's thousands would keep a room from taking a
-	// reader who joined a moment later until those tombstones were purged, a minute and a half
-	// after the frame's tab had gone. What that bound was here for - keeping one frame from
-	// becoming thousands of pg_notify sends, the relay splitting a batch into whole-client
-	// notifications within roomSyncPayloadLimit - the relay does itself, on the clients a room
-	// holds now (maxAwarenessClientsPerRoom, awarenessRelay.enqueue).
+	// What a room's awareness may hold, whoever sent it: at most maxAwarenessClientsPerRoom
+	// client entries, the tombstones of the clients that left included
+	// (Server.MaxAwarenessClientsPerRoom, which ygo forwards to awareness.Awareness.SetMaxClients),
+	// and the bytes of the states those entries hold now (maxAwarenessBytesPerRoom). Unbounded,
+	// ygo's default, one peer's frame can claim client ids each with a state of up to 1 MiB, and
+	// a frame of thousands of ids with cursor-sized states - or of nulls for ids the room has
+	// never held, which cost no bytes at all - grows the room's map by every id it names, which
+	// the byte bound does not stop. Past the client bound ygo refuses a client id the room has
+	// not seen before, whoever sends it; what keeps that from shutting a reader out is that a
+	// room of this service frees a departed client's entry as it leaves, rather than two
+	// expiries later (reclaimAwarenessSlots).
+	srv.MaxAwarenessClientsPerRoom = maxAwarenessClientsPerRoom
 	srv.MaxAwarenessBytesPerRoom = maxAwarenessBytesPerRoom
 
 	service.srv = newRoomServer(srv)

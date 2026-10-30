@@ -4,11 +4,12 @@ body: |-
   `dispatch_doc_awareness`, at most once per 50 ms per room. A reader who opens a document second
   sees the first reader's cursor at once, and a reader who leaves on one process leaves on the
   other. A room forgets a client it hears nothing from for 30 s, so a cursor relayed from a process
-  that stopped without a word goes away. A process relays at most 256 of a room's clients at once,
-  so one frame claiming thousands of clients cannot fan out into thousands of notifications; the
-  bound counts the clients a room holds now, so the clients of such a frame give their slots back
-  as they leave and a reader who joins after one is relayed at once. Processes of the earlier
-  build relay none, and show no other process's cursors.
+  that stopped without a word goes away. A room tracks at most 256 awareness clients, the ones
+  that have left included, so one frame claiming thousands of client ids neither grows a room's
+  memory without limit nor fans out into thousands of notifications; a client that leaves gives
+  its entry back at once, so the bound counts the clients a room holds now and a reader who joins
+  after such a frame is taken in and relayed at once. Processes of the earlier build relay none,
+  and show no other process's cursors.
 time: 2026-10-28T12:12:12Z
 custom:
   Issue: pr2414

@@ -303,10 +303,10 @@ func relayedClients(service *Service, room string) int {
 	return len(relay.local[room])
 }
 
-// One frame inventing far more awareness clients than any room has readers costs the other
-// processes the bound and no more: the room takes the frame, and the relay sends the bound's
-// clients at most (maxAwarenessClientsPerRoom) in the few notifications they fill, not one per
-// client.
+// One frame inventing far more awareness clients than any room has readers costs the room, and
+// the other processes, the bound and no more: the room takes the bound's clients of the frame
+// and refuses the rest (maxAwarenessClientsPerRoom), and the relay sends those in the few
+// notifications they fill, not one per client.
 func TestAnAwarenessFrameOverTheClientBoundRelaysNoMoreThanTheBound(t *testing.T) {
 	pair := newProcessPair(t)
 	handledB := runAwareness(t, pair.taskB)
@@ -325,8 +325,8 @@ func TestAnAwarenessFrameOverTheClientBoundRelaysNoMoreThanTheBound(t *testing.T
 	waitFor(t, roomWait(t), "task A's relay to be sending the bound's clients of the frame", func() bool {
 		return relayedClients(pair.taskA, pair.artifactID) == maxAwarenessClientsPerRoom
 	})
-	if refused := pair.taskA.awarenessRelay.refused.Load(); refused != flood-maxAwarenessClientsPerRoom {
-		t.Fatalf("task A's relay refused %d of the frame's %d clients, want %d", refused, flood, flood-maxAwarenessClientsPerRoom)
+	if tracked := trackedAwarenessClients(t, pair.taskA, pair.artifactID); tracked != maxAwarenessClientsPerRoom {
+		t.Fatalf("task A's room tracks %d of the frame's %d clients, want the bound's %d", tracked, flood, maxAwarenessClientsPerRoom)
 	}
 
 	deadline := time.After(roomWait(t))
@@ -359,11 +359,11 @@ func TestAnAwarenessFrameOverTheClientBoundRelaysNoMoreThanTheBound(t *testing.T
 	t.Logf("a frame of %d awareness clients relayed %d of them in %d notifications", flood, relayed, sends)
 }
 
-// The clients of a flood that leaves give their slots back as they go: the relay's bound counts
-// the clients a room holds now, not every client id it has ever heard of, so a reader who joins
-// just after a frame of thousands has gone is relayed at once rather than after the frame's
-// clients have expired and been purged.
-func TestAwarenessClientsThatLeaveFreeTheRelaysBoundAtOnce(t *testing.T) {
+// The clients of a flood that leaves give their entries back as they go: a room's bound counts
+// the clients it holds now, not every client id it has ever heard of, so a cursor announced just
+// after a frame of thousands has gone is taken by the room and relayed at once rather than
+// refused until the frame's clients have expired and been purged.
+func TestAwarenessClientsThatLeaveFreeTheRoomsBoundAtOnce(t *testing.T) {
 	pair := newProcessPair(t)
 	runAwareness(t, pair.taskA)
 	runAwareness(t, pair.taskB)

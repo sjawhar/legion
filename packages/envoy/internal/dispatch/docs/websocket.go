@@ -443,6 +443,14 @@ func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) 
 	if s.srv.GetDoc(room) != nil {
 		s.awarenessRelay.query(room)
 	}
+	// The entries of the clients that have left the room go before this reader announces its own
+	// client, so a frame of null states for client ids a room never held - which ygo stores as
+	// entries it tells no observer about, the one case the room's own departure watcher cannot
+	// see - cannot hold the room at its client bound and keep this reader out
+	// (maxAwarenessClientsPerRoom, reclaimAwarenessSlots).
+	if aw, resident := s.srv.GetAwareness(room); resident {
+		reclaimAwarenessSlots(room, aw)
+	}
 	return websocket.ConnectionConfig{
 		ReadOnly: schemaReadOnly(open, r.URL.Query().Get("schema_version")),
 	}, true
