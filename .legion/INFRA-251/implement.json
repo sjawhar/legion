@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-251",
-  "completed": "2026-10-30T09:15:00Z",
+  "completed": "2026-10-30T11:40:00Z",
   "stateTable": [
     "Kept-decision hand-over: one rule, with the generation dimension",
     "",
@@ -41,60 +41,66 @@
   ],
   "proof": [
     {
-      "criterion": "The tester's red test TestADecisionAStaleStartReleasesReachesTheRunningArchitect passes unmodified: a start of an earlier generation that releases a claimed decision hands it to the running architect",
-      "surface": "Daemon outbox, workflow and supervisor on a real PostgreSQL 17.2 (UTF8 cluster) and nats-server 2.10.29",
-      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 timeout 600 go test -count=1 -v -run 'TestADecisionAStaleStartReleasesReachesTheRunningArchitect|TestAStartWhoseForgetFailedIsNotDeliveredAgainAfterItsTurn|TestARetriedStartDeliversItsTaskOnce|TestOnlyADelivered|TestACatchUpLeavesOutWhatAQueuedStartClaims|TestAStartThatFindsTheRootArchitectRunningNamesEachKeptDecisionOnce' ./internal/daemon/",
-      "observed": "All PASS, the red test 0.59s. jj diff --from 2f9a32bebb12 on parked_decision_test.go: 0 files changed.",
-      "headSha": "e14702f89259",
-      "negativeControl": "At 5ef027fb (7a0834dd's code) the red test fails at parked_decision_test.go:373: 'no start or catch-up of LEGION-1 names it'. With workflow.HandOverKept's QueueCatchUp replaced by return nil, the property test fails 8 of 30 seeds with 'told 0 times'."
+      "criterion": "The change merges onto main and the daemon still boots: its migrations apply after main's 0062-0064",
+      "surface": "store.Migrate on a fresh PostgreSQL 17.2 database at the merge head (main 96a7e5ea merged forward in 98e39d1f, migrations renumbered in f9cbaaa7)",
+      "command": "create database mig_fresh_r12; cd packages/daemon && go run <throwaway main calling store.Open + store.Migrate> 'postgres://postgres:pw@127.0.0.1:55432/mig_fresh_r12?sslmode=disable'; psql -c 'select version from schema_version where version >= 60' -c '\\d claims'; then cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 timeout 900 go test -count=1 ./internal/store/",
+      "observed": "'migrated: 66 <nil>'; schema_version 60,61,62,63,64,65,66; parked_decisions and readmitted_approvals exist; claims.delivered_rows bigint[] not null default '{}'. store ok 51.0s (TestParkedDecisionsArriveWith0065AndGoWithTheirRoot migrates through 64, then finds the tables added by 65). main@origin read again before the push: 88818a3b, still ending at 0064_pull_request_pass_settlement.",
+      "headSha": "f8391ab47cc7e170dc7308273848e4e4f3518f94",
+      "negativeControl": "At e8a595d3 merged with main (the tester's merge-tree reproduction) Migrate refuses 'migrations 0062_live_issue_reads.up.sql and 0062_parked_decisions.up.sql share version 62' and applies nothing. In this pod's own shared test database, which had applied the branch's old 62/63, the daemon suite failed with 'relation \"parked_decisions\" already exists' until that scratch schema was dropped; no deployed database ever held the old numbers (never on main)."
     },
     {
-      "criterion": "Property test: random seeded interleavings of decide, park, todo-wait, re-admission (generation change), start rows run out of order, catch-ups, ready, turn, forget failure, publish no-holder/refused/receipt-timeout, crash (finish lost) and daemon restart; every decision kept reaches an architect of the root's current run exactly once and none is lost",
-      "surface": "TestKeptDecisionsReachTheCurrentArchitectOnce (internal/daemon/kept_decision_property_test.go, commit 0449763c), real PostgreSQL, the real record store, engine, outbox runner, supervisor machines and intake.ApplyFact",
-      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 timeout 600 go test -count=1 -run TestKeptDecisionsReachTheCurrentArchitectOnce ./internal/daemon/   (defaults 30 seeds x 100 steps = 3000 steps; LEGION_KEPT_PROPERTY_SEED=<n> replays one seed with its trace; LEGION_KEPT_PROPERTY_RUNS=300 for 30000 steps)",
-      "observed": "Defaults ok in about 33 s. Seeds 1, 12, 21, 27, 29, 74, 101, 159 each ok. LEGION_KEPT_PROPERTY_RUNS=300 ok (323 s).",
-      "headSha": "e14702f89259",
-      "negativeControl": "On 5ef027fb's code the property test fails 18 of 30 seeds: B (seed 12, a stale start releases its decision after the current ready; told 0 times), C (seed 27, a failed forget then a release; told twice), A (seed 1, a generation-2 start task prompted while the root is parked at generation 4). Mutations at the fix head: hand-over off -> 8 seeds fail (told 0 times); the DeliveredRows check off -> 22 seeds fail (told twice); RootHears off -> 9 seeds fail (told while the root has no architect to hear it). Each reproduced byte for byte by its seed."
+      "criterion": "A row written with its id (a start or catch-up claiming kept decisions, workflow.EnqueueNaming, the hand-over's catch-up among them) wakes its lane as it commits (the tester's 23 s latency note)",
+      "surface": "The outbox lanes with the workflow's wake-decorated store (projectRecords) on real PostgreSQL",
+      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 timeout 900 go test -count=1 -run 'TestARowWrittenWithItsIDRunsOnItsLaneWithoutASweep|TestACommittedRowRunsOnItsLaneWithoutASweep' ./internal/daemon/",
+      "observed": "Both PASS (1.5s): the row written with EnqueueID is posted with no sweep fired. projectRecords.EnqueueID now wakes on commit; the hand-over's catch-up also states the default design gate (config.DesignGate.OrDefault, shared with the engine) where the tester saw \"\".",
+      "headSha": "f8391ab47cc7e170dc7308273848e4e4f3518f94",
+      "negativeControl": "With projectRecords.EnqueueID's wakeOnCommit removed, the new test FAILs: 'timed out waiting for the row written with its id was posted' (60.6s); reverted."
     },
     {
-      "criterion": "RootHears holds only a root architect's phase-less start task of a run while the root is parked, lingering or waiting for its slot; every path main's code resumes a root by (fresh admission, re-admission, an answered awaiting_person root, the reconcile when a person already acted) gives the architect its task exactly as with RootHears nil",
-      "surface": "TestARootThatMainsCodeResumesGetsItsTaskWithRootHearsWired (internal/daemon/root_hears_main_paths_test.go) over the real admission (admit.New), engine, outbox runner and a supervisor wired with the production workflowRuntime.rootHears; plus supervise's TestARootArchitectsTaskIsHeldUntilItsRootHasAnArchitectToHearIt and TestAnOperatorsTaskIsPromptedWhileTheRootHasNoArchitectToHearOne",
-      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 timeout 600 go test -count=1 -v -run TestARootThatMainsCodeResumesGetsItsTaskWithRootHearsWired ./internal/daemon/ && go test -count=1 -run 'TestARootArchitectsTaskIsHeld|TestAnOperatorsTaskIsPrompted' ./internal/supervise/",
-      "observed": "All 5 subtests PASS: each of the four main paths prompts its task once, the same count as with Deps.RootHears nil, RootHears asked about that delivery and answered yes; the parked-root control holds the task on a ready claim (answered no, nothing prompted) and the re-admission's start sends it once. Both supervise tests PASS.",
-      "headSha": "e14702f89259",
-      "negativeControl": "With workflow.ArchitectHears returning false, all four main-path subtests and the control FAIL ('prompted 0 times'); reverted."
+      "criterion": "The property model covers launch and resume failure (claims reaching failed, RequestRetry, architectEnded), a denied publish and delivery_failed; every decision is still told once and none lost",
+      "surface": "TestKeptDecisionsReachTheCurrentArchitectOnce with keptRuntime refusing Spawn and Resume, and listener modes keptDenied (notify.ErrPublishDenied) and keptDeliveryFailed (notify.ErrNotDelivered, ReasonDeliveryFailed)",
+      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 timeout 600 go test -count=1 -v -run TestKeptDecisionsReachTheCurrentArchitectOnce ./internal/daemon/ ; LEGION_KEPT_PROPERTY_RUNS=300 timeout 1500 go test -count=1 -timeout 25m -v -run TestKeptDecisionsReachTheCurrentArchitectOnce ./internal/daemon/",
+      "observed": "Defaults ok (31.2s): 62 launches refused, 19 claim failures, 71 starts relaunched a failed claim; catch-up publishes answered 50 delivered, 12 no-holder, 5 refused, 4 receipt-timeout, 3 denied, 7 delivery-failed; 17 of 30 seeds reached a failed claim. 300 seeds ok (316.5s): 544 refused launches, 166 claim failures, 744 failed-claim relaunches, 6 catch-ups finished because the architect will not hold its role (1 with the claim failed), 26 denied and 41 delivery-failed publishes. No seed failed, so no production change was needed for these.",
+      "headSha": "f8391ab47cc7e170dc7308273848e4e4f3518f94",
+      "negativeControl": "The round-11 mutations still apply to this model: hand-over off -> told 0 times; DeliveredRows check off -> told twice; RootHears off -> told while parked (round 11 proof, unchanged code paths)."
     },
     {
-      "criterion": "Nothing else regresses",
-      "surface": "The whole daemon module at the fix head b85fe8a6 (the commits after it add tests and docs only)",
-      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go build ./... && go vet ./... && gofmt -l internal cmd; timeout 3000 go test -count=1 -p 1 -timeout 48m ./internal/... ./cmd/... -skip '<Docker-only tests, tmux-on-PATH test, the keeper flake, the SQL_ASCII ompsessions test>'",
-      "observed": "build, vet and gofmt clean. Every package ok: daemon 514.4s, admit 246.9s, workflow 370.4s, store 50.6s, supervise 26.7s, record 33.8s, api 124.0s, sandbox 210.2s, workspace 328.1s, cmd/legion 126.1s and the rest. check-private-names exit 0.",
-      "headSha": "b85fe8a640eb",
-      "negativeControl": "The skipped tests fail without this change too: the Docker-only tests need rootless Docker, which this pod lacks; TestTheKeeperRetriesAControllerWhoseLaunchesRanOut fails at 9b011313 as well; TestImportRefusesContentNoTextValueHolds fails on main under a SQL_ASCII cluster (the tester's round-10 finding), and on this UTF8 cluster it passes."
+      "criterion": "Nothing else regresses at the merge head",
+      "surface": "The whole daemon module at f8391ab47cc7",
+      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go build ./... && go vet ./... && gofmt -l internal cmd; timeout 3000 go test -count=1 -p 1 -timeout 48m ./internal/... ./cmd/... -skip '<Docker-only tests, tmux-on-PATH test, the keeper flake>'",
+      "observed": "build, vet, gofmt clean. Every package ok: admit 282.5s, api 135.6s, workflow 424.2s, store 57.0s, supervise 28.4s, record 40.3s, sandbox 220.0s, workspace 342.2s, cmd/legion 125.2s, ompsessions ok on this UTF8 cluster; daemon 543.1s and intake 110.5s after the shared scratch schema holding the old 62/63 was reset.",
+      "headSha": "f8391ab47cc7e170dc7308273848e4e4f3518f94",
+      "negativeControl": "intake's TestConsumerLagCountsEveryConsumerWhileNATSRefusesTheOldestMessageRead (new on main) panics 'rootless Docker not found', like the other Docker-only tests this pod cannot run; CI runs them."
     }
   ],
   "filesChanged": [
-    "packages/daemon/internal/workflow/parked_decision.go: package-level ParkedDecisionTask and EnqueueNaming; HandOverKept (the one release rule); ArchitectHears (the shared reading)",
-    "packages/daemon/internal/workflow/catch_up.go: QueueCatchUp, the one catch-up composer the ready and the hand-over share",
-    "packages/daemon/internal/daemon/parked_decision.go: settleKept, handOverKept, writeSettlement, toldKept, settleTold, supersededKept (forgetKept removed)",
-    "packages/daemon/internal/daemon/outbox.go: start rows settle what they named after they run; catch-ups mark their telling before they forget, and hand over when superseded; designGate field",
-    "packages/daemon/internal/daemon/workflow.go, daemon.go: rootHears wired as supervise.Deps.RootHears; the design gate threaded into newOutbox",
-    "packages/daemon/internal/supervise/machine.go, delivery.go, table.go: Claim.DeliveredRows (per start row); Deps.RootHears; sendPending holds a root architect's phase-less run task; queue and StartedBy send a held task",
-    "packages/daemon/internal/record/record.go, store.go, parked_decision.go, outbox.go: ReleaseKeptClaims, Processed, KeptToldSource; DropCatchUps keeps a told catch-up",
-    "packages/daemon/internal/store/migrations/0063_claim_delivered_rows.up.sql (replaces 0063_claim_delivered_through), 0062 header, claims.go, claims_test.go",
-    "packages/daemon/internal/daemon/kept_decision_property_test.go, root_hears_main_paths_test.go, internal/supervise/delivery_test.go: tests",
-    "AGENTS.md, docs/site/src/content/docs/legion/troubleshooting.md, packages/daemon/.changes/unreleased/INFRA-251-kept-decision-once.yaml"
+    "packages/daemon/internal/store/migrations/0065_parked_decisions.up.sql, 0066_claim_delivered_rows.up.sql (renumbered from 0062, 0063), migration_0065_test.go (renamed from migration_0062_test.go, migrates through 64)",
+    "packages/daemon/.changes/unreleased/INFRA-251-kept-decision-once.yaml (names migration 0066)",
+    "packages/daemon/internal/daemon/daemon.go: projectRecords.EnqueueID wakes the row's lane on commit; outbox_lanes_test.go: TestARowWrittenWithItsIDRunsOnItsLaneWithoutASweep",
+    "packages/daemon/internal/config/stage3.go: DesignGate.OrDefault; internal/workflow/engine.go and parked_decision.go use it",
+    "packages/daemon/internal/daemon/kept_decision_property_test.go: launch and resume refusal, denied and delivery_failed listener modes, per-run counters",
+    "Merge of main 96a7e5ea (98e39d1f), no conflicts"
   ],
   "trickyParts": [
     "Which start tasks RootHears holds: only a delivery with Phase \"\" and Generation != 0 on a claim that is its tree's root architect. Main writes exactly two such tasks: admission's fresh start of a root (its task names the decisions kept for it, admit.go) and ResumeAwaitedRoot's task (an answered awaiting_person root, by admission's answered branch or by the reconcile when a person already acted). A phase worker's task, an operator's task (Generation 0), a production-check look and the controller's start are never asked. The root hears when it is its tree's root, not lingering, not out of the workflow, and not waiting in todo for a slot (workflow.ArchitectHears). Every main path that writes such a task gives the root a slot or keeps it in awaiting_person first, so it hears: TestARootThatMainsCodeResumesGetsItsTaskWithRootHearsWired shows each prompts exactly as with RootHears nil.",
     "A held task never wedges the claim: StartedBy (which every start row calls) and queue's ErrDeliveryPending refusal both call sendPending, so the next run's start sends it, even a start carrying no task of its own (property-test seed 101).",
     "A catch-up's publish and its forget are two transactions; the publish marks the telling (KeptToldSource, under the dedupe key a re-held copy shares) first, so a failed forget or a crash between them never releases a told decision for a second telling (seeds 21, 74), and DropCatchUps keeps a told-but-unforgotten catch-up (seed 159).",
-    "Settlement serializes with every fact (intake.SerializeFacts) because the hand-over reads the root and writes the catch-up a ready would write; a re-run row whose settlement committed finds nothing claimed and writes no second catch-up."
+    "Settlement serializes with every fact (intake.SerializeFacts) because the hand-over reads the root and writes the catch-up a ready would write; a re-run row whose settlement committed finds nothing claimed and writes no second catch-up.",
+    "Two notes the tester logged are fixed here rather than left: the hand-over's catch-up, written with its id (EnqueueID), woke no lane because only Enqueue was wrapped by projectRecords; and the outbox passed the raw design gate, so a configuration with no gate set gave the catch-up policy \"\" while the engine said root-issues."
   ],
   "deviations": [
-    "Migration 0063 is edited in place again (0063_claim_delivered_through renamed 0063_claim_delivered_rows, column delivered_rows bigint[]): it has never reached main or a release.",
-    "A start row settles twice on one path: before the start-running ClaimReady (so its catch-up never names what the task carries) and after the row's work; the second is a no-op.",
+    "The merge was made because the pull request's migrations collide with main's 0062-0064 (no text conflict). main moved again to 88818a3b before the push, still ending at 0064, so no second merge was made.",
+    "The fingerprint changed (before 271e9e3c82fbec5a66a7cf6a5a6fbd571a5df7f8dde08ab81e283a0cc458cdb5 at e8a595d3, after a3e43cd2852acf65aac8c1cc11331323902551e1e51c01f19f61022db4c21638 at the pure merge 98e39d1f), since main changed files this branch's diff touches; the renumber and the fixes follow in their own commits.",
     "The listener rollout case the reviewer judged out of scope remains: an earlier listener's 200 forgets a catch-up's decisions before its forward fails."
   ],
-  "openQuestions": []
+  "openQuestions": [],
+  "propertyModelGaps": [
+    "Spec decisions through the outbox's parkDecision, RelayNotParked and a session's decision: every path that keeps a decision calls the same record.RelayParkedDecision, which writes one parked_decisions row (root, ref, at) and nothing else that the hand-over reads; naming, claiming, forgetting and handing over read only that row. RelayNotParked and a session's decision keep nothing. So the entry path cannot change how many times a kept row is told. Covered on the whole daemon by the tester's round-7 drive.",
+    "The readmitted_approvals pair: ClaimKeptDecisions, ForgetKeptDecisions, ReleaseKeptClaims and MoveKeptClaims act on both tables in one statement set, keyed by the same outbox row, and the pair travels in the same KeptDecisions record as the decisions. So the pair is claimed, told, forgotten and handed over exactly when a decision of the same row is. TestARootReadmittedTwiceWithNoStartDeliveredIsStillToldBothVersions covers it alone.",
+    "Launch or resume failure: now modelled (keptRuntime). A retired claim's relaunch is not reachable in the model (nothing retires a claim: no tree close or linger expiry). It goes through the same RequestRetry and queue as a failed claim, and DeliveredRows is a stored claim column that survives the retire.",
+    "Linger expiry, tree close, ClearTreeGeneration: none of them touches parked_decisions or readmitted_approvals (record/store.go). Only the issue's deletion removes them (references issues on delete cascade), and then no architect of that root exists to tell. Children: a child's decision is kept under its root (RelayParkedDecision sets decision.Root to the root), so it is the same row. The awaiting_person resume task (ResumeAwaitedRoot) carries no Kept and names no kept decision, so it adds no telling; TestARootThatMainsCodeResumesGetsItsTaskWithRootHearsWired shows RootHears leaves it unchanged. An operator's delivery has Generation 0 and is never held or counted. An operator's suspension leaves a phase-less task pending (supervise settle's exemption), as the model's daemon suspension does.",
+    "Publish answers: denied and delivery_failed are now modelled. An unroutable notice and a re-hold whose budget is spent both finish the row without a telling, so the row's deletion releases its claims (FK on delete set null). The architect's next launch's ready then names them: the same ending as 'refused', which is modelled.",
+    "Concurrency and time: every naming claims only rows whose claimed_by is null in its own transaction. The settlement and the hand-over take the facts' advisory lock (intake.SerializeFacts), so two lanes or two daemons cannot claim one row twice or settle one row against a different read. A moving clock only changes when a row runs; the model already runs due rows in random order and drops finishes, which covers any order backoff, lease expiry or a re-hold delay could produce. The model's admission start is checked against the real admission by TestARootThatMainsCodeResumesGetsItsTaskWithRootHearsWired."
+  ],
+  "round11Proof": "Round 11's proof entries are in this file at commit e8a595d31f14."
 }
