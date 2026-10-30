@@ -2,15 +2,23 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-592",
-  "completed": "2026-10-30T04:22:08Z",
+  "completed": "2026-10-30T07:03:24Z",
   "proof": [
     {
-      "criterion": "The forward merge of main's #2463 keeps both behaviours: a comment edit carries its block ids, through this branch's writer gate and error answers",
-      "surface": "Real envoy-dispatch binary on INFRA-589's local stack (Postgres via 1 ms proxy, NATS, listener), built from the head",
-      "command": "LOADTEST_ROOT=/legion/scratch/tmp/infra-592/lt3 stack.sh reset; bash /legion/scratch/tmp/infra-592/edit-smoke.sh (new project and issue, POST a two-paragraph comment, poll GET /api/v1/comments/{id}/blocks, PATCH /api/v1/comments/{id} with base_revision and the carried blocks, read the blocks again)",
-      "observed": "blocks b1 'First paragraph.' and b2 'Second paragraph.' at revision 1, indexed by the background block-index pass; edit 200 in 0.14 s; at revision 2 b1 'First paragraph, edited.' changed_revision 2 and b2 kept its id, changed_revision 1, from 26; 0 ERROR lines in Dispatch's log",
-      "headSha": "b7892ad2e20da894e66f7809ef300ecdf4bf4671",
-      "negativeControl": "The same PATCH with blocks and no base_revision answers 400 INVALID_COMMENT 'blocks: requires base_revision'"
+      "criterion": "A write refused for its own input waits on no writer gate (tester round 4: editComment took the gate before 'blocks: requires base_revision')",
+      "surface": "Real envoy-dispatch binary on INFRA-589's local stack (lt3: Postgres via 1 ms proxy, NATS, listener), built from the head",
+      "command": "stack.sh setup; stack.sh reset; bash /legion/scratch/tmp/infra-592/r6-demo.sh (the tester's r5-demo.sh, output path changed): psql holds an anchored comment's row for 12 s while a valid carried-blocks edit holds the document's writer gate; then PATCH the same comment with blocks and no base_revision",
+      "observed": "invalid edit while the gate is held: 400 INVALID_COMMENT in 0.004 s; held valid edit 200 in 11.2 s; reads during the hold 200 in 0.03-0.10 s; invalid edit with no gate held 400 in 0.007 s; block-index pass waiter is dispatch-background; 0 ERROR lines",
+      "headSha": "bb5628b39c67defb89d9fb58709031bda891401c",
+      "negativeControl": "At b7892ad2 the same demo (tester round 4, r5-demo.out) answered the invalid edit 400 after 8.93 s, behind the held gate"
+    },
+    {
+      "criterion": "Every gated write route answers its request-only refusals before the gate; codes unchanged",
+      "surface": "go test against a real Postgres 16 (UTF-8 cluster)",
+      "command": "go test -count=1 -run 'TestACommentEditRefusedForItsInputWaitsOnNoWriterGate$|Comment|Ask|Anchor|External|Turn|WriterGate|PatchIssue|Suggestion' ./internal/dispatch/api/; the worker's full go test ./internal/dispatch/api/ on the same cluster; gofmt, go build ./..., go vet",
+      "observed": "selected tests ok (248 s), the red test passes unmodified (document_writer_gate_test.go unchanged since 22fcdcdf); the full api package passes but for TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, which refuses this pod's byte-order collation",
+      "headSha": "bb5628b39c67defb89d9fb58709031bda891401c",
+      "negativeControl": "TestACommentEditRefusedForItsInputWaitsOnNoWriterGate fails at 22fcdcdf (the tester's red commit)"
     },
     {
       "criterion": "Excess load refused early with a retryable status, connection waits bounded, 1x served, at the merged head",
@@ -19,34 +27,21 @@
       "observed": "1x: 100.0% of 59.7 req/s 2xx, 0 refusals, 3.99/3.99 events/s committed, 0 goroutines waiting for a connection, 37/37 metrics samples with all ten pools. 10x: 88,874 reads and 6,847 writes refused 429 OVERLOADED (read refusal p50 21 ms, p99 132 ms), 17.2% of 596 req/s served, 1.77 events/s committed, 0 connection failures, at most 14 goroutines waiting",
       "headSha": "b7892ad2e20da894e66f7809ef300ecdf4bf4671",
       "negativeControl": "Before (merge-base 2df3353c, PR body tables): 2x-10x 0.0-55 successful reads/s and 3,485-20,174 goroutines waiting for a connection"
-    },
-    {
-      "criterion": "The merge builds, vets and passes the touched packages; connection count re-derived from main; CI filters cover the merged packages",
-      "surface": "go build/vet/test against a real Postgres 16; check-ci-filters.sh; bun test",
-      "command": "cd packages/envoy && go build ./... && go vet ./...; (cd infra && go vet ./... && go vet -tags natslive ./core/ && go test -run ConnectionsPer ./gcp/); go test ./internal/dispatch/api/ ./internal/dispatch/docs/ ./cmd/dispatch/ ./internal/dispatch/store/ ./internal/dispatch/admission/; uv run --with pyyaml==6.0.2 --no-project bash .github/scripts/check-ci-filters.sh; cd packages/envoy-client && bun test src/__tests__/dispatch-http.test.ts && bun run typecheck",
-      "observed": "build and vet ok; ConnectionsPerProcess 87 = dispatchConnectionsPerPod 87 (main added no pool or lease name); docs, cmd/dispatch, store, admission ok; api: every test but TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, which refuses this pod's byte-order collation; filters: 25 gates covered; envoy-client 51 pass, typecheck clean",
-      "headSha": "7a490c2c31e8 (merge resolution; b7892ad2 adds only a docs-pages comment)",
-      "negativeControl": "Before the envoy_go_race_docs line for internal/dispatch/itemblocks, check-ci-filters.sh failed with 6 uncovered files"
     }
   ],
   "filesChanged": [
-    ".github/workflows/ci.yaml",
-    ".github/workflows/docs-pages.yaml",
     "packages/envoy/internal/dispatch/api/comment_actions.go",
     "packages/envoy/internal/dispatch/api/comment_create.go",
-    "packages/envoy/internal/dispatch/api/messages.go",
-    "packages/envoy/internal/dispatch/api/comment_delivery.go",
-    "packages/envoy/internal/dispatch/api/message_delivery.go",
-    "packages/envoy/internal/dispatch/api/item_blocks.go",
-    "packages/envoy/internal/dispatch/docs/block_index.go",
-    "packages/envoy-client/src/__tests__/dispatch-http.test.ts"
+    "packages/envoy/internal/dispatch/api/anchors.go",
+    "packages/envoy/internal/dispatch/api/asks.go",
+    "packages/envoy/internal/dispatch/api/issue_patch.go"
   ],
   "trickyParts": [
-    "#2463's item-block batch in ReconcileBlockIndex read on the request pool; it now reads on the tick's background pool like the rest of the pass",
-    "editComment takes the writer gate before #2463's carried-edit check and transaction"
+    "Audit of every gated write: editComment (carried blocks), commentAction (actor encoding), createCommentFor (thread fields, turn value, anchor shape), createAskFor (anchor shape) and patchIssue (external-link URL syntax) moved; reopenComment, editAsk, closeAsk, storeArtifact, editArtifact, rebuildArtifact and the background ask repair had no request-only refusal after the gate",
+    "Two precedences change because input is now refused first: a PATCH with a malformed and a taken external link answers INVALID_URL, and a root comment with turn 'nobody' answers INVALID_COMMENT rather than TURN_REQUIRES_ASK"
   ],
   "deviations": [
-    "10x served 17.2% of requests (about 103 reads/s) against 24.8% at c2ce589b and 107-148/s in earlier rounds, on a stack seeded fresh after the pod was recreated; still 0 connection failures and 0 non-429 answers"
+    "The load-step proof is from b7892ad2 (r4-1x, r4-10x); this round moves only refusal order on write routes"
   ],
   "openQuestions": []
 }
