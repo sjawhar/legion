@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-590",
-  "completed": "2026-10-30T08:10:00Z",
+  "completed": "2026-10-30T13:40:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2395",
-  "head": "bcf50ed5282d0655405e648be162f1df774ab173",
-  "round": "16 (acceptance held at c60e2b72 but GitHub reported CONFLICTING): forward merge of main a21100c5bc (bcf50ed5). Migrations renumbered to 0148_duty_holds/0149_outbox_claim above main's #2376 0145-0147; dispatch-outbox.md text conflict keeps both sides; main's two new session-answers tests adapted in setup only; connections 89 and CI filters unchanged. Not a confirmation round: main changed cmd/dispatch/README.md, store/store_test.go and infra/gcp/dispatch.go, which the PR also changes. Code pushed first, handoff second. Diff-check comment 6517975067.",
+  "head": "141704508a7254de319a64f0b5ee602343f78d1f",
+  "round": "17 (the round-13 review, changes requested at bcf50ed5): forward merge of main 88818a3b9b with #2508 (3760e51c), a full round: every envelope keeps #2508's quiet field; every send that did not reach NATS is counted through countPublishFailure in sendChains' settle (refused, denied, failed, NATS unreachable included; a deadline-fenced send counts nothing); the window and Request read #2508's per-subject denial record; #2508's tests adapted in setup only, TestAPublishFailureThatEndsTheAttemptIsCountedOnce restored through scanBatch. Then the fix (14170450): a Request's flush runs beside the wait for its answer, so a lost connection answers ErrUnavailable at once. Code pushed first, handoff second. Diff-check comment 6522904586.",
   "proof": [
     {
       "criterion": "Exactly one process publishes at a time through a lease on the outbox's own database connection; /healthz carries boolean outbox_publisher",
@@ -174,6 +174,14 @@
       "observed": "build and vet clean; store ok 330.2 s, outbox ok 289.9 s, duty ok 27.5 s, cmd/dispatch ok 313.2 s, api TestSessionAnswers ok (22 tests); TestDispatchConnectionsPerPodIsTheServers ok at 89; main's CI filter check 0 uncovered.",
       "headSha": "bcf50ed5282d0655405e648be162f1df774ab173",
       "negativeControl": "Before the renumbering, main's 0145_events_person_words and 0146_comment_deliveries_session share versions with this branch's migrations; before the setup adaptation, main's outbox/session_answers_test.go fails to compile ('undefined: scan') and api/session_answers_test.go ('undefined: outbox.Run'). main's sessionanswers.TestTheReadOfASessionsMessageDeliveriesReadsItsWindowsRange fails identically on main's own tree on this pod's Postgres 17."
+    },
+    {
+      "criterion": "A Request whose connection drops before or during its flush answers ErrUnavailable at once; #2508's quiet field, publish-failure count and denial record hold in the batch model on main's newest code.",
+      "surface": "bus package on in-process NATS; outbox, store, duty, events, cmd/dispatch and cmd/listener packages on pod Postgres 17 (fresh UTF8 database); the repository multiprocess harness",
+      "command": "cd packages/envoy && go test -count=50 -run TestARequestWhoseConnectionIsLostAnswersUnavailable ./internal/bus/ && CGO_ENABLED=1 GOMAXPROCS=4 go test -race -count=10 -p 2 -parallel 4 -run 'TestARequest|TestManyRequests|NotStored|Denied|Window' ./internal/bus/ && go test -p 2 -parallel 4 -count=1 ./internal/bus/ && DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -p 2 -parallel 4 -count=1 ./internal/dispatch/outbox/ ./internal/dispatch/store/ ./internal/dispatch/duty/ ./internal/dispatch/events/ && go test -p 2 -parallel 4 -count=1 ./cmd/dispatch/ ./cmd/listener/ && go test -p 2 -parallel 4 -count=1 -tags multiprocess -timeout 25m ./cmd/dispatch",
+      "observed": "lost-connection test -count=50 ok (2.2 s), -race -count=10 ok (207.7 s), bus ok (337.6 s at 14170450); at the merge: outbox ok 314.5 s, store ok 345.9 s, duty ok, events ok, bus ok 351.0 s, cmd/dispatch ok 356.0 s, listener ok 531.1 s, multiprocess ok 1049.4 s; TestRunCountsADeniedSubjectOncePerRefusedMessage, TestEnvelopePayloadStatesWhetherTheEventIsQuiet and TestAPublishFailureThatEndsTheAttemptIsCountedOnce pass.",
+      "headSha": "141704508a7254de319a64f0b5ee602343f78d1f",
+      "negativeControl": "Before the fix, with the test hook in place, TestARequestWhoseConnectionIsLostAnswersUnavailable failed 3 of 3: 'no answer within 10s'. Without the count in settle's lost arm, TestAPublishFailureThatEndsTheAttemptIsCountedOnce fails: '/metrics body = ... want the unreachable destination counted once'."
     }
   ],
   "filesChanged": [
@@ -196,7 +204,8 @@
     "Round 13 merge: packages/envoy/AGENTS.md, cmd/listener/{api.go,api_test.go,confirmed.go,delivery.go,publish_refusal_answers_test.go,role_holder.go}, internal/bus/{async.go,nats.go,request_core_test.go}",
     "Round 14: merge (packages/envoy/AGENTS.md, cmd/dispatch/README.md, migrations renamed to 0142_duty_holds/0143_outbox_claim and references); new cmd/listener/delivery_role_stale_holder_test.go",
     "Round 15 merge: cmd/dispatch/README.md, migrations renamed to 0145_duty_holds/0146_outbox_claim and references, .github/workflows/ci.yaml (one filter line)",
-    "Round 16 merge: .dispatch/architecture/dispatch-outbox.md, cmd/dispatch/README.md, migrations renamed to 0148_duty_holds/0149_outbox_claim and references, outbox/session_answers_test.go and api/session_answers_test.go (setup)"
+    "Round 16 merge: .dispatch/architecture/dispatch-outbox.md, cmd/dispatch/README.md, migrations renamed to 0148_duty_holds/0149_outbox_claim and references, outbox/session_answers_test.go and api/session_answers_test.go (setup)",
+    "Round 17: merge (ci.yaml, docs-pages.yaml, AGENTS.md, cmd/dispatch/main.go and main_test.go, internal/bus/{async.go,nats.go,core_permission_test.go,publish_denied_window_test.go}, outbox/{batch.go,publisher.go,publisher_test.go,core_denied_test.go}); fix: internal/bus/{async.go,nats.go,export_test.go,window_request_test.go}"
   ],
   "trickyParts": [
     "Blocked events take their blocker's next_attempt_at (no attempt), so they are not re-read on every wake while the blocker waits out a back-off; an owner whose first 100 events all wait has its later due event deferred to the earliest of them (deferPastWindow).",
