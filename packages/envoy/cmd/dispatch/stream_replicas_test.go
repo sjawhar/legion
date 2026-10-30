@@ -27,16 +27,13 @@ import (
 // The Dispatch server's starts of the stream here go through dispatchStreamOptions over what
 // resolveBootConfig read from the settings table, connecting in the background as main's do
 // (serverClient, connectDispatchStream), on an in-process three-server cluster
-// (testnats.StartCluster), one per test or subtest, unless a test says single server. Each start
-// waits out what it expects itself: the reconcile within reconcileWait, or within
-// repairedReconcileWait once the test has repaired what the start first failed on
-// (dispatchStart.awaitReconciled), or the first failed run of the reconnect hooks
-// (dispatchStart.awaitHookFailure).
+// (testnats.StartCluster), one per test or subtest, unless a test says single server.
 
 // replicasTestClientID is the GitHub App the tests' webhook sweeper signs as.
 const replicasTestClientID = "Iv1.replicas"
 
-// reconcileWait bounds the wait of the start helpers for the background reconcile of the stream.
+// reconcileWait bounds the wait of the start helpers for a start's first outcome: the stream's
+// background reconcile, or the first failed run of the reconnect hooks.
 const reconcileWait = 30 * time.Second
 
 // repairedReconcileWait bounds the wait for the reconcile after a test has repaired what the
@@ -57,11 +54,10 @@ type dispatchStart struct {
 // connectDispatchStream is the Dispatch server's publisher connect for the settings overrides
 // names, exactly as main makes it on the servers at urls: ConnectOwningStream with serverClient
 // over dispatchStreamOptions, with no option and no clock of the test's own. It returns the start
-// it made: the settings it resolved, the client, the buffer that holds the client's log lines, and
-// the overrides. The client returns before it has connected, and its first connection reconciles
-// the stream and only then starts its keeper (bus.WithConnectInBackground), so a caller waits for
-// what it expects itself (dispatchStart.awaitReconciled, dispatchStart.awaitHookFailure). The
-// helper sets the default logger to record the client's lines until the test ends: a test that
+// it made (dispatchStart). The client returns before it has connected, and its first connection
+// reconciles the stream and only then starts its keeper (bus.WithConnectInBackground), so a caller
+// waits for what it expects itself (dispatchStart.awaitReconciled, dispatchStart.awaitHookFailure).
+// The helper sets the default logger to record the client's lines until the test ends: a test that
 // calls it must not run in parallel.
 func connectDispatchStream(t *testing.T, urls []string, overrides map[string]string) dispatchStart {
 	t.Helper()
@@ -89,8 +85,8 @@ func connectDispatchStream(t *testing.T, urls []string, overrides map[string]str
 // start had written at all.
 //
 // A failed run of the reconnect hooks does not end the wait, because the bus runs those hooks
-// again. The wait reads the log for one thing only: the failure its own failure message names
-// (reconcileFailure).
+// again. The wait reads no log at all. Its failure message names how long the hooks have been due
+// and the error of the last run that failed (bus.Client.HookStall).
 func (s dispatchStart) awaitReconciled(t *testing.T, within time.Duration) {
 	t.Helper()
 	reconciled := reconciledFor(s.boot)
@@ -103,8 +99,8 @@ func (s dispatchStart) awaitReconciled(t *testing.T, within time.Duration) {
 			}
 		}
 		if time.Now().After(deadline) {
-			failure := reconcileFailure(s.logged.String())
-			t.Fatalf("Dispatch's start for %v did not reconcile the stream within %s: %+v (%v), hooked events %d, first logged failure of the reconnect hooks %q (%s)", s.overrides, within, info, err, s.client.HookedConnectionEvents(), failure.Message, failure.Error)
+			stall, hookErr := s.client.HookStall()
+			t.Fatalf("Dispatch's start for %v did not reconcile the stream within %s: %+v (%v), hooked events %d, reconnect hooks due for %s, last failed run %v", s.overrides, within, info, err, s.client.HookedConnectionEvents(), stall, hookErr)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -114,19 +110,16 @@ func (s dispatchStart) awaitReconciled(t *testing.T, within time.Duration) {
 // publisher logs (reconcileFailure), for a start whose settings the servers refuse. It leaves the
 // client open and the caller decides what follows: a caller that wants no further reconcile closes
 // the client, a caller that repairs what the start failed on waits the repaired reconcile out
-// (awaitReconciled, repairedReconcileWait). It fails the test when the stream reconciles instead,
-// and when the publisher logs no such failure within reconcileWait.
+// (awaitReconciled, repairedReconcileWait). It fails the test when the start's hooks run through
+// instead, and when the publisher logs no such failure within reconcileWait.
 func (s dispatchStart) awaitHookFailure(t *testing.T) hookFailure {
 	t.Helper()
-	reconciled := reconciledFor(s.boot)
 	for deadline := time.Now().Add(reconcileWait); ; {
 		if failure := reconcileFailure(s.logged.String()); failure.Message != "" {
 			return failure
 		}
-		if s.client.Connected() && s.client.HookedConnectionEvents() >= 1 {
-			if info, err := s.client.JS().StreamInfo(bus.Stream); err == nil && reconciled(info.Config) {
-				t.Fatalf("Dispatch's start for %v reconciled the stream to %+v, want the server to refuse the start", s.overrides, info.Config)
-			}
+		if s.client.HookedConnectionEvents() >= 1 {
+			t.Fatalf("Dispatch's start for %v ran its reconnect hooks through, so the servers accepted the start, want them to refuse it", s.overrides)
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("Dispatch's start for %v logged no failed run of the reconnect hooks within %s, hooked events %d", s.overrides, reconcileWait, s.client.HookedConnectionEvents())
@@ -217,8 +210,8 @@ func startDispatchNATS(t *testing.T, urls []string, overrides map[string]string)
 // A Dispatch start whose first reconcile fails on a cluster with a member down waits that failure
 // out: the bus runs the reconnect hooks again, the start's own log line for the first failure is
 // the retried WARN, and an operator who starts the missing member again finds the start's stream
-// at the three copies the settings ask of it, within repairedReconcileWait of the restart. Every
-// step runs on the test's own goroutine, because testnats.Server.Start, testnats.Server.Stop and
+// at the three copies the settings ask of it, once the cluster is ready again. Every step runs on
+// the test's own goroutine, because testnats.Server.Start, testnats.Server.Stop and
 // testnats.Cluster.AwaitReady call t.Fatal, which Go forbids off the test goroutine.
 func TestADispatchStartWaitsOutAReconcileFailureTheBusRetries(t *testing.T) {
 	cluster := testnats.StartCluster(t, 3)
@@ -235,10 +228,7 @@ func TestADispatchStartWaitsOutAReconcileFailureTheBusRetries(t *testing.T) {
 	cluster.AwaitReady(t)
 	start.awaitReconciled(t, repairedReconcileWait)
 
-	info := testnats.AwaitSettledStream(t, cluster.JetStream(t), bus.Stream)
-	if !reconciledFor(resolveWith(t, overrides))(info.Config) {
-		t.Errorf("the repaired start left the stream at %+v with %d copies, want what %v asks of it", info.Config, testnats.Copies(info.Cluster), overrides)
-	}
+	testnats.AwaitStreamCopies(t, cluster.JetStream(t), bus.Stream, 3)
 }
 
 // On an existing three-copy stream with a byte limit, DiscardOld and an id, a Dispatch start whose
