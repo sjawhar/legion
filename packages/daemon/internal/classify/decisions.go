@@ -1071,9 +1071,8 @@ func ApprovalStands(pr record.PullRequest, reviewed string) bool {
 // request's current head, its new head not arrived yet. A push delivered late, after its new head
 // arrived and the branch returned to this one, is spent by the move the record made (unspentPushes),
 // so it is not on its way; the same two heads pushed again are spent as its repeat
-// (record.Move.Repeats), and look the same until their synchronize moves the head. No merge lands
-// them meanwhile, since a READY merge names the approved head as GitHub's expected head
-// (ghautomerge.Submit).
+// (record.Move.Repeats), and look the same until their synchronize moves the head. The daemon
+// lands no merge meanwhile: the merger merges, and it merges the head its review approved.
 func CodeOnItsWay(pr record.PullRequest) bool {
 	for _, p := range pathFrom(pr.Pushes, pr.HeadSHA, true) {
 		if p.MayChangeCode() {
@@ -1114,15 +1113,14 @@ func linkedBack(pushes []record.ClassifiedPush, head, earlier string, link func(
 	return false
 }
 
-// ConflictWithdrawsReady says whether a READY pull request, in awaiting_merge, has started
-// conflicting with its base: the pull request is open, and the daemon's last read of GitHub's
-// mergeability found MergeabilityConflicting. The read stands for whatever head GitHub last
-// computed it on, and the daemon's own read is the only path to it, so there is no older read to
-// prefer. GitHub runs no checks at all on a conflicting head - there is no merge ref to run them
-// against - and no CI result moves an issue in any case (dispatch://INFRA-714/spec R1), so a
-// conflict is the one thing a pull request's own state still withdraws a READY for (workflow's
-// mergeability handler).
-func ConflictWithdrawsReady(pr record.PullRequest) bool {
+// HeadConflicts says whether an open pull request's head has started conflicting with its base:
+// the daemon's last read of GitHub's mergeability found MergeabilityConflicting. The read stands
+// for whatever head GitHub last computed it on, and the daemon's own read is the only path to it,
+// so there is no older read to prefer. GitHub runs no checks at all on a conflicting head - there
+// is no merge ref to run them against - and no CI result moves an issue in any case
+// (dispatch://INFRA-714/spec R1), so a conflict is the one thing a pull request's own state still
+// moves an issue for (workflow's mergeability handler).
+func HeadConflicts(pr record.PullRequest) bool {
 	return pr.State == record.PullRequestOpen && pr.Mergeability == record.MergeabilityConflicting
 }
 

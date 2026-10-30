@@ -19,7 +19,7 @@ later phase keeps it current rather than replacing it:
 **Look at first:** <one to three `path:line` places where a wrong decision would hurt> (the reviewer writes this line)
 **Proven by:** <the `E2E (implementer)` line's surface and run, one line>
 **Not proven / risk:**
-- <one line per claim recorded as unproven before READY>, or the single word `none` (the reviewer writes this line; `none` is invalid while such a claim stands)
+- <one line per claim recorded as unproven before the merge>, or the single word `none` (the reviewer writes this line; `none` is invalid while such a claim stands)
 **Size:** <files changed, +added/−removed>
 
 ## Verification
@@ -53,14 +53,15 @@ Verified the implementer's proof by <re-running its command | driving the same s
 The implementer runs the repository's fast local checks for the paths it changed before the push,
 then pushes and completes. It never waits for, watches or polls the pull request's remote CI
 (`gh run watch`, `gh pr checks --watch`, `sleep` around `gh run view`) and never sleeps in a loop.
-Under the Go daemon a check or workflow the base branch requires that settles red on the head,
-before the completion or after it, sends the work back to `implementing` with the failing checks
-named, until `max_fix_attempts` is spent, when the architect decides. The one CI result an implementer waits for is a re-run: when its task names a red that
-failed on its own, it re-runs the failed jobs once (`gh run rerun <run-id> --failed`) and completes once
-the re-run settles green, woken by the pull request's checks event (`skill://envoy`, *Wait for
-CI or a merge*: subscribe, then end the turn), never by a sleep loop. A completion while that red
-still stands is sent back, at once for a required check and at the daemon's next read of the runs
-(within two minutes) for a required workflow.
+Under the Go daemon a check that settles red on the head moves the issue nowhere: the daemon names
+every check GitHub reported, with the conclusion GitHub gave it, in one message to the tree's
+architect, the worker of the issue's current phase and the implementer, and judges none of them.
+That message is the implementer's to act on while it still works the issue: a red that failed on
+its own is re-run once (`gh run rerun <run-id> --failed`), woken by the pull request's checks
+event (`skill://envoy`, *Wait for CI or a merge*: subscribe, then end the turn) and never by a
+sleep loop; a red at the code is fixed, which the reviewer asks for anyway, since it reads the
+head's checks on GitHub before it approves; and a red only GitHub can settle is GitHub's, which
+holds the merge for it under the base branch's own rules.
 
 ## The brief for the human
 
@@ -71,11 +72,10 @@ push; `Outcome` is a sentence a user of the repository would recognise, never "f
 name, and `Why` ends with the Dispatch key, never a URL. The reviewer writes `Look at first` and
 `Not proven / risk` at each round, into the live body (`gh api
 repos/{owner}/{repo}/pulls/{number} --jq .body`, edit, then `--method PATCH ... -F body=@body.md`);
-`Not proven / risk` copies every claim recorded as unproven before READY — the tester's
+`Not proven / risk` copies every claim recorded as unproven before the merge — the tester's
 `failures`, the reviewer's own review, any proof-check comment already on the pull request —
-word for word, and `none` is a finding while one stands. The merger quotes `Outcome` and
-`Not proven / risk` from the body at the head it merges
-(*The packet* in `skill://legion-worker/references/merge-gate.md`); a stale `Outcome` that no
+word for word, and `none` is a finding while one stands. The merger reads `Outcome` and
+`Not proven / risk` from the body at the head it merges, and a stale `Outcome` that no
 longer describes the diff is a finding against the implementer, not a line the merger rewrites.
 
 ## What a proof is

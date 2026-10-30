@@ -15,8 +15,8 @@ Retro runs on the reviewed head, after the architect's acceptance and before the
 
 - **A head that still holds `.legion/<issue>/`**, because a squash merge would carry the handoffs
   onto the base, where nothing reads them. The merger reads the head for that directory before it
-  merges and sends the issue back to retro rather than merging it, and the daemon refuses the
-  merger's completion on the same ground (`READY_HEAD_CARRIES_HANDOFFS`). Every implement, test or
+  merges and sends the issue back to retro rather than merging it; nothing in the daemon reads the
+  head for it, so that read is the only one. Every implement, test or
   review phase after a retro writes the directory again, so every retro ends with the removal.
 - Nothing else: no Legion check compares the head that merges with the one the review approved, so
   whether a push made after the approval must be reviewed again is the repository's own rule.
@@ -60,7 +60,7 @@ missing proof goes back as step 1 says. The Dispatch message (step 7) is for a f
 4. **Commit the removal last**, after every learning commit, touching nothing else:
 
    ```bash
-   cd -- "$LEGION_WORKSPACE" && if [ -e ".legion/${LEGION_ISSUE:?}" ]; then rm -r -- ".legion/${LEGION_ISSUE:?}" && jj -R "$LEGION_WORKSPACE" split -m "retro: remove .legion/${LEGION_ISSUE:?}/ before READY" ".legion/${LEGION_ISSUE:?}"; fi
+   cd -- "$LEGION_WORKSPACE" && if [ -e ".legion/${LEGION_ISSUE:?}" ]; then rm -r -- ".legion/${LEGION_ISSUE:?}" && jj -R "$LEGION_WORKSPACE" split -m "retro: remove .legion/${LEGION_ISSUE:?}/ before the merge" ".legion/${LEGION_ISSUE:?}"; fi
    ```
 
    When an earlier retro removed it and no phase ran since, this does nothing.

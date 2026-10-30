@@ -37,12 +37,15 @@ import (
 // The phase's owner is the role that works the issue's phase (RoleFor) on an issue in the workflow
 // whose tree is admitted — its root holds a slot — and does not linger: a lingering tree's claims
 // stay suspended until re-admission runs the tree again. Accepting's owner is the tree's
-// architect, which admission starts with the tree, so no issue there is given one. Each owner is
+// architect, which admission starts with the tree, so no issue there is given one. A phase its own
+// terminating fact has already met is given none either (PhaseFinished): a merged root stands in
+// merging for as long as the rest of its tree runs, and resuming its merger there would hand it
+// the same phase again at every boot, for days. Each owner left is
 // given the start admission gives a re-admitted tree's mid-phase child, through the outbox's start
 // like every other start: its claim resumed by rule, and the task that carries its phase on
-// (ResumePhaseTask, the merger's with the head its round approved), which the outbox does not
-// deliver to a claim still holding its phase's task. A role a start already covers (StartFor) gets
-// no second. The sweep runs first so the resume reads the trees it closed as lingering.
+// (ResumePhaseTask), which the outbox does not deliver to a claim still holding its phase's task.
+// A role a start already covers (StartFor) gets no second. The sweep runs first so the resume
+// reads the trees it closed as lingering.
 func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted) (intake.Result, error) {
 	if err := e.sweepMerged(ctx, tx); err != nil {
 		return intake.Result{}, err
@@ -82,6 +85,13 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted
 		}
 		root, ok := byKey[issue.Tree]
 		if !ok || !slotted[root.Key] || root.Lingers() {
+			continue
+		}
+		finished, err := e.phaseFinished(ctx, tx, issue)
+		if err != nil {
+			return intake.Result{}, err
+		}
+		if finished {
 			continue
 		}
 		project, err := claim.ProjectToken(issue.Project)

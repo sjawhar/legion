@@ -274,3 +274,27 @@ func TestNoPartSaysTheDaemonMerges(t *testing.T) {
 		t.Errorf("go/merger.md does not say %q", want)
 	}
 }
+
+// GitHub's default squash message, `squash_merge_commit_message` of `COMMIT_MESSAGES`, joins every
+// commit message of a pull request, which put this tree's Dispatch keys, `Omp-Session:` trailers
+// and `skip-checks: true` lines on the default branch (dispatch://INFRA-714, R2). So the merger
+// writes the message itself, and on the one path that cannot — `enqueuePullRequest` takes no
+// message — it reads the repository's setting first and stops rather than enqueueing under a
+// setting that joins them. The command's shape is the instruction: a merge that drops `--subject`
+// or `--body ”` lets GitHub write the message again.
+func TestTheMergersSquashMessageIsItsOwn(t *testing.T) {
+	merger := rolePart(t, "merger.md")
+	for _, want := range []string{
+		"gh pr merge <n> --squash --match-head-commit <head> --subject '<pull request title> (#<n>)' --body ''",
+		"--subject",
+		"--body ''",
+		"squash_merge_commit_message",
+		"COMMIT_MESSAGES",
+		"`enqueuePullRequest` takes no message",
+		"Do not enqueue it and do not complete.",
+	} {
+		if !strings.Contains(merger, want) {
+			t.Errorf("roles/merger.md does not say %q", want)
+		}
+	}
+}

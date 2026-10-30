@@ -310,10 +310,10 @@ func (refusingOwnerTokens) ReadToken(context.Context, appauth.AppRole, string) (
 	return appauth.Lease{}, errors.New("GitHub is down")
 }
 
-// Branch creation, the disarm and the READY merge mint the implement App's token for the owner of
-// the repository the issue's record names, and a mint that fails names that owner, so the outbox's
-// failure line says whose installation refused.
-func TestBranchCreationTheDisarmAndTheREADYMergeNameTheOwnerTheyMintFor(t *testing.T) {
+// Branch creation mints the implement App's token for the owner of the repository the issue's
+// record names, and a mint that fails names that owner, so the outbox's failure line says whose
+// installation refused.
+func TestBranchCreationNamesTheOwnerItMintsFor(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	issue := record.Issue{Key: "LEGION-208", Repo: "zeta/tools", DefaultBranch: "main", GitHubRepo: "zeta/tools", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow",
@@ -323,13 +323,5 @@ func TestBranchCreationTheDisarmAndTheREADYMergeNameTheOwnerTheyMintFor(t *testi
 	want := "mint the implement App token for zeta: GitHub is down"
 	if err := runner.createBranch(context.Background(), issue); err == nil || err.Error() != want {
 		t.Errorf("createBranch with a refused mint = %v, want %q", err, want)
-	}
-	row := mustOutboxRow(t, "LEGION-208", record.AutoMergeDisable{Number: 7}, time.Now())
-	if err := runner.autoMergeDisable(context.Background(), row, record.AutoMergeDisable{Number: 7}); err == nil || err.Error() != want {
-		t.Errorf("autoMergeDisable with a refused mint = %v, want %q", err, want)
-	}
-	merge := record.ReadyMerge{Number: 7, Head: "ready-head"}
-	if err := runner.readyMerge(context.Background(), mustOutboxRow(t, "LEGION-208", merge, time.Now()), merge); err == nil || err.Error() != want {
-		t.Errorf("readyMerge with a refused mint = %v, want %q", err, want)
 	}
 }

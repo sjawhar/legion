@@ -1,6 +1,6 @@
 // Handing an issue to Legion and getting it back ready to merge: a finished issue first, then the
 // next one handed over, its questions and spec approval answered in the Inbox, and its status
-// following the phases to READY. Rebuild it with the command in docs/site/media/README.md. Each
+// following the phases to the merge. Rebuild it with the command in docs/site/media/README.md. Each
 // narration line was written to its measured clip and starts at the cue it names, once that moment
 // is on screen.
 import type { Page } from "@playwright/test";
@@ -14,8 +14,6 @@ import {
   finish,
   linkPullRequest,
   PHASE_STATUSES,
-  postReady,
-  readyLine,
   requestSpecApproval,
   SAVED_CART,
   seedProject,
@@ -64,7 +62,7 @@ async function openConversation(page: Page, issue: Tracked): Promise<void> {
 const legionIssueJourney: Walkthrough<Seeded> = {
   title: "Hand an issue to Legion",
   seed,
-  pronounce: { READY: "Ready", Todo: "to-do" },
+  pronounce: { Todo: "to-do" },
   sections: [
     {
       id: "done",
@@ -78,7 +76,7 @@ const legionIssueJourney: Walkthrough<Seeded> = {
         await expect(page.getByRole("combobox", { name: "Status" })).toHaveValue("done");
         await expect(turns(page)).toContainText("Signed off.");
       },
-      act: async (page, seeded, cue) => {
+      act: async (page, _seeded, cue) => {
         await linger(page, 0.6);
         await highlight(page, page.getByRole("combobox", { name: "Status" }));
         cue("status");
@@ -86,7 +84,7 @@ const legionIssueJourney: Walkthrough<Seeded> = {
         await highlight(page, turns(page).getByText(/^Signed off\./));
         cue("signoff");
         await linger(page, 1.2);
-        await highlight(page, turns(page).getByText(readyLine(seeded.done, SAVED_CART)));
+        await highlight(page, page.getByRole("combobox", { name: "Status" }));
         cue("merge");
         await linger(page, 1.8);
       },
@@ -217,27 +215,6 @@ const legionIssueJourney: Walkthrough<Seeded> = {
         await accept(seeded.next, DELIVERY_DATE);
         await expect(pill).toHaveValue("retro");
         await linger(page, 1.7);
-      },
-    },
-    {
-      id: "ready",
-      narration: [
-        { at: "ready", text: "READY names the pull request," },
-        { at: "outcome", text: "and what it changes, for your merge." },
-      ],
-      open: async (page, seeded) => {
-        await postReady(seeded.next, DELIVERY_DATE);
-        await openConversation(page, seeded.next);
-        await expect(turns(page).getByText(readyLine(seeded.next, DELIVERY_DATE))).toBeVisible();
-      },
-      act: async (page, seeded, cue) => {
-        await linger(page, 0.4);
-        await highlight(page, turns(page).getByText(readyLine(seeded.next, DELIVERY_DATE)));
-        cue("ready");
-        await linger(page, 1.2);
-        await highlight(page, turns(page).getByText(/^Outcome:/));
-        cue("outcome");
-        await linger(page, 2.4);
       },
     },
   ],

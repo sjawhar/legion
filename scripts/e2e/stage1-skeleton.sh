@@ -202,7 +202,7 @@ jq '{name, version}' "$root/packages/pi-envoy/package.json" >"$plugins/pi-envoy/
 pane_home=(env -u OMP_PROFILE -u PI_PROFILE HOME="$work/home")
 
 # Beyond what boot needs, the file plants what the state's `settings` must show and must not
-# (LEGION-791): a max_fix_attempts the default would not answer, a github_apps block whose
+# (LEGION-791): a review_round_cap the default would not answer, a github_apps block whose
 # inline PEM fixture is the App key the state must never print, and an envoy_url carrying userinfo
 # at the default host and port, the credential the settings must mask. The loader takes github_apps
 # as the workflow configured and then wants projects too (resolveStage3: `projects must declare at
@@ -217,7 +217,7 @@ port: $port
 postgres_dsn: $LEGION_E2E_PG_DSN
 state_dir: $work/state
 operator_token_file: $work/operator-token
-max_fix_attempts: 5
+review_round_cap: 5
 envoy_url: http://legion:fixture-envoy-password@127.0.0.1:9020
 projects:
   FIXTURE: {}
@@ -294,7 +294,7 @@ jq -e '(.capabilities | length) == 21
 # its userinfo masked, and none of what the fixture planted as a credential, a credential file or an
 # App key — the App rides as its id and installations alone, and nothing anywhere in the document
 # reads as a PEM, a DSN, the planted password or a `user:password@` of any URL.
-jq -e '.settings.max_fix_attempts == 5
+jq -e '.settings.review_round_cap == 5
   and .settings.worker_boot_timeout_seconds == 120
   and .settings.runtime.name == "tmux"
   and .settings.envoy_url == "http://xxxxx@127.0.0.1:9020"
@@ -302,7 +302,7 @@ jq -e '.settings.max_fix_attempts == 5
   and ([.. | strings | select(test("BEGIN|PRIVATE KEY|postgres://|fixture-envoy-password|://[^/@ ]+:[^/@ ]+@"))] | length) == 0
   and (.settings.github_apps.implement | keys) == ["app_id", "installations"]' \
   "$work/state1.json" || {
-  echo "the state does not carry the resolved settings with the fixture's max_fix_attempts, the masked envoy_url and no credential, credential file or App key"
+  echo "the state does not carry the resolved settings with the fixture's review_round_cap, the masked envoy_url and no credential, credential file or App key"
   exit 1
 }
 "$work/legion" legions --json |

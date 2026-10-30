@@ -14,8 +14,8 @@ approve the spec, the daemon runs **phase workers** one after another: a planner
 that writes the change and opens a pull request, a tester, a reviewer and a merger. Each agent is an
 [Oh My Pi](https://github.com/sjawhar/oh-my-pi) session in a Kubernetes pod of its own.
 
-When the change is tested, reviewed and approved, the merger posts `READY` on the Dispatch issue
-and submits the pull request for merge under the repository's own branch protection. The architect
+When the change is tested, reviewed and approved, the merger merges the pull request itself, at
+the head it read, under the repository's own branch protection. The architect
 accepts the reviewed change before that, and the merge closes the issue. The implementer then
 drives the merged change in production, once your deploy carries it, and records what it saw on
 the pull request. Every step leaves a record you can read: the spec
@@ -39,8 +39,7 @@ flowchart LR
   reviewer --> accepting["The architect<br/>accepts the change"]
   accepting --> retro
   accepting -. sends back .-> implementer
-  merger --> ready["READY on<br/>the issue"]
-  ready --> merge["The daemon submits the merge;<br/>the repository's rules land it"]
+  merger --> merge["The merger merges the head it read;<br/>the repository's rules land it"]
   merge --> done["The merge<br/>closes the issue"]
   done --> production["Production check<br/>(the implementer, on the pull request)"]
 ```

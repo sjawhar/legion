@@ -5,7 +5,6 @@ import (
 	"errors"
 	"maps"
 	"os"
-	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -78,40 +77,6 @@ func TestARootArchitectIsToldTheDesignGatePolicyAndWhatItAsks(t *testing.T) {
 				}
 			})
 		}
-	}
-}
-
-func TestAMergerIsToldItsProjectsMergeRules(t *testing.T) {
-	composer, err := prompts.New(t.TempDir())
-	if err != nil {
-		t.Fatalf("compose the shipped prompts: %v", err)
-	}
-	rules := config.MergeRules{
-		ByHand: []config.PathPattern{{Expression: "^migrations/versions/", Regexp: regexp.MustCompile("^migrations/versions/")}},
-	}
-	for _, tc := range []struct {
-		name string
-		role claim.Role
-		want bool
-	}{
-		{"merger", claim.RoleMerger, true},
-		{"implementer", claim.RoleImplementer, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			token, err := claim.NewToken("s1", "S1-2", tc.role)
-			if err != nil {
-				t.Fatal(err)
-			}
-			s := specs{stateDir: t.TempDir(), project: "s1", prompts: composer, mergeRules: rules, repositories: noRepositoriesView}
-			spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: token, Issue: "S1-2", Tree: "S1-1", Role: tc.role})
-			if err != nil {
-				t.Fatalf("SpawnSpec: %v", err)
-			}
-			told := strings.Contains(spec.Prompt.Addressing, "Merge policy: by_hand `^migrations/versions/`.")
-			if told != tc.want {
-				t.Fatalf("addressing %q; merge policy present = %t, want %t", spec.Prompt.Addressing, told, tc.want)
-			}
-		})
 	}
 }
 

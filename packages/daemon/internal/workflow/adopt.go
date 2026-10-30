@@ -138,7 +138,7 @@ func (e *Engine) Adopt(ctx context.Context, tx pgx.Tx, issue, root record.Issue,
 			continue
 		}
 		member.Tree, member.Project, member.Generation, member.Phase = root.Tree, root.Project, next, phase.Done
-		member.LingerUntil, member.Hold, member.ReadyPendingVersion, member.Ancestry = nil, nil, nil, nil
+		member.LingerUntil, member.Hold, member.Ancestry = nil, nil, nil
 		if err := e.store.PutIssue(ctx, tx, member); err != nil {
 			return err
 		}

@@ -97,12 +97,10 @@ type Options struct {
 	// Trees is the store's durable tree barrier, which the operator routes open a root's tree
 	// through and reserve and finish a closed tree's cleanup through.
 	Trees TreeLifecycles
-	// GitHubAPI is GitHub's REST root, which the handoff route reads an issue branch's head, its
-	// handoff file and READY's checks under; empty, in production, is https://api.github.com, and a
+	// GitHubAPI is GitHub's REST root, which the daemon's own reads of a pull request and its
+	// compares go under; empty, in production, is https://api.github.com, and a
 	// test points it at a stand-in.
 	GitHubAPI string
-	// MergeRules is the merge policy an issue's project configures. Nil has no special policy.
-	MergeRules func(project string) config.MergeRules
 	// Grants mints and redeems the daemon-local one-command credential handles.
 	Grants   *credential.Grants
 	Pool     *pgxpool.Pool
@@ -184,7 +182,6 @@ type server struct {
 	tokens       appauth.Tokens
 	githubOwners func() []string
 	githubAPI    string
-	mergeRules   func(project string) config.MergeRules
 	grants       *credential.Grants
 	releaser     store.TreeReleaser
 	trees        TreeLifecycles
@@ -232,7 +229,6 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		tokens:             opts.Tokens,
 		githubOwners:       opts.GitHubOwners,
 		githubAPI:          opts.GitHubAPI,
-		mergeRules:         opts.MergeRules,
 		releaser:           opts.Releaser,
 		trees:              opts.Trees,
 		grants:             opts.Grants,

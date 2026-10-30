@@ -7,7 +7,7 @@ import { dispatchApi, expect, fakeEnvoy } from "../harness";
 
 export const PROJECT = "SHOP";
 
-/** The Legion daemon's own writes: the status it sets and the READY it posts. */
+/** The Legion daemon's own writes: the status it sets on the issue. */
 export const DAEMON = {
   actor: { id: "legion-daemon:SHOP", kind: "session" },
   as: "agent",
@@ -40,9 +40,8 @@ export interface Example {
   readonly decision: { readonly id: string; readonly pick: string };
   readonly approvalSummary: string;
   readonly pullRequest: { readonly number: number; readonly url: string };
-  /** The approved head the merger names in READY. */
+  /** The head the merger merges. */
   readonly head: string;
-  readonly ready: { readonly outcome: string; readonly risk: string };
   readonly merge: string;
   /** The architect's acceptance of the reviewed head, posted before retro and the merge. */
   readonly acceptance: string;
@@ -79,14 +78,9 @@ I recommend Server: the second criterion needs the cart on another device, which
     "Saved carts live on the server, one per account, and open on any device; a nightly job removes carts untouched for 30 days, a week after emailing the shopper.",
   pullRequest: { number: 42, url: "https://github.com/acme/storefront/pull/42" },
   head: "9c41e07",
-  ready: {
-    outcome:
-      "a signed-in shopper saves their cart and reopens it from their account on another device.",
-    risk: "the expiry email was checked in the mail provider's sandbox, not a real inbox.",
-  },
   merge: "4b7d2a1",
   acceptance:
-    "Signed off. All three acceptance criteria are met: the tester's handoff and both E2E lines prove them at 9c41e07, which the reviewer approved with no open threads. Retro, READY and the merge follow; the production check follows the merge, on the pull request.",
+    "Signed off. All three acceptance criteria are met: the tester's handoff and both E2E lines prove them at 9c41e07, which the reviewer approved with no open threads. Retro and the merge follow; the production check follows the merge, on the pull request.",
 };
 
 export const DELIVERY_DATE: Example = {
@@ -119,13 +113,9 @@ I recommend Carrier: its estimate already counts the warehouse's cut-off time an
     "Checkout asks the carrier for each shipping option's delivery date when it loads, and shows the date beside the option.",
   pullRequest: { number: 43, url: "https://github.com/acme/storefront/pull/43" },
   head: "2f8e6c1",
-  ready: {
-    outcome: "each shipping option at checkout shows the carrier's delivery date.",
-    risk: "none",
-  },
   merge: "7d03b9e",
   acceptance:
-    "Signed off. Both acceptance criteria are met: the tester's handoff and both E2E lines prove them at 2f8e6c1, which the reviewer approved with no open threads. Retro, READY and the merge follow; the production check follows the merge, on the pull request.",
+    "Signed off. Both acceptance criteria are met: the tester's handoff and both E2E lines prove them at 2f8e6c1, which the reviewer approved with no open threads. Retro and the merge follow; the production check follows the merge, on the pull request.",
 };
 
 /** An example issue in Dispatch: its key and its spec document. */
@@ -250,28 +240,6 @@ export const PHASE_STATUSES = ["testing", "needs_review"] as const;
 export async function setStatus(issue: Tracked, status: string): Promise<void> {
   const api = await dispatchApi();
   await api.patchIssue(issue.key, { status }, DAEMON);
-}
-
-/** The first line of the READY message. */
-export function readyLine(issue: Tracked, example: Example): string {
-  const { number, url } = example.pullRequest;
-  return `READY #${number} at ${example.head} (approved at ${example.head}) for ${issue.key} (${url})`;
-}
-
-/** The daemon posts the merger's READY on the issue. */
-export async function postReady(issue: Tracked, example: Example): Promise<void> {
-  const api = await dispatchApi();
-  await api.createMessage(
-    issue.key,
-    {
-      body: [
-        readyLine(issue, example),
-        `Outcome: ${example.ready.outcome}`,
-        `Not proven / risk: ${example.ready.risk}`,
-      ].join("\n\n"),
-    },
-    DAEMON
-  );
 }
 
 /** The reviewer approved, so the issue is in accepting: the architect posts its acceptance of the

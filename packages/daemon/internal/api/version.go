@@ -301,9 +301,10 @@ package api
 // 36: INFRA-229 (sjawhar/legion) -- `api.PullRequestView` gains `state`, the pull request's
 // `open`, `merged` or `closed`, always emitted: an architect's acceptance is now refused while an
 // issue beneath it is still in the workflow and a merged root's close waits for the rest of its
-// tree, so a root stands in `awaiting_merge` for days and an operator must see that its pull
-// request merged rather than guess at it. A 35 plugin's strict reader refuses a state whose pull
-// request views carry the field, so the boot gate and `legion probe-image` refuse the mixed pair.
+// tree, so a root stands in the phase that waits for its merge for days and an operator must see
+// that its pull request merged rather than guess at it. A 35 plugin's strict reader refuses a
+// state whose pull request views carry the field, so the boot gate and `legion probe-image`
+// refuse the mixed pair.
 //
 // 37: sjawhar/legion INFRA-80 -- an issue's disk dies with its pod: the pod's one volume is a
 // generic ephemeral volume the pod itself owns (issuePod.disk), which the kubelet creates

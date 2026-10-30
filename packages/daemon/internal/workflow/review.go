@@ -85,7 +85,7 @@ func (e *Engine) carryApproval(ctx context.Context, tx pgx.Tx, issue record.Issu
 // acts on the two things that read can say.
 //
 // A head that conflicts with its base sends the issue back to implementing from whatever later
-// phase it stands in (TriggerConflict, and in awaiting_merge the READY is withdrawn with it):
+// phase it stands in (TriggerConflict):
 // GitHub computes no merge ref for a conflicting head, so no check runs on it and no CI result
 // will ever arrive for it, and only the implementer merging the base forward clears it. It
 // decides on every read, not only a changed one, since the recorded conflict is what a read made
@@ -121,7 +121,7 @@ func (e *Engine) mergeability(ctx context.Context, tx pgx.Tx, fact intake.PullRe
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	if classify.ConflictWithdrawsReady(*pr) {
+	if classify.HeadConflicts(*pr) {
 		reason := fmt.Sprintf("the head conflicts with %s: GitHub runs no checks on it; merge %s forward", base, base)
 		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerConflict, "", record.PhaseRow{}, pr, reason)
 	}

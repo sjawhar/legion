@@ -60,7 +60,7 @@ func TestAnApprovalMovesTheIssueToAcceptingAndStartsNobody(t *testing.T) {
 // sign_off is the architect's acceptance, taken in accepting alone: elsewhere it changes nothing
 // and says so.
 func TestSignOffIsRefusedOutsideAccepting(t *testing.T) {
-	for _, at := range []phase.Phase{phase.Reviewing, phase.AwaitingMerge} {
+	for _, at := range []phase.Phase{phase.Reviewing, phase.Merging} {
 		t.Run(string(at), func(t *testing.T) {
 			pool := migratedPool(t)
 			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: at, Generation: 1, Status: fixtureStatus(at), Rank: "U"})
@@ -241,7 +241,7 @@ func seedAcceptingChild(t *testing.T, pool *pgxpool.Pool, key, parent string, at
 // Nothing beneath an issue holds its acceptance: the architect accepts the issue's own reviewed
 // head, and the sign-off moves it to retro whether the issues under it, however deep, still run,
 // are done or are parked. The tree's order is kept at the close, where a root whose pull request
-// merged waits in awaiting_merge for the rest of its tree (closeMerged).
+// merged waits in merging for the rest of its tree (closeMerged).
 func TestSignOffIsAcceptedWhateverIsBeneathIt(t *testing.T) {
 	for _, tc := range []struct {
 		name string

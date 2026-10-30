@@ -150,13 +150,13 @@ func noticeReasons(t *testing.T, pool *pgxpool.Pool, kind string) []string {
 
 // GitHub sends no event when it computes a pull request's mergeability, so a head that starts
 // conflicting with its base - someone merged another pull request into it - is learned only from
-// the daemon's own read of /pulls/{number}. In awaiting_merge a conflicting read withdraws the
-// READY and sends the tree back to implementing, as a red verdict does: GitHub computes no merge
+// the daemon's own read of /pulls/{number}. A conflicting read sends the tree back to implementing
+// from every phase after the implementer's: GitHub computes no merge
 // ref for a conflicting head and runs no checks on it at all. A read that finds `mergeable` still
 // null - GitHub has not computed it yet - or true moves nothing. The read must apply the fact and
 // decide even when it only confirms what is already stored: a conflict can be recorded while the
-// issue is still in testing, reviewing, retro or merging, where nothing moves yet, and the first
-// read after the issue reaches awaiting_merge has to catch it then, with no change in the GitHub
+// issue is still in testing or reviewing, and the first
+// read after the issue reaches merging has to catch it then, with no change in the GitHub
 // answer to key off.
 func TestThePerIssueReadCatchesAHeadThatStartsConflictingWithItsBase(t *testing.T) {
 	for _, tc := range []struct {
@@ -167,13 +167,13 @@ func TestThePerIssueReadCatchesAHeadThatStartsConflictingWithItsBase(t *testing.
 		want         phase.Phase
 	}{
 		{"conflicting", "false", "", record.MergeabilityConflicting, phase.Implementing},
-		{"not yet computed", "null", "", record.MergeabilityUnknown, phase.AwaitingMerge},
-		{"mergeable", "true", "", record.MergeabilityMergeable, phase.AwaitingMerge},
+		{"not yet computed", "null", "", record.MergeabilityUnknown, phase.Merging},
+		{"mergeable", "true", "", record.MergeabilityMergeable, phase.Merging},
 		{"conflict already recorded", "false", record.MergeabilityConflicting, record.MergeabilityConflicting, phase.Implementing},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)
-			seedCapture(t, pool, phase.AwaitingMerge, "retro",
+			seedCapture(t, pool, phase.Merging, "retro",
 				record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "code", Summary: "READY #86 at code"})
 			if tc.stored != "" {
 				if _, err := pool.Exec(context.Background(), "update pull_requests set mergeability = $1 where issue = 'CAPTURE-1'", string(tc.stored)); err != nil {
@@ -221,7 +221,7 @@ func TestThePerIssueReadRecordsGitHubsMergeStateForTheHead(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)
-			seedCapture(t, pool, phase.AwaitingMerge, "retro",
+			seedCapture(t, pool, phase.Merging, "retro",
 				record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "code", Summary: "READY #86 at code"})
 			w := readRuntime(pool, mergeStateStandIn(t, tc.state).URL, quietLogger())
 			if err := w.readIssuePullRequest(context.Background(), "CAPTURE-1"); err != nil {
@@ -234,8 +234,8 @@ func TestThePerIssueReadRecordsGitHubsMergeStateForTheHead(t *testing.T) {
 			if pr.MergeState.Mergeable() != tc.mergeable {
 				t.Fatalf("%q reads as mergeable = %t, want %t", pr.MergeState, pr.MergeState.Mergeable(), tc.mergeable)
 			}
-			if got != phase.AwaitingMerge {
-				t.Fatalf("after the read the issue is in %s, want awaiting_merge: recording the merge state moves nothing", got)
+			if got != phase.Merging {
+				t.Fatalf("after the read the issue is in %s, want merging: recording the merge state moves nothing", got)
 			}
 		})
 	}

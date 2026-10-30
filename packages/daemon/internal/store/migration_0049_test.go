@@ -7,10 +7,11 @@ import (
 )
 
 // The architect accepts before the merge and the merge closes the issue, so production_check is no
-// phase. An issue the old daemon left there, or held from there, has its pull request merged and
-// stands at awaiting_merge after 0049, where the new daemon's boot closes it; the phase constraints
-// then admit accepting and refuse production_check.
-func TestTheOldPostMergePhaseMigratesToAwaitingMergeAndTheConstraintsSwap(t *testing.T) {
+// phase. An issue the old daemon left there, or held from there, has its pull request merged, so
+// 0049 moves it to the phase that waited for that merge and 0069 moves it on to `merging`, where
+// the daemon's boot closes it; the phase constraints then admit accepting and refuse
+// production_check.
+func TestTheOldPostMergePhaseMigratesToMergingAndTheConstraintsSwap(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
 	migrateThrough(t, store, 48)
@@ -25,8 +26,8 @@ func TestTheOldPostMergePhaseMigratesToAwaitingMergeAndTheConstraintsSwap(t *tes
 		t.Fatalf("migrate: %v", err)
 	}
 	for _, want := range []struct{ key, phase, heldFrom string }{
-		{"LEGION-208", "awaiting_merge", ""},
-		{"LEGION-209", "held", "awaiting_merge"},
+		{"LEGION-208", "merging", ""},
+		{"LEGION-209", "held", "merging"},
 		{"LEGION-210", "reviewing", ""},
 	} {
 		var phase string
@@ -39,7 +40,7 @@ func TestTheOldPostMergePhaseMigratesToAwaitingMergeAndTheConstraintsSwap(t *tes
 			got = *heldFrom
 		}
 		if phase != want.phase || got != want.heldFrom {
-			t.Fatalf("%s after 0049 = phase %q held_from %q, want %q and %q", want.key, phase, got, want.phase, want.heldFrom)
+			t.Fatalf("%s after the migrations = phase %q held_from %q, want %q and %q", want.key, phase, got, want.phase, want.heldFrom)
 		}
 	}
 	if _, err := store.Pool().Exec(ctx, `insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
@@ -70,7 +71,7 @@ func TestTheMergeCommitAndTheProductionCheckArriveWith0049(t *testing.T) {
 	migrateThrough(t, store, 48)
 	if _, err := store.Pool().Exec(ctx, `insert into issues
 		(key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
-		values ('LEGION-208', 'LEGION-208', 'LEGION', 'merged root', 'awaiting_merge', 1, 'retro', 'A', 1)`); err != nil {
+		values ('LEGION-208', 'LEGION-208', 'LEGION', 'merged root', 'retro', 1, 'retro', 'A', 1)`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Pool().Exec(ctx, `insert into pull_requests

@@ -17,7 +17,7 @@ func TestAPullRequestRecordedBefore0064HasNoMergeState(t *testing.T) {
 	migrateThrough(t, store, 63)
 	if _, err := store.Pool().Exec(ctx, `insert into issues
 		(key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
-		values ('LEGION-208', 'LEGION-208', 'LEGION', 'root', 'awaiting_merge', 1, 'retro', 'A', 1)`); err != nil {
+		values ('LEGION-208', 'LEGION-208', 'LEGION', 'root', 'retro', 1, 'retro', 'A', 1)`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Pool().Exec(ctx, `insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at,

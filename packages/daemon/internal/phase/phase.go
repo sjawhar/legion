@@ -20,7 +20,6 @@ const (
 	Accepting      Phase = "accepting"
 	Retro          Phase = "retro"
 	Merging        Phase = "merging"
-	AwaitingMerge  Phase = "awaiting_merge"
 	Done           Phase = "done"
 	Held           Phase = "held"
 )
@@ -28,15 +27,15 @@ const (
 // All is every phase, in the transition table's order.
 var All = []Phase{
 	Admitted, AwaitingPerson, Planning, Implementing, Testing, Reviewing, Accepting, Retro, Merging,
-	AwaitingMerge, Done, Held,
+	Done, Held,
 }
 
 // HandoffFile is the handoff a phase ends with, .legion/<issue>/<word>.json, and whether it ends
 // with one its role writes and commits: the planner's, the implementer's implementing rounds, the
 // tester's, and the reviewer's, each under the word its role's prompt spells
 // (internal/prompts/roles/*.md), which the `legion` tool's `handoff_complete` finds the carrying
-// commit of (packages/pi-shared/src/handoff-commit.ts). Retro and the merger's READY write none,
-// and report the commit they stand on; accepting is the architect's sign-off, no handoff at all.
+// commit of (packages/pi-shared/src/handoff-commit.ts). Retro and merging write none, and report
+// the commit they stand on; accepting is the architect's sign-off, no handoff at all.
 func HandoffFile(p Phase) (string, bool) {
 	switch p {
 	case Planning:

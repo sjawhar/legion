@@ -59,7 +59,7 @@ func TestReworkRoundAdvancesOnlyOnThatRoundsHandoff(t *testing.T) {
 
 // A completion the workflow does not act on is refused, not answered as though it applied: a role
 // the daemon has never started on the issue - no claim of its own, and no handoff on its row -
-// reporting a phase of it, and a merger's completion without READY. A role the issue has moved on
+// reporting a phase of it. A role the issue has moved on
 // without is the other case, and its completion is recorded instead (engine's leftItsPhase).
 func TestIgnoredCompletionsAreRefused(t *testing.T) {
 	for _, tc := range []struct {
@@ -72,11 +72,6 @@ func TestIgnoredCompletionsAreRefused(t *testing.T) {
 			name: "role no longer owns the phase", current: phase.Testing,
 			fact: intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "late"},
 			code: "HANDOFF_NOT_CURRENT_PHASE",
-		},
-		{
-			name: "merger without READY", current: phase.Merging,
-			fact: intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", Commit: "merge"},
-			code: "READY_REQUIRED",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

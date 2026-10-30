@@ -45,8 +45,8 @@ below, and `skill://legion-worker/references/conflicts-and-rewrites.md`).
   (`gh api repos/<o>/<r>/commits/<ci head>/check-runs --paginate --jq '.check_runs[] | [.name, .status, .conclusion] | @tsv'`):
   every required name present, `completed` and `success` (GitHub counts `neutral` and `skipped`
   as passing for a required check). And the compare proving only `.legion/<issue>/` changed since,
-  `<issue>` being your `LEGION_ISSUE` (another issue's `.legion/` is code to the daemon and READY)
-  (`gh api repos/<o>/<r>/compare/<ci head>...<headRefOid> --jq '{handoffsOnly: ([.files[] | .filename, (.previous_filename // empty)] | all(startswith(".legion/<issue>/"))), files: (.files | length)}'`
+  `<issue>` being your `LEGION_ISSUE` (another issue's `.legion/` is code, and a head carrying it
+  is not one you may treat as handoffs-only)
   prints `handoffsOnly` `true`; `false` means code was pushed since CI ran, so wait for the new
   push's runs and read the CI head again). GitHub's compare lists at most 300 files for the whole
   comparison, so `files` at 300 is a comparison GitHub cut at its cap and `handoffsOnly` decides
@@ -97,10 +97,11 @@ below, and `skill://legion-worker/references/conflicts-and-rewrites.md`).
   and "a push since the approved head changed code, then an approval of the head" in
   `packages/daemon/internal/workflow/review_test.go`). That push carries no `skip-checks: true`
   line, so GitHub runs the branch's workflows on it. Wait for that head's required checks to be
-  green, and approve only then. The daemon sends nothing back for a red at a head the review App
-  pushed (`PlannedRed` in `classify/decisions.go`), so your own read is the only one. A red you
-  approve over reaches nobody: the tree runs on to the merge, where GitHub holds the pull request
-  under the base branch's required checks until someone reads them. A red there is a
+  green, and approve only then: nothing but your own read catches a check your prose broke, since
+  the daemon moves the issue for no check at all. A red you
+  approve over reaches nobody who will act on it: the tree runs on to the merge, where GitHub
+  holds the pull request under the base branch's required checks until someone reads them. A red
+  there is a
   `REQUEST_CHANGES` when the code is at fault, and your own commit to fix when your prose broke
   it. The architect reads your prose commits at its acceptance (*The architect's acceptance*,
   below), and that read is no new round.
@@ -111,14 +112,15 @@ the head that push made, by its SHA; then complete. A red at the code is a `REQU
 naming the check, never an approval. A request for changes does not wait, since it stands
 whatever CI says and the issue leaves reviewing with it. The approval waits on nothing at a
 handoff-only commit either: it ends the round whatever CI says there, since the round reads no CI
-verdict, and a red the daemon reads later — at that commit or any above it — is the code's red
-and resumes the implementer from wherever the issue is (reviewing, retro or merging) without the
-reviewer. A head your own push changed beyond `.legion/<issue>/` is the exception. The daemon marks it a
-planned red and sends nothing back for it, so wait for its checks yourself (*Fix a prose-only
-finding yourself*, above). A review of a head the handoff push then replaces names a head the pull
-request no longer has. The daemon moves the issue once both are in — the decision GitHub reports
-and your completion, in either order — so a review posted without a completion leaves the issue in
-reviewing until you finish.
+verdict, and a settlement the daemon reads later — at that commit or any above it — moves the
+issue nowhere. The daemon names each check GitHub reported, with the conclusion GitHub gave it, in
+one message to the tree's architect, the worker of the issue's current phase and the implementer,
+and judges none of them: a red is the implementer's to fix or re-run, the architect's to decide
+on, and GitHub's to hold the merge for. So the reviewer's own read before it approves is the only
+read that decides anything. A review of a head the handoff push then replaces names a head the
+pull request no longer has. The daemon moves the issue once both are in — the decision GitHub
+reports and your completion, in either order — so a review posted without a completion leaves the
+issue in reviewing until you finish.
 
 ## The architect's acceptance
 
@@ -133,9 +135,9 @@ reviewing until you finish.
   accept while the issue holds a finding ask no controller has taken (`findings.md`, "When no
   controller takes it"). The acceptance asks no `Production:` line of anyone: that line is written
   after the close (*The production check after the close*, below).
-  CI red at the head in `accepting` returns the issue to `implementing` as it does in review. A
-  head the review App pushed beyond `.legion/<issue>/` is the exception: the daemon marks it a planned red
-  and acts on it nowhere, and GitHub holds the merge under the base branch's own rules.
+  CI red at the head in `accepting` moves nothing, as it moves nothing anywhere: the daemon names
+  the checks GitHub reported and leaves the decision to the roles it told. Read the head's checks
+  on GitHub yourself before you accept, and send a red head back with `request_backward_move`.
 
 ## Retro
 
@@ -160,25 +162,40 @@ reviewing until you finish.
 ## The merger
 
 - The merger resolves no review thread: the reviewer's approval already judged them, and the
-  packet requires no thread state beyond it. It writes no file, commits nothing and pushes
+  merge requires no thread state beyond it. It writes no file, commits nothing and pushes
   nothing.
 - **The merge is the merger's own act, at the head it read.** It reads the pull request
-  (`gh pr view <n> --json number,url,state,baseRefName,headRefOid,mergeStateStatus`), and every
-  step below names that `headRefOid`:
+  (`gh pr view <n> --json number,title,url,state,baseRefName,headRefOid,mergeStateStatus`), and
+  every step below names that `headRefOid`:
   - *The handoffs first.* While that head still carries `.legion/<issue>/`
     (`gh api 'repos/{owner}/{repo}/contents/.legion/<issue>?ref=<head>'`: GitHub's 404 means it
     carries none, and any other failure leaves it unknown), it merges nothing and completes
     nothing. Retro's last commit is what removes the directory, so a head carrying it is one retro
-    did not finish, and a squash merge would put this issue's handoffs on the default branch. It
+    did not finish, and a squash merge would put this issue's handoffs on the default branch.
+    Nothing in the daemon reads the head for it, so this read is the only one. It
     tells the architect, who moves the issue back to `retro` with `request_backward_move`, and it
     merges the head retro's push then makes.
-  - *The merge.* `gh pr merge <n> --squash --match-head-commit <head>`, as the implement App, so
+  - *The message, before the merge.* GitHub's default squash message,
+    `squash_merge_commit_message` of `COMMIT_MESSAGES`, joins every commit message of the pull
+    request, which puts the tree's `Dispatch:` keys, its `Omp-Session:` trailers and every
+    `skip-checks: true` line on the default branch. So the merger writes the message itself,
+    `--subject '<pull request title> (#<n>)' --body ''`, on every merge, whatever the repository's
+    setting says. It reads that setting first all the same
+    (`gh api "repos/<o>/<r>" --jq '[.squash_merge_commit_title, .squash_merge_commit_message] | @tsv'`),
+    because the merge-queue path below can pass no message.
+  - *The merge.*
+    `gh pr merge <n> --squash --match-head-commit <head> --subject '<pull request title> (#<n>)' --body ''`,
+    as the implement App, so
     GitHub refuses the merge once the head has moved under it: merging at a named head is how bors
     and Prow's Tide merge only what they tested. On a base with a merge queue — a `merge_queue`
     rule among the base branch's rules — it enqueues the pull request instead, with GraphQL
     `enqueuePullRequest` and the same head as `expectedHeadOid`, because `gh pr merge` on such a
     base turns auto-merge on while a required check is pending, which arms the pull request rather
-    than queueing it. It never turns auto-merge on; the daemon submits no merge and changes no
+    than queueing it. `enqueuePullRequest` takes no message, so where that base's
+    `squash_merge_commit_message` reads `COMMIT_MESSAGES` the queue would commit the branch's
+    messages and nothing the merger passes can stop it: it enqueues nothing, completes nothing,
+    and tells the architect, naming the setting and that only a person can change it to `PR_BODY`
+    or `BLANK`. It never turns auto-merge on; the daemon submits no merge and changes no
     merge setting of any pull request.
   - *The watch.* On a merge-queue base it reads the pull request until GitHub merges it or takes
     it out of the queue, and acts on a removal: a head the queue took out over its own
@@ -188,38 +205,29 @@ reviewing until you finish.
     still running, a required review only a person can give) and merge again; merge again at the
     head it re-reads when a push moved it, or when GitHub refused while it was still computing
     mergeability; send the issue back with `request_backward_move` when the head itself must
-    change (a conflict with the base, a required check that failed); or tell the architect what no
+    change (a conflict with the base, a check that failed); or tell the architect what no
     worker can do — a repository setting or an App permission only a person can change — with
     GitHub's own answer quoted. The repository's required reviews and checks decide what may
     merge: Legion bypasses none, and a review only a person can give is waited for.
-- *The packet* the merger sends with its completion is
-  `READY #<n> at <head> for <KEY> (<pr url>)`
-  (the shape `packages/daemon/internal/prompts/roles/merger.md` defines), then
-  `Merge: pull request #<n> merged at <head>`, then the PR body's `Outcome:` line and its
-  `Not proven / risk:` value — every bullet under that label joined with `; ` on the one line, or
-  `none` — quoted from the `## For the reviewer` block at that head (or one line saying the body
-  carries no brief — the packet still goes out), then the PR body's gate facts. The packet names
-  both the implementer's and the tester's `E2E` lines; a missing one is reported to the architect
-  instead of completing.
-- The completion is `handoff_complete` with `ready: true` and the packet as its `summary`. The
-  daemon reads the pull request and refuses the completion on each ground the merger's role prompt
-  names in its `Go daemon workflow` part, by its code and with its remedy. That part is the one
-  complete list of those refusals. A refusal records nothing; the merger reports it to the
-  architect unless it says to complete again, and never pushes a commit to make CI run. A pull
-  request already merged is refused for nothing its head could carry, since a merged head can no
-  longer change. On success the daemon posts the packet as a `dispatch message` on the issue,
-  publishes it to the project's merge queue role when one is set, and says on the issue when that
-  role has no live holder.
+- *The completion* is `handoff_complete` with the ordinary two-sentence `summary`, which names the
+  pull request, the head merged and the merge commit. It records the merger's phase row and moves
+  nothing: no Dispatch message, no publish, no phase. What moves the issue is the daemon's own
+  reading of the merged pull request, which writes `done` — before the completion or after it,
+  whichever comes second. The daemon refuses that completion only as it refuses any phase
+  worker's: `HANDOFF_NOT_CURRENT_PHASE` (the issue left `merging`), `HANDOFF_STALE_GENERATION`,
+  `HANDOFF_NO_RUN`, `HANDOFF_ALREADY_RECORDED` and `TREE_LINGERING`. It reads neither the head,
+  nor its checks, nor the approval, nor `.legion/<issue>/`: every one of those reads is the
+  merger's own, above.
 
 ## The production check after the close
 
 - **The merge closes the issue; the production check is the implementer's work after the close.**
-  When the pull request merges, the daemon writes `done` and, in the implementer's session, still
-  live, hands it the check task. On a root whose tree still runs the close, and so the check task,
-  comes later: the merge is recorded, the root waits in `awaiting_merge` until the last other
-  issue of its tree is done or parked, and the check opens with that close. Its first line is
+  When the pull request merges, the daemon reads that merge, writes `done` and, in the
+  implementer's session, still live, hands it the check task. On a root whose tree still runs the
+  close, and so the check task, comes later: the merge is recorded, the root stays in `merging` on
+  its merged pull request until the last other issue of its tree is done or parked, and the check
+  opens with that close. Its first line is
   `Production check of <KEY>: <title>.`, and it names the repository, the pull request, the merge
-  commit, the look's number, what woke the look (`the merge`, for the first) and whether it is the
   last. A resumed session tells the check task
   from its last phase task by that first line. The check carries no phase and no handoff: a look
   ends with `handoff_complete` carrying a `verdict` and a `summary`, no commit, and the daemon

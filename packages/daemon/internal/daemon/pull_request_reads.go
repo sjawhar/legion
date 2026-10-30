@@ -107,12 +107,13 @@ func (w *workflowRuntime) openRecord(ctx context.Context, pr record.PullRequest)
 // merge state differs from the one recorded, or when the base GitHub names is not the recorded
 // one, or when a push onto that base is recorded with no read of it yet
 // (record.PullRequest.BaseMoved): workflow's mergeability decides a CONFLICTING read every time,
-// even one that only confirms the stored value, so a conflict recorded before the issue reached
-// awaiting_merge is still acted on once it gets there; a merge state that moved while the
-// mergeability stood still is recorded as the read found it; and this read is the one that records
-// the base, both for a pull request whose record has none and as the answer to a push onto its
-// base, which GitHub recomputed the mergeability for and sent no event about. A read that says
-// what is recorded applies nothing, so a second read of an unchanged pull request changes nothing.
+// even one that only confirms the stored value, so a conflict recorded while the issue stood in a
+// phase the trigger has no row for is still acted on once it reaches one that has; a merge state
+// that moved while the mergeability stood still is recorded as the read found it; and this read
+// is the one that records the base, both for a pull request whose record has none and as the
+// answer to a push onto its base, which GitHub recomputed the mergeability for and sent no event
+// about. A read that says what is recorded applies nothing, so a second read of an unchanged pull
+// request changes nothing.
 // An apply that fails is logged, and the next read of the pull request applies it again.
 func (w *workflowRuntime) applyMergeability(ctx context.Context, pr record.PullRequest, pull githubPullRequest) {
 	base, mergeable, state := pull.Base.Ref, pull.mergeability(), pull.mergeState()

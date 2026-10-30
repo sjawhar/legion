@@ -19,7 +19,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
-	"github.com/sjawhar/legion/daemon/internal/ghautomerge"
 	"github.com/sjawhar/legion/daemon/internal/ghbranch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
@@ -56,8 +55,7 @@ const (
 	messageReadSkew = 5 * time.Second
 	// waitWarnAttempts is when a waiting row is logged as a warning: past the backoff's climb to
 	// its cap, a wait of about two minutes, what it waits on is not ending on its own, and an
-	// operator should look. A READY merge only GitHub's own rules hold back (routineWait) stays
-	// debug at every attempt.
+	// operator should look.
 	waitWarnAttempts = 7
 	// issueBranchTimeout bounds one issue_branch row's GitHub calls, its token's mint with them:
 	// the row runs on its issue's lifecycle lane, one row at a time, so a call GitHub never
@@ -204,21 +202,19 @@ func (r *outbox) settle(ctx context.Context, row record.OutboxRow, err error) {
 	if err != nil {
 		r.noteLimit(row, err)
 		// A failure no retry repairs is not logged as the row failing: once its finish commits,
-		// finishRefused's own line says what became of the row (a person's dequeue of a READY merge,
-		// say, is no failure of the daemon's), and a finish that does not commit is logged below with
-		// it as the cause. A wait that ends the row (a stalled ghautomerge.Lagging) logs as a wait too.
-		permanent := permanentRefusal(row, err, r.now().UTC())
+		// finishRefused's own line says what became of the row, and a finish that does not commit
+		// is logged below with it as the cause.
+		permanent := permanentRefusal(row, err)
 		if errors.Is(err, wait.ErrWaiting) {
 			// A wait is not a failure (wait.ErrWaiting): a held notice, a suspension or start held
 			// for a turn, a task behind the claim's pending delivery, a tree's cleanup reservation,
-			// a close waiting for its stops, or a READY merge GitHub does not allow, or has not
-			// made, yet. The row runs again on its backoff, logged when it first waits and as a
-			// warning once it has waited long, unless only GitHub's own rules hold it back.
+			// or a close waiting for its stops. The row runs again on its backoff, logged when it
+			// first waits and as a warning once it has waited long.
 			level := slog.LevelDebug
 			switch {
 			case row.Attempts == 0:
 				level = slog.LevelInfo
-			case row.Attempts >= waitWarnAttempts && !routineWait(err):
+			case row.Attempts >= waitWarnAttempts:
 				level = slog.LevelWarn
 			}
 			r.log.Log(ctx, level, "outbox row waits", "row", row.ID, "kind", row.Kind, "issue", row.Issue,
@@ -280,17 +276,12 @@ func (r *outbox) finish(ctx context.Context, row record.OutboxRow) error {
 
 // finishRefused finishes a row whose failure no retry repairs (permanentRefusal), its follow-up in
 // the same transaction and only while the row's lease still holds (FinishLeasedOutbox), so a worker
-// whose lease expired, or was taken by a reopen (record's readyMergeConflict), commits nothing
-// beside the one that holds the row now.
+// whose lease expired commits nothing beside the one that holds the row now.
 //
 // A status row Dispatch refused finishes so it no longer holds its issue's later writes back. A
 // hand-over's row drops its fence with it: the write that would hand the child to Legion never
 // lands, so no admission consumes the fence, and one left behind would keep naming the child's own
 // tree as its Sandbox's home (store.IssueSandboxHome) for good. The child stays where it is until
-// a person labels it, which admits it as an orphan. A READY merge row tells the issue's architect
-// why it ended without a merge (readyMergeEnded): its notice row is written in the finish's own
-// transaction, which owns the commit hook that write registers (projectRecords, intake.OnCommit),
-// so the notice's lane is woken as the finish commits and the notice is published without a sweep.
 func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow, cause error) error {
 	payload, err := record.DecodeOutboxPayload(row)
 	if err != nil {
@@ -313,22 +304,6 @@ func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow, cause 
 				r.log.Warn("outbox hand-over refused by Dispatch; its fence is dropped and the child is not handed to Legion",
 					"row", row.ID, "issue", row.Issue, "tree", value.HandOverTree, "linger", value.HandOverLinger)
 			}
-		}
-	case record.ReadyMerge:
-		notice, err := record.NewOutboxRow(row.Issue, readyMergeEnded(cause), r.now().UTC())
-		if err != nil {
-			return err
-		}
-		follow = func(tx pgx.Tx) error { return r.records.Enqueue(scoped, tx, notice) }
-		// Someone removing the arm is a person's act, told to the architect; GitHub refusing the
-		// submission or a webhook the daemon never received is a fault.
-		level := slog.LevelError
-		var removed *ghautomerge.Removed
-		if errors.As(cause, &removed) {
-			level = slog.LevelWarn
-		}
-		told = func() {
-			r.log.Log(scoped, level, "outbox READY merge ended without a merge; its architect is told", "row", row.ID, "issue", row.Issue, "error", cause)
 		}
 	}
 	if err := pgx.BeginFunc(scoped, r.pool, func(tx pgx.Tx) error {
@@ -385,15 +360,12 @@ type rateLimit struct {
 }
 
 // githubBudgets is the GitHub budgets a row of each kind spends, as the implement App: its REST
-// calls (an issue branch's create, a production check's compare) the REST core's, its GraphQL
-// calls (a disarm, a READY merge) GraphQL's, and every call GitHub's secondary limit. A kind it
-// does not name calls no GitHub API.
+// calls (an issue branch's create, a production check's compare) the REST core's, and every call
+// GitHub's secondary limit. A kind it does not name calls no GitHub API.
 var githubBudgets = map[record.OutboxKind][]githubrest.Budget{
-	record.OutboxKindIssueBranch:      {githubrest.BudgetCore, githubrest.BudgetSecondary},
-	record.OutboxKindAutoMergeDisable: {githubrest.BudgetGraphQL, githubrest.BudgetSecondary},
-	record.OutboxKindReadyMerge:       {githubrest.BudgetGraphQL, githubrest.BudgetSecondary},
-	record.OutboxKindCheckCompare:     {githubrest.BudgetCore, githubrest.BudgetSecondary},
-	record.OutboxKindApprovalCarry:    {githubrest.BudgetCore, githubrest.BudgetSecondary},
+	record.OutboxKindIssueBranch:   {githubrest.BudgetCore, githubrest.BudgetSecondary},
+	record.OutboxKindCheckCompare:  {githubrest.BudgetCore, githubrest.BudgetSecondary},
+	record.OutboxKindApprovalCarry: {githubrest.BudgetCore, githubrest.BudgetSecondary},
 }
 
 // standingLimit is the limit in limits, among the budgets a row of kind spends, that still stands
@@ -420,33 +392,13 @@ func retryBackoff(attempts int) time.Duration {
 
 // permanentRefusal is a row's failure no retry repairs, so the row is finished with its follow-up
 // (finishRefused) rather than retried: a Dispatch status write Dispatch refuses the same way every
-// time (dispatch.PermanentRefusal), which would hold every later status of its issue behind it, and
-// a READY merge GitHub refuses where it still stands (ghautomerge.Refused), whose pull request
-// GitHub has shown closed or at another head than the record awaits for longer than
-// ghautomerge.LagBound at now (ghautomerge.Lagging.Stalled), or whose arm or merge-queue entry
-// someone else removed without a merge (ghautomerge.Removed), which a retry must not undo.
-func permanentRefusal(row record.OutboxRow, err error, now time.Time) bool {
-	switch row.Kind {
-	case record.OutboxKindDispatchStatus:
-		_, permanent := dispatch.PermanentRefusal(err)
-		return permanent
-	case record.OutboxKindReadyMerge:
-		var refused *ghautomerge.Refused
-		var removed *ghautomerge.Removed
-		var lagging *ghautomerge.Lagging
-		return errors.As(err, &refused) || errors.As(err, &removed) || errors.As(err, &lagging) && lagging.Stalled(now)
-	default:
+// time (dispatch.PermanentRefusal), which would hold every later status of its issue behind it.
+func permanentRefusal(row record.OutboxRow, err error) bool {
+	if row.Kind != record.OutboxKindDispatchStatus {
 		return false
 	}
-}
-
-// routineWait is a wait only GitHub's own rules hold back, which ends without anyone acting for
-// Legion: a pull request armed or queued at READY's head (ghautomerge.Armed), one GitHub reports not
-// mergeable yet for a reason its rules end (ghautomerge.Unmergeable.Routine), or one the merge queue
-// took out to merge, which GitHub has yet to show merged (ghautomerge.Merging).
-func routineWait(err error) bool {
-	var routine interface{ Routine() bool }
-	return errors.As(err, &routine) && routine.Routine()
+	_, permanent := dispatch.PermanentRefusal(err)
+	return permanent
 }
 
 func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
@@ -484,16 +436,10 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		})
 	case record.WorkspaceRemove:
 		return r.removeWorkspace(ctx, row, value)
-	case record.MergeQueuePublish:
-		return r.mergeQueue(ctx, row, value)
 	case record.RoleMessage:
 		return r.roleMessage(ctx, row, value)
 	case record.IssueBranch:
 		return r.issueBranch(ctx, row, value)
-	case record.AutoMergeDisable:
-		return r.autoMergeDisable(ctx, row, value)
-	case record.ReadyMerge:
-		return r.readyMerge(ctx, row, value)
 	case record.CheckCompare:
 		return r.checkCompare(ctx, row, value)
 	case record.CheckLook:
@@ -705,26 +651,6 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 		return nil
 	}
 	return fmt.Errorf("%w: %s holds no role for %s: %w", errNoticeWaits, architect, row.Issue, published)
-}
-
-// mergeQueue publishes the merger's READY packet, or the daemon's withdrawal of it, to the
-// project's merge queue role, keyed by the row so a retried row is one delivery. A role with no
-// live holder refuses every attempt until someone claims it, so waiting would retry forever; the
-// Dispatch message the same READY posted already carries the packet, and the issue's status shows
-// a withdrawal, so the issue is told the role had no holder, as the merger's prompt says the
-// daemon does (internal/prompts/go/merger.md), and the row is done.
-func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload record.MergeQueuePublish) error {
-	if r.notices == nil {
-		return errors.New("merge queue executor has no Envoy publisher")
-	}
-	err := r.notices.Publish(ctx, notify.RoleTopicPrefix+payload.Role, payload.Packet, payload.Packet, record.OutboxKey(row.ID))
-	if errors.Is(err, notify.ErrNoHolder) {
-		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s had no live holder at %s", payload.Role, r.now().UTC().Format(time.RFC3339))})
-	}
-	if err != nil {
-		return fmt.Errorf("publish %s's READY packet or its withdrawal to merge queue role %s: %w", row.Issue, payload.Role, err)
-	}
-	return nil
 }
 
 // roleMessage publishes one message to a role's topic, keyed by the row so a retried row is one

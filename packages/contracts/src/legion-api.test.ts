@@ -147,9 +147,9 @@ test("a backward move rejects future read-only phases", () => {
 
 // Contract 40: `awaiting_person`, a root that gave its slot up while its architect waits on a
 // person, follows `admitted`, and no backward move reaches it. Contract 33: the architect accepts
-// before the merge, in `accepting`, between `reviewing` and `retro`; the merge closes the issue
-// (`done`), and the production check after the close is no phase, so no phase follows
-// `awaiting_merge` and `integrating` but the close itself.
+// before the merge, in `accepting`, between `reviewing` and `retro`; the merger merges in
+// `merging`, the daemon closes the issue when it reads that merge (`done`), and the production
+// check after the close is no phase, so no phase follows `integrating` but the close itself.
 test("the phase lists are the daemon's, with awaiting_person after admitted and accepting before retro", () => {
   expect(LEGION_WORKFLOW_PHASES).toEqual([
     "admitted",
@@ -161,7 +161,6 @@ test("the phase lists are the daemon's, with awaiting_person after admitted and 
     "accepting",
     "retro",
     "merging",
-    "awaiting_merge",
     "integrating",
     "done",
     "held",
@@ -175,7 +174,6 @@ test("the phase lists are the daemon's, with awaiting_person after admitted and 
     "accepting",
     "retro",
     "merging",
-    "awaiting_merge",
     "done",
     "held",
   ]);

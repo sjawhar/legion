@@ -398,7 +398,7 @@ type PhaseView struct {
 // stays through implementing and testing, and an approval through retro and every phase after
 // it; absent until a review in a round decides.
 // State is whether the pull request is open, merged, or closed unmerged, always one of the three:
-// a merged root waits in awaiting_merge for the rest of its tree, so an operator reads the merge
+// a merged root waits in merging for the rest of its tree, so an operator reads the merge
 // here rather than guessing at it.
 // MergeState is GitHub's own merge state for the head, in GitHub's lowercase spelling, as the
 // daemon's last read of the pull request found it (record.PullRequest.MergeState); absent until

@@ -69,10 +69,10 @@ not begin planning anew: the daemon has already started the role of its current 
 the root is held, tells you of the hold with a `held` notice to retry or escalate. The carried gate
 is a copy on the old root's spec document, which belongs to the old tree: nothing done to that
 document after the carry closes your gate, and a gate carried closed opens when a human approves
-the old document at the carried version or a later one, releasing any READY it refused; you are
+the old document at the carried version or a later one; you are
 told so with `carried-gate-opened`, never `design-approved`, and start nothing for it. Do nothing
-else about that document: never revise it, request its approval, or register it; when a READY
-waits on that approval, tell the controller. Resume the tree from there; a root carried in
+else about that document: never revise it, request its approval, or register it; when the tree's
+work waits on that approval, tell the controller. Resume the tree from there; a root carried in
 `accepting` is yours to accept with `sign_off`, or to send back with `request_backward_move`, once
 you have read its evidence.
 
@@ -81,15 +81,12 @@ no design gate to carry (a root reopened in its linger loses its gate, and its s
 its children over without one). Its workers already run their phases from its carried phase
 records and pull request, so do not start section 2 of your skill: decompose nothing and release
 no wave. Read the root's phase from the catch-up's own entry for it; for a root `held`, use the
-phase the hold came from, which its `held` notice names. Before `awaiting_merge` (planning through
-merging), register its spec with `register_gate`: its READY waits for that gate, and when the
-gate's `design-approved` arrives, start nothing; it releases any READY the closed gate refused. In
-`awaiting_merge` the READY is already through and the work may have merged, so register no spec and
+phase the hold came from, which its `held` notice names. Before `merging` (planning through
+retro), register its spec with `register_gate`: the tree's work waits for that gate, and when the
+gate's `design-approved` arrives, start nothing. In
+`merging` the work is already through every gate and may have merged, so register no spec and
 ask no human to approve one: the merge closes the issue, and the production check after the close
-is the implementer's, on the pull request. `awaiting_merge` can move
-back: a red or conflicting head returns the root to `implementing`, and its next READY reads the
-gate again. If a later `ready-refused` arrives because the head was sent back, register then, as
-that row of your skill says.
+is the implementer's, on the pull request.
 
 Necessary work remains your responsibility until it is complete. The only legitimate
 deferral is a new child issue you create and own. A child that looks independent of the tree,

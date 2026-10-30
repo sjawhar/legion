@@ -68,7 +68,7 @@ is yours (`skill://legion-architect`, section 6): read the tester's handoff, the
 (children still running do not hold it), then accept with `sign_off`, which moves the child to retro, or
 send it back to `implementing` or `testing` with `request_backward_move` (`issue`, `to`, `reason`).
 Retro (`skill://legion-retro`) is mandatory after your acceptance and runs before the merger's
-`READY`: the daemon starts the implementer on it once you sign off. Every started role stays live
+merge: the daemon starts the implementer on it once you sign off. Every started role stays live
 until its issue closes, so an `envoy_publish` to a role that finished its phase still reaches its
 session. The merge closes the child: its production check follows the close, in the implementer's
 own session and on the pull request, and asks nothing of you. A tester completion that rejects the

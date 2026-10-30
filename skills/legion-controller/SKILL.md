@@ -68,7 +68,7 @@ Wake details: `skill://legion-controller/references/wakes.md`.
 | A finding ask's reference, or its answer | `skill://legion-controller/references/finding-asks.md` |
 | A clear defect a role sends | `skill://legion-controller/references/finding-asks.md#hand-over-a-clear-defect` |
 | A finding sent as text | Open an ask ([Findings](#findings-and-the-issues-you-file)) |
-| READY, a scope question, a routing request | `skill://legion-controller/references/backlog-stewardship.md` |
+| A scope question or a routing request | `skill://legion-controller/references/backlog-stewardship.md` |
 | A GitHub mention | Answer it, or route it to the owning architect |
 | A Slack mention | `skill://legion-controller/references/slack-mentions.md` |
 

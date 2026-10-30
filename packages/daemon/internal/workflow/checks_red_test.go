@@ -24,7 +24,7 @@ import (
 // checks ran on, and the tree's architect, who owns the tree. Each message names every check the
 // settlement reports and the conclusion it reports for it, in name order. A role named twice - the
 // implementer holding the phase, the architect holding accepting - is told once, and a phase no
-// worker holds (awaiting_merge) names none. Nothing else happens: no phase moves, no architect
+// worker holds names none. Nothing else happens: no phase moves, no architect
 // hears checks-red, no worker is started, and no return is counted.
 func TestASettlementMovesNothingAndTellsTheThreeRoles(t *testing.T) {
 	for _, tc := range []struct {
@@ -39,7 +39,6 @@ func TestASettlementMovesNothingAndTellsTheThreeRoles(t *testing.T) {
 		{phase.Accepting, "needs_review", []claim.Role{claim.RoleArchitect, claim.RoleImplementer}},
 		{phase.Retro, "retro", []claim.Role{claim.RoleArchitect, claim.RoleImplementer}},
 		{phase.Merging, "retro", []claim.Role{claim.RoleArchitect, claim.RoleMerger, claim.RoleImplementer}},
-		{phase.AwaitingMerge, "retro", []claim.Role{claim.RoleArchitect, claim.RoleImplementer}},
 	} {
 		t.Run(string(tc.from), func(t *testing.T) {
 			pool := migratedPool(t)
@@ -51,10 +50,7 @@ func TestASettlementMovesNothingAndTellsTheThreeRoles(t *testing.T) {
 			if role := RoleFor(tc.from); role != "" && role != claim.RoleImplementer {
 				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: role, Claim: claim.Token(string(role) + "-claim")})
 			}
-			if tc.from == phase.AwaitingMerge {
-				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: "READY #42 at head"})
-			}
-			applyRefusingNothing(t, pool, readyEngine("merge-queue"), settledAt("head", 1, "unit"))
+			applyRefusingNothing(t, pool, mergingEngine(), settledAt("head", 1, "unit"))
 
 			if got := issuePhase(t, pool); got != tc.from {
 				t.Fatalf("after the settlement the issue is in %s, want it left in %s: a CI result moves nothing", got, tc.from)
@@ -64,9 +60,6 @@ func TestASettlementMovesNothingAndTellsTheThreeRoles(t *testing.T) {
 			}
 			assertOutboxCount(t, pool, "supervise", 0)
 			assertOutboxCount(t, pool, "dispatch_status", 0)
-			if published := mergeQueuePublishes(t, pool); len(published) != 0 {
-				t.Fatalf("merge queue publishes %v, want none: no READY is withdrawn on a CI result", published)
-			}
 			if pass := implementerPass(t, pool); pass != 0 {
 				t.Fatalf("pass = %d, want none counted: nothing went back", pass)
 			}
@@ -93,7 +86,7 @@ func TestASettlementThatSaysNothingNewTellsNobodyAgain(t *testing.T) {
 		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim"})
-	engine := readyEngine("merge-queue")
+	engine := mergingEngine()
 	messages := []record.RoleMessage{}
 	for i, step := range []struct {
 		fact intake.Fact
@@ -131,7 +124,7 @@ func TestACheckGitHubNeverRanIsToldLikeAnyOtherConclusion(t *testing.T) {
 		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim"})
-	applyRefusingNothing(t, pool, readyEngine("merge-queue"), intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head",
+	applyRefusingNothing(t, pool, mergingEngine(), intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head",
 		CheckRuns: []record.AttemptRun{{Name: "unit", ID: 1}}, Generation: 1, Snapshot: "never-ran",
 		Failing: []string{"pr-checks-result"}})
 
@@ -163,7 +156,7 @@ func TestASettlementOfALingeringTreeTellsNobody(t *testing.T) {
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-209", Repo: "sjawhar/legion",
 		Number: 42, Branch: "legion/LEGION-209", HeadSHA: "head"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleImplementer, Claim: "implement-claim"})
-	applyRefusingNothing(t, pool, readyEngine("merge-queue"), settledAt("head", 1, "unit"))
+	applyRefusingNothing(t, pool, mergingEngine(), settledAt("head", 1, "unit"))
 
 	assertRoleMessages(t, pool, "LEGION-209", nil)
 	if checked := recordedPR(t, pool, "LEGION-209").CheckedHead; checked != "head" {
@@ -182,7 +175,7 @@ func TestASettlementThatStandsForNoHeadTellsNobody(t *testing.T) {
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
 		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-	applyRefusingNothing(t, pool, readyEngine("merge-queue"), settledAt("another-commit", 1, "unit"))
+	applyRefusingNothing(t, pool, mergingEngine(), settledAt("another-commit", 1, "unit"))
 
 	assertRoleMessages(t, pool, "LEGION-208", nil)
 	if got := issuePhase(t, pool); got != phase.Testing {
@@ -206,10 +199,10 @@ func TestAPushThatCompletesTheCarryMovesNothingAndTellsNobody(t *testing.T) {
 		{"the push arrives after its head", "head", pushedFromTo("code", "head", ".legion/LEGION-208/implement.json", "legion-implementer[bot]")},
 		{"the head arrives over a push already known", "code", syncedTo("head")},
 	} {
-		for _, from := range []phase.Phase{phase.Testing, phase.Merging, phase.AwaitingMerge} {
+		for _, from := range []phase.Phase{phase.Testing, phase.Merging} {
 			t.Run(tc.name+", in "+string(from), func(t *testing.T) {
 				pool := migratedPool(t)
-				status := map[phase.Phase]string{phase.Testing: "testing", phase.Merging: "retro", phase.AwaitingMerge: "retro"}[from]
+				status := map[phase.Phase]string{phase.Testing: "testing", phase.Merging: "retro"}[from]
 				seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 					Phase: from, Generation: 1, Status: status, Rank: "U"})
 				pr := record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
@@ -220,10 +213,7 @@ func TestAPushThatCompletesTheCarryMovesNothingAndTellsNobody(t *testing.T) {
 				}
 				seedPR(t, pool, pr)
 				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-				if from != phase.Testing {
-					seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: "READY #42 at head"})
-				}
-				applyRefusingNothing(t, pool, readyEngine("merge-queue"), tc.fact)
+				applyRefusingNothing(t, pool, mergingEngine(), tc.fact)
 
 				if got := recordedPR(t, pool, "LEGION-208"); got.HeadSHA != "head" || got.CheckedHead != "code" {
 					t.Fatalf("after the carry the head is %q and its settlement is of %q, want head carrying the code head's settlement", got.HeadSHA, got.CheckedHead)
@@ -236,9 +226,6 @@ func TestAPushThatCompletesTheCarryMovesNothingAndTellsNobody(t *testing.T) {
 					t.Fatalf("the architect was told %v, want nothing", got)
 				}
 				assertOutboxCount(t, pool, "supervise", 0)
-				if published := mergeQueuePublishes(t, pool); len(published) != 0 {
-					t.Fatalf("merge queue publishes %v, want none: the READY stands", published)
-				}
 			})
 		}
 	}
@@ -256,7 +243,7 @@ func TestAReopenStartsTheCheckSettlementAfreshAndTellsItAgain(t *testing.T) {
 		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", HeadUpdatedAt: time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim"})
-	engine := readyEngine("merge-queue")
+	engine := mergingEngine()
 	applyRefusingNothing(t, pool, engine, settledAt("head", 1, "unit"))
 	applyRefusingNothing(t, pool, engine,
 		intake.PullRequestClosed{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", UpdatedAt: time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC)},
@@ -320,8 +307,8 @@ func TestACompletionHandsOnASettledHeadWithoutReadingIt(t *testing.T) {
 // forward clears it. The daemon's own read of GitHub's mergeability (workflow's mergeability) is
 // the only path to it, since GitHub sends no event when it recomputes one. The move names the
 // base the implementer must merge forward and counts the return as a pass, so the implementer's
-// completion of the merge is told from its completion of the pass before; in awaiting_merge the
-// READY is withdrawn with it. GitHub reports mergeability UNKNOWN until it has computed it - that
+// completion of the merge is told from its completion of the pass before. GitHub reports
+// mergeability UNKNOWN until it has computed it - that
 // is "not yet known", never a conflict - so an unknown or a mergeable read moves nothing, and
 // neither does a conflict read in implementing, where the work it needs already is.
 func TestAConflictingHeadSendsTheIssueBackToImplementingFromEveryLaterPhase(t *testing.T) {
@@ -337,10 +324,9 @@ func TestAConflictingHeadSendsTheIssueBackToImplementingFromEveryLaterPhase(t *t
 		{"conflicting in accepting", phase.Accepting, "needs_review", record.MergeabilityConflicting, phase.Implementing},
 		{"conflicting in retro", phase.Retro, "retro", record.MergeabilityConflicting, phase.Implementing},
 		{"conflicting in merging", phase.Merging, "retro", record.MergeabilityConflicting, phase.Implementing},
-		{"conflicting in awaiting_merge", phase.AwaitingMerge, "retro", record.MergeabilityConflicting, phase.Implementing},
 		{"conflicting in implementing: the work it needs is already there", phase.Implementing, "in_progress", record.MergeabilityConflicting, phase.Implementing},
-		{"unknown in awaiting_merge: GitHub has not computed it yet", phase.AwaitingMerge, "retro", record.MergeabilityUnknown, phase.AwaitingMerge},
-		{"mergeable in awaiting_merge", phase.AwaitingMerge, "retro", record.MergeabilityMergeable, phase.AwaitingMerge},
+		{"unknown in merging: GitHub has not computed it yet", phase.Merging, "retro", record.MergeabilityUnknown, phase.Merging},
+		{"mergeable in merging", phase.Merging, "retro", record.MergeabilityMergeable, phase.Merging},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -349,23 +335,12 @@ func TestAConflictingHeadSendsTheIssueBackToImplementingFromEveryLaterPhase(t *t
 			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
 				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			if tc.from == phase.Reviewing {
-				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "head", Summary: "reviewed"})
-			}
-			if tc.from == phase.AwaitingMerge {
-				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: "READY #42 at head"})
-			}
-			applyRefusingNothing(t, pool, readyEngine("merge-queue"),
+			applyRefusingNothing(t, pool, mergingEngine(),
 				intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", Mergeable: tc.mergeable})
 			if got := issuePhase(t, pool); got != tc.want {
 				t.Fatalf("after the mergeability read the issue is in %s, want %s", got, tc.want)
 			}
-			published := mergeQueuePublishes(t, pool)
 			if tc.from == tc.want {
-				// Nothing moved: no phase to leave, so no notice, no start and no pass.
-				if len(published) != 0 {
-					t.Fatalf("merge queue publishes %v, want none: nothing moved", published)
-				}
 				assertOutboxCount(t, pool, "supervise", 0)
 				if pass := implementerPass(t, pool); pass != 0 {
 					t.Fatalf("pass = %d, want none counted: nothing went back", pass)
@@ -383,16 +358,6 @@ func TestAConflictingHeadSendsTheIssueBackToImplementingFromEveryLaterPhase(t *t
 			}
 			if pass := implementerPass(t, pool); pass != 1 {
 				t.Fatalf("pass = %d, want the return to implementing counted", pass)
-			}
-			// Only awaiting_merge has a READY standing to withdraw; every earlier phase has none.
-			if tc.from != phase.AwaitingMerge {
-				if len(published) != 0 {
-					t.Fatalf("merge queue publishes %v, want none: no READY stood in %s", published, tc.from)
-				}
-				return
-			}
-			if len(published) != 1 || published[0].Role != "merge-queue" || !strings.Contains(published[0].Packet, "READY withdrawn") || !strings.Contains(published[0].Packet, want) {
-				t.Fatalf("merge queue publishes %v, want one to merge-queue withdrawing the READY and saying %q", published, want)
 			}
 		})
 	}
@@ -437,31 +402,6 @@ func TestEveryConflictingReadDecidesAndTheMoveItselfStopsTheRepeat(t *testing.T)
 	}
 	if pass := implementerPass(t, pool); pass != 1 {
 		t.Fatalf("pass = %d, want the one return to implementing counted once", pass)
-	}
-}
-
-// A READY is posted on the Dispatch issue whether or not the project names a merge queue role, so
-// its withdrawal is too: with no role, the issue's own record would otherwise keep telling a human
-// to merge a head GitHub will not merge. With a role, the role is told as well.
-func TestAREADYWithdrawalIsPostedOnTheIssueWithOrWithoutAMergeQueueRole(t *testing.T) {
-	for _, role := range []string{"", "merge-queue"} {
-		t.Run("merge queue role "+strconv.Quote(role), func(t *testing.T) {
-			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-				Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
-			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			applyRefusingNothing(t, pool, readyEngine(role),
-				intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", Mergeable: record.MergeabilityConflicting})
-			want := "READY withdrawn for LEGION-208, pull request #42: the head conflicts with main"
-			if posted := messageBodies(t, pool); len(posted) != 1 || !strings.Contains(posted[0], want) {
-				t.Fatalf("Dispatch messages %q, want one saying %q", posted, want)
-			}
-			if published := mergeQueuePublishes(t, pool); (role == "") != (len(published) == 0) {
-				t.Fatalf("merge queue publishes %v with role %q, want one exactly when a role is named", published, role)
-			}
-		})
 	}
 }
 

@@ -20,8 +20,6 @@ import {
   linkPullRequest,
   PHASE_STATUSES,
   postDailyReport,
-  postReady,
-  readyLine,
   requestSpecApproval,
   SAVED_CART,
   seedProject,
@@ -178,19 +176,8 @@ const legion: ShotSet<LegionJourney> = {
       element: (page) => page.getByTestId("issue-header"),
     },
     {
-      id: "ready",
-      alt: "The READY message on the issue: the pull request, its head and the approved commit, then the outcome and the risk.",
-      route: conversation,
-      viewport: "desktop",
-      theme: "light",
-      prepare: (journey) => postReady(journey, SAVED_CART),
-      ready: async (page, journey) => {
-        await expect(turns(page)).toContainText(readyLine(journey, SAVED_CART));
-      },
-    },
-    {
       id: "signed-off",
-      alt: "The issue closed as Done at the merge, with the architect's acceptance and the READY message.",
+      alt: "The issue closed as Done at the merge, with the architect's acceptance on it.",
       route: conversation,
       viewport: "desktop",
       theme: "light",

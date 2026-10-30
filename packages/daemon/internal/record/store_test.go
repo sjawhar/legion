@@ -109,23 +109,21 @@ func must(t *testing.T, err error) {
 
 func issueFixture(key string) Issue {
 	parent := "LEGION-200"
-	ready := 9
 	return Issue{
-		Key:                 key,
-		Tree:                key,
-		Project:             "LEGION",
-		Title:               "Persist every workflow fact",
-		Parent:              &parent,
-		Phase:               phase.Implementing,
-		Generation:          3,
-		Status:              "in_progress",
-		Rank:                "00042U",
-		HandedOver:          true,
-		LastDispatchSeq:     41,
-		ReadyPendingVersion: &ready,
-		Repo:                "acme/widgets",
-		DefaultBranch:       "release/v7.1",
-		GitHubRepo:          "Acme/Widgets",
+		Key:             key,
+		Tree:            key,
+		Project:         "LEGION",
+		Title:           "Persist every workflow fact",
+		Parent:          &parent,
+		Phase:           phase.Implementing,
+		Generation:      3,
+		Status:          "in_progress",
+		Rank:            "00042U",
+		HandedOver:      true,
+		LastDispatchSeq: 41,
+		Repo:            "acme/widgets",
+		DefaultBranch:   "release/v7.1",
+		GitHubRepo:      "Acme/Widgets",
 	}
 }
 
@@ -197,7 +195,7 @@ func TestQueuedRootsUnderListsTheLabelledTodoRootsWhoseChainHoldsTheKey(t *testi
 	records := NewStore()
 	issue := func(key, tree, status string, handed bool, ancestry ...string) Issue {
 		issue := issueFixture(key)
-		issue.Tree, issue.Status, issue.HandedOver, issue.ReadyPendingVersion, issue.Ancestry = tree, status, handed, nil, ancestry
+		issue.Tree, issue.Status, issue.HandedOver, issue.Ancestry = tree, status, handed, ancestry
 		if len(ancestry) != 0 {
 			issue.Parent = ParentOf(ancestry[0])
 		}
@@ -382,8 +380,7 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 				{Reopened: true}},
 		},
 	}
-	phase := PhaseRow{Issue: issue.Key, Role: claim.RoleImplementer, Claim: "legion-208-implementer", HandoffCommit: "aabbcc", Pass: 3, Rounds: 2, Verdict: "pass",
-		MergeNote: "MANUAL_MERGE_REQUIRED: pull request #1243 matches a by_hand merge rule; do not auto-arm it"}
+	phase := PhaseRow{Issue: issue.Key, Role: claim.RoleImplementer, Claim: "legion-208-implementer", HandoffCommit: "aabbcc", Pass: 3, Rounds: 2, Verdict: "pass"}
 	gate := DesignGate{Issue: issue.Key, ArtifactID: "artifact-208", LatestVersion: 7, ApprovedVersion: &approved}
 	slot := Slot{Issue: issue.Key, Index: 0, AdmittedAt: updatedAt}
 
@@ -1101,62 +1098,6 @@ func TestRenewOutboxLeaseRenewsOnlyUnderItsToken(t *testing.T) {
 		must(t, err)
 		if renewed {
 			t.Fatal("a finished row's lease was renewed")
-		}
-	})
-}
-
-// A ready_merge row records that it saw READY's head armed (ReadyMerge.Armed) only under its own
-// lease: a wrong token replaces nothing, and a payload of another kind is an error, never taken for a
-// lease lost. A queue of the same issue and head, a reopen at READY's head, starts the row over
-// unarmed and takes it from the worker holding it, whose replacement then touches nothing.
-func TestAREADYMergeRowsArmIsItsLeaseHoldersAndAReopenStartsItOver(t *testing.T) {
-	ctx := context.Background()
-	st := migratedStore(t)
-	records := NewStore()
-	now := time.Date(2026, 10, 17, 6, 0, 0, 0, time.UTC)
-	queue := func(tx pgx.Tx) {
-		row, err := NewOutboxRow("LEGION-208", ReadyMerge{Number: 42, Head: "ready-head"}, now)
-		must(t, err)
-		must(t, records.Enqueue(ctx, tx, row))
-	}
-	armed := func(tx pgx.Tx) bool {
-		var armed bool
-		must(t, tx.QueryRow(ctx, `select coalesce((payload->>'armed')::boolean, false) from outbox where kind = 'ready_merge'`).Scan(&armed))
-		return armed
-	}
-	seen := ReadyMerge{Number: 42, Head: "ready-head", Armed: true}
-	var leased OutboxRow
-	inTx(t, st, func(tx pgx.Tx) {
-		queue(tx)
-		claimed := claimEachDue(t, records, tx, "LEGION", now)
-		if len(claimed) != 1 {
-			t.Fatalf("claimed %v, want the one row", outboxKeys(claimed))
-		}
-		leased = claimed[0]
-		replaced, err := records.ReplaceOutboxPayload(ctx, tx, leased.ID, "another-lane", seen)
-		must(t, err)
-		if replaced || armed(tx) {
-			t.Fatalf("a replacement under a wrong token = %v, armed %v; want neither", replaced, armed(tx))
-		}
-		replaced, err = records.ReplaceOutboxPayload(ctx, tx, leased.ID, leased.LeaseToken, AutoMergeDisable{Number: 42})
-		if err == nil || replaced || armed(tx) {
-			t.Fatalf("a replacement of another kind under the lease's token = %v, %v, armed %v; want an error and nothing replaced", replaced, err, armed(tx))
-		}
-		replaced, err = records.ReplaceOutboxPayload(ctx, tx, leased.ID, leased.LeaseToken, seen)
-		must(t, err)
-		if !replaced || !armed(tx) {
-			t.Fatalf("a replacement under the lease's token = %v, armed %v; want both", replaced, armed(tx))
-		}
-	})
-	inTx(t, st, func(tx pgx.Tx) {
-		queue(tx)
-		if armed(tx) {
-			t.Fatal("a queue of the same issue and head kept the row armed, want it started over")
-		}
-		replaced, err := records.ReplaceOutboxPayload(ctx, tx, leased.ID, leased.LeaseToken, seen)
-		must(t, err)
-		if replaced || armed(tx) {
-			t.Fatalf("the worker the queue took the row from replaced its payload = %v, armed %v; want neither", replaced, armed(tx))
 		}
 	})
 }

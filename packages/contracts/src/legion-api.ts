@@ -24,8 +24,9 @@ const timestamp = z.iso.datetime({ offset: true });
  * the role working it: `workers` is keyed by role (`LEGION_ROLES`). `awaiting_person` is a root
  * that gave its admission slot up while its architect waits on a person's answer (`waitingOn` on
  * the issue record). `accepting` is the architect's acceptance between the reviewer's approval and
- * retro: no worker runs it. The merge closes the issue (`done`); the production check after it is
- * no phase (`check` on the issue record). */
+ * retro: no worker runs it. The merger merges in `merging`, and the daemon closes the issue when
+ * it reads that merge (`done`); the production check after the close is no phase (`check` on the
+ * issue record). */
 export const LEGION_WORKFLOW_PHASES = [
   "admitted",
   "awaiting_person",
@@ -36,7 +37,6 @@ export const LEGION_WORKFLOW_PHASES = [
   "accepting",
   "retro",
   "merging",
-  "awaiting_merge",
   "integrating",
   "done",
   "held",
@@ -53,7 +53,6 @@ export const LEGION_PHASE_BACKWARD_TARGETS = [
   "accepting",
   "retro",
   "merging",
-  "awaiting_merge",
   "done",
   "held",
 ] as const;
@@ -640,13 +639,9 @@ export type LegionGrant = z.output<typeof LegionGrantResponse>;
 
 /** Every completed fact route returns an intentional empty JSON object, never an unconstrained body. */
 export const LegionEmptyResponse = z.strictObject({});
-/** `api.HandoffCompleteResponse`: `note` is what READY answers when it has something to say about
- * the merge it publishes - the pull request was already merged, so its head's handoffs went
- * unread, or a person merges this one (`MANUAL_MERGE_REQUIRED:`); every other completion answers
- * none. */
-export const LegionHandoffCompleteResponse = z.strictObject({
-  note: nonEmptyString.optional(),
-});
+/** `api.HandoffCompleteResponse`: an empty object. The merger merges and the daemon merges
+ * nothing, so no completion has anything to answer with. */
+export const LegionHandoffCompleteResponse = z.strictObject({});
 /** `api.WaveReleaseResponse`. A release is accepted whatever the children's links say, so
  * `released` is every issue the request named, each once, in the order the request first named it,
  * and the architect is never asked to send the request again; `started` and `held` then say what

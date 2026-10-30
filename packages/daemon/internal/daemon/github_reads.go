@@ -32,10 +32,10 @@ type githubPullRequest struct {
 	MergeableState string    `json:"mergeable_state"`
 }
 
-// mergeability is the pull request's `mergeable` as the mergeability fact decides a READY by: null
+// mergeability is the pull request's `mergeable` as the mergeability fact reads it: null
 // is record.MergeabilityUnknown, GitHub not having computed it yet; true is
-// record.MergeabilityMergeable; false is record.MergeabilityConflicting, the state that, in
-// awaiting_merge, withdraws a READY GitHub can run no checks on and merge (workflow's
+// record.MergeabilityMergeable; false is record.MergeabilityConflicting, the state that sends the
+// issue back to implementing from every phase after the implementer's (workflow's
 // mergeability).
 func (p githubPullRequest) mergeability() record.Mergeability {
 	switch {

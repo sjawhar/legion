@@ -131,69 +131,6 @@ func TestRegisteredOpenGateRecordsChildAndStartsPlanningInTheSameFact(t *testing
 	}
 }
 
-func TestRefusedReadyIsCommittedAndApprovalAdvancesWithoutSecondReady(t *testing.T) {
-	pool := migratedPool(t)
-	ctx := context.Background()
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
-	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4})
-	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
-	engine := testEngine(config.DesignGateRootIssues, nil)
-
-	result, err := intake.ApplyFact(ctx, pool, "api", "ready", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Ready: true, Summary: readyPacket}, engine, admissionStub{})
-	if err != nil {
-		t.Fatalf("ApplyFact READY: %v", err)
-	}
-	if result.Refusal == nil || result.Refusal.Status != 409 || result.Refusal.Message != "READY refused: approve design version 4 before requesting READY." {
-		t.Fatalf("READY refusal = %#v, want committed version-4 refusal", result.Refusal)
-	}
-	var pending int
-	if err := pool.QueryRow(ctx, "select ready_pending_version from issues where key = $1", "LEGION-208").Scan(&pending); err != nil {
-		t.Fatalf("read committed ready pending version: %v", err)
-	}
-	if pending != 4 {
-		t.Fatalf("ReadyPendingVersion = %d, want 4", pending)
-	}
-
-	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "approval", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 4}, engine, admissionStub{}); err != nil {
-		t.Fatalf("ApplyFact approval: %v", err)
-	}
-	var gotPhase string
-	var readyPending *int
-	if err := pool.QueryRow(ctx, "select phase, ready_pending_version from issues where key = $1", "LEGION-208").Scan(&gotPhase, &readyPending); err != nil {
-		t.Fatalf("read advanced issue: %v", err)
-	}
-	if gotPhase != string(phase.AwaitingMerge) || readyPending != nil {
-		t.Fatalf("advanced issue = %q pending %v, want awaiting_merge with no pending version", gotPhase, readyPending)
-	}
-}
-
-// The same READY on an issue with no design gate at all — a tree whose architect never registered
-// one, or a project whose gate is off. The refusal recorded a pending version of 0, which the
-// issues table refuses (ready_pending_version > 0), so the whole fact failed on a constraint
-// instead of committing the refusal the merger was supposed to read.
-func TestReadyRefusedWithNoDesignGateCommitsAndRecordsNoPendingVersion(t *testing.T) {
-	pool := migratedPool(t)
-	ctx := context.Background()
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
-	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
-	engine := testEngine(config.DesignGateRootIssues, nil)
-
-	result, err := intake.ApplyFact(ctx, pool, "api", "ready", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Ready: true}, engine, admissionStub{})
-	if err != nil {
-		t.Fatalf("ApplyFact READY with no gate: %v", err)
-	}
-	if result.Refusal == nil || result.Refusal.Status != 409 {
-		t.Fatalf("READY refusal = %#v, want a committed refusal", result.Refusal)
-	}
-	var pending *int
-	if err := pool.QueryRow(ctx, "select ready_pending_version from issues where key = $1", "LEGION-208").Scan(&pending); err != nil {
-		t.Fatalf("read committed ready pending version: %v", err)
-	}
-	if pending != nil {
-		t.Fatalf("ReadyPendingVersion = %d, want none: there is no version to approve", *pending)
-	}
-}
-
 // A pull request GitHub reopens is the same pull request: it keeps its newest review, which
 // orders every review it will have, and takes the head the reopen names - commits pushed while it
 // was closed reach no synchronize, so the reopen is the only fact that carries them.
@@ -226,33 +163,6 @@ func TestAReopenedPullRequestTakesItsNewHeadAndKeepsItsReview(t *testing.T) {
 	}
 	if review != 91 {
 		t.Fatalf("reopened pull request review seen = %d, want the 91 it carried", review)
-	}
-}
-
-func TestRefusedReadyAdvancesWhenTheGateReopensAtALaterVersion(t *testing.T) {
-	pool := migratedPool(t)
-	ctx := context.Background()
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
-	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4})
-	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
-	engine := testEngine(config.DesignGateRootIssues, nil)
-
-	if _, err := intake.ApplyFact(ctx, pool, "api", "ready", intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Ready: true, Summary: readyPacket}, engine, admissionStub{}); err != nil {
-		t.Fatalf("ApplyFact READY: %v", err)
-	}
-	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "version-5", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactVersion, Version: 5}, engine, admissionStub{}); err != nil {
-		t.Fatalf("ApplyFact version 5: %v", err)
-	}
-	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "approval-5", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 5}, engine, admissionStub{}); err != nil {
-		t.Fatalf("ApplyFact approval 5: %v", err)
-	}
-	var gotPhase string
-	var readyPending *int
-	if err := pool.QueryRow(ctx, "select phase, ready_pending_version from issues where key = $1", "LEGION-208").Scan(&gotPhase, &readyPending); err != nil {
-		t.Fatalf("read issue: %v", err)
-	}
-	if gotPhase != string(phase.AwaitingMerge) || readyPending != nil {
-		t.Fatalf("issue = %q pending %v, want awaiting_merge with no pending version", gotPhase, readyPending)
 	}
 }
 
@@ -468,9 +378,9 @@ func TestTheCloseLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testin
 	pool := migratedPool(t)
 	ctx := context.Background()
 	now := time.Date(2026, 9, 23, 4, 0, 0, 0, time.UTC)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.AwaitingMerge, Generation: 7, Status: "retro", Rank: "U"})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 7, Status: "retro", Rank: "U"})
 	parent := "LEGION-208"
-	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.AwaitingMerge, Generation: 3, Status: "retro", Rank: "V", LastDispatchSeq: 1})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Merging, Generation: 3, Status: "retro", Rank: "V", LastDispatchSeq: 1})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger", HandoffCommit: "head"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleImplementer, Claim: "child-implementer"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}})
@@ -484,7 +394,7 @@ func TestTheCloseLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testin
 	if _, err := intake.ApplyFact(ctx, pool, "github", "merged-echo", merged, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact merged echo: %v", err)
 	}
-	assertPhase(t, pool, phase.AwaitingMerge)
+	assertPhase(t, pool, phase.Merging)
 	assertOutboxCount(t, pool, "linger_close", 0)
 	assertOutboxCount(t, pool, "dispatch_status", 0)
 
@@ -646,16 +556,6 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 			wantPhase: phase.Merging, wantStatus: "retro", wantOutbox: []string{"supervise", "notice"},
 		},
 		{
-			name: "approved merger ready", current: phase.Merging, role: claim.RoleMerger,
-			setup: func(t *testing.T, pool *pgxpool.Pool) {
-				seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact", LatestVersion: 1, ApprovedVersion: new(1)})
-			},
-			fact: func() intake.Fact {
-				return intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "claim", Ready: true, Summary: "READY #42 at head (approved at head) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)"}
-			},
-			wantPhase: phase.AwaitingMerge, wantStatus: "retro", wantOutbox: []string{"notice", "dispatch_message"},
-		},
-		{
 			name: "sign-off", current: phase.Accepting,
 			fact: func() intake.Fact {
 				return intake.SignOff{Issue: "LEGION-208"}
@@ -722,7 +622,7 @@ func fixtureStatus(current phase.Phase) string {
 		return "testing"
 	case phase.Reviewing, phase.Accepting:
 		return "needs_review"
-	case phase.Retro, phase.Merging, phase.AwaitingMerge:
+	case phase.Retro, phase.Merging:
 		return "retro"
 	default:
 		return "in_progress"
@@ -766,9 +666,8 @@ func TestEveryBackwardEdgeAppliesThroughIntake(t *testing.T) {
 	}
 }
 
-// A backward move no backward row serves is refused, and nothing moves or is counted: to
-// awaiting_merge, which no worker holds; to the phase the issue is already in or a later one; out
-// of awaiting_merge, where no worker holds a phase; by a role that does not run the phase, the
+// A backward move no backward row serves is refused, and nothing moves or is counted: to the
+// phase the issue is already in or a later one; by a role that does not run the phase, the
 // implementer's from accepting among them; or to no phase at all, which the row lookup would
 // otherwise take to match any row.
 func TestABackwardMoveNoRowServesIsRefused(t *testing.T) {
@@ -778,11 +677,9 @@ func TestABackwardMoveNoRowServesIsRefused(t *testing.T) {
 		requester claim.Role
 		to        phase.Phase
 	}{
-		{"accepting to awaiting_merge", phase.Accepting, claim.RoleArchitect, phase.AwaitingMerge},
 		{"accepting by the implementer", phase.Accepting, claim.RoleImplementer, phase.Implementing},
 		{"implementing to implementing", phase.Implementing, claim.RoleImplementer, phase.Implementing},
 		{"testing to a later phase", phase.Testing, claim.RoleTester, phase.Reviewing},
-		{"out of awaiting_merge", phase.AwaitingMerge, claim.RoleImplementer, phase.Implementing},
 		{"by a role that does not run the phase", phase.Testing, claim.RoleReviewer, phase.Implementing},
 		{"to no phase", phase.Testing, claim.RoleTester, ""},
 	} {

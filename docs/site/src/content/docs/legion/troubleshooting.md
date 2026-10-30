@@ -323,7 +323,7 @@ when the architect has nothing handed to the person. A root waiting on its gate 
 gives its slot back at that daemon's first boot. The gate stays closed until a person approves the
 spec at its current version; `designGate.approvedVersion` is `null`, or lower than `currentVersion`,
 until someone approves the latest version from the document's header or the Inbox. An approval of an
-earlier version does not count: the spec changed since. The merger's `READY` waits on the same approval.
+earlier version does not count: the spec changed since. The gate holds the tree's start, not its merge.
 
 ## An issue is held
 
@@ -589,13 +589,11 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   architect decides in the same turn whether to narrow the next rounds, split work off (a sibling child, or, on a root, an ask whether the rest needs an issue), or
   let rounds that are converging run, and posts that decision on the issue; it asks you only for a
   decision that needs your authority.
-- **`Pull request #<n> reached max_fix_attempts=3.`** A check or workflow the base branch requires
-  stayed red through three fix attempts. Red CI within the attempt that ran the count out (the
-  counted head and every head pushed on top of it until a push lands on a head CI judged green, or
-  on a settled head whose base branch requires no check and no workflow; such a push raises no
-  count) no longer sends the work back by itself, so the issue waits in testing, review, acceptance,
-  retro or merging for the architect, or for a worker's own decision such as a reviewer's request
-  for changes. A `READY` is still withdrawn on red CI.
+- **A red check.** Nothing moves for it. The daemon names every check GitHub reported, with the
+  conclusion GitHub gave it, in one message each to the tree's architect, the worker of the
+  issue's current phase and the implementer, and judges none of them. Re-run a check that failed
+  on itself, have the implementer fix code that is at fault, or leave it to GitHub, which holds
+  the merge under the base branch's own required checks.
 - **A review round that no review decides.** Legion's reviewer must approve the head or request
   changes; a plain comment leaves the issue in `needs_review`, and the architect asks the reviewer
   for the decision. Only the review App or an account with write access to the repository decides a
@@ -627,8 +625,8 @@ These arrive as messages on the Dispatch issue, and the architect is told:
 - **A review round stuck on an approval of an earlier head.** The architect is told `the reviewer
   approved <sha> on pull request #<n>, which does not approve head <sha>: a push since may have
   changed code`. The approval counts at a later head only when everything above it changed only
-  the issue's own `.legion/<issue>/`; another issue's `.legion/` counts as code, as `READY` counts
-  it. The daemon learns that from each push's webhook, and every two minutes, while the round sits
+  the issue's own `.legion/<issue>/`; another issue's `.legion/` counts as code. The daemon
+  learns that from each push's webhook, and every two minutes, while the round sits
   so, it also asks GitHub's compare of the approved head with the head: when the head is built on
   the approved head and only `.legion/<issue>/` changed between them, it applies that push and the
   round ends, logged at warn as `workflow: only the issue's handoffs changed above the approved
@@ -638,56 +636,38 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   or no changed files; an approved head GitHub does not know), and the remedy is the reviewer's
   approval of the head itself, which ends the round once the record reaches that head, whether or
   not its push webhook ever arrives.
-- **`READY` refused.** The merger's `READY` is refused while the pull request's head carries
-  anything above the reviewer's approved head but retro's notes under `docs/solutions/` and its
-  removal of `.legion/<issue>/` (`READY_UNREVIEWED_CHANGE`, naming the paths; also when the head
-  is not built on the approved one, GitHub does not know the approved head, or GitHub's compare
-  gives no file list or lists 300 files, the most it lists), or
-  the review round recorded no approval (`READY_NOT_APPROVED`): either way the issue goes back to
-  `reviewing`. It is refused while the head still carries
-  the issue's handoffs, `.legion/<issue>/`, which retro's last commit removes (the issue goes back
-  to `retro`); while the head conflicts with its base, which GitHub cannot merge and starts no
-  pull-request CI for (`READY_HEAD_CONFLICTS`, naming the base the implementer merges forward);
-  and while the design gate is closed. The refusal names the head and the directory, the base, or the spec version
-  that needs approval. A refusal saying GitHub's read of `.legion/<issue>/` failed is GitHub's
-  failure, and the merger completes again. `READY` reads no check of the head: whether the merge
-  happens is GitHub's to decide, under the base branch's own rules. None of these reads applies
-  to a pull request a
-  person already merged: its `READY` is published unread, and the merge closes the issue the moment
-  it reaches `awaiting_merge` — or, for a root whose tree still runs, once the last other issue of
-  that tree is done or parked. If that merge carried `.legion/<issue>/` onto the base, the architect asks whoever merged
-  for a pull request that deletes it.
+- **The merger merges nothing.** It merges nothing while the pull request's head still carries the
+  issue's handoffs, `.legion/<issue>/`, which retro's last commit removes: it tells the architect,
+  who moves the issue back to `retro`, and it merges the head retro's push then makes. It merges
+  nothing while the head conflicts with its base either, which GitHub can neither merge nor start
+  pull-request CI for: the daemon sends such a head back to `implementing` on its own. And it
+  enqueues nothing on a merge-queue base whose `squash_merge_commit_message` still joins the
+  branch's commit messages, since the enqueue can carry no message of its own: it tells the
+  architect, and only a person can change that repository setting to `PR_BODY` or `BLANK`. A
+  merge GitHub refuses is the merger's to decide on, quoting GitHub's own answer: wait for what
+  GitHub waits for, merge again at the head it re-reads, send the issue back, or tell the
+  architect what only a person can change. A pull request a person already merged needs nothing:
+  the daemon reads that merge and closes the issue — or, for a root whose tree still runs, once
+  the last other issue of that tree is done or parked. If that merge carried `.legion/<issue>/`
+  onto the base, the architect asks whoever merged for a pull request that deletes it.
 
-An issue back in `in_progress` from `retro` or `merging` had a required check or workflow turn red
-on the head: the daemon sent it back to the implementer and told the architect which checks. From
+An issue back in `in_progress` from `retro` or `merging` has a head that conflicts with its base:
+GitHub computes no merge ref for such a head and runs no check on it at all, so the daemon sent
+the issue back to the implementer with the base to merge forward and told the architect. From
 `retro` the implementer kept its turn and was handed the implementing task once that turn ended;
-from `merging` the merger's turn was interrupted. One back in `in_progress` after its `READY`,
-while it awaited its merge, had a required check or workflow turn red on the head itself, or its
-head conflicts with its base (GitHub computes no merge ref for a conflicting head and runs no
-checks on it at all): the daemon sent it back to the implementer, told the architect which checks
-or that the head conflicts, and posted on the issue, and told the project's `merge_queue_role` when
-one is set, that the `READY` is withdrawn: the merge the daemon had submitted names a commit about
-to be replaced, so it takes its own submission back. The work comes back through testing, review
-and a new `READY`.
+from `merging` the merger's turn was interrupted. The work comes back through testing, review,
+acceptance and retro to a new merge. A red check sends nothing back from anywhere.
 
-The pull request's state as the daemon sees it, its `checksVerdict` judged only by the checks and
-workflows the base branch requires:
+The pull request's state as the daemon sees it:
 
 ```sh
 legion state --config legion.yaml --json | jq '.issues["<KEY>"].pullRequest'
 ```
 
-No `checksVerdict` on a pull request whose checks have settled has one of these causes: the base
-branch requires no check and no workflow, so the daemon judges nothing there and a failed check
-sends nothing back; the daemon has not read the base branch's required checks yet; a required check
-was cancelled, or the head's checks settled without it; or a required workflow's run on the head is
-still going, has not happened, or has not been read since the head settled. The absent value alone
-does not tell these apart: read on GitHub what the base branch requires and the head's checks. A
-head with no verdict holds nothing back - `READY` reads no check of it, and GitHub decides the merge
-under the base branch's own rules - it is only that Legion sends the work nowhere on it. The
-daemon's log names each read GitHub refused, with the repository, the pull request and the HTTP
-status (`read the checks a pull request's base branch requires`); the daemon reads again every two
-minutes.
+The daemon reads the checks GitHub reports and judges none of them, so no state there holds work
+back and no state there moves it. Read on GitHub what the base branch requires and what the head's
+checks say: that pair is what decides whether the pull request can merge, and the merger waits on
+GitHub for it.
 
 ## A repository change was not applied
 

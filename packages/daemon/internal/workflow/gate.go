@@ -16,8 +16,7 @@ import (
 
 // gateRegistered records the gate an architect registered for its root, and logs it. With the
 // design gate off it is approved at once, whatever the gate held before, and an open gate advances
-// the admitted tree and releases any READY the gate refused, including one refused before any gate
-// was registered. What register_gate read of Dispatch's approval travels with the registration, so
+// the admitted tree. What register_gate read of Dispatch's approval travels with the registration, so
 // a person's review given before the architect registered is applied here: an approval of the
 // latest version (ApprovedVersion) records the gate open, and the root keeps its slot and starts
 // planning; a changes request on it (ChangesRequestedVersion) records it closed with the architect
@@ -153,8 +152,8 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 		return intake.Result{}, nil
 	}
 	// The gate of this document was already open at this version: the architect was told then, so
-	// the registration tells it nothing again. Advancing the admitted tree and releasing a refused
-	// READY change nothing that already moved. A root waiting on a person is told by its resume,
+	// the registration tells it nothing again. Advancing the admitted tree changes nothing that
+	// already moved. A root waiting on a person is told by its resume,
 	// which says how its spec stands (answerOpenGates), so it gets no notice now as well.
 	switch {
 	case issue.AwaitingPerson():
@@ -167,9 +166,6 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 		e.logOnCommit(ctx, "workflow: a registration of a gate already open at its version tells the architect nothing", "issue", issue.Key, "version", gate.LatestVersion)
 	}
 	if err := e.advanceAdmittedTree(ctx, tx, *issue, gate); err != nil {
-		return intake.Result{}, err
-	}
-	if err := e.advancePendingReady(ctx, tx, fact.Issue, gate); err != nil {
 		return intake.Result{}, err
 	}
 	return intake.Result{}, nil
@@ -477,7 +473,7 @@ func (e *Engine) gateAboveDispatch(ctx context.Context, tx pgx.Tx, fact intake.G
 	if !off && fact.Read.Kind != intake.DispatchArtifactVersion {
 		return intake.Result{}, e.applyArtifact(ctx, tx, reset, fact.Read, false)
 	}
-	return intake.Result{}, e.advancePendingReady(ctx, tx, issue.Key, reset)
+	return intake.Result{}, nil
 }
 
 // declareRegistration declares the hand-back a registration makes (gateRegistered): when the
@@ -555,14 +551,14 @@ func (e *Engine) dispatchArtifact(ctx context.Context, tx pgx.Tx, fact intake.Di
 // belongs to the old tree now, so nothing on it closes the copy: not a new version, a changes
 // request, or an approval of a version older than the copy's (which ApplyDesignGateEvent would
 // record as the approved version, closing it). Only an approval of the copy's version or a later
-// one applies, opening a copy carried closed and releasing the READYs it refused.
+// one applies, opening a copy carried closed.
 func copyTakes(gate record.DesignGate, fact intake.DispatchArtifact) bool {
 	return fact.Kind == intake.DispatchArtifactApproved && fact.Version >= gate.LatestVersion
 }
 
 // applyArtifact applies an artifact event to one gate, for the issue that holds it: an approval
-// opens it and advances that issue's admitted tree, a changes request or a new version closes it,
-// and an open gate releases the READYs it refused in that issue's tree. Each open or close is
+// opens it and advances that issue's admitted tree, and a changes request or a new version closes
+// it. Each open or close is
 // logged, and a changes request that finds the gate closed has a line of its own. The architect is
 // told an opening as design-approved, which starts its tree's work, except for a carried copy
 // (carried): that tree's design was approved before the carry, so its architect is told
@@ -679,7 +675,7 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 		switch {
 		case carried:
 			opened = &record.Notice{Kind: "carried-gate-opened", Version: fact.Version, Reason: fmt.Sprintf(
-				"a human approved %s's spec document at version %d, which opens the gate %s carried; any READY it refused is released and any child waiting on it starts", fact.Key, fact.Version, key)}
+				"a human approved %s's spec document at version %d, which opens the gate %s carried; any child waiting on it starts", fact.Key, fact.Version, key)}
 		case issue.AwaitingPerson():
 			opened = nil
 			e.logOnCommit(ctx, "workflow: a root waiting on a person is told its gate's opening by its resume", "issue", key, "version", fact.Version)
@@ -693,7 +689,7 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 			return err
 		}
 	}
-	return e.advancePendingReady(ctx, tx, key, updated)
+	return nil
 }
 
 // tellChangesOnce tells fact's changes request to its issue's architect once, by a notice or by the

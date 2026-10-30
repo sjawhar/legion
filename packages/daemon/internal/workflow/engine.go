@@ -21,10 +21,7 @@ import (
 )
 
 // Config supplies the project-scoped workflow limits and the clock used only to stamp durable
-// outbox deadlines. Zero limits take their shipped defaults. MergeQueueRole is the project's
-// `merge_queue_role`, the role the merger's READY is published to, and its withdrawal when the
-// head's own CI turns red or it starts conflicting with its base before the merge; empty, the
-// READY is posted only.
+// outbox deadlines. Zero limits take their shipped defaults.
 type Config struct {
 	Project        string
 	DesignGate     config.DesignGate
@@ -42,9 +39,8 @@ type Config struct {
 	// Deploys are the project's deploy workflows (config.Project.Deploys, `projects.<KEY>.deploys`):
 	// a completed run of one on the default branch of its repository is read from GitHub for each
 	// open production check of that repository (deployRunCompleted). Empty, no run wakes a check.
-	Deploys        []config.Deploy
-	MergeQueueRole string
-	Clock          func() time.Time
+	Deploys []config.Deploy
+	Clock   func() time.Time
 	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
 	// by it is never a fix attempt, and a red on its red tests is planned; a review it submits decides
 	// a round whatever GitHub gives its bot account (DecidesRound) and can be the reviewer's answer
@@ -144,8 +140,6 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.merged(ctx, tx, fact)
 	case intake.PullRequestClosed:
 		return e.closed(ctx, tx, fact)
-	case intake.MergeFailed:
-		return e.mergeFailed(ctx, tx, fact)
 	case intake.ClaimReady:
 		return e.claimReady(ctx, tx, fact)
 	case intake.ClaimFailed:
@@ -448,11 +442,6 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 			}
 		}
 	}
-	// The child's open pull request outlives the run, and may still be armed for the READY of the
-	// run being left: no head of the new run is an accepted READY's, so it is disarmed now.
-	if err := e.disarmOpen(ctx, tx, child.Key); err != nil {
-		return err
-	}
 	if err := e.store.ClearGeneration(ctx, tx, child.Key); err != nil {
 		return err
 	}
@@ -595,9 +584,6 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 	if lingers {
 		return refusedLingering(*issue, fmt.Sprintf("the %s's completion of phase %s", fact.Role, reported)), nil
 	}
-	if current && issue.Phase == phase.Merging && !fact.Ready {
-		return refused("READY_REQUIRED", "the merger's completion is READY: call the legion tool's handoff_complete with ready: true; this completion changed nothing"), nil
-	}
 	row, err := e.phaseRow(ctx, tx, fact.Issue, fact.Role)
 	if err != nil {
 		return intake.Result{}, err
@@ -605,11 +591,6 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 	pr, err := e.store.PullRequest(ctx, tx, fact.Issue)
 	if err != nil {
 		return intake.Result{}, err
-	}
-	if current && issue.Phase == phase.Merging {
-		if result, err := e.holdReadyToItsHead(ctx, tx, *issue, pr, fact); err != nil || result.Refusal != nil {
-			return result, err
-		}
 	}
 	if phase.FileBacked(reported) {
 		// The commit a completion carries is the pushed commit carrying the phase's handoff, which
@@ -621,7 +602,6 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		row.LastHandoff = fact.Commit
 	}
 	row.Claim, row.HandoffCommit, row.Verdict, row.Summary, row.CompletedAt = fact.Claim, fact.Commit, fact.Verdict, fact.Summary, e.now()
-	row.MergeNote = fact.MergeNote
 	if err := e.store.PutPhase(ctx, tx, row); err != nil {
 		return intake.Result{}, err
 	}
@@ -648,32 +628,6 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		return intake.Result{}, err
 	case phase.Retro:
 		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerRetroCompleted, "", row, pr, "")
-	case phase.Merging:
-		gate, err := e.gateForIssue(ctx, tx, *issue)
-		if err != nil {
-			return intake.Result{}, err
-		}
-		if gate == nil || !classify.DesignGateOpen(*gate) {
-			// With a gate, the refusal records the version a human must approve, and the approval
-			// of that version advances the merge without a second READY. With no gate there is no
-			// version to wait for: the issues table takes only a positive one, and writing zero
-			// failed the whole fact on its check constraint instead of committing this refusal.
-			message := "READY refused: no design version is approved; register and approve the tree's spec before requesting READY."
-			version := 0
-			if gate != nil {
-				version = gate.LatestVersion
-				issue.ReadyPendingVersion = &version
-				message = fmt.Sprintf("READY refused: approve design version %d before requesting READY.", version)
-			}
-			if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
-				return intake.Result{}, err
-			}
-			if err := e.notice(ctx, tx, issue.Key, record.Notice{Kind: "ready-refused", Version: version, Reason: message}); err != nil {
-				return intake.Result{}, err
-			}
-			return intake.Result{Refusal: &intake.Refusal{Status: 409, Code: "DESIGN_GATE_CLOSED", Message: message}}, nil
-		}
-		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerReady, "", row, pr, "")
 	}
 	return intake.Result{}, nil
 }
@@ -824,8 +778,8 @@ func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMo
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	// The table is the guard: a move no backward row serves - to awaiting_merge, which no worker
-	// holds, or to anything but an earlier phase - is refused rather than answered as if it moved.
+	// The table is the guard: a move no backward row serves - to anything but an earlier phase -
+	// is refused rather than answered as if it moved.
 	// An empty target is refused first, since the row lookup takes it to match any row.
 	if _, ok := e.row(issue.Phase, TriggerBackward, fact.To, Snapshot{Phase: issue.Phase}); fact.To == "" || !ok || RoleFor(issue.Phase) != fact.Requester {
 		return refused("BACKWARD_REFUSED", fmt.Sprintf("a backward move needs the role running %s of %s and an earlier phase a backward move reaches from it; the %s's move to %s changed nothing",
@@ -854,9 +808,9 @@ func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMo
 // approval told it before acceptance existed. Outside accepting it changes nothing and says so.
 // Nothing beneath the issue holds it: the acceptance is of the issue's own reviewed head, and the
 // tree's order is kept at the close instead, where a root whose pull request merged while any
-// other issue of its tree is still in the workflow waits in awaiting_merge until the last of them
-// is done or parked (closeMerged). Holding the acceptance as well kept an approved pull request out
-// of retro, READY and the merge queue for as long as any issue beneath it ran.
+// other issue of its tree is still in the workflow waits in merging until the last of them
+// is done or parked (closeMerged). Holding the acceptance as well kept an approved pull request
+// out of retro and the merge for as long as any issue beneath it ran.
 func (e *Engine) signOff(ctx context.Context, tx pgx.Tx, fact intake.SignOff) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil {
@@ -923,11 +877,6 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	if row.Status != "" {
 		issue.Status = row.Status
 	}
-	// A READY the gate refused belongs to the merging phase it was sent in: leaving that phase by
-	// any trigger voids it, so a later approval never advances the next merger's phase on it.
-	if from == phase.Merging {
-		issue.ReadyPendingVersion = nil
-	}
 	if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 		return err
 	}
@@ -944,37 +893,32 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	// the finished role answers questions read-only: a completion it reports is refused, since it no
 	// longer works the issue's phase (handoff), and a task queued for a phase the issue has left is
 	// dropped rather than sent (supervise.Deps's PhaseHolds). A move between two phases of one role -
-	// retro back to implementing on a red - hands the running worker the new phase's task once its
-	// turn is over, as any start of a working claim does. A move no completion records - CI settling
-	// red while the tester tested, the reviewer reviewed a round it had not completed, or the merger
-	// worked toward READY (takenOver) - waits for that role's turn instead: the next role's start
-	// interrupts it and acts once it is over.
+	// retro back to implementing on a conflicting head - hands the running worker the new phase's
+	// task once its turn is over, as any start of a working claim does. A move no completion
+	// records - the head started conflicting with its base while the tester tested, or the reviewer
+	// reviewed a round it had not completed (takenOver) - waits for that role's turn instead: the
+	// next role's start interrupts it and acts once it is over.
 	starting := RoleFor(row.To)
-	quiesce, err := e.takenOver(ctx, tx, issue.Key, trigger, from, starting)
-	if err != nil {
-		return err
-	}
-	if err := e.start(ctx, tx, issue, starting, task(issue, handoff, pr, reason), quiesce); err != nil {
-		return err
+	// A pull request GitHub has already merged leaves the merger nothing to merge, so no merger is
+	// started for it and the merge closes the issue the moment it reaches merging. The close is
+	// closeMergedTelling's rather than a second transition's because a root's close waits for the
+	// rest of its tree, and an issue that arrives there and waits must be told why: the notice its
+	// architect got at the merge could not say it, since the issue was elsewhere then.
+	mergedAlready := row.To == phase.Merging && pr != nil && pr.State == record.PullRequestMerged
+	if !mergedAlready {
+		quiesce, err := e.takenOver(ctx, tx, issue.Key, trigger, from, starting)
+		if err != nil {
+			return err
+		}
+		if err := e.start(ctx, tx, issue, starting, task(issue, handoff, pr, reason), quiesce); err != nil {
+			return err
+		}
 	}
 	if err := e.notice(ctx, tx, issue.Key, noticeFor(trigger, from, handoff, reason)); err != nil {
 		return err
 	}
-	if from == phase.AwaitingMerge && (trigger == TriggerChecksRed || trigger == TriggerConflict) {
-		return e.withdrawReady(ctx, tx, issue, pr, reason)
-	}
-	if row.To == phase.AwaitingMerge {
-		// A pull request that merged before the issue reached awaiting_merge leaves nothing to merge:
-		// the merge closes the issue at once, and no READY asks a human to merge it. The close is
-		// closeMergedTelling's rather than a second transition's because a root's close waits for the
-		// rest of its tree, and an issue that arrives here and waits must be told why: the notice its
-		// architect got at the merge could not say it, since the issue was elsewhere then. Nothing
-		// else of the two paths differs, since they part only inside a lingering tree, which no issue
-		// reaches awaiting_merge in.
-		if pr != nil && pr.State == record.PullRequestMerged {
-			return e.closeMergedTelling(ctx, tx, issue, pr)
-		}
-		return e.ready(ctx, tx, issue, handoff, pr)
+	if mergedAlready {
+		return e.closeMergedTelling(ctx, tx, issue, pr)
 	}
 	if row.To == phase.Done {
 		return e.leave(ctx, tx, issue, "done")
@@ -984,15 +928,14 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 
 // noticeFor is what a transition on trigger out of from tells the architect: that from finished,
 // with its worker's handoff, or, when the head started conflicting with its base (TriggerConflict),
-// or the merge queue failed its merge (TriggerChecksRed), why. Both of those are told under the
-// one checks-red kind the architect's prompt reads, since both are the daemon stopping the phase
-// on something it read of the head. Two moves tell it nothing (a
-// notice of no kind, which notice drops): its own sign-off, whose only recipient would be the
-// architect that just acted, and the merge that closes the issue, whose close tells a child's
-// architect child-closed itself (leave) and suspends a root's with the rest of its tree.
+// why, under the checks-red kind the architect's prompt reads, since that is the daemon stopping
+// the phase on something it read of the head. Two moves tell it nothing (a notice of no kind, which
+// notice drops): its own sign-off, whose only recipient would be the architect that just acted, and
+// the merge that closes the issue, whose close tells a child's architect child-closed itself
+// (leave) and suspends a root's with the rest of its tree.
 func noticeFor(trigger TriggerKind, from phase.Phase, handoff record.PhaseRow, reason string) record.Notice {
 	switch trigger {
-	case TriggerChecksRed, TriggerConflict:
+	case TriggerConflict:
 		return record.Notice{Kind: "checks-red", Role: claim.RoleArchitect, Phase: from, Reason: reason}
 	case TriggerSignOff, TriggerPullRequestMerged:
 		return record.Notice{}
@@ -1002,12 +945,12 @@ func noticeFor(trigger TriggerKind, from phase.Phase, handoff record.PhaseRow, r
 
 // daemonRaised says whether the daemon raises trigger on its own, out of something it read of the
 // pull request, rather than an agent's handoff or request raising it: a head that conflicts with
-// its base, a merge the repository failed, the review GitHub delivered, and the merge that closes
-// the issue. Every other trigger is a worker's completion or the architect's own act, and the
-// phase it ends was the worker's to end.
+// its base, the review GitHub delivered, and the merge that closes the issue. Every other trigger
+// is a worker's completion or the architect's own act, and the phase it ends was the worker's to
+// end.
 func daemonRaised(trigger TriggerKind) bool {
 	switch trigger {
-	case TriggerChecksRed, TriggerConflict, TriggerReviewApproved, TriggerReviewRejected, TriggerPullRequestMerged:
+	case TriggerConflict, TriggerReviewApproved, TriggerReviewRejected, TriggerPullRequestMerged:
 		return true
 	}
 	return false
@@ -1016,11 +959,10 @@ func daemonRaised(trigger TriggerKind) bool {
 // takenOver is the role a transition on trigger out of from takes the phase from while that role
 // may still be at work in it: a move the daemon made on its own (daemonRaised) out of a phase
 // whose role has reported no completion - the head started conflicting with its base while the
-// tester tested, the reviewer's own review decided a round it had not completed, or the merge the
-// merger asked for failed. Every other move is a completion's (the outgoing worker's turn reports
-// it once its handoff is committed and pushed) or
-// the outgoing role's own request (a backward move from inside its turn), and takes over from
-// nobody. Nor does a move between two phases of one role -
+// tester tested, or the reviewer's own review decided a round it had not completed. Every other
+// move is a completion's (the outgoing worker's turn reports it once its handoff is committed and
+// pushed) or the outgoing role's own request (a backward move from inside its turn), and takes
+// over from nobody. Nor does a move between two phases of one role -
 // retro back to implementing, where starting, the role the transition starts, is the one leaving -
 // take the phase from anyone: the implementer keeps its turn and is handed the new phase's task
 // once it ends, and a start may not wait on its own role (record.SuperviseRequest's Quiesce). The
@@ -1273,7 +1215,7 @@ func (e *Engine) gateForIssue(ctx context.Context, tx pgx.Tx, issue record.Issue
 }
 
 func phaseIndex(value phase.Phase) int {
-	for index, candidate := range []phase.Phase{phase.Planning, phase.Implementing, phase.Testing, phase.Reviewing, phase.Accepting, phase.Retro, phase.Merging, phase.AwaitingMerge} {
+	for index, candidate := range []phase.Phase{phase.Planning, phase.Implementing, phase.Testing, phase.Reviewing, phase.Accepting, phase.Retro, phase.Merging} {
 		if candidate == value {
 			return index
 		}

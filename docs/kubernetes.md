@@ -1387,8 +1387,8 @@ label again it waits in the line and is admitted into the phase it stood in, con
 in a pod of its own from the issue's branch: its roles' sessions continue from the session table,
 and whatever the pod it had was working on went with that pod's disk ([The disk dies with its
 pod](#the-disk-dies-with-its-pod)). Taken out by a status, it comes back as any
-root does after its linger: a new generation at `admitted`, its design gate, handoffs and pending
-READY cleared (`ClearTreeGeneration`), its architect starting over from the issue's branch. A
+root does after its linger: a new generation at `admitted`, its design gate and handoffs
+cleared (`ClearTreeGeneration`), its architect starting over from the issue's branch. A
 hand-over fence counts only while the child's record still names the tree the fence was written
 for, and a hand-over Dispatch refuses permanently drops its fence with its row (`finishRefused`,
 `internal/daemon/outbox.go`). Past that the Sandbox is an orphan, which the sweep deletes, fenced
@@ -6179,7 +6179,7 @@ or under `runtime: tmux` as a pane in a window of its own (docs/deployment.md, "
 block"). `controller: daemon` needs `dispatch_url` (`controller: daemon needs dispatch_url: …`), and
 the loader refuses any value but the two.
 
-Under either mode a controller reads its daemon's resolved settings — `max_fix_attempts`,
+Under either mode a controller reads its daemon's resolved settings — `review_round_cap`,
 `worker_boot_timeout_seconds`, `admission_cap` and the rest of `legion.yaml`, with every credential,
 credential source and credential file path left out — from `read_state`'s `settings` (contract 35,
 LEGION-791), never from the ConfigMap in `legion-system`, which `legion-worker` may not read.

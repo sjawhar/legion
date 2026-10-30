@@ -69,7 +69,7 @@ func TestWhoseStatusWriteTakesARunningRootOutOfTheWorkflow(t *testing.T) {
 				if err != nil {
 					t.Fatalf("read root: %v", err)
 				}
-				root.Phase, root.Status, root.LastDispatchSeq = phase.AwaitingMerge, "retro", 1
+				root.Phase, root.Status, root.LastDispatchSeq = phase.Merging, "retro", 1
 				if err := records.PutIssue(ctx, tx, *root); err != nil {
 					t.Fatalf("put root: %v", err)
 				}
@@ -104,8 +104,8 @@ func TestWhoseStatusWriteTakesARunningRootOutOfTheWorkflow(t *testing.T) {
 				}
 				assertSlots(t, pool, []record.Slot{{Issue: "LEGION-9", Index: 1, AdmittedAt: fixedNow}})
 			case setBack, setBackAndTold:
-				if got.Phase != phase.AwaitingMerge || got.LingerUntil != nil || got.Status != "retro" || got.LastDispatchSeq != 2 || reasserted != 1 {
-					t.Fatalf("root after %s = %#v with %d re-asserted status writes, want awaiting_merge, not lingering, status retro kept, seq 2, and retro re-asserted over %s once", tc.name, got, reasserted, tc.status)
+				if got.Phase != phase.Merging || got.LingerUntil != nil || got.Status != "retro" || got.LastDispatchSeq != 2 || reasserted != 1 {
+					t.Fatalf("root after %s = %#v with %d re-asserted status writes, want merging, not lingering, status retro kept, seq 2, and retro re-asserted over %s once", tc.name, got, reasserted, tc.status)
 				}
 				assertSlots(t, pool, []record.Slot{{Issue: "LEGION-1", Index: 0, AdmittedAt: fixedNow}, {Issue: "LEGION-9", Index: 1, AdmittedAt: fixedNow}})
 				wantTold := 0

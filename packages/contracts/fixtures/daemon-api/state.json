@@ -504,9 +504,6 @@
     "dispatch_url": "https://dispatch.internal.example",
     "projects": {
       "LEGION": {
-        "merge": {
-          "by_hand": []
-        },
         "slack_channels": [
           "C0123ABCD",
           "C0123ABCE"
@@ -520,13 +517,6 @@
         ]
       },
       "WIDGETS": {
-        "merge_queue_role": "merge-queue",
-        "merge": {
-          "by_hand": [
-            "^deploy/",
-            "\\.sql$"
-          ]
-        },
         "slack_channels": [],
         "deploys": []
       }

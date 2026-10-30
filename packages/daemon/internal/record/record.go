@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -56,19 +55,18 @@ func (p ClassifiedPush) MayChangeCode() bool {
 // session's write the daemon sets back (sessionStatusWrite), which leaves it. While a chain of
 // writes is queued, it can briefly hold an earlier write's echo.
 type Issue struct {
-	Key                 string
-	Tree                string
-	Project             string
-	Title               string
-	Parent              *string
-	Phase               phase.Phase
-	Generation          uint64
-	Status              string
-	Rank                string
-	LingerUntil         *time.Time
-	Hold                *Hold
-	LastDispatchSeq     int64
-	ReadyPendingVersion *int
+	Key             string
+	Tree            string
+	Project         string
+	Title           string
+	Parent          *string
+	Phase           phase.Phase
+	Generation      uint64
+	Status          string
+	Rank            string
+	LingerUntil     *time.Time
+	Hold            *Hold
+	LastDispatchSeq int64
 	// HandedOver is whether the issue carried LegionLabel when Dispatch last showed it: what hands
 	// a root, or an orphan admitted as one, to Legion. A child running under its tree needs none.
 	HandedOver bool
@@ -317,8 +315,8 @@ type PhaseRow struct {
 	// requested changes, and nothing else moves this count.
 	Rounds  int
 	Verdict string
-	// Summary is what the role reported with its completion. The merger's is its READY packet,
-	// which the daemon posts when the issue reaches awaiting_merge.
+	// Summary is what the role reported with its completion, which the architect is told when the
+	// phase ends.
 	Summary string
 	// LastHandoff is the carrying commit the role last reported for a file-backed phase. Unlike
 	// HandoffCommit it survives the next phase's start, so a completion reporting it again is known
@@ -337,33 +335,6 @@ type PhaseRow struct {
 	// ClearGeneration resets the row without it. Behind a completion an old daemon wrote, a stale time
 	// at worst makes a review read as the reviewer's answer: one extra review-stuck notice.
 	CompletedAt time.Time
-	// MergeNote is the by-hand note the merger's READY was accepted with, empty for any other: the
-	// MANUAL_MERGE_REQUIRED answer READY gives a pull request whose change touches a path the
-	// project's merge.by_hand names. The packet the daemon tells starts with it (ReadyPacket), the
-	// daemon submits no merge for it, and the disarm keeps nothing armed for such a READY.
-	MergeNote string
-}
-
-// byHandMergeLine is the line ReadyPacket puts in place of the merger's line saying the daemon
-// submits the merge, for a READY a person merges.
-const byHandMergeLine = "Merge: by hand. A person merges this pull request under the repository's rules; nothing arms it."
-
-// ReadyPacket is the READY packet the daemon tells for summary, the merger's packet, and note, its
-// READY's by-hand note (PhaseRow.MergeNote): summary as it is when there is no note; otherwise the
-// note, a blank line, then summary with each line that begins `Merge:`, the merger's line saying the
-// daemon submits the merge, replaced by one saying a person merges it, so no reader of the packet
-// arms it.
-func ReadyPacket(summary, note string) string {
-	if note == "" {
-		return summary
-	}
-	lines := strings.Split(summary, "\n")
-	for i, line := range lines {
-		if strings.HasPrefix(line, "Merge:") {
-			lines[i] = byHandMergeLine
-		}
-	}
-	return note + "\n\n" + strings.Join(lines, "\n")
 }
 
 // ReviewDecision is what one review decided: its state (changes_requested or approved), its body,
@@ -1015,9 +986,6 @@ type Store interface {
 	// identical one.
 	ControllerNoticePending(ctx context.Context, tx pgx.Tx, project string, kind NoticeKind) (bool, error)
 
-	// DisarmPending says whether outbox still holds an unfinished auto_merge_disable row of issue:
-	// a finished row is deleted, so any row of the kind is one still to run or retrying.
-	DisarmPending(ctx context.Context, tx pgx.Tx, issue string) (bool, error)
 	Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error
 	// DueRows is every row of project a lane may run at now — due, under no live lease, in order
 	// behind none of its issue's older rows, and, for a lifecycle row, with no other lifecycle row
@@ -1050,12 +1018,6 @@ type Store interface {
 	// committing it beside the replacement worker's own.
 	FinishLeasedOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error
 	RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, nextAt time.Time, lastErr string) error
-	// ReplaceOutboxPayload replaces row id's payload with payload while leaseToken holds it: what a
-	// running row learned that its next run must know (a ready_merge row having seen READY's head
-	// armed, ReadyMerge.Armed). False is a lease no longer the caller's, a row another worker or a
-	// reopen's queue now holds, which keeps its own payload. A payload of another kind than the row
-	// it holds is an error, and replaces nothing.
-	ReplaceOutboxPayload(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, payload OutboxPayload) (bool, error)
 	PendingStatusWrites(ctx context.Context, tx pgx.Tx, project string) ([]OutboxRow, error)
 	Handover(ctx context.Context, tx pgx.Tx, issue string) (*Handover, error)
 	PutHandover(ctx context.Context, tx pgx.Tx, handover Handover) error
