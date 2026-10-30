@@ -2,30 +2,37 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-607",
-  "completed": "2026-10-29T22:04:18Z",
-  "testedHead": "d1eddece5557920ab73340de9c3d7b43abe82194",
-  "codeHead": "bc54fc4fdd2ee70e20f101e4d4f098b0f3e4ce13",
-  "round": 11,
-  "scope": "bc54fc4f is a forward merge of main 5455925b. Main added 0141_drop_broadcast_idempotency_keys, so the branch's migrations moved from 0141-0147 to 0142-0148. The unchanged-diff fingerprint differs: 84d139a3 gives b2755e7f…, bc54fc4f gives 9c3fe489…. With migration numbers normalised, the two PR diffs are byte-identical (0 differing lines). So the only change is the renumbering, and this round drives the paths a renumbered migration chain could break: a deploy from main's schema 141, beside the main build.",
+  "completed": "2026-10-30T01:57:35Z",
+  "testedHead": "5ea9342db496661d9298cb031e23fea352e4e0ac",
+  "codeHead": "e8337760317bebcbaad8ea54cf4e02f62856e76b",
+  "round": 12,
+  "scope": "e8337760 is a forward merge of main, from base 5455925b to base cd5ca7c3. Main added migrations 0142-0144 (item blocks, #2463), so the branch's migrations moved to 0145-0151. The raw fingerprint changed (9c3fe489 -> 9854397f). With migration numbers 014x/015x normalised, the PR's own diff is byte-identical to round 11's (0 differing lines). This is still a full round, not a confirmation round: main changed eight files of the PR's diff in the merged window. They are docs/reference_excerpts.go, refs/excerpts.go, docs/block_index.go, infra/gcp/dispatch.go, cmd/dispatch/README.md and three AGENTS.md files. Main's changes to the Go files are refactors: text.Refs(located), targetOf renamed to TargetOf, a podPriorityClass helper. So this round builds and vets at the merged head, runs the touched packages' tests, and drives the woken paths on the real binary beside main.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I built bc54fc4f and its fork point 5455925b myself, on a fresh Postgres 16 cluster with every statement logged, NATS 2.10.29 and the Envoy listener (config A). The main build created the database at schema 141 and seeded 18 suggestions. A head process started beside it and migrated: schema_migrations holds 140-148 with no gap, and there was no ERROR line in either log."
+    "how": "On my build of e8337760 and of main cd5ca7c3, on a fresh Postgres 16 cluster with every statement logged, NATS and the Envoy listener, in config A. main created the database at schema 144. A head process migrated it beside main to 140-151 with no gap, and there was no ERROR line in either log."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "The renumbered migrations deploy on main's schema, and the woken loops they serve still work beside the previous release",
-      "surface": "The fork-point build (5455925b) seeding through POST /api/v1/projects, /issues and /issues/{key}/comments, then a head process (bc54fc4f) migrating that database while the old build runs. A person's edit through POST /api/v1/artifacts/{id}/edits, and refs rows cleared with psql.",
-      "command": "start.sh main 0 t8; seed SUG-1..8; start.sh head 1 t8; comments through both ports; agent spec plus person edit on SUG-8; after 100 s psql -f mainrules.sql and diff; update refs set excerpt_version = null for a new spec citing two issues",
-      "observed": "schema_migrations: 140,141,...,148. Suggestions: the 18 live outcomes (9 judged) are identical row for row to main's full-table rules. The head skipped the suggestion-outcomes lease in the minutes the old build held it. Edit notice: due 21:56:03.262; 'dispatch: sent edit notices notices=1' at 21:56:03.273; one artifact.human_edited event; row gone. Excerpts: re-recorded about 1 s after they were cleared.",
-      "headSha": "bc54fc4fdd2ee70e20f101e4d4f098b0f3e4ce13",
+      "criterion": "The merged head builds and vets, and the packages main changed under the PR pass",
+      "surface": "An export of packages/envoy at e8337760",
+      "command": "go build ./... and go vet ./... (GOWORK=off) in packages/envoy; in packages/envoy/infra, with its own go.work: go vet ./... and go vet -tags natslive ./core/; go test -p 2 -parallel 4 ./internal/dispatch/refs/; go test -p 2 -parallel 4 ./internal/dispatch/docs/ -run 'Excerpt|BlockIndex|EditNotice|TaskProgress'; go test -p 2 ./infra/gcp/ -run 'Connections|Disruption|Priority'",
+      "observed": "Build and both vets are clean, and infra's go.work.sum was unchanged. refs ok in 6.9 s, the docs subset ok in 57.9 s, infra/gcp ok in 0.3 s (TestDispatchConnectionsPerPodIsTheServers among them). The pod held 2.7-3.0 GiB during the runs.",
+      "headSha": "e8337760317bebcbaad8ea54cf4e02f62856e76b",
+      "negativeControl": "Run in the export with GOWORK=off, the infra vet failed with 'missing go.sum entry ... nats-server/v2/server'. That is the infra module run without its own go.work, not a defect; with go.work it is clean."
+    },
+    {
+      "criterion": "The renumbered migrations deploy on main's schema, and the woken loops still work beside the previous release",
+      "surface": "main cd5ca7c3 seeding through POST /api/v1/projects, /issues and /issues/{key}/comments; a head process migrating that database while main runs; a person's edit through POST /api/v1/artifacts/{id}/edits; refs cleared with psql",
+      "command": "start.sh main 0 t8; seed SUG-1..8 (18 suggestions); start.sh head 1 t8; comments through both ports; agent spec plus person edit on SUG-8; a new spec citing SUG-1 and SUG-2, then update refs set excerpt_version = null; psql -f mainrules.sql and diff",
+      "observed": "schema_migrations: 140-151 with no gap. Edit notice: due 01:54:21.199; one artifact.human_edited event at 01:54:21.202; row gone. Excerpts: re-recorded within about 1 s. Suggestions: the 21 live outcomes (9 judged) are identical row for row to main's full-table rules on the same data.",
+      "headSha": "e8337760317bebcbaad8ea54cf4e02f62856e76b",
       "negativeControl": "ses-other's comment on SUG-3 resolved nothing in either the live table or main's rules."
     }
   ],
-  "ci": "At bc54fc4f (21:59Z): changes and pr-title were queued. At 84d139a3, the code whose PR diff is identical up to migration numbers: ci-ok failed on one job, envoy-go-race. Every other job passed: dispatch, envoy-go, envoy-infra-go, the multiprocess jobs, dispatch-memory, envoy-e2e-local, envoy-smoke, envoy-session-stall, listener-server-change, docs, lint, typecheck, test and worker-image build. envoy-go-race failed on two packages; this PR's api, delivery and store passed in that job. (1) internal/dispatch/docs hit go test's 30-minute timeout. That is main's: main ea721a28 (job 123634394657) and five unrelated pull requests the same day (INFRA-715 123694353510, INFRA-592 123686573540, INFRA-590 123684426467, INFRA-720 123648206657, INFRA-588 123643922299) all fail docs at about 1801 s. (2) internal/dispatch/pmdoc's CPU-time linearity tests failed (TestBareURLShapesParseAndRenderLinearly: a 1 MiB read 'did not return within 1m0s'; TestUpdateIsLinearInTheBlockCount refused to measure while that run was still going). pmdoc passed in those six jobs. Its test dependency closure (pmdoc, docs/crafted, docs/docstest, cputest, stacktest) holds no file this PR changes, so this is a timing flake of a package the PR cannot affect. I recorded it for the controller and did not re-run CI.",
+  "ci": "At 01:57Z at e8337760, only changes and pr-title are queued: the router has not yet created lint, typecheck, test or the long suites. By the rule for a merge in which main changed the PR's files, these lanes must read green at e8337760 before approval: envoy-go, envoy-go-race and the docs race job (#2516 gave docs its own race job), envoy-infra-go and dispatch. Each can instead name a known main red. I did not wait for them.",
   "mainReds": [
-    "close-withdraws-asks.e2e.ts:126 (the controller's list).",
-    "envoy-go-race: internal/dispatch/docs times out at 30 minutes under the race detector on main and on every PR I checked. New to the list."
+    "close-withdraws-asks.e2e.ts:126. Watch also the docs race timeout; #2516 moved docs into its own race job, which may clear it."
   ]
 }
