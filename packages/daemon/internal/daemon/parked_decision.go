@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"fmt"
-	"strconv"
 
 	"github.com/jackc/pgx/v5"
 
@@ -77,45 +76,18 @@ func (r *outbox) parkDecision(ctx context.Context, issue, root string, notice re
 	return nil
 }
 
-// startDeliveredSource is the processed-event source that marks a root-architect start row whose
-// task, naming kept decisions, was delivered and whose decisions were forgotten (forgetKept): its
-// event id is the row's id. A retry of that row — a ClaimReady that failed after the forget, or a
-// finish that did not commit — finds the mark and delivers nothing again, even once the claim's
-// delivery has been retired and the same delivery id would be taken as a new task.
-const startDeliveredSource = "start-delivered"
-
-// startDelivered says whether start row's task was already delivered and what it named forgotten.
-func (r *outbox) startDelivered(ctx context.Context, row int64) (bool, error) {
-	var delivered bool
-	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
-		var err error
-		delivered, err = r.records.Processed(ctx, tx, startDeliveredSource, strconv.FormatInt(row, 10))
-		return err
-	}); err != nil {
-		return false, fmt.Errorf("read whether start row %d was delivered: %w", row, err)
-	}
-	return delivered, nil
-}
-
 // forgetKept forgets what outbox row's delivered architect start task or catch-up named of what
 // its root keeps and row claims (record.Store.ForgetKeptDecisions), in a transaction of its own
-// after the delivery; for a start row, the same transaction marks the row delivered
-// (startDeliveredSource), so a retry never delivers the task again. A row that finishes without
-// delivering releases its claims, so every decision stays for the next start or catch-up to name.
-// A failure returns an error, so the row retries.
-func (r *outbox) forgetKept(ctx context.Context, root string, kept *record.KeptDecisions, row int64, start bool) error {
+// after the delivery. A row that finishes without delivering releases its claims, so every
+// decision stays for the next start or catch-up to name. A failure returns an error, so the row
+// retries; a retried start queues its task no second time (supervise.Claim.DeliveredThrough) and
+// forgets again.
+func (r *outbox) forgetKept(ctx context.Context, root string, kept *record.KeptDecisions, row int64) error {
 	if kept == nil {
 		return nil
 	}
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
-		if err := r.records.ForgetKeptDecisions(ctx, tx, root, *kept, row); err != nil {
-			return err
-		}
-		if start {
-			_, err := r.records.MarkProcessed(ctx, tx, startDeliveredSource, strconv.FormatInt(row, 10))
-			return err
-		}
-		return nil
+		return r.records.ForgetKeptDecisions(ctx, tx, root, *kept, row)
 	}); err != nil {
 		return fmt.Errorf("forget the decisions named to %s: %w", root, err)
 	}

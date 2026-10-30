@@ -119,7 +119,14 @@ type Claim struct {
 	// no start has run for. A stop from an older row is one the newer start superseded: it was
 	// written to end a run that is over, and acting on it would stop the run that start began.
 	LastStartRow int64
-	Locator      *runtime.Locator
+	// DeliveredThrough is the outbox row id of the newest start whose task this claim queued
+	// (RequestDeliver.Row), and 0 for one no row has given a task. It is written with that
+	// delivery, in the same transaction, so a row's task is known queued no later than it is: a
+	// retry of that row, or of an older one, is never queued again, whether its delivery is still
+	// pending or the claim has since retired it. An issue's outbox rows run in row order, so no
+	// older row is still to deliver once a newer one has.
+	DeliveredThrough int64
+	Locator          *runtime.Locator
 	// Enrollment is the secrets broker's record of the claim's running process, when the runtime
 	// enrolls pods: the enrollment id, and the incarnation it was made for. It is
 	// revoked and cleared wherever the process is let go (letGo), so a record for another

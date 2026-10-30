@@ -884,8 +884,6 @@ type DispatchIssueRow struct {
 // atomically deduplicate an event, update the record, and enqueue all of its effects.
 type Store interface {
 	MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID string) (fresh bool, err error)
-	// Processed says whether MarkProcessed already marked source's event, writing nothing.
-	Processed(ctx context.Context, tx pgx.Tx, source, eventID string) (bool, error)
 	Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, error)
 	Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error)
 	// QueuedRootsUnder is every labelled todo root whose Ancestry holds key, by key: the roots the

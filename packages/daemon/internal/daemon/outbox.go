@@ -710,7 +710,7 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 		// The architect has the catch-up, so the decisions it named and this row claims are told;
 		// a row that finishes any other way releases them for the next catch-up or start.
 		if payload.CatchUp != nil {
-			return r.forgetKept(ctx, tree.root.Key, payload.CatchUp.Kept, row.ID, false)
+			return r.forgetKept(ctx, tree.root.Key, payload.CatchUp.Kept, row.ID)
 		}
 		return nil
 	case errors.As(published, &notDelivered) && notDelivered.Reason == notify.ReasonReceiptTimeout:
@@ -966,32 +966,25 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		// id its delivery's, and a delivery with no phase is held by nothing (supervise's
 		// phaseHolds), so the task reaches the implementer whatever the issue's phase.
 		held := machine.Claim()
-		delivered := false
-		if payload.Kept != nil {
-			if delivered, err = r.startDelivered(ctx, row.ID); err != nil {
-				return err
-			}
-		}
 		if pending := held.Pending; (payload.ResumeTask || state == supervise.StateFailed) && pending != nil && payload.Phase != "" &&
 			pending.StillWorked(payload.Generation, payload.Phase, held.State) {
 			r.log.Info("outbox start of a claim that holds its phase's task; not delivered again", "row", row.ID, "issue", issue.Key,
 				"role", payload.Role, "phase", payload.Phase, "held", pending.ID)
-		} else if delivered {
-			// A retry of a start whose task, naming kept decisions, was delivered and its decisions
-			// forgotten (the mark forgetKept wrote): delivering it again would tell the architect
-			// each decision twice once the claim had retired the delivery.
-			r.log.Info("outbox start already delivered its task; not delivered again", "row", row.ID, "issue", issue.Key, "role", payload.Role)
 		} else if payload.Task != "" {
 			// The row's phase, already held to the issue's above, travels with the delivery: it is
-			// what says the task is still the work to do once the delivery has outlived its id.
+			// what says the task is still the work to do once the delivery has outlived its id. The
+			// row travels too: the claim writes it with the delivery, so a retry of this row (a forget
+			// or a ClaimReady below that failed, a crash before the row finished) queues the task
+			// again neither while it is pending nor once the claim has retired it
+			// (supervise.Claim.DeliveredThrough).
 			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: payload.Task, Phase: payload.Phase, Generation: payload.Generation,
-				ID: fmt.Sprintf("%s%d", outboxDeliveryPrefix, row.ID)}); err != nil {
+				ID: fmt.Sprintf("%s%d", outboxDeliveryPrefix, row.ID), Row: row.ID}); err != nil {
 				return fmt.Errorf("deliver to claim %s: %w", token, err)
 			}
-			// The claim has the task, so the decisions it named and this row claims are told, and the
-			// row is marked delivered in the same transaction. Every branch above that finishes
-			// without delivering releases them, with the row, for the next start or catch-up.
-			if err := r.forgetKept(ctx, issue.Tree, payload.Kept, row.ID, true); err != nil {
+			// The claim has the task, so the decisions it named and this row claims are told. Every
+			// branch above that finishes without delivering releases them, with the row, for the next
+			// start or catch-up.
+			if err := r.forgetKept(ctx, issue.Tree, payload.Kept, row.ID); err != nil {
 				return err
 			}
 		}
@@ -1003,7 +996,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		// for the running launch, once per start row, and the architect is told its tree's new
 		// generation. It does so after the task is delivered and the decisions it names are
 		// forgotten, so the catch-up never names a kept decision the task already names; a retry
-		// of the row finds its delivered mark and applies the fact once.
+		// of the row queues the task no second time and applies the fact once.
 		if claimTookRole(state) && claim.IsTreeArchitect(payload.Role, issue.Key, issue.Tree) {
 			if _, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("start-running:%s:%d", token, row.ID),
 				intake.ClaimReady{Issue: issue.Key, Role: payload.Role, Launch: machine.Claim().Generation}, r.handlers...); err != nil {

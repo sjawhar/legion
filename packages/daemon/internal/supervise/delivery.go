@@ -101,20 +101,39 @@ func pendingID(p *Delivery) string {
 
 // queue gives the claim the task a deliver request carries, with the phase it was queued for. An
 // outbox repeats its row id after a crash before FinishOutbox; the same task and id are therefore
-// accepted without changing the persisted delivery.
+// accepted without changing the persisted delivery. A request from an outbox row the claim already
+// queued a task from, or an older one (Claim.DeliveredThrough), is accepted and queues nothing,
+// whether that delivery is still pending, was taken back under a new id, or has been retired: the
+// task was given once, and a retry of its row — after a failure that followed the delivery, or a
+// crash before the row finished — must not give it again. A request from a newer row writes the
+// row with its delivery, in one transaction, so the fact is durable no later than the delivery.
 func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 	id, task := request.ID, request.Task
+	delivered := request.Row > 0 && request.Row <= m.claim.DeliveredThrough
 	if pending := m.claim.Pending; pending != nil {
-		if id != "" && pending.ID == id && pending.Task == task {
+		if (id != "" && pending.ID == id && pending.Task == task) || delivered {
 			return nil
 		}
 		return &RefusedError{State: m.claim.State, Request: "deliver", Err: ErrDeliveryPending}
+	}
+	if delivered {
+		m.log.Info("supervise: the row's task was already given; not queued again", "row", request.Row, "delivery", id)
+		return nil
 	}
 	if id == "" {
 		id = rand.Text()
 	}
 	d := Delivery{ID: id, Task: task, Phase: request.Phase, Generation: request.Generation, QueuedAt: m.deps.Clock.Now()}
-	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, d); err != nil {
+	if request.Row > 0 {
+		// The claim records the row only once the store has it with the delivery: a write that
+		// failed leaves the row undelivered, so its retry queues the task.
+		stored := m.stored()
+		stored.DeliveredThrough = request.Row
+		if err := m.deps.Store.PutClaimAndDelivery(ctx, stored, d); err != nil {
+			return err
+		}
+		m.claim.DeliveredThrough = request.Row
+	} else if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, d); err != nil {
 		return err
 	}
 	m.claim.Pending, m.unsaved = &d, false
