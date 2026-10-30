@@ -116,15 +116,6 @@ func checkSignInSettings(boot bootConfig, identityMode string) error {
 	return nil
 }
 
-// requireCookieSignIn refuses cookie identity with no way to sign in: a cookie server signs people
-// in through its sign-in issuer, or, under dev sign-in, at /auth/_dev/signin.
-func requireCookieSignIn(boot bootConfig, devSignIn bool) error {
-	if boot.SignInIssuer != "" || devSignIn {
-		return nil
-	}
-	return fmt.Errorf("cookie identity signs people in: %s are required", signInSettingNames())
-}
-
 // signInRule is who boot's sign-in admits: the members of a Cognito pool's group, or the people of
 // a Google Workspace domain; nil when boot configures neither (header identity, or dev sign-in),
 // matching signInFlow.
