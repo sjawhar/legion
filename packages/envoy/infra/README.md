@@ -11,7 +11,7 @@ Pulumi language needs only the Pulumi CLI:
 | `envoy-infra:aws:WebhookListener` | Envoy's webhook listener on ECS Fargate, behind your load balancer's target group, with an alarm on each log line that says a delivery or a start went wrong. |
 | `envoy-infra:gcp:NatsHub` | A NATS server with JetStream on one Google Cloud VM that joins a tailnet, where its clients reach it: see [docs/nats-hub.md](docs/nats-hub.md), which says what it deploys, its inputs and how it is updated, with an example. |
 | `envoy-infra:gcp:ClusteredNatsHub` | NATS with JetStream as three servers on a GKE cluster, one per zone, through the `nats` Helm chart, with an optional tailnet entry whose hosts also run Envoy's session listener: see [gcp:ClusteredNatsHub](#gcpclusterednatshub). |
-| `envoy-infra:gcp:Dispatch` | Dispatch on GKE Autopilot, with Cloud SQL, served over a tailnet and, only to the namespaces `allowedNamespaces` names, inside its own cluster: see [gcp:Dispatch](#gcpdispatch). |
+| `envoy-infra:gcp:Dispatch` | Dispatch on GKE Autopilot, with Cloud SQL, served over a tailnet and, only to the namespaces `allowedNamespaces` names, inside its own cluster, or that cluster alone with `clusterOnly`: see [gcp:Dispatch](#gcpdispatch). |
 
 The listener creates the `ENVOY_NOTIFICATIONS` stream and its key-value buckets itself when it
 starts, so it needs only a NATS server with JetStream to reach. It creates them at the deployment's
@@ -543,25 +543,33 @@ the tailnet ingress on port 443, and proxies to the app's ClusterIP Service on p
 also serves Dispatch's API in-cluster to the namespaces `allowedNamespaces` names; a NetworkPolicy
 refuses every other namespace. The front door's SOCKS5 Service on port 1055 and the listener's
 Service on port 9020 are reachable only from the workloads their own policies name: the app and
-the listener may dial the proxy, and the app alone may dial the listener.
+the listener may dial the proxy, and the app alone may dial the listener. With `clusterOnly` it
+deploys the cluster, its VPC and Cloud NAT alone and none of the rest, and the table below says
+which resources that is.
 
-| Resource | Purpose |
-| --- | --- |
-| VPC, subnetwork, router and Cloud NAT | Private Autopilot nodes can pull images and reach the tailnet control plane without public node addresses. |
-| Private services access range and connection | Cloud SQL receives a private IP on the component's VPC. |
-| Autopilot cluster | Enables the Secret Manager add-on, Secret Sync with rotation (GKE 1.33 or later; a new Secret Manager version reaches a synced Kubernetes Secret whose SecretProviderClass reads `versions/latest` without an apply), and Workload Identity. |
-| Cloud SQL instance, database, user and generated password | PostgreSQL 18 by default (`databaseVersion`), private IP only, automated backups and point-in-time recovery. |
-| Kubernetes namespace (not with `existingNamespace`), ServiceAccount `<hostname>`, Secrets, ConfigMap and SecretProviderClass | The app's and the listener's account, which Workload Identity lets mount the NATS seed; the generated application secrets (`<hostname>-dispatch`), the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the front door's auth key (`<hostname>-tailnet-auth-key`, one key `TS_AUTHKEY`), the Serve configuration (ConfigMap `<hostname>-serve`, rendered from the resolved `tailnetService`), and the NATS seed mount (and, with `azureEmbedKeySecret`, a second SecretProviderClass, `<hostname>-azure-embed-key`, for the Azure embedder's key). |
-| ServiceAccount `<hostname>-tailnet`, Role and RoleBinding `<hostname>-tailnet-tls` | The front door's pods run as an account of their own, which the Role lets `get` and `patch` the one Secret `<hostname>-tailnet-tls` and nothing else (no `create`, since the component creates it, and no `update`, since the pods send merge patches), so neither the app nor the listener, nor the account `serviceAccountSubject` names, can write the certificate. The pod does not automount the account's token: only `cert-publish`, which calls the API server, mounts it, so the tailnet-facing `tailscale` and `advertiser` containers hold no credential for the Secret. |
-| Secret `<hostname>-tailnet-tls` | The Tailscale Service's certificate, its key and the ACME account key (keys `tls.crt`, `tls.key` and `acme-account.key.pem`), which the front door's pods publish and seed from ([The front door](#the-front-door)). The component declares it with no data and ignores its contents, so a later preview never plans to undo what the pods wrote, and no pod template carries its checksum, so a renewed certificate rolls no pod. |
-| Three ClusterIP Services and three NetworkPolicies | Dispatch's API on port 8766, to the `allowedNamespaces` and the front door; the front door's SOCKS5 proxy on port 1055, to the app and the listener; the listener's API on port 9020, to the app. Each policy admits those sources alone among pods (Kubernetes still admits each pod's own node). |
-| Three Deployments | The app at `replicas` pods, the front door at `frontDoorReplicas` (2 by default) and the listener at `listenerReplicas` (1 by default), each `Recreate` at one pod and `RollingUpdate` (`maxUnavailable: 0`, `maxSurge: 1`) above one, by its own count. Every pod carries required pod anti-affinity on `kubernetes.io/hostname` and a `topology.kubernetes.io/zone` spread with `minDomains: 2`, both over its own Deployment's pods, and every serving container a startup and a liveness probe ([The pods](#the-pods)). The app and the listener have a 35-second termination grace period, a five-second pre-stop wait and the stop each is built for; the front door 60 seconds, for its drain ([The front door](#the-front-door)). Every container has equal requests and limits. A pod template whose Deployment has no PodDisruptionBudget carries `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`; one whose Deployment has a budget does not. |
-| Up to three PodDisruptionBudgets | `<hostname>` with `appPdbMinAvailable`, `<hostname>-tailnet` with `frontDoorPdbMinAvailable` and `<hostname>-listener` with `listenerPdbMinAvailable`, each over its own Deployment's pods (`app=<name>`) alone, with that `minAvailable` and Kubernetes' default `unhealthyPodEvictionPolicy`, so a drain cannot take that workload below that many ready pods. |
+| Resource | Purpose | With `clusterOnly` |
+| --- | --- | --- |
+| VPC, subnetwork, router and Cloud NAT | Private Autopilot nodes can pull images and reach the tailnet control plane without public node addresses. | Built |
+| Private services access range and connection | Cloud SQL receives a private IP on the component's VPC. | Not built |
+| Autopilot cluster | Enables the Secret Manager add-on, Secret Sync with rotation (GKE 1.33 or later; a new Secret Manager version reaches a synced Kubernetes Secret whose SecretProviderClass reads `versions/latest` without an apply), and Workload Identity. | Built |
+| Cloud SQL instance, database, user and generated password | PostgreSQL 18 by default (`databaseVersion`), private IP only, automated backups and point-in-time recovery. | Not built |
+| Kubernetes namespace (not with `existingNamespace`), ServiceAccount `<hostname>`, Secrets, ConfigMap and SecretProviderClass | The app's and the listener's account, which Workload Identity lets mount the NATS seed; the generated application secrets (`<hostname>-dispatch`), the listener's generated bearer in a Secret of its own (`<hostname>-listener`, one key `ENVOY_API_TOKEN`), the front door's auth key (`<hostname>-tailnet-auth-key`, one key `TS_AUTHKEY`), the Serve configuration (ConfigMap `<hostname>-serve`, rendered from the resolved `tailnetService`), and the NATS seed mount (and, with `azureEmbedKeySecret`, a second SecretProviderClass, `<hostname>-azure-embed-key`, for the Azure embedder's key). | Not built |
+| ServiceAccount `<hostname>-tailnet`, Role and RoleBinding `<hostname>-tailnet-tls` | The front door's pods run as an account of their own, which the Role lets `get` and `patch` the one Secret `<hostname>-tailnet-tls` and nothing else (no `create`, since the component creates it, and no `update`, since the pods send merge patches), so neither the app nor the listener, nor the account `serviceAccountSubject` names, can write the certificate. The pod does not automount the account's token: only `cert-publish`, which calls the API server, mounts it, so the tailnet-facing `tailscale` and `advertiser` containers hold no credential for the Secret. | Not built |
+| Secret `<hostname>-tailnet-tls` | The Tailscale Service's certificate, its key and the ACME account key (keys `tls.crt`, `tls.key` and `acme-account.key.pem`), which the front door's pods publish and seed from ([The front door](#the-front-door)). The component declares it with no data and ignores its contents, so a later preview never plans to undo what the pods wrote, and no pod template carries its checksum, so a renewed certificate rolls no pod. | Not built |
+| Three ClusterIP Services and three NetworkPolicies | Dispatch's API on port 8766, to the `allowedNamespaces` and the front door; the front door's SOCKS5 proxy on port 1055, to the app and the listener; the listener's API on port 9020, to the app. Each policy admits those sources alone among pods (Kubernetes still admits each pod's own node). | Not built |
+| Three Deployments | The app at `replicas` pods, the front door at `frontDoorReplicas` (2 by default) and the listener at `listenerReplicas` (1 by default), each `Recreate` at one pod and `RollingUpdate` (`maxUnavailable: 0`, `maxSurge: 1`) above one, by its own count. Every pod carries required pod anti-affinity on `kubernetes.io/hostname` and a `topology.kubernetes.io/zone` spread with `minDomains: 2`, both over its own Deployment's pods, and every serving container a startup and a liveness probe ([The pods](#the-pods)). The app and the listener have a 35-second termination grace period, a five-second pre-stop wait and the stop each is built for; the front door 60 seconds, for its drain ([The front door](#the-front-door)). Every container has equal requests and limits. A pod template whose Deployment has no PodDisruptionBudget carries `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`; one whose Deployment has a budget does not. | Not built |
+| Up to three PodDisruptionBudgets | `<hostname>` with `appPdbMinAvailable`, `<hostname>-tailnet` with `frontDoorPdbMinAvailable` and `<hostname>-listener` with `listenerPdbMinAvailable`, each over its own Deployment's pods (`app=<name>`) alone, with that `minAvailable` and Kubernetes' default `unhealthyPodEvictionPolicy`, so a drain cannot take that workload below that many ready pods. | Not built |
 
 ### Inputs
 
-The required plain inputs are `region`, `hostname`, `tailnetDnsName`, `tags`, the four
-digest-pinned images, `signInClientId`, and `signInDomain`. `tailnetAuthKey`, `tailnetService`,
+The schema requires `region` and `hostname` alone. Thirteen inputs that configure Dispatch itself
+— `tailnetDnsName`, `tags`, `tailnetAuthKey`, `tailnetService`, the four digest-pinned images
+`envoyImage`, `tailscaleImage`, `cloudSqlProxyImage` and `frontDoorToolsImage`, `natsUrl`,
+`natsSeedSecret`, `signInClientId`, `signInClientSecret` and `signInDomain` — are optional in the
+schema and required by the resolver while `clusterOnly` is off, which refuses each missing one by
+name as it always did. They are optional in the schema because a generated SDK's constructor
+refuses a nil required input, so a cluster-only consumer, which sets none of them, could not call
+the component at all while they stayed required. `tailnetAuthKey`, `tailnetService`,
 `natsUrl`, `natsSeedSecret`, and `signInClientSecret` are Pulumi inputs and may come from another
 resource or stack. `tailnetAuthKey` and `signInClientSecret` are secrets. `databaseVersion`
 defaults to `POSTGRES_18`, `databaseTier` to `db-custom-4-15360`, `namespace` to `dispatch`, and
@@ -579,6 +587,19 @@ for a cluster that already exists: on a first apply the component creates the cl
 program can have made the namespace yet. `allowedNamespaces`, empty by default, each a DNS label,
 names the in-cluster namespaces the NetworkPolicy admits on port 8766.
 
+`clusterOnly`, `false` by default, builds the cluster alone: the VPC, its subnetwork, the router,
+Cloud NAT and the Autopilot cluster, and nothing else. It registers no private services access
+range and no peering, no Cloud SQL instance, database or user, no generated password, no Secret
+Manager grant, no Kubernetes provider and no Kubernetes object, so it requires a `gcp` provider
+alone and no `random` one. Only `region`, `hostname` and `deletionProtection` come with it, the
+last guarding the cluster; every other input is refused by name, as `<input> configures Dispatch,
+which clusterOnly does not build: unset it, or unset clusterOnly`. `clusterName`, `kubeconfig` and
+`serviceAccountIssuer` carry the cluster's own values; `url`, `databaseInstance`, `principal`,
+`agentToken` and `serviceAccountSubject` are an explicit empty string, which is the same value in
+a preview and in an update. A stack already running Dispatch cannot turn it on: such a stack sets
+the inputs the mode refuses, so the update is refused before anything it would no longer build is
+deleted.
+
 `databaseVersion` defaults to `POSTGRES_18`; envoy-infra v2.9.1 and every release before this
 change defaulted to `POSTGRES_16`. A stack that leaves `databaseVersion` unset is upgraded in place
 from its current major version to PostgreSQL 18 at its first `pulumi up` after its `envoy-infra`
@@ -591,30 +612,32 @@ instance running it ([Upgrade the database major version
 in-place](https://cloud.google.com/sql/docs/postgres/upgrade-major-db-version-inplace)). To keep
 PostgreSQL 16, set `databaseVersion: POSTGRES_16` before moving the pin.
 
-`tailnetService`, required, is the Tailscale Service the front door's pods host, as Tailscale's
-API names it. It must resolve to `svc:<hostname>`, the name the certificate and the URL carry, and
-any other value fails the update once it resolves, naming the input and never echoing the value.
-The component never creates the Service: the consumer declares it in the tailnet with its one
-port, `tcp:443`, gives it an auto-approval for `tags` in the tailnet policy, and passes the `Name`
-output of its `tailscale.Service` here. The auto-approval only lets the front door's nodes host
-the Service; it gives no client access. A Tailscale Service is a grant destination of its own
-([Tailscale Services](https://tailscale.com/kb/1552/tailscale-services), "Configure Service
-access"), so the tailnet policy also needs a grant with `dst: ["svc:<hostname>"]` and `ip:
-["443"]` for every client of Dispatch, or a tag on the Service that their grants already name:
-a grant on the front door's `tags` does not cover the Service's address, which is the address
-`<hostname>.<tailnetDnsName>` resolves to. The Serve ConfigMap `<hostname>-serve` is rendered
-from the resolved value, and the front door's Deployment waits for that ConfigMap and for whatever
-the value came from, so on a fresh stack no pod advertises the Service before it exists: a node
-that advertises a Service before it exists is not approved when the Service appears.
+`tailnetService`, required with `clusterOnly` off, is the Tailscale Service the front door's pods
+host, as Tailscale's API names it. It must resolve to `svc:<hostname>`, the name the certificate
+and the URL carry, and any other value fails the update once it resolves, naming the input and
+never echoing the value. The component never creates the Service: the consumer declares it in the
+tailnet with its one port, `tcp:443`, gives it an auto-approval for `tags` in the tailnet policy,
+and passes the `Name` output of its `tailscale.Service` here. The auto-approval only lets the
+front door's nodes host the Service; it gives no client access. A Tailscale Service is a grant
+destination of its own ([Tailscale Services](https://tailscale.com/kb/1552/tailscale-services),
+"Configure Service access"), so the tailnet policy also needs a grant with
+`dst: ["svc:<hostname>"]` and `ip: ["443"]` for every client of Dispatch, or a tag on the Service
+that their grants already name: a grant on the front door's `tags` does not cover the Service's
+address, which is the address `<hostname>.<tailnetDnsName>` resolves to. The Serve ConfigMap
+`<hostname>-serve` is rendered from the resolved value, and the front door's Deployment waits for
+that ConfigMap and for whatever the value came from, so on a fresh stack no pod advertises the
+Service before it exists: a node that advertises a Service before it exists is not approved when
+the Service appears.
 
-`frontDoorToolsImage`, required and pinned by digest like the other three images, is the image the
-front door's `cert-publish` container runs on. Its scripts call `/bin/sh`, `curl`, `openssl` 3,
-`base64`, GNU `date`, `sed`, `grep` and `tr`, so the image must carry them all; the envoy image
-does, and the Tailscale image, which is busybox with neither `curl` nor `openssl`, does not. It is
-an input of its own rather than `envoyImage` so a release of the app's image never rolls the front
-door: pin the envoy image here at a digest that moves only on purpose. The container runs as uid
-999, the envoy image's `envoy` user, which every container of a front-door pod shares, since
-tailscaled writes its certificate cache readable by its own uid alone.
+`frontDoorToolsImage`, required with `clusterOnly` off and pinned by digest like the other three
+images, is the image the front door's `cert-publish` container runs on. Its scripts call
+`/bin/sh`, `curl`, `openssl` 3, `base64`, GNU `date`, `sed`, `grep` and `tr`, so the image must
+carry them all; the envoy image does, and the Tailscale image, which is busybox with neither
+`curl` nor `openssl`, does not. It is an input of its own rather than `envoyImage` so a release
+of the app's image never rolls the front door: pin the envoy image here at a digest that moves
+only on purpose. The container runs as uid 999, the envoy image's `envoy` user, which every
+container of a front-door pod shares, since tailscaled writes its certificate cache readable by
+its own uid alone.
 
 `databaseTier`, `db-custom-4-15360` (4 vCPU and 15 GB) by default, is sized by connections. Cloud
 SQL's default `max_connections` follows the instance's memory, and from 15 to under 30 GB it is
@@ -862,9 +885,10 @@ front door cannot join the tailnet, Dispatch refuses a blank sign-in secret at b
 `tailnetService` other than `svc:<hostname>` — each a refusal naming the input and never echoing
 it; and a `natsUrl` that holds a seed, is local (the pods reach NATS only through the front door's
 SOCKS5 proxy), is empty, or holds a comma or a control character, each a refusal naming
-`natsUrl`. It requires both `gcp` and `random` providers. It creates its Kubernetes provider from
-the cluster's stable exec-plugin kubeconfig, so the machine running Pulumi needs
-`gke-gcloud-auth-plugin`.
+`natsUrl`. It requires both `gcp` and `random` providers, and with `clusterOnly` a `gcp` provider
+alone. It creates its Kubernetes provider from the cluster's stable exec-plugin kubeconfig, so the
+machine running Pulumi needs `gke-gcloud-auth-plugin`; with `clusterOnly` it creates no Kubernetes
+provider and needs no plugin for one.
 
 The generated `principal` output is the Kubernetes service account's Workload Identity principal,
 `principal://iam.googleapis.com/projects/<project number>/locations/global/workloadIdentityPools/<project id>.svc.id.goog/subject/ns/<namespace>/sa/<hostname>`,
@@ -1359,11 +1383,13 @@ another stack.
 A component creates its resources only with providers you pass it in its `providers` resource
 option. The listener takes a `docker` provider always, and a `command` provider too when
 `watchdog` is set; the hub takes a `gcp` provider; `gcp:Dispatch` takes `gcp` and `random`
-providers. Their resources use those providers at the version and with the configuration you give
+providers, and with `clusterOnly` a `gcp` provider alone, since it registers no `RandomPassword`.
+Their resources use those providers at the version and with the configuration you give
 them: a docker provider's `host` decides which Docker daemon the listener runs on, and a gcp
-provider's `project` which project the hub or Dispatch is created in. `gcp:Dispatch` creates its Kubernetes provider from the cluster it creates, so no default
-Kubernetes provider is used. The plugin never falls back to a default provider of its own. Without
-one, the component fails before it registers anything:
+provider's `project` which project the hub or Dispatch is created in. `gcp:Dispatch` creates its
+Kubernetes provider from the cluster it creates, so no default Kubernetes provider is used; with
+`clusterOnly` it creates no Kubernetes provider at all. The plugin never falls back to a default
+provider of its own. Without one, the component fails before it registers anything:
 
 ```text
 envoy-infra:host:Listener needs a "docker" provider in its providers option

@@ -1,6 +1,0 @@
-kind: Added
-body: |-
-    The Dispatch tools take a block reference in `reply_to` and `in_reply_to` to answer one block of a comment or message, and read a block of a comment or message by its reference.
-time: 2026-10-28T12:34:46.000000000Z
-custom:
-    Issue: pr2463
