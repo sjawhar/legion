@@ -2,51 +2,50 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-707",
-  "completed": "2026-10-29T17:55:00Z",
+  "completed": "2026-10-30T01:45:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2496",
-  "codeHead": "4720aa342ae71959f043bc10b448527828e0a87d",
-  "round": "answers the tester's fail at 78a70370 (test.json, 1febe317)",
+  "codeHead": "eb0fe0be3cdfe265e0313569afb04ba405cb1b35",
+  "round": "answers the tester's fail at 4720aa34 (test.json, bb5cf244)",
   "answersToTester": [
-    "1. Conflict with main: merged main forward twice, never a rebase: 8a911ecc at df79159d (six conflicted files, per-file resolution in https://github.com/sjawhar/legion/pull/2496#issuecomment-6500462902), then 7c2effba at 4720aa34 (one conflict, .dispatch/architecture/dispatch-docs.md, https://github.com/sjawhar/legion/pull/2496#issuecomment-6501975958). GitHub reports MERGEABLE; pull-request CI runs on 4720aa34 (15 pass, 3 pending, 0 failing when this was written).",
-    "2. Acceptance 2: the INFRA-514 architect dispatched release-envoy-listener.yaml at 4720aa34 (run https://github.com/sjawhar/legion/actions/runs/40909104936) for the tester's cluster runs on INFRA-598's slot; INFRA-598's baseline at 9b92ac14 with browsertype: 16 of 20 typed documents mismatched (dispatch://INFRA-598/artifact/stored-order-10x-typing-lt-20261029t115927-655c-tar-gz). Run stored-order with --artifact for each typed document first: the whole-database check hit cluster.sh's 1,800 s bound.",
-    "3. Acceptance 3: the tester's run on INFRA-589's harness, 5 runs per side, with the same image.",
-    "4. Acceptance 4: the PR body's Chain line quotes each implementer's confirmation (2026-10-29): #2445 (INFRA-605) becomes flushThrough through the run's highest seq with queuedClass marks and roomFlush.markStored; #2468 (INFRA-636) keeps flushThrough's appends in the read phase, queued in call order, no CPU between them; #2480 (INFRA-715) fits as is. Whichever merges second adapts and keeps TestStoredOrder* green.",
-    "5. Dispatch keys: none in any line this PR adds (checked with an awk over `jj diff --from main@origin` + lines); the flush.go and shadow.go keys and eight rewrapped comment lines were cleared. The changelog fragment keeps its required <ISSUE KEY>-<slug>.yaml name (AGENTS.md)."
+    "1. envoy-go-race: CI run 40966135659 at eb0fe0be ran the combined lane: internal/dispatch/docs ok 1578.1s, pmdoc ok 1190.3s, api ok 976.5s (main run 40913369816: 1720.7s, 1497.7s, 1109.1s). The 4720aa34 timeout does not recur. The lane's only red is internal/bus TestTwoStartsRaisingOneStreamAtOnceBothSucceed, main's known flake (INFRA-747, per the INFRA-514 architect); this PR changes nothing under internal/bus. #2516 (docs' own race job) merged on main after this head.",
+    "2. browsertype: repeatable -protect TEXT (abd86842). A peer never edits a paragraph whose plain text holds TEXT, at any depth, read inside the keystroke's transaction (pmdoc.TextInTransaction). The tester's two red tests pass; the only change to them passes the protected marker to keystroke, as their text names, and drops a Dispatch key from one comment. INFRA-598's cluster.sh accepts it.",
+    "3. Third forward merge of main 5455925b at 52f3a8f4 (comment https://github.com/sjawhar/legion/pull/2496#issuecomment-6509860993). Current main cd5ca7c3 merges cleanly (shared files cmd/dispatch/README.md and subcommands.go), so no fourth merge; GitHub reports MERGEABLE.",
+    "4. Changelog fragment renamed to packages/envoy/.changes/unreleased/pr2496-stored-order.yaml with Issue: pr2496.",
+    "Also (architect): stored-order reports a document it compared nothing of as unchecked, never clean; a named unchecked document or a run that checked nothing exits 1 (eb0fe0be). The summary line ends with unchecked=%d."
   ],
   "proof": [
     {
       "criterion": "1. A test drives an agent write racing browser updates on one warm room, fails on main, passes at the head over enough rounds (count and main's failure rate stated).",
-      "surface": "Go tests against a real Postgres 18.6 + pgvector 0.8.7 (local, as CI runs them)",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<url> go test ./internal/dispatch/docs/ -run 'TestStoredOrder' -count=1 -v ; go test ./internal/dispatch/docs/ -run TestStoredOrderSoak -count=1 -v -timeout 60m -args -stored-order-rounds=300 ; CGO_ENABLED=1 go test -race ./internal/dispatch/docs/ -run 'TestStoredOrder|TestAFlush|TestAReadPoint|TestAShadow|TestAFailedRooms|TestRenderReuse' -count=1 -timeout 40m ; go test ./internal/dispatch/docs/ -count=1 -timeout 60m ; go test ./cmd/dispatch/ -count=1",
-      "observed": "At 4720aa34: every TestStoredOrder test passes; soak rounds=300 counted=300 mismatching_counted_rounds=0 mismatches=0 (write_p50=287ms write_p99=2.65s); race lane ok 736.2s, no data race; whole docs package ok 1283.7s; cmd/dispatch ok 301.1s. Failure rate on main p = 1 (12 of 12 counted rounds at main 7c2effba plus the tests; 200 of 200 at 7f2ba1ff), so n = 200; 300 run.",
-      "headSha": "4720aa342ae71959f043bc10b448527828e0a87d",
-      "negativeControl": "main 7c2effba's production code plus this branch's storedorder.go and storedorder_test.go: all ten window tests and the soak FAIL (soak rounds=12 counted=12 mismatching_counted_rounds=12 mismatches=179); TestStoredOrderChecker passes, so the checker is not what fails."
+      "surface": "Go tests against a real Postgres 18.6 + pgvector 0.8.7 (local, as CI runs them), and CI's envoy-go-race lane",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<url> go test ./internal/dispatch/docs/ -run 'TestStoredOrder|TestAFlush|TestAReadPoint|TestAShadow' -count=1 -v ; go test ./loadtest/browsertype/ ./cmd/dispatch/ -run 'Protect|StoredOrder' -count=1 -v ; CI run 40966135659 (go test -race -timeout 30m ./internal/dispatch/docs/ ...)",
+      "observed": "At eb0fe0be every listed test passes (soak 12 counted rounds, 0 mismatches); browsertype and cmd/dispatch ok; CI race lane docs ok 1578.1s. Whole docs package ok 1429.8s at the merge 52f3a8f4; 300-round soak 0 mismatches at 4720aa34 and in the tester's run. p = 1 on main, so n = 200.",
+      "headSha": "eb0fe0be3cdfe265e0313569afb04ba405cb1b35",
+      "negativeControl": "main 7c2effba's production code plus this branch's storedorder.go and storedorder_test.go: all ten window tests and the soak fail (179 mismatches over 12 of 12 counted rounds); the tester rebuilt the same control from main's own tree (170 mismatches)."
     },
     {
-      "criterion": "Stored history replays under real browsers and agent HTTP writes on a real Dispatch server (the surface acceptance 2 runs at cluster scale)",
-      "surface": "local real envoy-dispatch built from the head, Postgres 18.6 + pgvector, browsertype peers over the document websocket, agent writes over the HTTP API, envoy-dispatch stored-order built from the same head",
-      "command": "HEAD_SRC=<4720aa34 packages/envoy> bash run.sh head <4720aa34 packages/envoy> 18801 60 (run.sh, agent.py, pg.sh in dispatch://INFRA-707/artifact/infra-707-implementer-evidence-tar-gz version 3)",
-      "observed": "agent: 55 delete + 43 insert + 19 replace edits, 63 named versions, 51 uploads all accepted; 6 peers errors=0; stored-order documents=2 clean=2 mismatched=0 (1701 and 1733 updates checked, 92 and 93 versions checked), exit 0; server log 0 ERROR lines.",
-      "headSha": "4720aa342ae71959f043bc10b448527828e0a87d",
-      "negativeControl": "Same script with the server built from main 7c2effba: stored-order documents=2 clean=0 mismatched=2, 50 mismatches (32 and 18), exit 1."
+      "criterion": "Stored history replays under real browsers and agent HTTP writes on a real Dispatch server; browsertype -protect leaves the protected paragraph alone",
+      "surface": "local real envoy-dispatch built from the head, Postgres 18.6 + pgvector, browsertype peers over the document websocket, agent writes over the HTTP API, envoy-dispatch stored-order from the same head",
+      "command": "PROTECT='The last paragraph of the seed.' HEAD_SRC=<eb0fe0be packages/envoy> bash run.sh head <eb0fe0be packages/envoy> 18801 60 (run.sh, agent.py, pg.sh in dispatch://INFRA-707/artifact/infra-707-implementer-evidence-tar-gz version 4)",
+      "observed": "agent: 56 delete + 44 insert + 19 replace edits, 64 named versions, 51 uploads accepted; 6 peers errors=0; stored-order documents=2 clean=2 mismatched=0 refused=0 failed=0 unchecked=0 (1696 and 1725 updates, 93 and 95 versions checked), exit 0; the protected sentence still in both documents; server log 0 ERROR lines.",
+      "headSha": "eb0fe0be3cdfe265e0313569afb04ba405cb1b35",
+      "negativeControl": "Same script with the server built from main 5455925b and no -protect: stored-order documents=2 clean=0 mismatched=2, 34 mismatches (16 and 18), exit 1; the unprotected sentence was typed into (grep -c 0)."
     }
   ],
   "filesChanged": [
-    "Forward merges: packages/envoy/internal/dispatch/docs/{docstest/docstest.go,livewrite.go,mutation.go,service.go,tree.go,websocket.go} (conflicts), flush.go, lostedit.go, shadow.go (shadowUpdate renamed shadowRepair), .dispatch/architecture/dispatch-docs.md",
-    "Tests adapted at the merge: render_reuse_test.go (identity repair backfill at afterLiveCommit; foreign commit between operations), margin_equivalence_flows_test.go (anchored comment beside a browser edit), ask_lifecycle_test.go, stale_room_test.go, flush_test.go (signatures)",
-    "Comments: Dispatch keys removed from added lines in authors_test.go, livewrite.go, lostedit.go, mutation.go, mutation_test.go, service.go, flush.go, shadow.go"
+    "Third forward merge: packages/envoy/internal/dispatch/docs/{livewrite.go,mutation.go,service.go} (conflicts), tree.go (comment), fork_reads_test.go (one case adapted to the one-read rule); main's readFork(fork) renamed readForkTree",
+    "packages/envoy/loadtest/browsertype/main.go (-protect), keystroke_test.go (marker passed to keystroke), packages/envoy/internal/dispatch/pmdoc/update.go (TextInTransaction)",
+    "packages/envoy/internal/dispatch/docs/storedorder.go and storedorder_test.go (Checked, Clean requires a check), packages/envoy/cmd/dispatch/storedorder.go and storedorder_test.go (unchecked count, exit 1 on nothing checked), cmd/dispatch/README.md",
+    "packages/envoy/.changes/unreleased/pr2496-stored-order.yaml (renamed from the key-named file)"
   ],
   "trickyParts": [
-    "warmFork now takes the replica's mark and rendering under the replica lock with the exact copy (replicaRead), combining main's render reuse (#2453) with the one exact read; rebuildFork clears forkMarkdown and keeps forkRead.",
-    "flushRead moved into main's recordLiveOperation, before AppendUpdateTx, so margin writes (#2448's applyMargin) also store the room's updates through their read point first.",
-    "The race lane with TestRenderReuse needs -timeout 40m on 2 CPUs; at Go's 10-minute default it stops while still running.",
-    "Local harness: pg.sh (Postgres 18.6 + pgvector unpacked under $TMPDIR/pg18, port 55418). run.sh exits 1 at its last line only because `grep -c ' ERROR '` counts 0 under pipefail; read the stored-order exit line."
+    "browsertype reads paragraph text inside Transact; YText.ToString takes the document lock and deadlocks there, so pmdoc.TextInTransaction walks the items lock-free.",
+    "A local race timing of the docs package at the head and at main did not finish on this pod: the pod's Postgres died with the process restart and the second attempt was stopped for the proof runs before the 02:00Z drain; the CI lane's own times are quoted instead.",
+    "Local harness: pg.sh (Postgres 18.6 + pgvector under $TMPDIR/pg18, port 55418). run.sh's trailing grep counts exit nonzero under pipefail; read the files under e2e/<label>/."
   ],
   "deviations": [
-    "An edit a snapshot or settlement stores itself is credited on that version, not the next one (same rule captureWrite follows); the affected credit tests are renamed and listed in the PR body.",
-    "The api package's TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves refuses the local C-collation database; unrelated, runs in CI."
+    "An edit a snapshot or settlement stores itself is credited on that version, not the next one (same rule captureWrite follows); the affected credit tests are renamed and listed in the PR body."
   ],
   "openQuestions": [
-    "Acceptances 2 and 3 are the tester's runs with the image of 4720aa34 (run 40909104936)."
+    "Acceptance 2: INFRA-598's two cluster passes with the image the architect dispatched at eb0fe0be (run 40986096153); INFRA-598 must parse the summary line's new trailing unchecked= field."
   ]
 }
