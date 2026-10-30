@@ -17,14 +17,16 @@ import (
 
 // Two peers' updates reach the room's persistence in whatever order their read loops hand them
 // on, which need not be the order the room applied them in: ygo fires a transaction's update
-// observers after the transaction has released the document's lock, so one peer's update can be
-// stored while another's is still between the room's update observer, which counts it as pending
-// (recordUpdateClass), and ygo's persistence observer, which hands it to the room's worker.
-// Settlement reads the room only once that count is zero, so a count an out-of-order store left
-// behind would hold the room's settlement off for good: its edits unversioned and its
-// pending-settlement row retried forever. Here the first peer's update is held between those two
-// observers while the second peer's is stored. The room counts the held update, a settlement
-// meanwhile writes nothing, and once the held update is stored the room settles both peers' text.
+// observers after the transaction has released the document's lock, so one peer's update can
+// reach the room's worker while another's is still between the room's update observer, which
+// counts it as pending (recordUpdateClass), and ygo's persistence observer, which hands it to the
+// room's worker. A batch of the room's queued updates may store the held update with the other
+// peer's (room_appends.go), but its count stays until ygo's own call for it takes it. Settlement
+// reads the room only once that count is zero, so a count an out-of-order call left behind would
+// hold the room's settlement off for good: its edits unversioned and its pending-settlement row
+// retried forever. Here the first peer's update is held between those two observers while the
+// second peer's is stored. The room still counts the held update, a settlement meanwhile writes
+// nothing, and once the held update's call returns the room settles both peers' text.
 func TestARoomWhosePeersUpdatesAreStoredOutOfOrderSettlesBoth(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -105,8 +107,8 @@ func TestARoomWhosePeersUpdatesAreStoredOutOfOrderSettlesBoth(t *testing.T) {
 	waitFor(t, 10*time.Second, "the second peer's update to be stored", func() bool {
 		return storedClock(beta.Doc.ClientID()) > 0
 	})
-	if storedClock(alpha.Doc.ClientID()) != 0 {
-		t.Fatal("the first peer's update was stored while it was held")
+	if !service.hasPendingUpdates(artifactID) {
+		t.Fatal("the room counts no pending update while the first peer's update is held before its persistence")
 	}
 
 	state := service.room(artifactID)

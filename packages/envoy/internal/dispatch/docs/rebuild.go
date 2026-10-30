@@ -152,12 +152,16 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 		// markdown is nil here: a closed issue refuses supplied markdown above. The seed differs
 		// from the latest version by the close's states, as each of the issue's documents the
 		// close wrote differs from its own, so it owes the settlement those writes leave owed
-		// (markUpdateOwed): none runs while the issue is closed, and the one its reopen runs
+		// (updateOwedStatement): none runs while the issue is closed, and the one its reopen runs
 		// versions the document and indexes, as new open asks, the blocks marked resolved here
 		// with no ask row. RebuildTx holds the document's advisory lock, which the mark is ordered
-		// by. The writes credit no one, as the close's do: no pending author is added, and the
-		// latest edit source the row names is kept.
-		if err := markUpdateOwed(ctx, tx, artifactID); err != nil {
+		// by. The writes credit no one, as the close's do (the zero owedUpdates): no pending author
+		// is added, and the latest edit source the row names is kept.
+		owed, err := updateOwedStatement(artifactID, owedUpdates{})
+		if err != nil {
+			return RebuildReport{}, VersionResult{}, err
+		}
+		if err := owed.exec(ctx, tx); err != nil {
 			return RebuildReport{}, VersionResult{}, err
 		}
 		logUnindexedAskBlocks(*owner.IssueKey, closedStates.marked)

@@ -28,9 +28,12 @@ same step before and after its change, and compares the two rows.
 | `sample.go` | The 5 s sampler: CPU, RSS, Postgres connections, goroutines, pool waiters, heap, NATS `/varz`. The transaction-id probe. |
 | `lockprobe.go` | The 20 ms sampler of the commit-order lock |
 | `locksampler.go` | The 1 s sampler of every ungranted lock in `pg_locks` |
-| `pgpoll.go` | The poll loop of the lock probes (`pollPG`), and the error policy of the probes' reads, which the 5 s sampler shares: failed reads are counted, the first three are logged, and so is their total past three |
+| `pgpoll.go` | The poll loop of the lock probes (`pollPG`) and of the room sampler (`poll`), and the error policy of the probes' reads, which the 5 s sampler shares: failed reads are counted, the first three are logged, and so is their total past three |
 | `live.go` | The dashboard live sockets' reader of `GET /ws/live` event frames, and the live frame latencies |
-| `proxy.go` | The TCP latency proxy toward Postgres |
+| `editors.go` | The browser-editor workload: Yjs peers on the document websocket, the relay latency and the durable-latency probe (Editors, below) |
+| `rooms.go` | The document rooms' measurements: the 100 ms sampler of the connections rooms hold, and the window's readings of the proxy's wire counts, `dispatch_rooms` and `artifact_versions` (Document rooms, below) |
+| `proxy.go` | The TCP latency proxy toward Postgres, and its wire-count endpoint |
+| `pgwire.go` | The proxy's reading of the Postgres wire protocol: round trips, room work and the timing of version inserts |
 | `tables.go` | `TABLES.md` from one or more `summary.json` files, the pprof tops and the goroutine summary |
 | `guard.go` | `stack.json`, the endpoint flags and the check that every endpoint is the stack's own |
 | `util.go` | Helpers that several files share: the sleep, the profile fetch, the JSON file write and the collector of a step's records |
@@ -78,6 +81,7 @@ same step before and after its change, and compares the two rows.
 | `LOADTEST_SRC` | The checkout that holds the script | The checkout that `stack.sh setup` builds `envoy-dispatch`, `envoy-listener` and `loadgen` from. |
 | `LOADTEST_PG_PORT` | `15432` | The Postgres port. |
 | `LOADTEST_PROXY_PORT` | `15433` | The latency proxy port. |
+| `LOADTEST_PROXY_STATS_PORT` | `15434` | The latency proxy's wire-count port (`GET /stats`, Document rooms, below). |
 | `LOADTEST_NATS_PORT` | `14222` | The NATS client port. |
 | `LOADTEST_NATS_MONITOR_PORT` | `18222` | The NATS monitoring port (`/varz`). |
 | `LOADTEST_LISTENER_PORT` | `19120` | The Envoy listener port. |
@@ -103,7 +107,8 @@ the key stays the same across steps. `stack.sh` stops each process by the pid in
 ```bash
 packages/envoy/loadtest/run-step.sh <name> --events <per s> --sessions <n> --requests <per s> \
   [--duration 180s] [--warmup 30s] [--grace 20s] [--event-mix <preset or kind=w,...>] \
-  [--route-mix <file>] [--human 0.1] [--live <n>] [--rng-seed 1] [--out <dir>]
+  [--route-mix <file>] [--human 0.1] [--live <n>] [--rng-seed 1] [--out <dir>] \
+  [--editors 0] [--editor-rate 2] [--editor-docs 10]
 ```
 
 Example, the 1x step of the root report:
@@ -127,11 +132,14 @@ value.
 | `--route-mix` | the committed `routes-2026-10-26-1719Z.txt` | A route-mix file (Route mix, below). It must be a file. |
 | `--human` | `0.1` | The share of writes that a person makes, 0 to 1. |
 | `--live` | `max(1, round(requests/30))` | Dashboard live sockets (`GET /ws/live`, each subscribed to the event feed as a dashboard tab is): 2 at 60 req/s, 20 at 600 req/s. |
-| `--rng-seed` | `1` | The seed of the event and request schedules. |
+| `--rng-seed` | `1` | The seed of the event, request and editor schedules. |
 | `--out` | `$LOADTEST_ROOT/runs/<name>` | The step directory. It must not exist, or it must be empty. |
+| `--editors` | `0` | Browser editors on document websockets (Editors, below). `0` starts none. |
+| `--editor-rate` | `2` | Updates per second per editor. More than 0. |
+| `--editor-docs` | `10` | The documents the editors share: the first N seeded specs in key order. With fewer editors than documents, the editors edit only as many documents as there are editors. |
 
-Rates are used as given. `0` is a real zero. The event and request schedules are open-loop Poisson
-from the RNG seed, so two runs of one step with one seed offer the same arrivals.
+Rates are used as given. `0` is a real zero. The event, request and editor schedules are open-loop
+Poisson from the RNG seed, so two runs of one step with one seed offer the same arrivals.
 
 `run-step.sh` does these steps in order:
 
@@ -241,7 +249,8 @@ series directory.
   1,000 at 10x. That is 400·f up to 1x, and 400 + 600·(f − 1)/9 above it.
   `loadgen series-sessions <f>` prints the value.
 - The series passes every other step flag to each step: `--duration`, `--warmup`, `--grace`,
-  `--event-mix`, `--route-mix`, `--human`, `--rng-seed`. It refuses `--events`, `--sessions`,
+  `--event-mix`, `--route-mix`, `--human`, `--rng-seed`, and `--editors`, `--editor-rate` and
+  `--editor-docs` (Editors, below), which it does not scale. It refuses `--events`, `--sessions`,
   `--requests`, `--live` and `--out`, because it sets them.
 - With the default window, a step takes about 5 minutes and a series about 30 minutes.
 - `run-series.sh` runs the setup (one build of the checkout), the start, the seed and the migration
@@ -254,6 +263,34 @@ series directory.
 - A failed step stops the series. `run-series.sh` still writes the series `TABLES.md`, over the
   steps that ran (the failed step included when it wrote `summary.json`), and exits with status 1,
   naming the step.
+
+## The document-room steps
+
+Four named steps measure the document rooms' database work before and after a change. Each is
+one `run-step.sh` command. Run each on
+the build before the change and on the build after it, back to back, with the same seed, and
+give each run its own name (for example `1x-before` and `1x-after`):
+
+```bash
+# 1x: the full REST mix of step-1x, plus 20 editors at 2 updates/s on 10 specs.
+packages/envoy/loadtest/run-step.sh 1x --events 4 --sessions 400 --requests 60 \
+  --editors 20 --editor-rate 2 --editor-docs 10
+# 10x: the full REST mix at 10 times 1x, plus 200 editors at 2 updates/s on 100 specs.
+packages/envoy/loadtest/run-step.sh 10x --events 40 --sessions 4000 --requests 600 \
+  --editors 200 --editor-docs 100
+# The editors of 1x over the 0.25x REST mix, which main at c3d09eec survives (plan D7.6).
+packages/envoy/loadtest/run-step.sh editors-1x-over-0.25x --events 1 --sessions 100 --requests 15 \
+  --editors 20 --editor-docs 10
+# The editors of 10x over the 0.25x REST mix.
+packages/envoy/loadtest/run-step.sh editors-10x-over-0.25x --events 1 --sessions 100 --requests 15 \
+  --editors 200 --editor-docs 100
+```
+
+- The 10x step runs 4,000 sessions, as plan D7.6 names it; the series' `step-10x` runs 1,000
+  (Run the series, above). Its sessions wrap over the 1,000 issues.
+- The editor rate is 2 updates a second in every step (`--editor-rate`'s default).
+- The editors' tables are Editors and Document rooms (The tables, below). `loadgen tables` over
+  the step directories puts the runs side by side.
 
 ## The stack (`stack.sh`)
 
@@ -278,10 +315,19 @@ The processes:
   `log_min_duration_statement 50ms`, `log_lock_waits on`. It also adds
   `track_commit_timestamp = on`, for the delivery latency from commit, and
   `unix_socket_directories = ''`, for TCP only. Its logs are in `$LOADTEST_ROOT/pg/log`.
-- **The latency proxy**, `loadgen proxy -rtt 1ms`. It holds each chunk for half the round trip in
-  each direction. Dispatch reaches Postgres through it. In the root report, `-rtt 1ms` added about
-  4 ms per round trip: `select 1` took 4.18 ms p50 through the proxy and 0.13 ms directly. A short
-  sleep in gVisor oversleeps.
+- **The latency proxy**, `loadgen proxy -rtt 1ms -stats 127.0.0.1:<proxy_stats>`. It holds each
+  chunk for half the round trip in each direction. Dispatch reaches Postgres through it. In the
+  root report, `-rtt 1ms` added about 4 ms per round trip: `select 1` took 4.18 ms p50 through the
+  proxy and 0.13 ms directly. A short sleep in gVisor oversleeps. With `-stats`, it also reads the
+  Postgres wire protocol of every connection and serves its counts at `GET /stats` (Document
+  rooms, below). The parse reads the chunks the relay has already copied, on its own goroutines,
+  and never blocks the relay, so the delay is the same with or without it. Its CPU is in the
+  `proxy cores` column.
+
+  `stack.sh start` keeps a proxy that already runs. A proxy started from an older `loadgen` serves
+  no wire counts, so after a `setup` that rebuilt `loadgen`, run `stack.sh stop proxy` and
+  `stack.sh start`. A `stack.json` from before `proxy_stats` gains it at the next `setup`, which
+  refuses while a stack process runs: `stack.sh stop` first.
 - **NATS** with JetStream: `nats-server -js -a 127.0.0.1 -n <stack name> -m <monitor port>`, on a
   fresh store directory at each start.
 - **The listener**, with `ENVOY_MACHINE_ID=<stack name>` and a random API token.
@@ -535,6 +581,62 @@ report.
 A request that the generator cannot start because 25,000 requests are in flight is dropped and
 counted. 25,000 is more than 600 req/s × the 30 s client timeout.
 
+### Editors
+
+`--editors N` adds browser editors: N Yjs peers that type into the seeded specs over Dispatch's
+document websocket, as the dashboard's editor does
+(`packages/dispatch/web/src/features/doc/connection.ts`).
+
+- Editor i edits spec i mod D of the first D seeded specs in key order (`--editor-docs`), as the
+  person `person-<i>`: the request carries `X-Dispatch-User: person-<i>`, the stack's header
+  identity, which the document websocket takes as a person (`docs.Service.requestActor`).
+- It connects to `/ws/doc/{artifact_id}?schema_version=<pmdoc.SchemaVersion()>`, on Hocuspocus
+  framing (each frame starts with the document's name). As `@hocuspocus/provider` does, it sends
+  the token frame (the dashboard's token is its schema version), then sync step 1. It answers the
+  room's sync step 1 and applies every update the room relays. It is synced once the room's sync
+  step 2 has arrived.
+- The editors connect when the step starts, at the start of the warm-up. An editor whose
+  connection ends or fails connects again 1 s later, with a new copy of the document.
+- Each editor sends updates at `--editor-rate` per second, open-loop Poisson from the RNG seed
+  (stream 3 + i, which also picks each update's word), from the step's start to the window's end.
+  Where an update lands in the document comes from another stream, so a skipped update does not
+  move the schedule. An update scheduled while its editor is not connected and synced is not sent;
+  `not_sent` counts it by reason.
+- An update is one keystroke's transaction on the editor's copy: it inserts a space and a word of
+  the seed's vocabulary, with no marks, into the text of a top-level paragraph, at a position
+  inside the text (never at its start or end). It never edits the document's first paragraph,
+  which in a seeded spec is the `Revision token rN` line that the event generator's edits replace,
+  nor a paragraph with more than one text run. The edit stays in the Proof schema
+  (`TestEditParagraphStaysInsideTheProofSchema`).
+- Every 50th update of an editor inserts, in place of the word, a space and a marker
+  `lge<n>x`, with n in 12 digits: 16 bytes, unique in the step, inserted as one string, so the
+  update's bytes hold it whole.
+- The room answers every sync step 2 and update an editor sends with one SyncStatus frame, in
+  order: 1 when it applied the update, 0 when it did not (a read-only connection, or an update it
+  refused). `acknowledged` and `refused` count these answers for the updates scheduled in the
+  window.
+
+The two latencies:
+
+- **Relay**: from just before an editor writes an update to its socket, to when another editor of
+  the same document reads the frame after which its copy holds the update (its state vector holds
+  the sender's clock after the update). Each other editor of the document that was connected and
+  synced when the update was sent counts one receipt. Both times are `loadgen`'s clock. The value
+  includes `loadgen`'s own scheduling of its readers. A document with one editor has no relay
+  latency; `TABLES.md` names those documents. That happens when N < 2D.
+- **Durable**: from the same send time to when a probe finds the marker's row in `doc_updates`.
+  The probe has its own direct Postgres connection (`application_name` `loadgen-durable-probe`),
+  not through the proxy. Every 10 ms it sends, in one pipelined batch, for each marker not yet
+  found, `select version from doc_updates where artifact_id = $1 and version > $2 and
+  position($3 in update) > 0`, so it reads the documents with a marker pending only. `$2` is the
+  highest version the probe had seen on the document before the marker was sent: its read of each
+  document's head before the first editor connects, then the versions of the markers it found. The
+  found time is when the batch's answer arrives, so the value is up to 10 ms plus the batch's
+  time late (±10 ms). A marker not found 60 s after its send is given up: `markers` minus
+  `markers_found`.
+
+Both latencies count only the updates whose schedule is in the window, as the other workloads do.
+
 ## Delivery latency
 
 A **receipt** is one envelope that one session gets on a topic it subscribes to. Its time is when
@@ -629,7 +731,7 @@ series `TABLES.md`, because `run-step.sh` already wrote them for each step.
 
 ## The tables
 
-`TABLES.md` has eight tables, with one row per step. The window is the measured window
+`TABLES.md` has ten tables, with one row per step. The window is the measured window
 (`--duration`). "Cores" means CPU-seconds per second. A cell is `-` when it has no value, and also
 when the read that it comes from failed; a failed read also marks the step name with `(commit
 rows not read)`, `(1 failed read)` or `(<n> failed reads)` (below), so no cell shows a failed read
@@ -716,7 +818,7 @@ divided by 100 ticks per second and by the seconds between the two samples.
 | `heap in use MiB p50 / max` | MiB | Dispatch's `HeapInuse` from `/debug/pprof/heap?debug=1`, read every 15 s. | `resources.heap_inuse_mib` |
 | `goroutines p50 / max` | count | Dispatch's goroutines, from `/debug/pprof/goroutine?debug=1`. | `resources.goroutines` |
 | `goroutines waiting for a pool connection p50 / max` | count | Dispatch's goroutines with a pgx pool `Acquire` frame (puddle) in their stack. | `resources.pool_acquire_goroutines` |
-| `Postgres connections max` | count | The highest number of `pg_stat_activity` rows for database `dispatch`. It includes up to 4 connections of `loadgen`: the sampler, the lock probe, the ungranted-lock sampler and the transaction-id probe. | `resources.pg_conns_total.max` |
+| `Postgres connections max` | count | The highest number of `pg_stat_activity` rows for database `dispatch`. It includes up to 4 connections of `loadgen`: the sampler, the lock probe, the ungranted-lock sampler and the transaction-id probe; a step with editors adds 2 (the room sampler and the durable probe), and the window's two readings of `artifact_versions` hold 1 for a moment each. | `resources.pg_conns_total.max` |
 | `connections waiting on a lock p50` | count | The p50 of `dispatch` connections with state `active` and wait event type `Lock`, over the samples that saw at least one. `0` when no sample saw one. An advisory lock wait has this type. | `resources.pg_conns_by_state["active\|Lock"]` |
 | `Dispatch CPU-s per operation` | CPU-seconds | Dispatch's mean cores divided by the operation rate. An operation is a committed write or a sent request in the window. `-` when the commit rows were not read. | `resources.dispatch_cpu_s_per_op` |
 
@@ -843,6 +945,102 @@ step whose sampler took no sample has `-` in every cell.
 | `step` | name | The step name, with the mark `(1 failed read)` when the transaction-id probe's connect or one of its two reads failed (Commit-order lock, above). | `config.step`, `resources.xid_read_error` |
 | `transaction ids per s` | transaction ids per second | The transaction ids that Postgres assigned per second in the window, in all databases of the server. The transaction-id probe reads the next transaction id (`pg_snapshot_xmax(pg_current_snapshot())`) at the window start and at the window end. It divides the difference by the seconds between the two reads. The probe assigns no transaction id itself. `-` with the mark when a read failed (`resources.xid_read_error` holds the error, and `run.log` shows it); `-` alone when `resources` is null. | `resources.xids_per_s` |
 
+### Editors
+
+The browser editors (Editors, above). A step without editors, and a `summary.json` from before
+them, has no `editors` (null), and its cells are `-`. Updates, latencies and markers count the
+updates scheduled in the window; connects, connect failures and closes count the whole step,
+warm-up and grace included.
+
+| Column | Unit | What it shows | Source |
+| --- | --- | --- | --- |
+| `step` | name | The step name. | `config.step` |
+| `editors on documents (with one editor)` | count | The editors, the documents they edit, then how many of those documents have one editor. A note under the table names those documents per step. | `editors.editors`, `editors.docs`, `editors.single_editor_docs` |
+| `updates/s target / sent` | updates per second | Editors × `--editor-rate`, then the updates sent in the window divided by the window. | `editors.target_per_s`, `editors.sent_per_s` |
+| `updates sent / acknowledged / refused` | count | The updates sent, then those the room answered with SyncStatus 1, then with 0. The rest had no answer by the end of the grace. | `editors.sent`, `editors.acknowledged`, `editors.refused` |
+| `updates not sent` | count | The updates scheduled in the window that were not sent, then the count per reason: `disconnected` (the editor was not connected and synced), `no paragraph` (its copy held no paragraph it may edit) or `write failed` (the socket refused the frame). | `editors.not_sent` |
+| `relay ms p50 / p99` | ms | Relay latency over every receipt (Editors, above). | `editors.relay_ms` |
+| `durable ms p50 / p99 (found / markers)` | ms, then count | Durable latency, ±10 ms, then the markers found and the markers sent. `-` when the probe could not connect or read the heads; a note names why. | `editors.durable_ms`, `editors.markers_found`, `editors.markers`, `editors.durable_note` |
+| `connects / connect failures` | count | The connections opened, then the connection attempts that failed, with the count per reason: `http <status>` for a refused upgrade, `dial` for any other failure. | `editors.connects`, `editors.connect_failures` |
+| `closes by code` | count | The connections the room ended, per WebSocket close code (`1006`: no close frame), most first; `read error` and `unreadable frame` for the other ends. `0` when the room ended none. | `editors.closes` |
+
+`editors` also holds `readonly_connections` (the room admitted the editor read-only, so it
+refused its updates) and `auth_denied` (the room refused the token frame).
+
+### Document rooms
+
+Dispatch's document rooms' database work. Every step after this table was added has `rooms`; a
+`summary.json` from before it has none, and its cells are `-`. A note under the table says why a
+step has no value for a column.
+
+**Round trips.** The latency proxy reads the Postgres wire protocol of each client connection
+(`pgwire.go`), and `loadgen run` reads its counts (`GET /stats` on `ports.proxy_stats`) at the
+window's start and at its end; the columns are the differences.
+
+- The parser follows the startup (an SSLRequest or GSSENCRequest first, which the server refuses
+  with one byte: the harness DSN is `sslmode=disable`), then the typed frames. It maps every
+  prepared statement's name, the unnamed one included, to its SQL from the `Parse` frames.
+- A **round trip** is each `Sync`, each simple `Query` and each function call: each is what a
+  client waits on, and Postgres answers each with one `ReadyForQuery`. A `Flush` is one too when a
+  frame since the last round trip awaits an answer. pgx v5.11 sends no `Flush`: only
+  `pgconn.Pipeline.SendFlushRequest` does, and neither pgx nor Dispatch calls it; `flush` in
+  `rooms.round_trips` counts them. The startup's `ReadyForQuery` is no round trip.
+- A round trip is **room work** when one of its statements (the SQL of a `Parse`, the statement a
+  `Bind` names, or a `Query`'s text), matched case-insensitively, names `doc_updates`,
+  `doc_checkpoints`, `doc_pending_authors` or `doc_settlements_pending`, or takes, tries or frees
+  the document's advisory lock as Dispatch writes it: `pg_advisory_(xact_)lock(hashtext($n))`,
+  `pg_try_advisory_lock(hashtext($n))`, `pg_advisory_unlock(hashtext($n))`. A lock on
+  `hashtext` of a literal (`'issue-rank:' || $1`) or on two keys is not a room's. The match is on
+  the SQL text, so it counts the same on any build.
+- The proxy counts every connection through it: Dispatch's, and no other, since `loadgen`'s
+  samplers reach Postgres directly. A connection whose stream the parser cannot follow (a frame it
+  cannot read, an encrypted stream, or a parser 4,096 chunks behind the relay) is not counted from
+  then on; `unparsed_connections` counts them, and a note names the step.
+- The two readings are some milliseconds after the window's start and end, `interval_s` apart.
+- `-` with a note when Dispatch reaches Postgres directly (`LOADTEST_PG_DIRECT=1`), when
+  `stack.json` names no `proxy_stats`, when the proxy serves no `/stats` (one started from an
+  older `loadgen`), or under `-allow-foreign`. `proxy_stats` is no endpoint flag: a foreign run
+  takes nothing from `stack.json`, so it reads no proxy's counts, and the rule that a foreign run
+  gives every endpoint flag does not cover it.
+
+**Connections held by rooms.** In a step with editors only, a sampler reads every 100 ms, from the
+window's start to its end, over its own direct connection (`loadgen-room-sampler`), the backends
+of database `dispatch` that hold or wait for a single-key advisory lock (`pg_locks`,
+`locktype = 'advisory'`, `objsubid = 1`) other than the events commit-order lock
+`0x4449535041544348` (`internal/dispatch/events/broker.go`), together with the backends that are
+not idle and whose statement names `doc_updates`. `loadgen`'s own backends are left out. A step
+without editors runs no such sampler, so its load is the one the other tables measured before the
+sampler existed: each read of `pg_locks` costs Postgres CPU (Ungranted locks, above). Its failed
+reads, a failed connect counting as one, mark the row `(<n> failed reads)` as the other probes'
+failed reads do (Commit-order lock, above); `rooms.connections.errors` counts them, and `run.log`
+shows the first three and their total.
+
+**Batches.** `loadgen run` reads Dispatch's `dispatch_rooms` from the profiler's `/debug/vars` at
+the window's start and end. A build that serves no `dispatch_rooms` reads `not served by this
+build`, with the profiler's answer when it answered an error; the cell shows it on one line, its
+white space collapsed and `|` escaped.
+
+**Whole markdown per version.** At the window's start and end, over a direct
+connection, `loadgen run` reads `pg_total_relation_size('artifact_versions')` (heap, TOAST and
+indexes) and the table's rows. The proxy times each round trip that runs a statement matching
+`insert into artifact_versions`: from its `Sync` or `Query` reaching Postgres (after the proxy's
+delay) to Postgres's `ReadyForQuery` reaching the proxy, so it is Postgres's time for the insert
+and its triggers, plus a loopback hop, without the added round trip. A round trip that only
+prepares the insert is not timed.
+
+| Column | Unit | What it shows | Source |
+| --- | --- | --- | --- |
+| `step` | name | The step name, with the mark `(<n> failed reads)` when the room sampler had failed reads. | `config.step`, `rooms.connections.errors` |
+| `round trips room / all` | count | The room-work round trips, then all round trips, in the window. | `rooms.round_trips.room`, `.all` |
+| `room round trips per update` | round trips | Room-work round trips divided by the editor updates sent in the window. The numerator includes room work that is not the editors' (a REST edit's write to a room, a settlement, a room's load). `-` without editors. | `rooms.round_trips.room_per_update` |
+| `connections held by rooms p50 / p99 / max` | count | The backends counted per sample. | `rooms.connections.held` |
+| `shared-pool share` | percent | Over every sample, the counted backends whose `application_name` is not `dispatch-room-appends` or `dispatch-rooms` (Dispatch's room pools), divided by all counted backends. A build whose room appends use the shared pool reads 100%. | `rooms.connections.shared_pool_share` |
+| `append batches / updates / round trips` | count | `dispatch_rooms`' `append_batches`, `appended_updates` and `append_round_trips` in the window. | `rooms.batches` |
+| `batch sizes (updates: batches)` | count | `dispatch_rooms`' `batch_sizes` in the window: for each bucket of updates per batch that holds a batch, its batches. | `rooms.batches.batch_sizes` |
+| `artifact_versions KiB/s` | KiB per second | The growth of `artifact_versions` divided by the seconds between the two reads. Postgres grows a relation by 8 KiB pages, so the growth is exact to a few pages per relation. | `rooms.versions.bytes_per_s` |
+| `versions written` | count | The rows `artifact_versions` gained. | `rooms.versions.written` |
+| `version insert ms p50 / p99 (count, total ms)` | ms, then count and ms | The timed version inserts: p50 / p99 over those the proxy's ring of the latest 16,384 still held (`insert_samples_missing` counts the rest), then their count and their time in all, which are exact. | `rooms.versions.insert_ms`, `.insert_count`, `.insert_total_ms` |
+
 ### Requests by route
 
 There is one row per route and one column per step.
@@ -909,9 +1107,10 @@ Give `-nats-server-name` to keep the NATS check. The sampler gets no pids. `meta
 - **No embeddings.** Dispatch gets no AWS credentials or region. Meaning search is unavailable, and
   search falls back to keyword.
 - **A smaller dataset.** 1,000 issues and about 10,000 events at the start of each step.
-- **No browser documents.** No document websockets and no dashboard refetch fan-out. The browser
-  share of the route mix is plain GETs. The live sockets subscribe to the event feed alone (no
-  delivery or agent views), time each event frame, and do nothing more.
+- **Browser documents in editor steps only.** A step with `--editors` opens document websockets
+  and types into specs (Editors, above); the others open none. No step has a dashboard refetch
+  fan-out. The browser share of the route mix is plain GETs. The live sockets subscribe to the
+  event feed alone (no delivery or agent views), time each event frame, and do nothing more.
 - **One listener, sessions on NATS.** The sessions receive from NATS directly, as the pi plugin's
   self-subscription does. They register with port 0, so the listener delivers nothing to them.
 - **One process each.** One Dispatch process, one NATS server and one listener, all on
@@ -957,9 +1156,8 @@ Compare the right rows:
 - These belong to the cluster load test: 10-minute steps, one-hour soak trends (the 5 s series in
   `samples.json` is there for them), the replay of production's log, sampling of the production
   database and restarts during load.
-- The browser-editor load work adds its browser-editor workload, its round-trip counter and its
-  document-room sampler
-  to this package.
+- The editors type only into paragraphs of specs, one word at a time; they neither format, delete,
+  nor send awareness, and each editor keeps one document.
 - The request-path CPU work's request generator, a replay of production's writes, is to be built
   into this package, so that
   one generator remains. The route-mix file and `routes.go` are this package's own GET generator

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-605",
+  "completed": "2026-10-30T04:34:43Z",
+  "round": 3,
+  "reviewedHead": "code f99cd8043925 (forward merge of main de546ed2 over 27ef52a6); the approval names the handoff-only head this push makes",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 4,
+  "fullRound": "Main changed 16 of the PR's files in the window 1f5b0828..de546ed2, and the merge resolved code in docs/read_cache.go and docs/websocket.go, so this is a full round, not a confirmation.",
+  "ci": "Required set on main (ruleset): lint, typecheck, test, pr-title; branch protection none. CI run 40976387622 at f99cd804: attempt 1 green except envoy-go (internal/dispatch/startup TestTwoAnnouncersAtOnceAnnounceAndPublishOnce, started_test.go:271 FleetCommit=<nil>, a package this PR does not touch, NATS 'stream unavailable' retries around it) and ci-ok cancelled; attempt 2 (gh run rerun --failed, once) completed success, every job green: lint, test, pr-title, envoy-go, envoy-go-race, envoy-go-race-docs, envoy-infra-go, dispatch, dispatch-memory, dispatch-multiprocess, ci-ok; typecheck skipped (no daemon change). compare f99cd804...60fa3208: .legion/INFRA-605/ only, 2 files.",
+  "thermonuclear": {
+    "deepReview": "Verdict: APPROVE at f99cd804 - read_cache.go resolution correct (leader's token taken under its hold before the stamp read; four stale-serve interleavings refuted); main's changes to the 16 shared files keep the head tracker, own-write tracking, batched appends and socket admission; no writer without beginOwnWrite.",
+    "codeQuality": "Verdict: APPROVE at f99cd804 - merge resolution sound; connection totals 95/190 agree in code and docs; Minor items only."
+  },
+  "keyFindings": [
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/read_cache.go:430", "description": "fold.read.heads is set by the caller before put, outside documentReads.mu, against the comment at :78; let put take the token and assign it under its lock, as get does."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/persistence.go:134", "description": "Says lockSettlementCursor try-locks at shutdown; it now waits under lock_timeout (service.go:2434-2464)."},
+    {"severity": "minor", "file": "packages/envoy/cmd/dispatch/multiprocess_test.go:924", "description": "Says retrySettleSoon re-arms at a fixed 10 ms; it now re-arms at once or when the room's appends land (service.go:1344-1356)."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/service.go:1546", "description": "Says settleRetrySoon runs again in a moment; it now runs once the appends land."}
+  ],
+  "proseFixes": "None pushed this round: the architect asked for the approval at f99cd804 with its checks green and nothing pushed meanwhile; the three stale comments and the put() setup are named in the review for the implementer's next push (the forward merge before READY).",
+  "threads": "11 threads, all opened by this reviewer. The 10 from round 1 are answered, accepted and resolved. Round 2's PRRT_kwDORFy7ds6xobI0 (race-lane deadline) answered at f99cd804 (fixed by main's #2516, envoy-go-race-docs green) and accepted; the implementer resolves it. No bot threads."
+}

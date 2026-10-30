@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"runtime"
 	"slices"
@@ -203,6 +204,74 @@ func TestPoolRefusesASecondConnectionWhileOneIsHeld(t *testing.T) {
 	}
 }
 
+// What AfterCommit registers runs once, when the transaction ends, with whether it committed: a
+// commit runs it with true, a rollback with false, and the deferred rollback every caller runs
+// after its commit runs nothing again. A transaction opened with no hold mark on its context is
+// tracked as well, and one the pool did not open - begun on an acquired connection - is refused,
+// as is a transaction that has already ended.
+func TestAfterCommitRunsOnceWhenTheTransactionEnds(t *testing.T) {
+	database := openTestStore(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name string
+		end  func(pgx.Tx) error
+		want []bool
+	}{
+		{name: "commit", end: func(tx pgx.Tx) error { return tx.Commit(ctx) }, want: []bool{true}},
+		{name: "rollback", end: func(tx pgx.Tx) error { return tx.Rollback(ctx) }, want: []bool{false}},
+		{name: "commit then deferred rollback", end: func(tx pgx.Tx) error {
+			if err := tx.Commit(ctx); err != nil {
+				return err
+			}
+			if err := tx.Rollback(ctx); !errors.Is(err, pgx.ErrTxClosed) {
+				return fmt.Errorf("rollback after commit = %v, want pgx.ErrTxClosed", err)
+			}
+			return nil
+		}, want: []bool{true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tx, err := database.Pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin: %v", err)
+			}
+			defer tx.Rollback(ctx)
+			var ran []bool
+			if !AfterCommit(tx, func(committed bool) { ran = append(ran, committed) }) {
+				t.Fatal("AfterCommit refused a transaction of the pool")
+			}
+			if len(ran) != 0 {
+				t.Fatalf("AfterCommit ran %v before the transaction ended", ran)
+			}
+			if err := tc.end(tx); err != nil {
+				t.Fatalf("end the transaction: %v", err)
+			}
+			if !slices.Equal(ran, tc.want) {
+				t.Fatalf("AfterCommit ran with %v, want %v", ran, tc.want)
+			}
+			if AfterCommit(tx, func(bool) { t.Error("a function registered after the end ran") }) {
+				t.Error("AfterCommit accepted a transaction that has ended")
+			}
+		})
+	}
+
+	conn, err := database.Pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire a connection: %v", err)
+	}
+	defer conn.Release()
+	own, err := conn.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin on the acquired connection: %v", err)
+	}
+	defer own.Rollback(ctx)
+	if AfterCommit(own, func(bool) { t.Error("a function registered on a transaction the pool did not open ran") }) {
+		t.Error("AfterCommit accepted a transaction the pool did not open")
+	}
+	if err := own.Commit(ctx); err != nil {
+		t.Fatalf("commit on the acquired connection: %v", err)
+	}
+}
+
 // Reads a caller runs side by side each take one connection: each read's context carries a hold
 // mark of its own, so one read's open cursor does not refuse the other, while each is still
 // refused a second connection of its own, and a caller already holding one is refused them all.
@@ -301,6 +370,129 @@ func TestListenerIsServedWhileTheSharedPoolIsFullyAcquired(t *testing.T) {
 			t.Fatalf("round %d: close: %v", round, err)
 		}
 		cancel()
+	}
+}
+
+// RoomAppends hands out connections of a pool of its own: a connection taken there is not one of
+// the shared pool's, names itself dispatch-room-appends to Postgres, and is counted by Use, which
+// the process drain waits on (cmd/dispatch's waitUntilIdle) before it closes the pool. A rooms
+// connection names itself dispatch-rooms, so pg_stat_activity tells a load from a room's append
+// and both from a request.
+func TestRoomAppendsIsAPoolOfItsOwnThatUseCounts(t *testing.T) {
+	database := openTestStore(t)
+	ctx := context.Background()
+	appends, err := database.Pool.RoomAppends()
+	if err != nil {
+		t.Fatalf("open the room-appends pool: %v", err)
+	}
+	if again, err := database.Pool.RoomAppends(); err != nil || again != appends {
+		t.Fatalf("a second RoomAppends = %p, %v; want the pool the first opened, %p", again, err, appends)
+	}
+	if got := appends.Config().MaxConns; got != roomAppendsPoolSize {
+		t.Fatalf("room-appends pool holds at most %d connections, want %d", got, roomAppendsPoolSize)
+	}
+
+	sharedAcquires := database.Pool.Stat().AcquireCount()
+	before := database.Pool.Use()
+	conn, err := appends.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire a room-appends connection: %v", err)
+	}
+	released := false
+	defer func() {
+		if !released {
+			conn.Release()
+		}
+	}()
+	var name string
+	if err := conn.QueryRow(ctx, "select current_setting('application_name')").Scan(&name); err != nil {
+		t.Fatalf("read the room-appends connection's application name: %v", err)
+	}
+	if name != roomAppendsApplicationName {
+		t.Fatalf("room-appends connection's application_name = %q, want %q", name, roomAppendsApplicationName)
+	}
+	if got := database.Pool.Stat().AcquireCount(); got != sharedAcquires {
+		t.Fatalf("a room-appends connection took %d connections of the shared pool, want none", got-sharedAcquires)
+	}
+	if use := database.Pool.Use(); use.InUse != before.InUse+1 {
+		t.Fatalf("Use counts %d connections in use with one room-appends connection held, want %d", use.InUse, before.InUse+1)
+	}
+	conn.Release()
+	released = true
+	if use := database.Pool.Use(); use.InUse != before.InUse || use.Returned != before.Returned+1 {
+		t.Fatalf("after the room-appends connection's release Use = %+v, want %d in use and %d returned",
+			use, before.InUse, before.Returned+1)
+	}
+
+	rooms, err := database.Pool.Rooms()
+	if err != nil {
+		t.Fatalf("open the rooms pool: %v", err)
+	}
+	if err := rooms.QueryRow(ctx, "select current_setting('application_name')").Scan(&name); err != nil {
+		t.Fatalf("read the rooms connection's application name: %v", err)
+	}
+	if name != roomsApplicationName {
+		t.Fatalf("rooms connection's application_name = %q, want %q", name, roomsApplicationName)
+	}
+}
+
+// Close waits for every connection in use to come back, and the health probe answers for as long
+// as it waits: a caller waiting on Close (cmd/dispatch's closePool) asks it whether the connection
+// it waits on will ever come back. Use keeps counting that connection, and once Close has returned
+// the health probe's pool has closed too.
+func TestHealthyAnswersWhileCloseWaitsForAConnectionInUse(t *testing.T) {
+	database := openTestStore(t)
+	ctx := context.Background()
+	// The health probe reads the applied schema version, so the database must have one.
+	if err := database.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	held, err := database.Pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire a shared connection: %v", err)
+	}
+	released := false
+	defer func() {
+		if !released {
+			held.Release()
+		}
+	}()
+
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		database.Pool.Close()
+	}()
+	// Close refuses the other separate pools from the moment it begins.
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := database.Pool.Rooms(); errors.Is(err, ErrPoolClosed) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Close never began")
+		}
+	}
+	if _, err := database.Pool.Healthy(ctx); err != nil {
+		t.Fatalf("health probe while Close waits for a connection in use: %v, want an answer", err)
+	}
+	if use := database.Pool.Use(); use.InUse != 1 {
+		t.Fatalf("Use counts %d connections in use while Close waits for the one held, want 1", use.InUse)
+	}
+	select {
+	case <-closed:
+		t.Fatal("Close returned with a connection still in use")
+	default:
+	}
+
+	held.Release()
+	released = true
+	select {
+	case <-closed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close did not return once the connection in use came back")
+	}
+	if _, err := database.Pool.Healthy(ctx); !errors.Is(err, ErrPoolClosed) {
+		t.Fatalf("health probe after Close: %v, want ErrPoolClosed", err)
 	}
 }
 

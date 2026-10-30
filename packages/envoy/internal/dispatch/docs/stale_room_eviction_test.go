@@ -166,9 +166,9 @@ func TestAWriteOnTheOtherProcessClosesThisProcessesRoomWithinTheRoundTrip(t *tes
 	waitForPeerDocument(t, again, stored)
 }
 
-// This process's own writes evict nothing: a browser typing here appends several updates a
-// second, each notifying every process, and a room closed on its own write would close under
-// every keystroke. The room's cursor is what tells them apart - its own append advanced it
+// This process's own writes evict nothing: a browser typing here appends several batches of
+// updates a second, each notifying every process, and a room closed on its own write would close
+// under every keystroke. The room's cursor is what tells them apart - its own append advanced it
 // under the lock it appended in, so the room stands at the head - and this waits for each
 // keystroke's own notification to be decided rather than for a moment to pass.
 func TestARoomIsNotEvictedByItsOwnProcessesWrites(t *testing.T) {
@@ -1303,7 +1303,7 @@ func listenForDocumentChanges(t *testing.T, database *store.Store) <-chan string
 }
 
 // A browser's append commits inside the session lock it took the document under, and advances its
-// room's cursor before it drops that lock (appendUpdate). Between the two the store stands one
+// room's cursor before it drops that lock (AppendUpdatesWithCredit). Between the two the store stands one
 // past the room, which is what a notification read through the pool sees - this process's own
 // write, read as another process's. The evictor reads the room again under that lock before it
 // closes anything (roomBehindDurableHead), where the append has either dropped the lock, cursor

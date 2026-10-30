@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-605",
+  "round": 7,
+  "completed": "2026-10-30T01:24:00Z",
+  "headTested": "9b7d6ac53b828a442d5636af38f31f4b4f313d72 (handoff-only, skip-checks; its code head f99cd8043925833c0ce97b47e3a2833f0a1c7611, the forward merge of main de546ed2 over the reviewer's 27ef52a6 above my round-6 head a529f15f; real-surface runs used exports of f99cd804 and of de546ed2 with f99cd804's loadtest/)",
+  "forwardMerge": "Full round. Fingerprint a529f15f -> f99cd804 (conflicts-and-rewrites command, fileset '~(.legion | docs/solutions)'): be3856472cc4a0ebad1c64027ba7b85ae093b9657c7df9075cfbe5948dba15dc -> a652a0f332735e525f2d32532f0ec14ecc5d282fce12b23b44b665b041988fbd, changed. The pull request's own diff changed in three places: the reviewer's doc fix (two processes hold 190, not 188), comment rewraps against main's text, and one code resolution in read_cache.go, where main's shared cold-read fold (foldDocument, singleflight on a context no request cancels) now stores the rendering with the head tracker's token the leading read took before its stamp read (fold.read.heads = heads; s.reads.put(fold.read, s.heads)). Main also changed 16 files of the pull request's diff in the window 1f5b0828..de546ed2, among them docs/service.go, websocket.go, tree.go, livewrite.go, mutation.go and read_cache.go.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "At f99cd804 on this pod: go build -p 2 ./... and go vet -p 2 ./... in packages/envoy pass, and so do go vet ./... and go vet -tags natslive ./core/ in packages/envoy/infra (no go.work.sum change). The read-cache, head-tracker, ping, half-open and caps tests (22, my four red tests among them, unchanged since round 4) pass against a real Postgres 16.2 with -p 2 -parallel 4 (ok 55.0 s). Real surface below."
+  },
+  "ci": "Read at f99cd804, 01:20Z: not settled - runners queued. Completed success: worker-image build, docs, changes, pr-title (one of two). Queued or running: lint, test, pr-title, envoy-go, envoy-go-race, envoy-go-race-docs (main's #2516 split the docs package into its own race job), envoy-infra-go, listener-server-change, dispatch, dispatch-multiprocess, dispatch-memory, dispatch-browser-multiprocess, broker-multiprocess, envoy-smoke, envoy-session-stall, pi-legion, ci-filters. Main changed files of the pull request's diff in the merged window, so by the architect's rule the lanes that build them (envoy-go, envoy-go-race, envoy-go-race-docs, envoy-infra-go, dispatch and the multiprocess lanes) must be read green at f99cd804 before approval; none had run when I read.",
+  "failed": 0,
+  "failures": [],
+  "notMine": [
+    "Known red on main per the INFRA controller: packages/dispatch/e2e/close-withdraws-asks.e2e.ts:126.",
+    "Pool pile-ups of ~10 s in the base build's load run (20 goroutines waiting for a pool connection, durable p99 11,100 ms), as in round 6 on both builds; the head's run had none."
+  ],
+  "proof": [
+    {
+      "criterion": "A cached cold read needs no database read while the tracker trusts itself (the code the merge resolved)",
+      "surface": "REST GET /api/v1/artifacts/<id>/text on one of two processes through the latency proxy, round trips counted by the proxy",
+      "command": "$TMPDIR/t605/cachehit.sh <after7|before7> t605ch7",
+      "observed": "100 cached reads: 642 round trips at f99cd804 (tracker trusted, one cache entry), 766 at the base de546ed2 - one round trip fewer per read, the stamp read the base makes every time",
+      "headSha": "f99cd8043925833c0ce97b47e3a2833f0a1c7611",
+      "negativeControl": "the base de546ed2: 766 round trips for the same 100 reads, /debug/vars 404"
+    },
+    {
+      "criterion": "Concurrent cold reads that share one fold stay fresh and monotonic while another process writes",
+      "surface": "two Dispatch processes on one database; A takes 20 REST edits (POST /api/v1/artifacts/<id>/edits, r0 -> r20, one each 0.25 s) while 8 readers send 400 cold reads each to B",
+      "command": "$TMPDIR/t605/race.sh <after7|before7> t605rc7",
+      "observed": "head: 3,200 reads on B, 0 reads older than a revision the same reader had already read, every reader ended on r20, B read r20 0.2 s after A's last edit answered; base: the same, 0.3 s",
+      "headSha": "f99cd8043925833c0ce97b47e3a2833f0a1c7611",
+      "negativeControl": "the round-1 head 59a3aeae (round 1): a reader whose LISTEN was half-open served the old text for 31.4 s; here the base build serves the same answers without a cache, so equal freshness is the control"
+    },
+    {
+      "criterion": "DR-08: a reader whose document LISTEN goes half-open sees another process's write within the bound",
+      "surface": "two dispatch-after7 processes; the reader's 'listen dispatch_doc_head...' backend stopped with SIGSTOP after its tracker trusted itself",
+      "command": "$TMPDIR/t605/halfopen.sh after7 t605h7",
+      "observed": "B trusted:true with the spec cached before the stall; A's edit 200; B fresh after 2.3 s; trusted:false 4 s later",
+      "headSha": "f99cd8043925833c0ce97b47e3a2833f0a1c7611",
+      "negativeControl": "the round-1 head 59a3aeae (round 4's run): B served the old text for 25.5 s while trusted:true"
+    },
+    {
+      "criterion": "Browser updates batched on the rooms' own connections; DR-16 caps answer 503 only; tracker entries follow what is held; the ping costs nothing at idle",
+      "surface": "INFRA-589's load reproduction (one run per side), real document websockets, 2 and 4 Dispatch processes with a psql LISTEN dispatch_doc_ping, /debug/vars",
+      "command": "run-step.sh r7-editors-1x-over-0.25x-<side> --events 1 --sessions 100 --requests 15 --editors 20 --editor-docs 10; caps.sh after7 t605c7 2 3; leak.sh after7 t605lk7; idle.sh <before7|after7> <db> 4 120 (twice per side); PRE=edit SETTLE=110 idle.sh after7 t605i7e 2 60",
+      "observed": "load base -> head: 9.18 -> 2.97 room round trips per update, shared-pool share 100% -> 31%, rooms' connections p99 13 -> 5, durable p50/p99 86/11,100 -> 75/210 ms, REST p99 2,365 -> 193 ms, 7,193/7,193 acknowledged both, 5,890 batches of 7,187 updates in 17,670 round trips. Caps 2/3: 2 admitted, 503:8, then 503:10, no 401. Entries: p1 {rooms 6, cache 5, entries 11} -> {rooms 0, cache 5, entries 5} 130 s later, p2 {cache 2, entries 2}. Idle 4 processes: 0 pings; round trips 752 / 1,000 (base) against 997 / 988 (head) per min over 120 s windows, the first base window short by one minutely pass as in round 6; after one REST edit: 0 pings, 0 entries.",
+      "headSha": "f99cd8043925833c0ce97b47e3a2833f0a1c7611",
+      "negativeControl": "the base de546ed2: 100% of room-held connections on the shared request pool and /debug/vars 404; round 2's head 2fdeabab sent 240 pings/min from four idle processes"
+    }
+  ]
+}

@@ -828,6 +828,12 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, map[string]string{"DISPATCH_PPROF_PORT": "0"}, "DISPATCH_PPROF_PORT")
 		},
+		"DISPATCH_MAX_LIVE_ROOMS": func(t *testing.T) {
+			documentCapReachesTheService(t, "DISPATCH_MAX_LIVE_ROOMS", func(rooms, _ int) int { return rooms })
+		},
+		"DISPATCH_MAX_DOC_CONNECTIONS": func(t *testing.T) {
+			documentCapReachesTheService(t, "DISPATCH_MAX_DOC_CONNECTIONS", func(_, connections int) int { return connections })
+		},
 		"DISPATCH_SERVER_URL": func(t *testing.T) {
 			if cfg, err := envoyJSON(t, map[string]string{"DISPATCH_SERVER_URL": "https://from-the-table.example"}); err != nil || cfg.Dispatch.ServerURL != "https://from-the-table.example" {
 				t.Errorf("set: %+v, %v; want the variable over envoy.json", cfg, err)
@@ -1712,6 +1718,23 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 	}
 	for name := range cases {
 		t.Errorf("a case for %s, which the settings table does not list", name)
+	}
+}
+
+// documentCapReachesTheService hands name, one of the document service's caps, to the service
+// main builds (newDocumentService) through the settings read alone, and reads back the cap it
+// sets (capOf of docs.Service.RoomCapsForTest): unset, the service's own default of 1,000; set,
+// its value; and a value that is not a positive integer refuses startup naming it.
+func documentCapReachesTheService(t *testing.T, name string, capOf func(rooms, connections int) int) {
+	t.Helper()
+	for value, want := range map[string]int{"": 1000, " 25 ": 25} {
+		boot := resolveWith(t, map[string]string{name: value})
+		if got := capOf(newDocumentService(boot, docs.Deps{}).RoomCapsForTest()); got != want {
+			t.Errorf("%s=%q: the document service's cap is %d, want %d", name, value, got, want)
+		}
+	}
+	for _, invalid := range []string{"0", "-5", "+3", "1.5", "lots"} {
+		refusedWith(t, map[string]string{name: invalid}, fmt.Sprintf("%s=%q (expected a positive integer)", name, invalid))
 	}
 }
 

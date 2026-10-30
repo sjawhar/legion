@@ -35,9 +35,9 @@ type setting struct {
 }
 
 // settings is every Dispatch setting, in the order an operator meets them: storage, identity,
-// where the server listens, NATS, the Envoy listener, projects, the GitHub App, cookies,
-// service-account tokens, the secrets broker, meaning search's model service, the dashboard, and
-// local and test runs.
+// where the server listens and how many document rooms and connections it holds, NATS, the Envoy
+// listener, projects, the GitHub App, cookies, service-account tokens, the secrets broker, meaning
+// search's model service, the dashboard, and local and test runs.
 var settings = []setting{
 	{Name: "DATABASE_URL", Required: "yes",
 		Description: "Postgres connection string. The server migrates the database before serving; `census`, `backfill-block-ids`, `backfill-anchor-blocks`, `backfill-files` and `rebuild-refs` read it too. A `pool_max_conns` parameter is refused."},
@@ -66,7 +66,11 @@ var settings = []setting{
 	{Name: "DISPATCH_LISTEN_FD", Required: "no",
 		Description: "An inherited listening TCP socket (descriptor number) the server serves on instead of binding; for test harnesses that hold the port. `DISPATCH_PORT` and `DISPATCH_LISTEN_HOST`, when set and not empty, must name the socket's address; `DISPATCH_SERVER_URL` is not derived from it. A descriptor that is not a listening TCP socket refuses startup, and the server binds nothing in its place."},
 	{Name: "DISPATCH_PPROF_PORT", Required: "no",
-		Description: "Port on `127.0.0.1` the Go profiler (`net/http/pprof`, under `/debug/pprof/`) listens on, reachable only from inside the pod or through `kubectl port-forward`; unset or empty, nothing listens. A value that is not a port 1-65535 refuses startup."},
+		Description: "Port on `127.0.0.1` the Go profiler (`net/http/pprof`, under `/debug/pprof/`) and the process's `expvar` variables (`/debug/vars`, the document rooms' figures as `dispatch_rooms`) listen on, reachable only from inside the pod or through `kubectl port-forward`; unset or empty, nothing listens. A value that is not a port 1-65535 refuses startup."},
+	{Name: "DISPATCH_MAX_LIVE_ROOMS", Default: "`1000`", Required: "no",
+		Description: "Most document rooms the server holds in memory at once; a document socket that would open one more is refused (503) until a room goes. A positive integer."},
+	{Name: "DISPATCH_MAX_DOC_CONNECTIONS", Default: "`1000`", Required: "no",
+		Description: "Most browser connections to document rooms the server holds at once; one more document socket is refused (503) until one leaves. A positive integer."},
 	{Name: "XDG_CONFIG_HOME", Default: "`~/.config`", Required: "no",
 		Description: "Directory whose `legion/envoy.json` is the user `envoy.json`, which `DISPATCH_SERVER_URL` and `NATS_URLS` fall back to; set but empty, it is `~/.config` too, and a path that is not absolute refuses startup."},
 	{Name: "DISPATCH_SERVER_URL", Default: "`dispatch.serverUrl` from `envoy.json`", Required: "no",

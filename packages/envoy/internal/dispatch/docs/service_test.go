@@ -4250,11 +4250,11 @@ func (s failingVersionedStore) AppendUpdate(ctx context.Context, room string, up
 	return s.VersionedStore.AppendUpdate(ctx, room, update)
 }
 
-func (s failingVersionedStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
+func (s failingVersionedStore) AppendUpdatesWithCredit(ctx context.Context, room string, updates []BrowserUpdate) (persistence.Version, error) {
 	if s.appendErr != nil {
 		return 0, s.appendErr
 	}
-	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
+	return s.VersionedStore.AppendUpdatesWithCredit(ctx, room, updates)
 }
 
 type failingBackfillVersionedStore struct {
@@ -4292,12 +4292,12 @@ func (s *blockingFirstAppendStore) AppendUpdate(ctx context.Context, room string
 	return s.VersionedStore.AppendUpdate(ctx, room, update)
 }
 
-func (s *blockingFirstAppendStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
+func (s *blockingFirstAppendStore) AppendUpdatesWithCredit(ctx context.Context, room string, updates []BrowserUpdate) (persistence.Version, error) {
 	if s.blocked.CompareAndSwap(false, true) {
 		close(s.entered)
 		<-s.release
 	}
-	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
+	return s.VersionedStore.AppendUpdatesWithCredit(ctx, room, updates)
 }
 
 // room is the state the service holds for room now, created when it holds none, for a test to read
@@ -4310,7 +4310,7 @@ func (s *Service) room(name string) *roomState {
 
 // recordActor makes actor a pending author of room's next version, and its latest editor, as a
 // landed browser edit does: a durable pending author, written under the document's advisory lock
-// (AppendUpdateWithCredit), and the room's latest edit source.
+// (AppendUpdatesWithCredit), and the room's latest edit source.
 func (s *Service) recordActor(t *testing.T, room string, actor model.Actor) {
 	t.Helper()
 	ctx := context.Background()

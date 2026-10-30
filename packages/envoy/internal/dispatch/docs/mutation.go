@@ -296,9 +296,9 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 		return joinedSchemaError(mutateErr, start)
 	}
 	// A write whose transactions changed nothing writes nothing. Appended, its empty update would
-	// refresh the anchors and mark the document owing a settlement again (markUpdateOwed), which
-	// every repair pass over a closed issue would then sweep. Its updates are dropped, so the fork,
-	// which it left as it was, is kept.
+	// refresh the anchors and mark the document owing a settlement again (updateOwedStatement),
+	// which every repair pass over a closed issue would then sweep. Its updates are dropped, so the
+	// fork, which it left as it was, is kept.
 	if len(op.updates) > 0 && forkHeld(wasClocks, wasDeletes, fork) {
 		op.updates = nil
 	}

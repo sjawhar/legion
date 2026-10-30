@@ -24,8 +24,9 @@
 #
 # Environment: LOADTEST_ROOT (default ${TMPDIR:-/tmp}/dispatch-loadtest); LOADTEST_SRC (default: the
 # checkout holding this script); ports LOADTEST_PG_PORT (15432), LOADTEST_PROXY_PORT (15433),
-# LOADTEST_NATS_PORT (14222), LOADTEST_NATS_MONITOR_PORT (18222), LOADTEST_LISTENER_PORT (19120),
-# LOADTEST_DISPATCH_PORT (18777), LOADTEST_PPROF_PORT (16061), read by setup into stack.json;
+# LOADTEST_PROXY_STATS_PORT (15434, the proxy's wire counts), LOADTEST_NATS_PORT (14222),
+# LOADTEST_NATS_MONITOR_PORT (18222), LOADTEST_LISTENER_PORT (19120), LOADTEST_DISPATCH_PORT (18777),
+# LOADTEST_PPROF_PORT (16061), read by setup into stack.json;
 # LOADTEST_PROXY_RTT (1ms); LOADTEST_PG_DIRECT=1 starts Dispatch on Postgres without the proxy.
 #
 # Every stack process starts under `env -i` with an explicit environment, so this shell's
@@ -56,14 +57,14 @@ PGSERVER_VERSION=0.1.4
 PROCESSES=(dispatch listener nats proxy postgres)
 START_ORDER=(postgres proxy nats listener dispatch)
 # The stack.json port keys in their order, each one's environment variable and its default.
-PORT_KEYS=(postgres proxy nats nats_monitor listener dispatch pprof)
+PORT_KEYS=(postgres proxy proxy_stats nats nats_monitor listener dispatch pprof)
 declare -A PORT_VAR=(
-  [postgres]=LOADTEST_PG_PORT [proxy]=LOADTEST_PROXY_PORT [nats]=LOADTEST_NATS_PORT
-  [nats_monitor]=LOADTEST_NATS_MONITOR_PORT [listener]=LOADTEST_LISTENER_PORT
+  [postgres]=LOADTEST_PG_PORT [proxy]=LOADTEST_PROXY_PORT [proxy_stats]=LOADTEST_PROXY_STATS_PORT
+  [nats]=LOADTEST_NATS_PORT [nats_monitor]=LOADTEST_NATS_MONITOR_PORT [listener]=LOADTEST_LISTENER_PORT
   [dispatch]=LOADTEST_DISPATCH_PORT [pprof]=LOADTEST_PPROF_PORT
 )
 declare -A PORT_DEFAULT=(
-  [postgres]=15432 [proxy]=15433 [nats]=14222 [nats_monitor]=18222 [listener]=19120
+  [postgres]=15432 [proxy]=15433 [proxy_stats]=15434 [nats]=14222 [nats_monitor]=18222 [listener]=19120
   [dispatch]=18777 [pprof]=16061
 )
 
@@ -288,6 +289,7 @@ check_port() {
 
 ports_of() {
   case $1 in
+    proxy) printf '%s\n' proxy proxy_stats ;;
     nats) printf '%s\n' nats nats_monitor ;;
     dispatch) printf '%s\n' dispatch pprof ;;
     *) printf '%s\n' "$1" ;;
@@ -308,12 +310,13 @@ start_postgres() {
 start_proxy() {
   running proxy && return 0
   check_port proxy proxy
+  check_port proxy proxy_stats
   local log=$LOGS/proxy.out
   spawn proxy "$log" base_env "$BIN/loadgen" proxy -listen "127.0.0.1:$(port proxy)" \
-    -target "127.0.0.1:$(port postgres)" -rtt "${LOADTEST_PROXY_RTT:-1ms}"
+    -target "127.0.0.1:$(port postgres)" -rtt "${LOADTEST_PROXY_RTT:-1ms}" -stats "127.0.0.1:$(port proxy_stats)"
   wait_for "the latency proxy" 30 proxy "$log" port_open "$(port proxy)"
   set_pid proxy "$(pid_of proxy)"
-  note "proxy pid $(pid_of proxy) on 127.0.0.1:$(port proxy) (rtt ${LOADTEST_PROXY_RTT:-1ms})"
+  note "proxy pid $(pid_of proxy) on 127.0.0.1:$(port proxy) (rtt ${LOADTEST_PROXY_RTT:-1ms}, wire counts on 127.0.0.1:$(port proxy_stats))"
 }
 
 nats_named() {

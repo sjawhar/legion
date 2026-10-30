@@ -4,6 +4,7 @@
 #   run-step.sh <name> --events <per s> --sessions <n> --requests <per s>
 #     [--duration 180s] [--warmup 30s] [--grace 20s] [--event-mix <preset or kind=w,...>]
 #     [--route-mix <file>] [--human 0.1] [--live <n>] [--rng-seed <n>] [--out <dir>]
+#     [--editors 0] [--editor-rate 2] [--editor-docs 10]
 #
 # From a fresh checkout it sets up, starts and seeds the stack (stack.sh). Then, every step that is
 # not part of a series: it rebuilds the binaries from this checkout (stack.sh setup, incremental) and
@@ -52,6 +53,7 @@ while [ $# -gt 0 ]; do
     --sessions) have_sessions=true ;;
     --requests) have_requests=true ;;
     --duration | --warmup | --grace | --event-mix | --human | --live | --rng-seed) ;;
+    --editors | --editor-rate | --editor-docs) ;;
     --route-mix)
       [ -f "$value" ] || die "--route-mix names $value, which is not a file"
       value=$(cd -- "$(dirname -- "$value")" && pwd -P)/$(basename -- "$value")

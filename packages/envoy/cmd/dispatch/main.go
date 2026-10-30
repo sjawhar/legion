@@ -124,6 +124,11 @@ type bootConfig struct {
 	// PprofAddr is where the profiling listener binds, 127.0.0.1 and DISPATCH_PPROF_PORT
 	// (pprofAddress); empty, nothing listens.
 	PprofAddr string
+	// MaxLiveRooms and MaxDocConnections are DISPATCH_MAX_LIVE_ROOMS and
+	// DISPATCH_MAX_DOC_CONNECTIONS, the document service's room and connection caps; zero, unset,
+	// is the service's own default.
+	MaxLiveRooms      int
+	MaxDocConnections int
 	// DevSignIn (DISPATCH_DEV_SIGNIN=1) mounts GET /auth/_dev/signin behind the dev sign-in
 	// fence; the signing key is then per process, or derived from DevSignInSharedKey.
 	DevSignIn bool
@@ -318,6 +323,7 @@ func main() {
 		Settle:          boot.SettleDelay,
 		EditNoticeQuiet: boot.EditNoticeQuiet,
 	})
+	publishRoomFigures(documentService)
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
 	// The asks a close or a reopen by a release older than the withdrawal left: at boot, then on an
 	// interval below. It appends events and takes no copy lock, so it runs after
@@ -725,6 +731,12 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		return bootConfig{}, err
 	}
 	boot.PprofAddr = pprofAddr
+	if boot.MaxLiveRooms, err = positiveSetting(env, "DISPATCH_MAX_LIVE_ROOMS"); err != nil {
+		return bootConfig{}, err
+	}
+	if boot.MaxDocConnections, err = positiveSetting(env, "DISPATCH_MAX_DOC_CONNECTIONS"); err != nil {
+		return bootConfig{}, err
+	}
 	if boot.NATSReplicas, err = bus.ParseNATSReplicas(env.get(bus.ReplicasEnvVar)); err != nil {
 		return bootConfig{}, err
 	}
@@ -1011,6 +1023,8 @@ func devSignInSharedSigningKey(shared string) string {
 // router through appContextOptions, so dropping a hand-off here fails a case.
 func newDocumentService(boot bootConfig, built docs.Deps) *docs.Service {
 	built.AgentTokens = boot.AgentTokens
+	built.MaxLiveRooms = boot.MaxLiveRooms
+	built.MaxDocConnections = boot.MaxDocConnections
 	return docs.New(built)
 }
 
@@ -1176,6 +1190,21 @@ func parsePort(name, raw string) (int, error) {
 		return 0, fmt.Errorf("invalid %s %q: want a port number 1-65535", name, raw)
 	}
 	return port, nil
+}
+
+// positiveSetting reads the positive whole number the setting name holds: decimal digits alone,
+// at least 1, with whitespace at either end ignored; unset or empty, it is 0. The error names the
+// setting and the value, so a refusal says which variable to fix.
+func positiveSetting(env settingValues, name string) (int, error) {
+	raw := strings.TrimSpace(env.get(name))
+	if raw == "" {
+		return 0, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || strings.TrimLeft(raw, "0123456789") != "" || value < 1 {
+		return 0, fmt.Errorf("%s=%q (expected a positive integer)", name, raw)
+	}
+	return value, nil
 }
 
 // openFileStore is the uploaded-file store boot names, or nil when DISPATCH_FILE_STORE_BUCKET is

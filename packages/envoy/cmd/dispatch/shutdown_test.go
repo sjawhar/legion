@@ -24,6 +24,7 @@ import (
 
 	gws "github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/cmdtest"
@@ -582,58 +583,125 @@ func TestSIGTERMWithAnEditorConnectedSettlesItsDocumentBeforeExit(t *testing.T) 
 }
 
 // A database that stops answering - a failover, a partition - holds every connection waiting on it,
-// and closing the pool waits for every connection in use. Once the document service has stopped,
-// Dispatch gives up on them when silentProbes health probes in a row have failed with no
-// connection taken back meanwhile, so it exits well inside a runtime's grace period instead of
-// being killed.
+// and closing the pool waits for every connection in use. Here that is an issue create's: it waits
+// in Postgres on another writer's lock on its project's row when the relay stops forwarding, so
+// whatever Postgres answers it never arrives. HTTP shutdown waits for that request, so the document
+// service starts httpDrainBeforeDocuments after the signal, with no document to settle: the issue
+// it would create has none yet. Dispatch then gives up on the connection when silentProbes health
+// probes in a row have failed with no connection taken back meanwhile, so it exits well inside a
+// runtime's grace period instead of being killed, and says why.
 func TestSIGTERMWithTheDatabaseUnansweringExitsWithinTheShutdownBudget(t *testing.T) {
+	ctx := context.Background()
 	database := storetest.Open(t)
 	relay := startDatabaseRelay(t, database.Pool.Config().ConnString())
 	process := startDispatchProcess(t, relay.url)
 	process.waitHealthy(t)
-	_, artifactID := process.createIssue(t)
-	editor := process.openEditor(t, artifactID, "before\n")
-	replaceText(t, editor, "before", "after")
-	waitForRoom(t, editor)
+	process.call(t, http.MethodPost, "/api/v1/projects", `{"key":"STOP","name":"Shutdown"}`, http.StatusCreated)
+
+	// An issue create takes its number from the project's row, so it queues behind this lock.
+	holder, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the lock holder: %v", err)
+	}
+	t.Cleanup(func() { _ = holder.Rollback(ctx) })
+	if _, err := holder.Exec(ctx, `select 1 from projects where key = 'STOP' for no key update`); err != nil {
+		t.Fatalf("lock the project: %v", err)
+	}
+	go func() {
+		// It is never answered: the process exits with it in flight.
+		response, err := process.send(http.MethodPost, "/api/v1/issues", `{"project":"STOP","title":"Never answered"}`)
+		if err == nil {
+			_ = response.Body.Close()
+		}
+	}()
+	if waiting := storetest.WaitForLockWaiters(t, holder, 1, 10*time.Second); waiting < 1 {
+		t.Fatalf("the issue create never queued behind the project lock:\n%s", process.Output.String())
+	}
 
 	relay.freeze()
 	signalled := process.Terminate(t)
 	process.WaitExit(t, "SIGTERM with the database unanswering")
 	exited := time.Since(signalled)
 	t.Logf("exited %v after SIGTERM", exited)
-	// Nothing is in flight over HTTP, so the document service starts at once and spends at most
-	// its budget (14 s: more than round 5's, so a loaded box's jitter on this real binary is
-	// proportionally bigger too, observed up to 26.4 s on this box); then each failed probe takes
-	// its two seconds and a poll interval.
-	if bound := documentShutdownTimeout + silentProbes*(2*time.Second+drainPollInterval) + 8*time.Second; exited > bound {
+	// The request in flight holds the HTTP drain for its whole share, then the document service
+	// returns at once with no room to settle, and each failed probe takes its two seconds and a
+	// poll interval. The slack is a loaded box's jitter on this real binary.
+	if bound := httpDrainBeforeDocuments + silentProbes*(2*time.Second+drainPollInterval) + 5*time.Second; exited > bound {
 		t.Errorf("Dispatch exited %v after SIGTERM with the database unanswering, want within %v", exited, bound)
 	}
-	if !strings.Contains(process.Output.String(), "once the database stopped answering") {
+	output := process.Output.String()
+	if !strings.Contains(output, `msg="dispatch: settle documents with requests still in flight"`) {
+		t.Errorf("the issue create was not in flight when the document service started")
+	}
+	if !strings.Contains(output, "once the database stopped answering") {
 		t.Errorf("Dispatch did not say it exited because the database stopped answering")
 	}
-	for _, line := range strings.Split(process.Output.String(), "\n") {
+	for _, line := range strings.Split(output, "\n") {
 		if strings.Contains(line, "level=WARN") {
 			t.Logf("Dispatch logged: %s", line)
 		}
 	}
 }
 
-// waitForRoom returns once the room has answered a request the editor sent after its edit: the
-// room handles one connection's messages in order, so it has applied the edit by then.
-func waitForRoom(t *testing.T, editor *docstest.Peer) {
-	t.Helper()
-	for len(editor.Answers) > 0 {
-		<-editor.Answers
+// A connection taken after shutdown saw the pools idle - ygo's persistence worker compacting a room
+// as it exits takes one with no deadline - is in use when the pool closes, and closing the pool
+// waits for it. On a database that has stopped answering it never comes back, so closePool gives up
+// on it by waitUntilIdle's rule, silentProbes failed health probes in a row with no connection taken
+// back, and says so, instead of waiting on it until the runtime kills Dispatch. The test's pool pings
+// every connection it hands out, as pgxpool pings one idle for over a second, so the late taker is
+// held by a ping the frozen database never answers without the test waiting out that second.
+func TestClosingThePoolGivesUpOnALateConnectionOnceTheDatabaseStopsAnswering(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	relay := startDatabaseRelay(t, database.Pool.Config().ConnString())
+	config, err := pgxpool.ParseConfig(relay.url)
+	if err != nil {
+		t.Fatalf("parse the relay's URL: %v", err)
 	}
-	if err := editor.AskForDocument(); err != nil {
-		t.Fatalf("ask the room for the document: %v", err)
+	config.ShouldPing = func(context.Context, pgxpool.ShouldPingParams) bool { return true }
+	opened, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("open a pool through the relay: %v", err)
+	}
+	pool := store.NewPool(opened)
+	// The probe answers through the relay before it freezes, so its failures after are the freeze's.
+	if _, err := pool.Healthy(ctx); err != nil {
+		t.Fatalf("health probe through the relay: %v", err)
+	}
+	if _, err := pool.Exec(ctx, "select 1"); err != nil {
+		t.Fatalf("open a shared connection through the relay: %v", err)
+	}
+
+	relay.freeze()
+	taken := make(chan error, 1)
+	go func() {
+		conn, err := pool.Acquire(context.Background())
+		if err == nil {
+			conn.Release()
+		}
+		taken <- err
+	}()
+	for deadline := time.Now().Add(10 * time.Second); pool.Use().InUse == 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the late taker never took the idle shared connection")
+		}
+	}
+
+	logged := capturedLog(t)
+	started := time.Now()
+	closePool(pool)
+	took := time.Since(started)
+	t.Logf("closePool returned %v after it began", took)
+	if bound := silentProbes*(drainPollInterval+2*time.Second) + 3*time.Second; took > bound {
+		t.Errorf("closePool returned %v after it began with the database unanswering, want within %v", took, bound)
 	}
 	select {
-	case <-editor.Answers:
-	case <-editor.Ended:
-		t.Fatal("the editor's connection closed before the room answered")
-	case <-time.After(10 * time.Second):
-		t.Fatal("the room never answered the editor")
+	case err := <-taken:
+		t.Errorf("the late taker's connection came back (%v), want it held by the frozen database", err)
+	default:
+	}
+	if !strings.Contains(logged.String(), "once the database stopped answering") {
+		t.Errorf("closePool did not say it gave up because the database stopped answering:\n%s", logged.String())
 	}
 }
 

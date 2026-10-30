@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -291,6 +292,66 @@ func TestTablesMarkAFailedTransactionIDRead(t *testing.T) {
 	}
 	if note := noteLine(text, "(1 failed read)"); !strings.Contains(note, "`resources.xid_read_error`") {
 		t.Errorf("no note of the failed-reads mark names summary.json `resources.xid_read_error`:\n%s", text)
+	}
+	checkRowWidths(t, md)
+}
+
+func TestTablesRenderEditorsAndRoomsPerStep(t *testing.T) {
+	var old summary
+	if err := json.Unmarshal([]byte(`{"config":{"step":"old"}}`), &old); err != nil {
+		t.Fatal(err)
+	}
+	perUpdate, share, bytesPerS := 1.75, 0.25, 2048.0
+	count, written, total := int64(4), int64(4), 31.2
+	edited := summary{
+		Config: summaryConfig{Step: "editors-1x"},
+		Editors: &editorsSummary{
+			Editors: 3, Docs: 2, SingleEditorDocs: []string{"LGA-0002"}, TargetPerS: 6, Sent: 1000, SentPerS: 5.6, Acknowledged: 990, Refused: 2,
+			NotSent: map[string]int{"disconnected": 4}, Connects: 3, ConnectFailures: map[string]int{"http 503": 2}, Closes: map[string]int{"1006": 1},
+			RelayMs: stat{N: 600, P50: 12, P99: 80}, Markers: 20, MarkersFound: 19, DurableMs: stat{N: 19, P50: 40, P99: 150},
+		},
+		Rooms: &roomsSummary{
+			RoundTrips:  &roundTripsSummary{All: 9000, Room: 1750, RoomPerUpdate: &perUpdate},
+			Connections: &roomConnections{Samples: 1800, Held: stat{N: 1800, P50: 2, P99: 9, Max: 12}, SharedPoolShare: &share},
+			Batches:     &dispatchRooms{AppendBatches: 400, AppendedUpdates: 1000, AppendRoundTrips: 800, BatchSizes: map[string]uint64{"1": 100, "3-4": 50, "2": 250, "5-8": 0}},
+			Versions:    versionsSummary{BytesPerS: &bytesPerS, Written: &written, InsertCount: &count, InsertTotalMs: &total, InsertMs: stat{N: 4, P50: 6.5, P99: 12}},
+		},
+	}
+	restOnly := summary{
+		Config: summaryConfig{Step: "rest-only"},
+		Rooms:  &roomsSummary{RoundTripsNote: "stack.json names no proxy_stats port", ConnectionsNote: "the room sampler runs only in a step with editors", BatchesNote: notServed},
+	}
+	// A build whose /debug/vars answered 404: the note carries the response body, newline and "|"
+	// included; the room sampler's one read failed.
+	notFound := summary{
+		Config: summaryConfig{Step: "rooms-404"},
+		Rooms: &roomsSummary{RoundTripsNote: "stack.json names no proxy_stats port", Connections: &roomConnections{Errors: 1},
+			BatchesNote: "not served by this build (http://127.0.0.1:16061/debug/vars: 404 404 page | not found\n)"},
+	}
+	md := renderTables([]stepData{{name: "old", sum: old}, {name: "editors-1x", sum: edited}, {name: "rest-only", sum: restOnly}, {name: "rooms-404", sum: notFound}})
+	const notFoundCell = `not served by this build (http://127.0.0.1:16061/debug/vars: 404 404 page \| not found )`
+	for _, c := range []struct{ title, want string }{
+		{"Editors", "| old | - | - | - | - | - | - | - | - |\n"},
+		{"Editors", "| editors-1x | 3 on 2 (1) | 6.0 / 5.6 | 1,000 / 990 / 2 | 4 (disconnected 4) | 12 / 80 | 40 / 150 (19 / 20) | 3 / 2 (http 503 2) | 1006: 1 |\n"},
+		{"Editors", "| rest-only | - | - | - | - | - | - | - | - |\n"},
+		{"Editors", "Documents with one editor, which have no relay latency: editors-1x: LGA-0002."},
+		{"Document rooms", "| old | - | - | - | - | - | - | - | - | - |\n"},
+		{"Document rooms", "| editors-1x | 1,750 / 9,000 | 1.75 | 2 / 9 / 12 | 25% | 400 / 1,000 / 800 | 1: 100, 2: 250, 3-4: 50 | 2.0 | 4 | 6.5 / 12.0 (4, 31) |\n"},
+		{"Document rooms", "| rest-only | - | - | - | - | not served by this build | not served by this build | - | - | - |\n"},
+		{"Document rooms", "rest-only: round trips not measured: stack.json names no proxy_stats port."},
+		{"Document rooms", "\n| rooms-404 (1 failed read) | - | - | - | - | " + notFoundCell + " | " + notFoundCell + " | - | - | - |\n"},
+	} {
+		if text := section(md, c.title); !strings.Contains(text, c.want) {
+			t.Errorf("section %q lacks %q:\n%s", c.title, c.want, text)
+		}
+	}
+	if note := noteLine(section(md, "Document rooms"), "(<n> failed reads)"); !strings.Contains(note, "`rooms.connections.errors`") {
+		t.Errorf("the Document rooms table has no note of the failed-reads mark that names summary.json `rooms.connections.errors`:\n%s", md)
+	}
+	for _, step := range []string{"editors-1x (", "rest-only ("} {
+		if strings.Contains(section(md, "Document rooms"), "| "+step) {
+			t.Errorf("a step whose room sampler read every time, or never ran, is marked:\n%s", md)
+		}
 	}
 	checkRowWidths(t, md)
 }

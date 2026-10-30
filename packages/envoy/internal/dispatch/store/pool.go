@@ -131,13 +131,18 @@ type Pool struct {
 	// mu guards each separate pool's creation against this pool's close: one lock, so a
 	// caller that loses the race is told the pool is closed rather than opening one nothing
 	// will ever close.
-	mu     sync.Mutex
-	rooms  *pgxpool.Pool
-	health *pgxpool.Pool
-	listen *pgxpool.Pool
-	leases *pgxpool.Pool
-	outbox *pgxpool.Pool
-	closed bool
+	mu          sync.Mutex
+	rooms       *pgxpool.Pool
+	roomAppends *pgxpool.Pool
+	health      *pgxpool.Pool
+	listen      *pgxpool.Pool
+	leases      *pgxpool.Pool
+	outbox      *pgxpool.Pool
+	// closed refuses every separate pool but the health probe's from the moment Close begins
+	// (separate); healthClosed refuses that one too, once Close has closed every other pool
+	// (healthPool).
+	closed       bool
+	healthClosed bool
 }
 
 // NewPool wraps an open pgx pool.
@@ -170,6 +175,29 @@ const sharedPoolSize = 64
 // concurrently. Measured on the real server, eight cold rooms loading at once are no faster at
 // eight connections than at one, so this is small on purpose.
 const roomsPoolSize = 4
+
+// roomsApplicationName is how a connection of the rooms pool (Pool.Rooms) names itself in
+// pg_stat_activity, so a reader of the database's sessions can tell a document load from a request.
+const roomsApplicationName = "dispatch-rooms"
+
+// roomAppendsPoolSize bounds the connections the document rooms' browser updates are stored on
+// (Pool.RoomAppends). Only the browser batch path takes one: a room's queued browser updates are
+// stored together, in one transaction, so a room holds a connection for its batch's few round
+// trips and starts at most one batch per linger window, and a handful of connections serve many
+// rooms writing at once. Eight is twice the rooms pool and an eighth of the shared one: every
+// connection here is one more in the server's total against the database's limit, so it is small
+// on purpose, and a room that finds all eight held waits for another batch to commit.
+//
+// It cannot deadlock. A batch holds its connection and the document's advisory lock and takes no
+// other connection (store.HoldsConnection stays on its context, so a read of the shared pool under
+// it is refused), and no holder of a document lock ever waits for a connection of this pool:
+// settlements, live writes and the other withRoomLock callers take theirs where they always have,
+// so every holder of a lock a batch can wait on finishes without one of these connections.
+const roomAppendsPoolSize = 8
+
+// roomAppendsApplicationName is how a connection of the room-appends pool (Pool.RoomAppends) names
+// itself in pg_stat_activity.
+const roomAppendsApplicationName = "dispatch-room-appends"
 
 // healthPoolSize bounds the connections the health probe uses. The probe answers one question -
 // is Postgres reachable, and at which schema - and asks it on a connection nothing else can take,
@@ -206,7 +234,16 @@ var ErrPoolClosed = errors.New("connection pool is closed")
 // the loads have their own, opened on demand and closed with this pool: one per store, not one
 // per caller who wants to read a document.
 func (p *Pool) Rooms() (*pgxpool.Pool, error) {
-	return p.separate(&p.rooms, roomsPoolSize, "document rooms")
+	return p.separate(&p.rooms, roomsPoolSize, "document rooms", roomsApplicationName)
+}
+
+// RoomAppends is where a document room stores its browser updates: a batch of one room's queued
+// updates takes a connection here, holds it and the document's advisory lock for one transaction,
+// and gives it back (roomAppendsPoolSize says why that cannot deadlock). On a pool of their own
+// the appends wait for no request and hold no connection a request could use, and a request
+// waits for none of them.
+func (p *Pool) RoomAppends() (*pgxpool.Pool, error) {
+	return p.separate(&p.roomAppends, roomAppendsPoolSize, "document room appends", roomAppendsApplicationName)
 }
 
 // Healthy reports the highest schema migration Postgres has applied, read within
@@ -219,8 +256,13 @@ func (p *Pool) Rooms() (*pgxpool.Pool, error) {
 // The version is read from schema_migrations on every call rather than remembered from this
 // process's own Migrate, so it reports what the database holds: a deploy check compares it with
 // the highest migration in the commit the image was built from.
+//
+// It answers while Close waits for the connections still in use, so a caller waiting on Close
+// (cmd/dispatch's shutdown) can tell a database still finishing work from one that has stopped
+// answering; once Close has closed every other pool it closes this one and Healthy refuses
+// (ErrPoolClosed).
 func (p *Pool) Healthy(ctx context.Context) (int, error) {
-	health, err := p.separate(&p.health, healthPoolSize, "health probe")
+	health, err := p.healthPool()
 	if err != nil {
 		return 0, err
 	}
@@ -252,7 +294,7 @@ const listenerPoolSize = 1
 // held that long would be one fewer for every request, and a LISTEN on a pooled connection would
 // end when the pool recycled it.
 func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
-	listen, err := p.separate(&p.listen, listenerPoolSize, "listener")
+	listen, err := p.separate(&p.listen, listenerPoolSize, "listener", "")
 	if err != nil {
 		return nil, err
 	}
@@ -290,7 +332,7 @@ const leasePoolSize = 13
 // through the shared pool - which is what a pass does - would be a caller holding two of its
 // connections (ErrNestedAcquire).
 func (p *Pool) Leases() (*pgxpool.Pool, error) {
-	return p.separate(&p.leases, leasePoolSize, "loop leases")
+	return p.separate(&p.leases, leasePoolSize, "loop leases", "")
 }
 
 // outboxPoolSize bounds the pool the events outbox reads and records events through. The outbox
@@ -310,30 +352,50 @@ const permanentListeners = 3
 // ConnectionsPerProcess is the most connections one Dispatch server process opens to Postgres:
 // every pool's size, the registry's own pool (processes.Register) among them, and one connection
 // per permanent listener, which the listener pool dials and hands off rather than holds.
-const ConnectionsPerProcess = sharedPoolSize + roomsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + registryPoolSize + permanentListeners
+const ConnectionsPerProcess = sharedPoolSize + roomsPoolSize + roomAppendsPoolSize + healthPoolSize + leasePoolSize + outboxPoolSize + registryPoolSize + permanentListeners
 
 // Outbox is the pool the events outbox claims, reads and records events through, and reads the
 // followers and authors a publish routes to. Under load the API's requests queue for the shared
 // pool's connections, and an outbox statement queued behind them holds back every event behind
 // it; on a pool of its own it waits for none of them, and holds no connection a request could use.
 func (p *Pool) Outbox() (*Pool, error) {
-	opened, err := p.separate(&p.outbox, outboxPoolSize, "events outbox")
+	opened, err := p.separate(&p.outbox, outboxPoolSize, "events outbox", "")
 	if err != nil {
 		return nil, err
 	}
 	return NewPool(opened), nil
 }
 
-// separate opens the pool held at field on demand, sized at size and copied from the shared
-// pool's configuration, and closes it with the shared pool. Each caller holds mu for the whole
-// check-and-open so two of them cannot open two pools, and one opened after Close would be a
-// pool nobody closes.
-func (p *Pool) separate(field **pgxpool.Pool, size int32, name string) (*pgxpool.Pool, error) {
+// separate opens the pool held at field on demand (openSeparateLocked) and closes it with the
+// shared pool. It refuses from the moment Close begins (ErrPoolClosed). Each caller holds mu for
+// the whole check-and-open so two of them cannot open two pools, and one opened after Close would
+// be a pool nobody closes.
+func (p *Pool) separate(field **pgxpool.Pool, size int32, name, applicationName string) (*pgxpool.Pool, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
 		return nil, ErrPoolClosed
 	}
+	return p.openSeparateLocked(field, size, name, applicationName)
+}
+
+// healthPool is separate for the health probe's pool, whose close rule is its own: it opens and
+// is handed out while Close waits for the other pools' connections, and refuses once Close has
+// closed every other pool (healthClosed), so Healthy answers for as long as Close waits.
+func (p *Pool) healthPool() (*pgxpool.Pool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.healthClosed {
+		return nil, ErrPoolClosed
+	}
+	return p.openSeparateLocked(&p.health, healthPoolSize, "health probe", "")
+}
+
+// openSeparateLocked is the pool held at field, opened when there is none, sized at size and
+// copied from the shared pool's configuration. Its connections name themselves applicationName in
+// pg_stat_activity, or keep the shared pool's name when it is empty. Its caller holds mu and has
+// checked the pool is not closed for it.
+func (p *Pool) openSeparateLocked(field **pgxpool.Pool, size int32, name, applicationName string) (*pgxpool.Pool, error) {
 	if *field != nil {
 		return *field, nil
 	}
@@ -344,6 +406,12 @@ func (p *Pool) separate(field **pgxpool.Pool, size int32, name string) (*pgxpool
 	// pool - which pgxpool re-attempts, and puddle refuses as full, every health-check period.
 	config.MinConns = 0
 	config.MinIdleConns = 0
+	if applicationName != "" {
+		if config.ConnConfig.RuntimeParams == nil {
+			config.ConnConfig.RuntimeParams = make(map[string]string)
+		}
+		config.ConnConfig.RuntimeParams["application_name"] = applicationName
+	}
 	opened, err := pgxpool.NewWithConfig(context.Background(), config)
 	if err != nil {
 		return nil, fmt.Errorf("open %s pool: %w", name, err)
@@ -352,8 +420,11 @@ func (p *Pool) separate(field **pgxpool.Pool, size int32, name string) (*pgxpool
 	return opened, nil
 }
 
-// Close releases every connection the pool holds, the document rooms and the health probe
-// included.
+// Close releases every connection the pool holds, the document rooms, their appends and the health
+// probe included, and returns once every connection in use has come back. It closes the health
+// probe's pool last, after every other pool has closed: Healthy answers for as long as Close waits,
+// and Use keeps counting the closing pools' connections. No other separate pool opens or is handed
+// out once Close has begun.
 func (p *Pool) Close() {
 	p.mu.Lock()
 	if p.closed {
@@ -361,15 +432,21 @@ func (p *Pool) Close() {
 		return
 	}
 	p.closed = true
-	rooms, health, listen, leases, outbox := p.rooms, p.health, p.listen, p.leases, p.outbox
-	p.rooms, p.health, p.listen, p.leases, p.outbox = nil, nil, nil, nil, nil
+	separates := []*pgxpool.Pool{p.rooms, p.roomAppends, p.listen, p.leases, p.outbox}
 	p.mu.Unlock()
-	for _, separate := range []*pgxpool.Pool{rooms, health, listen, leases, outbox} {
+	for _, separate := range separates {
 		if separate != nil {
 			separate.Close()
 		}
 	}
 	p.pool.Close()
+	p.mu.Lock()
+	p.healthClosed = true
+	health := p.health
+	p.mu.Unlock()
+	if health != nil {
+		health.Close()
+	}
 }
 
 // Config returns a copy of the pool's configuration.
@@ -378,21 +455,22 @@ func (p *Pool) Config() *pgxpool.Config { return p.pool.Config() }
 // Stat reports the pool's current connection counts.
 func (p *Pool) Stat() *pgxpool.Stat { return p.pool.Stat() }
 
-// ConnectionUse is how many connections of the shared and document-rooms pools are in use, and
-// how many those two pools have taken back since they opened, whether returned or discarded. The
-// health probe's pool is left out: it is how a caller asks whether the database answers.
+// ConnectionUse is how many connections of the shared, document-rooms and room-appends pools are
+// in use, and how many those pools have taken back since they opened, whether returned or
+// discarded. The health probe's pool is left out: it is how a caller asks whether the database
+// answers.
 type ConnectionUse struct {
 	InUse    int32
 	Returned int64
 }
 
-// Use reports the shared and document-rooms pools' ConnectionUse.
+// Use reports the shared, document-rooms and room-appends pools' ConnectionUse.
 func (p *Pool) Use() ConnectionUse {
 	p.mu.Lock()
-	rooms := p.rooms
+	rooms, roomAppends := p.rooms, p.roomAppends
 	p.mu.Unlock()
 	var use ConnectionUse
-	for _, pool := range []*pgxpool.Pool{p.pool, rooms} {
+	for _, pool := range []*pgxpool.Pool{p.pool, rooms, roomAppends} {
 		if pool == nil {
 			continue
 		}
@@ -401,6 +479,22 @@ func (p *Pool) Use() ConnectionUse {
 		use.Returned += stat.AcquireCount() - int64(stat.AcquiredConns())
 	}
 	return use
+}
+
+// RoomPoolStats is the document-rooms and the room-appends pools' Stat, each nil while its pool
+// has not been opened: reading them opens neither, so a reader of the room figures costs no
+// connection.
+func (p *Pool) RoomPoolStats() (rooms, roomAppends *pgxpool.Stat) {
+	p.mu.Lock()
+	roomsPool, appendsPool := p.rooms, p.roomAppends
+	p.mu.Unlock()
+	if roomsPool != nil {
+		rooms = roomsPool.Stat()
+	}
+	if appendsPool != nil {
+		roomAppends = appendsPool.Stat()
+	}
+	return rooms, roomAppends
 }
 
 func (p *Pool) guard(ctx context.Context) error {
@@ -530,6 +624,19 @@ func (p *Pool) SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults
 	return p.pool.SendBatch(ctx, batch)
 }
 
+// QueueExec queues sql with args into b; its error, wrapped in what as a statement sent alone
+// would wrap it, is what b's Close returns when the statement is the first of b's to fail. One
+// helper for every caller that pipelines statements, so a batch's statements report their errors
+// alike.
+func QueueExec(b *pgx.Batch, what, sql string, args ...any) {
+	b.Queue(sql, args...).Fn = func(results pgx.BatchResults) error {
+		if _, err := results.Exec(); err != nil {
+			return fmt.Errorf("%s: %w", what, err)
+		}
+		return nil
+	}
+}
+
 // Begin opens a transaction and marks the request as holding one.
 func (p *Pool) Begin(ctx context.Context) (pgx.Tx, error) {
 	if err := p.guard(ctx); err != nil {
@@ -549,18 +656,15 @@ func (p *Pool) BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, erro
 // begin is the guarded body both transaction entry points share: guard runs in the exported
 // method, as it does in every exported method that hands out one of this pool's connections,
 // so a refusal records the caller that asked for the transaction rather than one of this
-// pool's own frames.
+// pool's own frames. Every transaction it opens is a trackedTx, whether or not ctx carries a hold
+// mark, so AfterCommit reaches each of them.
 func (p *Pool) begin(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error) {
 	tx, err := p.pool.BeginTx(ctx, options)
 	if err != nil {
 		return nil, err
 	}
-	release := hold(ctx)
 	beforeCommit, _ := ctx.Value(beforeCommitKey{}).(BeforeCommit)
-	if release == nil && beforeCommit == nil {
-		return tx, nil
-	}
-	return &trackedTx{Tx: tx, release: release, beforeCommit: beforeCommit}, nil
+	return &trackedTx{Tx: tx, release: hold(ctx), beforeCommit: beforeCommit}, nil
 }
 
 // BeforeCommit is a step every transaction a request opens takes just before its COMMIT, inside
@@ -579,37 +683,81 @@ func WithBeforeCommit(ctx context.Context, step BeforeCommit) context.Context {
 	return context.WithValue(ctx, beforeCommitKey{}, step)
 }
 
-// trackedTx clears the caller's mark however the transaction ends, and takes the caller's
-// BeforeCommit step before it commits. Callers commit and then run a deferred rollback; the
-// release absorbs that second call. Either part may be absent: a context the pool does not track
-// has no mark, and one with no step commits as it is.
+// trackedTx is a transaction of this pool. It takes the caller's BeforeCommit step before it
+// commits, clears the caller's hold mark however the transaction ends, when the caller's context
+// carried one (release is nil for a context the pool cannot see), and then runs what AfterCommit
+// registered on it. Callers commit and then run a deferred rollback: the first of the two ends the
+// transaction, and the second ends nothing again. A context with no BeforeCommit step commits as
+// it is.
 type trackedTx struct {
 	pgx.Tx
 	release      func()
 	beforeCommit BeforeCommit
+	// mu guards ended and after: a transaction is used from one goroutine at a time, but nothing
+	// stops a caller from registering on one goroutine and ending it on another.
+	mu    sync.Mutex
+	ended bool
+	after []func(committed bool)
 }
 
 func (t *trackedTx) Commit(ctx context.Context) error {
-	defer t.end()
+	committed := false
+	defer func() { t.end(committed) }()
 	if t.beforeCommit != nil && t.Tx.Conn().PgConn().TxStatus() == 'T' {
 		if err := t.beforeCommit(ctx, t.Tx); err != nil {
 			_ = t.Tx.Rollback(ctx)
 			return err
 		}
 	}
-	return t.Tx.Commit(ctx)
+	err := t.Tx.Commit(ctx)
+	committed = err == nil
+	return err
 }
 
 func (t *trackedTx) Rollback(ctx context.Context) error {
-	defer t.end()
+	defer t.end(false)
 	return t.Tx.Rollback(ctx)
 }
 
-// end clears the caller's mark, when the pool tracks one.
-func (t *trackedTx) end() {
+// end runs once, at whichever of Commit and Rollback comes first: it clears the hold mark, then
+// runs each function AfterCommit registered, in the order registered, with whether the
+// transaction committed. A Commit that failed did not commit, whatever Postgres made of it.
+func (t *trackedTx) end(committed bool) {
+	t.mu.Lock()
+	if t.ended {
+		t.mu.Unlock()
+		return
+	}
+	t.ended = true
+	after := t.after
+	t.after = nil
+	t.mu.Unlock()
 	if t.release != nil {
 		t.release()
 	}
+	for _, fn := range after {
+		fn(committed)
+	}
+}
+
+// AfterCommit registers fn to run once tx ends, with whether it committed, and reports whether it
+// could: tx is a transaction of a Pool (Begin, BeginTx) that has not ended yet. fn runs inside the
+// Commit or Rollback that ends tx, after the hold mark is cleared and before that call returns, so
+// whatever the caller does once its commit returns - answer a request, read what it wrote - comes
+// after fn. A transaction the pool did not open (one begun on an acquired connection, a savepoint,
+// a test's own) answers false, and fn never runs.
+func AfterCommit(tx pgx.Tx, fn func(committed bool)) bool {
+	tracked, ok := tx.(*trackedTx)
+	if !ok {
+		return false
+	}
+	tracked.mu.Lock()
+	defer tracked.mu.Unlock()
+	if tracked.ended {
+		return false
+	}
+	tracked.after = append(tracked.after, fn)
+	return true
 }
 
 type errRow struct {
