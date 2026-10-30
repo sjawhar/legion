@@ -10,7 +10,6 @@ date: 2026-10-30
 status: active
 module: packages/envoy/cmd/dispatch
 related_issues:
-  - "INFRA-562"
   - "sjawhar/legion#2387"
 ---
 
