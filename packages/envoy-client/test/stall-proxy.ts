@@ -8,7 +8,9 @@ export interface ProxiedConnection {
    *  through it. Undefined until then, and for good on a connection stalled from its first byte. */
   readonly subscribedAt: number | undefined;
   /** When the client's socket ended (`Date.now()` at its FIN or its close, whichever came first):
-   *  the client closed it, or `close()` destroyed it. Undefined while it is open. */
+   *  the client closed it, or `close()` destroyed it. Undefined while it is open, and on a
+   *  connection a `freeze()` paused until `close()` destroys it: a paused socket reads no FIN,
+   *  and the proxy closes neither side of a frozen path. */
   readonly closedAt: number | undefined;
 }
 
@@ -79,14 +81,13 @@ export async function startStallProxy(upstream: string): Promise<StallProxy> {
     const path = { frozen: false, client, target };
     open.push(path);
     client.on("data", (chunk: Buffer) => {
-      if (path.frozen) return;
       if (record.subscribedAt === undefined && /(^|\n)SUB /.test(chunk.toString("latin1"))) {
         record.subscribedAt = Date.now();
       }
       target.write(chunk);
     });
     target.on("data", (chunk: Buffer) => {
-      if (!path.frozen) client.write(chunk);
+      client.write(chunk);
     });
     // While the path forwards, an end on one side is passed to the other, as a live route does.
     client.on("close", () => {

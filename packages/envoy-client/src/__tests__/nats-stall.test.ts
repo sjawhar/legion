@@ -2,10 +2,8 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { connect, Events, StringCodec } from "nats";
 import { type EnvoyStack, envoyStackEnabled, startEnvoyStack } from "../../test/envoy-stack";
 import { startStallProxy } from "../../test/stall-proxy";
+import { RECOVERY_BOUND_MS } from "../../test/stall-scenario";
 import { natsConnectionOptions } from "../nats-connection";
-
-/** The spec's bound: a session finds a path that answers within a minute of the freeze. */
-const RECOVERY_BOUND_MS = 60_000;
 
 const codec = StringCodec();
 
