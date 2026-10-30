@@ -2,49 +2,49 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-512",
-  "completed": "2026-10-30T01:58:00Z",
-  "scope": "This round is the plan's section 0 items (c) and (d) only: the issue read's database round trips and INFRA-653's four pmdoc render cleanups, plus the project artifact list route's one-statement version read (the last per-artifact version query; the architect put it in scope). Items (a), the garbage-collection pass, and (b), deliverable 3, are NOT in this head: they start when the last child of INFRA-512 closes. The architect holds the root in accepting until then and sends it back to implementing for (a)+(b) in this same pull request.",
+  "completed": "2026-10-30T05:40:00Z",
+  "scope": "This round is the plan's section 0 items (c) and (d) only: the issue read's database round trips and INFRA-653's four pmdoc render cleanups, plus the project artifact list route's one-statement version read (the last per-artifact version query; the architect put it in scope). Items (a), the garbage-collection pass, and (b), deliverable 3, are NOT in this head: they start when the last child of INFRA-512 closes. The architect holds the root in accepting until then and sends it back to implementing for (a)+(b) in this same pull request. Round 2 answers the tester's round 1 (fail at 75918db5: the branch conflicted with main in refs/graph.go against #2463, so no CI had run). It merges main forward twice and redoes proof entries 2-5 at the merge head; the code of (c) and (d) is unchanged.",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2535",
   "proof": [
     {
       "criterion": "(c) The issue read's round trips are cut, and the count is quoted before and after",
       "surface": "GET /api/v1/issues/{key} on a Postgres-backed Dispatch test server, with a pgx tracer that counts each statement and each batch (packages/envoy/internal/dispatch/api/issue_read_batch_test.go)",
       "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:15432/postgres?sslmode=disable go test ./internal/dispatch/api/ -count=1 -v -run 'TestIssueReadCostsTwoRoundTrips|TestBatchedIssueRead'",
-      "observed": "The full test issue (4 artifacts, documents with an approval and an open approval request, open asks, children, links, backlinks) took 14 round trips with the old composition and takes 2 now. An issue with no artifact and no open ask takes 1. A load-test seed issue (1 spec, no ask) took 9. The batched body equals the sequential loaders' body byte for byte. A missing key still answers 404 NOT_FOUND.",
-      "headSha": "7c3be794b3fecb9953f91e8202aab2de9a7bbd25",
+      "observed": "The full test issue (4 artifacts, documents with an approval and an open approval request, open asks, children, links, backlinks) took 14 round trips with the old composition and takes 2 now. An issue with no artifact and no open ask takes 1. A load-test seed issue (1 spec, no ask) took 9. The batched body equals the sequential loaders' body byte for byte. A missing key still answers 404 NOT_FOUND. Re-run at the merge head da947e18 in the api Issue/.../Backlink test run: passes. Measured at the merge head da947e18 (main cd5ca7c3); 9f3303df is a later forward merge of main 5dc21cb9 whose unchanged-diff fingerprint equals da947e18's (618dbe4e...), and main changed nothing under dispatch/api, pmdoc, refs, events or store/storetest in between.",
+      "headSha": "9f3303df8a1d2e8077958fb7a47fece6ceb0e7e6",
       "negativeControl": "The full issue's batched read was checked against the old sequential composition built in the test, and the test fails on any byte difference. On the live stack, a head with its batch path's approval fill removed answered 2,180 of 2,180 seeded-issue reads differently."
     },
     {
-      "criterion": "(c) The issue read's answer stays byte-identical over real issues",
-      "surface": "Dispatch server under packages/envoy/loadtest on this pod (Postgres 16.2, real migrations), INFRA-639's LINUX replay seed (linux-replay-seed-0114, dump sha256 9b0349e4...)",
-      "command": "INFRA-639's stack.sh replay-get and replay-prepare at legion/INFRA-639@origin 4f53011a, with the base build de546ed2 (migrations 114 to 141). The head build 7c3be794 started from a copy of that same migrated template. Each side ran `stack.sh reset --replay`, then GET /api/v1/issues/{key} for all 1,047 LINUX issues and GET /api/v1/projects/LINUX/artifacts, as a person and as an agent (augment.py dump; script linux-cmp2.sh in dispatch://INFRA-512/artifact/infra512-pr2535-final-head-evidence-tar-gz)",
-      "observed": "2,096 answers, all 200, 8,876,360 bytes. Base gave the same answers on two resets, and head matched base: list sha256 1e9eb013... on both sides. The answers include 238 issues with children, 583 with more than one document (up to 43 documents and 220 versions on one issue), and approved and changes-requested documents. The same comparison at 633c9e5b against 2b427f93 (2,094 issue answers, f691e9fd...) was also identical.",
-      "headSha": "7c3be794b3fecb9953f91e8202aab2de9a7bbd25",
-      "negativeControl": "The head with its batch path's approval fill removed (applyApprovals skipped) answered 2,180 of 2,180 reads of the 1,090-issue seed differently (every issue has a spec, so its approval was null)."
+      "criterion": "(c) The issue read's answer stays byte-identical over real issues, backlink counts included, after #2463",
+      "surface": "Dispatch server under packages/envoy/loadtest on this pod (3 cores, Postgres 16.2, real migrations), INFRA-639's LINUX replay seed (linux-replay-seed-0114, dump sha256 9b0349e4...)",
+      "command": "round2.sh/round2b.sh (in dispatch://INFRA-512/artifact/infra512-pr2535-round2-evidence-tar-gz): INFRA-639's stack.sh replay-get and replay-prepare at legion/INFRA-639@origin b14ae092 with main cd5ca7c3 (migrations 114 -> 144); reset --replay; wait until comment_block_state, message_block_state, document_block_versions and block_grammar_owed owe nothing; copy that drained database as the template; the head build da947e18 starts from a copy of the same template. Each side: GET /api/v1/issues/{key} for all 1,047 LINUX issues and GET /api/v1/projects/LINUX/artifacts, as a person and as an agent.",
+      "observed": "2,096 answers, all 200, 8,876,360 bytes; base on two resets identical, head identical to base (list sha256 1e9eb013... on both sides); owed 0 at every dump; the template holds 18,720 comments with 38,539 comment blocks indexed and 0 owed; reset checksum 1,047 issues, 1,788 artifacts, 10,872 versions, 18,720 comments, 76 asks, md5 8678c90a. Measured at the merge head da947e18 (main cd5ca7c3); 9f3303df is a later forward merge of main 5dc21cb9 whose unchanged-diff fingerprint equals da947e18's (618dbe4e...), and main changed nothing under dispatch/api, pmdoc, refs, events or store/storetest in between.",
+      "headSha": "9f3303df8a1d2e8077958fb7a47fece6ceb0e7e6",
+      "negativeControl": "Base dumped twice from two resets gives identical lists (determinism); in round 1 the head with its batch path's approval fill removed answered 2,180 of 2,180 seeded reads differently."
     },
     {
-      "criterion": "(c) The parts LINUX lacks (external links, blockers, open and answered asks, cited asks, approvals) stay byte-identical",
-      "surface": "Dispatch server under packages/envoy/loadtest on this pod: the load-test seed (1,000 issues) with 300 of them given those parts through the API (augment.py augment), kept as a template",
-      "command": "aug-cmp2.sh: reset from that template with main de546ed2 and with head 7c3be794, then GET /api/v1/issues/{key} for all 1,090 issues and GET /api/v1/projects/{LGA,LGB,LGC,LGD}/artifacts, as a person and as an agent",
-      "observed": "2,188 answers, all 200, identical at base and head (list sha256 40b8ec74...). The seed covers 150 issues with external links and blockers, 118 with more than one document, 25 approved, 17 awaiting approval and 25 stale documents, 92 issues with open asks, 90 with children and grandchildren, and 10 cited asks.",
-      "headSha": "7c3be794b3fecb9953f91e8202aab2de9a7bbd25",
-      "negativeControl": "Two base runs from two resets gave identical answers, so the comparison is deterministic. The approval-fill mutation above changed 2,180 of 2,180."
+      "criterion": "(c) The parts LINUX lacks (external links, blockers, open and answered asks, cited asks, approvals, backlink counts) stay byte-identical after #2463",
+      "surface": "Dispatch server under packages/envoy/loadtest on this pod: the load-test seed made fresh by main cd5ca7c3 (migration 144, with main's reference seeding), 300 issues given those parts through the API (augment.py augment), drained, kept as a template",
+      "command": "round2.sh part A: reset from that template with main cd5ca7c3 and with head da947e18, then GET /api/v1/issues/{key} for all 1,090 issues and GET /api/v1/projects/{LGA,LGB,LGC,LGD}/artifacts, as a person and as an agent",
+      "observed": "2,188 answers, all 200, 33,105,104 bytes, identical at base and head (list sha256 00bf24d8...); owed 0 at each dump; the template holds 8,075 comments with 8,075 comment blocks indexed and 0 owed. Every issue has referenced_by_count above 0 (up to 6) and 10 have a cited open ask, so the backlink counts under #2463's rule are compared. Measured at the merge head da947e18 (main cd5ca7c3); 9f3303df is a later forward merge of main 5dc21cb9 whose unchanged-diff fingerprint equals da947e18's (618dbe4e...), and main changed nothing under dispatch/api, pmdoc, refs, events or store/storetest in between.",
+      "headSha": "9f3303df8a1d2e8077958fb7a47fece6ceb0e7e6",
+      "negativeControl": "The approval-fill mutation of round 1 changed 2,180 of 2,180 answers of the same comparison; dispatch://INFRA-512/artifact/infra512-pr2535-round2-aug-answers-tar-gz holds both lists."
     },
     {
       "criterion": "(c) The change is not slower: the median head run's whole-process CPU is not above the highest base run's",
-      "surface": "packages/envoy/loadtest route mix (INFRA-589's routes-2026-10-26-1719Z.txt) on this pod",
-      "command": "run-step.sh <side>-<n> --events 1.5 --sessions 150 --requests 22 --rng-seed 1, 180 s window, each run from its own reset, alternating base and head in one session (runs2.sh)",
-      "observed": "Base de546ed2, window starts 01:31:14, 01:39:44, 01:48:12 UTC on 2026-10-30: 29.16, 28.95, 27.13 CPU-s, getIssue share 1.93%, 2.41%, 1.70%. Head 7c3be794, window starts 01:35:30, 01:43:58, 01:52:26: 27.86, 26.70, 29.69 CPU-s, getIssue share 0.64%, 0.43%, 0.92%. The median head (27.86) is not above the highest base (29.16), and the base spread is 2.03 s. The issue route's p50 was 43.8-45.8 ms (browser) and 39.8-42.3 ms (cli) at base, and 17.2-17.5 ms and 13.3-13.4 ms at head. Every run had 4,088 of 4,088 requests 2xx and 261 of 261 writes committed, with box busy before it at 0.5-1.9%. The first set at 633c9e5b against 2b427f93 (19:43-20:05Z) also passed: median head 27.26 against highest base 28.02.",
-      "headSha": "7c3be794b3fecb9953f91e8202aab2de9a7bbd25",
-      "negativeControl": "Calibration found 100% 2xx at these flags (box 25% busy). INFRA-651 found that --events 2 --sessions 200 --requests 30 saturates the pod (76.8% 2xx), so those flags measure nothing."
+      "surface": "packages/envoy/loadtest route mix (INFRA-589's routes-2026-10-26-1719Z.txt) on this pod (nproc 3), from the drained run seed",
+      "command": "run-step.sh <side>-<n> --events 1.5 --sessions 150 --requests 22 --rng-seed 1, 180 s window, each from its own reset, alternating base and head in one session (round2b.sh part C)",
+      "observed": "Base cd5ca7c3, window starts 2026-10-30 04:34:06, 04:43:07, 04:51:37 UTC: 43.64, 43.29, 46.72 CPU-s, getIssue share 1.83%, 1.99%, 2.11%. Head da947e18, window starts 04:38:49, 04:47:22, 04:55:56: 41.96, 41.37, 42.00 CPU-s, getIssue share 0.45%, 0.88%, 0.69%. Every head run is below every base run; median head 41.96 against highest base 46.72; base spread 3.43 s. Issue route p50 browser 50.6-51.5 ms at base, 19.2-19.4 ms at head; cli 46.7-48.0 ms and 15.0-15.5 ms. Every run 4,088 of 4,088 requests 2xx, 261 of 261 writes committed; box busy before 0.2-6.2%. Heap in use p50 base 492/517/495 MiB, head 518/527/511 MiB; RSS max base 891/919/891 MiB, head 929/916/918 MiB. CPU-seconds are higher than round 1's because this pod has 3 cores and main now seeds references; base and head ran on the same pod and seed. Measured at the merge head da947e18 (main cd5ca7c3); 9f3303df is a later forward merge of main 5dc21cb9 whose unchanged-diff fingerprint equals da947e18's (618dbe4e...), and main changed nothing under dispatch/api, pmdoc, refs, events or store/storetest in between.",
+      "headSha": "9f3303df8a1d2e8077958fb7a47fece6ceb0e7e6",
+      "negativeControl": "INFRA-651 found that --events 2 --sessions 200 --requests 30 saturates the pod (76.8% 2xx); these flags gave 100% 2xx in every run."
     },
     {
       "criterion": "(d) Rendered output is byte-identical on every LINUX spec",
-      "surface": "pmdoc renderer, read-back and misread checks, and StripAnchorMarks, over every LINUX issue's current spec (1,210 specs fetched read-only on 2026-10-29 with the Dispatch API, 64 MB, not committed, corpus sha256 50f7dbc1...)",
-      "command": "1) bash packages/envoy/internal/dispatch/pmdoc/gen/differential.sh --base 633c9e5b --corpus linux.jsonl, at b73c558e before the forward merge. 2) A throwaway harness (harness_dump_test.go) built in main de546ed2's tree and in the merge head's tree. It writes RenderWithBlockOffsets, RefuseMisreadDocument, NewMisread against the read-back, StripAnchorMarks and the render of what it gives, for each spec and for an anchored copy of it (every text run cut in three, the middle third under dispatchAsk or proofComment, every seventh run holding a U+0000). Parse's random block ids are masked by order (mask.py).",
-      "observed": "1) The differential's base and head dumps were cmp identical over 1,339 documents (the corpus plus the in-repo documents). 2) The harness dumps were identical at main and the merge head: 1,210 documents, sha256 fa44c0fe... on both sides. The full pmdoc suite passes at the merge head, as do -race on the Strip, Written, Marks and ReadBack tests and the docs package's Strip, Anchor, Edit and Tree tests.",
-      "headSha": "7c3be794b3fecb9953f91e8202aab2de9a7bbd25",
-      "negativeControl": "The head with StripAnchorMarks as cloneNode(node) dumped 1,210 of 1,210 anchored specs differently. TestStripAnchorMarksSharesNothingWithItsDocument fails when StripAnchorMarks returns writtenTree(node, false) without the copy."
+      "surface": "pmdoc renderer, read-back and misread checks, and StripAnchorMarks, over every LINUX issue's current spec (1,210 specs fetched read-only on 2026-10-30, not committed, corpus sha256 36546917...)",
+      "command": "A throwaway harness (harness_dump_test.go) built in main cd5ca7c3's tree and in the merge head da947e18's tree, writing RenderWithBlockOffsets, RefuseMisreadDocument, NewMisread against the read-back, StripAnchorMarks and its render, for each spec and for an anchored copy (each text run cut in three, the middle third under dispatchAsk or proofComment, every seventh run holding a U+0000); Parse's random block ids masked by order (mask.py)",
+      "observed": "The two dumps are identical: 1,210 documents, masked sha256 f7324c09... on both sides. Measured at the merge head da947e18 (main cd5ca7c3); 9f3303df is a later forward merge of main 5dc21cb9 whose unchanged-diff fingerprint equals da947e18's (618dbe4e...), and main changed nothing under dispatch/api, pmdoc, refs, events or store/storetest in between.",
+      "headSha": "9f3303df8a1d2e8077958fb7a47fece6ceb0e7e6",
+      "negativeControl": "The merge head with StripAnchorMarks as cloneNode(node) dumped 1,210 of 1,210 documents differently."
     }
   ],
   "filesChanged": [
@@ -77,10 +77,19 @@
   ],
   "deviations": [
     "The plan's section 0 says to measure with INFRA-589's route-mix file. At the architect's instruction (19:31Z) the flags are the calibrated --events 1.5 --sessions 150 --requests 22, because the 0.5x flags saturate the pod.",
-    "The simplify pass also changed GET /api/v1/projects/{key}/artifacts (project_artifacts.go, outside the original diff) to read all versions in one statement. It was the last per-artifact version query, and the architect agreed it is in scope. Its answers matched at base and head on both seeds."
+    "The simplify pass also changed GET /api/v1/projects/{key}/artifacts (project_artifacts.go, outside the original diff) to read all versions in one statement. It was the last per-artifact version query, and the architect agreed it is in scope. Its answers matched at base and head on both seeds.",
+    "Round 2 ran on a replaced pod with 3 cores (round 1 had 2), so its CPU-seconds are not comparable with round 1's; base and head of each round share their pod and seed."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
     "TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves fails on this pod's pgserver Postgres, whose default collation is already byte order. The test refuses such a database at its first line (rank_test.go:313-318), before any code this change touches runs. CI's Postgres is not affected."
-  ]
+  ],
+  "round": 2,
+  "roundTwo": {
+    "merges": [
+      "e00f224a -> da947e18: main cd5ca7c3. graph.go resolved as a semantic merge: #2463's uuid import and doc comment, this branch's pgx import and BacklinkCountsStatement/ScanBacklinkCounts split; heldByABlock is #2463's version, byte-identical to main's, and BacklinkCountsStatement calls it, so the batched count applies #2463's item-block rule. Fingerprint cbc11b75... -> 618dbe4e... (changed: the merge).",
+      "da947e18 -> 9f3303df: main 5dc21cb9 for #2537 (the docs race job's filter covers internal/dispatch/itemblocks), which the red ci-filters check at da947e18 needs. Fingerprint 618dbe4e... -> 618dbe4e... (unchanged)."
+    ],
+    "ciAtDa947e18": "ci-filters red (main's filter gap, fixed by #2537 now merged in); envoy-session-stall red in envoy-client's NATS stall test (a TypeScript test of packages/envoy-client, which this branch does not touch); 16 other checks green."
+  }
 }
