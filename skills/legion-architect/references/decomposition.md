@@ -44,6 +44,10 @@ EOF
   the root's pull request or an open child's."* A child survives only when it cannot ride in the
   root's pull request or an open child's: its code is in a repository no open pull request of this
   tree is in, or it must merge or deploy on its own before other work of the tree can build on it.
+  A repeated change — the same edit per program, directory or wave of this tree's own work —
+  survives as one child, never one per instance, and a deletion of what this tree replaced rides
+  in the pull request of the last change it waits on, never a child of its own: a wave is an order
+  of merges, not a deliverable.
   Post the verdict, with the folds you made, as one `dispatch comment` on the root: the architect
   who wrote the list reads every child on it as needed, and the comment stops a later session
   filing the same children again.
