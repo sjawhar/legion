@@ -914,13 +914,16 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			// Its three readers, on a single server, which refuses a create at more than one copy
 			// and names the setting: the stream main's publisher reconciles
 			// (dispatchStreamOptions) on its first connection, in the background, so the refusal
-			// reaches the reconnect hook's logged error (refusedDispatchStream), the webhook
-			// sweeper's bucket (webhookSweeper's Open) and the bucket redeliver-webhooks opens.
-			// stream_replicas_test.go raises the same on a cluster.
+			// reaches the reconnect hook's logged error (dispatchStart.awaitHookFailure), the
+			// webhook sweeper's bucket (webhookSweeper's Open) and the bucket redeliver-webhooks
+			// opens. stream_replicas_test.go raises the same on a cluster.
 			_, url := testnats.Start(t)
 			three := map[string]string{"ENVOY_NATS_REPLICAS": "3"}
-			if refusal := refusedDispatchStream(t, []string{url}, three); !strings.Contains(refusal, "ENVOY_NATS_REPLICAS=3: ") {
-				t.Errorf("the stream at ENVOY_NATS_REPLICAS=3 on one server: logged %q, want the server's refusal naming the setting", refusal)
+			refused := connectDispatchStream(t, []string{url}, three)
+			refusal := refused.awaitHookFailure(t)
+			refused.client.Close()
+			if !strings.Contains(refusal.Error, "ENVOY_NATS_REPLICAS=3: ") {
+				t.Errorf("the stream at ENVOY_NATS_REPLICAS=3 on one server: logged %q, want the server's refusal naming the setting", refusal.Error)
 			}
 			conn := testnats.Connect(t, url)
 			t.Cleanup(conn.Close)
