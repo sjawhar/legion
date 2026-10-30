@@ -6,16 +6,11 @@ import (
 	"testing"
 )
 
-// Two readings sjawhar/legion#2481 gave the lines a code block holds, which nothing locked: the
-// reader's own suite stayed green with either taken out (#2481's review, "Not proven / risk";
-// measured again at #2507's head, where removing each left every test of this package passing).
-// Each test below fails when its reading is taken out, so the next change to these lines is told.
-//
-// A third such reading, sourceLines.asHeldBefore, has no test here: no document of the corpora
-// measured for #2507 - this package's own corpus and corpus-errors, #2481's 20,000 indented-code
-// documents, the 5,975 fence documents, the 916 callout documents and 38,304 generated tables -
-// reads or is refused otherwise with it taken out, so either a document that tells them apart is
-// still to be found or the lines no longer need it.
+// Three readings sjawhar/legion#2481 gave the lines a code block holds, which nothing locked: the
+// reader's own suite stayed green with any of them taken out (#2481's review, "Not proven /
+// risk"; measured again at #2507's head, where removing each left every test of this package
+// passing). Each test below fails when its reading is taken out, so the next change to these
+// lines is told.
 
 // A fenced code block whose last line is the document's own, with no line feed and nothing past
 // the fence's indentation, holds none of that line: the browser editor's parser takes as many
@@ -51,6 +46,25 @@ func TestAFencedBlockEndingAtTheDocumentsOwnWhitespaceLineHoldsNoneOfIt(t *testi
 // markdown refuses it.
 func TestATypedBlocksBlankLineInAnItemIsRefusedBesideAnEmptyItem(t *testing.T) {
 	markdown := "-\n\n- a\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n  ```\n  x\n\t"
+	const refusal = "a typed block holding a blank line inside a list item"
+	for _, reader := range blockMarkdownReaders() {
+		if _, err := reader.parse(markdown); !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), refusal) {
+			t.Errorf("%s: %v, want ErrSchema saying %q", reader.name, err, refusal)
+		}
+	}
+}
+
+// The whitespace lines indented code holds are the blank lines they were before it held them, so
+// a typed block holding one in a list item beside an empty list item is refused as it was before
+// sjawhar/legion#2481 (sourceLines.asHeldBefore, source_lines.go). Those lines are none of the
+// code's to blanksOutsideCode, which reads a code block only up to the line it began holding at,
+// but sourceLines.blank passes over them for every other reader of the source; asHeldBefore is
+// what puts them back for this one refusal. Without it the reader stores the document, and the
+// browser editor spaces the list by that line where the reader does not, so the person sees a
+// list they did not write. The fenced form of the same shape is the test above; this is the
+// indented form, which only asHeldBefore decides.
+func TestIndentedCodesHeldLineInATypedBlockIsRefusedBesideAnEmptyItem(t *testing.T) {
+	markdown := "-\n\n- a\n  :::callout{#c1 kind=\"note\" title=\"T\"}\n      code\n      \n  :::\n"
 	const refusal = "a typed block holding a blank line inside a list item"
 	for _, reader := range blockMarkdownReaders() {
 		if _, err := reader.parse(markdown); !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), refusal) {
