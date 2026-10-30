@@ -1409,7 +1409,7 @@ and every later `POST /api/v1/comments/{id}/deliveries` retry - claims it (`clai
 same shape on `message_deliveries`, resolved before the claim rather than after it: a direct
 message's attempt 1 is committed `pending` and unclaimed in the transaction that stores the
 message, naming no session yet (`createStoredMessage`, carrying the requester and the urgency,
-migration `0148`), as a broadcast recipient's is beside its message, naming its session; then
+migration `0149`), as a broadcast recipient's is beside its message, naming its session; then
 `recordPendingMessageDelivery` claims that attempt, or opens one for a Retry, and commits it
 `pending` carrying the resolution, pinning the session it resolved to a row that named none; the
 send follows, and `completeMessageDelivery` settles it with the `message.delivery` event. Either
@@ -2164,10 +2164,17 @@ its parser unquotes back. Marks are read as that parser reads them, as a set, wh
 them: a mark opened where the same mark is already open adds nothing, and its close ends the mark
 for the rest of the text around it, up to the node that opened it (`parseInlineMarks`), so
 `*x *y* z*` is
-`x y` in emphasis and ` z` without, and `****a****` is strong once. An image is read without the
-marks around it, a link among them, as the browser editor's store (y-prosemirror, which keeps a
-mark on text alone) holds it, so a linked image is stored without its link (LEGION-365) rather than
-refused. Delimiter runs pair as that parser pairs them: CommonMark's rule of three is judged on the
+`x y` in emphasis and ` z` without, and `****a****` is strong once. An inline leaf - a node that is
+inline, holds no content of its own and is not text: raw HTML, an image, a hard break, a footnote
+reference - is read without the marks around it, a link among them, by both readers, since a mark
+lives on text alone, as the browser editor's store (y-prosemirror) holds it and as the engine
+itself reads it; so a linked image is stored without its link (LEGION-365) rather than refused,
+and a comment and a past version draw what the document stores. An autolink inside a link label
+carries its own link, in place of the label's, on its own text (the autolink arm of
+`parseInlineMarks`, where a mark excludes another of its own type), and the label's link covers the
+runs around it: stacking the two would put a text under two links, a tree ProseMirror cannot hold,
+and the write would be refused. Delimiter runs
+pair as that parser pairs them: CommonMark's rule of three is judged on the
 lengths two runs have left after the pairs already made from them (`emphasisDelimiters`), where
 goldmark judged the lengths they were written with, so in `***a.****&#32;b*` the closer's last `**`
 is text. A run of `*` or `_` can also open where another `*` or `_` follows it and close where one
@@ -2363,7 +2370,16 @@ grammar decides, since an escaped `<` reads as text in both: goldmark reads a de
 `<!` and an uppercase letter, and an unquoted attribute value holding no control character, where
 CommonMark 0.31 and the engine also read a lowercase one (`<!doctype x;[a@b.cc](mailto:a@b.cc)>`)
 and a U+0001 in an unquoted value as raw HTML. Only a `<` the run's first writing reads so is
-escaped, so a run that reads back keeps its bytes. A text `<` first after its line's container
+escaped, so a run that reads back keeps its bytes. The reader opens a declaration by the rule the
+scan already judged it by (`opensDeclaration`, which `rawHTMLCloser` asks for the reader and for the
+scan alike): `<!` and any ASCII letter, as CommonMark 0.31 and the engine open one, where goldmark's
+raw HTML parser opens one only after an uppercase letter, so `p <!a> q` is read as inline raw HTML
+and stored unescaped. Every kind of inline raw HTML that ends at a closer of its own is read by the
+one parser (`inlineRawHTMLParser`), which walks a block to its end at most once per kind: the first
+opener of a kind whose walk finds no closer is recorded (`unclosedRawHTML` for a parse,
+`rawHTMLScan.ends` for a write) and every later opener of it in that block is refused without a
+walk, so a kind added to `rawHTMLCloser` keeps that guarantee only by recording what its own walk
+answered. A text `<` first after its line's container
 prefix is also escaped where micromark's html-flow start conditions open an HTML block there, judged
 in `endLine` on the line as written across nodes (`htmlBlockStart`), since goldmark can read a
 paragraph there: `<span title=a=b;[a@b.cc](mailto:a@b.cc)>` alone on a paragraph's first line is a
@@ -2761,7 +2777,7 @@ read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy census").
 ## Critical conventions
 
 - `packages/contracts` defines the TypeScript event schemas consumed by Dispatch clients. The Go Dispatch server maintains its emitted event names and wire payloads separately; `bun run gen:go` generates Envoy envelope validation only.
-- `GET /api/v1/issues` answers every issue its filters match (`project`, `status`, `parent`, `label`, `priority`, `open`, `updated_since`, `route_status`, and the human-only `pinned`) as an array, or one page of them when the caller names `limit` (1 to `contracts.MaxIssuePageLimit`, 250) or `offset` (0 or more; alone it pages `contracts.DefaultIssuePageLimit`, 50): `{issues, total, limit, offset}` (`model.IssueSummaryPage`), the count beside the rows as `GET /api/v1/asks/open` carries it. `parseIssuePage` (`api/issue_page.go`) reads both, and a repeated, blank, non-integer or out-of-range value is `400 INVALID_QUERY` naming the parameter; so is `cursor`, which the listing does not page with, since answering it with the first page would hand back rows the caller cannot tell from the ones it asked for (LEGION-406: the route ignored all three and answered every row). The page is cut after every filter, `route_status` included, which is applied in Go after the query, so `total` is what the filters match. `route_status` is judged against one stored listener answer, the `route_roster` row (migration `0149`, `api/issue_route_status.go`), at most five seconds old by the database's clock and the same on every process, so which process serves a page does not change what the page holds. The order ends on the key, the one column no two issues share: nothing makes a rank unique (`issues_project_rank` is a plain index, and every project's first issue is `U`), and `created_at` is the creating transaction's start, so without the key consecutive offsets could show a row twice or never even over a listing that holds still. A walk of the pages is exact only on an unchanged listing: an issue that enters or leaves what the filters match (a `route_status` filter's by a refreshed listener answer too), or whose status or rank changes, between two reads shifts rows across a page boundary, and one issue is served twice and another never. The unpaged array is the only exact set one read gives. The `dispatch issues` command always sends `limit` and `offset` (`DispatchClient.listIssuePage`, `packages/envoy-client`) and refuses an array answered to that paged request, which means a Dispatch older than #1612 or a regression of the page. So a Dispatch rolled back past #1612, or one that stops paging, fails every `dispatch issues` call with that refusal; the SPA and both daemons send neither parameter and keep reading the array.
+- `GET /api/v1/issues` answers every issue its filters match (`project`, `status`, `parent`, `label`, `priority`, `open`, `updated_since`, `route_status`, and the human-only `pinned`) as an array, or one page of them when the caller names `limit` (1 to `contracts.MaxIssuePageLimit`, 250) or `offset` (0 or more; alone it pages `contracts.DefaultIssuePageLimit`, 50): `{issues, total, limit, offset}` (`model.IssueSummaryPage`), the count beside the rows as `GET /api/v1/asks/open` carries it. `parseIssuePage` (`api/issue_page.go`) reads both, and a repeated, blank, non-integer or out-of-range value is `400 INVALID_QUERY` naming the parameter; so is `cursor`, which the listing does not page with, since answering it with the first page would hand back rows the caller cannot tell from the ones it asked for (LEGION-406: the route ignored all three and answered every row). The page is cut after every filter, `route_status` included, which is applied in Go after the query, so `total` is what the filters match. `route_status` is judged against one stored listener answer, the `route_roster` row (migration `0150`, `api/issue_route_status.go`), at most five seconds old by the database's clock and the same on every process, so which process serves a page does not change what the page holds. The order ends on the key, the one column no two issues share: nothing makes a rank unique (`issues_project_rank` is a plain index, and every project's first issue is `U`), and `created_at` is the creating transaction's start, so without the key consecutive offsets could show a row twice or never even over a listing that holds still. A walk of the pages is exact only on an unchanged listing: an issue that enters or leaves what the filters match (a `route_status` filter's by a refreshed listener answer too), or whose status or rank changes, between two reads shifts rows across a page boundary, and one issue is served twice and another never. The unpaged array is the only exact set one read gives. The `dispatch issues` command always sends `limit` and `offset` (`DispatchClient.listIssuePage`, `packages/envoy-client`) and refuses an array answered to that paged request, which means a Dispatch older than #1612 or a regression of the page. So a Dispatch rolled back past #1612, or one that stops paging, fails every `dispatch issues` call with that refusal; the SPA and both daemons send neither parameter and keep reading the array.
 - Issues carry a nullable coarse priority (`P0` highest through `P3` lowest) alongside their server-generated fractional `rank`. `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept `priority` as `0` through `3` or null; each priority write emits `issue.updated`. Issue and pinned lists sort by lifecycle status, then rank, then creation time, then key; priority is a badge and a filter, never a sort key, so the List and the Board (whose columns keep the list's order) show the same order. `PATCH /api/v1/issues/{key}` accepts neighboring issue keys as `rank.before` and/or `rank.after`, validates they share the project, and serializes rank allocation per project; it locks both neighbours together with every other issue row the PATCH names, in one key order, then rewrites only that issue's order key.
 - Every issue has a nullable `parent_key` (`graph_edges.child_of` is a live view over it). `POST /api/v1/issues` validates a supplied `parent` exists in the same project (`400 PARENT_INPUT`) and leaves the new issue at most `parentDepthCap` (32) links below its root (`409 PARENT_INPUT`), and `PATCH /api/v1/issues/{key}` accepts a tri-state `parent`: absent leaves it, `null` clears it, a key reparents. Parent changes, and creates with a parent, take the project's dependency advisory lock, serializing with blocker writes; a parent change then locks the issue, its old parent and the proposed parent together in one key order, as a status write locks the issue and its parent (`409 PARENT_CONTENDED` when a concurrent reparent moves the parent at both attempts). Plain, depth-capped reads refuse a missing, self, or foreign-project parent (`400 PARENT_INPUT`), a parent cycle (`409 PARENT_INPUT`), a parent that would put the deepest issue under the moved one more than 32 links below its root (`409 PARENT_INPUT`), or a wait cycle through parent and `blocked_by` edges (`409 DEPENDENCY_CYCLE`); unrelated row activity adds no refusal. A reparent of a closed issue is `409 ISSUE_CLOSED` (a closed issue takes only `rank`, `components`, a reopening `status` — any status but `done` — and an `external_links` write that adds no new URL, so a link can move to the issue that replaced it; every other field, `priority` included, waits for the reopen). An actual parent change appends `child.removed` to the old parent and `child.added` to the new one (`{child_key}`, all owners in one `LockOwners` with the issue's own event) — both always notify, like `child.status`. Issue-detail `children` rows are one recursive-CTE query (`loadChildren`): each direct child carries `subtree_done` / `subtree_total` (the child itself included, every status; done = `status='done'`), `active_at` (the subtree's newest `updated_at`), and its own `external_links`, still ordered by key.
 - Every issue has a nullable `assignee`: the **lowercase** email of the person who answers its asks (`issues.assignee`, migration `0034`, indexed on open issues). Both identity implementations name a person by lowercase email, so `model.CanonicalLogin` (`strings.ToLower(strings.TrimSpace(login))`) is the stored form and plain `=` compares it; the SPA lowercases the `/auth/whoami` viewer once and compares exact. `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept `assignee` (the PATCH's `json.RawMessage` tri-state: absent leaves it, `null` clears, a string is canonicalised and must name a row of `people` (migration `0068`: everyone who has signed in) — else `400 ASSIGNEE_NOT_ALLOWED` naming the email; a non-string is `400 INVALID_ISSUE`). Any authenticated actor may set it; the event's actor is who assigned it, and the whole issue rides in `issue.created` / `issue.updated`, so there is no `assigned_by`. Absent on create, the default is the first match of: a human actor's email; a personal token's `Owner`; the parent's assignee when it names someone; the project's `default_assignee` when that still names a row of `people` (`projects.default_assignee`, migration `0116`; a default left stale by a restore or a direct write falls through to nobody rather than refusing the create, so the check is one query on the create's own transaction and not `allowedLogin`); null — so an issue the shared token creates with no assignee named and no parent assignee lands on the project's default, and one it creates where the project names none stays unassigned; nothing back-fills issues already filed, an explicit `null` on the create still means nobody, and a daemon status PATCH (no `assignee` key) never touches it. A project's default is set by a person alone, through `GET /api/v1/settings/project-default-assignees` and `PUT /api/v1/projects/{key}/default-assignee` `{assignee}` (an email of a row of `people`, or `null` to clear it; `400 ASSIGNEE_NOT_ALLOWED` otherwise, `400 INVALID_PROJECT` for a body without `assignee` or one whose `assignee` is neither a string nor null, and a `settings.project_default_assignee.updated` event); no agent command, flag or route sets it, which is deliberate (`api/project_default_assignee.go`). `GET /api/v1/users` (human-only) returns everyone in `people`, sorted by email, as `{users: [{login}]}` — the picker's options; `GET /api/v1/whoami` (any auth) returns `{kind: "user", login}` (the person's lowercase email) for a cookie/header caller or `{kind: "agent", owner}` for a bearer (`owner` is the personal token's owner by lowercase email, null under the shared token) — what `dispatch whoami` reports. Issue reads (`GET /issues/{key}`, summaries, pinned) carry `assignee`, and so does the `issue` on every inbox row.
@@ -4485,6 +4501,31 @@ once and named exactly, keyed by account in `Config.ServiceLogins`; read by the 
 is an account `BROKER_SERVICES` binds for a service's pods, since every such pod holds a token for
 it; needs `BROKER_K8S_OIDC_ISSUER`; unset, no service logs in with a token),
 `BROKER_K8S_OIDC_ISSUER` / `BROKER_K8S_OIDC_AUDIENCE` (set together or not at all),
+`BROKER_GOOGLE_OIDC_AUDIENCE` (optional; the audience a Google VM identity token must carry,
+`Config.GoogleOIDCAudience`; its issuer is always `https://accounts.google.com`, the constant
+`config.GoogleOIDCIssuer`, so there is no issuer variable; it needs `BROKER_VM_SERVICES`, since an
+audience no VM service is listed for could accept no token; unset, `BROKER_VM_SERVICES`,
+`BROKER_VM_PROJECTS` and `BROKER_VM_INSTANCES` are each refused, naming the variable and this one),
+`BROKER_VM_SERVICES` (optional; whitespace-separated `name=<service account email>` entries, such
+as `example-service=example-fleet@example-project.iam.gserviceaccount.com`, keyed by account in
+`Config.VMServicesByAccount`; read by its own parser (`parseVMServiceAccounts`), since
+`parseServiceAccounts` takes only Kubernetes subjects. After the same service-name form and refusal
+of `shared`, `vmAccountRefusal` takes only a user-managed account,
+`<account id>@<project id>.iam.gserviceaccount.com` in lowercase as a token carries it, and refuses
+with a message of its own such an address written with capital letters, a project's default
+account (Compute Engine's `<number>-compute@developer.gserviceaccount.com` or App Engine's
+`<project id>@appspot.gserviceaccount.com`, which the project's workloads run as by default), and a
+Google-managed service agent (`service-<number>@…`, or any `gcp-sa-` domain); then the refusal of
+an account given twice, naming both services when they differ, through the helper both parsers
+share (`bindOnce`); every account needs an entry in both settings below),
+`BROKER_VM_PROJECTS` / `BROKER_VM_INSTANCES` (optional; whitespace-separated
+`<service account email>=<project id>` and `<service account email>=<instance-name glob>` entries,
+keyed by account in `Config.VMProjects` and `Config.VMInstancePatterns`, each account read by
+`vmAccountRefusal` as above; the glob is `path.Match`'s syntax over an instance name's characters
+(lowercase letters, digits, `-`, and `*`, `?`, `[`, `]`, `^`), so a `/`, a capital, a `.`, a `\` or
+a `!` is refused; an account given twice is refused, and so is an entry naming an account
+`BROKER_VM_SERVICES` does not list, the first such entry as written; an account that setting lists
+with no project or no glob is refused, naming that account, its entry and the missing setting),
 `BROKER_EXCHANGE_K8S_AUDIENCE` (optional; the audience a pod's projected token must carry to be
 exchanged for a Dispatch access token — its own, beside `BROKER_K8S_OIDC_AUDIENCE`, so neither
 token is spendable where the other is; its issuer is the one cluster the broker is told about,
@@ -4562,7 +4603,9 @@ of the number among them) and a key name outside `global`; the other store's key
 `BROKER_SERVICE_LOGINS` or `BROKER_EXCHANGE_K8S_AUDIENCE` set with no cluster issuer, a
 `BROKER_EXCHANGE_ACCOUNTS` with no `BROKER_EXCHANGE_K8S_AUDIENCE` and a
 `BROKER_EXCHANGE_WORKFLOWS` with no `BROKER_EXCHANGE_GITHUB_ISSUER`, each naming the pair whose
-tokens its callers present; and a `_SECONDS` variable that isn't a
+tokens its callers present; any of `BROKER_VM_SERVICES`, `BROKER_VM_PROJECTS` and
+`BROKER_VM_INSTANCES` set with no `BROKER_GOOGLE_OIDC_AUDIENCE`, and that audience set with no
+`BROKER_VM_SERVICES`; each VM refusal of the paragraph above; and a `_SECONDS` variable that isn't a
 whole number between the min and max its row of Load's `ints` table gives (non-numeric fails the
 same check as out of range). `cmd/broker/main.go` logs at boot, before it loads the AWS config or
 opens the database, how it signs in (`database sign-in method=rds-iam` when `Config.DatabaseIAM`,

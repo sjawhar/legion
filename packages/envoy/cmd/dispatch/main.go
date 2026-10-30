@@ -258,6 +258,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	// asks_anchor_artifact_id (migration 0148) indexes the anchors whose artifact_id is a
+	// lower-case document id, the form every server-written anchor carries. A row an earlier
+	// release stored with another spelling is left out, and settlement records no mark for it:
+	// the migration refuses no such row, so the log is where its count is visible. A count that
+	// fails is a log line too, never a boot that stops: the server serves without it.
+	if outside, err := database.AsksOutsideAnchorArtifactIndex(ctx); err != nil {
+		slog.Warn("dispatch: count the anchored asks left out of asks_anchor_artifact_id", "error", err)
+	} else if outside > 0 {
+		slog.Warn("dispatch: anchored asks left out of asks_anchor_artifact_id: their anchor's artifact_id is not a lower-case document id, so settlement records no mark for them", "count", outside)
+	}
+
 	if err := validateDefaultProject(ctx, database, boot.DefaultProject); err != nil {
 		slog.Error("dispatch: validate default project", "error", err)
 		os.Exit(1)

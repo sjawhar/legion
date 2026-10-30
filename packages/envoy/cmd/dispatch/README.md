@@ -112,7 +112,7 @@ reach the stream adds nothing to the stream.
   stops the sweep and counts nothing against the delivery. No sweep sends GitHub anything until
   the time GitHub gave (`Retry-After`, or `x-ratelimit-reset` when no requests remain), and at
   least one minute, doubling while limits follow one another, up to 64 minutes. Both live in
-  `github_rate_limits` (migration `0150`), judged by the database's clock: GitHub's own wait under
+  `github_rate_limits` (migration `0151`), judged by the database's clock: GitHub's own wait under
   the App's scope, `app`, which every process's App calls obey (Running more than one process,
   below), and the doubling under the sweep's own, `redelivery`, so a limit met on redelivery
   requests never holds token mints and installation lookups past GitHub's wait. Each sweep reads
@@ -629,7 +629,7 @@ What the two processes share, and what each keeps to itself:
   the future" check, as the delivery claims' lease, the route roster's age and the GitHub rate
   limits are.
 - Route status and the agents list come from one stored listener answer. Every issue read judges
-  its `route_status` against the `route_roster` row (migration `0149`), the listener's last
+  its `route_status` against the `route_roster` row (migration `0150`), the listener's last
   live-session list, and `GET /api/v1/agents` lists that row's sessions, so both processes read a
   route the same way, list the same agents, and a `route_status` page read on either is cut from
   the same answer. A process that finds the row older than five seconds by the database's clock
@@ -640,7 +640,7 @@ What the two processes share, and what each keeps to itself:
   can still move issues across a page boundary, as any change does under offset paging.
 - GitHub's rate limits hold every process. GitHub budgets the App and each installation, not a
   process, and warns that requests sent while limited may get the integration banned, so a limit
-  one process meets is recorded in `github_rate_limits` (migration `0150`) and every process reads
+  one process meets is recorded in `github_rate_limits` (migration `0151`) and every process reads
   it before it sends GitHub anything (`githubapp.Client.request`, `githubapp/ratelimit`). Scope
   `app` holds the calls the App JWT signs (installation lookups, token mints, the webhook delivery
   endpoints) and `installation:<id>` the calls under that installation's token, each for the wait
@@ -682,7 +682,7 @@ What the two processes share, and what each keeps to itself:
 - A Delivery page configuration warning is logged once across the processes. Every read judges
   each deploy run, and a successful run holding none of `production_job_names`, or whose production
   job lists no step named `production_apply_step_name`, is named in the log; the process whose
-  insert into `delivery_run_warnings` (migration `0151`) writes the run's row logs it, and every
+  insert into `delivery_run_warnings` (migration `0152`) writes the run's row logs it, and every
   other process finds the row and stays quiet. A database that cannot record the row leaves the
   process to log it anyway.
 - A test hook acts on every process (`DISPATCH_TEST_HOOKS=1` only, so never in a real
@@ -1451,7 +1451,22 @@ message included (a message is never edited), and owes an index to every message
 reading `messages` once. Its trigger takes `SHARE ROW EXCLUSIVE` on `messages` alone, so a message
 write waits behind it while a read does not. Its census answers `0` for the same reasons.
 
-Migration `0148_message_delivery_urgency` adds `message_deliveries.urgency`, the urgency a targeted
+Migration `0148_asks_anchor_artifact_id` creates `asks_anchor_artifact_id`, an index over the asks
+whose `anchor` is set of `case when anchor->>'artifact_id' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (anchor->>'artifact_id')::uuid end`:
+the uuid cast `comments_anchor_artifact` (`0032`) indexes, guarded by the form every
+server-written anchor carries, since an unguarded cast would fail the boot over an anchor an
+earlier release could store. Settlement's sweep reads through it the marks a document's asks
+record, by the anchor's document alone, so an ask that also names an ask block on another document
+(`block_artifact_id`) keeps its mark on the document its anchor names. Building it takes `SHARE`
+on `asks`, so ask writes wait for the build; it rewrites no row and refuses none, so its census
+answers `0`. An anchor whose artifact id is not a lower-case document id is left out of the index,
+which costs the read nothing — its text comparison never matched such a spelling either — and
+each boot logs the count of those asks with a warning when there are any. The release before it
+never reads the index and serves beside it unchanged, except that its sweep still drops the mark
+of an ask holding both columns (no such row is written today), and rolling Dispatch back past
+`0148` is an image rollback alone: the index is left for the next release that reads it.
+
+Migration `0149_message_delivery_urgency` adds `message_deliveries.urgency`, the urgency a targeted
 message was sent with, so a send that resumes a stranded attempt - the delivery sweep's
 (`api/delivery_sweep.go`, `resumeOwedDeliveries`) or a person's same-mode Retry - hands the
 listener the urgency the person chose; an attempt a Retry opens records none and sends none. A
@@ -1463,11 +1478,11 @@ rolls beside it; an attempt that release wrote is resumed without an urgency, as
 was. Its check, one of `low`, `med`, `high` and `blocking`, is a second statement added
 `not valid`, as the rule below requires, and nothing validates it later, since every row below
 the migration carries no urgency. The sweep reads its candidates through `0138`'s partial indexes
-(above); `0148` builds none of its own. The census answers `0`. `0148` is additive, so rolling
-back past it is an image rollback alone. It follows `0147_message_deliveries_session_created`, which
+(above); `0149` builds none of its own. The census answers `0`. `0149` is additive, so rolling
+back past it is an image rollback alone. It follows `0148_asks_anchor_artifact_id`, which
 already uses the preceding migration number.
 
-Migration `0149_route_roster` creates `route_roster`, one row (its `id` checked `true`, as
+Migration `0150_route_roster` creates `route_roster`, one row (its `id` checked `true`, as
 `embeddings_rate_limit`'s is) holding the listener's last answer to `GET /v1/sessions` that every
 process judges issue reads' `route_status` against and lists `GET /api/v1/agents` from: whether it
 answered, the sessions it listed as the listener listed them, when the call was sent and until
@@ -1478,7 +1493,7 @@ The release before it neither reads nor writes the table and keeps its per-proce
 list while both serve, so only processes of this release agree on a route and on the agents list;
 rolling back past it is an image rollback alone.
 
-Migration `0150_github_rate_limits` creates `github_rate_limits`, one row per scope GitHub
+Migration `0151_github_rate_limits` creates `github_rate_limits`, one row per scope GitHub
 budgets (`app`, `installation:<id>`) and one for the webhook redelivery sweep's own backoff
 (`redelivery`): until when no process sends GitHub a request under the scope, judged against the
 database's `now()` as `embeddings_rate_limit`'s budget is, the strikes the sweep doubles its wait
@@ -1488,7 +1503,7 @@ rewritten, and the census answers `0`. The release before it neither reads nor w
 while both serve, its processes obey only the answers GitHub gives each of them, and its sweeps
 keep their backoff in the NATS KV bucket; rolling back past it is an image rollback alone.
 
-Migration `0151_delivery_run_warnings` creates `delivery_run_warnings`, one row per Delivery page
+Migration `0152_delivery_run_warnings` creates `delivery_run_warnings`, one row per Delivery page
 configuration warning logged: the deploy run (`repo`, `run_id`) and the configuration it was
 warned under (`job_names`, and `apply_step`, `''` for a run holding no production job), all four
 the primary key, so a changed configuration is warned about again. A read inserts the row before
