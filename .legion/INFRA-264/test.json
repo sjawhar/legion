@@ -2,119 +2,113 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-264",
-  "completed": "2026-10-30T14:35:00Z",
-  "round": 3,
+  "completed": "2026-10-30T18:55:00Z",
+  "round": 4,
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round three answers the review's request for changes (one High, two Medium, nine minors at e7e4a6af). The implement handoff now carries fourteen proofs at the fix head 02b80896702e, three of them for the review's findings. Each was re-driven here on a live pair rebuilt at that tree — packages/envoy/scripts/dev-broker.sh and packages/dispatch `bun run dispatch:local`, with a counting proxy between Dispatch and the broker — by the same second DPoP/RFC 8693 client written from the RFCs with the Go standard library alone, never internal/broker/helper. The three findings are closed on the surface, not only in a test: (1) every uuid spelling Postgres accepts but Go's uuid.Parse refuses — no hyphens, a hyphen after each group of four, uppercase, braces — now resolves another project's comment to its project and is refused 403 PROJECT_SCOPE, while the same spellings of the caller's own comment still work, so the resolver and the handler agree in both directions; (2) a machine login's own access token, which the broker answers live with no session, is refused 401 BROKER_TOKEN_NOT_A_SESSION at whoami and at every write, and the request body no longer chooses the session, while that same token still exchanges for a session-bearing one; (3) an upload or message into another session's conversation is refused 403 SESSION_SCOPE naming both sessions, while the caller's own session is accepted. The review's minors I could drive are fixed too: the rate refusal is now 429 with Retry-After: 1, and a project-scoped caller naming an external ref mapped to another project is refused before anything is returned or recorded. Every acceptance line of rounds one and two was re-driven at this head and still holds."
+    "how": "Round four answers the second review round (changes requested at c0cacf98: the branch conflicting with main, and five minors). Since round three the branch has two forward merges (55e8991d, which renumbers this change's Dispatch migration 0148_dpop_proofs to 0149_dpop_proofs because main took 0148, and b5103ea3, one text conflict in packages/envoy/AGENTS.md) and one fix commit, a1f34c47 'fix(dispatch): the review's five minors'. The implement handoff's fourteen proofs now stand at b5103ea3. My workspace was recreated between rounds, so the pod held neither the Postgres harness nor my client: both were rebuilt from scratch — the unpacked-Debian Postgres 17 by the recipe, and the second DPoP/RFC 8693 client written again from RFC 9449 and RFC 8693 with the Go standard library alone, never internal/broker/helper — and the whole battery was re-driven at this head against a real broker and a real Dispatch with a counting proxy between them. Everything holds: the migration applies in its new place (the live database reports version 149 with the dpop_proofs table), the three earlier findings stay closed, every acceptance line of rounds one to three repeats, and the five minors that have an observable surface are true on it. The one claim I could not drive is `callerOf` refusing a project_scope that is neither named nor person: the broker writes only those two, so that fail-closed branch is reachable from its unit test alone; both scopes it does write were driven here."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "The review's High finding is closed: a project-scoped token cannot reach another project's object by spelling its id the way Postgres accepts and Go's uuid.Parse does not (INFRA-265).",
-      "surface": "The live pair at the fix tree: POST /api/v1/comments/{id}/reply and the other id-addressed rows, with one EXAMPLE-scoped broker token, against a comment of the seed's CORE and against one of EXAMPLE.",
-      "command": "The CORE comment 199c4663-da1e-4034-8b76-35e09bca7c03 addressed five ways — canonical, no hyphens (199c4663da1e40348b7635e09bca7c03), a hyphen after each group of four (199c-4663-da1e-4034-8b76-35e0-9bca-7c03), uppercase, and braces ({…}, percent-encoded) — then the CORE ask and the CORE document in the four-group form, then the EXAMPLE comment in each of those spellings",
-      "observed": "All five spellings of the CORE comment → 403 PROJECT_SCOPE 'this request's credential may write project EXAMPLE; this write belongs to project CORE'; the CORE ask and CORE document in the four-group form → the same refusal. The same four spellings of the caller's own EXAMPLE comment → 200 each, so nothing honest broke: the check resolves exactly what the handler resolves.",
-      "headSha": "4598e4d7929cedce2cc7e6b9d7f4367c537fd78e",
-      "negativeControl": "The caller's own comment in the no-hyphen and four-group spellings is accepted in the same run, so the refusal is the project and not the spelling; and an id that resolves to nothing (an unknown uuid, a non-uuid) is refused 403 'this write resolves to no project of that credential's' rather than answered, which is the fail-closed rule the review asked for."
+      "criterion": "A caller presenting a broker-issued token is accepted, and Dispatch reports the session, the person and the project; a mismatching body actor, an unprovable key, a replayed proof, a dropped ath, a foreign htu and the Bearer scheme are each refused (INFRA-264).",
+      "surface": "A live pair rebuilt at this head: packages/envoy/scripts/dev-broker.sh (real cmd/broker, real dev-oidc-issuer, its own Postgres database) and packages/dispatch `bun run dispatch:local` (real Go server, real Postgres with every migration applied, the production SPA build), driven by a DPoP client written from the RFCs with the Go standard library alone.",
+      "command": "dpopdrv exchange --subject-token-file $DEV_BROKER_DIR/exchange-token --session example-worker-session; then GET http://127.0.0.1:17712/api/v1/whoami under 'Authorization: DPoP <token>', and POST /api/v1/issues/EXAMPLE-1/comments with no actor and with an actor naming ses-not-mine",
+      "observed": "200 {\"kind\":\"agent\",\"owner\":\"ada@example.com\",\"project\":\"EXAMPLE\",\"service\":null,\"session\":\"example-worker-session\"}; the write with no actor 201; the mismatching actor 403 ACTOR_SESSION_MISMATCH.",
+      "headSha": "1193d088f7f0d50b8e14baf5210dee073ef96c0f",
+      "negativeControl": "The same token under Bearer → 401 UNAUTHORIZED; proved by a second ES256 key → 401 BROKER_TOKEN_KEY_MISMATCH; one jti presented twice → the second 401 BROKER_TOKEN_PROOF_INVALID; the proof's ath dropped, and its htu naming http://evil.example → 401 BROKER_TOKEN_PROOF_INVALID each."
     },
     {
-      "criterion": "The review's first Medium is closed: a live broker token that names no session is refused, and the request body cannot fill one in (INFRA-264).",
-      "surface": "The live pair: a person's machine login driven by hand at the broker (device authorization with an RFC 9101 request object and dpop_jkt, approved through agent-secrets-devrelay, the device code redeemed), whose own access token — not an exchanged one — is then presented to Dispatch.",
-      "command": "POST /v1/oauth/introspect on the machine access token; then GET /api/v1/whoami, POST /api/v1/issues with a body actor naming ses-chosen-by-the-body, and POST /api/v1/issues/CORE-1/comments with the same body actor, each under 'Authorization: DPoP <that machine token>'",
-      "observed": "The broker answers {\"active\":true,\"scope\":\"machine\",\"client_id\":\"agent-secrets-helper\"} — live, and naming no session and no person. Dispatch refuses all three with 401 BROKER_TOKEN_NOT_A_SESSION 'this access token is not a session's credential: the secrets broker names no session for it'. Nothing is created and no session is taken from the body.",
-      "headSha": "4598e4d7929cedce2cc7e6b9d7f4367c537fd78e",
-      "negativeControl": "The same machine token still exchanges for a session-bearing token in the same run (POST /v1/oauth/token, subject_token_type access_token, session ada-devbox → 200), and that token is accepted at whoami, so the refusal is the missing session and not the token or its key."
+      "criterion": "The first review round's High finding stays closed after two forward merges and the project check's mount-time refactor: no uuid spelling reaches another project's object (INFRA-265).",
+      "surface": "The same live pair: the id-addressed rows with one EXAMPLE-scoped token, against CORE's comment, ask and document and against EXAMPLE's own comment.",
+      "command": "The CORE comment addressed canonically, with no hyphens, with a hyphen after each group of four, in upper case and in braces (percent-encoded); the CORE ask and the CORE document in the four-group form; then the EXAMPLE comment in each of those spellings",
+      "observed": "Every CORE spelling → 403 PROJECT_SCOPE naming both projects; the CORE ask and document likewise. Each spelling of the caller's own comment → 200, so the resolver and the handler still agree in both directions after the refactor that decides the route's class at mount.",
+      "headSha": "1193d088f7f0d50b8e14baf5210dee073ef96c0f",
+      "negativeControl": "An unknown uuid and a non-uuid are refused 403 'this write resolves to no project of that credential's' rather than answered, which is the fail-closed rule; a cookie and the shared token on the same unknown id still get the handler's own answer."
     },
     {
-      "criterion": "The review's second Medium is closed: a route that writes into one session's conversation is held to the session the credential proved (INFRA-265).",
-      "surface": "The live pair: POST /api/v1/agents/{session_id}/artifacts and POST /api/v1/agents/{session_id}/messages under a broker token proving session example-worker-session.",
-      "command": "A multipart upload into the seeded planner's session 019a1c01-0d7b-7a2a-8e93-4a5b6c7d8e01, then the identical upload into example-worker-session, then a message into the planner's session",
-      "observed": "The other session's conversation → 403 SESSION_SCOPE 'this request's credential acts for session example-worker-session; POST /api/v1/agents/{session_id}/artifacts writes into session 019a1c01-…'; its own session → 201 with the artifact recorded under agent/example-worker-session/mine-txt; the message route → the same 403 naming itself.",
-      "headSha": "4598e4d7929cedce2cc7e6b9d7f4367c537fd78e",
-      "negativeControl": "The caller's own session is accepted in the same run, and the shared token on the same route still answers its old 400 ACTOR_KIND ('bearer callers require actor.kind session'), so the new check leaves every credential that proves no session exactly as it was."
+      "criterion": "The review's two Mediums stay closed: a live broker token naming no session is refused and the body cannot fill one in, and a write into one session's conversation is held to the session the credential proved (INFRA-264, INFRA-265).",
+      "surface": "The same live pair: a machine login driven by hand at the broker (device authorization with an RFC 9101 request object and dpop_jkt, approved through agent-secrets-devrelay, the device code redeemed), and POST /api/v1/agents/{session_id}/artifacts.",
+      "command": "The machine access token at GET /api/v1/whoami and at POST /api/v1/issues with a body actor naming ses-chosen-by-the-body; then a multipart upload into the planner's session 019a1c01-… and into example-worker-session",
+      "observed": "The machine token → 401 BROKER_TOKEN_NOT_A_SESSION at both, nothing created; the other session's conversation → 403 SESSION_SCOPE naming both sessions; its own session → 201.",
+      "headSha": "1193d088f7f0d50b8e14baf5210dee073ef96c0f",
+      "negativeControl": "That same machine token still exchanges for a session-bearing one (200) which whoami accepts, and the caller's own conversation is accepted in the same run."
     },
     {
-      "criterion": "A caller presenting a broker-issued token is accepted and Dispatch reports the session, the person and the project; a mismatching body actor, an unprovable key, a replayed proof and the Bearer scheme are each refused (INFRA-264).",
-      "surface": "The same live pair.",
-      "command": "GET /api/v1/whoami under DPoP; POST /api/v1/issues/EXAMPLE-1/comments with no actor, a matching actor and an actor naming ses-not-mine; the same whoami under Bearer, proved by a second key, and with one jti presented twice",
-      "observed": "200 {\"kind\":\"agent\",\"owner\":\"ada@example.com\",\"project\":\"EXAMPLE\",\"service\":null,\"session\":\"example-worker-session\"}; the writes 201, 201 and 403 ACTOR_SESSION_MISMATCH; Bearer → 401 UNAUTHORIZED; the second key → 401 BROKER_TOKEN_KEY_MISMATCH; the replayed jti → 401 BROKER_TOKEN_PROOF_INVALID.",
-      "headSha": "4598e4d7929cedce2cc7e6b9d7f4367c537fd78e",
-      "negativeControl": "The accepted writes in the same run, so each refusal is the one thing it names."
+      "criterion": "The exception the review asked the pull request body to state is true and bounded: POST /api/v1/messages/{id}/reply is the calling session's write, so a session sent a message on another project's issue may reply there — and only to its own delivery (INFRA-265).",
+      "surface": "The same live pair, with the fake Envoy's live-session fixture holding example-worker-session so a delivery attempt lands.",
+      "command": "A signed-in person posts an issue message on CORE-1 targeting session:example-worker-session with delivery steer; the EXAMPLE-scoped token then POSTs /api/v1/messages/{id}/reply {body, attempt:1}; then the same token replies to a second CORE-1 message delivered to the planner's session",
+      "observed": "Its own delivery → 201, the reply recorded on CORE-1 with author {\"kind\":\"session\",\"id\":\"example-worker-session\",\"owner\":\"ada@example.com\",\"project\":\"EXAMPLE\"} — the documented exception, exactly as the body now states it. The other session's delivery → 403 REPLY_FORBIDDEN 'session may reply only to its own delivery', so the exception reaches no further than the session's own attempt.",
+      "headSha": "1193d088f7f0d50b8e14baf5210dee073ef96c0f",
+      "negativeControl": "The refusal above is the control: the same route, the same project, the same caller, and only the delivery's session differs."
     },
     {
-      "criterion": "A revoked token stops working within the cache's few seconds, and a refusal is never served from a cache, on an exchanged token and on a dev box token (INFRA-264; the architect's point 4).",
-      "surface": "The same live pair with the counting proxy.",
-      "command": "whoami to cache the answer, POST /v1/oauth/revoke as the dispatch caller, then whoami every half second; and, for the dev box token, POST /v1/launcher-credentials/{id}/revoke-by-approver after the same caching read",
-      "observed": "Exchanged token: accepted to t=+4.7 s, 401 BROKER_TOKEN_NOT_ACTIVE at t=+5.3 s, the window costing two introspections. Dev box token (project_scope person, whoami project null, writing both projects as the rule says): accepted to t=+4.7 s, refused at t=+5.2 s. A refusal is never cached: one unknown token presented twice cost two introspections. The cache and its single flight: five presentations within 1.5 s cost one introspection, a sixth after five seconds a second, and ten concurrent presentations of a fresh token exactly one, all ten answered 200.",
-      "headSha": "4598e4d7929cedce2cc7e6b9d7f4367c537fd78e",
+      "criterion": "A revoked token stops working within the cache's few seconds, on an exchanged token and on a dev box token, and a refusal is never served from a cache (INFRA-264; the architect's point 4).",
+      "surface": "The same live pair with a counting reverse proxy between Dispatch and the broker.",
+      "command": "whoami to cache the answer, then POST /v1/oauth/revoke as the dispatch caller, then whoami every half second; and the same with POST /v1/launcher-credentials/{id}/revoke-by-approver for a dev box session's token",
+      "observed": "Exchanged token: accepted to t=+4.6 s, 401 BROKER_TOKEN_NOT_ACTIVE at t=+5.2 s. Dev box token (introspection project_scope person, whoami project null, writing CORE and EXAMPLE as the rule says): accepted to t=+4.6 s, refused at t=+5.2 s. A refusal is never cached: one unknown token presented twice cost two introspections. Five presentations of a fresh token within 1.5 s cost one introspection, a sixth after five seconds a second, and ten concurrent presentations exactly one with all ten answered 200.",
+      "headSha": "1193d088f7f0d50b8e14baf5210dee073ef96c0f",
       "negativeControl": "Both revocations presented by the introspection-only caller → 403 ACCOUNT_LACKS_POWER naming that caller and that route, with the token still accepted afterwards."
     },
     {
-      "criterion": "A write to an object of a project the token does not cover is refused and names both projects, a deployment-wide write is refused by name, and an external ref mapped to another project is refused before anything is returned (INFRA-265, with the review's first minor).",
-      "surface": "The same live pair, with EXAMPLE as the token's project, the seed's CORE as the other, and a repository mapping acme/widgets → CORE made by a signed-in person.",
-      "command": "Under one EXAMPLE token: writes to CORE's issue, comment, ask, document and project document; POST /api/v1/projects and POST /api/v1/broadcasts; POST /api/v1/issues with external acme/widgets#1 (an issue the person had already created from that ref) and with acme/widgets#2 (a ref no issue holds yet)",
-      "observed": "Every CORE address → 403 PROJECT_SCOPE naming both projects; both deployment rows → 403 PROJECT_SCOPE_DEPLOYMENT naming the route; both external refs → 403 PROJECT_SCOPE 'this write belongs to project CORE', so neither the existing CORE-8 nor a related-check record was returned or written.",
-      "headSha": "4598e4d7929cedce2cc7e6b9d7f4367c537fd78e",
-      "negativeControl": "The person created CORE-8 from the same ref in the same run, and the EXAMPLE token's writes to its own project are accepted, so the refusal is the project and not the ref."
-    },
-    {
-      "criterion": "The rate refusal names how long to wait (the review's second minor), and the unauthenticated path still cannot spend the people's approval budget (plan P5).",
+      "criterion": "The rate refusal still names how long to wait after its helper moved to internal/ratelimit (the review's third minor), and the unauthenticated path cannot spend the people's approval budget (plan P5).",
       "surface": "The same live pair with the counting proxy.",
       "command": "Forty-five presentations of distinct unknown tokens from one address, then one more read with its response headers",
-      "observed": "429 Too Many Requests with 'Retry-After: 1' and {\"code\":\"BROKER_TOKEN_RATE_LIMITED\",\"error\":\"too many access tokens checked from this address; try again in 200ms\"}; the tokens past the bucket never reached the broker.",
-      "headSha": "4598e4d7929cedce2cc7e6b9d7f4367c537fd78e",
+      "observed": "429 Too Many Requests, 'Retry-After: 1', {\"code\":\"BROKER_TOKEN_RATE_LIMITED\",\"error\":\"too many access tokens checked from this address; try again in 200ms\"}; the tokens past the bucket never reached the broker. `go test ./internal/ratelimit/...` passes at its new home.",
+      "headSha": "1193d088f7f0d50b8e14baf5210dee073ef96c0f",
       "negativeControl": "Ten concurrent presentations of one live token in the same stack cost one introspection and all answered 200, so the bound refuses the flood and not the honest caller."
+    },
+    {
+      "criterion": "A write to an object of a project the token does not cover is refused and names both projects, and a deployment-wide write is refused to a project-scoped caller (INFRA-265).",
+      "surface": "The same live pair with EXAMPLE as the token's project and the seed's CORE as the other.",
+      "command": "Under one EXAMPLE token: POST /api/v1/issues/CORE-1/comments; POST /api/v1/projects; and the caller's own POST /api/v1/issues/EXAMPLE-1/comments",
+      "observed": "403 PROJECT_SCOPE naming both projects; 403 PROJECT_SCOPE_DEPLOYMENT naming the route; the caller's own write 201.",
+      "headSha": "1193d088f7f0d50b8e14baf5210dee073ef96c0f",
+      "negativeControl": "A signed-in person's cookie created both projects and their issues in the same run: the check is a no-op for every credential that names no project."
     },
     {
       "criterion": "The document editor's live connection takes a person's cookie and no bearer, and a person's editing is unaffected (INFRA-264, INFRA-265).",
       "surface": "The live Dispatch, and the repository's browser suite in a real Chromium against the production SPA build.",
-      "command": "Upgrade /ws/doc/{EXAMPLE-1's spec} with the shared bearer and the old X-Dispatch-Actor header, and with a signed-in person's cookie; then `bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/doc.e2e.ts e2e/collab-cursor.e2e.ts` against the same instance",
-      "observed": "The shared token → 401; the cookie → 101. The browser suite: 17 of 17 rows passed in 2.5 m, two people editing one document live with their cursors, named versions, the diff, an agent edit landing in an open editor, and reconnection after a dropped transport.",
-      "headSha": "4598e4d7929cedce2cc7e6b9d7f4367c537fd78e",
-      "negativeControl": "The same shared token on the HTTP API in the same run → 200 at /api/v1/whoami, so the socket's 401 is the deleted door."
+      "command": "Upgrade /ws/doc/{EXAMPLE-1's spec} with the shared bearer and the old X-Dispatch-Actor header, and with a person's cookie; then `bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/doc.e2e.ts e2e/collab-cursor.e2e.ts` against the same instance",
+      "observed": "The shared token → 401; the cookie → 101; the same bearer on the HTTP API → 200. The browser suite: 17 of 17 rows passed in 1.1 m. `grep -rn 'X-Dispatch-Actor'` finds nothing outside packages/envoy/CHANGELOG.md.",
+      "headSha": "1193d088f7f0d50b8e14baf5210dee073ef96c0f",
+      "negativeControl": "The bearer's 200 on the HTTP API in the same run, so the socket's 401 is the deleted door and not a wrong token."
     },
     {
-      "criterion": "An open stream re-resolves its caller without replaying the proof, a multipart body is not eaten, and a broker outage fails closed rather than unscoping the caller.",
-      "surface": "The live Dispatch: a /ws/live socket under a broker token, a multipart artifact upload, and every route with cmd/broker stopped.",
-      "command": "A WebSocket held 45 s (three heartbeats) under one proof; POST /api/v1/issues/EXAMPLE-1/artifacts as multipart; then, with the broker killed, whoami, the issue create, a comment on an issue that does not exist, and the agent artifact upload",
-      "observed": "The socket stayed open the whole 45 s and took two frames; the multipart upload answered 201; with the broker down every one of the four answered 503 BROKER_UNAVAILABLE, the caller's own targets included.",
-      "headSha": "4598e4d7929cedce2cc7e6b9d7f4367c537fd78e",
+      "criterion": "An open stream re-resolves its caller without replaying the proof, a multipart body is not eaten, and a broker outage fails closed on every class of route.",
+      "surface": "The live Dispatch: a /ws/live socket under a broker token, a multipart artifact upload, and every route class with cmd/broker stopped.",
+      "command": "A WebSocket held 45 s (three heartbeats) under one proof; POST /api/v1/issues/EXAMPLE-1/artifacts as multipart; then, with the broker killed, whoami, a write to its own project, a write to another, POST /api/v1/projects and the agent-artifact route",
+      "observed": "The socket stayed open the whole 45 s and took two frames; the multipart upload 201; with the broker down all five answered 503 BROKER_UNAVAILABLE, the caller's own targets and the session-scoped route included.",
+      "headSha": "1193d088f7f0d50b8e14baf5210dee073ef96c0f",
       "negativeControl": "In the same outage the shared token and a person's cookie both answered 200 at /api/v1/whoami, so the 503 is the broker-token branch alone."
     },
     {
-      "criterion": "The fix's own tests pass, and the route table still admits no undecided mutating row.",
-      "surface": "The packages' own suites against a real Postgres at the fix tree.",
-      "command": "go test -run 'TestEveryMutatingRouteIsClassed|TestAProjectScopedTokenWritesOnlyItsOwnProject|TestATargetThatResolvesToNoProjectIsRefusedToAProjectScopedToken|TestADeploymentWriteIsRefusedToAProjectScopedToken|TestCredentialsThatNameNoProjectAreUnaffected|TestAProjectScopedTokenCreatesIssuesOnlyInItsOwnProject|TestAMachineLoginsOwnTokenIsRefusedAndNeverFilledInFromTheBody|TestAnUploadIsHeldToTheSessionTheCredentialProved|TestTheRateRefusalCarriesTheWaitInItsHeader|TestEachAgentsConversationKeepsItsFilesApartFromAnothers|TestTheOtherCredentialsAreUnaffectedByTheBrokerBranch|TestABrokerTokensReresolutionIsNotProofCheckedAgain' ./internal/dispatch/api; go test ./internal/brokertoken/...",
-      "observed": "ok github.com/sjawhar/envoy/internal/dispatch/api 18.154s; ok github.com/sjawhar/envoy/internal/brokertoken 10.307s.",
-      "headSha": "4598e4d7929cedce2cc7e6b9d7f4367c537fd78e",
-      "negativeControl": "TestEveryMutatingRouteIsClassed's own sub-tests are the control and pass: the same walk over a fixture holding an unclassed mutating row, and over one classed as a project's write whose address names no object, fails on each."
+      "criterion": "The renumbered migration applies, and the pod binary checks of the three scopes pass at this head (INFRA-264, INFRA-382, INFRA-401, INFRA-402).",
+      "surface": "The live Dispatch's own database, and the packages' suites against a real Postgres.",
+      "command": "The live server's boot ran its migrations; then `select version from schema_migrations order by version desc limit 3` and the dpop table listing; then go test -run of the project-scope, broker-token, agent-artifact and rate-limit tests in ./internal/dispatch/api, ./internal/brokertoken/..., ./internal/ratelimit/..., and TestAPodWritesOnlyUnderASessionRegisteredForIt with TestAListedAccountReachesOnlyItsOwnRoutes in ./cmd/broker, and TestEveryAccountRouteDeclaresItsPower with the Flood tests in ./internal/broker/api",
+      "observed": "The live database reports versions 149, 148, 147 and holds the table dpop_proofs, so 0149_dpop_proofs applies where main's 0148 now sits. Every suite passes: internal/dispatch/api 11.9 s, internal/brokertoken 6.7 s, internal/ratelimit 0.02 s, cmd/broker 19.6 s, internal/broker/api 3.6 s.",
+      "headSha": "1193d088f7f0d50b8e14baf5210dee073ef96c0f",
+      "negativeControl": "TestEveryMutatingRouteIsClassed's own sub-tests are the control and pass: the same walk fails on a fixture holding an unclassed mutating row and on one classed as a project's write whose address names no object — which is what proves the two forward merges left no mutating route of main's undecided."
     },
     {
-      "criterion": "The private-name check passes (the repository's own required check).",
-      "surface": "The repository's own script over this working copy.",
-      "command": "bash .github/scripts/check-private-names.sh",
-      "observed": "exit 0 — 'no file or path names the private deployment repository or the company, and no text names a private internal host or a Tailscale MagicDNS host (6512 files in the repository)'.",
-      "headSha": "4598e4d7929cedce2cc7e6b9d7f4367c537fd78e",
-      "negativeControl": "none needed: the script's refusal path is the repository's own."
+      "criterion": "The TypeScript Actor type carries the project the server now stores (the review's fifth minor), and the private-name check passes.",
+      "surface": "packages/contracts/src/dispatch-api.ts read at this head, and the repository's own script over the working copy.",
+      "command": "Read the Actor union's session member; bash .github/scripts/check-private-names.sh",
+      "observed": "The session member now carries `project?: string` with the sentence that the server reads it from a broker-issued token and never from a body, absent for every credential naming none. The check exits 0 over 6608 files.",
+      "headSha": "1193d088f7f0d50b8e14baf5210dee073ef96c0f",
+      "negativeControl": "none needed for either: the type is read at the head, and the script's refusal path is the repository's own."
     }
   ],
-  "whatWasTriedAndHeld": [
-    "Every uuid spelling Postgres accepts (none, four-group and braced hyphenation, upper case) against another project's comment, ask and document: refused; against the caller's own: accepted.",
-    "A lowercase issue key and a lowercase project key (example-1, /projects/example/...): nobody can address them — a signed-in person gets 404 for both — so the fail-closed 403 a scoped caller would get names no object that works for anyone else, and no honest call is broken by it.",
-    "A machine login's own live access token at whoami and at two writes with a body actor: 401 BROKER_TOKEN_NOT_A_SESSION, nothing created.",
-    "An upload and a message into another session's conversation: 403 SESSION_SCOPE; the caller's own session accepted.",
-    "A proof replayed by jti, one with no ath, one with another token's ath, one whose htu names another origin, one with typ jwt, one with iat ten minutes either side of now, and one signed by a second key: each refused with its own code.",
-    "A broker outage on every route, including the caller's own project and the session-scoped routes: 503 BROKER_UNAVAILABLE, never an unscoped write, while the shared token and a cookie are unaffected."
-  ],
   "ciAtTheHead": {
-    "note": "Read on GitHub at the head under test and recorded for no later step to trust; no lane was re-run and none was waited for.",
-    "pullRequest": "sjawhar/legion#2541 at 4598e4d7929cedce2cc7e6b9d7f4367c537fd78e",
-    "runs": "Run 41061943386 is the head's CI; at the time of writing every job of it (lint, typecheck, test, envoy-go, dispatch, broker-multiprocess, docs and the rest) reports pending behind the runner queue, and pr-title reports pass. A lane still running is read as running: the reviewer reads the head's checks before it approves, and a required check that settles red sends the work back on its own.",
-    "reviewDecision": "CHANGES_REQUESTED still stands from round one's review; this round's fixes are what answer it."
+    "note": "Read on GitHub and recorded for no later step to trust; no lane was re-run and none was waited for.",
+    "pullRequest": "sjawhar/legion#2541 at 1193d088f7f0d50b8e14baf5210dee073ef96c0f, mergeable MERGEABLE (mergeStateStatus BLOCKED: the base's required checks are not green yet, and the first review round's changes-requested still stands)",
+    "runs": "The head is the handoff commit and carries `skip-checks: true`, so GitHub starts nothing for it and the code head's verdict is the one that counts: at the code head b5103ea3, PR Title run 41103928506 concluded success and CI run 41103928584 is queued behind the runner backlog. A lane still running is read as running."
   },
+  "notDriven": [
+    "callerOf refusing a project_scope that is neither named nor person (the review's fourth minor): the broker writes only those two values, so no live token can carry a third. Its unit test covers the branch; both values the broker does write were driven here, named at whoami with its project and person with none."
+  ],
   "environment": {
-    "note": "Three pod limits bear on what can be driven, none a defect of this change: gVisor answers SO_PEERPIDFD 'protocol not available', so agent-secrets-helper refuses every local client and a machine login must be driven as its four HTTP steps; Playwright's webkit and firefox cannot be installed, so only chromium rows run; and the whole internal/dispatch/api package takes longer than its CI job allows here (one of its rows, TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, also fails for the pod's C collation rather than for the branch), so this round ran the fix's own test functions by name and left the whole package to CI, which owns it."
+    "note": "The workspace and the pod disk were recreated before this round, so the Postgres harness and the DPoP client were rebuilt from scratch (/legion/harness/setup.sh by the INFRA-42 recipe, and /legion/scratch/tmp/dpopdrv). Another role of this pod already held 127.0.0.1:5433 with that harness's data directory, so this round used that server rather than starting a second one on the same directory. Playwright's chromium had to be installed again (`bunx playwright install chromium`) and packages/contracts rebuilt (`bun run build`) before the browser suite would run; webkit and firefox still cannot be installed here, so only chromium rows run. gVisor still answers SO_PEERPIDFD 'protocol not available', so a machine login is driven as its four HTTP steps rather than through agent-secrets-helper."
   }
 }
