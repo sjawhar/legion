@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-156",
-  "completed": "2026-10-30T04:30:49Z",
+  "completed": "2026-10-30T07:18:10Z",
   "proof": [
     {
       "criterion": "A3 (server): a test block type declaring a block-pointer attribute accepts a valid block reference and refuses a malformed one",
       "surface": "the real Dispatch server process (packages/dispatch/e2e/run-server.sh, go build of the working copy) on a local Postgres 17 with pgvector and real migrations, built with a scratch blocks.json adding requirement and claim{serves: block[], targets [requirement]}; driven over HTTP",
       "command": "bash $TMPDIR/infra156/a3-e2e.sh (script posted on the pull request), steps 2 and 4",
       "observed": "upload of checks.md holding :::claim{#c1 serves=\"dispatch://CORE-1/spec#b-r1\"} -> 201; serves=\"dispatch://CORE-1/spec#x\", \"...#b-r%311\" (over-encoded), \"dispatch://CORE-1/artifact/spec#b-r1\" (non-canonical spec spelling), a doubled space and a leading space -> each 400 INVALID_MARKDOWN naming typed block \"claim\" attribute \"serves\" and the bad value",
-      "headSha": "691cb8ab84b7d58dd5d3382aaee996ea653f501e",
+      "headSha": "3859628538bcd508b8d01f727f4e599f929f13e8",
       "negativeControl": "the malformed values above, each refused 400 INVALID_MARKDOWN with no version written"
     },
     {
@@ -17,7 +17,7 @@
       "surface": "same real server process over HTTP (upload route and POST /api/v1/artifacts/{id}/edits)",
       "command": "bash $TMPDIR/infra156/a3-e2e.sh, step 4",
       "observed": "serves naming the spec's paragraph -> 400 INVALID_MARKDOWN 'block pointer refused: typed block \"claim\" #c1 attribute \"serves\" points at dispatch://CORE-1/spec#b-<paragraph id>, a \"paragraph\" block; it points only at requirement'; naming callout k1 -> 400 INVALID_MARKDOWN naming \"callout\"; an edit op inserting a claim pointing at k1 -> 400 INVALID_OP field \"attributes\" with the same message",
-      "headSha": "691cb8ab84b7d58dd5d3382aaee996ea653f501e",
+      "headSha": "3859628538bcd508b8d01f727f4e599f929f13e8",
       "negativeControl": "the same pointer at requirement r1 -> 201 (the allowed type is accepted)"
     },
     {
@@ -25,7 +25,7 @@
       "surface": "same real server process, read over HTTP and with the real dispatch CLI (bun packages/envoy-client/bin/dispatch.ts read)",
       "command": "bash $TMPDIR/infra156/a3-e2e.sh, step 3",
       "observed": "dispatch read --ref dispatch://CORE-1/spec#b-r1 prints 'Referenced by: - serves block dispatch://CORE-1/artifact/checks-md#b-c1'; GET /api/v1/references?to=...#b-r1&kind=serves -> [{kind: serves, node: dispatch://CORE-1/artifact/checks-md#b-c1}]; &kind=mentions -> []; GET /api/v1/block-links?from=checks.md&to=spec -> [{kind: serves, from: c1, to: r1}]",
-      "headSha": "691cb8ab84b7d58dd5d3382aaee996ea653f501e",
+      "headSha": "3859628538bcd508b8d01f727f4e599f929f13e8",
       "negativeControl": "?kind=nope -> 400 INVALID_KIND naming the structural kinds and the declared block[] names (serves); checks.md re-uploaded with serves=\"\" -> 201 and ?to=...#b-r1 lists no edge"
     },
     {
@@ -33,7 +33,7 @@
       "surface": "same real server process over HTTP",
       "command": "bash $TMPDIR/infra156/a3-e2e.sh, retype steps",
       "observed": "edit op retype r1 -> callout on the spec -> 200, then ?to=...#b-r1 lists no edge; retype back to requirement -> 200, the serves edge from c1 is listed again",
-      "headSha": "691cb8ab84b7d58dd5d3382aaee996ea653f501e",
+      "headSha": "3859628538bcd508b8d01f727f4e599f929f13e8",
       "negativeControl": "while r1 is a callout the serves edge is absent from ?to= (a target of a disallowed type is not listed)"
     },
     {
@@ -41,7 +41,7 @@
       "surface": "same real server process over HTTP, with a scratch type loose{serves: block[] with no targets} beside claim{serves: block[] targets [requirement]}",
       "command": "bash $TMPDIR/infra156/a3-e2e.sh, 'review finding 1' steps",
       "observed": "loose.md holding :::loose{#c1 serves=\"dispatch://CORE-1/spec#b-k1\"} -> 201; the same document re-uploaded as :::claim{#c1 serves=...k1} -> 400 INVALID_MARKDOWN 'block pointer refused: typed block \"claim\" #c1 attribute \"serves\" points at dispatch://CORE-1/spec#b-k1, a \"callout\" block; it points only at requirement'; edit op {op: retype, block: c1, type: claim, attributes: {serves: [k1]}} -> 400 INVALID_OP field \"attributes\" with the same message",
-      "headSha": "691cb8ab84b7d58dd5d3382aaee996ea653f501e",
+      "headSha": "3859628538bcd508b8d01f727f4e599f929f13e8",
       "negativeControl": "the same retype op with serves at requirement r1 -> 200, and an unrelated insert into loose.md -> 200"
     },
     {
@@ -49,7 +49,7 @@
       "surface": "the real Dispatch server built from the head with a scratch schema (requirement; claim{serves: block[] targets [requirement], cites: block[]}), on local Postgres 17 + pgvector; the tester's rig: a browser write gives claim c1 the paragraph's id, the server is killed before it settles, then rebuild-refs and the block index pass re-index the stored state",
       "command": "bash $TMPDIR/infra156/dup2.sh $TMPDIR/infra156/r5-bin infra156_impl_dup_new 8811 $TMPDIR/infra156-tester/src5 (the tester's dup2.sh with its log, jar and client paths moved under $TMPDIR/infra156)",
       "observed": "stored blocks [paragraph f1a508e6, claim f1a508e6, paragraph]; after rebuild-refs and the block index pass block_refs holds only 'f1a508e6 mentions -> DUP-1/spec#r1', and GET /api/v1/references?to=r1 lists [mentions #f1a508e6]",
-      "headSha": "691cb8ab84b7d58dd5d3382aaee996ea653f501e",
+      "headSha": "3859628538bcd508b8d01f727f4e599f929f13e8",
       "negativeControl": "the same rig on the code before the type check in pointerPairs (BlockPointers' skip alone): block_refs held 'serves' from the paragraph and the paragraph's mention was lost; the tester reproduced the same at f5cc766b"
     }
   ],
@@ -94,6 +94,7 @@
     "Conflict round (forward merge 233a8d61 against main 690c0136, fingerprint 847de598 -> d44f78a6). Main's 0135_server_processes took this PR's number, so the migration is now 0136_block_pointer_links (SQL unchanged but each file's header comment), with every reference moved (packages/envoy/AGENTS.md x2, cmd/dispatch/README.md x2, cmd/dispatch/AGENTS.md, the envoy changelog fragment). The architect asked for 0139 (after #2463's 0136-0138), but store's TestMigrationSetIsNumberedOneToN refuses a gap: at 0139 it fails ('numbered 139 where 136 comes next'). The architect agreed to keep 0136, and this PR renumbers again when #2463 lands, carrying its graph_edges arms and the block[] refusal of an item-block reference. Three prose conflicts kept both sides: cmd/dispatch/README.md (both migration paragraphs), docs/rebuild.go's doc comment (main's closed-issue rebuild plus refuseBlockPointers), proof-editor/AGENTS.md (fourteen own files: main's two mermaid files plus block-pointers.ts). Checks: the whole store package, refs, the filtered pmdoc/docs/api tests, go build/vet/gofmt, proof-editor, contracts, envoy-client, dispatch, the claude-envoy dist check, biome; the a3 E2E output is identical to the previous round's.",
     "Review round 10 (20b70d81; the rule main's #2423 brought in). packages/claude-envoy/dist was restored to main's build (`jj restore --from 690c0136`, the merge's main parent, whose dist and legion/ equal main@origin's 8b4a862b: 0 files differ), so this PR commits nothing under dist/ or legion/; the pr2394 claude-envoy fragment stays. No source changed. The PR body's Size note drops the dist lines, and its Production line adds #2423's post-merge step: name the Rebuild Claude Envoy plugin run after the merge and the commit it landed, and run `bun run check-dist` at that commit. claude-envoy tests pass under the pinned Bun 1.4.4 (220 pass; under the pod's 1.3.14 the build-pin test refuses, as designed), and the a3 E2E at 20b70d81 is identical to the previous run.",
     "Forward merge for landing ahead of the remaining children (merge 0194ce2a against main cd5ca7c3; main since moved only by #2533 and a dist rebuild, no conflict; format fix ecf20c3a). Fourteen conflicts resolved, keeping both sides; in code: refs/graph.go (a document's block hides its document's mention by a link of any kind, comment and message blocks by the same kind), docs/mutation.go (refuseBlockPointers runs on op.tx after main's refactor), refs/blocks.go (main's text and citedBlocks moves plus pointers), text/refs.go (FormatBlockRef refuses Item), pmdoc/render.go (main's holdsNul/withNulsWritten); refs.targetOf became TargetOf and item_blocks.go's new blockPairs call passes no pointers. main's workflow is now ci.yaml, so the PR's filters moved there (contracts table paths; contracts/src in envoy_go_race). Migration renumbered to 0145_block_pointer_links; its graph_edges view is 0142's with the block_refs arm filtered by block_ref_listed. As the second of #2394 and #2463, it adds the block[] refusal of a comment or message block (text.Ref.Item) in pmdoc.validateBlockPointerValues and contracts' blockPointersProblem, with five DISPATCH_BLOCK_POINTER_VALUES rows carrying a problem string both tests assert; with the check disabled 5 Go and 5 TS rows fail. Checks: go build/vet/gofmt; text, refs, store and pmdoc (CI=1) packages whole; docs and api packages whole (api's rank collation test needs a non-byte-order default collation and passes on an ICU cluster; it refuses the C-locale rig by design); contracts 395, envoy-client dispatch-execute 288, proof-editor 209, dispatch 2955 pass, typechecks, biome; a3 E2E identical to earlier rounds plus the two item-block refusals.",
-    "Review round 12 (code 752d79ec, then merge 691cb8ab of main 49e23926 for #2537, which the architect allowed since ci-filters' only other red was main's itemblocks gap). (1) ci.yaml envoy_go_race_docs gains pmdoc/pmdoctest/* (docs/block_pointer_links_test.go imports it); check-ci-filters.sh (pyyaml via uv) exits 0 at the merge, and without the line reports envoy-go-race-docs 1 uncovered, pmdoctest.go. (2) contracts' ITEM_BLOCK_REFERENCE takes Go's two shapes only: <ISSUE>/comment|message/<id> and <PROJECT>/artifact/<slug>/comment/<id>, the id with no \\s and decoded by decodeBlockId. Rows dispatch://CORE-1/artifact/notes-md/comment/c1#b-x and dispatch://CORE-1/comment/%ZZ#b-x carry problem 'is not a block reference as Dispatch writes one'; the previous reader said 'is a block of a comment' for both. (3) refs.blockHolds has no anyKind flag: every holder matches a link of any kind (item block refs hold only mentions, so no answer changes), one comment as cmd/dispatch/AGENTS.md says. Checks: go build/vet/gofmt; refs and text whole; pmdoc, docs, api filtered (api's rank test on an ICU cluster); contracts 397, envoy-client, proof-editor, biome; a3 E2E identical to round 12."
+    "Review round 12 (code 752d79ec, then merge 691cb8ab of main 49e23926 for #2537, which the architect allowed since ci-filters' only other red was main's itemblocks gap). (1) ci.yaml envoy_go_race_docs gains pmdoc/pmdoctest/* (docs/block_pointer_links_test.go imports it); check-ci-filters.sh (pyyaml via uv) exits 0 at the merge, and without the line reports envoy-go-race-docs 1 uncovered, pmdoctest.go. (2) contracts' ITEM_BLOCK_REFERENCE takes Go's two shapes only: <ISSUE>/comment|message/<id> and <PROJECT>/artifact/<slug>/comment/<id>, the id with no \\s and decoded by decodeBlockId. Rows dispatch://CORE-1/artifact/notes-md/comment/c1#b-x and dispatch://CORE-1/comment/%ZZ#b-x carry problem 'is not a block reference as Dispatch writes one'; the previous reader said 'is a block of a comment' for both. (3) refs.blockHolds has no anyKind flag: every holder matches a link of any kind (item block refs hold only mentions, so no answer changes), one comment as cmd/dispatch/AGENTS.md says. Checks: go build/vet/gofmt; refs and text whole; pmdoc, docs, api filtered (api's rank test on an ICU cluster); contracts 397, envoy-client, proof-editor, biome; a3 E2E identical to round 12.",
+    "Renumber round (merge 38596285 of main a21100c5, no conflicts): main's #2376 added 0145_events_person_words, 0146 and 0147, so the migration is now 0148_block_pointer_links (header and census comment), with every reference moved: packages/envoy/AGENTS.md x2, cmd/dispatch/README.md x2, cmd/dispatch/AGENTS.md, the envoy changelog fragment. Main's 0145-0147 touch neither graph_edges, block_refs nor document_blocks. Checks: go build/vet/gofmt; the whole store package (numbering test included), refs, text, filtered docs and api; a3 E2E identical to round 13 on a database migrated fresh to 148."
   ]
 }
