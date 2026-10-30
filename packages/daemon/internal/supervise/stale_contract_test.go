@@ -1,0 +1,74 @@
+package supervise
+
+import "testing"
+
+// A live claim whose registration declared a plugin contract below PodUpdateContract — a worker
+// started from the image of the release before this one, which is what every roll of this
+// deployment leaves behind for a moment — can never answer an update task: the op list is a closed
+// enum compiled into its plugin. An update round therefore sends it nothing and waits for it, so
+// the only thing that can bring it onto this daemon's plugin is the stale-plugin relaunch, which
+// keeps the pod and the disk and resumes the claim's own session. Once it has registered at this
+// daemon's contract it joins any round as any claim does.
+//
+// It is relaunched when it is not in a turn, and not before. A turn in flight belongs to a worker
+// that cannot be asked to push first — that is the whole reason this claim is relaunched rather
+// than tasked — so ending that turn where it stands throws away whatever it had not pushed, which
+// is the harm this issue exists to end. The wait costs nothing: the claim holds no round open,
+// nothing else of its pod is waiting on it, and the turn ends on its own. The machine already
+// waits out a turn this way for a held suspension and for a plugin round's own end
+// (TestPodUpdateEndedInAPluginRoundRelaunchesOnceTheTurnIsOver).
+//
+// Observed live on 2026-10-30: after a daemon boot on a newer contract, an issue's claims came up
+// on the previous image at plugin contract 42, every `legion` tool call failed, and the daemon
+// went on routing work to them until an operator moved the issue by hand.
+func TestAStalePluginBelowTheUpdateContractIsRelaunchedWhenItsTurnEnds(t *testing.T) {
+	t.Run("idle, so it is relaunched at once", func(t *testing.T) {
+		h := updateHarness(t, PodUpdateContract-2)
+		h.reach(StateReady)
+		h.m.deps.PluginContract = PodUpdateContract
+		recorded := h.locator()
+
+		h.must(StalePlugin{Claim: h.token, Trigger: "boot"})
+
+		h.wantState(StateLaunching)
+		h.wantPrompts(0)
+		c := h.wantRound("")
+		if c.PluginRelaunchFor != PodUpdateContract {
+			t.Errorf("PluginRelaunchFor = %d, want this daemon's %d", c.PluginRelaunchFor, PodUpdateContract)
+		}
+		resume := h.wantCalls("Resume", 1)[0]
+		if resume.Previous == nil || *resume.Previous != recorded {
+			t.Errorf("resumed over %+v, want the recorded process %+v: the relaunch keeps the pod and its disk", resume.Previous, recorded)
+		}
+		if resume.Spec.ResumeSessionFile != sessionFile {
+			t.Errorf("resumed session file %q, want the claim's own %q", resume.Spec.ResumeSessionFile, sessionFile)
+		}
+	})
+
+	t.Run("in a turn, so it is relaunched once that turn ends", func(t *testing.T) {
+		h := updateHarness(t, PodUpdateContract-2)
+		h.reach(StateReady)
+		h.must(RequestDeliver{Claim: h.token, Task: "implement the plan"})
+		h.must(StreamTurnStart{Claim: h.token})
+		h.m.deps.PluginContract = PodUpdateContract
+
+		h.must(StalePlugin{Claim: h.token, Trigger: "boot"})
+
+		if got := h.claim().State; got != StateWorking {
+			t.Fatalf("the claim is %s while its worker runs a turn, want it left %s: ending that turn throws away whatever the worker had not pushed, and a worker below this contract cannot be asked to push first",
+				got, StateWorking)
+		}
+		h.wantCalls("Resume", 0)
+		if p := h.pending(); p.Interrupted {
+			t.Errorf("the task was taken back as interrupted while its turn still runs: %+v", p)
+		}
+
+		h.must(StreamTurnEnd{Claim: h.token})
+
+		h.wantState(StateLaunching)
+		h.wantCalls("Resume", 1)
+		if c := h.claim(); c.PluginRelaunchFor != PodUpdateContract {
+			t.Errorf("PluginRelaunchFor after the turn ended = %d, want this daemon's %d", c.PluginRelaunchFor, PodUpdateContract)
+		}
+	})
+}
