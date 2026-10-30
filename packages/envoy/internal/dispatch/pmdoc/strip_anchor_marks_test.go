@@ -12,9 +12,10 @@ import (
 
 // stripSampleDoc holds every shape the copy and the merge must carry: anchor marks a strip
 // removes (proofComment, dispatchAsk), runs the strip makes mergeable, a link mark with
-// attributes, a U+0000 in text and in a link href, which the strip leaves as it is, and a
-// paragraph the rendering writes as it is, which writtenTree gives back unchanged and only
-// cloneNode copies.
+// attributes, a U+0000 in text and in a link href, which the strip leaves as it is, the two line
+// breaks a rendering writes and a strip does not - a hard break the editor kept from a paste
+// (isInline) and a line feed in text outside code - and a paragraph the rendering writes as it is,
+// which writtenTree gives back unchanged and only cloneNode copies.
 func stripSampleDoc() *Node {
 	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
 	strong := Mark{Type: "strong"}
@@ -29,11 +30,18 @@ func stripSampleDoc() *Node {
 			text("link", link, comment),
 			text("ed", link),
 		}},
+		{Type: "paragraph", Children: []*Node{
+			text("before a soft break"),
+			{Type: "hardbreak", Attrs: Attrs{"isInline": true}},
+			text("after it, and a line feed\nin text"),
+		}},
 	}}
 }
 
 // The copy holds exactly the written marks, in their order, the merged runs' first attributes and
-// children, and nil in place of every empty slice and map (cloneNode, cloneAttrs, cloneMarks).
+// children, nil in place of every empty slice and map (cloneNode, cloneAttrs, cloneMarks), and
+// every line break as the document holds it: the strip copies what writtenTree gives with
+// lineBreaks false, which rewrites none of them.
 func TestStripAnchorMarksIsItsDocumentStripped(t *testing.T) {
 	text := func(value string, marks ...Mark) *Node { return &Node{Type: "text", Text: value, Marks: marks} }
 	comment := writtenCommentMark("c1")
@@ -46,6 +54,11 @@ func TestStripAnchorMarksIsItsDocumentStripped(t *testing.T) {
 					text("anchor", Mark{Type: "strong"}),
 					text(" and a nul\x00 here"),
 					text("linked", Mark{Type: "link", Attrs: Attrs{"href": "https://example.com/a\x00b", "title": "t"}}),
+				}},
+				{Type: "paragraph", Children: []*Node{
+					text("before a soft break"),
+					{Type: "hardbreak", Attrs: Attrs{"isInline": true}},
+					text("after it, and a line feed\nin text"),
 				}},
 			}},
 		},

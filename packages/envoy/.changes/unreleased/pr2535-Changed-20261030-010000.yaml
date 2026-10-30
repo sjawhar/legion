@@ -3,9 +3,12 @@ body: |-
     `GET /api/v1/issues/{key}` reads the database in two pgx batches, one round trip each on one
     pooled connection, instead of one statement at a time: 6 statements, plus one per artifact,
     plus 2 when the issue has documents and 2 when it has open asks. An issue with no artifact and
-    no open ask takes one round trip. The answer is unchanged byte for byte. Every route that
-    lists an issue's artifacts (`loadArtifacts`), and `GET /api/v1/projects/{key}/artifacts`, now
-    read all their versions in one statement instead of one statement per artifact. In
+    no open ask takes one round trip, and a key no issue carries keeps the connection's prepared
+    statements. The answer is unchanged byte for byte. Every route that lists an issue's
+    artifacts (`loadArtifacts`), and `GET /api/v1/projects/{key}/artifacts`, now read their
+    versions, latest reviews and open approval requests in one batch instead of one statement per
+    artifact and two more; an issue's or a document's asks, the Inbox and an event page read their
+    asks' identity events and backlink counts in one batch instead of two statements. In
     the load test's route mix, the median of three runs each, the issue route's p50 latency fell
     from 50.7 ms to 19.2 ms (browser) and its share of Dispatch's CPU from 1.99% to 0.69%. The
     markdown renderer writes U+0000 in its own pass after its merge decisions.

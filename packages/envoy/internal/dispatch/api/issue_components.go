@@ -146,8 +146,8 @@ func writeIssueComponents(ctx context.Context, tx pgx.Tx, key, project string, i
 // issue_components row of either mode, that row's members split into ids still in the
 // project's component model and ids a re-import retired. Joined `left join lateral (...) comp
 // on true`, it yields one row per issue, all null when no ancestor chose. The recursive walk
-// uses `union` with parentDepthCap like loadChildren so it terminates even if a raced reparent
-// ever commits a cycle.
+// uses `union` with parentDepthCap like issueChildrenStatement so it terminates even if a raced
+// reparent ever commits a cycle.
 var issueComponentsLateral = `
 	left join lateral (
 		with recursive chain as (

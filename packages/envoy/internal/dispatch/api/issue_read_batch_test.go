@@ -2,8 +2,10 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -11,9 +13,11 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
@@ -126,11 +130,10 @@ func createIssueAsk(t *testing.T, handler http.Handler, key, question string) st
 	return decodeBody[model.Ask](t, response).ID
 }
 
-// sequentialIssueRead is the body getIssue composed before it batched its reads: the sequential
-// loaders, in the order it called them, written with WriteJSON's own encoding. It answers the
-// artifacts it read as well, which is how many version queries that composition made before
-// loadArtifacts read every artifact's versions in one statement.
-func sequentialIssueRead(t *testing.T, deps Deps, key string) ([]byte, int) {
+// sequentialIssueRead is the body getIssue composed before it batched its reads: the statements
+// and the scans the loaders every other route calls still run, in the order it called them,
+// written with WriteJSON's own encoding into the one type the read answers (issueDetail).
+func sequentialIssueRead(t *testing.T, deps Deps, key string) []byte {
 	t.Helper()
 	served := directServer(deps)
 	ctx := context.Background()
@@ -143,11 +146,16 @@ func sequentialIssueRead(t *testing.T, deps Deps, key string) ([]byte, int) {
 	if err != nil {
 		t.Fatalf("load the artifacts: %v", err)
 	}
-	openAsks, err := served.loadOpenAsks(ctx, pool, issue.Key)
+	asks, replies, err := served.queryOwnerAsks(ctx, pool, issueOwner(issue.Key), "open")
 	if err != nil {
 		t.Fatalf("load the open asks: %v", err)
 	}
-	children, err := served.loadChildren(ctx, pool, issue.Key)
+	rows, err := pool.Query(ctx, issueChildrenStatement, issue.Key)
+	if err != nil {
+		t.Fatalf("query the children: %v", err)
+	}
+	children, err := scanIssueChildren(rows)
+	rows.Close()
 	if err != nil {
 		t.Fatalf("load the children: %v", err)
 	}
@@ -156,23 +164,15 @@ func sequentialIssueRead(t *testing.T, deps Deps, key string) ([]byte, int) {
 		t.Fatalf("count the issue's backlinks: %v", err)
 	}
 	recorder := httptest.NewRecorder()
-	WriteJSON(recorder, http.StatusOK, struct {
-		model.Issue
-		model.IssueRouteReach
-		Progress          model.IssueProgress `json:"progress"`
-		Artifacts         []model.Artifact    `json:"artifacts"`
-		OpenAsks          []issueOpenAsk      `json:"open_asks"`
-		Children          []model.IssueChild  `json:"children"`
-		ReferencedByCount int                 `json:"referenced_by_count"`
-	}{
+	WriteJSON(recorder, http.StatusOK, issueDetail{
 		Issue:             issue,
 		Progress:          progress,
 		Artifacts:         artifacts,
-		OpenAsks:          openAsks,
+		OpenAsks:          issueOpenAsksOf(asks, replies),
 		Children:          children,
 		ReferencedByCount: counts[issue.Key],
 	})
-	return recorder.Body.Bytes(), len(artifacts)
+	return recorder.Body.Bytes()
 }
 
 // The batched read answers exactly what the sequential loaders answered, byte for byte: the two
@@ -186,7 +186,7 @@ func TestBatchedIssueReadAnswersTheSequentialLoadersBytes(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("read the issue: status=%d body=%s", response.Code, response.Body.String())
 	}
-	want, _ := sequentialIssueRead(t, deps, fixture.key)
+	want := sequentialIssueRead(t, deps, fixture.key)
 	if got := response.Body.String(); got != string(want) {
 		t.Fatalf("the batched read answered\n%s\nthe sequential loaders answered\n%s", got, want)
 	}
@@ -245,46 +245,57 @@ func TestBatchedIssueReadAnswersTheSequentialLoadersBytes(t *testing.T) {
 	}
 }
 
-// roundTrips counts what a traced pool sends to Postgres while it is counting: one for each
+// countedRead marks the context of the one request a roundTrips counts. Every statement the
+// handler runs is run on a context derived from the request's, which pgx hands the tracer
+// (TraceQueryStart, TraceBatchStart), so the count is that request's own statements and not a
+// settlement's or another request's on the same traced pool.
+type countedRead struct{}
+
+// countedIssueRead reads the issue through the handler on a request a roundTrips counts.
+func countedIssueRead(t *testing.T, handler http.Handler, key string) *httptest.ResponseRecorder {
+	t.Helper()
+	ctx := context.WithValue(context.Background(), countedRead{}, true)
+	request := httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/v1/issues/"+key, nil)
+	request.Header.Set("X-Dispatch-User", "alice")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+// roundTrips counts what a traced pool sends to Postgres for a counted request: one for each
 // statement run on its own and one for each batch, whatever that batch holds.
 type roundTrips struct {
 	mu         sync.Mutex
-	counting   bool
 	statements []string
 }
 
-func (r *roundTrips) start() {
+// take returns the statements counted since the last take, a batch as one "batch" entry.
+func (r *roundTrips) take() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.counting = true
+	taken := r.statements
 	r.statements = nil
+	return taken
 }
 
-// stop ends the count and returns the statements it saw, a batch as one "batch" entry.
-func (r *roundTrips) stop() []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.counting = false
-	return r.statements
-}
-
-func (r *roundTrips) record(statement string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.counting {
-		r.statements = append(r.statements, statement)
+func (r *roundTrips) record(ctx context.Context, statement string) {
+	if ctx.Value(countedRead{}) == nil {
+		return
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.statements = append(r.statements, statement)
 }
 
 func (r *roundTrips) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
-	r.record(data.SQL)
+	r.record(ctx, data.SQL)
 	return ctx
 }
 
 func (r *roundTrips) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
 
 func (r *roundTrips) TraceBatchStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceBatchStartData) context.Context {
-	r.record("batch of " + strconv.Itoa(data.Batch.Len()) + " statements")
+	r.record(ctx, "batch of "+strconv.Itoa(data.Batch.Len())+" statements")
 	return ctx
 }
 
@@ -301,26 +312,18 @@ func TestIssueReadCostsTwoRoundTrips(t *testing.T) {
 	handler, _, deps := newTestServer(t, testServerOptions{
 		store: traced,
 		// The caller's identity is resolved on the untraced pool, so the count is the read's
-		// own statements and not the sign-in lookup every request makes.
+		// own statements and not the sign-in lookup every request makes, which runs on the
+		// request's own context and would otherwise be one of the statements it marks.
 		identity: headerIdentity(database),
 		// A settlement of one of the issue's documents is database work of its own, on the same
-		// pool; a delay no test run reaches keeps it out of the counts, and the server's
-		// shutdown settles the documents after them.
+		// pool; a delay no test run reaches keeps it off the issue's rows, and the server's
+		// shutdown settles the documents after the counts.
 		settle: time.Hour,
 	})
 	fixture := buildFullIssueRead(t, handler)
 
-	counter.start()
-	_, artifacts := sequentialIssueRead(t, deps, fixture.key)
-	sequential := counter.stop()
-	t.Logf(
-		"the sequential loaders read this issue in %d round trips, and the composition before this change made %d of them (a version query per artifact, %d here, where the loaders now read every artifact's versions in one statement): %v",
-		len(sequential), len(sequential)+artifacts-1, artifacts, sequential,
-	)
-
-	counter.start()
-	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+fixture.key, nil, "alice")
-	batched := counter.stop()
+	response := countedIssueRead(t, handler, fixture.key)
+	batched := counter.take()
 	if response.Code != http.StatusOK {
 		t.Fatalf("read the issue: status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -351,9 +354,8 @@ func TestIssueReadCostsTwoRoundTrips(t *testing.T) {
 			t.Fatalf("take the bare issue's artifacts out (%s): %v", statement, err)
 		}
 	}
-	counter.start()
-	bareRead := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+bareKey, nil, "alice")
-	bareTrips := counter.stop()
+	bareRead := countedIssueRead(t, handler, bareKey)
+	bareTrips := counter.take()
 	if bareRead.Code != http.StatusOK {
 		t.Fatalf("read the bare issue: status=%d body=%s", bareRead.Code, bareRead.Body.String())
 	}
@@ -362,8 +364,8 @@ func TestIssueReadCostsTwoRoundTrips(t *testing.T) {
 	}
 }
 
-// A key no issue carries answers what it always has: the issue row is the batch's first
-// statement, so its pgx.ErrNoRows is the error the read returns.
+// A key no issue carries answers what it always has: the issue row's callback records the missing
+// row, and the read answers that row's pgx.ErrNoRows once its batch has closed.
 func TestBatchedIssueReadStillAnswersAMissingKey(t *testing.T) {
 	handler := newTestHandler(t)
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/NOPE-1", nil, "alice")
@@ -373,4 +375,79 @@ func TestBatchedIssueReadStillAnswersAMissingKey(t *testing.T) {
 	if body := response.Body.String(); body != `{"code":"NOT_FOUND","error":"not found"}`+"\n" {
 		t.Fatalf("read a missing issue: body=%s", body)
 	}
+}
+
+// A missing key costs the connection nothing. pgx invalidates every statement of a batch whose
+// results Close answers an error, in that connection's statement and description caches
+// (invalidateCachesOnBatchResultsError, pgx's batch.go), and the next read on it deallocates those
+// statements and prepares them again; the issue read closes a missing key's batch without an error,
+// so the statements the read prepared are still prepared after it.
+//
+// The read runs on a pool of one connection, read by this test alone, so the read after the
+// missing key is on the connection that read it and pg_prepared_statements - a session's own
+// prepared statements - is that connection's. Every read on it runs through the same statement
+// cache a request's does: the pool is opened from the server's own configuration.
+func TestMissingIssueReadKeepsTheConnectionsPreparedStatements(t *testing.T) {
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	fixture := buildFullIssueRead(t, handler)
+	deps.Store = singleConnectionStore(t, database)
+	served := directServer(deps)
+	ctx := context.Background()
+
+	if _, err := served.readIssue(ctx, fixture.key); err != nil {
+		t.Fatalf("read the issue: %v", err)
+	}
+	prepared := preparedStatementNames(t, deps.Store)
+	if len(prepared) == 0 {
+		t.Fatal("the read prepared no statement, so a deallocation would not show here")
+	}
+
+	if _, err := served.readIssue(ctx, "NOPE-1"); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("read a missing issue: %v, want pgx.ErrNoRows", err)
+	}
+	after := preparedStatementNames(t, deps.Store)
+	for _, name := range prepared {
+		if !slices.Contains(after, name) {
+			t.Fatalf("the missing key's read left %s deallocated: %v are prepared, %v were", name, after, prepared)
+		}
+	}
+	if _, err := served.readIssue(ctx, fixture.key); err != nil {
+		t.Fatalf("read the issue after the missing key: %v", err)
+	}
+	if again := preparedStatementNames(t, deps.Store); len(again) != len(after) {
+		t.Fatalf("the read after the missing key prepared statements again: %v, where %v were prepared", again, after)
+	}
+}
+
+// singleConnectionStore opens a pool of one connection on the database database is already on,
+// from its own configuration, closed after t ends.
+func singleConnectionStore(t *testing.T, database *store.Store) *store.Store {
+	t.Helper()
+	config := database.Pool.Config()
+	config.MaxConns = 1
+	config.MinConns = 0
+	config.MinIdleConns = 0
+	opened, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		t.Fatalf("open a pool of one connection on the same database: %v", err)
+	}
+	pool := store.NewPool(opened)
+	t.Cleanup(pool.Close)
+	return &store.Store{Pool: pool}
+}
+
+// preparedStatementNames is what the pool's connection has prepared, which a statement pgx
+// invalidated is deallocated from before this very read runs
+// (Conn.deallocateInvalidatedCachedStatements).
+func preparedStatementNames(t *testing.T, database *store.Store) []string {
+	t.Helper()
+	rows, err := database.Pool.Query(context.Background(), `select name from pg_prepared_statements order by name`)
+	if err != nil {
+		t.Fatalf("read the connection's prepared statements: %v", err)
+	}
+	names, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatalf("scan the connection's prepared statements: %v", err)
+	}
+	return names
 }

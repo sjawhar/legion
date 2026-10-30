@@ -358,11 +358,14 @@ type warnedProductionRun struct {
 	applyStep string
 }
 
-// queryer is the pgx surface shared by *pgxpool.Pool and pgx.Tx, so one loader
-// serves both the plain-read and in-transaction paths.
+// queryer is the pgx surface shared by *store.Pool and pgx.Tx, so one loader
+// serves both the plain-read and in-transaction paths. A loader that reads
+// several statements at once queues them in one batch on it (loadArtifactDetails,
+// loadAskDetails) rather than spending a round trip on each.
 type queryer interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults
 }
 
 // Register mounts every native-workspace route on mux. The routes live in routes_table.go; the

@@ -978,11 +978,7 @@ func (s *server) queryOwnerAsks(ctx context.Context, q queryer, owner owner, sta
 	if err != nil {
 		return nil, nil, err
 	}
-	askPointers := askReadPointers(asks)
-	if err := s.attachOpenedEventIDs(ctx, q, askPointers); err != nil {
-		return nil, nil, err
-	}
-	if err := attachAskBacklinkCounts(ctx, q, askPointers); err != nil {
+	if err := loadAskDetails(ctx, q, askReadPointers(asks)); err != nil {
 		return nil, nil, err
 	}
 	return asks, replies, nil
@@ -1060,8 +1056,8 @@ func (s *server) attachOpenedEventIDs(
 }
 
 // distinctAskIDs is each listed ask's id once, in the order the asks are listed: the argument
-// events.OpenedEventIDsStatement takes, whether it is run on its own or queued in the issue
-// read's batch.
+// events.OpenedEventIDs takes, whether it is run on its own or queued in a batch
+// (events.QueueOpenedEventIDs, through queueAskDetails).
 func distinctAskIDs(asks []*model.Ask) []string {
 	askIDs := make([]string, 0, len(asks))
 	seen := make(map[string]struct{}, len(asks))

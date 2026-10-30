@@ -22,25 +22,41 @@ type Queryer interface {
 // a legacy ask readable but unrefreshable, aborting an unrelated document
 // write for reasons the read API already tolerates.
 //
-// OpenedEventIDsStatement and ScanOpenedEventIDs are the statement and the scan it runs, so a
-// caller that queues the read beside its others (the issue read's batch, api.getIssue) resolves
-// an ask's identity event exactly as this does.
+// It is the sequential half of the one read: QueueOpenedEventIDs queues the same statement and
+// reads it with the same scan, for a caller that resolves the ids beside its other reads (the
+// issue read's batch, api.getIssue), so the two paths cannot drift.
 func OpenedEventIDs(ctx context.Context, q Queryer, askIDs []string) (map[string]int64, error) {
+	result := make(map[string]int64, len(askIDs))
 	if len(askIDs) == 0 {
-		return map[string]int64{}, nil
+		return result, nil
 	}
-	rows, err := q.Query(ctx, OpenedEventIDsStatement, askIDs)
+	rows, err := q.Query(ctx, openedEventIDsStatement, askIDs)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return ScanOpenedEventIDs(rows, len(askIDs))
+	if err := scanOpenedEventIDs(rows, result); err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
-// OpenedEventIDsStatement is the query OpenedEventIDs runs, $1 the ask ids. The partial index
+// QueueOpenedEventIDs is the batched half: it queues OpenedEventIDs's statement in b and reads its
+// rows into into, keyed by ask id. No ask queues nothing and leaves into as it is, so a caller
+// need not ask whether it has any.
+func QueueOpenedEventIDs(b *pgx.Batch, askIDs []string, into map[string]int64) {
+	if len(askIDs) == 0 {
+		return
+	}
+	b.Queue(openedEventIDsStatement, askIDs).Query(func(rows pgx.Rows) error {
+		return scanOpenedEventIDs(rows, into)
+	})
+}
+
+// openedEventIDsStatement is the query both halves run, $1 the ask ids. The partial index
 // events_ask_payload_id (migration 0030) serves it, and that index's `type in (...)` list
 // mirrors this one.
-const OpenedEventIDsStatement = `
+const openedEventIDsStatement = `
 		select payload->>'id', min(id)
 		from events
 		where type in ('ask.opened', 'ask.answered', 'ask.resolved', 'ask.edited')
@@ -48,20 +64,15 @@ const OpenedEventIDsStatement = `
 		group by payload->>'id'
 	`
 
-// ScanOpenedEventIDs reads the rows OpenedEventIDsStatement returns, keyed by ask id; asks is
-// how many asks were asked for, which sizes the result.
-func ScanOpenedEventIDs(rows pgx.Rows, asks int) (map[string]int64, error) {
-	result := make(map[string]int64, asks)
+// scanOpenedEventIDs reads the rows openedEventIDsStatement returns into result, keyed by ask id.
+func scanOpenedEventIDs(rows pgx.Rows, result map[string]int64) error {
 	for rows.Next() {
 		var askID string
 		var eventID int64
 		if err := rows.Scan(&askID, &eventID); err != nil {
-			return nil, err
+			return err
 		}
 		result[askID] = eventID
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return result, nil
+	return rows.Err()
 }

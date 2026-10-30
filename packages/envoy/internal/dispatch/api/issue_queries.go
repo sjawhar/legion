@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"slices"
@@ -11,7 +12,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
@@ -320,9 +320,13 @@ func (s *server) scanIssueSummaries(ctx context.Context, listQuery string, argum
 // loaded server).
 //
 // Batch 1 is everything keyed on the issue key alone: the issue row, its external links, its
-// artifacts, its open asks, its children and its backlink count. The issue row is queued first,
-// so a missing issue answers that row's pgx.ErrNoRows - 404 NOT_FOUND - whatever the others
-// found, since a batch returns its first error.
+// artifacts, its open asks, its children and its backlink count. A key no issue carries is what
+// the issue row's callback records, answered as that row's pgx.ErrNoRows - 404 NOT_FOUND - once
+// the batch has closed: a callback that returned the error would close the batch on it, and pgx
+// invalidates every statement of a batch whose Close answers an error in the connection's
+// statement and description caches (invalidateCachesOnBatchResultsError), so one 404 would cost
+// that connection the whole read's prepared statements. The other callbacks run against an issue
+// with no row, answer empty lists, and readIssue drops them with the rest of the read.
 //
 // Batch 2 is what only batch 1's answers name: every artifact's versions in one statement, the
 // documents' latest reviews and open approval requests, and the open asks' identity events and
@@ -344,56 +348,48 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	var reach model.IssueRouteReach
-	if read.issue.Route != nil {
-		reach = s.readRouteRoster(r.Context()).reach(read.issue.Route)
+	if read.Route != nil {
+		read.IssueRouteReach = s.readRouteRoster(r.Context()).reach(read.Route)
 	}
-	WriteJSON(w, http.StatusOK, struct {
-		model.Issue
-		model.IssueRouteReach
-		Progress  model.IssueProgress `json:"progress"`
-		Artifacts []model.Artifact    `json:"artifacts"`
-		OpenAsks  []issueOpenAsk      `json:"open_asks"`
-		Children  []model.IssueChild  `json:"children"`
-		// ReferencedByCount is what the header's `Referenced by (N)` control names. The page
-		// pays for it here, with the detail it already reads, instead of a graph request of
-		// its own; the edges themselves are read only when the reader opens the panel.
-		ReferencedByCount int `json:"referenced_by_count"`
-	}{
-		Issue:             read.issue,
-		IssueRouteReach:   reach,
-		Progress:          read.progress,
-		Artifacts:         read.artifacts,
-		OpenAsks:          read.openAsks,
-		Children:          read.children,
-		ReferencedByCount: read.referencedByCount,
-	})
+	WriteJSON(w, http.StatusOK, read)
 }
 
-// issueRead is everything getIssue answers from the database, in the shape its response carries.
-type issueRead struct {
-	issue             model.Issue
-	progress          model.IssueProgress
-	artifacts         []model.Artifact
-	openAsks          []issueOpenAsk
-	children          []model.IssueChild
-	referencedByCount int
+// issueDetail is everything GET /api/v1/issues/{key} answers, in the shape its response carries:
+// readIssue fills every field but the route's reach, which getIssue takes from the roster, and the
+// batch test builds one from the sequential loaders, so one type is the encoding all three answer.
+type issueDetail struct {
+	model.Issue
+	model.IssueRouteReach
+	Progress  model.IssueProgress `json:"progress"`
+	Artifacts []model.Artifact    `json:"artifacts"`
+	OpenAsks  []issueOpenAsk      `json:"open_asks"`
+	Children  []model.IssueChild  `json:"children"`
+	// ReferencedByCount is what the header's `Referenced by (N)` control names. The page
+	// pays for it here, with the detail it already reads, instead of a graph request of
+	// its own; the edges themselves are read only when the reader opens the panel.
+	ReferencedByCount int `json:"referenced_by_count"`
 }
 
 // readIssue runs getIssue's two batches, whose statements and scans are the ones the sequential
-// loaders run - loadIssueWithProgress, loadArtifacts, loadOpenAsks, loadChildren and
-// refs.BacklinkCounts - so the two paths answer the same bytes.
-func (s *server) readIssue(ctx context.Context, key string) (issueRead, error) {
-	var read issueRead
+// loaders run - loadIssueWithProgress, loadArtifacts, queryOwnerAsks with issueOpenAsksOf,
+// issueChildrenStatement with scanIssueChildren and refs.BacklinkCounts - so the two paths answer
+// the same bytes.
+func (s *server) readIssue(ctx context.Context, key string) (issueDetail, error) {
+	var read issueDetail
 	var links []model.ExternalLink
 	var asks []model.Ask
 	var replies map[string]model.AskLastReply
 	issueCounts := map[string]int{}
+	missing := false
 
 	first := &pgx.Batch{}
 	first.Queue(issueRowStatement, key).QueryRow(func(row pgx.Row) error {
 		issue, progress, err := scanIssueRow(row)
-		read.issue, read.progress = issue, progress
+		if errors.Is(err, pgx.ErrNoRows) {
+			missing = true
+			return nil
+		}
+		read.Issue, read.Progress = issue, progress
 		return err
 	})
 	first.Queue(issueExternalLinksStatement, key).Query(func(rows pgx.Rows) error {
@@ -403,7 +399,7 @@ func (s *server) readIssue(ctx context.Context, key string) (issueRead, error) {
 	})
 	first.Queue(issueArtifactsStatement, key).Query(func(rows pgx.Rows) error {
 		scanned, err := collectArtifacts(rows)
-		read.artifacts = scanned
+		read.Artifacts = scanned
 		return err
 	})
 	first.Queue(listIssueAsksQueryOpen, key).Query(func(rows pgx.Rows) error {
@@ -413,85 +409,42 @@ func (s *server) readIssue(ctx context.Context, key string) (issueRead, error) {
 	})
 	first.Queue(issueChildrenStatement, key).Query(func(rows pgx.Rows) error {
 		scanned, err := scanIssueChildren(rows)
-		read.children = scanned
+		read.Children = scanned
 		return err
 	})
-	issueCountsSQL, issueCountsArgs := refs.BacklinkCountsStatement("issue", []string{key}, nil)
-	first.Queue(issueCountsSQL, issueCountsArgs...).Query(func(rows pgx.Rows) error {
-		return refs.ScanBacklinkCounts(rows, "issue", issueCounts)
-	})
+	refs.QueueBacklinkCounts(first, "issue", []string{key}, nil, issueCounts)
 	if err := s.deps.Store.Pool.SendBatch(ctx, first).Close(); err != nil {
-		return issueRead{}, err
+		return issueDetail{}, err
 	}
-	read.issue.ExternalLinks = links
-	read.referencedByCount = issueCounts[read.issue.Key]
+	if missing {
+		return issueDetail{}, pgx.ErrNoRows
+	}
+	read.Issue.ExternalLinks = links
+	read.ReferencedByCount = issueCounts[read.Issue.Key]
 
-	if err := s.readIssueDetails(ctx, artifactPointers(read.artifacts), askReadPointers(asks)); err != nil {
-		return issueRead{}, err
+	if err := s.readIssueDetails(ctx, artifactPointers(read.Artifacts), askReadPointers(asks)); err != nil {
+		return issueDetail{}, err
 	}
-	read.openAsks = issueOpenAsksOf(asks, replies)
+	read.OpenAsks = issueOpenAsksOf(asks, replies)
 	return read, nil
 }
 
 // readIssueDetails is getIssue's second batch: what only the first batch's answers name, filled
-// into the artifacts and asks it read. An issue with no artifact and no open ask names nothing,
-// so it sends no batch.
+// into the artifacts and asks it read, by the one queue-and-apply each of them has
+// (queueArtifactDetails, queueAskDetails). An issue with no artifact and no open ask names
+// nothing, so it queues nothing and sends no batch.
 func (s *server) readIssueDetails(ctx context.Context, artifacts []*model.Artifact, asks []*model.Ask) error {
-	versionIDs := artifactIDs(artifacts)
-	approvalIDs, approvalTargetsByID := approvalTargets(artifacts)
-	askIDs := distinctAskIDs(asks)
-	if len(versionIDs) == 0 && len(askIDs) == 0 {
-		return nil
-	}
-	// Each scan returns a map of its own, which replaces the nil one here; a statement not queued
-	// leaves its map nil, which every apply below only indexes.
-	var versions map[string][]model.Version
-	var latestReviews map[string]model.ArtifactReview
-	var requests map[string]openApprovalRequest
-	var openedEventIDs map[string]int64
-	askCounts := map[string]int{}
-
 	batch := &pgx.Batch{}
-	if len(versionIDs) > 0 {
-		batch.Queue(artifactVersionsStatement, versionIDs).Query(func(rows pgx.Rows) error {
-			scanned, err := scanVersionsByArtifact(rows)
-			versions = scanned
-			return err
-		})
-	}
-	if len(approvalIDs) > 0 {
-		batch.Queue(latestReviewsStatement, approvalIDs).Query(func(rows pgx.Rows) error {
-			scanned, err := scanLatestReviews(rows)
-			latestReviews = scanned
-			return err
-		})
-		batch.Queue(openApprovalAsksStatement, approvalIDs).Query(func(rows pgx.Rows) error {
-			scanned, err := scanOpenApprovalRequests(rows)
-			requests = scanned
-			return err
-		})
-	}
-	if len(askIDs) > 0 {
-		batch.Queue(events.OpenedEventIDsStatement, askIDs).Query(func(rows pgx.Rows) error {
-			scanned, err := events.ScanOpenedEventIDs(rows, len(askIDs))
-			openedEventIDs = scanned
-			return err
-		})
-		askCountsSQL, askCountsArgs := refs.BacklinkCountsStatement("ask", askIDs, refs.AskBacklinkExclusions)
-		batch.Queue(askCountsSQL, askCountsArgs...).Query(func(rows pgx.Rows) error {
-			return refs.ScanBacklinkCounts(rows, "ask", askCounts)
-		})
+	applyArtifacts := queueArtifactDetails(batch, artifacts)
+	applyAsks := queueAskDetails(batch, asks)
+	if batch.Len() == 0 {
+		return nil
 	}
 	if err := s.deps.Store.Pool.SendBatch(ctx, batch).Close(); err != nil {
 		return err
 	}
-	applyVersions(artifacts, versions)
-	applyApprovals(approvalTargetsByID, latestReviews, requests)
-	if err := applyOpenedEventIDs(asks, openedEventIDs); err != nil {
-		return err
-	}
-	applyAskBacklinkCounts(asks, askCounts)
-	return nil
+	applyArtifacts()
+	return applyAsks()
 }
 
 // issueOpenAsk is an open ask on the issue detail together with the newest
@@ -500,18 +453,6 @@ func (s *server) readIssueDetails(ctx context.Context, artifacts []*model.Artifa
 type issueOpenAsk struct {
 	model.Ask
 	LastReply *model.AskLastReply `json:"last_reply"`
-}
-
-// loadOpenAsks returns the issue's unanswered asks, oldest first, each with the
-// newest reply in its thread (null when nobody has replied). The issue listing
-// carries only a count; the detail response carries the asks themselves so
-// agents, which cannot read the human inbox, can see what is waiting.
-func (s *server) loadOpenAsks(ctx context.Context, q queryer, key string) ([]issueOpenAsk, error) {
-	asks, replies, err := s.queryOwnerAsks(ctx, q, issueOwner(key), "open")
-	if err != nil {
-		return nil, err
-	}
-	return issueOpenAsksOf(asks, replies), nil
 }
 
 // issueOpenAsksOf pairs each ask with the newest reply in its thread, the shape the detail
@@ -533,8 +474,8 @@ func (s *server) loadIssue(ctx context.Context, q queryer, key string) (model.Is
 }
 
 // issueRowStatement reads one issue with its progress, $1 its key; scanIssueRow decodes it. It
-// is the issue read's first queued statement (getIssue), so a missing issue answers this row's
-// pgx.ErrNoRows whatever the rest of the batch found.
+// is the issue read's first queued statement (getIssue), whose callback records a missing issue
+// for the read to answer as this row's pgx.ErrNoRows whatever the rest of the batch found.
 var issueRowStatement = `
 		select i.key, i.project_key, i.number, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key,
 		       coalesce((select array_agg(l.target_key order by l.target_key) from issue_links l where l.issue_key = i.key and l.kind = 'blocked_by'), '{}'),
@@ -673,15 +614,4 @@ func scanIssueChildren(rows pgx.Rows) ([]model.IssueChild, error) {
 		children = append(children, child)
 	}
 	return children, rows.Err()
-}
-
-// loadChildren returns the issue's direct children, each with its subtree rollup
-// (issueChildrenStatement).
-func (s *server) loadChildren(ctx context.Context, q queryer, key string) ([]model.IssueChild, error) {
-	rows, err := q.Query(ctx, issueChildrenStatement, key)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanIssueChildren(rows)
 }

@@ -68,9 +68,9 @@ var AskBacklinkExclusions = []string{"replies_to"}
 // paragraphs counts 2. A node with no inbound edge is absent from the result; the caller decides
 // what zero means.
 //
-// It is the sequential half of the one count: BacklinkCountsStatement and ScanBacklinkCounts are
-// the same statement and the same scan, which the issue read queues in a batch of its own
-// (api.getIssue), so the two paths cannot drift.
+// It is the sequential half of the one count: QueueBacklinkCounts queues the same statement and
+// reads it with the same scan, for a caller that counts beside its other reads (the issue read's
+// batch, api.getIssue), so the two paths cannot drift.
 func BacklinkCounts(
 	ctx context.Context,
 	q Queryer,
@@ -82,22 +82,34 @@ func BacklinkCounts(
 	if len(ids) == 0 {
 		return counts, nil
 	}
-	sql, args := BacklinkCountsStatement(toKind, ids, excludeKinds)
+	sql, args := backlinkCountsStatement(toKind, ids, excludeKinds)
 	rows, err := q.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, fmt.Errorf("count %s backlinks: %w", toKind, err)
 	}
 	defer rows.Close()
-	if err := ScanBacklinkCounts(rows, toKind, counts); err != nil {
+	if err := scanBacklinkCounts(rows, toKind, counts); err != nil {
 		return nil, err
 	}
 	return counts, nil
 }
 
-// BacklinkCountsStatement is the statement and arguments BacklinkCounts runs, for a caller that
-// queues the count beside its other reads instead of spending a round trip on it (the issue
-// read's batch, api.getIssue). ScanBacklinkCounts reads the rows it returns.
-func BacklinkCountsStatement(toKind string, ids []string, excludeKinds []string) (string, []any) {
+// QueueBacklinkCounts is the batched half: it queues BacklinkCounts's statement in b and reads its
+// rows into counts, for a caller that counts beside its other reads instead of spending a round
+// trip on it (the issue read's batch, api.getIssue). No id queues nothing and leaves counts as it
+// is, so a caller need not ask whether it has any.
+func QueueBacklinkCounts(b *pgx.Batch, toKind string, ids, excludeKinds []string, counts map[string]int) {
+	if len(ids) == 0 {
+		return
+	}
+	sql, args := backlinkCountsStatement(toKind, ids, excludeKinds)
+	b.Queue(sql, args...).Query(func(rows pgx.Rows) error {
+		return scanBacklinkCounts(rows, toKind, counts)
+	})
+}
+
+// backlinkCountsStatement is the statement and arguments both halves run.
+func backlinkCountsStatement(toKind string, ids []string, excludeKinds []string) (string, []any) {
 	sql := `select g.to_id, count(*)::int from graph_edges g
 		where g.to_kind = $1 and g.to_id = any($2) and g.from_kind = any($3) and not ` + heldByABlock("g")
 	args := []any{toKind, ids, nodeKinds}
@@ -108,11 +120,11 @@ func BacklinkCountsStatement(toKind string, ids []string, excludeKinds []string)
 	return sql + " group by g.to_id", args
 }
 
-// ScanBacklinkCounts reads the rows BacklinkCountsStatement returns into counts, which a node
+// scanBacklinkCounts reads the rows backlinkCountsStatement returns into counts, which a node
 // with no inbound edge stays absent from. A batched caller reaches the statement's own failure
 // through the rows it is handed, so that failure is wrapped here exactly as BacklinkCounts wraps
 // the error its Query returns.
-func ScanBacklinkCounts(rows pgx.Rows, toKind string, counts map[string]int) error {
+func scanBacklinkCounts(rows pgx.Rows, toKind string, counts map[string]int) error {
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("count %s backlinks: %w", toKind, err)
 	}

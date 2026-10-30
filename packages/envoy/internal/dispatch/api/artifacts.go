@@ -1114,11 +1114,7 @@ func (s *server) loadArtifacts(ctx context.Context, q queryer, issueKey string) 
 	if err != nil {
 		return nil, err
 	}
-	pointers := artifactPointers(artifacts)
-	if err := s.attachVersions(ctx, q, pointers); err != nil {
-		return nil, err
-	}
-	if err := s.attachApprovals(ctx, q, pointers); err != nil {
+	if err := loadArtifactDetails(ctx, q, artifactPointers(artifacts)); err != nil {
 		return nil, err
 	}
 	return artifacts, nil
@@ -1157,23 +1153,61 @@ func artifactIDs(artifacts []*model.Artifact) []string {
 	return ids
 }
 
-// attachVersions fills Versions for every listed artifact from one statement rather than a query
-// per artifact; applyVersions leaves an artifact with no version a non-nil empty list.
-func (s *server) attachVersions(ctx context.Context, q queryer, artifacts []*model.Artifact) error {
+// queueArtifactDetails queues in b what a list of artifacts carries beside its rows - every
+// artifact's versions in one statement rather than a query per artifact, and every document's
+// latest review and open approval request - and returns the apply that fills them in once the
+// batch is closed. The statements are queued in that order wherever a list of artifacts is read:
+// the issue read queues them beside its other reads (readIssueDetails), and a list of its own
+// sends them as a batch of its own (loadArtifactDetails). The apply fills the versions first,
+// since an approval's state reads them (applyApprovals), and leaves an artifact with no version a
+// non-nil empty list (applyVersions). No artifact queues nothing and its apply fills nothing.
+func queueArtifactDetails(b *pgx.Batch, artifacts []*model.Artifact) func() {
 	ids := artifactIDs(artifacts)
-	if len(ids) == 0 {
+	approvalIDs, approvalTargetsByID := approvalTargets(artifacts)
+	// Each scan returns a map of its own, which replaces the nil one here; a statement not queued
+	// leaves its map nil, which the apply below only indexes.
+	var versions map[string][]model.Version
+	var latestReviews map[string]model.ArtifactReview
+	var requests map[string]openApprovalRequest
+	if len(ids) > 0 {
+		b.Queue(artifactVersionsStatement, ids).Query(func(rows pgx.Rows) error {
+			scanned, err := scanVersionsByArtifact(rows)
+			versions = scanned
+			return err
+		})
+	}
+	if len(approvalIDs) > 0 {
+		b.Queue(latestReviewsStatement, approvalIDs).Query(func(rows pgx.Rows) error {
+			scanned, err := scanLatestReviews(rows)
+			latestReviews = scanned
+			return err
+		})
+		b.Queue(openApprovalAsksStatement, approvalIDs).Query(func(rows pgx.Rows) error {
+			scanned, err := scanOpenApprovalRequests(rows)
+			requests = scanned
+			return err
+		})
+	}
+	return func() {
+		applyVersions(artifacts, versions)
+		applyApprovals(approvalTargetsByID, latestReviews, requests)
+	}
+}
+
+// loadArtifactDetails sends queueArtifactDetails's statements as a batch of their own on q, for a
+// list read that queues nothing else: an issue's artifacts (loadArtifacts), a project's
+// (listProjectArtifacts). The batch holds q's connection until its results close, so nothing else
+// reads the database in between.
+func loadArtifactDetails(ctx context.Context, q queryer, artifacts []*model.Artifact) error {
+	batch := &pgx.Batch{}
+	apply := queueArtifactDetails(batch, artifacts)
+	if batch.Len() == 0 {
 		return nil
 	}
-	rows, err := q.Query(ctx, artifactVersionsStatement, ids)
-	if err != nil {
+	if err := q.SendBatch(ctx, batch).Close(); err != nil {
 		return err
 	}
-	defer rows.Close()
-	versions, err := scanVersionsByArtifact(rows)
-	if err != nil {
-		return err
-	}
-	applyVersions(artifacts, versions)
+	apply()
 	return nil
 }
 
