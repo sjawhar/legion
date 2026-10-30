@@ -73,3 +73,79 @@ func TestAReaderJoiningAfterAnAwarenessFloodIsSeenOnTheOtherProcess(t *testing.T
 			invented, liveWithin)
 	}
 }
+
+// The same flood, from a tab that stays: it keeps its 2,048 invented clients alive, re-announcing
+// them every ten seconds as a tab's heartbeat does. Alice, opening the document on A a second
+// later, is seen at once by carol on A; she must be seen by bob on B within a second too, as she
+// would be were all three on one process. With a room bound that counts every client a room holds
+// (maxAwarenessClientsPerRoom), A's room is full of the tab's clients, refuses alice's client id,
+// and never relays it: bob sees her only once the flooding tab stops re-announcing and its clients
+// expire.
+func TestAReaderJoiningDuringALiveAwarenessFloodIsSeenOnTheOtherProcess(t *testing.T) {
+	pair := startPair(t, nil)
+	project := uniqueProjectKey(t, "FLL")
+	pair.a.createProject(t, project, "Live awareness flood")
+	_, artifactID := pair.a.createIssueIn(t, project, "Flooded live", "x")
+	bob := pair.openStoredEditor(t, pair.b, "bob", artifactID, "x\n")
+	carol := pair.openStoredEditor(t, pair.a, "carol", artifactID, "x\n")
+
+	flood, _, err := gws.DefaultDialer.Dial(pair.a.documentURL(artifactID), asUser("mallory"))
+	if err != nil {
+		t.Fatalf("connect the flooding tab to A: %v", err)
+	}
+	defer flood.Close()
+	go func() {
+		for {
+			if _, _, err := flood.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}()
+	const invented = 2048
+	announce := func(clock uint64) {
+		update := encoding.EncodeBytes(func(e *encoding.Encoder) {
+			e.WriteVarUint(invented)
+			for i := range invented {
+				e.WriteVarUint(uint64(600_000 + i))
+				e.WriteVarUint(clock)
+				e.WriteVarString(fmt.Sprintf(`{"user":{"name":"invented %d"}}`, i))
+			}
+		})
+		frame := encoding.EncodeBytes(func(e *encoding.Encoder) {
+			e.WriteVarString(artifactID)
+			e.WriteVarUint(1) // awareness
+			e.WriteVarBytes(update)
+		})
+		if err := flood.WriteMessage(gws.BinaryMessage, frame); err != nil {
+			t.Errorf("announce the flooding tab's clients at clock %d: %v", clock, err)
+		}
+	}
+	announce(1)
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for clock := uint64(2); ; clock++ {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				announce(clock)
+			}
+		}
+	}()
+	time.Sleep(time.Second)
+
+	alice := pair.openStoredEditor(t, pair.a, "alice", artifactID, "x\n")
+	if err := alice.SetAwareness(aliceAwarenessClient, cursorState("alice", 0)); err != nil {
+		t.Fatalf("announce alice's cursor: %v", err)
+	}
+	if err := carol.WaitForAwareness(liveWithin, holdsState(aliceAwarenessClient, cursorState("alice", 0))); err != nil {
+		t.Fatalf("carol on A did not see alice within %v: %v", liveWithin, err)
+	}
+	if err := bob.WaitForAwareness(liveWithin, holdsState(aliceAwarenessClient, cursorState("alice", 0))); err != nil {
+		t.Fatalf("alice, who opened the document on A while one tab there kept %d invented awareness clients alive, was seen at once by carol on A but not by bob on B within %v: A's room is full of that tab's clients and never relays hers",
+			invented, liveWithin)
+	}
+}
