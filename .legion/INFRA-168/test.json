@@ -2,78 +2,70 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-168",
-  "completed": "2026-10-30T00:30:00Z",
-  "round": 15,
-  "headSha": "e061d9edfc2e667f1dedec283e1593133dd6bd8b",
-  "handoffHead": "f1905acba604d577ed590e3fdf5cca1284adba26",
-  "scope": "The architect's brief (23:49Z): main question, the review's injection finding (the override comment never lets rebuttal text expand or run, and stands only where bash reads it as a comment; dispatch gets exactly the original argv; the marker argv matches; the resend reads back as the same rebuttal), for rebuttals holding $(...), backticks, a single quote and a newline and calls with a multi-line quoted --body, a here-document and a pipe; then the second upload of the decision document, one record-stop and shutdown-cut path, no record before a refusing mint; then the five cases in warn and block.",
-  "provider": "The 39 sessions' assistant turns were served by anthropic/claude-opus-5 (143 turns) and by its fallback anthropic/claude-opus-4-8 (7 turns, all in 15-s9-block, which was re-run as 15-s9b-block on claude-opus-5), read from each session's own turns. One review call was refused by the provider (15-c5-warn, reasoning_extraction), infrastructure.",
-  "fingerprint": "f9b2d51b6d1f7de6… at f1905acb, changed from round 14's beb82fdd…: a full round.",
-  "fixture": "dispatch://INFRA-766 had been closed by the INFRA Legion controller (21:16Z); reopened to triage for the round, the architect told, and closed again at 00:2xZ with every ask retracted.",
+  "completed": "2026-10-30T03:55:00Z",
+  "round": 16,
+  "headSha": "08ff93e8601c1b7cae5298e5fba3dc68e280d096",
+  "handoffHead": "5e15073a925cd4cacd6bf6be27dbaecb6eb45aa5",
+  "workspace": "Recreated before this round; it held my round-15 handoff 5ffea41f and the implementer's two fix commits above it, matching what I had pushed. Scratch scripts under /legion/scratch/tmp were gone and were rebuilt under /legion/scratch/tmp/t8.",
+  "scope": "The architect's brief (03:29Z): narrowed round on the review at ca8969e1. Main question: every decision record reaches Dispatch or its loss is counted, under round 15's load (about 22 concurrent sessions, warn and block), counted by id, none lost or duplicated; a driven loss counted by askgate-report from the session file. Then one stop per queued record, the override comment across a backslash continuation (one definition, never dropped, nothing runs), and the five cases in warn and block.",
+  "provider": "anthropic/claude-opus-5 served all 249 assistant turns of the 45 sessions, read from each session's own turns; review calls answered as claude-opus-5 except one charter and two rules calls answered by the fallback anthropic/claude-opus-4-8 after a provider refusal (L8-warn), infrastructure.",
+  "fingerprint": "ac6c54d147c2e696… at 5e15073a, changed from round 15's f9b2d51b….",
+  "fixture": "dispatch://INFRA-766 reopened to triage for the round and closed again (done, message 91af367b) with every ask retracted.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-drove its live injection probe (a two-line --body with a rebuttal holding $(touch …) and a pipe-stage rebuttal) in block and warn with my own canary, read every posted text back from Dispatch, and ran 11 adversarial rows of my own beside its 30-row table through real bash on a git archive copy of the head; drove its unit-pinned findings live (second upload, the shutdown cut of an unmarked record) and checked its test claims with four mutants."
+    "how": "Repeated its 22-session load independently with my own prompt (a refused no-change ask, its rebuttal resend and a comment per session), matching records by id: 43 of 43, 0 duplicate, 0 failure entries; and its unreachable-Dispatch loss (ECONNREFUSED) with askgate-report --sessions counting the losses. Added the never-answering and shutdown-cut losses, a 7 s slow-Dispatch proxy for queued records, and nine real-bash continuation rows."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Main question: no rebuttal text expands or runs; the comment stands only where bash reads it as one; dispatch receives the agent's argv without the override and the marker matches it; the resend reads back as the same rebuttal.",
-      "surface": "Nested headless Oh My Pi sessions on the branch build in this Legion pod, the branch CLI first on PATH, block and warn, production Dispatch, dispatch://INFRA-766; canary directory /legion/scratch/tmp/t7/sent.",
-      "command": "/legion/scratch/tmp/t7/run-case.sh 15-s<n>-<mode> <mode> p15/s<n>.txt: s1 two-line single-quoted --body holding \" and $HOME with --advisor-rebuttal 'the probe needs $(touch <canary>/s1-dollar) and `touch <canary>/s1-tick` kept as text' (block, warn); s3 a rebutted dispatch ask | head -n 5 (block, warn); s5 a rebuttal holding $(touch …) with --question-file - <<'EOF' 2>&1; s6 cd … && dispatch comment … --advisor-rebuttal 'a # b; c && d' 2>&1; s7 a two-line rebuttal holding $(touch …); s8 --advisor-rebuttal \"the owner's written request\"; s9b the s1-shape call, then the recorded command resent verbatim; then dispatch read --ref dispatch://INFRA-766/comment/<id> for each posted comment.",
-      "observed": "All posted in block mode (marker matched). Recorded commands end '# '--advisor-rebuttal' '…'' after the body's closing line, after 2>&1, after the here-document opener and after | head -n 5. Posted bodies read back byte for byte as written (the two-line s1 and s9 bodies, s6, s8). The canary directory stayed empty in every run. s9b's resend of the two-line commented form was recorded as the same rebuttal and posted. s7's newline rebuttal could not be carried: the comment was dropped and the acknowledgement says AskGate removed the flag.",
-      "headSha": "e061d9edfc2e667f1dedec283e1593133dd6bd8b",
-      "negativeControl": "In block mode the CLI refuses a write with no matching marker (14-u1-block, 15-u1-block), so each post is the marker matching the argv bash handed it; the newline rebuttal is the value the gate must not write, and it was dropped."
+      "criterion": "Under load every decision record reaches Dispatch once, counted by id.",
+      "surface": "22 nested headless Oh My Pi sessions at once (11 block, 11 warn) on this branch's build in this Legion pod, the branch CLI first on PATH, production Dispatch, dispatch://INFRA-766.",
+      "command": "for i in 1..11: /legion/scratch/tmp/t8/run-case.sh L$i-<block|warn> <mode> p/load.txt (03:31:39Z-03:34:59Z); python3 /legion/scratch/tmp/t8/reconcile.py L (gate entries with a ruleOutcome or an override, by toolCallId, against the ids of `dispatch doc-read --project INFRA --artifact askgate-decisions-<session>-md`); bun packages/pi-envoy/scripts/askgate-report.ts --dispatch-project INFRA --since 2026-10-30T03:31:00Z",
+      "observed": "43 published entries (21 rules refusals, 1 rules match that timed out, 21 rebuttals), 43 records, 0 missing, 0 duplicated ids, 0 advisor-gate-record entries. Reader: 22 sessions, duplicate records 0, 22 rules calls, 22 refusals (no_change), 21 overrides.",
+      "headSha": "08ff93e8601c1b7cae5298e5fba3dc68e280d096",
+      "negativeControl": "Round 15 at e061d9ed under the same load: 13 of 31 records given up at the 5 s stop."
     },
     {
-      "criterion": "The same, through real bash for shapes beyond the implementer's table.",
-      "surface": "A git archive copy of the head under $TMPDIR/adv15, a describe block appended to askgate.test.ts (throwaway, not committed): the real gate via bind(), a stand-in dispatch printing argv and stdin as JSON, bash -c.",
-      "command": "cd $TMPDIR/adv15/packages/pi-envoy && bun test extensions/askgate/askgate.test.ts -t 'tester round 15'",
-      "observed": "11 rows x block and warn, 22 of 22: backslash-continued dispatch; double-quoted multi-line body; body holding ' # '; rebuttal ending in a backslash; rebuttal holding ;&&|>< $(...) ${HOME}; here-document whose body has an 'EOF # …' line; | tail -n 1; here-document then | head; a blank override beside a real one; unicode and a tab; rebuttal before a two-line single-quoted body. In each, argv and stdin equal those of the command with the flag deleted by hand, the canary is absent, and the handed command resent comes back unchanged with the same rebuttal; the comment was kept in all 11.",
-      "headSha": "e061d9edfc2e667f1dedec283e1593133dd6bd8b",
-      "negativeControl": "Each row's expected output is the hand-deleted command run through the same bash."
+      "criterion": "A lost record is counted by askgate-report from the session file.",
+      "surface": "Nested sessions and omp --mode json -p with Dispatch unreachable.",
+      "command": "run-case.sh X-refused-block (DISPATCH_URL=http://127.0.0.1:1), X-hang-block (DISPATCH_URL=http://10.255.255.1:8766), X-unmarked-block (echo x | dispatch ask …, refused Dispatch); python3 /legion/scratch/tmp/t8/shutdown.py S-1 (rebutted comment, never-answering Dispatch, SIGTERM 1.5 s after the call); bun packages/pi-envoy/scripts/askgate-report.ts --sessions <run>/sessions --since 2026-10-30T03:30:00Z --sample 0 --out <dir>",
+      "observed": "X-refused: two advisor-gate-record entries (ECONNREFUSED), report 'decision records lost: 2' of 'gated calls: 3'. X-hang: two entries 'The operation timed out.' at 03:38:21Z and 03:39:21Z (the queued record's own 60 s), 'lost: 2' of 3. S-1: advisor-gate, session_exit, then advisor-gate-record 'the session shut down before Dispatch answered the record' at +2.77 s, process exit +2.84 s; 'lost: 1' of 1. X-unmarked: the unmarked entry carries recordError ECONNREFUSED. Across all round-16 session files: gated calls 77, decision records lost 4 (the X-refused and X-hang losses; S-1's runs dir was read on its own).",
+      "headSha": "08ff93e8601c1b7cae5298e5fba3dc68e280d096",
+      "negativeControl": "The 22 load sessions report 0 lost and 0 failure entries, so the counter counts only real losses."
     },
     {
-      "criterion": "A second upload of a session's decision document keeps the earlier records.",
-      "surface": "Two omp -p processes on one session file (--resume), block mode, production Dispatch.",
-      "command": "bash /legion/scratch/tmp/t7/resume-probe.sh (run 15-resume after 00:03Z): process 1 a refused no-change ask; process 2 --resume <file> a second; dispatch doc-read/read of askgate-decisions-<session>-md.",
-      "observed": "After process 1: 1 record, version 1. After process 2: 2 records (00:03:47Z and 00:04:10Z), version 2 — appended, not replaced. A first try at 23:58Z, while Dispatch was answering past 5 s, lost process 1's record to the shutdown cut, with an advisor-gate-record entry naming it.",
-      "headSha": "e061d9edfc2e667f1dedec283e1593133dd6bd8b",
-      "negativeControl": "Each process's advisor-gate entry is in the one session file (2 entries), so the second record is the second process's."
+      "criterion": "One stop per queued record: a slow record does not use up the next one's time.",
+      "surface": "A proxy in front of Dispatch (/legion/scratch/tmp/t8/slowproxy.ts) holding every request to an artifacts path 7 s; nested sessions in block and warn.",
+      "command": "run-case.sh Q-par-<block|warn> <mode> p/par.txt DISPATCH_URL=http://127.0.0.1:18766 (three no-change asks as parallel tool calls in one message, then sleep 40); proxy.log; reconcile.py Q-",
+      "observed": "Per session: GET by name 404 (7 s), POST upload 201 (7 s), then two POST …/edits 200 (7 s each), serial, each with its own Idempotency-Key; the third record's write began about 14 s after the first. 3 of 3 records landed in each session, 0 failure entries.",
+      "headSha": "08ff93e8601c1b7cae5298e5fba3dc68e280d096",
+      "negativeControl": "The review reproduced, at ca8969e1, records 2 and 3 failing 'did not answer within 5000 ms' behind a 3 s write; here they wait 14 s and land."
     },
     {
-      "criterion": "One record stop and one shutdown cut, for the gate's and the unmarked path's records.",
-      "surface": "omp --mode json -p, block mode, DISPATCH_URL unreachable; probe.py.",
-      "command": "python3 probe.py shutdown 15-s-sd; DELAY=2.5 python3 probe.py unmarked 15-u-sd-2.5 (echo x | dispatch ask …, SIGTERM 2.5 s after the call).",
-      "observed": "Rebutted comment: advisor-gate entry, session_exit, then advisor-gate-record recordError 'the session shut down before Dispatch answered the record' before exit. Unmarked write: session_exit, then the unmarked entry with recordError 'the session shut down before Dispatch answered the record' (not 'did not answer within 5000 ms').",
-      "headSha": "e061d9edfc2e667f1dedec283e1593133dd6bd8b",
-      "negativeControl": "The unmarked write's record error under Dispatch load without a shutdown (15-u1-warn) reads 'Dispatch did not answer the record within 5000 ms', so the shutdown wording is the cut's."
+      "criterion": "The override comment across a backslash line continuation: one definition, never dropped, nothing runs, resend reads back the same.",
+      "surface": "Live nested sessions; and a git archive copy of the head under $TMPDIR/adv16 with a throwaway describe block (the real gate via bind(), a stand-in dispatch printing argv and stdin, bash -c).",
+      "command": "run-case.sh K-cont2-block block p/cont2.txt (… --advisor-rebuttal 'tester round 16: `touch <canary>` stays text' \\\\⏎  2>&1); cd $TMPDIR/adv16/packages/pi-envoy && bun test extensions/askgate/askgate.test.ts -t 'tester round 16'",
+      "observed": "Live: ran as '… \\\\⏎  2>&1 # '--advisor-rebuttal' '…'', posted in block mode, canary directory empty. Real bash: 9 shapes x block and warn, the rebuttal holding $(touch <canary>) and backticks (flag on the continued line; before the continuation; a continued cd … &&, the shape round 15 saw dropped; before 2>&1; two continuations; with a multi-line body; into a here-document; then | head; a backslash inside a quoted body): comment kept in 18 of 18, argv and stdin equal the hand-deleted command, canary absent, each handed command resent unchanged as outcome rebuttal.",
+      "headSha": "08ff93e8601c1b7cae5298e5fba3dc68e280d096",
+      "negativeControl": "Each row's expected output is the hand-deleted command through the same bash; at e061d9ed the continued-cd shape dropped the comment (round 15's suite, 'an override the gate cannot write where the line ends is removed')."
     },
     {
-      "criterion": "No record before a refusing mint, and the review's test gaps are closed.",
-      "surface": "The same git archive copy, askgate-core.ts mutated and restored (cmp).",
-      "command": "cd $TMPDIR/adv15/packages/pi-envoy && bun test, unmutated and per mutant: M1 startRecord(entry) in place of the post-mint decision; M2 the rules reset removed; M3 callEnded removed from tool_result; M4 overrideComment's newlineOutsideQuotes guard removed.",
-      "observed": "Unmutated: 1656 pass, 6 fail (the copy's packaging and listener tests, which need the build tarball; the same six in every run). M1 adds 'a mint that refuses makes the record say the call was sent back'; M2 adds rules test 20; M3 adds 'a call whose tool_result arrived during its review mints nothing either'; M4 adds 'an override the gate cannot write where the line ends is removed, not written wrong' and 'an override comment anywhere but the end of the command's line is no override'.",
-      "headSha": "e061d9edfc2e667f1dedec283e1593133dd6bd8b",
-      "negativeControl": "The unmutated run is the baseline."
-    },
-    {
-      "criterion": "Regression: the five cases, repeated flags, the unmarked record, an ended call.",
-      "surface": "Nested headless sessions, branch build, production Dispatch.",
-      "command": "run-case.sh 15-c<0-5>-<mode>, 15-r8-block, 15-u1-<mode>; probe.py abort 15-a-1.",
-      "observed": "c1 refused no_change with the marker store empty after; c2 rebuttal opened and its recorded form resent read as the same rebuttal; c3 refused naming #log-retention; c4 refused untried_access; c5 rules none; c0 allowed; r8 three flags kept; u1 refused by the CLI in block, posted with its warning in warn; abort: abandoned, mintSkipped call-ended.",
-      "headSha": "e061d9edfc2e667f1dedec283e1593133dd6bd8b",
+      "criterion": "Regression: the five cases, charter-only call and unmarked write, warn and block.",
+      "surface": "Nested sessions, branch build, production Dispatch.",
+      "command": "run-case.sh R-<c0..c5,u1>-<mode>",
+      "observed": "c1 refused no_change, marker store empty after (ls shows only . and ..); c2 rebuttal opened (warn: the recorded commented form resent read as the same rebuttal; block: the agent declined to resend and asked instead); c3 refused naming #log-retention; c4 refused untried_access; c5 rules none (block: the charter revised it under Access 7; warn: timeout); c0 allowed; u1 refused by the CLI in block, posted in warn. Records 18 of 18 by id for the R- and K- sessions.",
+      "headSha": "08ff93e8601c1b7cae5298e5fba3dc68e280d096",
       "negativeControl": "c2's rebuttal opened where c1 was refused; c5's tried read answered none where c4 matched."
     }
   ],
   "observations": [
-    "Records under load: 23:50Z-00:00Z, with about 22 sessions at once, Dispatch answered 13 of 31 records past their 5 s stop; each left an advisor-gate-record entry (the unmarked one its recordError on its own entry), and those decisions are missing from the Dispatch counts A5 reads. Dispatch answered reads in 0.3-0.7 s by 00:03Z, and with Dispatch quiet 6 of 6 sessions ending right after a gated call kept their record. The 5 s stop is the same one the record had before bd250c48.",
-    "The unmarked path puts recordError on its advisor-gate entry, the gated path on a separate advisor-gate-record entry; askgate-report reads neither, so a lost record shows only in the session file.",
-    "s7 (newline rebuttal, comment dropped): the agent, told AskGate removed the flag, sent the call a second time to check, and two identical comments posted. One session; a newline in a rebuttal is rare.",
-    "The agents would not send a rebuttal of the form \"it's …; $(touch …)\" (double quotes with a command substitution would run in their own shell, and the grammar reads it as non-literal), and twice joined a backslash-continued command onto one line; both shapes are covered by the real-bash rows.",
+    "Live continuation prompts: two agents told to keep a two-line backslash command joined it onto one line (K-cont-*); the warn one then sent it three times to check the comment, posting three identical comments. The two-line shapes are covered by the real-bash rows and K-cont2.",
+    "R-c2-block: told to resend the recorded commented form, the agent declined, calling it 'the bypass and not the rebuttal path', and asked the user. No false report and no extra ask; agent caution, as rounds 6-15 saw in other forms.",
+    "A never-answering Dispatch holds each queued record up to the client's 60 s timeout, serially; a session that ends meanwhile cuts them at shutdown and counts them lost.",
     "I ran bun install for the build; bun.lock was restored and nothing of it is pushed."
   ],
-  "ci": "Read at 00:21Z, nothing re-run: at f1905acb, CI run 40974977664 queued (pi-envoy not started); PR Title runs queued or cancelled by later events.",
+  "ci": "Read at 03:47Z, nothing re-run: at 08ff93e8, CI run 40989884813 queued (pi-envoy not started), PR Title 40997230551 pending.",
   "priorRounds": [
     {
       "round": 1,
@@ -170,6 +162,13 @@
       "fixture": "dispatch://INFRA-766",
       "verdict": "pass",
       "summary": "91 sessions: deadline 25,000 ms on branch and main; paired timeouts followed load (an l4 gap reversed on re-run); 57/57 records landed; shutdown record entry before exit. Full record in commit e272addd's test.json."
+    },
+    {
+      "round": 15,
+      "headSha": "e061d9edfc2e667f1dedec283e1593133dd6bd8b",
+      "fixture": "dispatch://INFRA-766",
+      "verdict": "pass",
+      "summary": "39 sessions: the injection question held live and in 22 real-bash rows; second upload appends; one shutdown cut; four test-gap mutants each failed; under ~22 sessions Dispatch answered 13 of 31 records past the 5 s stop. Full record in commit 5ffea41f's test.json."
     }
   ]
 }
