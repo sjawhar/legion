@@ -2,43 +2,41 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-567",
-  "completed": "2026-10-30T04:00:00Z",
-  "round": 4,
-  "reviewedHead": "e719a7f203f2d339a8f13881c704fa0f08b32f05",
-  "codeHead": "45c0fb686c2ccdea9f34e645335314c52b329581",
+  "completed": "2026-10-30T05:10:00Z",
+  "round": 5,
+  "reviewedCodeHead": "9862c8d8b999",
   "decision": "changes_requested",
-  "critical": 0,
-  "important": 2,
-  "minor": 3,
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. CI run 40991734132 at code head 45c0fb68 was cancelled at 03:17Z during the re-pin drain and has been re-run (queued). No CI run has completed on this branch since 65da1690 (run 40913687637). The compare 45c0fb68...e719a7f2 changes only .legion/INFRA-567/. A request for changes does not wait on CI.",
-  "threads": "Round 3's threads: all four accepted (PRRT_kwDORFy7ds6xz7yX re-answered, PRRT_kwDORFy7ds6x0i2Y, PRRT_kwDORFy7ds6x0i2d, PRRT_kwDORFy7ds6x0i2i); each already resolved. The replacement Go check brought two new findings, raised as new inline comments.",
-  "thermonuclear": "Both run at e719a7f2, both CHANGES. The deep review found the Go-row classifier mismatch and confirmed the real golang row passes (GOLANG_VERSION=1.27.1 at its amd64 config); the quality review found the same mismatch, dead test fixtures and a misleading error message. The Docker Hub read on every run is my own finding.",
+  "critical": 1,
+  "important": 1,
+  "minor": 1,
+  "scope": "Narrowed by the architect: judge review 5707922815's five threads, require lint, typecheck, test and pr-title green at the code head, read the whole diff and name every remaining code finding in this one review; prose-only nits fixed by the reviewer in its own commit.",
+  "threads": "All five round-4 threads fixed in 9862c8d8 and accepted: the held row's Go read from the package, the shared parser ci_images.py, the refusal naming the row's whole upstream, the dead harness fixtures, and the mirror header (whose remaining 'every library/golang row' claim I corrected in my own commit, with AGENTS.md's copy).",
+  "ci": "Required set: lint, typecheck, test, pr-title. CI run 41003510761 at code head 9862c8d8 was queued at the read; no CI run has completed on this branch since 65da1690. Biome at the head (2.4.11, the version bun.lock pins) fails two files, which is the lint red finding 1 names; CI run 40957622905 at a744ce61 failed lint and envoy-client on exactly these two files.",
+  "proseFixedByReviewer": [
+    ".github/scripts/mirror-ci-images.sh and AGENTS.md: the Go check covers every library/golang row whose upstream names a tag; a digest-only golang row is skipped, and rule 7 refuses any reference on one",
+    ".github/scripts/check-ci-images.sh header: the files that decide the ci-images job include .github/scripts/ci_images.py",
+    "docs/solutions/github/join-a-job-to-the-ci-router.md: ci-images is a selected job, not an always-run one, and SELECTED_BY maps it",
+    "packages/envoy/.changes/unreleased/INFRA-567-ci-images-by-digest.yaml: the developer scripts fetch nothing in CI (dev-postgres.sh is run by a CI job)",
+    ".github/e2e-scripts.json: why_hosted is a note no job reads"
+  ],
+  "proseLeftToImplementer": "The review App has no `workflows` permission, so GitHub refused my push of two ci.yaml comment fixes: the ci-images job comment (ci.yaml:1310-1311) must name .github/scripts/ci_images.py among the files that decide the job, and the envoy-smoke comment (ci.yaml:2602-2604) says the SPA stage's base carries an ARG, which it no longer does. Both are in the review for the implementer.",
+  "thermonuclear": "Both run at e3c5e17d over the whole diff; both CHANGES. Deep review: the Biome red (High). Code quality: check-bun-version.sh keeps its own row reader, which falsely refuses a tag@digest oven/bun upstream the gate accepts (reproduced on a tree copy), plus Low items; I carry the unused TREE constant and judge the rest (the duplicate CI constant in ci_job_reads.py, the timeout on tests-closed's disabled job, the repeated GOPROXY comment) not findings.",
   "keyFindings": [
     {
-      "severity": "important",
-      "file": ".github/scripts/mirror-ci-images.sh:117",
-      "description": "image_go reads `$source`, the row's Docker Hub upstream at its digest, for every library/golang row on every ci-images run, held or copied. The package holds the same digest, so the read can come from `$registry@$digest`. As written it puts an anonymous Docker Hub fetch back into a CI job on every run that selects ci_images (each pull request touching the three filter files, each merge group, each such push to main), which is the fault class this change removes, and makes ci-images.yaml:10-11's 'reads Docker Hub a few times a year' false. Fix: read the config from the package for a held row and from the upstream only before a copy (or from the package after the copy), and keep the prose true."
+      "severity": "critical",
+      "file": "packages/envoy-client/src/__tests__/nats-server.ts:9",
+      "description": "Biome (biome.json lineWidth 100) refuses this line and the one-item apt arrays at .github/e2e-scripts.json:28 and :58; lint's `bunx biome check .` and envoy-client's lint step fail, so ci-ok cannot pass. Run `bunx biome format --write` on both files, and move ci.yaml:1710's citation (nats-server.ts:9) to the constant's new line."
     },
     {
       "severity": "important",
-      "file": ".github/scripts/mirror-ci-images.sh:88",
-      "description": "The mirror script decides which rows are library/golang with its own parser, stripping only Docker Hub hosts, while check-ci-images.sh's upstream_parts strips any host. A row such as mirror.gcr.io/library/golang:1.27.1-alpine counts as the Go row for rules 3 and 7 but gets claimed_go='' here, so the Go check skips it silently: the label-bytes mismatch this round set out to catch. Fix: one shared parser module both scripts import (PYTHONPATH=.github/scripts, as workflow_paths is), or rule 1 refusing a row whose upstream host is not Docker Hub; add a case."
+      "file": ".github/scripts/check-bun-version.sh:487",
+      "description": "The Bun FROM rule reads a row with its own reader (mirror_rows, a substring 'oven/bun' test and bun_tag_is_pinned, which splits at the first ':'), so an oven/bun upstream written tag@digest, the shape the nats hub row uses, is refused as another release while check-ci-images.sh accepts it. Read the row with ci_images.upstream_parts (repository oven/bun, its tag) and drop the second reader and the duplicate digest-unknown refusal rule 6 owns."
     },
     {
       "severity": "minor",
-      "file": ".github/scripts/mirror-ci-images.sh:121",
-      "description": "The refusal says to write the digest golang:$claimed_go names, which drops the -alpine variant (golang:1.27.1 is the Debian image); name the row's own upstream instead."
-    },
-    {
-      "severity": "minor",
-      "file": ".github/scripts/mirror-ci-images.test.sh:142",
-      "description": "Dead fixture lines left by the deleted tag read (:142-143, :204's tags append) and the harness prose describing upstream-tag reads (:8-9, :12-13, :116-117)."
-    },
-    {
-      "severity": "minor",
-      "file": ".github/scripts/mirror-ci-images.sh:32",
-      "description": "'every library/golang row' — a golang row whose upstream names a digest alone is skipped; say 'every tagged library/golang row'."
+      "file": ".github/scripts/check-ci-images.sh:197",
+      "description": "TREE = \"tree\" is never read; delete it."
     }
   ],
-  "contractCensus": "Not required: the refusals are this repository's own CI gates, every input in this tree, passing at the head."
+  "contractCensus": "Not required: the refusals are this repository's own CI gates, every input in this tree."
 }
