@@ -1,3 +1,2 @@
--- One nullable column, one `not valid` check and two partial indexes; the index builds read every
--- row of their tables, and no row is refused or rewritten.
+-- One nullable column and one `not valid` check; no row is read, refused or rewritten.
 select 0;

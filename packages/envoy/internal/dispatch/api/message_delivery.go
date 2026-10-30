@@ -260,8 +260,8 @@ func (s *server) acceptDelivery(w http.ResponseWriter, r *http.Request) {
 // pendingMessageDelivery is the attempt one targeted send owns: committed as pending under
 // the message's lock, carrying the frame, the listener resolution and the urgency it is sent
 // with. The urgency is the one the attempt's row recorded (message_deliveries.urgency), so every
-// send of one attempt - its first, a resume loop's, a person's same-mode Retry - carries the same
-// one, and an attempt a Retry opens, which records none, carries none.
+// send of one attempt - its first, the delivery sweep's, a person's same-mode Retry - carries the
+// same one, and an attempt a Retry opens, which records none, carries none.
 type pendingMessageDelivery struct {
 	attemptClaim
 	resolved ResolvedMention
@@ -461,7 +461,7 @@ func (s *server) recordPendingMessageDelivery(
 		// The same mode: resume it under its original number, and so its original
 		// idempotency key, whose repeat of a send that did land is recognised and dropped
 		// (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts), and with the urgency it
-		// recorded, as the resume loop would send it. An attempt that already names
+		// recorded, as the delivery sweep would send it. An attempt that already names
 		// a session keeps it; one stranded before anything was resolved takes the recipient
 		// this resolution found, so the row names the session its frame is going to either
 		// way and that session can answer it.
@@ -685,8 +685,8 @@ var errAttemptNotPending = errors.New("delivery attempt is no longer pending")
 // attempt and nothing else: it never opens a second attempt beside it and never supersedes it,
 // answering errAttemptNotPending instead. Every sender whose attempt exists before it starts sends
 // that way: a direct message's own request (createStoredMessage opens attempt 1 in the
-// transaction that stores the message), a broadcast's workers, and the resume loop
-// (delivery_resume.go). A human who changes the mode from the agent card in the meantime settles
+// transaction that stores the message), a broadcast's workers, and the delivery sweep
+// (delivery_sweep.go). A human who changes the mode from the agent card in the meantime settles
 // the attempt and sends their own, and a bound sender that then opened an attempt of its own
 // would put a second frame on the session's subject. Bound to attempt 1 of a message that has no
 // attempt yet - a message a stopped process committed before it could open one - it opens that

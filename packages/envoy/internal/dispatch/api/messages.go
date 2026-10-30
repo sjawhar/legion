@@ -315,7 +315,7 @@ func (s *server) createStoredMessage(
 	// A targeted message's attempt 1 is written here, in the transaction that stores the
 	// message, unclaimed and naming no session yet, as writeBroadcast opens each recipient's: a
 	// process that dies, or a request whose connection is cut, between this commit and the send
-	// then leaves a pending attempt the resume loop (delivery_resume.go) sends, where opening it
+	// then leaves a pending attempt the delivery sweep (delivery_sweep.go) sends, where opening it
 	// after the listener lookup left a stored message with no attempt that nothing would ever
 	// send. It records who asked for it and the urgency they chose, which every send of it
 	// carries (pendingMessageDelivery), this request's own and a resumed one alike.
@@ -345,7 +345,7 @@ func (s *server) createStoredMessage(
 		// client's receipt timeout bounds it there.
 		sending := context.WithoutCancel(ctx)
 		// Bound to attempt 1, never the unbound send, so this request cannot open a second
-		// attempt beside one the resume loop or a person's Retry already took. Another sender
+		// attempt beside one the delivery sweep or a person's Retry already took. Another sender
 		// owning attempt 1 - a repeat of a keyed send that found this message committed
 		// (sendHeldMessageOn) among them - means the message's delivery is under way there: the
 		// message is stored, so it is answered with the attempts as that sender has left them.

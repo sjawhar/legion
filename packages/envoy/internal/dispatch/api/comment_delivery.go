@@ -168,11 +168,11 @@ func openCommentDeliveryAttempt(
 // beside a live sender that would be a second frame on the session's subject. The creating
 // request completes attempt 1 this way, which the comment's transaction opened unclaimed, and so
 // does a keyed repeat's (replayComment): a Retry that took it in the moment after the commit owns
-// it, and a reply that settled it is what the request reports. The resume loop finishes a
-// stranded attempt this way (delivery_resume.go), and the delivery sweep the attempt it found
-// owed, so an older attempt a card retry overtook is never sent in that attempt's place. An
-// unbound call (0) is a person's or an agent's Retry: it resumes the lowest pending attempt once
-// its claim has lapsed, and otherwise opens an attempt of its own.
+// it, and a reply that settled it is what the request reports. The delivery sweep finishes the
+// attempt it found owed this way (delivery_sweep.go), so an older attempt a card retry overtook
+// is never sent in that attempt's place. An unbound call (0) is a person's or an agent's Retry:
+// it resumes the lowest pending attempt once its claim has lapsed, and otherwise opens an
+// attempt of its own.
 func (s *server) claimCommentDeliveryAttempt(
 	ctx context.Context, comment model.Comment, target ResolvedMention, resumeAttempt int,
 ) (claimedCommentDelivery, error) {
@@ -431,7 +431,7 @@ func (s *server) recordCommentDeliveryResolution(
 // transaction.
 //
 // attempt binds the claim (claimCommentDeliveryAttempt): 1 for the creating request's completion of
-// the attempt its transaction opened, a stranded attempt's number for the resume loop, 0 for a
+// the attempt its transaction opened, an owed attempt's number for the delivery sweep, 0 for a
 // Retry. takeover is the pacing the sends start in. The creating request's sender carries on in
 // the window its mention's resolution before the transaction opened (resolveThroughTakeover), so a
 // resolution that waited a take-over out is not given a second window; every other caller starts
@@ -446,7 +446,7 @@ func (s *server) recordCommentDeliveryResolution(
 //
 // Attempt 1 of a comment whose other routes were decided on its mentions' resolution
 // (mentions_decide_routes, resolveCommentDeliveries) keeps the resolution it was opened with,
-// whichever sender finishes it - the creating request, the resume loop, or a Retry that takes it
+// whichever sender finishes it - the creating request, the delivery sweep, or a Retry that takes it
 // after its sender died. A pinned session is only rechecked, and a resolution that reached no
 // session settles failed with its resolve error, never resolved again: the comment's route and
 // author fan-outs went out on that outcome, so a session this mention reached now could hear the

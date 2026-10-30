@@ -92,10 +92,6 @@ type bootConfig struct {
 	// SettleDelay is how long a document waits after a live change before it settles, zero for the
 	// document service's own default; only DISPATCH_TEST_SETTLE_DELAY, under the test hooks, sets it.
 	SettleDelay time.Duration
-	// DeliveryResumeInterval is how often the resume loop looks for stranded delivery attempts:
-	// api.DeliveryResumeInterval, unless DISPATCH_TEST_DELIVERY_RESUME_INTERVAL, under the test
-	// hooks, sets another.
-	DeliveryResumeInterval time.Duration
 	// RouteRosterTTL is how long a stored listener answer serves issue reads' route_status, zero
 	// for the server's own five seconds; only DISPATCH_TEST_ROUTE_ROSTER_TTL, under the test hooks,
 	// sets it.
@@ -463,11 +459,6 @@ func main() {
 	// The related-item check's keyword statistics (each project's df and N), rebuilt at
 	// boot and every ten minutes.
 	go api.RunSearchTermStatsRefresh(ctx, database.Pool, api.SearchTermStatsInterval, leases)
-	// Sends the delivery attempts a stopped request or process left pending - a
-	// message's, a broadcast recipient's, a comment mention's - once their claim has lapsed, on the
-	// dependencies the routes send with, so no attempt waits for a person's Retry because a
-	// process stopped mid-send.
-	go appCtx.RunDeliveryResume(ctx, boot.DeliveryResumeInterval, leases)
 	// Issues whose spec's task count is not their latest version's - every row the migration that
 	// added the count columns found, and any the task this one replaces versions while both run -
 	// are counted again, at start and on an interval, so their progress shows without anyone
@@ -700,23 +691,22 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		return bootConfig{}, err
 	}
 	boot := bootConfig{
-		DatabaseURL:            strings.TrimSpace(env.get("DATABASE_URL")),
-		RepoProjects:           strings.TrimSpace(env.get("DISPATCH_REPO_PROJECTS")),
-		DefaultProject:         strings.TrimSpace(env.get("DISPATCH_DEFAULT_PROJECT")),
-		GitHubAPIBase:          strings.TrimSpace(env.get("DISPATCH_GITHUB_API_BASE")),
-		SignInIssuer:           strings.TrimSpace(env.get("DISPATCH_SIGNIN_ISSUER")),
-		SignInClientID:         strings.TrimSpace(env.get("DISPATCH_SIGNIN_CLIENT_ID")),
-		SignInClientSecret:     strings.TrimSpace(env.get("DISPATCH_SIGNIN_CLIENT_SECRET")),
-		SignInGroup:            strings.TrimSpace(env.get("DISPATCH_SIGNIN_GROUP")),
-		SignInDomain:           strings.TrimSpace(env.get("DISPATCH_SIGNIN_DOMAIN")),
-		NATSDisabled:           env.get("DISPATCH_NATS_DISABLED") == "1",
-		TestHooksEnabled:       env.get("DISPATCH_TEST_HOOKS") == "1",
-		WebDist:                env.get("DISPATCH_WEB_DIST"),
-		FileStoreBucket:        strings.TrimSpace(env.get("DISPATCH_FILE_STORE_BUCKET")),
-		DevSignInSharedKey:     env.get("DISPATCH_DEV_SIGNIN_SHARED_KEY"),
-		InsecureCookie:         env.get("DISPATCH_INSECURE_COOKIE") != "",
-		EnvoyToken:             env.get("ENVOY_TOKEN"),
-		DeliveryResumeInterval: api.DeliveryResumeInterval,
+		DatabaseURL:        strings.TrimSpace(env.get("DATABASE_URL")),
+		RepoProjects:       strings.TrimSpace(env.get("DISPATCH_REPO_PROJECTS")),
+		DefaultProject:     strings.TrimSpace(env.get("DISPATCH_DEFAULT_PROJECT")),
+		GitHubAPIBase:      strings.TrimSpace(env.get("DISPATCH_GITHUB_API_BASE")),
+		SignInIssuer:       strings.TrimSpace(env.get("DISPATCH_SIGNIN_ISSUER")),
+		SignInClientID:     strings.TrimSpace(env.get("DISPATCH_SIGNIN_CLIENT_ID")),
+		SignInClientSecret: strings.TrimSpace(env.get("DISPATCH_SIGNIN_CLIENT_SECRET")),
+		SignInGroup:        strings.TrimSpace(env.get("DISPATCH_SIGNIN_GROUP")),
+		SignInDomain:       strings.TrimSpace(env.get("DISPATCH_SIGNIN_DOMAIN")),
+		NATSDisabled:       env.get("DISPATCH_NATS_DISABLED") == "1",
+		TestHooksEnabled:   env.get("DISPATCH_TEST_HOOKS") == "1",
+		WebDist:            env.get("DISPATCH_WEB_DIST"),
+		FileStoreBucket:    strings.TrimSpace(env.get("DISPATCH_FILE_STORE_BUCKET")),
+		DevSignInSharedKey: env.get("DISPATCH_DEV_SIGNIN_SHARED_KEY"),
+		InsecureCookie:     env.get("DISPATCH_INSECURE_COOKIE") != "",
+		EnvoyToken:         env.get("ENVOY_TOKEN"),
 	}
 	if boot.DatabaseURL == "" {
 		return bootConfig{}, errors.New("DATABASE_URL required")
@@ -755,7 +745,6 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		target *time.Duration
 	}{
 		{"DISPATCH_TEST_SETTLE_DELAY", &boot.SettleDelay},
-		{"DISPATCH_TEST_DELIVERY_RESUME_INTERVAL", &boot.DeliveryResumeInterval},
 		{"DISPATCH_TEST_ROUTE_ROSTER_TTL", &boot.RouteRosterTTL},
 		{"DISPATCH_TEST_EDIT_NOTICE_QUIET", &boot.EditNoticeQuiet},
 	} {

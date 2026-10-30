@@ -8,9 +8,8 @@ body: |-
     (`dispatch_test_hooks`) and answer once each has acted, or `504 TEST_HOOK_TIMEOUT` after 10 s
     naming the lock keys of the processes that did not. With `DISPATCH_TEST_HOOKS=1` each process
     holds one more Postgres connection, outside the shared pool, to hear them; without it nothing
-    changes. Two test-only settings, accepted only with `DISPATCH_TEST_HOOKS=1`, shorten the new
-    delivery resume loop's interval (`DISPATCH_TEST_DELIVERY_RESUME_INTERVAL`) and the stored route
-    list's life (`DISPATCH_TEST_ROUTE_ROSTER_TTL`).
+    changes. One test-only setting, accepted only with `DISPATCH_TEST_HOOKS=1`, shortens the
+    stored route list's life (`DISPATCH_TEST_ROUTE_ROSTER_TTL`).
 time: 2026-10-28T10:30:03.000000000Z
 custom:
     Issue: pr2387

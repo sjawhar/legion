@@ -600,10 +600,12 @@ What the two processes share, and what each keeps to itself:
   written in the transaction that stores it, and a request's own send outlives a cut connection.
   An attempt a process left pending - killed between its claim and its settle, a direct message,
   a broadcast recipient's, a comment mention's or a Retry's alike - is sent by whichever process
-  runs the delivery resume loop next (`api/delivery_resume.go`, every ten seconds, under the
-  `delivery-resume` lease, one of the leased loops below), once its claim is a minute old, under
-  its own attempt number and idempotency key, so the session is handed it once. An attempt older
-  than an hour is left for a person's Retry.
+  runs the delivery sweep next (`api/delivery_sweep.go`, `resumeOwedDeliveries`, a pass of the
+  maintenance loop below, once a minute), once its claim is a minute old, under its own attempt
+  number and idempotency key, so the session is handed it once. An attempt older than
+  `DELIVERY_DUPLICATE_WINDOW_MS` (72 hours), past which a resend is no longer recognised as a
+  repeat, is left for a person's Retry, and an attempt nothing can send - its issue closed, its
+  mention gone - is settled `failed` with that cause instead.
 - A send waits out a listener take-over. While the active Envoy listener pod is replaced, its
   successor refuses connections, answers 502, 503 or 504, or does not hold the session yet; a send
   that meets one of those (or a receipt timeout) is tried again under the attempt it holds and the
@@ -611,7 +613,7 @@ What the two processes share, and what each keeps to itself:
   try, and only then settles `failed` (`api/envoy_resolve.go`, `listenerTakeoverWindow`). A request
   that sends during a take-over answers up to 12 seconds later, and a send to a session that is
   really gone reads `failed: no live session` about 12 seconds after it was made. A process killed
-  during the wait leaves the attempt to the resume loop.
+  during the wait leaves the attempt to the delivery sweep.
 - Times that one process writes and another compares come from the database's clock, never a
   host's: an issue's `claimed_at`, an ask's answer time (the answer route's and a carried
   approval's, the `created_at` of the `ask.answered` event beside it) and the "snooze must be in
@@ -642,13 +644,13 @@ What the two processes share, and what each keeps to itself:
   installation, not the token, and storing tokens would put live credentials in Postgres and its
   backups. A repository's installation is remembered for ten minutes, so every process finds an
   App moved to another installation within that.
-- Thirteen periodic maintenance loops run once per period across the processes, not once per
-  process: the document compaction, the suggestion-outcome sweep, the delivery resume, the
-  reference-excerpt reconciliation, the term-statistics refresh, the edit-notice sweep, the
-  block-index reconciliation, the repair of closed and reopened issues' asks, the webhook
-  redelivery sweep, the architecture import, the delivery reconcile, the server process registry's
-  prune and the delivery intakes' consumer reconciliation, which takes one lease per durable, so
-  at most `store.leasePoolSize` callers hold a lease at once.
+- Twelve periodic maintenance loops run once per period across the processes, not once per
+  process: the document compaction, the suggestion-outcome sweep (whose pass also runs the
+  delivery sweep), the reference-excerpt reconciliation, the term-statistics refresh, the
+  edit-notice sweep, the block-index reconciliation, the repair of closed and reopened issues'
+  asks, the webhook redelivery sweep, the architecture import, the delivery reconcile, the server
+  process registry's prune and the delivery intakes' consumer reconciliation, which takes one
+  lease per durable, so at most `store.leasePoolSize` callers hold a lease at once.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a
   process whose tick lands inside another's pass logs a skip; and, under that lease, each pass is
   recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick
@@ -1370,24 +1372,20 @@ follows `0139_related_checks` and `0140_issue_embedding_spec`, which already use
 migration numbers.
 
 Migration `0142_message_delivery_urgency` adds `message_deliveries.urgency`, the urgency a targeted
-message was sent with, so a send that resumes a stranded attempt - the resume loop's
-(`api/delivery_resume.go`) or a person's same-mode Retry - hands the listener the urgency the
-person chose; an attempt a Retry opens records none and sends none. A direct message's attempt 1
-is written with it in the transaction that stores the message; a broadcast recipient's carries
-none. It is internal: no API read selects it. It is nullable with no default, so it writes the
-catalog alone under
-`message_deliveries`' `ACCESS EXCLUSIVE` lock, refuses and rewrites no row, and the release before
-it, which names no urgency in its inserts, rolls beside it; an attempt that release wrote is resumed
-without an urgency, as its first send was. Its check, one of `low`, `med`, `high` and `blocking`, is
-a second statement added `not valid`, as the rule below requires, and nothing validates it later,
-since every row below the migration carries no urgency. `0142` also creates two partial indexes on
-`created_at` where `state = 'pending'`, `message_deliveries_pending_created` and
-`comment_deliveries_pending_created`, which the resume loop reads its candidates through, oldest
-first, without reading every settled attempt. They are plain `create index`, as `0120`'s is, and
-each build holds its table's lock while it reads the rows, which the census bounds by its 1 GiB
-limit. The census answers `0`. `0142` is additive, so rolling back past it is an image rollback
-alone. It follows `0141_drop_broadcast_idempotency_keys`, which already uses the preceding
-migration number.
+message was sent with, so a send that resumes a stranded attempt - the delivery sweep's
+(`api/delivery_sweep.go`, `resumeOwedDeliveries`) or a person's same-mode Retry - hands the
+listener the urgency the person chose; an attempt a Retry opens records none and sends none. A
+direct message's attempt 1 is written with it in the transaction that stores the message; a
+broadcast recipient's carries none. It is internal: no API read selects it. It is nullable with
+no default, so it writes the catalog alone under `message_deliveries`' `ACCESS EXCLUSIVE` lock,
+refuses and rewrites no row, and the release before it, which names no urgency in its inserts,
+rolls beside it; an attempt that release wrote is resumed without an urgency, as its first send
+was. Its check, one of `low`, `med`, `high` and `blocking`, is a second statement added
+`not valid`, as the rule below requires, and nothing validates it later, since every row below
+the migration carries no urgency. The sweep reads its candidates through `0138`'s partial indexes
+(above); `0142` builds none of its own. The census answers `0`. `0142` is additive, so rolling
+back past it is an image rollback alone. It follows `0141_drop_broadcast_idempotency_keys`, which
+already uses the preceding migration number.
 
 Migration `0143_route_roster` creates `route_roster`, one row (its `id` checked `true`, as
 `embeddings_rate_limit`'s is) holding the listener's last answer to `GET /v1/sessions` that every

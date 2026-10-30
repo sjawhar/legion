@@ -297,9 +297,9 @@ func TestASendWithNoListenerConfiguredSettlesAtOnce(t *testing.T) {
 
 // A sender waiting out a take-over renews its claim before each try and settles on the claim it
 // renewed last, so the attempt never reads as abandoned while its sender is still trying: the
-// resume loop, run during the wait, sends nothing and opens nothing beside it, and the attempt
+// delivery sweep, run during the wait, sends nothing and opens nothing beside it, and the attempt
 // reaches its session once, under attempt 1, with one receipt. The listener refuses until two
-// tries have found the attempt held and a resume pass has run, so the fourth try - 1.75 s of
+// tries have found the attempt held and a sweep pass has run, so the fourth try - 1.75 s of
 // backoff after the first - is the one it answers, and the claim is read at four points across
 // three renewals. The server's window is 3 s: it still admits that fourth try with over a second
 // to spare, and the production twelve would only lengthen a failure.
@@ -376,15 +376,15 @@ func TestASenderWaitingOutAListenerTakeOverRenewsItsClaimBeforeEachTry(t *testin
 				time.Sleep(20 * time.Millisecond)
 			}
 
-			// The attempt is old enough for the resume loop, and only its live claim keeps it the
-			// waiting sender's.
+			// The attempt is old enough for the delivery sweep, and only its live claim keeps it
+			// the waiting sender's.
 			if _, err := database.Pool.Exec(context.Background(),
 				`update `+tc.table+` set created_at = created_at - interval '5 minutes' where state = 'pending'`,
 			); err != nil {
 				t.Fatalf("age the attempt: %v", err)
 			}
-			if err := directServer(deps).resumeStrandedDeliveries(context.Background()); err != nil {
-				t.Fatalf("resume pass during the wait: %v", err)
+			if err := directServer(deps).resumeOwedDeliveries(context.Background()); err != nil {
+				t.Fatalf("delivery sweep pass during the wait: %v", err)
 			}
 			var id string
 			if err := database.Pool.QueryRow(context.Background(),
@@ -392,7 +392,7 @@ func TestASenderWaitingOutAListenerTakeOverRenewsItsClaimBeforeEachTry(t *testin
 				t.Fatalf("read the waiting attempt: %v", err)
 			}
 			if states := attemptStates(t, database, tc.table, tc.column, id); !slices.Equal(states, []string{"1:pending"}) {
-				t.Fatalf("attempts after a resume pass during the wait = %v, want attempt 1 alone, still the waiting sender's", states)
+				t.Fatalf("attempts after a sweep pass during the wait = %v, want attempt 1 alone, still the waiting sender's", states)
 			}
 
 			listener.refuse(false)

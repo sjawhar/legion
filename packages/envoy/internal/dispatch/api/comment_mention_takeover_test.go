@@ -140,10 +140,10 @@ func TestACommentMentioningSeveralEndedSessionsAnswersWithinOneTakeOverWindow(t 
 // for longer than the take-over window, decides its route on the mention's failed resolution: the
 // mention reached nobody, so suppress_route stays off and the route fan-out carries the comment to
 // s1. A sender that dies before it settles that mention leaves attempt 1 pending, holding the
-// resolve error the decision was made on. Whoever finishes the attempt later - the resume loop, or
-// a person's Retry of the pending attempt - must settle it with that resolution: s1 answers by
-// then, and a mention resolved afresh steers s1 the comment under the mention's own key, beside
-// the route's frame the listener cannot recognise it as a repeat of.
+// resolve error the decision was made on. Whoever finishes the attempt later - the delivery
+// sweep, or a person's Retry of the pending attempt - must settle it with that resolution: s1
+// answers by then, and a mention resolved afresh steers s1 the comment under the mention's own
+// key, beside the route's frame the listener cannot recognise it as a repeat of.
 func TestAResumedMentionOfARoutedCommentReachesTheRouteHolderOnce(t *testing.T) {
 	listener := startTakeOverListener(t)
 	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.server.URL})
@@ -206,9 +206,11 @@ func TestAResumedMentionOfARoutedCommentReachesTheRouteHolderOnce(t *testing.T) 
 		comment mentionedCommentRead
 		run     func(t *testing.T)
 	}{
-		{"the resume loop", comments[0], func(t *testing.T) {
-			if err := direct.resumeStrandedDeliveries(context.Background()); err != nil {
-				t.Fatalf("resume pass: %v", err)
+		{"the delivery sweep", comments[0], func(t *testing.T) {
+			// strandStoredAttempt leaves the attempt as main's sweep requires an owed one: created
+			// over a minute ago, under a claim long lapsed.
+			if err := direct.resumeOwedDeliveries(context.Background()); err != nil {
+				t.Fatalf("delivery sweep pass: %v", err)
 			}
 		}},
 		{"a person's Retry", comments[1], func(t *testing.T) {

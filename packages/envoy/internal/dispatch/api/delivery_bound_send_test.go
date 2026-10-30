@@ -1,7 +1,6 @@
 package api
 
 import (
-	"cmp"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -14,14 +13,14 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// resumeSend is one send the resume tests' listener answered: the key, the session and the
+// resumeSend is one send the bound-send tests' listener answered: the key, the session and the
 // urgency it carried.
 type resumeSend struct {
 	key, target, urgency string
 }
 
-// resumeListener is the Envoy listener the resume tests send through: one live session, s1, that
-// takes every mode and holds role:reviewer, and a record of every send it answered.
+// resumeListener is the Envoy listener the bound-send tests send through: one live session, s1,
+// that takes every mode and holds role:reviewer, and a record of every send it answered.
 type resumeListener struct {
 	server *httptest.Server
 	mu     sync.Mutex
@@ -160,10 +159,10 @@ func TestABoundSendTakesAnUnpinnedAttemptAndPinsTheSessionItsTargetResolvedTo(t 
 	}
 }
 
-// The resume loop names one attempt and must send that attempt or nothing. A live sender holding
-// it - its claim inside the lease - owns the frame, so the resume sends nothing and opens no
-// attempt beside it, where a Retry would open one; once that claim lapses, the resume takes the
-// attempt under its original number and key.
+// The delivery sweep names one attempt and must send that attempt or nothing. A live sender
+// holding it - its claim inside the lease - owns the frame, so a bound send makes none and opens
+// no attempt beside it, where a Retry would open one; once that claim lapses, the bound send takes
+// the attempt under its original number and key.
 func TestACommentResumeSendsNothingBesideALiveSenderAndTakesTheAttemptOnceItLapses(t *testing.T) {
 	listener := startResumeListener(t)
 	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.server.URL})
@@ -217,80 +216,40 @@ func TestACommentResumeSendsNothingBesideALiveSenderAndTakesTheAttemptOnceItLaps
 	}
 }
 
-// One pass of the resume loop sends every attempt a sender left pending past the claim lease and
-// inside the horizon, with the urgency its message was sent with, and leaves the rest as they
-// are: a request's own fresh attempt, an attempt older than the horizon (it waits for a person's
-// Retry), and a message on a closed issue, whose claim would be refused for good.
-func TestTheDeliveryResumePassSendsOnlyTheStrandedAttemptsItOwes(t *testing.T) {
+// The urgency a targeted message was sent with lives on its attempt row
+// (message_deliveries.urgency, migration 0142), and the claim of a bound send reads it from there
+// (pendingMessageDelivery). The delivery sweep therefore carries no urgency of its own - its
+// resumeOwedDelivery hands deliverMessageResuming the attempt's number and nothing else - and a
+// stranded urgent message it resumes still reaches the listener as urgent, not as a plain steer.
+func TestTheDeliverySweepResumesAnAttemptWithTheUrgencyItRecorded(t *testing.T) {
 	listener := startResumeListener(t)
 	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.server.URL})
 	direct := directServer(deps)
-	open := createInteractionIssue(t, handler, "TEST", "Stranded deliveries", "before")
-	closed := createInteractionIssue(t, handler, "SHUT", "Closed since", "before")
-	agentMessage := func(body string) model.Message {
-		t.Helper()
-		return decodeBody[model.Message](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages",
-			map[string]any{"body": body, "delivery": "steer"}, "alice"))
-	}
-
-	stranded := createIssueMessage(t, handler, open.Key, map[string]any{
+	issue := createInteractionIssue(t, handler, "TEST", "Stranded and urgent", "before")
+	stranded := createIssueMessage(t, handler, issue.Key, map[string]any{
 		"body": "Stranded, and urgent", "target": "session:s1", "delivery": "steer", "urgency": "high",
 	}, "alice")
 	strandStoredAttempt(t, database, "message_deliveries", "message_id", stranded.ID, "'2 minutes'", "'2 minutes'")
-	mention := decodeMentionedComment(t, postMentionedComment(t, handler, open.Key, map[string]any{
-		"body": "A stranded mention.", "mentions": []map[string]any{{"target": "session:s1"}},
-	}))
-	strandStoredAttempt(t, database, "comment_deliveries", "comment_id", mention.ID, "'2 minutes'", "'2 minutes'")
-	fresh := agentMessage("Its request is still sending it")
-	strandStoredAttempt(t, database, "message_deliveries", "message_id", fresh.ID, "null", "'0 seconds'")
-	tooOld := agentMessage("Stranded before the horizon")
-	strandStoredAttempt(t, database, "message_deliveries", "message_id", tooOld.ID, "'2 hours'", "'2 hours'")
-	onClosed := createIssueMessage(t, handler, closed.Key, map[string]any{
-		"body": "On an issue closed since", "target": "session:s1", "delivery": "steer",
-	}, "alice")
-	strandStoredAttempt(t, database, "message_deliveries", "message_id", onClosed.ID, "'2 minutes'", "'2 minutes'")
-	if _, err := database.Pool.Exec(context.Background(),
-		`update issues set status = 'done', closed_at = now() where key = $1`, closed.Key); err != nil {
-		t.Fatalf("close %s: %v", closed.Key, err)
-	}
 	listener.forget()
 
-	if err := direct.resumeStrandedDeliveries(context.Background()); err != nil {
-		t.Fatalf("resume pass: %v", err)
+	if err := direct.resumeOwedDeliveries(context.Background()); err != nil {
+		t.Fatalf("delivery sweep pass: %v", err)
 	}
 
-	byKey := func(a, b resumeSend) int { return cmp.Compare(a.key, b.key) }
-	sends := listener.answered()
-	slices.SortFunc(sends, byKey)
-	want := []resumeSend{
-		{key: stranded.ID + ":steer", target: "s1", urgency: "high"},
-		{key: mention.ID + ":session:s1:steer", target: "s1"},
+	want := resumeSend{key: stranded.ID + ":steer", target: "s1", urgency: "high"}
+	if sends := listener.answered(); len(sends) != 1 || sends[0] != want {
+		t.Fatalf("the sweep sent %#v, want exactly %#v: the urgency the attempt recorded", sends, want)
 	}
-	slices.SortFunc(want, byKey)
-	if !slices.Equal(sends, want) {
-		t.Fatalf("the pass sent %#v, want only the stranded message, with its urgency, and the stranded mention: %#v", sends, want)
-	}
-	for _, row := range []struct {
-		name, table, column, id string
-		want                    []string
-	}{
-		{"the stranded message", "message_deliveries", "message_id", stranded.ID, []string{"1:sent"}},
-		{"the stranded mention", "comment_deliveries", "comment_id", mention.ID, []string{"1:sent"}},
-		{"the fresh attempt", "message_deliveries", "message_id", fresh.ID, []string{"1:pending"}},
-		{"the attempt past the horizon", "message_deliveries", "message_id", tooOld.ID, []string{"1:pending"}},
-		{"the message on a closed issue", "message_deliveries", "message_id", onClosed.ID, []string{"1:pending"}},
-	} {
-		if states := attemptStates(t, database, row.table, row.column, row.id); !slices.Equal(states, row.want) {
-			t.Errorf("%s: attempts = %v, want %v", row.name, states, row.want)
-		}
+	if states := attemptStates(t, database, "message_deliveries", "message_id", stranded.ID); !slices.Equal(states, []string{"1:sent"}) {
+		t.Fatalf("attempts = %v, want attempt 1 alone, sent", states)
 	}
 }
 
 // A person's Retry in the same mode, once the claim on a stranded attempt has lapsed, resumes that
-// attempt under its own number and key - the send the resume loop would have made - so it must
-// carry the urgency the attempt recorded, as the resume loop's does. A Retry that opens an
-// attempt of its own instead - in another mode, or beside a sender still holding the stranded
-// one - is a new send of the person's, which asked for no urgency.
+// attempt under its own number and key - the send the delivery sweep would have made - so it must
+// carry the urgency the attempt recorded, as the sweep's does. A Retry that opens an attempt of
+// its own instead - in another mode, or beside a sender still holding the stranded one - is a new
+// send of the person's, which asked for no urgency.
 func TestARetryCarriesTheUrgencyOfTheAttemptItResumesAndNoneOnANewAttempt(t *testing.T) {
 	listener := startResumeListener(t)
 	handler, database, _ := newTestServer(t, testServerOptions{envoyURL: listener.server.URL})

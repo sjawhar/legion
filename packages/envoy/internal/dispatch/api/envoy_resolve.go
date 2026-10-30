@@ -41,9 +41,10 @@ import (
 //  3. settle - a second short transaction records the outcome and appends the receipt.
 //
 // A sender that never reaches its settle - its process killed, the database refusing the write -
-// leaves the attempt pending under its claim. Whichever process runs the resume loop next sends it
-// once the claim lease (claimLapsed) has passed, under the attempt's own number and idempotency
-// key (delivery_resume.go); only an attempt older than the loop's horizon waits for a Retry.
+// leaves the attempt pending under its claim. Whichever process runs the delivery sweep next
+// sends it once the claim lease (claimLapsed) has passed, under the attempt's own number and
+// idempotency key (delivery_sweep.go); only an attempt past the duplicate window waits for a
+// Retry.
 //
 // Between its first send and its settle a sender may try again (takeoverRetry.retry): a listener
 // being replaced refuses connections, answers 503, or does not hold the session yet for a few
@@ -298,7 +299,7 @@ func (s *server) resolveThroughTakeover(
 //
 // A sender that tries again renews its claim before the try and settles on the claim it renewed
 // last, so a claim never ages toward the claimLapsed lease while its sender is still trying: the
-// resume loop finds nothing to take, and a person's Retry finds the attempt held.
+// delivery sweep finds nothing to take, and a person's Retry finds the attempt held.
 func (r *takeoverRetry) again(ctx context.Context, failure string) bool {
 	if !retryableDeliveryFailure(failure) || time.Since(r.first)+r.backoff > r.window {
 		return false

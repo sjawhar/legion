@@ -9,20 +9,11 @@ body: |-
     - A request's own send no longer stops when its connection is cut (a closed tab, a front-door
       pod roll): a direct message, a comment's mentions, and a Retry finish their send and record
       its outcome after the browser has gone.
-    - A new leased loop, `delivery-resume`, runs every 10 s on every process (one process makes each
-      pass) and sends every message attempt and comment mention attempt left `pending` - by a
-      process killed between its claim and its settle, or a database write that failed - once its
-      claim is a minute old, under that attempt's own number and idempotency key, so a send that
-      had landed reads as a duplicate rather than reaching the session twice. Only attempts created
-      in the last hour are resumed; an older one waits for a person's Retry, as every stranded
-      attempt did before, since an instruction that old sent unasked could act on stale context. The
-      first deploy therefore sends, at its first passes, any attempt stranded in the hour before it.
-      A resumed direct message is more than a minute old, so its session shows it as a card
-      rather than as its user's own turn. Migration `0142` adds `message_deliveries.urgency`, so a
-      resumed direct message keeps the urgency it was sent with, whether the loop or a person's
-      same-mode Retry resumes it (an attempt a Retry opens carries none), and two partial indexes
-      the loop reads pending attempts through. The loop takes one more connection in the lease
-      pool (`store.leasePoolSize`).
+    - Migration `0142` adds `message_deliveries.urgency`, so a message attempt the delivery sweep
+      resumes after its sender stopped keeps the urgency it was sent with, as does a person's
+      same-mode Retry of it (an attempt a Retry opens carries none). A resumed direct message is
+      more than a minute old, so its session shows it as a card rather than as its user's own
+      turn.
     - A send that meets an Envoy listener take-over (the new pod refusing connections, answering
       502, 503 or 504, or not yet holding the session) or a receipt timeout tries again under the
       same attempt and idempotency key, backing off from 250 ms to 2 s, for up to 12 s from its
@@ -42,7 +33,7 @@ body: |-
       take-over out settles with that outcome rather than waiting a second time. Its
       `comment.created` payload carries
       `mentions_decide_routes: true`, and each mention's first attempt keeps that resolution when the
-      resume loop or a person's Retry finishes it after its sender stopped, so a mention that reached
+      delivery sweep or a person's Retry finishes it after its sender stopped, so a mention that reached
       nobody settles `failed` rather than reaching the route holder a second time. A comment's
       mentions are resolved and sent at once, so a comment mentioning several ended sessions answers
       within one 12 s window rather than one per mention.

@@ -1422,8 +1422,8 @@ being 750 ms (`testTakeoverWindow`), so a send that runs the window out does not
 other outcome - a mode the session does not take, a send the listener refused, the listener's own
 answer (`envoy listener answered: …`) - settles at once. Every sender takes this path: a request's
 own send (whose request therefore answers up to 12 s later), a broadcast worker, a Retry and the
-resume loop. A process killed during the wait leaves the attempt pending under the claim it
-renewed last, which the resume loop sends once that claim's lease has passed.
+delivery sweep. A process killed during the wait leaves the attempt pending under the claim it
+renewed last, which the delivery sweep sends once that claim's lease has passed.
 
 A comment decides before it commits which sessions its other routes skip - the issue's route
 when a mention resolved to its session (`suppress_route`), and the outbox's session routes for
@@ -1439,7 +1439,7 @@ their attempts. A mention's window starts at that first resolution and its sende
 after the commit (`deliverResolvedCommentMention` takes the pacing as an argument), so a mention
 whose resolution waited the window out settles with that outcome on its first try. Attempt 1 of a
 mention whose comment records `mentions_decide_routes` keeps that resolution whichever sender
-finishes it - the creating request, the resume loop, or a Retry that takes it after its sender
+finishes it - the creating request, the delivery sweep, or a Retry that takes it after its sender
 died: a pinned session is only rechecked, and a resolve error settles the attempt `failed` with
 that error, never resolved again, so the route holder does not hear the comment from the route and
 again from the mention under a key the listener cannot match. That once-only guarantee is attempt
@@ -1464,23 +1464,18 @@ recorded neither, are resolved again on such a comment too (`deliverResolvedComm
 attempt stranded before anything was resolved has no recipient to keep and is resolved afresh
 under that same number, never reported undeliverable unsent.
 
-**A stranded attempt is sent without anyone pressing Retry.** `api.RunDeliveryResume`
-(`api/delivery_resume.go`, wired in `cmd/dispatch/main.go`) runs every `DeliveryResumeInterval`
-(10 s) on every process, each pass under the `delivery-resume` lease (`duty.Exclusive`), so one
-process makes it. A pass reads, oldest first and with no transaction held, the pending
-`message_deliveries` and `comment_deliveries` rows whose last claim - or, never claimed, whose
-row - is more than a minute old and that were created within the last hour (`strandedAttempt`),
-less those whose claim would be refused for good (a closed issue, a gone document or mention),
-and sends each, four at a time, bound to that attempt: a message's through
-`deliverMessageResuming` with the attempt's number, its `requested_by` (the author when null) and
-its `urgency`, a mention's through `deliverResolvedCommentMention` with the attempt's number,
-which claims that exact attempt when its claim has lapsed and otherwise sends nothing. It never
-opens an attempt, so the key is the one the stopped sender used and a send that had landed reads
-`duplicate`. The hour is the horizon: inside it a resend is provably not a second delivery (the
-72-hour duplicate window), and an attempt older than that means every process was down for an
-hour, and a steer that old sent unasked could act on stale instructions, so it waits for a
-person's Retry. A resumed direct message is more than a minute old, so the session's accept
-answers `ACCEPT_STALE` and shows it as a card rather than as its user's turn.
+**A stranded attempt is sent without anyone pressing Retry.** The delivery sweep
+(`api/delivery_sweep.go`, `resumeOwedDeliveries`), which every pass of the maintenance loop runs
+("The delivery sweep", below), sends each owed attempt bound to its own number: a message's
+through `deliverMessageResuming`, with the `requested_by` the row recorded (the message's author
+when the row has none) and the `urgency` its claim reads off the row
+(`pendingMessageDelivery`), and a mention's through `deliverResolvedCommentMention`, which claims
+that exact attempt when its claim has lapsed and otherwise sends nothing. Neither opens an
+attempt, so the key is the one the stopped sender used and a send that had landed reads
+`duplicate`. The horizon is `DeliveryDuplicateWindow` (72 hours): past it a resend is no longer
+recognised as a repeat, so it waits for a person's Retry. A resumed direct message is more than a
+minute old, so the session's accept answers `ACCEPT_STALE` and shows it as a card rather than as
+its user's turn.
 
 The idempotency key carries no attempt number: it is `<message>:<mode>` and
 `<comment>:<target>:<mode>`, stable across every attempt of that pair. The listener prefixes the
@@ -3109,7 +3104,7 @@ before the pool closes), so a shutdown lets it finish instead of ending it with 
 leaves them owed, for the delivery sweep, or a repeat (below), to resume. Each
 recipient starts with attempt 1, opened pending and unclaimed in the same transaction as its
 message, which a delivery worker then claims and settles, or, when the process stops first, the
-resume loop sends once its row is a minute old (`api/delivery_resume.go`).
+delivery sweep sends once its row is a minute old (`api/delivery_sweep.go`).
 `GET /api/v1/broadcasts` lists the newest sends with recipient and reply counts, and
 `GET /api/v1/broadcasts/{id}` reads every recipient's message, attempts and replies in the
 order the send named them; all three routes are human-only, like the one-session route they are
@@ -3333,7 +3328,7 @@ blind republishing.
   may have delivered the mention; a first attempt stranded `pending` past the minute may have
   landed before its sender stopped; and a process that stopped between a mention's claim and its
   send leaves that attempt `pending`, so once its claim lapses the outbox publishes that session's
-  copy and the resume loop (`delivery_resume.go`) sends the mention again. Either way the outbox
+  copy and the delivery sweep (`delivery_sweep.go`) sends the mention again. Either way the outbox
   also publishes the session's own-topic copy, so the session receives the comment twice, under
   different dedupe keys (the mention's delivery and the outbox's event); a host treats the second
   copy as the same comment (same comment id).

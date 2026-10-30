@@ -1192,19 +1192,18 @@ func lockTables(t *testing.T, database *store.Store, mode string, tables ...stri
 // holds - which is the only way two processes' passes are made to overlap on purpose rather than
 // by luck.
 //
-// Five of the twelve leases are observable inside a window a test can wait out:
+// Five of the eleven leases are observable inside a window a test can wait out:
 // reference-excerpts, block-index, search-term-stats and webhook-redelivery, whose first pass is
 // immediate, and suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in.
-// The other seven are not, and this row says so rather than pretending: document-compaction's
+// The other six are not, and this row says so rather than pretending: document-compaction's
 // interval is 24 h; issue-ask-repair's first leased pass is one IssueAskRepairInterval (10 min) in,
 // the boot's repair taking no lease; architecture-import's and delivery-reconcile's first pass is
 // jittered uniformly over SyncInterval/ReconcileInterval (5 min) and each process draws its own,
 // so whether their passes ever overlap is a coin toss no test should turn into a flake;
-// edit-notices' and delivery-resume's periods are five and ten seconds, so this window holds many
-// of their periods, each served once (docs.TestEditNoticeSweepOfTwoServicesSendsEachNoticeOnce
-// holds what the edit-notices lease is for); and server-processes' prune is one delete on
-// server_processes, the table every process's heartbeat writes every five seconds, so a lock that
-// held the prune would hold the registry itself.
+// edit-notices' period is five seconds, so this window holds many of its periods, each served once
+// (docs.TestEditNoticeSweepOfTwoServicesSendsEachNoticeOnce holds what its lease is for); and
+// server-processes' prune is one delete on server_processes, the table every process's heartbeat
+// writes every five seconds, so a lock that held the prune would hold the registry itself.
 func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	pair := newPair(t)
 	fake := startGitHubFake(t)
@@ -1279,7 +1278,6 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 		{"architecture-import", "its first pass is jittered over SyncInterval (5 min) and each process draws its own"},
 		{"delivery-reconcile", "its first pass is jittered over ReconcileInterval (5 min) and each process draws its own"},
 		{"edit-notices", "its period is 5 s, so the window holds many periods, each served once"},
-		{"delivery-resume", "its period is 10 s, so the window holds many periods, each served once"},
 		{"server-processes", "its pass is one delete on server_processes, which every process's heartbeat writes, so holding it would hold the heartbeats too"},
 	} {
 		if ran := countLease(pair.a, leaseRan, unobserved.lease) + countLease(pair.b, leaseRan, unobserved.lease); ran > 0 {
@@ -1998,12 +1996,10 @@ func startFakeListener(t *testing.T, sessions ...listenerSession) *fakeListener 
 }
 
 // processEnv is what a Dispatch process delivering through this listener is started with: the
-// listener's URL, and the interval its resume loop sends stranded attempts on.
-func (f *fakeListener) processEnv(resumeInterval time.Duration) map[string]string {
-	return map[string]string{
-		"ENVOY_URL":                              f.server.URL,
-		"DISPATCH_TEST_DELIVERY_RESUME_INTERVAL": resumeInterval.String(),
-	}
+// listener's URL. Nothing here shortens the delivery sweep's period: it runs at production's
+// SuggestionSweepInterval (a minute), as every pass of the maintenance loop does.
+func (f *fakeListener) processEnv() map[string]string {
+	return map[string]string{"ENVOY_URL": f.server.URL}
 }
 
 // setSessions replaces the sessions the listener knows: from now on its registry read, its live
@@ -2368,7 +2364,9 @@ func (p *dispatchProcess) kill(t *testing.T) {
 }
 
 // backDatePendingAttempts moves every pending attempt's claim and creation two minutes back, past
-// the one-minute claim lease the resume loop waits out, so a row does not wait a real minute.
+// both ages the delivery sweep judges an attempt owed by (api/delivery_sweep.go,
+// owedMessageAttempt): the one-minute claim lease, and the minute a row must have been open for,
+// so a row does not wait real minutes for its attempts to be owed.
 func backDatePendingAttempts(t *testing.T, database *store.Store) {
 	t.Helper()
 	for _, table := range []string{"message_deliveries", "comment_deliveries"} {
@@ -2382,9 +2380,20 @@ func backDatePendingAttempts(t *testing.T, database *store.Store) {
 	}
 }
 
+// sweepWait is how long a row waits for the surviving process's delivery sweep to send what a
+// killed process left owed. The sweep is a pass of the maintenance loop
+// (api.RunSuggestionOutcomeSweep), which these processes run at production's
+// api.SuggestionSweepInterval (a minute) with no test override: attempts back-dated just after a
+// tick wait that tick out, a minute, and when the killed process had already served that tick's
+// period - one pass per period across the processes, duty.Exclusive - the survivor's next tick
+// serves instead, a second minute. Half a minute on top covers the pass itself: its suggestion
+// and request-key sweeps, and the sends, each bounded by the listener client's five-second
+// window.
+const sweepWait = 150 * time.Second
+
 // A process killed while it delivers leaves its attempts pending: a direct message and a comment
 // mention whose own request was sending them, and a broadcast recipient a background worker was
-// sending. The other process's resume loop sends each one once its claim has lapsed, under the
+// sending. The other process's delivery sweep sends each one once its claim has lapsed, under the
 // attempt and the idempotency key the killed process used, so the session gets each once. The
 // subtest kills the process earlier, after the message is stored and before anything is resolved
 // or claimed: the attempt the storing transaction wrote is what the survivor sends.
@@ -2392,7 +2401,7 @@ func TestADeliveryAKilledProcessLeftPendingIsSentByTheOther(t *testing.T) {
 	t.Run("killed while sending", func(t *testing.T) {
 		listener := startFakeListener(t, resumeSession)
 		sends := listener.hold(listenerSend)
-		pair := startPair(t, listener.processEnv(time.Second))
+		pair := startPair(t, listener.processEnv())
 		project := uniqueProjectKey(t, "RSM")
 		pair.a.createProject(t, project, "Resumed deliveries")
 		issue, _ := pair.a.createIssueIn(t, project, "Mentioned while sending", "spec")
@@ -2412,7 +2421,7 @@ func TestADeliveryAKilledProcessLeftPendingIsSentByTheOther(t *testing.T) {
 		requireAbandoned(t, direct, mention, broadcast)
 		sends.Release()
 		backDatePendingAttempts(t, pair.database)
-		requireDeliveredOnce(t, pair, listener, 30*time.Second,
+		requireDeliveredOnce(t, pair, listener, sweepWait,
 			messageDelivery("the direct message", direct.subject),
 			mentionDelivery("the mention", mention.subject),
 			messageDelivery("the broadcast recipient's message", broadcast.subject),
@@ -2422,7 +2431,7 @@ func TestADeliveryAKilledProcessLeftPendingIsSentByTheOther(t *testing.T) {
 	t.Run("killed before the claim", func(t *testing.T) {
 		listener := startFakeListener(t, resumeSession)
 		lookups := listener.hold(listenerRegistry)
-		pair := startPair(t, listener.processEnv(time.Second))
+		pair := startPair(t, listener.processEnv())
 		pair.a.sendInBackground(http.MethodPost, "/api/v1/agents/"+resumeSession.SessionID+"/messages",
 			`{"body":"Stored, then killed","delivery":"steer"}`)
 		lookup := lookups.next(t, 30*time.Second, "the direct message's registry read")
@@ -2436,7 +2445,7 @@ func TestADeliveryAKilledProcessLeftPendingIsSentByTheOther(t *testing.T) {
 			t.Fatalf("read the stored message: %v", err)
 		}
 		backDatePendingAttempts(t, pair.database)
-		requireDeliveredOnce(t, pair, listener, 30*time.Second,
+		requireDeliveredOnce(t, pair, listener, sweepWait,
 			messageDelivery("the message stored before the kill", messageID+":steer"))
 	})
 }
@@ -2485,11 +2494,11 @@ func cancelOnceHeld(t *testing.T, p *dispatchProcess, listener *fakeListener, pa
 
 // A request cut off after its commit - a closed tab, a front door's pod roll - must not take the
 // send it was making with it: the direct message and the mention each reach their session once
-// and read sent, with no Retry. The resume loop is an hour out, so nothing but the request's own
-// send can deliver them.
+// and read sent, with no Retry. No attempt here is a minute old, and nothing back-dates one, so
+// the delivery sweep owes none of them: only the request's own send can deliver them.
 func TestASendWhoseRequestIsCancelledAfterItsCommitReachesItsRecipient(t *testing.T) {
 	listener := startFakeListener(t, resumeSession)
-	pair := startPair(t, listener.processEnv(time.Hour))
+	pair := startPair(t, listener.processEnv())
 	project := uniqueProjectKey(t, "CNL")
 	pair.a.createProject(t, project, "Cancelled requests")
 	issue, _ := pair.a.createIssueIn(t, project, "Mentioned, then cut off", "spec")
@@ -2588,12 +2597,13 @@ func requireWaitingOutTheTakeOver(t *testing.T, database *store.Store, listener 
 // once it answers: attempt 1 sent, one receipt, one send. A session the listener never knows still
 // reads failed, "no live session", once the take-over window has passed. And a process killed
 // while it waits leaves its attempts pending under the claim it renewed last, which the other
-// process's resume loop sends.
+// process's delivery sweep sends.
 func TestASendDuringAListenerTakeOverReachesItsSession(t *testing.T) {
 	t.Run("sent during the take-over", func(t *testing.T) {
 		listener := startFakeListener(t, resumeSession)
-		// The resume loop is an hour out, so only each request's own sender can deliver.
-		pair := startPair(t, listener.processEnv(time.Hour))
+		// No attempt here is back-dated, so the delivery sweep owes none and only each request's
+		// own sender can deliver.
+		pair := startPair(t, listener.processEnv())
 		project := uniqueProjectKey(t, "TKO")
 		pair.a.createProject(t, project, "Listener take-over")
 		issue, _ := pair.a.createIssueIn(t, project, "Mentioned during a take-over", "spec")
@@ -2616,7 +2626,7 @@ func TestASendDuringAListenerTakeOverReachesItsSession(t *testing.T) {
 
 	t.Run("sent to a session the listener never knows", func(t *testing.T) {
 		listener := startFakeListener(t, resumeSession)
-		pair := startPair(t, listener.processEnv(time.Hour))
+		pair := startPair(t, listener.processEnv())
 		started := time.Now()
 		var message model.Message
 		if err := json.Unmarshal(pair.a.call(t, http.MethodPost, "/api/v1/agents/never-known/messages",
@@ -2642,7 +2652,7 @@ func TestASendDuringAListenerTakeOverReachesItsSession(t *testing.T) {
 
 	t.Run("killed during the wait", func(t *testing.T) {
 		listener := startFakeListener(t, resumeSession)
-		pair := startPair(t, listener.processEnv(time.Second))
+		pair := startPair(t, listener.processEnv())
 		project := uniqueProjectKey(t, "TKK")
 		pair.a.createProject(t, project, "Killed during a take-over")
 		issue, _ := pair.a.createIssueIn(t, project, "Mentioned, then killed", "spec")
@@ -2653,7 +2663,7 @@ func TestASendDuringAListenerTakeOverReachesItsSession(t *testing.T) {
 		pair.a.kill(t)
 		listener.endTakeOver()
 		backDatePendingAttempts(t, pair.database)
-		requireDeliveredOnce(t, pair, listener, 30*time.Second, direct, mention)
+		requireDeliveredOnce(t, pair, listener, sweepWait, direct, mention)
 	})
 }
 
@@ -3225,12 +3235,11 @@ func TestTwoProcessesSyncingOneProjectNeverWriteTheOlderCommit(t *testing.T) {
 // ───── route status from one stored listener answer ────────────────────────
 
 // rosterEnv is what both processes of a route-status row are started with: the fake listener as
-// ENVOY_URL, the resume loop an hour out (no row here sends anything), and a listener answer that
-// serves issue reads for a minute (DISPATCH_TEST_ROUTE_ROSTER_TTL, under the test hooks every
-// process here runs with), so the row reads both processes inside one answer's life however slow
-// the machine, with no timing window.
+// ENVOY_URL, and a listener answer that serves issue reads for a minute
+// (DISPATCH_TEST_ROUTE_ROSTER_TTL, under the test hooks every process here runs with), so the row
+// reads both processes inside one answer's life however slow the machine, with no timing window.
 func rosterEnv(listener *fakeListener) map[string]string {
-	env := listener.processEnv(time.Hour)
+	env := listener.processEnv()
 	env["DISPATCH_TEST_ROUTE_ROSTER_TTL"] = time.Minute.String()
 	return env
 }

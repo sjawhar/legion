@@ -455,7 +455,7 @@ func (s *server) writeBroadcast(
 		// The recipient's first delivery attempt is opened here, unclaimed, rather than by the
 		// worker that will send it. A recipient then always has an attempt to show - "Sending"
 		// while a worker holds it, and, if the process dies before the send, a lapsed pending
-		// row the resume loop (delivery_resume.go) and the ordinary same-mode retry both resume
+		// row the delivery sweep (delivery_sweep.go) and the ordinary same-mode retry both resume
 		// under its own idempotency key. Opening it later left a stranded recipient with no
 		// attempt at all, which only a delivery in a DIFFERENT mode could move, and that is a
 		// genuine second frame where the first landed. claimed_at stays null, so
@@ -486,9 +486,9 @@ func (s *server) writeBroadcast(
 // refused settles that recipient's attempt as failed, a recipient whose attempt was taken over
 // from the agent card is skipped, and a delivery this cannot record at all - a shutdown, a killed
 // process, a database that refuses the write - leaves the attempt pending and unclaimed, which
-// the broadcast view shows as sending and which the delivery sweep (resumeOwedDeliveries), the
-// resume loop (delivery_resume.go), or a repeat under the send's key
-// (sendOwedBroadcastRecipients), resumes once the claim lease has passed.
+// the broadcast view shows as sending and which the delivery sweep (delivery_sweep.go,
+// resumeOwedDeliveries), or a repeat under the send's key (sendOwedBroadcastRecipients), resumes
+// once the claim lease has passed.
 func (s *server) deliverBroadcast(ctx context.Context, sends []broadcastSend, delivery string, actor model.Actor) {
 	workers := min(broadcastDeliveryWorkers, len(sends))
 	pending := make(chan broadcastSend)

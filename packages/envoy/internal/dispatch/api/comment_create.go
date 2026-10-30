@@ -357,8 +357,8 @@ type commentWrite struct {
 // commit would reach a session those routes reach too: the session would hear the comment twice.
 // So the comment.created event records that its routes were decided on these resolutions
 // (mentions_decide_routes), and each mention's attempt 1 keeps its resolution for whichever sender
-// finishes it, the resume loop and a Retry included (deliverResolvedCommentMention). A comment with
-// no such route commits at once, and its mentions' senders wait out the take-over under the
+// finishes it, the delivery sweep and a Retry included (deliverResolvedCommentMention). A comment
+// with no such route commits at once, and its mentions' senders wait out the take-over under the
 // attempts the commit made durable, resolving the mention again. Every lookup runs at once, so a
 // comment waits about one take-over window however many mentions it carries
 // (validateCommentMentions allows ten).
@@ -837,7 +837,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	// Each mention's send outlives the request's connection, keeping its values and dropping its
 	// cancellation, as createStoredMessage's does: attempt 1 is committed above, and a client that
 	// gives up on the comment, or retries it under its key, must not leave that attempt pending
-	// for a minute's lease and the resume loop. A keyed request's handler runs detached already
+	// for a minute's lease and the delivery sweep. A keyed request's handler runs detached already
 	// (keyedWrites); an unkeyed one's mentions are detached here, and http.Server.Shutdown waits
 	// for the handler.
 	//
@@ -851,7 +851,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	// (store.WithTransactionTracking), so senders sharing the request's would trip it whenever two
 	// of them were inside a claim or settle transaction at once, and race on its flag. The marks are
 	// taken before any sender starts, so a refusal leaves nothing in flight; the committed attempts
-	// stay pending for the resume loop.
+	// stay pending for the delivery sweep.
 	sendCtx := context.WithoutCancel(r.Context())
 	senders := make([]context.Context, len(resolvedMentions))
 	for index := range senders {
