@@ -24,9 +24,15 @@ body: |-
     card while its first attempt is still waiting on a lane opens an attempt of its own, and the
     recipient is handed one copy: the Retry that is delivered takes the mention over, and the
     attempt it overtook is settled `failed`, "not sent: a later attempt of this mention superseded
-    it", by whichever of the two comes second; a Retry that fails delivers nothing, so the attempt
-    it overtook stands, and the lane sends it when it reaches it, or the delivery sweep does once
-    that lane's claim has lapsed. The comment's own event is
+    it", by whichever of the two comes second, or by the delivery sweep when neither did; a Retry
+    recorded `failed` may still have reached the session - a receipt timeout says so itself - so
+    the attempt it overtook stands, and the lane sends it when it reaches it, or the delivery
+    sweep does once that lane's claim has lapsed. Every send of one mention now goes under one
+    idempotency key, `<comment>:<target>`, where it was `<comment>:<target>:<mode>`: whichever
+    copy reaches the session second repeats the key of the one that landed, and its host drops it,
+    so that resend cannot deliver the comment twice. The same key is why a Retry in ANY mode of a
+    mention whose earlier attempt reached the session is recorded `duplicate` and delivers
+    nothing, where a mode change used to be a second delivery. The comment's own event is
     never published again, so a route, claimant or follower that changed since gets nothing of it.
     A client that read a mention's delivery state from the create response reads it from the
     comment, or from its `comment.delivery` event, afterwards.

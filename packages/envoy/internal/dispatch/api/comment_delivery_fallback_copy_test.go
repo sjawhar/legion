@@ -445,12 +445,22 @@ type queuedMention struct {
 // outbox decides, and with no route the mention's own send is the only thing that can hand s1
 // the comment. The sender holds the queued attempt's claim throughout, writing it again every
 // mentionClaimRefresh: it is the live claim the outbox bounds its wait by however long the lane
-// is held.
+// is held. The listener client's send window is long enough that no send of this lane's misses
+// it; a test whose send must miss it names a shorter one (aMentionQueuedWithinASendWindow).
 func aMentionQueuedBehindAStalledSend(t *testing.T, route string) queuedMention {
+	t.Helper()
+	return aMentionQueuedWithinASendWindow(t, route, 30*time.Second)
+}
+
+// aMentionQueuedWithinASendWindow is aMentionQueuedBehindAStalledSend with the window the
+// listener client gives a send named: past it a send is a receipt timeout, whose attempt is
+// failed while its frame may well have landed. A caller that names a short one releases the
+// stalled send well inside it, so the lane is held by the test rather than by that window.
+func aMentionQueuedWithinASendWindow(t *testing.T, route string, window time.Duration) queuedMention {
 	t.Helper()
 	listener, state := newMentionListener(t)
 	handler, database, deps, served := newRegisteredTestServer(t, testServerOptions{
-		envoyURL: listener.URL, envoyTimeout: 30 * time.Second,
+		envoyURL: listener.URL, envoyTimeout: window,
 	})
 	issue := createInteractionIssue(t, handler, "TEST", "A lane held past a lease", "before")
 	if route != "" {
@@ -555,8 +565,9 @@ func TestAMentionQueuedPastALeasePublishesItsCopyWhenTheSendFails(t *testing.T) 
 // event is not held with the attempt it overtook. Once the overtaken attempt is past a claim
 // lease the outbox counts it resumed whoever holds it (model.MentionResumedSQL), so it publishes
 // the comment to every other destination at once and keeps s1's copy as a fallback row, which
-// waits while that attempt is pending. A Retry that failed delivered nothing, so the attempt it
-// overtook stands (model.MentionAttemptStandsSQL) and the lane sends it when it reaches it;
+// waits while that attempt is pending. A Retry recorded failed may have delivered nothing, and
+// may have landed, so the attempt it overtook stands (model.MentionAttemptStandsSQL) and the
+// lane sends it when it reaches it, under the mention's one key;
 // here s1's host refuses that send too, so the pass publishes the copy and s1 hears the comment
 // exactly once, from the outbox.
 func TestARetryThatFailsDoesNotHoldTheCommentOfTheAttemptItOvertook(t *testing.T) {

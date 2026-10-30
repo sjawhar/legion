@@ -61,17 +61,18 @@ type mentionDeliveries struct {
 	// model.CommentMentionIdempotencyKey), which the session's copy carries (attempt.sessionCopy,
 	// publishFallbackCopies). A send that landed before its attempt failed - a receipt timeout, or
 	// a send handed the listener before a kill whose resend then failed - has already given the
-	// host that key, so the host drops the copy; a session no mention reached shows it. A session
-	// whose failed attempts span several targets keys by the lowest target, and a target with
-	// several failed attempts by the latest one's mode. One key is enough: each target is a send
-	// of its own, so a comment naming one session under two targets gives it one copy per target
-	// that lands, and a copy shown beside another target's landed mention leaves the session no
-	// more copies than had every one of its mentions landed.
+	// host that key, so the host drops the copy; a session no mention reached shows it. Every
+	// attempt of one mention sends under that one key whatever its mode, so which of a target's
+	// failed attempts is the latest does not change it. A session whose failed attempts span
+	// several targets keys by the lowest target. One key is enough: each target is a send of its
+	// own, so a comment naming one session under two targets gives it one copy per target that
+	// lands, and a copy shown beside another target's landed mention leaves the session no more
+	// copies than had every one of its mentions landed.
 	fallbackKeys map[string]string
 	// targetFallbackKeys is keyed like targets, and holds for each target with a failed or
-	// abandoned attempt that names a session the dedupe key of that target's latest such attempt
-	// (of the lowest session, should its attempts name several), which a fallback copy keyed by
-	// that target carries (publishFallbackCopies).
+	// abandoned attempt that names a session the dedupe key of that target's mention (of the
+	// lowest session, should its attempts name several), which a fallback copy keyed by that
+	// target carries (publishFallbackCopies).
 	targetFallbackKeys map[string]string
 	// held holds each destination of the comment a fallback row owns (comment_fallback_copies):
 	// the fallback pass publishes or settles it, and the event's own publish skips it
@@ -333,8 +334,10 @@ func payloadMentionedSessions(payload any) map[string]struct{} {
 // mentionDeliveryQuery groups a comment's mention attempts by the session each counts under
 // (model.MentionSessionSQL) and by its target, and reports of each group whether an attempt was
 // sent, is past the lease a send is waited out for (model.MentionResumedSQL), is live
-// (model.MentionLiveSQL), and is abandoned (model.MentionAbandonedSQL), and the mode of its
-// latest attempt that failed or is abandoned, null when none did (mentionDeliveries.fallbackKeys).
+// (model.MentionLiveSQL), is abandoned (model.MentionAbandonedSQL), and whether any attempt of it
+// failed or is abandoned (mentionDeliveries.fallbackKeys). What mode those attempts went in does
+// not matter: every attempt of one mention sends under one key
+// (model.CommentMentionIdempotencyKey).
 var mentionDeliveryQuery = `
 	select ` + model.MentionSessionSQL + `,
 	       target,
@@ -342,8 +345,7 @@ var mentionDeliveryQuery = `
 	       bool_or(state = 'pending' and ` + model.MentionResumedSQL("comment_deliveries") + `),
 	       bool_or(state = 'pending' and ` + model.MentionLiveSQL("comment_deliveries") + `),
 	       bool_or(state = 'pending' and ` + model.MentionAbandonedSQL("comment_deliveries") + `),
-	       (array_agg(delivery order by attempt desc)
-	           filter (where state = 'failed' or (state = 'pending' and ` + model.MentionAbandonedSQL("comment_deliveries") + `)))[1]
+	       bool_or(state = 'failed' or (state = 'pending' and ` + model.MentionAbandonedSQL("comment_deliveries") + `))
 	from comment_deliveries
 	where comment_id = $1
 	group by 1, 2
@@ -388,17 +390,17 @@ func readMentionDeliveries(ctx context.Context, deps Deps, event model.Event, co
 	}
 	fallbackTargets, fallbackSessions := map[string]string{}, map[string]string{}
 	for rows.Next() {
-		var sessionID, failedDelivery *string
+		var sessionID *string
 		var target string
-		var sent, resending, sending, abandoned bool
-		if err := rows.Scan(&sessionID, &target, &sent, &resending, &sending, &abandoned, &failedDelivery); err != nil {
+		var sent, resending, sending, abandoned, failedSend bool
+		if err := rows.Scan(&sessionID, &target, &sent, &resending, &sending, &abandoned, &failedSend); err != nil {
 			return failed(err)
 		}
 		state := mentionStateOf(sent, resending, sending, abandoned)
 		if sessionID != nil {
 			result.sessions.record(*sessionID, state)
-			if failedDelivery != nil {
-				key := contracts.AgentSendDedupeKey(*sessionID, model.CommentMentionIdempotencyKey(commentID, target, *failedDelivery))
+			if failedSend {
+				key := contracts.AgentSendDedupeKey(*sessionID, model.CommentMentionIdempotencyKey(commentID, target))
 				if chosen, ok := fallbackTargets[*sessionID]; !ok || target < chosen {
 					fallbackTargets[*sessionID] = target
 					result.fallbackKeys[*sessionID] = key

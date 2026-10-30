@@ -91,8 +91,8 @@ type sweepRoute struct {
 	// broadcast and a comment's mentions, which the mention sender delivers after the response.
 	// Every other route answers once its own attempt has settled.
 	atCommit bool
-	// comment says the attempt is a comment mention's, keyed <comment id>:<target>:<mode>; any
-	// other is a message's, keyed <message id>:<mode>.
+	// comment says the attempt is a comment mention's, keyed <comment id>:<target>; any other is
+	// a message's, keyed <message id>:<mode>.
 	comment bool
 }
 
@@ -578,7 +578,7 @@ func TestTheDeliverySweepSettlesWhatItCannotSend(t *testing.T) {
 			len(closedMessages), len(closedKeyed), len(closedMentions)+1, unsendable)
 	}
 
-	mentionKey := sendableMention + ":session:s1:steer"
+	mentionKey := sendableMention + ":session:s1"
 	want := []string{mentionKey, mentionKey, sendableKeyed + ":steer", sendableMessage + ":steer"}
 	slices.Sort(want)
 	settled := func() map[string]int {
@@ -672,12 +672,17 @@ func TestTheDeliverySweepSendsTheAttemptItFoundOwed(t *testing.T) {
 			insert into comment_deliveries (comment_id, target, attempt, delivery, session_id, state, claimed_at, created_at)
 			values ($1, 'session:s1', 2, 'btw', 's1', 'pending', now() - interval '5 minutes', now() - interval '5 minutes')
 		`, comment)
-		before := len(keysOf(sends))
+		before := keysOf(sends)
 		if err := served.resumeOwedDeliveries(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		if keys := keysOf(sends); len(keys) != before+1 || !slices.Contains(keys, comment+":session:s1:btw") {
-			t.Fatalf("the sweep sent %v after the comment's own send, want the retry's attempt alone, in btw", keys)
+		// Every attempt of one mention sends under its one key, whatever its mode, so which
+		// attempt the sweep sent shows in the rows below - attempt 2 sent, attempt 1 superseded
+		// by it - rather than in the key.
+		want := slices.Concat(before, []string{comment + ":session:s1"})
+		slices.Sort(want)
+		if keys := keysOf(sends); !equalStrings(keys, want) {
+			t.Fatalf("the sweep sent %v after the comment's own send, want %v: the retry's attempt alone", keys, want)
 		}
 		if states := rig.count(`
 			select count(*) from comment_deliveries

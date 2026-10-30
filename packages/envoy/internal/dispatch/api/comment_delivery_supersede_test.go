@@ -17,9 +17,11 @@ import (
 // comment (model.MentionAttemptStandsSQL). These are the paths that rule decides, each on an
 // issue with no route, where the mention's own send is the only thing that can hand the session
 // the comment: a Retry that fails, one that is sent, one still in flight when the lane reaches
-// the attempt it overtook (both outcomes), a keyed repeat's queued send, and the delivery
-// sweep's. Every one of them must leave the session exactly one copy
-// (copiesOfTheComment): never none, and never two.
+// the attempt it overtook (both outcomes), one in another mode whose frame landed but whose
+// receipt timed out, a keyed repeat's queued send, and the delivery sweep's, which sends an
+// attempt that stands and settles one a later attempt has delivered the comment in the place of.
+// Every one of them must leave the session exactly one copy (copiesOfTheComment): never none,
+// and never two.
 
 // bothMentionAttemptsSettled reports whether the comment's mention has two attempts and neither
 // is pending.
@@ -376,5 +378,131 @@ func TestTheSweepSendsTheAttemptAFailedRetryOvertookOnceItsClaimLapses(t *testin
 	}
 	if copies := copiesOfTheComment(t, lane.database, published, lane.queued, "s1"); copies != 1 {
 		t.Fatalf("s1 was handed %d copies of the comment, want the sweep's send alone", copies)
+	}
+}
+
+// framesOfTheQueuedComment is what the listener took of the comment queued behind the stalled
+// send: how many sends of it reached s1, the distinct idempotency keys those sends went under,
+// and how many of them s1 was actually handed - a send answered as a repeat of a key the
+// recipient's host already holds hands it nothing (dropRepeats).
+func framesOfTheQueuedComment(listener *mentionListener) (sends int, keys []string, handedOver int) {
+	for _, send := range listener.sent() {
+		if !send.is("s1", "second") {
+			continue
+		}
+		sends++
+		if !slices.Contains(keys, send.key) {
+			keys = append(keys, send.key)
+		}
+		if !send.duplicate {
+			handedOver++
+		}
+	}
+	return sends, keys, handedOver
+}
+
+// Round 8 of the review, the reviewer's reproduction. A Retry in ANOTHER mode whose frame reached
+// s1 but whose receipt missed the send window settles failed, saying the message may already have
+// been delivered. The attempt it overtook therefore stands (model.MentionAttemptStandsSQL) and is
+// sent after it, in its own pinned mode - and that is only safe because every attempt of one
+// mention goes under the mention's one idempotency key
+// (model.CommentMentionIdempotencyKey), whatever its mode: s1's host recognises the second frame
+// as the repeat it is and hands s1 nothing. With the mode in the key the two frames went under
+// different keys and s1 was handed the comment twice.
+func TestARetryInAnotherModeThatTimedOutLeavesTheRecipientOneCopy(t *testing.T) {
+	const sendWindow = 2 * time.Second
+	lane := aMentionQueuedWithinASendWindow(t, "", sendWindow)
+	lane.listener.dropRepeats()
+	// The Retry's frame reaches s1 and its answer is held past the send window.
+	landed, answerRetry := lane.listener.holdAnswer("s1")
+	t.Cleanup(answerRetry)
+	answered := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		answered <- dispatchRequest(t, lane.handler, http.MethodPost,
+			"/api/v1/comments/"+lane.queued+"/deliveries", map[string]any{"delivery": "btw"}, "alice")
+	}()
+	<-landed
+
+	// The lane reaches the attempt that Retry overtook while it is still in flight, so it stands
+	// down and leaves it pending and unclaimed.
+	lane.release()
+	awaitUnclaimedPendingAttempt(t, lane.database, lane.queued, "session:s1")
+	retried := decodeBody[commentDeliveryRead](t, <-answered)
+	if retried.Attempt != 2 || retried.Delivery != "btw" || retried.State != "failed" ||
+		deref(retried.Error) != receiptTimeoutText {
+		t.Fatalf("the Retry = %#v, want its own attempt 2 in btw, failed with the receipt timeout %q",
+			retried, receiptTimeoutText)
+	}
+	answerRetry()
+
+	// Nothing else can send that attempt now: its lane is gone and the Retry failed, so the
+	// delivery sweep owes it.
+	ageAttempts(t, lane.database, lane.queued)
+	if err := lane.served.resumeOwedDeliveries(context.Background()); err != nil {
+		t.Fatalf("resume the owed deliveries: %v", err)
+	}
+	settled := waitForCommentDeliveries(t, lane.database, lane.queued, "both attempts settled", bothMentionAttemptsSettled)
+	if settled[0].State != "sent" || settled[0].Delivery != "steer" || !settled[0].Duplicate {
+		t.Fatalf("the attempt the Retry overtook = %#v, want the sweep to have sent it in its own mode "+
+			"and s1's host to have dropped it as the repeat it is", settled[0])
+	}
+	sends, keys, handedOver := framesOfTheQueuedComment(lane.listener)
+	wantKey := model.CommentMentionIdempotencyKey(lane.queued, "session:s1")
+	if sends != 2 || !slices.Equal(keys, []string{wantKey}) {
+		t.Fatalf("the listener took %d sends of the queued comment under keys %v, want the Retry's and "+
+			"the sweep's, both under the mention's key %q", sends, keys, wantKey)
+	}
+	if handedOver != 1 {
+		t.Fatalf("s1 was handed %d frames of the queued comment, want the Retry's alone: the second "+
+			"frame repeats its key and is dropped", handedOver)
+	}
+}
+
+// Thread 2 of round 8. A lane that stood down leaves its attempt pending and claim-free, and
+// nothing binds to it again: the sweep sends only the attempts that stand, and a keyed repeat
+// requeues only a mention with a single attempt. So when the Retry that overtook it becomes sent
+// without its own sender settling anything - here s1 answers the frame whose send had already
+// failed, and the reply turns that attempt sent (replyComment) - no supersede runs at all and the
+// attempt would stay pending for good. The delivery sweep settles it superseded instead, as it
+// settles the owed attempts nothing can send.
+func TestTheSweepSettlesAnOvertakenAttemptNoSenderSettled(t *testing.T) {
+	lane, releaseRetry, answered := aRetryStillInFlightWhenTheLaneArrives(t)
+	lane.listener.refuseSends("s1")
+	releaseRetry()
+	if retried := decodeBody[commentDeliveryRead](t, <-answered); retried.Attempt != 2 || retried.State != "failed" {
+		t.Fatalf("the Retry = %#v, want its own attempt 2, failed: s1's host refused its send", retried)
+	}
+	lane.listener.allowSends("s1")
+	// s1 answers the frame all the same, which records the reply on attempt 2 and turns it sent.
+	reply := bearerRequest(t, lane.handler, http.MethodPost, "/api/v1/comments/"+lane.queued+"/reply", map[string]any{
+		"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 2,
+		"target": "session:s1", "body": "Answered after its send was recorded failed.",
+	})
+	if reply.Code != http.StatusCreated {
+		t.Fatalf("s1's reply to the Retry: status=%d body=%s", reply.Code, reply.Body.String())
+	}
+	answeredAttempts := waitForCommentDeliveries(t, lane.database, lane.queued, "the Retry's attempt sent",
+		func(attempts []model.CommentDelivery) bool {
+			return len(attempts) == 2 && attempts[1].State == "sent"
+		})
+	if answeredAttempts[0].State != "pending" {
+		t.Fatalf("the attempt the lane stood down from = %#v, want it still pending: the reply settled "+
+			"the Retry's attempt without superseding anything", answeredAttempts[0])
+	}
+
+	if err := lane.served.resumeOwedDeliveries(context.Background()); err != nil {
+		t.Fatalf("resume the owed deliveries: %v", err)
+	}
+	settled := waitForCommentDeliveries(t, lane.database, lane.queued, "both attempts settled", bothMentionAttemptsSettled)
+	if settled[0].State != "failed" || settled[0].Error == nil || *settled[0].Error != mentionSupersededError {
+		t.Fatalf("the attempt the lane stood down from = %#v, want the sweep to have settled it "+
+			"superseded: the attempt that overtook it delivered the comment", settled[0])
+	}
+	if !unclaimedSettled(t, lane.database, lane.queued, "session:s1", 1) {
+		t.Fatal("the attempt the sweep superseded kept a claim")
+	}
+	if sends := sendsOfTheQueuedComment(lane.listener); sends != 1 {
+		t.Fatalf("the listener took %d sends of the queued comment, want the Retry's alone: a superseded "+
+			"attempt is settled, never sent", sends)
 	}
 }

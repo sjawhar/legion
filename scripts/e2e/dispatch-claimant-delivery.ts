@@ -254,7 +254,7 @@ async function personMentions(
   const sends = (await (await fetch(new URL("/__fixture/sends", envoyUrl))).json()) as {
     idempotency_key: string;
   }[];
-  // A mention's send is keyed `<comment id>:<target>:<mode>`.
+  // A mention's send is keyed `<comment id>:<target>`, whatever mode the attempt went in.
   const taken = sends.filter((send) => send.idempotency_key.startsWith(`${commentId}:`)).length;
   note(
     `the person commented ${commentId} on ${key} mentioning session:${session}; comment.created mentions ${resolved.join(" ") || "(none)"}; the fake listener took ${taken} send(s) for it`

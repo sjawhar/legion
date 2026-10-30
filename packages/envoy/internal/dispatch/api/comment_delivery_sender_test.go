@@ -19,8 +19,9 @@ import (
 )
 
 // senderTestSessions are the live sessions the mention sender's stand-in listener knows, each
-// able to receive a steer.
-const senderTestSessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]},` +
+// able to receive a steer, and s1 a BTW too, so a Retry of its mention in another mode resolves
+// (TestARetryInAnotherModeThatTimedOutLeavesTheRecipientOneCopy).
+const senderTestSessions = `[{"session_id":"s1","title":"planner","capabilities":["steer","btw"]},` +
 	`{"session_id":"s2","title":"reviewer","capabilities":["steer"]},` +
 	`{"session_id":"s3","title":"tester","capabilities":["steer"]}]`
 
@@ -38,8 +39,16 @@ type mentionListener struct {
 	refused map[string]struct{}
 	// stalls holds the next send to a session before the listener records it at all, so a send
 	// the test has not released has not reached the recipient yet.
-	stalls  map[string]*mentionStall
-	arrived chan string
+	stalls map[string]*mentionStall
+	// answers holds the ANSWER to the next send to a session, which the listener records first:
+	// that send reached the recipient and only its receipt is outstanding (holdAnswer).
+	answers map[string]*mentionStall
+	// dedupe makes the listener answer duplicate for a send repeating the key of one it already
+	// took for that session, as the stream does inside contracts.DeliveryDuplicateWindow
+	// (dropRepeats); delivered holds the keys it has taken.
+	dedupe    bool
+	delivered map[string]struct{}
+	arrived   chan string
 }
 
 // mentionStall is one held-back send: reached is closed when that send arrives at the listener,
@@ -49,16 +58,28 @@ type mentionStall struct {
 	release chan struct{}
 }
 
+// mentionListenerSend is one send the listener took: the session it was for, its body, the
+// idempotency key it went under, and whether the listener answered it as a repeat of a key it
+// already held for that session, which means the recipient was not handed it again (dropRepeats).
 type mentionListenerSend struct {
-	session, body string
+	session, body, key string
+	duplicate          bool
+}
+
+// is reports whether the send carried body to session.
+func (s mentionListenerSend) is(session, body string) bool {
+	return s.session == session && s.body == body
 }
 
 func newMentionListener(t *testing.T) (*httptest.Server, *mentionListener) {
 	t.Helper()
 	state := &mentionListener{
 		held: map[string]chan struct{}{}, heldLookups: map[string]chan struct{}{},
-		refused: map[string]struct{}{},
-		stalls:  map[string]*mentionStall{}, arrived: make(chan string, 64),
+		refused:   map[string]struct{}{},
+		stalls:    map[string]*mentionStall{},
+		answers:   map[string]*mentionStall{},
+		delivered: map[string]struct{}{},
+		arrived:   make(chan string, 64),
 	}
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
@@ -82,8 +103,9 @@ func newMentionListener(t *testing.T) (*httptest.Server, *mentionListener) {
 			_, _ = w.Write([]byte(senderTestSessions))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			var request struct {
-				TargetSession string `json:"target_session"`
-				Message       string `json:"message"`
+				TargetSession  string `json:"target_session"`
+				Message        string `json:"message"`
+				IdempotencyKey string `json:"idempotency_key"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 				t.Errorf("decode mention send: %v", err)
@@ -101,11 +123,31 @@ func newMentionListener(t *testing.T) (*httptest.Server, *mentionListener) {
 				}
 			}
 			state.mu.Lock()
-			state.sends = append(state.sends, mentionListenerSend{request.TargetSession, request.Message})
-			gate := state.held[request.TargetSession]
 			_, refused := state.refused[request.TargetSession]
+			// A refused send is handed to nobody, so it leaves the recipient's host no key.
+			repeat := false
+			if state.dedupe && !refused {
+				frame := request.TargetSession + " " + request.IdempotencyKey
+				_, repeat = state.delivered[frame]
+				state.delivered[frame] = struct{}{}
+			}
+			state.sends = append(state.sends, mentionListenerSend{
+				session: request.TargetSession, body: request.Message,
+				key: request.IdempotencyKey, duplicate: repeat,
+			})
+			gate := state.held[request.TargetSession]
+			answer := state.answers[request.TargetSession]
+			delete(state.answers, request.TargetSession)
 			state.mu.Unlock()
 			state.arrived <- request.TargetSession
+			if answer != nil {
+				close(answer.reached)
+				select {
+				case <-answer.release:
+				case <-r.Context().Done():
+					return
+				}
+			}
 			if gate != nil {
 				select {
 				case <-gate:
@@ -115,6 +157,11 @@ func newMentionListener(t *testing.T) (*httptest.Server, *mentionListener) {
 			}
 			if refused {
 				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			if repeat {
+				_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"` +
+					request.TargetSession + `","duplicate":true}`))
 				return
 			}
 			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"` + request.TargetSession + `"}`))
@@ -136,6 +183,28 @@ func (l *mentionListener) hold(sessions ...string) func() {
 	}
 	l.mu.Unlock()
 	return sync.OnceFunc(func() { close(gate) })
+}
+
+// holdAnswer holds the ANSWER to the next send to session: the listener records that send, so the
+// frame reached the recipient, and only its receipt waits. landed is closed when it is recorded;
+// release lets the listener answer it, and may be called more than once. Every other send is
+// answered as usual, so a lane behind it is not held with it.
+func (l *mentionListener) holdAnswer(session string) (landed <-chan struct{}, release func()) {
+	answer := &mentionStall{reached: make(chan struct{}), release: make(chan struct{})}
+	l.mu.Lock()
+	l.answers[session] = answer
+	l.mu.Unlock()
+	return answer.reached, sync.OnceFunc(func() { close(answer.release) })
+}
+
+// dropRepeats makes the listener answer duplicate for a send that repeats the key of one it has
+// already taken for that session, as the stream and the hosts do inside
+// contracts.DeliveryDuplicateWindow: that frame is not handed to the recipient a second time, and
+// the attempt behind it records a duplicate.
+func (l *mentionListener) dropRepeats() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.dedupe = true
 }
 
 // refuseSends makes every send to session from now on answer 503, so the attempt behind it fails
@@ -315,8 +384,8 @@ func TestMentionSendsReachOneRecipientInTheOrderItsCommentsWereAccepted(t *testi
 	release()
 	settledCommentDeliveries(t, database, first.ID)
 	settledCommentDeliveries(t, database, second.ID)
-	if sent := state.sent(); len(sent) != 2 || sent[0] != (mentionListenerSend{"s1", "first"}) ||
-		sent[1] != (mentionListenerSend{"s1", "second"}) {
+	if sent := state.sent(); len(sent) != 2 || !sent[0].is("s1", "first") ||
+		!sent[1].is("s1", "second") {
 		t.Fatalf("sends = %#v, want first then second, both to s1", sent)
 	}
 }
@@ -737,7 +806,7 @@ func TestARollingUpdatesSuccessorSendsTheMentionTheOldProcessAcceptedWhileDraini
 	if settled[0].SessionID == nil || *settled[0].SessionID != "s1" {
 		t.Fatalf("the successor's send = %#v, want it sent to s1", settled)
 	}
-	if sent := state.sent(); len(sent) != 1 || sent[0] != (mentionListenerSend{"s1", "Accepted during the HTTP drain."}) {
+	if sent := state.sent(); len(sent) != 1 || !sent[0].is("s1", "Accepted during the HTTP drain.") {
 		t.Fatalf("sends = %#v, want the drained comment's one send to s1", sent)
 	}
 }
@@ -964,8 +1033,8 @@ func TestAHeldLaneKeepsItsQueuedCommentsInOrderThroughASweep(t *testing.T) {
 			t.Fatalf("comment %s attempts = %#v, want it sent", comment, settled)
 		}
 	}
-	if sent := state.sent(); len(sent) != 3 || sent[0] != (mentionListenerSend{"s1", "first"}) ||
-		sent[1] != (mentionListenerSend{"s1", "second"}) || sent[2] != (mentionListenerSend{"s1", "third"}) {
+	if sent := state.sent(); len(sent) != 3 || !sent[0].is("s1", "first") ||
+		!sent[1].is("s1", "second") || !sent[2].is("s1", "third") {
 		t.Fatalf("sends = %#v, want each comment sent to s1 once, in the order they were accepted", sent)
 	}
 }

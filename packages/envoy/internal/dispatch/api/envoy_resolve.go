@@ -139,12 +139,15 @@ func deliveryErrorText(err error) string {
 // A claim transaction takes a pending attempt only while no sender holds it
 // (model.DeliveryClaimFreeSQL, selected beside the row it locks): nobody claimed it, or whoever
 // did never came back within model.DeliveryClaimLapse. A retry beside a live claim takes an
-// attempt of its own rather than two senders driving one. What a retry beside a lapsed claim does
-// depends on its mode. In the attempt's own mode it resumes that attempt under its original
-// number, and so its original idempotency key, whose repeat of a send that did land is recognised
-// and dropped (DELIVERY_DUPLICATE_WINDOW_MS in packages/contracts). In a different mode it may
-// not: that key is mode-scoped, so riding the same row would publish a second frame under one
-// attempt number. It settles the stranded attempt instead and opens an attempt of its own.
+// attempt of its own rather than two senders driving one. A retry beside a lapsed claim resumes
+// that attempt under its original number, and so its original idempotency key, whose repeat of a
+// send that did land is recognised and dropped (DELIVERY_DUPLICATE_WINDOW_MS in
+// packages/contracts), and in the mode that attempt's row pinned rather than the one asked for.
+// For a comment mention that is the whole of it: its key names the mention and not the mode
+// (model.CommentMentionIdempotencyKey), so a resumed attempt's frame goes under the key its
+// earlier frame went under whichever mode either was sent in (claimCommentDeliveryAttempt). A
+// targeted message's key is mode-scoped, so a retry there in another mode may not ride that row
+// at all: it settles the stranded attempt and opens an attempt of its own (deliverMessageResuming).
 type attemptClaim struct {
 	attempt   int
 	claimedAt time.Time

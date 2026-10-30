@@ -239,17 +239,22 @@ func openCommentDeliveryAttempt(
 //
 // A later attempt of the same mention - a Retry from the card opened while this one waited on its
 // lane (createCommentDelivery) - decides the bound attempt only once it is delivered: a Retry
-// that failed delivered nothing, so the bound attempt stands (model.MentionAttemptStandsSQL) and
-// this call sends it, under its own number and idempotency key. One that was sent handed the
-// recipient the comment (model.MentionAttemptDeliveredLaterSQL), so this call reports the bound
-// attempt superseded and its caller settles it failed (supersedeCommentDelivery), leaving the
-// recipient one copy. While that later attempt is still pending neither holds, so this call
-// stands down: it sends nothing, gives its claim back and leaves the attempt pending, for the
-// delivery sweep to send once the later attempt failed (model.OwedMentionAttemptSQL) or for that
-// attempt's own sender to supersede once it is sent (supersedeOvertakenAttempts). That is the one
-// shape in which neither sending nor superseding is safe: a send would be a second copy in
-// another mode should the later attempt land, and a supersede would lose the comment should it
-// fail.
+// recorded failed is an outcome unknown, since a receipt timeout and a reply callback's error
+// both leave an attempt failed whose frame the session may hold, so the bound attempt stands
+// (model.MentionAttemptStandsSQL) and this call sends it, under its own number and the mention's
+// one idempotency key (model.CommentMentionIdempotencyKey) - the key that Retry's own send went
+// under, so a Retry that did land leaves this send a repeat the recipient's host drops. One that
+// was sent handed the recipient the comment (model.MentionAttemptDeliveredLaterSQL), so this call
+// reports the bound attempt superseded and its caller settles it failed
+// (supersedeCommentDelivery), leaving the recipient one copy. While that later attempt is still
+// pending neither holds, so this call stands down: it sends nothing, gives its claim back and
+// leaves the attempt pending, for the delivery sweep to send once the later attempt failed
+// (model.OwedMentionAttemptSQL) or for it to be settled superseded once that attempt is sent - by
+// that attempt's own sender (supersedeOvertakenAttempts), or by the sweep
+// (settleSupersededMentions). That is the one shape in which neither sending nor superseding
+// settles anything: a supersede would lose the comment should the later attempt fail, and a send
+// would put a frame on the wire for the host to drop as a repeat should it land, settling this
+// attempt a duplicate before the outcome it is waiting on is known.
 //
 // A zero resume is a retry from the card: it resumes the oldest pending attempt nobody holds, and
 // otherwise opens one of its own.
@@ -326,6 +331,12 @@ func (s *server) claimCommentDeliveryAttempt(
 	case err != nil && !errors.Is(err, pgx.ErrNoRows):
 		return claimedCommentDelivery{}, err
 	case err == nil && takeable:
+		// A Retry that asks for another mode resumes this attempt in the mode its row pinned
+		// rather than the one asked for: a resumed attempt keeps the resolution it was opened
+		// with, mode included (mentionResolutionFor), and the mention's idempotency key is one
+		// whatever the mode, so the mode decides only how the frame is presented and the
+		// recipient is handed one copy either way. A send in the other mode is what a Retry
+		// opened once this attempt has settled makes.
 		if err := claimed.take(ctx, tx, &pending); err != nil {
 			return claimedCommentDelivery{}, err
 		}
@@ -365,8 +376,9 @@ func (claimed *claimedCommentDelivery) take(ctx context.Context, tx pgx.Tx, pend
 // transaction's read was - the claim is given back only while it is this caller's own, or already
 // nobody's - so an attempt another sender has taken since keeps that sender's claim. Giving it
 // back is what hands the attempt on: the delivery sweep sends it once the later attempt failed,
-// and that attempt's own sender settles it superseded once it is sent, and neither waits out this
-// caller's lease first.
+// and once that attempt is sent it is settled superseded - by that attempt's own sender
+// (supersedeOvertakenAttempts), or by the sweep should that settle not happen
+// (settleSupersededMentions) - and none of them waits out this caller's lease first.
 func (claimed *claimedCommentDelivery) standDown(
 	ctx context.Context, tx pgx.Tx, pending *model.CommentDelivery, resume attemptClaim,
 ) error {
@@ -451,10 +463,12 @@ const mentionSupersededError = "not sent: a later attempt of this mention supers
 // opened while this attempt waited on its lane, and sent - and gives its claim back, so nothing
 // sends it and the recipient gets the later attempt's copy alone. Its caller is the sender bound
 // to that attempt, when its lane reaches an attempt already overtaken
-// (claimCommentDeliveryAttempt), or the sender of the later attempt itself, for an attempt a lane
-// stood down from while that send was in flight (supersedeOvertakenAttempts). It runs the settle
-// transaction every outcome of a mention goes through (settleDeliveryAttempt), so this attempt
-// carries its comment.delivery receipt like any other. Its statement is guarded as the claim
+// (claimCommentDeliveryAttempt), the sender of the later attempt itself, for an attempt a lane
+// stood down from while that send was in flight (supersedeOvertakenAttempts), or the delivery
+// sweep, for one left pending and claim-free because neither of those settled it
+// (settleSupersededMentions). It runs the settle transaction every outcome of a mention goes
+// through (settleDeliveryAttempt), so this attempt carries its comment.delivery receipt like any
+// other. Its statement is guarded as the claim
 // transaction's read was, under the comment's owner lock, and on a later attempt having been sent
 // rather than merely opened: an attempt another sender has taken since, one already settled, and
 // one whose overtaking attempt has not delivered the comment are left as they are and reported as
@@ -631,10 +645,12 @@ func (s *server) deliverResolvedCommentMention(
 	if err != nil {
 		return model.CommentDelivery{}, fmt.Errorf("encode comment mention delivery frame: %w", err)
 	}
-	// The key is scoped to the mention's target and mode (model.CommentMentionIdempotencyKey).
+	// The key is the mention's, scoped to its target and not to the mode of this attempt
+	// (model.CommentMentionIdempotencyKey), so a second frame of this mention repeats the key of
+	// the first whichever modes the two went in and the recipient's host drops it.
 	// When the issue route's copy is suppressed for this send: model.CommentEventPayload.SuppressRoute.
 	envelopeID, duplicate, deliveryError := s.sendResolvedDelivery(
-		ctx, target, stored.Body, model.CommentMentionIdempotencyKey(stored.ID, target.Target, target.Delivery), nil, frame,
+		ctx, target, stored.Body, model.CommentMentionIdempotencyKey(stored.ID, target.Target), nil, frame,
 	)
 	settled, err := s.completeCommentDelivery(
 		ctx, stored, recorded, actor, claimed.attemptClaim, envelopeID, duplicate, deliveryError,
@@ -643,10 +659,10 @@ func (s *server) deliverResolvedCommentMention(
 		return model.CommentDelivery{}, err
 	}
 	if err := s.supersedeOvertakenAttempts(ctx, stored, settled, actor); err != nil {
-		// The attempt stays pending and is sent by nobody: a later attempt of its mention was
-		// sent, and the delivery sweep owes only the attempts that stand
+		// The attempt stays pending, claim-free and sent by nobody: a later attempt of its mention
+		// was sent, and the delivery sweep owes only the attempts that stand
 		// (model.OwedMentionAttemptSQL). So no copy is delivered twice and none is lost, and the
-		// next sender bound to that attempt settles it.
+		// next delivery sweep settles it superseded (settleSupersededMentions).
 		slog.Error("dispatch: settle the attempts a comment mention's send superseded",
 			"comment", stored.ID, "target", settled.Target, "attempt", settled.Attempt, "error", err)
 	}
@@ -663,7 +679,7 @@ func (s *server) deliverResolvedCommentMention(
 // It costs a read only when this send settled an attempt past the first, which is the only way an
 // earlier attempt can exist, and nothing at all when that send delivered nothing: a failed
 // attempt supersedes none, and the attempt it overtook stands and is sent again
-// (model.MentionAttemptStandsSQL).
+// (model.MentionAttemptStandsSQL), under the same key this send went under.
 func (s *server) supersedeOvertakenAttempts(
 	ctx context.Context, comment model.Comment, sent model.CommentDelivery, actor model.Actor,
 ) error {

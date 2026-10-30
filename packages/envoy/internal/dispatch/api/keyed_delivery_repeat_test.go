@@ -135,7 +135,7 @@ func TestARepeatOfACommentDeliversItsOwedMentionOnce(t *testing.T) {
 	}
 	// Both sends carry the attempt's own key, which is what makes the second a repeat the stream
 	// drops rather than a second frame.
-	key := comment.ID + ":session:s1:steer"
+	key := comment.ID + ":session:s1"
 	if keys := keysOf(sends); !equalStrings(keys, []string{key, key}) {
 		t.Fatalf("listener sends = %v, want the one attempt's key twice", keys)
 	}
