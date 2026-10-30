@@ -269,13 +269,14 @@ const streamFullPrefix = "envoy: the message bus refused the message because its
 // bus.ErrInvalidSubject and bus.ErrInvalidKey, each of them this client's own refusal of the
 // caller's bytes, decided before anything is sent. A denial is the opposite: the publish reached a
 // server that answered `-ERR 'Permissions Violation for Publish to "<subject>"'` and dropped it,
-// which internal/bus/confirm.go names bus.ErrPublishDenied around nats.ErrPermissionViolation and
-// the server's own text. So it is not an outage and not a malformed request, and retrying it can
-// never succeed: the grant this listener connects with forbids the subject until an operator
-// changes it. 403 says exactly that - the request was understood and the server refuses to
-// authorise it - where 400 would blame the caller's bytes, which are fine, and where any 5xx would
-// be retried: packages/envoy-client/src/transport.ts retries every status at or past 500 and no
-// status below it. No Retry-After rides it for the same reason.
+// which internal/bus names bus.ErrPublishDenied around nats.ErrPermissionViolation and the
+// server's own text (confirmPublished for a core publish, deniedPublish for a JetStream one). So
+// it is not an outage and not a malformed request, and retrying it can never succeed: the grant
+// this listener connects with forbids the subject until an operator changes it. 403 says exactly
+// that - the request was understood and the server refuses to authorise it - where 400 would
+// blame the caller's bytes, which are fine, and where any 5xx would be retried:
+// packages/envoy-client/src/transport.ts retries every status at or past 500 and no status below
+// it. No Retry-After rides it for the same reason.
 //
 // A message the stream refused because it is full (bus.ErrStreamFull) is answered ahead of the
 // bus-unavailable 503 too, with a 503 and Retry-After of its own under streamFullPrefix: the bus

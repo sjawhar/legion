@@ -510,8 +510,11 @@ line says when it was published while the session's connection was down. A repla
 Dispatch to accept no user turn and posts no Dispatch reply, since a person's stale input run late
 could act on an old instruction. Dispatch
 recorded that attempt as sent when the listener stored it, and nothing later accepts or answers
-it. A frame the renderer skips (`notify: false`, the session's own event, another session's
-follow) records nothing, so an eligible copy of it on another subject still shows. A replayed
+it. A frame the renderer skips (an event Dispatch marks `quiet` on an owner topic, the session's
+own event, another session's follow) records nothing, so an eligible copy of it on another
+subject still shows. An agent's comment, document or ask on an issue is not quiet, so a session
+that followed that issue's topic is shown it, where a renderer skipping every `notify: false`
+frame showed it none of them. A replayed
 `subscription.removed` closes a topic only when it was stored after the session started following
 that topic (the cursor's `since`), and takes it out of the listener's registry as
 `envoy_unsubscribe` does (`client.unsubscribe`), both by the engine's shared rule

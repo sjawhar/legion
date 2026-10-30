@@ -29,16 +29,22 @@ import (
 // about a hundred and twenty reads an hour for a pull request on a base of its own, sixty for each
 // more on the same base, and thirty more for each pull request whose base requires a workflow; it
 // compares an approved head with the head once for each review round whose approval is set aside
-// below the head (readApprovalCarry), until the approval stands or GitHub answers; and it lists the
-// open pull requests on the branch of each issue whose implementer completed with no pull request
-// recorded, thirty an hour while one waits. Two minutes also gives a newly opened pull request its
-// set well before its first CI settles, and bounds how long a review decision, a head or a pull
-// request whose webhook never arrived stays unread.
+// below the head (readApprovalCarry), until the approval stands or GitHub answers; for a head GitHub
+// shows moved with no recorded push ending at it, it reads the branch's activity once and compares
+// each push of the move the record lacks (lostPushes); for a head no CI settlement stands for, it
+// reads the head's check runs, a read per hundred runs each pass until one stands (readSettlement); and
+// it lists each served repository's open pull requests (readListings), a read per hundred of them,
+// thirty an hour for a repository with fewer than a hundred open. Two minutes also gives a newly
+// opened pull request its set well before its first CI settles, and bounds how long a review
+// decision, a head, a push, a close or merge, a settlement, or a pull request whose webhook never
+// arrived stays unread. It is also how long a head's newest check run must have completed before
+// the pass settles the head itself, the time Envoy's listener had to settle it first.
 const requiredChecksInterval = 2 * time.Minute
 
 // requiredChecksRead bounds one pull request's reads in a pass: its base branch, its reviews, then
 // that branch's rulesets and protection, then its workflow runs, each a single GitHub answer that
-// comes in well under a second.
+// comes in well under a second. It bounds one repository's listing of its open pull requests
+// (readListings) too, a page per hundred.
 const requiredChecksRead = 30 * time.Second
 
 // watchRequiredChecks reads the checks each open pull request's base branch requires
@@ -62,29 +68,36 @@ func (w *workflowRuntime) watchRequiredChecks(ctx context.Context) {
 }
 
 // readRequiredChecks is one pass: for each open pull request of the project it reads the pull
-// request itself (readPullRequest). When GitHub's head is not the recorded one it applies the
-// synchronize the webhook would have carried and goes on with the record that leaves (followHead);
-// when following fails short of GitHub's rate limit, it goes on with the record as it stands.
-// It applies an intake.PullRequestMergeability fact whenever GitHub's lazily computed mergeability
-// is CONFLICTING or differs from the one recorded - workflow's mergeability decides a CONFLICTING
-// read every time, even one that only confirms the stored value, so a conflict the poll recorded
-// before the issue reached awaiting_merge is still acted on once it gets there. It then reads the
+// request itself (readPullRequest). When GitHub shows it closed it applies the close or merge its
+// webhook would have carried and reads it no further (applyClose). When GitHub's head is not the
+// recorded one it applies the pushes that took the branch there and the synchronize, as their
+// webhooks would have carried them, and goes on with the record that leaves (followHead); when
+// following fails short of GitHub's rate limit, it goes on with the record as it stands. It applies
+// an intake.PullRequestMergeability fact whenever GitHub's lazily computed mergeability is
+// CONFLICTING or differs from the one recorded - workflow's mergeability decides a CONFLICTING read
+// every time it is applied, even one that only confirms the stored value, so a conflict the poll
+// recorded before the issue reached awaiting_merge is still acted on once it gets there; it is
+// applied again only once the record or the issue's phase changed (applyJudged). It then reads the
 // pull request's reviews and applies a deciding one the daemon has not recorded, whose webhook
 // never arrived (readReviews), whatever phase the issue is in, and, for a review round whose
 // approval is set aside below the head, GitHub's compare of the approved head with the head,
-// applying the handoff-only push it shows (readApprovalCarry). It then reads what the base branch
+// applying the handoff-only push it shows (readApprovalCarry). For a head no CI settlement stands
+// for, it reads the head's check runs, and applies the settlement Envoy's listener would have
+// published once every run completed an interval ago (readSettlement). It then reads what the base branch
 // requires with the implement App's installation token, the credential the daemon reads GitHub
-// with for its own work (requiredchecks.Required, which this pass is the only reader of), and, when
-// that includes a workflow, each required workflow's latest run on the head whose settlement stands
-// for the pull request's (classify.WorkflowHead, requiredchecks.Workflows). It applies an
-// intake.RequiredChecks fact when that read differs from the one recorded, which decides the head's
-// verdict again (workflow's requiredChecks). Last it looks up the open pull request of each issue
-// whose implementer completed with none recorded (readUnrecordedPullRequests). A read that fails is
-// logged with the repository, the pull request and GitHub's HTTP status, and changes nothing: the
-// pull request keeps the set and runs last read, and one never read keeps no checks verdict,
-// neither red nor green, until a later pass reads it. A rate-limit answer ends the pass there,
-// since every read after it on the same installation meets the same limit, and the panes share it;
-// the next pass starts over.
+// with for its own work (requiredchecks.Required, which this pass is the only reader of), and,
+// when that includes a workflow, each required workflow's latest run on the head whose settlement
+// stands for the pull request's (classify.WorkflowHead, requiredchecks.Workflows). It applies an
+// intake.RequiredChecks fact when that read differs from the one recorded, which decides the
+// head's verdict again (workflow's requiredChecks). Last it lists each served repository's open
+// pull requests (readListings). Every fact the pass applies carries an event id built from what
+// GitHub showed, and from the record a fact is judged against (passEventID), never from the time or
+// the boot, and one already applied is skipped before any transaction (unapplied). A read that
+// fails is logged with the repository, the pull request and GitHub's HTTP status, and changes
+// nothing: the pull request keeps the set and runs last read, and one never read keeps no checks
+// verdict, neither red nor green, until a later pass reads it. A rate-limit answer ends the pass
+// there, since every read after it on the same installation meets the same limit, and the panes
+// share it; the next pass starts over.
 func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 	var open []record.PullRequest
 	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
@@ -111,6 +124,10 @@ func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 			}
 			continue
 		}
+		if pull.State == "closed" {
+			w.applyClose(ctx, pr, pull)
+			continue
+		}
 		if pr, err = w.followHead(ctx, github, pr, pull); err != nil {
 			if ctx.Err() != nil {
 				return
@@ -129,15 +146,12 @@ func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 		// The reads below start their bound only now: following a head waits on the fact lock,
 		// which the GitHub consumer's backlog can hold for a while.
 		prCtx, cancel := context.WithTimeout(ctx, requiredChecksRead)
-		base, mergeable := pull.Base.Ref, pull.mergeability()
+		base, mergeable := pull.Base.Ref, mergeability(pull)
 		if pr.Mergeability != mergeable || mergeable == record.MergeabilityConflicting {
-			eventID := fmt.Sprintf("mergeability:%s:%s:%s#%d:%d", w.dispatchProject, w.bootID, pr.Repo, pr.Number, time.Now().UnixNano())
 			fact := intake.PullRequestMergeability{Repo: pr.Repo, Number: pr.Number, Base: base, Mergeable: mergeable}
-			if _, err := intake.ApplyFact(ctx, w.pool, "github", eventID, fact, w.handlers...); err != nil {
-				w.log.Warn("apply whether a pull request's head can be merged into its base", "repo", pr.Repo, "pullRequest", pr.Number, "error", err)
-			}
+			w.applyJudged(ctx, pr, fact, "mergeability", "whether a pull request's head can be merged into its base", pull.Head.SHA, clock(pull.UpdatedAt))
 		}
-		if w.readReviews(ctx, prCtx, github, pr) || w.readApprovalCarry(ctx, prCtx, github, pr) {
+		if w.readReviews(ctx, prCtx, github, pr) || w.readApprovalCarry(ctx, prCtx, github, pr) || w.readSettlement(ctx, prCtx, github, pr) {
 			cancel()
 			return
 		}
@@ -158,12 +172,59 @@ func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 		if pr.RequiredReadUnchanged(checks.Names, checks.Workflows, checks.WorkflowsHead) && !w.engine.HoldLapsed(pr) {
 			continue
 		}
-		eventID := fmt.Sprintf("required-checks:%s:%s:%s#%d:%d", w.dispatchProject, w.bootID, pr.Repo, pr.Number, time.Now().UnixNano())
-		if _, err := intake.ApplyFact(ctx, w.pool, "github", eventID, checks, w.handlers...); err != nil {
-			w.log.Warn("apply the checks a pull request's base branch requires", "repo", pr.Repo, "pullRequest", pr.Number, "error", err)
-		}
+		w.applyJudged(ctx, pr, checks, "required-checks", "the checks a pull request's base branch requires", pr.HeadSHA)
 	}
-	w.readUnrecordedPullRequests(ctx)
+	w.readListings(ctx)
+}
+
+// applyJudged applies fact, which the pass read from GitHub for pr and which its handler judges
+// against the record as it stands (mergeability, requiredChecks), under an event id naming kind,
+// pr, observed and what it is judged by (decidedBy), unless that id is applied already
+// (unapplied): the same read against an unchanged record and phase decides nothing new, and costs
+// one read rather than a transaction and a processed_events row every pass. what names the fact in
+// a failure's log.
+func (w *workflowRuntime) applyJudged(ctx context.Context, pr record.PullRequest, fact intake.Fact, kind, what string, observed ...string) {
+	judged, err := w.decidedBy(ctx, pr, fact)
+	if err != nil {
+		if ctx.Err() == nil {
+			w.log.Warn("apply "+what+"; a later pass applies it", "repo", pr.Repo, "pullRequest", pr.Number, "error", err)
+		}
+		return
+	}
+	eventID := w.passEventID(kind, pr.Repo, pr.Number, append(observed, judged)...)
+	if !w.unapplied(ctx, eventID) {
+		return
+	}
+	if _, err := intake.ApplyFact(ctx, w.pool, "github", eventID, fact, w.handlers...); err != nil {
+		w.log.Warn("apply "+what, "repo", pr.Repo, "pullRequest", pr.Number, "error", err)
+	}
+}
+
+// applyClose applies what GitHub shows of pr, recorded open and read closed (readPullRequest), as
+// the webhook of its close would have carried it, its delivery lost or waiting behind the GitHub
+// consumer's backlog: intake.PullRequestMerged with its merge commit when GitHub shows it merged,
+// which closes an issue awaiting the merge (workflow's closeMerged) and tells the architect
+// pr-merged otherwise, and intake.PullRequestClosed at its head and updated_at when it closed
+// unmerged, which the workflow records and tells the architect pr-closed-unmerged of (workflow's
+// closed). Either way the pass reads the pull request no further: nothing else of a closed pull
+// request decides anything. The event id is the close GitHub shows, applied once however often it
+// is read, and the webhook arriving afterwards changes nothing (a merge of a pull request the record
+// holds merged, a close at the record's clock).
+func (w *workflowRuntime) applyClose(ctx context.Context, pr record.PullRequest, pull githubrest.PullRequest) {
+	var fact intake.Fact = intake.PullRequestClosed{Repo: pr.Repo, Number: pr.Number, HeadSHA: pull.Head.SHA, UpdatedAt: pull.UpdatedAt}
+	eventID, how := w.passEventID("closed-read", pr.Repo, pr.Number, pull.Head.SHA, clock(pull.UpdatedAt)), "closed without merging"
+	if pull.IsMerged() {
+		fact = intake.PullRequestMerged{Repo: pr.Repo, Number: pr.Number, MergeSHA: pull.MergeCommitSHA}
+		eventID, how = w.passEventID("merged-read", pr.Repo, pr.Number, pull.MergeCommitSHA), "merged"
+	}
+	if !w.unapplied(ctx, eventID) {
+		return
+	}
+	w.log.Warn("workflow: GitHub shows a pull request the daemon records open "+how+"; applying the close its webhook would",
+		"repo", pr.Repo, "pullRequest", pr.Number, "issue", pr.Issue, "head", pull.Head.SHA, "merge", pull.MergeCommitSHA, "updated_at", pull.UpdatedAt)
+	if _, err := intake.ApplyFact(ctx, w.pool, "github", eventID, fact, w.handlers...); err != nil {
+		w.log.Warn("apply a pull request's close read from GitHub", "repo", pr.Repo, "pullRequest", pr.Number, "error", err)
+	}
 }
 
 // logPassFailure logs a failed GitHub read for pr during a required-checks pass, naming action -
@@ -172,36 +233,29 @@ func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 // limit: every further read on the same installation meets the same limit, and the panes share it,
 // so the caller must stop the whole pass there rather than skip only this pull request.
 func (w *workflowRuntime) logPassFailure(pr record.PullRequest, action string, err error) bool {
-	attributes := []any{"repo", pr.Repo, "pullRequest", pr.Number, "error", err}
+	return w.logReadFailure(err,
+		"read "+action+": GitHub's rate limit; this pass reads no more pull requests, and every unread one's checks verdict stays as the set last read decides it",
+		"read "+action+"; its checks verdict stays as the set last read decides it, and undecided when none was",
+		"repo", pr.Repo, "pullRequest", pr.Number)
+}
+
+// logReadFailure logs err, a GitHub read of the required-checks pass that failed, at error level
+// with attributes, then err and GitHub's HTTP status when err carries one: as limited when the
+// answer was GitHub's rate limit, and as failed otherwise. It returns true for the rate limit:
+// every further read on the same installation meets the same limit, and the panes share it, so the
+// caller must stop the whole pass there.
+func (w *workflowRuntime) logReadFailure(err error, limited, failed string, attributes ...any) bool {
+	attributes = append(attributes, "error", err)
 	var answer *githubrest.Answer
 	if errors.As(err, &answer) {
 		attributes = append(attributes, "status", answer.Status)
 	}
 	if answer != nil && answer.RateLimited {
-		w.log.Error("read "+action+": GitHub's rate limit; this pass reads no more pull requests, and every unread one's checks verdict stays as the set last read decides it", attributes...)
+		w.log.Error(limited, attributes...)
 		return true
 	}
-	w.log.Error("read "+action+"; its checks verdict stays as the set last read decides it, and undecided when none was", attributes...)
+	w.log.Error(failed, attributes...)
 	return false
-}
-
-// githubPullRequest is one pull request as GitHub answers GET /pulls/{number} and lists it in
-// GET /pulls: its number, state (open or closed), page, body, base branch, head branch and commit,
-// when it last changed, and its nullable, lazily computed `mergeable`, which the list leaves out.
-type githubPullRequest struct {
-	Number  int    `json:"number"`
-	State   string `json:"state"`
-	HTMLURL string `json:"html_url"`
-	Body    string `json:"body"`
-	Base    struct {
-		Ref string `json:"ref"`
-	} `json:"base"`
-	Head struct {
-		Ref string `json:"ref"`
-		SHA string `json:"sha"`
-	} `json:"head"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Mergeable *bool     `json:"mergeable"`
 }
 
 // mergeability is the pull request's `mergeable` as the mergeability fact decides a READY by: null
@@ -209,7 +263,7 @@ type githubPullRequest struct {
 // record.MergeabilityMergeable; false is record.MergeabilityConflicting, the state that, in
 // awaiting_merge, withdraws a READY GitHub can run no checks on and merge (workflow's
 // mergeability).
-func (p githubPullRequest) mergeability() record.Mergeability {
+func mergeability(p githubrest.PullRequest) record.Mergeability {
 	switch {
 	case p.Mergeable == nil:
 		return record.MergeabilityUnknown
@@ -224,18 +278,18 @@ func (p githubPullRequest) mergeability() record.Mergeability {
 // requires, the mergeability, and the head and its clock followHead compares with the record, in
 // the single read they share. It also returns the githubrest.Client its own token mint built, so
 // the pass's further reads of the same pull request reuse it rather than minting a second token.
-func (w *workflowRuntime) readPullRequest(ctx context.Context, pr record.PullRequest) (githubrest.Client, githubPullRequest, error) {
+func (w *workflowRuntime) readPullRequest(ctx context.Context, pr record.PullRequest) (githubrest.Client, githubrest.PullRequest, error) {
 	repository, err := ghrepo.Parse("the pull request's repository", pr.Repo)
 	if err != nil {
-		return githubrest.Client{}, githubPullRequest{}, err
+		return githubrest.Client{}, githubrest.PullRequest{}, err
 	}
 	github, err := w.implementClient(ctx, repository)
 	if err != nil {
-		return githubrest.Client{}, githubPullRequest{}, err
+		return githubrest.Client{}, githubrest.PullRequest{}, err
 	}
-	var pull githubPullRequest
+	var pull githubrest.PullRequest
 	if err := github.Get(ctx, fmt.Sprintf("/pulls/%d", pr.Number), &pull); err != nil {
-		return githubrest.Client{}, githubPullRequest{}, err
+		return githubrest.Client{}, githubrest.PullRequest{}, err
 	}
 	return github, pull, nil
 }

@@ -45,12 +45,12 @@ Which machines, files or people, the numbers, then "A happens to X, or B to Y?" 
 
 Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, `done` with `--reason` once driven in production. An issue with the `legion` label, or under one: never write its status or route it, and claim it only as a Legion role of its tree, even when its claim reads `· not running`, as a suspended architect's does: taking it removes the tree from the workflow.
 
-A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on release), brings a person's answers, comments and messages; for agents' activity, `envoy_subscribe notifications.dispatch.issue.<KEY>.>`.
+A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on release), brings a person's answers, comments and messages; for agents' activity, `envoy_subscribe notifications.dispatch.issue.<KEY>.>`, which shows no event Dispatch marks quiet, like an unnamed autosave.
 
 ## Close what you opened
 
-- An ask you opened is yours until answered or resolved. If it is answered another way or made moot, `dispatch resolve-ask` it that turn.
-- Resolve each open ask a later write names that is no longer needed; retract one a new ask replaces.
+- An ask you opened is yours until answered or resolved. `dispatch resolve-ask` it that turn once anything makes it needless: another answer, a later write, work dropped.
+- Retract an ask a new one replaces.
 
 ## Structure over stream
 

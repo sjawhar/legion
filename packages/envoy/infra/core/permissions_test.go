@@ -316,6 +316,7 @@ func TestDaemonPermissions(t *testing.T) {
 	require.Equal(t, core.Permissions{
 		Publish: core.Rules{Allow: []string{
 			"$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS",
+			"$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS",
 			"$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.>",
 			"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.>",
 			"$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>",
