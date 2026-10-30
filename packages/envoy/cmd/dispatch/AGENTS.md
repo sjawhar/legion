@@ -178,8 +178,9 @@ stream holds the most copies and the largest limit any Envoy program of the depl
 clustered deployment sets both alike here and in every envoy-listener; what a start and the keeper
 do with them is `packages/envoy/AGENTS.md`'s "Operational notes". A
 present `DISPATCH_SERVER_URL` overrides merged `dispatch.serverUrl`; it must be an absolute `http`
-or `https` URL with no path, and is the exact browser origin
-used for sign-in. It must equal the URL humans type into the browser, with
+or `https` URL with no path, and, where the `DISPATCH_SIGNIN_*` settings
+configure browser sign-in, is the exact browser origin used for it. It must
+then equal the URL humans type into the browser, with
 `<DISPATCH_SERVER_URL>/auth/callback` listed on the sign-in pool's app client. Host
 adapters can override their configured Dispatch base URL with `DISPATCH_URL`.
 `DISPATCH_TEST_HOOKS=1` mounts test-only routes — unset in every real deployment. `POST
@@ -320,11 +321,16 @@ write identity errors with `identity.WriteError`.
 
 - `DISPATCH_IDENTITY=cookie` is the default. Cookie identity signs people in
   through a Cognito sign-in pool or with Google directly (OpenID Connect
-  authorization code, `internal/oidc/codeflow.go`) and requires `DISPATCH_SIGNIN_ISSUER`,
-  `DISPATCH_SIGNIN_CLIENT_ID`, `DISPATCH_SIGNIN_CLIENT_SECRET` and exactly one
-  of `DISPATCH_SIGNIN_GROUP` (through the pool) or
-  `DISPATCH_SIGNIN_DOMAIN` (with Google directly, under the issuer
-  `https://accounts.google.com`). `checkSignInSettings` refuses, in this order,
+  authorization code, `internal/oidc/codeflow.go`) where the sign-in settings
+  configure one: `DISPATCH_SIGNIN_ISSUER`, `DISPATCH_SIGNIN_CLIENT_ID`,
+  `DISPATCH_SIGNIN_CLIENT_SECRET` and exactly one of `DISPATCH_SIGNIN_GROUP`
+  (through the pool) or `DISPATCH_SIGNIN_DOMAIN` (with Google directly, under
+  the issuer `https://accounts.google.com`). With none of the five set the
+  server boots and runs no browser sign-in: nobody signs in, `/auth/start`
+  answers `503 SIGNIN_UNCONFIGURED`, and the agent-token API is served, which
+  is what a sandbox deployment runs. `checkSignInSettings`, reached only when
+  at least one sign-in setting is set, is what refuses a partial one. It
+  refuses, in this order,
   both set, some without the others (naming the missing ones), a domain under
   another issuer, a domain that is not a lowercase DNS name, and a group under
   Google's issuer; a deployment with the four Cognito settings reaches none of

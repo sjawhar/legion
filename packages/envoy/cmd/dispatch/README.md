@@ -1,9 +1,9 @@
 # Dispatch HTTP server
 
 Go binary serving the Dispatch dashboard and API. People sign in through a Cognito
-sign-in pool or with Google directly and are named by lowercase email; the
-web app's GitHub reads go to GitHub as the GitHub App. Dispatch keeps application
-state in Postgres.
+sign-in pool or with Google directly, where the `DISPATCH_SIGNIN_*` settings
+configure one, and are named by lowercase email; the web app's GitHub reads go to
+GitHub as the GitHub App. Dispatch keeps application state in Postgres.
 
 ## Required configuration
 
@@ -35,9 +35,12 @@ stored mapping, then falls back to `DISPATCH_DEFAULT_PROJECT` when configured.
 An unmapped external repository without a default project is rejected. An issue
 created through the default also gets a `repo:owner/name` label.
 
-`DISPATCH_SERVER_URL` IS the sign-in callback origin. It must equal the URL
-humans type into their browser, and the sign-in pool's app client must list
-`<DISPATCH_SERVER_URL>/auth/callback` as a callback URL.
+Where browser sign-in is configured, `DISPATCH_SERVER_URL` IS the sign-in
+callback origin: it must equal the URL humans type into their browser, and the
+sign-in pool's app client must list `<DISPATCH_SERVER_URL>/auth/callback` as a
+callback URL. With no `DISPATCH_SIGNIN_*` setting nobody signs in through a
+browser, and the variable is the origin Dispatch builds its own links from and
+nothing more.
 
 `DISPATCH_ALLOWED_LOGINS`, `DISPATCH_APP_CLIENT_SECRET` and `DISPATCH_ASSET_STORE_BUCKET` are
 removed: a boot that still sets any of them is refused, naming what replaced it.
@@ -234,6 +237,21 @@ lowercase email:
   under any issuer but `https://accounts.google.com`, a group under that one,
   or a domain that is not a lowercase DNS name refuse the boot, each naming
   what is wrong (`checkSignInSettings`).
+
+  With no `DISPATCH_SIGNIN_*` setting at all the server boots and runs no
+  browser sign-in: it issues no `dsession` cookie, and it refuses every one
+  it has issued, answering each request that needs a person `401 NO_IDENTITY`
+  (`requestIdentityFor`). A cookie minted while sign-in was on still
+  verifies for its thirty days, since the key signing it is the deployment's
+  `DISPATCH_SIGNING_KEY` and outlives the configuration, and with no issuer
+  nothing is left to confirm that the person it names may still use
+  Dispatch. The agent-token API is served as it always is, and
+  `GET /auth/start` answers `503 SIGNIN_UNCONFIGURED`. That is what a
+  sandbox deployment runs (`envoy-infra:gcp:Dispatch` with its tailnet
+  inputs unset, which has no origin an OAuth provider takes). A partial set
+  is still half a sign-in and refuses the boot, naming every setting it
+  misses (`checkSignInSettings`). Dev sign-in (`DISPATCH_DEV_SIGNIN`, below)
+  sets none of these either and keeps its cookies: it mints them itself.
 
   The issuer's discovery document is read in the background from boot, on the
   service-account issuer's schedule (above), and an issuer that cannot be
