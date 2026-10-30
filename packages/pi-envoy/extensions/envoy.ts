@@ -3384,7 +3384,9 @@ export default function envoyExtension(pi: PiApi): void {
   // Dispatch as (`DISPATCH_SESSION_ID`). Dispatch is resolved with `commands: "kept"`, so no `!`
   // token command runs on the request path, and the read waits at most
   // `SESSION_ANSWERS_DEADLINE_MS` before the last list read stands in. A subagent this process
-  // cannot place carries no list rather than another session's.
+  // cannot place carries no list rather than another session's. A Dispatch with no answers route
+  // carries nothing to the model; the read's `notice`, which it gives once per session and
+  // Dispatch URL, goes to the log instead.
   const sessionAnswersText = async (context: SessionContext): Promise<string | undefined> => {
     const session = await replyAddress(context, context.sessionManager.getSessionId());
     if (session === "") return undefined;
@@ -3397,6 +3399,7 @@ export default function envoyExtension(pi: PiApi): void {
         }).dispatch,
         env: process.env,
       });
+      if (read.notice !== undefined) logger.warn(`envoy: ${read.notice}`);
       return read.text;
     } catch (error) {
       // Oh My Pi drops all a `context` handler returns when it throws, the dispatch-first skill

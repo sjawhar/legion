@@ -13669,6 +13669,56 @@ console.log(JSON.stringify(args));
     );
   });
 
+  // A Dispatch URL of its own: the no-route back-off is process-wide, by URL.
+  test("a Dispatch with no answers route adds no line to the model, and the log says so once for the session", async () => {
+    const base = "http://dispatch-no-route.test";
+    process.env.DISPATCH_URL = base;
+    process.env.DISPATCH_TOKEN = "answers-token";
+    const reads: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.host !== "dispatch-no-route.test") return responseWithRegistration(input, init, {});
+      if (url.pathname.endsWith("/answers")) reads.push(url.pathname);
+      return Response.json(
+        { code: "NOT_FOUND", error: `no route for GET ${url.pathname}` },
+        { status: 404 }
+      );
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?session-answers-no-route");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    const context = sessionContext("ses_answers_no_route");
+    await fixture.handlers.get("session_start")?.({}, context);
+    const warnings: string[] = [];
+    const stopSink = logger.registerLogSink((entry) => {
+      if (entry.level === "warn") warnings.push(entry.message);
+    });
+    const requests: unknown[][] = [];
+    try {
+      for (const text of ["First question.", "Second question."]) {
+        const prompt = { role: "user", content: [{ type: "text", text }], timestamp: 1 };
+        const messages = contextMessages(
+          await fixture.handlers.get("context")?.({ messages: [prompt] }, context)
+        );
+        expect(messages.slice(1)).toEqual([prompt]);
+        requests.push(messages);
+      }
+    } finally {
+      stopSink();
+    }
+
+    for (const messages of requests) {
+      expect(JSON.stringify(messages[0])).toContain("<dispatch-first-skill>");
+      expect(JSON.stringify(messages)).not.toContain("dispatch answers");
+      expect(JSON.stringify(messages)).not.toContain("could not be read");
+    }
+    // The second request falls inside the 5-minute back-off, so Dispatch was asked once.
+    expect(reads).toEqual(["/api/v1/agents/ses_answers_no_route/answers"]);
+    expect(warnings.filter((warning) => warning.includes("no answers route"))).toEqual([
+      `envoy: Dispatch at ${base} has no answers route (its build is older than the route), so people's answers cannot be read from it`,
+    ]);
+  });
+
   test("a task subagent's context handler reads its parent's list", async () => {
     const fixture = transcriptFixture();
     try {

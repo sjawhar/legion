@@ -217,7 +217,7 @@ function isJson(response: Response): boolean {
 /** Whether `error` is a server's answer that it has no route for the request (`404 NOT_FOUND`,
  *  "no route for …"), as a server older than a route answers it; a `404 NOT_FOUND` for a
  *  resource the server does not know says "not found" instead. */
-function isNoRoute(error: unknown): boolean {
+export function isNoRoute(error: unknown): boolean {
   return (
     error instanceof DispatchServiceError &&
     error.status === 404 &&
