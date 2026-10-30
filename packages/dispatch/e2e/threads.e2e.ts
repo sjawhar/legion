@@ -11,6 +11,7 @@ import {
   resolveAsk,
 } from "./api";
 import { conversationFilter, threadCard } from "./editor";
+import { hasReadingPane, inboxRow, selectedRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { holdPosts, refusePosts, WRITE_REFUSED_TEXT } from "./sends";
 import { asUser } from "./users";
@@ -469,7 +470,8 @@ test("a session retraction leaves its reason on the card and removes the human's
   const alice = await asUser(browser, "alice");
   const inboxPage = await alice.newPage();
   await inboxPage.goto("/");
-  await expect(inboxPage.getByTestId(`ask-${ask.id}`)).toBeVisible();
+  await expect(inboxRow(inboxPage, ask.id)).toBeVisible();
+  await expect(inboxPage.getByText(/^Blocked on you: 1 item/)).toBeVisible();
   await inboxPage.screenshot({
     fullPage: true,
     path: testInfo.outputPath("inbox-before-ask-retraction.png"),
@@ -497,7 +499,18 @@ test("a session retraction leaves its reason on the card and removes the human's
     bobSession
   );
 
-  await expect(inboxPage.getByTestId(`ask-${ask.id}`)).toHaveCount(0);
+  // The retraction takes the question out of the human's Inbox, live: the "Blocked on you"
+  // strip counts what the server lists, and it drops with no reload.
+  await expect(inboxPage.getByText(/^Blocked on you:/)).toHaveCount(0);
+  // The row itself: from 1280 px the reading column is showing it, and a row the reader is
+  // reading is held where they last saw it rather than taken from under them (INFRA-575), so
+  // it goes once they look away. With no column, and no hand on the row, it goes at once.
+  if (hasReadingPane(inboxPage)) {
+    await expect(selectedRow(inboxPage)).toHaveAttribute("data-inbox-row", ask.id);
+    await inboxPage.reload();
+  }
+  await expect(inboxRow(inboxPage, ask.id)).toHaveCount(0);
+  await expect(inboxPage.getByText("Nothing needs you")).toBeVisible();
   await inboxPage.screenshot({
     fullPage: true,
     path: testInfo.outputPath("inbox-after-ask-retraction.png"),
