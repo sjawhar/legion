@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-10-30T11:57:55Z",
+  "completed": "2026-10-30T19:23:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -220,6 +220,14 @@
       "observed": "After a failed Retry the lane sends attempt 1 (one copy); an in-flight Retry makes the lane stand down, then the sweep sends attempt 1 if the Retry fails, or the Retry's sender supersedes it if it lands (one copy); a keyed repeat and the sweep send an overtaken attempt once.",
       "headSha": "edaaae7e9436a2a5b6b06ad12bbcad0c49f5f72f",
       "negativeControl": "On e4846fb7 the reproduction reads attempt 1 failed 'superseded' with no copy, and every path test but the sent Retry (a guard) fails."
+    },
+    {
+      "criterion": "Review round 8 (architect's ruling): one dedupe key for every attempt of a mention whatever its mode, a timed-out Retry treated as outcome unknown (the review's repro gives one copy), no round-7 path loses the comment, and an overtaken attempt whose supersede did not run does not stay pending for good.",
+      "surface": "The API handler, a Retry in another mode through POST /api/v1/comments/{id}/deliveries, the post-response sender, main's delivery sweep and the outbox against Postgres, on an issue with no route",
+      "command": "go test -p 2 -parallel 4 ./internal/dispatch/api/ -run 'TestARetryInAnotherModeThatTimedOutLeavesTheRecipientOneCopy|TestTheSweepSettlesAnOvertakenAttemptNoSenderSettled|Supersede|Retry|Sweep|Mention' -count=1",
+      "observed": "s1 is handed one frame (attempt 1 sent under the shared key, recorded duplicate); the sweep settles attempt 1 superseded after a reply turns the Retry sent; every round-7 path test green.",
+      "headSha": "afab3fdca01bad52fda2aff7fac839a8f3641b11",
+      "negativeControl": "With d8b5a38f's product code (model.go, comment_delivery.go, delivery_sweep.go, envoy_resolve.go, outbox/mentions.go) on the pre-merge tree, both new tests fail: attempt 1 sent as a second frame (not a duplicate), and attempt 1 left pending."
     }
   ],
   "filesChanged": [
@@ -298,8 +306,8 @@
     "packages/envoy/internal/dispatch/outbox/publisher.go",
     "packages/envoy/internal/dispatch/outbox/publisher_claimant_test.go",
     "packages/envoy/internal/dispatch/outbox/publisher_mentions_test.go",
-    "packages/envoy/internal/dispatch/store/migrations/0148_comment_fallback_copies.census.sql",
-    "packages/envoy/internal/dispatch/store/migrations/0148_comment_fallback_copies.up.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0149_comment_fallback_copies.census.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0149_comment_fallback_copies.up.sql",
     "packages/envoy/internal/dispatch/store/pool.go",
     "packages/envoy/loadtest/README.md",
     "packages/envoy/loadtest/live.go",
@@ -358,7 +366,9 @@
     "Forward merge at e4846fb7 (main a21100c5): main took 0145-0147, so the fallback table is 0148_comment_fallback_copies; route pin 147; main's session_answers_test.go fixture waits for a mentioned comment's post-response send.",
     "TestAnAbandonedMentionIsSettledByTheOutboxOrLeftToTheClaimThatTookItFirst's 'a claim commits first' case now expects the event published with a held fallback row (the attempt is past a lease), not deferred.",
     "Forward merge at fd9f4e1c (main 96a7e5ea): the fallback pass counts its publish failures through Deps.countPublishFailure; route pin 148 (main's own pin is stale at 146 against 147 routes).",
-    "Two existing assertions changed with the supersede rule: the routed failed-Retry test now expects the lane to send attempt 1 (the copy assertions unchanged), and the sweep test expects the overtaken attempt 1 settled superseded once attempt 2 lands."
+    "Two existing assertions changed with the supersede rule: the routed failed-Retry test now expects the lane to send attempt 1 (the copy assertions unchanged), and the sweep test expects the overtaken attempt 1 settled superseded once attempt 2 lands.",
+    "The mention dedupe key drops the mode (<comment>:<target>): a Retry in any mode of a mention that already reached the session is recorded duplicate and dropped (architect's ruling).",
+    "Forward merge at afab3fdc (main d126b19d): main's #2483 took 0148, so the fallback table is 0149_comment_fallback_copies; route pin 148."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
@@ -367,7 +377,7 @@
     "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle.",
     "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands."
   ],
-  "round": 15,
+  "round": 16,
   "answersTest": "735b6cde36e432bdc4bd6290e57e7dd4b71f6e0e",
-  "answersReview": "f0c9a14add01314b30b6c42dbce283c44e835b2c"
+  "answersReview": "d8b5a38fcddc4e3a4c504d787c6371812805bec0"
 }
