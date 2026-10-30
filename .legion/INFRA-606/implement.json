@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-10-29T23:08:47Z",
+  "completed": "2026-10-30T02:00:39Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -196,6 +196,14 @@
       "observed": "s1 receives first, second, third once each in order while a sweep pass and the outbox run beside the held lane; queued attempts hold claims refreshed every third of a lease; no comment_fallback_copies row.",
       "headSha": "74779becb2c8b3d1a2ca48a2001baa3dfee5e547",
       "negativeControl": "With each attempt committed unclaimed (dc3ad918's behaviour) the same test reads sends second, third, first (the sweep resent the queued two first)."
+    },
+    {
+      "criterion": "Review round 5 (architect's ruling): a queued mention's claim does not keep the outbox deferring comment.created past about a minute, the send order stays, and the held-lane test exercises real claim ageing.",
+      "surface": "The API handler, the post-response mention sender with its claim refresh, main's delivery sweep and the real outbox against Postgres",
+      "command": "go test -p 2 -parallel 4 ./internal/dispatch/api/ -run 'TestAMentionQueuedPastALease|TestAHeldLaneKeepsItsQueuedCommentsInOrderThroughASweep|TestASweepTakesTheQueuedMentionsOfALaneWhoseClaimsLapsed|TestAKeyedRepeatOfAQueuedMention|TestARetryWhileTheFirstAttemptIsQueued' -count=1",
+      "observed": "A send queued past a lease: the event is published, the session's copy held as a row, settled unpublished when the send lands (one copy) or published once when it fails; with real claim ageing and a keepClaims tick the sweep leaves the lane alone and order holds; a keyed repeat's claim is kept; a Retry while attempt 1 is queued leaves one send, attempt 1 superseded.",
+      "headSha": "5a26d3ab1b6f7d3638ac6e496622cbbbc1e91fd6",
+      "negativeControl": "74779bec's MentionResumedSQL leaves the event unpublished; with the keepClaims loop removed the held-lane test finds the claims lapsed; each other fix removed fails its test."
     }
   ],
   "filesChanged": [
@@ -272,8 +280,8 @@
     "packages/envoy/internal/dispatch/outbox/publisher.go",
     "packages/envoy/internal/dispatch/outbox/publisher_claimant_test.go",
     "packages/envoy/internal/dispatch/outbox/publisher_mentions_test.go",
-    "packages/envoy/internal/dispatch/store/migrations/0142_comment_fallback_copies.census.sql",
-    "packages/envoy/internal/dispatch/store/migrations/0142_comment_fallback_copies.up.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0145_comment_fallback_copies.census.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0145_comment_fallback_copies.up.sql",
     "packages/envoy/internal/dispatch/store/pool.go",
     "packages/envoy/loadtest/README.md",
     "packages/envoy/loadtest/live.go",
@@ -327,7 +335,8 @@
     "Main's keyed-send.e2e.ts cut-off test changed (architect's ruling): its cut-off now comes from a slow write inside the request; a slow-send-after-the-answer case added.",
     "Forward merge of main at ab986cd2: main's #2513 fixed TestARepeatedSubReplacesAnotherKind in its own rig, so this branch's rig change and pin test are dropped in favour of main's.",
     "Forward merge of main at df929648: main's #2501 took 0141, so the fallback table is 0142_comment_fallback_copies; main's #2377 reference seed kept beside --min-events in the load test.",
-    "A card Retry while a send is still queued now opens attempt 2 rather than resuming attempt 1 (the queued attempt holds a live claim), the documented rule for a live claim."
+    "A card Retry while a send is still queued now opens attempt 2 rather than resuming attempt 1 (the queued attempt holds a live claim), the documented rule for a live claim.",
+    "Forward merges at 1b1b727a (main de546ed2) and 5a26d3ab (main cd5ca7c3): main's #2463 took 0142-0144, so the fallback table is 0145_comment_fallback_copies; route pin 146."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
@@ -336,7 +345,7 @@
     "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle.",
     "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands."
   ],
-  "round": 12,
+  "round": 13,
   "answersTest": "735b6cde36e432bdc4bd6290e57e7dd4b71f6e0e",
-  "answersReview": "44dcd5e44a1b93bb2553923ab612a3ea5b64256e"
+  "answersReview": "35427967ef738f7becd4439aeec549acef044fe5"
 }
