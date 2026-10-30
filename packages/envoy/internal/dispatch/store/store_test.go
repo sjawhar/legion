@@ -247,6 +247,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"issues_parent_key",
 		"artifacts_issue_key",
 		"asks_anchor_artifact",
+		"asks_anchor_artifact_id",
 		"comments_anchor_artifact",
 		"ask_followers_ask_id_text",
 		"events_ask_answered_by_user",

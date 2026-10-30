@@ -1353,13 +1353,28 @@ message included (a message is never edited), and owes an index to every message
 reading `messages` once. Its trigger takes `SHARE ROW EXCLUSIVE` on `messages` alone, so a message
 write waits behind it while a read does not. Its census answers `0` for the same reasons.
 
-Migration `0148_handoffs` creates `handoffs` (`packages/envoy/AGENTS.md`), the phase handoffs a
+Migration `0148_asks_anchor_artifact_id` creates `asks_anchor_artifact_id`, an index over the asks
+whose `anchor` is set of `case when anchor->>'artifact_id' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (anchor->>'artifact_id')::uuid end`:
+the uuid cast `comments_anchor_artifact` (`0032`) indexes, guarded by the form every
+server-written anchor carries, since an unguarded cast would fail the boot over an anchor an
+earlier release could store. Settlement's sweep reads through it the marks a document's asks
+record, by the anchor's document alone, so an ask that also names an ask block on another document
+(`block_artifact_id`) keeps its mark on the document its anchor names. Building it takes `SHARE`
+on `asks`, so ask writes wait for the build; it rewrites no row and refuses none, so its census
+answers `0`. An anchor whose artifact id is not a lower-case document id is left out of the index,
+which costs the read nothing — its text comparison never matched such a spelling either — and
+each boot logs the count of those asks with a warning when there are any. The release before it
+never reads the index and serves beside it unchanged, except that its sweep still drops the mark
+of an ask holding both columns (no such row is written today), and rolling Dispatch back past
+`0148` is an image rollback alone: the index is left for the next release that reads it.
+
+Migration `0149_handoffs` creates `handoffs` (`packages/envoy/AGENTS.md`), the phase handoffs a
 session records on its issue: `id`, `issue_key` (a foreign key to `issues`, `on delete cascade`),
 `phase` (checked to be a lowercase slug), `version` (from 1, unique per issue and phase), `body`
 (the exact text written, in a `text` column so a read answers the bytes written; the API checks it
 is one JSON object), `author` and `created_at`. A new table that no earlier release names: it rolls,
 and its census answers `0`. It follows `0137_request_keys` through
-`0147_message_deliveries_session_created`, which already use the preceding migration numbers.
+`0148_asks_anchor_artifact_id`, which already use the preceding migration numbers.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a

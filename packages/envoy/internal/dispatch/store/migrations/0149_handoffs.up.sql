@@ -1,4 +1,4 @@
--- 0148_handoffs.up.sql — phase handoffs recorded on their issue.
+-- 0149_handoffs.up.sql — phase handoffs recorded on their issue.
 --
 -- sjawhar/legion#2354: Legion's phase handoffs move from committed `.legion/<KEY>/<phase>.json`
 -- files to records on the Dispatch issue. One row per handoff a session writes
