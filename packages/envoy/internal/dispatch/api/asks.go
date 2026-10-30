@@ -770,11 +770,7 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 	// The ask read is the one caller that serialises the count; the write paths load the row
 	// only to check its owner and answer from their own re-read, so they do not pay for it. The
 	// same goes for the part ids of its options and of its answer, and its part revision.
-	if err := attachAskBacklinkCounts(r.Context(), s.deps.Store.Pool, []*model.Ask{&ask}); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if err := attachAskPartIDs(r.Context(), s.deps.Store.Pool, []*model.Ask{&ask}); err != nil {
+	if err := attachAskReadFields(r.Context(), s.deps.Store.Pool, []*model.Ask{&ask}); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -1021,10 +1017,7 @@ func (s *server) queryOwnerAsks(ctx context.Context, q queryer, owner owner, sta
 	if err := s.attachOpenedEventIDs(ctx, q, askPointers); err != nil {
 		return nil, nil, err
 	}
-	if err := attachAskBacklinkCounts(ctx, q, askPointers); err != nil {
-		return nil, nil, err
-	}
-	if err := attachAskPartIDs(ctx, q, askPointers); err != nil {
+	if err := attachAskReadFields(ctx, q, askPointers); err != nil {
 		return nil, nil, err
 	}
 	return asks, replies, nil

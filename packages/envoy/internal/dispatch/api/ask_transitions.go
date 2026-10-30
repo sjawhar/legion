@@ -350,13 +350,11 @@ func (s *server) closeAskTx(ctx context.Context, tx pgx.Tx, id string, actor mod
 	}
 	// A transition writes no question text, so it reconciles none of the ask's own references.
 	// An answer is a part of the ask, though, so both transitions index the parts here, where
-	// the ask row they wrote is held: a resolution changes no part, and its indexing is a read
-	// of the state row that writes nothing. The answer a transition wrote is in tx, so the
-	// ask's Replies rows are read after it.
-	at := time.Now().UTC()
-	if ask.Answer != nil {
-		at = ask.Answer.At
-	}
+	// the ask row they wrote is held: a resolution adds no part, but its indexing still takes
+	// the ask's state row, reconciles the links its parts hold and clears owed_at, and writes
+	// every part of an ask an older build left owed. The answer a transition wrote is in tx, so
+	// the ask's Replies rows are read after it.
+	at := refs.AskPartsAt(ask)
 	changes, err := s.indexAskParts(ctx, tx, ask, at, model.ReferenceChanges{})
 	if err != nil {
 		return model.Ask{}, nil, err

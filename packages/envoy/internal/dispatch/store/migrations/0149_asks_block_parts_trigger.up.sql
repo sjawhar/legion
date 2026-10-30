@@ -1,6 +1,6 @@
 -- 0149_asks_block_parts_trigger.up.sql
 --
--- An ask any build writes is owed a block index of its parts (0145's ask_block_state.owed_at), as
+-- An ask any build writes is owed a block index of its parts (0148's ask_block_state.owed_at), as
 -- 0143 owes a comment: on insert and on a write of any of the three columns the parts are read
 -- from, its question, its options and its answer. A block-aware build indexes the ask later in
 -- the same transaction, which clears owed_at, so an ask still owed was written by a build without

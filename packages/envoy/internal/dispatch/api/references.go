@@ -197,12 +197,12 @@ func (s *server) blockReferenceNode(ctx context.Context, query refs.Query, ref t
 // recorded (model.BlockPin, its Version the revision), "unchanged" or "changed" by comparing the
 // current text with N's, or "removed" with the revision that removed it (RemovedVersion), as a
 // node with no text or changed revision whose facts are a removed block's
-// (refs.RemovedAskBlockNode, refs.RemovedCommentBlockNode). A pin past the item's current
-// revision, or to one that did not hold the block, answers 404, each saying which. A message
-// never changes, so no reference pins a message's block (parseReferencesQuery refuses one).
+// (refs.RemovedItemBlockNode). A pin past the item's current revision, or to one that did not
+// hold the block, answers 404, each saying which. A message never changes, so no reference pins
+// a message's block (parseReferencesQuery refuses one).
 func (s *server) itemBlockReferenceNode(ctx context.Context, query refs.Query, ref text.Ref) (model.GraphNode, error) {
 	pool := s.deps.Store.Pool
-	ask := refs.ItemKind(ref.Item) == refs.ItemAsk
+	kind := refs.ItemKind(ref.Item)
 	noun := itemBlockNoun(ref.Item)
 	item, found, err := refs.Node(ctx, pool, ref.Item, ref.ID, true)
 	if err != nil {
@@ -216,7 +216,7 @@ func (s *server) itemBlockReferenceNode(ctx context.Context, query refs.Query, r
 		return model.GraphNode{}, err
 	}
 	if current {
-		if node.Text, err = refs.CurrentItemBlockText(ctx, pool, refs.ItemKind(ref.Item), query.ID); err != nil {
+		if node.Text, err = refs.CurrentItemBlockText(ctx, pool, kind, query.ID); err != nil {
 			return model.GraphNode{}, err
 		}
 	}
@@ -226,12 +226,7 @@ func (s *server) itemBlockReferenceNode(ctx context.Context, query refs.Query, r
 		}
 		return node, nil
 	}
-	var at refs.ItemBlockRevision
-	if ask {
-		at, err = refs.AskPartAt(ctx, pool, item.ID, ref.Block, ref.Pin)
-	} else {
-		at, err = refs.CommentBlockAt(ctx, pool, item.ID, ref.Block, ref.Pin)
-	}
+	at, err := refs.ItemBlockAt(ctx, pool, kind, item.ID, ref.Block, ref.Pin)
 	if err != nil {
 		return model.GraphNode{}, err
 	}
@@ -243,13 +238,7 @@ func (s *server) itemBlockReferenceNode(ctx context.Context, query refs.Query, r
 	}
 	pin := &model.BlockPin{Version: ref.Pin, Ref: refs.BlockRef(item.Ref, ref.Block) + "@v" + strconv.Itoa(ref.Pin), Text: *at.Text}
 	if !current {
-		var removed model.GraphNode
-		var held bool
-		if ask {
-			removed, held, err = refs.RemovedAskBlockNode(ctx, pool, query.ID, at.RemovedRevision)
-		} else {
-			removed, held, err = refs.RemovedCommentBlockNode(ctx, pool, query.ID, at.RemovedRevision)
-		}
+		removed, held, err := refs.RemovedItemBlockNode(ctx, pool, kind, query.ID, at.RemovedRevision)
 		if err != nil {
 			return model.GraphNode{}, err
 		}

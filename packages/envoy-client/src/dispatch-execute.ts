@@ -684,6 +684,11 @@ function itemBlockOf(value: string): ItemBlockRef | undefined {
     : { ...ref, item: ref.item, block: ref.block };
 }
 
+/** The indefinite article a kind of item takes, with the kind: "an ask", "a comment". */
+function article(kind: string): string {
+  return kind === "ask" ? "an ask" : `a ${kind}`;
+}
+
 /**
  * Why `value`, given to `field` of a `kind` reply, names no block that reply can answer: a block
  * of another kind of item (a document's included), or one pinned to a revision, since a reply
@@ -697,7 +702,6 @@ function replyBlockProblem(
   value: string
 ): string | undefined {
   if (!/^dispatch:\/\/[^#]*#b-/.test(value)) return undefined;
-  const article = (item: string) => (item === "ask" ? "an ask" : `a ${item}`);
   const form = `dispatch://KEY/${kind}/<id>#b-<block id>`;
   const ref = parseDispatchRef(value);
   if (ref?.kind !== "block") {
@@ -928,24 +932,18 @@ function messageInReplyTo(args: ToolArguments): ReplyTarget | undefined {
     : { id, ...(block === undefined ? {} : { block: block.block }) };
 }
 
-/** The comment a `reply_to` names: a comment's block reference splits into the comment's id and
- *  the block's; `argumentProblems` refused any other block reference, and Dispatch checks any
- *  other value as the comment's id. */
-function commentReplyTo(args: ToolArguments): ReplyTarget | undefined {
-  const replyTo = optionalString(args, "reply_to");
+/** The item a `reply_to` or a `reply_to_ask` names: a comment's block reference splits into the
+ *  comment's id and the block's, and a part reference into the ask's id and the part's;
+ *  `argumentProblems` refused any other block reference, and Dispatch checks any other value as
+ *  the item's id. */
+function itemReplyTo(
+  args: ToolArguments,
+  field: "reply_to" | "reply_to_ask"
+): ReplyTarget | undefined {
+  const replyTo = optionalString(args, field);
   if (replyTo === undefined) return undefined;
   const block = itemBlockOf(replyTo);
   return block === undefined ? { id: replyTo } : { id: block.item.id, block: block.block };
-}
-
-/** The ask a `reply_to_ask` names: a part reference splits into the ask's id and the part's;
- *  `argumentProblems` refused any other block reference, and Dispatch checks any other value as
- *  the ask's id. */
-function askReplyTo(args: ToolArguments): ReplyTarget | undefined {
-  const replyToAsk = optionalString(args, "reply_to_ask");
-  if (replyToAsk === undefined) return undefined;
-  const block = itemBlockOf(replyToAsk);
-  return block === undefined ? { id: replyToAsk } : { id: block.item.id, block: block.block };
 }
 
 /**
@@ -1250,7 +1248,7 @@ function innerRefProblem(
         : ref.kind === "children"
           ? "the children"
           : ref.kind === "block"
-            ? `block ${ref.block}${ref.item === undefined ? "" : ` of ${ref.item.kind === "ask" ? "an" : "a"} ${ref.item.kind}`}`
+            ? `block ${ref.block}${ref.item === undefined ? "" : ` of ${article(ref.item.kind)}`}`
             : `a ${ref.kind}`;
   return `ref ${refText} names ${item} on ${owner}; dispatch ${commandName(tool)} would act on ${owner} and drop the ${ref.kind}: ${fix}`;
 }
@@ -2366,7 +2364,9 @@ function askPartEdges(
       rest.push(edge);
       continue;
     }
-    at.set(part, [...(at.get(part) ?? []), { ...edge, block: undefined }]);
+    const held = at.get(part);
+    if (held === undefined) at.set(part, [{ ...edge, block: undefined }]);
+    else held.push({ ...edge, block: undefined });
   }
   return { at, rest: { node: incoming.node, edges: rest } };
 }
@@ -3893,8 +3893,8 @@ export async function executeDispatchTool(
             : undefined
           : await resolveDocument(owner, artifactReference);
       const anchored = resolved ? anchor(resolved.artifact, args) : undefined;
-      const replyTo = commentReplyTo(args);
-      const replyToAskTarget = askReplyTo(args);
+      const replyTo = itemReplyTo(args, "reply_to");
+      const replyToAskTarget = itemReplyTo(args, "reply_to_ask");
       const replyToAsk =
         replyToAskTarget === undefined ? undefined : normalizeUUID(replyToAskTarget.id);
       if (replyToAskTarget !== undefined && replyToAsk === undefined) {

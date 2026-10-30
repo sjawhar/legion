@@ -228,10 +228,7 @@ func (s *server) attachAskEventFields(ctx context.Context, events []model.Event)
 	if err := s.attachOpenedEventIDs(ctx, s.deps.Store.Pool, askPointers); err != nil {
 		return err
 	}
-	if err := attachAskBacklinkCounts(ctx, s.deps.Store.Pool, askPointers); err != nil {
-		return err
-	}
-	if err := attachAskPartIDs(ctx, s.deps.Store.Pool, askPointers); err != nil {
+	if err := attachAskReadFields(ctx, s.deps.Store.Pool, askPointers); err != nil {
 		return err
 	}
 	for index := range payloads {

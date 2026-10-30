@@ -176,7 +176,7 @@ func attachAskBacklinkCounts(ctx context.Context, q queryer, asks []*model.Ask) 
 // A part is matched to the option it stands for by its stored position and type, never by
 // hashing the option's label a second time: the index owns the identity of a part, and a reader
 // of this id must get back exactly the part the index wrote. An ask whose parts are not indexed
-// yet - owed by migration 0146's trigger and never drained, so no build with the index has
+// yet - owed by migration 0149's trigger and never drained, so no build with the index has
 // written them - has no state row or no parts, and carries no id and revision 0: a read of an ask
 // never depends on the index being current. So does an ask whose stored parts stand for other
 // options than the row now holds, where the index is behind the row and positions no longer line
@@ -220,6 +220,18 @@ func attachAskPartIDs(ctx context.Context, q queryer, asks []*model.Ask) error {
 		}
 	}
 	return nil
+}
+
+// attachAskReadFields is what every list and detail read of an ask attaches beyond its row: its
+// inbound graph-edge count (attachAskBacklinkCounts), then the part ids of its options and of its
+// answer with its part revision (attachAskPartIDs). A write attaches neither. The two are always
+// read together and in this order, so the reads a caller pays for, and the error it reports, are
+// the same at every site.
+func attachAskReadFields(ctx context.Context, q queryer, asks []*model.Ask) error {
+	if err := attachAskBacklinkCounts(ctx, q, asks); err != nil {
+		return err
+	}
+	return attachAskPartIDs(ctx, q, asks)
 }
 
 // askParts is one ask's indexed parts as attachAskPartIDs reads them: the revision its parts have

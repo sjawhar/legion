@@ -281,7 +281,7 @@ func CountedChanges(ctx context.Context, q Queryer, changed []Target) (model.Ref
 			// A part is counted as its ask, named between the 'ask/' prefix and the '#', so two
 			// parts of one ask, or a part and the ask's own row, name that ask once.
 			item, _, _ := strings.Cut(target.ID, "#")
-			target = Target{Kind: string(ItemAsk), ID: strings.TrimPrefix(item, "ask/")}
+			target = Target{Kind: string(ItemAsk), ID: strings.TrimPrefix(item, string(ItemAsk)+"/")}
 		}
 		if _, duplicate := seen[[2]string{target.Kind, target.ID}]; duplicate {
 			continue

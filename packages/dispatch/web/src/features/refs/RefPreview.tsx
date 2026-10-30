@@ -338,6 +338,13 @@ function DocumentPreview({ route }: { route: DispatchReferenceRoute }): ReactNod
   );
 }
 
+/** The holder a block's card heads with, for the item kinds `itemOfBlock` names. */
+const BLOCK_HOLDER_LABELS: Record<"ask" | "comment" | "message", string> = {
+  ask: "Ask",
+  comment: "Comment",
+  message: "Message",
+};
+
 /** A block of a document: its document, then for a pinned reference the version it pins and how
  *  the block stands since (`BlockPin.state`), then its text - the pinned version's for a pinned
  *  reference, its current text otherwise. The document's name is the card's own read of its
@@ -350,14 +357,7 @@ function BlockPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
   const { block } = useReferenceData(route, { text: false });
   const artifact = useBlockDocument(route);
   const item = itemOfBlock(route);
-  const holder =
-    item === undefined
-      ? artifact?.name
-      : item.kind === "ask"
-        ? "Ask"
-        : item.kind === "comment"
-          ? "Comment"
-          : "Message";
+  const holder = item === undefined ? artifact?.name : BLOCK_HOLDER_LABELS[item.kind];
   if (holder === undefined || block === undefined) {
     return <Heading>{shortForm(route)}</Heading>;
   }

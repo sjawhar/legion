@@ -235,16 +235,12 @@ type ItemBlockRevision struct {
 	RemovedRevision int
 }
 
-// CommentBlockAt reads block blockID of comment commentID, a comment's uuid, as revision records
-// it (itemBlockAt).
-func CommentBlockAt(ctx context.Context, q Queryer, commentID, blockID string, revision int) (ItemBlockRevision, error) {
-	return itemBlockAt(ctx, q, ItemComment, commentID, blockID, revision)
-}
-
-// itemBlockAt reads block blockID of the item of kind whose uuid is itemID as revision records it.
-// A revision past Current is one the item has not reached; its Text is still the block's latest,
-// which the caller does not read.
-func itemBlockAt(ctx context.Context, q Queryer, kind ItemKind, itemID, blockID string, revision int) (ItemBlockRevision, error) {
+// ItemBlockAt reads block blockID of the item of kind whose uuid is itemID as revision records
+// it: a block of a comment as that revision of the comment records it, a part of an ask as that
+// revision of the ask's parts does, over the kind's state and texts tables, where the text at
+// revision N is the latest row with revision <= N. A revision past Current is one the item has
+// not reached; its Text is still the block's latest, which the caller does not read.
+func ItemBlockAt(ctx context.Context, q Queryer, kind ItemKind, itemID, blockID string, revision int) (ItemBlockRevision, error) {
 	tables, err := kind.tables()
 	if err != nil {
 		return ItemBlockRevision{}, err
@@ -265,19 +261,13 @@ func itemBlockAt(ctx context.Context, q Queryer, kind ItemKind, itemID, blockID 
 	return read, nil
 }
 
-// RemovedCommentBlockNode is the node of comment block nodeID, which no current revision holds
-// since revision removedRevision removed it (removedItemBlockNode). found is false when the
-// comment has no such block. The caller adds its pin.
-func RemovedCommentBlockNode(ctx context.Context, q Queryer, nodeID string, removedRevision int) (model.GraphNode, bool, error) {
-	return removedItemBlockNode(ctx, q, ItemComment, nodeID, removedRevision)
-}
-
-// removedItemBlockNode is the node of block nodeID of an item of kind, which no current revision
-// holds since revision removedRevision removed it, built as a current block's but with no changed
-// revision: made as it was made, last changed by that removal (by the block's maker, at the
-// block's removed_at), and part of the item at the revision before it, the last one to hold it.
-// found is false when the item has no such block.
-func removedItemBlockNode(ctx context.Context, q Queryer, kind ItemKind, nodeID string, removedRevision int) (model.GraphNode, bool, error) {
+// RemovedItemBlockNode is the node of block nodeID of an item of kind — a block of a comment, a
+// part of an ask — which no current revision holds since revision removedRevision removed it,
+// built as a current block's but with no changed revision: made as it was made, last changed by
+// that removal (by the block's maker, at the block's removed_at), and part of the item at the
+// revision before it, the last one to hold it. found is false when the item has no such block.
+// The caller adds its pin.
+func RemovedItemBlockNode(ctx context.Context, q Queryer, kind ItemKind, nodeID string, removedRevision int) (model.GraphNode, bool, error) {
 	blocks, err := itemBlockNodes(ctx, q, kind, []string{nodeID}, true)
 	if err != nil || len(blocks) == 0 {
 		return model.GraphNode{}, false, err

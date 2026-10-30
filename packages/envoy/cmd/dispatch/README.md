@@ -1651,7 +1651,7 @@ build writes during the roll, or after a rollback, is owed its blocks (`owed_at`
 triggers of `0143` and `0144`), which the same block-index reconciliation indexes, at most 200 a
 tick, with no command run.
 
-An ask's parts are blocks too (migrations `0145`-`0146`): its question, each of its options and
+An ask's parts are blocks too (migrations `0148`-`0149`): its question, each of its options and
 its current answer, in that order (`refs.AskParts`), each a text of its own rather than a span of
 one body, since an ask has no body — the question as the row holds it, an option as
 `<label> — <description>` or its label alone, and the answer as the one line an `ask.answered`
@@ -1674,7 +1674,7 @@ its `replies_to` edges, its clarification thread, and its parts' `part_of` edges
 names them (`refs.AskBacklinkExclusions`). A reply in an ask's thread names the part it answers
 with `reply_to_block`. A reference to a part no current revision of the ask holds is
 `404 NOT_FOUND` `no part "<part>" in ask <id>`. An ask any build writes is owed a part index
-(`0146`'s trigger on `asks`), which the same block-index reconciliation drains.
+(`0149`'s trigger on `asks`), which the same block-index reconciliation drains.
 
 ```bash
 DATABASE_URL=postgres://... envoy-dispatch rebuild-refs

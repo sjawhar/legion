@@ -350,10 +350,7 @@ func (s *Service) reconcileAskBlocks(
 			}
 			// The restoration writes state, answer and resolution back: the answer it brings
 			// back is a part again, and the event names what that moved.
-			restoredAt := time.Now().UTC()
-			if ask.Answer != nil {
-				restoredAt = ask.Answer.At
-			}
+			restoredAt := refs.AskPartsAt(ask)
 			changes, err := refs.IndexAskPartsCounted(ctx, tx, ask, s.serverURL, restoredAt, model.ReferenceChanges{})
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index the parts of restored ask %s: %w", ask.ID, err)

@@ -55,6 +55,17 @@ func AskParts(ask model.Ask) []itemblocks.Block {
 	return parts
 }
 
+// AskPartsAt is the time a write that did not change the ask's question or options records its
+// parts at: the answer's own time when the ask holds one, since the answer is the part that
+// write added, and now otherwise. It is what a transition and a restoration of a retracted ask
+// index at, where a create and an edit index at the time their own write of the row carries.
+func AskPartsAt(ask model.Ask) time.Time {
+	if ask.Answer != nil {
+		return ask.Answer.At
+	}
+	return time.Now().UTC()
+}
+
 // askPart is one part of an ask, its identity hash salted with its type.
 func askPart(partType, partText string) itemblocks.Block {
 	return itemblocks.Block{Type: partType, Text: partText, Hash: itemblocks.Hash(partType + "\n" + partText)}
@@ -143,7 +154,8 @@ func askPartPairs(parts []itemblocks.Block, ids []string, serverURL string) []bl
 //
 // It returns the targets of the part mentions it moved, which the caller's event counts.
 func IndexAskParts(ctx context.Context, tx pgx.Tx, ask model.Ask, serverURL string, at time.Time) ([]Target, error) {
-	return indexAskParts(ctx, tx, ask, AskParts(ask), serverURL, at)
+	parts := AskParts(ask)
+	return indexAskParts(ctx, tx, ask, parts, askPartsSum(parts), serverURL, at)
 }
 
 // IndexAskPartsCounted is IndexAskParts for a writer that appends an event: it indexes the ask's
@@ -173,15 +185,15 @@ func IndexAskPartsCounted(
 	return MergeChanges(beside, counted), nil
 }
 
-// indexAskParts is IndexAskParts over parts the caller has already read.
-func indexAskParts(ctx context.Context, tx pgx.Tx, ask model.Ask, parts []itemblocks.Block, serverURL string, at time.Time) ([]Target, error) {
+// indexAskParts is IndexAskParts over parts the caller has already read and summed.
+func indexAskParts(ctx context.Context, tx pgx.Tx, ask model.Ask, parts []itemblocks.Block, sum, serverURL string, at time.Time) ([]Target, error) {
 	makers, err := askPartMakers(ask, parts)
 	if err != nil {
 		return nil, err
 	}
 	return indexItemBlocks(ctx, tx, ItemAsk, ask.ID, at, itemBlockSource{
 		blocks:  parts,
-		bodySum: askPartsSum(parts),
+		bodySum: sum,
 		madeBy:  makers,
 		ids: func(stored []itemblocks.Stored, next []itemblocks.Block, _, counter int) ([]string, int, error) {
 			ids, counter := itemblocks.AlignReplaced(stored, next, counter, AskAnswerPart)
@@ -252,10 +264,11 @@ func indexAskIfOwed(ctx context.Context, tx pgx.Tx, askID, serverURL string) (bo
 		return false, fmt.Errorf("read the block state of ask %s: %w", askID, err)
 	}
 	parts := AskParts(ask)
-	if stated && !owed && sum != nil && *sum == askPartsSum(parts) {
+	partsSum := askPartsSum(parts)
+	if stated && !owed && sum != nil && *sum == partsSum {
 		return false, nil
 	}
-	if _, err := indexAskParts(ctx, tx, ask, parts, serverURL, writtenAt); err != nil {
+	if _, err := indexAskParts(ctx, tx, ask, parts, partsSum, serverURL, writtenAt); err != nil {
 		return false, fmt.Errorf("index the parts of ask %s: %w", askID, err)
 	}
 	return true, nil

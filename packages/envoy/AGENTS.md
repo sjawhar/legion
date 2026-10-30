@@ -1707,11 +1707,11 @@ reaches an item block's links through its item's own `refs` rows, so the member'
 item, and a reference to an item block, as to its item, reaches no document.
 
 A comment block reference may be pinned to revision N of its comment,
-`dispatch://KEY/comment/<id>#b-<block>@v<N>` (`itemBlockReferenceNode`, `refs.CommentBlockAt`):
+`dispatch://KEY/comment/<id>#b-<block>@v<N>` (`itemBlockReferenceNode`, `refs.ItemBlockAt`):
 `pin.version` is the revision and `pin.text` the latest `comment_block_texts` text at or before
 N, and `state` is `unchanged` or `changed` against the current text, or `removed`, with
 `removed_version` the latest revision that recorded the block removed, no edges, and the node a
-removed block's (`refs.RemovedCommentBlockNode`: made as it was made, last changed by the
+removed block's (`refs.RemovedItemBlockNode`: made as it was made, last changed by the
 comment's author at the block's `removed_at`, part of the comment at the revision before the
 removal). A pin past the comment's current revision is `404 NOT_FOUND` `no revision <N> of comment
 <id>; its current revision is <M>`, one to a revision that did not hold the block `404 NOT_FOUND`
@@ -2670,7 +2670,7 @@ resolves through `loadAskBlockNodes` and a build without ask parts skips as an u
 reference is the ask's with `#b-` and the part id - `dispatch://KEY/ask/<id>#b-<part>`, or
 `dispatch://PROJECT/artifact/<slug>/ask/<id>#b-<part>` on a project document's ask - pinned with
 `@v<N>` to a revision of the ask's parts, which reads the part as that revision held it
-(`refs.AskPartAt`, `refs.RemovedAskBlockNode`). A part no current revision holds is
+(`refs.ItemBlockAt`, `refs.RemovedItemBlockNode`). A part no current revision holds is
 `404 NOT_FOUND` `no part "<part>" in ask <id>` (`itemBlockNoun`; a comment's and a message's say
 `block`), and a pin past the ask's current revision or to a revision that did not hold the part
 says which. The part id of each option and of the answer, with the ask's `revision`, is batched

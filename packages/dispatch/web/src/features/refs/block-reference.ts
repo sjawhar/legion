@@ -24,9 +24,7 @@ export function itemOfBlock(
   if (route.kind === "ask" || route.kind === "comment" || route.kind === "message") {
     return { id: route.id, kind: route.kind };
   }
-  return route.kind === "document" && route.item !== undefined
-    ? { id: route.item.id, kind: route.item.kind }
-    : undefined;
+  return route.kind === "document" ? route.item : undefined;
 }
 
 /** `route` naming its block `id`, pinned to `pin` when one is given, as the server's
