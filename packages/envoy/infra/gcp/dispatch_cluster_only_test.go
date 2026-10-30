@@ -109,25 +109,20 @@ type dispatchClusterOnlyRefusal struct {
 }
 
 // dispatchClusterOnlyRefusals is every input the cluster-only mode refuses, one row each, holding
-// a value a consumer would plausibly send. TestDispatchEveryInputIsLiveOrRefusedUnderClusterOnly
-// holds the table complete against DispatchArgs itself.
+// a value a consumer would plausibly send. The nine rows of the tailnet and sign-in groups come
+// from the groups' own tables, which are where those values are written
+// (dispatchSandboxTailnetGroup, dispatchSandboxSignInGroup), so a group that gains an input is
+// refused here without that input being written down a second time.
+// TestDispatchEveryInputIsLiveOrRefusedUnderClusterOnly holds the table complete against
+// DispatchArgs itself.
 func dispatchClusterOnlyRefusals() []dispatchClusterOnlyRefusal {
-	return []dispatchClusterOnlyRefusal{
-		{"tailnetDnsName", func(a *gcp.DispatchArgs) { a.TailnetDnsName = "example-tailnet.ts.net" }},
-		{"tags", func(a *gcp.DispatchArgs) { a.Tags = []string{"tag:example-dispatch"} }},
-		{"tailnetAuthKey", func(a *gcp.DispatchArgs) { a.TailnetAuthKey = pulumi.String("tskey-auth-example-0123456789") }},
-		{"tailnetService", func(a *gcp.DispatchArgs) { a.TailnetService = pulumi.String("svc:example-dispatch") }},
+	return slices.Concat(dispatchSandboxTailnetGroup, dispatchSandboxSignInGroup, []dispatchClusterOnlyRefusal{
 		{"envoyImage", func(a *gcp.DispatchArgs) { a.EnvoyImage = dispatchEnvoyImage }},
-		{"tailscaleImage", func(a *gcp.DispatchArgs) { a.TailscaleImage = dispatchTailscaleImage }},
 		{"cloudSqlProxyImage", func(a *gcp.DispatchArgs) { a.CloudSqlProxyImage = dispatchProxyImage }},
-		{"frontDoorToolsImage", func(a *gcp.DispatchArgs) { a.FrontDoorToolsImage = dispatchToolsImage }},
 		{"natsUrl", func(a *gcp.DispatchArgs) { a.NatsUrl = pulumi.String("nats://example-hub.example-tailnet.ts.net:4222") }},
 		{"natsSeedSecret", func(a *gcp.DispatchArgs) {
 			a.NatsSeedSecret = pulumi.String("projects/example-project/secrets/example-nats-seed")
 		}},
-		{"signInClientId", func(a *gcp.DispatchArgs) { a.SignInClientId = "example-client-id" }},
-		{"signInClientSecret", func(a *gcp.DispatchArgs) { a.SignInClientSecret = pulumi.String("example-client-secret") }},
-		{"signInDomain", func(a *gcp.DispatchArgs) { a.SignInDomain = "example.com" }},
 		{"agentSecretsUrl", func(a *gcp.DispatchArgs) { a.AgentSecretsUrl = "https://example-broker.internal.example" }},
 		{"agentSecretsAudience", func(a *gcp.DispatchArgs) { a.AgentSecretsAudience = "example-broker-audience" }},
 		{"appClientId", func(a *gcp.DispatchArgs) { a.AppClientId = "example-app-client-id" }},
@@ -166,31 +161,7 @@ func dispatchClusterOnlyRefusals() []dispatchClusterOnlyRefusal {
 		{"azureFederationAudience", func(a *gcp.DispatchArgs) {
 			a.AzureFederationAudience = pulumi.StringRef("api://AzureADTokenExchange")
 		}},
-	}
-}
-
-// dispatchNamedRefusals selects the named rows of dispatchClusterOnlyRefusals, in the table's
-// order, so a test that sets a group of inputs sets each to the value that table already holds
-// rather than to a second copy of it. A name no row carries panics: it would leave the group a
-// row short, and a group short an input asks for a mode rather than a refusal. The names are
-// written in this package beside the table and the groups are built at package initialisation,
-// so a name matching nothing is a programming error here and not anything a consumer sends, as
-// it is for the resolver's own groups.
-func dispatchNamedRefusals(names ...string) []dispatchClusterOnlyRefusal {
-	rows := make([]dispatchClusterOnlyRefusal, 0, len(names))
-	for _, row := range dispatchClusterOnlyRefusals() {
-		if slices.Contains(names, row.input) {
-			rows = append(rows, row)
-		}
-	}
-	if len(rows) < len(names) {
-		for _, name := range names {
-			if !slices.ContainsFunc(rows, func(row dispatchClusterOnlyRefusal) bool { return row.input == name }) {
-				panic("dispatchNamedRefusals: " + name + " is no row of dispatchClusterOnlyRefusals")
-			}
-		}
-	}
-	return rows
+	})
 }
 
 // Every input that configures Dispatch rather than the cluster is refused by name when it arrives

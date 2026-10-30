@@ -198,17 +198,19 @@ func TestDispatchSandboxRefusesWhatItDoesNotBuild(t *testing.T) {
 		name, input string
 		set         func(*gcp.DispatchArgs)
 	}
-	// The three rows no refusal table holds: every row of one sets an input, and these leave one
-	// unset, which is how a sandbox goes without the in-cluster hub and the ingress it has no
-	// front door to do without.
+	// The rows no group's table holds: the three that leave an input unset, which is how a sandbox
+	// goes without the in-cluster hub and the ingress it has no front door to do without, and the
+	// front door's own size and budget, which belong to no group and so are written here.
 	rows := []refusal{
 		{"natsInCluster unset", "natsInCluster", func(a *gcp.DispatchArgs) { a.NatsInCluster = nil }},
 		{"natsInCluster false", "natsInCluster", func(a *gcp.DispatchArgs) { a.NatsInCluster = pulumi.BoolRef(false) }},
 		{"allowedNamespaces empty", "allowedNamespaces", func(a *gcp.DispatchArgs) { a.AllowedNamespaces = nil }},
+		{"frontDoorReplicas", "frontDoorReplicas", func(a *gcp.DispatchArgs) { a.FrontDoorReplicas = pulumi.IntRef(2) }},
+		{"frontDoorPdbMinAvailable", "frontDoorPdbMinAvailable", func(a *gcp.DispatchArgs) { a.FrontDoorPdbMinAvailable = pulumi.IntRef(1) }},
 	}
-	// The front door's two sizes and the whole sign-in group, each set to the value the
-	// package's own refusal table holds for it, and named by the input it sets.
-	for _, row := range append(dispatchNamedRefusals("frontDoorReplicas", "frontDoorPdbMinAvailable"), dispatchSandboxSignInGroup...) {
+	// The whole sign-in group, each input set as its own table sets it and named by the input it
+	// sets.
+	for _, row := range dispatchSandboxSignInGroup {
 		rows = append(rows, refusal{row.input, row.input, row.set})
 	}
 	for _, row := range rows {
@@ -226,14 +228,25 @@ func TestDispatchSandboxRefusesWhatItDoesNotBuild(t *testing.T) {
 
 // dispatchSandboxTailnetGroup is the tailnet group: the name Dispatch is served at, the tags its
 // front-door nodes carry, the key they join the tailnet with, the Tailscale Service they host, and
-// the two images their pods run. Each input is set as dispatchClusterOnlyRefusals sets it, the
-// package's one table of plausible values.
-var dispatchSandboxTailnetGroup = dispatchNamedRefusals(
-	"tailnetDnsName", "tags", "tailnetAuthKey", "tailnetService", "tailscaleImage", "frontDoorToolsImage")
+// the two images their pods run, each set to a value a consumer would plausibly send. The group is
+// written here and nowhere else, dispatchClusterOnlyRefusals taking these rows into its own table,
+// and the rows are in the order the resolver's own group names them in (dispatchTailnetInputs).
+var dispatchSandboxTailnetGroup = []dispatchClusterOnlyRefusal{
+	{"tailnetDnsName", func(a *gcp.DispatchArgs) { a.TailnetDnsName = "example-tailnet.ts.net" }},
+	{"tags", func(a *gcp.DispatchArgs) { a.Tags = []string{"tag:example-dispatch"} }},
+	{"tailnetAuthKey", func(a *gcp.DispatchArgs) { a.TailnetAuthKey = pulumi.String("tskey-auth-example-0123456789") }},
+	{"tailnetService", func(a *gcp.DispatchArgs) { a.TailnetService = pulumi.String("svc:example-dispatch") }},
+	{"tailscaleImage", func(a *gcp.DispatchArgs) { a.TailscaleImage = dispatchTailscaleImage }},
+	{"frontDoorToolsImage", func(a *gcp.DispatchArgs) { a.FrontDoorToolsImage = dispatchToolsImage }},
+}
 
 // dispatchSandboxSignInGroup is the sign-in group: the Google client Dispatch hands a browser to,
-// and the domain whose accounts it admits.
-var dispatchSandboxSignInGroup = dispatchNamedRefusals("signInClientId", "signInClientSecret", "signInDomain")
+// and the domain whose accounts it admits. Written here alone, as the tailnet group is.
+var dispatchSandboxSignInGroup = []dispatchClusterOnlyRefusal{
+	{"signInClientId", func(a *gcp.DispatchArgs) { a.SignInClientId = "example-client-id" }},
+	{"signInClientSecret", func(a *gcp.DispatchArgs) { a.SignInClientSecret = pulumi.String("example-client-secret") }},
+	{"signInDomain", func(a *gcp.DispatchArgs) { a.SignInDomain = "example.com" }},
+}
 
 // setDispatchTailnetGroup sets the whole tailnet group, the Dispatch a consumer reaches over its
 // tailnet, from the group's own list, so a tailnet input added later is set here too.
@@ -245,10 +258,12 @@ func setDispatchTailnetGroup(args *gcp.DispatchArgs) {
 
 // A group set in part is refused naming every input of that group still unset, so a consumer
 // learns its whole shortfall in one run rather than setting one input, being refused for the next,
-// and repeating that until the group is whole. The tailnet group is judged against a sandbox,
-// where one of its inputs is what asks for a front door; the sign-in group against a whole tailnet
-// group, since a sign-in input with no tailnet is refused for being sent at all
-// (TestDispatchSandboxRefusesWhatItDoesNotBuild).
+// and repeating that until the group is whole. That holds whether the refusal is about an input
+// the consumer left unset or about the value one it did set carries: a bad value is no reason to
+// drop the list, since correcting it leaves the same inputs missing. The tailnet group is judged
+// against a sandbox, where one of its inputs is what asks for a front door; the sign-in group
+// against a whole tailnet group, since a sign-in input with no tailnet is refused for being sent
+// at all (TestDispatchSandboxRefusesWhatItDoesNotBuild).
 func TestDispatchPartialTailnetGroupNamesEveryMissingInput(t *testing.T) {
 	for _, group := range []struct {
 		name   string
@@ -274,5 +289,48 @@ func TestDispatchPartialTailnetGroupNamesEveryMissingInput(t *testing.T) {
 				}
 			})
 		}
+	}
+	// The same shortfall where the input the consumer did set is one the resolver refuses the
+	// value of. valid is how many of the group's inputs the resolver checks before the broken
+	// one, set here as the group's own table sets them, so the refusal under test is the one the
+	// bad value earns rather than a check before it.
+	for _, row := range []struct {
+		name   string
+		rest   func(*gcp.DispatchArgs)
+		group  []dispatchClusterOnlyRefusal
+		valid  int
+		broken string
+		set    func(*gcp.DispatchArgs)
+	}{
+		{"tailnet tailnetDnsName", nil, dispatchSandboxTailnetGroup, 0, "tailnetDnsName", func(a *gcp.DispatchArgs) {
+			a.TailnetDnsName = "example-tailnet.example.com"
+		}},
+		{"tailnet tags", nil, dispatchSandboxTailnetGroup, 1, "tags", func(a *gcp.DispatchArgs) {
+			a.Tags = []string{"example-dispatch"}
+		}},
+		{"tailnet tailscaleImage", nil, dispatchSandboxTailnetGroup, 2, "tailscaleImage", func(a *gcp.DispatchArgs) {
+			a.TailscaleImage = "example.invalid/tailscale:latest"
+		}},
+		{"sign-in signInDomain", setDispatchTailnetGroup, dispatchSandboxSignInGroup, 0, "signInDomain", func(a *gcp.DispatchArgs) {
+			a.SignInDomain = "Example.com"
+		}},
+	} {
+		t.Run(row.name+" malformed", func(t *testing.T) {
+			args := dispatchSandboxArgs()
+			if row.rest != nil {
+				row.rest(args)
+			}
+			for _, in := range row.group[:row.valid] {
+				in.set(args)
+			}
+			row.set(args)
+			_, err := gcp.ResolveDispatch(args)
+			require.Error(t, err)
+			for _, other := range row.group[row.valid:] {
+				if other.input != row.broken {
+					require.ErrorContains(t, err, other.input, "the refusal names %s, which is unset too", other.input)
+				}
+			}
+		})
 	}
 }

@@ -335,17 +335,6 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	if _, err := corev1.NewServiceAccount(ctx, s.hostname, &corev1.ServiceAccountArgs{Metadata: metadata(s.hostname)}, child...); err != nil {
 		return err
 	}
-	// The auth key is the front door's alone: with no front door the consumer sets no tailnet
-	// input, so there is nothing to join a tailnet with and nothing to hold here. The gate is
-	// what keeps a nil tailnetAuthKey away from refuseDispatchSeedInSecret, which would dial
-	// ToStringOutput on it and take the provider down with it.
-	authKeyName := s.hostname + "-tailnet-auth-key"
-	var authKeySecret *corev1.Secret
-	if s.frontDoor {
-		if authKeySecret, err = corev1.NewSecret(ctx, authKeyName, &corev1.SecretArgs{Metadata: metadata(authKeyName), StringData: pulumi.StringMap{"TS_AUTHKEY": refuseDispatchSeedInSecret(args.TailnetAuthKey, dispatch, "tailnetAuthKey")}}, child...); err != nil {
-			return err
-		}
-	}
 	dispatchSecretName := s.hostname + "-dispatch"
 	databaseURL := pulumi.Sprintf("postgres://dispatch:%s@127.0.0.1:5432/dispatch?sslmode=disable", database.password.Result)
 	// The sign-in client secret is one key of this Secret only where sign-in is on: without the
@@ -368,18 +357,6 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	}, child...)
 	if err != nil {
 		return err
-	}
-	// The front door's children (its TLS Secret, its Serve config, its account and the pod spec
-	// itself) are built only where one is built at all: without the tailnet inputs none of them
-	// has a value to render from, tailnetService among them.
-	var (
-		frontDoorPod  corev1.PodSpecArgs
-		frontDoorOpts []pulumi.ResourceOption
-	)
-	if s.frontDoor {
-		if frontDoorPod, frontDoorOpts, err = newDispatchFrontDoor(ctx, dispatch, s, args.TailnetService, authKeyName, metadata, child); err != nil {
-			return err
-		}
 	}
 	seedName := s.hostname + "-nats-seed"
 	seedPath := refuseDispatchSeed(args.NatsSeedSecret, dispatch, "natsSeedSecret").ApplyT(func(secret string) string {
@@ -509,14 +486,58 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	seedMount := corev1.VolumeMountArray{corev1.VolumeMountArgs{Name: pulumi.String("nats-seed"), MountPath: pulumi.String("/var/run/secrets/envoy"), ReadOnly: pulumi.Bool(true)}}
 	seedVolume := corev1.VolumeArray{corev1.VolumeArgs{Name: pulumi.String("nats-seed"), Csi: &corev1.CSIVolumeSourceArgs{Driver: pulumi.String("secrets-store-gke.csi.k8s.io"), ReadOnly: pulumi.Bool(true), VolumeAttributes: pulumi.StringMap{"secretProviderClass": pulumi.String(seedName)}}}}
 
-	// The front door: frontDoorReplicas pods hosting the Tailscale Service svc:<hostname>, the name
-	// every reader reaches Dispatch at, each also running, without natsInCluster, the SOCKS5 proxy
-	// the app and the listener reach the NATS hub through (newDispatchFrontDoor). Recreated at one
-	// pod and rolled above it, so by default a roll never leaves the name to a single pod. Only the
-	// auth key's checksum is on its template: a renewed certificate in its TLS Secret rolls no pod.
-	// Without the tailnet inputs there is no front door and none of this is registered: readers
-	// reach the app inside the cluster instead.
-	//
+	podPeer := func(app string) networkingv1.NetworkPolicyPeerArgs {
+		return labelPeer(map[string]string{"app": app})
+	}
+	policy := func(name string, ingress networkingv1.NetworkPolicyIngressRuleArray) error {
+		return networkPolicy(ctx, name, s.namespace, map[string]string{"app": name}, ingress, child...)
+	}
+
+	// The front door, one thing and registered as one: the Secret holding the key its pods join
+	// the tailnet with, the children newDispatchFrontDoor builds and renders its pod from (its TLS
+	// Secret, its Serve config and its account), frontDoorReplicas pods hosting the Tailscale
+	// Service svc:<hostname>, the name every reader reaches Dispatch at, the Service the app and
+	// the listener dial their SOCKS5 proxy at without natsInCluster, and the policy fencing that
+	// proxy. The Deployment is recreated at one pod and rolled above it, so by default a roll never
+	// leaves the name to a single pod, and only the auth key's checksum is on its template: a
+	// renewed certificate in its TLS Secret rolls no pod. Without the tailnet inputs none of this
+	// is registered: nothing here has a value to render from, the auth key and tailnetService among
+	// them, and readers reach the app inside the cluster instead. The gate is also what keeps a nil
+	// tailnetAuthKey away from refuseDispatchSeedInSecret, which would dial ToStringOutput on it
+	// and take the provider down with it.
+	var frontDoorResources []pulumi.Resource
+	if s.frontDoor {
+		authKeyName := s.hostname + "-tailnet-auth-key"
+		authKeySecret, err := corev1.NewSecret(ctx, authKeyName, &corev1.SecretArgs{Metadata: metadata(authKeyName), StringData: pulumi.StringMap{"TS_AUTHKEY": refuseDispatchSeedInSecret(args.TailnetAuthKey, dispatch, "tailnetAuthKey")}}, child...)
+		if err != nil {
+			return err
+		}
+		frontDoorPod, frontDoorOpts, err := newDispatchFrontDoor(ctx, dispatch, s, args.TailnetService, authKeyName, metadata, child)
+		if err != nil {
+			return err
+		}
+		tailnet, err := deployment(tailnetName, s.frontDoorReplicas, s.disruption.frontDoorPDBMinAvailable, map[string]*corev1.Secret{authKeyName: authKeySecret}, frontDoorPod, frontDoorOpts...)
+		if err != nil {
+			return err
+		}
+		// Whatever reaches the proxy gets tailnet egress as a front-door node, on every front-door
+		// pod, so only the two workloads that dial the hub through it may. With natsInCluster no
+		// proxy runs and the front door admits nothing at all: the Service is not registered, and
+		// port 1055 being the policy's only rule today, the policy is still created with an empty
+		// Ingress, which denies every source.
+		frontDoorIngress := networkingv1.NetworkPolicyIngressRuleArray{}
+		if !s.natsInCluster {
+			tailnetService, err := service(tailnetName, dispatchSOCKS5Port)
+			if err != nil {
+				return err
+			}
+			frontDoorResources = []pulumi.Resource{tailnet, tailnetService}
+			frontDoorIngress = append(frontDoorIngress, ingressFrom(dispatchSOCKS5Port, networkingv1.NetworkPolicyPeerArray{podPeer(s.hostname), podPeer(listenerName)}))
+		}
+		if err := policy(tailnetName, frontDoorIngress); err != nil {
+			return err
+		}
+	}
 	// In the SOCKS5 mode both other workloads dial the NATS hub through the front door's proxy, so
 	// each waits for its pod and its Service, for a reason of its own. envoy-listener exits on a
 	// failed initial connect (packages/envoy/cmd/listener/main.go), so a listener pod started
@@ -529,20 +550,6 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	// registered at all, and waiting would let a front-door outage hold up a listener rollout that
 	// no longer depends on it. Without a front door neither waits either, there being nothing to
 	// wait for, and the sandbox is in-cluster NATS by the resolver's own rule.
-	var frontDoorResources []pulumi.Resource
-	if s.frontDoor {
-		tailnet, err := deployment(tailnetName, s.frontDoorReplicas, s.disruption.frontDoorPDBMinAvailable, map[string]*corev1.Secret{authKeyName: authKeySecret}, frontDoorPod, frontDoorOpts...)
-		if err != nil {
-			return err
-		}
-		if !s.natsInCluster {
-			tailnetService, err := service(tailnetName, dispatchSOCKS5Port)
-			if err != nil {
-				return err
-			}
-			frontDoorResources = []pulumi.Resource{tailnet, tailnetService}
-		}
-	}
 	frontDoor := pulumi.DependsOn(frontDoorResources)
 	// Both also mount the NATS seed, which the pod can read only once its principal holds
 	// roles/secretmanager.secretAccessor on the secret, so each waits for that grant too rather
@@ -724,12 +731,6 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		return err
 	}
 
-	podPeer := func(app string) networkingv1.NetworkPolicyPeerArgs {
-		return labelPeer(map[string]string{"app": app})
-	}
-	policy := func(name string, ingress networkingv1.NetworkPolicyIngressRuleArray) error {
-		return networkPolicy(ctx, name, s.namespace, map[string]string{"app": name}, ingress, child...)
-	}
 	// An ingress rule with an empty from admits every source, so a named namespace gets a rule and
 	// no named namespace gets none.
 	appIngress := networkingv1.NetworkPolicyIngressRuleArray{}
@@ -745,20 +746,6 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	}
 	if err := policy(s.hostname, appIngress); err != nil {
 		return err
-	}
-	// Whatever reaches the proxy gets tailnet egress as a front-door node, on every front-door pod,
-	// so only the two workloads that dial the hub through it may. With natsInCluster no proxy runs
-	// and the front door admits nothing at all: port 1055 is its only rule today, so the policy is
-	// still created, with an empty Ingress, which denies every source. Without a front door the
-	// policy is not created either: it would select pods that do not exist.
-	if s.frontDoor {
-		frontDoorIngress := networkingv1.NetworkPolicyIngressRuleArray{}
-		if !s.natsInCluster {
-			frontDoorIngress = append(frontDoorIngress, ingressFrom(dispatchSOCKS5Port, networkingv1.NetworkPolicyPeerArray{podPeer(s.hostname), podPeer(listenerName)}))
-		}
-		if err := policy(tailnetName, frontDoorIngress); err != nil {
-			return err
-		}
 	}
 	if err := policy(listenerName, networkingv1.NetworkPolicyIngressRuleArray{
 		ingressFrom(core.DefaultListenerPort, networkingv1.NetworkPolicyPeerArray{podPeer(s.hostname)}),

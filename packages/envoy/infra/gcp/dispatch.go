@@ -577,25 +577,48 @@ type dispatchInput struct {
 	set   bool
 }
 
-// dispatchClusterOnlyRefusals is every pulumi-tagged input of DispatchArgs that configures
-// Dispatch rather than the cluster, which clusterOnly refuses by name. Only the four inputs both
-// modes use are absent: clusterOnly itself, region and hostname, which name every cloud resource,
-// and deletionProtection, which guards the cluster as well as the database.
-func dispatchClusterOnlyRefusals(args *DispatchArgs) []dispatchInput {
+// dispatchTailnetInputs is the tailnet group: every input that exists only because Dispatch has a
+// front door on a tailnet, from the name it is served at to the images its pods run. A consumer
+// sets all six, for a Dispatch readers reach over the tailnet, or none, for the sandbox, where no
+// front door is built and the app is reached inside its cluster alone. Each row's set-predicate is
+// written here and nowhere else, dispatchClusterOnlyRefusals taking the group from here, so the
+// resolver's mode, the refusals of a half-set group and clusterOnly's can never read an input two
+// ways. The rows are in the order a refusal names them in (dispatchGroupClause).
+func dispatchTailnetInputs(args *DispatchArgs) []dispatchInput {
 	return []dispatchInput{
 		{"tailnetDnsName", args.TailnetDnsName != ""},
 		{"tags", len(args.Tags) > 0},
 		{"tailnetAuthKey", args.TailnetAuthKey != nil},
 		{"tailnetService", args.TailnetService != nil},
-		{"envoyImage", args.EnvoyImage != ""},
 		{"tailscaleImage", args.TailscaleImage != ""},
-		{"cloudSqlProxyImage", args.CloudSqlProxyImage != ""},
 		{"frontDoorToolsImage", args.FrontDoorToolsImage != ""},
-		{"natsUrl", args.NatsUrl != nil},
-		{"natsSeedSecret", args.NatsSeedSecret != nil},
+	}
+}
+
+// dispatchSignInInputs is the sign-in group: the Google client Dispatch hands a browser to, and
+// the domain whose accounts it admits. All three or none, as the tailnet group; with none the app
+// runs no browser sign-in at all, which is what the sandbox is for. Written here alone, as the
+// tailnet group is.
+func dispatchSignInInputs(args *DispatchArgs) []dispatchInput {
+	return []dispatchInput{
 		{"signInClientId", args.SignInClientId != ""},
 		{"signInClientSecret", args.SignInClientSecret != nil},
 		{"signInDomain", args.SignInDomain != ""},
+	}
+}
+
+// dispatchClusterOnlyRefusals is every pulumi-tagged input of DispatchArgs that configures
+// Dispatch rather than the cluster, which clusterOnly refuses by name. Only the four inputs both
+// modes use are absent: clusterOnly itself, region and hostname, which name every cloud resource,
+// and deletionProtection, which guards the cluster as well as the database. The nine inputs of the
+// two groups come from the groups' own definitions, so an input either group gains is refused here
+// without being written down a second time.
+func dispatchClusterOnlyRefusals(args *DispatchArgs) []dispatchInput {
+	return slices.Concat(dispatchTailnetInputs(args), dispatchSignInInputs(args), []dispatchInput{
+		{"envoyImage", args.EnvoyImage != ""},
+		{"cloudSqlProxyImage", args.CloudSqlProxyImage != ""},
+		{"natsUrl", args.NatsUrl != nil},
+		{"natsSeedSecret", args.NatsSeedSecret != nil},
 		{"agentSecretsUrl", args.AgentSecretsUrl != ""},
 		{"agentSecretsAudience", args.AgentSecretsAudience != ""},
 		{"appClientId", args.AppClientId != ""},
@@ -632,49 +655,7 @@ func dispatchClusterOnlyRefusals(args *DispatchArgs) []dispatchInput {
 		{"azureTenantId", args.AzureTenantId != nil},
 		{"azureClientId", args.AzureClientId != nil},
 		{"azureFederationAudience", args.AzureFederationAudience != nil},
-	}
-}
-
-// dispatchNamedInputs selects the named inputs from dispatchClusterOnlyRefusals, which is the one
-// definition of what "the consumer set this input" means for each of them: a group judged here
-// and a group refused there can never read the same input two ways. The rows come back in the
-// table's order, which is the order each group names them in, so dispatchGroupUnset's list reads
-// as the group does. A name no row carries would shrink the group it is selecting, and a group
-// short an input turns a mode on rather than refusing, so it panics instead: the names are
-// written in this file beside the table and read at every resolve, so one that matches nothing is
-// a programming error here and never a consumer's mistake.
-func dispatchNamedInputs(args *DispatchArgs, names ...string) []dispatchInput {
-	group := make([]dispatchInput, 0, len(names))
-	for _, in := range dispatchClusterOnlyRefusals(args) {
-		if slices.Contains(names, in.input) {
-			group = append(group, in)
-		}
-	}
-	if len(group) < len(names) {
-		for _, name := range names {
-			if !slices.ContainsFunc(group, func(in dispatchInput) bool { return in.input == name }) {
-				panic("dispatchNamedInputs: " + name + " is no input of dispatchClusterOnlyRefusals")
-			}
-		}
-	}
-	return group
-}
-
-// dispatchTailnetInputs is the tailnet group: every input that exists only because Dispatch has a
-// front door on a tailnet, from the name it is served at to the images its pods run. A consumer
-// sets all six, for a Dispatch readers reach over the tailnet, or none, for the sandbox, where no
-// front door is built and the app is reached inside its cluster alone. It is the group's one
-// definition, so the resolver's mode and the refusals of a half-set group can never disagree.
-func dispatchTailnetInputs(args *DispatchArgs) []dispatchInput {
-	return dispatchNamedInputs(args,
-		"tailnetDnsName", "tags", "tailnetAuthKey", "tailnetService", "tailscaleImage", "frontDoorToolsImage")
-}
-
-// dispatchSignInInputs is the sign-in group: the Google client Dispatch hands a browser to, and
-// the domain whose accounts it admits. All three or none, as the tailnet group; with none the app
-// runs no browser sign-in at all, which is what the sandbox is for.
-func dispatchSignInInputs(args *DispatchArgs) []dispatchInput {
-	return dispatchNamedInputs(args, "signInClientId", "signInClientSecret", "signInDomain")
+	})
 }
 
 // dispatchGroupSet reports whether the consumer set any input of group, which is what turns the
@@ -685,29 +666,23 @@ func dispatchGroupSet(group []dispatchInput) bool {
 	return slices.ContainsFunc(group, func(in dispatchInput) bool { return in.set })
 }
 
-// dispatchGroupUnset names every input of group the consumer left unset, comma-joined and in the
-// group's order, and "" for a whole group. A refusal carries it so one run names the whole
-// shortfall: the checks stop at the first input missing, and a consumer told only about that one
-// would set it and be refused again for the next.
-func dispatchGroupUnset(group []dispatchInput) string {
+// dispatchGroupClause is the clause every refusal of one of feature's own inputs trails while the
+// group is set in part: the rule the consumer broke, then unset, every input of the group left
+// unset, comma-joined and in the group's order. One run then names the whole shortfall whatever
+// the refusal was about, the value an input carries or an input missing: the checks stop at the
+// first input that is wrong, and a consumer told about that one alone would correct it and be
+// refused again for the next. A whole group is missing nothing to name, so its clause is "".
+func dispatchGroupClause(feature string, group []dispatchInput) string {
 	unset := make([]string, 0, len(group))
 	for _, in := range group {
 		if !in.set {
 			unset = append(unset, in.input)
 		}
 	}
-	return strings.Join(unset, ", ")
-}
-
-// dispatchGroupClause is the clause a refusal of one of feature's own inputs trails while the
-// group is set in part: the rule it broke, then unset, dispatchGroupUnset's list. It is empty for
-// an input the consumer did set, whose refusal is about the value it gave and not about the
-// group, and empty for a whole group, which is missing nothing to name.
-func dispatchGroupClause(feature, unset string, set bool) string {
-	if set || unset == "" {
+	if len(unset) == 0 {
 		return ""
 	}
-	return fmt.Sprintf(" (the %s inputs are set together or not at all; unset: %s)", feature, unset)
+	return fmt.Sprintf(" (the %s inputs are set together or not at all; unset: %s)", feature, strings.Join(unset, ", "))
 }
 
 // refuseDispatchHostname refuses a hostname that is not hostnameRule's shape. Both resolvers run
@@ -772,46 +747,44 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	}
 	// The two groups the consumer sets together or not at all, and the modes they turn on. Each
 	// group's own checks run only when that group is set, so the sandbox, which sets neither,
-	// reaches none of them; a group set in part fails them, and every refusal of an input it
-	// left unset names the rest of the shortfall (dispatchGroupClause).
+	// reaches none of them; a group set in part fails them, and every refusal of one of its inputs
+	// names the rest of the shortfall, whether the input it is about is missing or carries a value
+	// the resolver refuses (dispatchGroupClause). Each clause is what its group is short, read once
+	// here: no check below sets an input, so none of them can move either clause.
 	tailnetGroup, signInGroup := dispatchTailnetInputs(args), dispatchSignInInputs(args)
 	frontDoor, signInOn := dispatchGroupSet(tailnetGroup), dispatchGroupSet(signInGroup)
-	tailnetClause := func(set bool) string { return dispatchGroupClause("tailnet", dispatchGroupUnset(tailnetGroup), set) }
-	signInClause := func(set bool) string { return dispatchGroupClause("sign-in", dispatchGroupUnset(signInGroup), set) }
+	tailnetClause, signInClause := dispatchGroupClause("tailnet", tailnetGroup), dispatchGroupClause("sign-in", signInGroup)
 	if frontDoor {
 		if !tailnetDNSNameRule.MatchString(args.TailnetDnsName) {
-			return dispatchSettings{}, fmt.Errorf("tailnetDnsName %q must match %s%s", args.TailnetDnsName, tailnetDNSNameRule, tailnetClause(args.TailnetDnsName != ""))
+			return dispatchSettings{}, fmt.Errorf("tailnetDnsName %q must match %s%s", args.TailnetDnsName, tailnetDNSNameRule, tailnetClause)
 		}
 		if len(args.Tags) == 0 {
-			return dispatchSettings{}, fmt.Errorf("tags: at least one tag is required%s", tailnetClause(false))
+			return dispatchSettings{}, fmt.Errorf("tags: at least one tag is required%s", tailnetClause)
 		}
 		for i, tag := range args.Tags {
 			if !tagRule.MatchString(tag) {
-				return dispatchSettings{}, fmt.Errorf("tags[%d] %q must match %s", i, tag, tagRule)
+				return dispatchSettings{}, fmt.Errorf("tags[%d] %q must match %s%s", i, tag, tagRule, tailnetClause)
 			}
 		}
 	}
-	// The app's two images are the sandbox's as much as the tailnet's; the front door's two are
-	// read only where one is built, so without the tailnet group they are refused as set rather
-	// than required as unset (the sandbox block below).
+	// The app's two images are the sandbox's as much as the tailnet's, so they belong to no group
+	// and their refusals trail no clause; the front door's two are read only where one is built,
+	// so without the tailnet group they are refused as set rather than required as unset (the
+	// sandbox block below).
 	for _, image := range []struct {
-		field, ref    string
-		frontDoorOnly bool
+		field, ref, clause string
+		frontDoorOnly      bool
 	}{
-		{"envoyImage", args.EnvoyImage, false},
-		{"tailscaleImage", args.TailscaleImage, true},
-		{"cloudSqlProxyImage", args.CloudSqlProxyImage, false},
-		{"frontDoorToolsImage", args.FrontDoorToolsImage, true},
+		{"envoyImage", args.EnvoyImage, "", false},
+		{"tailscaleImage", args.TailscaleImage, tailnetClause, true},
+		{"cloudSqlProxyImage", args.CloudSqlProxyImage, "", false},
+		{"frontDoorToolsImage", args.FrontDoorToolsImage, tailnetClause, true},
 	} {
 		if image.frontDoorOnly && !frontDoor {
 			continue
 		}
 		if !imageRule.MatchString(image.ref) {
-			clause := ""
-			if image.frontDoorOnly {
-				clause = tailnetClause(image.ref != "")
-			}
-			return dispatchSettings{}, fmt.Errorf("%s %q must be pinned by digest, as <name>@sha256:<64 lowercase hex digits>%s", image.field, image.ref, clause)
+			return dispatchSettings{}, fmt.Errorf("%s %q must be pinned by digest, as <name>@sha256:<64 lowercase hex digits>%s", image.field, image.ref, image.clause)
 		}
 	}
 	if err := refuseDispatchRegion(args.Region); err != nil {
@@ -844,18 +817,18 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	}
 	if signInOn {
 		if args.SignInClientId == "" {
-			return dispatchSettings{}, fmt.Errorf("signInClientId is required%s", signInClause(false))
+			return dispatchSettings{}, fmt.Errorf("signInClientId is required%s", signInClause)
 		}
 		if !signInDomainRule.MatchString(args.SignInDomain) {
-			return dispatchSettings{}, fmt.Errorf("signInDomain %q must be a lowercase DNS name%s", args.SignInDomain, signInClause(args.SignInDomain != ""))
+			return dispatchSettings{}, fmt.Errorf("signInDomain %q must be a lowercase DNS name%s", args.SignInDomain, signInClause)
 		}
 	}
 	if frontDoor {
 		if args.TailnetAuthKey == nil {
-			return dispatchSettings{}, fmt.Errorf("tailnetAuthKey is required%s", tailnetClause(false))
+			return dispatchSettings{}, fmt.Errorf("tailnetAuthKey is required%s", tailnetClause)
 		}
 		if args.TailnetService == nil {
-			return dispatchSettings{}, fmt.Errorf("tailnetService is required%s", tailnetClause(false))
+			return dispatchSettings{}, fmt.Errorf("tailnetService is required%s", tailnetClause)
 		}
 	}
 	if args.NatsUrl == nil {
@@ -865,7 +838,7 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 		return dispatchSettings{}, errors.New("natsSeedSecret is required")
 	}
 	if signInOn && args.SignInClientSecret == nil {
-		return dispatchSettings{}, fmt.Errorf("signInClientSecret is required%s", signInClause(false))
+		return dispatchSettings{}, fmt.Errorf("signInClientSecret is required%s", signInClause)
 	}
 	if args.AgentSecretsAudience != "" && args.AgentSecretsUrl == "" {
 		return dispatchSettings{}, errors.New("agentSecretsUrl is required when agentSecretsAudience is set")
