@@ -488,11 +488,13 @@ export interface GateEntry {
    */
   ruleAsksPartial?: true;
   /**
-   * Why the Dispatch decision record of an `unmarked` write was never written (`decision-record.ts`),
-   * which the host writes inside its own handler (envoy.ts). A gated call's own record runs after
-   * the gate's handler returned, so its failure rides on an `advisor-gate-record` entry instead.
+   * On an `unmarked` entry whose write carried an ask, so the host started a Dispatch decision
+   * record of it (`decision-record.ts`): that record's own id, `<toolCallId>#<the CLI ledger
+   * line's place in the call>`. One tool call can log several unmarked writes and be a gated call
+   * of its own, so this, and never the tool call id, is what ties the `advisor-gate-record`
+   * follow-up of a record that failed to this entry.
    */
-  recordError?: string;
+  recordId?: string;
   /**
    * Why this call's marker was not minted, though its decision let the write out: `call-ended`,
    * the call's own tool having ended while the gate still held it, so no command of it can run.
@@ -500,13 +502,20 @@ export interface GateEntry {
   mintSkipped?: "call-ended";
 }
 /**
- * The follow-up entry of a gated call whose decision reached no Dispatch record: which call it
- * belongs to, and what stopped the record. The decision itself stands, in the `advisor-gate` entry
- * written before the record began.
+ * The follow-up entry of a call whose decision reached no Dispatch record: which call it belongs
+ * to, and what stopped the record. The decision itself stands, in the `advisor-gate` entry
+ * written before the record began. The core writes one for a gated call, the host (envoy.ts) one
+ * for an unmarked write, which names the entry by its `recordId`.
  */
 export interface GateRecordEntry {
   toolCallId: string;
   tool: string;
+  /**
+   * On an unmarked write's follow-up, written by the host: the `recordId` of the `advisor-gate`
+   * entry this loss belongs to. A gated call's follow-up, written by the core, carries none: its
+   * tool call id names its one entry.
+   */
+  recordId?: string;
   recordError: string;
 }
 /** A model as the gate passes it around: the fork's full Model, of which the core reads only these. */

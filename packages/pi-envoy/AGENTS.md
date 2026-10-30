@@ -576,8 +576,12 @@ apart from the verdict's mode (`sessionMode`, block by default); `envoy.ts` turn
 CLI logged as unmarked into an `unmarked` entry, and, where the CLI's own line says the write
 carried asks for a person (`asksCarried`, counted with `newAsks` in
 `@legion/envoy-client/askgate-new-asks`), publishes one decision record for it through the
-recorder `registerAskGate` returns, which runs until Dispatch answers it or the shutdown cut ends it,
-with `recordError` on the entry when that fails. The gate appends a cause note
+recorder `registerAskGate` returns, which runs until Dispatch answers it or the shutdown cut ends it.
+The entry is appended before that record starts and the tool result awaits none of it — a session's
+records are written one at a time, each with the client's own deadline, so awaiting one there
+stalled the write past the host's handler limit — and a record that fails appends its own
+`advisor-gate-record` entry, named by the `recordId` (`<toolCallId>#<ledger line>`) the entry
+carries. The gate appends a cause note
 (`nonLiteralCause`, `causeNote`) to the result of a call outside the literal form that the CLI
 refused. A gate that did not load refuses each literal call at the hook (`loadFailureGate`) and
 mints nothing; it writes no mode, so a write that reaches the CLI — one outside the literal form,
@@ -599,8 +603,10 @@ the CLI ledger line's place in its tool call — so the reader counts one (sessi
 core starts a gated call's record as its handler returns, never inside it, and holds it in a
 pending set: a record that fails or is cut at shutdown writes one line to `runtimeLogger` and
 appends one `advisor-gate-record` entry (`ADVISOR_GATE_RECORD_ENTRY_TYPE`, carrying `toolCallId`,
-`tool` and `recordError`), since the call's `advisor-gate` entry was written before the record
-began; `askgate-report.ts` counts both of those as records lost. Once the session is shutting
+`tool`, `recordError` and, from the host, `recordId`), since the call's `advisor-gate` entry was
+written before the record began; `askgate-report.ts` counts each of those as a decision record the
+session could not confirm, joining a gated call's follow-up by tool call id and an unmarked
+write's by `recordId`, since one tool call can carry both. Once the session is shutting
 down, the one `session_shutdown` handler `registerAskGate` binds owns the cut and its delay
 (`RECORD_CUT_DELAY_MS`, whether or not the gate loaded), and the core's handler waits for its own
 handlers and then for those records, so a record still lands, and the entry of one that could

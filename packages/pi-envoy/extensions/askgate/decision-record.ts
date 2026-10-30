@@ -41,13 +41,14 @@
 //
 // What is lost, and is left visible in a count rather than hidden: a session killed between a
 // decision and its write loses that one record; a session that never reached a gated call writes
-// no document at all; a write that fails or that the session's shutdown cuts loses its record,
-// and one given up that way may have landed all the same, so a record its caller calls lost can
-// still be in the document; and two processes that write one session's first record at the same
-// moment each find no document and upload one, where the later upload's version replaces the
-// record the earlier one carried. The caller says where a loss goes: the core appends an
-// `advisor-gate-record` entry for the gated call it belongs to, and the host leaves `recordError`
-// on the `unmarked` entry it writes; `scripts/askgate-report.ts` counts both as records lost.
+// no document at all; a write that fails or that the session's shutdown cuts is unconfirmed, and
+// one given up that way may have landed all the same, so a record its caller could not confirm
+// can still be in the document; and two processes that write one session's first record at the
+// same moment each find no document and upload one, where the later upload's version replaces
+// the record the earlier one carried. The caller says where a loss goes: both the core, for a
+// gated call, and the host, for an unmarked write, append an `advisor-gate-record` entry — the
+// host's named by the record's own id, since one tool call can log several unmarked writes — and
+// `scripts/askgate-report.ts` counts each as a decision record the session could not confirm.
 import type { CreateArtifactInput, EditArtifactInput } from "@legion/contracts";
 import { DispatchServiceError } from "@legion/envoy-client/dispatch-http";
 import pkg from "../../package.json";

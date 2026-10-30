@@ -7510,7 +7510,7 @@ describe("the Dispatch decision record (A5)", () => {
   test("a call that opens no new ask writes no rules fields and no record", async () => {
     // A comment opens no ask, and a re-upload whose stored version the gate read holds every
     // opener it carries: neither is a rules decision. A record written here would reach this
-    // Dispatch, which answers only the reads, and come back as recordError.
+    // Dispatch, which answers only the reads, and come back as an `advisor-gate-record` entry.
     const stored = ":::ask{#window}\nWhich deployment window?\n:::\n";
     const served = dispatchServing([
       { id: "doc-brief", name: "brief.md", slug: "brief", markdown: stored },
@@ -7536,7 +7536,7 @@ describe("the Dispatch decision record (A5)", () => {
         "ruleAsksPartial",
         "ruleAsksCut",
         "ruleTextMissing",
-        "recordError",
+        "recordId",
       ] as const)
         expect(entry[field]).toBeUndefined();
     }

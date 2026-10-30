@@ -170,7 +170,12 @@ import { sideTurn } from "../src/side-turn";
 import { TypedPictures } from "../src/typed-pictures";
 import { type CardDelivery, UnwrittenFrames, unwrittenCardKeys } from "../src/unwritten-frames";
 import { type AskGateRegistration, registerAskGate } from "./askgate/askgate";
-import { ADVISOR_GATE_ENTRY_TYPE, type GateEntry } from "./askgate/askgate-core";
+import {
+  ADVISOR_GATE_ENTRY_TYPE,
+  ADVISOR_GATE_RECORD_ENTRY_TYPE,
+  type GateEntry,
+  type GateRecordEntry,
+} from "./askgate/askgate-core";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
 
@@ -3734,31 +3739,54 @@ export default function envoyExtension(pi: PiApi): void {
         // The entry above reaches only this machine's disk. A write that would have opened an
         // ask for a person also goes to Dispatch, where a session with no access to this machine
         // counts the asks that went out, or were refused, unreviewed: the record carries the
-        // tool, the mode and how many asks the write carried, and no ask text. Its write runs
-        // until Dispatch has answered it or the session's shutdown cuts it, so an unreachable
-        // Dispatch delays this one tool result by what the client's own attempts cost, and a
-        // failure costs the result nothing: the log says why, and so does the entry.
+        // tool, the mode and how many asks the write carried, and no ask text. The entry is
+        // appended first and the record started behind it, awaited by nothing of this call: a
+        // session's records are written one at a time and each read and write has the client's
+        // own deadline, so awaiting one here held this tool result for as long as every record
+        // queued before it took, past the host's handler limit (#2161, reviewer round 17). A
+        // record that fails or that the shutdown cuts rides on an `advisor-gate-record` follow-up
+        // of its own, as a gated call's does (`askgate-core.ts`), appended while the session is
+        // still live; the recorder's cut at shutdown is what bounds it.
         const asksCarried = askgate.asksCarried ?? 0;
-        let recordError: string | undefined;
-        if (askgateRecorder !== undefined && asksCarried > 0) {
-          recordError = await askgateRecorder.recordUnmarked({
-            entry: { ...entry, asksCarried },
-            sessionId: context.sessionManager.getSessionId(),
-            directory: context.cwd,
-            // One tool call can log several gated writes, so the record's id names the ledger
-            // line's own place in it: what the reader de-duplicates a replayed write by.
-            id: `${event.toolCallId}#${line}`,
-          });
-          if (recordError !== undefined) {
-            logger.warn(
-              `envoy: AskGate did not record the unmarked ${entry.path} on Dispatch: ${recordError}`
-            );
-          }
-        }
+        // One tool call can log several gated writes, so the record's id names the ledger line's
+        // own place in it: what the reader de-duplicates a replayed write by, and what ties the
+        // follow-up of a record that failed to this entry alone — the gated calls of that same
+        // tool call carry its id too.
+        const recordId = `${event.toolCallId}#${line}`;
+        const recorder = asksCarried > 0 ? askgateRecorder : undefined;
         pi.appendEntry(ADVISOR_GATE_ENTRY_TYPE, {
           ...entry,
-          ...(recordError === undefined ? {} : { recordError }),
+          ...(recorder === undefined ? {} : { recordId }),
         } satisfies GateEntry);
+        if (recorder === undefined) continue;
+        void (async () => {
+          let recordError: string | undefined;
+          try {
+            recordError = await recorder.recordUnmarked({
+              entry: { ...entry, asksCarried },
+              sessionId: context.sessionManager.getSessionId(),
+              directory: context.cwd,
+              id: recordId,
+            });
+          } catch (error) {
+            recordError = messageFor(error);
+          }
+          if (recordError === undefined) return;
+          logger.warn(
+            `envoy: AskGate did not record the unmarked ${entry.path} on Dispatch: ${recordError}`
+          );
+          try {
+            pi.appendEntry(ADVISOR_GATE_RECORD_ENTRY_TYPE, {
+              toolCallId: entry.toolCallId,
+              tool: entry.tool,
+              recordId,
+              recordError,
+            } satisfies GateRecordEntry);
+          } catch {
+            // The session is sealed or its file is gone: there is nothing left to tell, and the
+            // tool result this record belongs to was answered long before it ran.
+          }
+        })();
       }
     }
     if (event.isError) return;

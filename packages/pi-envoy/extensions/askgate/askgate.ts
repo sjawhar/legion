@@ -102,8 +102,10 @@ export interface AskGateRegistration {
   /**
    * Publishes one Dispatch decision record for a write that reached the CLI outside the form the
    * gate reads (`decision-record.ts`). The write runs until Dispatch has answered it or the
-   * session's shutdown cuts it. Answers the text for the entry's `recordError` when the write
-   * failed or was given up, and undefined when it recorded or when the entry is nothing to record.
+   * session's shutdown cuts it, and the caller awaits it outside its own handler. Answers the
+   * text for the `recordError` of the `advisor-gate-record` follow-up the caller then appends
+   * when the write failed or was given up, and undefined when it recorded or when the entry is
+   * nothing to record.
    */
   readonly recordUnmarked: (request: RecordRequest) => Promise<string | undefined>;
 }

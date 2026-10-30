@@ -310,43 +310,73 @@ describe("parseSessionText", () => {
   });
 
   // #2161, reviewer round 16: a decision the gate could not record on Dispatch is in no count of
-  // the Dispatch report, so the session files are where it is counted. The gate's own calls carry
-  // the loss on an `advisor-gate-record` entry written after the call's own; an unmarked write's
-  // entry carries it itself.
-  test("a record the gate could not write is read onto its call, from either entry", () => {
-    const lost = (toolCallId: string, recordError: string) =>
-      JSON.stringify({
-        type: "custom",
-        customType: "advisor-gate-record",
-        id: `r-${toolCallId}`,
-        parentId: "p",
-        timestamp: "2026-10-21T12:00:01.000Z",
-        data: { toolCallId, tool: "dispatch_ask", recordError },
-      });
+  // the Dispatch report, so the session files are where it is counted. Round 17: an unmarked
+  // write's loss rides on a follow-up of its own too, since the host appends that write's entry
+  // before it starts the record.
+  const SHUT_DOWN = "the session shut down before Dispatch answered the record";
+  const REFUSED = "dispatch: 503 Service Unavailable";
+  /** An `advisor-gate-record` follow-up: the gate's names a tool call, the host's a record id. */
+  const lost = (data: Record<string, unknown>) =>
+    JSON.stringify({
+      type: "custom",
+      customType: "advisor-gate-record",
+      id: `r-${String(data.toolCallId)}`,
+      parentId: "p",
+      timestamp: "2026-10-21T12:00:01.000Z",
+      data: { tool: "dispatch_ask", ...data },
+    });
+  test("a record the session could not confirm is read onto its call, from either follow-up", () => {
     const text = [
       gate({ id: "k1", fields: { ruleOutcome: "none" } }),
-      lost("k1", "the session shut down before Dispatch answered the record"),
+      lost({ toolCallId: "k1", recordError: SHUT_DOWN }),
       gate({ id: "k2", fields: { ruleOutcome: "none" } }),
-      // An unmarked write: the host writes the entry once its own record has answered, so the
-      // reason rides on the entry itself.
-      gate({
-        id: "k3",
-        outcome: "unmarked",
-        fields: { asksCarried: 1, recordError: "dispatch: 503 Service Unavailable" },
-      }),
+      // An unmarked write: its entry is written before the record starts, so the reason rides on
+      // a follow-up named by the record's own id.
+      gate({ id: "k3", outcome: "unmarked", fields: { asksCarried: 1, recordId: "k3#0" } }),
+      lost({ toolCallId: "k3", recordId: "k3#0", recordError: REFUSED }),
     ].join("\n");
     const parsed = parseSessionText(text, "s");
     expect(parsed.map((record) => [record.toolCallId, record.recordError])).toEqual([
-      ["k1", "the session shut down before Dispatch answered the record"],
+      ["k1", SHUT_DOWN],
       ["k2", null],
-      ["k3", "dispatch: 503 Service Unavailable"],
+      ["k3", REFUSED],
     ]);
-    // The follow-up entry is no gated call of its own: it is counted as a record lost, and in
-    // nothing else.
+    // The follow-up entry is no gated call of its own: it is counted as a record the session
+    // could not confirm, and in nothing else.
     const stats = computeStats(parsed);
     expect(stats.gatedCalls).toBe(3);
-    expect(stats.recordsLost).toBe(2);
-    expect(formatReport(stats, 1)).toContain("decision records lost: 2");
+    expect(stats.recordsUnconfirmed).toBe(2);
+    expect(formatReport(stats, 1)).toContain("decision records not confirmed: 2");
+  });
+
+  // The quality review's probe (#2161, round 17): an unmarked entry takes the tool call id of the
+  // `tool_result` that read the CLI's ledger line, so one tool call can carry a gated call of its
+  // own and several unmarked writes. Joining the gated call's follow-up by that id copied its one
+  // loss onto each of them, and counted one lost record three times.
+  test("a gated call's unconfirmed record is counted once, not again on each unmarked entry of its tool call", () => {
+    const text = [
+      gate({ id: "c1", fields: { ruleOutcome: "none" } }),
+      gate({ id: "c1", outcome: "unmarked", fields: { asksCarried: 1, recordId: "c1#0" } }),
+      gate({ id: "c1", outcome: "unmarked", fields: { asksCarried: 1, recordId: "c1#1" } }),
+      lost({ toolCallId: "c1", recordError: SHUT_DOWN }),
+    ].join("\n");
+    const parsed = parseSessionText(text, "s");
+    expect(parsed.map((record) => record.recordError)).toEqual([SHUT_DOWN, null, null]);
+    const stats = computeStats(parsed);
+    expect(stats.gatedCalls).toBe(3);
+    expect(stats.recordsUnconfirmed).toBe(1);
+  });
+
+  test("an unmarked write's unconfirmed record lands on its own entry alone, never on the tool call's others", () => {
+    const text = [
+      gate({ id: "c1", fields: { ruleOutcome: "none" } }),
+      gate({ id: "c1", outcome: "unmarked", fields: { asksCarried: 1, recordId: "c1#0" } }),
+      gate({ id: "c1", outcome: "unmarked", fields: { asksCarried: 1, recordId: "c1#1" } }),
+      lost({ toolCallId: "c1", recordId: "c1#1", recordError: REFUSED }),
+    ].join("\n");
+    const parsed = parseSessionText(text, "s");
+    expect(parsed.map((record) => record.recordError)).toEqual([null, null, REFUSED]);
+    expect(computeStats(parsed).recordsUnconfirmed).toBe(1);
   });
 });
 

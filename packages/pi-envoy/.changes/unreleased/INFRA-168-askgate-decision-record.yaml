@@ -15,12 +15,15 @@ body: |-
   stored version already holds counts them as carried. `OMP_ASKGATE_RECORD_PROJECT` names the
   project, else `LEGION_PROJECT` does, and with neither set nothing is written. The record runs
   once the gate has answered the call, never inside its `tool_call` handler, and never changes
-  the decision. Its write runs until Dispatch has answered it or the session's shutdown cuts it,
+  the decision; an unmarked write's runs behind that write's own entry, and the tool result waits
+  on none of it. Its write runs until Dispatch has answered it or the session's shutdown cuts it,
   under the one `Idempotency-Key` the client gives the call, so a Dispatch slow under load is
   waited out rather than given up. A record that fails or that the session's shutdown cuts writes
   one line to the host's log and appends one
-  `advisor-gate-record` entry carrying `toolCallId`, `tool` and `recordError`; the call's own
-  `advisor-gate` entry stands as written, and `--sessions` counts both as decision records lost.
+  `advisor-gate-record` entry carrying `toolCallId`, `tool`, `recordError` and, for an unmarked
+  write, the record's own `recordId`, which is what ties it to that write's entry alone; the
+  call's own `advisor-gate` entry stands as written, and `--sessions` counts each follow-up as one
+  decision record the session could not confirm.
   At shutdown the one `session_shutdown` handler the gate binds gives the records 1.25 s from
   that moment and then cuts them, whether or not the gate loaded, and the gate waits for what is
   still pending, so a record still lands, and the entry of one that could not, before the session

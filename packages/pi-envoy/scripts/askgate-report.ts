@@ -23,10 +23,13 @@
 //     not `verdict`: timeout, error, no-verdict, halted, skipped, rebuttal, breaker, and in
 //     warn mode `unreadable`, `unmarked`, `abandoned` and `shutdown`. A warn-mode `abandoned` or
 //     `shutdown` is that alone: its decision is `allow`, so it is not sent back.
-//   - records lost: the gated call's decision never reached Dispatch. Every entry carrying a
-//     `recordError` — an unmarked write's own, written with the entry, and the one the gate
-//     appends as an `advisor-gate-record` entry for every other call — so the day's `--sessions`
-//     count names what the `--dispatch-project` count over the same day cannot hold.
+//   - decision records not confirmed: the session could not confirm that the gated call's
+//     decision reached Dispatch. Every entry carrying a `recordError`, which rides on the
+//     `advisor-gate-record` entry written after the call — the gate's own, named by the tool call
+//     id, and an unmarked write's, named by that record's own id — so the day's `--sessions`
+//     count names what the `--dispatch-project` count over the same day cannot hold. It is an
+//     upper bound on what Dispatch lacks: a write given up on this side may still have landed
+//     (`extensions/askgate/decision-record.ts`).
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseArgs as parseArgv } from "node:util";
@@ -82,9 +85,16 @@ export interface GateRecord {
   /** Why no marker was minted though the decision let the write out: `call-ended`, or null. */
   mintSkipped: string | null;
   /**
-   * Why this call's decision never reached Dispatch: the `recordError` of the `advisor-gate-record`
-   * entry the gate appended after it, or, for an unmarked write, the one on the entry itself.
-   * Null where the record landed, or where the call had none to write.
+   * On an unmarked write whose Dispatch record the host started: that record's own id,
+   * `<toolCallId>#<the CLI ledger line's place in the call>`, which is what its
+   * `advisor-gate-record` follow-up names. Null on every other entry.
+   */
+  recordId: string | null;
+  /**
+   * Why this call's decision record was never confirmed: the `recordError` of the
+   * `advisor-gate-record` entry written after it — the gate's own, named by the tool call id, or
+   * an unmarked write's, named by its `recordId`. Null where the record landed, or where the call
+   * had none to write. The write may have landed on Dispatch all the same (`decision-record.ts`).
    */
   recordError: string | null;
   /** `reviewed`: the text the model judged. `command`: the tool call's own text, which for a
@@ -147,10 +157,13 @@ export interface Stats {
    */
   mintsSkipped: number;
   /**
-   * Gated calls carrying a `recordError`: the decision never reached Dispatch, so the Dispatch
-   * report over the same day counts one decision fewer than the machine made.
+   * Gated calls carrying a `recordError`: the session could not confirm that the decision's
+   * record reached Dispatch, because the write failed or was given up. An upper bound on what
+   * Dispatch lacks, never a count of it — a write given up on this side may have landed all the
+   * same (`decision-record.ts`) — so the Dispatch report over the same day counts at most that
+   * many decisions fewer than the machine made.
    */
-  recordsLost: number;
+  recordsUnconfirmed: number;
   perTool: ToolShare[];
   rules: RuleStats;
   /** Every outcome seen and how many entries carried it, most first. */
@@ -193,15 +206,22 @@ function callText(call: Json): string {
 }
 
 /**
- * Reads every advisor-gate entry of one session file's text, each carrying what the gate could
- * not record of it on Dispatch: the `recordError` of its own entry (an unmarked write's, written
- * with the entry) or of the `advisor-gate-record` entry the gate appended after it. Lines that do
- * not parse are skipped.
+ * Reads every advisor-gate entry of one session file's text, each carrying what the session could
+ * not confirm of its record on Dispatch: the `recordError` of the `advisor-gate-record` entry
+ * written after it, which the gate names by the tool call id and the host, for an unmarked write,
+ * by that record's own id. Lines that do not parse are skipped.
  */
 export function parseSessionText(text: string, session: string): GateRecord[] {
   const calls = new Map<string, string>();
-  /** Each call whose decision record was lost, by tool call id, and what stopped it. */
-  const recordsLost = new Map<string, string>();
+  /** Each gated call whose decision record failed, by tool call id, and what stopped it. */
+  const gatedLost = new Map<string, string>();
+  /**
+   * The same for an unmarked write, by its record's own id: one tool call can log several
+   * unmarked writes and be a gated call itself, since an unmarked entry takes the id of the tool
+   * result that read the CLI's ledger line, so a tool call id names none of them on its own
+   * (#2161, reviewer round 17).
+   */
+  const unmarkedLost = new Map<string, string>();
   const records: GateRecord[] = [];
   for (const line of text.split("\n")) {
     if (line.trim() === "") continue;
@@ -225,7 +245,10 @@ export function parseSessionText(text: string, session: string): GateRecord[] {
     if (entry.type === "custom" && entry.customType === "advisor-gate-record") {
       const lost = isObject(entry.data) ? entry.data : {};
       const why = strOrNull(lost.recordError);
-      if (why !== null) recordsLost.set(str(lost.toolCallId), why);
+      if (why === null) continue;
+      const recordId = strOrNull(lost.recordId);
+      if (recordId === null) gatedLost.set(str(lost.toolCallId), why);
+      else unmarkedLost.set(recordId, why);
       continue;
     }
     if (entry.type !== "custom" || entry.customType !== "advisor-gate") continue;
@@ -255,16 +278,24 @@ export function parseSessionText(text: string, session: string): GateRecord[] {
       ruleModel: strOrNull(data.ruleModel),
       target: strOrNull(data.target),
       mintSkipped: strOrNull(data.mintSkipped),
-      // The unmarked write's own entry carries it; the gate's own calls carry it on the
-      // follow-up entry joined below.
-      recordError: strOrNull(data.recordError),
+      recordId: strOrNull(data.recordId),
+      // Joined below, from the follow-up entry the record's failure wrote.
+      recordError: null,
     });
   }
   // The call comes before its entry, and the record's follow-up entry after it, but both joins
   // wait for the whole file.
   for (const record of records) {
     if (record.textSource === "command") record.text = calls.get(record.toolCallId) ?? null;
-    record.recordError ??= recordsLost.get(record.toolCallId) ?? null;
+    // Each side joins on its own key, so one lost record is counted once: a gated call's loss is
+    // not copied onto the unmarked entries that share its tool call id, nor an unmarked write's
+    // onto the gated call's entry.
+    record.recordError =
+      record.outcome === "unmarked"
+        ? record.recordId === null
+          ? null
+          : (unmarkedLost.get(record.recordId) ?? null)
+        : (gatedLost.get(record.toolCallId) ?? null);
   }
   return records;
 }
@@ -415,7 +446,7 @@ export function computeStats(records: GateRecord[]): Stats {
     costCount: costs.length,
     refusals: records.filter(isRefusal).length,
     mintsSkipped: records.filter((r) => r.mintSkipped !== null).length,
-    recordsLost: records.filter((r) => r.recordError !== null).length,
+    recordsUnconfirmed: records.filter((r) => r.recordError !== null).length,
     perTool: [...byTool.values()].sort((a, b) => (a.tool < b.tool ? -1 : a.tool > b.tool ? 1 : 0)),
     rules: computeRuleStats(records),
     byOutcome: [...byOutcome.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)),
@@ -458,6 +489,9 @@ export function formatReport(stats: Stats, seed: number): string[] {
     `The rules error lines show the ${ERROR_TEXTS_SHOWN} commonest error texts.`,
     "A mint skipped is a call whose decision let the write out and whose own tool ended while the",
     "gate still held it: no marker was minted, since no command of that call can run any more.",
+    "Decision records not confirmed are the calls whose decision record failed or was given up:",
+    "an upper bound on what Dispatch lacks, since a write given up here may have landed, so the",
+    "Dispatch report over the same day counts at most that many decisions fewer than this one.",
     `gated calls: ${stats.gatedCalls}`,
     `reviews: ${stats.reviews}`,
     `sent back: ${share(stats.sentBack, stats.gatedCalls)} (${stats.sentBack} of ${stats.gatedCalls} gated calls)`,
@@ -467,7 +501,7 @@ export function formatReport(stats: Stats, seed: number): string[] {
     `refusals: ${stats.refusals}`,
     `unreviewed sends: ${stats.unreviewed}`,
     `mints skipped: ${stats.mintsSkipped}`,
-    `decision records lost: ${stats.recordsLost}`,
+    `decision records not confirmed: ${stats.recordsUnconfirmed}`,
     ...stats.byOutcome.map(([outcome, count]) => `outcome ${outcome}: ${count}`),
     ...stats.perTool.map(
       (t) =>

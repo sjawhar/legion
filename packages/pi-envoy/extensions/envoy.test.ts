@@ -4451,6 +4451,8 @@ console.log(JSON.stringify(args));
     const recordWrites = { uploads: 0, appends: 0 };
     /** The documents this Dispatch holds, which its list of the project's answers. */
     const recordDocuments: Array<{ id: string; name: string; slug: string }> = [];
+    /** Woken as each record reaches the stand-in Dispatch: what `recordsLanded` waits on. */
+    const recordWaiters: Array<() => void> = [];
     /**
      * Answers the three Dispatch calls a decision record makes — the read of the session's own
      * document by name, the document's upload, then an append to it — and keeps each JSON record
@@ -4464,9 +4466,11 @@ console.log(JSON.stringify(args));
       recordDocuments.length = 0;
       process.env.OMP_ASKGATE_RECORD_PROJECT = "INFRA";
       const other = globalThis.fetch;
+      recordWaiters.length = 0;
       const keep = (markdown: string) => {
         for (const [, line] of markdown.matchAll(/```json\n(.*)\n```/g))
           published.push(JSON.parse(line ?? "{}") as Record<string, unknown>);
+        for (const wake of recordWaiters.splice(0)) wake();
       };
       globalThis.fetch = async (input, init) => {
         const url = String(input instanceof Request ? input.url : input);
@@ -4504,12 +4508,30 @@ console.log(JSON.stringify(args));
       };
     };
     /**
+     * Waits for `wanted` records to reach the stand-in Dispatch. An unmarked write's record runs
+     * behind its tool result (#2161, reviewer round 17), so what a test reads is what landed
+     * after the handler returned, not what it returned with: the wait is on the write itself,
+     * never on a delay.
+     */
+    const recordsLanded = async (wanted: number) => {
+      while (published.length < wanted) {
+        const { promise, resolve } = Promise.withResolvers<void>();
+        recordWaiters.push(resolve);
+        await promise;
+      }
+    };
+    /**
      * One unmarked write, end to end: the session's gate is bound, the `dispatch` CLI runs the
      * write with no marker for it — what a pipe, a script or a subagent's call leaves — and the
      * session's next tool result reads the line the CLI wrote in the ledger. Answers what reached
-     * Dispatch and the `advisor-gate` entries the entry appended.
+     * Dispatch, once the `wanted` records have landed, and the `advisor-gate` entries the entry
+     * appended.
      */
-    const unmarkedRun = async (envoyExtension: (pi: TestPi) => void, argv: readonly string[]) => {
+    const unmarkedRun = async (
+      envoyExtension: (pi: TestPi) => void,
+      argv: readonly string[],
+      wanted = 1
+    ) => {
       const fixture = allHandlers();
       envoyExtension(fixture.pi);
       const context = gateContext([]);
@@ -4536,6 +4558,7 @@ console.log(JSON.stringify(args));
         },
         context
       );
+      await recordsLanded(wanted);
       return {
         records: [...published],
         gateEntries: fixture.entries.flatMap((entry) =>
@@ -4552,9 +4575,9 @@ console.log(JSON.stringify(args));
             context
           )) as { block?: boolean } | undefined;
           // The gate's own decision record runs after its handler has returned (#2161), so the
-          // call's answer comes first and the record lands behind it, on the microtasks the
-          // stand-in Dispatch settles on.
-          for (let i = 0; i < 200 && published.length === before; i++) await Promise.resolve();
+          // call's answer comes first and the record lands behind it, on the write the stand-in
+          // Dispatch answers.
+          await recordsLanded(before + 1);
           return { result, records: [...published] };
         },
         shutdown: async () => {
@@ -4623,13 +4646,11 @@ console.log(JSON.stringify(args));
     test("an unmarked dispatch comment publishes no record: no person waits on it", async () => {
       gateOn();
       const { default: envoyExtension } = await import("./envoy.ts?unmarked-record-comment");
-      const run = await unmarkedRun(envoyExtension, [
-        "comment",
-        "--issue",
-        "DSP-1",
-        "--body",
-        "The rollout landed.",
-      ]);
+      const run = await unmarkedRun(
+        envoyExtension,
+        ["comment", "--issue", "DSP-1", "--body", "The rollout landed."],
+        0
+      );
       expect(run.records).toEqual([]);
       // The entry is still appended: the report counts every unmarked write, asks or none.
       expect(run.gateEntries).toMatchObject([{ tool: "dispatch_comment", outcome: "unmarked" }]);
@@ -4659,6 +4680,108 @@ console.log(JSON.stringify(args));
       expect(JSON.stringify(run.records)).not.toContain("deployment window");
       await run.shutdown();
     }, 30_000);
+    // #2161, reviewer round 17: the handler used to await the record, which queues behind the
+    // session's other records and has the client's own deadline on each read and write, so a
+    // Dispatch that accepts the connection and never answers stalled every unmarked write past
+    // the host's handler limit, and the entry that is the only local count of the decision was
+    // not written meanwhile.
+    const hangingRecordProject = () => {
+      standInRecordProject();
+      const other = globalThis.fetch;
+      const reached = Promise.withResolvers<void>();
+      // Accepted and never answered: what an unreachable Dispatch under load looks like here.
+      const { promise: hang } = Promise.withResolvers<Response>();
+      globalThis.fetch = (async (input, init) => {
+        const url = String(input instanceof Request ? input.url : input);
+        if (/\/api\/v1\/projects\/INFRA\/artifacts/.test(url)) {
+          reached.resolve();
+          return hang;
+        }
+        return other(input, init);
+      }) as typeof fetch;
+      return { reached: reached.promise };
+    };
+    /** The session's gate bound, an unmarked `dispatch ask` logged, and nothing read yet. */
+    const unmarkedWriteLogged = async (envoyExtension: (pi: TestPi) => void) => {
+      const fixture = allHandlers();
+      envoyExtension(fixture.pi);
+      const context = gateContext([]);
+      await fixture.handlers.get("session_start")?.({}, context);
+      const dispatch = hangingRecordProject();
+      await runDispatchCli(
+        UNMARKED_ASK,
+        { ...process.env, DISPATCH_HOST: "omp" },
+        {
+          stdout: () => {},
+          stderr: () => {},
+          readText: (path) => readFileSync(path, "utf8"),
+          cwd: configDirectory,
+          fetchImpl: (async () => Response.json({})) as typeof fetch,
+        }
+      );
+      const readLedger = () =>
+        fixture.handlers.get("tool_result")?.(
+          {
+            toolName: "bash",
+            toolCallId: "call-py",
+            input: { command: "python3 post.py" },
+            content: [],
+            isError: false,
+          },
+          context
+        );
+      const entriesOf = (customType: string) =>
+        fixture.entries.flatMap((entry) =>
+          entry.customType === customType ? [entry.data as Record<string, unknown>] : []
+        );
+      return {
+        ...dispatch,
+        readLedger,
+        entriesOf,
+        shutdown: () => fixture.handlers.get("session_shutdown")?.({}, context),
+      };
+    };
+
+    test("an unmarked write's tool result returns while its record still waits on Dispatch", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?unmarked-record-hangs");
+      const run = await unmarkedWriteLogged(envoyExtension);
+      const handled = run.readLedger();
+      // The record is in flight against a Dispatch that will never answer it.
+      await run.reached;
+      // The result is answered all the same: it waits on none of it.
+      await handled;
+      // The entry, the only local count of the decision, is written before the record starts, so
+      // a session killed in this window still counts it.
+      expect(run.entriesOf("advisor-gate")).toMatchObject([
+        { tool: "dispatch_ask", outcome: "unmarked", recordId: "call-py#0" },
+      ]);
+      expect(published).toEqual([]);
+      expect(run.entriesOf("advisor-gate-record")).toEqual([]);
+      await run.shutdown();
+    }, 30_000);
+
+    test("a record the session could not write lands as an advisor-gate-record follow-up keyed on the unmarked entry", async () => {
+      gateOn();
+      const { default: envoyExtension } = await import("./envoy.ts?unmarked-record-follow-up");
+      const run = await unmarkedWriteLogged(envoyExtension);
+      await run.readLedger();
+      await run.reached;
+      // The shutdown's cut gives the record up, and the loss rides on a follow-up of its own,
+      // appended while the session is still live and named by the record's own id: the tool call
+      // id alone can name a gated call and several unmarked writes of one call.
+      await run.shutdown();
+      expect(run.entriesOf("advisor-gate-record")).toEqual([
+        {
+          toolCallId: "call-py",
+          tool: "dispatch_ask",
+          recordId: "call-py#0",
+          recordError: "the session shut down before Dispatch answered the record",
+        },
+      ]);
+      expect(run.entriesOf("advisor-gate")[0]).not.toHaveProperty("recordError");
+    }, 30_000);
+
     // #2161: the record of an unmarked write is the host's, the record of a gated call the core's,
     // and a session makes both. Each recorder holds its own map of the documents it uploaded, so
     // two of them upload the session's document twice under its one name, which Dispatch answers

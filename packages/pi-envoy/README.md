@@ -610,14 +610,18 @@ CLI outside the form the gate reads and carried an ask for a person (`outcome: "
   session's shutdown cuts it — the client asks again under one `Idempotency-Key` for the whole
   call, and nothing retries it from outside — so a Dispatch that is slow under load is waited
   out rather than given up. A record that fails or that the shutdown cuts writes one line to the
-  host's log and appends one `advisor-gate-record` entry, carrying `toolCallId`, `tool` and
-  `recordError`; the decision's own entry stands as written. Once the session is shutting down,
-  the one `session_shutdown` handler the gate binds gives the records 1.25 s from that moment and
-  then cuts them, whether or not the gate loaded, and the gate's own handler waits for what is
-  still pending inside the 1.5 s it holds shutdown for, so a record still lands, and the entry of
-  one that could not, before the session is sealed; a record cut that way says the shutdown cut
-  it. An unmarked write's record is published from the `tool_result` the CLI's line reached, and
-  it goes through the one recorder the gate's own records use.
+  host's log and appends one `advisor-gate-record` entry, carrying `toolCallId`, `tool`,
+  `recordError` and, for an unmarked write, the record's own `recordId`; the decision's own entry
+  stands as written. Once the session is shutting down, the one `session_shutdown` handler the
+  gate binds gives the records 1.25 s from that moment and then cuts them, whether or not the
+  gate loaded, and the gate's own handler waits for what is still pending inside the 1.5 s it
+  holds shutdown for, so a record still lands, and the entry of one that could not, before the
+  session is sealed; a record cut that way says the shutdown cut it. An unmarked write's record is
+  started from the `tool_result` the CLI's line reached, after that write's `advisor-gate` entry
+  is appended and awaited by nothing of the tool result, which returns while the record is still
+  in flight: the records of a session are written one at a time and each has the client's own
+  deadline, so a Dispatch that does not answer would otherwise stall every such write. It goes
+  through the one recorder the gate's own records use.
 - **One document per session.** The session's first decision uploads it; every later one appends a
   fenced JSON line through `docEdit`, because an upload of a name Dispatch already holds stores a
   new version of that document, and the reader reads the latest version alone. A process holding
@@ -629,14 +633,14 @@ CLI outside the form the gate reads and carried an ask for a person (`outcome: "
   next is sent, so the order they land in is not the order they were made.
 - **What is lost, and what is counted.** A session killed between a decision and its write loses
   that one record, and a session that never reached a gated call writes no document. A record
-  that fails, or that the shutdown cuts, is lost too — and one given up that way may have landed
-  all the same, so a record the entry calls lost can still be in the document, where the reader
-  counts it once by its `id` and counts the second copy as a duplicate. Two processes writing one
-  session's first record at the same moment each find no document and upload one, and the later
-  upload's version replaces the record the earlier one carried. Every decision the machine made
-  but Dispatch never took is counted on the machine's own side: `--sessions` counts the entries
-  carrying a `recordError` as **decision records lost**, which is what the day's
-  `--dispatch-project` counts cannot hold.
+  that fails, or that the shutdown cuts, is unconfirmed too — and one given up that way may have
+  landed all the same, so a record the session could not confirm can still be in the document,
+  where the reader counts it once by its `id` and counts the second copy as a duplicate. Two
+  processes writing one session's first record at the same moment each find no document and upload
+  one, and the later upload's version replaces the record the earlier one carried. What the
+  machine could not get Dispatch to confirm is counted on the machine's own side: `--sessions`
+  counts the entries carrying a `recordError` as **decision records not confirmed**, an upper
+  bound on what the day's `--dispatch-project` counts cannot hold.
 
 `scripts/askgate-report.ts --dispatch-project <KEY> --since <RFC 3339> [--json]` reads those
 documents and prints the day's refusals by rule, the refusals the agent overrode, the calls
@@ -646,7 +650,7 @@ it could not read, and the records it read twice, counted beside them. An unmark
 rules-call count and in no override count: no check judged it. Its `asksCarried` counts every ask
 and ask block the write carries, so a re-upload of blocks a stored version already holds counts
 them as carried. The same script's `--sessions <dir>` mode still reports the entries on disk, the
-decision records lost among them. Each flag is given once: the
+decision records not confirmed among them. Each flag is given once: the
 script refuses a flag given twice by name, rather than reading only its last value.
 
 **What AskGate is not.** AskGate reviews the writes of a cooperating agent, so that a write that
