@@ -41,8 +41,8 @@ const reconcileWait = 30 * time.Second
 // connection reconciles the stream and only then starts its keeper (bus.WithConnectInBackground),
 // so the helper waits, at the latest for reconcileWait, until the stream holds what the settings
 // ask of it (reconciledFor), or until the client logs that reconcile's failure: main's constructor
-// no longer returns a refusal of the server, which reaches the log as the reconnect hook's failure
-// (`envoy nats reconnect hook failed`). A refused start is closed, so it retries no more, and the
+// no longer returns a refusal of the server, which reaches the log as a failed run of the
+// reconnect hooks (reconcileFailure). A refused start is closed, so it retries no more, and the
 // logged error is returned. It sets the default logger to record the client's lines until the
 // test ends: a test that calls it must not run in parallel.
 func startDispatchStream(t *testing.T, urls []string, overrides map[string]string) (*bus.Client, error) {
@@ -96,12 +96,20 @@ func reconciledFor(boot bootConfig) func(natsgo.StreamConfig) bool {
 	}
 }
 
-// reconcileFailure is the error of the first `envoy nats reconnect hook failed` record the
-// Dispatch publisher logged in logs, JSON lines, and "" when it logged none.
+// reconcileFailure is the error of the first failed run of the reconnect hooks that the Dispatch
+// publisher logged in logs, JSON lines, and "" when it logged none. The bus reports such a run by
+// how long its hooks have been uncovered (internal/bus, bus.RepairGrace): under that grace the
+// WARN `envoy nats reconnect hook failed; it is retried`, at or past it the ERROR `envoy nats
+// reconnect hooks have not succeeded`. A refusal reaches the first of them, and both are read, so
+// that a refusal a slow start logs past the grace is read as well.
 func reconcileFailure(logs string) string {
 	for line := range strings.Lines(logs) {
 		var record map[string]any
-		if json.Unmarshal([]byte(line), &record) == nil && record["msg"] == "envoy nats reconnect hook failed" && record["name"] == "dispatch" {
+		if json.Unmarshal([]byte(line), &record) != nil || record["name"] != "dispatch" {
+			continue
+		}
+		switch record["msg"] {
+		case "envoy nats reconnect hook failed; it is retried", "envoy nats reconnect hooks have not succeeded":
 			return fmt.Sprint(record["error"])
 		}
 	}
