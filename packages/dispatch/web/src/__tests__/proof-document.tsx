@@ -76,16 +76,20 @@ export function renderProofDocument({
   fake = fakeDocumentRuntime({ text: "The live document" }),
   highlightTerm,
   isClosed = false,
+  onAskAnswered,
   queryClient = createQueryClient(),
   showDiff = false,
+  surface,
   version,
 }: {
   document?: Artifact;
   fake?: FakeDocumentRuntime;
   highlightTerm?: string;
   isClosed?: boolean;
+  onAskAnswered?(askId: string): void;
   queryClient?: QueryClient;
   showDiff?: boolean;
+  surface?: "page" | "pane";
   version?: number;
 } = {}) {
   const margin = {
@@ -112,7 +116,10 @@ export function renderProofDocument({
   };
   queryClient.setQueryData(["block-schema"], blockSchema);
   const toolbar: { current: DocumentToolbar | undefined } = { current: undefined };
-  const onToolbarChange = (next: DocumentToolbar) => {
+  /** Every value the document reported upward, so a suite can assert it reported none at all. */
+  const toolbarChanges: (DocumentToolbar | undefined)[] = [];
+  const onToolbarChange = (next: DocumentToolbar | undefined) => {
+    toolbarChanges.push(next);
     toolbar.current = next;
   };
   const onVersionChange = (_version: number | null) => {};
@@ -134,10 +141,12 @@ export function renderProofDocument({
               highlight={undefined}
               highlightTerm={next.highlightTerm ?? highlightTerm}
               isClosed={next.isClosed ?? isClosed}
+              onAskAnswered={onAskAnswered}
               onToolbarChange={onToolbarChange}
               owner={{ key: "CORE-1", kind: "issue" }}
               onVersionChange={onVersionChange}
               showDiff={next.showDiff ?? showDiff}
+              surface={surface}
               user={{ event_head: "0", kind: "user", login: "alice" }}
               version={next.version ?? version}
             />
@@ -172,6 +181,7 @@ export function renderProofDocument({
       fake.sync();
     },
     toolbar,
+    toolbarChanges,
     view,
   };
 }

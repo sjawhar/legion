@@ -22,13 +22,13 @@ function artifact(approval: ArtifactApproval | undefined): Artifact {
   };
 }
 
-function renderChip(target: Artifact, variant?: "header" | "list") {
+function renderChip(target: Artifact, variant?: "header" | "list", onReviewed?: () => void) {
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
   return render(
     <QueryClientProvider client={queryClient}>
-      <ApprovalChip artifact={target} variant={variant} />
+      <ApprovalChip artifact={target} onReviewed={onReviewed} variant={variant} />
     </QueryClientProvider>
   );
 }
@@ -241,6 +241,34 @@ test("clicking the chip opens a popover listing every review", async () => {
     ).not.toBeNull();
   } finally {
     listArtifactReviews.mockRestore();
+    view.unmount();
+  }
+});
+
+// A host that selected this approval request - the Inbox's reading pane - learns from the chip
+// that the reader reviewed it here, so it can move on to the next item.
+test("a review the server records tells the host, once, that the document was reviewed", async () => {
+  const createArtifactReview = spyOn(api, "createArtifactReview").mockResolvedValue({
+    actor: { id: "alice", kind: "user" },
+    artifact_id: "artifact-1",
+    ask_id: null,
+    created_at: "2026-09-11T00:00:00Z",
+    id: "review-1",
+    reason: null,
+    state: "approved",
+    version: 3,
+  });
+  let reviewed = 0;
+  const view = renderChip(artifact({ latest_version: 3, state: "awaiting" }), "header", () => {
+    reviewed += 1;
+  });
+  try {
+    expect(reviewed).toBe(0);
+    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(reviewed).toBe(1));
+    expect(createArtifactReview).toHaveBeenCalledTimes(1);
+  } finally {
+    createArtifactReview.mockRestore();
     view.unmount();
   }
 });
