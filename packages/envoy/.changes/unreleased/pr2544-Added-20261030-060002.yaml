@@ -1,0 +1,13 @@
+kind: Added
+body: |-
+    Dispatch writes a memory trace where `DISPATCH_MEMORY_TRACE` names a file: one line every 50 ms
+    holding every class of memory the Go runtime has mapped, the collector's limit, goal, cycles and
+    CPU limiter, the process's resident memory from `/proc/self/status` and the container's
+    `memory.current`, so a pod near its memory limit can be told from one the runtime is holding
+    comfortably inside it. The limit the boot sets bounds what the runtime has mapped less what it has
+    released, so that difference, not `vmrss`, is the figure to compare with the container's: a kernel
+    can keep released pages counted resident, and gVisor does. Unset — every deployment — nothing is
+    sampled and no file is written.
+time: 2026-10-30T06:00:02.000000000Z
+custom:
+    Issue: pr2544
