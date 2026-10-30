@@ -605,7 +605,7 @@ What the two processes share, and what each keeps to itself:
   `0107_events_notify`), so an event committed on either process reaches every open subscription
   with no reconnect.
 - Each delivery durable delivers to one process at a time: the process that holds that durable's
-  hold (`duty.Hold`, migration `0148_duty_holds`, a row with a 15-second lease on the database's
+  hold (`duty.Hold`, migration `0149_duty_holds`, a row with a 15-second lease on the database's
   clock, renewed every five seconds). The other processes stand by and try for the hold every two
   seconds. A process that stops hands back every message it was delivered and did not handle and
   releases the hold, so another process takes the durable over at once and is redelivered those
@@ -760,7 +760,7 @@ each surface the two builds share, this is what build N+1 may change while build
   reference edges to node kinds this build does not know. A page's document socket is writable by
   the whole fleet's numbers (`internal/dispatch/docs/websocket.go`, `authorize`): each process
   registers V, the schema version it reads, and R, the highest `since` among the elements it may
-  create, in `server_processes` (migration `0149_server_processes_schema`). A page presents its own
+  create, in `server_processes` (migration `0150_server_processes_schema`). A page presents its own
   V and R as `schema_version` and `schema_creatable`, and is writable on an open issue when its R
   is at most every live process's V and at most the highest R among the live processes, and its V
   is at least every live process's R and the highest `since` among the elements the document
@@ -811,7 +811,7 @@ each surface the two builds share, this is what build N+1 may change while build
   (`duty_passes`, the row `<lease>/<period_ns>`; `duty/exclusive.go`), so two builds with different
   intervals for one loop each run it once per their own period, and two builds at one interval
   share it as one build does. The embedder is coordinated by the code: one identity is active at a
-  time (`embedder_active`, migration `0150_embedder_active`), it stays active while a live process
+  time (`embedder_active`, migration `0151_embedder_active`), it stays active while a live process
   carries it, and only the processes configured with it embed, drop or reserve tokens (Search,
   below), so two builds with different embedders do not drop each other's vectors. So is the file
   store: while a live process has no bucket (`file_store` false or unset), an upload keeps its
@@ -819,7 +819,7 @@ each surface the two builds share, this is what build N+1 may change while build
   takes `backfill-files --restore` before the release that unsets it (Moving uploaded files to the
   bucket, above). Both decisions read only the live rows of `server_processes`
   (`internal/dispatch/processes`, `Live`). A build that writes a row but predates the fleet
-  columns (migration `0149_server_processes_schema`) registers no embedder identity and no
+  columns (migration `0150_server_processes_schema`) registers no embedder identity and no
   `file_store`, so it counts as carrying no identity and as having no bucket. A build that writes
   no `server_processes` row at all (every release before migration `0135_server_processes`, such
   as `legion-envoy-v19.0.0`, which stops at migration `0134`) is invisible to both decisions:
@@ -1546,7 +1546,22 @@ message included (a message is never edited), and owes an index to every message
 reading `messages` once. Its trigger takes `SHARE ROW EXCLUSIVE` on `messages` alone, so a message
 write waits behind it while a read does not. Its census answers `0` for the same reasons.
 
-Migration `0148_duty_holds` creates `duty_holds (name, holder, token, expires_at)`, the holds a
+Migration `0148_asks_anchor_artifact_id` creates `asks_anchor_artifact_id`, an index over the asks
+whose `anchor` is set of `case when anchor->>'artifact_id' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (anchor->>'artifact_id')::uuid end`:
+the uuid cast `comments_anchor_artifact` (`0032`) indexes, guarded by the form every
+server-written anchor carries, since an unguarded cast would fail the boot over an anchor an
+earlier release could store. Settlement's sweep reads through it the marks a document's asks
+record, by the anchor's document alone, so an ask that also names an ask block on another document
+(`block_artifact_id`) keeps its mark on the document its anchor names. Building it takes `SHARE`
+on `asks`, so ask writes wait for the build; it rewrites no row and refuses none, so its census
+answers `0`. An anchor whose artifact id is not a lower-case document id is left out of the index,
+which costs the read nothing — its text comparison never matched such a spelling either — and
+each boot logs the count of those asks with a warning when there are any. The release before it
+never reads the index and serves beside it unchanged, except that its sweep still drops the mark
+of an ask holding both columns (no such row is written today), and rolling Dispatch back past
+`0148` is an image rollback alone: the index is left for the next release that reads it.
+
+Migration `0149_duty_holds` creates `duty_holds (name, holder, token, expires_at)`, the holds a
 process keeps by renewing them (`duty.Hold`): each delivery intake holds one name per durable
 (Running more than one process, above). The holder records its deliver subject as `token`, or
 `<subject> start=<seq>` while a take-over is pending: from just before the take-over deletes the
@@ -1554,10 +1569,10 @@ durable until it has created it again at stream sequence `<seq>` (`delivery/held
 `intakeHoldToken`).
 `expires_at` is always written from the database's `now()`, so a lapse is judged by one clock. It
 is a new table: nothing existing is read, locked or rewritten, the release before it neither reads
-nor writes it, and its census answers `0`. It follows `0147_message_deliveries_session_created`,
-which already uses the preceding migration number.
+nor writes it, and its census answers `0`. It follows `0148_asks_anchor_artifact_id`, which
+already uses the preceding migration number.
 
-Migration `0149_server_processes_schema` adds four columns to `server_processes`: `schema_version`
+Migration `0150_server_processes_schema` adds four columns to `server_processes`: `schema_version`
 and `schema_creatable`, the document schema numbers each process reads and creates, which the
 document socket's admission reads (Two builds at once, above); `embedder_identity`, the identity
 of the process's embedder; and `file_store`, whether it stores files in a bucket. Their defaults
@@ -1566,7 +1581,7 @@ a process of the release before it, which names its columns in every statement o
 neither reads nor writes these. Nothing else is read, locked or rewritten, and its census answers
 `0`.
 
-Migration `0150_embedder_active` creates `embedder_active (one, identity, since)`, at most one row
+Migration `0151_embedder_active` creates `embedder_active (one, identity, since)`, at most one row
 (`one` is the primary key and can only be true): the embedder identity whose processes embed and
 drop vectors (Search, below). It is a new table: nothing existing is read, locked or rewritten, the
 release before it neither reads nor writes it, and its census answers `0`.
@@ -1979,7 +1994,7 @@ oldest lacking item has waited. The `backfill-embeddings` subcommand, which did 
 job by hand, is gone, with its checkpoint table (0119).
 
 One embedder identity is active at a time, the one row of `embedder_active` (migration
-`0150_embedder_active`, `internal/dispatch/embedqueue/active.go`). Each process registers its
+`0151_embedder_active`, `internal/dispatch/embedqueue/active.go`). Each process registers its
 embedder's identity in `server_processes` (`embedder_identity`), and the active identity stays
 active while any live process carries it, so a restart or a roll of the processes that carry it
 keeps it. When no live process carries it, the identity of the earliest-started live process that

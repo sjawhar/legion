@@ -264,6 +264,17 @@ async function startSession(
       }
       return new Response("unavailable", { status: 503 });
     }
+    // The answers route, as a Dispatch answers it with nothing for the session: every request
+    // carries no list, so its last message is what started the turn.
+    const answers = /^\/api\/v1\/agents\/([^/]+)\/answers$/.exec(url.pathname);
+    if (answers !== null) {
+      return Response.json({
+        session_id: decodeURIComponent(answers[1] ?? ""),
+        since: new Date(Date.now() - 72 * 3_600_000).toISOString(),
+        total: 0,
+        items: [],
+      });
+    }
     const accept = url.pathname.match(/^\/api\/v1\/messages\/([^/]+)\/deliveries\/(\d+)\/accept$/);
     if (accept !== null) {
       const messageID = accept[1] as string;

@@ -8,7 +8,11 @@ body: |-
     progress, and to try again in one minute. The architecture-source fallbacks to an older server's
     singular routes run once the retries are spent. An abort of the client's signal, or its
     deadline, during a wait rejects the request at once with the abort's reason, and the request is
-    not sent again. The client and `executeDispatchTool` take a `sleep`, so a test does not wait.
+    not sent again. The client and `executeDispatchTool` take a `sleep`, so a test does not wait. A
+    client built with `retryNoRoute: false` sends each request once instead and throws that answer
+    as it came, for a caller that has an answer of its own to a missing route: the per-request read
+    of people's answers, whose own five-minute back-off keeps a model request from waiting on a
+    Dispatch older than the answers route.
 time: 2026-10-28T12:39:46.716209574Z
 custom:
     Issue: pr2461

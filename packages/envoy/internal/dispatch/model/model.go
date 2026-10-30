@@ -3,6 +3,7 @@ package model
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -63,6 +64,48 @@ type Anchor struct {
 	Version    int     `json:"version"`
 	Quote      string  `json:"quote"`
 	Orphaned   bool    `json:"orphaned"`
+}
+
+// DecodeAnchor decodes a stored anchor row, reading artifact_id only where the stored value is a
+// JSON string. No release writes a non-string artifact_id - the server writes a document's id,
+// which is text - but a row an earlier release wrote could hold one, and a read of such a row
+// must answer the ask or comment it belongs to rather than 500 for the whole route, which
+// decoding a number into ArtifactID's string field would. Any other JSON value - a number, null,
+// an object, a bool - leaves ArtifactID empty, which names no document, the same answer the SQL
+// read gives for a value that casts to no uuid. Every other field decodes as its struct tag says,
+// errors included, and encoding is unchanged.
+//
+// This is a function and not an UnmarshalJSON method on Anchor: a method makes encoding/json scan
+// every anchor an extra time before calling it, which costs every well-formed anchor a read
+// decodes. Here the plain decode runs first, so a well-formed anchor costs exactly a plain
+// json.Unmarshal. Only the type error artifact_id itself raises takes the second decode, which
+// reads that one field as raw JSON; any other error is the decode's answer.
+func DecodeAnchor(data []byte, anchor *Anchor) error {
+	err := json.Unmarshal(data, anchor)
+	if err == nil {
+		return nil
+	}
+	var wrongType *json.UnmarshalTypeError
+	if !errors.As(err, &wrongType) || wrongType.Field != "artifact_id" {
+		return err
+	}
+	// The embedded anchorFields decodes every field but artifact_id as before; the field beside
+	// it shadows artifact_id and reads it as raw JSON.
+	type anchorFields Anchor
+	decoded := struct {
+		*anchorFields
+		ArtifactID json.RawMessage `json:"artifact_id"`
+	}{anchorFields: (*anchorFields)(anchor)}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var artifactID string
+	if err := json.Unmarshal(decoded.ArtifactID, &artifactID); err != nil {
+		anchor.ArtifactID = ""
+		return nil
+	}
+	anchor.ArtifactID = artifactID
+	return nil
 }
 
 // AnchorInput selects document text by quote or identifies a browser-owned mark.

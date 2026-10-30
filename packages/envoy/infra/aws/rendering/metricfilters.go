@@ -99,6 +99,27 @@ var ListenerLogSignals = []LogSignal{
 			"a cap in legion's normalizer or a CI bound, not the NATS server's limits.",
 	},
 	{
+		// A rebuild of the listener's KV watches that has not succeeded within bus.RepairGrace of
+		// a NATS reconnect: the ERROR the bus logs through Go's default handler
+		// (internal/bus/recovery.go, reportHookFailure), so date, time and level anchor it. The
+		// WARN the same call writes below the grace, `envoy nats reconnect hook failed; it is
+		// retried`, is repaired by the next run and does not page, so the level and the plural
+		// `hooks` both keep it out.
+		alarm:  "reconnect-hooks-stalled",
+		metric: "ReconnectHooksStalled",
+		filters: []struct{ name, pattern string }{
+			{"reconnect-hooks-stalled-filter", `[date=%^\d{4}/\d{2}/\d{2}$%, time=%^\d{2}:\d{2}:\d{2}$%, level=ERROR, w1=envoy, w2=nats, w3=reconnect, w4=hooks, w5=have, w6=not, w7=succeeded, ...]`},
+		},
+		description: "An Envoy listener's KV watch rebuild has not succeeded for a minute after a NATS " +
+			"reconnect (`envoy nats reconnect hooks have not succeeded`): its interest, role-claim, " +
+			"session and CI caches no longer follow their buckets and serve what they last held, and " +
+			"`/healthz` reports this as 200 `degraded` naming `KV watch rebuild` — deliberately not a " +
+			"503, which would replace the only task into the same failing rebuild with empty caches. " +
+			"The bus keeps retrying the rebuild with backoff. Read the line's `error` in %s for the " +
+			"failing bucket read: typically a JetStream that refuses or does not answer consumer " +
+			"creation for the KV streams.",
+	},
+	{
 		// A start that dropped another deployment's overlapping stream subject: the WARN the bus
 		// logs through Go's default handler (internal/bus/stream.go), so date, time and level
 		// anchor it.

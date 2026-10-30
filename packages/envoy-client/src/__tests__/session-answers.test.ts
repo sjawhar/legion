@@ -20,6 +20,7 @@ import {
   renderSessionAnswerItem,
   renderSessionAnswers,
   renderSessionAnswersList,
+  SESSION_ANSWERS_DEADLINE_MS,
   SESSION_ANSWERS_MARKER,
   type SessionAnswersRead,
   sessionAnswersFailureLine,
@@ -178,6 +179,26 @@ describe("renderSessionAnswers", () => {
     expect(rendered).toContain("run `dispatch answers` to read every one in full.");
   });
 
+  test("withoutCommand ends the list with a left-out line that names no command, still under the cap", () => {
+    const items = Array.from({ length: 12 }, (_, index) =>
+      message(`item-${index}`, hoursAgo(index + 1), `${index}:${"w".repeat(1_000)}`)
+    );
+    const rendered = renderSessionAnswers(items, { now: NOW, withoutCommand: true }) ?? "";
+    const shown = items.filter((item) => rendered.includes(`Direct message ${item.id},`));
+    expect(shown).toEqual(items.slice(0, shown.length));
+    expect(rendered.length).toBeLessThan(8_000);
+    const count = items.length - shown.length;
+    expect(rendered).toEndWith(`\n\n${count} older items left out to stay under 8,000 characters.`);
+    expect(rendered).not.toContain("dispatch answers");
+    expect(
+      renderSessionAnswers([message("one", hoursAgo(1), "one")], {
+        now: NOW,
+        total: 2,
+        withoutCommand: true,
+      })
+    ).toEndWith("\n\n1 older item left out to stay under 8,000 characters.");
+  });
+
   test("prints no left-out line when everything fits, and nothing at all when there is nothing", () => {
     const rendered = renderSessionAnswers([answer, direct], { now: NOW });
     expect(rendered).not.toContain("left out");
@@ -303,8 +324,19 @@ const cacheFile = (root: string, session: string) =>
   join(root, "sessions", session, "answers.json");
 const hostOf = (dispatch: ActiveDispatchConfig) => new URL(dispatch.url).host;
 
-/** Each way a read fails, with the reason it gives and how long a request waits on it. */
-const failedReads = [
+/** A page something in Dispatch's place serves, with `status`. */
+const page = (status: number, body: string, statusText = "") =>
+  new Response(body, { status, statusText, headers: { "Content-Type": "text/html" } });
+
+/** Each way a read fails that keeps the failure line, with the reason it gives (a pattern for an
+ *  answer Dispatch did not write, whose reason names the request's URL) and how long a request
+ *  waits on it. */
+const failedReads: readonly {
+  readonly kind: string;
+  readonly reason: string | RegExp;
+  readonly deadlineMs: number;
+  readonly respond: () => Response | Promise<Response>;
+}[] = [
   {
     kind: "401",
     reason: "token revoked",
@@ -318,24 +350,90 @@ const failedReads = [
     respond: () => json({ code: "INTERNAL", error: "database is down" }, 500),
   },
   {
+    kind: "Dispatch's own 503",
+    reason: "the database is unavailable",
+    deadlineMs: 2_000,
+    respond: () => json({ code: "UNAVAILABLE", error: "the database is unavailable" }, 503),
+  },
+  {
     kind: "a hang past the deadline",
     reason: "Dispatch did not answer within 50 ms",
     deadlineMs: 50,
     respond: () => new Promise<Response>(() => undefined),
   },
   {
-    kind: "a body that is no answers list",
+    kind: "a proxy's 404 page",
+    reason:
+      /^GET \S+\/answers\?max_chars=8000 answered 404 Not Found with a body that is not Dispatch's error JSON \(.*\), which looks like a proxy or gateway page rather than Dispatch's own answer, so /,
+    deadlineMs: 2_000,
+    respond: () =>
+      page(404, "<html><body><h1>404 Not Found</h1><hr>nginx</body></html>", "Not Found"),
+  },
+  {
+    kind: "a 404 with an empty body",
+    reason:
+      /^GET \S+\/answers\?max_chars=8000 answered 404 with an empty body, which looks like a proxy or gateway page rather than Dispatch's own answer, so /,
+    deadlineMs: 2_000,
+    respond: () => new Response("", { status: 404 }),
+  },
+  {
+    kind: "a 200 whose JSON is no answers list",
     reason: "Dispatch answered with something that is not an answers list",
     deadlineMs: 2_000,
     respond: () => json({ session_id: "s", topics: [] }),
   },
   {
-    kind: "404",
-    reason: NO_ANSWERS_ROUTE_REASON,
+    kind: "a 200 HTML sign-in page",
+    reason: "Dispatch answered with something that is not an answers list",
     deadlineMs: 2_000,
-    respond: () => json({ code: "NOT_FOUND", error: "no route" }, 404),
+    respond: () => page(200, "<!doctype html><html><title>Sign in</title><form></form></html>"),
   },
-] as const;
+  {
+    kind: "a 200 JSON error envelope",
+    reason: "Dispatch answered with something that is not an answers list",
+    deadlineMs: 2_000,
+    respond: () => json({ code: "UNAUTHORIZED", error: "sign in first" }),
+  },
+  {
+    kind: "a 200 with null items",
+    reason: "Dispatch answered with something that is not an answers list",
+    deadlineMs: 2_000,
+    respond: () => json({ session_id: "s", since: hoursAgo(72), total: 0, items: null }),
+  },
+  {
+    kind: "a 200 with an empty body",
+    reason: "Dispatch answered with something that is not an answers list",
+    deadlineMs: 2_000,
+    respond: () => new Response("", { status: 200 }),
+  },
+];
+
+/** Dispatch's own answer that it has no answers route, as its router answers a build older than
+ *  the route. */
+const noRoute = (call: FakeCall) =>
+  json(
+    {
+      code: "NOT_FOUND",
+      error: `no route for GET ${call.url.pathname}`,
+      hint: "GET /api/v1 lists every route",
+    },
+    404
+  );
+
+/** The notice a read gives once per session and URL for a Dispatch with no answers route. */
+const noRouteNotice = (url: string) =>
+  `Dispatch at ${url} has no answers route (its build is older than the route), so people's answers cannot be read from it`;
+
+/** That `read` is the failure line, naming `reason`, with no notice. */
+function expectFailureLine(read: SessionAnswersRead, reason: string | RegExp): void {
+  if (typeof reason === "string") expect(read.reason).toBe(reason);
+  else expect(read.reason).toMatch(reason);
+  expect(read).toEqual({
+    text: sessionAnswersFailureLine(read.reason ?? ""),
+    source: "failure",
+    reason: read.reason,
+  });
+}
 
 describe("readSessionAnswers", () => {
   test("reads the list with max_chars, renders it, and keeps it in answers.json with its Dispatch URL", async () => {
@@ -418,11 +516,7 @@ describe("readSessionAnswers", () => {
         readAt: new Date(NOW).toISOString(),
       });
       fail = true;
-      expect(await readSessionAnswers({ ...options, deadlineMs })).toEqual({
-        text: sessionAnswersFailureLine(reason),
-        source: "failure",
-        reason,
-      });
+      expectFailureLine(await readSessionAnswers({ ...options, deadlineMs }), reason);
     });
 
     test(`after a non-empty read, a failed read (${kind}) carries the cached list, its header naming why`, async () => {
@@ -439,18 +533,92 @@ describe("readSessionAnswers", () => {
       const later = NOW + 60_000;
       const read = await readSessionAnswers({ ...options, now: () => later, deadlineMs });
       const readAt = new Date(NOW).toISOString();
+      if (typeof reason === "string") expect(read.reason).toBe(reason);
+      else expect(read.reason).toMatch(reason);
+      const failed = read.reason ?? "";
       expect(read).toEqual({
-        text: renderSessionAnswers(recent, { now: later, cached: { readAt, reason } }),
+        text: renderSessionAnswers(recent, { now: later, cached: { readAt, reason: failed } }),
         source: "cache",
         readAt,
-        reason,
+        reason: failed,
       });
-      expect(read.text?.split("\n").slice(0, 2)).toEqual([
-        SESSION_ANSWERS_MARKER,
-        `As read at ${readAt}; this read failed: ${reason}.`,
-      ]);
+      expect(read.text?.split("\n")[0]).toBe(SESSION_ANSWERS_MARKER);
+      expect(read.text?.split("\n")[1]).toStartWith(`As read at ${readAt}; this read failed: `);
     });
   }
+
+  test("a proxy's 404 is a failed read like any other: Dispatch is asked again, and no notice", async () => {
+    const { calls, fetchImpl } = fakeDispatch(() =>
+      page(404, "<html><body><h1>404 Not Found</h1></body></html>", "Not Found")
+    );
+    const options = {
+      session: newSession(),
+      dispatch: dispatchAt(),
+      env: envAt(stateDir()),
+      fetchImpl,
+      now: () => NOW,
+    };
+    const proxyPage = /answered 404 Not Found with a body that is not Dispatch's error JSON/;
+    expectFailureLine(await readSessionAnswers(options), proxyPage);
+    expectFailureLine(await readSessionAnswers(options), proxyPage);
+    expect(calls).toHaveLength(2);
+  });
+
+  test("after an empty read, Dispatch's own no-route 404 adds no line and gives the host a notice", async () => {
+    let missing = false;
+    const { fetchImpl } = fakeDispatch((call) => (missing ? noRoute(call) : listed([])));
+    const dispatch = dispatchAt();
+    const options = {
+      session: newSession(),
+      dispatch,
+      env: envAt(stateDir()),
+      fetchImpl,
+      now: () => NOW,
+    };
+    expect((await readSessionAnswers(options)).source).toBe("fresh");
+    missing = true;
+    const read = await readSessionAnswers(options);
+    expect(read).toEqual({
+      text: undefined,
+      source: "unavailable",
+      reason: NO_ANSWERS_ROUTE_REASON,
+      notice: noRouteNotice(dispatch.url),
+    });
+    expect(read.text).toBeUndefined();
+  });
+
+  test("a cached list carried after Dispatch's no-route 404 never names `dispatch answers`, its left-out line included", async () => {
+    // Twelve items of about 1,000 characters each: the cap leaves the oldest out.
+    const items = Array.from({ length: 12 }, (_, index) =>
+      message(`item-${index}`, hoursAgo(index + 1), `${index}:${"w".repeat(1_000)}`)
+    );
+    let missing = false;
+    const { fetchImpl } = fakeDispatch((call) => (missing ? noRoute(call) : listed(items)));
+    const options = {
+      session: newSession(),
+      dispatch: dispatchAt(),
+      env: envAt(stateDir()),
+      fetchImpl,
+      now: () => NOW,
+    };
+    const fresh = await readSessionAnswers(options);
+    expect(fresh.text).toContain("run `dispatch answers` to read every one in full.");
+    missing = true;
+    const read = await readSessionAnswers(options);
+    const readAt = new Date(NOW).toISOString();
+    expect(read.source).toBe("cache");
+    expect(read.text).toBe(
+      renderSessionAnswers(items, {
+        now: NOW,
+        cached: { readAt, reason: NO_ANSWERS_ROUTE_REASON },
+        withoutCommand: true,
+      })
+    );
+    expect(read.text?.split("\n").at(-1)).toMatch(
+      /^\d+ older items left out to stay under 8,000 characters\.$/
+    );
+    expect(read.text).not.toContain("dispatch answers");
+  });
 
   test("a failed read carries the failure line once every cached item is past 72 hours", async () => {
     let fail = false;
@@ -671,34 +839,121 @@ describe("readSessionAnswers", () => {
     expect(one.source).toBe("fresh");
   });
 
-  test("a Dispatch that answers 404 has no answers route, and is not asked again for 5 minutes", async () => {
+  test("Dispatch's own no-route 404 adds no line, and that Dispatch is not asked again for 5 minutes", async () => {
     const dispatch = dispatchAt();
-    const { calls, fetchImpl } = fakeDispatch((call) =>
-      json({ code: "NOT_FOUND", error: `no route for GET ${call.url.pathname}` }, 404)
-    );
+    const { calls, fetchImpl } = fakeDispatch(noRoute);
     let clock = NOW;
-    // The read asks a route no build answered four times in all; `sleep` skips the waits.
-    const options = {
+    const options = { dispatch, env: envAt(stateDir()), fetchImpl, now: () => clock };
+    const unavailable: SessionAnswersRead = {
+      text: undefined,
+      source: "unavailable",
+      reason: "this Dispatch build has no answers route",
+      notice: noRouteNotice(dispatch.url),
+    };
+    expect(await readSessionAnswers({ ...options, session: newSession() })).toEqual(unavailable);
+    // Any session of the process, for that Dispatch URL.
+    clock = NOW + 5 * 60_000 - 1;
+    expect(await readSessionAnswers({ ...options, session: newSession() })).toEqual(unavailable);
+    expect(calls).toHaveLength(1);
+    clock = NOW + 5 * 60_000 + 1;
+    await readSessionAnswers({ ...options, session: newSession() });
+    expect(calls).toHaveLength(2);
+  });
+
+  test("Dispatch's own no-route 404 is unavailable within the deadline, from one ask", async () => {
+    // On the request path the read's client asks once and lets that answer through: the read's
+    // own 5-minute back-off is its answer to a release rolling out, so no request waits out
+    // attempts of a route this Dispatch has not got. No fake clock and no fake sleep here.
+    const dispatch = dispatchAt();
+    const { calls, fetchImpl } = fakeDispatch(noRoute);
+    const startedAt = Date.now();
+    const read = await readSessionAnswers({
+      session: newSession(),
       dispatch,
       env: envAt(stateDir()),
       fetchImpl,
-      now: () => clock,
-      sleep: async () => {},
-    };
-    const first = await readSessionAnswers({ ...options, session: newSession() });
-    expect(first).toEqual({
-      text: sessionAnswersFailureLine(NO_ANSWERS_ROUTE_REASON),
-      source: "failure",
-      reason: "this Dispatch build has no answers route",
     });
-    // Any session of the process, for that Dispatch URL.
-    clock = NOW + 5 * 60_000 - 1;
-    const second = await readSessionAnswers({ ...options, session: newSession() });
-    expect(second.reason).toBe(NO_ANSWERS_ROUTE_REASON);
-    expect(calls).toHaveLength(4);
-    clock = NOW + 5 * 60_000 + 1;
-    await readSessionAnswers({ ...options, session: newSession() });
-    expect(calls).toHaveLength(8);
+    expect(read).toEqual({
+      text: undefined,
+      source: "unavailable",
+      reason: NO_ANSWERS_ROUTE_REASON,
+      notice: noRouteNotice(dispatch.url),
+    });
+    expect(Date.now() - startedAt).toBeLessThan(SESSION_ANSWERS_DEADLINE_MS);
+    expect(calls).toHaveLength(1);
+  });
+
+  test("the no-route notice comes once per session and Dispatch URL, and again after the route answered", async () => {
+    const session = newSession();
+    const a = dispatchAt();
+    const b = dispatchAt();
+    let routed = false;
+    const { calls, fetchImpl } = fakeDispatch((call) => (routed ? listed([]) : noRoute(call)));
+    let clock = NOW;
+    const options = { env: envAt(stateDir()), fetchImpl, now: () => clock };
+    const notices = async (dispatch: ActiveDispatchConfig, of = session) =>
+      (await readSessionAnswers({ ...options, session: of, dispatch })).notice;
+
+    // Two reads of A for the session: the 404, then one inside its back-off.
+    expect(await notices(a)).toBe(noRouteNotice(a.url));
+    expect(await notices(a)).toBeUndefined();
+    // After the back-off, A answers 404 again: the session was told already.
+    clock += 5 * 60_000 + 1;
+    expect(await notices(a)).toBeUndefined();
+    expect(calls).toHaveLength(2);
+    // Another URL for the same session, and another session for A, are each told once.
+    expect(await notices(b)).toBe(noRouteNotice(b.url));
+    expect(await notices(b)).toBeUndefined();
+    const other = newSession();
+    expect(await notices(a, other)).toBe(noRouteNotice(a.url));
+    expect(await notices(a, other)).toBeUndefined();
+    // A route that answers a list clears it: a later 404 is told again.
+    clock += 5 * 60_000 + 1;
+    routed = true;
+    expect((await readSessionAnswers({ ...options, session, dispatch: a })).source).toBe("fresh");
+    routed = false;
+    expect(await notices(a)).toBe(noRouteNotice(a.url));
+  });
+
+  test("within the no-route back-off, a list read earlier from that URL is still carried, its header naming the missing route", async () => {
+    const session = newSession();
+    let missing = false;
+    const { calls, fetchImpl } = fakeDispatch((call) => (missing ? noRoute(call) : listed(recent)));
+    const dispatch = dispatchAt();
+    const options = { dispatch, env: envAt(stateDir()), fetchImpl, now: () => NOW };
+    expect((await readSessionAnswers({ ...options, session })).source).toBe("fresh");
+    missing = true;
+    const readAt = new Date(NOW).toISOString();
+    const carried: SessionAnswersRead = {
+      text: renderSessionAnswers(recent, {
+        now: NOW,
+        cached: { readAt, reason: NO_ANSWERS_ROUTE_REASON },
+        withoutCommand: true,
+      }),
+      source: "cache",
+      readAt,
+      reason: NO_ANSWERS_ROUTE_REASON,
+    };
+    // The read that meets the 404, with the notice; then a request inside the back-off, which
+    // asks nothing.
+    expect(await readSessionAnswers({ ...options, session })).toEqual({
+      ...carried,
+      notice: noRouteNotice(dispatch.url),
+    });
+    expect(await readSessionAnswers({ ...options, session })).toEqual(carried);
+    expect(calls).toHaveLength(2);
+    expect(carried.text?.split("\n")[1]).toBe(
+      `As read at ${readAt}; this read failed: ${NO_ANSWERS_ROUTE_REASON}.`
+    );
+    expect(carried.text).not.toContain("dispatch answers");
+    // A session with no list read from that URL carries nothing.
+    expect(await readSessionAnswers({ ...options, session: newSession() })).toEqual({
+      text: undefined,
+      source: "unavailable",
+      reason: NO_ANSWERS_ROUTE_REASON,
+      notice: noRouteNotice(dispatch.url),
+    });
+    expect(calls).toHaveLength(2);
   });
 
   test("Dispatch off with an error is a failed read with that reason; off with a notice reads nothing", async () => {

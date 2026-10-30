@@ -220,9 +220,9 @@ function isJson(response: Response): boolean {
 }
 
 /** Whether `error` is a Dispatch process's answer that it has no route for the request (`404
- *  NOT_FOUND`, `NO_ROUTE_MESSAGE_PREFIX`). A `404 NOT_FOUND` for a resource the server does not
- *  know says "not found" instead. */
-function isNoRoute(error: unknown): boolean {
+ *  NOT_FOUND`, `NO_ROUTE_MESSAGE_PREFIX`), as a process older than a route answers it; a `404
+ *  NOT_FOUND` for a resource the server does not know says "not found" instead. */
+export function isNoRoute(error: unknown): boolean {
   return (
     error instanceof DispatchServiceError &&
     error.status === 404 &&
@@ -692,6 +692,7 @@ export class DispatchClient {
   readonly #resolvedIssues = new Map<string, Promise<string>>();
   readonly #signal: AbortSignal;
   readonly #sleep: Sleep;
+  readonly #retryNoRoute: boolean;
   readonly writeRetry: DispatchWriteRetry;
 
   constructor(
@@ -702,12 +703,19 @@ export class DispatchClient {
       readonly signal?: AbortSignal | undefined;
       readonly writeRetry?: DispatchWriteRetry | undefined;
       readonly sleep?: Sleep | undefined;
+      /** Whether a request a Dispatch process answered with no route for it is asked again
+       *  (`#noRoute`), true by default. False runs each request once and throws that answer as it
+       *  came (a `DispatchServiceError` `isNoRoute` recognises), for a caller that has an answer
+       *  of its own to a missing route and wants it at once, rather than after the waits of
+       *  `NO_ROUTE_RETRY_DELAYS_MS`. */
+      readonly retryNoRoute?: boolean | undefined;
     } = {}
   ) {
     this.#baseUrl = baseUrl.replace(/\/+$/, "");
     this.#signal = requestSignal(options.signal);
     this.writeRetry = options.writeRetry ?? DISPATCH_WRITE_RETRY;
     this.#sleep = options.sleep ?? sleep;
+    this.#retryNoRoute = options.retryNoRoute ?? true;
   }
 
   /**
@@ -773,11 +781,18 @@ export class DispatchClient {
     );
   }
 
+  /**
+   * `POST /api/v1/projects/{key}/artifacts`: an upload the project owns. `key` is the caller's own
+   * `Idempotency-Key` for the upload, where the caller has one intent across calls and processes —
+   * AskGate's decision document, created once per session however many processes reach for it — and
+   * replaces the key this call would mint for itself. It must match `IDEMPOTENCY_KEY_PATTERN`.
+   */
   async projectArtifact(
     project: string,
-    input: CreateArtifactInput
+    input: CreateArtifactInput,
+    key?: string
   ): Promise<ArtifactUploadResponse> {
-    return this.#upload(["api", "v1", "projects", project, "artifacts"], input);
+    return this.#upload(["api", "v1", "projects", project, "artifacts"], input, key);
   }
 
   async getProjectArtifact(project: string, slug: string): Promise<Artifact> {
@@ -1303,8 +1318,21 @@ export class DispatchClient {
     );
   }
 
-  async docEdit(id: string, input: EditArtifactInput): Promise<EditArtifactResponse> {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "edits"], input);
+  /**
+   * `POST /api/v1/artifacts/{id}/edits`: an edit of a document's text. `key` is the caller's own
+   * `Idempotency-Key` for the edit, where the caller has one intent across calls and processes —
+   * AskGate's one append per decision, which a resumed session must not write twice — and replaces
+   * the key this call would mint for itself. It must match `IDEMPOTENCY_KEY_PATTERN`.
+   */
+  async docEdit(id: string, input: EditArtifactInput, key?: string): Promise<EditArtifactResponse> {
+    return this.#json(
+      "POST",
+      ["api", "v1", "artifacts", id, "edits"],
+      input,
+      undefined,
+      undefined,
+      key
+    );
   }
 
   async nameArtifactVersion(id: string, input: CreateVersionInput): Promise<Version> {
@@ -1385,9 +1413,10 @@ export class DispatchClient {
     path: readonly string[],
     body?: unknown,
     query?: object,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    key?: string
   ): Promise<T> {
-    return (await this.#jsonAnswer<T>(method, path, body, query, signal)).payload;
+    return (await this.#jsonAnswer<T>(method, path, body, query, signal, key)).payload;
   }
 
   /** `#json` with the status Dispatch answered, for a route whose status says what it did.
@@ -1397,7 +1426,8 @@ export class DispatchClient {
     path: readonly string[],
     body?: unknown,
     query?: object,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    key?: string
   ): Promise<{ readonly status: number; readonly payload: T }> {
     const url = this.#url(path, query);
     return this.#noRoute(async () => {
@@ -1408,7 +1438,8 @@ export class DispatchClient {
           ? undefined
           : { content: JSON.stringify(body), type: "application/json" },
         undefined,
-        signal
+        signal,
+        key
       );
       return { status: response.status, payload: await this.#response<T>(method, url, response) };
     }, signal);
@@ -1422,8 +1453,13 @@ export class DispatchClient {
    * carries a key of its own (`#send`), as a first attempt does. After the last attempt it throws
    * `DispatchNoRouteError`. An abort of the client's signal, or of the call's own `signal`, during
    * a wait rejects at once with the abort's reason and sends nothing more.
+   *
+   * A client built with `retryNoRoute: false` runs `attempt` once instead and throws its answer
+   * of no route as it came (the `DispatchServiceError` `isNoRoute` recognises), so a caller with
+   * an answer of its own to a missing route — a back-off of its own — reaches it at once.
    */
   #noRoute<T>(attempt: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (!this.#retryNoRoute) return attempt();
     return retryNoRoute(attempt, isNoRoute, {
       exhausted: () => new DispatchNoRouteError(),
       signal: signal === undefined ? this.#signal : AbortSignal.any([this.#signal, signal]),
@@ -1432,14 +1468,14 @@ export class DispatchClient {
   }
 
   /** An upload to an owner's artifact route: inline content as JSON, a file as multipart. */
-  async #upload<T>(path: readonly string[], input: CreateArtifactInput): Promise<T> {
-    if ("content" in input) return this.#json("POST", path, input);
+  async #upload<T>(path: readonly string[], input: CreateArtifactInput, key?: string): Promise<T> {
+    if ("content" in input) return this.#json("POST", path, input, undefined, undefined, key);
     const form = new FormData();
     form.set("name", input.name);
     if (input.summary !== undefined) form.set("summary", input.summary);
     if (input.actor !== undefined) form.set("actor", JSON.stringify(input.actor));
     form.set("file", input.file, input.name);
-    return this.#form("POST", path, form);
+    return this.#form("POST", path, form, key);
   }
 
   /**
@@ -1447,13 +1483,18 @@ export class DispatchClient {
    * boundary, and a retry whose bytes differ from its first attempt's is a different request to
    * Dispatch, which refuses a key reused for one (`422 KEY_REUSED`).
    */
-  async #form<T>(method: string, path: readonly string[], form: FormData): Promise<T> {
+  async #form<T>(
+    method: string,
+    path: readonly string[],
+    form: FormData,
+    key?: string
+  ): Promise<T> {
     const url = this.#url(path);
     return this.#noRoute(async () => {
       const encoded = new Response(form);
       const type = encoded.headers.get("Content-Type") ?? "multipart/form-data";
       const content = new Uint8Array(await encoded.arrayBuffer());
-      const response = await this.#send(method, url, { content, type });
+      const response = await this.#send(method, url, { content, type }, undefined, undefined, key);
       return this.#response<T>(method, url, response);
     });
   }
@@ -1461,7 +1502,8 @@ export class DispatchClient {
   /**
    * The one request function: every call the client makes goes through here. A read, a PUT or a
    * DELETE goes once, and `signal` aborts it beside the client's own signal. A write (POST or
-   * PATCH) carries an `Idempotency-Key` minted here for this call alone, so all its attempts are
+   * PATCH) carries an `Idempotency-Key`: the caller's own `callerKey`, where it has one intent
+   * across calls and processes, else one minted here for this call alone, so all its attempts are
    * one intent to Dispatch, which runs it once and answers a
    * repeat with the answer it stored, while two calls are two writes. Each attempt sends the same
    * encoded body. While an attempt gets no definitive answer (`writeAnswer`, a transport failure,
@@ -1485,7 +1527,8 @@ export class DispatchClient {
     url: string,
     body?: EncodedBody,
     accept = "application/json",
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    callerKey?: string
   ): Promise<Response> {
     const headers: Record<string, string> = {
       Accept: accept,
@@ -1500,7 +1543,7 @@ export class DispatchClient {
         ...(body === undefined ? {} : { body: body.content }),
       });
     }
-    const key = crypto.randomUUID();
+    const key = callerKey ?? crypto.randomUUID();
     headers[IDEMPOTENCY_KEY_HEADER] = key;
     const { pausesMs, withinMs, silenceMs, pause = pauseFor } = this.writeRetry;
     const request = `${method} ${url}`;
