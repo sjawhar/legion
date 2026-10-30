@@ -484,8 +484,9 @@ func planChains(events []*batchEvent) []*chain {
 // connection or a passed deadline (bus.ErrUnavailable; bus.ErrWindowDeadline, the window refusing
 // a send past the publisher hold's deadline) stops the batch: no further send of any chain is
 // made. So does ctx ending; the answers already in are still read, and every other send in flight
-// is lost.
-func sendChains(ctx context.Context, sender bus.Sender, chains []*chain) {
+// is lost. Each send that did not reach NATS is counted once as it settles, under the reason it
+// came to (deps.countPublishFailure).
+func sendChains(ctx context.Context, deps Deps, sender bus.Sender, chains []*chain) {
 	stopped := false
 	var inflight []*chain
 	issue := func(c *chain) {
@@ -518,16 +519,30 @@ func sendChains(ctx context.Context, sender bus.Sender, chains []*chain) {
 			// Refused the same way however often it is retried (the envelope is past the server's
 			// max payload, or its subject past NATS's limit or holding whitespace, as an unbounded
 			// document slug or a bearer's session id can make it), so it is logged once and counts
-			// as reached.
+			// as reached. It did not reach NATS, so it is still counted a refusal.
+			deps.countPublishFailure("refused")
 			slog.Error("dispatch outbox: destination refused", "event_id", send.event.event.ID, "topic", send.dest.subject, "error", err)
 			send.state = reached
 		case send.fenced, errors.Is(err, bus.ErrUnavailable):
+			// NATS unreachable is the outage the publish-failure metric exists for, so the send
+			// that met it is counted a failure, once; a send the hold's deadline refused never
+			// left this process and is not.
+			if !send.fenced {
+				deps.countPublishFailure("failed")
+			}
 			send.state = lost
 			send.connection = errors.Is(err, bus.ErrUnavailable)
 			stopped = true
 		case ctx.Err() != nil && errors.Is(err, ctx.Err()):
 			send.state = lost
 		default:
+			// A send the server refused under this connection's own publish permissions is
+			// counted a denial, every other failure a failure (countPublishFailure).
+			if errors.Is(err, bus.ErrPublishDenied) {
+				deps.countPublishFailure("denied")
+			} else {
+				deps.countPublishFailure("failed")
+			}
 			send.state = failed
 			send.connection = errors.Is(err, bus.ErrNotAcknowledged)
 		}

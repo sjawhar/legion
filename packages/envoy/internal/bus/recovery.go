@@ -53,6 +53,10 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 	c.mu.Lock()
 	if nc == c.Conn {
 		c.connEvents++
+		// The session this reconnect replaced is the one the server reported its publish refusals
+		// on, and the publishes they answered are over; this session's grant is read again from
+		// its own refusals.
+		c.clearPublishDenials()
 		// nats.go has re-sent every subscription, so a refusal the server made of the core one
 		// before is past: this server may grant it. A refusal of the re-sent one is reported after
 		// this callback, and marks it again (onAsyncError).

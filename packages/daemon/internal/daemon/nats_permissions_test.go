@@ -41,7 +41,7 @@ const (
 func TestDaemonPermissionsOnRealServers(t *testing.T) {
 	for _, image := range testnatsimages.Images {
 		t.Run(image.Name, func(t *testing.T) {
-			t.Run("the daemon restarts, acknowledges Dispatch, its start and GitHub, and receives exceptions", func(t *testing.T) {
+			t.Run("the daemon restarts, reads its consumers' lag, acknowledges Dispatch, its start and GitHub, and receives exceptions", func(t *testing.T) {
 				grant := daemonpermissions.Grant()
 				daemonSeed, admin, js, server, uri := startDaemonGrantServer(t, image.Ref, grant)
 				defer admin.Close()
@@ -69,14 +69,23 @@ func TestDaemonPermissionsOnRealServers(t *testing.T) {
 					t.Fatalf("flush the exceptions subscription: %v", err)
 				}
 
-				handler := &failFirstDaemonGrantHandler{}
-				stop := runDaemonGrantConsumers(t, restarted, handler)
-				defer stop()
-
 				publishDaemonGrantFixture(t, js, "../intake/testdata/dispatch/issue-updated.json")
 				publishDaemonGrantFixture(t, js, "../intake/testdata/github/pr-opened.json")
 				publishDaemonGrantEnvelope(t, js, "notifications.dispatch.server.started", "dispatch-server-started-grant",
 					`{"commit":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c","started_at":"2026-10-19T06:00:00Z"}`)
+				// Before the consumers run, each has its one event waiting, so the state's lag read
+				// makes every request it can under the grant: each consumer's info and its oldest
+				// waiting message's stored-message get.
+				for _, lag := range restarted.consumers.Lag(t.Context()) {
+					if lag.Waiting != 1 || lag.OldestAt.IsZero() || lag.Unavailable != "" {
+						t.Fatalf("lag of %s under the daemon grant = %+v, want its one event waiting with its time and nothing unavailable", lag.Name, lag)
+					}
+				}
+
+				handler := &failFirstDaemonGrantHandler{}
+				stop := runDaemonGrantConsumers(t, restarted, handler)
+				defer stop()
+
 				if err := admin.Publish("notifications.envoy.exceptions.notifications.role.example", []byte("retry this notice")); err != nil {
 					t.Fatalf("publish the role-lane exception: %v", err)
 				}
@@ -106,7 +115,7 @@ func TestDaemonPermissionsOnRealServers(t *testing.T) {
 				if serverLog := daemonGrantServerLogs(t, server); strings.Contains(serverLog, "Permissions Violation") {
 					t.Fatalf("the server logged a permissions violation:\n%s", serverLog)
 				}
-				t.Log("restarted daemon created the three consumers, NAKed then acknowledged every event kind, and received the role-lane exception without a permission refusal")
+				t.Log("restarted daemon created the three consumers, read their lag, NAKed then acknowledged every event kind, and received the role-lane exception without a permission refusal")
 			})
 
 			t.Run("without the dispatch consumer-create permission, the daemon and server report it", func(t *testing.T) {
@@ -190,10 +199,9 @@ func connectDaemonGrant(t *testing.T, uri, seed string, logs *syncBuffer) *workf
 
 func runDaemonGrantConsumers(t *testing.T, w *workflowRuntime, handlers ...intake.Handler) func() {
 	t.Helper()
-	pool := isolatedOutboxPool(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- w.consumers.Run(ctx, pool, handlers...) }()
+	go func() { done <- w.consumers.Run(ctx, handlers...) }()
 	return func() {
 		cancel()
 		if err := <-done; err != nil {

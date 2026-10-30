@@ -1335,6 +1335,96 @@ func TestRunPublishesEveryEventButRoutesOnlyNotifyingEvents(t *testing.T) {
 	}
 }
 
+// What a reader following an owner topic is given to decide on. `notify` is false for every
+// event an agent wrote, so a reader that skipped on it never saw an agent's comment on an issue
+// it had subscribed to; `quiet` says whether the event carries anything at all.
+func TestEnvelopePayloadStatesWhetherTheEventIsQuiet(t *testing.T) {
+	agent := model.Actor{Kind: "session", ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7"}
+	for _, tc := range []struct {
+		name  string
+		event model.Event
+		quiet bool
+	}{
+		{
+			name: "an agent's comment on an issue",
+			event: model.Event{
+				ID: 1, IssueKey: new("T-1"), Type: "comment.created", Actor: agent,
+				Payload: map[string]any{"id": "comment-9", "body": "Slice 3 is pushed."},
+			},
+			quiet: false,
+		},
+		{
+			name: "the delivery receipt of that comment",
+			event: model.Event{
+				ID: 2, IssueKey: new("T-1"), Type: "comment.delivery", Actor: agent,
+				Payload: map[string]any{"id": "comment-9", "state": "delivered"},
+			},
+			quiet: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			item, err := envelope(tc.event, "")
+			if err != nil {
+				t.Fatalf("envelope: %v", err)
+			}
+			var payload struct {
+				Type   string `json:"type"`
+				Notify bool   `json:"notify"`
+				Quiet  bool   `json:"quiet"`
+			}
+			if err := json.Unmarshal([]byte(item.Payload), &payload); err != nil {
+				t.Fatalf("decode event payload %s: %v", item.Payload, err)
+			}
+			if payload.Type != tc.event.Type {
+				t.Fatalf("payload type = %q, want %q", payload.Type, tc.event.Type)
+			}
+			if payload.Quiet != tc.quiet {
+				t.Fatalf("payload quiet = %t, want %t", payload.Quiet, tc.quiet)
+			}
+			if payload.Notify {
+				t.Fatalf("payload notify = true, want false: an agent's event wakes no route")
+			}
+		})
+	}
+
+	// What a reader is actually given: the outbox answers Quiet for the event it scanned out of
+	// Postgres, whose payload decoded into a map rather than the typed value the append held, and
+	// a targeted message is quiet either way - the session it names already had it through the
+	// synchronous listener send, so the issue's followers are not shown it a second time.
+	t.Run("a targeted message the outbox scanned out of Postgres", func(t *testing.T) {
+		database := storetest.Open(t)
+		broker := events.NewBroker()
+		seedIssue(t, database, "T-1", nil)
+		target := "session:ses_target"
+		appendEvent(t, database, broker, model.Event{
+			IssueKey: new("T-1"), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+			Payload: model.MessageEventPayload{Message: model.Message{
+				ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: new("T-1"),
+				Body: "Target this update", Target: &target,
+			}},
+		})
+		publisher := &recordingPublisher{}
+		deps := Deps{Store: database, Publisher: publisher}
+		if _, err := scanBatch(context.Background(), deps, unfenced{}, holding(t, deps).instance); err != nil {
+			t.Fatalf("scan the batch: %v", err)
+		}
+
+		items := publisher.all()
+		if len(items) != 1 {
+			t.Fatalf("published %#v, want the issue topic alone", topicsOf(items))
+		}
+		var payload struct {
+			Quiet bool `json:"quiet"`
+		}
+		if err := json.Unmarshal([]byte(items[0].Payload), &payload); err != nil {
+			t.Fatalf("decode event payload %s: %v", items[0].Payload, err)
+		}
+		if !payload.Quiet {
+			t.Fatalf("payload quiet = false for a targeted message: %s", items[0].Payload)
+		}
+	})
+}
+
 func TestRunRetriesEventWhenRequiredRoleRouteFails(t *testing.T) {
 	database := storetest.Open(t)
 	broker := events.NewBroker()
@@ -1630,7 +1720,8 @@ func run(t *testing.T, database *store.Store, publisher Publisher, broker *event
 }
 
 // runDeps runs New(deps) until the returned func stops it, which fails t unless Run returns within
-// stopWithin.
+// stopWithin. A test that needs more of Deps than run's store, publisher and broker - a metrics
+// counter among them - builds it itself and calls this.
 func runDeps(t *testing.T, deps Deps, stopWithin time.Duration) func() {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())

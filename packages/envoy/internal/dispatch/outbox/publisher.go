@@ -23,6 +23,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/retry"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
+	"github.com/sjawhar/envoy/internal/metrics"
 	"github.com/sjawhar/envoy/internal/roles"
 )
 
@@ -95,6 +96,21 @@ type Deps struct {
 	// both, reading on Publisher's connection.
 	RoleClaims roles.ClaimStore
 	Sessions   roles.SessionLookup
+	// PublishFailures counts a destination of a publish attempt that did not reach NATS, by
+	// reason (countPublishFailure). cmd/dispatch registers it on the process's metrics
+	// registry, so a denied or refused destination shows on /metrics rather than only in the
+	// log.
+	PublishFailures *metrics.Counter
+}
+
+// countPublishFailure counts one destination of a publish attempt that did not reach NATS, under
+// reason ("denied", "refused" or "failed"). Every increment goes through here: a Deps built
+// without a counter - the package's own tests - then counts nothing instead of dereferencing nil.
+func (d Deps) countPublishFailure(reason string) {
+	if d.PublishFailures == nil {
+		return
+	}
+	d.PublishFailures.Inc([2]string{"reason", reason})
 }
 
 // compactDaily runs compactDocuments once per compactInterval until ctx ends, on a goroutine of its
@@ -201,7 +217,7 @@ func publishBatch(ctx context.Context, deps Deps, hold fence, holder uuid.UUID, 
 	changed := deps.Publisher.ConnectionChanged()
 	window := deps.Publisher.WindowUntil(hold.Deadline)
 	result.started = time.Now()
-	sendChains(ctx, window, chains)
+	sendChains(ctx, deps, window, chains)
 
 	connectionFailed := false
 	for _, event := range events {
@@ -1023,8 +1039,16 @@ func publishedDestinationSet(subjects []string) map[string]struct{} {
 	return delivered
 }
 
+// envelope builds the bus envelope of one event. Its payload is the event with one field the
+// event log does not hold: `quiet` (events.Quiet), whether the event carries nothing for a
+// reader following its owner topic. A reader takes it as the whole answer, where `notify` says
+// only whether the event wakes the route, so an agent's comment on an issue reaches the sessions
+// that subscribed to that issue's topic.
 func envelope(event model.Event, slug string) (contracts.Envelope, error) {
-	payload, err := json.Marshal(event)
+	payload, err := json.Marshal(struct {
+		model.Event
+		Quiet bool `json:"quiet"`
+	}{Event: event, Quiet: events.Quiet(event)})
 	if err != nil {
 		return contracts.Envelope{}, fmt.Errorf("encode event: %w", err)
 	}

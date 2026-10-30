@@ -153,6 +153,7 @@ on:
       - 'packages/envoy/internal/githubappjwt/*'
       - 'packages/envoy/internal/id/*'
       - 'packages/envoy/internal/kvwatch/*'
+      - 'packages/envoy/internal/metrics/*'
       - 'packages/envoy/internal/oidc/*'
       - 'packages/envoy/internal/pglisten/*'
       - 'packages/envoy/internal/pgmigrate/*'

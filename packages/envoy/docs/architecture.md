@@ -92,23 +92,30 @@ attempt:
 | The target is live but does not advertise the frame's `delivery.mode`, or that mode cannot be read unambiguously | `403` naming the session, and the mode when it could be read |
 | The publish is refused as too large (`bus.ErrTooLarge`) | `413` naming the size against the server's max payload |
 | The publish is refused for its subject or key (`bus.ErrRefused`) | `400` naming the refusal, with no `Retry-After` |
+| The server denies the publish under this listener's own grant (`bus.ErrPublishDenied`) | `403 {"error":"envoy: the message bus denied the publish under this listener's own permissions: <reason>"}` with no `Retry-After`, recorded `publish_denied` (below) |
 | Any other publish failure | `503` with the same prefix and `Retry-After: 1`, carrying the bus's own reason |
 
 `POST /v1/messages/publish` answers the publish of a topic the stream captures that failed, and a
 role send's first role-holder resolution that did not answer, exactly the same way; that
 resolution (the claim read, the holder's session read and the release of a lapsed claim) runs
 inside the same 3.5 s budget, and one the budget runs out on is that 503 too, naming the call that
-did not answer. Its 413, its 400s and its role 404s (`unclaimed`, `holder_lapsed`) are unchanged; a
-role or ad-hoc topic's confirmed send then runs on within its own 4 s and answers its 200, 403
-`capability` or 504 as "Role delivery and exceptions" says. Two refusals are its own. A publish
-the server denies under this
-listener's own grant (`bus.ErrPublishDenied`) is
-`403 {"error":"envoy: the message bus denied the publish under this listener's own permissions: <reason>"}`
-with no `Retry-After`, recorded `publish_denied`. Only a topic the stream does not capture — a
-role send's forward or an ad-hoc topic's own publish, which go over core NATS — can be denied this way, since that error is
-made only where a core publish is confirmed (`confirmPublished`, `internal/bus/confirm.go`); a send
-publishes `notifications.agent.<id>`, which the stream captures, so it goes through JetStream and
-never meets it. The other is a publish that lost the race for the role's claim — every one
+did not answer. Its 413, its 400s, its 403 for a denied publish and its role 404s (`unclaimed`,
+`holder_lapsed`) are unchanged; a role or ad-hoc topic's confirmed send then runs on within its
+own 4 s and answers its 200, 403 `capability` or 504 as "Role delivery and exceptions" says.
+
+A publish the server denies under this listener's own grant (`bus.ErrPublishDenied`) is the
+table's `403` on either route. A publish on either transport can be denied this way: a core
+publish reads the denial from the connection's last error across its flush (`confirmPublished`,
+`internal/bus/confirm.go`), and a JetStream publish, which the stream acknowledges with nothing
+when the server refuses it, reads the violation the server reported under its own subject
+(`deniedPublish`, `internal/bus/denials.go`). So a topic the stream captures is answered that 403
+too, and so is `POST /v1/messages/send`, which publishes `notifications.agent.<id>` over
+JetStream. That is a change for a client: such a publish and such a send were the retried `503`
+with `Retry-After: 1` before, and are now a `403` with none, which
+`packages/envoy-client/src/transport.ts` does not retry (it retries every status at or past 500 and
+none below it).
+
+One refusal is the publish route's own: a publish that lost the race for the role's claim — every one
 of the two resolution attempts spent on a supersession (`errRoleHolderChanged`) — keeps the 503
 and the `Retry-After: 1`, since a fresh read wins that race as soon as the replacement claim
 settles, but answers its own body,
@@ -154,7 +161,8 @@ Each inbound send and publish is recorded in one line, INFO when accepted and WA
 `source`, `source_session`, `payload_summary`, `outcome` and `status`, and `holder` as well when a
 role topic resolved one. `outcome` is one of `accepted`, `invalid_request`, `too_large` and
 `bus_unavailable`, plus `no_live_session` for send, `capability_refused` for send and a role send,
-and `publish_denied`, `role_unclaimed`, `role_lapsed`, `role_holder_changed`,
+`publish_denied` for send and publish alike, since a publish on either transport can be denied,
+and `role_unclaimed`, `role_lapsed`, `role_holder_changed`,
 `role_claim_unreadable` and a confirmed send's 504 reason (`receipt_timeout`, `delivery_failed`,
 `not_confirmed`, `publish_failed`) for publish. Two
 refusals carry no such line, because neither reaches a handler: the 401 the API auth wrapper

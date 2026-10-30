@@ -1,0 +1,15 @@
+kind: Added
+body: |-
+    The secrets broker reads four settings for Google VM identities: `BROKER_GOOGLE_OIDC_AUDIENCE`,
+    the audience a VM's identity token must carry (its issuer is always Google's), and
+    `BROKER_VM_SERVICES`, `BROKER_VM_PROJECTS` and `BROKER_VM_INSTANCES`, which bind one
+    user-managed Google service account to one service name, one project and one instance-name glob.
+    The broker refuses to start, naming the setting and the entry, on a malformed entry, an account
+    given twice or with capital letters, a project's default account (Compute Engine's or App
+    Engine's), a Google-managed service agent, a glob holding a character no instance name has, a
+    VM account missing its project or glob, a project or glob for an account no VM service lists,
+    any VM setting without the audience, or the audience without a VM service. With none of them
+    set, it starts as before.
+time: 2026-10-29T22:30:00.000000000Z
+custom:
+    Issue: INFRA-782

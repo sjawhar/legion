@@ -215,6 +215,25 @@ type DispatchArgs struct {
 	FrontDoorReplicas *int `pulumi:"frontDoorReplicas,optional"`
 	ListenerReplicas  *int `pulumi:"listenerReplicas,optional"`
 
+	// NatsInCluster: the app and the listener dial natsUrl directly, at an address their own
+	// cluster resolves, rather than through the front door's SOCKS5 proxy. Neither NATS client
+	// carries ENVOY_NATS_SOCKS5_PROXY then, and the component renders no SOCKS5 proxy on the front
+	// door's pods, no port-1055 Service and no ingress rule admitting the two workloads to it.
+	// Unset, the SOCKS5 path renders as it does today, for a deployment whose NATS hub is outside
+	// this cluster.
+	NatsInCluster *bool `pulumi:"natsInCluster,optional"`
+	// NatsReplicas is the number of copies JetStream keeps of every stream and bucket, from 1 to
+	// bus.MaxReplicas: ENVOY_NATS_REPLICAS on the app's and the listener's containers, which every
+	// Envoy program of a deployment carries alike. It is not replicas, the app Deployment's pod
+	// count above: more than one copy needs a clustered NATS, which no pod count gives. Unset
+	// renders nothing and both binaries keep one copy (bus.ParseNATSReplicas).
+	NatsReplicas *int `pulumi:"natsReplicas,optional"`
+	// StreamMaxBytes is the stream's byte limit, at least 1: ENVOY_STREAM_MAX_BYTES on the same two
+	// containers. A deployed limit is never lowered, so programs carrying different limits leave
+	// the largest. Unset renders nothing and both binaries set no limit, so a deployed stream keeps
+	// the one it has (bus.ParseStreamMaxBytes).
+	StreamMaxBytes *int `pulumi:"streamMaxBytes,optional"`
+
 	// AppCpu and appMemory size the app Deployment's envoy-dispatch container, as Kubernetes
 	// quantities set as both its request and its limit: 1 CPU and 4Gi by default. The pod's
 	// cloud-sql-proxy sidecar is sized by proxyCpu and proxyMemory, and the front door and the
@@ -386,6 +405,8 @@ type Dispatch struct {
 // dispatchSettings are the plain inputs, validated, with the defaults applied, so they are known at
 // preview. images.tools is frontDoorToolsImage. With clusterOnly set only hostname, region and
 // deletionProtection are resolved: no other field is read by the cluster the mode builds.
+// natsReplicas and streamMaxBytes are 0 when their inputs are unset, where the component renders
+// neither setting.
 type dispatchSettings struct {
 	clusterOnly                                 bool
 	hostname, tailnetDNSName, region, namespace string
@@ -400,10 +421,22 @@ type dispatchSettings struct {
 	deletionProtection, existingNamespace       bool
 	replicas                                    int
 	frontDoorReplicas, listenerReplicas         int
+	natsInCluster                               bool
+	natsReplicas, streamMaxBytes                int
 	appResources                                dispatchAppResources
 	pprofPort                                   int
 	disruption                                  dispatchDisruption
 	azure                                       dispatchAzure
+}
+
+// socks5Proxy is the address of the front door's SOCKS5 proxy, the one the app and the listener
+// dial the NATS hub through, and "" with natsInCluster, where no proxy runs and the two dial
+// natsUrl themselves. One derivation, so the mode and the address can never disagree.
+func (s dispatchSettings) socks5Proxy() string {
+	if s.natsInCluster {
+		return ""
+	}
+	return clusterLocal(s.hostname+"-tailnet", s.namespace) + ":" + strconv.Itoa(dispatchSOCKS5Port)
 }
 
 // dispatchAzure is the Azure embedder's plain configuration, the zero value when
@@ -549,6 +582,9 @@ func dispatchClusterOnlyRefusals(args *DispatchArgs) []dispatchClusterOnlyInput 
 		{"replicas", args.Replicas != nil},
 		{"frontDoorReplicas", args.FrontDoorReplicas != nil},
 		{"listenerReplicas", args.ListenerReplicas != nil},
+		{"natsInCluster", args.NatsInCluster != nil},
+		{"natsReplicas", args.NatsReplicas != nil},
+		{"streamMaxBytes", args.StreamMaxBytes != nil},
 		{"appCpu", args.AppCpu != nil},
 		{"appMemory", args.AppMemory != nil},
 		{"proxyCpu", args.ProxyCpu != nil},
@@ -782,6 +818,26 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	}
 	if s.listenerReplicas, err = dispatchReplicas("listenerReplicas", args.ListenerReplicas, defaultDispatchListenerReplicas); err != nil {
 		return dispatchSettings{}, err
+	}
+	s.natsInCluster = args.NatsInCluster != nil && *args.NatsInCluster
+	// The two deployment settings both NATS clients carry, each unset (0) rendering nothing: the
+	// binaries then keep one copy and set no byte limit (bus.ParseNATSReplicas,
+	// bus.ParseStreamMaxBytes).
+	if args.NatsReplicas != nil {
+		replicas := *args.NatsReplicas
+		switch {
+		case replicas < 1:
+			return dispatchSettings{}, core.InputErrorf("natsReplicas", "natsReplicas %d is below 1; leave it unset for one copy", replicas)
+		case replicas > bus.MaxReplicas:
+			return dispatchSettings{}, core.InputErrorf("natsReplicas", "natsReplicas %d is above %d, the most copies NATS keeps", replicas, bus.MaxReplicas)
+		}
+		s.natsReplicas = replicas
+	}
+	if args.StreamMaxBytes != nil {
+		if limit := *args.StreamMaxBytes; limit < 1 {
+			return dispatchSettings{}, core.InputErrorf("streamMaxBytes", "streamMaxBytes %d is below 1; leave it unset for no limit", limit)
+		}
+		s.streamMaxBytes = *args.StreamMaxBytes
 	}
 	if s.appResources, err = newDispatchAppResources(args); err != nil {
 		return dispatchSettings{}, err

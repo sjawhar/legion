@@ -82,6 +82,23 @@ Dispatch that does not answer the boot's read of the mapping delays the boot rat
 the daemon reads it again, one second doubling to one minute between reads, for as long as Dispatch
 stays unreachable, logs each wait, and serves nothing until the read passes.
 
+Beside the two role Apps, every read of the mapping, the boot's included, asks Dispatch whether its
+GitHub App, the Envoy App whose webhook carries GitHub's events
+([The GitHub Apps](#the-github-apps)), is installed on each served repository. A repository it is
+not installed on is served all the same, but GitHub sends Legion none of its events and Dispatch
+has no delivery of it to redeliver, so only the daemon's two-minute pass (below) brings its pull
+requests' changes in. `legion state` names each such repository on a `webhook App missing on
+<repo>: <reason>` line, and `--json` lists it under `repositories.withoutWebhookApp` with its
+`repo` and `reason`, which says whether the App is not installed, `the webhook App check failed:
+<error>` (Dispatch holds no App key, `GITHUB_APP_UNCONFIGURED`, or its read of GitHub failed,
+`GITHUB_UNREADABLE`), or `this Dispatch does not answer the webhook App check` (a Dispatch older
+than the check). The check never leaves a repository out and never fails the boot; the boot's
+`repositories` stage line and each `legion workflow repositories changed` line log the same list
+as `withoutWebhookApp`. The check reads only the App's installation, so a repository whose events
+come through a repository webhook is listed too. Install the Envoy App on the repository: the
+daemon names it no more from its next read of the mapping, at a restart or the next change of the
+mapping in Dispatch.
+
 ## The GitHub Apps
 
 Legion uses three GitHub Apps, each installed on the owner of every repository Legion works: an
@@ -96,12 +113,51 @@ are exactly what Legion's agents can do on GitHub:
 
 The implement App cannot create a check run, and a review never comes from the App that wrote the
 change. `gh api /apps/<app slug> --jq .permissions` shows what an App holds. The daemon itself reads
-GitHub with the implement App too: every two minutes it reads each open pull request's base branch
-and the checks that branch requires (its rulesets and its branch protection), since only those
-decide whether CI is red at a head, and so where Legion sends the issue. The same read follows a
-pull request's head when its push webhook is lost or late, and the daemon looks up the open pull
-request of an issue whose implementer completed with none recorded. Whether the merge happens
-is GitHub's to decide, under those same rules.
+GitHub with the implement App too, in a pass as it starts and every two minutes after: it reads
+each open pull request's base branch and the checks that branch requires (its rulesets and its
+branch protection), since only those decide whether CI is red at a head, and so where Legion sends
+the issue. Whether the merge happens is GitHub's to decide, under those same rules.
+
+The same pass applies what a GitHub event lost, or still waiting behind the daemon's GitHub
+consumer, would have carried, so such an event leaves the record behind for at most one pass:
+
+- **An opened or reopened pull request, in any phase.** Every pass lists each served repository's
+  open pull requests, a request per hundred of them. One on an issue's branch, `legion/<KEY>`, of
+  the repository itself (not a fork's) that the daemon does not record open is applied as its
+  opened webhook would be, a reopen when the record holds the same pull request: the workflow
+  records it in whatever phase the issue is, and moves an implementing issue whose implementer
+  completed on to testing.
+- **A close or a merge.** A pull request recorded open that GitHub shows closed has its close
+  applied, or its merge with its merge commit: the merge closes an issue waiting on it in
+  `awaiting_merge` and otherwise tells the architect `pr-merged`, and a close without merging tells
+  the architect `pr-closed-unmerged`.
+- **A push.** A head GitHub shows that the record does not hold is applied as its synchronize
+  webhook would be. When no recorded push ends at that head, the pass first rebuilds the pushes
+  that took the branch there from GitHub's repository activity of the branch (its newest hundred
+  entries): one push for each push, force push or branch creation not yet recorded, oldest first,
+  with its pusher and the paths GitHub's compare of its two commits lists. When that activity does
+  not lead back to the recorded head, the pass applies none of them and logs a warning, `workflow:
+  the pass cannot rebuild from GitHub's activity the pushes that moved a pull request's head; …`,
+  with its `reason`. Then, or when a recorded push ends at the head, it applies the one push
+  GitHub's compare shows changed only the issue's own `.legion/<issue>/`, and leaves any other push
+  to its webhook.
+- **A review.** A deciding review whose webhook never arrived is applied, whatever phase the issue
+  is in.
+- **A CI settlement.** For a head no settlement from Envoy's listener stands for, the pass reads
+  the head's check runs; once every check's latest run has completed and the newest completed at
+  least two minutes before, it applies the settlement the listener would have published, and the
+  listener's own settlement of that head arriving later changes nothing the pass learned.
+- **A missing pull request.** An issue in `implementing` whose implementer completed, with no open
+  or merged pull request recorded and none GitHub lists on its branch, is told to its architect as
+  `pull-request-missing`, once per handoff commit
+  ([Troubleshooting](/legion/legion/troubleshooting/#an-architect-is-told-pull-request-missing)).
+
+Each fact the pass applies carries an id built from what GitHub showed, never from the time, so one
+observation is applied once however many passes read it, and the webhook arriving after it changes
+nothing. These reads share the implement App's hourly limit with every pane's `gh`: a rate-limit
+answer ends the pass there, and the next pass starts over. The implementer's completion of
+implementing reads its branch's open pull request with the implement App too, and is refused
+`HANDOFF_NO_PULL_REQUEST` when there is none and the record holds none merged.
 
 `scripts/github-apps/create.ts` registers all three from the manifests beside it:
 `scripts/github-apps/implement.json` and `review.json` hold the permissions above and carry no
@@ -711,11 +767,16 @@ Closing the terminal leaves the project without one, and the daemon logs
   ```text
   legion WIDGETS on http://192.0.2.10:13370 — schema 12, boot 7 started 2026-10-03T09:12:40Z (first boot 2026-09-20T15:02:11Z)
   admission: 3 active, 1 waiting, cap 4; 9 issues
+  blocked on Dispatch links: none
   roots waiting on a person: 1, 0 answered and waiting for a slot — WIDGETS-9 waits on ask 7f3c2a10, unanswered
   open production checks: 1; the oldest, WIDGETS-12 #42 at 4b7d2a1, look 1 woken by merge at 2026-10-03T10:15:02Z, bound 2026-10-17T10:15:02Z
   pending Dispatch status writes: none
   held lifecycle rows: none
   claims nothing will wake: none
+  webhook App missing: none
+  consumer legion-go-WIDGETS-dispatch: 0 waiting
+  consumer legion-go-WIDGETS-dispatch-server: 0 waiting
+  consumer legion-go-WIDGETS-github: 3 waiting, oldest 2s
   ```
 
   The `roots waiting on a person` line counts the roots that gave their admission slot back to
@@ -730,6 +791,27 @@ Closing the terminal leaves the project without one, and the daemon logs
   announcement that every server process serves a build), `dispatch build` or `bound`) and when,
   and when the check's bound comes due (`none` when no check is open).
 
+  The `webhook App missing` lines name each served repository Dispatch's GitHub App is not known
+  to be installed on, one line each with why (`webhook App missing on <repo>: <reason>`), or say
+  `none` ([The project's repositories](#the-projects-repositories)).
+
+  The `consumer` lines are the lag of the daemon's three durable consumers on the
+  `ENVOY_NOTIFICATIONS` stream: `legion-go-<project>-dispatch` (Dispatch's issue events and the
+  project's repository mapping), `legion-go-<project>-dispatch-server` (Dispatch's own start) and
+  `legion-go-<project>-github` (the GitHub events of the project's repositories). Each says how
+  many messages wait for the consumer, delivered and not yet handled or not yet delivered, the
+  events the daemon will acknowledge without acting on included, and how long ago the oldest of
+  them was stored (`oldest unknown` when that message could not be read). A message is handled
+  once the daemon acknowledged it, or terminated it as poison; a message put back to retry is not.
+  `STALLED: none handled for <d>` ends the line when messages wait and the daemon has handled
+  none of that consumer's for 60 seconds, since the last it handled (named) or, before the first,
+  since the daemon started. `unavailable: <error>` names what NATS did not answer in time (two
+  seconds for the consumer, one of them for its oldest message), or refused: alone on the line
+  when the consumer's info could not be read, since nothing else is known then. A daemon with no
+  workflow prints `durable consumers: none`.
+  [GitHub events wait](/legion/legion/troubleshooting/#github-events-wait) says what each means
+  and what to check.
+
   `--json` prints everything the daemon records: `admission` (`cap`, `active`, `waiting`), each
   issue under `issues` with its `phase`, `status`, `repo` and `defaultBranch`, `holdReason`,
   `architect` and `workers` (each claim's `state`), `pullRequest` (`repo`, `head`, `checksVerdict`,
@@ -742,8 +824,13 @@ Closing the terminal leaves the project without one, and the daemon logs
   `controllerLocator`, `pendingStatusWrites`,
   `heldOutboxRows` ([An issue's stop or start waits behind its own launch](/legion/legion/troubleshooting/#an-issues-stop-or-start-waits-behind-its-own-launch)),
   `strandedClaims` ([A tree does not move after a restart](/legion/legion/troubleshooting/#a-tree-does-not-move-after-a-restart)),
-  `repositories` (the project's mapping as the daemon serves it: `owners`, `mapped`, and `refused`
-  with each left-out repository's `reason`),
+  `repositories` (the project's mapping as the daemon serves it: `owners`, `mapped`, `refused`
+  with each left-out repository's `reason`, and `withoutWebhookApp` with each served repository
+  Dispatch's GitHub App is not known to be installed on, its `repo` and `reason`),
+  `consumers` (each durable consumer's `name`; `waiting`; `oldestAt` and `oldestAgeSeconds`, the
+  stream time of the oldest waiting message and its age in whole seconds, both null when nothing
+  waits or that message could not be read; `lastHandledAt`, null before the first; `stalled`; and
+  `unavailable`, present only when a NATS read failed),
   `settings` (the daemon's resolved `legion.yaml` — `max_fix_attempts`, `worker_boot_timeout_seconds`
   and the rest as the daemon runs them — with every credential, credential source and credential
   file path left out, and a URL's userinfo masked as `xxxxx@`), and `agentSecretsLogin` when the
