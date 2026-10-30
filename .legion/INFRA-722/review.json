@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-722",
+  "completed": "2026-10-30T12:39:22Z",
+  "round": 1,
+  "reviewedHead": "0e46ff75c3c13d9661477a6d3ccdbdf29a7e8123 (code 46aa74d3192715774ba9f9ef158689882f30c7c4)",
+  "decision": "changes_requested",
+  "critical": 2,
+  "important": 5,
+  "minor": 6,
+  "keyFindings": [
+    {"severity": "critical", "file": "(branch)", "description": "The pull request is CONFLICTING with main since #2518 merged (11:45Z), so GitHub builds no CI. Merge main keeping both sides; html_flow.go's kind detection and htmlFlowRefusal (and its reason, which names the lower-case declaration) must agree with #2518's reading of a lower-case declaration, never refuse what it now accepts; re-run the engine old-against-new fuzz and the differential on the merged engine."},
+    {"severity": "critical", "file": "packages/envoy/internal/dispatch/pmdoc/list_spacing.go:388", "description": "Two known silent misreads, measured by the tester DIVERGENT at base and head: indented code in a nested list inside a typed block in a list item, and an unclosed typed block whose indented code ends the document. Refuse each by name (architect's request under no-deferrals), each with a corpus-errors document and the test naming the constant; differential 'newly refused that the base read correctly' stays 0 or each listed, census changes no stored version."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/pmdoc/html_flow.go:144", "description": "Second port of micromark html-flow: htmlFlowKind/completeAttributes/htmlSpace/htmlValueEnd/htmlNamed/htmlNameIn duplicate escape.go htmlBlockStart/htmlCompleteTagEnd/htmlTagEnd/nameIs over the same name lists; code-quality fuzz of 3,000,000 lines found 0 differences. Keep one grammar; render_inline.go asks the question both ways."},
+    {"severity": "important", "file": "packages/proof-editor/src/lib-remark-directive-plugin.ts:42", "description": "HTML flow construct registration and the HTML-block transform live in the copied directive file, which forced a new allowed edit kind for copied files in proof-editor AGENTS.md; move to a Legion-owned module listed in the own-files table."},
+    {"severity": "important", "file": "packages/proof-editor/src/lib-headless.ts:218", "description": "remarkStrictHtmlFlow on serializeProcessor does nothing (only micromarkExtensions, no remarkParse there); delete it and the AGENTS.md clause documenting it."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/pmdoc/refusals_test.go:195", "description": "browserBlockHTML copies part of htmlFlowRefusal's inline message (html_flow.go:111); declare the reason as a named constant as typedDefinitionRefusal's are and assert that."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/pmdoc/parse.go:243", "description": "ParseWithSourceStarts documents byte offsets in the caller's markdown, but they are now offsets into the U+FFFD-replaced buffer (each U+0000 shifts later starts by 2); itemblocks.bySourceStarts cuts the caller's body at them (deep-review probe: a paragraph split mid-line). Map starts back, or change the contract and itemblocks together."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/pmdoc/html_flow.go:85", "description": "Exemption comment says the browser's block runs to the first blank line; true for kinds 6 and 7 only. Gate the exemption on kind >= 6 or narrow the comment."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/pmdoc/render_inline.go:659", "description": "codeLineOpensHTML (and AGENTS.md) claims a lone-tag lazy line opens kind 7 in every CommonMark reader; CommonMark forbids it, only upstream micromark did."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/pmdoc/list_spacing.go:446", "description": "quotedListSpread's string return is empty on every path; drop it. htmlFlowRefusal's lines parameter is always node.Lines()."},
+    {"severity": "minor", "file": "packages/envoy/AGENTS.md:2066", "description": "Docs drift: parseUnstamped named as the NUL entry (it is parseMarkdown); line 2408 still names deleted nestedQuotedListBlank; line 2235 omits the alone-before-a-blank-line exemption; typedCodeBlankInItem and dropHTMLFlowLines undocumented in AGENTS.md and the changelog fragment."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/pmdoc/table.go:232", "description": "asRead comment says it falls back where the parse recorded none; on an open paragraph the lookup misses because recordLine keys by the trimmed start."},
+    {"severity": "minor", "file": "(PR body)", "description": "No '## Contract change census' though the change adds refusals at the document write boundary (htmlFlowRefusal, typedCodeBlankInItem, and the two requested): add search commands, hits with dispositions, and the rollout line (immediate refusal naming the silent misread it closes)."}
+  ],
+  "ci": "Required set lint, typecheck, test, pr-title; at CI head 46aa74d3 (compare to 0e46ff75: handoffsOnly true, 2 files): lint, test, pr-title success, typecheck skipped. Non-required envoy-go and envoy-go-race fail only TestRoutesTablePinsEveryRegisteredRoute (147 rows, pin 146), a main defect from the merge base a21100c5 that this diff does not touch, owned by open #2551; pi-envoy fails nine queued-card tests in a package this diff does not touch; dispatch and dispatch-memory still running. Branch now CONFLICTING, so no new CI.",
+  "thermonuclear": "deep-review: APPROVE at 46aa74d3, three Minors (offsets, two comments) adopted above; code-quality: CHANGES at 46aa74d3, findings 1-8 and 10 adopted above, 9a (a pre-existing key reflowed) not a finding.",
+  "proseFixesByReviewer": "None this round: the head is conflicting so no CI would run on a prose push, and each prose finding sits in a paragraph the requested code changes rewrite; all are listed for the implementer."
+}
