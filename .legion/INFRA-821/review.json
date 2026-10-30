@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-821",
+  "completed": "2026-10-30T07:48:00Z",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "AGENTS.md",
+      "description": "Line 523 ('Learnings: docs/solutions/<category>/<slug>.md') disagreed with the corrected legion-retro skill (<slug>-pr<number>.md). Prose; fixed by the reviewer in d112b0053108, as the architect directed. CI at d112b005: lint, test, pr-title success, typecheck skipped (run 41012636579, 41012636538)."
+    },
+    {
+      "severity": "minor",
+      "file": "PR #2545 body",
+      "description": "'Where no CI job reads this change' said skills/** and AGENTS.md select pi_legion, docs, contracts and claude_envoy. ci.yaml's contracts filter (lines 533-547) names only skills/dispatch and skills/dispatch-writing-specs, so contracts is not selected (run 41012636579 skipped it); skills/** selects daemon_go_tests, claude_envoy, docs, envoy_plugin, envoy_client, pi_shared, pi_envoy, pi_legion and worker_image, and AGENTS.md selects pi_legion. Body corrected by the reviewer."
+    }
+  ],
+  "verified": [
+    "Spec acceptance 1-4 and plan A5/A6 against the diff main@origin(3c2691a7)..d112b005: the four stale lines and the two learnings.md lines are gone; every .changie.yaml line 32 holds the fragmentFileFormat the bullet quotes.",
+    "No tooling reads a learning's file name by issue key: grep of .github, docs/site/generators and scripts for docs/solutions finds only path prefixes.",
+    "Remaining fixtures (INFRA-1-*.yaml in .github/scripts/*.test.sh) and the .changie.yaml headers name no fragment form an author follows; left as the plan settles.",
+    "No review threads, comments or reviews on #2545 before this round."
+  ],
+  "thermonuclear": "Not run: the diff is docs-only (markdown, a skill reference, a YAML comment header and a changelog fragment); no runtime code changed."
+}
