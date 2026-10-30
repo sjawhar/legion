@@ -56,16 +56,15 @@ func ScanReview(row pgx.Row) (model.ArtifactReview, error) {
 // belongs to one, else the document itself. askID is the approval ask the review answers, nil
 // when it was given from the document header with no request open. The review row keeps the
 // event's sequence on that owner (event_seq), which places a read of the review among the owner's
-// events. Every caller already holds the owner's row (and, when it appends `ask.answered` first,
-// the commit-order lock) before it calls this; inside WriteReview the row is inserted before the
-// event is appended and its sequence written after. The update that writes the sequence runs the
-// foreign-key checks again, since Postgres re-checks a row its own transaction inserted, and so asks
-// for the same FOR KEY SHARE locks the insert took: the transaction already holds them, so the
-// request never waits. Migration 0120's trigger, which gives the release
-// before this one's reviews their sequence, would give this row its sequence too, but only at the
-// commit, the first moment the event exists for every release; so WriteReview writes it itself,
-// and the row is right for any read the caller makes before it commits. The trigger then finds the
-// row sequenced and leaves it. The caller owns the transaction and publishes the event.
+// events. Every caller already holds the owner's row before it calls this; inside WriteReview the
+// row is inserted before the event is appended and its sequence written after. The update that
+// writes the sequence runs the foreign-key checks again, since Postgres re-checks a row its own
+// transaction inserted, and so asks for the same FOR KEY SHARE locks the insert took: the
+// transaction already holds them, so the request never waits. Migration 0120's trigger, which gives
+// the release before this one's reviews their sequence, would give this row its sequence too, but
+// only at the commit, the first moment the event exists for every release; so WriteReview writes it
+// itself, and the row is right for any read the caller makes before it commits. The trigger then
+// finds the row sequenced and leaves it. The caller owns the transaction and publishes the event.
 func WriteReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact model.Artifact, version int, state string, actor model.Actor, reason *string, askID *string) (model.ArtifactReview, model.Event, error) {
 	actorJSON, err := json.Marshal(actor)
 	if err != nil {

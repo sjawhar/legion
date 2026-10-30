@@ -78,9 +78,10 @@ type AppContext struct {
 	// and empty otherwise. Only BuildAppContext sets it, from DevSignInOrigin, so no caller can
 	// turn the route on without the origin check.
 	devSignInHost string
-	// eventHead reads the id of the newest committed event, which GET /auth/whoami answers as
-	// event_head: through apiDeps.Store, the database the API reads the event log from, or, for a
-	// context with no Store, nothing, since it has no event log to read (whoami then answers 503).
+	// eventHead reads the event_head GET /auth/whoami answers: nil for a context with a Store, whose
+	// router reads it through the API server it registers (api.Background's EventHead, an id at or
+	// below which every event is final), and, for a context with no Store, nothing, since it has no
+	// event log to read (whoami then answers 503). A test sets it to answer a head of its own.
 	eventHead func(context.Context) (int64, error)
 }
 
@@ -188,9 +189,11 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 	if err != nil {
 		return nil, fmt.Errorf("BuildAppContext: %w", err)
 	}
-	eventHead := func(context.Context) (int64, error) { return 0, errNoEventLog }
-	if database := apiDeps.Store; database != nil {
-		eventHead = func(ctx context.Context) (int64, error) { return api.EventHead(ctx, database) }
+	// A context with a Store reads its head through the API server New registers (api.Background's
+	// EventHead), which holds the event horizon it is read from.
+	var eventHead func(context.Context) (int64, error)
+	if apiDeps.Store == nil {
+		eventHead = func(context.Context) (int64, error) { return 0, errNoEventLog }
 	}
 	return &AppContext{
 		SigningKey:     opts.SigningKey,
@@ -240,6 +243,9 @@ type router struct {
 	// assets keeps what the asset store answered, for every request of the process
 	// (serveRetainedAsset).
 	assets *assetCache
+	// eventHead is what GET /auth/whoami answers as event_head: the context's own (AppContext's
+	// eventHead) when it names one, else the registered API server's (api.Background's EventHead).
+	eventHead func(context.Context) (int64, error)
 }
 
 // New returns an http.Handler that serves all dispatch routes, and the API server's background
@@ -262,6 +268,10 @@ func New(ctx *AppContext) (http.Handler, api.Background) {
 	mux.HandleFunc("GET /auth/whoami", accesslog.HandlerFunc("/auth/whoami", r.authWhoami))
 	mux.HandleFunc(githubapi.Prefix, accesslog.HandlerFunc(githubapi.Prefix, r.apiGithubRest))
 	background := api.Register(mux, r.ctx.lifetime, r.ctx.apiDeps)
+	r.eventHead = ctx.eventHead
+	if r.eventHead == nil {
+		r.eventHead = background.EventHead
+	}
 	mux.HandleFunc("/", r.staticHandler)
 	if ctx.devSignInHost == "" {
 		return r.enforceCookieOrigin(mux), background
@@ -444,25 +454,34 @@ type whoamiAnswer struct {
 	Login     string `json:"login"`
 }
 
-// authWhoami answers the signed-in person and event_head, the decimal id of the newest committed
-// event, read after the sign-in check and before the answer is written. The page starts every read
+// authWhoami answers the signed-in person and event_head, the decimal id at or below which every
+// event is final (api.Background's EventHead), read after the sign-in check and before the answer
+// is written. The page starts every read
 // the event feed keeps current only once whoami has answered, and resumes its first events
 // subscription from event_head, so a change committed while it loads is replayed rather than
-// missed. A head that cannot be read is 503 EVENT_HEAD_UNAVAILABLE, never a whoami without it: a
-// page that took a missing head for an older server's answer would start its feed at the server's
-// head and could miss such a change.
+// missed. A head it cannot answer is a 503, never a whoami without it: a page that took a missing
+// head for an older server's answer would start its feed at the server's head and could miss such a
+// change. EVENT_HEAD_UNAVAILABLE says only that no event id is proven final yet
+// (api.ErrEventHeadUnproven: an event insert open since before every mark, with no horizon proven
+// or persisted), which ends on its own and which the page asks again for as long as it lasts.
+// Every other failure (the database or the horizon's pool not answering) is
+// EVENT_HEAD_READ_FAILED, which the page retries a few times and then shows as an error.
 func (r *router) authWhoami(w http.ResponseWriter, req *http.Request) {
 	email, ok := r.login(w, req)
 	if !ok {
 		return
 	}
-	head, err := r.ctx.eventHead(req.Context())
+	head, err := r.eventHead(req.Context())
 	if err != nil {
 		// A read the page's own leaving cut short says nothing of the database.
 		if req.Context().Err() == nil {
 			slog.Warn("dispatch: whoami could not read the event log's head", "error", err)
 		}
-		writeCodeError(w, http.StatusServiceUnavailable, "the event log's head could not be read; ask again", "EVENT_HEAD_UNAVAILABLE")
+		if errors.Is(err, api.ErrEventHeadUnproven) {
+			writeCodeError(w, http.StatusServiceUnavailable, "no event id is proven final yet; ask again", "EVENT_HEAD_UNAVAILABLE")
+			return
+		}
+		writeCodeError(w, http.StatusServiceUnavailable, "the event log's head could not be read", "EVENT_HEAD_READ_FAILED")
 		return
 	}
 	api.WriteJSON(w, http.StatusOK, whoamiAnswer{EventHead: strconv.FormatInt(head, 10), Kind: "user", Login: email})
