@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"regexp"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -345,9 +347,9 @@ func TestLeaseReleasedRecordIsTakenAtTheNextPollKeepingServiceSince(t *testing.T
 // has stopped: the receiver's own stop calls Release again with the shutdown context a graceful
 // stop can have overrun (durableReceiver.Stop, after the hand-back's own release timed out at
 // handBackReleaseWait), and a record left unreleased is taken only once its TTL runs out, with
-// the ack wait's cap - a graceful stop delivering like a hard one. Before this fix Release
-// selected over the stopped loop and the ended context together, so Go picked
-// either: half of those stops skipped the write and logged a false warning.
+// the ack wait's cap - a graceful stop delivering like a hard one. The rule: a loop that has
+// already stopped is read before ctx, so a stop that did everything it owed writes the release
+// whatever its context says, rather than letting Go pick between two ready channels.
 func TestLeaseReleaseWritesWithAnExpiredContextAfterTheLoopStopped(t *testing.T) {
 	kv := leaseBucket(t)
 	clock := newFakeLeaseClock()
@@ -370,5 +372,85 @@ func TestLeaseReleaseWritesWithAnExpiredContextAfterTheLoopStopped(t *testing.T)
 		if !record.Released || record.Holder != "pod-a" {
 			t.Fatalf("release %d with an expired context left the record %+v, want it marked released", run+1, record.leaseFields)
 		}
+	}
+}
+
+// stalledRenewKV is the listener state bucket with one renewal held: once the test arms it, the
+// next write of the lease record blocks until the test lets it go, as a bucket call that hangs
+// past a release's bound does. Every later write lands, so the release that follows the held
+// renewal writes the record.
+type stalledRenewKV struct {
+	natsgo.KeyValue
+	armed  atomic.Bool
+	held   chan struct{}
+	letGo  chan struct{}
+	stalls sync.Once
+}
+
+func newStalledRenewKV(kv natsgo.KeyValue) *stalledRenewKV {
+	return &stalledRenewKV{KeyValue: kv, held: make(chan struct{}), letGo: make(chan struct{})}
+}
+
+func (k *stalledRenewKV) Update(key string, value []byte, revision uint64) (uint64, error) {
+	if k.armed.CompareAndSwap(true, false) {
+		k.stalls.Do(func() { close(k.held) })
+		<-k.letGo
+	}
+	return k.KeyValue.Update(key, value, revision)
+}
+
+// A Release the lease's loop outlasts records the term's ack-wait debt before it gives up, so the
+// release that lands later writes ack_wait_owed: a graceful stop whose first release timed out
+// (durableReceiver.handBack) has let go of the deliver subject by the time the second one writes
+// the record, and no linger follows that write, so a standby that takes it moments later must
+// hold for an ack wait rather than count the write a graceful hand-back.
+func TestLeaseAReleaseThatTimedOutLeavesTheTermOwingTheAckWait(t *testing.T) {
+	kv := leaseBucket(t)
+	clock := newFakeLeaseClock()
+	// The clock never moves, so the term's validity never runs out: the debt this row is about is
+	// the timed-out release's, not a lapse's.
+	stalled := newStalledRenewKV(kv.KeyValue)
+	a := testLease(bus.KeyValue{KeyValue: stalled}, "pod-a", testLeaseTiming(), clock.now)
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	a.Start(ctx)
+	awaitLease(t, "pod-a to hold the lease", 5*time.Second, a.Holding)
+	// A term that settled and then handed its messages back on a graceful stop: unsettled, owing
+	// its successor nothing of its own.
+	status := a.Status()
+	a.Settled(status.Term)
+	a.Unsettle(status.Term)
+
+	stalled.armed.Store(true)
+	select {
+	case <-stalled.held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no renewal was held within 5s")
+	}
+	releaseCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	err := a.Release(releaseCtx)
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("release while the loop is held = %v, want the context's deadline", err)
+	}
+	close(stalled.letGo)
+	<-a.done
+	if err := a.Release(context.Background()); err != nil {
+		t.Fatalf("release after the loop stopped: %v", err)
+	}
+
+	record, _ := readLease(t, kv)
+	if !record.Released || !record.Unsettled || !record.AckWaitOwed {
+		t.Fatalf("record after a release that timed out = %+v, want released, unsettled and owing an ack wait", record.leaseFields)
+	}
+	b := testLease(kv, "pod-b", testLeaseTiming(), clock.now)
+	b.step()
+	next := b.Status()
+	if !next.Holding || next.How != leaseTakenReleased || !next.Settle || next.HandedBack {
+		t.Fatalf("pod-b status = %+v, want held from a released record, settling, no hand-back: no linger followed that write", next)
+	}
+	receiver := &durableReceiver{durableReceiverOptions: durableReceiverOptions{timing: productionReceiveConfig()}}
+	if hold := receiver.settleHold(next.HandedBack); hold != consumerAckWait+settleMargin {
+		t.Fatalf("pod-b's settle hold is capped at %s, want the %s of a term owed an ack wait", hold, consumerAckWait+settleMargin)
 	}
 }

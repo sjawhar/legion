@@ -77,12 +77,14 @@ wait only once the pod holding it has died or lost the lease.
   a receiving holder comes before 1 s (`lingerUntaken`, two standby polls) and one poll have
   passed since the release, however far its 3 s cap has run. That floor, 1.25 s after the release,
   is the stop's guarantee to its successor: a standby whose term is to settle for the hand-back
-  delay alone must have subscribed within 1 s of the release (`leaseHandBackBridge`, a poll inside
-  the floor, which leaves its SUB a round trip). Then it drains the
+  delay alone must have had the server read its SUB within 1 s of the release
+  (`leaseHandBackBridge`, a poll inside the floor, which leaves that SUB a round trip). Then it
+  drains the
   subscription. So everything it
-  handed back is back within the standby's 3 s cap, as long as a standby took the record and
-  subscribed inside that window: a pod that takes the record later (none was running, so the
-  linger ended "not taken"), or takes it in time and is slower than that to subscribe, finds what
+  handed back is back within the standby's 3 s cap, as long as a standby took the record and the
+  server had its subscription inside that window: a pod that takes the record later (none was
+  running, so the linger ended "not taken"), takes it in time and is slower than that to
+  subscribe, or subscribes in time with a flush that fails or returns past the window, finds what
   the durable pushed meanwhile gone to no subscriber,
   or to a lost node's binding alone, and settles for an ack wait instead (below). The standby
   delivers about 2 to 3 s after the stop (the hand-back delay and a settle read), about 3 to 4 s
@@ -115,19 +117,23 @@ wait only once the pod holding it has died or lost the lease.
   lapsed, whatever its own flags stood at: the lapse dropped what it held without an ack.
   `ack_wait_owed` is the ack wait the releasing term still
   owed its successor: a term that must settle owes one from its acquiring write until its own hold
-  ends, and a term taken from a graceful hand-back until it has subscribed inside that hand-back's
-  window, so every release -
+  ends, and a term taken from a graceful hand-back until the server has its subscription inside
+  that hand-back's window, so every release -
   a stop, a lapse, a give-up, a stop before the term ever subscribed - writes the debt as the term
-  stands, a release during a lapse writing it set, and every take-over writes it false. A pod that
+  stands, a release during a lapse writing it set, and every take-over writes it false. A release
+  the lease's loop outlasts (`handBackReleaseWait`, 2 s) writes no record and records the debt
+  instead, so the release that lands after the linger has let go of the deliver subject carries
+  it: no linger follows that write. A pod that
   takes a released record carrying
   `stale_binding` or `unsettled` settles too, subscribing at once beside any binding rather than
   waiting it out as a pre-lease build's. Its cap is the hand-back delay and a second when the
   record carries `unsettled` without `ack_wait_owed`, the take-over's write is less than 1 s after
   the release (`leaseHandBackBridge`, `lingerUntaken`, by the server's timestamps of the two
-  writes) and the pod subscribes inside that same second, which it judges by the server's gap
-  between the two writes and its own clock since just before the second of them: the stopping
+  writes) and the server has the pod's subscription inside that same second, which the pod judges
+  by the server's gap between the two writes and its own clock since just before the second of
+  them, before each subscribe and again when that subscribe's flush returns: the stopping
   pod's linger guarantees the deliver subject its subscription for a poll longer than that and no
-  more. The cap is one
+  more, and a SUB the server has not read bridges to nothing. The cap is one
   ack wait and a second otherwise: the messages the stopping pod handed back come back after the
   hand-back delay to the next pod and to a lingering binding alike, but one that went to such a
   binding alone, or to no subscriber at all once the linger ended, or that a dead pod before the
@@ -151,7 +157,7 @@ and `settle`, `stale_binding` and `handed_back`), `listener lease term must sett
 once and holding what arrives until the durable's outstanding messages are in hand` (with `cap`),
 `hand-back window passed before subscribing; holding for the ack wait` (with `cap` and
 `since_release_ms`, logged by a term that took a hand-back and was slower than its window to
-subscribe),
+subscribe, or whose SUB the server had not read by then),
 `durable still push-bound by an earlier lease holder; receiving beside it`, `settle hold ended;
 delivering the held messages in stream order` (with `outcome` `settled` or `cap`, `held_ms`,
 `messages` and `ack_pending`), `durable receiving` (with `lease`, `waited_ms` and `settle`),

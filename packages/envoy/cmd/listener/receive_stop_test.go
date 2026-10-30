@@ -332,9 +332,9 @@ func TestAStoppingPodsLingerOutlastsTheHandBackWindowThoughItsCapHasRun(t *testi
 // pushes between that and the successor's subscribe reaches no subscriber of this machine's and
 // comes back only at its ack wait. The successor judges itself by the same window and holds for
 // 7 s, so that message lands in its held batch and is delivered in stream order, before the newer
-// one published after it subscribed. Before this fix it counted the
-// hand-back from the take-over alone, held for 3 s, delivered what it had, and the message that
-// had gone nowhere came back behind newer events of the same session.
+// one published after it subscribed. The rule: the hand-back's 3 s cap rests on a subscription
+// the stopping pod's linger bridged to, so it is the term's subscribe, not its take-over, that
+// the window is measured to.
 func TestASuccessorThatSubscribesPastTheHandBackWindowSettlesForTheAckWait(t *testing.T) {
 	uri := testnats.URL(t)
 	const machineID = "box-late-subscriber"
@@ -376,12 +376,12 @@ func TestASuccessorThatSubscribesPastTheHandBackWindowSettlesForTheAckWait(t *te
 	standby.lease.Start(context.Background())
 	waitFor(t, 2*time.Second, "pod-b to take the released lease", standby.lease.Holding)
 	took := standby.lease.Status()
-	if !took.HandedBack || took.HandBackSince(time.Now()) >= leaseHandBackBridge {
-		t.Fatalf("pod-b took the record %s after the release, %+v: the row needs a take-over inside the %s window", took.HandBackSince(time.Now()), took, leaseHandBackBridge)
+	if since := time.Since(released); !took.HandedBack || since >= leaseHandBackBridge {
+		t.Fatalf("pod-b took the record %s after the release, %+v: the row needs a take-over inside the %s window", since, took, leaseHandBackBridge)
 	}
 	<-stopped
-	// The window has not passed yet, and pod-a has already let go: what the durable pushes now
-	// reaches a binding of a lost node alone.
+	// pod-a's stop has returned, so its linger outlasted the window and it has let go of the
+	// deliver subject: what the durable pushes now reaches a binding of a lost node alone.
 	pushToALostBinding(t, uri, active.client, active.consumer, "lost", len(published)+1)
 
 	// pod-b subscribes past the window, as one whose prepare was slow does.
@@ -409,6 +409,79 @@ func TestASuccessorThatSubscribesPastTheHandBackWindowSettlesForTheAckWait(t *te
 	}
 	if end := standby.settleHoldEnd(t, time.Second); end["outcome"] != "settled" || end["messages"] != float64(4) {
 		t.Fatalf("pod-b's settle hold ended %v, want settled holding all four messages", end)
+	}
+}
+
+// A successor whose subscribe the server never got - its SUB is still unsent when the flush times
+// out - settles for the ack wait's cap and goes on owing its own successor one, though it took the
+// record inside the hand-back's window. The window is what the stopping pod's linger guarantees
+// the deliver subject its subscription for, and a SUB the server has not read bridges nothing to:
+// what the durable pushed meanwhile went to no subscriber of this machine's and comes back only at
+// its ack wait. A resubscribe that lands later records the term receiving, which no longer clears
+// that debt, so the record this term releases tells the pod after it to wait an ack wait out too.
+func TestASuccessorWhoseSubscribeTheServerNeverGotSettlesForTheAckWait(t *testing.T) {
+	uri := testnats.URL(t)
+	const machineID = "box-unflushed-sub"
+	relay := startListenerRelay(t, uri)
+	// A message outstanding for a minute, so the successor's settle hold runs to its cap rather
+	// than ending at its first read and clearing the term's debt with it.
+	leaveARetryOutstanding(t, uri, machineID, "retry")
+	handle, _ := recordingHandler()
+	standby := newReceiverRigVia(t, relay.relayed, uri, machineID, "pod-b", handle, testReceiveTiming(), testLeaseTiming())
+	// A request on pod-b's own connection, so nats.go has subscribed its reply inbox before the
+	// relay is armed: from here the only SUB on that link is the one begin sends.
+	if _, err := standby.client.JS().ConsumerInfo(bus.Stream, standby.consumer); err != nil {
+		t.Fatalf("read the durable on pod-b's connection: %v", err)
+	}
+	// The relay swallows that SUB and everything pod-b sends after it, the flush's PING included,
+	// so the subscribe's flush times out and the server never counts the subscription.
+	relay.arm("SUB ", 1)
+	// The record is written last, so pod-b takes it inside leaseHandBackBridge of the release, as
+	// a standby takes a graceful hand-back.
+	putLeaseRecord(t, uri, machineID, `{"holder":"pod-gone","boot":"0123456789abcdef","released":true,"unsettled":true}`)
+	standby.lease.Start(context.Background())
+	standby.receiver.Start()
+
+	if acquired := standby.logRecord(t, "listener lease acquired", 15*time.Second); acquired["handed_back"] != true {
+		t.Fatalf("pod-b took the record %v, want it taken as a graceful hand-back: the row needs a take inside the %s window", acquired, leaseHandBackBridge)
+	}
+	if settling := standby.logRecord(t, "listener lease term must settle; receiving at once and holding what arrives until the durable's outstanding messages are in hand", 5*time.Second); settling["cap"] != (handBackDelay + settleMargin).String() {
+		t.Fatalf("pod-b's hold before it subscribed = %v, want the %s cap of a hand-back", settling, handBackDelay+settleMargin)
+	}
+	passed := standby.logRecord(t, "hand-back window passed before subscribing; holding for the ack wait", 15*time.Second)
+	if passed["cap"] != (consumerAckWait + settleMargin).String() {
+		t.Fatalf("pod-b's hold after its subscribe went unflushed = %v, want the %s cap of a term owed an ack wait", passed, consumerAckWait+settleMargin)
+	}
+	if standby.lease.Status().HandedBack {
+		t.Fatal("pod-b still counts its term a hand-back though the server never got its subscription")
+	}
+
+	// The link comes back and pod-b resubscribes, which records the term receiving: the debt the
+	// term took on stands all the same, and its release hands it to the pod that takes the record
+	// next.
+	relay.arm("", 0)
+	relay.drop()
+	// The connection itself is what the wait reads: a request issued on the dropped link would
+	// hold its own JetStream deadline, long past the term's settle hold.
+	conn := standby.client.Conn
+	waitFor(t, 10*time.Second, "pod-b to notice the dropped link", func() bool { return !conn.IsConnected() })
+	waitFor(t, 15*time.Second, "pod-b to reconnect", conn.IsConnected)
+	if err := standby.receiver.resubscribe(context.Background()); err != nil {
+		t.Fatalf("resubscribe pod-b: %v", err)
+	}
+	if err := standby.lease.Release(context.Background()); err != nil {
+		t.Fatalf("release pod-b's lease: %v", err)
+	}
+	entry, err := standby.lease.kv.Get(standby.lease.key)
+	if err != nil {
+		t.Fatalf("read the lease record: %v", err)
+	}
+	record, err := decodeLeaseRecord(entry.Value())
+	if err != nil {
+		t.Fatalf("decode the lease record %s: %v", entry.Value(), err)
+	}
+	if !record.Released || !record.Unsettled || !record.AckWaitOwed {
+		t.Fatalf("the record pod-b released = %+v, want released, unsettled and owing an ack wait", record.leaseFields)
 	}
 }
 

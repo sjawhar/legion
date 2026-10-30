@@ -29,20 +29,23 @@ body: |-
     outstanding and about 12 to 13 s after it otherwise; a NAK-delayed retry stays outstanding,
     holds the hold to its cap and arrives after it. After a graceful stop the cap is the 2 s
     hand-back delay and a second, 3 s, every hand-over alike, as long as a standby took the
-    released record and subscribed on it while the stopping pod's linger could still have bridged
-    to it. The lease
+    released record and the server read its subscribe while the stopping pod's linger could still
+    have bridged to it. The lease
     record carries
     `stale_binding` (its holder subscribed beside a lingering push binding), `unsettled` (its
     term's hold had not ended, kept by a release, or its holder handed messages back on a graceful
     stop, or its renewals had lapsed when it was stopped), `ack_wait_owed` (the ack wait the
     releasing term still owed: a term that must settle owes one from its acquiring write until its
-    hold ends, and a term taken from a hand-back until it has subscribed inside the hand-back's
-    window, so a stop, a lapse, a
-    give-up or a stop before the term ever subscribed hands the debt on) and `receiving` (its
+    hold ends, and a term taken from a hand-back until the server has its subscription inside the
+    hand-back's window, so a stop, a lapse, a
+    give-up or a stop before the term ever subscribed hands the debt on, and a release the lease's
+    loop outlasts records it for the release that lands after the linger has let go) and
+    `receiving` (its
     holder's subscription is up), and a pod that takes a
     released record carrying `stale_binding` or `unsettled` settles the same way, capped at 3 s
-    when it carries `unsettled` without `ack_wait_owed` and the take-over both writes and
-    subscribes less than 1 s after the release, a poll inside the shortest linger, and at 7 s
+    when it carries `unsettled` without `ack_wait_owed` and the take-over writes the record and
+    has the server read its SUB less than 1 s after the release, a poll inside the shortest
+    linger, and at 7 s
     otherwise. A holder that
     takes an absent record, or a released one with neither flag, and finds the durable push-bound
     by a listener build from before the lease waits for that binding to end and subscribes within

@@ -189,3 +189,22 @@ func waitUnlessDone(ctx context.Context, d time.Duration) error {
 		return nil
 	}
 }
+
+// awaitDone waits for done and reports nil, or returns ctx.Err() when ctx ends first. done is
+// read before ctx, so a wait whose work finished just as ctx ran out reports it finished: a
+// select over the two ready channels together would pick either, and half of those waits would
+// report work undone that was done. Every wait of the shutdown on a loop that is stopping reads
+// it this way (lease.Release, durableReceiver.Stop, waitLoops, shutdownListener).
+func awaitDone(ctx context.Context, done <-chan struct{}) error {
+	select {
+	case <-done:
+		return nil
+	default:
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}

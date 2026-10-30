@@ -1468,14 +1468,8 @@ func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.C
 	// reconnecting, end the retired watchers and delete their consumers (endListenerKVWatchers, the
 	// drain hook main adds), and drain the connection, but never let a blocked NATS request pin the
 	// process after its HTTP listener is gone.
-	select {
-	case <-loops.monitorDone:
-	default:
-		select {
-		case <-loops.monitorDone:
-		case <-shutdownCtx.Done():
-			logger.Warn("self-health monitor still running at shutdown")
-		}
+	if awaitDone(shutdownCtx, loops.monitorDone) != nil {
+		logger.Warn("self-health monitor still running at shutdown")
 	}
 	// The live lane drains before the main client, within 3 s: a live delivery still in its handler
 	// publishes its exception through the main client, and reads the caches stopped below. Core

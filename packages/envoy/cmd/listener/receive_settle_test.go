@@ -241,8 +241,9 @@ func TestASettleHoldEndsAtItsCap(t *testing.T) {
 // hand-back delay and a second after a graceful hand-back (a released record carrying unsettled
 // and not ack_wait_owed, taken within leaseHandBackBridge of the release, with stale_binding or
 // without). A message NAKed for a retry a minute later stays outstanding past either, so the hold
-// runs to its cap and then delivers what it holds; at the old cap of two ack waits and a second,
-// 13 s, a graceful take-over delivered 14 s after the stop and a hard one 19 s after the kill.
+// runs to its cap and then delivers what it holds. The rule: each cap is what the previous holder
+// can still have outstanding and no more, so a hand-over waits the hand-back delay out and a
+// take-over an ack wait, rather than both waiting the sum of the two.
 func TestASettleHoldsCapIsWhatThePreviousHolderCanStillHaveOutstanding(t *testing.T) {
 	for _, row := range []struct {
 		name, machineID, record string
@@ -291,44 +292,61 @@ func TestASettleHoldsCapIsWhatThePreviousHolderCanStillHaveOutstanding(t *testin
 	}
 }
 
-// The hand-back's cap is judged when the term subscribes, not when it took the record: the
-// stopping pod guarantees the deliver subject its subscription for leaseHandBackBridge after the
-// release and no longer (lingerUntaken and a poll, durableReceiver.linger), so a term that took
-// the record inside that window and is slower to subscribe - a prepare that retried, a durable
-// that refused the first subscribe - holds for the ack wait's cap instead. The lease carries the
-// release's age at the acquiring write (handBackBridge), so both pods judge the one window.
-func TestAHandBacksCapIsJudgedWhenTheTermSubscribes(t *testing.T) {
+// The hand-back's cap is judged when the server has the term's subscription, not when it took the
+// record: the stopping pod guarantees the deliver subject its subscription for
+// leaseHandBackBridge after the release and no longer (lingerUntaken and a poll,
+// durableReceiver.linger), so a term that took the record inside that window and is slower to
+// subscribe - a prepare that retried, a durable that refused the first subscribe - or whose
+// subscribe the server never read - a flush that timed out - holds for the ack wait's cap
+// instead, and goes on owing its successor one. The lease carries the release's age at the
+// acquiring write (handBackBridge), so both pods judge the one window.
+func TestAHandBacksCapIsJudgedWhenTheServerHasTheSubscription(t *testing.T) {
 	receiver := &durableReceiver{durableReceiverOptions: durableReceiverOptions{timing: productionReceiveConfig()}}
 	release := time.Now()
-	// The acquiring write landed 100 ms after the release write by the server's timestamps, and
-	// the taking pod read its own clock just before that write.
-	taken := leaseStatus{Settle: true, HandedBack: true,
-		handBack: handBackBridge{delta: 100 * time.Millisecond, at: release.Add(100 * time.Millisecond)}}
 	for _, row := range []struct {
-		name        string
-		status      leaseStatus
-		subscribeAt time.Duration
-		handedBack  bool
-		limit       time.Duration
+		name string
+		// taken says the term was taken from a graceful hand-back, judgeAt when the receive loop
+		// judges it, and subscribed what it tells the lease of the server's reading of its SUB.
+		taken      bool
+		judgeAt    time.Duration
+		subscribed bool
+		holds      bool
+		limit      time.Duration
 	}{
-		{"subscribes inside the window", taken, 900 * time.Millisecond, true, handBackDelay + settleMargin},
-		{"subscribes past the window", taken, 1100 * time.Millisecond, false, consumerAckWait + settleMargin},
-		{"no hand-back to count", leaseStatus{Settle: true}, 0, false, consumerAckWait + settleMargin},
+		{"the server has the subscription inside the window", true, 900 * time.Millisecond, true, true, handBackDelay + settleMargin},
+		{"the server has it past the window", true, 1100 * time.Millisecond, true, false, consumerAckWait + settleMargin},
+		{"the subscribe never reached the server", true, 100 * time.Millisecond, false, false, consumerAckWait + settleMargin},
+		{"no hand-back to count", false, 0, true, false, consumerAckWait + settleMargin},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			now := release.Add(row.subscribeAt)
-			if row.status.HandedBack {
-				if since := row.status.HandBackSince(now); since != row.subscribeAt {
-					t.Fatalf("the release reads %s old at the subscribe, want %s", since, row.subscribeAt)
-				}
+			now := release.Add(row.judgeAt)
+			l := &lease{now: func() time.Time { return now }}
+			var bridge handBackBridge
+			if row.taken {
+				// The acquiring write landed 100 ms after the release write by the server's
+				// timestamps, and the taking pod read its own clock just before that write.
+				bridge = handBackBridge{delta: 100 * time.Millisecond, at: release.Add(100 * time.Millisecond)}
 			}
-			handedBack := row.status.HandedBackAt(now)
-			if handedBack != row.handedBack {
-				t.Fatalf("a term subscribing %s after the release counts as handed back %v, want %v: the window is %s",
-					row.subscribeAt, handedBack, row.handedBack, leaseHandBackBridge)
+			l.startTermLocked(leaseTakenReleased, true, bridge, false)
+			holds, since := l.HandBackHolds(l.term, row.subscribed)
+			if holds != row.holds {
+				t.Fatalf("a term judged %s after the release, its subscription read %v, counts as handed back %v, want %v: the window is %s",
+					row.judgeAt, row.subscribed, holds, row.holds, leaseHandBackBridge)
 			}
-			if hold := receiver.settleHold(handedBack); hold != row.limit {
+			if row.taken && since != row.judgeAt {
+				t.Fatalf("the release reads %s old at the judgement, want %s", since, row.judgeAt)
+			}
+			if hold := receiver.settleHold(holds); hold != row.limit {
 				t.Fatalf("its settle hold is capped at %s, want %s", hold, row.limit)
+			}
+			// A hand-back judged over stays over, and the subscription that lands later clears no
+			// debt: the term owes its successor the ack wait until its own hold ends.
+			if again, _ := l.HandBackHolds(l.term, true); again != row.holds {
+				t.Fatalf("judged again, the hand-back holds %v, want %v", again, row.holds)
+			}
+			l.SetReceiving(l.term)
+			if owed := l.ackWaitOwed; owed == row.holds {
+				t.Fatalf("after the term was recorded receiving it owes an ack wait %v, want %v", owed, !row.holds)
 			}
 		})
 	}

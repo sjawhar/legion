@@ -180,25 +180,34 @@ func TestLeaseAckWaitOwedIsTheTermsDebtAndDecidesTheHandBack(t *testing.T) {
 	}
 }
 
-// A term taken from a graceful hand-back owes its successor an ack wait until it has subscribed
-// inside the hand-back's window: the stopping pod's linger bridges the deliver subject to that
-// subscription and no further. A term that stops, or gives the lease up, before it subscribes (a
-// Stop during prepare, a holder stuck on its durable) releases the record owing the ack wait, so
-// the next holder's hold waits one out; one that subscribed first releases it owing nothing, and
-// the hand-over keeps the 3 s cap. One that subscribed past the window (HandBackLapsed, the
-// receive loop's judgement) owes it like any other settling term: what the durable pushed while
-// no pod of this machine was subscribed comes back only at its ack wait.
+// A term taken from a graceful hand-back owes its successor an ack wait until the server has its
+// subscription inside the hand-back's window: the stopping pod's linger bridges the deliver
+// subject to that subscription and no further. A term that stops, or gives the lease up, before
+// it subscribes (a Stop during prepare, a holder stuck on its durable) releases the record owing
+// the ack wait, so the next holder's hold waits one out; one whose subscription the server had
+// inside the window releases it owing nothing, and the hand-over keeps the 3 s cap. One judged
+// past the window, and one whose subscribe the server never got, owe it like any other settling
+// term (HandBackHolds, which the receive loop asks before each subscribe and again when the
+// subscribe's flush returns): what the durable pushed while the server had no subscription of
+// this pod's comes back only at its ack wait, and the subscription that lands later clears no
+// debt.
 func TestLeaseATermTakenFromAHandBackOwesTheAckWaitUntilItSubscribes(t *testing.T) {
 	clock := newFakeLeaseClock()
 	for _, row := range []struct {
-		name      string
-		lapsed    bool
-		subscribe bool
-		owed      bool
+		name string
+		// judged is whether the receive loop judged the hand-back at all, which a term that never
+		// reached its subscribe does not; advance is how long after the take it judged it, and
+		// subscribed what it told the lease of the server's reading of its SUB.
+		judged     bool
+		advance    time.Duration
+		subscribed bool
+		holds      bool
+		owed       bool
 	}{
-		{"stopped before it subscribed", false, false, true},
-		{"stopped after it subscribed", false, true, false},
-		{"subscribed past the hand-back window", true, true, true},
+		{"stopped before it subscribed", false, 0, false, false, true},
+		{"the server had its subscription inside the window", true, 0, true, true, false},
+		{"the server had its subscription past the window", true, leaseHandBackBridge, true, false, true},
+		{"its subscribe never reached the server", true, 0, false, false, true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			kv := leaseBucket(t)
@@ -209,10 +218,13 @@ func TestLeaseATermTakenFromAHandBackOwesTheAckWaitUntilItSubscribes(t *testing.
 			if !status.Holding || status.How != leaseTakenReleased || !status.Settle || !status.HandedBack {
 				t.Fatalf("pod-a status = %+v, want held from a graceful hand-back, settling", status)
 			}
-			if row.lapsed {
-				a.HandBackLapsed(status.Term)
+			if row.judged {
+				clock.advance(row.advance)
+				if holds, _ := a.HandBackHolds(status.Term, row.subscribed); holds != row.holds {
+					t.Fatalf("the hand-back holds %v %s after the take, subscribed %v, want %v", holds, row.advance, row.subscribed, row.holds)
+				}
 			}
-			if row.subscribe {
+			if row.subscribed {
 				a.SetReceiving(status.Term)
 			}
 			if err := a.Release(context.Background()); err != nil {

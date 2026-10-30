@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -450,4 +452,28 @@ func (p *listenerProcess) waitHealthy(t *testing.T) {
 func (p *listenerProcess) waitStandby(t *testing.T, activeInstance string) {
 	t.Helper()
 	p.waitHealth(t, "a healthy standby of "+activeInstance, map[string]any{"role": "standby", "active_instance": activeInstance})
+}
+
+// A shutdown's wait on a loop that is stopping reads the loop before the context (awaitDone):
+// every such wait runs with a context the stop can have run out of, and a select over the two
+// ready channels together would pick either, so half of those waits would report work undone
+// that was done - a lease left unreleased for a standby to wait out as an expired one
+// (lease.Release), a hand-back reported unfinished (durableReceiver.Stop), a warning about loops
+// that had returned (waitLoops, shutdownListener). A context that ended with the loop still
+// running is its error.
+func TestAwaitDoneReadsTheLoopBeforeTheContext(t *testing.T) {
+	done := make(chan struct{})
+	close(done)
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	// Both channels are ready at every call, so a select over the two would take the context's
+	// branch about half the time; 100 runs make that certain.
+	for run := range 100 {
+		if err := awaitDone(ended, done); err != nil {
+			t.Fatalf("wait %d on a loop that had returned with an ended context: %v, want it counted done", run+1, err)
+		}
+	}
+	if err := awaitDone(ended, make(chan struct{})); !errors.Is(err, context.Canceled) {
+		t.Fatalf("wait on a loop still running with an ended context = %v, want the context's error", err)
+	}
 }
