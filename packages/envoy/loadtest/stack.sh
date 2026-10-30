@@ -76,7 +76,7 @@
 # k of the path's sha256 modulo 200 gives postgres 15000+10k, proxy 15001+10k, nats 15002+10k,
 # nats_monitor 15003+10k, listener 15004+10k, dispatch 15005+10k, pprof 15006+10k), so two roots on
 # one machine hold the same 7 ports about 1 pair in 200 and otherwise none, and a collision is
-# refused by setup, not shared; LOADTEST_PG_PORT, LOADTEST_PROXY_PORT, LOADTEST_NATS_PORT, LOADTEST_NATS_MONITOR_PORT,
+# refused by start, not shared; LOADTEST_PG_PORT, LOADTEST_PROXY_PORT, LOADTEST_NATS_PORT, LOADTEST_NATS_MONITOR_PORT,
 # LOADTEST_LISTENER_PORT, LOADTEST_DISPATCH_PORT and LOADTEST_PPROF_PORT each override their own
 # port, read by setup into stack.json (`stack.sh status` prints them); LOADTEST_PROXY_RTT (1ms);
 # LOADTEST_PG_DIRECT=1 starts Dispatch on Postgres without the proxy;

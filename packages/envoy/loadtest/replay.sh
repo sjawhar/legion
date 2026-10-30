@@ -5,10 +5,12 @@
 # It holds replay-seed-patch-check and replay-seed (the seed build at REPLAY_COMMIT, the work
 # Dispatch still owes, the dump and its parts), replay-manifest, replay-get (the manifest's parts,
 # the bundle, the restored seed template), replay-prepare and its prepared templates, and the
-# `reset --replay` that resets database dispatch from one (cmd_reset_replay). It uses stack.sh's
-# own helpers (sql, spawn, start_dispatch, build_dispatch_at, loadgen) and common.sh's (die, note,
-# sha256_of, joined_sha256), so stack.sh sources it after them. $here, $ROOT, $BIN, $LOGS and
-# base_env are stack.sh's too (SC2154).
+# `reset --replay` that resets database dispatch from one (cmd_reset_replay). Its functions call
+# stack.sh's own helpers (sql, spawn, start_dispatch, build_dispatch_at, loadgen) and common.sh's
+# (die, note, sha256_of, joined_sha256), which bash resolves when they are called, so stack.sh
+# sources it before it defines them; its top-level constants read $here and $ROOT, which stack.sh
+# sets before the source line. $here, $ROOT, $BIN, $LOGS, $PGBIN, base_env and BUILT_TREE (set by
+# build_dispatch_at) are stack.sh's (SC2154).
 # shellcheck disable=SC2154
 
 # The LINUX replay's seed: Dispatch at production's commit on 2026-10-26 (newest migration 0114,

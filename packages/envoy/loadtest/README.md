@@ -116,7 +116,7 @@ Every process listens on `127.0.0.1`. The default ports follow `LOADTEST_ROOT`: 
 a root meet. The block is a hash, not a reservation: two roots land in one block about 1 pair in
 200, and then they hold the same 7 ports. Two Legion roles of one pod, each with its own
 `LOADTEST_ROOT`, therefore almost always run a stack each with no port variable set; on a collision
-`stack.sh setup` refuses the second stack (`check_port`, so no stack is ever shared) and the
+`stack.sh start` refuses the second stack (`check_port`, so no stack is ever shared) and the
 refusal names the block and the remedies: set the `LOADTEST_*_PORT` variables, or move to another
 `LOADTEST_ROOT`, which picks another block with probability 199/200. Each `LOADTEST_*_PORT`
 overrides its own port.
