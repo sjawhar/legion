@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-607",
+  "completed": "2026-10-30T14:42:30Z",
+  "testedHead": "ab8cf99da5ad711ae054e9c4c047879f490d21ff",
+  "codeHead": "d4f3743185809ee72b2d8adc6d92b22b6bae3d6f",
+  "round": 15,
+  "scope": "Confirmation round (architect, 14:06Z): d4f37431 merges main a4af0341 with one text-only conflict (cmd/dispatch/README.md) and renumbers the branch's migrations to 0149-0155. round-shape.py v3 (from the workspace, PR 2391): 'old head 98b5c5ffb297a08d49da7cfa0c4c531b7d06a35d -> new head d4f3743185809ee72b2d8adc6d92b22b6bae3d6f; files whose own diff differs: 0; equal only after migration numbers were normalised: 28'. Those 28 are the 14 renumbered migration files, the docs and changelog fragments citing them, suggestion_outcomes_test.go and six Go files whose only difference is the migration numbers their comments cite (api/suggestion_outcomes.go, delivery/settings_cache.go, docs/edit_notices.go, docs/reference_excerpts.go, embedqueue/queue.go, refs/excerpts.go), the same 28 as round 13.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Build step at d4f37431: go build ./... and go vet ./... in packages/envoy clean; infra go vet ./... and go vet -tags natslive ./core/ clean. Main a4af0341 created a database at schema 148; the head migrated it beside main to 145-155 with no gap and no ERROR line; /healthz 200; a person's edit notice was sent once, 4 ms after due (14:10:55.982 -> 14:10:55.986)."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Confirmation round: the PR's own diff is unchanged, the head builds and vets, and it migrates main's schema forward to 155",
+      "surface": "round-shape.py v3 over the workspace; an export of packages/envoy at d4f37431; my builds of d4f37431 and main a4af0341 on a fresh Postgres 16 with NATS and the Envoy listener",
+      "command": "python3 round-shape.py <full ids> 2391; go build ./... && go vet ./...; (cd infra && go vet ./... && go vet -tags natslive ./core/); start.sh main 0 t8, seed, start.sh head 1 t8; select version from schema_migrations",
+      "observed": "0 files differ; build and vets clean; schema_migrations 145,146,...,155; /healthz 200; edit notice sent at due through the woken loop.",
+      "headSha": "d4f3743185809ee72b2d8adc6d92b22b6bae3d6f",
+      "negativeControl": "round-shape.py v3 exits 1 naming the error for a revision that does not exist (checked when v2 was attached), so its 0 is a real comparison."
+    }
+  ],
+  "ci": "Not run when I completed: at 14:41Z at d4f37431 changes and pr-title were queued and lint, typecheck and test not yet created. I waited 30 minutes, then completed for the 14:50Z drain. The reviewer reads lint, typecheck, test and pr-title at this head before approving.",
+  "mainReds": [
+    "TestRoutesTablePinsEveryRegisteredRoute (147 routes, pin 146) at main 0e636ed7, if not yet fixed; close-withdraws-asks.e2e.ts:126."
+  ]
+}
