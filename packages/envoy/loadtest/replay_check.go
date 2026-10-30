@@ -352,8 +352,12 @@ type seedCheck struct {
 	Distribution                    []openRootsDistribution
 }
 
-func readReplayIDs(ctx context.Context, conn *pgx.Conn) (map[[2]string]string, error) {
-	rows, err := conn.Query(ctx, `select kind, logged_id, local_id from loadtest.replay_ids`)
+// readReplayIDs reads loadtest.replay_ids from any connection or pool (as openAnchored takes a
+// QueryRow), so the seed and the check have one reader.
+func readReplayIDs(ctx context.Context, q interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+}) (map[[2]string]string, error) {
+	rows, err := q.Query(ctx, `select kind, logged_id, local_id from loadtest.replay_ids`)
 	if err != nil {
 		return nil, fmt.Errorf("read loadtest.replay_ids: %w", err)
 	}

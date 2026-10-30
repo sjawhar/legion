@@ -58,17 +58,12 @@ type callResult struct {
 
 func (r callResult) ok() bool { return r.err == nil && r.status/100 == 2 }
 
-// errorCode is the code a non-2xx answer's JSON body names (Dispatch's writeError writes
-// {"error": ..., "code": ...}); "" for a 2xx answer, a transport error or a body naming none.
+// errorCode is the code a non-2xx answer's body names; "" for a 2xx answer or a transport error.
 func (r callResult) errorCode() string {
 	if r.err != nil || r.status/100 == 2 {
 		return ""
 	}
-	var body struct {
-		Code string `json:"code"`
-	}
-	_ = json.Unmarshal(r.body, &body)
-	return body.Code
+	return errorCode(r.body)
 }
 
 // transient is a failure worth retrying: a transport error, 429 or 5xx.
@@ -173,7 +168,7 @@ func (a *api) callRetryKeyed(ctx context.Context, method, path string, w who, bo
 	for attempt := 0; ; attempt++ {
 		res := a.callKeyed(ctx, method, path, w, body, key)
 		transient := res.transient() ||
-			(key != "" && res.status == http.StatusConflict && refusalCode(res.body) == contracts.IdempotencyKeyInFlight)
+			(key != "" && res.status == http.StatusConflict && errorCode(res.body) == contracts.IdempotencyKeyInFlight)
 		if res.ok() || !transient || attempt >= 6 || ctx.Err() != nil {
 			return res
 		}
@@ -181,15 +176,13 @@ func (a *api) callRetryKeyed(ctx context.Context, method, path string, w who, bo
 	}
 }
 
-// refusalCode is the code of a Dispatch refusal ({"error", "code"}), empty when the body is not
-// one.
-func refusalCode(body []byte) string {
+// errorCode is the code a Dispatch error body names (writeError writes {"error": ..., "code": ...});
+// "" when the body names none or is not JSON at all.
+func errorCode(body []byte) string {
 	var refusal struct {
 		Code string `json:"code"`
 	}
-	if json.Unmarshal(body, &refusal) != nil {
-		return ""
-	}
+	_ = json.Unmarshal(body, &refusal)
 	return refusal.Code
 }
 

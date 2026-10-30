@@ -514,9 +514,9 @@ func countWindowWrites(window []replayEvent) windowWrites {
 			continue
 		}
 		switch ev.Type {
-		case "artifact.version":
+		case evArtifactVersion:
 			ww.Writes[*ev.IssueKey]++
-		case "comment.created":
+		case evCommentCreated:
 			var p struct {
 				Anchor  *replayAnchor `json:"anchor"`
 				ReplyTo *string       `json:"reply_to"`

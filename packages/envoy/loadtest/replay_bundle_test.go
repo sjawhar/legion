@@ -103,3 +103,30 @@ func TestReadBundleRoundTripAndRefusal(t *testing.T) {
 		t.Fatalf("a changed file was not refused by name: %v", err)
 	}
 }
+
+// TestReplayEventTypeConstants holds each constant to the event type Dispatch's log names, so a
+// rename here cannot quietly stop matching the bundle's events, and checks decodePayload names the
+// event in its error.
+func TestReplayEventTypeConstants(t *testing.T) {
+	want := map[string]string{
+		"issue.created": evIssueCreated, "issue.updated": evIssueUpdated, "issue.closed": evIssueClosed,
+		"issue.claimed": evIssueClaimed, "issue.released": evIssueReleased,
+		"comment.created": evCommentCreated, "comment.edited": evCommentEdited, "comment.resolved": evCommentResolved,
+		"comment.reopened": evCommentReopened, "comment.anchor_refreshed": evCommentAnchorRefreshed,
+		"artifact.created": evArtifactCreated, "artifact.version": evArtifactVersion,
+		"ask.opened": evAskOpened, "ask.answered": evAskAnswered, "ask.resolved": evAskResolved,
+		"message.created": evMessageCreated, "message.delivery": evMessageDelivery, "message.accepted": evMessageAccepted,
+		"child.status": evChildStatus,
+		"issue.":       evPrefixIssue, "ask.": evPrefixAsk, "user_state.": evPrefixUserState,
+	}
+	for lit, got := range want {
+		if got != lit {
+			t.Errorf("constant for %s holds %q", lit, got)
+		}
+	}
+	if _, err := decodePayload[struct {
+		N int `json:"n"`
+	}](replayEvent{ID: 7, Payload: json.RawMessage(`{"n":"x"}`)}); err == nil || !strings.Contains(err.Error(), "event 7: ") {
+		t.Errorf("decodePayload error %v", err)
+	}
+}

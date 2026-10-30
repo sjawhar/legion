@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"strconv"
@@ -26,8 +25,9 @@ func readSSE(body io.Reader, nonce int64, now func() time.Time, onFrame func(liv
 	br := bufio.NewReaderSize(body, 64<<10)
 	var n int64
 	var data []byte
-	var idField, prevID int64
-	hasData, havePrev := false, false
+	var idField int64
+	fr := liveFrames{nonce: nonce}
+	hasData := false
 	for {
 		line, err := br.ReadBytes('\n')
 		n += int64(len(line))
@@ -37,23 +37,7 @@ func readSSE(body io.Reader, nonce int64, now func() time.Time, onFrame func(liv
 		line = bytes.TrimSuffix(bytes.TrimSuffix(line, []byte("\n")), []byte("\r"))
 		if len(line) == 0 {
 			if hasData {
-				f := liveFrame{at: now().UnixNano(), id: idField}
-				f.marker, _ = findMarker(data, nonce)
-				var ev struct {
-					ID        *int64    `json:"id"`
-					CreatedAt time.Time `json:"created_at"`
-				}
-				if json.Unmarshal(data, &ev) == nil {
-					if ev.ID != nil {
-						f.id = *ev.ID
-					}
-					if !ev.CreatedAt.IsZero() {
-						f.created = ev.CreatedAt.UnixNano()
-					}
-				}
-				f.outOfOrder = havePrev && f.id <= prevID
-				prevID, havePrev = f.id, true
-				onFrame(f)
+				onFrame(fr.frame(now().UnixNano(), idField, data, true))
 			}
 			data, idField, hasData = data[:0], 0, false
 			continue
