@@ -14,7 +14,7 @@
 // the refusing process to stop heartbeating, so a process restarted after a kill, whose dead row
 // still counts as live for up to LiveWindow, starts once that row lapses.
 //
-// Each row also records what the decisions over the fleet read (migration 0146): the
+// Each row also records what the decisions over the fleet read (migration 0149): the
 // document schema numbers the process reads and creates, which the document socket's admission
 // takes (docs.Service.authorize), its embedder's identity, and whether it stores files in a bucket.
 package processes
@@ -80,7 +80,7 @@ const pruneLease = "server-processes"
 var ErrKeySetMismatch = errors.New("this process's signing key set does not match a live server process's")
 
 // Instance is what a process registers: the build it serves, the keys it signs and verifies with,
-// and what the decisions over the fleet read (migration 0146).
+// and what the decisions over the fleet read (migration 0149).
 type Instance struct {
 	// Commit is the legion commit the binary was stamped with, "" for an unstamped build.
 	Commit string

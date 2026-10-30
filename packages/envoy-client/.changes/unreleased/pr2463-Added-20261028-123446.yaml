@@ -1,6 +1,0 @@
-kind: Added
-body: |-
-    `dispatch comment --reply-to` and `dispatch message --in-reply-to` take a block reference to answer one block, `dispatch read` prints the block a reply answers (`Re: block b2: …`) and reads a block of a comment or message by its reference, and `commentBlocks` and `messageBlocks` read an item's blocks.
-time: 2026-10-28T12:34:46.000000000Z
-custom:
-    Issue: pr2463

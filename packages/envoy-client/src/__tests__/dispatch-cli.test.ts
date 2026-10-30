@@ -331,6 +331,13 @@ const server = Bun.serve({
       });
     }
     if (pathname === "/v1/interests/ses-1") return interests();
+    // A Dispatch build older than the answers route, which it therefore lacks.
+    if (pathname.endsWith("/answers")) {
+      return Response.json(
+        { code: "NOT_FOUND", error: `no route for ${request.method} ${pathname}` },
+        { status: 404 }
+      );
+    }
     return Response.json({ error: `unexpected ${request.method} ${pathname}` }, { status: 500 });
   },
 });
@@ -428,6 +435,19 @@ describe("the dispatch CLI", () => {
     expect(stdout).toContain("DISPATCH_SESSION_ID");
     expect(requests).toEqual([]);
   });
+
+  // The CLI asks a route no build answered three more times, 1, 2 and 4 s apart (jittered), before
+  // it says so: the test waits those seconds.
+  test("answers against a Dispatch without the route says its build is older than the answers route, exit 1", async () => {
+    const { code, stdout } = await run(["answers"], omp);
+    expect(code).toBe(1);
+    expect(stdout).toBe(
+      `This Dispatch (http://127.0.0.1:${server.port}) has no answers route yet: its build is older than the answers route.\n`
+    );
+    expect(requests.map((request) => request.path)).toEqual(
+      Array(4).fill("/api/v1/agents/ses-1/answers")
+    );
+  }, 20_000);
 
   test("an unknown flag is refused in command syntax, with an example", async () => {
     const { code, stdout } = await run(["message", "--issue", "X", "--isue", "Y"], omp);

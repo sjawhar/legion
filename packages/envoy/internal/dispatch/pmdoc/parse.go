@@ -134,10 +134,11 @@ func parseStampedAt(markdown string, at origin, budget *WriteBudget) (*Node, err
 // markdown names on two blocks is refused (ErrSchema) instead of repaired, since the repair would
 // silently give the id to whichever block comes first. live is the document the markdown replaces
 // whole, or nil for a fragment or a new document: a repeat live already carries is not refused
-// (RepeatedBlockID), and the repair keeps it for its first block, as settlement would. A block id
-// of any length is written; one longer than text.MaxBlockIDBytes is simply no graph node
-// (refs.IndexBlocks). A document whose rendering, the markdown it is stored as, reads back
-// otherwise is refused (RefuseMisreadDocument).
+// (RepeatedBlockID), and the repair keeps it for its first block, as settlement would. Each untyped
+// block of live the markdown leaves unchanged keeps its id (carryBlockIDs), which the markdown
+// cannot name, so the write leaves it as it was. A block id of any length is written; one longer
+// than text.MaxBlockIDBytes is simply no graph node (refs.IndexBlocks). A document whose rendering,
+// the markdown it is stored as, reads back otherwise is refused (RefuseMisreadDocument).
 func ParseForWrite(markdown string, live *Node) (*Node, error) {
 	doc, err := parseForWrite(markdown, live, true, NewWriteBudget())
 	if err != nil {
@@ -158,6 +159,10 @@ func ParseFragment(markdown string, opensDocument bool, budget *WriteBudget) (*N
 	return parseForWrite(markdown, nil, opensDocument, budget)
 }
 
+// parseForWrite is the parse ParseForWrite and ParseFragment share. The markdown's tree is judged
+// for repeated ids (RepeatedBlockID) with only the ids it names, then takes the ids of the blocks
+// of live it leaves unchanged (carryBlockIDs), and only then is an id minted for each block still
+// without one (EnsureBlockIDs), so the refusal and the carry see only the ids the markdown named.
 func parseForWrite(markdown string, live *Node, readFrontmatter bool, budget *WriteBudget) (*Node, error) {
 	doc, err := parseUnstamped(LineFeeds(markdown), fromStart, readFrontmatter, budget)
 	if err != nil {
@@ -170,6 +175,7 @@ func parseForWrite(markdown string, live *Node, readFrontmatter bool, budget *Wr
 	if err := refuseUncreatable([]*Node{doc}, func() *Node { return live }); err != nil {
 		return nil, err
 	}
+	carryBlockIDs(doc, live)
 	EnsureBlockIDs(doc)
 	return doc, nil
 }

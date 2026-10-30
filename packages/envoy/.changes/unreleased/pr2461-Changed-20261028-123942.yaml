@@ -1,7 +1,7 @@
 kind: Changed
 body: |-
     Each Dispatch delivery durable (`delivery-events`, `delivery-jobs`) delivers to one process at a
-    time: the holder of its hold, a row of `duty_holds` (migration `0145_duty_holds`) with a 15-second
+    time: the holder of its hold, a row of `duty_holds` (migration `0148_duty_holds`) with a 15-second
     lease on the database's clock, renewed every 5 s. The other processes stand by and try for the
     hold every 2 s. A take-over deletes the durable and creates it again at its ack floor on a fresh
     deliver subject, which redelivers a dead holder's unacknowledged messages at once and fences that

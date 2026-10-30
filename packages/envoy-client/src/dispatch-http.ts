@@ -49,6 +49,7 @@ import type {
   RelatedCheckInput,
   ResolveAskInput,
   SearchResponse,
+  SessionAnswersResponse,
   Suggestions,
   UpdateIssueInput,
   Version,
@@ -914,6 +915,32 @@ export class DispatchClient {
     return this.#json("GET", ["api", "v1", "asks", "open"], undefined, { project });
   }
 
+  /** `GET /api/v1/agents/{session_id}/answers`: what people wrote that Dispatch delivered to the
+   *  session since `since` (72 hours ago when unset), newest first. With `maxChars` the server
+   *  stops after the item whose text takes the running sum of text lengths past it, so the body
+   *  stays about that size plus one item. `signal` aborts the request beside the client's own
+   *  deadline, so a caller with a shorter deadline of its own does not leave it running. A server
+   *  older than the route answers 404. */
+  async sessionAnswers(
+    sessionID: string,
+    options: {
+      readonly since?: string;
+      readonly maxChars?: number;
+      readonly signal?: AbortSignal;
+    } = {}
+  ): Promise<SessionAnswersResponse> {
+    return this.#json(
+      "GET",
+      ["api", "v1", "agents", sessionID, "answers"],
+      undefined,
+      {
+        ...(options.since === undefined ? {} : { since: options.since }),
+        ...(options.maxChars === undefined ? {} : { max_chars: options.maxChars }),
+      },
+      options.signal
+    );
+  }
+
   /** `GET /api/v1/agents`: the Envoy listener's live sessions, as of Dispatch's copy of its list
    *  (at most 5 s old), for naming a session by the title it is running under rather than the
    *  one it stamped on an old write. */
@@ -1353,27 +1380,34 @@ export class DispatchClient {
     method: string,
     path: readonly string[],
     body?: unknown,
-    query?: object
+    query?: object,
+    signal?: AbortSignal
   ): Promise<T> {
-    return (await this.#jsonAnswer<T>(method, path, body, query)).payload;
+    return (await this.#jsonAnswer<T>(method, path, body, query, signal)).payload;
   }
 
-  /** `#json` with the status Dispatch answered, for a route whose status says what it did. */
+  /** `#json` with the status Dispatch answered, for a route whose status says what it did.
+   *  `signal` aborts a read beside the client's own signal (`#send`). */
   async #jsonAnswer<T>(
     method: string,
     path: readonly string[],
     body?: unknown,
-    query?: object
+    query?: object,
+    signal?: AbortSignal
   ): Promise<{ readonly status: number; readonly payload: T }> {
     const url = this.#url(path, query);
     return this.#noRoute(async () => {
       const response = await this.#send(
         method,
         url,
-        body === undefined ? undefined : { content: JSON.stringify(body), type: "application/json" }
+        body === undefined
+          ? undefined
+          : { content: JSON.stringify(body), type: "application/json" },
+        undefined,
+        signal
       );
       return { status: response.status, payload: await this.#response<T>(method, url, response) };
-    });
+    }, signal);
   }
 
   /**
@@ -1382,13 +1416,13 @@ export class DispatchClient {
    * release rolls out, two builds of Dispatch answer, and the next attempt may reach the build
    * that serves the route. No handler ran, so this is safe for every method; a write's repeat
    * carries a key of its own (`#send`), as a first attempt does. After the last attempt it throws
-   * `DispatchNoRouteError`. An abort of the client's signal during a wait rejects at once with the
-   * abort's reason and sends nothing more.
+   * `DispatchNoRouteError`. An abort of the client's signal, or of the call's own `signal`, during
+   * a wait rejects at once with the abort's reason and sends nothing more.
    */
-  #noRoute<T>(attempt: () => Promise<T>): Promise<T> {
+  #noRoute<T>(attempt: () => Promise<T>, signal?: AbortSignal): Promise<T> {
     return retryNoRoute(attempt, isNoRoute, {
       exhausted: () => new DispatchNoRouteError(),
-      signal: this.#signal,
+      signal: signal === undefined ? this.#signal : AbortSignal.any([this.#signal, signal]),
       sleep: this.#sleep,
     });
   }
@@ -1422,8 +1456,9 @@ export class DispatchClient {
 
   /**
    * The one request function: every call the client makes goes through here. A read, a PUT or a
-   * DELETE goes once. A write (POST or PATCH) carries an `Idempotency-Key` minted here for this
-   * call alone, so all its attempts are one intent to Dispatch, which runs it once and answers a
+   * DELETE goes once, and `signal` aborts it beside the client's own signal. A write (POST or
+   * PATCH) carries an `Idempotency-Key` minted here for this call alone, so all its attempts are
+   * one intent to Dispatch, which runs it once and answers a
    * repeat with the answer it stored, while two calls are two writes. Each attempt sends the same
    * encoded body. While an attempt gets no definitive answer (`writeAnswer`, a transport failure,
    * or `writeRetry.silenceMs` without progress, `#attempt`) the write asks again under its key,
@@ -1445,7 +1480,8 @@ export class DispatchClient {
     method: string,
     url: string,
     body?: EncodedBody,
-    accept = "application/json"
+    accept = "application/json",
+    signal?: AbortSignal
   ): Promise<Response> {
     const headers: Record<string, string> = {
       Accept: accept,
@@ -1456,7 +1492,7 @@ export class DispatchClient {
       return this.fetchImpl(url, {
         method,
         headers,
-        signal: this.#signal,
+        signal: signal === undefined ? this.#signal : AbortSignal.any([this.#signal, signal]),
         ...(body === undefined ? {} : { body: body.content }),
       });
     }

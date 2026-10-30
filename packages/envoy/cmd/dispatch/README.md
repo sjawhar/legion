@@ -596,7 +596,7 @@ What the two processes share, and what each keeps to itself:
   `0107_events_notify`), so an event committed on either process reaches every open subscription
   with no reconnect.
 - Each delivery durable delivers to one process at a time: the process that holds that durable's
-  hold (`duty.Hold`, migration `0145_duty_holds`, a row with a 15-second lease on the database's
+  hold (`duty.Hold`, migration `0148_duty_holds`, a row with a 15-second lease on the database's
   clock, renewed every five seconds). The other processes stand by and try for the hold every two
   seconds. A process that stops hands back every message it was delivered and did not handle and
   releases the hold, so another process takes the durable over at once and is redelivered those
@@ -751,7 +751,7 @@ each surface the two builds share, this is what build N+1 may change while build
   reference edges to node kinds this build does not know. A page's document socket is writable by
   the whole fleet's numbers (`internal/dispatch/docs/websocket.go`, `authorize`): each process
   registers V, the schema version it reads, and R, the highest `since` among the elements it may
-  create, in `server_processes` (migration `0146_server_processes_schema`). A page presents its own
+  create, in `server_processes` (migration `0149_server_processes_schema`). A page presents its own
   V and R as `schema_version` and `schema_creatable`, and is writable on an open issue when its R
   is at most every live process's V and at most the highest R among the live processes, and its V
   is at least every live process's R and the highest `since` among the elements the document
@@ -802,7 +802,7 @@ each surface the two builds share, this is what build N+1 may change while build
   (`duty_passes`, the row `<lease>/<period_ns>`; `duty/exclusive.go`), so two builds with different
   intervals for one loop each run it once per their own period, and two builds at one interval
   share it as one build does. The embedder is coordinated by the code: one identity is active at a
-  time (`embedder_active`, migration `0147_embedder_active`), it stays active while a live process
+  time (`embedder_active`, migration `0150_embedder_active`), it stays active while a live process
   carries it, and only the processes configured with it embed, drop or reserve tokens (Search,
   below), so two builds with different embedders do not drop each other's vectors. So is the file
   store: while a live process has no bucket (`file_store` false or unset), an upload keeps its
@@ -810,7 +810,7 @@ each surface the two builds share, this is what build N+1 may change while build
   takes `backfill-files --restore` before the release that unsets it (Moving uploaded files to the
   bucket, above). Both decisions read only the live rows of `server_processes`
   (`internal/dispatch/processes`, `Live`). A build that writes a row but predates the fleet
-  columns (migration `0146_server_processes_schema`) registers no embedder identity and no
+  columns (migration `0149_server_processes_schema`) registers no embedder identity and no
   `file_store`, so it counts as carrying no identity and as having no bucket. A build that writes
   no `server_processes` row at all (every release before migration `0135_server_processes`, such
   as `legion-envoy-v19.0.0`, which stops at migration `0134`) is invisible to both decisions:
@@ -1465,6 +1465,43 @@ EXCLUSIVE` on `broadcasts` too, because the table's foreign key puts triggers th
 read or send waits for the instant the migration's transaction lasts. Its census answers `0`. It
 follows `0139_related_checks` and `0140_issue_embedding_spec`, which already use the preceding
 migration numbers.
+Migrations `0145_events_person_words` and `0146_comment_deliveries_session` add two partial
+indexes for `GET /api/v1/agents/{session_id}/answers` (`sessionanswers.List`, Routes below), which
+every agent host reads on every model request. `0145` creates `events_person_words` on `events
+(created_at desc, id desc)` where the actor is a person and the type is `ask.answered`,
+`comment.created`, `message.created` or `message.answered`: the route reads the window's human
+events of those types through it, newest first, and keeps those whose `published_destinations`
+hold the session's own topic. A GIN index on `published_destinations` would find the session's
+events directly, but the outbox appends each topic it published an event to that array, and every
+such append would then also write the new element's entry into the index: a write load every
+outbox append would pay for a read only this route makes. `0146` creates
+`comment_deliveries_session` on `comment_deliveries (session_id, created_at desc)` where
+`session_id` is not null: the route reads the session's mentions created since an hour before its
+window as one range of it. Each is a plain `create index` inside the runner's
+transaction, so it holds `SHARE` on its table while it builds: writes to it wait, reads do not. On
+a local Postgres 17 (two CPUs, `maintenance_work_mem` 64 MB) with `events` seeded to 1,000,000
+rows (421 MB with its indexes, 126,541 of them in the index), `0145` built in 0.66-1.13 s over
+three runs and `0146` in 0.11-0.14 s on 50,003 deliveries. Both censuses answer `0`: an index
+build refuses and rewrites no row, and the census report already counts and sizes each table it
+reads.
+
+Migration `0147_message_deliveries_session_created` creates `message_deliveries_session_created`
+on `message_deliveries (session_id, created_at desc) include (message_id)` where `state` is
+`sent`, for the same route's read of the session's sent message deliveries created since an hour
+before its window. `message_deliveries_session` (`0051`) keys `session_id` alone, so through it
+that read fetched the session's whole delivery history and filtered it by time: a long-lived
+session that receives every broadcast copy read all of its deliveries on every model request.
+The new index holds only the read's sent rows and carries the one column it returns, so the read
+is an index-only scan of the window's range, and a cached generic plan, which knows neither the
+session nor the window, chooses it too: costed as a plain `(session_id, created_at desc)` index it
+came within a percent of `0051`, which the generic plan kept. `0051` stays for the conversation
+window, which reads every delivery a session ever received. On the seeded database above, with one
+session given 60,003 sent deliveries (1,019 since an hour before its window), the read of them
+went from 58,984 rows fetched and discarded (798 buffers, 20-22 ms) to an index-only scan of the
+1,019 (11 buffers, 0.3-0.4 ms), in the custom and the generic plan alike; the index built in
+0.34-0.52 s over three runs on 110,003 deliveries. A plain `create index` inside the runner's
+transaction, it holds `SHARE` on `message_deliveries` while it builds: writes to it wait, reads do
+not. Its census answers `0`.
 
 Migration `0142_item_blocks` creates the tables behind the blocks of a comment or message as graph
 nodes (`packages/envoy/AGENTS.md`, "References form one graph"): `comment_blocks`,
@@ -1500,7 +1537,7 @@ message included (a message is never edited), and owes an index to every message
 reading `messages` once. Its trigger takes `SHARE ROW EXCLUSIVE` on `messages` alone, so a message
 write waits behind it while a read does not. Its census answers `0` for the same reasons.
 
-Migration `0145_duty_holds` creates `duty_holds (name, holder, token, expires_at)`, the holds a
+Migration `0148_duty_holds` creates `duty_holds (name, holder, token, expires_at)`, the holds a
 process keeps by renewing them (`duty.Hold`): each delivery intake holds one name per durable
 (Running more than one process, above). The holder records its deliver subject as `token`, or
 `<subject> start=<seq>` while a take-over is pending: from just before the take-over deletes the
@@ -1508,10 +1545,10 @@ durable until it has created it again at stream sequence `<seq>` (`delivery/inta
 `intakeHoldToken`).
 `expires_at` is always written from the database's `now()`, so a lapse is judged by one clock. It
 is a new table: nothing existing is read, locked or rewritten, the release before it neither reads
-nor writes it, and its census answers `0`. It follows `0144_messages_item_blocks_trigger`,
+nor writes it, and its census answers `0`. It follows `0147_message_deliveries_session_created`,
 which already uses the preceding migration number.
 
-Migration `0146_server_processes_schema` adds four columns to `server_processes`: `schema_version`
+Migration `0149_server_processes_schema` adds four columns to `server_processes`: `schema_version`
 and `schema_creatable`, the document schema numbers each process reads and creates, which the
 document socket's admission reads (Two builds at once, above); `embedder_identity`, the identity
 of the process's embedder; and `file_store`, whether it stores files in a bucket. Their defaults
@@ -1520,7 +1557,7 @@ a process of the release before it, which names its columns in every statement o
 neither reads nor writes these. Nothing else is read, locked or rewritten, and its census answers
 `0`.
 
-Migration `0147_embedder_active` creates `embedder_active (one, identity, since)`, at most one row
+Migration `0150_embedder_active` creates `embedder_active (one, identity, since)`, at most one row
 (`one` is the primary key and can only be true): the embedder identity whose processes embed and
 drop vectors (Search, below). It is a new table: nothing existing is read, locked or rewritten, the
 release before it neither reads nor writes it, and its census answers `0`.
@@ -1933,7 +1970,7 @@ oldest lacking item has waited. The `backfill-embeddings` subcommand, which did 
 job by hand, is gone, with its checkpoint table (0119).
 
 One embedder identity is active at a time, the one row of `embedder_active` (migration
-`0147_embedder_active`, `internal/dispatch/embedqueue/active.go`). Each process registers its
+`0150_embedder_active`, `internal/dispatch/embedqueue/active.go`). Each process registers its
 embedder's identity in `server_processes` (`embedder_identity`), and the active identity stays
 active while any live process carries it, so a restart or a roll of the processes that carry it
 keeps it. When no live process carries it, the identity of the earliest-started live process that
@@ -2252,6 +2289,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/me/replies?limit=&offset=&issue=\|artifact=` | GET | cookie or trusted header (human only) | List the threads the caller wrote in where someone else has written since the caller last read them, newest reply first, less an open ask the Inbox lists. A row names the thread, its owner, its subject, its root's deep link and the newest reply's author, first line and time. `issue` or `artifact` narrows to one owner (both is `400 INVALID_QUERY`); `limit` is 1–200 (default 50). |
 | `/api/v1/me/threads/{id}/read` | PUT | cookie or trusted header (human only) | Move the caller's read mark on one thread forward to `{read_through}`; it never moves back, a value more than a minute ahead of the server is `400 INVALID_STATE`, and a non-uuid id is `400 THREAD_ID_INPUT`. Answers `204`, writing nothing for a thread the caller never wrote in. |
 | `/api/v1/agents` | GET | cookie, trusted header, or bearer | List live Envoy sessions (`session_id`, `title`, `dir`, `machine_id`, `roles`, `capabilities`, `last_seen`), newest first, from Dispatch's copy of the listener's session list, at most 5 s old; `503 ENVOY_UNAVAILABLE` when the listener cannot be reached, and for up to 5 s after a failed listener read without asking the listener again. |
+| `/api/v1/agents/{session_id}/answers?since=&max_chars=` | GET | cookie, trusted header, or bearer | What people wrote that Dispatch delivered to one session, newest first: each ask's current answer (`replaced` when it changed an earlier one), each comment at its current body (`edited_at` when edited) and each message, once however it arrived: a person's `ask.answered`, `comment.created`, `message.created` or `message.answered` event whose `published_destinations` hold the session's own topic, its sent message deliveries, and its sent comment deliveries (mentions). Never an agent's or the system's words, an ask's resolution or hand-back, or a delivery to a `role:` route. Each item carries its `relation`, the `ask` and its question where it answers or replies in one, and its `owner`, `ref` and `href`. `since` defaults to 72 hours ago (older than 7 days or in the future is `400 INVALID_QUERY`); `max_chars` (1–100,000) stops the list after the item whose text takes the running sum past it, `total` still counting every item; a bad `session_id` is `400 INVALID_SESSION_ID`. Not an authorization boundary: direct-message text already reaches every caller through `GET /api/v1/events`, and a person may read any session's list. |
 | `/api/v1/projects` | GET | cookie, trusted header, or bearer | List projects (`key`, `name`, `open_asks`, `created_at`), ordered by key. |
 | `/api/v1/projects` | POST | cookie, trusted header, or bearer | Create a project from `key` and `name`, for a person or an agent session alike; rejects a key that is not a project key, an empty name, a name holding a control character or a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069), and a name with no visible character (a letter, number, punctuation or symbol other than the blank fillers U+115F, U+1160, U+3164, U+FFA0 and U+2800, or a code point Go's Unicode tables leave unassigned, such as an emoji newer than them, other than a noncharacter (U+FDD0-U+FDEF and each code point ending in FFFE or FFFF) or a reserved default-ignorable (U+2065, U+FFF0-U+FFF8, U+E0000-U+E0FFF); combining marks, format characters, private-use characters and whitespace don't count) with `400 INVALID_PROJECT`, a name over 80 characters (`contracts.ProjectNameMax`, UTF-16 units after the trim) with `400 CAP_EXCEEDED`, and a duplicate key with `409 PROJECT_EXISTS`. |
 | `/api/v1/settings/repo-projects` | GET | cookie, trusted header, or bearer | List repository-to-project mappings, each with `default`, whether it is its project's default repository. |
@@ -2462,7 +2500,7 @@ node type weighs:
 | `409 ANCHOR_MISSING` | A browser submitted a `mark_id` that the server did not observe in the live tree. |
 | `409 ANCHOR_ORPHANED` | An operation needs a mark whose anchored text has been deleted. |
 | `400 INVALID_ANCHOR` | An anchor must provide exactly one of a nonempty `quote` or nonempty `mark_id`, with its document artifact. |
-| `400 INVALID_MARKDOWN` | Uploaded document content cannot be represented by the Proof schema, such as a table row holding text in a cell past its delimiter row's width, which a pipe inside code or a link that is not backslash-escaped makes. A Markdown document nests at most 100 blocks (quotes, lists and their items, typed blocks, and footnote definitions), of them at most 32 typed blocks inside one another whatever other blocks stand between them, and one textblock's inline markdown at most 100 marks (emphasis, strong, strikethrough, links, images, and code); deeper content is refused naming the line. An accepted suggestion whose blocks nest within those bounds but land deep enough that the document would nest past one is `INVALID_OP` on `replace_with`, naming how many blocks, or typed blocks, the result nests. Malformed edit replacements report `INVALID_OP`. |
+| `400 INVALID_MARKDOWN` | Uploaded document content cannot be represented by the Proof schema, such as a table row holding text in a cell past its delimiter row's width, which a pipe inside code or a link that is not backslash-escaped makes. A Markdown document nests at most 100 blocks (quotes, lists and their items, typed blocks, and footnote definitions), of them at most 32 typed blocks inside one another whatever other blocks stand between them, and one textblock's inline markdown at most 100 marks (emphasis, strong, strikethrough, links, images, and code); deeper content is refused naming the line. An accepted suggestion whose blocks nest within those bounds but land deep enough that the document would nest past one is `INVALID_OP` on `replace_with`, naming how many blocks, or typed blocks, the result nests. Malformed edit replacements report `INVALID_OP`. An upload that moves an open anchor's quote where that anchor cannot stand - an ask's quote into a code block, or any open ask's, comment's or suggestion's quote into the front matter - and leaves no copy where it can is refused naming the anchor, its quote and where the text landed: move the text out, or resolve the anchor first. A copy there beside the original is taken, and the anchor stays on the original. |
 | `409 DOC_SCHEMA` | A stored tree is outside the Proof schema, such as one holding a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99; settlement writes no version of such a tree. Every route that starts from that tree answers it alike, with one message - reading its text or blocks (`/text`, `/blocks`), editing it (`POST /edits`) and naming a version (`POST /versions`) - and a schema refusal of a tree the request itself produced is a `500`. Replace it by uploading markdown under the same document name; an upload preserves every open ask block, and is refused `400 INVALID_ASK_BLOCK` for an ask block that breaks the ask content rule, as a new document is. The document websocket admits no connection to such a room: it completes the upgrade and closes with code `4409` (reason `DOC_SCHEMA`, `DOCUMENT_SCHEMA_CLOSE_CODE` and `DOCUMENT_SCHEMA_CLOSE_REASON` in `packages/contracts`, generated into Go) before any sync, so a browser editor never receives a tree it would normalize and write back. |
 | `409 DOC_NEWER_CONTENT` | A stored tree holds an element this Dispatch process's build does not know: a node, mark or typed block its schema manifest does not name, an attribute a typed block does not declare, or a value an enum attribute does not list. Two builds serve one database during a release, so a newer build can have written it; a tree that also holds a known element in a broken shape is this code, not `DOC_SCHEMA`. Every route that starts from that tree answers it alike, with one message that names the element, says to try again in one minute, and says that a replacement deletes the element. No route repairs it: an upload or replacement over it is refused with this code and leaves the document unchanged, and settlement writes no version of it. The document websocket admits no connection to such a room: it completes the upgrade and closes with code `4425` (reason `DOC_NEWER_CONTENT`, `DOCUMENT_NEWER_CONTENT_CLOSE_CODE` and `DOCUMENT_NEWER_CONTENT_CLOSE_REASON` in `packages/contracts`, generated into Go) before any sync. The Hocuspocus provider reconnects on that code with its backoff, so a later connection can reach a build that reads the document. |
 | `409 DOCUMENT_UNLOADABLE` | A document's stored history does not decode, so nothing can read or open it. A rebuild from its latest saved version (`POST /api/v1/artifacts/{id}/rebuild`) discards every edit made after that version, and a person decides whether to do it; the dashboard offers that rebuild for this code alone. A room or store that could not serve the document stays `503 DOC_SERVICE_UNAVAILABLE`, which is retried, not rebuilt. |

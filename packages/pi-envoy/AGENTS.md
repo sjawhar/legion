@@ -767,6 +767,88 @@ every request as a session without it, plus the skill's own tokens. `src/dispatc
 holds the insertion rules, and `extensions/dispatch-first-omp.test.ts` checks turn 1, turn 2, after
 a compaction, and without Dispatch on the real binary.
 
+The same `context` handler appends, after the last message of each main-loop request, what
+people wrote to the session in the last 72 hours: `readSessionAnswers`
+from `@legion/envoy-client/session-answers` over `GET /api/v1/agents/{session_id}/answers`, as a
+separate user message (`src/session-answers-context.ts`), never merged into the last message and
+never at the head. The session is the one `replyAddress` names: the top-level one's
+`getSessionId()`, and for a `task` subagent its parent's, resolved through `resolveEnvoySession`,
+which is also the session it writes to Dispatch as (`DISPATCH_SESSION_ID`); a subagent this
+process cannot place carries no list. Dispatch is resolved per request with `commands: "kept"`,
+so no `!` token command runs on the request path, and `readSessionAnswers` works out the cache's
+directory from `process.env`. Position: Oh My Pi marks every message a `context` handler adds as
+per-call, and its Anthropic placement puts no `cache_control` on a per-call message, so the
+anchors stay on the conversation's own last messages and a change in the list re-reads none of
+the cached prefix; at the head, every change would invalidate everything after it.
+
+The pinned host (18.12.2) runs a `context` handler on every conversion of messages for a model,
+not only on the main loop's requests, and `withSessionAnswers` adds no list, and starts no read,
+on the others, each recognized by what the binary builds: a side turn
+(`AgentSession.runEphemeralTurn`: a Dispatch BTW, the stop-time self-check, `/btw`, the idle
+recap) converts `[...conversation, developer notice, .../btw history, user prompt]`, the notice
+and the prompt `attribution: "agent"`, the notice the host's `side-channel-no-tools.md`; the
+handoff converts `[...conversation, user prompt]`, the prompt `attribution: "agent"` and opening
+with the host's `handoff-document.md`; Anthropic remote compaction (`buildLiveProviderContext`)
+converts the conversation up to its cut, counts the result and keeps that many messages of the
+whole conversation's conversion, so the request that ends at a message the session's branch
+(`getBranch`) holds with a later one after it gets no list (a failed or aborted reply, which a
+retry drops from the context but not from the branch, does not count as later). The branch's
+messages are those the compaction builds its conversation from (`MI`): a `message` entry's
+message, a `custom_message` entry as role `custom` (every Envoy delivery with `triggerTurn` is
+one, and the cut can fall right after it) and a `branch_summary` entry as role `branchSummary`,
+each timestamped `new Date(entry.timestamp).getTime()`, matched by role and timestamp; a
+`compaction` entry becomes none there, since the earlier summary heads the conversion. The whole
+conversation's conversion carries the list at its end, past the cut. A compaction that keeps no
+tail converts the same messages twice, both ending at the branch's last message, so nothing on
+the branch tells either from a main-loop request: the second is a repeat of the conversion
+before it in the same session (`sessionManager`), ending at the same branch tip with the same
+messages' roles and timestamps, while the live `AgentSession` reads `isCompacting` (an automatic
+or manual compaction, the main loop paused) or `compactionSpeculation === "running"`, and it gets
+no list, so the compaction keeps none whatever the first carried. A repeat right after a cut
+keeps its list: that is the main loop's next request beside a speculative compaction with a tail,
+matching its whole conversion. Each session's last conversion lives in a process-wide `WeakMap`
+(on `globalThis` under `Symbol.for("legion.pi-envoy.session-answers-conversions.v1")`). Left
+open: a speculative compaction that keeps no tail (its kept turn right after a failed reply the
+branch still holds) beside the main loop's request matching it, which can lose that request's
+list; and a `task` subagent, which the host's registry does not list, so its compaction that
+keeps no tail carries the list. The dispatch-first skill goes on all of them as before. Not
+covered: OpenAI live steering (`providers.openaiLiveSteering`, a Codex WebSocket stream) converts
+the queued steers alone through the same handler, which no message tells apart from a first
+turn, so the skill and the list go out with a live steer there.
+
+Two copies of the extension run their handlers in turn on one request. The list's first line is
+`SESSION_ANSWERS_MARKER` (the failure line has its own), and only the last message is checked for
+it, so a second copy appends no second list. A copy that read no text appends nothing, so each
+copy also records the messages array it decided in a process-wide `WeakSet` (on `globalThis`
+under `Symbol.for("legion.pi-envoy.session-answers-requests.v1")`): the host hands the next
+handler that same array when one returns nothing, and the second copy neither reads nor waits.
+Bounds, all in the shared module: under 8,000 characters (at most 7,999) for the whole message, items newest first as a
+strict prefix with a left-out line naming `dispatch answers`; one read in flight per session and
+Dispatch URL for the whole process, the parent's and every subagent's requests joining it; each
+request waits at most `SESSION_ANSWERS_DEADLINE_MS` (800 ms), then carries the last list read
+from that Dispatch (memory, then `answers.json` in the session's state directory) with its read
+time and why this read failed, or, when that renders nothing, the failure line naming why; a read
+that already passed its deadline is not waited on again; a 404 keeps that Dispatch URL from being
+asked for 5 minutes. The pinned host hands a `context` handler no abort signal: it races the
+handler against the run's own and drops an aborted handler's result. A handler that throws loses
+everything it returns, the skill included, so a read that throws rather than answering carries
+the failure line naming the error. `src/session-answers-context.test.ts` holds the insertion
+rules, the requests that carry no list and the two-copy cases, `extensions/envoy.test.ts` the
+handler, a subagent reading its parent's id and a Dispatch that answers no list, and
+`extensions/session-answers-omp.test.ts` the real binary: a new answer in the next turn, after a
+compaction and in a subagent's first request; every kind of item word for word; the cap; a route
+that never answers costing a request under one second; a route that answers 404; the cache
+prefix byte for byte with no `cache_control` on the list; a `/btw` side turn and the handoff
+ending with their own prompts, with no list and no read; a remote compaction request ending at
+its cut, after a question and after a delivered message, and one that keeps no tail carrying no
+list (the stand-in model claims `supportsServerCompaction` and `bedrockMessagesApi`, which the
+binary takes for a first-party endpoint; a test-only extension sends the delivered messages as
+`extensions/envoy.ts` does, since pi-envoy reads deliveries off NATS); and two copies with an
+empty list making one read.
+The timed cases run against a profile whose model catalog is already built: a fresh profile
+builds it beside its first turn, holding the host's event loop for one to two seconds whatever
+the extension does.
+
 `before_agent_start` injects nothing into the conversation; its open-asks query arms the run-end
 nudge only for a turn carrying the user's own text, its snapshot `as_of` becoming the period's first
 window. It runs only for a session the stop could actually nudge — the host awaits this handler, so
