@@ -2,9 +2,9 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,17 +68,10 @@ func (w *workflowRuntime) readReviews(ctx, read context.Context, github githubre
 		if ctx.Err() != nil {
 			return true
 		}
-		attributes := []any{"repo", pr.Repo, "pullRequest", pr.Number, "error", err}
-		var answer *githubrest.Answer
-		if errors.As(err, &answer) {
-			attributes = append(attributes, "status", answer.Status)
-		}
-		if answer != nil && answer.RateLimited {
-			w.log.Error("read a pull request's reviews: GitHub's rate limit; this pass reads no more pull requests", attributes...)
-			return true
-		}
-		w.log.Error("read a pull request's reviews; a decision its webhook never delivered stays unread until a later pass reads it", attributes...)
-		return false
+		return w.logReadFailure(err,
+			"read a pull request's reviews: GitHub's rate limit; this pass reads no more pull requests",
+			"read a pull request's reviews; a decision its webhook never delivered stays unread until a later pass reads it",
+			"repo", pr.Repo, "pullRequest", pr.Number)
 	}
 	review, ok, err := w.reviewToApply(read, pr, reviews)
 	if err != nil {
@@ -93,10 +86,14 @@ func (w *workflowRuntime) readReviews(ctx, read context.Context, github githubre
 		return false
 	}
 	// A deciding review the pull request's record had not seen when the pass listed it: its webhook
-	// was lost, or is still on its way, and whichever copy comes second records nothing.
+	// was lost, or is still on its way, and whichever copy comes second records nothing. A review
+	// the pass applied before is not applied again.
+	eventID := w.passEventID("review-read", pr.Repo, pr.Number, strconv.FormatInt(review.ID, 10), clock(review.SubmittedAt))
+	if !w.unapplied(ctx, eventID) {
+		return false
+	}
 	w.log.Warn("workflow: GitHub holds a deciding review the daemon has not recorded; applying it as its webhook would",
 		"repo", pr.Repo, "pullRequest", pr.Number, "issue", pr.Issue, "review", review.ID, "author", review.Author, "state", review.State, "submitted_at", review.SubmittedAt)
-	eventID := fmt.Sprintf("review-read:%s:%s:%s#%d:%d", w.dispatchProject, w.bootID, pr.Repo, pr.Number, time.Now().UnixNano())
 	if _, err := intake.ApplyFact(ctx, w.pool, "github", eventID, review, w.handlers...); err != nil {
 		w.log.Warn("apply a review read from GitHub", "repo", pr.Repo, "pullRequest", pr.Number, "review", review.ID, "error", err)
 	}

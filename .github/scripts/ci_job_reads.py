@@ -192,6 +192,7 @@ RULES = {
         ("scripts/pi-plugin-prepack.sh", "internal/daemon/agentmodels_omp_test.go:175 --stage-skills"),
         ("skills/**", "internal/daemon/agentmodels_omp_test.go:175 prepack stages skills/<name>")),
     f"{DAEMON}/internal/daemon/capability_reports_test.go": reads((f"{FIX}/capability-redaction.json", "internal/daemon/capability_reports_test.go:315")),
+    f"{DAEMON}/internal/daemon/check_settlement_test.go": reads((f"{FIX}/checks-settlement/*", "internal/daemon/check_settlement_test.go:56")),
     f"{DAEMON}/internal/daemon/daemon_test.go": reads((f"{DAEMON}/internal/intake/testdata/dispatch/issue-updated.json", "internal/daemon/daemon_test.go:1004")),
     f"{DAEMON}/internal/daemon/nats_permissions_test.go": reads(
         (f"{DAEMON}/internal/intake/testdata/dispatch/issue-updated.json", "internal/daemon/nats_permissions_test.go:76"),
@@ -202,6 +203,8 @@ RULES = {
         Read(g, "internal/daemon/promptreferences_omp_test.go:132,207-228 bun pm pack of packages/pi-envoy and pi-legion runs their prepack")
         for g in PACK_READS] + reads(("packages/envoy-client/scripts/build-dispatch-cli.sh", "scripts/pi-plugin-prepack.sh:92, run by the pack in promptreferences_omp_test.go:228")),
     f"{DAEMON}/internal/daemon/supervision_test.go": reads((f"{DAEMON}/internal/stream/*", "internal/daemon/supervision_test.go:1220 Glob ../stream/*.go")),
+    f"{DAEMON}/internal/intake/redelivered_test.go": [
+        run(ENVOY, ["./cmd/listener", "./cmd/dispatch"], "internal/intake/redelivered_test.go:255 go build -C ../../../envoy ./cmd/listener ./cmd/dispatch", mode="build")],
     f"{DAEMON}/internal/intake/intake_test.go": reads((f"{FIX}/github-envelopes/*", "internal/intake/intake_test.go:698,763")),
     f"{DAEMON}/internal/projection/state_golden_test.go": reads((f"{FIX}/daemon-api/*", "internal/projection/state_golden_test.go:161")),
     f"{DAEMON}/internal/prompts/roles_test.go": reads(("packages/pi-legion/agents/*", "internal/prompts/roles_test.go:236")),
@@ -233,6 +236,7 @@ RULES = {
     f"{ENVOY}/cmd/listener/api_test.go": reads((f"{FIX}/dispatch-targeted-delivery.json", "cmd/listener/api_test.go:191,436,480")),
     f"{ENVOY}/internal/broker/config/config_test.go": reads((f"{ENVOY}/docker/rds-global-bundle.pem", "internal/broker/config/config_test.go:513")),
     f"{ENVOY}/internal/broker/oauth/claims_doc_test.go": reads(("docs/kubernetes.md", "internal/broker/oauth/claims_doc_test.go:161")),
+    f"{ENVOY}/internal/cistore/settlement_fixture_test.go": reads((f"{FIX}/checks-settlement/*", "internal/cistore/settlement_fixture_test.go:56")),
     f"{ENVOY}/internal/contracts/dedupe_test.go": reads((f"{FIX}/dedupe-keys.json", "internal/contracts/dedupe_test.go:14")),
     f"{ENVOY}/internal/contracts/golden_test.go": reads(
         (f"{ENVOY}/scripts/fixtures/github/*", "internal/contracts/golden_test.go:47"),
@@ -460,6 +464,7 @@ GATES = [
         (CONTRACTS_SRC, f"{at('envoy-client', 'Build contracts for Envoy client')}; tsconfig paths @legion/contracts -> ../contracts/src/index.ts"),
         (f"{FIX}/dispatch-targeted-delivery.json", "packages/envoy-client/src/__tests__/delivery.test.ts:16-17, dispatch-text.test.ts:117-118"),
         (f"{FIX}/dispatch-public-url.json", "packages/envoy-client/src/__tests__/dispatch-config.test.ts:5"),
+        (f"{ENVOY}/internal/dispatch/api/testdata/**", "packages/envoy-client/src/__tests__/askgate-new-asks.test.ts:14-21 reads the Dispatch server's table of decision-block inserts, which packages/envoy/internal/dispatch/api's TestDocumentEditAdviceCountsTheAskBlocksTheEditAdded reads too"),
         ("skills/**", "packages/envoy-client/src/__tests__/dispatch-advice.test.ts:683-690 reads skills/<skill>/SKILL.md for every skill a notice cites"),
     ) + biome(at("envoy-client", "Lint Envoy client")) + bun_job("envoy-client") + CI_SELF),
 
