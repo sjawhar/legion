@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-625",
+  "completed": "2026-10-30T14:51:30Z",
+  "round": 1,
+  "reviewedCodeHead": "37a00f765f559bfc2a51d44adb9b41d6f8611f01",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 9,
+  "minor": 9,
+  "ciRead": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection: none. CI head 37a00f76 (run 41064245867): typecheck skipped by its filter, pr-title success, lint and test still queued at 14:43Z. The compare from 37a00f76 to 27b43641 lists only .legion/INFRA-625/ (2 files). A request for changes does not wait on CI.",
+  "thermonuclear": "Both run once at 37a00f76: deep-review CHANGES (1 high, 2 medium, 3 minor), code-quality CHANGES (8 important, 8 minor).",
+  "threads": "No review threads on #2519 (gh api graphql, 0 nodes).",
+  "keyFindings": [
+    {"severity": "important", "file": "packages/dispatch/web/src/features/refs/markdown-worker-threshold.ts", "description": "Architect's request: 4,000 leaves Firefox 701-874 ms against the 1,000 ms bound for the body one character under it (98 open containers times about 3,900 blank lines, parsed twice). Lower it so the slowest page-parsed body is under about 500 ms in Firefox, measured in all three engines, and correct the comment and the '4,000 characters' text in packages/dispatch/AGENTS.md and the changelog fragment."},
+    {"severity": "important", "file": "packages/dispatch/web/src/features/refs/markdown-engine.ts", "description": "A streaming long turn: dropAbandonedBodies removes the body the worker is already parsing, so postNextBody posts every frame and the worker parses each stale one; every answer is dropped, nothing paints until the stream stops, and the deadline can then send the last body to the page's own thread. Reproduced by the deep review with the fake worker (21 bodies posted, 0 paints in 20 frames)."},
+    {"severity": "important", "file": "packages/dispatch/web/src/features/refs/useRenderedMarkdown.tsx", "description": "keepTheReadersPlace measures once before a sliced paint and corrects after it, so a reader's own scroll during the paint is undone."},
+    {"severity": "important", "file": "packages/dispatch/web/src/features/refs/useRenderedMarkdown.tsx", "description": "A formatted long body whose source changes (an edit, a streamed turn that crossed the threshold) is repainted in one task (!first), which MarkdownBody.tsx's own measurement puts at 918-971 ms in WebKit; and a cached long body on a fresh mount paints in slices with no pending marker, empty between tasks."},
+    {"severity": "important", "file": "packages/dispatch/web/src/features/refs/markdown-engine.ts", "description": "The parse client duplicates mermaid-diagrams.ts's serial worker queue piece by piece; extract one queue (or at least its own module) so a fix reaches both."},
+    {"severity": "important", "file": "packages/dispatch/web/src/features/refs/MarkdownBody.tsx", "description": "paintBlock and paintBlockInSlices each list the finishing passes, and nothing tests task checkboxes or tight items on the sliced path; one finishing function for both."},
+    {"severity": "important", "file": "packages/proof-editor/src/block-nesting.ts", "description": "takeBlankLineFast is a list speed-up applied as a runtime rewrite in the nesting-bound module; it belongs in patches/micromark-core-commonmark@2.0.3.patch beside the other linear-time fixes."},
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/api/artifacts.go", "description": "The ReadBackOf fallback branch and its comment are written four times across artifacts.go and issue_create.go; two helpers."},
+    {"severity": "important", "file": "packages/envoy/AGENTS.md", "description": "Docs contradict the block-index deferral: AGENTS.md:1563 says IndexBlocks runs in the version writer's transaction, no fragment names the 2,000-block deferral, the 235635 fragment says what a write stores is unchanged, and reference_excerpts.go:37 names the settlement where an unchanged upload is indexed by the reconciliation (~30 s)."},
+    {"severity": "minor", "file": "packages/dispatch/web/src/features/refs/markdown-engine.ts", "description": "useMarkdownHeadline keeps the previous source's headline while a new long source is pending, against its docstring."},
+    {"severity": "minor", "file": "packages/dispatch/web/src/features/refs/MarkdownBody.tsx", "description": "renderSpec(document, toDOM(node)) without node.attrs skips prosemirror's attribute-array guard, and the node's marks are not wrapped as serializeNode wraps them."},
+    {"severity": "minor", "file": "packages/dispatch/AGENTS.md", "description": "Names nodeFromJSON where the code uses documentFromJSON, and gives the open-fence answer's reason as a round trip where it avoids a page-thread re-parse."},
+    {"severity": "minor", "file": "(22 sites)", "description": "New comments cite sjawhar/legion#2403 (INFRA-581's pull request) for this change's own work; cite INFRA-625."},
+    {"severity": "minor", "file": "packages/envoy/.changes/unreleased/pr2519-*.yaml", "description": "Named pr2519-* with Issue: pr2519 where the root AGENTS.md asks for INFRA-625-<slug>.yaml; the 235634 fragment says the browser counts the same blocks as Go, but Go also counts footnote definitions."},
+    {"severity": "minor", "file": "packages/proof-editor/src/directive-container.ts", "description": "exitsOfALazyLine builds ExitRun with a lazyLine placeholder then mutates it; and the per-parse depth record exists twice (directive-container.ts and block-nesting.ts)."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/pmdoc/block_ids.go", "description": "Reimplements uuid.EnableRandPool; if the reason is that the pool is process-global and not safe to enable concurrently, say so in the comment."},
+    {"severity": "minor", "file": "packages/dispatch/web/src/features/refs/markdown-parse.worker.ts", "description": "ParseReply.doc typed object and cast twice; type it DocumentJSON. The markdownWorkerThreshold re-export from markdown-engine.ts and the two-line ReadBack/readBack wrappers are pass-through layers."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/pmdoc/nesting_corpus_test.go", "description": "Repeats the quotes and lists rows of TestParseRefusesMarkdownNestedPastTheBound; and markdown-engine.ts:466's file: URL guard is a test-only branch in production code."}
+  ],
+  "verified": [
+    "The browser's nesting bound and Go's maxNesting are both 100 with depth > 100 refused on both sides; the 50/51 and 100/101 corpus boundaries match. proof-editor tests/heavy-bodies.test.ts: 29 pass, 0 fail.",
+    "The parity fuzz's oracle self-check is real (one marker per patched file, asserted absent in the oracle and present in the workspace), and it compares HTML and mdast with positions.",
+    "packages/dispatch and packages/proof-editor have no .changes directory, so the envoy fragments are the only fragments needed."
+  ]
+}
