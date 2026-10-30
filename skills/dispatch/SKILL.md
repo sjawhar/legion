@@ -54,7 +54,7 @@ A claim, or `dispatch issue-update --route session:<your id>` (`--route ''` on r
 
 ## Structure over stream
 
-- One issue per deliverable, its content the issue's document. Decisions are asks.
+- One issue per deliverable, its content the issue's document.
 - A message replies to a person or tells them what they must know now.
 - Text a person must read to decide belongs in the spec. An artifact is a real file.
 
@@ -80,7 +80,7 @@ dispatch://PROJECT/artifact/<slug>/ask/<id>
 dispatch://PROJECT/artifact/<slug>/comment/<id>#b-<block>[@vN]
 ```
 
-A bare id or filename is not a reference. An ask or comment id can be an 8-hex prefix.
+A bare id or filename is not a reference. Write each id whole, from `dispatch read`'s `Ask id:` or the page URL: a shortened prefix 404s, leaving the reader to find the ask.
 
 ## Setup and the HTTP API
 
