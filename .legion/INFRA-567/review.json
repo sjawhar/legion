@@ -2,40 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-567",
-  "completed": "2026-10-30T05:10:00Z",
-  "round": 5,
-  "reviewedCodeHead": "9862c8d8b999",
+  "completed": "2026-10-30T07:56:00Z",
+  "round": 6,
+  "reviewedHead": "0b3e9085e2ce2fdc0623c8c6f42e56aaa97e235f",
+  "codeHead": "e4d33f454fe5",
   "decision": "changes_requested",
   "critical": 1,
-  "important": 1,
-  "minor": 1,
-  "scope": "Narrowed by the architect: judge review 5707922815's five threads, require lint, typecheck, test and pr-title green at the code head, read the whole diff and name every remaining code finding in this one review; prose-only nits fixed by the reviewer in its own commit.",
-  "threads": "All five round-4 threads fixed in 9862c8d8 and accepted: the held row's Go read from the package, the shared parser ci_images.py, the refusal naming the row's whole upstream, the dead harness fixtures, and the mirror header (whose remaining 'every library/golang row' claim I corrected in my own commit, with AGENTS.md's copy).",
-  "ci": "Required set: lint, typecheck, test, pr-title. CI run 41003510761 at code head 9862c8d8 was queued at the read; no CI run has completed on this branch since 65da1690. Biome at the head (2.4.11, the version bun.lock pins) fails two files, which is the lint red finding 1 names; CI run 40957622905 at a744ce61 failed lint and envoy-client on exactly these two files.",
-  "proseFixedByReviewer": [
-    ".github/scripts/mirror-ci-images.sh and AGENTS.md: the Go check covers every library/golang row whose upstream names a tag; a digest-only golang row is skipped, and rule 7 refuses any reference on one",
-    ".github/scripts/check-ci-images.sh header: the files that decide the ci-images job include .github/scripts/ci_images.py",
-    "docs/solutions/github/join-a-job-to-the-ci-router.md: ci-images is a selected job, not an always-run one, and SELECTED_BY maps it",
-    "packages/envoy/.changes/unreleased/INFRA-567-ci-images-by-digest.yaml: the developer scripts fetch nothing in CI (dev-postgres.sh is run by a CI job)",
-    ".github/e2e-scripts.json: why_hosted is a note no job reads"
-  ],
-  "proseLeftToImplementer": "The review App has no `workflows` permission, so GitHub refused my push of two ci.yaml comment fixes: the ci-images job comment (ci.yaml:1310-1311) must name .github/scripts/ci_images.py among the files that decide the job, and the envoy-smoke comment (ci.yaml:2602-2604) says the SPA stage's base carries an ARG, which it no longer does. Both are in the review for the implementer.",
-  "thermonuclear": "Both run at e3c5e17d over the whole diff; both CHANGES. Deep review: the Biome red (High). Code quality: check-bun-version.sh keeps its own row reader, which falsely refuses a tag@digest oven/bun upstream the gate accepts (reproduced on a tree copy), plus Low items; I carry the unused TREE constant and judge the rest (the duplicate CI constant in ci_job_reads.py, the timeout on tests-closed's disabled job, the repeated GOPROXY comment) not findings.",
+  "important": 0,
+  "minor": 0,
+  "scope": "Narrowed by the architect: judge review 5708350410's findings only, with lint, typecheck, test and pr-title green at the new code head.",
+  "threads": "All three round-5 findings fixed in e4d33f45 and accepted (PRRT_kwDORFy7ds6x2ooe Biome, PRRT_kwDORFy7ds6x2ooj the Bun reader through ci_images.py, PRRT_kwDORFy7ds6x2oon TREE), each already resolved; the three ci.yaml comments are corrected. Biome over the whole tree, check-bun-version.sh and its harness, check-ci-filters.sh, check-ci-images.sh tree and its harness all pass in the pod at this head.",
+  "ci": "CI run 41009980170 at code head e4d33f45, the first since 65da1690 to reach its required checks: typecheck and pr-title success; lint and test failure. Both fail in check-ci-images.sh, on the pull request's merge with main: main's envoy-go-race-docs job (#2516, after the fork point) declares its services Postgres as mirror.gcr.io/pgvector/pgvector@sha256:2358fcba…, refused at .github/workflows/ci.yaml:2476 of the merge (lint job 123919645492), and the harness's real-tree case fails the same way (test job 123919645418: 97 passed, 2 failed). ci-images succeeded and check-ci-images.sh package now reads all 12 rows in the package.",
   "keyFindings": [
     {
       "severity": "critical",
-      "file": "packages/envoy-client/src/__tests__/nats-server.ts:9",
-      "description": "Biome (biome.json lineWidth 100) refuses this line and the one-item apt arrays at .github/e2e-scripts.json:28 and :58; lint's `bunx biome check .` and envoy-client's lint step fail, so ci-ok cannot pass. Run `bunx biome format --write` on both files, and move ci.yaml:1710's citation (nats-server.ts:9) to the constant's new line."
-    },
-    {
-      "severity": "important",
-      "file": ".github/scripts/check-bun-version.sh:487",
-      "description": "The Bun FROM rule reads a row with its own reader (mirror_rows, a substring 'oven/bun' test and bun_tag_is_pinned, which splits at the first ':'), so an oven/bun upstream written tag@digest, the shape the nats hub row uses, is refused as another release while check-ci-images.sh accepts it. Read the row with ci_images.upstream_parts (repository oven/bun, its tag) and drop the second reader and the duplicate digest-unknown refusal rule 6 owns."
-    },
-    {
-      "severity": "minor",
-      "file": ".github/scripts/check-ci-images.sh:197",
-      "description": "TREE = \"tree\" is never read; delete it."
+      "file": ".github/workflows/ci.yaml",
+      "description": "Required checks lint and test are red at e4d33f45: main's envoy-go-race-docs job names mirror.gcr.io/pgvector/pgvector, which the gate refuses on the merge ref. A need only the base meets: merge main forward, repoint that job's services image to ghcr.io/sjawhar/legion/ci@sha256:2358fcba…, and keep every gate this change adds true for main's new job (its timeout-minutes, the filters, ci-ok's needs and SELECTED_BY, ci_job_reads.py)."
     }
   ],
   "contractCensus": "Not required: the refusals are this repository's own CI gates, every input in this tree."
