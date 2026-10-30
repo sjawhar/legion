@@ -155,12 +155,6 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		capExceeded(w, "body", length, contracts.DispatchBodyMax)
 		return
 	}
-	r, release, err := s.gateComment(r, r.PathValue("id"))
-	if err != nil {
-		s.writeHandlerError(w, r, err)
-		return
-	}
-	defer release()
 	var carried *refs.CarriedEdit
 	if input.Blocks != nil {
 		if input.BaseRevision == nil {
@@ -169,6 +163,12 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		}
 		carried = &refs.CarriedEdit{BaseRevision: *input.BaseRevision, Blocks: input.Blocks}
 	}
+	r, release, err := s.gateComment(r, r.PathValue("id"))
+	if err != nil {
+		s.writeHandlerError(w, r, err)
+		return
+	}
+	defer release()
 	tx, err := s.begin(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, r, err)
@@ -272,6 +272,13 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 	if !ok {
 		return
 	}
+	// The actor's encoding is the request's own, and its failure needs no row: it is answered
+	// before the gate, so no such write queues behind the document's writers.
+	resolvedBy, err := encodeJSON(actor)
+	if err != nil {
+		s.writeHandlerError(w, r, err)
+		return
+	}
 	r, release, err := s.gateComment(r, r.PathValue("id"))
 	if err != nil {
 		s.writeHandlerError(w, r, err)
@@ -298,11 +305,6 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 	}
 	projectionKind := ""
 	eventType := "comment.resolved"
-	resolvedBy, err := encodeJSON(actor)
-	if err != nil {
-		s.writeHandlerError(w, r, err)
-		return
-	}
 	switch action {
 	case "resolve":
 		// An orphaned suggestion's mark is gone, so it has no projection kind to carry; the

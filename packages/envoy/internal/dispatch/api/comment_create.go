@@ -224,34 +224,46 @@ func (s *server) owedCommentMentions(ctx context.Context, commentID string) ([]R
 	return owed, rows.Err()
 }
 
+// validateCommentThreadInput refuses the thread a comment names on the request's own terms: the
+// field combinations a comment may not carry, and a reply_to that is no comment id at all. It
+// reads nothing, so createCommentFor takes it before the documents' writer gates
+// (normalizeCommentThreadTarget answers everything that needs the rows).
+func validateCommentThreadInput(input commentInput) error {
+	if input.ReplyTo != nil && input.AskID != nil {
+		return errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to and ask_id cannot both be set")
+	}
+	if input.Anchor != nil && (input.ReplyTo != nil || input.AskID != nil) {
+		return errorf(http.StatusBadRequest, "INVALID_COMMENT", "replies cannot carry anchors")
+	}
+	if input.Suggestion != nil && (input.ReplyTo != nil || input.AskID != nil) {
+		return errorf(http.StatusBadRequest, "INVALID_COMMENT", "replies cannot carry suggestions")
+	}
+	if input.ReplyToBlock != nil && input.AskID != nil {
+		return errorf(http.StatusBadRequest, "INVALID_COMMENT", replyBlockInAskThread)
+	}
+	if input.ReplyToBlock != nil && input.ReplyTo == nil {
+		return errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to_block requires reply_to, the comment whose block it names")
+	}
+	if input.ReplyTo != nil {
+		if strings.TrimSpace(*input.ReplyTo) == "" {
+			return errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to must be a full comment id")
+		}
+		if _, err := uuid.Parse(*input.ReplyTo); err != nil {
+			return errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to must be a full comment id")
+		}
+	}
+	return nil
+}
+
+// normalizeCommentThreadTarget reads the thread the comment joins, under the write's locks. Its
+// caller has already refused an input no row can make good (validateCommentThreadInput).
 func (s *server) normalizeCommentThreadTarget(
 	ctx context.Context,
 	tx pgx.Tx,
 	owner owner,
 	input commentInput,
 ) (commentThreadTarget, error) {
-	if input.ReplyTo != nil && input.AskID != nil {
-		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to and ask_id cannot both be set")
-	}
-	if input.Anchor != nil && (input.ReplyTo != nil || input.AskID != nil) {
-		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "replies cannot carry anchors")
-	}
-	if input.Suggestion != nil && (input.ReplyTo != nil || input.AskID != nil) {
-		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "replies cannot carry suggestions")
-	}
-	if input.ReplyToBlock != nil && input.AskID != nil {
-		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", replyBlockInAskThread)
-	}
-	if input.ReplyToBlock != nil && input.ReplyTo == nil {
-		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to_block requires reply_to, the comment whose block it names")
-	}
 	if input.ReplyTo != nil {
-		if strings.TrimSpace(*input.ReplyTo) == "" {
-			return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to must be a full comment id")
-		}
-		if _, err := uuid.Parse(*input.ReplyTo); err != nil {
-			return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to must be a full comment id")
-		}
 		parent, err := s.loadOwnedCommentForUpdate(ctx, tx, owner, *input.ReplyTo)
 		if err != nil {
 			return commentThreadTarget{}, err
@@ -488,6 +500,22 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		s.writeHandlerError(w, r, err)
 		return
 	}
+	// What the request refuses itself, before any lookup and before the documents' writer gates:
+	// the thread it names, the turn it carries and the shape of its anchor all read no row, so a
+	// comment that can never be written waits on nothing (normalizeCommentThreadTarget answers
+	// whether the thread is an ask's, which is what TURN_REQUIRES_ASK needs).
+	if err := validateCommentThreadInput(input); err != nil {
+		s.writeHandlerError(w, r, err)
+		return
+	}
+	if input.Turn != nil && *input.Turn != "human" && *input.Turn != "agent" {
+		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "turn must be human or agent")
+		return
+	}
+	if err := validateAnchorInput(input.Anchor); err != nil {
+		s.writeHandlerError(w, r, err)
+		return
+	}
 
 	// Every Envoy listener lookup this comment needs happens here, with no transaction and no
 	// pooled connection held: each mention, and the issue's delivery route when the comment
@@ -537,15 +565,11 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		s.writeHandlerError(w, r, err)
 		return
 	}
-	if input.Turn != nil {
-		if threadTarget.AskID == nil {
-			writeError(w, "TURN_REQUIRES_ASK", http.StatusBadRequest, "turn is only valid on a reply to an ask")
-			return
-		}
-		if *input.Turn != "human" && *input.Turn != "agent" {
-			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "turn must be human or agent")
-			return
-		}
+	// The turn's value was refused before the gate; whether the thread is an ask's is this
+	// transaction's to say.
+	if input.Turn != nil && threadTarget.AskID == nil {
+		writeError(w, "TURN_REQUIRES_ASK", http.StatusBadRequest, "turn is only valid on a reply to an ask")
+		return
 	}
 	input.ReplyTo = threadTarget.ReplyTo
 	input.AskID = threadTarget.AskID

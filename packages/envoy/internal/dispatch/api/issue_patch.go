@@ -134,6 +134,16 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, r, err)
 		return
 	}
+	// A link's URL syntax is the request's own; refusing it here keeps a PATCH that can never
+	// land out of the documents' writer gates below.
+	if input.ExternalLinks != nil {
+		for _, link := range *input.ExternalLinks {
+			if err := validateExternalURL(link.URL); err != nil {
+				s.writeHandlerError(w, r, err)
+				return
+			}
+		}
+	}
 
 	key := r.PathValue("key")
 	// Whether the write closes the issue (closing) waits for the issue's row; whether it asks to is
@@ -382,10 +392,6 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, link := range *input.ExternalLinks {
-			if err := validateExternalURL(link.URL); err != nil {
-				s.writeHandlerError(w, r, err)
-				return
-			}
 			kind := link.Kind
 			if kind == "" {
 				kind = "url"

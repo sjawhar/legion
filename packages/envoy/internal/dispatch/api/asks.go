@@ -163,6 +163,12 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.writeHandlerError(w, r, err)
 		return
 	}
+	// The anchor's own shape is refused here, before the gate: it reads nothing, so an ask that
+	// can never be written must not queue behind the document's writers (resolveAnchor).
+	if err := validateAnchorInput(input.Anchor); err != nil {
+		s.writeHandlerError(w, r, err)
+		return
+	}
 
 	// An anchored ask marks its document, so it queues for that document's writer gate before its
 	// transaction opens, and checks under the owner's lock that the anchor still names it.
