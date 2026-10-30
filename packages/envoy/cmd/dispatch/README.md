@@ -95,12 +95,20 @@ App JWT, which is why Dispatch runs this. The webhook the App delivers to is the
 publishes GitHub envelopes under a JetStream MsgId of it. So redelivering a delivery that did
 reach the stream adds nothing to the stream.
 
-- A delivery the listener answered with 5xx, or that GitHub could not complete, is redelivered
-  on the next sweep. If that redelivery fails too, it is retried after 2, 4, 8 and 16 minutes, at most
-  five times.
-- A redelivery request GitHub refuses (for example 422) delivers nothing. It is asked again on
-  the same backoff, at most five times, even after its failed attempt is older than the sweep's
-  hour: a refused request adds no attempt to GitHub's log, so the sweep's record brings it back.
+- Every failed delivery is asked for again, whatever status code its failed attempts carry: a
+  5xx, an attempt GitHub could not complete, and a 4xx alike (the listener's 401 for a signature
+  it cannot check, 400 for a body it cannot use, 422 for a publish NATS refused), since what the
+  listener cannot take now it may take later. The first request goes on the next sweep. While no
+  attempt is `OK`, the next request is due 2, 4, 8, 16 and 32 minutes after the one before, then
+  every 60 minutes. A redelivery request GitHub refuses (for example 422) delivers nothing and is
+  asked again on the same schedule, as is an accepted request whose redelivery never appears in
+  GitHub's log.
+- The sweep stops asking 72 hours after the first failed attempt it saw for the delivery, since
+  GitHub keeps a delivery 72 hours, or when GitHub answers the redelivery request 404 (it no
+  longer has the delivery). It logs
+  `level=ERROR msg="webhook delivery expired undelivered"` once per delivery, with `requests`,
+  `first_delivered_at` and `reason` (`GitHub keeps a delivery 72 hours` or
+  `GitHub no longer has the delivery`).
 - A rate-limited answer (403 or 429, as GitHub's REST rate-limit documentation describes one)
   stops the sweep and counts nothing against the delivery. No sweep sends GitHub anything until
   the time GitHub gave (`Retry-After`, or `x-ratelimit-reset` when no requests remain), and at
@@ -109,22 +117,22 @@ reach the stream adds nothing to the stream.
   a request already sent when another sweeper records a limit is not recalled. It logs
   `level=WARN msg="webhook redelivery rate-limited by GitHub"`. Redelivery requests go a second
   apart, as GitHub asks of a large number of POSTs.
-- A delivery the listener answered with 4xx is never redelivered: the listener refused the
-  request itself, and the same bytes would fail the same way.
 - A delivery GitHub has recorded an `OK` attempt for is never asked for again, even when a request
-  for it was recorded as refused (an accepted request whose answer was lost).
-- Giving up logs `level=ERROR msg="webhook redelivery exhausted"`. A 4xx logs
-  `level=ERROR msg="webhook delivery refused terminally"`. Each is logged once per delivery.
-  Every sweep logs an INFO `msg="webhook redelivery sweep"` line: `failed_attempts` (the failed
+  for it was recorded as refused (an accepted request whose answer was lost). When the sweep had
+  made at least one request for it, it logs `level=INFO msg="webhook delivery recovered"` once,
+  with `requests`, the number of requests the delivery took.
+- Every sweep logs an INFO `msg="webhook redelivery sweep"` line: `failed_attempts` (the failed
   attempts listed), `deliveries` (the deliveries the sweep decided: the GUIDs of the listed failed
-  attempts, plus refused deliveries the listing no longer returns), and one count per outcome,
+  attempts, plus the open deliveries the listing no longer returns), and one count per outcome,
   which add up to `deliveries`. `closed` is a delivery an earlier sweep settled (GitHub recorded it
-  `OK`, it was refused terminally, or it was given up on): its failed attempt stays listed until it
-  is older than the sweep's hour, so after a burst of failures is redelivered, the next hour's
-  sweeps count the burst as `closed`.
-  `pending` is a redelivery GitHub accepted and has not made yet.
-- A sweep looks back one hour. After a gap in sweeping (Dispatch down), it resumes from its
-  cursor, back to GitHub's three days. The first sweep ever made looks back one hour only.
+  `OK`, or it expired): its failed attempt stays listed until it is older than the sweep's hour, so
+  after a burst of failures is redelivered, the next hour's sweeps count the burst as `closed`.
+  `waiting` is a delivery whose next request is not due yet. A delivery the sweep's cap of 300
+  requests left over is not counted; the next sweep takes it.
+- A sweep looks back one hour, and decides every delivery whose record is still open, neither
+  delivered nor expired, even when its attempts are older than that. After a gap in sweeping
+  (Dispatch down), it resumes from its cursor, back to GitHub's three days. The first sweep ever
+  made, with no cursor, looks back 72 hours.
 
 The cursor, the last rate limit, and one record per delivery acted on live in the JetStream KV
 bucket `envoy_webhook_redelivery`. Its 72-hour TTL matches GitHub's horizon. The server opens the
@@ -2032,11 +2040,12 @@ Every route the server answers writes one: every `/api/v1` route, the document w
 live socket (`/ws/live`), `/auth/*`, the GitHub proxy `/api/github/rest/`, and the 404 an
 `unmatched` path gets (a known path called with a method its route does not serve is one too).
 The dashboard's own pages and assets write none, so a browser's page loads do not bury the
-callers. `/healthz`, which a load balancer calls every few seconds, and `/livez`, which a liveness
-or startup probe calls, write none either. Three answers are given before any route runs and write
-none: the `403` a cookie request from another origin gets, the `421` a request for another host
-gets on a server with local sign-in, and the `307` redirect Go's router gives an unclean path
-(`/api/v1//issues`) or a prefix route called without its trailing slash (`/api/github/rest`). Match
+callers. `/healthz`, which a load balancer calls every few seconds, `/livez`, which a liveness
+or startup probe calls, and `/metrics`, which a scraper calls, write none either. Three answers
+are given before any route runs and write none: the `403` a cookie request from another origin
+gets, the `421` a request for another host gets on a server with local sign-in, and the `307`
+redirect Go's router gives an unclean path (`/api/v1//issues`) or a prefix route called without
+its trailing slash (`/api/github/rest`). Match
 the line as `msg="dispatch: request"`: the previous-shared-token warning's message starts with the
 same words. The line goes through the process's logger, which never makes a request wait on
 stderr: a line that finds its buffer of 4,096 full is dropped and counted
@@ -2075,6 +2084,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/github/rest/...` | GET | cookie or trusted header | Read GitHub as the GitHub App installation that covers the repository: a pull request (`repos/{o}/{r}/pulls/{n}`), an issue (`repos/{o}/{r}/issues/{n}`), a commit's check runs (`repos/{o}/{r}/commits/{sha}/check-runs`) or a commit's workflow runs (`repos/{o}/{r}/actions/runs?head_sha={sha}`, the query being the full 40-hex `head_sha` and at most a numeric `per_page` and `page`, each once), the only reads the web app makes; the checks pill joins each check run to its workflow run for the workflow name and event, keeping the newest run of each check as GitHub's merge does and dropping the runs of an event GitHub does not evaluate for a pull request (only `push`, `pull_request`, `pull_request_review`, `pull_request_target`, `deployment` and `deployment_status` count). A workflow-runs answer of `200` is trimmed to `total_count` and, per run in GitHub's order, only `check_suite_id`, `event` and `name`, so a run's head commit (message, author), actor and repository never reach the browser; a body that does not decode is `502 GITHUB_UPSTREAM`, and any other status passes through unchanged. The pill needs the App's Actions: read, which the delivery reconcile already needs: without it `actions/runs` answers `403` and the pill disappears. Every person shares the App's credential, which reads far more of a repository than that, so any other method is `405 METHOD_NOT_ALLOWED`; any other path, a workflow-runs read with any other query, or a path under it (`actions/runs/{id}`, its jobs or logs) `404 GITHUB_PATH_REFUSED`; and a repository the App is not installed on, or no App key, `503 GITHUB_TOKEN_UNAVAILABLE`. |
 | `/healthz` | GET | none | The readiness probe: `200` while this process can serve requests, which is while Postgres answers within `store.healthProbeTimeout` (two seconds) on the health pool — a dedicated one-connection pool, never the shared one — and `ok` says the same. A database that stops answering is `503` with `db: false` inside that bound, never silence, and the reason is logged. It is not a liveness check (`/livez` is): it fails while the database is unreachable, so a liveness probe on it would restart every server process during a database failover. Every other field is reported and never decides `ok` or the status, and a deploy check that needs one asserts it itself (`nats: true`, `files: true`, `signin: true`): `nats`, whether the server's publisher is connected to NATS (`null` with `DISPATCH_NATS_DISABLED=1`), so a bus outage is `200` with `nats: false` while the process serves and its outbox waits for the bus; the client pings every second and declares a connection lost at two pings outstanding, so a silently cut bus reads `false` within two to three seconds; `files`, whether the file store's bucket answers a two-second `HeadBucket` where `DISPATCH_FILE_STORE_BUCKET` is set (`null` when it is not), so a bucket outage fails uploads and downloads and nothing else; `signin` and `service_tokens`, whether the sign-in issuer's and the service-account token issuer's discovery documents have been read (`false` before, `null` where that issuer is not configured). Two seconds fits the tightest prober here, the three-second compose healthcheck and deploy script, as well as the ALB's five. The body also names what is deployed: `commit`, the legion commit this process's image build stamped (the Dockerfile's `LEGION_COMMIT`; `null` in an unstamped build); `fleet_commit`, the commit of the latest announcement that every live server process serves one build, the one `server.started` carries (`null` when there is none, or before this process's announcer has first read the table, and up to one announcer pass, five seconds, behind it); and `schema_version`, the highest migration `schema_migrations` records, read by the same probe (`null` when `db` is false). |
 | `/livez` | GET | none | Answer `204` with no body, reading nothing: it says only that the process answers. A liveness or startup probe asks it rather than `/healthz`, so a slow or unreachable Postgres, NATS or file store neither restarts the process nor adds load on every probe period. |
+| `/metrics` | GET | none | The process's metrics in the Prometheus text format: `envoy_dispatch_outbox_publish_failures_total{reason}`, one count per destination of an outbox publish attempt that did not reach NATS, `reason` being `denied` (the server refused it under the connection's own publish permissions), `refused` (NATS refuses the envelope or its subject however often it is retried) or `failed` (every other failure). It is answered above the router, so it is never the dashboard's shell, and whoever reaches the HTTP port can read it. Nothing scrapes it yet. |
 | `/api/v1/artifacts/_test/quiesce` | POST | cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1` | Close every live document and wait for the settlements in flight; not mounted otherwise. |
 | `/api/v1/artifacts/{id}/_test/outside-schema` | POST | cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1` | Write the crafted malformed tree e2e uses; not mounted otherwise. |
 | `/api/v1/live/_test/disconnect` | POST | cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1` | Close every open live socket with 1012, as a restart does; not mounted otherwise. |
@@ -2092,6 +2102,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/projects` | POST | cookie, trusted header, or bearer | Create a project from `key` and `name`, for a person or an agent session alike; rejects a key that is not a project key, an empty name, a name holding a control character or a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069), and a name with no visible character (a letter, number, punctuation or symbol other than the blank fillers U+115F, U+1160, U+3164, U+FFA0 and U+2800, or a code point Go's Unicode tables leave unassigned, such as an emoji newer than them, other than a noncharacter (U+FDD0-U+FDEF and each code point ending in FFFE or FFFF) or a reserved default-ignorable (U+2065, U+FFF0-U+FFF8, U+E0000-U+E0FFF); combining marks, format characters, private-use characters and whitespace don't count) with `400 INVALID_PROJECT`, a name over 80 characters (`contracts.ProjectNameMax`, UTF-16 units after the trim) with `400 CAP_EXCEEDED`, and a duplicate key with `409 PROJECT_EXISTS`. |
 | `/api/v1/settings/repo-projects` | GET | cookie, trusted header, or bearer | List repository-to-project mappings, each with `default`, whether it is its project's default repository. |
 | `/api/v1/settings/repo-projects/{owner}/{repo}` | PUT, DELETE | cookie, trusted header, or bearer | Create or replace, or remove, a repository mapping; PUT takes `{project, default?}`, and `default: true` moves the project's one default to it. A mapping an issue names as its `repo` is neither deleted nor moved: `409 REPO_PROJECT_IN_USE`. `AGENTS.md` gives the rules and the `settings.repo_project.updated` events. |
+| `/api/v1/github/app-installation/{owner}/{repo}` | GET | cookie, trusted header, or bearer | Whether Dispatch's GitHub App, which GitHub sends the repository's webhook events through, is installed on the repository: `200 {installed}`, `false` when GitHub answers 404. `503 GITHUB_APP_UNCONFIGURED` when Dispatch holds no App key, `502 GITHUB_UNREADABLE` naming the repository and GitHub's error on any other failure. The Legion daemon asks it for every repository it serves, for `legion state`. |
 | `/api/v1/settings/project-default-assignees` | GET | cookie or trusted header (human only) | List every project that names a default assignee, by project key, as `[{project, assignee}]`; a project with no default is left out. Human-only, since the default names a person. |
 | `/api/v1/projects/{key}/default-assignee` | PUT | cookie or trusted header (human only) | Set a project's default assignee `{assignee}` (the email of a person who has signed in, or `null` to clear it): who an issue created with no assignee, by nobody, under no parent or under a parent with nobody on it, goes to — the last step of the create chain. `400 ASSIGNEE_NOT_ALLOWED` for an email nobody has signed in with, `400 INVALID_PROJECT` for a body without `assignee` or one whose `assignee` is neither a string nor null, `404 NOT_FOUND` for an unknown project. Human-only: no agent surface sets it. |
 | `/api/v1/delivery/session-groups` | POST | cookie, trusted header, or bearer | Create a Delivery session group `{name, sessions}`: its sessions' pull requests take it as their Parent agent, `group:<id>`. `409 SESSION_IN_GROUP` for a session another group holds, `409 SESSION_GROUP_NAME_TAKEN` for a name another group has (ignoring case), `409 SESSION_GROUP_NAME_IS_SESSION_TITLE` for a name that is the latest title of a session outside the group, `400 SESSION_GROUP_INPUT` for a blank name or no sessions. The timeline lists every group (`session_groups`). |

@@ -1,13 +1,16 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -51,10 +54,11 @@ func handoffFile(word, issue string) string {
 }
 
 // handoffGitHub is GitHub's REST API for one repository, acme/widgets unless a test names another
-// (repo), as READY reads it: the files at each commit (whether a head still carries
-// .legion/<issue>/), and what READY reads of pull request #42 on main. A test changes what it
-// serves between calls; every call's bearer, every path it is asked for (served) and every
-// contents read are recorded. Nothing but READY reads GitHub at a completion.
+// (repo), as a completion reads it: READY's reads of the files at each commit (whether a head
+// still carries .legion/<issue>/) and of pull request #42 on main, and the implementer's
+// completion's list of the open pull requests on its branch, which lists #42 while it is open,
+// whatever head the list asks for. A test changes what it serves between calls; every call's
+// bearer, every path it is asked for (served) and every contents read are recorded.
 type handoffGitHub struct {
 	url  string
 	mu   sync.Mutex
@@ -65,9 +69,9 @@ type handoffGitHub struct {
 	// fail is the status GitHub answers every route under the given path prefix with instead of
 	// its answer: GitHub's trouble.
 	fail map[string]int
-	// pull request #42: its head, its mergeable_state, its state, whether it is merged, and its
-	// updated_at. merge is the project's merge policy, and pullFiles the JSON array GitHub answers
-	// for the pull request's changed files.
+	// pull request #42, on legion/LEGION-208: its head, its mergeable_state, its state, whether it
+	// is merged, and its updated_at. merge is the project's merge policy, and pullFiles the JSON
+	// array GitHub answers for the pull request's changed files.
 	pullHead       string
 	mergeableState string
 	pullState      string
@@ -139,6 +143,13 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 		case path == "pulls/42":
 			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"base":{"ref":"main"},"mergeable_state":%q,"state":%q,"merged":%t,"updated_at":%q}`,
 				g.pullHead, g.mergeableState, g.pullState, g.merged, g.pullUpdatedAt.Format(time.RFC3339))
+		case path == "pulls":
+			if g.pullState != "open" {
+				_, _ = io.WriteString(w, "[]")
+				return
+			}
+			_, _ = fmt.Fprintf(w, `[{"number":42,"state":"open","html_url":"https://github.com/%s/pull/42","body":"Dispatch: LEGION-208","head":{"ref":"legion/LEGION-208","sha":%q},"base":{"ref":"main"},"updated_at":%q}]`,
+				g.repo, g.pullHead, g.pullUpdatedAt.Format(time.RFC3339))
 		case path == "rules/branches/main":
 			if g.rulesStatus != 0 {
 				w.WriteHeader(g.rulesStatus)
@@ -232,9 +243,9 @@ const approvedSHA = "a99e0000000000000000000000000000000000ff"
 const retroCompare = `{"status":"ahead","files":[{"filename":".legion/LEGION-208/review.json","status":"removed"},{"filename":"docs/solutions/legion/retro-LEGION-208.md","status":"added"}]}`
 
 // newHandoffHarness serves the daemon's routes over a real Postgres, reading GitHub at github as
-// the implement App for READY, with facts recording every fact the routes apply, refused as
-// refusal says. The issue's repository is acme/widgets, so a READY read minted for anyone but acme
-// shows.
+// the implement App for READY and for the implementer's completion, with facts recording every
+// fact the routes apply, refused as refusal says. The issue's repository is acme/widgets, so a
+// read minted for anyone but acme shows.
 func newHandoffHarness(t *testing.T, github *handoffGitHub, grants *credential.Grants, refusal *intake.Refusal) (*harness, *factRecorder) {
 	t.Helper()
 	h := newHarness(t)
@@ -255,6 +266,23 @@ func newHandoffHarness(t *testing.T, github *handoffGitHub, grants *credential.G
 		},
 	}).Handler
 	return h, facts
+}
+
+// newWorkflowHandoffHarness is newHandoffHarness with the workflow deciding every fact the routes
+// apply, so a completion moves the issue and writes its records as the daemon does, and with the
+// server's log written to logs.
+func newWorkflowHandoffHarness(t *testing.T, github *handoffGitHub, logs io.Writer) *harness {
+	t.Helper()
+	h := newHarness(t)
+	records := record.NewStore()
+	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, ReviewRoundCap: 3, MaxFixAttempts: 3}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
+		Handlers: []intake.Handler{engine}, Dispatch: &statusRecorder{}, Log: slog.New(slog.NewTextHandler(logs, nil)),
+		Tokens: handoffTokens{}, GitHubAPI: github.url,
+	}).Handler
+	return h
 }
 
 // seedIssueAt records key as a root at the given phase, on acme/widgets, which is where the handoff
@@ -361,34 +389,183 @@ func lastCompletion(t *testing.T, facts *factRecorder) intake.HandoffComplete {
 	return fact
 }
 
+// handoffRecord is where key stands in the workflow's records: its phase, its implementer's phase
+// row (nil while none is recorded) and its pull request record (nil while none is recorded).
+func handoffRecord(t *testing.T, h *harness, key string) (phase.Phase, *record.PhaseRow, *record.PullRequest) {
+	t.Helper()
+	var at phase.Phase
+	var implementer *record.PhaseRow
+	var pr *record.PullRequest
+	records := record.NewStore()
+	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		issue, err := records.Issue(context.Background(), tx, key)
+		if err != nil {
+			return err
+		}
+		at = issue.Phase
+		rows, err := records.Phases(context.Background(), tx, key)
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			if row.Role == claim.RoleImplementer {
+				implementer = &row
+			}
+		}
+		pr, err = records.PullRequest(context.Background(), tx, key)
+		return err
+	}); err != nil {
+		t.Fatalf("read the records of %s: %v", key, err)
+	}
+	return at, implementer, pr
+}
+
 // The commit a completion records is the one the worker reports: for a file-backed phase the pushed
-// commit carrying its handoff, which the `legion` tool's handoff_complete finds in the pane. The
-// daemon reads no branch head and no handoff file on GitHub for it - nothing but READY reads GitHub
-// at a completion - and a request without a commit is refused before anything is recorded.
-func TestHandoffCompleteRecordsTheCommitTheWorkerReportsAndReadsNoGitHub(t *testing.T) {
+// commit carrying its handoff, which the `legion` tool's handoff_complete finds in the pane, and a
+// request without a commit is refused before anything is recorded or read. The implementer's
+// completion of implementing reads its branch's open pull request on GitHub, as the implement App
+// minted for the repository's owner: one the daemon has not recorded - its opened webhook lost, or
+// still waiting behind the GitHub consumer's backlog - is recorded, and the completion moves the
+// issue to testing, where without the read it would wait in implementing for that webhook.
+func TestHandoffCompleteRecordsTheCommitTheWorkerReportsAndTheOpenPullRequestGitHubShows(t *testing.T) {
 	github := newHandoffGitHub(t)
-	h, facts := newHandoffHarness(t, github, nil, nil)
+	h := newWorkflowHandoffHarness(t, github, io.Discard)
 	seedIssueAt(t, h, "LEGION-208", phase.Implementing)
 	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
 
 	if message := refused(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "implemented"}), http.StatusBadRequest, "MISSING_FIELD"); message != "commit is required" {
 		t.Fatalf("a completion naming no commit was refused with %q; want the field named", message)
 	}
-	if got := facts.recorded(); len(got) != 0 {
-		t.Fatalf("handoff facts = %#v, want none", got)
+	if served := github.serves(); len(served) != 0 {
+		t.Fatalf("GitHub was asked for %v for a completion refused for its fields, want nothing", served)
 	}
 
 	answer := completion(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "implemented", Commit: headSHA}))
 	if answer.Note != "" {
 		t.Fatalf("answer = %+v, want no note outside READY", answer)
 	}
-	if fact := lastCompletion(t, facts); fact.Commit != headSHA || fact.Role != claim.RoleImplementer || fact.Summary != "implemented" {
-		t.Fatalf("completion = %+v, want the implementer's at the commit it reported, %s", fact, headSHA)
+	at, row, pr := handoffRecord(t, h, "LEGION-208")
+	if at != phase.Testing {
+		t.Fatalf("after the completion LEGION-208 is in %s, want testing", at)
+	}
+	if row == nil || row.HandoffCommit != headSHA || row.Summary != "implemented" {
+		t.Fatalf("implementer row = %+v, want the completion at the commit it reported, %s", row, headSHA)
+	}
+	if pr == nil || pr.State != record.PullRequestOpen || pr.Number != 42 || pr.Repo != "acme/widgets" || pr.Branch != "legion/LEGION-208" || pr.HeadSHA != headSHA {
+		t.Fatalf("pull request record = %+v, want acme/widgets#42 open on legion/LEGION-208 at %s", pr, headSHA)
 	}
 	github.mu.Lock()
 	defer github.mu.Unlock()
-	if len(github.bearers) != 0 {
-		t.Fatalf("GitHub was called %d times for a completion that is not READY, want never", len(github.bearers))
+	if !slices.Equal(github.served, []string{"pulls"}) || !slices.Equal(github.bearers, []string{"Bearer implement-token-for-acme"}) {
+		t.Fatalf("GitHub served %v with bearers %v, want one list of the open pull requests as the implement App for acme", github.served, github.bearers)
+	}
+}
+
+// An implementer's completion with no open pull request on its branch is refused before anything
+// is applied: the implementer's phase row and the pull request record stay as they were, so the
+// same completion, once the pull request is open, is applied and moves the issue to testing.
+func TestHandoffCompleteWithNoOpenPullRequestRecordsNothing(t *testing.T) {
+	github := newHandoffGitHub(t)
+	github.set(func(g *handoffGitHub) { g.pullState = "closed" })
+	h := newWorkflowHandoffHarness(t, github, io.Discard)
+	seedIssueAt(t, h, "LEGION-208", phase.Implementing)
+	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
+	complete := func() *httptest.ResponseRecorder {
+		t.Helper()
+		return h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "implemented", Commit: headSHA})
+	}
+
+	message := refused(t, complete(), http.StatusConflict, "HANDOFF_NO_PULL_REQUEST")
+	if want := "no open pull request on acme/widgets legion/LEGION-208; nothing was recorded. Open the pull request and complete again."; message != want {
+		t.Fatalf("refusal = %q, want %q", message, want)
+	}
+	if at, row, pr := handoffRecord(t, h, "LEGION-208"); at != phase.Implementing || row != nil || pr != nil {
+		t.Fatalf("after the refusal LEGION-208 is in %s with implementer row %+v and pull request %+v, want implementing with neither", at, row, pr)
+	}
+
+	github.set(func(g *handoffGitHub) { g.pullState = "open" })
+	completion(t, complete())
+	if at, row, pr := handoffRecord(t, h, "LEGION-208"); at != phase.Testing || row == nil || row.HandoffCommit != headSHA || pr == nil || pr.Number != 42 {
+		t.Fatalf("after the pull request opened, the same completion left LEGION-208 in %s with implementer row %+v and pull request %+v, want testing at %s on #42", at, row, pr, headSHA)
+	}
+}
+
+// GitHub failing the read never blocks a completion: the completion is applied as it is with no
+// read, the read's failure logged at warn, and the issue waits in implementing for a pull request
+// to be recorded, by its opened webhook or the required-checks pass.
+func TestHandoffCompleteAppliesTheCompletionWhenGitHubFailsTheRead(t *testing.T) {
+	github := newHandoffGitHub(t)
+	github.set(func(g *handoffGitHub) { g.fail["pulls"] = http.StatusBadGateway })
+	var logs bytes.Buffer
+	h := newWorkflowHandoffHarness(t, github, &logs)
+	seedIssueAt(t, h, "LEGION-208", phase.Implementing)
+	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
+
+	completion(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "implemented", Commit: headSHA}))
+	if at, row, pr := handoffRecord(t, h, "LEGION-208"); at != phase.Implementing || row == nil || row.HandoffCommit != headSHA || pr != nil {
+		t.Fatalf("after the completion LEGION-208 is in %s with implementer row %+v and pull request %+v, want implementing with the completion at %s recorded and no pull request", at, row, pr, headSHA)
+	}
+	warnings := 0
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "level=WARN") && strings.Contains(line, "read the open pull request on a completing implementer's branch") && strings.Contains(line, "status=502") {
+			warnings++
+		}
+	}
+	if warnings != 1 {
+		t.Fatalf("logged %d warnings naming the failed read, want 1; log:\n%s", warnings, logs.String())
+	}
+}
+
+// recordPullRequest records LEGION-208's pull request #42 on acme/widgets in state, at headSHA.
+func recordPullRequest(t *testing.T, h *harness, state record.PullRequestState) {
+	t.Helper()
+	recorded := record.PullRequest{State: state, Issue: "LEGION-208", Repo: "acme/widgets", Number: 42, Branch: "legion/LEGION-208", HeadSHA: headSHA, Failing: []string{}}
+	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		return record.NewStore().PutPullRequest(context.Background(), tx, recorded)
+	}); err != nil {
+		t.Fatalf("record the %s pull request: %v", state, err)
+	}
+}
+
+// A recorded pull request closed without merging is no open one: with none open on GitHub the
+// completion is refused naming it, since its close told the architect, which decides the issue's
+// phase, and nothing is recorded.
+func TestHandoffCompleteNamesTheClosedPullRequestTheRecordHolds(t *testing.T) {
+	github := newHandoffGitHub(t)
+	github.set(func(g *handoffGitHub) { g.pullState = "closed" })
+	h := newWorkflowHandoffHarness(t, github, io.Discard)
+	seedIssueAt(t, h, "LEGION-208", phase.Implementing)
+	recordPullRequest(t, h, record.PullRequestClosed)
+	_, _, before := handoffRecord(t, h, "LEGION-208")
+	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
+
+	message := refused(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "implemented", Commit: headSHA}), http.StatusConflict, "HANDOFF_NO_PULL_REQUEST")
+	want := "no open pull request on acme/widgets legion/LEGION-208; nothing was recorded. Open the pull request and complete again. pull request #42 is closed; your architect was told and decides this issue's phase."
+	if message != want {
+		t.Fatalf("refusal = %q, want %q", message, want)
+	}
+	at, row, pr := handoffRecord(t, h, "LEGION-208")
+	if at != phase.Implementing || row != nil || !reflect.DeepEqual(pr, before) {
+		t.Fatalf("after the refusal LEGION-208 is in %s with implementer row %+v and pull request %+v, want implementing with no row and the record as it was, %+v", at, row, pr, before)
+	}
+}
+
+// A pull request merged while the issue was in implementing told the architect (pr-merged), and
+// the workflow runs on: GitHub lists no open pull request on the branch, and the completion is
+// applied and moves the issue to testing on the merged record, where a refusal would leave it in
+// implementing with nothing recorded and nobody told.
+func TestHandoffCompleteOnAMergedPullRequestMovesTheIssueToTesting(t *testing.T) {
+	github := newHandoffGitHub(t)
+	github.set(func(g *handoffGitHub) { g.pullState, g.merged = "closed", true })
+	h := newWorkflowHandoffHarness(t, github, io.Discard)
+	seedIssueAt(t, h, "LEGION-208", phase.Implementing)
+	recordPullRequest(t, h, record.PullRequestMerged)
+	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
+
+	completion(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "implemented", Commit: headSHA}))
+	at, row, pr := handoffRecord(t, h, "LEGION-208")
+	if at != phase.Testing || row == nil || row.HandoffCommit != headSHA || pr == nil || pr.State != record.PullRequestMerged || pr.Number != 42 {
+		t.Fatalf("after the completion LEGION-208 is in %s with implementer row %+v and pull request %+v, want testing at %s on #42 still merged", at, row, pr, headSHA)
 	}
 }
 
@@ -731,6 +908,7 @@ func TestHandoffCompleteRefusesExpiredAndRevokedGrants(t *testing.T) {
 	github := newHandoffGitHub(t)
 	h, facts := newHandoffHarness(t, github, credential.New(func() time.Time { return now }), nil)
 	seedIssueAt(t, h, "LEGION-208", phase.Implementing)
+	seedPullRequest(t, h, "LEGION-208", headSHA)
 	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
 	expired := implementer.grant(t)
 	now = now.Add(time.Minute)

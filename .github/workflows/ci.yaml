@@ -731,12 +731,14 @@ jobs:
               # Fixtures its Go tests read: cmd/listener/api_test.go:191,
               # internal/contracts/dedupe_test.go:14, golden_test.go:72,
               # internal/dispatch/api/delivery_live_diff_test.go:965,
-              # internal/dispatch/docs/approval_carry_test.go:26.
+              # internal/dispatch/docs/approval_carry_test.go:26,
+              # internal/cistore/settlement_fixture_test.go:56.
               - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
               - 'packages/contracts/fixtures/dedupe-keys.json'
               - 'packages/contracts/fixtures/github-envelopes/**'
               - 'packages/contracts/fixtures/delivery-live/**'
               - 'packages/contracts/fixtures/decision-blocks/**'
+              - 'packages/contracts/fixtures/checks-settlement/**'
               # The claim list its fence reads: internal/broker/oauth/claims_doc_test.go:161.
               - 'docs/kubernetes.md'
               - '.github/actions/pull-test-images/**'

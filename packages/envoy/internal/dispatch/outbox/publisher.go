@@ -23,6 +23,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/retry"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
+	"github.com/sjawhar/envoy/internal/metrics"
 )
 
 const (
@@ -116,6 +117,21 @@ type Deps struct {
 	// is required of a Run that ticks: there is no nil-means-unleased path, and cmd/dispatch
 	// exits at boot if the lease pool cannot be opened.
 	Leases duty.Leases
+	// PublishFailures counts a destination of a publish attempt that did not reach NATS, by
+	// reason (countPublishFailure). cmd/dispatch registers it on the process's metrics
+	// registry, so a denied or refused destination shows on /metrics rather than only in the
+	// log.
+	PublishFailures *metrics.Counter
+}
+
+// countPublishFailure counts one destination of a publish attempt that did not reach NATS, under
+// reason ("denied", "refused" or "failed"). Every increment goes through here: a Deps built
+// without a counter - the package's own tests - then counts nothing instead of dereferencing nil.
+func (d Deps) countPublishFailure(reason string) {
+	if d.PublishFailures == nil {
+		return
+	}
+	d.PublishFailures.Inc([2]string{"reason", reason})
 }
 
 // Run drains unpublished events at startup, after committed local events, and
@@ -649,7 +665,7 @@ func releaseClaim(ctx context.Context, deps Deps, ids []int64) {
 // reports errMentionPending once every answer is in (attempt.err). The destinations the attempt
 // reached are recorded with the batch (recordBatch), so a retry publishes only the rest.
 func send(ctx context.Context, deps Deps, sender bus.Sender, pending pendingEvent, delivered map[string]struct{}) *attempt {
-	a := &attempt{delivered: delivered, sender: sender}
+	a := &attempt{deps: deps, delivered: delivered, sender: sender}
 	event := pending.event
 	if event.IssueKey == nil && event.ArtifactID == nil && event.Project == "" {
 		return a
@@ -734,7 +750,7 @@ func publishPrimaryDocumentAuthors(deps Deps, item contracts.Envelope, event mod
 }
 
 // attempt is one pass over an event's destinations, sent through sender, its batch's window
-// (Publisher.Window). delivered holds the destinations the event
+// (Publisher.Window), for the run deps describes. delivered holds the destinations the event
 // reached before this pass and those this pass sent, so that none is sent twice; sent is what this
 // pass sent, in order, with each one's answer to come. wait reads those answers into reached, the
 // destinations NATS accepted or refused (bus.ErrRefused), denied, the denials
@@ -743,6 +759,7 @@ func publishPrimaryDocumentAuthors(deps Deps, item contracts.Envelope, event mod
 // delivered (a new comment's alone), and deferred whether a session's copy was held back for a
 // mention still being sent.
 type attempt struct {
+	deps      Deps
 	sender    bus.Sender
 	delivered map[string]struct{}
 	sent      []sentDestination
@@ -799,11 +816,14 @@ func (a *attempt) answer(sent sentDestination, err error) error {
 	switch {
 	case err == nil:
 	case errors.Is(err, bus.ErrPublishDenied):
+		a.deps.countPublishFailure("denied")
 		a.denied = append(a.denied, fmt.Errorf("%s %q: %w", sent.label, sent.id, err))
 		return nil
 	case !errors.Is(err, bus.ErrRefused):
+		a.deps.countPublishFailure("failed")
 		return fmt.Errorf("%s %q: %w", sent.label, sent.id, err)
 	default:
+		a.deps.countPublishFailure("refused")
 		slog.Error("dispatch outbox: destination refused", "event_id", sent.eventID, "topic", sent.topic, "error", err)
 	}
 	a.reached = append(a.reached, sent.topic)
@@ -1225,7 +1245,9 @@ func publishedDestinationSet(subjects []string) map[string]struct{} {
 // reached, or this attempt already sent, is skipped. The answer is read later (attempt.wait),
 // except one that came back before anything was sent: a refusal or a denial is kept for wait to
 // read, and any other failure - NATS unreachable (bus.ErrUnavailable), say - ends the attempt,
-// named by label and id.
+// named by label and id. Such a failure is counted here, as attempt.answer counts the ones it
+// reads, and counted once: a destination that ends the attempt is never added to a.sent, so wait
+// never reads its answer.
 func publishDestination(deps Deps, eventID int64, item contracts.Envelope, a *attempt, label, id string) error {
 	if _, ok := a.delivered[item.Topic]; ok {
 		return nil
@@ -1235,6 +1257,7 @@ func publishDestination(deps Deps, eventID int64, item contracts.Envelope, a *at
 	select {
 	case err := <-sent.answer:
 		if err != nil && !errors.Is(err, bus.ErrPublishDenied) && !errors.Is(err, bus.ErrRefused) {
+			deps.countPublishFailure("failed")
 			return fmt.Errorf("%s %q: %w", label, id, err)
 		}
 		answered := make(chan error, 1)
@@ -1265,8 +1288,16 @@ func publishRoute(deps Deps, eventID int64, item contracts.Envelope, a *attempt,
 	return publishDestination(deps, eventID, item, a, "publish route", *route)
 }
 
+// envelope builds the bus envelope of one event. Its payload is the event with one field the
+// event log does not hold: `quiet` (events.Quiet), whether the event carries nothing for a
+// reader following its owner topic. A reader takes it as the whole answer, where `notify` says
+// only whether the event wakes the route, so an agent's comment on an issue reaches the sessions
+// that subscribed to that issue's topic.
 func envelope(event model.Event, slug string) (contracts.Envelope, error) {
-	payload, err := json.Marshal(event)
+	payload, err := json.Marshal(struct {
+		model.Event
+		Quiet bool `json:"quiet"`
+	}{Event: event, Quiet: events.Quiet(event)})
 	if err != nil {
 		return contracts.Envelope{}, fmt.Errorf("encode event: %w", err)
 	}

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -19,6 +20,7 @@ import (
 
 // decodedMessage is the checked envelope identity and its workflow fact. A nil Fact is a valid
 // additive or non-workflow event that the shipped reducer acknowledges without a state change.
+// EventID is the id ApplyFact records the fact under (envoyEnvelope.factID).
 type decodedMessage struct {
 	Source  string
 	EventID string
@@ -48,9 +50,10 @@ const serverStartedSubject = "notifications.dispatch.server.started"
 // decodeMessage decodes the Envoy envelope first, then the subject's source-specific payload.
 // project is the daemon's Dispatch project: another project's issue event is a nil Fact.
 // repositories are its configured repositories: a GitHub event whose payload names another
-// repository is a nil Fact, whatever subject carried it. Dispatch's announcement of its fleet's
-// build is matched before the issue subjects, which it is not one of.
-func decodeMessage(subject, project string, repositories []ghrepo.Repository, data []byte) (decodedMessage, error) {
+// repository is a nil Fact, whatever subject carried it. deploys are the project's deploy workflows
+// (ConsumerSpec.Deploys): a workflow run of any other workflow is a nil Fact. Dispatch's
+// announcement of its fleet's build is matched before the issue subjects, which it is not one of.
+func decodeMessage(subject, project string, repositories []ghrepo.Repository, deploys []config.Deploy, data []byte) (decodedMessage, error) {
 	var envelope envoyEnvelope
 	if err := json.Unmarshal(data, &envelope); err != nil {
 		return decodedMessage{}, fmt.Errorf("decode Envoy envelope: %w", err)
@@ -82,14 +85,14 @@ func decodeMessage(subject, project string, repositories []ghrepo.Repository, da
 		if envelope.Source != "github" {
 			return decodedMessage{}, fmt.Errorf("GitHub subject has envelope source %q", envelope.Source)
 		}
-		fact, unread, err = decodeGitHubFact(subject, repositories, envelope.Payload)
+		fact, unread, err = decodeGitHubFact(subject, repositories, deploys, envelope.Payload)
 	default:
 		return decodedMessage{}, fmt.Errorf("unsupported durable subject %q", subject)
 	}
 	if err != nil {
 		return decodedMessage{}, err
 	}
-	return decodedMessage{Source: envelope.Source, EventID: envelope.EventID, Fact: fact, Unread: unread}, nil
+	return decodedMessage{Source: envelope.Source, EventID: envelope.factID(), Fact: fact, Unread: unread}, nil
 }
 
 func (e envoyEnvelope) valid() error {
@@ -114,6 +117,24 @@ func (e envoyEnvelope) valid() error {
 		return fmt.Errorf("Envoy envelope payload is not JSON")
 	}
 	return nil
+}
+
+// factID is the id the envelope's fact is recorded under in processed_events, which skips a fact
+// already applied (ApplyFact, Applied): the envelope's event_id, except for a GitHub webhook
+// delivery's envelope, whose dedupe_key names the delivery, "github." and its X-GitHub-Delivery
+// (Envoy's GithubEnvelope), and which takes that dedupe_key. The listener mints a new event_id for
+// every request GitHub sends, so a redelivery of the same delivery the stream stored again (asked
+// for after the stream's 72-hour duplicate window, or published without a MsgId) would otherwise
+// be a new fact. The topic is left out, though the stream's MsgId adds it: a review that mentions
+// the trigger is published on its mention topics beside its own, each copy the same fact, decoded
+// from the payload and applied once. A checks settlement keeps its event_id: its dedupe_key names a
+// commit's settlement generation, which Envoy's CI store starts again once the commit's record
+// expires, and processed_events is never pruned. A Dispatch event's event_id is its dedupe_key.
+func (e envoyEnvelope) factID() string {
+	if e.Source == "github" && e.DedupeKey == "github."+e.SourceEventID {
+		return e.DedupeKey
+	}
+	return e.EventID
 }
 
 // decodeServerStarted decodes Dispatch's server.started: the build commit every live Dispatch
@@ -566,7 +587,7 @@ func isJSONObject(raw json.RawMessage) bool {
 	return json.Unmarshal(raw, &item) == nil && item != nil
 }
 
-func decodeGitHubFact(subject string, repositories []ghrepo.Repository, payload string) (Fact, []string, error) {
+func decodeGitHubFact(subject string, repositories []ghrepo.Repository, deploys []config.Deploy, payload string) (Fact, []string, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(payload), &raw); err != nil || raw == nil {
 		return nil, nil, nil
@@ -597,20 +618,30 @@ func decodeGitHubFact(subject string, repositories []ghrepo.Repository, payload 
 	case "checks":
 		fact, err = decodeChecks(subject, repository, raw)
 	case "workflow":
-		fact = decodeWorkflowRun(repository, raw)
+		fact = decodeWorkflowRun(repository, deploys, raw)
 	}
 	// Comments, and every other kind, route to the current role but do not change the durable
 	// workflow record.
 	return fact, nil, err
 }
 
+// decodePullRequest decodes a pull request's lifecycle event on an issue's branch
+// (claim.BranchIssue). One on any other branch is no fact, read before anything else of the
+// event, so it is acknowledged without a transaction: the workflow records a pull request only on
+// an issue's branch (PullRequestOpened), and every later event applies only to a recorded one. A
+// mapped repository whose other pull requests open and move many times a minute would otherwise
+// cost the daemon one transaction under the fact lock (ApplyFact) for every one, all of them
+// changing nothing. Every action carries head_ref.
 func decodePullRequest(repository ghrepo.Repository, raw map[string]json.RawMessage) (Fact, error) {
+	branch, _ := rawString(raw, "head_ref")
+	if _, isIssueBranch := claim.BranchIssue(branch); !isIssueBranch {
+		return nil, nil
+	}
 	number, action, ok := githubIdentity(raw)
 	if !ok {
 		return nil, nil
 	}
 	repo := repository.String()
-	branch, _ := rawString(raw, "head_ref")
 	sha, _ := rawString(raw, "head_sha")
 	body, _ := rawString(raw, "body")
 	updatedAt, _ := rawTimestamp(raw, "updated_at")
@@ -731,13 +762,20 @@ func decodeChecks(subject string, repository ghrepo.Repository, raw map[string]j
 	return PullRequestChecks{Repo: repository.String(), Number: number, HeadSHA: headSHA, CheckRuns: runs, Generation: generation, Snapshot: snapshot, Failing: failed, Cancelled: cancelled}, nil
 }
 
-// decodeWorkflowRun reads a workflow run's envelope (Envoy's `workflow_run` payload): its
-// completion is a WorkflowRunCompleted, and every other action, or a completion that names no
-// positive run id and attempt (decimal strings, as Envoy writes GitHub's numbers), no workflow
-// path or no branch, is no fact. A malformed run is acknowledged rather than poison: it can wake
-// nothing, and the next run's envelope is read on its own.
-func decodeWorkflowRun(repository ghrepo.Repository, raw map[string]json.RawMessage) Fact {
+// decodeWorkflowRun reads a workflow run's envelope (Envoy's `workflow_run` payload): the completion
+// of a run of one of deploys (DeployOf) is a WorkflowRunCompleted, and every other action, a run of
+// any other workflow, or a completion that names no positive run id and attempt (decimal strings,
+// as Envoy writes GitHub's numbers), no workflow path or no branch, is no fact. Only a deploy's run
+// can wake a production check (workflow's deployRunCompleted), so any other is acknowledged without
+// a transaction, and a repository whose CI runs many workflows costs the daemon nothing for them. A
+// malformed run is acknowledged rather than poison: it can wake nothing, and the next run's
+// envelope is read on its own.
+func decodeWorkflowRun(repository ghrepo.Repository, deploys []config.Deploy, raw map[string]json.RawMessage) Fact {
 	if action, _ := rawString(raw, "action"); action != "completed" {
+		return nil
+	}
+	path, _ := rawString(raw, "path")
+	if _, ok := DeployOf(deploys, repository.String(), path); !ok {
 		return nil
 	}
 	runID, ok := rawPositiveDecimal(raw, "run_id", 64)
@@ -748,12 +786,25 @@ func decodeWorkflowRun(repository ghrepo.Repository, raw map[string]json.RawMess
 	if !ok {
 		return nil
 	}
-	path, _ := rawString(raw, "path")
 	branch, _ := rawString(raw, "head_branch")
 	if path == "" || branch == "" {
 		return nil
 	}
 	return WorkflowRunCompleted{Repo: repository.String(), Path: path, RunID: runID, Attempt: int(attempt), HeadBranch: branch}
+}
+
+// DeployOf is the deploy of deploys whose workflow a run of repo at path is: its repository is repo,
+// compared case-insensitively as GitHub compares names, and its workflow file is path exactly. A
+// project names a repository's workflow once (config's readDeploys), so at most one matches. It is
+// the one matching rule the decoder's filter and the workflow's wake (deployRunCompleted) share.
+func DeployOf(deploys []config.Deploy, repo, path string) (config.Deploy, bool) {
+	at := slices.IndexFunc(deploys, func(deploy config.Deploy) bool {
+		return strings.EqualFold(deploy.Repo.String(), repo) && deploy.Workflow == path
+	})
+	if at < 0 {
+		return config.Deploy{}, false
+	}
+	return deploys[at], true
 }
 
 func githubIdentity(raw map[string]json.RawMessage) (int, string, bool) {
