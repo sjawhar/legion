@@ -1,9 +1,0 @@
-kind: Fixed
-body: |-
-  Main's rebuild of `dist/` and `legion/` lands even when main moved while its push job waited
-  for a runner: it commits the build onto main's tip whenever it is newer than the build main
-  holds, and starts one fresh run when a build input changed in between, so main's built plugin is
-  at most one run behind its inputs and never moves backward (#2493).
-  `scripts/build-inputs.txt` lists every path that can change the build; `tests/build-inputs.test.ts`
-  runs the build and fails when the bundles or the Legion plugin read a file the list does not
-  match (the files the build's scripts read by path are listed by hand).
