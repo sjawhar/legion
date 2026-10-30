@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-591",
+  "completed": "2026-10-30T18:58:18Z",
+  "headTested": "189b601a4eb3aedea3756c5e6e8e81a222935d6f",
+  "codeHead": "2127dde7062cd3acac8d0bb492678e566c34e3a3",
+  "round": "Forward merge of main e65900f4 into the approved and retro'd head af78f59b. The architect called it a full round, but narrow (Envoy 18:37Z).",
+  "roundShape": {
+    "command": "python3 round-shape.py af78f59bbb07 2127dde7062c 2392 (dispatch://INFRA-598/artifact/round-shape-py version 3)",
+    "oldHead": "af78f59bbb0747e6c5b74c03491d2c4c7caf8da5",
+    "newHead": "2127dde7062cd3acac8d0bb492678e566c34e3a3",
+    "filesWhoseOwnDiffDiffers": [
+      "packages/envoy/internal/dispatch/api/events.go"
+    ],
+    "equalOnlyAfterMigrationNumbersNormalised": [
+      "packages/envoy/.changes/unreleased/pr2392-Changed-20261028-124735.yaml",
+      "packages/envoy/internal/dispatch/store/migrations/NNNN_event_horizon.census.sql",
+      "packages/envoy/internal/dispatch/store/migrations/NNNN_event_horizon.up.sql"
+    ],
+    "reading": "One runtime file differs, so this is a full round. Its change from af78f59b is only that the store import stays: main's own new line (store.CastableUUID in the asks query) needs it, and the PR had removed it. The other three files differ only in the migration number, which is now 0149."
+  },
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "I reproduced the CI failure that the merge fixes, then checked the fix on the merged tree. At af78f59b, CI's test lane failed the daemon's four scratch-Dispatch tests and intake's TestADeliveryNATSRefusedIsRedeliveredByTheSweepAndApplied with 'internal/dispatch/api/events.go:368:39: undefined: store' (job 124143048547). envoy-go failed the same way (job 124143049075). At 2127dde7, go build ./... and go vet ./... in packages/envoy pass, and those daemon tests pass against my own Postgres 16.2 and NATS."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Architect's check 1: the merged tree builds, and the daemon's scratch-Dispatch tests pass",
+      "surface": "packages/envoy go build and go vet; packages/daemon tests that build envoy-dispatch from the tree and run it on a real Postgres and NATS",
+      "command": "cd packages/envoy && go build ./... && go vet ./...; cd packages/daemon && LEGION_TEST_PG_DSN=... LEGION_TEST_NATS_URL=nats://127.0.0.1:16222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:16223 go test -p 1 ./internal/daemon/ -run ScratchDispatch -v; go test -p 1 ./internal/intake/ -skip TestConsumerLagCountsEveryConsumerWhileNATSRefusesTheOldestMessageRead -v",
+      "observed": "go build and go vet: no output and exit 0. internal/daemon: TestBlockedIssuesAreNotStartedAgainstScratchDispatch, TestAHandOverReachesScratchDispatchAsOneEventCarryingTheTodoAndTheLabel, TestOutboxMessageCrashRecoveryPostsOnceAgainstScratchDispatch and TestOutboxPostsABodyAtThePostLimitWithTheLongestMarkerAgainstScratchDispatch pass. internal/intake: ok, 73 tests passed, TestADeliveryNATSRefusedIsRedeliveredByTheSweepAndApplied among them. I skipped one test: TestConsumerLagCountsEveryConsumerWhileNATSRefusesTheOldestMessageRead starts its own NATS container with nkey users and panics 'rootless Docker not found' in this pod. CI's test lane runs it.",
+      "headSha": "2127dde7062c",
+      "negativeControl": "At af78f59b (before the merge), CI job 124143048547 failed those same five tests with 'build scratch Dispatch: exit status 1 ... events.go:368:39: undefined: store'."
+    },
+    {
+      "criterion": "Architect's check 2a: the head migrates main's schema forward to 0149",
+      "surface": "envoy-dispatch boot: main's binary (e65900f4), then the head's, on one fresh database",
+      "command": "python3 h.py migrate",
+      "observed": "Main's binary boots, and I created project TSA and issues TSA-1 to TSA-3 through its API. Its migrations end at 146,147,148, and event_horizon does not exist. The head then boots on the same database and migrates to 147,148,149. event_horizon has columns id smallint, safe bigint, safe_at timestamptz and updated_at timestamptz, and TSA-1 reads back 200.",
+      "headSha": "2127dde7062c",
+      "negativeControl": "Main's binary stops at version 148 (asks_anchor_artifact_id) and has no event_horizon table."
+    },
+    {
+      "criterion": "Architect's check 2b: the live feed delivers an out-of-order commit in id order",
+      "surface": "GET /ws/live events view (bin/wsfeed, a gorilla/websocket client) on the head binary",
+      "command": "python3 h.py ooo, on the head and on main's binary",
+      "observed": "Head: an event insert on TSA-1 (id 7) was held open in psql, and a comment POST on TSA-2 answered 201 in 44 ms (id 8). The open subscription sent nothing in 2.5 s while 7 was open. After 7 committed, it sent [7, 8] in that order. A resume with since=6 got events_start since=6 replay_complete=true, then [7, 8].",
+      "headSha": "2127dde7062c",
+      "negativeControl": "Main's binary (e65900f4) on the same steps: while id 5 was open, the live subscription sent 6 at once, and after the commit it still never sent 5."
+    },
+    {
+      "criterion": "Architect's check 2c: whoami's two 503 codes",
+      "surface": "GET /auth/whoami on the head binary; go test ./internal/dispatch/routes/ -run Whoami; Dispatch's browser harness (shell.e2e.ts and live.e2e.ts, Chromium)",
+      "command": "python3 h.py whoami; go test ./internal/dispatch/routes/ -run Whoami -v; bun run e2e -- bunx playwright test e2e/shell.e2e.ts e2e/live.e2e.ts --project=chromium --workers=1",
+      "observed": "On the binary, with nothing open, whoami answered 200 event_head 6 in 12 ms. I cleared event_horizon and held an insert (id 7) open across a restart. whoami then answered 503 {\"code\":\"EVENT_HEAD_UNAVAILABLE\",\"error\":\"no event id is proven final yet; ask again\"}, and 200 event_head 7 once the insert committed. All 11 whoami route tests pass, TestWhoamiRefusesWhenItCannotReadTheEventHead (EVENT_HEAD_READ_FAILED) among them. Browser suites: 33 passed, 1 skipped. Those include round 13's EVENT_HEAD_UNAVAILABLE test (the page keeps asking) and the EVENT_HEAD_READ_FAILED test (the page stops on 'Couldn't reach Dispatch.' with Retry). As in round 15, EVENT_HEAD_READ_FAILED is shown by the route test and the browser test, not on a live server.",
+      "headSha": "2127dde7062c",
+      "negativeControl": "I changed router.go to answer EVENT_HEAD_UNAVAILABLE for every head error, then restored it (jj status clean). With that change, TestWhoamiRefusesWhenItCannotReadTheEventHead fails ('503 EVENT_HEAD_UNAVAILABLE, want 503 EVENT_HEAD_READ_FAILED'), and so does the anonymous-whoami test."
+    }
+  ],
+  "ci": "Read on GitHub at 2127dde7 at 18:58Z. lint: success. typecheck: success. pr-title: success, both runs. Also success: contracts, claude-envoy, envoy-client, envoy-infra-go, envoy-plugin, pi-envoy, pi-legion, pi-shared, ci-filters, docs / build and worker-image / build. Still running or queued, so unread: test (in progress), envoy-go, envoy-go-race, envoy-go-race-docs, dispatch, dispatch-memory, dispatch-multiprocess, dispatch-browser-multiprocess, broker-multiprocess, envoy-e2e-local, envoy-session-stall, envoy-smoke and listener-server-change."
+}
