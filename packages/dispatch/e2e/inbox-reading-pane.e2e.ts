@@ -686,3 +686,55 @@ test("a withdrawn question the reader was answering keeps its text in the column
     await alice.close();
   }
 });
+
+test("an options-only answer the server refuses keeps its question in the column, with a Retry", async ({
+  browser,
+}) => {
+  const seed = await seedInbox();
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize({ height: 900, width: 1440 });
+    const list = inboxList(page);
+    const pane = inboxPane(page);
+    await page.goto(INBOX);
+    await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", seed.decisionAskId);
+
+    // The server refuses this one answer, in the words of its own route, and refuses it for a
+    // reason the same answer may get past: the card offers Retry rather than closing its form.
+    await page.route(`**/api/v1/asks/${seed.decisionAskId}/answer`, (route) =>
+      route.fulfill({
+        body: JSON.stringify({
+          code: "ASK_REVISION_REQUIRED",
+          error: "expected_edited_at is required",
+        }),
+        contentType: "application/json",
+        status: 400,
+      })
+    );
+
+    // The two taps of the row above, and nothing typed: with no draft to keep the question
+    // here, the answer itself is what holds it.
+    const block = pane.locator(`[data-dispatch-ask-block="${DECISION_BLOCK}"]`);
+    await expect(block).toContainText(DECISION_QUESTION);
+    await pane.getByRole("button", { name: "Skip to the answer" }).click();
+    const card = block.locator("article[data-testid^=ask-]");
+    await card.getByRole("radio", { exact: true, name: "Ledger first" }).click();
+    await card.getByRole("button", { exact: true, name: "Answer" }).click();
+
+    // The refusal is in the card that wrote it, on the question it was written to, and the
+    // reader can send the same answer again from there. The selection never moved on, and the
+    // row the optimistic removal took is listed again - the server still has the question open.
+    await expect(card.getByRole("alert")).toContainText("Could not save your answer.");
+    await expect(card.getByRole("alert").getByRole("button", { name: "Retry" })).toBeVisible();
+    await expect(block).toContainText(DECISION_QUESTION);
+    await expect(page).toHaveURL(inboxAt(seed.decisionAskId));
+    await expect(list.locator(`[data-inbox-row="${seed.decisionAskId}"]`)).toHaveCount(1);
+    await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", seed.decisionAskId);
+    await expect
+      .poll(async () => (await getInbox()).some((row) => row.id === seed.decisionAskId))
+      .toBe(true);
+  } finally {
+    await alice.close();
+  }
+});

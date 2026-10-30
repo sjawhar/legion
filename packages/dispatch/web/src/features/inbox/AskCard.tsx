@@ -216,6 +216,7 @@ export function AskCard({
     submitGuard,
     threadQuery,
     trimmedAnswer,
+    unsentAnswer,
   } = useAskAnswerForm({
     answer,
     ask,
@@ -483,6 +484,20 @@ export function AskCard({
           markRef={answerIsNewest ? markNewest : undefined}
           onChangeAnswer={canChangeAnswer ? startChanging : undefined}
         />
+        {unsentAnswer === "" ? null : (
+          <div
+            className={`mt-3 rounded-xl border p-3 ${borderDefault}`}
+            data-testid="ask-unsent-answer"
+          >
+            <p className={`text-xs ${textMutedOnSurface}`}>
+              This question closed before you sent your answer, so it was not sent. Your text is
+              here to copy.
+            </p>
+            <p className={`mt-1 text-sm whitespace-pre-wrap ${textPrimaryOnSurface}`}>
+              {unsentAnswer}
+            </p>
+          </div>
+        )}
         {answerFailure === null ? null : <QueryError message={answerFailure.message} />}
         {referencedByNode}
         {threadNode}

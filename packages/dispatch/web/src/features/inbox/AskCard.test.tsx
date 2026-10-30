@@ -551,3 +551,44 @@ test("the diff keeps a paragraph changed beside the decision blocks", async () =
     getArtifactVersion.mockRestore();
   }
 });
+
+test("a question closed under the reader keeps their unsent answer, out of the form", async () => {
+  const open = answeredAsk({ answer: null, state: "open" });
+  const typed = "Only on a cold start, and only back to the last lease.";
+  const { queryClient, view } = renderCard(<AskCard ask={open} initialThread={thread(open, [])} />);
+  const card = within(view.container);
+  try {
+    fireEvent.change(card.getByLabelText("Your answer"), { target: { value: typed } });
+
+    // The server withdraws the question while that answer is still a draft.
+    act(() => {
+      queryClient.setQueryData<AskRead>(
+        ["ask-thread", open.id],
+        thread(
+          {
+            ...open,
+            resolution: {
+              actor: { id: "session-1", kind: "session" },
+              at: "2026-10-08T03:00:00Z",
+              kind: "retracted",
+              reason: "A newer question supersedes this one.",
+            },
+            state: "resolved",
+          },
+          []
+        )
+      );
+    });
+
+    // The form is gone - an answer sent now is one the server refuses - and the text it held is
+    // where the reader can still read and copy it.
+    await waitFor(() =>
+      expect(card.getByTestId("ask-resolution-badge").textContent).toBe("Retracted")
+    );
+    expect(card.queryByRole("button", { name: "Answer" })).toBeNull();
+    expect(view.container.querySelector("[data-ask-answer]")).toBeNull();
+    expect(card.getByTestId("ask-unsent-answer").textContent).toContain(typed);
+  } finally {
+    view.unmount();
+  }
+});

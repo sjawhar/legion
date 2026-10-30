@@ -11,7 +11,7 @@ import {
   resolveAsk,
 } from "./api";
 import { conversationFilter, threadCard } from "./editor";
-import { hasReadingPane, inboxRow, selectedRow } from "./inbox-pane";
+import { inboxRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { holdPosts, refusePosts, WRITE_REFUSED_TEXT } from "./sends";
 import { asUser } from "./users";
@@ -502,13 +502,9 @@ test("a session retraction leaves its reason on the card and removes the human's
   // The retraction takes the question out of the human's Inbox, live: the "Blocked on you"
   // strip counts what the server lists, and it drops with no reload.
   await expect(inboxPage.getByText(/^Blocked on you:/)).toHaveCount(0);
-  // The row itself: from 1280 px the reading column is showing it, and a row the reader is
-  // reading is held where they last saw it rather than taken from under them (INFRA-575), so
-  // it goes once they look away. With no column, and no hand on the row, it goes at once.
-  if (hasReadingPane(inboxPage)) {
-    await expect(selectedRow(inboxPage)).toHaveAttribute("data-inbox-row", ask.id);
-    await inboxPage.reload();
-  }
+  // The row itself: a question the server withdraws leaves the list at once, at every width and
+  // with no reload - a withdrawn question with a live answer form invites an answer the server
+  // refuses, and nothing holds a row the reader has not touched (INFRA-575).
   await expect(inboxRow(inboxPage, ask.id)).toHaveCount(0);
   await expect(inboxPage.getByText("Nothing needs you")).toBeVisible();
   await inboxPage.screenshot({

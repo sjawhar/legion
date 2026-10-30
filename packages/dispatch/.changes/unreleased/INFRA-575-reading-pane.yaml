@@ -5,12 +5,18 @@ body: |-
   document at its section heading, with a bar down to the block and "Skip to the answer"; an
   approval request shows Approve at the head of the column and the latest version below it, with
   every word changed since the last approval marked and "Next change" stepping them. The URL
-  carries the selection, the first row is selected when the Inbox opens, the reader's own answer
-  or snooze hands the selection to the next row they can see - and names none at all once the
-  list has none left, so a reload never opens the folded Later band in front of them - and every
-  keyboard binding keeps its meaning against the selected row, standing down wherever the key
-  belongs to the control the reader's focus is on. A
-  narrower screen and the Inbox drawer keep today's card.
+  carries the selection, the first row is selected when the Inbox opens, and the selection moves
+  to the next question you can see whenever the one you are on leaves the list - the server
+  recorded your answer, you deferred it, or it was withdrawn, resolved or answered elsewhere -
+  naming none at all once the list has none left, so a reload never opens the folded Later band
+  in front of you. Two questions stay. One you were part-way through answering when it was
+  withdrawn: its row goes with the rest, and the right column keeps the question, shows that it
+  is closed in place of the answer form, and keeps your text where you can copy it until you
+  pick another row. And one whose answer the server has not taken yet: the column stays on it
+  while your answer is out, and while one the server refused is still there to send again, so a
+  refusal reaches you beside what you answered instead of leaving with the card. Every keyboard
+  binding keeps its meaning against the selected row, standing down wherever the key belongs to
+  the control your focus is on. A narrower screen and the Inbox drawer keep today's card.
 time: 2026-10-30T03:20:00.000000000Z
 custom:
   Issue: INFRA-575

@@ -160,7 +160,7 @@ async function leaveRow(page: Page): Promise<void> {
     .toBe(true);
 }
 
-test("a row being typed into stays put, draft and all, when an agent's progress note flips its turn, and moves only once the reader leaves it @phone", async ({
+test("a row being typed into keeps its draft when an agent's progress note flips its turn, and holds its place only while the reader's hand is on it @phone", async ({
   browser,
 }) => {
   const target = await seedBothSections();
@@ -186,31 +186,38 @@ test("a row being typed into stays put, draft and all, when an agent's progress 
       session
     );
 
-    // The card says whose turn it is now; the row itself stays where the reader is typing.
+    // The card says whose turn it is now, and what the reader is typing is untouched by it.
     await expect(page.getByTestId(`turn-${target.ask.id}`)).toHaveText(
       "Waiting on e2e-session-title"
     );
-    await expect(row).toHaveAttribute("data-inbox-section", "human");
     await expect(field).toHaveValue("Ship it once the audit lands");
     await expect(field).toBeFocused();
+    if (hasReadingPane(page)) {
+      // The question is in the column, so the reader's hand is on no row at all: the row joins
+      // Waiting on agents at once, telling the truth about whose turn it is, and the column
+      // keeps the question and the half-written answer where they are (INFRA-575). The view
+      // does not follow the row down.
+      await expect(row).toHaveAttribute("data-inbox-section", "agent");
+      expect(Math.abs((await listScrollTop(page)) - scrolled)).toBeLessThanOrEqual(2);
+      return;
+    }
+    // Without the column the card is in the row, under the reader's hand: the row stays where
+    // they are typing.
+    await expect(row).toHaveAttribute("data-inbox-section", "human");
     expect(Math.abs((await topOf(row)) - before)).toBeLessThanOrEqual(2);
     expect(Math.abs((await listScrollTop(page)) - scrolled)).toBeLessThanOrEqual(2);
 
     await leaveRow(page);
     await expect(row).toHaveAttribute("data-inbox-section", "agent");
     expect(Math.abs((await listScrollTop(page)) - scrolled)).toBeLessThanOrEqual(2);
-    if (!hasReadingPane(page)) {
-      // The card never left the row it moved with, so what was typed into it is still there.
-      // The reading column draws one card per question (`key={ask.id}`), so selecting another
-      // row there is the reader putting this one down, half-written answer and all.
-      await expect(field).toHaveValue("Ship it once the audit lands");
-    }
+    // The card never left the row it moved with, so what was typed into it is still there.
+    await expect(field).toHaveValue("Ship it once the audit lands");
   } finally {
     await alice.close();
   }
 });
 
-test("the reader's own Ask back keeps the row where it is and the view still, until they leave it @phone", async ({
+test("the reader's own Ask back leaves the view still and holds the row only where their hand is @phone", async ({
   browser,
 }) => {
   const target = await seedBothSections();
@@ -243,14 +250,19 @@ test("the reader's own Ask back keeps the row where it is and the view still, un
       "Waiting on e2e-session-title"
     );
 
-    // The row is still under Waiting on you, where the reader's hand is - the selection the
-    // reading column follows, or, without it, the focus Ask back handed back to the row as it
-    // disabled itself - and the view has not moved after it.
     if (hasReadingPane(page)) {
+      // The question is in the column, which stays on it: the selection is the reader's and
+      // only they move it. The row beside it joins Waiting on agents at once - their hand is in
+      // the column, on no row (INFRA-575) - and the view does not follow it.
       await expect(selectedRow(page)).toHaveAttribute("data-inbox-row", target.ask.id);
-    } else {
-      await expect(row).toBeFocused();
+      await expect(row).toHaveAttribute("data-inbox-section", "agent");
+      expect(Math.abs((await listScrollTop(page)) - scrolled)).toBeLessThanOrEqual(2);
+      return;
     }
+    // Without the column the row is still under Waiting on you, where the reader's hand is -
+    // the focus Ask back handed back to the row as it disabled itself - and the view has not
+    // moved after it.
+    await expect(row).toBeFocused();
     await expect(row).toHaveAttribute("data-inbox-section", "human");
     expect(Math.abs((await topOf(row)) - before)).toBeLessThanOrEqual(2);
     const afterAskBack = await listScrollTop(page);

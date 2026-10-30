@@ -2561,10 +2561,168 @@ test("the reader's own answer takes its row off the list and selects the next on
   }
 });
 
-test("a selected row the server drops stays where the reader left it until they select another", async () => {
+// The reader picks an option and presses Answer, and nothing of theirs is typed into the box:
+// the draft that would otherwise keep the question in the column is empty, so this reads the
+// hold the answer itself takes. Reverted, the optimistic removal hands the selection on at once
+// and unmounts the card, which is the only surface the refusal is shown on.
+test("an answer the server refuses keeps its question in the column, and a retry that lands moves on", async () => {
+  const narrow = widenToReadingPane();
+  const first = inboxIssue("ask-a", "CORE-1", "Which approach?", {
+    options: [{ label: "Ship" }, { label: "Hold" }],
+  });
+  const second = inboxIssue("ask-b", "CORE-2", "Which format?");
+  let served = [first, second];
+  const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
+  const getAsk = mockAskReads([first, second]);
+  const getIssue = mockIssueReads();
+  const refusal = Promise.withResolvers<never>();
+  const answerAsk = spyOn(api, "answerAsk").mockImplementation(() => refusal.promise);
+  const { unmount } = renderInbox();
+
+  try {
+    const pane = await screen.findByTestId("inbox-pane");
+    fireEvent.click(within(pane).getByRole("radio", { name: "Ship" }));
+    fireEvent.click(within(pane).getByRole("button", { name: "Answer" }));
+
+    // The optimistic removal takes the row at once; the column keeps the question, because the
+    // answer is still the reader's to finish, and the selection stays on it.
+    await waitFor(() => expect(rowIds()).toEqual(["ask-b"]));
+    expect(address()).toBe("/?item=ask-a");
+    expect(within(screen.getByTestId("inbox-pane")).getByTestId("ask-ask-a")).toBeTruthy();
+    expect(within(screen.getByTestId("inbox-pane")).getByText("Answering…")).toBeTruthy();
+
+    await act(async () => {
+      refusal.reject(
+        new ApiError(400, {
+          code: "ASK_REVISION_REQUIRED",
+          error: "expected_edited_at is required",
+        })
+      );
+      await Promise.resolve();
+    });
+
+    // The reason and its Retry are in the card that wrote, under what the reader answered, and
+    // the rolled-back row is listed again with the selection still on it.
+    const refused = await waitFor(() =>
+      within(screen.getByTestId("inbox-pane")).getByRole("alert")
+    );
+    expect(refused.textContent).toContain("Could not save your answer.");
+    await waitFor(() => expect(rowIds()).toEqual(["ask-a", "ask-b"]));
+    expect(selectedIds()).toEqual(["ask-a"]);
+    expect(address()).toBe("/?item=ask-a");
+
+    // The server records the same answer on the card's own Retry: that is when the row leaves
+    // and the next visible row in list order is selected.
+    answerAsk.mockImplementation(async () => {
+      served = [second];
+      return {
+        ...first,
+        answer: { at: "2026-09-11T03:00:00Z", selected: ["Ship"], text: "", user: "alice" },
+        state: "answered",
+      };
+    });
+    fireEvent.click(
+      within(screen.getByTestId("inbox-pane")).getByRole("button", { name: "Retry" })
+    );
+
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
+    expect(rowIds()).toEqual(["ask-b"]);
+    expect(address()).toBe("/?item=ask-b");
+    expect(within(screen.getByTestId("inbox-pane")).getByTestId("ask-ask-b")).toBeTruthy();
+    expect(answerAsk).toHaveBeenCalledTimes(2);
+  } finally {
+    unmount();
+    narrow();
+    answerAsk.mockRestore();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
+test("a selected row the server drops leaves the list at once and the next row is selected", async () => {
   const narrow = widenToReadingPane();
   const first = inboxIssue("ask-a", "CORE-1", "Which approach?");
   const second = inboxIssue("ask-b", "CORE-2", "Which format?");
+  const third = inboxIssue("ask-c", "CORE-3", "Which order?");
+  let served = [first, second, third];
+  const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
+  const getAsk = mockAskReads(served);
+  const getIssue = mockIssueReads();
+  const { queryClient, unmount } = renderInbox();
+
+  try {
+    await screen.findByTestId("inbox-pane");
+    // The middle row, so the next row in list order and the first row are not the same answer.
+    fireEvent.keyDown(document.body, { key: "j" });
+    expect(selectedIds()).toEqual(["ask-b"]);
+
+    // Someone else answers the selected question while the reader is reading it. They have
+    // typed nothing into it, so nothing holds it: a withdrawn question with a live answer form
+    // invites an answer the server refuses.
+    served = [first, third];
+    await act(async () => {
+      await queryClient.refetchQueries({ queryKey: ["inbox"] });
+    });
+    expect(rowIds()).toEqual(["ask-a", "ask-c"]);
+
+    // The selection goes where that row was heading - the next row the reader can see, not the
+    // first one - the address follows it, and the column shows that row's question.
+    expect(selectedIds()).toEqual(["ask-c"]);
+    expect(address()).toBe("/?item=ask-c");
+    const pane = screen.getByTestId("inbox-pane");
+    expect(within(pane).getByTestId("ask-ask-c")).toBeTruthy();
+    expect(within(pane).queryByTestId("ask-ask-b")).toBeNull();
+
+    // An empty list shows no row at all, and no column beside it. The address is left as it
+    // was: a list holding nothing answers no `?item=`, since it cannot tell a list that is
+    // empty from one still loading or failed.
+    served = [];
+    await act(async () => {
+      await queryClient.refetchQueries({ queryKey: ["inbox"] });
+    });
+    await waitFor(() => expect(rowIds()).toEqual([]));
+    expect(selectedIds()).toEqual([]);
+    expect(screen.queryByTestId("inbox-pane")).toBeNull();
+  } finally {
+    unmount();
+    narrow();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
+/** The ask's thread read once an agent has retracted it: what the card draws its closed state
+ *  from, whatever the Inbox list still says. */
+function retracted(row: InboxRow): AskRead {
+  return {
+    answers: [],
+    ask: {
+      ...row,
+      resolution: {
+        actor: { id: "session-1", kind: "session" },
+        at: "2026-09-11T03:00:00Z",
+        kind: "retracted",
+        reason: "A newer question supersedes this one.",
+      },
+      state: "resolved",
+    },
+    claimant: null,
+    edits: [],
+    followers: [],
+    replies: [],
+    route: null,
+    route_status: null,
+    route_holder: null,
+  };
+}
+
+test("a question the reader was answering keeps its text in the column, closed, until they move", async () => {
+  const narrow = widenToReadingPane();
+  const first = inboxIssue("ask-a", "CORE-1", "Which approach?");
+  const second = inboxIssue("ask-b", "CORE-2", "Which format?");
+  const typed = "Only on a cold start, and only back to the last lease.";
   let served = [first, second];
   const getInbox = spyOn(api, "getInbox").mockImplementation(async () => served);
   const getAsk = mockAskReads([first, second]);
@@ -2572,21 +2730,48 @@ test("a selected row the server drops stays where the reader left it until they 
   const { queryClient, unmount } = renderInbox();
 
   try {
-    await screen.findByTestId("inbox-pane");
-    expect(selectedIds()).toEqual(["ask-a"]);
+    const pane = await screen.findByTestId("inbox-pane");
+    fireEvent.change(within(pane).getByLabelText("Your answer"), { target: { value: typed } });
 
-    // Someone else answers the selected question while the reader is reading it.
+    // The server withdraws the question the reader is answering: it leaves the list like any
+    // other dropped row, and its own read says it is closed.
     served = [second];
     await act(async () => {
+      queryClient.setQueryData<AskRead>(["ask-thread", "ask-a"], retracted(first));
       await queryClient.refetchQueries({ queryKey: ["inbox"] });
     });
-    expect(rowIds()).toEqual(["ask-a", "ask-b"]);
-    expect(selectedIds()).toEqual(["ask-a"]);
+    expect(rowIds()).toEqual(["ask-b"]);
 
-    // Moving on is what lets it go.
+    // The column keeps the question, shows its closed state in place of the answer form, and
+    // keeps what the reader typed where they can read and copy it.
+    const kept = within(screen.getByTestId("inbox-pane"));
+    expect(kept.getByTestId("ask-resolution-badge").textContent).toBe("Retracted");
+    expect(kept.queryByRole("button", { name: "Answer" })).toBeNull();
+    expect(document.querySelector("[data-ask-answer]")).toBeNull();
+    expect(kept.getByTestId("ask-unsent-answer").textContent).toContain(typed);
+
+    // Until the reader selects another row, which shows that row's question and nothing of
+    // this one.
     fireEvent.keyDown(document.body, { key: "j" });
-    await waitFor(() => expect(rowIds()).toEqual(["ask-b"]));
-    expect(selectedIds()).toEqual(["ask-b"]);
+    await waitFor(() => expect(selectedIds()).toEqual(["ask-b"]));
+    const after = within(screen.getByTestId("inbox-pane"));
+    expect(after.getByTestId("ask-ask-b")).toBeTruthy();
+    expect(after.queryByTestId("ask-ask-a")).toBeNull();
+    expect(after.queryByTestId("ask-unsent-answer")).toBeNull();
+
+    // The same holds when the row that goes is the last one: an empty list shows no row, and
+    // the column is still the reader's text and the question it belongs to.
+    const lastTyped = "Two attempts, then the mirror takes over.";
+    fireEvent.change(after.getByLabelText("Your answer"), { target: { value: lastTyped } });
+    served = [];
+    await act(async () => {
+      queryClient.setQueryData<AskRead>(["ask-thread", "ask-b"], retracted(second));
+      await queryClient.refetchQueries({ queryKey: ["inbox"] });
+    });
+    await waitFor(() => expect(rowIds()).toEqual([]));
+    const last = within(screen.getByTestId("inbox-pane"));
+    expect(last.getByTestId("ask-resolution-badge").textContent).toBe("Retracted");
+    expect(last.getByTestId("ask-unsent-answer").textContent).toContain(lastTyped);
   } finally {
     unmount();
     narrow();

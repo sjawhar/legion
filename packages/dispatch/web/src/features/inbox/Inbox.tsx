@@ -31,6 +31,7 @@ import { AskCard } from "./AskCard";
 import { InboxOwnerLink } from "./AskOwnerLink";
 import { AssigneeFilter } from "./AssigneeFilter";
 import { AssignToMe } from "./AssignToMe";
+import { answerDraft } from "./answer-drafts";
 import { formatAskAge } from "./ask-age";
 import { outsideAskCard } from "./ask-card";
 import { isDecisionAsk } from "./ask-decision";
@@ -41,6 +42,7 @@ import { crossBandCounts, groupRows } from "./grouping";
 import { bandGroupItems, useGroupJump } from "./InboxGroups";
 import { ROW_ATTRIBUTE, ROW_SELECTOR } from "./inbox-row";
 import { useMotionHold } from "./motion-hold";
+import { answerOutstanding } from "./outstanding-answers";
 import { questionLine } from "./question-line";
 import { ReadingPane } from "./ReadingPane";
 import { SnoozeControl } from "./SnoozeControl";
@@ -582,9 +584,15 @@ export function Inbox({
   // answered: without it, writing the selection to the address would read back as a reader's
   // own navigation and select the row again, one step behind every `j`.
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
+  /** The selection as it stands now, for a callback whose closure is older than it: an answer's
+   *  own card holds the `onAnswered` of the render its write began in, and by the time the
+   *  server records that answer the row has left the list and the selection has moved on. */
+  const selectedNow = useRef<string | undefined>(undefined);
+  selectedNow.current = selectedId;
   const shownItem = useRef<string | undefined>(undefined);
   const select = (askId: string | undefined) => {
     setSelectedId(askId);
+    selectedNow.current = askId;
     shownItem.current = askId;
     if (askId !== filter.item) {
       // Replace, never push: a reader walking the list with `j` would otherwise have to press
@@ -595,20 +603,70 @@ export function Inbox({
       navigate(buildInboxPath({ ...filter, item: askId }), { replace: true });
     }
   };
+  /** The question the column is showing, as the list last held it, and whether it is being kept
+   *  there past its row. */
+  const paneSubject = useRef<{ ask: InboxRow; kept: boolean } | undefined>(undefined);
+  /**
+   * What the column shows this commit, given the selected row among the ones the list renders
+   * (none, where it renders none at all). Normally that row's question, which leaves the column
+   * as its row leaves the list. Two things outlive the row, both of them the reader's own answer
+   * to that question:
+   *
+   * Their unsent answer. A question whose row the server dropped while they had typed one into
+   * its box stays in the column - the card draws its closed state, with that text under it -
+   * until they select another row, so an answer they are in the middle of writing is never taken
+   * off the screen under their hands.
+   *
+   * Their sent answer, until the server decides it (`outstanding-answers.ts`). `useAskAnswerForm`
+   * drops the row the moment the answer goes out, and the column hands the selection on when the
+   * server records it (`recordAnswered`), not when the page guesses it will: an answer the server
+   * refuses leaves the question here with the card's own refusal and its Retry under what they
+   * answered - the one surface that refusal is shown on - exactly as it does below this column's
+   * width, where the reader's hand on the row holds it (`heldRow`). This is `snoozing`'s rule for
+   * a deferred row, for the one write whose own optimistic update takes the row out of the Inbox
+   * read rather than merely out of this view.
+   *
+   * A question the reader has neither typed nor sent an answer to is held by nothing, the first
+   * row this list selected for them included.
+   */
+  const paneAsk = (listed: InboxRow | undefined): InboxRow | undefined => {
+    const showing = paneSubject.current;
+    if (!paneShown || selectedId === undefined) {
+      paneSubject.current = undefined;
+      return undefined;
+    }
+    if (listed !== undefined) {
+      paneSubject.current = { ask: listed, kept: false };
+      return listed;
+    }
+    if (showing === undefined || showing.ask.id !== selectedId) {
+      paneSubject.current = undefined;
+      return undefined;
+    }
+    const kept = showing.kept || answerOutstanding(selectedId) || answerDraft(selectedId) !== "";
+    paneSubject.current = kept ? { ask: showing.ask, kept: true } : undefined;
+    return kept ? showing.ask : undefined;
+  };
   // Where the selection goes when the row it is on leaves the bands: the next row the reader
   // can see after it, else the nearest above it, so the column always shows a question they
-  // can answer. One rule for both ways a row leaves by the reader's own hand - their answer,
-  // which takes it at once below, and their snooze, which takes it once the write lands - and
-  // read on every commit rather than when it is wanted, because a snooze folds its row into
-  // `Later` the moment they pick: while that write is out the read is held, so where they are
-  // sent is read off the list as it stood when they deferred.
+  // can answer. One rule for every way a row leaves - the reader's own answer, which takes it
+  // at once below, their own snooze, which takes it once the write lands, and the server
+  // withdrawing, resolving or answering the question elsewhere - and read on every commit
+  // rather than when it is wanted, because a snooze folds its row into `Later` the moment they
+  // pick: while that write is out the read is held, so where they are sent is read off the list
+  // as it stood when they deferred. The commit that drops the row holds it for the same reason:
+  // the row is gone from that commit's list, and where it was heading is exactly what the
+  // settling effect is about to read this for.
   const nextAfterSelected = useRef<string | undefined>(undefined);
   // The refetch a recorded answer triggers returns the list the optimistic removal already
   // produced, so it re-renders nothing on its own; release explicitly. The reader's own answer
-  // is also one of the two things that move the selection for them.
+  // is one of the ways the selection is handed on, and only while it is still the selected
+  // question: the column holds the question here until the server decides their answer, but a
+  // selection that moved on meanwhile - an approval reviewed from the head, a row they walked
+  // off - must not be pulled back off the row that took its place.
   const recordAnswered = (id: string) => {
     answered.current = id;
-    if (paneShown && selectedId === id) select(nextAfterSelected.current);
+    if (paneShown && selectedNow.current === id) select(nextAfterSelected.current);
     release();
   };
   const rows = () => [...(listRef.current?.querySelectorAll<HTMLElement>(ROW_SELECTOR) ?? [])];
@@ -862,6 +920,11 @@ export function Inbox({
       if (selectedId !== filter.item) select(selectedId);
       return;
     }
+    // A question the column is keeping for the reader's unsent answer keeps the selection with
+    // it: the row has gone, the question has not, and only their next pick ends that.
+    if (paneSubject.current?.kept === true) {
+      return;
+    }
     // The row the selection was on has left the bands - the reader deferred it, the server
     // took it away - so the selection goes where that row was heading and the address follows
     // it, down to naming no row at all when the list has none left to show.
@@ -884,11 +947,13 @@ export function Inbox({
     return <p className={dangerText}>Could not load your inbox.</p>;
   }
 
-  // Which row the list holds in place while the server moves the list under it. Without the
-  // reading column that is the row the reader's hand is on (focus or pointer); with it, it is
-  // the row the column is showing - the reader is reading it, wherever their hand is - and the
-  // hold lasts until they select another, rather than until they look away.
-  const handId = paneShown ? selectedId : anchor?.id;
+  // Which row the list holds in place while the server moves the list under it: the row the
+  // reader's hand is on (focus or pointer), with or without the reading column. A row the
+  // column is merely showing is not held - the Inbox selects the first row for the reader the
+  // moment it opens, and a question the server withdraws, resolves or answers elsewhere must
+  // not stay in the list on the strength of a selection nobody made. What the column does with
+  // a selected question the server takes away is `paneAsk` below.
+  const handId = anchor?.id;
   const seen =
     handId === undefined || handId === answered.current
       ? undefined
@@ -973,13 +1038,40 @@ export function Inbox({
     </>
   );
 
+  // Two columns, the reading column to the right of the list, each scrolling in itself inside
+  // the height the page gives them (`app.tsx` makes the Inbox page fill the viewport here).
+  //
+  // One root, selection or none: the column is what appears and disappears beside the list,
+  // never the list itself. A selection empties for a commit whenever the selected row leaves
+  // the rendered bands - the reader's own bulk snooze of that row does it, before the effect
+  // above hands the selection on - and a root that changed shape there would have React
+  // unmount the whole list, taking the keyboard's focus, the bulk bar and every row's state
+  // with it and mounting a fresh one a commit later.
+  const columns = (listColumn: ReactNode, subject: InboxRow | undefined): ReactNode => (
+    <div className="flex min-h-0 flex-1 gap-6">
+      {listColumn}
+      {subject === undefined ? null : (
+        <div className="min-w-0 flex-1" ref={paneRef}>
+          <ReadingPane
+            ask={subject}
+            onAnswered={recordAnswered}
+            onSnoozeLive={onSnoozeLive}
+            viewer={viewer}
+          />
+        </div>
+      )}
+    </div>
+  );
+
   if (shown.length === 0 && held === undefined) {
     const emptyMessage = emptyStateMessage({ agent, agentTitle, credentials, selection, viewer });
     // Nothing to read, so nothing to select and no column beside the list: the list column is
-    // the whole Inbox, as it is below the reading column's width.
+    // the whole Inbox, as it is below the reading column's width. The one question that
+    // outlives every row is the one the column is keeping for an unsent answer, and it keeps
+    // its column here too: the reader's text is in it.
     presented.current = [];
     listedRows.current = [];
-    return (
+    const empty = (
       <div className="space-y-6" data-testid="inbox-list">
         {header}
         {emptyMessage === undefined ? null : (
@@ -987,6 +1079,8 @@ export function Inbox({
         )}
       </div>
     );
+    const kept = paneAsk(undefined);
+    return kept === undefined ? empty : columns(empty, kept);
   }
 
   const rowsIn = (section: InboxSection) =>
@@ -1016,16 +1110,20 @@ export function Inbox({
   // never sits above "ask 1 of 2", and a twin folded away in `Later` leaves the row on screen
   // with the short name rather than a count of something the reader cannot see.
   const ordinals = askOrdinals(presented.current.map(({ ask }) => ask));
-  const selectedAsk = paneShown
-    ? presented.current.find(({ ask }) => ask.id === selectedId)?.ask
-    : undefined;
+  const selectedAsk = paneAsk(presented.current.find(({ ask }) => ask.id === selectedId)?.ask);
   // Read here, where the rows stand as the reader sees them, and held while a snooze of the
   // selected row is out: that write folds its row into `Later` on the pick, so a read taken
-  // after it would answer with the row above rather than the row that took its place.
-  if (selectedId === undefined || (!snoozing.has(selectedId) && bulkSnoozing === 0)) {
+  // after it would answer with the row above rather than the row that took its place. Held too
+  // on a commit whose list no longer holds the selected row at all: that is the commit the
+  // settling effect reads this on, and the answer it wants is the one taken while the row was
+  // still there.
+  if (selectedId === undefined) {
+    nextAfterSelected.current = undefined;
+  } else if (!snoozing.has(selectedId) && bulkSnoozing === 0) {
     const at = presented.current.findIndex(({ ask }) => ask.id === selectedId);
-    nextAfterSelected.current =
-      at === -1 ? undefined : (presented.current[at + 1] ?? presented.current[at - 1])?.ask.id;
+    if (at !== -1) {
+      nextAfterSelected.current = (presented.current[at + 1] ?? presented.current[at - 1])?.ask.id;
+    }
   }
 
   // One list, keyed by ask id, with the section headings as items between the rows: a row that
@@ -1088,9 +1186,9 @@ export function Inbox({
                   onMark={onMark}
                   onSelect={paneShown ? select : undefined}
                   onSnoozeLive={onSnoozeLive}
-                  // The reader's hand releases a held row only where it is what holds it: with
-                  // the reading column on, the selection holds the row, and moving it releases.
-                  onRelease={!paneShown && ask.id === held?.ask.id ? release : undefined}
+                  // The reader's hand holds the row, and lets it go when their focus or
+                  // pointer leaves it, whether or not the reading column is on.
+                  onRelease={ask.id === held?.ask.id ? release : undefined}
                   section={section}
                   selected={ask.id === selectedId}
                   threadUpdatedAt={inbox.dataUpdatedAt}
@@ -1106,31 +1204,5 @@ export function Inbox({
     </div>
   );
 
-  if (!paneShown) {
-    return list;
-  }
-  // Two columns, the reading column to the right of the list, each scrolling in itself inside
-  // the height the page gives them (`app.tsx` makes the Inbox page fill the viewport here).
-  //
-  // One root, selection or none: the column is what appears and disappears beside the list,
-  // never the list itself. A selection empties for a commit whenever the selected row leaves
-  // the rendered bands - the reader's own bulk snooze of that row does it, before the effect
-  // above hands the selection on - and a root that changed shape there would have React
-  // unmount the whole list, taking the keyboard's focus, the bulk bar and every row's state
-  // with it and mounting a fresh one a commit later.
-  return (
-    <div className="flex min-h-0 flex-1 gap-6">
-      {list}
-      {selectedAsk === undefined ? null : (
-        <div className="min-w-0 flex-1" ref={paneRef}>
-          <ReadingPane
-            ask={selectedAsk}
-            onAnswered={recordAnswered}
-            onSnoozeLive={onSnoozeLive}
-            viewer={viewer}
-          />
-        </div>
-      )}
-    </div>
-  );
+  return paneShown ? columns(list, selectedAsk) : list;
 }
