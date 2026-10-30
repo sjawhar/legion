@@ -1699,9 +1699,9 @@ has not succeeded for a minute after a NATS reconnect, so the listener's caches 
 last held and `/healthz` answers 200 `degraded`), `<N>-stream-subject-dropped` (a start that
 dropped another deployment's overlapping stream subject), `<N>-durable-refused` (a start that
 refused its durable consumer) and `<N>-subscribe-exhausted` (a start that gave up binding its
-subscription). `<N>-publish-failure` and `<N>-webhook-refused` count a GitHub delivery's first
-failure or refusal in each listener task: a later one of the same delivery, such as each of the
-redeliveries Dispatch's sweep asks for over 72 hours, is logged
+durable subscription). `<N>-publish-failure` and `<N>-webhook-refused` count a GitHub delivery's
+first failure or refusal in each listener task: a later one of the same delivery, such as each of
+the redeliveries Dispatch's sweep asks for over 72 hours, is logged
 `redelivery <delivery>: <action> refused` (or `failed`), which no filter counts, so one delivery
 pages once per task, and again after a restart. Each description names `logGroupName` as the log
 to read, and assumes the wiring of the deployment the alarms were written for: that GitHub
