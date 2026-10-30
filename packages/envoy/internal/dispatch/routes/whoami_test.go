@@ -415,14 +415,18 @@ func holdClusterTransactionID(t *testing.T, hold time.Duration) (release func())
 // can see says nothing about the ids below it. A page starts its reads after whoami answers and
 // resumes its first events subscription from event_head, which is replayed every event above that
 // id alone: an event_head of max(id) with a lower id still open would have the page miss that event
-// for good. So whoami answers the newest of the server's marks taken before every write of this
-// database still open, the boot mark here, which stands below the open id. Once that write
+// for good. So whoami answers the newest of the server's marks taken before every event insert
+// still open, which stands below the open id. Once that write
 // commits, it answers at least the higher id.
 func TestWhoamiEventHeadStaysBelowAnEventStillOpen(t *testing.T) {
 	database := storetest.Open(t)
 	handler := storeRouter(t, database)
 	createProject(t, handler, "ONE")
 	createProject(t, handler, "TWO")
+	// A mark taken before the write below opens, as a page's earlier load takes one: the boot mark
+	// may be taken late on a loaded machine, after the write, and then no mark would count until the
+	// write ends.
+	askWhoami(t, handler)
 
 	low, high, commitLow := appendOutOfOrder(t, database, "ONE", "TWO")
 	if head := eventHeadID(t, askWhoami(t, handler)); head >= low {
