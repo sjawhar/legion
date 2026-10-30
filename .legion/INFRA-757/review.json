@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-757",
+  "completed": "2026-10-30T14:55:00Z",
+  "round": 5,
+  "decision": "approved",
+  "kind": "forward merge after retro (89ce0fbf merges main d9aee5bf into 19b7716e)",
+  "fingerprint": "544774958c8a (my last approval) a7d766555fecc063a5954408585ed51ffe4a924c1731e5c8043cfc7229feed71 -> e668b3e6d584 2cd180755f5e8a366cf575911261cde3b922021e5d8f9cdc736fc039267c36cf: changed. The only added lines are two in .github/workflows/ci.yaml's listener_server_change filter (:879-880): a comment and 'packages/envoy/internal/dispatch/api/testdata/**'. Forced by main: main's write_advice_test.go:504 reads api/testdata/decision-block-inserts.json, which listener-server-change compiles. With the two lines removed at the merged head, check-ci-filters.sh fails: '::error file=packages/envoy/internal/dispatch/api/testdata/decision-block-inserts.json::listener-server-change reads ... which its filter listener_server_change does not match', '1 CI filter problem(s)'. The envoy_go citation conflict resolution left the fingerprint unchanged.",
+  "thermonuclear": "Not run: the round's delta is two lines of CI filter configuration, no runtime code; the last pass (round 3, f5a17777) covers every runtime line of this head.",
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection: none. CI head 89ce0fbf (run 41059086197): lint, typecheck, pr-title and ci-filters success; test queued at 14:50Z. The approval is submitted only once test is green. Compare 89ce0fbf...e668b3e6: handoffsOnly true, 2 files.",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "keyFindings": []
+}
