@@ -28,7 +28,6 @@ func dispatchConstructInputs() map[string]property.Value {
 		"tailscaleImage":      property.New(dispatchTailscaleImage),
 		"cloudSqlProxyImage":  property.New(dispatchProxyImage),
 		"frontDoorToolsImage": property.New(dispatchToolsImage),
-		"tailnetService":      property.New("svc:example-dispatch"),
 		"signInClientId":      property.New("example-client-id"),
 		"signInDomain":        property.New("example.com"),
 		// The three NATS settings, so every Construct test decodes them through the plugin, where a
@@ -50,17 +49,18 @@ func setConstructApp(inputs map[string]property.Value) {
 	inputs["appPrivateKeySecretKey"] = property.New("private-key.b64")
 }
 
-// dispatchConstructGCP and dispatchConstructRandom are the references a consumer's program gives
-// Construct, one per provider package it declares.
+// dispatchConstructGCP, dispatchConstructRandom and dispatchConstructTailscale are the references
+// a consumer's program gives Construct, one per provider package it declares.
 var (
-	dispatchConstructGCP    = p.ProviderReference{Urn: resource.URN("urn:pulumi:s::p::" + gcpProviderType + "::gcp-example"), ID: "gcp-example-id"}
-	dispatchConstructRandom = p.ProviderReference{Urn: resource.URN("urn:pulumi:s::p::" + randomProviderType + "::random-example"), ID: "random-example-id"}
+	dispatchConstructGCP       = p.ProviderReference{Urn: resource.URN("urn:pulumi:s::p::" + gcpProviderType + "::gcp-example"), ID: "gcp-example-id"}
+	dispatchConstructRandom    = p.ProviderReference{Urn: resource.URN("urn:pulumi:s::p::" + randomProviderType + "::random-example"), ID: "random-example-id"}
+	dispatchConstructTailscale = p.ProviderReference{Urn: resource.URN("urn:pulumi:s::p::" + tailscaleProviderType + "::tailscale-example"), ID: "tailscale-example-id"}
 )
 
 func constructDispatch(t *testing.T, inputs map[string]property.Value, dryRun bool) (*pulumitest.Mocks, p.ConstructResponse, error) {
 	t.Helper()
 	return constructDispatchWithProviders(t, inputs, dryRun, map[tokens.Package]p.ProviderReference{
-		"gcp": dispatchConstructGCP, "random": dispatchConstructRandom,
+		"gcp": dispatchConstructGCP, "random": dispatchConstructRandom, "tailscale": dispatchConstructTailscale,
 	})
 }
 
@@ -73,10 +73,10 @@ func constructDispatchWithProviders(t *testing.T, inputs map[string]property.Val
 	return m, response, err
 }
 
-// Every Input may come from another resource. tailnetService typically is the consumer's
-// Tailscale Service's name output: the serve ConfigMap built from it, and the front door's
-// Deployment, then carry that resource among their dependencies, so on a fresh stack no front-door
-// pod exists before the Service does.
+// Every Input may come from another resource: tailnetAuthKey typically is the consumer's
+// Tailscale auth key, and signInClientSecret its OAuth client's, each read from a secret store
+// the program declares. The component resolves every one of them and still renders what the
+// front door needs, down to the serve.json the golden holds.
 func TestConstructTakesDispatchInputsFromAnotherResource(t *testing.T) {
 	inputs := dispatchConstructInputs()
 	inputs["agentSecretsUrl"] = property.New("https://example-broker.internal.example")
@@ -84,7 +84,6 @@ func TestConstructTakesDispatchInputsFromAnotherResource(t *testing.T) {
 	setConstructApp(inputs)
 	for key, value := range map[string]property.Value{
 		"tailnetAuthKey":     property.New("tskey-auth-example-0123456789").WithSecret(true),
-		"tailnetService":     property.New("svc:example-dispatch"),
 		"natsUrl":            property.New("nats://example-hub.example-tailnet.ts.net:4222"),
 		"natsSeedSecret":     property.New("projects/example-project/secrets/example-nats-seed"),
 		"signInClientSecret": property.New("example-client-secret").WithSecret(true),
@@ -98,12 +97,8 @@ func TestConstructTakesDispatchInputsFromAnotherResource(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, "https://example-dispatch.example-tailnet.ts.net", url.AsString())
 
-	serve := m.Named(t, "kubernetes:core/v1:ConfigMap", "example-dispatch-serve").RPC
-	require.Contains(t, serve.GetDependencies(), string(upstream), "the serve ConfigMap waits for the Tailscale Service")
-	require.Contains(t, serve.GetPropertyDependencies()["data"].GetUrns(), string(upstream), "serve.json is built from the resolved tailnetService")
 	frontDoor := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch-tailnet").RPC.GetDependencies()
-	require.Contains(t, frontDoor, string(upstream), "the front door's Deployment waits for the Tailscale Service")
-	require.Contains(t, frontDoor, dispatchConstructChildURN("kubernetes:core/v1:ConfigMap", "example-dispatch-serve"), "and for the ConfigMap its pods mount")
+	require.Contains(t, frontDoor, dispatchConstructChildURN("kubernetes:core/v1:ConfigMap", "example-dispatch-serve"), "the front door's Deployment waits for the ConfigMap its pods mount")
 	data := normalizedProperty(m.Named(t, "kubernetes:core/v1:ConfigMap", "example-dispatch-serve").Inputs["data"]).(map[string]any)
 	require.Equal(t, readGolden(t, "dispatch-serve.golden"), data["serve.json"])
 }
@@ -118,7 +113,7 @@ func TestConstructAcceptsUnknownDispatchInputsUnderPreview(t *testing.T) {
 	inputs["agentSecretsUrl"] = property.New("https://example-broker.internal.example")
 	inputs["agentSecretsAudience"] = property.New("example-broker-audience")
 	setConstructApp(inputs)
-	for _, key := range []string{"tailnetAuthKey", "tailnetService", "natsUrl", "natsSeedSecret", "signInClientSecret"} {
+	for _, key := range []string{"tailnetAuthKey", "natsUrl", "natsSeedSecret", "signInClientSecret"} {
 		inputs[key] = property.New(property.Computed).WithDependencies([]resource.URN{upstream})
 	}
 	_, _, err := constructDispatch(t, inputs, true)

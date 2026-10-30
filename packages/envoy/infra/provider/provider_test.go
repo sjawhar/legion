@@ -239,17 +239,14 @@ func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
 		require.False(t, dispatch.InputProperties[input].Secret, input)
 		require.NotContains(t, dispatch.RequiredInputs, input)
 	}
-	// The Tailscale Service the front door hosts is an Input, typically the consumer's Service's
-	// name output; the image cert-publish runs on is a plain string. Each keeps its type and its
-	// plainness, and both are optional in the schema: a generated Go SDK's constructor refuses a
-	// nil required input, so a cluster-only consumer could not call the component at all while
-	// they stayed required, and the resolver is what requires them with clusterOnly off.
-	for input, plain := range map[string]bool{"tailnetService": false, "frontDoorToolsImage": true} {
-		require.Equal(t, "string", dispatch.InputProperties[input].Type, input)
-		require.Equal(t, plain, dispatch.InputProperties[input].Plain, input)
-		require.False(t, dispatch.InputProperties[input].Secret, input)
-		require.NotContains(t, dispatch.RequiredInputs, input)
-	}
+	// The image cert-publish runs on is a plain string, optional in the schema as every input
+	// that configures Dispatch is: a generated Go SDK's constructor refuses a nil required
+	// input, so a cluster-only consumer could not call the component at all while it stayed
+	// required, and the resolver is what requires it with clusterOnly off.
+	require.Equal(t, "string", dispatch.InputProperties["frontDoorToolsImage"].Type)
+	require.True(t, dispatch.InputProperties["frontDoorToolsImage"].Plain)
+	require.False(t, dispatch.InputProperties["frontDoorToolsImage"].Secret)
+	require.NotContains(t, dispatch.RequiredInputs, "frontDoorToolsImage")
 	// clusterOnly, which builds the cluster alone, is an optional plain boolean: it decides which
 	// resources register, so it is never another resource's output, and a stack that sets nothing
 	// sends no property at all, leaving an applied stack's inputs where they are.

@@ -493,19 +493,19 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		return networkPolicy(ctx, name, s.namespace, map[string]string{"app": name}, ingress, child...)
 	}
 
-	// The front door, one thing and registered as one: the Secret holding the key its pods join
-	// the tailnet with, the children newDispatchFrontDoor builds and renders its pod from (its TLS
-	// Secret, its Serve config, its account and that account's Role and RoleBinding),
-	// frontDoorReplicas pods hosting the Tailscale Service svc:<hostname>, the name every reader
-	// reaches Dispatch at, the Service the app and the listener dial their SOCKS5 proxy at without
-	// natsInCluster, and the policy fencing that proxy. The Deployment is recreated at one pod and
-	// rolled above it, so by default a roll never leaves the name to a single pod, and only the
-	// auth key's checksum is on its template: a renewed certificate in its TLS Secret rolls no
-	// pod. Without the tailnet inputs none of this
-	// is registered: nothing here has a value to render from, the auth key and tailnetService among
-	// them, and readers reach the app inside the cluster instead. The gate is also what keeps a nil
-	// tailnetAuthKey away from refuseDispatchSeedInSecret, which would dial ToStringOutput on it
-	// and take the provider down with it.
+	// The front door, one thing and registered as one: the Tailscale Service svc:<hostname> itself
+	// (newDispatchTailscaleService), the Secret holding the key its pods join the tailnet with, the
+	// children newDispatchFrontDoor builds and renders its pod from (its TLS Secret, its Serve
+	// config, its account and that account's Role and RoleBinding), frontDoorReplicas pods hosting
+	// that Service, the name every reader reaches Dispatch at, the Service the app and the listener
+	// dial their SOCKS5 proxy at without natsInCluster, and the policy fencing that proxy. The
+	// Deployment is recreated at one pod and rolled above it, so by default a roll never leaves the
+	// name to a single pod, and only the auth key's checksum is on its template: a renewed
+	// certificate in its TLS Secret rolls no pod. Without the tailnet inputs none of this is
+	// registered: nothing here has a value to render from, the auth key and the tags the Service
+	// carries among them, and readers reach the app inside the cluster instead. The gate is also
+	// what keeps a nil tailnetAuthKey away from refuseDispatchSeedInSecret, which would dial
+	// ToStringOutput on it and take the provider down with it.
 	var frontDoorResources []pulumi.Resource
 	if s.frontDoor {
 		authKeyName := s.hostname + "-tailnet-auth-key"
@@ -513,7 +513,11 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		if err != nil {
 			return err
 		}
-		frontDoorPod, frontDoorOpts, err := newDispatchFrontDoor(ctx, dispatch, s, args.TailnetService, authKeyName, metadata, child)
+		tailscaleService, err := newDispatchTailscaleService(ctx, comp, s, database.instance)
+		if err != nil {
+			return err
+		}
+		frontDoorPod, frontDoorOpts, err := newDispatchFrontDoor(ctx, s, tailscaleService, database.instance, authKeyName, metadata, child)
 		if err != nil {
 			return err
 		}
@@ -528,11 +532,11 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		// Ingress, which denies every source.
 		frontDoorIngress := networkingv1.NetworkPolicyIngressRuleArray{}
 		if !s.natsInCluster {
-			tailnetService, err := service(tailnetName, dispatchSOCKS5Port)
+			socks5Service, err := service(tailnetName, dispatchSOCKS5Port)
 			if err != nil {
 				return err
 			}
-			frontDoorResources = []pulumi.Resource{tailnet, tailnetService}
+			frontDoorResources = []pulumi.Resource{tailnet, socks5Service}
 			frontDoorIngress = append(frontDoorIngress, ingressFrom(dispatchSOCKS5Port, networkingv1.NetworkPolicyPeerArray{podPeer(s.hostname), podPeer(listenerName)}))
 		}
 		if err := policy(tailnetName, frontDoorIngress); err != nil {

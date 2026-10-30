@@ -10,6 +10,7 @@ import (
 
 	gcpsdk "github.com/pulumi/pulumi-gcp/sdk/v10/go/gcp"
 	randomsdk "github.com/pulumi/pulumi-random/sdk/v4/go/random"
+	tailscalesdk "github.com/pulumi/pulumi-tailscale/sdk/go/tailscale"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/stretchr/testify/require"
@@ -21,8 +22,9 @@ import (
 )
 
 const (
-	dispatchType       = "envoy-infra:gcp:Dispatch"
-	randomProviderType = "pulumi:providers:random"
+	dispatchType          = "envoy-infra:gcp:Dispatch"
+	randomProviderType    = "pulumi:providers:random"
+	tailscaleProviderType = "pulumi:providers:tailscale"
 
 	dispatchEnvoyImage     = "example.invalid/envoy@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	dispatchTailscaleImage = "example.invalid/tailscale@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
@@ -39,7 +41,6 @@ func dispatchArgs() *gcp.DispatchArgs {
 		TailnetDnsName:      "example-tailnet.ts.net",
 		Tags:                []string{"tag:example-dispatch"},
 		TailnetAuthKey:      pulumi.String("tskey-auth-example-0123456789"),
-		TailnetService:      pulumi.String("svc:example-dispatch"),
 		EnvoyImage:          dispatchEnvoyImage,
 		TailscaleImage:      dispatchTailscaleImage,
 		CloudSqlProxyImage:  dispatchProxyImage,
@@ -144,17 +145,21 @@ func runDispatchNamed(t *testing.T, name string, args *gcp.DispatchArgs, provide
 	if !providers {
 		return runDispatchWithProviders(t, name, args)
 	}
-	return runDispatchWithProviders(t, name, args, newGCPProvider, newRandomProvider)
+	return runDispatchWithProviders(t, name, args, newGCPProvider, newRandomProvider, newTailscaleProvider)
 }
 
-// newGCPProvider and newRandomProvider declare the two providers a Dispatch program gives the
-// component, each under the name the registration golden holds.
+// newGCPProvider, newRandomProvider and newTailscaleProvider declare the three providers a
+// Dispatch program gives the component, each under the name the registration golden holds.
 func newGCPProvider(ctx *pulumi.Context) (pulumi.ProviderResource, error) {
 	return gcpsdk.NewProvider(ctx, "gcp-example", &gcpsdk.ProviderArgs{})
 }
 
 func newRandomProvider(ctx *pulumi.Context) (pulumi.ProviderResource, error) {
 	return randomsdk.NewProvider(ctx, "random-example", &randomsdk.ProviderArgs{})
+}
+
+func newTailscaleProvider(ctx *pulumi.Context) (pulumi.ProviderResource, error) {
+	return tailscalesdk.NewProvider(ctx, "tailscale-example", &tailscalesdk.ProviderArgs{})
 }
 
 // runDispatchWithProviders runs args through the mock engine with the providers the program
@@ -316,7 +321,7 @@ func TestDispatchRefusesAPprofPortBeforeRegistering(t *testing.T) {
 	args.PprofPort = pulumi.IntRef(70000)
 	m, err := runDispatch(t, args, true)
 	require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: pprofPort 70000 must be a port number 1-65535")
-	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType, tailscaleProviderType}, m.Types())
 }
 
 func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
@@ -344,7 +349,6 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "a namespace longer than a DNS label", edit: func(a *gcp.DispatchArgs) { a.Namespace = pulumi.StringRef(strings.Repeat("a", 64)) }, err: []string{"namespace", "DNS label"}},
 		{name: "an allowed namespace longer than a DNS label", edit: func(a *gcp.DispatchArgs) { a.AllowedNamespaces = []string{strings.Repeat("a", 64)} }, err: []string{"allowedNamespaces[0]", "DNS label"}},
 		{name: "no tailnet auth key", edit: func(a *gcp.DispatchArgs) { a.TailnetAuthKey = nil }, err: []string{"tailnetAuthKey", "required"}},
-		{name: "no tailnet service", edit: func(a *gcp.DispatchArgs) { a.TailnetService = nil }, err: []string{"tailnetService", "required"}},
 		{name: "no NATS URL", edit: func(a *gcp.DispatchArgs) { a.NatsUrl = nil }, err: []string{"natsUrl", "required"}},
 		{name: "no NATS seed secret", edit: func(a *gcp.DispatchArgs) { a.NatsSeedSecret = nil }, err: []string{"natsSeedSecret", "required"}},
 		{name: "no sign-in client secret", edit: func(a *gcp.DispatchArgs) { a.SignInClientSecret = nil }, err: []string{"signInClientSecret", "required"}},
@@ -604,7 +608,7 @@ func TestDispatchRefusesInvalidInputBeforeRegistering(t *testing.T) {
 	args.Hostname = "dispatch-"
 	m, err := runDispatch(t, args, true)
 	require.ErrorContains(t, err, `envoy-infra:gcp:Dispatch example-dispatch: hostname`)
-	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType, tailscaleProviderType}, m.Types())
 }
 
 func TestDispatchRequiresGCPAndRandomProvidersBeforeRegistering(t *testing.T) {
@@ -698,7 +702,7 @@ func TestDispatchRefusesASeedInTheComponentName(t *testing.T) {
 			m, err := runDispatchNamed(t, row.dispatch, dispatchArgs(), true)
 			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch: the component's name holds an nkey seed (not echoed)")
 			require.NotContains(t, strings.ToUpper(err.Error()), seed)
-			require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types(),
+			require.ElementsMatch(t, []string{gcpProviderType, randomProviderType, tailscaleProviderType}, m.Types(),
 				"nothing registered beyond the test's providers")
 		})
 	}
@@ -1281,21 +1285,6 @@ func TestDispatchFrontDoorTLSSecretHoldsOnlyWhatThePodsPublish(t *testing.T) {
 	require.Contains(t, m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch-tailnet").RPC.GetDependencies(),
 		"urn:pulumi:s::p::"+dispatchType+"$kubernetes:core/v1:Secret::example-dispatch-tailnet-tls",
 		"the front door's pods mount the Secret, so the Deployment waits for it")
-}
-
-// tailnetService names the Tailscale Service the front door hosts, and the pods host
-// svc:<hostname>, whose name the certificate and the URL carry: once it resolves to anything else,
-// the run fails naming the input and never the value.
-func TestDispatchRefusesATailnetServiceOtherThanItsOwn(t *testing.T) {
-	for _, value := range []string{"svc:another-service", "another-service", "svc:example-dispatch-other"} {
-		t.Run(value, func(t *testing.T) {
-			args := dispatchArgs()
-			args.TailnetService = pulumi.String(value)
-			_, err := runDispatch(t, args, true)
-			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: tailnetService must be svc:example-dispatch")
-			require.NotContains(t, err.Error(), value)
-		})
-	}
 }
 
 // requireWaitsForTheFrontDoor fails unless deployment is created after the front door's pod and
@@ -2143,7 +2132,7 @@ func TestDispatchRefusesAnAzureMisconfigurationBeforeRegistering(t *testing.T) {
 	setAzureEndpoint(args)
 	m, err := runDispatch(t, args, true)
 	require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: azureEmbedEndpoint needs one credential")
-	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+	require.ElementsMatch(t, []string{gcpProviderType, randomProviderType, tailscaleProviderType}, m.Types())
 }
 
 // Unset, the Azure inputs leave no trace: no key SecretProviderClass and no accessor beyond the
@@ -2354,7 +2343,7 @@ func TestDispatchRefusesAppResourcesBeforeRegistering(t *testing.T) {
 			row.edit(args)
 			m, err := runDispatch(t, args, true)
 			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: "+row.err)
-			require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+			require.ElementsMatch(t, []string{gcpProviderType, randomProviderType, tailscaleProviderType}, m.Types())
 		})
 	}
 }
@@ -2464,7 +2453,7 @@ func TestDispatchRefusesEphemeralStorageBeforeRegistering(t *testing.T) {
 			row.edit(args)
 			m, err := runDispatch(t, args, true)
 			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: "+row.err)
-			require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+			require.ElementsMatch(t, []string{gcpProviderType, randomProviderType, tailscaleProviderType}, m.Types())
 		})
 	}
 }
@@ -2632,7 +2621,7 @@ func TestDispatchRefusesABudgetBeforeRegistering(t *testing.T) {
 			row.edit(args)
 			m, err := runDispatch(t, args, true)
 			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: "+row.err)
-			require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types())
+			require.ElementsMatch(t, []string{gcpProviderType, randomProviderType, tailscaleProviderType}, m.Types())
 		})
 	}
 }

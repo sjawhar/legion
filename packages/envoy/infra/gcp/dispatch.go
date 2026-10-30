@@ -136,10 +136,10 @@ type DispatchArgs struct {
 	// optional in the schema while the resolver is what requires it: a generated Go SDK emits a
 	// nil check in its constructor for every required input whose type can be nil, so a
 	// cluster-only consumer, which sets none of these, could not call the component at all while
-	// they stayed required. With clusterOnly off, four of the thirteen — the digest-pinned images
+	// they stayed required. With clusterOnly off, four of the twelve — the digest-pinned images
 	// envoyImage and cloudSqlProxyImage, natsUrl and natsSeedSecret — every deployment sets, and
 	// newDispatchSettings refuses each one missing by name, in the wording it always used. The
-	// other nine are two groups, each set whole or left wholly unset: the tailnet group
+	// other eight are two groups, each set whole or left wholly unset: the tailnet group
 	// (dispatchTailnetInputs), which builds the front door and serves Dispatch at its tailnet
 	// name, and the sign-in group (dispatchSignInInputs), which runs people's browser sign-in.
 	// Both unset is the sandbox, which the resolver accepts; the tailnet group set with the
@@ -147,17 +147,11 @@ type DispatchArgs struct {
 	// too. A sign-in input sent with the tailnet group unset is refused for being sent at all
 	// (refuseDispatchSandbox). Otherwise a group set in part is refused by the per-input refusal
 	// it always gave, trailing one clause naming every input of that group still unset
-	// (dispatchGroupClause). With clusterOnly on the resolver refuses each of the thirteen that
+	// (dispatchGroupClause). With clusterOnly on the resolver refuses each of the twelve that
 	// is set.
 	TailnetDnsName string             `pulumi:"tailnetDnsName,optional"`
 	Tags           []string           `pulumi:"tags,optional"`
 	TailnetAuthKey pulumi.StringInput `pulumi:"tailnetAuthKey,optional" provider:"secret"`
-	// TailnetService is the Tailscale Service the front door's pods host, as Tailscale's API names
-	// it: svc:<hostname>, and once resolved anything else is refused. The consumer declares the
-	// Service (with an auto-approval for the tags) and passes its name output here, so the serve
-	// ConfigMap, and through it the front door's Deployment, waits for the Service: a node that
-	// advertises a Service before it exists is not approved when it appears.
-	TailnetService pulumi.StringInput `pulumi:"tailnetService,optional"`
 
 	EnvoyImage         string `pulumi:"envoyImage,optional"`
 	TailscaleImage     string `pulumi:"tailscaleImage,optional"`
@@ -590,7 +584,7 @@ type dispatchInput struct {
 
 // dispatchTailnetInputs is the tailnet group: every input that exists only because Dispatch has a
 // front door on a tailnet, from the name it is served at to the images its pods run. A consumer
-// sets all six, for a Dispatch readers reach over the tailnet, or none, for the sandbox, where no
+// sets all five, for a Dispatch readers reach over the tailnet, or none, for the sandbox, where no
 // front door is built and the app is reached inside its cluster alone. Each row's set-predicate is
 // written here and nowhere else, dispatchClusterOnlyRefusals taking the group from here, so the
 // resolver's mode, the refusals of a half-set group and clusterOnly's can never read an input two
@@ -600,7 +594,6 @@ func dispatchTailnetInputs(args *DispatchArgs) []dispatchInput {
 		{"tailnetDnsName", args.TailnetDnsName != ""},
 		{"tags", len(args.Tags) > 0},
 		{"tailnetAuthKey", args.TailnetAuthKey != nil},
-		{"tailnetService", args.TailnetService != nil},
 		{"tailscaleImage", args.TailscaleImage != ""},
 		{"frontDoorToolsImage", args.FrontDoorToolsImage != ""},
 	}
@@ -621,9 +614,9 @@ func dispatchSignInInputs(args *DispatchArgs) []dispatchInput {
 // dispatchClusterOnlyRefusals is every pulumi-tagged input of DispatchArgs that configures
 // Dispatch rather than the cluster, which clusterOnly refuses by name. Only the four inputs both
 // modes use are absent: clusterOnly itself, region and hostname, which name every cloud resource,
-// and deletionProtection, which guards the cluster as well as the database. The nine inputs of the
-// two groups come from the groups' own definitions, so an input either group gains is refused here
-// without being written down a second time.
+// and deletionProtection, which guards the cluster as well as the database. The eight inputs of
+// the two groups come from the groups' own definitions, so an input either group gains is refused
+// here without being written down a second time.
 func dispatchClusterOnlyRefusals(args *DispatchArgs) []dispatchInput {
 	return slices.Concat(dispatchTailnetInputs(args), dispatchSignInInputs(args), []dispatchInput{
 		{"envoyImage", args.EnvoyImage != ""},
@@ -698,9 +691,9 @@ func dispatchGroupClause(feature string, group []dispatchInput) string {
 
 // refuseDispatchTailnetGroup judges the tailnet group alone: the tailnet name Dispatch is served
 // at, the tags its front-door nodes carry, the two images those pods run, held to the digest rule
-// the app's own images are held to, the key the nodes join the tailnet with and the Service they
-// host. It runs only while that group is set, so the sandbox, which sets none of it, reaches none
-// of these checks, and every refusal trails clause, which names every tailnet input still unset
+// the app's own images are held to, and the key the nodes join the tailnet with. It runs only
+// while that group is set, so the sandbox, which sets none of it, reaches none of these checks,
+// and every refusal trails clause, which names every tailnet input still unset
 // (dispatchGroupClause): a group set in part is refused for the first input that is wrong and
 // told the whole shortfall at once.
 func refuseDispatchTailnetGroup(args *DispatchArgs, clause string) error {
@@ -725,9 +718,6 @@ func refuseDispatchTailnetGroup(args *DispatchArgs, clause string) error {
 	}
 	if args.TailnetAuthKey == nil {
 		return fmt.Errorf("tailnetAuthKey is required%s", clause)
-	}
-	if args.TailnetService == nil {
-		return fmt.Errorf("tailnetService is required%s", clause)
 	}
 	return nil
 }
@@ -1350,6 +1340,13 @@ func NewDispatch(ctx *pulumi.Context, name string, args *DispatchArgs, opts ...p
 	// program would otherwise have to declare one it never uses.
 	if !s.clusterOnly {
 		if err := providers.Require(ctx.Context(), dispatchType, "random", opts...); err != nil {
+			return nil, err
+		}
+	}
+	// Only the front door declares Dispatch's Tailscale Service, so a consumer that builds none —
+	// the sandbox, and clusterOnly, which leave the mode off — declares no tailscale provider.
+	if s.frontDoor {
+		if err := providers.Require(ctx.Context(), dispatchType, "tailscale", opts...); err != nil {
 			return nil, err
 		}
 	}
