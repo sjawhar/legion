@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-598",
-  "completed": "2026-10-30T18:29:17Z",
+  "completed": "2026-10-30T20:01:12Z",
   "proof": [
+    {
+      "criterion": "Review round 3: a SIGKILLed step's runner_wait ends with its step and never stops a later run's job of the same name; runner_copy_back returns 0 or 1 with its own heap note; one failed-kinds text",
+      "surface": "cluster.sh under cluster.test.sh's fakes (real processes, real SIGKILL), and the repository's CI check scripts",
+      "command": "cd packages/envoy && timeout 1800 bash loadtest/cluster/cluster.test.sh && bash loadtest/run-step.test.sh && go test -p 2 -parallel 4 -count=1 ./loadtest/; uv run --no-project --with pyyaml==6.0.2 bash .github/scripts/check-ci-images.sh tree",
+      "observed": "cluster.test.sh 48 PASS, 0 FAIL: case (w) kills the step with SIGKILL and, with no pkill, every process of the step is gone and step-pgkill is never in runner-stops; runner_wait at its deadline with another run's lock stops nothing; case (x) shows both heap.txt notes and heap-missing.txt; run-step, go test, check-ci-images tree all exit 0",
+      "headSha": "7604610db88f",
+      "negativeControl": "against 34d2d17d's cluster.sh case (w) fails: '40 s after the step shell was killed, the step still runs here (... cluster.sh step ... pgkill ...): its wait on the runner job polls on, and at the step's deadline it stops the job step-pgkill'"
+    },
     {
       "criterion": "Tester round 4: main's required lint and test checks pass at the code head (check-ci-images tree mode)",
       "surface": "the repository's own CI check scripts, run in the workspace as CI runs them",
