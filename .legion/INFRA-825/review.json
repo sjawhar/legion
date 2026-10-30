@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-825",
+  "completed": "2026-10-30T18:55:00Z",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 5,
+  "reviewedCodeHead": "141bc3464f34",
+  "thermonuclear": "Both run at 6982c15f1def. Deep review: the mutations are sound (variables as JSON, String! valid on both inputs, empty title impossible, callers unchanged); its one Medium, an arm storing the headline so a title edited after the arm does not reach the merge, is the planner's O3, which the architect accepted with no re-arm machinery (dispatch://INFRA-825/comment/6d4f559f); what stood was that the docs and the PR body did not record it, fixed by the reviewer. Code quality: no structural finding; comment and wording minors fixed by the reviewer; the rest judged not defects.",
+  "keyFindings": [
+    {"severity": "minor", "file": "packages/daemon/internal/ghautomerge/ghautomerge.go", "description": "The comment said GitHub ignores the enable's message inputs, true only on a merge-queue base, and did not say an arm stores the headline when accepted. Reworded by the reviewer in 141bc346."},
+    {"severity": "minor", "file": "AGENTS.md", "description": "The public-repository bullet called the daemon's subject the bare title, dropped that a hand merge of one commit takes that commit's subject, and did not say the daemon's subject is the title as it stood at the merge or arm. Reworded by the reviewer in 141bc346."},
+    {"severity": "minor", "file": "packages/daemon/.changes/unreleased/squash-commit-message.yaml", "description": "The fragment did not say an armed auto-merge keeps the title it was armed with. Added by the reviewer in 141bc346. Its unkeyed file name is correct: the key-leak rule (dispatch://INFRA-514/comment/fcf8c751) forbids Dispatch keys in file names on sjawhar/legion, which outranks AGENTS.md's <ISSUE KEY>- naming."},
+    {"severity": "minor", "file": ".github/scripts/release-bump.sh", "description": "The header ended with a measurement anecdote and did not say a type!: title still bumps major. Reworded by the reviewer in 141bc346, pointing to packages/daemon/internal/ghautomerge."},
+    {"severity": "minor", "file": "packages/daemon/internal/ghautomerge/ghautomerge_test.go", "description": "submitted()'s doc repeated the production comment's rationale. Cut to a pointer by the reviewer in 141bc346."}
+  ],
+  "notDefects": [
+    "The fake's spacing-sensitive query matches (\" title \", \"commitHeadline: $headline\") fail loudly, never silently green.",
+    "The title added to the two internal/daemon fixtures makes the read realistic; those tests assert merge outcomes, not the headline, which the ghautomerge suite asserts."
+  ]
+}
