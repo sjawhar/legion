@@ -2,27 +2,15 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-757",
-  "completed": "2026-10-30T06:50:00Z",
-  "round": 3,
-  "decision": "changes_requested",
-  "reviewedCode": "a6d0c2eff37e (615dc86f plus the merge of main 3c2691a7), with the reviewer's prose commit above it",
-  "roundTwoItems": "All fixed in 615dc86f: the role claim view is reported last in healthzHandler, after ConsumerInfo and durableUnbound, as 200 degraded keeping the healthy body's fields, with TestHealthzStillReportsALostDurableWhileTheRoleClaimViewIsIncomplete; the /livez assertion is gone; the no-op wake after a replacement watch is removed and the field comment narrowed; docs/site envoy.md and infra/README.md describe the new degraded meaning; the ci.yaml:380 citation; the changelog's 30 s start; timingOutWatcher returns the watcher alone; check-ci-filters.test.sh covers the RULES-row branch and the ! exemption. The architect's added item: envoy_go_race_docs names packages/envoy/internal/dispatch/itemblocks/* (ci.yaml:812, taken from main in a6d0c2ef); check-ci-filters.sh passes at this head (27 gates).",
-  "whyChangesRequested": "One prose finding stands in .github/workflows/ci.yaml, which the review App cannot push: GitHub refused the push with 'refusing to allow a GitHub App to create or update workflow .github/workflows/ci.yaml without workflows permission'. The implementer applies the replacement text the review gives.",
-  "proseFixedByReviewer": [
-    "packages/envoy/cmd/listener/main.go:403-414 and :479-481: the comments said every check above the role claim view answers 503; a transient KV ping or durable info failure answers its own 200 degraded and returns first.",
-    "docs/site/src/content/docs/dispatch/envoy.md:396: the degraded row said both causes keep the healthy body's fields and are reported after every unhealthy fault; only the role claim view's answer does.",
-    "packages/envoy/AGENTS.md:2750: the degraded example now says the check runs last and the answer keeps the healthy fields.",
-    "packages/envoy/.changes/unreleased/pr2517-Fixed-20261029-183000.yaml:5: 'whenever it holds' became 'when it reports no other fault'."
-  ],
-  "thermonuclear": "deep-review at f5a17777: APPROVE; healthz order correct, the wake removal safe under every interleaving, the merge resolved exactly; TestHealthz* 9 of 9 green; three Minor prose findings. code-quality at f5a17777: CHANGES on prose only. All but the ci.yaml one are fixed in the reviewer's commit.",
+  "completed": "2026-10-30T08:33:00Z",
+  "round": 4,
+  "decision": "approved",
+  "reviewedCode": "fcf9f30d9fa1: the pasted ci.yaml comment, above c5fdf5b2 (round 3's head)",
+  "scope": "The architect scoped round 4 to the pasted ci.yaml comment and the required checks with ci-filters green at the new code head. fcf9f30d changes only .github/workflows/ci.yaml:2421-2425, byte-identical to the replacement text the round-3 review gave on thread PRRT_kwDORFy7ds6x2A3e. No runtime code changed since the round-3 thermonuclear pass at f5a17777 (only the reviewer's prose commit c8fdfac5 and this comment), so no new pass was run.",
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection: none. CI head fcf9f30d, run 41013545062: lint, typecheck, test, pr-title success; ci-filters success; envoy-go, envoy-go-race, envoy-go-race-api, envoy-go-race-pmdoc and every other finished job success; dispatch and envoy-go-race-docs still in progress at 08:31Z (neither required). Compare fcf9f30d...544cfdbe: handoffsOnly true, 2 files.",
+  "threads": "PRRT_kwDORFy7ds6x2A3e resolved by the implementer after fcf9f30d; accepted. Every other thread carries the reviewer's answer from rounds 2 and 3.",
   "critical": 0,
   "important": 0,
-  "minor": 5,
-  "keyFindings": [
-    {"severity": "minor", "file": ".github/workflows/ci.yaml", "description": "Lines 2421-2425 say the Dispatch store's and delivery's tests open the database through internal/testpg; they read DISPATCH_TEST_DATABASE_URL (store_test.go:27, storetest.go:34, delivery/intake_test.go:39-41), and only cmd/listener/dispatch_resolution_test.go:158 uses testpg. Open; the implementer applies the review's replacement text."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/main.go", "description": "Comments overstated the healthz order; fixed by the reviewer."},
-    {"severity": "minor", "file": "docs/site/src/content/docs/dispatch/envoy.md", "description": "Degraded row overstated what a key-value degraded answer carries; fixed by the reviewer."},
-    {"severity": "minor", "file": "packages/envoy/AGENTS.md", "description": "Degraded example out of date; fixed by the reviewer."},
-    {"severity": "minor", "file": "packages/envoy/.changes/unreleased/pr2517-Fixed-20261029-183000.yaml", "description": "'whenever it holds' overclaimed; fixed by the reviewer."}
-  ]
+  "minor": 0,
+  "keyFindings": []
 }
