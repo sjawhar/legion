@@ -1,10 +1,11 @@
 kind: Changed
 body: |-
     `GET /api/v1/issues/{key}` reads the database in two pgx batches, one round trip each on one
-    pooled connection, instead of one statement at a time: 6 statements, plus one per artifact,
-    plus 2 when the issue has documents and 2 when it has open asks. An issue with no artifact and
-    no open ask takes one round trip, and a key no issue carries keeps the connection's prepared
-    statements. The answer is unchanged byte for byte. Every route that lists an issue's
+    pooled connection once that connection has prepared their statements, instead of one
+    statement at a time: 6 statements, plus one per artifact, plus 2 when the issue has documents
+    and 2 when it has open asks. An issue with no artifact and no open ask takes one round trip,
+    and a key no issue carries keeps the connection's prepared statements. The answer is
+    unchanged byte for byte. Every route that lists an issue's
     artifacts (`loadArtifacts`), and `GET /api/v1/projects/{key}/artifacts`, now read their
     versions, latest reviews and open approval requests in one batch instead of one statement per
     artifact and two more; an issue's or a document's asks, the Inbox and an event page read their

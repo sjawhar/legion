@@ -70,7 +70,7 @@ var AskBacklinkExclusions = []string{"replies_to"}
 //
 // It is the sequential half of the one count: QueueBacklinkCounts queues the same statement and
 // reads it with the same scan, for a caller that counts beside its other reads (the issue read's
-// batch, api.getIssue), so the two paths cannot drift.
+// own count, and api.queueAskDetails for every list of asks), so the two paths cannot drift.
 func BacklinkCounts(
 	ctx context.Context,
 	q Queryer,
@@ -96,8 +96,8 @@ func BacklinkCounts(
 
 // QueueBacklinkCounts is the batched half: it queues BacklinkCounts's statement in b and reads its
 // rows into counts, for a caller that counts beside its other reads instead of spending a round
-// trip on it (the issue read's batch, api.getIssue). No id queues nothing and leaves counts as it
-// is, so a caller need not ask whether it has any.
+// trip on it (the issue read's own count, api.getIssue, and api.queueAskDetails). No id queues
+// nothing and leaves counts as it is, so a caller need not ask whether it has any.
 func QueueBacklinkCounts(b *pgx.Batch, toKind string, ids, excludeKinds []string, counts map[string]int) {
 	if len(ids) == 0 {
 		return
@@ -121,9 +121,10 @@ func backlinkCountsStatement(toKind string, ids []string, excludeKinds []string)
 }
 
 // scanBacklinkCounts reads the rows backlinkCountsStatement returns into counts, which a node
-// with no inbound edge stays absent from. A batched caller reaches the statement's own failure
-// through the rows it is handed, so that failure is wrapped here exactly as BacklinkCounts wraps
-// the error its Query returns.
+// with no inbound edge stays absent from. A batch can hand it rows that already hold an error -
+// one the sequential Query would have returned itself - and that error is wrapped here as
+// BacklinkCounts wraps its Query's; an error that arrives while the rows are read is the last
+// rows.Err(), unwrapped on both paths.
 func scanBacklinkCounts(rows pgx.Rows, toKind string, counts map[string]int) error {
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("count %s backlinks: %w", toKind, err)

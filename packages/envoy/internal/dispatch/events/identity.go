@@ -17,14 +17,16 @@ type Queryer interface {
 // ask.opened event, falling back to the earliest ask.answered/ask.resolved/
 // ask.edited event for a legacy row whose opening event has since been
 // pruned. This is the one place an ask's identity event is resolved, shared
-// by the read API (api.attachOpenedEventIDs) and the anchor-refresh cascade
+// by the read API (api.attachOpenedEventIDs, and api.queueAskDetails through
+// QueueOpenedEventIDs) and the anchor-refresh cascade
 // (docs.refreshAnchors) — a second, stricter fallback ladder here would make
 // a legacy ask readable but unrefreshable, aborting an unrelated document
 // write for reasons the read API already tolerates.
 //
 // It is the sequential half of the one read: QueueOpenedEventIDs queues the same statement and
-// reads it with the same scan, for a caller that resolves the ids beside its other reads (the
-// issue read's batch, api.getIssue), so the two paths cannot drift.
+// reads it with the same scan, for a caller that resolves the ids beside its other reads
+// (api.queueAskDetails, for the issue read's batch and every list of asks), so the two paths
+// cannot drift.
 func OpenedEventIDs(ctx context.Context, q Queryer, askIDs []string) (map[string]int64, error) {
 	result := make(map[string]int64, len(askIDs))
 	if len(askIDs) == 0 {

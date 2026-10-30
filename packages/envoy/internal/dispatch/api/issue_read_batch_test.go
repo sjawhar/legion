@@ -130,9 +130,11 @@ func createIssueAsk(t *testing.T, handler http.Handler, key, question string) st
 	return decodeBody[model.Ask](t, response).ID
 }
 
-// sequentialIssueRead is the body getIssue composed before it batched its reads: the statements
-// and the scans the loaders every other route calls still run, in the order it called them,
-// written with WriteJSON's own encoding into the one type the read answers (issueDetail).
+// sequentialIssueRead builds getIssue's body from the loaders the other routes call, in the order
+// getIssue once called them, written with WriteJSON's own encoding into the one type the read
+// answers (issueDetail). loadArtifacts and queryOwnerAsks send the same queueArtifactDetails and
+// queueAskDetails the read queues, so the comparison checks how readIssue puts its two batches
+// and its answer together, not those detail statements themselves.
 func sequentialIssueRead(t *testing.T, deps Deps, key string) []byte {
 	t.Helper()
 	served := directServer(deps)

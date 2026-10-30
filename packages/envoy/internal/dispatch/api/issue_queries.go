@@ -313,11 +313,12 @@ func (s *server) scanIssueSummaries(ctx context.Context, listQuery string, argum
 }
 
 // getIssue answers the issue page's read. Its database work is two batches, each one round trip
-// on one pooled connection, where it was a statement at a time: the issue row, its links, its
-// artifacts, a version query per artifact, its documents' reviews and approval requests, its
-// open asks with their events and counts, its children and its own backlink count, every one of
-// them a connection taken and given back in turn (store.sharedPoolSize says what that costs a
-// loaded server).
+// on one pooled connection once that connection has prepared their statements (pgx prepares a
+// statement it has not cached in a round trip of its own first, as before a single query), where
+// it was a statement at a time: the issue row, its links, its artifacts, a version query per
+// artifact, its documents' reviews and approval requests, its open asks with their events and
+// counts, its children and its own backlink count, every one of them a connection taken and
+// given back in turn (store.sharedPoolSize says what that costs a loaded server).
 //
 // Batch 1 is everything keyed on the issue key alone: the issue row, its external links, its
 // artifacts, its open asks, its children and its backlink count. A key no issue carries is what

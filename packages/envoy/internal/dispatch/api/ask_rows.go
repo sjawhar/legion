@@ -162,8 +162,8 @@ func attachAskBacklinkCounts(ctx context.Context, q queryer, asks []*model.Ask) 
 }
 
 // applyAskBacklinkCounts stamps each ask with its count, zero included, from what the count
-// query answered; the issue read queues that query in a batch (getIssue) and stamps its asks
-// with this.
+// query answered: attachAskBacklinkCounts for one ask, and queueAskDetails for every list of
+// asks.
 func applyAskBacklinkCounts(asks []*model.Ask, counts map[string]int) {
 	for _, ask := range asks {
 		count := counts[ask.ID]
