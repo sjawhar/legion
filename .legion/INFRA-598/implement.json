@@ -2,8 +2,32 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-598",
-  "completed": "2026-10-29T21:43:45Z",
+  "completed": "2026-10-30T01:42:22Z",
   "proof": [
+    {
+      "criterion": "Tester round 1 failure 2 (plan D5): an abandoned run's lock goes stale, so up names the down command",
+      "surface": "GKE namespace loadtest, from this Legion worker pod",
+      "command": "cluster.sh up --namespace loadtest --storage-class premium-rwo --dispatch-commit 9b92ac14351a926361c982edb7953e0325fab0de --pg-major 18 --production-repo <deployment repo> --stored-order-source 1febe317da128054b6c50e5882cbf8251ae42513 (run lt-20261030t001327-1013), then 150 s with no command of the run alive; kubectl -n loadtest get cm dispatch-loadtest-lock -o jsonpath='{.data.heartbeat}' before and after; then cluster.sh down. Log dispatch://INFRA-598/artifact/cluster-load-test-round2-lt-20261030t002127-32ec-log-txt",
+      "observed": "the lock's heartbeat read 2026-10-30T00:17:29Z at 00:18:18 and still at 00:20:48; logs/heartbeat.log: 'heartbeat: no command of run lt-20261030t001327-1013 is alive; stopping, so the lock ages and goes stale'; the _heartbeat process was gone; cluster.test.sh case (o), unmodified from ff4dcd85, passes (40 PASS, 0 FAIL)",
+      "headSha": "ed2ca0f0bcc80e66c7b252d51fde6f38ebe1aceb",
+      "negativeControl": "before the fix the tester measured the same daemon renewing the lock every 60 s after its run's command was killed (run lt-20261029t215258-9b0d, heartbeat 57 s old 8 min after the kill); case (o) failed at f752782c with 'still runs 5 s after the last command of its run ended'"
+    },
+    {
+      "criterion": "Tester round 1 failure 3: the stored-order counts of a checker that ends its summary with unchecked=N reach stored-order.json and STORED-ORDER.md",
+      "surface": "cluster.sh's stored_order_summary and stored_order_table, sourced by cluster.test.sh; and the live quick run's STORED-ORDER.md",
+      "command": "cd packages/envoy && bash loadtest/cluster/cluster.test.sh (case (p), unmodified from ff4dcd85); quick run lt-20261030t002127-32ec's STORED-ORDER.md",
+      "observed": "case (p) passes: 'documents=5 clean=2 mismatched=1 refused=0 failed=0 unchecked=2' gives unchecked 2 and every count; a line without unchecked gives unchecked null; the live STORED-ORDER.md has Unchecked and Typed unchecked columns (null for checker 1febe317)",
+      "headSha": "ed2ca0f0bcc80e66c7b252d51fde6f38ebe1aceb",
+      "negativeControl": "at f752782c the same line gave every count null (the tester's red output)"
+    },
+    {
+      "criterion": "Tester round 1 failure 1: the head carries a CI verdict; the forward merge resolves main's conflicts and the one command still runs end to end",
+      "surface": "GKE namespace loadtest, Dispatch 9b92ac14, and GitHub CI on the pushed head",
+      "command": "cluster.sh all <the up flags above> --profile quick (run lt-20261030t002127-32ec, 00:21-01:40Z); head pushed with no skip-checks trailer; forward-merge comment https://github.com/sjawhar/legion/pull/2462#issuecomment-6511608021",
+      "observed": "all exit 0, 11 steps, none failed; the seed ran main's seed-refs ('1000 targets, 19471 target versions, references.md on 310 issues citing 51071 targets') then seed-finish; every step chose SSE; stored order clean (10x: 2,310 of 2,310); down printed 'No resources found in loadtest namespace.'. With the reference seed, 9b92ac14's Postgres reaches 3.25 cores at 1x and its 16 at 3x (GET references p50 685 ms at 1x): the knee moves to 2x-3x",
+      "headSha": "ed2ca0f0bcc80e66c7b252d51fde6f38ebe1aceb",
+      "negativeControl": "seedfinish_test.go: a template still holding request_keys rows fails before vacuum and the trigger, naming the count"
+    },
     {
       "criterion": "One command stands the copy up at production's sizes in the INFRA-597 namespace, seeds it, runs the steps, collects the tables and profiles, and tears it down",
       "surface": "GKE namespace loadtest, from this Legion worker pod (kubectl through the legion-worker Role)",
@@ -47,11 +71,14 @@
   "trickyParts": [
     "#2449 removed Dispatch's SSE endpoint and loadgen's SSE client; the commit this issue measures serves only SSE, so loadgen probes /ws/live once per step and falls back to /api/v1/events on a 404 handshake.",
     "browsertype typed into the 'Revision token rN' paragraph that loadgen's edits replace, failing every later edit and upload of a typed document; cluster.sh passes -protect 'Revision token' and up refuses a driver without it, before the lock.",
-    "The 5 s sampler's text heap read took 29% of Dispatch's CPU in the replay; it now reads the binary profile off its loop. Results v4 carries only fixed-sampler runs."
+    "The 5 s sampler's text heap read took 29% of Dispatch's CPU in the replay; it now reads the binary profile off its loop. Results v4 carries only fixed-sampler runs.",
+    "The heartbeat renews the lock only while a registered command of the run is the same live process (pid and /proc start time in <run>/commands/); a script's gap between two commands can stop it, and the next command's ensure_daemons starts it again.",
+    "Main's reference seed (#2469) runs in both stack.sh and cluster.sh seed; its request_keys delete moved into loadgen seed-finish, which both share."
   ],
   "deviations": [
-    "Typing steps with -protect are not run live: INFRA-707's driver has no -protect yet (its implementer adds it in INFRA-707's next round). cluster.test.sh covers the flag and the refusal; INFRA-707's tester runs both typed passes on this harness once that commit exists.",
-    "Typed replays still lose about 10% of their edits (82 and 85 of 874), because typing changes logged text that replay edits find; -protect does not cover it, and the README and results say the typed replays are not compared with the outage."
+    "The root's full curves and hour are rerun on the reference seed in a later round, after INFRA-707's two typed passes (architect's decision 01:42Z); results v5 will carry both seeds.",
+    "cluster.test.sh's cases (o) and (p), as the tester wrote them, add shellcheck notes (SC2030/SC2031, one SC1090); they are left unmodified, as red tests are. CI runs no shellcheck on these files; cluster.sh itself is clean.",
+    "Typing steps with -protect still wait for INFRA-707's branch image of eb0fe0be (release-envoy-listener run 40986096153)."
   ],
   "openQuestions": []
 }
