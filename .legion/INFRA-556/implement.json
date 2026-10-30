@@ -2,47 +2,46 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-556",
-  "completed": "2026-10-30T20:37:19Z",
-  "round": "review round 3 (changes requested at cf17a2e1): merge of main e65900f4 with migrations renumbered 0149-0151, the removal-clock fix (item 2), reviewer items 3-15, PR body item 16, and a fix for main's memory test that the merge exposed",
+  "completed": "2026-10-30T21:56:20Z",
+  "round": "architect send-back (20:38Z): one forward merge of main 6fa26c74 (#2392, per-issue event writes), migrations renumbered 0150-0152 above main's 0149_event_horizon, connections 91 (main's 89 plus this change's two)",
   "proof": [
     {
       "criterion": "Items 1-6 and D10 across two processes, on the tree merged with main: live edits, cursors and presence, close/reopen, ask authors, agent writes, fresh reads, rebuild/resumption/queue, serving-process header, awareness bounds and the removal clock",
       "surface": "two real envoy-dispatch binaries on one Postgres 17 (pgvector), driven over HTTP and /ws/doc",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_test?sslmode=disable go test -tags multiprocess -count=1 -timeout 50m ./cmd/dispatch",
-      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 1081.528s; docs package ok 1612.436s; store 300.738s, processes 23.870s, plain cmd/dispatch 294.892s, room-related api 475.498s, infra/gcp TestDispatchConnectionsPerPodIsTheServers ok; -race render/replica/torn tests ok",
-      "headSha": "4f15d975a2810eee30dba0487b9f9aad727c2eec",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_test?sslmode=disable go test -tags multiprocess -count=1 -timeout 55m ./cmd/dispatch",
+      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 1121.697s (multiprocess); docs ok 1544.510s; duty ok 19.339s; store ok 301.844s; processes ok 21.999s; plain cmd/dispatch ok 292.983s; api -run 'Issue|Clos|Ask|Patch|Rebuild|Conditional|Hook|Routes|Comment|Live|Socket|Room|Horizon|Event|Copy' ok 618.157s; infra/gcp TestDispatchConnectionsPerPodIsTheServers ok",
+      "headSha": "bf6318c01ed94bc202d8ad7b84b99c8e60daa521",
       "negativeControl": "At cf17a2e1 TestAReaderLeavingIsRelayedAtItsClientsClockThoughAPurgeRacesTheEncode fails (alice's removal relayed at clock 0); at the test-support commit aa50b68c the seven two-process tests fail on their bugs"
     },
     {
       "criterion": "A room fed only by agent writes keeps memory within its bound (main's TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound) after the merge",
       "surface": "docs package on real Postgres",
-      "command": "cd packages/envoy && go test -count=3 -timeout 20m -run TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound ./internal/dispatch/docs/",
-      "observed": "PASS 3 of 3, BOUND retained=635544 stored=837326 bound=2934478",
-      "headSha": "4f15d975a2810eee30dba0487b9f9aad727c2eec",
+      "command": "cd packages/envoy && go test -count=1 -timeout 55m ./internal/dispatch/docs/",
+      "observed": "ok github.com/sjawhar/envoy/internal/dispatch/docs 1544.510s, TestARoomFedOnlyByAgentWritesKeepsMemoryWithinTheBound included",
+      "headSha": "bf6318c01ed94bc202d8ad7b84b99c8e60daa521",
       "negativeControl": "At the merge f89b26c5 (no replica fix) it fails 2 of 2: retained=3319888, 386137 more than stored plus 2097152; main e65900f4 passes with GOWORK=off"
     },
     {
       "criterion": "Browser: two people on two processes see each other's typing and cursor within a second on one socket each",
       "surface": "Chromium on main's two-process harness (round-robin proxy, two envoy-dispatch processes, one Postgres)",
       "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:5433/infra556_e2e?sslmode=disable bun run e2e:multiprocess -- coedit.multiprocess",
-      "observed": "✓ coedit.multiprocess.e2e.ts:143:1 two people on two processes ... (6.8s); 1 passed (10.3s)",
-      "headSha": "4f15d975a2810eee30dba0487b9f9aad727c2eec",
+      "observed": "✓ coedit.multiprocess.e2e.ts:143:1 two people on two processes ... (7.3s); 1 passed (9.6s)",
+      "headSha": "bf6318c01ed94bc202d8ad7b84b99c8e60daa521",
       "negativeControl": "Fails without this change (https://github.com/sjawhar/legion/pull/2414#issuecomment-6464882958)"
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/docs/tree.go (renderedReplica.startFromRead)",
-    "packages/envoy/internal/dispatch/docs/awareness_relay.go (removal at the recorded clock)",
-    "packages/envoy/internal/dispatch/docs/append_gate.go, awareness_limit.go, room_sync.go, keepalive.go",
-    "packages/envoy/internal/dispatch/store/migrations/0149-0151 (renumbered)",
-    "packages/envoy/cmd/dispatch/*_multiprocess_test.go, process_pair_test.go, docs tests",
-    "packages/envoy README.md, AGENTS.md, .changes/unreleased/pr2414-*"
+    "packages/envoy/internal/dispatch/docs/copied_asks.go, packages/envoy/internal/dispatch/duty/exclusive.go (merge: lock enumeration comments)",
+    "docs/site/src/content/docs/dispatch/running-dispatch.md (connection paragraph, 91)",
+    "packages/envoy/internal/dispatch/store/migrations/0150-0152 (renumbered) and every reference",
+    "packages/envoy/infra/gcp/dispatch.go (dispatchConnectionsPerPod 91)",
+    "packages/envoy/.changes/unreleased/pr2414-Changed-migrations-0150-0152.yaml, pr2414-Changed-connections-per-process.yaml"
   ],
   "deviations": [
-    "Main moved to 0be366cf after the merge; GitHub reads CONFLICTING again. Per the architect the branch does not chase main; main's highest migration is still 0148."
+    "INFRA-562's #2387 is open and also renumbers from this base; whichever lands later renumbers again."
   ],
   "openQuestions": [],
   "trickyParts": [
-    "The memory test came in from main; the branch's publish loads no room, so a room loaded by a settlement had no replica at the test's base and built a second document copy inside the measured window. A read's copy now starts the replica."
+    "#2392 removed the events' commit-order advisory lock; no code of this change took it. The close still re-stamps closed_at as its last statement before commit, after the ask withdrawal, so the close margin and the room freeze are unchanged."
   ]
 }
