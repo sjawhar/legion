@@ -2,88 +2,70 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-757",
-  "completed": "2026-10-30T19:05:00Z",
-  "round": 6,
+  "completed": "2026-10-30T20:32:00Z",
+  "round": 7,
   "implementerProof": {
-    "verdict": "rejected",
-    "how": "Each of the three entries is true as written, and this phase re-drove all three: the fingerprint pair (2cd18075 at 571d7140 to 1d419296 here) and the four conflicted paths, the route-pin test (ok at this head, and the job log at 89ce0fbf reads 'routes() has 147 rows, want 146', so main's own commit closed it), and the drift check (28 gates, 0 uncovered). What the proof does not cover is the gate this merge had to satisfy. Main's #2512 moved every image a CI job fetches to ghcr.io/sjawhar/legion/ci, and the merge converted the Postgres service of envoy-go-race but not of envoy-go-race-api, this branch's own job, which still names mirror.gcr.io. Two required checks are red at the merged head because of it, and the proof's third entry says in its place that 'the merge undid nothing of this change'. The round is a failure for that one line; everything else this phase drove is green."
+    "verdict": "verified",
+    "how": "The round's whole delta since the head this phase failed is one commit, c92ffe58, and it is exactly the fix round 6 named: the comment line main uses and 'image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba…' in envoy-go-race-api's Postgres service, with nothing else of the tree touched. This phase drove the two gates that were red, their negative control and the filter check in this pod, and then read the required checks and the race jobs at the fix head on GitHub rather than taking the handoff's word: lint, test, ci-images and ci-filters are green, and envoy-go-race-api itself - the job whose service image changed - ran green, which is the only reading that proves the new reference pulls and serves."
   },
-  "failures": [
-    {
-      "criterion": "The pull request's own CI is green on the head that merges (acceptance 3, DA-4): the required lint and test checks are red at the merged head, over one line of this branch's own job.",
-      "evidence": "ci.yaml:2551, in envoy-go-race-api - a job this pull request adds - still reads 'image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11'. Main's #2512 (9726bcda, in this round's merge a4b9f4c5) requires every image a CI job fetches to be the copy in ghcr.io/sjawhar/legion/ci named by a row of .github/ci-images.yaml; main's own ci.yaml holds no mirror.gcr.io reference at all, and the merge converted the sibling job envoy-go-race to 'ghcr.io/sjawhar/legion/ci@sha256:2358fcba…' while leaving this one. Two red checks, both required: (1) the lint job of run 41104365691, job 124233792975, '.github/workflows/ci.yaml:2551: the postgres service's image names mirror.gcr.io/pgvector/pgvector, and every image a CI job fetches is a copy in ghcr.io/sjawhar/legion/ci…', a second line on the same line number, and '::error::2 problem(s) between .github/ci-images.yaml and the images CI fetches'; (2) the test job of the same run, job 124233792837, whose check-ci-images.test.sh cases 'the real tree passes the tree mode' and 'says what it read' fail. Reproduced here: '.github/scripts/check-ci-images.sh tree' prints the same two lines and '2 problem(s)', and 'bash .github/scripts/check-ci-images.test.sh' is 97 passed, 2 failed. The repository's own gate is the red test for this defect, so no new test is needed. The fix is one line plus main's own comment above it: '# ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)' and 'image: ghcr.io/sjawhar/legion/ci@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11', exactly as envoy-go-race and main's other nine Postgres services read it. With that edit in this workspace the check prints '.github/ci-images.yaml holds 12 row(s); 37 reference(s) in 32 file(s) of CI's reach name one of those rows; of 6590 text file(s) swept, the 28 that name mirror.gcr.io are all in the exception list' and the suite is 99 passed, 0 failed; the edit was reverted at once and jj status is clean."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
-      "criterion": "What the merge did to the branch's own change: no Go line moved, and the four changed hunks are CI configuration and prose rebased onto main's new text.",
-      "surface": "The unchanged-diff fingerprint of skill://legion-worker/references/conflicts-and-rewrites.md at this phase's own two heads, and the two diffs compared file by file.",
-      "command": "base=$(gh pr view 2517 -R sjawhar/legion --json baseRefName -q '.baseRefName | @json'); jj git fetch; jj diff --from \"fork_point(${base}@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, at 571d7140 and 0f245bb4; then the two diffs compared per file.",
-      "observed": "571d7140: 2cd180755f5e8a366cf575911261cde3b922021e5d8f9cdc736fc039267c36cf. 0f245bb4: 1d4192963fe7b129728ea76468a7c2cc2d68105a5a0228434083fbfb7147f7f7. Changed, so a full round. Both diffs hold the same 23 files; four differ and every one is CI configuration or prose: ci_job_reads.py (a cited line number 965 to 982, main's own edit), ci.yaml (one more removed pattern, api/testdata/*, which main narrowed and this branch widens), docs/site/.../envoy.md and packages/envoy/AGENTS.md (the degraded paragraph merged with main's new 'KV watch rebuild unavailable' sentence). Every .go hunk of the branch is identical between the two heads.",
-      "headSha": "0f245bb4502f92e7c3f740a6346b863f381954ac",
-      "negativeControl": "The per-file comparison is the control: a merge that had dropped or altered a Go line of the branch would show as a differing .go entry, and none does.",
+      "criterion": "Round 6's failure is fixed, and fixed in one line: the required lint and test checks are green at the head.",
+      "surface": "The repository's own image gate and its suite, run in this pod, and the required checks of CI run 41113556374 at the code head c92ffe58.",
+      "command": "cd $LEGION_WORKSPACE && PATH=\"$TMPDIR/venv/bin:$PATH\" .github/scripts/check-ci-images.sh tree; PATH=\"$TMPDIR/venv/bin:$PATH\" bash .github/scripts/check-ci-images.test.sh; and gh api repos/sjawhar/legion/actions/runs/41113556374/jobs.",
+      "observed": "The gate prints '.github/ci-images.yaml holds 12 row(s); 37 reference(s) in 32 file(s) of CI's reach name one of those rows; of 6590 text file(s) swept, the 28 that name mirror.gcr.io are all in the exception list', where at the failed head it printed two problems; the suite is 99 passed, 0 failed, where it was 97 passed, 2 failed. On GitHub at c92ffe58: lint success and test success, the two required checks round 6 reported red, with typecheck, ci-images, ci-filters, contracts, pi-envoy, pi-shared, envoy-client, envoy-plugin, claude-envoy, envoy-smoke, docs and the worker image green beside them. The change itself is one commit: the comment '# ghcr.io/sjawhar/legion/ci, the copy of pgvector/pgvector (.github/ci-images.yaml)' and the image line, and nothing else in the tree. Ten Postgres services of ci.yaml now name that one digest, which is the pgvector-2358fcba row of .github/ci-images.yaml, and no mirror.gcr.io reference is left in the file.",
+      "headSha": "7af7a5e37846a8525a27619f1363ecf5b5d30e2e",
+      "negativeControl": "Putting the old line back in this workspace - the mirror.gcr.io reference, the comment removed - makes the same gate refuse again, by line and by name: '.github/workflows/ci.yaml:2551: the postgres service's image names mirror.gcr.io/pgvector/pgvector…', the second line on the same number, and '::error::2 problem(s) between .github/ci-images.yaml and the images CI fetches'. The file was restored at once and jj status is clean.",
       "status": "pass"
     },
     {
-      "criterion": "Acceptance 1 and 2, flake A, at the merged head.",
-      "surface": "This pod's Go test runs under the load recipe (GOMAXPROCS=1, two busy loops, one dd conv=fsync writer) against the rootless PostgreSQL 17 with its default durability. The pod was recreated again before this round, so the loop script, the binaries and the overlays were all rebuilt.",
-      "command": "cd packages/envoy/internal/dispatch/startup && GOMAXPROCS=1 bash <the rebuilt loop script> r6A-before 30 2 1 <a binary built here with main@origin's started_test.go through -overlay> -test.run '^TestTwoAnnouncersAtOnceAnnounceAndPublishOnce$', and r6A-after 40 with the head's binary.",
-      "observed": "Before: 21 pass, 9 fail of 30 (wall 459 s), each failure the FleetCommit assertion. After: 40 pass, 0 fail of 40 (wall 590 s).",
-      "headSha": "0f245bb4502f92e7c3f740a6346b863f381954ac",
-      "negativeControl": "The before binary is the control: the two differ in started_test.go alone, and only the one with main's copy fails.",
+      "criterion": "The changed service image works where it has to: the job it belongs to pulls it and runs its Postgres-backed race tests.",
+      "surface": "GitHub Actions, the envoy-go-race-api job of run 41113556374 at the code head.",
+      "command": "gh api repos/sjawhar/legion/actions/runs/41113556374/jobs; gh api repos/sjawhar/legion/actions/jobs/124266677597/logs.",
+      "observed": "envoy-go-race-api: success, 'ok github.com/sjawhar/envoy/internal/dispatch/api 610.296s'. The package's tests open the Dispatch database through the service this change re-pointed, so a reference that did not pull, or pulled an image without pgvector, would have failed the job at its service or its first test rather than passing in 610 s.",
+      "headSha": "7af7a5e37846a8525a27619f1363ecf5b5d30e2e",
+      "negativeControl": "The job's own history is the control: at a4b9f4c5, with the mirror.gcr.io reference, the run never reached this reading because lint and test refused the tree, and the one job of the lane that had already been converted to the ghcr copy, envoy-go-race, is green in both runs. The image gate's refusal above is the control on the reference itself.",
       "status": "pass"
     },
     {
-      "criterion": "Acceptance 1 and 2, flake B, at the merged head.",
-      "surface": "cmd/listener's test binary with the forced device rebuilt against the merged tree, and the committed regression test in internal/store.",
-      "command": "The four device rows (row 1 main@origin's kv.go, main.go and six listener test files; row 2 main's product with this branch's tests; row 3 the branch; row 4 main with the device off), the regression test at the head and with -overlay at main@origin's kv.go, then the two 40-run loops.",
-      "observed": "Row 1 FAIL at interest_read_routes_test.go:103 with 'status 503 … the role claim view is not complete'; row 2 FAIL at :106; row 3 PASS; row 4 PASS. The regression test is ok 1.413s at the head and fails at role_holders_test.go:300 against main's kv.go. Loops: plain 40 pass, 0 fail of 40 (wall 253 s); the device forced, 40 pass, 0 fail of 40 (wall 293 s). The whole package is ok cmd/listener 457.990s, go test -race ./internal/store/ ./internal/kvwatch/... is ok 38.275s and ok 68.059s, and the healthz family is eleven of eleven green (ok 14.834s), two of them tests main added since the last round.",
-      "headSha": "0f245bb4502f92e7c3f740a6346b863f381954ac",
-      "negativeControl": "Rows 1, 2 and 4: with the device off main's product passes, and with it on main's product fails whether the tests are main's or this branch's.",
+      "criterion": "Nothing else of the change moved, so round 6's green readings carry.",
+      "surface": "The branch's own diff between the head this phase failed and this head.",
+      "command": "jj diff --from cb774f1fa88b --to @- --stat; jj diff -r c92ffe5886dd --git.",
+      "observed": "Two files: .github/workflows/ci.yaml, three lines (one removed, two added, the comment and the image), and .legion/INFRA-757/implement.json, the handoff. No Go file, no document, no other workflow line. So round 6's readings at 0f245bb4 stand at this head: flake A 21 pass 9 fail of 30 on main@origin's started_test.go and 40 pass 0 fail of 40 at the head; flake B device rows 1 and 2 FAIL and rows 3 and 4 ok; the committed regression test ok at the head and failing at role_holders_test.go:300 against main's kv.go; the loops 40/40 plain and 40/40 with the device forced; ok cmd/listener 457.990s; go test -race over internal/store and internal/kvwatch ok at 38.275s and 68.059s; the healthz family 11 of 11.",
+      "headSha": "7af7a5e37846a8525a27619f1363ecf5b5d30e2e",
+      "negativeControl": "The diff is the control: a change to any Go line would appear in it, and the only lines it holds are the two of the image reference.",
       "status": "pass"
     },
     {
-      "criterion": "The router still passes at the merged head, after main rewrote ci.yaml's image references.",
-      "surface": "The repository's own drift check over the merged workflow.",
-      "command": "PATH=\"$TMPDIR/venv/bin:$PATH\" .github/scripts/check-ci-filters.sh",
-      "observed": "'every ci.yaml filter matches every file its job reads (28 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)'. The gate count rose from 27 to 28 with main's own new job, and this branch's three filters are among those that match.",
-      "headSha": "0f245bb4502f92e7c3f740a6346b863f381954ac",
-      "negativeControl": "Round 5's control stands for this check's sensitivity on this branch's own lines: deleting the listener_server_change pattern this branch adds makes the same script refuse by name. The check is a different gate from the image check that is red above, and passing it says nothing about that one.",
+      "criterion": "The router still passes with the edited workflow.",
+      "surface": "The repository's own drift check in this pod, and the ci-filters job of the run at the head.",
+      "command": "PATH=\"$TMPDIR/venv/bin:$PATH\" .github/scripts/check-ci-filters.sh; and the run's ci-filters job.",
+      "observed": "'every ci.yaml filter matches every file its job reads (28 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)'. ci-filters is success in run 41113556374.",
+      "headSha": "7af7a5e37846a8525a27619f1363ecf5b5d30e2e",
+      "negativeControl": "Round 6's control stands: deleting the listener_server_change pattern this branch adds makes the same script refuse by name, so a passing run means the filters were read and matched, not skipped.",
       "status": "pass"
     },
     {
-      "criterion": "Also delivered: every race-lane job has real time headroom, all four measured in one run of this branch.",
-      "surface": "GitHub Actions job logs of run 41059086197 (head 89ce0fbf, this branch), read through the jobs API.",
-      "command": "gh api repos/sjawhar/legion/actions/jobs/<id>/logs --allow-escape-sequences | sed 's/\\x1b\\[[0-9;]*m//g' | grep -aE '^ok|^FAIL' for jobs 124095316437, 124095316243, 124095316153 and 124095316891.",
-      "observed": "envoy-go-race (success): cmd/listener 362.287 s, internal/bus 359.231 s, dispatch/store 212.360 s, delivery 80.382 s, kvwatch 63.685 s, internal/store 30.722 s, session 10.365 s, measures 1.071 s - the largest is 33.5 % of its 1080 s bar. envoy-go-race-pmdoc (success) 1083.316 s, 75.2 % of its 1440 s bar. envoy-go-race-docs (success) 1115.436 s, 51.6 % of its 2160 s bar. envoy-go-race-api 640.721 s, 59.3 % of its 1080 s bar; that job's conclusion is failure, on the route-pin test main has since fixed, not on time. Every job of the lane is under its own bar, so no shard is due; pmdoc is the closest and the 40-minute deadline is what gives it that margin.",
-      "headSha": "0f245bb4502f92e7c3f740a6346b863f381954ac",
+      "criterion": "Also delivered: every race-lane job has real time headroom, measured again at this head.",
+      "surface": "GitHub Actions job logs of run 41113556374, read through the jobs API.",
+      "command": "gh api repos/sjawhar/legion/actions/jobs/<id>/logs --allow-escape-sequences | sed 's/\\x1b\\[[0-9;]*m//g' | grep -aE '^ok|^FAIL' for jobs 124266677646, 124266677611 and 124266677597.",
+      "observed": "envoy-go-race (success): cmd/listener 345.673 s, internal/bus 332.490 s, dispatch/store 173.761 s, delivery 62.144 s, kvwatch 63.093 s, internal/store 30.570 s, session 10.462 s, measures 1.037 s - the largest is 32.0 % of its 1080 s bar. envoy-go-race-pmdoc (success) 1097.707 s, 76.2 % of its 1440 s bar. envoy-go-race-api (success) 610.296 s, 56.5 % of its 1080 s bar. envoy-go-race-docs was still queued when this handoff was written; its own last green reading is 1115.436 s at 89ce0fbf, 51.6 % of its 2160 s bar, and this round changes no docs step. Every job of the lane is under its own bar; pmdoc is the closest, and its 40-minute deadline is what gives it that margin.",
+      "headSha": "7af7a5e37846a8525a27619f1363ecf5b5d30e2e",
       "negativeControl": "The same packages contending in one job on main before the split, run 40877712458 job 123461966609: docs 1772.969 s, pmdoc 1563.552 s, api 1099.487 s, bus 315.651 s FAIL, store 277.864 s, delivery 93.562 s, and no line at all for the listener step.",
-      "status": "pass"
-    },
-    {
-      "criterion": "Round 5's reading of the pi-envoy red is confirmed: it was main's drift, and the merge answered it.",
-      "surface": "The conclusions of run 41059086197, the run at the head round 5 passed.",
-      "command": "gh api repos/sjawhar/legion/actions/runs/41059086197/jobs --paginate --jq '.jobs[]|\"\\(.name):\\(.conclusion)\"'",
-      "observed": "pi-envoy: success, as round 5 predicted from main's commit 2d3a725f adding the answers route its fake Dispatch needed. lint, typecheck, test, ci-filters, envoy-go-race, -pmdoc and -docs: success. The run's only failures were envoy-go, envoy-go-race-api and ci-ok, all three on the one route-pin assertion.",
-      "headSha": "0f245bb4502f92e7c3f740a6346b863f381954ac",
-      "negativeControl": "The job list itself is the control: the suite that was red is green at the next head with no change of this branch's to that package, which is what 'main's drift' means.",
       "status": "pass"
     }
   ],
   "ciAtTheHead": {
-    "head": "0f245bb4502f92e7c3f740a6346b863f381954ac",
-    "readAt": "2026-10-30T18:57Z",
-    "state": "The handoff head carries no run of its own (handoff-only push, skip-checks: true). The code head a4b9f4c5 has CI run 41104365691, created at 18:09Z. At 18:57Z: lint failure and test failure, both required and both the image reference above; changes, typecheck, ci-images, envoy-client, pi-shared, envoy-plugin, pi-envoy, pi-legion, claude-envoy, envoy-infra-go, broker-multiprocess, dispatch-multiprocess, dispatch-browser-multiprocess, listener-server-change, envoy-e2e-local, envoy-go-race, docs / build and worker-image / build success; envoy-go, dispatch, envoy-go-race-api, envoy-go-race-pmdoc, envoy-go-race-docs, dispatch-memory, envoy-smoke and envoy-session-stall still running; contracts and ci-filters queued. The run before it, 41059086197 at 89ce0fbf, failed on the route pin alone, which main's own commit has since fixed."
+    "head": "7af7a5e37846a8525a27619f1363ecf5b5d30e2e",
+    "readAt": "2026-10-30T20:28Z",
+    "state": "The handoff head carries no run of its own (handoff-only push, skip-checks: true). The code head c92ffe58 has CI run 41113556374, created at 19:14Z. At 20:28Z: changes, lint, test, typecheck, ci-images, ci-filters, contracts, envoy-client, envoy-plugin, pi-envoy, pi-shared, pi-legion, claude-envoy, envoy-smoke, envoy-go-race, envoy-go-race-api, envoy-go-race-pmdoc, dispatch-browser-multiprocess, envoy-infra-go, docs / build and worker-image / build all success; envoy-go, dispatch and a few others still running, and envoy-go-race-docs queued. Nothing is red. The two checks that were red at the previous head, lint and test, are both green here. The reviewer and the merger read ci-ok at the merging head, as DA-4 binds acceptance 3."
   },
   "observations": [
     {
-      "what": "Two rounds running, the red at this pull request's head has come from main moving under it rather than from its own work, and this round's is the first that is its own.",
-      "evidence": "Round 5's red was pi-envoy's card-delivery suite, fixed by main's 2d3a725f and green at the next head. The round before this one was red on the Dispatch API route pin, 147 routes against a pin of 146, which main's own commit carried whole and the merge closed. This round's red is different in kind: main changed the rule for every CI image, and the branch's own job is the one line of the tree that still breaks it. The gap between a merge of main and the merge of this pull request is where each of these comes from."
-    },
-    {
-      "what": "The implementer's round-6 checks did not include the image gate that main's merge brought in.",
-      "evidence": "Its proof runs check-ci-filters.sh, that script's suite, check-private-names.sh, go build and go vet, but not check-ci-images.sh, which main's #2512 added to the lint job in the very merge this round took. Running it is seconds: '.github/scripts/check-ci-images.sh tree'."
+      "what": "This is the first head of the branch in four rounds with nothing red and no merge of main pending.",
+      "evidence": "Rounds 5 and 6 were red on main's drift (pi-envoy's card-delivery suite, then the Dispatch API route pin), and round 6 on this change's own mirror.gcr.io line. At c92ffe58 every finished job of run 41113556374 is green, including all three race jobs that have finished. The merge window is the remaining risk, as rounds 5 and 6 showed: the longer this head waits, the more of main's drift it meets."
     },
     {
       "what": "A watcher fault of the role claim bucket is still reported under the interest cache's name.",
