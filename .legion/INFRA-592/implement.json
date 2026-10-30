@@ -2,52 +2,51 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-592",
-  "completed": "2026-10-30T00:51:02Z",
+  "completed": "2026-10-30T04:22:08Z",
   "proof": [
     {
-      "criterion": "Background work takes connections from limits of its own: the term-statistics refresh a related-item check starts runs on the background pool (tester round 2 failure 1)",
+      "criterion": "The forward merge of main's #2463 keeps both behaviours: a comment edit carries its block ids, through this branch's writer gate and error answers",
       "surface": "Real envoy-dispatch binary on INFRA-589's local stack (Postgres via 1 ms proxy, NATS, listener), built from the head",
-      "command": "stack.sh reset; bash /legion/scratch/tmp/infra-592-tester/demo.sh (psql holds the new project's search_term_totals row for 20 s; POST /api/v1/issues creates its first issue; pg_stat_activity sampled at 2, 5, 10 s)",
-      "observed": "create 201 in 0.32 s; the waiting insert into search_term_totals is application_name dispatch-background at 2, 5 and 10 s; Dispatch logs 'search term statistics refreshed for a project the related-item check found without them' items=2 duration=18.74s and the row reads items 2 after the holder rolls back",
-      "headSha": "c2ce589bbc13e17faab60ebaded8b279936fda47",
-      "negativeControl": "The same demo at 8e87c0d8 (tester round 2, /legion/scratch/tmp/infra-592-tester/demo.out) showed the wait held by dispatch-requests; TestARefreshTheRelatedCheckStartedHoldsNoRequestPoolConnection passes at the head unmodified"
+      "command": "LOADTEST_ROOT=/legion/scratch/tmp/infra-592/lt3 stack.sh reset; bash /legion/scratch/tmp/infra-592/edit-smoke.sh (new project and issue, POST a two-paragraph comment, poll GET /api/v1/comments/{id}/blocks, PATCH /api/v1/comments/{id} with base_revision and the carried blocks, read the blocks again)",
+      "observed": "blocks b1 'First paragraph.' and b2 'Second paragraph.' at revision 1, indexed by the background block-index pass; edit 200 in 0.14 s; at revision 2 b1 'First paragraph, edited.' changed_revision 2 and b2 kept its id, changed_revision 1, from 26; 0 ERROR lines in Dispatch's log",
+      "headSha": "b7892ad2e20da894e66f7809ef300ecdf4bf4671",
+      "negativeControl": "The same PATCH with blocks and no base_revision answers 400 INVALID_COMMENT 'blocks: requires base_revision'"
     },
     {
-      "criterion": "No request-pool connection is held after a request answers: a settlement's cold-room warm-up reads the issue state on the settlements pool (envoy-go failure at 8e87c0d8)",
-      "surface": "go test against a real Postgres 16 (DISPATCH_TEST_DATABASE_URL)",
-      "command": "go test -count=20 -run 'TestARefreshTheRelatedCheckStartedHoldsNoRequestPoolConnection$|TestTheWriterGateAdmitsAWriteAndRefusesAPinnedRead$' ./internal/dispatch/api/; go test -count=1 ./internal/dispatch/docs/ ./internal/dispatch/api/ ./cmd/dispatch/ ./internal/dispatch/admission/ ./internal/dispatch/store/ ./loadtest/",
-      "observed": "both tests pass 20 of 20; docs ok (900 s), cmd/dispatch, admission, store, loadtest ok; api: every test but TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, which refuses to run on this pod's byte-order collation (it says so) and passes on CI",
-      "headSha": "c2ce589bbc13e17faab60ebaded8b279936fda47",
-      "negativeControl": "envoy-go at 8e87c0d8 (job 123686573524): pinned_connection_test.go:216 '1 request-pool connections taken after both requests answered, want 0'"
+      "criterion": "Excess load refused early with a retryable status, connection waits bounded, 1x served, at the merged head",
+      "surface": "INFRA-589's 2-core load reproduction, a fresh stack seeded by the head (build_commit b7892ad2, dirty false)",
+      "command": "run-step.sh r4-1x --events 4 --sessions 400 --requests 60; run-step.sh r4-10x --events 40 --sessions 1000 --requests 600 (LOADTEST_ROOT=/legion/scratch/tmp/infra-592/lt3)",
+      "observed": "1x: 100.0% of 59.7 req/s 2xx, 0 refusals, 3.99/3.99 events/s committed, 0 goroutines waiting for a connection, 37/37 metrics samples with all ten pools. 10x: 88,874 reads and 6,847 writes refused 429 OVERLOADED (read refusal p50 21 ms, p99 132 ms), 17.2% of 596 req/s served, 1.77 events/s committed, 0 connection failures, at most 14 goroutines waiting",
+      "headSha": "b7892ad2e20da894e66f7809ef300ecdf4bf4671",
+      "negativeControl": "Before (merge-base 2df3353c, PR body tables): 2x-10x 0.0-55 successful reads/s and 3,485-20,174 goroutines waiting for a connection"
     },
     {
-      "criterion": "CI green: ci-filters (tester round 2 failure 2) and envoy-go-race's docs timeout (failure 3)",
-      "surface": ".github/scripts/check-ci-filters.sh, the check ci.yaml's ci-filters job runs; main's #2516 (envoy-go-race-docs, 60 min) merged forward",
-      "command": "uv run --with pyyaml==6.0.2 --no-project bash .github/scripts/check-ci-filters.sh",
-      "observed": "every ci.yaml filter matches every file its job reads (25 gates), and docs-pages' on.push.paths equals the docs filter; the new envoy_go_race_docs filter names internal/dispatch/admission",
-      "headSha": "c2ce589bbc13e17faab60ebaded8b279936fda47",
-      "negativeControl": "At 22afdff5's parent the same check failed with 44 files the filters missed; on the merge before the admission line it failed with 4 for envoy-go-race-docs"
-    },
-    {
-      "criterion": "Requests have deadlines, connection waits are bounded, excess is refused early with a retryable status; at 1x the server serves the load; recovery when load drops",
-      "surface": "INFRA-589's 2-core load reproduction, Dispatch built from the head (build_commit c2ce589b, dirty false)",
-      "command": "run-step.sh s9-1x --events 4 --sessions 400 --requests 60; run-step.sh s9-10x --events 40 --sessions 1000 --requests 600; run-step.sh s9-recovery --events 4 --sessions 1000 --requests 60 --schedule 10x:180s,0.5x:120s --recovery-ref-p99 139 (LOADTEST_ROOT=/legion/scratch/tmp/infra-592/lt2)",
-      "observed": "1x: 100.0% of 59.7 req/s 2xx, 0 refusals, 3.99/3.99 events/s committed, 0 goroutines waiting for a connection, 37/37 metrics samples with all ten pools. 10x: 80,751 reads and 6,748 writes refused 429 OVERLOADED (read refusal p50 16 ms p99 108 ms), 24.8% of 596 req/s served, 2.32 events/s committed, 0 connection failures, at most 13 goroutines waiting. Recovery: 10 s after the drop; every window from 10 s on 100% success, all offered events committed, p99 74-221 ms",
-      "headSha": "c2ce589bbc13e17faab60ebaded8b279936fda47",
-      "negativeControl": "Before (merge-base 2df3353c, PR body tables): 2x-10x 0.0-55 successful reads/s and 3,485-20,174 goroutines waiting for a connection; never recovered within 120 s after the drop"
+      "criterion": "The merge builds, vets and passes the touched packages; connection count re-derived from main; CI filters cover the merged packages",
+      "surface": "go build/vet/test against a real Postgres 16; check-ci-filters.sh; bun test",
+      "command": "cd packages/envoy && go build ./... && go vet ./...; (cd infra && go vet ./... && go vet -tags natslive ./core/ && go test -run ConnectionsPer ./gcp/); go test ./internal/dispatch/api/ ./internal/dispatch/docs/ ./cmd/dispatch/ ./internal/dispatch/store/ ./internal/dispatch/admission/; uv run --with pyyaml==6.0.2 --no-project bash .github/scripts/check-ci-filters.sh; cd packages/envoy-client && bun test src/__tests__/dispatch-http.test.ts && bun run typecheck",
+      "observed": "build and vet ok; ConnectionsPerProcess 87 = dispatchConnectionsPerPod 87 (main added no pool or lease name); docs, cmd/dispatch, store, admission ok; api: every test but TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, which refuses this pod's byte-order collation; filters: 25 gates covered; envoy-client 51 pass, typecheck clean",
+      "headSha": "7a490c2c31e8 (merge resolution; b7892ad2 adds only a docs-pages comment)",
+      "negativeControl": "Before the envoy_go_race_docs line for internal/dispatch/itemblocks, check-ci-filters.sh failed with 6 uncovered files"
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/api/related_terms.go",
-    "packages/envoy/internal/dispatch/docs/service.go",
-    "packages/envoy/internal/dispatch/api/references.go (merge adaptation)",
-    "packages/envoy/loadtest/api.go, README.md, packages/envoy/AGENTS.md (merge resolutions)",
     ".github/workflows/ci.yaml",
-    ".github/workflows/docs-pages.yaml"
+    ".github/workflows/docs-pages.yaml",
+    "packages/envoy/internal/dispatch/api/comment_actions.go",
+    "packages/envoy/internal/dispatch/api/comment_create.go",
+    "packages/envoy/internal/dispatch/api/messages.go",
+    "packages/envoy/internal/dispatch/api/comment_delivery.go",
+    "packages/envoy/internal/dispatch/api/message_delivery.go",
+    "packages/envoy/internal/dispatch/api/item_blocks.go",
+    "packages/envoy/internal/dispatch/docs/block_index.go",
+    "packages/envoy-client/src/__tests__/dispatch-http.test.ts"
   ],
   "trickyParts": [
-    "The warm-up's issue read went through docs.Service.queryFrom, which fell back to the request pool; queryFrom now honours a pool the context names (withQueryPool), so settlement work reached through allowInject stays on the settlements pool"
+    "#2463's item-block batch in ReconcileBlockIndex read on the request pool; it now reads on the tick's background pool like the rest of the pass",
+    "editComment takes the writer gate before #2463's carried-edit check and transaction"
   ],
-  "deviations": [],
+  "deviations": [
+    "10x served 17.2% of requests (about 103 reads/s) against 24.8% at c2ce589b and 107-148/s in earlier rounds, on a stack seeded fresh after the pod was recreated; still 0 connection failures and 0 non-429 answers"
+  ],
   "openQuestions": []
 }
