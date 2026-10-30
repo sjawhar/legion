@@ -160,9 +160,9 @@ func renderDocument(doc *Node, spanCells int, validate bool) (r *renderer, err e
 	labels := definedFootnoteLabels(doc)
 	r = renderBlocks(doc, labels, false, spanCells)
 	// An empty code block in a typed block in a spread list item is written with a line between its
-	// fences, as main wrote it, except in a document holding a shape this parser reads only as the
-	// browser editor does, where that line is refused (emptyCodeWrittenBare): there the document is
-	// written again with the fences alone.
+	// fences, as the writer before sjawhar/legion#1464 wrote it, except in a document holding a
+	// shape this parser reads only as the browser editor does, where that line is refused
+	// (emptyCodeWrittenBare): there the document is written again with the fences alone.
 	if r.err == nil && r.wroteBlankEmptyCode && holdsBrowserOnlyShape(r.b.Bytes()) {
 		r = renderBlocks(doc, labels, true, spanCells)
 	}
@@ -692,29 +692,33 @@ func emptyCode(node *Node) bool {
 	return true
 }
 
+// codeBlockFence is a code block's fence: backticks, one more than the longest run of them in its
+// text and at least three - or, where its language holds a backtick, which a backtick fence's info
+// string cannot, tildes counted the same way.
 func codeBlockFence(node *Node) string {
+	fence := byte('`')
+	if language, _ := node.Attrs["language"].(string); strings.Contains(language, "`") {
+		fence = '~'
+	}
 	longest := 0
 	for _, child := range node.Children {
-		for run, char := 0, 0; ; {
-			if char < len(child.Text) && child.Text[char] == '`' {
-				run++
-				if run > longest {
-					longest = run
-				}
-				char++
-				continue
-			}
-			if char == len(child.Text) {
-				break
-			}
+		longest = max(longest, longestRun(child.Text, fence))
+	}
+	return strings.Repeat(string(fence), max(longest, 2)+1)
+}
+
+// longestRun is the length of the longest run of char in text, zero where text holds none.
+func longestRun(text string, char byte) int {
+	longest, run := 0, 0
+	for index := range len(text) {
+		if text[index] != char {
 			run = 0
-			char++
+			continue
 		}
+		run++
+		longest = max(longest, run)
 	}
-	if longest < 2 {
-		longest = 2
-	}
-	return strings.Repeat("`", longest+1)
+	return longest
 }
 
 func isBareURLLink(node *Node, marks []Mark, escapePipes bool) bool {
@@ -843,10 +847,6 @@ func escapeImageSource(src string, escapePipes bool) string {
 // bare, a `<` opening it escaped.
 func escapeDestination(href string, escapePipes bool, ampersand string) string {
 	angle := strings.ContainsAny(href, " ()")
-	if !angle && !strings.ContainsAny(href, "\\&") && !strings.HasPrefix(href, "<") && !(escapePipes && strings.Contains(href, "|")) &&
-		!strings.ContainsFunc(href, asciiControl) {
-		return href
-	}
 	var written strings.Builder
 	written.Grow(len(href) + 4)
 	if angle {
