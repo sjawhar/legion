@@ -4227,6 +4227,34 @@ machine in again) enrolls no one: its sign
 and sign-request answer NO_CREDENTIAL, so `identity` exits 1 and every other command fails, each
 with the same not-logged-in notice naming `agent-secrets machine login`.
 
+A request for agent secrets a machine session's helper signs carries what the kernel answered
+about the process that asked for it. The helper pins each connecting peer by pidfd
+(`SO_PEERPIDFD`, `helper/peer.go`), and `sign-request` reads that process's executable, working
+directory, start time and cgroup through that pin (`Peer.Facts`, `helper/peerfacts.go`) before
+`resolveDescendant` releases it, then signs them into the request object as its `peer` claim
+(`record.WithPeerFacts`, `record.PeerFacts`: `pid`, `executable`, `working_dir`, `cgroup`,
+`started_at`, `read_at`, the instants in Unix seconds, `read_at` taken once the last value has
+been read). The kernel offers no openat on a pidfd and answers `PIDFD_GET_INFO` with `ENOTTY` on
+this fleet's kernel, so one pid number is unavoidable; what the reading never does is build a
+`/proc/<pid>` path a second time. The pid comes from the handle, `/proc/<pid>` is opened once as
+a directory, every value is read through that descriptor, and the handle is read again after the
+open and after the reads, since a pid number is reusable only after its process is reaped and a
+reaped process makes `Peer.PID` answer 0 from then on; a directory opened while its process
+lived answers `ESRCH` once that process is gone rather than another process's values
+(`TestAProcDirectoryDescriptorNeverFollowsAReusedPid`). The start time's unit is the kernel's own
+`AT_CLKTCK`, read from `/proc/self/auxv`. A process the kernel can no longer be asked about is
+signed for with no `peer` claim and a `WARN` line, rather than refused; its record then renders
+no kernel facts at all. The signature proves the enrolled session's key made the claim, which on
+a machine session the helper runs is the helper's alone — the asking process never holds it,
+while that process's own `session_id` is an unsigned statement it fills in, and Dispatch's record
+page renders the two under separate headings (`packages/dispatch/AGENTS.md`,
+`features/credentials/`). A pod's `peer` claim is refused at `POST /v1/requests`
+(`requests.Machine.Create`, `400 REQUEST_INVALID`): a pod has no helper, so such a claim can only
+be a value something in the pod chose. `GET /v1/credential-requests/{id}` answers the claim as
+`peer` (null for a machine login, for a request no helper signed, and for every record made
+before the claim existed), decoded from the stored request object at read time, so no column and
+no migration carries it.
+
 The machine login is an OAuth 2.0 device authorization grant on the broker's own endpoints
 (`helper.Broker.Login`, client id `agent-secrets-helper`): a fresh P-256 key signs a
 `launcher_credential` request object naming the host and the operator file's login as
@@ -4878,9 +4906,11 @@ enforces the requester's signed request object end to end (single ES256 JWS, `ty
 `agent-secrets-request+jwt` — disjoint from the per-call proof's `agent-secrets-proof+jwt`, each
 verifier refusing the other's — embedded P-256 JWK, `iss` equal to that JWK's own thumbprint, `aud`
 equal to `BROKER_PUBLIC_URL`, `iat`/`exp` within skew and a 600-second cap, a `reason` of at most
-400 runes with bidi/zero-width categories refused, and `authorization_details` either every entry
+400 runes with bidi/zero-width categories refused, `authorization_details` either every entry
 `agent_secret` or exactly one `launcher_credential` entry naming a valid hostname and an optional
-`[a-z0-9-]{1,64}` service).
+`[a-z0-9-]{1,64}` service, and a `peer` claim, when there is one, whose pid is positive, whose
+executable and working directory are absolute paths, whose three strings are at most 4096 bytes
+with the same rune categories refused, and whose `read_at` is at or after its `started_at`).
 `Body.ApproverLogin(kind, service, login)` (`record.MayDecide`) is the one approver comparison. A
 record's approver is resolved when the record is created (a secret's owner, `anyone` for a shared
 human-tier secret, a person's machine login's `login_hint`, which is never `anyone`, or `anyone` for

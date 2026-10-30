@@ -161,3 +161,31 @@ test("a pending service login from before token logins offers Deny alone, which 
     denyCredentialRecord.mockRestore();
   }
 });
+
+// A machine login has no asking process the helper read through a pinned handle: the page shows
+// the facts it always did, says nothing about a kernel, and still says what the login claims.
+test("a machine login renders its facts with no kernel group", async () => {
+  const lookupMachineCredential = spyOn(api, "lookupMachineCredential").mockResolvedValue(
+    machineRecord()
+  );
+
+  try {
+    renderPage();
+
+    fireEvent.change(screen.getByLabelText("Code shown on the machine"), {
+      target: { value: "abcd1234" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Look up" }));
+
+    expect(await screen.findByText("worker-7.example.com")).toBeDefined();
+    expect(screen.getByText("Machine login")).toBeDefined();
+    expect(screen.queryByText("What the kernel says about the asking process")).toBeNull();
+    expect(screen.queryByText("Process ID")).toBeNull();
+    expect(screen.queryByText("Control group")).toBeNull();
+    expect(screen.getByText("What the process says about itself")).toBeDefined();
+    expect(screen.getByText("No session named.")).toBeDefined();
+  } finally {
+    cleanup();
+    lookupMachineCredential.mockRestore();
+  }
+});

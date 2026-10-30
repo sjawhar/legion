@@ -295,11 +295,20 @@ func (s *Server) sign(peer *Peer, pid int, method, url string) Response {
 // audience is always s.Broker.URL, never a value the peer supplies: a request object's aud claim
 // must be the broker's own public URL for the broker to accept it, and there is no reason to trust
 // an untrusted local peer's opinion of that value over the helper's own configuration.
+//
+// It also signs what the kernel answers about the asking process (Peer.Facts), read here because
+// this is the last point at which the pin is still held: resolveDescendant closes the pidfd. The
+// approval page renders those answers as the kernel's, beside the session id the process states
+// for itself, which nothing checks. A process the kernel can no longer be asked about is signed
+// for without them, with a WARN line naming why, rather than refused: by then the process has
+// gone, which resolveDescendant's own re-read of the handle refuses a moment later for every
+// request that matters, and a record without the claim renders no kernel facts at all.
 func (s *Server) signRequest(peer *Peer, pid int, names []string, reason string, lifetimeSeconds *int) Response {
 	if len(names) == 0 {
 		peer.Close()
 		return Response{Code: CodeBadRequest, Error: "sign-request needs at least one secret name"}
 	}
+	facts, factsErr := peer.Facts(time.Now)
 	sess, resp, ok := s.resolveDescendant(peer, pid, fmt.Sprintf("pid %d is not inside a registered machine session; a session root is started with `agent-secrets register --exec -- <agent argv>`", pid))
 	if !ok {
 		return resp
@@ -311,7 +320,14 @@ func (s *Server) signRequest(peer *Peer, pid int, names []string, reason string,
 	for i, name := range names {
 		details[i] = record.AuthorizationDetail{Type: record.KindAgentSecret, Identifier: name, Actions: []string{"inject"}}
 	}
-	compact, err := record.Sign(sess.Key, s.Broker.URL, details, reason, "", lifetimeSeconds, time.Now())
+	var opts []record.SignOption
+	if factsErr != nil {
+		s.Log.Warn("the kernel's facts about the asking process could not be read; its request will name none",
+			"pid", pid, "error", factsErr)
+	} else {
+		opts = append(opts, record.WithPeerFacts(facts.Claim()))
+	}
+	compact, err := record.Sign(sess.Key, s.Broker.URL, details, reason, "", lifetimeSeconds, time.Now(), opts...)
 	if err != nil {
 		return Response{Code: CodeSign, Error: err.Error()}
 	}

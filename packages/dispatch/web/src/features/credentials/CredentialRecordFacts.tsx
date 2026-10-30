@@ -38,6 +38,23 @@ function formatLifetime(seconds: number | null): string {
  *  and a service's machine login. */
 const ANYONE_APPROVER = "anyone";
 
+/** The three group headings' ids, which their `<section>`s name, so each group is a landmark a
+ *  reader (and a screen reader) can tell from the others. */
+const BROKER_HEADING_ID = "credential-broker-facts-heading";
+const KERNEL_HEADING_ID = "credential-kernel-facts-heading";
+const CLAIMED_HEADING_ID = "credential-claimed-facts-heading";
+
+/** An absolute UTC instant ("2026-10-30 23:04:11Z"), the one place this page formats one: a
+ *  kernel fact is read at a moment, and a relative "4 minutes ago" would not say which. An
+ *  unparseable string is shown as the broker wrote it. */
+function utcInstant(at: string): string {
+  const date = new Date(at);
+  if (Number.isNaN(date.getTime())) {
+    return at;
+  }
+  return `${date.toISOString().slice(0, 19).replace("T", " ")}Z`;
+}
+
 /** One label and value; the value wraps inside its grid cell, so a 64-hex policy version or a long
  *  host name never runs into the fact beside it or widens a narrow page. */
 function Fact({ children, label }: { children: ReactNode; label: string }): ReactNode {
@@ -50,15 +67,34 @@ function Fact({ children, label }: { children: ReactNode; label: string }): Reac
 }
 
 /**
- * The broker's facts about a credential record, then the agent's stated reason as plain text
- * (no markdown pipeline - a `<blockquote>` with `whitespace-pre-wrap` renders it verbatim), then,
- * for a pending machine (`launcher_credential`) record, the sentence explaining what approving it
- * grants: a person's machine starts agent sessions as them. A service (the Legion daemon) logs in
- * with its own Kubernetes token, which no person approves, so a pending service login a broker
- * opened before that is one the broker refuses to approve, and the sentence says so. A pod
- * enrollment's slot (`implementer-g3`) is its own fact, since several slots of one pod share the
- * same enrollment line. Shared by `CredentialRecordPage` and `MachineLoginPage`, which both show
- * this same layout before their own (page-specific) decision/action controls.
+ * A credential record's facts in three groups, each a `<section>` under its own heading, so the
+ * reader reads where a value came from and not only where it sits.
+ *
+ * **What the broker recorded**: kind, identifiers, enrollment, a pod enrollment's slot when it
+ * has one, lifetime, requested/expiry timestamps, policy version, approver - the broker's
+ * `anyone`, which a shared secret's request and a service's machine login name, reads "Anyone
+ * signed in to Dispatch".
+ *
+ * **What the kernel says about the asking process**, only when the broker answered a `peer`: the
+ * executable, working directory, start and cgroup the agent-secrets helper read from the kernel
+ * through the pidfd it pinned on its own socket, with the instant it read them. Its sentence
+ * says what the broker checked - the session's key signed them, and on a machine session the
+ * helper runs, the asking process never holds that key. The read moment and the process's start
+ * are absolute UTC instants, since "4 minutes ago" would not say which moment was read. A
+ * machine login, a pod (whose claim the broker refuses) and every record from before the field
+ * answer no peer, and this group then renders nothing at all.
+ *
+ * **What the process says about itself**, always: its session, the same resolution the Inbox
+ * row's own line uses, under a sentence saying nothing checked it.
+ *
+ * After the groups: the agent's stated reason as plain text (no markdown pipeline - a
+ * `<blockquote>` with `whitespace-pre-wrap` renders it verbatim), then, for a pending machine
+ * (`launcher_credential`) record, the sentence explaining what approving it grants: a person's
+ * machine starts agent sessions as them. A service (the Legion daemon) logs in with its own
+ * Kubernetes token, which no person approves, so a pending service login a broker opened before
+ * that is one the broker refuses to approve, and the sentence says so. Shared by
+ * `CredentialRecordPage` and `MachineLoginPage`, which both show this same layout before their
+ * own (page-specific) decision/action controls.
  */
 export function CredentialRecordFacts({ record }: { record: CredentialRecord }): ReactNode {
   const { agents, isError, isPending } = useAgents(
@@ -67,39 +103,79 @@ export function CredentialRecordFacts({ record }: { record: CredentialRecord }):
   );
   return (
     <div className="space-y-4">
-      <dl className="grid grid-cols-2 gap-3 text-sm">
-        <Fact label="Kind">
-          {record.kind === "launcher_credential" ? "Machine login" : "Secret request"}
-        </Fact>
-        <Fact label="Identifiers">{record.identifiers.join(", ")}</Fact>
-        <Fact label="Enrollment">
-          {record.enrollment === null
-            ? "—"
-            : `${record.enrollment.kind} · ${record.enrollment.runtime_id} · ${record.enrollment.operator || "—"}`}
-        </Fact>
-        {record.enrollment?.slot ? <Fact label="Worker slot">{record.enrollment.slot}</Fact> : null}
-        <Fact label="Session">
-          <div className="flex flex-col gap-1">
-            <CredentialSessionLines
-              agents={agents}
-              isError={isError}
-              isPending={isPending}
-              session={record.session}
-            />
-          </div>
-        </Fact>
-        <Fact label="Lifetime">{formatLifetime(record.lifetime_seconds)}</Fact>
-        <Fact label="Requested">
-          <Timestamp at={record.requested_at} />
-        </Fact>
-        <Fact label="Expires">
-          <Timestamp at={record.expires_at} />
-        </Fact>
-        <Fact label="Policy version">{record.rules_version}</Fact>
-        <Fact label="Approver">
-          {record.approver === ANYONE_APPROVER ? "Anyone signed in to Dispatch" : record.approver}
-        </Fact>
-      </dl>
+      <section aria-labelledby={BROKER_HEADING_ID}>
+        <h2 className={`text-sm font-semibold ${textMutedOnCanvas}`} id={BROKER_HEADING_ID}>
+          What the broker recorded
+        </h2>
+        <dl className="mt-2 grid grid-cols-2 gap-3 text-sm">
+          <Fact label="Kind">
+            {record.kind === "launcher_credential" ? "Machine login" : "Secret request"}
+          </Fact>
+          <Fact label="Identifiers">{record.identifiers.join(", ")}</Fact>
+          <Fact label="Enrollment">
+            {record.enrollment === null
+              ? "—"
+              : `${record.enrollment.kind} · ${record.enrollment.runtime_id} · ${record.enrollment.operator || "—"}`}
+          </Fact>
+          {record.enrollment?.slot ? (
+            <Fact label="Worker slot">{record.enrollment.slot}</Fact>
+          ) : null}
+          <Fact label="Lifetime">{formatLifetime(record.lifetime_seconds)}</Fact>
+          <Fact label="Requested">
+            <Timestamp at={record.requested_at} />
+          </Fact>
+          <Fact label="Expires">
+            <Timestamp at={record.expires_at} />
+          </Fact>
+          <Fact label="Policy version">{record.rules_version}</Fact>
+          <Fact label="Approver">
+            {record.approver === ANYONE_APPROVER ? "Anyone signed in to Dispatch" : record.approver}
+          </Fact>
+        </dl>
+      </section>
+      {record.peer ? (
+        <section aria-labelledby={KERNEL_HEADING_ID}>
+          <h2 className={`text-sm font-semibold ${textMutedOnCanvas}`} id={KERNEL_HEADING_ID}>
+            What the kernel says about the asking process
+          </h2>
+          <p className={`mt-1 text-xs ${textMutedOnCanvas}`}>
+            {`Read from the kernel through the handle the agent-secrets helper pinned, at ${utcInstant(record.peer.read_at)}, and signed with the session's key. On a machine session the helper runs, the asking process never holds that key.`}
+          </p>
+          <dl className="mt-2 grid grid-cols-2 gap-3 text-sm">
+            <Fact label="Process ID">{record.peer.pid}</Fact>
+            <Fact label="Executable">
+              <span className="[overflow-wrap:anywhere]">{record.peer.executable}</span>
+            </Fact>
+            <Fact label="Working directory">
+              <span className="[overflow-wrap:anywhere]">{record.peer.working_dir}</span>
+            </Fact>
+            <Fact label="Started">{utcInstant(record.peer.started_at)}</Fact>
+            <Fact label="Control group">
+              <span className="[overflow-wrap:anywhere]">{record.peer.cgroup}</span>
+            </Fact>
+          </dl>
+        </section>
+      ) : null}
+      <section aria-labelledby={CLAIMED_HEADING_ID}>
+        <h2 className={`text-sm font-semibold ${textMutedOnCanvas}`} id={CLAIMED_HEADING_ID}>
+          What the process says about itself
+        </h2>
+        <p className={`mt-1 text-xs ${textMutedOnCanvas}`}>
+          Nothing checked these. The asking process, or the launcher that started it, chose them.
+        </p>
+        <dl className="mt-2 grid grid-cols-2 gap-3 text-sm">
+          <Fact label="Session">
+            <div className="flex flex-col gap-1">
+              <CredentialSessionLines
+                agents={agents}
+                isError={isError}
+                isPending={isPending}
+                session={record.session}
+              />
+            </div>
+          </Fact>
+        </dl>
+      </section>
       {record.reason === "" ? null : (
         <div>
           <h2 className={`text-sm font-semibold ${textMutedOnCanvas}`}>

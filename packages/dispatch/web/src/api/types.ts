@@ -258,6 +258,21 @@ export interface CredentialDecisionEvent {
   at: string;
   credential_id: string | null;
 }
+/** What the kernel says about the process that asked for the credential, read by the
+ *  agent-secrets helper through the pidfd it pinned on its own unix socket when that process
+ *  connected: every value is the kernel's answer about that one pinned process, not a value the
+ *  process stated, and the handle names one process incarnation that nothing can swap behind it.
+ *  Every string is verbatim from the kernel. `started_at` is when the kernel says the process
+ *  started; `read_at` is when the helper read these facts through that pinned handle. */
+export interface CredentialPeerFacts {
+  pid: number;
+  executable: string;
+  working_dir: string;
+  cgroup: string;
+  started_at: string;
+  read_at: string;
+}
+
 export interface CredentialRecord {
   record_id: string;
   kind: CredentialRequestKind;
@@ -275,6 +290,9 @@ export interface CredentialRecord {
   requested_at: string;
   decided: CredentialDecisionEvent | null;
   session?: CredentialSession;
+  /** Absent or null for every record whose helper read no peer: a machine login, a pod or box
+   *  enrollment, and every record the broker made before this field existed. */
+  peer?: CredentialPeerFacts | null;
 }
 
 export interface CredentialApproval {
