@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-607",
-  "completed": "2026-10-30T08:10:00Z",
+  "completed": "2026-10-30T11:05:00Z",
   "proof": [
+    {
+      "criterion": "Forward merge of main b260b0c7 (no rebase) keeps the PR's own diff byte-identical: one conflict in cmd/dispatch/main.go resolved with the branch's loop starts and main's dispatchHandler metrics argument; no new migration on main; connection count unchanged",
+      "surface": "jj diff fingerprints, go build/vet in packages/envoy, go test on the real Postgres 16 (UTF8) at the merge head; diff-check comment on the PR",
+      "command": "$TMPDIR/infra607/fp.sh at f6aae9ba and 98b5c5ff; cd packages/envoy && go build ./... && go vet ./... && go vet -tags multiprocess ./cmd/dispatch/ && go test -p 2 -parallel 4 -count=1 -timeout 30m ./cmd/dispatch/, ./internal/dispatch/redeliver/, ./internal/bus/ one at a time",
+      "observed": "plain e41e3f962c3c and normalised 6fa0b746c92d at both heads (byte-identical PR diff); migrations stay 0148-0154 after main's 0147; ConnectionsPerProcess 88 = dispatchConnectionsPerPod; vet clean; cmd/dispatch 278 s, redeliver 19 s, bus 335 s all ok. PR comment 6520734737.",
+      "headSha": "98b5c5ffb297a08d49da7cfa0c4c531b7d06a35d",
+      "negativeControl": "main's side of the conflict still started RunSuggestionOutcomeSweep with SuggestionSweepInterval, leases and ResumeDeliveries, a signature this branch removed; keeping it would not compile (go build fails on the removed parameters), and the resolution keeps the branch's calls with only main's met argument added"
+    },
     {
       "criterion": "Forward merge of main a21100c5 (no rebase) keeps the PR's own diff: one text-only conflict in .dispatch/architecture/dispatch-api.md resolved with both sides kept, migrations renumbered past main's 0147, connection count re-derived",
       "surface": "jj diff fingerprints, go build/vet in packages/envoy and packages/envoy/infra, go test on a real Postgres 16 (pgserver, UTF8) at the merge head; diff-check comment on the PR",
@@ -14,6 +22,7 @@
     }
   ],
   "filesChanged": [
+    "98b5c5ff (forward merge of main b260b0c7): cmd/dispatch/main.go conflict (branch's RunSuggestionOutcomeSweep/RunMaintenanceSweep starts, main's dispatchHandler(routesHandler, met, ...))",
     "f6aae9ba (forward merge of main a21100c5): .dispatch/architecture/dispatch-api.md conflict (branch depends_on, main's paths and first paragraph, then the branch's paragraph); branch migrations renamed 0145-0151 -> 0148-0154 with every branch-only reference; the renumber learning keeps its historical numbers"
   ],
   "trickyParts": [
