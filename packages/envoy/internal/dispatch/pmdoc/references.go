@@ -18,15 +18,10 @@ func decodeMarkdownText(value []byte) string {
 	return decoded
 }
 
-// decodeMarkdownTextOffsets is decodeMarkdownText's text of value, and the offset in value each of
-// its offsets, and its end, begins at, -1 inside what one escape or character reference decodes
-// to; the offsets are nil where value holds no backslash and no `&`, so that each is its own.
-func decodeMarkdownTextOffsets(value []byte) (string, []int32) {
-	return decodeMarkdown(value, true)
-}
-
-// decodeMarkdown is decodeMarkdownText's text of value, with decodeMarkdownTextOffsets' offsets
-// where withOffsets.
+// decodeMarkdown is decodeMarkdownText's text of value, and where withOffsets the offset in value
+// each of its offsets, and its end, begins at, -1 inside what one escape or character reference
+// decodes to; the offsets are nil where value holds no backslash and no `&`, so that each is its
+// own.
 func decodeMarkdown(value []byte, withOffsets bool) (string, []int32) {
 	if !bytes.ContainsAny(value, "\\&") {
 		return string(value), nil

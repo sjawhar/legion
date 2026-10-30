@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { askgateStore, MARKER_MAX_AGE_MS, processStart } from "../askgate-marker";
 import { adviceMemory, resetAdviceMemory } from "../dispatch-execute";
 import { forgetShownPictures, shownPictures } from "../dispatch-picture-tools";
+import { sessionDirectory } from "../dispatch-session-directory";
 import {
   appendResult,
   loadSessionMemory,
@@ -23,7 +24,6 @@ import {
   recordOutcome,
   resultsEnd,
   saveSessionMemory,
-  sessionDirectory,
   writePicture,
 } from "../dispatch-session-state";
 
@@ -43,10 +43,6 @@ describe("per-session state", () => {
     expect(adviceMemory().has("triage:LEGION-2")).toBe(true);
     expect(shownPictures("s1").has("dispatch://LEGION-2/artifact/a@v1")).toBe(true);
     expect(follows.has("ask-1")).toBe(true);
-  });
-
-  test("a session id that could leave the state directory is refused", () => {
-    expect(() => sessionDirectory({ DISPATCH_STATE_DIR: root() }, "../x")).toThrow();
   });
 
   test("the ledger returns only what was appended after an offset", () => {

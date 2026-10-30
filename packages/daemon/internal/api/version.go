@@ -408,7 +408,26 @@ package api
 // turn; main landed each of those numbers first, the controller start command last at 41, so this
 // branch takes the number above them, as the collision note says.)
 //
-// 43: INFRA-484 -- the update round, which replaces a pod only once the work on it is pushed.
+// 43: api.State gains `consumers`, the lag of the daemon's three durable consumers
+// (api.ConsumerLagView), read from NATS after the state's transaction commits: each consumer's
+// `name`, `waiting` (JetStream's NumPending plus NumAckPending), `oldestAt` and
+// `oldestAgeSeconds` (the stream time of the first message after its ack floor on one of its
+// filter subjects, and that message's age in whole seconds; both null when nothing waits or the
+// message could not be read), `lastHandledAt` (when the daemon last acknowledged one of its
+// messages or terminated one as poison, null before the first; a nak is not handled), `stalled`
+// (messages waiting and none handled for 60 seconds, counted from the consumer's open before the
+// first) and `unavailable` (what NATS did not answer within the read's 2-second bound or refused,
+// absent when every read answered: a failed CONSUMER.INFO leaves `waiting` 0 and `stalled` false,
+// a failed STREAM.MSG.GET only the oldest null). Never null, so a 42 plugin's strict reader
+// refuses the state, and the boot gate and `legion probe-image` refuse the mixed pair. The state's
+// `repositories` gains `withoutWebhookApp` in the same contract: each served repository, as
+// Dispatch maps it, that Dispatch's GitHub App (the one GitHub sends its webhook events through)
+// is not known to be installed on, `{repo, reason}` sorted by repo, the reason naming whether the
+// App is not installed, the check failed, or Dispatch does not answer the check; never null, and
+// the repository is served all the same. (This branch took 41, then 42; 42 is declared by main's
+// stalled-worker reminder, so this change takes the number above it, as the collision note says.)
+//
+// 44: INFRA-484 -- the update round, which replaces a pod only once the work on it is pushed.
 // `POST /legion/v1/claims/ready-for-update` is a new claim route in the shape of `claims/ready`
 // (`claim.ReadyForUpdateRequest`: `claimToken`, `sessionId`, `secret`, `generation`, and an
 // optional `head`), answering 204: it is the worker's answer to the update task — everything it
@@ -421,8 +440,10 @@ package api
 // the head its worker reported when it answered — `updateRound` and `updateHead`, both absent
 // when there is none — on the state's claims (`api.ClaimView`) and on the operator's
 // (`api.OperatorClaim`), which `packages/contracts/src/legion-api.ts` mirrors; a strict reader
-// before 43 refuses a state carrying either. `legion.yaml` gains `pod_update_retask_hours` and
+// before 44 refuses a state carrying either. `legion.yaml` gains `pod_update_retask_hours` and
 // `pod_update_notice_hours`, which the settings carry as the two numbers they are. A plugin
-// before 43 has no op to signal with, so its pod's round would never end, and a daemon before 43
-// answers that op's post a 404; the boot gate and `legion probe-image` refuse either pair.
-const DaemonAPIVersion = 43
+// before 44 has no op to signal with, so its pod's round would never end, and a daemon before 44
+// answers that op's post a 404; the boot gate and `legion probe-image` refuse either pair. (This
+// branch took 43 while main's consumer lag was unmerged; main landed 43 first, so this change
+// takes the number above it, as the collision note says.)
+const DaemonAPIVersion = 44

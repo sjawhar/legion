@@ -785,6 +785,87 @@ test("the state golden carries the daemon's settings with no credential, and the
   expect(text).not.toMatch(/:\/\/[^/@\s]+:[^/@\s]+@/);
 });
 
+// The lag of the daemon's durable consumers (contract 43): the golden carries a caught-up consumer,
+// one whose info NATS did not answer and one stalled with messages waiting; a state with no
+// workflow carries an empty list; the oldest and the last handled are null rather than absent, an
+// unknown field and a negative count are refused, and the list cannot be dropped: a plugin from
+// before the field refuses the state, which is what the bump is for.
+test("the state golden carries each durable consumer's lag, and the list cannot be dropped", () => {
+  const state = LegionStateResponse.parse(fixture("state.json"));
+  expect(state.consumers).toEqual([
+    {
+      name: "legion-go-LEGION-dispatch",
+      waiting: 0,
+      oldestAt: null,
+      oldestAgeSeconds: null,
+      lastHandledAt: "2026-09-22T09:17:50Z",
+      stalled: false,
+    },
+    {
+      name: "legion-go-LEGION-dispatch-server",
+      waiting: 0,
+      oldestAt: null,
+      oldestAgeSeconds: null,
+      lastHandledAt: null,
+      stalled: false,
+      unavailable: "read the consumer's info: context deadline exceeded",
+    },
+    {
+      name: "legion-go-LEGION-github",
+      waiting: 412,
+      oldestAt: "2026-09-22T09:05:34Z",
+      oldestAgeSeconds: 754,
+      lastHandledAt: "2026-09-22T09:16:41Z",
+      stalled: true,
+    },
+  ]);
+  expect(LegionStateResponse.parse(fixture("state-stage3.json")).consumers).toEqual([]);
+
+  const absent = fixture("state.json") as { consumers: Record<string, unknown>[] };
+  delete absent.consumers[0]?.oldestAt;
+  expect(LegionStateResponse.safeParse(absent).success).toBeFalse();
+
+  const unknown = fixture("state.json") as { consumers: Record<string, unknown>[] };
+  unknown.consumers = [{ ...unknown.consumers[0], pending: 3 }];
+  expect(LegionStateResponse.safeParse(unknown).success).toBeFalse();
+
+  const negative = fixture("state.json") as { consumers: Record<string, unknown>[] };
+  negative.consumers = [{ ...negative.consumers[0], waiting: -1 }];
+  expect(LegionStateResponse.safeParse(negative).success).toBeFalse();
+
+  const dropped = fixture("state.json") as Record<string, unknown>;
+  delete dropped.consumers;
+  expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
+});
+
+// Each served repository Dispatch's GitHub App is not known to be installed on (contract 43): the
+// golden carries one with its reason, a state with none carries an empty list, an entry without
+// its reason is refused, and the list cannot be dropped: a plugin from before the field refuses
+// the state.
+test("the state golden names each served repository without the webhook App, and the list cannot be dropped", () => {
+  const state = LegionStateResponse.parse(fixture("state.json"));
+  expect(state.repositories.withoutWebhookApp).toEqual([
+    {
+      repo: "zeta/tools",
+      reason:
+        "Dispatch's GitHub App is not installed on zeta/tools: GitHub sends Legion none of its events and nothing redelivers them; the pass heals its pull requests every 2 minutes",
+    },
+  ]);
+  expect(
+    LegionStateResponse.parse(fixture("state-stage3.json")).repositories.withoutWebhookApp
+  ).toEqual([]);
+
+  const reasonless = fixture("state.json") as {
+    repositories: { withoutWebhookApp: Record<string, unknown>[] };
+  };
+  delete reasonless.repositories.withoutWebhookApp[0]?.reason;
+  expect(LegionStateResponse.safeParse(reasonless).success).toBeFalse();
+
+  const dropped = fixture("state.json") as { repositories: Record<string, unknown> };
+  delete dropped.repositories.withoutWebhookApp;
+  expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
+});
+
 // An operator spawns a claim on an issue no workflow records — `legion claims spawn`, which is
 // Stage 2's shape and the merge-queue holder's in production — and state lists that issue for the
 // claim's sake. The document parsed here is the one a live daemon served with such a claim on it:

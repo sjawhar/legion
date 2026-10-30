@@ -2719,9 +2719,13 @@ connection authenticates as. That user's grants, which `legion-pane` does not ho
 the connection uses: publish `$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS`,
 `$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.>`, `$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.>`,
 `$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` and `$JS.ACK.ENVOY_NOTIFICATIONS.>` (which its
-two durable consumers, `legion-go-<project>-dispatch` and `legion-go-<project>-github`, use, though
-the trailing `>` reaches every consumer of the stream, each host's listener consumer included, and
-lets the seed create a push consumer that delivers stream messages to any subject), and
+three durable consumers, `legion-go-<project>-dispatch`, `legion-go-<project>-dispatch-server` and
+`legion-go-<project>-github`, use, though the trailing `>` reaches every consumer of the stream,
+each host's listener consumer included, and lets the seed create a push consumer that delivers
+stream messages to any subject), `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS` (the stored-message
+get `legion state` reads each consumer's oldest waiting message with; without it the state's
+`consumers` show `unavailable: read the oldest waiting message: context deadline exceeded` on each
+consumer with messages waiting, its waiting count still shown), and
 subscribe `notifications.envoy.exceptions.notifications.role.>` and `_INBOX.>` (which receives
 every reply any client on the server gets, key-value reads and watch updates included, such as
 the listener's `envoy_roles` and `envoy_sessions` watchers). It publishes on no core
@@ -2730,7 +2734,11 @@ over the worker stream, so the Go daemon needs no `legion.ctl` grant. These subj
 live: a server granting exactly them logged no refusal across a boot creating both durables, a
 restart onto the existing ones, Dispatch and GitHub events acknowledged and a poison message
 terminated, and its trace showed no other API subject (no `$JS.API.INFO`, no
-`CONSUMER.DURABLE.CREATE`, which the TypeScript daemon uses instead). It is read by the same rule
+`CONSUMER.DURABLE.CREATE`, which the TypeScript daemon uses instead); the daemon's permission test
+(`internal/daemon/nats_permissions_test.go`) reads the consumers' lag under the same grant and
+expects no refusal. The stored-message get reaches a deployment with the envoy-infra release that
+carries it: until then the daemon runs as before, and only the lag's oldest message is
+`unavailable`. The daemon's seed is read by the same rule
 and refusals as the pane seed, the
 group-readable mount included, and neither seed falls back to the other: an unusable
 daemon seed refuses boot even beside a good pane seed. Unset, the daemon connects as the pane

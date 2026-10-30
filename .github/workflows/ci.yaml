@@ -22,11 +22,12 @@ name: CI
 # here (`cache: false` on every step). The jobs that cache Go restore one of five families with
 # actions/cache/restore: go-daemon (typecheck, test and pi-legion), go-docs (docs, and the build job
 # of docs-pages.yaml, which saves it), go-envoy (envoy-e2e-local and envoy-session-stall, which
-# build the same listener and natsd, and dispatch-browser-multiprocess, which saves none),
-# go-envoy-infra (envoy-infra-go) and go-notices (lint's notices step). Each family keeps one entry,
-# keyed on the Go version its job's setup-go installed, so it is refreshed only when Go is bumped. A
-# go.sum change downloads only the changed modules, and Go's build cache is content-addressed, so a
-# stale entry costs a run only what changed; a key on the go.sum files left a whole entry, up to a
+# build the same listener and natsd, listener-server-change, which builds the listener, and
+# dispatch-browser-multiprocess and envoy-go-race-docs, which save none), go-envoy-infra
+# (envoy-infra-go) and go-notices (lint's notices step). Each family keeps one entry, keyed on the
+# Go version its job's setup-go installed, so it is refreshed only when Go is bumped. A go.sum
+# change downloads only the changed modules, and Go's build cache is content-addressed, so a stale
+# entry costs a run only what changed; a key on the go.sum files left a whole entry, up to a
 # gigabyte, per change for seven days. Only a run off main falls back, when the exact key misses, to
 # the family's newest entry by its prefix; a run on main restores by the exact key only, so the
 # entry it saves after a Go bump holds nothing the older Go built. Each family is saved with
@@ -94,6 +95,7 @@ jobs:
       envoy_go: ${{ steps.filter.outputs.envoy_go }}
       envoy_infra_go: ${{ steps.filter.outputs.envoy_infra_go }}
       envoy_go_race: ${{ steps.filter.outputs.envoy_go_race }}
+      envoy_go_race_docs: ${{ steps.filter.outputs.envoy_go_race_docs }}
       dispatch_memory: ${{ steps.filter.outputs.dispatch_memory }}
       dispatch_multiprocess: ${{ steps.filter.outputs.dispatch_multiprocess }}
       listener_server_change: ${{ steps.filter.outputs.listener_server_change }}
@@ -233,6 +235,7 @@ jobs:
               - 'packages/envoy/internal/dispatch/githubapi/*'
               - 'packages/envoy/internal/dispatch/githubapp/*'
               - 'packages/envoy/internal/dispatch/identity/*'
+              - 'packages/envoy/internal/dispatch/itemblocks/*'
               - 'packages/envoy/internal/dispatch/model/*'
               - 'packages/envoy/internal/dispatch/outbox/*'
               - 'packages/envoy/internal/dispatch/pmdoc/**'
@@ -242,12 +245,14 @@ jobs:
               - 'packages/envoy/internal/dispatch/refs/*'
               - 'packages/envoy/internal/dispatch/retry/*'
               - 'packages/envoy/internal/dispatch/routes/*'
+              - 'packages/envoy/internal/dispatch/sessionanswers/*'
               - 'packages/envoy/internal/dispatch/startup/*'
               - 'packages/envoy/internal/dispatch/store/*'
               - 'packages/envoy/internal/dispatch/store/migrations/**'
               - 'packages/envoy/internal/dispatch/text/*'
               - 'packages/envoy/internal/githubappjwt/*'
               - 'packages/envoy/internal/id/*'
+              - 'packages/envoy/internal/metrics/*'
               - 'packages/envoy/internal/oidc/*'
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
@@ -350,6 +355,7 @@ jobs:
               - 'packages/envoy/internal/githubappjwt/*'
               - 'packages/envoy/internal/id/*'
               - 'packages/envoy/internal/logtest/*'
+              - 'packages/envoy/internal/metrics/*'
               - 'packages/envoy/internal/oidc/**'
               - 'packages/envoy/internal/pglisten/*'
               - 'packages/envoy/internal/pgmigrate/*'
@@ -419,6 +425,10 @@ jobs:
               # check-built, and the job puts it in place with release-push.sh extract-built.
               - '.github/scripts/check-private-names.sh'
               - '.github/scripts/release-push.sh'
+              # tests/answers-claude.test.ts runs the Claude Code release .claude-code-pin pins,
+              # which install-claude-code installs.
+              - '.claude-code-pin'
+              - '.github/actions/install-claude-code/**'
               - 'packages/contracts/src/**'
               # tests/daemon-api-version.test.ts:15 and its neighbours.
               - 'packages/contracts/fixtures/daemon-api/**'
@@ -719,12 +729,14 @@ jobs:
               # Fixtures its Go tests read: cmd/listener/api_test.go:191,
               # internal/contracts/dedupe_test.go:14, golden_test.go:72,
               # internal/dispatch/api/delivery_live_diff_test.go:965,
-              # internal/dispatch/docs/approval_carry_test.go:26.
+              # internal/dispatch/docs/approval_carry_test.go:26,
+              # internal/cistore/settlement_fixture_test.go:56.
               - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
               - 'packages/contracts/fixtures/dedupe-keys.json'
               - 'packages/contracts/fixtures/github-envelopes/**'
               - 'packages/contracts/fixtures/delivery-live/**'
               - 'packages/contracts/fixtures/decision-blocks/**'
+              - 'packages/contracts/fixtures/checks-settlement/**'
               # The claim list its fence reads: internal/broker/oauth/claims_doc_test.go:161.
               - 'docs/kubernetes.md'
               - '.github/actions/pull-test-images/**'
@@ -760,12 +772,53 @@ jobs:
               # pmdoc's tests run pmdoc/gen, which imports the editor
               # (internal/dispatch/pmdoc/update_test.go:236-239, render_readback_test.go:32).
               - 'packages/proof-editor/**'
-              # internal/dispatch/api/delivery_live_diff_test.go:965,
-              # internal/dispatch/docs/approval_carry_test.go:26 and cmd/listener/api_test.go:191
-              # (the listener's race step).
+              # internal/dispatch/api/delivery_live_diff_test.go:965 and
+              # cmd/listener/api_test.go:191 (the listener's race step).
               - 'packages/contracts/fixtures/delivery-live/**'
-              - 'packages/contracts/fixtures/decision-blocks/**'
               - 'packages/contracts/fixtures/dispatch-targeted-delivery.json'
+            # The document service's own race job. Not packages/envoy/**, as envoy_go_race has:
+            # a race job of twenty minutes or more must not run on every change under that tree
+            # (INFRA-490). This is the closure of ./internal/dispatch/docs/ (`go list -deps -test
+            # -race`), one pattern per directory, with the testdata of each directory that has
+            # one and what those packages embed.
+            envoy_go_race_docs:
+              - '.github/workflows/ci.yaml'
+              - *go_workspace
+              - 'packages/envoy/internal/contracts/*'
+              - 'packages/envoy/internal/contracts/testdata/**'
+              - 'packages/envoy/internal/dispatch/accesslog/*'
+              - 'packages/envoy/internal/dispatch/asks/*'
+              - 'packages/envoy/internal/dispatch/auth/*'
+              - 'packages/envoy/internal/dispatch/docs/*'
+              - 'packages/envoy/internal/dispatch/docs/crafted/*'
+              - 'packages/envoy/internal/dispatch/docs/docstest/*'
+              - 'packages/envoy/internal/dispatch/duty/*'
+              - 'packages/envoy/internal/dispatch/events/*'
+              - 'packages/envoy/internal/dispatch/identity/*'
+              - 'packages/envoy/internal/dispatch/itemblocks/*'
+              - 'packages/envoy/internal/dispatch/model/*'
+              - 'packages/envoy/internal/dispatch/pmdoc/*'
+              # internal/dispatch/pmdoc embeds schema/blocks.json; history_fold_test.go:478 reads
+              # pmdoc/testdata/fixtures.json.
+              - 'packages/envoy/internal/dispatch/pmdoc/schema/**'
+              - 'packages/envoy/internal/dispatch/pmdoc/testdata/**'
+              - 'packages/envoy/internal/dispatch/refs/*'
+              - 'packages/envoy/internal/dispatch/store/*'
+              # internal/dispatch/store embeds every migration.
+              - 'packages/envoy/internal/dispatch/store/migrations/**'
+              - 'packages/envoy/internal/dispatch/store/searchtest/*'
+              - 'packages/envoy/internal/dispatch/store/storetest/*'
+              - 'packages/envoy/internal/dispatch/text/*'
+              - 'packages/envoy/internal/dispatch/text/testdata/**'
+              - 'packages/envoy/internal/explaintest/*'
+              - 'packages/envoy/internal/githubappjwt/*'
+              - 'packages/envoy/internal/logtest/*'
+              - 'packages/envoy/internal/oidc/*'
+              - 'packages/envoy/internal/pglisten/*'
+              - 'packages/envoy/internal/pgmigrate/*'
+              - 'packages/envoy/internal/stacktest/*'
+              # internal/dispatch/docs/approval_carry_test.go:26.
+              - 'packages/contracts/fixtures/decision-blocks/**'
             # `go test -tags memory ./cmd/dispatch`. memory_profile_test.go reads four guides only
             # when DISPATCH_EDIT_PROFILE_OUT is set (its line 126), which CI never sets, so they are
             # not here. cmd/dispatch/nats_unreachable_test.go, which carries no tag, starts the
@@ -811,12 +864,14 @@ jobs:
               - 'packages/envoy/internal/dispatch/files/*'
               - 'packages/envoy/internal/dispatch/githubapp/*'
               - 'packages/envoy/internal/dispatch/identity/*'
+              - 'packages/envoy/internal/dispatch/itemblocks/*'
               - 'packages/envoy/internal/dispatch/model/*'
               - 'packages/envoy/internal/dispatch/pmdoc/**'
               - 'packages/envoy/internal/dispatch/processes/*'
               - 'packages/envoy/internal/dispatch/rank/*'
               - 'packages/envoy/internal/dispatch/refs/*'
               - 'packages/envoy/internal/dispatch/retry/*'
+              - 'packages/envoy/internal/dispatch/sessionanswers/*'
               - 'packages/envoy/internal/dispatch/store/*'
               - 'packages/envoy/internal/dispatch/store/migrations/**'
               - 'packages/envoy/internal/dispatch/text/**'
@@ -2091,6 +2146,10 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
+      # tests/answers-claude.test.ts runs the pinned Claude Code against a stand-in Messages
+      # endpoint and Dispatch, and refuses on GitHub Actions without one. The pin is read from
+      # .claude-code-pin, the repository's one copy of it (.github/actions/install-claude-code).
+      - uses: ./.github/actions/install-claude-code
       - run: bun install --frozen-lockfile
       - name: Lint Claude Envoy plugin
         run: bun run lint
@@ -2250,8 +2309,10 @@ jobs:
   # workspace. Vet compiles the files behind the live-test tags (pulumilive, natslive) too. The unit
   # tests start no container; the natslive files run in a step of their own against real
   # nats-server and Postgres, on testnats.Image, testnats.HubImage and testpg.Image, pulled first
-  # for the reason .github/actions/pull-test-images gives. The per-target compile runs in the lint
-  # job's notices step.
+  # for the reason .github/actions/pull-test-images gives. The gcp natslive tests pull no image:
+  # they install helm, nats-server, the config reloader and the exporter with go install, at the
+  # versions the clustered hub runs, and render the vendored chart in gcp/testdata. The per-target
+  # compile runs in the lint job's notices step.
   envoy-infra-go:
     needs: changes
     if: needs.changes.outputs.envoy_infra_go == 'true'
@@ -2299,7 +2360,9 @@ jobs:
         run: go test ./...
         working-directory: packages/envoy/infra
       - name: Live tests of envoy-infra against nats-server (natslive)
-        run: go test -tags natslive ./core/ ./seed/
+        # gcp's live tests build helm, nats-server, the config reloader and the exporter with go
+        # install first, minutes on a cold cache, so the package gets more than go test's 10 m.
+        run: go test -timeout 30m -tags natslive ./core/ ./seed/ ./gcp/
         working-directory: packages/envoy/infra
       - if: github.event_name == 'push' && success() && steps.go-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -2309,7 +2372,7 @@ jobs:
             ~/.cache/go-build
           key: ${{ steps.go-cache.outputs.cache-primary-key }}
 
-  # The document service and the API that drives it, pmdoc (LEGION-571: its own flakes under
+  # The API that drives the document service, pmdoc (LEGION-571: its own flakes under
   # -race and load, not a race in production code, cost three review rounds because nothing ran
   # this package under -race before a PR claimed it), delivery (its intake handler reads the
   # routing settings the poll loop publishes, from NATS's delivery goroutine), store (the
@@ -2325,14 +2388,15 @@ jobs:
   # not that freshness check itself - a stale fixture is envoy-go's failure to catch, not a race.
   # delivery's and the bus's NATS runs in the test process (internal/testnats), so the job needs
   # no container runtime of its own.
+  # The document service itself runs in envoy-go-race-docs, a job of its own.
   envoy-go-race:
     needs: changes
     if: needs.changes.outputs.envoy_go_race == 'true'
     runs-on: ubuntu-24.04
     # Each race step's -timeout 30m must fire before the runner cancels the job, so a hung test
     # prints the dump that names it. The worst case that still reaches the second step: about 1
-    # minute of setup, the first step up to its own 30 minutes (880 s on main's last green run), up
-    # to 5 minutes to compile the second step's race binaries, then its 30 minutes: 66 minutes.
+    # minute of setup, the first step up to its own 30 minutes, up to 5 minutes to compile the
+    # second step's race binaries, then its 30 minutes: 66 minutes.
     timeout-minutes: 75
     services:
       postgres:
@@ -2357,15 +2421,77 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
           cache: false
-      - name: Race-test the document service, its API, pmdoc, delivery, the store, and the bus
-        run: go test -race -timeout 30m ./internal/dispatch/docs/ ./internal/dispatch/api/ ./internal/dispatch/pmdoc/... ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/
+      - name: Race-test the API, pmdoc, delivery, the store, and the bus
+        run: go test -race -timeout 30m ./internal/dispatch/api/ ./internal/dispatch/pmdoc/... ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/
         working-directory: packages/envoy
       # The listener is where the role claim watcher, the session and interest watchers and the
       # request handlers meet; the role claim view, its lock and its epoch live in the store, and
       # the watchers' completeness and rescans in kvwatch (INFRA-141). A step of its own, so its
-      # time and any race it finds are read apart from the packages above.
-      - name: Race-test the listener, the registry store and kvwatch
-        run: go test -race -timeout 30m ./cmd/listener/ ./internal/store/ ./internal/kvwatch/...
+      # time and any race it finds are read apart from the packages above. The session cache runs
+      # here too: its reads take its shared lock beside watcher writes and the expiry timer's
+      # callback, as kvwatch's resume point is read while a replaced watcher still applies.
+      - name: Race-test the listener, the registry store, the session cache and kvwatch
+        run: go test -race -timeout 30m ./cmd/listener/ ./internal/store/ ./internal/session/ ./internal/kvwatch/...
+        working-directory: packages/envoy
+
+  # The document service alone, under the race detector, with a deadline of its own. It is by far
+  # the slowest package of the race lane - 1773 s of the 1842 s the first step of envoy-go-race
+  # spent on main at 14d907b6 (job 123461966609) - and sharing a 30-minute step with the other
+  # five groups left it no headroom: that step died on go test's own deadline at job 123503246603.
+  # Its own filter is the closure of this one package, not packages/envoy/**, so a change
+  # elsewhere in the module does not start this job. No Bun: no test file here runs it, and
+  # envoy-go-race's Bun is pmdoc's. It runs under -race because a read that walks a live document
+  # without its lock races the room's peers, which no ordinary run shows
+  # (TestReadsOfALiveDocumentRunBesideItsPeers, internal/dispatch/docs/live_read_race_test.go:39,
+  # LEGION-499).
+  envoy-go-race-docs:
+    needs: changes
+    if: needs.changes.outputs.envoy_go_race_docs == 'true'
+    runs-on: ubuntu-24.04
+    # The step's -timeout 60m must fire before the runner cancels the job, so a hung test prints
+    # the dump that names it: about 1 minute of setup, up to 5 minutes to compile the race binary,
+    # then the step's own 60 minutes, which is 66 under this limit of 70.
+    timeout-minutes: 70
+    services:
+      postgres:
+        image: mirror.gcr.io/pgvector/pgvector@sha256:2358fcba361ed2233a5ed81b5fe4ca779ccb304120ce531a3bf51c0ed7e2bc11
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    # Load-bearing, not boilerplate: this package's TestMain is storetest.Main
+    # (internal/dispatch/docs/persistence_test.go:19), and storetest.Open skips every test that
+    # opens the store when DISPATCH_TEST_DATABASE_URL is unset
+    # (internal/dispatch/store/storetest/storetest.go:57-61). A skip is a pass, so without the
+    # service this job would be green having run almost nothing.
+    env:
+      DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/go.mod
+          cache: false
+      # go-envoy, restored only: its modules are the envoy module's, but this job builds the
+      # document service's race test binary, not the listener and natsd the family's saving jobs
+      # build, so it saves none.
+      - id: go-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-envoy-${{ runner.os }}-go${{ steps.setup-go.outputs.go-version }}
+          restore-keys: ${{ github.ref != 'refs/heads/main' && format('go-envoy-{0}-', runner.os) || '' }}
+      - name: Race-test the document service
+        run: go test -race -timeout 60m ./internal/dispatch/docs/
         working-directory: packages/envoy
 
   # The real-process memory tests (packages/envoy/cmd/dispatch/memory_test.go, LEGION-481): each
@@ -2850,6 +2976,7 @@ jobs:
       - envoy-go
       - envoy-infra-go
       - envoy-go-race
+      - envoy-go-race-docs
       - dispatch-memory
       - dispatch-multiprocess
       - listener-server-change
@@ -2887,6 +3014,7 @@ jobs:
               "envoy-go": "envoy_go",
               "envoy-infra-go": "envoy_infra_go",
               "envoy-go-race": "envoy_go_race",
+              "envoy-go-race-docs": "envoy_go_race_docs",
               "dispatch-memory": "dispatch_memory",
               "dispatch-multiprocess": "dispatch_multiprocess",
               "listener-server-change": "listener_server_change",

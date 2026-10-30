@@ -81,7 +81,7 @@ var commands = map[string]commandEntry{
 	"version":        {runVersion, "print the version and the commit the binary was built from"},
 	"start":          {runStart, "run the Legion daemon from legion.yaml in the foreground; --check-config validates the file and exits"},
 	"stop":           {runStop, "stop the daemon registered for legion.yaml's project"},
-	"state":          {runState, "print the daemon's state: admission, issues, pending Dispatch status writes, claims nothing will wake (--json for all of it)"},
+	"state":          {runState, "print the daemon's state: admission, issues, pending Dispatch status writes, claims nothing will wake, served repositories without Dispatch's webhook App, the durable consumers' lag (--json for all of it)"},
 	"legions":        {runLegions, "list the daemons registered on this machine"},
 	"status":         {runStatus, "say whether a team's daemon is running, or set an issue's Dispatch status"},
 	"restart":        {runRestart, "stop a registered daemon and start it again from the configuration it recorded"},
@@ -548,6 +548,12 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintln(stdout, pendingSummary(state.PendingStatusWrites))
 	fmt.Fprintln(stdout, heldSummary(state.HeldOutboxRows))
 	fmt.Fprintln(stdout, strandedSummary(state.StrandedClaims))
+	for _, line := range webhookAppLines(state.Repositories.WithoutWebhookApp) {
+		fmt.Fprintln(stdout, line)
+	}
+	for _, line := range consumerLines(state.Consumers, state.Daemon.StartedAt, time.Now()) {
+		fmt.Fprintln(stdout, line)
+	}
 	// In a pane, the issue record is what a relaunched worker re-reads.
 	if key := os.Getenv("LEGION_ISSUE"); key != "" {
 		issue, ok := state.Issues[key]
@@ -777,6 +783,64 @@ func strandedSummary(stranded []api.StrandedClaim) string {
 		}
 	}
 	return fmt.Sprintf("claims nothing will wake: %d — %s", len(stranded), strings.Join(groups, "; "))
+}
+
+// webhookAppLines are the lines an operator reads for the served repositories Dispatch's GitHub App
+// is not known to be installed on (api.RepositoriesView.WithoutWebhookApp): GitHub sends Legion no
+// event of such a repository. One line per repository with why, in the state's order; with none
+// the one line says so.
+func webhookAppLines(gaps []api.WebhookAppGapView) []string {
+	if len(gaps) == 0 {
+		return []string{"webhook App missing: none"}
+	}
+	lines := make([]string, len(gaps))
+	for i, gap := range gaps {
+		lines[i] = "webhook App missing on " + gap.Repo + ": " + gap.Reason
+	}
+	return lines
+}
+
+// consumerLines are the lines an operator reads for the daemon's durable consumers
+// (api.ConsumerLagView), one per consumer in the state's order: how many messages wait for it and
+// how old the oldest is (unknown when NATS did not give it), and, when it is stalled, how long it
+// has handled none as of now, since its last handled message or, before the first, since the daemon
+// started at startedAt; then what NATS did not answer, alone on the line when the consumer's info
+// itself could not be read, since nothing else is known then. With no consumers (a daemon with no
+// workflow) the one line says so.
+func consumerLines(consumers []api.ConsumerLagView, startedAt, now time.Time) []string {
+	if len(consumers) == 0 {
+		return []string{"durable consumers: none"}
+	}
+	lines := make([]string, len(consumers))
+	for i, consumer := range consumers {
+		line := "consumer " + consumer.Name + ": "
+		if consumer.Unavailable != "" && consumer.Waiting == 0 {
+			lines[i] = line + "unavailable: " + consumer.Unavailable
+			continue
+		}
+		switch {
+		case consumer.Waiting == 0:
+			line += "0 waiting"
+		case consumer.OldestAgeSeconds != nil:
+			line += fmt.Sprintf("%d waiting, oldest %s", consumer.Waiting, time.Duration(*consumer.OldestAgeSeconds)*time.Second)
+		default:
+			line += fmt.Sprintf("%d waiting, oldest unknown", consumer.Waiting)
+		}
+		if consumer.Stalled {
+			if consumer.LastHandledAt != nil {
+				line += fmt.Sprintf("; STALLED: none handled for %s, the last at %s",
+					now.Sub(*consumer.LastHandledAt).Truncate(time.Second), consumer.LastHandledAt.UTC().Format(time.RFC3339))
+			} else {
+				line += fmt.Sprintf("; STALLED: none handled for %s, none since the daemon started at %s",
+					now.Sub(startedAt).Truncate(time.Second), startedAt.UTC().Format(time.RFC3339))
+			}
+		}
+		if consumer.Unavailable != "" {
+			line += "; unavailable: " + consumer.Unavailable
+		}
+		lines[i] = line
+	}
+	return lines
 }
 
 // stateAddress is where a daemon answers: the configured bind and port, with --port overriding

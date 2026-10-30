@@ -81,7 +81,7 @@ var _ intake.Handler = (*Admission)(nil)
 
 // New creates an admission handler for one Dispatch project. engine is the workflow's own, shared
 // with intake's other handler: reenterStrandedChildren calls its exported ReenterChild rather than
-// keeping a second copy of the suspend-and-gate-open re-entry.
+// keeping a second copy of re-entry and gate-open behavior.
 func New(store record.Store, engine *workflow.Engine, cap int, project string, log *slog.Logger) *Admission {
 	if log == nil {
 		log = slog.Default()
@@ -334,7 +334,7 @@ func (a *Admission) slotFree(ctx context.Context, tx pgx.Tx) (bool, error) {
 	if a.cap <= 0 {
 		return false, nil
 	}
-	issues, err := a.store.Issues(ctx, tx)
+	issues, err := a.store.LiveIssues(ctx, tx, a.project)
 	if err != nil {
 		return false, fmt.Errorf("list admission issues: %w", err)
 	}
@@ -342,14 +342,15 @@ func (a *Admission) slotFree(ctx context.Context, tx pgx.Tx) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("list admission slots: %w", err)
 	}
-	rows, err := blockers.Load(ctx, tx, a.store, a.project)
+	own := ownSlots(issues, slots)
+	waiting := record.Waiting(issues, own)
+	rows, err := blockers.Load(ctx, tx, a.store, a.project, blockers.Judged(nil, waiting))
 	if err != nil {
 		return false, err
 	}
-	own := ownSlots(issues, slots)
 	taking := 0
-	for _, waiting := range record.Waiting(issues, own) {
-		if len(blockers.WaitsOn(rows, waiting)) == 0 {
+	for _, candidate := range waiting {
+		if len(blockers.WaitsOn(rows, candidate)) == 0 {
 			taking++
 		}
 	}
@@ -388,7 +389,7 @@ func (a *Admission) wakeController(ctx context.Context, tx pgx.Tx, kind record.N
 // judged from this transaction's own reads by the function the state's `blocked` is built with
 // (blockers.Blocked), so the controller is told exactly what `legion state` shows it.
 func (a *Admission) blocked(ctx context.Context, tx pgx.Tx) ([]record.BlockedIssue, error) {
-	issues, err := a.store.Issues(ctx, tx)
+	issues, err := a.store.LiveIssues(ctx, tx, a.project)
 	if err != nil {
 		return nil, fmt.Errorf("list admission issues: %w", err)
 	}
@@ -396,11 +397,12 @@ func (a *Admission) blocked(ctx context.Context, tx pgx.Tx) ([]record.BlockedIss
 	if err != nil {
 		return nil, fmt.Errorf("list admission slots: %w", err)
 	}
-	rows, err := blockers.Load(ctx, tx, a.store, a.project)
+	waiting := record.Waiting(issues, ownSlots(issues, slots))
+	rows, err := blockers.Load(ctx, tx, a.store, a.project, blockers.Judged(issues, waiting))
 	if err != nil {
 		return nil, err
 	}
-	return blockers.Blocked(rows, issues, record.Waiting(issues, ownSlots(issues, slots))), nil
+	return blockers.Blocked(rows, issues, waiting), nil
 }
 
 // Reconcile applies the bounded Dispatch boot read to existing records, then fills newly available
@@ -948,8 +950,8 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	return a.store.ClearTreeGeneration(ctx, tx, stored.Tree)
 }
 
-// releaseReturnedSlots gives back the slots of roots that no longer run workers: a completed root,
-// or one in awaiting_person, whose architect is suspended until the person answers.
+// releaseReturnedSlots gives back the slots of roots that no longer need one: a completed root or
+// one in awaiting_person, whose architect stays live while the root waits for a person.
 func (a *Admission) releaseReturnedSlots(ctx context.Context, tx pgx.Tx) ([]string, error) {
 	return a.releaseSlots(ctx, tx, "returned", releasesSlot)
 }
@@ -1024,11 +1026,13 @@ func (a *Admission) promote(ctx context.Context, tx pgx.Tx) (int, []string, erro
 // every one of them back in the very call that released them. A queued root a live tree took in
 // (adoptQueuedRoots) leaves the line before anything else reads it.
 //
-// It reads the project's mirror of what Dispatch says each issue waits on once (mirror), for two
-// judgements: the candidates it skips here, and the held children of every live tree the engine
-// starts from the same rows once the waiting line is done with (StartUnblockedChildren). Every
-// path that promotes comes through here — a live fact, the controller tick, a hold's release, the
-// boot's Reconcile — so each of them is also a look at every child a blocker holds.
+// It reads the project's live records (record.Store.LiveIssues), never the done ones a project
+// keeps for good, and the mirror of what Dispatch says the issues it judges wait on once
+// (blockers.Judged, blockers.Load), for two judgements: the candidates it skips here, and the held
+// children of every live tree the engine starts from the same rows once the waiting line is done
+// with (StartUnblockedChildren). Every path that promotes comes through here — a live fact, the
+// controller tick, a hold's release, the boot's Reconcile — so each of them is also a look at every
+// child a blocker holds.
 func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bool) (int, []string, error) {
 	issues, slots, err := a.adoptQueuedRoots(ctx, tx, respectHolds)
 	if err != nil {
@@ -1052,7 +1056,7 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 	// what follows reads them as they now stand: an answer it recorded puts its root at the front of
 	// this pass's waiting line.
 	if changed {
-		if issues, err = a.store.Issues(ctx, tx); err != nil {
+		if issues, err = a.store.LiveIssues(ctx, tx, a.project); err != nil {
 			return 0, returned, fmt.Errorf("list admission issues: %w", err)
 		}
 		if slots, err = a.store.Slots(ctx, tx); err != nil {
@@ -1067,16 +1071,17 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 		return 0, returned, nil
 	}
 	if released {
-		if issues, err = a.store.Issues(ctx, tx); err != nil {
+		if issues, err = a.store.LiveIssues(ctx, tx, a.project); err != nil {
 			return 0, returned, fmt.Errorf("list admission issues: %w", err)
 		}
 	}
-	rows, err := blockers.Load(ctx, tx, a.store, a.project)
+	own := ownSlots(issues, slots)
+	waiting := record.Waiting(issues, own)
+	judged := blockers.Judged(issues, waiting)
+	rows, err := blockers.Load(ctx, tx, a.store, a.project, judged)
 	if err != nil {
 		return 0, returned, err
 	}
-	own := ownSlots(issues, slots)
-	waiting := record.Waiting(issues, own)
 	admitted, resumed := 0, false
 	for len(own) < a.cap && len(waiting) > 0 {
 		candidate := waiting[0]
@@ -1199,11 +1204,28 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 	// and the mirror rows this call already holds. It runs here rather than in promote because
 	// release bypasses promote, and a hold's release is one of the looks every held child gets. A
 	// resume above may have started children itself (its tree's gate open), so the issues are read
-	// again first: on the snapshot such a child would still stand at admitted, and start twice.
+	// again first: on the snapshot such a child would still stand at admitted, and start twice. The
+	// rows already read stand; only an issue the re-read shows holdable that the first judgement
+	// did not name has its row read.
 	if resumed {
-		if issues, err = a.store.Issues(ctx, tx); err != nil {
+		if issues, err = a.store.LiveIssues(ctx, tx, a.project); err != nil {
 			return admitted, returned, fmt.Errorf("list admission issues: %w", err)
 		}
+		named := make(map[string]struct{}, len(judged))
+		for _, key := range judged {
+			named[key] = struct{}{}
+		}
+		var fresh []string
+		for _, key := range blockers.Judged(issues, nil) {
+			if _, ok := named[key]; !ok {
+				fresh = append(fresh, key)
+			}
+		}
+		more, err := blockers.Load(ctx, tx, a.store, a.project, fresh)
+		if err != nil {
+			return admitted, returned, err
+		}
+		maps.Copy(rows, more)
 	}
 	if err := a.engine.StartUnblockedChildren(ctx, tx, issues, rows); err != nil {
 		return admitted, returned, err

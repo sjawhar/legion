@@ -51349,5 +51349,339 @@
     },
     "yjs_update_v1_b64": "AQgBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQEM8J+YgCBiZWZvcmUghgELBnN0cm9uZw57Im1hcmtlciI6IioifYQBDAZtYXJrZWSGARIGc3Ryb25nBG51bGyEARMSIOa8ouWtlyBhbmQgY2FmZcyBKAABAAdibG9ja0lkAXcIYi0wMDAwMDEA",
     "rendered_by_milkdown": "😀 before **marked** 漢字 and café\n"
+  },
+  {
+    "name": "writer-spells-a-flanked-letter-after-a-backslash",
+    "markdown": "A letter right after a literal backslash, beside an emphasis run, is one the writer spells as a\ncharacter reference.\n\np \\~\\a*~* q\n\np \\a*~*\\* q\n\np \\*\\a*~a* q\n\np \\a*_a* q\n\nPlain a_~`c`~~www.a.com/~x\\~~\\~ end.\n\n**](u)\\~\\\\~***b***\n\n| h |\n| --- |\n| *www.a.com/~x\\~~www.a.com/~xb**~ |\n\n[^a_b]: n\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "A letter right after a literal backslash, beside an emphasis run, is one the writer spells as a character reference."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "p ~\\a"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "emphasis",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ],
+              "text": "~"
+            },
+            {
+              "type": "text",
+              "text": " q"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "p \\a"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "emphasis",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ],
+              "text": "~"
+            },
+            {
+              "type": "text",
+              "text": "* q"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000004"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "p *\\a"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "emphasis",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ],
+              "text": "~a"
+            },
+            {
+              "type": "text",
+              "text": " q"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000005"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "p \\a"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "emphasis",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ],
+              "text": "_a"
+            },
+            {
+              "type": "text",
+              "text": " q"
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000006"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Plain a_"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "inlineCode"
+                },
+                {
+                  "type": "strike_through"
+                }
+              ],
+              "text": "c"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "strike_through"
+                }
+              ],
+              "text": "~~"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "link",
+                  "attrs": {
+                    "href": "http://www.a.com/~x\\~~\\",
+                    "title": null
+                  }
+                },
+                {
+                  "type": "strike_through"
+                }
+              ],
+              "text": "www.a.com/~x\\~~\\"
+            },
+            {
+              "type": "text",
+              "text": " end."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000007"
+          },
+          "content": [
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "strong",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ],
+              "text": "](u)~\\~"
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "emphasis",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ],
+              "text": "b"
+            },
+            {
+              "type": "text",
+              "text": "**"
+            }
+          ]
+        },
+        {
+          "type": "table",
+          "attrs": {
+            "blockId": "b-000008"
+          },
+          "content": [
+            {
+              "type": "table_header_row",
+              "attrs": {
+                "blockId": "b-000009"
+              },
+              "content": [
+                {
+                  "type": "table_header",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000010"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000011"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "h"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "table_row",
+              "attrs": {
+                "blockId": "b-000012"
+              },
+              "content": [
+                {
+                  "type": "table_cell",
+                  "attrs": {
+                    "colspan": 1,
+                    "rowspan": 1,
+                    "colwidth": null,
+                    "alignment": null,
+                    "blockId": "b-000013"
+                  },
+                  "content": [
+                    {
+                      "type": "paragraph",
+                      "attrs": {
+                        "blockId": "b-000014"
+                      },
+                      "content": [
+                        {
+                          "type": "text",
+                          "text": "*"
+                        },
+                        {
+                          "type": "text",
+                          "marks": [
+                            {
+                              "type": "link",
+                              "attrs": {
+                                "href": "http://www.a.com/~x\\~~www.a.com/~xb",
+                                "title": null
+                              }
+                            }
+                          ],
+                          "text": "www.a.com/~x\\~~www.a.com/~xb"
+                        },
+                        {
+                          "type": "text",
+                          "text": "**~"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "footnote_definition",
+          "attrs": {
+            "label": "a_b",
+            "blockId": "b-000015"
+          },
+          "content": [
+            {
+              "type": "paragraph",
+              "attrs": {
+                "blockId": "b-000016"
+              },
+              "content": [
+                {
+                  "type": "text",
+                  "text": "n"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "AWEBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQF0QSBsZXR0ZXIgcmlnaHQgYWZ0ZXIgYSBsaXRlcmFsIGJhY2tzbGFzaCwgYmVzaWRlIGFuIGVtcGhhc2lzIHJ1biwgaXMgb25lIHRoZSB3cml0ZXIgc3BlbGxzIGFzIGEgY2hhcmFjdGVyIHJlZmVyZW5jZS4oAAEAB2Jsb2NrSWQBdwhiLTAwMDAwMYcBAAMJcGFyYWdyYXBoBwABdwYEAAF4BXAgflxhhgF9CGVtcGhhc2lzDnsibWFya2VyIjoiKiJ9hAF+AX6GAX8IZW1waGFzaXMEbnVsbIQBgAECIHEoAAF3B2Jsb2NrSWQBdwhiLTAwMDAwMocBdwMJcGFyYWdyYXBoBwABhAEGBAABhQEEcCBcYYYBiQEIZW1waGFzaXMOeyJtYXJrZXIiOiIqIn2EAYoBAX6GAYsBCGVtcGhhc2lzBG51bGyEAYwBAyogcSgAAYQBB2Jsb2NrSWQBdwhiLTAwMDAwM4cBhAEDCXBhcmFncmFwaAcAAZEBBgQAAZIBBXAgKlxhhgGXAQhlbXBoYXNpcw57Im1hcmtlciI6IioifYQBmAECfmGGAZoBCGVtcGhhc2lzBG51bGyEAZsBAiBxKAABkQEHYmxvY2tJZAF3CGItMDAwMDA0hwGRAQMJcGFyYWdyYXBoBwABnwEGBAABoAEEcCBcYYYBpAEIZW1waGFzaXMOeyJtYXJrZXIiOiIqIn2EAaUBAl9hhgGnAQhlbXBoYXNpcwRudWxshAGoAQIgcSgAAZ8BB2Jsb2NrSWQBdwhiLTAwMDAwNYcBnwEDCXBhcmFncmFwaAcAAawBBgQAAa0BCFBsYWluIGFfhgG1AQppbmxpbmVDb2RlAnt9hgG2AQ5zdHJpa2VfdGhyb3VnaAJ7fYQBtwEBY4YBuAEKaW5saW5lQ29kZQRudWxshgG5AQ5zdHJpa2VfdGhyb3VnaARudWxshgG6AQ5zdHJpa2VfdGhyb3VnaAJ7fYQBuwECfn6GAb0BDnN0cmlrZV90aHJvdWdoBG51bGyGAb4BBGxpbmsxeyJocmVmIjoiaHR0cDovL3d3dy5hLmNvbS9+eFxcfn5cXCIsInRpdGxlIjpudWxsfYYBvwEOc3RyaWtlX3Rocm91Z2gCe32EAcABEHd3dy5hLmNvbS9+eFx+flyGAdABBGxpbmsEbnVsbIYB0QEOc3RyaWtlX3Rocm91Z2gEbnVsbIQB0gEFIGVuZC4oAAGsAQdibG9ja0lkAXcIYi0wMDAwMDaHAawBAwlwYXJhZ3JhcGgHAAHZAQYGAAHaAQZzdHJvbmcOeyJtYXJrZXIiOiIqIn2EAdsBB10odSl+XH6GAeIBBnN0cm9uZwRudWxshgHjAQhlbXBoYXNpcw57Im1hcmtlciI6IioifYQB5AEBYoYB5QEIZW1waGFzaXMEbnVsbIQB5gECKiooAAHZAQdibG9ja0lkAXcIYi0wMDAwMDeHAdkBAwV0YWJsZQcAAeoBAxB0YWJsZV9oZWFkZXJfcm93BwAB6wEDDHRhYmxlX2hlYWRlcgcAAewBAwlwYXJhZ3JhcGgHAAHtAQYEAAHuAQFoKAAB7QEHYmxvY2tJZAF3CGItMDAwMDExKAAB7AEHY29sc3BhbgF9ASgAAewBB3Jvd3NwYW4BfQEoAAHsAQdibG9ja0lkAXcIYi0wMDAwMTAoAAHrAQdibG9ja0lkAXcIYi0wMDAwMDmHAesBAwl0YWJsZV9yb3cHAAH1AQMKdGFibGVfY2VsbAcAAfYBAwlwYXJhZ3JhcGgHAAH3AQYEAAH4AQEqhgH5AQRsaW5rPHsiaHJlZiI6Imh0dHA6Ly93d3cuYS5jb20vfnhcXH5+d3d3LmEuY29tL354YiIsInRpdGxlIjpudWxsfYQB+gEcd3d3LmEuY29tL354XH5+d3d3LmEuY29tL354YoYBlgIEbGluawRudWxshAGXAgMqKn4oAAH3AQdibG9ja0lkAXcIYi0wMDAwMTQoAAH2AQdjb2xzcGFuAX0BKAAB9gEHcm93c3BhbgF9ASgAAfYBB2Jsb2NrSWQBdwhiLTAwMDAxMygAAfUBB2Jsb2NrSWQBdwhiLTAwMDAxMigAAeoBB2Jsb2NrSWQBdwhiLTAwMDAwOIcB6gEDE2Zvb3Rub3RlX2RlZmluaXRpb24HAAGhAgMJcGFyYWdyYXBoBwABogIGBAABowIBbigAAaICB2Jsb2NrSWQBdwhiLTAwMDAxNigAAaECBWxhYmVsAXcDYV9iKAABoQIHYmxvY2tJZAF3CGItMDAwMDE1AA==",
+    "rendered_by_milkdown": "A letter right after a literal backslash, beside an emphasis run, is one the writer spells as a character reference.\n\np \\~\\&#x61;*\\~* q\n\np \\&#x61;*\\~*\\* q\n\np \\*\\&#x61;*\\~a* q\n\np \\&#x61;*\\_a* q\n\nPlain a\\_~~`c`\\~\\~[www.a.com/\\~x\\\\\\~\\~\\\\](http://www.a.com/~x\\\\~~\\\\)~~ end.\n\n**]\\(u)\\~\\\\\\~***b*\\*\\*\n\n| h                                                                                 |\n| --------------------------------------------------------------------------------- |\n| \\*[www.a.com/\\~x\\\\\\~\\~www.a.com/\\~xb](http://www.a.com/~x\\\\~~www.a.com/~xb)\\*\\*\\~ |\n\n[^a_b]: n\n"
   }
 ]

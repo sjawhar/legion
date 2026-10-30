@@ -317,7 +317,7 @@ func readmissionRig(t *testing.T, suspend func(*supervisor, claim.Token)) (rt *f
 	suspend(sup, architect)
 	suspend(sup, implementer)
 	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
-	admission := admit.New(records, engine, 2, "legion", quietLogger())
+	admission := admit.New(records, engine, 2, "LEGION", quietLogger())
 	var clock time.Time
 	runner := &outbox{
 		dispatchProject: "LEGION",

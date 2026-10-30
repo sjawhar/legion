@@ -1490,10 +1490,12 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	var unread func(string) bool
 	var await func(repo, tree, child, parent string)
 	var githubAPI string
+	var consumerLag func(context.Context) []intake.ConsumerLag
 	if workflow != nil {
 		records, handlers, client, tokens, grants = workflow.records, workflow.handlers, workflow.dispatch, workflow.tokens, workflow.grants
 		claimReady, prepare, unread, await = workflow.claimReady, workflow.prepareObserved, workflow.repositoryUnread, workflow.awaitRecovery
 		githubAPI = workflow.githubAPI
+		consumerLag = workflow.consumers.Lag
 	}
 	// Under `controller: daemon` the keeper launches and keeps the project's controller, and takes
 	// its ready. The liveness sweep runs beside it under either mode, never behind it.
@@ -1518,6 +1520,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			settings:     api.SettingsOf(cfg),
 		},
 		StateTransactions:  st,
+		ConsumerLag:        consumerLag,
 		Supervisor:         s.supervisor,
 		BootTokens:         s.tokens,
 		Project:            p.project,

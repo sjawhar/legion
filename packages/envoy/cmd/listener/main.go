@@ -671,11 +671,7 @@ func main() {
 		if d == nil {
 			return 0
 		}
-		entries, err := d.sessions.List()
-		if err != nil {
-			return 0
-		}
-		return int64(len(entries))
+		return int64(d.sessions.LiveCount())
 	})
 	met.NewGaugeFunc("envoy_active_interests", "Number of active interest subscriptions", func() int64 {
 		d := deps.Load()
@@ -788,10 +784,16 @@ func main() {
 	}
 	cacheReadyCancel()
 
+	// A dead session's last heartbeat is kept for as long as the interest reaper can still hold its
+	// interest: the reaper deletes the row only store.InterestReapAllowance after its last write,
+	// so /v1/interests/ can report the session's real last heartbeat (the row's updated_at lags it
+	// by up to store.InterestRefreshAge) for every row it still lists. The allowance is the
+	// reaper's own (store.Registry.Reap), so the two cannot drift apart.
 	sessions, err := session.OpenSessionRegistry(
 		client.Conn,
 		session.WithSessionReplicas(cfg.NATSReplicas),
 		session.WithSessionLogger(logger.Slog()),
+		session.WithLastSeenRetention(store.InterestReapAllowance(store.InterestReapGrace)),
 	)
 	if err != nil {
 		log.Fatal(err)

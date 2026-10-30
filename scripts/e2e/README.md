@@ -482,15 +482,14 @@ configured, there is none to audit. The scratch Dispatch runs with `HOME` and `X
 the run's work directory, so it reads no envoy.json of the operator's.
 
 It proves admission order and slotless children — the child is parked to `backlog` as soon as it
-is seen slotless, which is all it was filed for, so it holds up no close above it — then
-drives a root from `todo` through an
-architect's spec and gate registration, which the architect does on its own (the proof never
-prompts it: its first turn is the daemon's `catch-up` notice, and the root's primary document is
-the proof's one-file smoke spec), the root's wait on the human at its gate (`awaiting_person`, no
-slot, the architect suspended), the human approval, the root's return to a slot, planner, implementer pull request,
-tester, reviewer, the architect's acceptance at `accepting`, retro, merger READY, the daemon's
-merge of the READY head, which closes the issue (`daemon-merge`), and the implementer's production
-check after the close, its first look and the bound's last look
+is seen slotless, which is all it was filed for, so it holds up no close above it — then drives a
+root from `todo` through an architect's spec and gate registration, which the architect does on its
+own (the proof never prompts it: its first turn is the daemon's `catch-up` notice, and the root's
+primary document is the proof's one-file smoke spec), the root's wait on the human at its gate
+(`awaiting_person`, no slot, architect live), the human approval, the root's return to a slot,
+planner, implementer pull request, tester, reviewer, the architect's acceptance at `accepting`,
+retro, merger READY, the daemon's merge of the READY head, which closes the issue (`daemon-merge`),
+and the implementer's production check after the close, its first look and the bound's last look
 (`production-check-bound`). It also proves three changes-requested rounds, each posted by the reviewer
 pane and ended by that reviewer's completion — a review ends when its reviewer completes it, so
 the round returns to implementing only once the reviewer's handoff is recorded, authored and
@@ -1852,10 +1851,10 @@ back, or requests approval again, which opens a new request since Request change
 one. It keeps the issue's asks as `<issue>-asks.json`, approval events as
 `<issue>-events.json`, each requested version as `<issue>-spec-v<N>.json`, and the verdict as
 `<issue>-gate-verdict.json`. While tree 1 waits on the human (its question, or a closed gate it
-registered) it is in `awaiting_person` with no slot and its architect suspended; once the gate
-opens, `spec-posted` waits for the root to hold a slot again (`await_root_slot`, which tree 1, the
-run's one root under `admission_cap: 2`, takes at once) before it waits for planning, and notes how
-many times the daemon logged the root giving its slot back.
+registered) it is in `awaiting_person` with no slot and its architect live; once the gate opens,
+`spec-posted` waits for the root to hold a slot again (`await_root_slot`, which tree 1, the run's
+one root under `admission_cap: 2`, takes at once) before it waits for planning, and notes how many
+times the daemon logged the root giving its slot back.
 
 `LEGION_E2E_POD_FILE` names a JSON file holding a deployment's own worker pod block, the
 `runtime.kubernetes.pod` value its configuration renders (`service_account`, `env`, `volumes`,
@@ -1997,11 +1996,13 @@ the run that owns it. A signal to the whole process group does not stop the remo
   went to `/dev/null`;
 - a teardown command that fails prints `cleanup warning: line N exited S`, never a check's `FAIL`
   line, and leaves the exit status the checks set.
-- **Production NATS, stream `ENVOY_NOTIFICATIONS`**: the daemon's two durable consumers. They are
-  named by the Dispatch key: `legion-go-<project>-dispatch` (`notifications.dispatch.issue.>`) and
+- **Production NATS, stream `ENVOY_NOTIFICATIONS`**: the daemon's three durable consumers. They are
+  named by the Dispatch key: `legion-go-<project>-dispatch` (`notifications.dispatch.issue.>`),
+  `legion-go-<project>-dispatch-server` (`notifications.dispatch.server.started`) and
   `legion-go-<project>-github` (`notifications.github.sjawhar.legion-smoke.>`) — `LEGSMOKE` by default.
-  - The teardown deletes both by exact name and prints `deleted` or `absent` for each.
-  - `hygiene` fails if either remains, and the preflight refuses to start while either exists.
+  - The teardown deletes every consumer named under `legion-go-<project>-` and notes each it
+    deleted or could not delete, so a consumer the daemon gains needs no change here.
+  - `hygiene` fails if any remains, and the preflight refuses to start while any exists.
   - A SIGKILLed driver runs no trap, and the next run of the same identity's preflight names what it left; a different identity's run never sees it.
 - **Production Dispatch, project `LEGSMOKE` by default**: three root issues per run. The preflight moves stale
   todo issues to backlog, roots and the children a failed run left todo alike. The proof human's writes use the agents' bearer and name the session
@@ -3869,17 +3870,16 @@ that quotes it.
 With the design gate armed (`gates.design: root-issues`), a root whose architect registers a closed
 gate while no worker of its tree runs waits on a person: `drive_gate ISSUE LABEL [SECONDS]` runs
 `architect_registers_gate`, then `await_gate_wait` (the root in `awaiting_person` with
-`waitingOn.kind` `gate` and no `answeredAt`, no `.slot` and absent from `admission.active`, then its
-architect `suspended` within `phase_seconds`), approves the registered version as the proof human,
-then `await_answered_slot`: the answer (`waitingOn.answeredAt`, or the root already holding a slot,
-since a slot free at the answer is taken in the same transaction) within 120 s, then
+`waitingOn.kind` `gate` and no `answeredAt`, no `.slot` and absent from `admission.active`, while
+its architect stays live within `phase_seconds`), approves the registered version as the proof
+human, then `await_answered_slot`: the answer (`waitingOn.answeredAt`, or the root already holding
+a slot, since a slot free at the answer is taken in the same transaction) within 120 s, then
 `await_root_slot`, the root out of `awaiting_person` holding a slot in `admission.active`, within
 `SECONDS` (`phase_seconds` by default; Stage 3's first root passes 1800, since its slot comes back
 only when a root that took the slot it gave up registers its own gate in turn). A timeout in any of
 them prints the root's phase, slot, `waitingOn` and architect state and the admission state. Only
-then does it wait for planning. `wait_for_architect ISSUE` and so `architect_registers_gate` accept
-an architect already suspended in `awaiting_person`, whose pane the watcher checked at its launch,
-since a proof may look after the root's wait began.
+then does it wait for planning. `wait_for_architect ISSUE` and so `architect_registers_gate` require
+that architect to remain live even after the root's wait began.
 
 `request_changes_as_reviewer ISSUE ROUND BODY [NOTE]` is a scripted changes-requested round: it
 tells the reviewer pane its decision and the review's text, quoted, which the reviewer ends with

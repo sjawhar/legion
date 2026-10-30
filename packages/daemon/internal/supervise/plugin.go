@@ -23,7 +23,7 @@ import (
 // It lives here rather than beside DaemonAPIVersion because internal/api imports this package.
 // internal/api's own test holds it to that version, so a later contract bump can never leave this
 // constant above the daemon's own.
-const PodUpdateContract = 43
+const PodUpdateContract = 44
 
 // CanAnswerUpdate says whether c's worker can answer an update task at all: its registration
 // declared PodUpdateContract or above, so its plugin has the ready_for_update op. It is the one

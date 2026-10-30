@@ -90,10 +90,14 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 43's update round (the
+number is the one `DaemonAPIVersion` declares, last bumped by contract 44's update round (the
 `legion` tool's `ready_for_update` op, which posts `POST /legion/v1/claims/ready-for-update` with
 the head of `legion/<issue>@origin`, and the `updateRound` and `updateHead` fields every claim
-view gains), after contract 42's four `LEGION_STALL_*`
+view gains), after contract 43's strict `consumers` on
+`GET /legion/v1/state` (the lag of the daemon's three durable consumers, each with what
+waits, the oldest waiting message, the last handled, whether it is stalled and what NATS did not
+answer; a 42 plugin rejects it) and `repositories.withoutWebhookApp` (each served repository
+Dispatch's GitHub App is not known to be installed on), after contract 42's four `LEGION_STALL_*`
 numbers in every worker's environment, Claude Code's three variables in a Claude role's start
 command and the session its launcher keeps in the session table (the phase reminder's limits, read
 through `@legion/pi-shared`'s `stall-limits.ts`), after contract 41's controller start
@@ -478,7 +482,12 @@ there; `pending` is refused on a phase completion) and `summary` alone, no hando
 the daemon refuses it with `CHECK_NOT_OPEN`, `CHECK_LOOK_NOT_OPEN` or `CHECK_VERDICT_REQUIRED`
 (`packages/daemon/internal/api/handoff.go`). The daemon reads no
 handoff file and no branch head: it refuses `HANDOFF_NOT_NEW` (the commit is the one the role
-reported for its previous phase) and, for the merger's `ready: true`, reads the pull request's
+reported for its previous phase); for the implementer's completion of implementing it reads the open
+pull request on `legion/<issue>` as the implement App, records one the webhook has not, and refuses
+`HANDOFF_NO_PULL_REQUEST` when there is none and the record holds none merged (naming a recorded
+pull request closed without merging, which is the architect's to decide), applying the completion
+unread when GitHub cannot be read;
+and for the merger's `ready: true` it reads the pull request's
 head on GitHub and refuses a packet the workflow must not take on, each refusal named in the
 merger's role prompt
 (`packages/daemon/internal/prompts/go/merger.md`); a refusal changed nothing, and the answer's

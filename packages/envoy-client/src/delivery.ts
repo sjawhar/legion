@@ -786,7 +786,12 @@ function dispatchReplyRef(
 // kept (`raw`) so no data is dropped and nothing renders as a hand-built text
 // template.
 type DispatchFrame =
-  | { readonly event: DispatchEvent; readonly notify: unknown; readonly delivery: unknown }
+  | {
+      readonly event: DispatchEvent;
+      readonly notify: unknown;
+      readonly quiet: unknown;
+      readonly delivery: unknown;
+    }
   | {
       readonly raw: unknown;
       readonly rejectedDelivery?: DispatchDelivery;
@@ -809,10 +814,15 @@ function parseDispatchFrame(rawPayload: string): DispatchFrame {
   if (isObject(value) && "delivery" in value) {
     const targeted = DispatchTargetedFrameSchema.safeParse(value);
     if (targeted.success) {
-      const wireFrame = value as { readonly event: DispatchEvent & { readonly notify?: unknown } };
+      // `notify` and `quiet` are fields of the event the frame wraps, which is where the
+      // outbox marshals them, and the schema drops both as unknown keys.
+      const wireFrame = value as {
+        readonly event: DispatchEvent & { readonly notify?: unknown; readonly quiet?: unknown };
+      };
       return {
         event: targeted.data.event,
         notify: wireFrame.event.notify,
+        quiet: wireFrame.event.quiet,
         delivery: targeted.data.delivery,
       };
     }
@@ -842,10 +852,14 @@ function parseDispatchFrame(rawPayload: string): DispatchFrame {
 
   const parsed = DispatchEventSchema.safeParse(value);
   if (!parsed.success) return { raw: value };
-  const wireEvent = value as DispatchEvent & { readonly notify?: unknown };
+  const wireEvent = value as DispatchEvent & {
+    readonly notify?: unknown;
+    readonly quiet?: unknown;
+  };
   return {
     event: parsed.data,
     notify: wireEvent.notify,
+    quiet: wireEvent.quiet,
     delivery: undefined,
   };
 }
@@ -912,7 +926,19 @@ export function renderInbound(
     } else {
       const frame = parseDispatchFrame(envelope.payload);
       if ("event" in frame) {
-        if (frame.notify === false && topic?.startsWith(DISPATCH_TOPIC_PREFIX) === true) {
+        // An owner topic carries every event of its issue, document or project, so a frame
+        // carrying nothing to read is dropped here rather than shown or recorded. Dispatch
+        // states that as `quiet` (`events.Quiet`): a delivery receipt, an anchor refresh,
+        // settings or per-viewer bookkeeping, a targeted message its session already had, an ask
+        // edit that only moved a version, or a version nobody named. `notify` is a different
+        // question — whether to wake the issue's route and claimant — and it is false for every
+        // event an agent wrote, so skipping on it dropped exactly the activity a session that
+        // subscribed to `notifications.dispatch.issue.<KEY>.>` asked for
+        // (skills/dispatch/SKILL.md). A frame with no `quiet` was published by a Dispatch from
+        // before this field and is judged by the old rule: the stream still holds 72 hours of
+        // them, and a replay must not start showing their receipts and autosaves.
+        const quiet = frame.quiet === undefined ? frame.notify === false : frame.quiet === true;
+        if (quiet && topic?.startsWith(DISPATCH_TOPIC_PREFIX) === true) {
           return { skip: true, content: "", envelope };
         }
         if (frame.event.actor.kind === "session" && frame.event.actor.id === sessionID) {

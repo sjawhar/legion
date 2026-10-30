@@ -1,0 +1,10 @@
+kind: Added
+body: |-
+    `envoy-infra`'s `core.ListenerConfig` takes `NATSReplicas` and `StreamMaxBytes`, rendered as
+    `ENVOY_NATS_REPLICAS` and `ENVOY_STREAM_MAX_BYTES` after every other variable, each only when it
+    is above 0, so every rendering made before them (`host:Listener`'s, `gcp:NatsHub`'s cloud-config,
+    `gcp:Dispatch`'s containers) stays byte for byte. `Check` refuses either below 0, and a
+    `NATSReplicas` above 5, the most copies NATS keeps of a stream.
+time: 2026-10-28T13:09:45.664607321Z
+custom:
+    Issue: pr2371

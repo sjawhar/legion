@@ -430,9 +430,11 @@ const legionCacheView = z.strictObject({
 /** `api.RepositoriesView` — the project's repository mapping as the daemon serves it: the owners
  * its roles' credentials span, each repository it serves (as GitHub names it, `default` the
  * project's default in Dispatch, `cache` its repository cache under the Kubernetes runtime), each
- * mapped repository it leaves out with `reason`, a GitHub App not installed on it, and the `caches`
- * of repositories the mapping no longer names. Every list sorted and never null (contracts 31,
- * 32). */
+ * mapped repository it leaves out with `reason`, a GitHub App not installed on it, each served
+ * repository Dispatch's GitHub App is not known to be installed on (`withoutWebhookApp`, as
+ * Dispatch maps it, with `reason`: not installed, the check failed, or Dispatch does not answer
+ * the check; served all the same, contract 43), and the `caches` of repositories the mapping no
+ * longer names. Every list sorted and never null (contracts 31, 32). */
 const legionRepositories = z.strictObject({
   owners: z.array(nonEmptyString),
   mapped: z.array(
@@ -443,7 +445,26 @@ const legionRepositories = z.strictObject({
     })
   ),
   refused: z.array(z.strictObject({ repo: nonEmptyString, reason: nonEmptyString })),
+  withoutWebhookApp: z.array(z.strictObject({ repo: nonEmptyString, reason: nonEmptyString })),
   caches: z.array(legionCacheView),
+});
+
+/** `api.ConsumerLagView` — one durable consumer's lag, read from NATS after the state's
+ * transaction commits (contract 43): its `name`; `waiting`, the messages it has not handled
+ * (JetStream's pending plus acknowledgement-pending); `oldestAt`, the stream time of the oldest of
+ * them, and `oldestAgeSeconds` its age at the read, both null when nothing waits or that message
+ * could not be read; `lastHandledAt`, when the daemon last acknowledged one of its messages or
+ * terminated one as poison, null before the first; `stalled`, messages waiting and none handled for
+ * 60 seconds; and `unavailable`, what NATS did not answer or refused, absent when every read
+ * answered. */
+const legionConsumerLag = z.strictObject({
+  name: nonEmptyString,
+  waiting: z.number().int().nonnegative(),
+  oldestAt: timestamp.nullable(),
+  oldestAgeSeconds: z.number().int().nullable(),
+  lastHandledAt: timestamp.nullable(),
+  stalled: z.boolean(),
+  unavailable: nonEmptyString.optional(),
 });
 
 /** `api.State`, the body of `GET /legion/v1/state`. `controllerLocator` is absent until a session
@@ -456,7 +477,8 @@ const legionRepositories = z.strictObject({
  * id, never null (contract 28); `repositories` is the project's repository mapping as the daemon
  * serves it (contract 31); `settings` is the daemon's resolved legion.yaml with no credential,
  * credential source or credential file path, required, and loose like `payload` above so a
- * legion.yaml key added later changes no strictly parsed shape (contract 35). */
+ * legion.yaml key added later changes no strictly parsed shape (contract 35); `consumers` is the lag
+ * of the daemon's durable consumers, never null, empty for a daemon with no workflow (contract 43). */
 export const LegionStateResponse = z.strictObject({
   daemon: daemonInfo,
   admission: legionAdmission,
@@ -469,6 +491,7 @@ export const LegionStateResponse = z.strictObject({
   capabilities: z.array(legionCapabilityState),
   repositories: legionRepositories,
   settings: legionSettings,
+  consumers: z.array(legionConsumerLag),
 });
 
 export type LegionState = z.output<typeof LegionStateResponse>;

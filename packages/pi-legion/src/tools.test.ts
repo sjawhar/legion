@@ -126,7 +126,9 @@ const OMP_LEGION_TOOL_DESCRIPTION =
   "on this branch, carried by another pane's commit, or not yet on `legion/<issue>@origin`, each naming the remedy. A production check report " +
   "(the task whose first line is `Production check of <KEY>`, handed to the implementer once the merge closed its issue) needs no handoff and no " +
   "commit: it carries its verdict and summary alone, and the daemon refuses it when no check is open (CHECK_NOT_OPEN). The daemon refuses " +
-  "HANDOFF_NOT_NEW (the commit is the one you reported for your previous phase: write and commit this phase's handoff) and, for READY, each " +
+  "HANDOFF_NOT_NEW (the commit is the one you reported for your previous phase: write and commit this phase's handoff), the implementer's " +
+  "completion of implementing with no open pull request on `legion/<issue>` and none recorded merged (HANDOFF_NO_PULL_REQUEST: open it; one " +
+  "naming a closed pull request is the architect's to decide) and, for READY, each " +
   "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " +
   "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " +
   "ready_for_update answers the daemon's update task on this issue's pod. Push every commit you want kept to the issue branch " +
