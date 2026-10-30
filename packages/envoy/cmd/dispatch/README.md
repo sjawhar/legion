@@ -591,7 +591,8 @@ release also loses broadcasts: the earlier build's broadcast send reads and writ
 drops, so every broadcast send fails while the rest of that build keeps working. A tab opened
 before the deploy needs a reload: `GET /api/v1/events` is gone, so it shows
 `Live updates unavailable`, and its broadcast body still carries `idempotency_key`, which this
-release refuses as an unknown field (`400 INVALID_JSON`).
+release refuses by name (`400 INVALID_JSON`, "idempotency_key is the Idempotency-Key header, not a
+body member"), so that tab sends no broadcast until it reloads.
 
 What the two processes share, and what each keeps to itself:
 
@@ -1549,7 +1550,7 @@ Migration `0148_duty_holds` creates `duty_holds (name, holder, token, expires_at
 process keeps by renewing them (`duty.Hold`): each delivery intake holds one name per durable
 (Running more than one process, above). The holder records its deliver subject as `token`, or
 `<subject> start=<seq>` while a take-over is pending: from just before the take-over deletes the
-durable until it has created it again at stream sequence `<seq>` (`delivery/intake.go`,
+durable until it has created it again at stream sequence `<seq>` (`delivery/held_durable.go`,
 `intakeHoldToken`).
 `expires_at` is always written from the database's `now()`, so a lapse is judged by one clock. It
 is a new table: nothing existing is read, locked or rewritten, the release before it neither reads
