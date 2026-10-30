@@ -2,50 +2,31 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-177",
-  "completed": "2026-10-30T20:59:40Z",
+  "completed": "2026-10-30T22:06:31Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2354",
   "proof": [
     {
-      "criterion": "Finding 1: the Dispatch API package passes with the route-count pin at the true count (151: main's 147 plus this PR's 4)",
-      "surface": "Dispatch API handler on Postgres (the full package, not the required test job)",
-      "command": "cd packages/envoy && go test -count=1 -p 1 -timeout 55m ./internal/dispatch/api/",
-      "observed": "ok (1334 s) at 14f6fdc9; also ok (1243 s) at 588dad34 and (1432 s) at b036d227",
-      "headSha": "14f6fdc983e4",
-      "negativeControl": "at a1a6523d the pin said 150 while routes() held 151 rows, and the reviewer's run of the package failed on it"
+      "criterion": "Finding 1: the required test job's e2e proof selector step passes with both handoff proofs named in .github/e2e-scripts.json",
+      "surface": "the selector's own test harness, the step the required test job runs",
+      "command": "bash .github/scripts/select-e2e-proofs.test.sh",
+      "observed": "Results: 97 passed, 0 failed; PASS: select-e2e-proofs.sh (it includes 'a schedule run of the repository's own data passes' and the workflow_dispatch case of every hosted row, handoff-records.sh among them)",
+      "headSha": "20bd9186cb49",
+      "negativeControl": "at c024f257, without the two rows, job 124319579653 failed that step with 17 cases, the first 'a schedule run of the repository's own data passes'"
     },
     {
-      "criterion": "Finding 7: the pass rebuilds a lost push above an approval from the branch's activity and applies it",
-      "surface": "daemon pass (readRequiredChecks) on Postgres against a GitHub stand-in serving the branch's activity",
-      "command": "cd packages/daemon && go test -count=1 -p 1 -timeout 30m ./internal/daemon/ (four environment-bound tests skipped: Docker, gVisor SigIgn, tmux credential helper)",
-      "observed": "ok (569 s) at 588dad34; TestThePassFollowsAPushAboveAnApprovalAsANewHead asserts one push-read fact and that the late webhook decides nothing",
-      "headSha": "588dad3401d3",
-      "negativeControl": "with the stand-in's activity read answering 404, the test fails: 'the pass applied 0 pushes it rebuilt from the branch's activity, want the one code..pushed'"
-    },
-    {
-      "criterion": "Handoff records end to end after the merges with main a4af0341, d126b19d and 2b891d47 (Dispatch migration 0150_handoffs, daemon migration 0065, contract 44)",
-      "surface": "scripts/e2e/handoff-records.sh: the Go daemon and a real Dispatch server on Postgres and NATS",
-      "command": "LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/t_hr bash scripts/e2e/handoff-records.sh",
-      "observed": "handoff records e2e: PASS in 39s",
-      "headSha": "14f6fdc983e4",
+      "criterion": "Finding 1: handoff-records.sh runs as its new hosted row gives it: LEGION_TEST_PG_DSN, bun and node_modules, jj, its evidence variable, and no LEGION_E2E_NATS_BIN",
+      "surface": "scripts/e2e/handoff-records.sh: the Go daemon and a real Dispatch server on Postgres with pgvector and NATS",
+      "command": "unset LEGION_E2E_NATS_BIN; HANDOFF_RECORDS_EVIDENCE_DIR=$TMPDIR/hr-evidence-r13 LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/u_hr bash scripts/e2e/handoff-records.sh",
+      "observed": "ok proof (28s); handoff records e2e: PASS in 76s; the evidence directory holds transcript.log, proof.log, daemon.log, dispatch.log and nats.log",
+      "headSha": "20bd9186cb49",
       "negativeControl": "the live test's own refusal: a record another session wrote is refused 403 HANDOFF_SESSION_MISMATCH and the phase does not move"
-    },
-    {
-      "criterion": "The Conversation shows handoff records, live, after main's #2392 event-lock change",
-      "surface": "Dispatch browser suite: the real Go server on Postgres, Chromium through Playwright",
-      "command": "bash /legion/harness/dispatch-e2e.sh 'postgres://postgres@127.0.0.1:5433/t_e2e?sslmode=disable' e2e/handoffs.e2e.ts",
-      "observed": "3 passed (10.5s)",
-      "headSha": "14f6fdc983e4",
-      "negativeControl": "at b7838708, with event-refresh.ts's [\"handoffs\", key] target removed, the live-update test failed (unexpected value \"2\")"
     }
   ],
   "filesChanged": [
-    "cae0d441: merge with main a4af0341: registeredRoutes 151; Dispatch migration 0148_handoffs -> 0149 (main took 0148), its README paragraph after main's 0148",
-    "b036d227: findings 3-7: record/store.go takes main's handoff_commit <> '' filter back; required_checks.go names the branch-activity read; running-legion.md in concepts.md's wording; packages/envoy/AGENTS.md names routeBody, handoffRequestLimit and CAP_EXCEEDED; TestThePassFollowsAPushAboveAnApprovalAsANewHead serves an activity entry and asserts the rebuilt push; the two ApprovalStands checks that could not fail are dropped",
-    "588dad34: merge with main d126b19d: AGENTS.md learnings line takes main's -pr<number> naming; main's #2552 carries the ci.yaml testdata filter line this PR added in a1a6523d, so that line is main's now",
-    "14f6fdc9: merge with main 2b891d47 (no conflict): Dispatch migration 0149_handoffs -> 0150 (main took 0149_event_horizon), README, AGENTS.md, handoffs.go, census and fragment"
+    "20bd9186: .github/e2e-scripts.json names handoff-records.sh under hosted (bun, jj, HANDOFF_RECORDS_EVIDENCE_DIR, 25 minutes) and handoff-cutover-github.sh under elsewhere with its header's needs; the pr2512 and pr2504 learnings put their handoff-push clauses in the past tense beside the present rule; this PR's superseding note lists pr2512 under supersedes and pr2504 among the kept-rule notes and drops the bullet for a note main deleted; packages/envoy/AGENTS.md reflowed at the two passages"
   ],
   "deviations": [
-    "Main moved to ab319326 (#2542, natsauth and envoy-client stall tests) after the checks; it conflicts with nothing and takes none of this PR's numbers, so no fourth merge was made.",
-    "claude-backend-sandbox.sh needs the operator's cluster and was not run here."
+    "No merge with main: #2354 was MERGEABLE at d521a519, and main took none of this PR's numbers (contract 43, Dispatch 0149, daemon 0064 on main).",
+    "Of the test job steps that the failure skipped, all ran locally and passed except two Docker-only cases of bun test scripts/e2e/lib (nats-stream.test.ts, which this PR does not change) and the Go daemon step, whose Docker-backed tests this pod cannot run."
   ]
 }
