@@ -1,0 +1,147 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-720",
+  "completed": "2026-10-30T08:25:00Z",
+  "proof": [
+    {
+      "criterion": "Merge round (awaiting_merge; main a21100c5 took 0145-0147): the head merges into main with migrations in sequence (0148), README keeps main's paragraphs and ours, the fingerprint changes by the renumber alone, and the merged sequence boots over the stored anchor spellings on a database main migrated to its latest",
+      "surface": "a real local Dispatch server built from the merge head, booted over the LINUX replay seed migrated to 0147 by main dd552dfd, holding nine asks opened through main's API on LINUX-344's spec and rewritten by SQL (block_artifact_id set) to anchor artifact_id canonical, upper case, braces, trailing newline, '', '5', leading space, not-a-uuid, JSON number 5",
+      "command": "prep-r10.sh: BASE_TEMPLATE=dispatch_replay_7c9bd31d304905fb shapes-proof.sh bin/dispatch-head-r10 merged10; fingerprints at 6fa32a6c and 73ca6370 and the diff of the two fingerprinted diffs (fp-delta.txt) (dispatch://INFRA-720/artifact/infra720-r10-merged-shapes-tgz)",
+      "observed": "schema 147 -> 148, WARN 'left out of asks_anchor_artifact_id' count=8; ask list and events 200; every single-ask read 200; canonical, upper case, braces resolve spec, the six others none; fingerprint 5d2b1d89... -> 88c25537..., all 21 changed lines 0145 -> 0148; GitHub MERGEABLE; store, refs, model, pgmigrate, targeted docs and api ok on a fresh database",
+      "headSha": "73ca6370836840de255e3987b13837e3d1a58ee9",
+      "negativeControl": "main dd552dfd over the same data: ask list 500 and single read 500 for the six uncastable shapes (22P02)"
+    },
+    {
+      "criterion": "Merge round (accepted, CONFLICTING with main 49e23926): the head merges into main with migrations in sequence (0145 after main's 0142-0144), README keeps main's paragraphs and ours, the fingerprint changes by the renumber alone, and the merged sequence boots over the stored anchor spellings on a database main migrated to its latest",
+      "surface": "a real local Dispatch server built from the merge head, booted over the LINUX replay seed migrated to 0144 by main 49e23926, holding nine asks opened through main's API on LINUX-344's spec and rewritten by SQL (block_artifact_id set) to anchor artifact_id canonical, upper case, braces, trailing newline, '', '5', leading space, not-a-uuid, JSON number 5",
+      "command": "prep-r9.sh: BASE_TEMPLATE=dispatch_replay_fd0564e4c3a2578e shapes-proof.sh bin/dispatch-head-r9 merged9; fingerprint per conflicts-and-rewrites.md at ee124abf and a46b10cb, then diff of the two fingerprinted diffs (fp-delta.txt) (dispatch://INFRA-720/artifact/infra720-r9-merged-shapes-tgz)",
+      "observed": "schema 144 -> 145, WARN 'left out of asks_anchor_artifact_id' count=8; ask list and events 200; every single-ask read 200; canonical, upper case, braces resolve spec, the six others none; fingerprint 18a1db02... -> 5d2b1d89..., all 20 changed lines are 0142 -> 0145; GitHub MERGEABLE; store, refs, model, pgmigrate, targeted docs and api ok on a fresh database",
+      "headSha": "a46b10cb20fe9a93b917d8cae3397ac20b3872f3",
+      "negativeControl": "main 49e23926 over the same data: ask list 500 and single read 500 for the six uncastable shapes (22P02)"
+    },
+    {
+      "criterion": "Merge round (tester fail on merge state alone): the head merges into main with migrations in sequence (0142 after main's 0141_drop_broadcast_idempotency_keys), README keeps both paragraphs, and the merged sequence boots over the stored anchor spellings",
+      "surface": "a real local Dispatch server built from the merge head, booted over the LINUX replay seed migrated to 0141 by main 08c2e8ad, holding nine asks opened through main's API on LINUX-344's spec and rewritten by SQL (block_artifact_id set) to anchor artifact_id canonical, upper case, braces, trailing newline, '', '5', leading space, not-a-uuid, JSON number 5",
+      "command": "prep-r8.sh: BASE_TEMPLATE=<main template> shapes-proof.sh bin/dispatch-d5e71a0a merged8 (dispatch://INFRA-720/artifact/infra720-r8-merged-shapes-tgz); gh pr view 2483 --json mergeable",
+      "observed": "schema 141 -> 142, WARN 'left out of asks_anchor_artifact_id' count=8; ask list and events 200; every single-ask read 200; canonical, upper case, braces resolve spec, the six others none; GitHub MERGEABLE; fingerprint 8868f24b... -> 7eeb1e8b...; store, refs, model, pgmigrate ok on a fresh database",
+      "headSha": "d5e71a0a5ce1935912e8be86c1101c87f10e2bf4",
+      "negativeControl": "main 08c2e8ad over the same data: ask list 500 and single read 500 for the six uncastable shapes (22P02)"
+    },
+    {
+      "criterion": "Review round 1 item 1: an ask whose anchor does not cast belongs to its block document in the reference graph, the same document search links it to",
+      "surface": "the references route (GET /api/v1/references?to=dispatch://<issue>/ask/<id>) and the search route of the api package on real Postgres 17.11; refs package",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/fresh720?sslmode=disable go test ./internal/dispatch/api/ -run 'AnchorArtifactID|AnUpperCaseOrBraced|Search|DoesNotCast|Reference' -count=1; go test ./internal/dispatch/refs/ -count=1",
+      "observed": "ok: TestRefsAndSearchPutAnAskWhoseAnchorDoesNotCastOnItsBlockDocument (node parent and search href both the block document), TestAskNodeAnswersOverAnAnchorArtifactIDThatDoesNotCast (block document), the tester's spelling tests unmodified",
+      "headSha": "c9c5430bdf33000898011fcbf5d9e141eddd4ede",
+      "negativeControl": "refs/graph.go's document case reverted to `k.anchor->>'artifact_id' is not null`: 'ask node's parent = &model.NodeParent{Kind:\"issue\", ...}, want its ask block's document'"
+    },
+    {
+      "criterion": "Review round 1 item 2: a stored anchor's decode costs no more than main's, and task 5(a) re-run at the new head against main",
+      "surface": "benchmark binaries built from main 30ecdcd4 and head c9c5430b: one well-formed anchor decode (model), and recordedMarkRefs over all 1,157 documents of the synthetic replay copy (docs)",
+      "command": "10 alternating rounds each; benchstat golang.org/x/perf@v0.0.0-20261009192801-be2c69fb417e (dispatch://INFRA-720/artifact/infra720-r7-bench-tgz)",
+      "observed": "decode 2.232 us -> 2.340 us ~ (p=0.105), 96 B and 2 allocs both; recordedMarkRefs 965.4 ms -> 984.7 ms ~ (p=0.796), allocs ~ (p=0.853)",
+      "headSha": "c9c5430bdf33000898011fcbf5d9e141eddd4ede",
+      "negativeControl": "the reviewer's fast path inside an UnmarshalJSON method at 0d6079ef: decode 2.211 -> 3.340 us, +51% (p=0.002): any method costs an extra scan, so the method was replaced by model.DecodeAnchor"
+    },
+    {
+      "criterion": "Round 5 (tester fail: CONFLICTING with main): the head merges into main with migrations in sequence (0141 after main's 0139 and 0140), search.go keeps main's change with both ask arms on store.CastableUUID, and the merged sequence boots over the nine anchor spellings",
+      "surface": "a real local Dispatch server built from the merge head, booted over the LINUX replay seed migrated to 0140 by main 30ecdcd4, holding nine asks opened through main's API on LINUX-344's spec and rewritten by SQL (block_artifact_id set) to anchor artifact_id: canonical, upper case, braces, trailing newline, '', '5', leading space, not-a-uuid, JSON number 5",
+      "command": "BASE_TEMPLATE=dispatch_replay_ca563d7cde95cee9 shapes-proof.sh bin/dispatch-3a3a08ab merged (dispatch://INFRA-720/artifact/infra720-r6-merged-shapes-tgz); gh pr view 2483 --json mergeable",
+      "observed": "schema 140 -> 141, WARN 'left out of asks_anchor_artifact_id' count=8; GET /api/v1/issues/LINUX-344/asks and /events 200; every single-ask read 200; canonical, upper case, braces resolve spec, the six others none; GitHub mergeable MERGEABLE; store and pgmigrate suites ok on a fresh database",
+      "headSha": "3a3a08ab1cb4b7af3fb77e0e8cca4f2a0ea59e5b",
+      "negativeControl": "main 30ecdcd4 over the same data: ask list 500 and single read 500 for the six uncastable shapes (22P02)"
+    },
+    {
+      "criterion": "Round 4 item 1: every ask reader (askRowFrom: ask list and single-ask read; events hydration; both search arms; refs ask node; loadAnchorRefreshedAsk) resolves every anchor spelling that casts as base does, and only an uncastable value to no document",
+      "surface": "a real local Dispatch server built from head, booted over the LINUX replay seed migrated to 0138 by base 8a911ecc, holding nine asks opened through base's API on LINUX-344's spec and rewritten by SQL (block_artifact_id set) to anchor artifact_id: canonical, upper case, braces, trailing newline, '', '5', leading space, not-a-uuid, JSON number 5",
+      "command": "BASE_TEMPLATE=dispatch_replay_8008d85477e69539 shapes-proof.sh bin/dispatch-413818e2 head (dispatch://INFRA-720/artifact/infra720-r5-shapes-tgz)",
+      "observed": "GET /api/v1/issues/LINUX-344/asks 200, /events 200; every GET /api/v1/asks/{id} 200; canonical, upper case and braces resolve anchor_artifact spec in the single read and the list; the six that do not cast resolve none; healthz 200",
+      "headSha": "413818e22bdde3e830335add68d53a89879be3a9",
+      "negativeControl": "base 8a911ecc on the same data: ask list 500 and single read 500 for the six uncastable shapes (22P02); round-3 head 1f4f79e7: upper case and braces resolve none, JSON number 5 answers 500"
+    },
+    {
+      "criterion": "Round 4 item 2: an anchor whose artifact_id is stored as a JSON number decodes as no document instead of failing",
+      "surface": "model and api packages on real Postgres 17.11; the real server above",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=... go test ./internal/dispatch/model/ -count=1; go test ./internal/dispatch/api/ -run 'AnchorArtifactID|AnUpperCaseOrBraced' -count=1 -v; go test ./internal/dispatch/refs/ -run TestAskNodeKeepsTheDocumentAnUpperCaseOrBracedAnchorNames -count=1",
+      "observed": "model ok; api PASS for TestAskRoutesAnswerOverAnAnchorArtifactIDStoredAsANumber, the tester's TestAskReadersResolveAnUpperCaseOrBracedAnchorToItsDocument (unmodified) and the four ...AnchorArtifactIDThatDoesNotCast tests; refs PASS for the tester's TestAskNodeKeepsTheDocumentAnUpperCaseOrBracedAnchorNames (unmodified); the server answers 200 for the number ask",
+      "headSha": "413818e22bdde3e830335add68d53a89879be3a9",
+      "negativeControl": "with Anchor.UnmarshalJSON removed the number test answers 500; on the round-3 head the server logs 'decode ask anchor: json: cannot unmarshal number into Go struct field Anchor.artifact_id of type string' and answers 500"
+    },
+    {
+      "criterion": "The INFRA-512 architect's requirement: migration 0139 (renumbered from 0137 at the forward merge) boots on any data production could hold and the server keeps serving; the boot logs the count of asks the index leaves out; the census refuses nothing",
+      "surface": "a real local Dispatch server built from the head tree, booted over the LINUX replay seed migrated to 0138 by base 8a911ecc, holding asks opened through the base server's API on LINUX-344's spec and rewritten by SQL into the shape only an earlier release could store (block_artifact_id set; anchor artifact_id 'not-a-uuid' and an upper-case uuid, beside a canonical one); NATS and the fake listener from INFRA-639's harness",
+      "command": "BASE_TEMPLATE=<base template> boot-proof.sh bin/dispatch-head head (dispatch://INFRA-720/artifact/infra720-r4-runs-tgz)",
+      "observed": "schema 138 -> 139, healthz ok in 2 s, WARN 'anchored asks left out of asks_anchor_artifact_id ...' count=2; edit of the spec 200 with no sweep error; GET /api/v1/issues/LINUX-344/asks 200 (canonical ask anchor_artifact spec, the other two none); events, search, references 200; healthz 200",
+      "headSha": "1f4f79e7fb4795755864c31b77c30e6f20274624",
+      "negativeControl": "base 8a911ecc over the same data: GET /api/v1/issues/LINUX-344/asks 500 'invalid input syntax for type uuid: \"not-a-uuid\" (SQLSTATE 22P02)'; previous head ff4d51c8 (unguarded index): boot exits 1 'apply migration 137: ... 22P02'"
+    },
+    {
+      "criterion": "A2: rows identical to INFRA-648's for every ask whose anchor casts; index scans for asks and comments",
+      "surface": "INFRA-512 replay database migrated to 0139 on Postgres 17.11 plus a synthetic copy (3,400 anchor-only, 1,157 block-only, 10 upper-case, 10 orphaned, 10 both-column, 10 both-column not-a-uuid asks)",
+      "command": "psql -d synth720 -f sql3/compare.sql; psql -d synth720 -f sql3/explain-run.sql (dispatch://INFRA-720/artifact/infra720-r4-evidence-tgz)",
+      "observed": "old except new 0, new except old 0, 3,410 = 3,410; 10 both-column asks listed under their anchor's document (INFRA-648: 0); not-a-uuid and upper-case listed by neither; generic plan Bitmap Index Scan on asks_anchor_artifact_id 0.27 ms for 18 rows, comments_anchor_artifact 0.15 ms",
+      "headSha": "1f4f79e7fb4795755864c31b77c30e6f20274624",
+      "negativeControl": "INFRA-648's predicate over the same 10 both-column asks lists none of them"
+    },
+    {
+      "criterion": "A3: the sweep's cost does not measurably rise (and the asks-listing and search shares quoted, as the architect asked)",
+      "surface": "(a) recordedMarkRefs over all 1,157 documents of the synthetic copy, base 8a911ecc vs head test binaries; (b) local Dispatch base 8a911ecc vs head 1f4f79e7 under INFRA-639's LINUX replay (b1367e2c), F=0.15, minutes 19-35, GOMAXPROCS=2",
+      "command": "(a) docs-<side>.test -test.bench RecordedMarkRefsEveryDocument x10 alternating, benchstat golang.org/x/perf@v0.0.0-20261009192801-be2c69fb417e; (b) run-step.sh i720r4-<side>-<n> --replay --rate 0.15 --from 19m --to 35m --gomaxprocs 2 --dispatch-commit <rev>, base-1 head-1 base-2 head-2 base-3 head-3; pprof -focus on sweepUnrecordedMarks, search, listIssueAsks, listIssueEvents",
+      "observed": "(a) 1.016 s \u00b1 7% -> 1.016 s \u00b1 16%, ~ (p=0.912 n=10); B/op +4.3% from the 10 both-column asks head lists. (b) CPU-s base 395.97/385.43/371.48, head 385.10/382.05/385.57: median head 385.10 <= max base 395.97 (spread 24.49); sweep share base 0.091/0.085/0.066%, head 0.077/0.073/0.083%: median head 0.077% <= max base 0.091%; search base 0.0078/0.008/0.0055%, head 0.013/0.0054/0.016% (2-6 samples a run); listIssueAsks 0 on both sides (the replay sends no ask-list request); no run saturated, 0 timeouts",
+      "headSha": "1f4f79e7fb4795755864c31b77c30e6f20274624",
+      "negativeControl": "base build 8a911ecc on the same inputs and pod is the control; the rule fails only if median head exceeds max base"
+    }
+  ],
+  "filesChanged": [
+    "docs/solutions/database-issues/a-read-reaches-an-expression-index-only-through-its-exact-expression-and-keeps-the-old-predicate-beside-it-pr2467.md",
+    "packages/envoy/.changes/unreleased/pr2483-settlement-keeps-anchored-ask-mark.yaml",
+    "packages/envoy/cmd/dispatch/README.md",
+    "packages/envoy/cmd/dispatch/main.go",
+    "packages/envoy/internal/dispatch/api/ask_anchor_artifact_test.go",
+    "packages/envoy/internal/dispatch/api/ask_anchor_fixtures_test.go",
+    "packages/envoy/internal/dispatch/api/ask_rows.go",
+    "packages/envoy/internal/dispatch/api/asks.go",
+    "packages/envoy/internal/dispatch/api/comment_queries.go",
+    "packages/envoy/internal/dispatch/api/events.go",
+    "packages/envoy/internal/dispatch/api/search.go",
+    "packages/envoy/internal/dispatch/docs/anchor_blocks.go",
+    "packages/envoy/internal/dispatch/docs/anchor_refreshed_ask_test.go",
+    "packages/envoy/internal/dispatch/docs/ask_row.go",
+    "packages/envoy/internal/dispatch/docs/marks.go",
+    "packages/envoy/internal/dispatch/docs/marks_test.go",
+    "packages/envoy/internal/dispatch/docs/recorded_mark_refs_test.go",
+    "packages/envoy/internal/dispatch/model/anchor_test.go",
+    "packages/envoy/internal/dispatch/model/model.go",
+    "packages/envoy/internal/dispatch/refs/ask_anchor_artifact_test.go",
+    "packages/envoy/internal/dispatch/refs/graph.go",
+    "packages/envoy/internal/dispatch/store/asks_anchor_artifact_id_migration_test.go",
+    "packages/envoy/internal/dispatch/store/asks_anchor_artifact_index.go",
+    "packages/envoy/internal/dispatch/store/canonical_uuid.go",
+    "packages/envoy/internal/dispatch/store/migrations/0148_asks_anchor_artifact_id.census.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0148_asks_anchor_artifact_id.up.sql",
+    "packages/envoy/internal/dispatch/store/store_test.go"
+  ],
+  "trickyParts": [
+    "The plan test needs an Index Cond on the index node, not only the index name: with a text-only predicate Postgres reads the whole partial index asks_anchor_artifact_id (its predicate anchor is not null is implied), which names the index and has no Seq Scan.",
+    "The A1 fixture leaves block_id null so B's ask-block reconciliation never sees the row; the unrecorded 'dangling' control mark makes a sweep that errored or never ran fail.",
+    "The census calls pg_input_is_valid(anchor->>'artifact_id','uuid'), the cast's own input function (Postgres 16+, the supported floor), so it counts exactly what the index build refuses; a missing artifact_id is null and is counted by neither."
+  ],
+  "deviations": [
+    "Round 3 (tester fail on the architect's requirement): 0137's index and every ask-anchor reader guard the cast with store.CanonicalUUID; the census is select 0 and a boot log counts the left-out rows (architect's accepted design, Envoy 4f4150f2, 07:36Z); the readers were widened into this PR on the architect's decision (a), Envoy 538813ee, 08:05Z.",
+    "Hardening ledger: the tester's red test 92cbecc9 (census refuses 0137) was replaced, not made to pass, by TestMigration0139BootsOverAnAskWhoseAnchorArtifactIDDoesNotCast, on the architect's requirement that the migration boot over any data.",
+    "Forward merge with main 8a911ecc (GitHub reported CONFLICTING: main took 0137_request_keys and 0138); migration renumbered 0148_asks_anchor_artifact_id with identical SQL; fingerprint 787ec9f0... -> 0ad6c541..., changed only by the renumbering.",
+    "The search guard is consistency only: both search arms read coalesce(artifact_id, block_artifact_id, <anchor>), which never reaches the anchor for any row an index allows; their tests pin the route answering over the real row shape, not the unreachable cast.",
+    "Task 5(b) ran on INFRA-639's replay (b1367e2c) at F=0.15, minutes 19-35, on the INFRA-512 architect's instruction; base is 8a911ecc, the main commit the head was merged with; all six runs on one pod.",
+    "Round 4 (narrowed by the INFRA-512 architect, Envoy 28bf3ef6, 15:13Z): only the reader guard switch to store.CastableUUID (pg_input_is_valid) and the non-string artifact_id decode; boot, index, census and sweep rows are settled, so the replay runs were not repeated. The A2/A3 entries above are round 3's at 1f4f79e7.",
+    "On head, a single-ask read of an uncastable anchor answers 200 and logs WARN 'answer a comment or ask read without its anchor's block position' (DOC_SERVICE_UNAVAILABLE from the document stamp read of that id): the read degrades as it does for any document it cannot open.",
+    "Round 5: forward merge with main 30ecdcd4 (GitHub CONFLICTING: main took 0139_related_checks and 0140_issue_embedding_spec; search.go and README conflicted); migration renumbered 0141 with identical SQL; fingerprint 115bb0e9... -> 83332516..., changed only by the renumbering and main's searchKeywordLegs signature. A local Postgres that had applied this branch's earlier 0139 refuses 0141 (index exists); no deployment ever ran an unmerged number.",
+    "Review round 1 item 2: the reviewer and architect named a fast path in Anchor.UnmarshalJSON; measured, that method still cost +51% per well-formed decode, so the lenient read is model.DecodeAnchor called at each stored-anchor decode site, which meets the stated criterion (decode not measurably costlier than main's: ~ p=0.105).",
+    "Merge round: forward merge with main 08c2e8ad (CONFLICTING: main took 0141_drop_broadcast_idempotency_keys; README conflicted); migration renumbered 0142 with identical SQL and census; fingerprint 8868f24b... -> 7eeb1e8b..., changed only by the renumbering.",
+    "Merge round: forward merge with main 49e23926 (CONFLICTING: main took 0142_item_blocks, 0143 and 0144; README conflicted); migration renumbered 0145 with identical SQL and census; fingerprint 18a1db02... -> 5d2b1d89..., changed only by the renumber (fp-delta.txt).",
+    "Merge round from awaiting_merge (the INFRA-512 architect, Envoy e1c2337d, 07:56Z): main a21100c5 took 0145-0147 with no text conflict; merged main dd552dfd, renumbered 0148 with identical SQL and census; fingerprint 5d2b1d89... -> 88c25537..., changed only by the renumber (fp-delta.txt). The merge commit was pushed before this task arrived, as the architect directed, since a backward move from awaiting_merge is refused."
+  ],
+  "openQuestions": [
+    "Comment-anchor casts (api/search.go comment arms, refs/graph.go:587, outbox/recipients.go:62) stay unguarded: comments_anchor_artifact (0032) casts every comment row, so no stored comment anchor fails. Approval casts are held by asks_approval_kind_check (0053), which requires a canonical uuid."
+  ]
+}
