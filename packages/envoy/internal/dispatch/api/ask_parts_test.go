@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -401,5 +403,247 @@ func TestAnAnsweredAsksEventNamesWhatItsAnswerMentions(t *testing.T) {
 	})
 	if links := askPartRefs(t, database, ask.ID); len(links) != 1 || links[0] != "b3 issue "+target.Key {
 		t.Fatalf("the links of the answered ask's parts = %#v, want one from its answer", links)
+	}
+}
+
+// askPartRef is the reference naming part blockID of the ask.
+func askPartRef(issueKey, askID, blockID string) string {
+	return "dispatch://" + issueKey + "/ask/" + askID + "#b-" + blockID
+}
+
+// latestEventID is the id of the newest event of the issue, the id a ?since= read counts from.
+func latestEventID(t *testing.T, database *store.Store, issueKey string) int64 {
+	t.Helper()
+	var id int64
+	if err := database.Pool.QueryRow(context.Background(), `
+		select coalesce(max(id), 0) from events where issue_key = $1
+	`, issueKey).Scan(&id); err != nil {
+		t.Fatalf("read the newest event of %s: %v", issueKey, err)
+	}
+	return id
+}
+
+// askPartTime is when part blockID of the ask was made, which is when it was last changed while
+// no later revision reworded it.
+func askPartTime(t *testing.T, database *store.Store, askID, blockID string) time.Time {
+	t.Helper()
+	var made, changed time.Time
+	if err := database.Pool.QueryRow(context.Background(), `
+		select made_at, changed_at from ask_blocks where ask_id = $1::uuid and block_id = $2
+	`, askID, blockID).Scan(&made, &changed); err != nil {
+		t.Fatalf("read the times of %s of ask %s: %v", blockID, askID, err)
+	}
+	if !made.Equal(changed) {
+		t.Fatalf("part %s of ask %s was made at %v and changed at %v; want one revision's time", blockID, askID, made, changed)
+	}
+	return made
+}
+
+// A part of an ask is a node a reference names: a comment citing an option holds one mention of
+// that part and of nothing else, the ask's own read lists the mention at the part holding it, and
+// the ask's card counts it. Each current part is part_of the ask, so an answer adds one. A part
+// the ask does not hold answers 404 naming the part and the ask.
+func TestAnAskOptionIsAddressable(t *testing.T) {
+	const option = "Monday — Ship at the start of the week."
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Addressable ask parts", "A spec")
+	ask := createPartAsk(t, handler, issue.Key, "Which day do we ship?",
+		map[string]string{"label": "Monday", "description": "Ship at the start of the week."},
+		map[string]string{"label": "Tuesday"})
+	askRef := "dispatch://" + issue.Key + "/ask/" + ask.ID
+	optionRef := askPartRef(issue.Key, ask.ID, "b2")
+	citer := createThreadComment(t, handler, issue.Key, map[string]any{"body": "We take " + optionRef + "."}, "alice")
+
+	if got := itemBlockRefs(t, database, "comment", citer.ID); strings.Join(got, ",") != "b1->ask_block:ask/"+ask.ID+"#b2" {
+		t.Fatalf("the citing comment's block mentions = %v, want b1 -> ask_block ask/%s#b2", got, ask.ID)
+	}
+	written := readGraph(t, handler, url.Values{"from": {"dispatch://" + issue.Key + "/comment/" + citer.ID}}).Edges
+	if len(written) != 1 || written[0].Kind != "mentions" {
+		t.Fatalf("the citing comment writes %#v, want its one mention of the option", written)
+	}
+	if node := written[0].Node; node.Kind != "block" || node.ID != "ask/"+ask.ID+"#b2" || node.BlockID != "b2" ||
+		node.Ref != optionRef || node.Parent == nil || node.Parent.ID != ask.ID {
+		t.Fatalf("the mention's other end = %#v, want part b2 of ask %s", written[0].Node, ask.ID)
+	}
+
+	part := readGraph(t, handler, url.Values{"to": {optionRef}})
+	if node := part.Node; node.Kind != "block" || node.ID != "ask/"+ask.ID+"#b2" || node.BlockID != "b2" ||
+		node.Ref != optionRef || node.Text != option || node.ChangedVersion != 1 {
+		t.Fatalf("?to= the option reads the node %#v, want part b2 reading %q", part.Node, option)
+	}
+	if len(part.Edges) != 1 || part.Edges[0].Node.ID != "comment/"+citer.ID+"#b1" {
+		t.Fatalf("?to= the option lists %#v, want the mention from block b1 of comment %s", part.Edges, citer.ID)
+	}
+
+	whole := readGraph(t, handler, url.Values{"to": {askRef}})
+	if len(whole.Edges) != 1 || whole.Edges[0].Kind != "mentions" || whole.Edges[0].Block == nil ||
+		whole.Edges[0].Block.BlockID != "b2" || whole.Edges[0].Node.ID != "comment/"+citer.ID+"#b1" {
+		t.Fatalf("?to= the ask lists %#v, want the mention once, at its part b2", whole.Edges)
+	}
+	askRead := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+ask.ID, nil, "alice")
+	if askRead.Code != http.StatusOK {
+		t.Fatalf("read the ask: status=%d body=%s", askRead.Code, askRead.Body.String())
+	}
+	counted := decodeBody[struct {
+		Ask askBacklinkCount `json:"ask"`
+	}](t, askRead).Ask
+	requireAskBacklinkCount(t, map[string]*int{counted.ID: counted.ReferencedByCount}, ask.ID, 1)
+
+	missing := graphRequest(t, handler, url.Values{"to": {askPartRef(issue.Key, ask.ID, "b9")}})
+	if missing.Code != http.StatusNotFound || !strings.Contains(missing.Body.String(), `"code":"NOT_FOUND"`) ||
+		!strings.Contains(missing.Body.String(), `no part \"b9\" in ask `+ask.ID) {
+		t.Fatalf("?to= part b9: status=%d body=%s", missing.Code, missing.Body.String())
+	}
+
+	if parts := readGraph(t, handler, url.Values{"to": {askRef}, "kind": {"part_of"}}).Edges; len(parts) != 3 {
+		t.Fatalf("?to= the ask with kind=part_of lists %d edges, want its question and two options", len(parts))
+	}
+	answerPartAsk(t, handler, ask, "alice", []string{"Monday"}, "Ship it then.")
+	if parts := readGraph(t, handler, url.Values{"to": {askRef}, "kind": {"part_of"}}).Edges; len(parts) != 4 {
+		t.Fatalf("?to= the answered ask with kind=part_of lists %d edges, want its four parts", len(parts))
+	}
+}
+
+// R12 for an ask's parts: a part carries the six facts of every node, read by its own reference
+// and as the other end of an edge. The ask's author made its question and its options, at the
+// revision that first held each; the answerer made the answer part, at the answer's time; each is
+// part of its ask at the revision its text last changed in.
+func TestAnAskPartCarriesTheFactsOfEveryNode(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Ask part facts", "A spec")
+	ask := createPartAsk(t, handler, issue.Key, "Which day do we ship?", map[string]string{"label": "Monday"})
+	askRef := "dispatch://" + issue.Key + "/ask/" + ask.ID
+	optionRef := askPartRef(issue.Key, ask.ID, "b2")
+	citer := createThreadComment(t, handler, issue.Key, map[string]any{"body": "We take " + optionRef + "."}, "alice")
+
+	opened, answered := 1, 2
+	asked := nodeFacts{
+		MadeBy: actorNames([]model.Actor{ask.Author}), MadeAt: &ask.CreatedAt,
+		ChangedBy: actorNames([]model.Actor{ask.Author}), ChangedAt: &ask.CreatedAt,
+		Parent: &model.NodeParent{Kind: "ask", ID: ask.ID, Ref: askRef}, ParentVersion: &opened,
+	}
+	requireFacts(t, "the option read by its own reference", readNode(t, handler, optionRef), asked)
+	written := readGraph(t, handler, url.Values{"from": {"dispatch://" + issue.Key + "/comment/" + citer.ID}}).Edges
+	if len(written) != 1 {
+		t.Fatalf("the citing comment writes %#v, want its one mention of the option", written)
+	}
+	requireFacts(t, "the option as the other end of the comment's mention", written[0].Node, asked)
+
+	answer := answerPartAsk(t, handler, ask, "alice", []string{"Monday"}, "Ship it then.")
+	if answer.Answer == nil {
+		t.Fatal("the answered ask carries no answer")
+	}
+	// The answer part is written at the answer's time, which the row holds to the microsecond
+	// Postgres keeps, where the answered ask carries the instant the write made.
+	answeredAt := askPartTime(t, database, ask.ID, "b3")
+	if !answeredAt.Equal(answer.Answer.At.Truncate(time.Microsecond)) {
+		t.Fatalf("the answer part was written at %v, want the answer's time %v", answeredAt, answer.Answer.At)
+	}
+	requireFacts(t, "the answer part", readNode(t, handler, askPartRef(issue.Key, ask.ID, "b3")), nodeFacts{
+		MadeBy: actorNames([]model.Actor{{Kind: "user", ID: "alice"}}), MadeAt: &answeredAt,
+		ChangedBy: actorNames([]model.Actor{{Kind: "user", ID: "alice"}}), ChangedAt: &answeredAt,
+		Parent: &model.NodeParent{Kind: "ask", ID: ask.ID, Ref: askRef}, ParentVersion: &answered,
+	})
+}
+
+// A15 for an ask's parts: a link pinned to revision N of an ask reads the part as N recorded it,
+// and says how it stands now: unchanged, changed (after an edit rewords the option) or removed
+// (after the edit that drops it, with the revision that removed it). The unpinned link reads the
+// current text, or 404 once the part is gone; a pin past the ask's revision answers 404.
+func TestAPinnedAskPartShowsTheRevisionItNames(t *testing.T) {
+	const (
+		tuesday  = "Tuesday — Ship once the review lands."
+		reworded = "Tuesday — Ship once the review lands and the queue is green."
+	)
+	handler, _ := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Pinned ask parts", "A spec")
+	ask := createPartAsk(t, handler, issue.Key, "Which day do we ship?",
+		map[string]string{"label": "Monday", "description": "Ship at the start of the week."},
+		map[string]string{"label": "Tuesday", "description": "Ship once the review lands."})
+	optionRef := askPartRef(issue.Key, ask.ID, "b3")
+	createThreadComment(t, handler, issue.Key, map[string]any{
+		"body": "Now " + optionRef + ", then " + optionRef + "@v1.",
+	}, "alice")
+
+	requirePin := func(step, ref, text, state string, removedVersion int, current string) model.GraphReferences {
+		t.Helper()
+		read := readGraph(t, handler, url.Values{"to": {ref}})
+		want := model.BlockPin{Version: 1, Ref: optionRef + "@v1", Text: text, State: state, RemovedVersion: removedVersion}
+		if read.Node.Pin == nil || *read.Node.Pin != want {
+			t.Fatalf("%s: the pin reads %#v, want %#v", step, read.Node.Pin, want)
+		}
+		if read.Node.Text != current {
+			t.Fatalf("%s: the pinned node's text = %q, want %q", step, read.Node.Text, current)
+		}
+		return read
+	}
+	requireUnpinned := func(step, text string) {
+		t.Helper()
+		if read := readGraph(t, handler, url.Values{"to": {optionRef}}); read.Node.Pin != nil || read.Node.Text != text {
+			t.Fatalf("%s: the unpinned read = %#v, want the text %q and no pin", step, read.Node, text)
+		}
+	}
+	requireNotFound := func(step, ref, message string) {
+		t.Helper()
+		response := graphRequest(t, handler, url.Values{"to": {ref}})
+		if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), message) {
+			t.Fatalf("%s: status=%d body=%s, want 404 saying %q", step, response.Code, response.Body.String(), message)
+		}
+	}
+
+	if read := requirePin("before the edit", optionRef+"@v1", tuesday, "unchanged", 0, tuesday); len(read.Edges) != 1 {
+		t.Fatalf("before the edit: the pinned read lists %d edges, want the one mention (pinned and unpinned are one target)", len(read.Edges))
+	}
+	requireUnpinned("before the edit", tuesday)
+	requireNotFound("a pin past the revision", optionRef+"@v2", "no revision 2 of ask "+ask.ID+"; its current revision is 1")
+
+	edited := editPartAskOptions(t, handler, ask.ID, "reword the option",
+		map[string]string{"label": "Monday", "description": "Ship at the start of the week."},
+		map[string]string{"label": "Tuesday", "description": "Ship once the review lands and the queue is green."})
+	requirePin("after the reword", optionRef+"@v1", tuesday, "changed", 0, reworded)
+	requireUnpinned("after the reword", reworded)
+
+	editPartAskOptions(t, handler, edited.ID, "drop the option",
+		map[string]string{"label": "Monday", "description": "Ship at the start of the week."})
+	removed := requirePin("after the drop", optionRef+"@v1", tuesday, "removed", 3, "")
+	if len(removed.Edges) != 0 || removed.Node.ChangedVersion != 0 || removed.Node.ParentVersion == nil ||
+		*removed.Node.ParentVersion != 2 || removed.Node.Parent == nil || removed.Node.Parent.ID != ask.ID {
+		t.Fatalf("after the drop: the removed part reads %#v with %d edges, want no edge, part of ask %s at revision 2",
+			removed.Node, len(removed.Edges), ask.ID)
+	}
+	if read := readGraph(t, handler, url.Values{"to": {optionRef + "@v2"}}); read.Node.Pin == nil ||
+		read.Node.Pin.Text != reworded || read.Node.Pin.State != "removed" {
+		t.Fatalf("after the drop: the pin at revision 2 reads %#v, want its reworded text, removed", read.Node.Pin)
+	}
+	requireNotFound("the unpinned read after the drop", optionRef, `no part \"b3\" in ask `+ask.ID)
+	requireNotFound("a pin to the revision that dropped it", optionRef+"@v3", `no part \"b3\" in ask `+ask.ID+" at revision 3")
+}
+
+// The answer's part rows are stamped with the ask.answered event that carried them (refs.Stamp),
+// so a ?since= read of the ask lists the edges the answer wrote and no older one; an unstamped row
+// is invisible to every such read.
+func TestAnAnsweredAsksPartEdgesAreListedSince(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	createReferenceAPIProject(t, handler, "OPS")
+	source := createReferenceAPIIssue(t, handler, "OPS")
+	target := createReferenceAPIIssue(t, handler, "CORE")
+	ask := createPartAsk(t, handler, source.Key, "Does dispatch://"+target.Key+" ship first?",
+		map[string]string{"label": "Monday"})
+	askRef := "dispatch://" + source.Key + "/ask/" + ask.ID
+	beforeTheAnswer := latestEventID(t, database, source.Key)
+	answerPartAsk(t, handler, ask, "alice", []string{"Monday"}, "Monday, once dispatch://"+target.Key+" lands.")
+
+	since := url.Values{"from": {askRef}, "since": {strconv.FormatInt(beforeTheAnswer, 10)}}
+	edges := readGraph(t, handler, since).Edges
+	if len(edges) != 1 || edges[0].Kind != "mentions" || edges[0].Node.ID != target.Key ||
+		edges[0].Block == nil || edges[0].Block.BlockID != "b3" {
+		t.Fatalf("?from= the ask since the event before the answer lists %#v, want the answer part's mention", edges)
+	}
+	afterTheAnswer := latestEventID(t, database, source.Key)
+	if edges := readGraph(t, handler, url.Values{
+		"from": {askRef}, "since": {strconv.FormatInt(afterTheAnswer, 10)},
+	}).Edges; len(edges) != 0 {
+		t.Fatalf("?from= the ask since the answer's own event lists %#v, want none", edges)
 	}
 }

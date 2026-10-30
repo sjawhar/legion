@@ -260,10 +260,12 @@ var countedKinds = [...]string{"issue", "ask", "artifact", "block"}
 // its count), an ask (every list that carries the ask row, plus the human Inbox), a document or
 // file (its Referenced by panel) and a block of a document (its own panel and every link to it,
 // which read one graph read, and its document's panel, which lists the edges at its blocks) — in
-// the shape those readers are keyed by. Comments, messages and components are dropped: nothing
-// counts them, and their panels refresh on the graph itself. A kind with more than
-// CountedChangeLimit named targets names none of them and is listed in TruncatedKinds, and the
-// reader falls back to refreshing every read of that kind; the other kinds are still named.
+// the shape those readers are keyed by. A part of an ask is named as its ask, whose cards and
+// panel are what a link to one of its parts moves. Comments, messages, their blocks and
+// components are dropped: nothing counts them, and their panels refresh on the graph itself. A
+// kind with more than CountedChangeLimit named targets names none of them and is listed in
+// TruncatedKinds, and the reader falls back to refreshing every read of that kind; the other
+// kinds are still named.
 //
 // A reference the grammar accepts need not address anything: `dispatch://CORE-1/ask/hello`
 // parses and is stored, so every lookup here compares text and a target that resolves to no
@@ -275,6 +277,12 @@ func CountedChanges(ctx context.Context, q Queryer, changed []Target) (model.Ref
 	ordered := make([]Target, 0, len(changed))
 	seen := make(map[[2]string]struct{}, len(changed))
 	for _, target := range changed {
+		if target.Kind == ItemAsk.BlockKind() {
+			// A part is counted as its ask, named between the 'ask/' prefix and the '#', so two
+			// parts of one ask, or a part and the ask's own row, name that ask once.
+			item, _, _ := strings.Cut(target.ID, "#")
+			target = Target{Kind: string(ItemAsk), ID: strings.TrimPrefix(item, "ask/")}
+		}
 		if _, duplicate := seen[[2]string{target.Kind, target.ID}]; duplicate {
 			continue
 		}
@@ -521,8 +529,8 @@ func ReferencedBy(ctx context.Context, q Queryer, refKey string) ([]model.Refere
 // Outgoing lists Dispatch mentions written by an artifact, resolving artifact targets. A block
 // target keeps its own kind and id and carries its document as the artifact, while a current
 // version holds the block; a block none holds is omitted, as is a target of a node kind this
-// build does not know. A block of a comment or a message, which this shape has no field for, is
-// listed by the graph read (Edges) alone. Any other unresolved target is listed.
+// build does not know. A block of an ask, a comment or a message, which this shape has no field
+// for, is listed by the graph read (Edges) alone. Any other unresolved target is listed.
 func Outgoing(ctx context.Context, q Queryer, artifactID string) ([]model.OutgoingReference, error) {
 	rows, err := q.Query(ctx, `
 		select e.to_kind, e.to_id,
@@ -534,7 +542,7 @@ func Outgoing(ctx context.Context, q Queryer, artifactID string) ([]model.Outgoi
 		left join artifacts a on a.ref_key = case e.to_kind when 'artifact' then e.to_id when 'block' then split_part(d.node_id, '#', 1) end
 		left join artifact_versions v on v.artifact_id = a.id
 		where e.from_kind = 'artifact' and e.from_id = $1 and e.kind = 'mentions' and e.to_kind = any($2)
-		  and e.to_kind not in ('comment_block', 'message_block')
+		  and e.to_kind not in ('comment_block', 'message_block', 'ask_block')
 		  and (e.to_kind <> 'block' or d.node_id is not null)
 		order by e.to_kind, e.to_id, v.number
 	`, artifactID, nodeKinds)
