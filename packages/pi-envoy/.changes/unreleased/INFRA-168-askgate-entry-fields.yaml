@@ -1,9 +1,0 @@
-kind: Added
-body: |-
-  The `advisor-gate` entry gains `charterLatencyMs`, the charter call's own time on the clock
-  `ruleLatencyMs` uses: the two calls run side by side, and the entry's `latencyMs` alone never
-  said which of them the gate waited on. It also gains `mintSkipped: "call-ended"`, on a call whose
-  decision let the write out but whose own tool ended while the gate still held it: no marker is
-  minted there, since no command of that call can run, and `scripts/askgate-report.ts` prints the
-  count of those entries.
-time: 2026-10-29T00:00:02Z

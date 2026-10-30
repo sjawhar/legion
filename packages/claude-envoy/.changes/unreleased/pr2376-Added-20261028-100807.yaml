@@ -1,7 +1,0 @@
-kind: Added
-body: |-
-    The `dispatch` command (`dist/dispatch.js`) takes `dispatch answers`, which prints every item of
-    that list in full.
-time: 2026-10-28T10:08:07.964677772Z
-custom:
-    Issue: pr2376

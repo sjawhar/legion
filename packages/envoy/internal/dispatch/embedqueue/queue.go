@@ -2,7 +2,7 @@
 // search, on whichever place (Bedrock or Azure AI Foundry) the deployment configures. A write's
 // AFTER INSERT/UPDATE trigger (0073-0077, and 0140's on a new version of an issue's spec) upserts a
 // pending row into embeddings with the latest text and a hash of it in the same transaction as the
-// write, and announces it on dispatch_embeddings (0149); this package's scan loop, woken by that
+// write, and announces it on dispatch_embeddings (0150); this package's scan loop, woken by that
 // announcement, embeds whatever that enqueue left pending, with the same claim-then-retry shape as
 // the event outbox
 // (internal/dispatch/outbox): a write never fails because the embedder did, since the model
@@ -29,7 +29,7 @@ import (
 )
 
 // WakeChannel is the Postgres notification channel embeddings_enqueue announces on each time it
-// writes a row (migration 0149): the channel whose pglisten.Hub wake the server passes as
+// writes a row (migration 0150): the channel whose pglisten.Hub wake the server passes as
 // Deps.Wake.
 const WakeChannel = "dispatch_embeddings"
 
@@ -73,7 +73,7 @@ type Deps struct {
 	Embedder embed.Embedder
 	// Wake is signalled when a write may have left a row pending: in the server, the shared
 	// pglisten.Hub's wake on dispatch_embeddings, which embeddings_enqueue notifies each time it
-	// writes a row (0149) and which the hub also signals after every successful LISTEN, so a row
+	// writes a row (0150) and which the hub also signals after every successful LISTEN, so a row
 	// written while the listener had no connection is scanned once it has one again. Run's scan
 	// loop does not wait for it to start: it scans at start whatever the listener's state. Nil
 	// leaves the loop with its start, its own due times and the coverage pass's rows.

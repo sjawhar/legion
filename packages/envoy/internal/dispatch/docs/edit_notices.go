@@ -117,7 +117,7 @@ func (s *Service) recordEditNotice(ctx context.Context, tx pgx.Tx, artifactID st
 
 // EditNoticesChannel is the Postgres notification channel a document's edit notice announces itself
 // on at commit each time a writer gives it a due time (document_edit_notices_notify, migration
-// 0155): the channel whose pglisten.Hub wake the server passes to RunEditNotices.
+// 0156): the channel whose pglisten.Hub wake the server passes to RunEditNotices.
 const EditNoticesChannel = "dispatch_edit_notices"
 
 // editNoticeLease names the lease one sweep runs under, editNoticeBatch the most due notices one
@@ -260,8 +260,8 @@ func (s *Service) sendDueEditNotices(ctx context.Context) (int, error) {
 // transaction, then publishes the event once it commits, and reports whether it sent one. It takes
 // the locks in the settlement's order: the document owner's (lockArtifactOwner), then the notice
 // row, which the settlement writes after its version (recordEditNotice), then the events' own
-// (events.Broker.Append, which takes the owner's lock again and the commit-order lock). No
-// statement here locks `for update`.
+// (events.Broker.Append, which takes the owner's lock again). No statement here locks
+// `for update`.
 //
 // A document deleted since the unlocked read has taken its notice with it (on delete cascade), and
 // one whose issue has closed takes no more edits: either way nothing is sent, and a closed issue's

@@ -284,7 +284,7 @@ func NextExcerptRetry(ctx context.Context, q Queryer) (time.Time, error) {
 // excerpt_version is null, so the route uses the document's name until the reconciliation stores
 // the latest excerpt: what a version write that cannot cut its excerpts leaves. Each row it marks
 // announces itself on dispatch_excerpts_owed at commit (refs_excerpts_owed_notify, migration
-// 0151), which wakes the reconciliation in every process.
+// 0152), which wakes the reconciliation in every process.
 func ClearExcerpts(ctx context.Context, q Execer, fromID string) error {
 	if _, err := q.Exec(ctx, `
 		update refs set excerpt_version = null where from_kind = 'artifact' and from_id = $1

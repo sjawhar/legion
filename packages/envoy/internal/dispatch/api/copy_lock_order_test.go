@@ -30,7 +30,7 @@ import (
 
 // lockEffect is a lock a function's own statements, or the functions it calls, take in the
 // transaction they run in: a project's copy lock (docs.lockProjectCopies), a
-// doc_settlements_pending row, or the events' commit-order lock an event append takes.
+// doc_settlements_pending row, or the event owner's row an event append locks.
 type lockEffect uint8
 
 const (
@@ -58,8 +58,9 @@ var ownTransactionFunctions = []string{
 // TestCopyLockComesBeforeEveryPendingRowAndEvent enforces the order the copy lock's deadlock
 // freedom rests on (docs.lockProjectCopies): no transaction takes a project's copy lock after it
 // has written a doc_settlements_pending row or appended an event. A holder of the copy lock goes
-// on to take other documents' pending rows and the events' commit-order lock, so a transaction
-// waiting on the copy lock while holding either could close a cycle with it.
+// on to take other documents' pending rows and to append events, each of which locks its event
+// owner's row (events.Broker.Append), so a transaction waiting on the copy lock while holding a
+// pending row, or an owner row an append of its own took, could close a cycle with it.
 //
 // It type-checks the Dispatch server's packages of this module from source, the packages they
 // import from their export data (go list -export), and finds each lock from the SQL that takes
