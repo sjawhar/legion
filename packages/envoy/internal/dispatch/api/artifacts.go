@@ -1156,12 +1156,12 @@ func artifactIDs(artifacts []*model.Artifact) []string {
 // queueArtifactDetails queues in b what a list of artifacts carries beside its rows - every
 // artifact's versions in one statement rather than a query per artifact, and every document's
 // latest review and open approval request (queueApprovals) - and returns the apply that fills
-// them in once the batch is closed. The statements are queued in that order wherever a list of
-// artifacts is read: the issue read queues them beside its other reads (readIssueDetails), and a
-// list of its own sends them as a batch of its own (loadArtifactDetails). The apply fills the
-// versions first, since an approval's state reads them (applyApprovals), and leaves an artifact
-// with no version a non-nil empty list (applyVersions). No artifact queues nothing and its apply
-// fills nothing.
+// them in once the batch is closed. The statements are queued in that order wherever artifacts
+// are read with their details: the issue read queues them beside its other reads
+// (readIssueDetails), and a read of its own sends them as a batch of its own (loadArtifactDetails).
+// The apply fills the versions first, since an approval's state reads them (applyApprovals), and
+// leaves an artifact with no version a non-nil empty list (applyVersions). No artifact queues
+// nothing and its apply fills nothing.
 func queueArtifactDetails(b *pgx.Batch, artifacts []*model.Artifact) func() {
 	versions := map[string][]model.Version{}
 	if ids := artifactIDs(artifacts); len(ids) > 0 {
@@ -1177,9 +1177,9 @@ func queueArtifactDetails(b *pgx.Batch, artifacts []*model.Artifact) func() {
 }
 
 // loadArtifactDetails sends queueArtifactDetails's statements as a batch of their own on q, for a
-// list read that queues nothing else: an issue's artifacts (loadArtifacts), a project's
-// (listProjectArtifacts). The batch holds q's connection until its results close, so nothing else
-// reads the database in between.
+// read that queues nothing else: an issue's artifacts (loadArtifacts), a project's
+// (listProjectArtifacts) and one artifact read by id or by ref_key (loadArtifactRow). The batch
+// holds q's connection until its results close, so nothing else reads the database in between.
 func loadArtifactDetails(ctx context.Context, q queryer, artifacts []*model.Artifact) error {
 	batch := &pgx.Batch{}
 	apply := queueArtifactDetails(batch, artifacts)
