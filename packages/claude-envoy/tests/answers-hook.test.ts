@@ -991,12 +991,15 @@ test("a hook whose start-up took past 800 ms still gives Dispatch its least wait
   // On a quiet host the read lands and the list is carried. On a loaded one the stand-in can miss
   // even the 150 ms least wait, and the design then allows the failure line; what it never allows
   // is a read given no wait at all, which this case exists to catch ("within 0 ms").
-  allowedOutcome(
+  const outcome = allowedOutcome(
     contextOf(run, "SessionStart"),
     items,
     /^Dispatch did not answer within (1[5-9]\d|[2-9]\d\d|\d{4,}) ms$/,
   )
   expect(run.timing.began).toBeGreaterThanOrEqual(820)
   expectWithinDeadline(run)
-  expect(dispatch.requests).toEqual([`Bearer hook-token /api/v1/agents/${SESSION}/answers`])
+  // A read that missed its wait may not have reached the stand-in before the hook exited.
+  const read = `Bearer hook-token /api/v1/agents/${SESSION}/answers`
+  if (outcome === "fresh") expect(dispatch.requests).toEqual([read])
+  else expect(dispatch.requests.filter((request) => request !== read)).toEqual([])
 }, 20_000)
