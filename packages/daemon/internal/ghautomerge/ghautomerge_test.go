@@ -192,8 +192,16 @@ func (g *github) serve(t *testing.T) string {
 			if pullTitle == "" {
 				pullTitle = title
 			}
-			_, _ = fmt.Fprintf(w, `{"data":{"repository":{"autoMergeAllowed":%t,"pullRequest":{"id":"PR_42","state":%q,"title":%q,"headRefOid":%q,"mergeStateStatus":%q,"updatedAt":%s,"isMergeQueueEnabled":%t,"autoMergeRequest":%s,"mergeQueueEntry":%s}}}}`,
-				g.autoMergeOK, state, pullTitle, g.head, mergeState, updated, g.queueRequired, autoMerge, entry)
+			// GitHub answers only the fields the read selects, so the answer carries the title only
+			// while the query asks for it, as passed() above records a field the mutation's input
+			// leaves out: a read that stopped selecting it would leave Submit with no headline but
+			// the pull request's number, and GitHub writes that onto the base branch unchanged.
+			titleField := ""
+			if strings.Contains(request.Query, " title ") {
+				titleField = fmt.Sprintf(`"title":%q,`, pullTitle)
+			}
+			_, _ = fmt.Fprintf(w, `{"data":{"repository":{"autoMergeAllowed":%t,"pullRequest":{"id":"PR_42","state":%q,%s"headRefOid":%q,"mergeStateStatus":%q,"updatedAt":%s,"isMergeQueueEnabled":%t,"autoMergeRequest":%s,"mergeQueueEntry":%s}}}}`,
+				g.autoMergeOK, state, titleField, g.head, mergeState, updated, g.queueRequired, autoMerge, entry)
 		}
 	}))
 	t.Cleanup(server.Close)
