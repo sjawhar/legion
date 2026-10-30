@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Dispatch</string>
+    <string name="channel_asks">New asks</string>
+    <string name="channel_asks_description">An ask on an issue assigned to you that is waiting on you.</string>
+    <string name="channel_watch">Inbox watch</string>
+    <string name="channel_watch_description">Shown while the app keeps a live connection to Dispatch.</string>
+    <string name="watch_notification">Watching your Inbox</string>
+    <string name="server_title">Dispatch server</string>
+    <string name="server_hint">https://dispatch.example.com</string>
+    <string name="server_save">Open</string>
+    <string name="server_invalid">Enter an https:// address.</string>
+    <string name="signed_out">Signed out of Dispatch: open the app to sign in again.</string>
+</resources>
