@@ -341,16 +341,23 @@ function DocumentPreview({ route }: { route: DispatchReferenceRoute }): ReactNod
 /** A block of a document: its document, then for a pinned reference the version it pins and how
  *  the block stands since (`BlockPin.state`), then its text - the pinned version's for a pinned
  *  reference, its current text otherwise. The document's name is the card's own read of its
- *  summary, which no link to the block reads. A block of a comment or message heads with its item
- *  and author in place of the document, and reads no summary (`useBlockDocument`), a comment's pin
- *  naming a revision of the comment; its text is the one its graph node carries, as a document
+ *  summary, which no link to the block reads. A part of an ask, or a block of a comment or
+ *  message, heads with its item and author in place of the document, and reads no summary
+ *  (`useBlockDocument`), a comment's pin naming a revision of the comment and an ask part's a
+ *  revision of the ask's parts; its text is the one its graph node carries, as a document
  *  block's is. */
 function BlockPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
   const { block } = useReferenceData(route, { text: false });
   const artifact = useBlockDocument(route);
   const item = itemOfBlock(route);
   const holder =
-    item === undefined ? artifact?.name : item.kind === "comment" ? "Comment" : "Message";
+    item === undefined
+      ? artifact?.name
+      : item.kind === "ask"
+        ? "Ask"
+        : item.kind === "comment"
+          ? "Comment"
+          : "Message";
   if (holder === undefined || block === undefined) {
     return <Heading>{shortForm(route)}</Heading>;
   }

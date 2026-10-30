@@ -5729,6 +5729,29 @@ describe("executeDispatchTool", () => {
         expect(requests).toContain(`/api/v1/asks/${ask}`);
       });
 
+      // An ask's parts are numbered by revision, so the `Node:` line of a part says which revision
+      // of the ask's parts it belongs to, as a comment block's says its comment's revision.
+      test("read prints an ask part's facts, its parent version a revision", async () => {
+        const { result } = readPart(
+          `${askRef}#b-b2`,
+          part("b2", {
+            text: "Yes",
+            made_by: [{ kind: "session", id: "author-1" }],
+            made_at: "2026-10-20T00:00:00Z",
+            changed_by: [{ kind: "session", id: "author-1" }],
+            changed_at: "2026-10-21T00:00:00Z",
+          })
+        );
+        expect((await result).text).toBe(
+          [
+            `Option b2 of ask ${ask} (changed in revision 2):`,
+            "Yes",
+            `Node: block ${askRef}#b-b2 · made by session author-1 at 2026-10-20T00:00:00Z · changed by session author-1 at 2026-10-21T00:00:00Z · part of ${askRef} (revision 2)`,
+            ...sections,
+          ].join("\n")
+        );
+      });
+
       test("a pinned reference to a part the ask has moved past names it a part", async () => {
         const pinned = `${askRef}#b-b5@v1`;
         const { result } = readPart(pinned, {

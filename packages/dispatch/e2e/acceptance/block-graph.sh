@@ -5,10 +5,14 @@
 # blocks of two documents; each block's changed version; every block part of its document; a link
 # in a list item; who made each node of every kind and when, who last changed it and when, its
 # parent and the parent's version, read by its own reference, as an edge's other end and on the
-# `Node:` line of `dispatch read`; the older document references route; and the blocks of comments
+# `Node:` line of `dispatch read`; the older document references route; the blocks of comments
 # and messages: a reply that names a block (A7), a mention that starts at a comment's block (A10),
 # the facts of a comment's and a message's block (A11), a block's id kept through a person's edits
-# (A13) and a pinned link to a comment's block (A15).
+# (A13) and a pinned link to a comment's block (A15); and the parts of an ask — its question, each
+# option and its answer — each named by its own reference and printed on the option's line by
+# `dispatch read` (A6), carrying the facts of every node, a part the ask has dropped included
+# (A11), pinned to a revision of the ask's parts (A15), holding a link of its own (R7), refused by
+# name where the ask holds no such part (R10) and named by a reply in the ask's thread (R11).
 #
 # Inputs: DISPATCH_URL (the server), DISPATCH_TOKEN or DISPATCH_TOKEN_FILE (an agent bearer, read
 # here and never printed), PROJECT (an existing project key), and optionally COMPONENT_SOURCE
@@ -21,9 +25,11 @@
 # /auth/_dev/signin, signs in: the local harness has it, a deployed server does not). Editing a
 # comment is a person's write alone, so the A13 and A15 comment sections sign that person in with a
 # cookie jar and edit the comments the person wrote; with DEV_SIGNIN_LOGIN unset each prints one
-# `SKIP: … PATCH /api/v1/comments/{id} is human-only …` line and every other section runs. It
-# writes two issues in PROJECT, the second a child of the first holding an ask, and resolves the
-# ask and closes both, also when a check fails; it removes the source `fixture` added the same way.
+# `SKIP: … PATCH /api/v1/comments/{id} is human-only …` line and every other section runs; the same
+# holds for the answer part of A6's section, whose answer only a person can write. It writes two
+# issues in PROJECT, the second a child of the first, and four asks, three on the child and one on
+# the first; it resolves every ask it can and closes both issues, also when a check fails, and it
+# removes the source `fixture` added the same way.
 # Each passing check prints `PASS: <section> <what>`; the first failing one prints
 # `FAIL: <section> <what>: <observed>` and the script exits 1.
 #
@@ -1193,6 +1199,325 @@ else
   want_status 404 "A15 comment" "?to=Y#b-b2 of the deleted block"
   pass "A15 comment" "?to=Y#b-b2 of the deleted block is 404"
 fi
+
+# A6: an ask's parts — its question, each option and its answer — are blocks of the graph. Each is
+# named by `dispatch://KEY/ask/<id>#b-<part>`, reads its own text and facts, and `dispatch read`
+# prints each option's own reference on the option's line with the edges that reach that part under
+# it (A6); each part carries R12's facts, one the ask has dropped included (A11); a part pinned to a
+# revision reads the text that revision held, says it changed after a reword and was removed after
+# the drop (A15); a bare dispatch:// URL in a question, in an option and in an answer starts at that
+# part, and the target counts each written link once (R7); a part no revision of the ask holds is
+# refused by name (R10); and a reply in the ask's thread names the part it answers (R11). No part id
+# is guessed: every one of them comes from the ask's own read or from its part_of edges. Answering is
+# a person's write alone (POST /api/v1/asks/{id}/answer is human-only), so the answer part and R7's
+# third link run under DEV_SIGNIN_LOGIN; every other check runs on any server.
+
+# ask_parts SECTION WHAT ASK: reads the ask; sets $parts_revision to the revision of its parts,
+# $option_parts to its options' part ids in the ask's order, and $answer_part to its answer's part
+# id ("" while it holds no answer).
+ask_parts() {
+  local part
+  get "/api/v1/asks/$3"
+  want_status 200 "$1" "$2"
+  parts_revision="$(jq -er '.ask.revision' "$work/body")" ||
+    fail "$1" "$2" "no revision of the ask's parts: $(body)"
+  mapfile -t option_parts < <(jq -r '.ask.options[] | .id // ""' "$work/body")
+  answer_part="$(jq -r '.ask.answer.id // ""' "$work/body")"
+  for part in ${option_parts[@]+"${option_parts[@]}"}; do
+    [[ -n "$part" ]] || fail "$1" "$2" "an option carries no part id: $(body)"
+  done
+}
+
+# part_node SECTION WHAT ASK REF ID TEXT: ?to=REF reads part ID of ASK, a block node of the ask
+# carrying TEXT and the revision its text last changed in; the answer stays in $work/body.
+part_node() {
+  get "/api/v1/references?to=$(q "$4")"
+  want_status 200 "$1" "$2"
+  expect "$1" "$2" \
+    "$(jq -cn --arg a "$3" --arg b "$5" --arg r "$4" --arg t "$6" --argjson v "$parts_revision" \
+      '["block", "ask/\($a)#\($b)", $b, $r, $t, "ask", $a, $v]')" \
+    '[.node.kind, .node.id, .node.block_id, .node.ref, .node.text, .node.parent.kind,
+      .node.parent.id, .node.changed_version]'
+}
+
+# The ask the parts of another ask name by a bare URL (R7): nothing edits it, so the three links
+# stand while the counts below are read.
+run A6 "an ask for three links to name" ask --issue "$key" \
+  --question "The block graph check names this ask from the question, an option and the answer of \
+another ask, to read that one written link is counted once. $recommendation"
+[[ "$(<"$work/out")" =~ Asked\ ([0-9a-f-]{36}) ]] ||
+  fail A6 "an ask for three links to name" "no ask id in: $(<"$work/out")"
+named_ask="${BASH_REMATCH[1]}"
+named_ref="dispatch://$key/ask/$named_ask"
+
+# The ask whose parts A6, A11, A15, R10 and R11 read: a question and two options, each option's
+# text its label, an em dash and its description, as the server writes a part's text.
+parts_question="Which day does the block graph check ship the ask parts on? Recommendation: Monday, \
+so this check reads a part before the week's reviews."
+monday="Monday — Ship at the start of the week."
+tuesday="Tuesday — Ship once the review lands."
+reworded_tuesday="Tuesday — Ship once the review lands and the queue is green."
+run A6 "the ask whose parts the check reads" ask --issue "$child" --question "$parts_question" \
+  --option "Monday: Ship at the start of the week." \
+  --option "Tuesday: Ship once the review lands."
+[[ "$(<"$work/out")" =~ Asked\ ([0-9a-f-]{36}) ]] ||
+  fail A6 "the ask whose parts the check reads" "no ask id in: $(<"$work/out")"
+parts_ask="${BASH_REMATCH[1]}"
+parts_ref="$child_ref/ask/$parts_ask"
+
+ask_parts A6 "read the ask's parts" "$parts_ask"
+[[ "${#option_parts[@]}" == 2 ]] ||
+  fail A6 "the ask's read names each option's part" "its options are ${option_parts[*]-none}"
+[[ "$parts_revision" == 1 ]] ||
+  fail A6 "the ask's parts are at revision 1" "the read ask's revision is $parts_revision"
+monday_part="${option_parts[0]}"
+tuesday_part="${option_parts[1]}"
+pass A6 "the ask's read names each option's part ($monday_part, $tuesday_part) at revision 1"
+monday_ref="$(block_ref "$parts_ref" "$monday_part")"
+tuesday_ref="$(block_ref "$parts_ref" "$tuesday_part")"
+
+# Every part of the ask is part_of it, the question among them, and the question's part id is read
+# from that list: no read of an ask carries it.
+get "/api/v1/references?to=$(q "$parts_ref")&kind=part_of"
+want_status 200 A6 "?to=<ask>&kind=part_of answers"
+expect A6 "?to=<ask>&kind=part_of lists its two options and one part more, its question" \
+  "$(jq -cnS --arg m "$monday_part" --arg t "$tuesday_part" '{parts: 3, options: [$m, $t] | sort}')" \
+  --arg m "$monday_part" --arg t "$tuesday_part" \
+  '[.edges[] | select(.kind == "part_of") | .node.block_id] as $ids
+   | {parts: ($ids | length), options: ($ids | map(select(. == $m or . == $t)) | sort)}'
+# No read of an ask names its question's part, so the question is the part its options and its
+# answer do not name; the read below is what proves that part holds the question.
+question_part="$(jq -er --arg m "$monday_part" --arg t "$tuesday_part" \
+  'first(.edges[] | select(.kind == "part_of") | .node.block_id | select(. != $m and . != $t))' \
+  "$work/body")" ||
+  fail A6 "the question is a part of the ask" "the parts are $(body)"
+question_ref="$(block_ref "$parts_ref" "$question_part")"
+
+# Each part is addressable by its own reference.
+part_node A6 "the question reads by its own reference" "$parts_ask" "$question_ref" \
+  "$question_part" "$parts_question"
+part_node A6 "the first option reads by its own reference" "$parts_ask" "$monday_ref" \
+  "$monday_part" "$monday"
+part_node A6 "the second option reads by its own reference" "$parts_ask" "$tuesday_ref" \
+  "$tuesday_part" "$tuesday"
+
+# A6: a comment cites the first option alone; the ask's read prints that option's own reference on
+# the option's line, with the edge that reaches the part under it, and the option nothing cites
+# carries no such list.
+run A6 "a comment citing the first option" comment --issue "$child" \
+  --body "We take $monday_ref."
+posted A6 "a comment citing the first option" comment
+citing="$posted"
+citing_ref="$child_ref/comment/$citing"
+get "/api/v1/references?to=$(q "$monday_ref")"
+want_status 200 A6 "?to=<first option> answers"
+expect A6 "?to=<first option> lists the comment's block, part of the comment" \
+  "$(jq -cn --arg c "$citing" '[["mentions", "block", "comment/\($c)#b1", $c]]')" \
+  '[.edges[] | [.kind, .node.kind, .node.id, .node.parent.id]]'
+
+run A6 "dispatch read --ref <ask>" read --ref "$parts_ref"
+grep -qxF -- "- $monday ($monday_ref)" "$work/out" ||
+  fail A6 "read shows it on the option" "$(<"$work/out")"
+grep -qxF -- "- $tuesday ($tuesday_ref)" "$work/out" ||
+  fail A6 "read shows it on the option" "$(<"$work/out")"
+pass A6 "read shows it on the option"
+mapfile -t under < <(grep -A 2 -xF -- "- $monday ($monday_ref)" "$work/out")
+[[ "${#under[@]}" == 3 && "${under[1]}" == "  Referenced by:" &&
+  "${under[2]}" == "  - mentions comment $citing_ref block b1 "* ]] ||
+  fail A6 "read lists the comment citing the option under that option" \
+    "$(printf '%s\n' "${under[@]-}")"
+pass A6 "read lists the comment citing the option under that option"
+mapfile -t under < <(grep -A 1 -xF -- "- $tuesday ($tuesday_ref)" "$work/out")
+[[ "${under[1]-}" != "  Referenced by:" ]] ||
+  fail A6 "the option nothing cites lists no reference of its own" "$(printf '%s\n' "${under[@]}")"
+pass A6 "the option nothing cites lists no reference of its own"
+
+# The CLI names a part by what it is, and prints the part's own facts on its `Node:` line (A11).
+run A6 "dispatch read --ref <first option>" read --ref "$monday_ref"
+grep -qxF "Option $monday_part of ask $parts_ask (changed in revision 1):" "$work/out" ||
+  fail A6 "dispatch read --ref <first option> names it as the ask's option" "$(<"$work/out")"
+pass A6 "dispatch read --ref <first option> names it as the ask's option"
+node_line A11 "dispatch read --ref <first option> prints its facts" \
+  "Node: block $monday_ref · made by session $session" " at " \
+  " · part of $parts_ref (revision 1)"
+run A6 "dispatch read --ref <question>" read --ref "$question_ref"
+grep -qxF "Question $question_part of ask $parts_ask (changed in revision 1):" "$work/out" ||
+  fail A6 "dispatch read --ref <question> names it as the ask's question" "$(<"$work/out")"
+pass A6 "dispatch read --ref <question> names it as the ask's question"
+
+# A11: a part carries the six facts of every node, read by its own reference and as the other end
+# of the comment's edge.
+of_parts_ask="$(parent_of ask "$parts_ask" "$parts_ref")"
+asked_facts="$(wanted "$me" "$me" "$of_parts_ask" 1)"
+node_facts "the first option" "$monday_ref" "$asked_facts" A11
+node_facts "the question" "$question_ref" "$asked_facts" A11
+node_of A11 "$monday_ref"
+get "/api/v1/references?from=$(q "$citing_ref")&kind=mentions"
+want_status 200 A11 "?from=<citing comment>&kind=mentions answers"
+expect A11 "the mention's other end is the option as its own reference reads it" "[$node]" \
+  "$defs"'[.edges[] | select(.kind == "mentions") | .node | same]'
+
+# R10: a part no revision of the ask holds is refused, naming the part and the ask.
+get "/api/v1/references?to=$(q "$(block_ref "$parts_ref" b9)")"
+want_status 404 R10 "?to=<ask>#b-b9"
+expect R10 "?to=<ask>#b-b9 is 404 NOT_FOUND naming the part and the ask" true \
+  --arg a "$parts_ask" '.code == "NOT_FOUND" and (.error | contains("no part \"b9\" in ask \($a)"))'
+
+# R11: a reply in the ask's thread names the part it answers, and every read of it carries that
+# part with its text.
+run R11 "a reply naming the first option" comment --issue "$child" --reply-to-ask "$monday_ref" \
+  --body "Monday works: the check runs at the start of the week."
+# A reply under an ask reports `Replied on ask <id> (comment <uuid>; …)`, not a posted comment.
+[[ "$(<"$work/out")" =~ Replied\ on\ ask\ $parts_ask\ \(comment\ ([0-9a-f-]{36}) ]] ||
+  fail R11 "a reply naming the first option" "no reply id in: $(<"$work/out")"
+part_reply="${BASH_REMATCH[1]}"
+get "/api/v1/comments/$part_reply"
+want_status 200 R11 "read the reply naming the option"
+expect R11 "the reply is under the ask and names the option, with the option's text" \
+  "$(jq -cn --arg a "$parts_ask" --arg b "$monday_part" --arg r "$monday_ref" --arg t "$monday" \
+    '[$a, $b, $r, $t, false]')" \
+  '[.comment.ask_id, .comment.reply_block.block_id, .comment.reply_block.ref,
+    .comment.reply_block.text, .comment.reply_block.removed]'
+get "/api/v1/references?to=$(q "$monday_ref")&kind=replies_to"
+want_status 200 R11 "?to=<first option>&kind=replies_to answers"
+expect R11 "?to=<first option>&kind=replies_to is the one reply naming it" \
+  "[[\"comment\",\"$part_reply\"]]" '[.edges[] | [.node.kind, .node.id]]'
+run R11 "dispatch read --ref <reply naming the option>" read --ref "$child_ref/comment/$part_reply"
+grep -qxF "Re: block $monday_part: $monday" "$work/out" ||
+  fail R11 "dispatch read --ref <reply> quotes the part it answers" "$(<"$work/out")"
+pass R11 "dispatch read --ref <reply> quotes the part it answers"
+
+# R7: a bare dispatch:// URL in a question and in an option starts at that part and nowhere else,
+# and the target counts each written link once — the question's link is held by the ask's own row
+# and by its question part, and counts once.
+run "R7 ask" "an ask naming the target from its question and an option" ask --issue "$child" \
+  --question "Does $named_ref close before this check ends? Recommendation: it closes with the \
+check, which reads how often one link counts." \
+  --option "Close with the check: $named_ref closes when the check ends." \
+  --option "Leave it open: a reader finds an ask no check owns."
+[[ "$(<"$work/out")" =~ Asked\ ([0-9a-f-]{36}) ]] ||
+  fail "R7 ask" "an ask naming the target from its question and an option" \
+    "no ask id in: $(<"$work/out")"
+r7_ask="${BASH_REMATCH[1]}"
+r7_ref="$child_ref/ask/$r7_ask"
+ask_parts "R7 ask" "read the parts of the ask naming the target" "$r7_ask"
+get "/api/v1/references?from=$(q "$r7_ref")&kind=mentions"
+want_status 200 "R7 ask" "?from=<ask>&kind=mentions answers"
+expect "R7 ask" "the ask's two links start at its question and at the option holding one" \
+  "$(jq -cn --arg a "$r7_ask" --arg o "${option_parts[0]}" --arg n "$named_ask" \
+    '[["block", "ask/\($a)#b1", "b1", "ask", $n], ["block", "ask/\($a)#\($o)", $o, "ask", $n]]
+      | sort')" \
+  '[.edges[] | select(.kind == "mentions")
+    | [.block.kind, .block.id, .block.block_id, .node.kind, .node.id]] | sort'
+get "/api/v1/asks/$named_ask"
+want_status 200 "R7 ask" "read the named ask"
+expect "R7 ask" "the named ask counts the question's link and the option's once each" 2 \
+  '.ask.referenced_by_count'
+
+if [[ -z "$dev_login" ]]; then
+  printf 'SKIP: R7 ask POST /api/v1/asks/{id}/answer is human-only and this server has no dev sign-in: DEV_SIGNIN_LOGIN is unset; on a server with /auth/_dev/signin, set it to a login to read the answer part and the third link\n'
+  run "R7 ask" "resolve the unanswered ask naming the target" resolve-ask --ask "$r7_ask" \
+    --kind resolved --reason "block-graph.sh read this ask's parts; nothing waits on a person."
+else
+  answer_text="Close with the check, since $named_ref closes when the check ends."
+  person_send POST "/api/v1/asks/$r7_ask/answer" \
+    "$(jq -cn --arg t "$answer_text" \
+      '{selected: ["Close with the check"], text: $t, expected_edited_at: null}')"
+  want_status 200 "R7 ask" "answer the ask as $dev_login"
+  ask_parts "R7 ask" "read the answered ask's parts" "$r7_ask"
+  [[ -n "$answer_part" ]] ||
+    fail "R7 ask" "the answered ask's read names its answer's part" "$(body)"
+  pass "R7 ask" "the answered ask's read names its answer's part ($answer_part)"
+  # The answer's part text is the labels it selected, " - " and the text it was given.
+  part_node A6 "the answer reads by its own reference" "$r7_ask" \
+    "$(block_ref "$r7_ref" "$answer_part")" "$answer_part" \
+    "Close with the check - $answer_text"
+  # The answerer made the answer part, where the ask's author made its question and its options.
+  node_facts "the answer part" "$(block_ref "$r7_ref" "$answer_part")" \
+    "$(wanted "$(jq -cn --arg l "$dev_login" '[{kind: "user", id: $l}]')" \
+      "$(jq -cn --arg l "$dev_login" '[{kind: "user", id: $l}]')" \
+      "$(parent_of ask "$r7_ask" "$r7_ref")" "$parts_revision")" A11
+  get "/api/v1/references?from=$(q "$r7_ref")&kind=mentions"
+  want_status 200 "R7 ask" "?from=<answered ask>&kind=mentions answers"
+  expect "R7 ask" "the three links start at the question, the option and the answer" \
+    "$(jq -cn --arg a "$r7_ask" --arg o "${option_parts[0]}" --arg w "$answer_part" --arg n "$named_ask" \
+      '[["ask/\($a)#b1", "b1", $n], ["ask/\($a)#\($o)", $o, $n], ["ask/\($a)#\($w)", $w, $n]]
+        | sort')" \
+    '[.edges[] | select(.kind == "mentions") | [.block.id, .block.block_id, .node.id]] | sort'
+  get "/api/v1/asks/$named_ask"
+  want_status 200 "R7 ask" "read the named ask after the answer"
+  expect "R7 ask" "the named ask counts the three written links once each" 3 \
+    '.ask.referenced_by_count'
+fi
+
+# A15, the ask clause: a comment links the second option bare and pinned to the revision it stands
+# at; the reword leaves the bare link reading the new text and the pinned one reading the revision
+# it names, changed; the drop makes the pinned link read removed and the bare one 404.
+tuesday_pin="$tuesday_ref@v1"
+run "A15 ask" "a comment linking the second option bare and pinned" comment --issue "$child" \
+  --body "Unpinned $tuesday_ref, pinned $tuesday_pin."
+get "/api/v1/references?to=$(q "$tuesday_pin")"
+want_status 200 "A15 ask" "?to=<second option>@v1 answers"
+expect "A15 ask" "?to=<second option>@v1 has pin.state unchanged at revision 1 with its text" \
+  "$(jq -cn --arg t "$tuesday" '["unchanged", 1, $t]')" \
+  '[.node.pin.state, .node.pin.version, .node.pin.text]'
+expect "A15 ask" "?to=<second option>@v1 lists the one mention: the two forms are one target" 1 \
+  '[.edges[] | select(.kind == "mentions")] | length'
+
+run "A15 ask" "reword the second option" edit-ask --ask "$parts_ask" \
+  --option "Monday: Ship at the start of the week." \
+  --option "Tuesday: Ship once the review lands and the queue is green."
+ask_parts "A15 ask" "read the ask after the reword" "$parts_ask"
+[[ "$parts_revision" == 2 ]] ||
+  fail "A15 ask" "the reword is a new revision of the parts" "the revision is $parts_revision"
+[[ "${option_parts[1]-}" == "$tuesday_part" ]] ||
+  fail "A15 ask" "the reworded option keeps its part id" \
+    "it is now ${option_parts[1]-none}, was $tuesday_part"
+pass "A15 ask" "the reworded option keeps its part id at revision 2"
+get "/api/v1/references?to=$(q "$tuesday_ref")"
+want_status 200 "A15 ask" "?to=<second option> answers after the reword"
+expect "A15 ask" "?to=<second option> reads the new text and no pin" \
+  "$(jq -cn --arg t "$reworded_tuesday" '[$t, null]')" '[.node.text, .node.pin]'
+get "/api/v1/references?to=$(q "$tuesday_pin")"
+want_status 200 "A15 ask" "?to=<second option>@v1 answers after the reword"
+expect "A15 ask" "?to=<second option>@v1 has pin.state changed with revision 1's text" \
+  "$(jq -cn --arg t "$tuesday" '["changed", 1, $t]')" \
+  '[.node.pin.state, .node.pin.version, .node.pin.text]'
+expect "A15 ask" "?to=<second option>@v1 has the unpinned text the new text" \
+  "$(jq -cn --arg t "$reworded_tuesday" '$t')" '.node.text'
+
+run "A15 ask" "drop the second option" edit-ask --ask "$parts_ask" \
+  --option "Monday: Ship at the start of the week."
+ask_parts "A15 ask" "read the ask after the drop" "$parts_ask"
+dropped_in="$parts_revision"
+[[ "${#option_parts[@]}" == 1 && "${option_parts[0]}" == "$monday_part" ]] ||
+  fail "A15 ask" "the drop leaves the first option alone" "its options are ${option_parts[*]-none}"
+get "/api/v1/references?to=$(q "$tuesday_pin")"
+want_status 200 "A15 ask" "?to=<second option>@v1 answers after the drop"
+expect "A15 ask" "?to=<second option>@v1 has pin.state removed with removed_version $dropped_in" \
+  "[\"removed\",$dropped_in]" '[.node.pin.state, .node.pin.removed_version]'
+expect "A15 ask" "?to=<second option>@v1 lists no edge for the dropped part" 0 '.edges | length'
+get "/api/v1/references?to=$(q "$tuesday_ref")"
+want_status 404 "A15 ask" "?to=<second option> of the dropped option"
+pass "A15 ask" "?to=<second option> of the dropped option is 404"
+run "A15 ask" "dispatch read --ref <second option>@v1" read --ref "$tuesday_pin"
+grep -qxF "Removed in revision $dropped_in." "$work/out" ||
+  fail "A15 ask" "dispatch read --ref <second option>@v1 prints Removed in revision" \
+    "$(<"$work/out")"
+pass "A15 ask" "dispatch read --ref <second option>@v1 prints Removed in revision $dropped_in"
+grep -qxF "Part $tuesday_part of ask $parts_ask:" "$work/out" ||
+  fail "A15 ask" "dispatch read --ref <second option>@v1 names a part the ask no longer places" \
+    "$(<"$work/out")"
+pass "A15 ask" "dispatch read --ref <second option>@v1 names a part the ask no longer places"
+
+# A11 for a part the ask has dropped: it carries the same six facts, part of the ask at the
+# revision its text last changed in, the reword's.
+node_facts "the dropped option" "$tuesday_pin" "$(wanted "$me" "$me" "$of_parts_ask" 2)" A11
+
+run A6 "resolve the ask whose parts the check read" resolve-ask --ask "$parts_ask" --kind resolved \
+  --reason "block-graph.sh read this ask's parts; nothing waits on a person."
+run A6 "resolve the ask the parts named" resolve-ask --ask "$named_ask" --kind resolved \
+  --reason "block-graph.sh read this ask's parts; nothing waits on a person."
 
 run close "resolve the ask on $child" resolve-ask --ask "$ask" --kind resolved \
   --reason "block-graph.sh read this ask's facts; nothing waits on a person."

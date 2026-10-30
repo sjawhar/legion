@@ -1027,6 +1027,76 @@ test("a comment or message block's card names its item and author, a comment's p
   }
 });
 
+// A part of an ask heads with the ask and the part's author, as a comment's block heads with its
+// comment: its text is the graph read's, so no ask, issue or document summary is read for it, and
+// its pin names a revision of the ask's parts.
+test("an ask part's card names the ask and its author, its pin a revision, and the part's text", async () => {
+  const ask = "22222222-2222-4222-8222-222222222222";
+  const getIssue = mockIssues();
+  const getAsk = spyOn(api, "getAsk");
+  const getIssueSummary = spyOn(api, "getIssueSummary");
+  const getReferences = spyOn(api, "getReferences").mockResolvedValue({
+    edges: [],
+    node: {
+      block_id: "b3",
+      changed_version: 2,
+      id: `ask/${ask}#b3`,
+      issue_key: "CORE-1",
+      kind: "block",
+      made_by: [{ id: "alice", kind: "user" }],
+      parent: { id: ask, kind: "ask", ref: `dispatch://CORE-1/ask/${ask}` },
+      pin: {
+        ref: `dispatch://CORE-1/ask/${ask}#b-b3@v1`,
+        state: "changed",
+        text: "Tuesday — Ship once the review lands.",
+        version: 1,
+      },
+      project: "CORE",
+      ref: `dispatch://CORE-1/ask/${ask}#b-b3`,
+      text: "Tuesday — Ship once the review lands and the queue is green.",
+    },
+  });
+  const view = render(
+    <Harness>
+      <Link
+        to="/"
+        {...referenceTriggerProps({
+          block: { id: "b3", pin: "1" },
+          id: ask,
+          key: "CORE-1",
+          kind: "ask",
+        })}
+      >
+        the ask part
+      </Link>
+    </Harness>
+  );
+  try {
+    act(() => {
+      screen.getByRole("link", { name: "the ask part" }).focus();
+    });
+    const card = screen.getByRole("tooltip");
+    await waitFor(() =>
+      expect(card.textContent).toContain("Tuesday — Ship once the review lands.")
+    );
+    expect(getReferences).toHaveBeenCalledWith(`dispatch://CORE-1/ask/${ask}#b-b3@v1`);
+    expect(card.textContent).toContain("CORE-1 · Ask · alice");
+    expect(card.textContent).toContain("Revision 1");
+    expect(card.textContent).toContain("Changed in revision 2");
+    // An ask's revisions have no page: the card opens the live ask at the part.
+    expect(card.querySelector("a")?.getAttribute("href")).toBe(`/issues/CORE-1/asks/${ask}#b-b3`);
+    expect(getAsk).not.toHaveBeenCalled();
+    expect(getIssue).not.toHaveBeenCalled();
+    expect(getIssueSummary).not.toHaveBeenCalled();
+  } finally {
+    view.unmount();
+    getReferences.mockRestore();
+    getIssueSummary.mockRestore();
+    getAsk.mockRestore();
+    getIssue.mockRestore();
+  }
+});
+
 // INFRA-440 (exclusion E1). The card is a tooltip inside one link to the reference, so the
 // comment's agent is named by its current registry title and marked running, with no link of
 // its own: the reference link stays the card's only anchor.

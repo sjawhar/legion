@@ -2106,9 +2106,9 @@ function graphSectionLines(
 /**
  * The read node's facts on one line: `Node: <kind> <ref> · made by <actors> at <time> · changed
  * by <actors> at <time> · part of <parent> (version <N>)`, the parent's version a revision when
- * the parent is a comment. An empty actor list is "nobody recorded"; a null time, version or
- * parent leaves its part out. A server older than the facts sends no `made_by`, and the read
- * prints no line.
+ * the parent is a comment or an ask, whose parts are numbered by revision. An empty actor list is
+ * "nobody recorded"; a null time, version or parent leaves its part out. A server older than the
+ * facts sends no `made_by`, and the read prints no line.
  */
 function nodeLine(node: GraphNode): string[] {
   if (node.made_by === undefined) return [];
@@ -2120,7 +2120,7 @@ function nodeLine(node: GraphNode): string[] {
   const partOf =
     parent == null
       ? ""
-      : ` · part of ${parent.ref ?? `${parent.kind} ${parent.id}`}${node.parent_version == null ? "" : ` (${parent.kind === "comment" ? "revision" : "version"} ${node.parent_version})`}`;
+      : ` · part of ${parent.ref ?? `${parent.kind} ${parent.id}`}${node.parent_version == null ? "" : ` (${parent.kind === "comment" || parent.kind === "ask" ? "revision" : "version"} ${node.parent_version})`}`;
   return [
     `Node: ${node.kind} ${node.ref ?? node.id} · made by ${made} · changed by ${changed}${partOf}`,
   ];
