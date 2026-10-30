@@ -87,8 +87,10 @@ func RaiseMaxAge(js nats.JetStreamContext, bucket string, age time.Duration) err
 // one change applied, so the bucket's other settings - its copies, age, history, discard policy,
 // direct get, rollup, delete settings, metadata and the rest - stay as they are. It returns the
 // configuration it read and whether it wrote. As for the stream (ensureStreamWithConfig), two
-// starts raising at once each write the deployment's one value, and a raise whose answer never
-// came succeeds when the stream, read again, holds what enough asks for (updateStream). Its error
+// starts raising at once each write the deployment's one value. A raise whose answer never came
+// succeeds when the stream, read again, holds what enough asks for, and one the server refused as
+// overlapping the bucket's own stream is sent again until the stream holds it or its sends run out
+// (updateStream). Its error
 // names the bucket's stream, and after it what of the stream the raise is (of, empty for the
 // stream itself); a refused raise names the deployment setting whose value it changes
 // (refusedSettings).
