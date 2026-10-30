@@ -1,11 +1,14 @@
 -- 0062_parked_decisions.up.sql — what a person decided on a parked tree waits for its root's architect.
 --
 -- A person's decision on a tree nobody in it could hear, which the daemon relayed to the controller
--- (a parked-decision notice), kept until the architect start task or catch-up that names it is
--- delivered. A root keeps one row per Dispatch reference. claimed_by is the one outbox row (a
--- root-architect start or a catch-up notice) whose payload names the row: no other start or
--- catch-up names a claimed row, the claimed row's delivery deletes it, and a claiming row that
--- finishes without delivering releases it (on delete set null) for the next start or catch-up.
+-- (a parked-decision notice), kept until the architect start task or catch-up that names it has
+-- reached an architect. A root keeps one row per Dispatch reference. claimed_by is the one outbox
+-- row (a root-architect start or a catch-up notice) whose payload names the row: no other start or
+-- catch-up names a claimed row until that row settles it. A start whose task the root architect's
+-- claim queued, and a published catch-up, delete what they named; a start that reached no claim,
+-- and a catch-up a newer one supersedes, hand their rows over — unclaimed again, and named at once
+-- by a fresh catch-up while the root has an architect to tell. A row's deletion releases what it
+-- still claims (on delete set null), for the next start or the next ready's catch-up to name.
 create table parked_decisions (
   root text not null references issues (key) on delete cascade,
   ref text not null,

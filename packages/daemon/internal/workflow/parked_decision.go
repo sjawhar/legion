@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
@@ -69,14 +70,18 @@ func (e *Engine) treeRoot(ctx context.Context, tx pgx.Tx, key string) (*record.I
 // what was kept since to its catch-up. When the re-admission found the root's spec approved at a
 // version below its latest (the admission's readmit, Store.KeepReadmittedApproval: a person
 // approved a version the spec has since moved past), it also names both versions, so the architect
-// requests approval of the latest; never under gates.design off, which asks no person. It names
-// only what no other start or catch-up claims (Store.UnclaimedKept) and deletes nothing: the
-// caller enqueues the task with the record of what it named (record.KeptDecisions) and claims
-// those rows for it in the same transaction (EnqueueNaming), the delivery of that task forgets
-// them (Store.ForgetKeptDecisions), and a start or catch-up that never reaches its architect
-// releases them for the next one. Both are zero when there was nothing.
-func (e *Engine) ParkedDecisionTask(ctx context.Context, tx pgx.Tx, root record.Issue) (string, *record.KeptDecisions, error) {
-	decisions, approved, latest, err := e.store.UnclaimedKept(ctx, tx, root.Key)
+// requests approval of the latest; never under gates.design off, which asks no person.
+//
+// The text names no generation: a start's task waits on its claim and is prompted whenever that
+// claim is next ready, which can be generations later, and the one architect session of the root
+// reads it then as what a person decided on its tree. It names only what no other start or
+// catch-up claims (Store.UnclaimedKept) and deletes nothing: the caller enqueues the task with the
+// record of what it named (record.KeptDecisions) and claims those rows for it in the same
+// transaction (EnqueueNaming). The row that carried it to an architect forgets those rows
+// (Store.ForgetKeptDecisions); one that reached none hands them over (HandOverKept). Both results
+// are zero when there was nothing.
+func ParkedDecisionTask(ctx context.Context, tx pgx.Tx, store record.Store, gate config.DesignGate, root record.Issue) (string, *record.KeptDecisions, error) {
+	decisions, approved, latest, err := store.UnclaimedKept(ctx, tx, root.Key)
 	if err != nil {
 		return "", nil, err
 	}
@@ -91,7 +96,7 @@ func (e *Engine) ParkedDecisionTask(ctx context.Context, tx pgx.Tx, root record.
 		parts = append(parts, fmt.Sprintf("While nobody in %s's tree could hear it, a person decided on the tree: %s. Read each before you continue.",
 			root.Key, strings.Join(named, "; ")))
 	}
-	if approved > 0 && e.cfg.DesignGate != config.DesignGateOff {
+	if approved > 0 && gate != config.DesignGateOff {
 		parts = append(parts, fmt.Sprintf("The spec is approved at version %d and is now at version %d: request approval of version %d, "+
 			"as skill://legion-architect/references/design-gate.md (\"The armed gate\") says.", approved, latest, latest))
 		kept.Approved, kept.Latest = approved, latest
@@ -102,24 +107,88 @@ func (e *Engine) ParkedDecisionTask(ctx context.Context, tx pgx.Tx, root record.
 	return strings.Join(parts, " "), &kept, nil
 }
 
+// ParkedDecisionTask is ParkedDecisionTask over the engine's store and design gate.
+func (e *Engine) ParkedDecisionTask(ctx context.Context, tx pgx.Tx, root record.Issue) (string, *record.KeptDecisions, error) {
+	return ParkedDecisionTask(ctx, tx, e.store, e.cfg.DesignGate, root)
+}
+
 // EnqueueNaming enqueues payload for issue, due at, a root-architect start or a catch-up notice
 // whose task names kept of what root keeps (ParkedDecisionTask), and claims those rows for that
 // outbox row in the same transaction (Store.ClaimKeptDecisions), so no other start or catch-up
-// names them until the row's delivery forgets them or the row finishes without delivering and
-// releases them. A nil kept enqueues payload as enqueueAt does.
-func (e *Engine) EnqueueNaming(ctx context.Context, tx pgx.Tx, issue, root string, payload record.OutboxPayload, kept *record.KeptDecisions, at time.Time) error {
-	if kept == nil {
-		return e.enqueueAt(ctx, tx, issue, payload, at)
-	}
+// names them until that row settles them: it forgets them once its task reached an architect, and
+// hands them over when it reached none (HandOverKept). A nil kept enqueues payload as enqueueAt
+// does.
+func EnqueueNaming(ctx context.Context, tx pgx.Tx, store record.Store, issue, root string, payload record.OutboxPayload,
+	kept *record.KeptDecisions, at time.Time) error {
 	row, err := record.NewOutboxRow(issue, payload, at)
 	if err != nil {
 		return err
 	}
-	id, err := e.store.EnqueueID(ctx, tx, row)
+	if kept == nil {
+		return store.Enqueue(ctx, tx, row)
+	}
+	id, err := store.EnqueueID(ctx, tx, row)
 	if err != nil {
 		return err
 	}
-	return e.store.ClaimKeptDecisions(ctx, tx, root, *kept, id)
+	return store.ClaimKeptDecisions(ctx, tx, root, *kept, id)
+}
+
+// EnqueueNaming is EnqueueNaming over the engine's store.
+func (e *Engine) EnqueueNaming(ctx context.Context, tx pgx.Tx, issue, root string, payload record.OutboxPayload, kept *record.KeptDecisions, at time.Time) error {
+	return EnqueueNaming(ctx, tx, e.store, issue, root, payload, kept, at)
+}
+
+// HandOverKept is the one rule a release of kept decisions follows: a release never leaves a kept
+// decision unclaimed while its root has an architect to tell. It unclaims everything outbox row
+// from holds (Store.ReleaseKeptClaims) — from told no architect what it named — and, when the root
+// has an architect to tell, writes that architect a fresh catch-up naming them at once
+// (QueueCatchUp, for launch, the root architect claim's current launch). A root with no architect
+// to hear it — no tree root, lingering, out of the workflow, or waiting in `todo` for its slot —
+// keeps them unclaimed instead, for the next start or ready to name, since a catch-up queued for
+// nobody would only be dropped by the ready that follows. A row that holds nothing returns at once,
+// so a row whose settle committed and whose finish did not writes no second catch-up when it runs
+// again.
+//
+// Two finishes hand over, and only two: an architect start whose task reached no claim (the
+// outbox's settleKept), and a catch-up a newer one supersedes (catchUpSuperseded, the outbox's
+// notice). Every other undelivered finish keeps the older rule — the row's deletion releases what
+// it claimed, and the architect's next ready names every unclaimed decision in its catch-up. Each
+// of those endings is one where the architect can take no notice at all now — its row was deleted
+// under its lease, it is unroutable, its architect stopped with its finished tree or will not hold
+// its role again, its holder refused the delivery or the listener's grant denied it — so a fresh
+// catch-up would reach nobody either, and what the ending releases waits for that architect's next
+// launch, whose ready names every unclaimed decision. A receipt timeout neither forgets nor hands
+// over: the re-held copy carries the claims on (Store.MoveKeptClaims).
+func HandOverKept(ctx context.Context, tx pgx.Tx, store record.Store, gate config.DesignGate, rootKey string,
+	from int64, launch uint64, now time.Time) error {
+	released, err := store.ReleaseKeptClaims(ctx, tx, from)
+	if err != nil || released == 0 {
+		return err
+	}
+	root, err := store.Issue(ctx, tx, rootKey)
+	if err != nil || root == nil {
+		return err
+	}
+	hears, err := ArchitectHears(ctx, tx, store, *root)
+	if err != nil || !hears {
+		return err
+	}
+	return QueueCatchUp(ctx, tx, store, gate, *root, launch, now)
+}
+
+// ArchitectHears says whether root has an architect to hear a person's decision now: it is its
+// tree's root, it does not linger, it has not left the workflow, and it does not wait in `todo`
+// for an admission slot (record.WaitsForSlot). It is the one reading of that question the daemon
+// has, so the hand-over of what a row named (HandOverKept) and the hold of a root architect's task
+// that names decisions (supervise's Deps.RootHears, the daemon's rootHears) never drift: a root
+// that hears is told at once, and one that does not keeps what it is owed until it runs again.
+func ArchitectHears(ctx context.Context, tx pgx.Tx, store record.Store, root record.Issue) (bool, error) {
+	if !claim.IsTreeRoot(root.Key, root.Tree) || root.Lingers() || record.OutOfWorkflow(root.Status) {
+		return false, nil
+	}
+	waits, err := record.WaitsForSlot(ctx, tx, store, root)
+	return !waits, err
 }
 
 // DesignGateOff says whether the engine runs with gates.design off, which asks no person to

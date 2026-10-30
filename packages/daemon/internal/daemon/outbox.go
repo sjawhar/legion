@@ -18,6 +18,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghautomerge"
 	"github.com/sjawhar/legion/daemon/internal/ghbranch"
@@ -87,7 +88,11 @@ type outbox struct {
 	// is shared, and another project's rows are another daemon's.
 	dispatchProject string
 	stateDir        string
-	log             *slog.Logger
+	// designGate is the project's design gate policy (gates.design), which a catch-up this runner
+	// writes states and whose kept approval pair a start task names (workflow.QueueCatchUp). A
+	// test that builds the runner by hand leaves it zero, which reads as the shipped policy.
+	designGate config.DesignGate
+	log        *slog.Logger
 	// now is the moment a row is listed, claimed, renewed and retried at; clock arms the lanes'
 	// timers — the sweep's, a lane's wait for its next due row, a running row's lease renewal.
 	// Both are the wall clock in production, and a test holds both still (heldClock). A test that
@@ -138,13 +143,13 @@ type outboxTrees interface {
 	CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser store.TreeReleaser) error
 }
 
-func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir, githubAPI string, tools map[string]string, log *slog.Logger) *outbox {
+func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, designGate config.DesignGate, project, dispatchProject, stateDir, githubAPI string, tools map[string]string, log *slog.Logger) *outbox {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &outbox{
 		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, trees: trees, tokens: tokens,
-		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, githubAPI: githubAPI,
+		handlers: handlers, designGate: designGate, project: project, dispatchProject: dispatchProject, stateDir: stateDir, githubAPI: githubAPI,
 		log: log, now: time.Now, clock: supervise.RealClock{},
 		// WarmCodegraphIndexInBackground runs here, never in provisionWorkspace: every outbox
 		// test injects its own `provision`, so only this production closure starts codegraph.
@@ -458,7 +463,13 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 	case record.ControllerNotice:
 		return r.controllerNotice(ctx, row, value)
 	case record.SuperviseRequest:
-		return r.supervise(ctx, row, value)
+		if err := r.supervise(ctx, row, value); err != nil {
+			return err
+		}
+		// Whatever the row made of itself — a task delivered, an earlier generation, a phase left,
+		// a lingering tree — the decisions it named are settled here (settleKept), reading from the
+		// claim what became of the task: the run itself is over, and what it did is on the claim.
+		return r.settleKept(ctx, row, value, false)
 	case record.GateSeed:
 		return r.seedGate(ctx, row, value)
 	case record.LingerClose:
@@ -652,10 +663,22 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 // publish, and so does a catch-up a newer one superseded (catchUpSuperseded, read against the
 // snapshot's root and the claim as it runs now): the re-hold reads the claim from memory and
 // writes its copy outside ApplyFact's lock, so it can lose the race to a ready and commit an older
-// copy after the fresh catch-up. A catch-up that publishes forgets the decisions it named
-// (forgetKept); one that finishes any other way leaves them kept, so the next catch-up names them
-// again.
+// copy after the fresh catch-up. A catch-up that publishes records the telling and forgets the
+// decisions it named (toldKept, settleTold); one a newer catch-up superseded hands them to a fresh
+// catch-up instead (supersededKept), since the newer one was composed without them; one that
+// finishes any other way leaves them claimed until its row's deletion releases them, for the
+// architect's next ready to name. However the row ends, a catch-up that told its decisions in any
+// run forgets them here rather than let its ending release what the architect has already heard.
 func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload record.Notice) error {
+	if err := r.deliverNotice(ctx, row, payload); err != nil {
+		return err
+	}
+	return r.settleTold(ctx, row, payload)
+}
+
+// deliverNotice is the notice executor's own work: routing the notice, publishing it, and settling
+// what a catch-up that will never publish named. Its endings are notice's to read.
+func (r *outbox) deliverNotice(ctx context.Context, row record.OutboxRow, payload record.Notice) error {
 	if r.notices == nil {
 		return errors.New("notice executor has no Envoy publisher")
 	}
@@ -679,7 +702,15 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 		if err != nil {
 			return fmt.Errorf("the architect of %s: %w", tree.root.Key, err)
 		}
-		if catchUpSuperseded(*payload.CatchUp, r.supervisedClaim(root).Claim, &tree.root) {
+		held := r.supervisedClaim(root).Claim
+		if catchUpSuperseded(*payload.CatchUp, held, &tree.root) {
+			// A row that published before told what it named and settles after this run
+			// (settleTold); one that never published hands its decisions to a fresh catch-up, since
+			// the newer catch-up was composed from what nobody claimed and left them out.
+			_, told := payload.Published(row.ID)
+			if err := r.supersededKept(ctx, tree.root.Key, row.ID, told, held.Generation); err != nil {
+				return err
+			}
 			r.log.Info("outbox catch-up finished without publishing: a newer catch-up supersedes it", "row", row.ID, "issue", row.Issue,
 				"generation", payload.CatchUp.Generation, "launch", payload.CatchUp.Launch)
 			return nil
@@ -707,10 +738,11 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	var denied notify.ErrPublishDenied
 	switch {
 	case published == nil:
-		// The architect has the catch-up, so the decisions it named and this row claims are told;
-		// a row that finishes any other way releases them for the next catch-up or start.
-		if payload.CatchUp != nil {
-			return r.forgetKept(ctx, tree.root.Key, payload.CatchUp.Kept, row.ID)
+		// The architect has the catch-up, so the decisions it named and this row claims are told:
+		// the telling is recorded under the key it went out on, before anything forgets them, and
+		// the settle after this run forgets them (toldKept, settleTold).
+		if payload.CatchUp != nil && payload.CatchUp.Kept != nil {
+			return r.toldKept(ctx, tree.root.Key, key)
 		}
 		return nil
 	case errors.As(published, &notDelivered) && notDelivered.Reason == notify.ReasonReceiptTimeout:
@@ -965,7 +997,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		// start names no phase, so it is never one of these: each look's task is delivered, its row
 		// id its delivery's, and a delivery with no phase is held by nothing (supervise's
 		// phaseHolds), so the task reaches the implementer whatever the issue's phase.
-		held := machine.Claim()
+		held, gave := machine.Claim(), false
 		if pending := held.Pending; (payload.ResumeTask || state == supervise.StateFailed) && pending != nil && payload.Phase != "" &&
 			pending.StillWorked(payload.Generation, payload.Phase, held.State) {
 			r.log.Info("outbox start of a claim that holds its phase's task; not delivered again", "row", row.ID, "issue", issue.Key,
@@ -973,20 +1005,16 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		} else if payload.Task != "" {
 			// The row's phase, already held to the issue's above, travels with the delivery: it is
 			// what says the task is still the work to do once the delivery has outlived its id. The
-			// row travels too: the claim writes it with the delivery, so a retry of this row (a forget
-			// or a ClaimReady below that failed, a crash before the row finished) queues the task
-			// again neither while it is pending nor once the claim has retired it
-			// (supervise.Claim.DeliveredThrough).
+			// row travels too: the claim writes it with the delivery, so a retry of this row (a
+			// settle or a ClaimReady below that failed, a crash before the row finished) queues the
+			// task again neither while it is pending nor once the claim has retired it
+			// (supervise.Claim.DeliveredRows), and that same record is what says, when the row
+			// settles what its task named, that the architect has it (settleKept).
 			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: payload.Task, Phase: payload.Phase, Generation: payload.Generation,
 				ID: fmt.Sprintf("%s%d", outboxDeliveryPrefix, row.ID), Row: row.ID}); err != nil {
 				return fmt.Errorf("deliver to claim %s: %w", token, err)
 			}
-			// The claim has the task, so the decisions it named and this row claims are told. Every
-			// branch above that finishes without delivering releases them, with the row, for the next
-			// start or catch-up.
-			if err := r.forgetKept(ctx, issue.Tree, payload.Kept, row.ID); err != nil {
-				return err
-			}
+			gave = true
 		}
 		// A start that finds a tree's root architect running is a re-admission while its session
 		// lived on. The linger suspends the root's claim, so that happens only when the claim was
@@ -994,10 +1022,14 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		// re-admission's start ran before the suspend. No ready follows, and a ready is what tells
 		// the architect its tree (workflow's claimReady), so the start applies that fact itself,
 		// for the running launch, once per start row, and the architect is told its tree's new
-		// generation. It does so after the task is delivered and the decisions it names are
-		// forgotten, so the catch-up never names a kept decision the task already names; a retry
-		// of the row queues the task no second time and applies the fact once.
+		// generation. Its catch-up names what nobody claims, which this row's task may name too, so
+		// the decisions the task carries are settled first (settleKept) and the catch-up is
+		// composed without them; the settle after the row then finds nothing left to do. A retry of
+		// the row queues the task no second time and applies the fact once.
 		if claimTookRole(state) && claim.IsTreeArchitect(payload.Role, issue.Key, issue.Tree) {
+			if err := r.settleKept(ctx, row, payload, gave); err != nil {
+				return err
+			}
 			if _, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("start-running:%s:%d", token, row.ID),
 				intake.ClaimReady{Issue: issue.Key, Role: payload.Role, Launch: machine.Claim().Generation}, r.handlers...); err != nil {
 				return fmt.Errorf("tell the running architect of %s its tree: %w", issue.Key, err)

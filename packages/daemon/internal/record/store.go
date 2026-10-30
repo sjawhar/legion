@@ -39,6 +39,15 @@ func (s *Postgres) MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID
 	return tag.RowsAffected() == 1, nil
 }
 
+func (s *Postgres) Processed(ctx context.Context, tx pgx.Tx, source, eventID string) (bool, error) {
+	var marked bool
+	if err := tx.QueryRow(ctx, "select exists (select 1 from processed_events where source = $1 and event_id = $2)",
+		source, eventID).Scan(&marked); err != nil {
+		return false, fmt.Errorf("read whether %s event %s is processed: %w", source, eventID, err)
+	}
+	return marked, nil
+}
+
 // issueColumns reads an empty ancestry as NULL, so a record with none scans as a nil Ancestry, as
 // it was written.
 const issueColumns = `key, tree, project, title, parent, phase, generation, status, rank, handed_over, taken_back, linger_until, held_from, last_dispatch_seq, ready_pending_version, coalesce(hold_reason, ''), dispatch_status, repo, default_branch, github_repo, awaiting_ask, awaiting_gate_version, coalesce(awaiting_artifact, ''), awaiting_answered_at, coalesce(awaiting_answered_by, ''), coalesce(awaiting_answered_detail, ''), awaiting_since_seq, awaiting_since, handout_seq, coalesce(declared_seq, 0), declared_at, nullif(ancestry, '{}'), handed_over_from`
@@ -661,6 +670,18 @@ func (s *Postgres) MoveKeptClaims(ctx context.Context, tx pgx.Tx, from, to int64
 		}
 	}
 	return nil
+}
+
+func (s *Postgres) ReleaseKeptClaims(ctx context.Context, tx pgx.Tx, row int64) (int64, error) {
+	var released int64
+	for _, table := range []string{"parked_decisions", "readmitted_approvals"} {
+		tag, err := tx.Exec(ctx, "update "+table+" set claimed_by = null where claimed_by = $1", row)
+		if err != nil {
+			return 0, fmt.Errorf("release the claims of outbox row %d: %w", row, err)
+		}
+		released += tag.RowsAffected()
+	}
+	return released, nil
 }
 
 func (s *Postgres) ForgetKeptDecisions(ctx context.Context, tx pgx.Tx, root string, kept KeptDecisions, row int64) error {
@@ -1493,7 +1514,10 @@ func (s *Postgres) DropStatusWrites(ctx context.Context, tx pgx.Tx, issue string
 }
 
 func (s *Postgres) DropCatchUps(ctx context.Context, tx pgx.Tx, issue string) error {
-	if _, err := tx.Exec(ctx, "delete from outbox where kind = $1 and issue = $2 and payload->>'kind' = 'catch-up'", string(OutboxKindNotice), issue); err != nil {
+	if _, err := tx.Exec(ctx, `delete from outbox where kind = $1 and issue = $2 and payload->>'kind' = 'catch-up'
+		and not exists (select 1 from processed_events where source = $3
+			and event_id = $4 || coalesce((outbox.payload->>'resend_of')::bigint, outbox.id))`,
+		string(OutboxKindNotice), issue, KeptToldSource, outboxKeyPrefix); err != nil {
 		return fmt.Errorf("drop the queued catch-ups of %s: %w", issue, err)
 	}
 	return nil

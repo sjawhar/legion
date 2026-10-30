@@ -263,7 +263,9 @@ func (r *outbox) issueTree(ctx context.Context, issue string) (root string, ling
 // root, as recorded now, is at a later generation, and its re-admission's start writes one,
 // whether it finds the claim running or relaunches it. Neither holds for a catch-up that may be
 // the architect's only one: a claim relaunching or not yet ready has had no later ready, and one
-// its later ready will write drops the queued copy.
+// its later ready will write drops the queued copy. The newer catch-up was composed from what
+// nobody claimed, so the superseded one's decisions are its own to hand over rather than leave
+// with its row (the outbox's notice, workflow.HandOverKept).
 func catchUpSuperseded(catchUp record.CatchUp, held supervise.Claim, root *record.Issue) bool {
 	if claimTookRole(held.State) && held.Generation > catchUp.Launch {
 		return true

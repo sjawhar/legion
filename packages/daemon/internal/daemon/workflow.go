@@ -430,6 +430,34 @@ func (w *workflowRuntime) phaseHolds(ctx context.Context, key string, queuedFor 
 	return issue.Phase == queuedFor && (generation == 0 || generation == issue.Generation), nil
 }
 
+// rootHears answers supervise's Deps.RootHears from the issue record: a root architect's task of a
+// run names no phase, so no phase ever drops it, and it waits on the claim until that claim next
+// runs — which a park, a hand back to `todo` or a linger can put generations later. The decisions
+// such a task names were forgotten when the claim queued it (the outbox's settleKept), so sending
+// it while the tree has nobody to act on it would spend a person's decision on an architect no run
+// of the root owns. The answer is the workflow's one reading of that question
+// (workflow.ArchitectHears), which the hand-over of a released decision reads too, in a short
+// read-only transaction of its own: a root that hears is one that is its tree's root, runs, does
+// not linger and does not wait in `todo` for its slot.
+//
+// A claim on an issue the daemon does not record hears, as it holds for the phase: there is no
+// record only for a claim the workflow never made.
+func (w *workflowRuntime) rootHears(ctx context.Context, c supervise.Claim, _ supervise.Delivery) (bool, error) {
+	var hears bool
+	if err := pgx.BeginTxFunc(ctx, w.pool, pgx.TxOptions{AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+		root, err := w.records.Issue(ctx, tx, c.Tree)
+		if err != nil || root == nil {
+			hears = err == nil
+			return err
+		}
+		hears, err = workflow.ArchitectHears(ctx, tx, w.records, *root)
+		return err
+	}); err != nil {
+		return false, fmt.Errorf("read whether the root of %s has an architect to hear its task: %w", c.Tree, err)
+	}
+	return hears, nil
+}
+
 // treeClosable answers supervise's Deps.TreeClosable: a tree a workflow issue backs closes when
 // its linger expires, never on an operator's close of its root claim. The machine asks it where
 // the close is decided rather than a round trip before it, for the operator's own close and for a
@@ -585,7 +613,7 @@ func (w *workflowRuntime) ensureWorkspace(ctx context.Context, issue string, rep
 func (w *workflowRuntime) attach(supervision *supervision) {
 	w.log.Info("legion workflow boot stage", "stage", "outbox")
 	w.outbox = newOutbox(w.pool, w.records, w.dispatch, notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"]), supervision.supervisor,
-		supervision.supervisor.store, w.tokens, w.handlers, w.projectID, w.dispatchProject, w.stateDir, w.githubAPI,
+		supervision.supervisor.store, w.tokens, w.handlers, supervision.cfg.Gates.Design, w.projectID, w.dispatchProject, w.stateDir, w.githubAPI,
 		supervision.plan.tools, w.log)
 	w.outboxWake.Store(w.outbox)
 	supervision.supervisor.OnTerminal(w.terminal)

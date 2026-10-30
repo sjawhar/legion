@@ -254,8 +254,9 @@ func (b BlockedIssue) MarshalJSON() ([]byte, error) {
 // what a person decided on the tree while nobody in it could hear it and the start did not name (a
 // decision made while the architect's claim had ended, before this relaunch), in the words of
 // workflow.Engine.ParkedDecisionTask; empty when there is none. Kept is what Decided named, which
-// the delivery of this catch-up forgets (Store.ForgetKeptDecisions): a catch-up that finishes
-// undelivered leaves it all for the next one to name again.
+// a published catch-up forgets (Store.ForgetKeptDecisions): a catch-up a newer one supersedes
+// hands it over to a fresh catch-up instead (workflow.HandOverKept), and one that finishes
+// undelivered any other way leaves it all for the architect's next ready to name again.
 type CatchUp struct {
 	Generation uint64         `json:"generation"`
 	Launch     uint64         `json:"launch"`
@@ -396,9 +397,10 @@ type SuperviseRequest struct {
 	Role claim.Role  `json:"role"`
 	Task string      `json:"task,omitempty"`
 	// Kept is what an architect start's Task named of the decisions its root keeps
-	// (workflow.Engine.ParkedDecisionTask), which the delivery of that task forgets
-	// (Store.ForgetKeptDecisions): a start that finishes without delivering leaves them for the
-	// next start or catch-up to name again. Every other request carries none.
+	// (workflow.Engine.ParkedDecisionTask). The start settles them once it has run (the outbox's
+	// settleKept): a task the root architect's claim queued forgets them
+	// (Store.ForgetKeptDecisions), and a start that reached no claim hands them over to a fresh
+	// catch-up (workflow.HandOverKept). Every other request carries none.
 	Kept *KeptDecisions `json:"kept,omitempty"`
 	// Generation is the issue generation the request serves. A request of an earlier generation
 	// finishes without acting: it must never suspend, stop, or start the next generation's worker.

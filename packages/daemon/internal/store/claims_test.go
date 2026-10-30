@@ -46,7 +46,7 @@ func tmuxClaim(token claim.Token) supervise.Claim {
 		// is waiting on, and queue a task the claim was already given.
 		LastStartRow:      7,
 		ServingGeneration: 4,
-		DeliveredThrough:  6,
+		DeliveredRows:     []int64{5, 6},
 	}
 }
 

@@ -1,0 +1,16 @@
+-- 0063_claim_delivered_rows.up.sql — every outbox start a claim queued a task from.
+--
+-- A start row delivers its task to the claim (supervise's queue) and then finishes; a failure or
+-- a crash between the two runs the row again. The claim deduplicated only against a delivery still
+-- pending, so a retry after the architect's turn on the task had ended and retired it queued the
+-- whole task again, and the architect was told each decision in it twice. The claim records the
+-- id of every start row whose task it queued, in the transaction that writes that delivery, so a
+-- retry of that row queues nothing whether its delivery is pending or retired. The rows of one
+-- issue do not run in row order, so the set is kept rather than a high-water mark: an older start
+-- that has never reached this claim still gives its task.
+--
+-- It is also what says whether a start's task reached the claim, which is what settles the
+-- decisions that start named (0062_parked_decisions): a start the root architect's claim queued
+-- forgets what it named, and one it did not hands those claims over to a fresh catch-up, so a
+-- release never leaves a kept decision unclaimed while its root has an architect to tell.
+alter table claims add column delivered_rows bigint[] not null default '{}';

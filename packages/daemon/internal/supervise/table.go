@@ -237,8 +237,8 @@ type RequestDeliver struct {
 	// for it is attributed to. An operator's own task names none.
 	Generation uint64
 	// Row is the outbox row the task comes from (a workflow start), 0 for a task of no row (an
-	// operator's own, the controller's start message). A row the claim already queued a task from,
-	// or an older one (Claim.DeliveredThrough), queues nothing: its task was given once.
+	// operator's own, the controller's start message). A row the claim already queued a task from
+	// (Claim.DeliveredRows) queues nothing: its task was given once.
 	Row int64
 }
 

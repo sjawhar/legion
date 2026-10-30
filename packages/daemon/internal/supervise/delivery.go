@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -101,18 +102,29 @@ func pendingID(p *Delivery) string {
 
 // queue gives the claim the task a deliver request carries, with the phase it was queued for. An
 // outbox repeats its row id after a crash before FinishOutbox; the same task and id are therefore
-// accepted without changing the persisted delivery. A request from an outbox row the claim already
-// queued a task from, or an older one (Claim.DeliveredThrough), is accepted and queues nothing,
-// whether that delivery is still pending, was taken back under a new id, or has been retired: the
-// task was given once, and a retry of its row — after a failure that followed the delivery, or a
-// crash before the row finished — must not give it again. A request from a newer row writes the
-// row with its delivery, in one transaction, so the fact is durable no later than the delivery.
+// accepted without changing the persisted delivery. A request from an outbox row the claim has
+// already queued a task from (Claim.DeliveredRows) is accepted and queues nothing, whether that
+// delivery is still pending, was taken back under a new id, or has been retired: the task was
+// given once, and a retry of its row — after a failure that followed the delivery, or a crash
+// before the row finished — must not give it again. Only that row's own retry is refused this
+// way: the supervise rows of one issue do not run in row order (record's outboxInOrder), so an
+// older row the claim has never heard from still gives its task. A request from a row no task
+// came from writes the row with its delivery, in one transaction, so the fact is durable no later
+// than the delivery.
+//
+// A request a pending task refuses sends that task first (sendPending), so a task held back
+// because its root had no architect to hear it never wedges the claim: the start of the root's
+// next run, retrying on its backoff, is what releases it, and the refusal that start is answered
+// with is over once the architect's turn on the held task has ended and the delivery retired.
 func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 	id, task := request.ID, request.Task
-	delivered := request.Row > 0 && request.Row <= m.claim.DeliveredThrough
+	delivered := request.Row > 0 && slices.Contains(m.claim.DeliveredRows, request.Row)
 	if pending := m.claim.Pending; pending != nil {
 		if (id != "" && pending.ID == id && pending.Task == task) || delivered {
 			return nil
+		}
+		if err := m.sendPending(ctx); err != nil {
+			return err
 		}
 		return &RefusedError{State: m.claim.State, Request: "deliver", Err: ErrDeliveryPending}
 	}
@@ -128,11 +140,11 @@ func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 		// The claim records the row only once the store has it with the delivery: a write that
 		// failed leaves the row undelivered, so its retry queues the task.
 		stored := m.stored()
-		stored.DeliveredThrough = request.Row
+		stored.DeliveredRows = append(slices.Clone(m.claim.DeliveredRows), request.Row)
 		if err := m.deps.Store.PutClaimAndDelivery(ctx, stored, d); err != nil {
 			return err
 		}
-		m.claim.DeliveredThrough = request.Row
+		m.claim.DeliveredRows = stored.DeliveredRows
 	} else if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, d); err != nil {
 		return err
 	}
@@ -142,7 +154,8 @@ func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 
 // sendPending sends the pending delivery if everything a send needs is true now: the claim is
 // ready or idle, the delivery is neither confirmed nor already on its way, the issue is still in
-// the phase the task was queued for, and the claim's connection is registered. A missing connection is not a
+// the phase the task was queued for, the root of a root architect's task of a run has an architect
+// to hear it, and the claim's connection is registered. A missing connection is not a
 // failure — the shim's next hello sends it. A delivery an earlier daemon may have sent is sent
 // again only after the agent says it is not already in a turn; if it is, that turn is taken as the
 // delivery's.
@@ -198,8 +211,35 @@ func (m *Machine) sendPending(ctx context.Context) error {
 	if !holds {
 		return nil
 	}
+	hears, err := m.rootHears(ctx, *p)
+	if err != nil {
+		return err
+	}
+	if !hears {
+		m.log.Info("supervise: the root of this task's tree has no architect to hear it; the task stays pending",
+			"delivery", p.ID, "issue", m.claim.Issue, "run", p.Generation)
+		return nil
+	}
 	m.startSend(conn, *p)
 	return nil
+}
+
+// rootHears asks whether the root of this claim's tree has an architect to hear the task now
+// (Deps.RootHears). Only a root architect's task of a run is put to the answer: it names no phase,
+// so the phase check never drops it, and its decisions were forgotten when the claim queued it, so
+// a prompt while the tree is parked, lingering or waiting for its slot would tell them to an
+// architect no run of the root owns. Every other delivery — a phase worker's, an operator's, a
+// production check's look, the controller's start message — is sent as it always was, and a daemon
+// with no workflow configured supplies no answer, where every delivery is sent.
+func (m *Machine) rootHears(ctx context.Context, d Delivery) (bool, error) {
+	if m.deps.RootHears == nil || d.Phase != "" || d.Generation == 0 || !m.claim.treeRoot() {
+		return true, nil
+	}
+	hears, err := m.deps.RootHears(ctx, m.claim, d)
+	if err != nil {
+		return false, fmt.Errorf("read whether the root of %s has an architect to hear its task: %w", m.claim.Token, err)
+	}
+	return hears, nil
 }
 
 // phaseHolds asks whether the issue is still in the phase and run this task was queued for. A delivery

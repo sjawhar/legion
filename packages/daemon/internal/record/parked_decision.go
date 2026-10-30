@@ -64,8 +64,10 @@ func WaitsForSlot(ctx context.Context, tx pgx.Tx, store Store, root Issue) (bool
 //     moved back into the workflow is nobody's parked tree (RelayNotParked): either keeps nothing.
 //   - Only a person decides (PersonActor): a session's write, the daemon's own included, is no
 //     decision to relay (RelayNoPerson).
-//   - What is kept is kept until the start or catch-up that named it was delivered
-//     (Store.ForgetKeptDecisions); what is relayed is one parked-decision controller notice of
+//   - What is kept is kept until the start or catch-up that named it reached an architect
+//     (Store.ForgetKeptDecisions); one that reached none hands it over to a fresh catch-up
+//     (workflow.HandOverKept), so it is never left unclaimed while its root has an architect to
+//     tell. What is relayed is one parked-decision controller notice of
 //     issue, naming root, the decision, where in Dispatch, who made it, and a spec decision's
 //     version and a changes request's reason.
 //
@@ -121,13 +123,24 @@ type DecisionMark struct {
 // KeptDecisions is what one architect start task or catch-up named of what its root keeps
 // (workflow.Engine.ParkedDecisionTask): each decision, and the pair of approved and latest spec
 // versions when it named one. It travels with the task (SuperviseRequest.Kept, CatchUp.Kept), and
-// the delivery of that task forgets exactly it (Store.ForgetKeptDecisions), so a start or catch-up
-// that finishes without delivering leaves every row for the next one to name again.
+// the row that carried it to an architect forgets exactly it (Store.ForgetKeptDecisions). A start
+// whose task reached no claim, and a catch-up a newer one supersedes, hand every row over instead
+// (workflow.HandOverKept): a fresh catch-up names them while the root has an architect to tell,
+// and otherwise they wait, unclaimed, for the next start or ready to name them.
 type KeptDecisions struct {
 	Decisions []DecisionMark `json:"decisions,omitempty"`
 	Approved  int            `json:"approved,omitempty"`
 	Latest    int            `json:"latest,omitempty"`
 }
+
+// KeptToldSource is the processed-event source a catch-up marks, under the key of its own outbox
+// row (OutboxKey), once its publish has told the architect what it named — before it forgets those
+// rows, in a transaction of its own. Only that mark says the architect was told when the forget
+// fails or the daemon dies before its commit: the row's next run then forgets what it named rather
+// than hand it over, and no drop of the root's queued catch-ups takes the row away before it does
+// (Store.DropCatchUps). A start needs none: its claim records the row with the delivery
+// (supervise.Claim.DeliveredRows).
+const KeptToldSource = "kept-told"
 
 func (k KeptDecisions) validate() error {
 	for _, decision := range k.Decisions {

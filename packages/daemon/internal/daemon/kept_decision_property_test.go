@@ -42,14 +42,20 @@ const (
 )
 
 // keptTelling is one time an architect of the root was told a kept decision: the generation the
-// telling names (the start row's, or the catch-up's), the generation the root stood at when the
-// architect received it, and what carried it.
+// telling names (a catch-up's; a start task names none), whether the root had an architect to hear
+// it when the architect received it, the generation the root stood at then, and what carried it.
 type keptTelling struct {
-	ref   string
-	named uint64
-	root  uint64
-	how   string
-	step  int
+	ref string
+	// prompt is whether a start task's prompt carried it. A start task names no generation
+	// (workflow.ParkedDecisionTask writes none) and the claim it reaches is the root's one
+	// architect session, which holds its task across the tree's re-admissions, so what it is held
+	// to is that the root has an architect to hear it (hears) rather than the generation named.
+	prompt bool
+	hears  bool
+	named  uint64
+	root   uint64
+	how    string
+	step   int
 }
 
 // keptPublishMode is what the listener does with a role publish this run.
@@ -185,7 +191,10 @@ type keptRun struct {
 // the ready — over a real PostgreSQL, and holds each run to the invariant after every step:
 //
 //   - no decision is told twice (a start task prompt or a published catch-up naming it again);
-//   - every telling names the generation the root stands at when the architect receives it;
+//   - every catch-up telling names the generation the root stands at when the architect receives
+//     it, and every start-task telling reaches a root that has an architect to hear it: a start
+//     task names no generation, and it is held on its claim, unsent, while its root is parked,
+//     lingering or waiting for its slot (supervise's Deps.RootHears);
 //   - once the run quiesces — every injected failure off, every row drained, the architect ready
 //     and its turns ended — every decision kept has been told once and nothing is left kept.
 //
@@ -302,6 +311,9 @@ func (r *keptRun) restart() {
 	sup := newSupervisor(r.ctx, nil, "legion", r.stateDir, quietLogger())
 	sup.deps = supervise.Deps{
 		Runtime: r.rt, Conns: fake.NewConns(), Store: r.claims, Specs: outboxSpecs{}, Clock: stillClock{}, Log: quietLogger(),
+		// The daemon's own reading of whether a root architect's task may be sent
+		// (workflowRuntime.rootHears), over this run's pool and store.
+		RootHears:      (&workflowRuntime{pool: r.pool, records: r.records}).rootHears,
 		Limits:         supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
 		Timeouts:       supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond},
 		PluginContract: 24,
@@ -720,7 +732,8 @@ func keptRefs(decisions []record.ParkedDecision) string {
 
 // observe reads what the architect was told since the last step — the prompts its connection
 // received and the catch-ups the publisher delivered to its role topic — and holds each telling to
-// the invariant: no reference twice, and the generation it names the one the root stands at now.
+// the invariant: no reference twice, a catch-up naming the generation the root stands at now, and
+// a start task reaching a root that has an architect to hear it.
 //
 // One telling is one delivery, not one frame: a prompt frame carries the daemon's delivery id, and
 // a shim that sees the same id twice answers it without a second turn (supervise.Delivery), so the
@@ -742,7 +755,7 @@ func (r *keptRun) observe() {
 			r.fatalf("the architect was prompted by delivery %q, whose outbox row %d the run never saw", prompt.DeliveryID, row)
 		}
 		for _, ref := range r.refsIn(prompt.Message) {
-			r.tell(keptTelling{ref: ref, named: named, root: generation, step: r.step,
+			r.tell(keptTelling{ref: ref, prompt: true, hears: r.architectToHear(), named: named, root: generation, step: r.step,
 				how: fmt.Sprintf("the start task of row %d, prompt %s", row, prompt.DeliveryID)})
 		}
 	}
@@ -764,14 +777,38 @@ func (r *keptRun) observe() {
 	}
 }
 
+// architectToHear is whether the root, as the record holds it now, has an architect to hear a
+// decision: its tree's root, in the workflow, not lingering, and not waiting in `todo` for its
+// slot (workflow.ArchitectHears, the reading the daemon holds a start task to). A start task's
+// prompt is held to this rather than to the generation it names, since it names none and reaches
+// the root's one architect session whenever that session is next ready.
+func (r *keptRun) architectToHear() bool {
+	var hears bool
+	if err := pgx.BeginFunc(r.ctx, r.pool, func(tx pgx.Tx) error {
+		root, err := r.records.Issue(r.ctx, tx, keptRoot)
+		if err != nil || root == nil {
+			return err
+		}
+		hears, err = workflow.ArchitectHears(r.ctx, tx, r.records, *root)
+		return err
+	}); err != nil {
+		r.fatalf("read whether the root has an architect to hear a decision: %v", err)
+	}
+	return hears
+}
+
 // tell records one telling and holds it to the two invariants a telling can break on its own.
 func (r *keptRun) tell(telling keptTelling) {
 	if before := r.told[telling.ref]; len(before) > 0 {
 		r.fatalf("%s was told twice: first at step %d by %s, now by %s; a person's decision reaches its architect once",
 			telling.ref, before[0].step, before[0].how, telling.how)
 	}
-	if telling.named != telling.root {
-		r.fatalf("%s was told by %s, which names generation %d, while %s stands at generation %d: every telling names the generation the root is at when its architect receives it",
+	switch {
+	case telling.prompt && !telling.hears:
+		r.fatalf("%s was told by %s while %s has no architect to hear it (parked, lingering, or waiting for its slot): a start task reaches an architect of the root's current run",
+			telling.ref, telling.how, keptRoot)
+	case !telling.prompt && telling.named != telling.root:
+		r.fatalf("%s was told by %s, which names generation %d, while %s stands at generation %d: every catch-up names the generation the root is at when its architect receives it",
 			telling.ref, telling.how, telling.named, keptRoot, telling.root)
 	}
 	r.told[telling.ref] = append(r.told[telling.ref], telling)
