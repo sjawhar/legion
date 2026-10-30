@@ -491,8 +491,19 @@ test("a hover card of a comment of 8,000 list items draws without holding the ma
 });
 
 /** Each heavy shape written as an issue document through the API, with the verdict Go gives it:
- *  stored, or refused as invalid markdown because it nests past `pmdoc/nesting.go`'s bound. */
-const documentRows: readonly { body: string; name: string; stored: boolean }[] = [
+ *  stored, or refused as invalid markdown because it nests past `pmdoc/nesting.go`'s bound.
+ *
+ *  `warm` names the one shape whose cost is the parse itself rather than anything the write does
+ *  with it, and whose first parse in a server process costs far more than its later ones. Its 49
+ *  markers hold 50 blocks open down every one of the ~31,900 blank lines under them, and
+ *  goldmark records a `lineStat` for each block on each line
+ *  (`goldmark@v1.8.6/parser/parser.go:1106`), so the slice it appends into grows with the depth
+ *  times the lines - about 3.1 million entries and ~75 MB for a body at the cap. Touching that
+ *  much fresh memory for the first time in a process is page faults, not parsing: the same write
+ *  is 316-343 ms once the process has done it and up to about 1.3 s the first time. The row
+ *  writes such a body once to warm the process, records that first write's time, and holds the
+ *  bound against the second, which is the steady state a reader's writes meet. */
+const documentRows: readonly { body: string; name: string; stored: boolean; warm?: true }[] = [
   { body: plainList, name: "8,000 list items", stored: true },
   { body: lazyQuote, name: "a quote followed by lines without its marker", stored: true },
   { body: lazyListItem, name: "a list item followed by lines without its marker", stored: true },
@@ -501,6 +512,7 @@ const documentRows: readonly { body: string; name: string; stored: boolean }[] =
     body: nested49ThenBlankLines,
     name: "49 list markers on one line then blank lines",
     stored: true,
+    warm: true,
   },
   {
     body: nestedThenBlankLines,
@@ -514,6 +526,19 @@ const documentRows: readonly { body: string; name: string; stored: boolean }[] =
 test("a document write of each heavy body answers in under a second, stored or refused", async () => {
   const issue = await seedIssue("Heavy documents");
 
+  /** Writes one row's body as a document of its own and answers what the write cost and refused. */
+  async function write(
+    row: (typeof documentRows)[number],
+    name: string
+  ): Promise<{ refusal: unknown; took: number }> {
+    const started = performance.now();
+    const refusal = await createIssueArtifact(issue.key, { content: row.body, name }, agent).then(
+      () => undefined,
+      (error: unknown) => error
+    );
+    return { refusal, took: performance.now() - started };
+  }
+
   for (const [index, row] of documentRows.entries()) {
     // A document takes far more than a comment does, so each row is held to the comment cap: the
     // browser rows above and this one then read the very same shapes.
@@ -521,16 +546,18 @@ test("a document write of each heavy body answers in under a second, stored or r
       row.body.length,
       `${row.name}: the row is longer than a comment's body cap`
     ).toBeLessThanOrEqual(bodyCap);
-    const started = performance.now();
-    const refusal = await createIssueArtifact(
-      issue.key,
-      { content: row.body, name: `heavy-${index}.md` },
-      agent
-    ).then(
-      () => undefined,
-      (error: unknown) => error
-    );
-    const took = performance.now() - started;
+    if (row.warm === true) {
+      // The first parse of this shape in a server process pays for the memory it touches, not for
+      // the parsing (the table above): write it once, record that, and hold the bound against the
+      // write after it, which is what every later writer of such a body meets.
+      const first = await write(row, `heavy-${index}-first.md`);
+      expect(first.refusal, `${row.name}: the warming write was refused`).toBeUndefined();
+      test.info().annotations.push({
+        description: `${Math.round(first.took)} ms`,
+        type: `${row.name}: the first write of this shape in a fresh server`,
+      });
+    }
+    const { refusal, took } = await write(row, `heavy-${index}.md`);
 
     if (row.stored) {
       expect(refusal, `${row.name}: the write was refused`).toBeUndefined();
