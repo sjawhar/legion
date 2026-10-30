@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-590",
-  "completed": "2026-10-30T20:20:00Z",
+  "completed": "2026-10-31T00:50:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2395",
-  "head": "fd93819c3426058f1f42b121f57c8bb934637473",
-  "round": "20 (sent back on a red `test` at the handoff head 2db7e8d6, which carried attempt 1's red from 811dced0 though attempt 2 was green; the head also conflicted with main's #2504): forward merge of main 0be366cf8 (fd93819c), a full round. nats.go keeps #2504's RepairGrace/HookStall/markHooksDueLocked and this PR's ConnectionChanged signal; a replacement connection calls markHooksDueLocked then connectionChangedLocked; recovery.go and cmd/listener/main.go auto-merged. Migrations 0149/0150 stand (main's last 0148), connections 89, CI filters 0 uncovered (#2552 now carries the api/testdata line). Code pushed first, handoff second. Diff-check comment 6532101928.",
+  "head": "9cabeaf6ff6d35ec0c7105e282b062d3a3e8beb5",
+  "round": "21 (tester round 20 failed at fd93819c: the head conflicted with main after #2392, and a role holder that never answers held back every other issue's events for its 5 s receipt wait). Merge of main 2b891d474 (896ea1f6): migrations to 0150_duty_holds/0151_outbox_claim above 0149_event_horizon, connections 91 (main's 89 + 2), three text conflicts kept on both sides. Fix (767794be): batches overlap (up to 4), each owner in one batch at a time (readBatch excludes owners in flight), an owner is settled, recorded and released as soon as its own sends settle, statements stay one at a time on the outbox pool. Merge of main e018f1d30 (9cabeaf6): #2542's doc edits carried, HookedConnectionEvents kept beside ConnectionChanged. Code pushed first, handoff second. Diff-check comment 6535980444.",
   "proof": [
     {
       "criterion": "Exactly one process publishes at a time through a lease on the outbox's own database connection; /healthz carries boolean outbox_publisher",
@@ -206,6 +206,14 @@
       "observed": "build and vet clean (envoy and infra); bus ok 348.9 s; outbox ok 270.3 s, duty ok 23.4 s, store ok 247.2 s; listener ok 450.3 s, kvwatch ok 62.7 s; TestDispatchConnectionsPerPodIsTheServers ok at 89; main's CI filter check 0 uncovered.",
       "headSha": "fd93819c3426058f1f42b121f57c8bb934637473",
       "negativeControl": "Before the merge, git merge-tree reported 'CONFLICT (content): Merge conflict in packages/envoy/internal/bus/nats.go' against main 0be366cf8, and GitHub showed the head conflicting."
+    },
+    {
+      "criterion": "A role receipt the outbox waits for holds back only its own owner's lane: other owners' events, including an owner read in the same batch, publish while it waits; per-owner order is kept; take-over within 10 s and each event once and in order still hold.",
+      "surface": "outbox package on in-process NATS and pod Postgres 17 (fresh UTF8 database); the repository multiprocess harness (two real envoy-dispatch processes, one Postgres, one NATS)",
+      "command": "cd packages/envoy && go test -count=50 -run TestAHolderThatNeverAnswersDoesNotDelayAnotherIssuesEvents ./internal/dispatch/outbox/ && CGO_ENABLED=1 GOMAXPROCS=4 go test -race -count=3 -run 'TestAHolderThatNeverAnswers|TestAnOwner' ./internal/dispatch/outbox/ && DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -p 2 -parallel 4 -count=1 ./internal/dispatch/outbox/ ./internal/dispatch/duty/ ./internal/dispatch/store/ && go test -p 2 -parallel 4 -count=1 ./internal/bus/ && go test -p 2 -parallel 4 -count=1 ./cmd/listener/ ./internal/kvwatch/ && go test -p 2 -parallel 4 -count=1 ./cmd/dispatch/ && go test -p 2 -parallel 4 -count=1 -tags multiprocess -timeout 25m ./cmd/dispatch",
+      "observed": "At 9cabeaf6: outbox ok 276.1 s, duty ok, store ok 246.5 s, bus ok 351.5 s, listener ok 412.4 s, kvwatch ok, cmd/dispatch ok 256.6 s, multiprocess ok 789.1 s (take-overs 2.5-5.8 s); the two lane tests -count=20 ok. At 767794be: TestAHolderThatNeverAnswersDoesNotDelayAnotherIssuesEvents -count=50 ok, -race -count=3 ok, outbox -race ok.",
+      "headSha": "9cabeaf6ff6d35ec0c7105e282b062d3a3e8beb5",
+      "negativeControl": "Before the fix, the tester's test failed: 'the answering holder received T-2's forward 4.811s after its commit, want within 1s: the silent holder's receipt wait held back another issue's send'; TestAnOwnerOfTheSilentHoldersBatchIsReleasedBeforeTheBatchEnds failed: '4.81s after its commit, want within 1s: the owner was held in flight until its batch ended'."
     }
   ],
   "filesChanged": [
@@ -231,7 +239,8 @@
     "Round 16 merge: .dispatch/architecture/dispatch-outbox.md, cmd/dispatch/README.md, migrations renamed to 0148_duty_holds/0149_outbox_claim and references, outbox/session_answers_test.go and api/session_answers_test.go (setup)",
     "Round 17: merge (ci.yaml, docs-pages.yaml, AGENTS.md, cmd/dispatch/main.go and main_test.go, internal/bus/{async.go,nats.go,core_permission_test.go,publish_denied_window_test.go}, outbox/{batch.go,publisher.go,publisher_test.go,core_denied_test.go}); fix: internal/bus/{async.go,nats.go,export_test.go,window_request_test.go}",
     "Round 18: internal/bus/{async.go,confirm.go,confirm_reconnect_test.go,denials.go,export_test.go,nats.go,stored.go,window_request_test.go,request_denied_window_test.go}, outbox/{batch.go,publisher.go,core_denied_test.go,role_test.go}, cmd/dispatch/{main.go,README.md}, running-dispatch.md, changelog fragment; merge: README, migrations renamed to 0149_duty_holds/0150_outbox_claim and references, ci.yaml",
-    "Round 20 merge: packages/envoy/internal/bus/nats.go (both conflicts resolved keeping both sides)"
+    "Round 20 merge: packages/envoy/internal/bus/nats.go (both conflicts resolved keeping both sides)",
+    "Round 21: outbox/{lease.go,batch.go,publisher.go,role.go,window_test.go}, new outbox/owner_lane_test.go, AGENTS.md, cmd/dispatch/README.md, .dispatch/architecture/dispatch-outbox.md, changelog fragment; merges: running-dispatch.md, infra/README.md, AGENTS.md, infra/gcp/dispatch.go (91), migrations renamed to 0150/0151 and references, internal/bus/{async.go,nats.go}, outbox/publisher.go, window_test.go"
   ],
   "trickyParts": [
     "Blocked events take their blocker's next_attempt_at (no attempt), so they are not re-read on every wake while the blocker waits out a back-off; an owner whose first 100 events all wait has its later due event deferred to the earliest of them (deferPastWindow).",
