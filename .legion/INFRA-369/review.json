@@ -1,0 +1,80 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-369",
+  "completed": "2026-10-30T21:54:02Z",
+  "decision": "changes_requested",
+  "reviewedHead": "the handoff head this commit makes, above code head 1b191490e1bac353d4f78330f3b9d74c03d198b0",
+  "critical": 1,
+  "important": 5,
+  "minor": 13,
+  "thermonuclear": "Run once at 2a671d91: deep review CHANGES (one High, three Medium, two Minor), code quality CHANGES (six code findings, seven prose findings). Each finding below was checked by the reviewer against the code at that head.",
+  "ci": "At code head 1b191490 the CI run 41128293217 was still queued or in progress when this review was written (lint, test, envoy-go, dispatch and the other lanes queued); PR Title 41128290804 success. A request for changes does not wait on CI; the next round reads it.",
+  "keyFindings": [
+    {
+      "severity": "critical",
+      "file": "packages/envoy/internal/dispatch/api/comment_create.go:292",
+      "description": "replyBlockInThread checks reply_to_block against the ask whenever the climb from reply_to reaches an ask, so `dispatch comment --reply-to dispatch://KEY/comment/<c>#b-b2`, where <c> is a reply in an ask's thread, is stored as a reply to part b2 of the ask (its first option), not to block b2 of <c>. The client (itemReplyTo) and the dispatch_comment tool description both mean the comment's block. main refused this request; the head stores the wrong target. comment_delivery.go's replyComment does the same. Fix: with reply_to, check the block against the comment reply_to names (refs.ItemComment, parent.ID); with ask_id, against the ask. ReplyBlocks' comment arm and replyBlockOwner already read a comment block in an ask's thread. Change the test at ask_parts_test.go:887-893 to assert the comment block."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/refs/ReferencedBy.tsx:50",
+      "description": "blockItem knows only comment and message parents, so once the reconciliation indexes every ask (0151 owes them all), a link in an ask's question is listed from its question part and the panel shows 'Artifact · KEY', one group per part, where main showed 'Ask · KEY'. This affects existing data. The CLI's edgeLine (dispatch-execute.ts:2079) has the same gap and prints `block dispatch://KEY/ask/<id>#b-b1`. Fix both, with one item-kind set in TS for edgeLine and nodeLine. Prove the reader-facing fix with a browser row that is red at the parent and green at the head, as the deployment instructions require."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/refs/graph.go:316",
+      "description": "ReferencedBy's WholeDocuments read drops every ask_block source and relies on the ask's own refs row, which holds the question's links only. A document linked only from an option or the answer is in the ?to= graph read but missing from GET /api/v1/artifacts/{id}/references. Map current ask parts' edges to their ask in that read, as the Closure arm does."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/api/ask_rows.go:217",
+      "description": "attachAskPartIDs matches stored parts to options by position and count alone. On the events route (events.go:320 askEventShell) an old ask.answered payload gets the current answer's part id, and an ask.opened whose options were replaced by the same number of others gets the new options' ids; the contract says a superseded answer carries none. On a live read, an index behind the row with the same option count gives wrong ids too. Fix: read text_sha256 in readAskParts and attach an id only where the hash of the option's or the answer's own text equals the stored one; delete askEventShell and match the payload's own options and answer."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy-client/src/dispatch-execute.ts:4670",
+      "description": "`dispatch read --ref <ask part>` awaits client.getAsk in the same Promise.all as the block read, so a failed ask read fails the whole read, only to choose the heading word. askPartNoun (:2228) also infers 'Question' by elimination from the server's placement rules. Put the part's type on the block node (ask_blocks.type is stored) and drop the extra request, or at least catch the getAsk failure and fall back to 'Part'."
+    },
+    {
+      "severity": "important",
+      "file": "PR body",
+      "description": "No `## Contract change census`. The change refuses an input main accepted: `?to=<server>/issues/KEY/asks/<id>#b-<x>` (text.ParseRef reads dashboard URLs) answered 200 with the ask on main and answers 404 at the head when <x> is not a part; stored text holding such a URL moves from the ask to a part on rebuild-refs. Also `dispatch://KEY/ask/<id>#b-<x>` goes from 400 INVALID_REFERENCE to 200/404, the reply_to_block refusals change, and Ask.revision, AskOption.id, AskAnswer.id and the event payload fields are added. List each with its search command, hits and disposition, and the rollout line: immediate, since R10 requires the 404 and no build on main emits an ask URL with a #b- fragment."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/refs/ask_blocks.go:71",
+      "description": "An answer part's hash is type and text only, so a different person giving the same answer keeps the first answerer's part and its made_by. Salt the answer part's hash with the answerer, or update made_by when the answerer changes."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/docs/decided_wording.go:58",
+      "description": "restoreWordings indexes the restored parts at coalesce(edited_at, created_at), the time of the edit it undoes, so a reworded part's changed_at names a time before the restore that changed it. Index at the statement's own time."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/refs/reply_blocks.go:126",
+      "description": "ReplyBlocks' ItemAsk arm copies the ItemComment arm with two names changed. Build one query from kind.tables(), as CurrentItemBlock does."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/refs/refs.go:545",
+      "description": "graph.go:316 and refs.go:545 hard-code the block kinds that itemKinds exists to generate. Build them from itemKinds with BlockKind()."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/refs/refs.go:283",
+      "description": "A third and fourth hand parse of `<kind>/<uuid>#<block>` (here and api/reply_blocks.go:18 replyBlockOwner, beside itemBlockParent). One exported refs helper returning (ItemKind, id, block)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/itemblocks/align.go:31",
+      "description": "Align only forwards to AlignReplaced. Give Align the variadic replaced parameter and delete AlignReplaced."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy-client/src/dispatch-execute.ts:1180",
+      "description": "Prose, listed for the implementer because each sits beside code this round changes and two are refusal strings tests pin: refGrammarProblem's list of forms lacks the ask-part form; innerRefProblem's doc comment and its dispatch_comment hint (:1239) drop the part (pass refText to reply_to_ask); replyBlockProblem gives no reply_to_ask hint for an ask part; TS doc comments at :672, :678, :915, :2073; Go doc comments refs.go:178 and :490, graph.go:136, api/reply_blocks.go:32; 0150_ask_blocks.up.sql:3-4 says the parts are split by the document parser; packages/envoy/AGENTS.md:285, :1607, :1688, :1722, :1886, :1932 and cmd/dispatch/README.md:1616, :2127 still name comments and messages only."
+    }
+  ]
+}
