@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-727",
+  "completed": "2026-10-30T13:05:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2548",
+  "head": "de1a0322ce4f9661ae533b4999ff5ffa9aeda106",
+  "proof": [
+    {
+      "criterion": "1. A red test first, past every remover: it fails on the commit before the fix and passes at the fix's head",
+      "surface": "Dispatch's web app in Chromium through Playwright, against the real Go server and PostgreSQL 17.11 with pgvector 0.8.7",
+      "command": "cd packages/dispatch && bun run e2e -- compose-wait",
+      "observed": "At the base 88840d35c5fd (the five rows alone, no fix): 4 failed, 1 passed (4.3m) - the long compose past the TTL, the author offline past the TTL, the re-anchor after another writer's edit, and the reader message all red; the forced-reconnect row green. At the head de1a0322ce4f: 5 passed (3.2m). The same five rows also passed at 8ca2f2e93b3c (before main was merged) and at 96a647ebd977 (the merge head).",
+      "headSha": "de1a0322ce4f9661ae533b4999ff5ffa9aeda106",
+      "negativeControl": "The server half disabled at 96a647eb (the sweep's connected-author set forced empty): the long-compose row still passes while its own per-second log shows the mark span going at 63 s, so the re-anchor carries it. The browser half disabled (remarkRecordMark forced to refuse 'gone'): the author-offline row and the mark-removed row both fail, each with the reader's message and no comment created."
+    },
+    {
+      "criterion": "2. The comment is created and anchored to the selected text; the composer keeps the draft on every error",
+      "surface": "The same five browser rows; the listed comment is read back through GET /api/v1/issues/{key}/comments",
+      "command": "cd packages/dispatch && bun run e2e -- compose-wait",
+      "observed": "Rows (a), (b), (c) and (e) each assert the listed comment's anchor quote equals the selection ('jumps over the lazy dog'), that it is not orphaned, and that the mark span the comment names covers exactly those words in the page; the composer closes. Row (d), whose selected text another writer deleted, shows 'The text you selected was changed or deleted, so this comment has nothing to attach to. Your draft is kept - select the text again to attach it.', keeps 'Please revise.' in the field and creates no comment.",
+      "headSha": "de1a0322ce4f9661ae533b4999ff5ffa9aeda106",
+      "negativeControl": "Row (d) is the deliberate break: the words are gone, so nothing is anchored anywhere, and the refusal is the reader's message rather than the server's string. The proof-editor unit tests add the other refusal: a quote that reads twice with no usable tracked range answers 'gone' rather than anchoring to a guess."
+    },
+    {
+      "criterion": "3. The root cause is named in the pull request with the evidence that shows it",
+      "surface": "The pull request body, from the red row's per-second log of the mark span in the page and the Go sweep's own timing",
+      "command": "cd packages/dispatch && bun run e2e -- compose-wait -g 'unrecorded-mark TTL keeps its anchor' (base), and cd packages/envoy && go test ./internal/dispatch/docs/ -run 'Unrecorded|VerifyMark|Sweep'",
+      "observed": "The span is present at every sample from 0s to 62s and gone from 63s on, and Send is then refused 409 ANCHOR_MISSING after markWait. That is sweepUnrecordedMarks: the settlement 2 s after the mark arrives records its first-seen time and the settlement re-armed for unrecordedMarkTTL removes it at about t+62 s. The same run at 12c9baf52c6c, the first parent of #2449 and so the build with the old idle reconnect, gives the same 0-62s present / 63s gone, and the forced-reconnect row passes on both builds: a reconnect takes nothing, and the reported 'about ten seconds' is unexplained. Production runs one Dispatch pod with no override of the mark, settle or TTL settings.",
+      "headSha": "de1a0322ce4f9661ae533b4999ff5ffa9aeda106",
+      "negativeControl": "The reconnect row, run at both commits, is the control for the competing explanation: it is green at each, so the reconnect is excluded as the remover."
+    },
+    {
+      "criterion": "INFRA-512's merge rule, as this child's plan sets it: no CPU regression",
+      "surface": "The committed load-test harness on this 2-vCPU pod: Dispatch, the Envoy listener, NATS, the latency proxy and PostgreSQL 16.2 with pgvector, all built from the checkout under test",
+      "command": "packages/envoy/loadtest/run-step.sh step-1x-<side>-<n> --events 4 --sessions 400 --requests 60, six alternating steps (base, head, base, head, base, head) over one shared seed, LOADTEST_SRC pointing at a21100c5's tree for each base step",
+      "observed": "Dispatch cores, base 0.3642 / 0.3548 / 0.2789 (started 12:29:46, 12:40:41, 12:50:33 UTC), head 0.3560 / 0.3568 / 0.3518 (12:35:51, 12:45:42, 12:55:24 UTC). Every head run lies inside the base spread 0.2789-0.3642 and the highest head run is below the highest base run, which is the rule. The base mean 0.3326 is below the head mean 0.3548, pulled down by base 3, whose Dispatch figure is the lowest of the six while its Postgres figure is the highest.",
+      "headSha": "de1a0322ce4f9661ae533b4999ff5ffa9aeda106",
+      "negativeControl": "box_busy_before was 0.027-0.040 for all six steps, so no step measured a busy box; the alternating order means a drift of the machine cannot favour one side."
+    }
+  ],
+  "filesChanged": [
+    "packages/dispatch/e2e/compose-wait.e2e.ts (new, the five rows)",
+    "packages/envoy/internal/dispatch/docs/marks.go, marks_test.go",
+    "packages/envoy/internal/dispatch/pmdoc/find.go, find_test.go",
+    "packages/proof-editor/src/record-mark-retype.ts, src/lib.ts, tests/record-mark-retype.test.ts",
+    "packages/dispatch/web/src/features/margin/margin-context.tsx, CommentsTab.tsx, margin-fixture.tsx, MentionComposer.margin.test.tsx",
+    "packages/dispatch/web/src/features/conversation/MentionComposer.tsx, held-sends.ts, composer-model.ts",
+    "packages/dispatch/web/src/features/doc/ProofDocument.tsx, ProofDocument.test.tsx, editor.ts",
+    "packages/dispatch/web/src/api/client.ts, web/src/__tests__/document-runtime.ts, web/src/__tests__/proof-document.tsx",
+    "packages/dispatch/AGENTS.md, packages/envoy/cmd/dispatch/README.md",
+    "packages/envoy/.changes/unreleased/INFRA-727-compose-keeps-anchor.yaml"
+  ],
+  "trickyParts": [
+    "A remote change reaches the editor through y-prosemirror, which rebuilds the document rather than mapping positions, and a reconnect can rebuild the editor and drop plugin state. A tracked range alone therefore recovers nothing in the two cases that matter, which is why the re-anchor also looks for the quote where it reads exactly once in the document.",
+    "HeldSends.retry does not call Writes.retry: that reuses the attempt closure built at the first press, which would POST the old mark id. It re-presses through send() with requestFor(), which supersedes the refused row and mints a fresh Idempotency-Key, since a 409 is Dispatch's verdict on that key.",
+    "The sweep now holds the room state once around its whole loop instead of taking it per mark, and reads the tree before taking it."
+  ],
+  "deviations": [
+    "The plan said no quote fallback. The architect's fifth row - remove the mark by hand mid-compose, with the words still there - can only be produced by another writer rewriting the sentence, which leaves no usable tracked position, so remarkRecordMark falls back to the one place the quote reads in the document and refuses on two readings. Sent to the INFRA-512 architect and accepted (its decision is a comment on sjawhar/legion#2548).",
+    "The plan had Send await the document's pending count before every mark-anchored compose. That wait is implemented (DocumentBridge.whenSent, bound 5 s) and used where the margin owns the press - after a re-anchor, before the retry - and not on the first Send, which the composer owns and which has had the mark in the document since the composer opened. No row needs it there, and it would delay every comment send for a race the server's markWait already covers.",
+    "The merge rule for this child is no-regression rather than INFRA-512's strict CPU gain (the plan's departure 1), since a correctness fix expects no gain.",
+    "main was merged forward once, for #2516's docs -race job, on the architect's instruction; one import conflict in held-sends.ts was resolved and the five rows were run again at the merge head."
+  ],
+  "openQuestions": [
+    "The reported 'about ten seconds' is still unexplained. Nothing found removes the mark before about 62 s, on this build or on the one before #2449, and a forced reconnect takes nothing on either. The fix removes the minute case and makes Send recover whenever the mark is gone, whatever took it."
+  ],
+  "discoveredComplexity": [
+    "WebKit cannot run in a worker pod: its system libraries are absent and the image is not root-writable. The WebKit lanes of keyed-send and offline-edits are CI's alone; Chromium, iPhone and Firefox were run here.",
+    "The simplify pass applied 7 of 13 findings. Skipped, each deliberately: collapsing useSessionSends.retry onto the new store method (outside this change's blast radius, and the reviewers differed on whether the row snapshot and the store entry are always the same), exporting createRecordMark into dispatch-action-bar.ts (a file this change does not touch), halving the author set with a TrimPrefix match (cleverness for an allocation the new guard already avoids in the common case), and ending a tracked entry when its send lands (a bounded per-editor-session cost the reviewer itself called optional)."
+  ]
+}
