@@ -2,67 +2,81 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-715",
-  "completed": "2026-10-29T19:48:00Z",
-  "round": 8,
-  "codeHead": "37f334f05032",
-  "pullRequestHead": "7cf7f3b6a9f1916c9dbccbaba84f29d22abb5909",
+  "completed": "2026-10-30T02:16:00Z",
+  "round": 9,
+  "codeHead": "b0a59b0b5c6a808af33504d9dabfaf39e7299e56",
+  "pullRequestHead": "65a535e108edb490e2156935fe6354a2c6da305c",
+  "roundKind": {
+    "verdict": "full round, not a confirmation round",
+    "fingerprintBefore": "efb945c82033ec62eeeea026a946a9fcf8fb8a11ad7f1b9bf7dd76b686ee9c38 at 37f334f05032, the head my round-8 E2E line names",
+    "fingerprintAfter": "4d3d20ca01c138b31645c2a660455a69bf525e50896bedc6e39ef490f54b9f85 at b0a59b0b",
+    "fileIntersection": "Not empty. The PR's own diff touches 20 files; main changed 318 in the window 30ecdcd4..de546ed2; four are in both: packages/dispatch/e2e/block-references.e2e.ts, packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md and packages/envoy/internal/dispatch/docs/mutation.go. mutation.go is where this change lives, so the merge could change it under the branch's own callers whatever the conflicts said: main's #2502-era work added a panicked flag to recoverMutation, made abandon drop a fork whose change panicked, and replaced treeOf(fork) with s.readFork(fork) in applyLive. That is why I drove the whole refusal table on a real server again rather than trusting the merge."
+  },
   "implementerProof": {
     "verdict": "verified",
-    "how": "This round changes no production code: the whole diff over packages/envoy since my round-7 head is find.go's At doc comment, which the reviewer wrote, and one row of upload_anchors_test.go. The row answers the review's finding that no committed test caught At being changed from the block's text-run start to the refused range's start. I did not take the row's passing as proof. I reproduced the mutation the review used, in a throwaway tree at this head, and ran the refusal table: exactly one row fails, the new one, reading 'two code blocks ... out of them' where it wants 'a code block ... out of it'. So the lock holds against the change that previously slipped through. Unmutated, all six rows pass, and the room tests, both anchor oracles, the copy test, the eight reanchorError cases and the two browser files pass at this head."
+    "how": "This round answers the review's two important findings, and both are verified on the surfaces they broke on. Finding 1, the dispatch lane's typecheck: bunx tsc --noEmit in packages/dispatch exits 0 at the merged head, and the browser file whose import main dropped passes in Chromium, six tests of it. Finding 2, the envoy-go-race timeout: with CGO_ENABLED=1 go test -race on the docs package the three room-memory tests SKIP, 0.00 s each, and the package finishes in 1.12 s; without -race the same three RUN and pass with their bound values, so the skip is conditioned on the race build and nothing else - that was the risk worth checking, since a skip that fired in the normal build would silently void acceptance 3. CI agrees at the code head: envoy-go-race and the new envoy-go-race-docs job are both green there."
   },
   "failed": 0,
   "failures": [],
   "reviewFindingsClosed": [
     {
-      "finding": "minor - no committed test pinned that two matches of a quote inside one code block count as one place; both review agents mutated MarkNotAllowedError.At and every docs and pmdoc test still passed.",
-      "closed": "upload_anchors_test.go gains the row 'an ask into one code block twice', seed 'Intro.\\n\\nrun the tests\\n' and upload 'Intro.\\n\\n```\\nrun the tests\\nand run the tests\\n```\\n', expecting 'a code block ... out of it'. I verified it is a lock rather than a passing row by rerunning the review's own mutation against it (proof entry 1). The unit case 'one place its quote stands in twice' stays as the message-level check it is; the new row is the one that runs the mark writer."
+      "finding": "important - the dispatch lane failed at bunx tsc --noEmit: e2e/block-references.e2e.ts could not find getArtifactText, which main's #2502 dropped from the file's import block while this PR's new test uses it.",
+      "closed": "The implementer forward-merged main and restored the import (92abb6c4). At the merged head bunx tsc --noEmit in packages/dispatch exits 0, and the file's six browser tests pass, the block-reference-across-an-upload one among them. CI's dispatch lane at b0a59b0b was still in progress at my read; lint, test and pr-title, the rest of the required set, are green there, and typecheck is skipped."
     },
     {
-      "finding": "minor - the At doc read as where the refused text begins.",
-      "closed": "The reviewer rewrote it in 8ca80716 (comment only): the start of the text run holding the refused text, its block's whole text, not where the refused range starts. That matches the code, which sets At to spans[last].From."
+      "finding": "important - envoy-go-race hit go test's 30-minute timeout, with about 220 s of it added by this PR's three room-memory tests, which measure heap growth that race instrumentation distorts and exercise no concurrency.",
+      "closed": "The three tests now call skipUnderRace, whose raceEnabled constant comes from a build-tagged file pair (race_enabled_test.go, race_disabled_test.go). I checked both directions, because a skip that also fired in the normal build would void acceptance 3 without anyone noticing: under -race all three skip in 0.00 s and the package finishes in 1.12 s; without -race all three run and report their bounds (673 B, 1,959 B and 1,499 B per write against 883 B, 927 B and 2,088 B stored). Main's #2516 also gave the docs package its own race job, which the merge brought in: envoy-go-race and envoy-go-race-docs are both green at b0a59b0b."
     }
   ],
   "proof": [
     {
-      "criterion": "The test added for the review's finding fails on the change it was written to catch, so the place-counting boundary is pinned",
-      "surface": "the real docs.Service on a live room over its websocket on Postgres 16, in a throwaway tree of this head with one line of pmdoc mutated, so the mark writer runs for real and the refusal travels the whole re-anchor path",
-      "command": "git archive 37f334f05032 into $TMPDIR/mut-check, change pmdoc/find.go:1138 from `At: spans[last].From` to `At: r.From`, then DISPATCH_TEST_DATABASE_URL=… go test ./internal/dispatch/docs/ -run TestAnUploadMovingAnAnchorsQuoteWhereItsMarkIsNotAllowedIsRefused -count=1",
-      "observed": "Exactly one of the six rows fails, the new 'an ask into one code block twice': 'the upload = ... would land in two code blocks, where its mark is not allowed, and the upload leaves its quote nowhere it may stand; move that text out of them ... want ... would land in a code block ... move that text out of it'. That is the wording the review predicted the mutation would produce, and the row that produces it is the one the review asked for. Unmutated at this head the same six rows pass, the two-code-blocks row and the one-block-twice row among them. The throwaway tree is deleted.",
-      "headSha": "37f334f05032",
-      "negativeControl": "The mutation is itself the control: before this row, the review reports that every docs and pmdoc test passed with At changed, so nothing caught it. After it, the suite fails on that change and on nothing else, which is what distinguishes a lock from a row that happens to pass."
+      "criterion": "After the forward merge of main into a file this change lives in, the whole refusal and re-anchor behaviour is unchanged on the surface a person meets",
+      "surface": "a real Dispatch server process built from the merged head (go build ./cmd/dispatch) on a real Postgres 16, driven over its HTTP API as an agent does - dispatch issue, POST /api/v1/issues/{key}/asks and dispatch comment for the anchors, POST /api/v1/issues/{key}/artifacts for the upload - with the server's own log, the artifact_versions rows and each anchor's holding block read back through document_blocks",
+      "command": "bash $TMPDIR/rig/copyanchor.sh $TMPDIR/bin/dispatch-r9 18901 tester_ca_r9, the eight-case table built over rounds 5 to 7",
+      "observed": "All eight cases answer exactly as they did before the merge. Accepted 201 with the anchor left on the original block: a heading's comment copied into the front matter (still on the heading) and an ask's quote copied into a code block above it (still open on the paragraph). Refused 400 INVALID_MARKDOWN: into a code block alone ('a code block ... out of it'), into the front matter alone ('the front matter'), into the front matter and a code block ('the front matter and a code block ... out of them'), into two separate code blocks ('two code blocks ... out of them'), into a code block where it stood and the front matter far above ('a code block and the front matter', nearest first), and into one code block holding the quote twice ('a code block ... out of it'). Every refusal leaves the artifact at version 1 with the anchor open and unorphaned, and no level=ERROR line is written in any of the eight.",
+      "headSha": "b0a59b0b5c6a808af33504d9dabfaf39e7299e56",
+      "negativeControl": "The refusals are themselves the control for the accepted pair, and the two accepted copies the control for the refusals: the same quote, the same anchor, the difference being only whether the upload leaves it somewhere its mark may stand. Across heads: at e0629eed two separate code blocks read 'a code block ... out of it', at 090ae14d a two-place refusal named only the farthest place, at bf2118ca the copy cases were refused, and on main bb9fe49c every one of them was 500 DOC_SCHEMA with a server ERROR line."
     },
     {
-      "criterion": "A3 and the reader-facing proof at this round's head: the room memory bounds, the anchor oracle, the refusal table, the block-id carry and the browser block-reference test still hold",
-      "surface": "the real docs.Service on a live room over its websocket on Postgres 16; pmdoc.ParseForWrite; and Dispatch's own browser suite in Chromium and on the phone profile against a real server",
-      "command": "cd packages/envoy && go build ./... && DISPATCH_TEST_DATABASE_URL=… go test ./internal/dispatch/docs/ -run 'KeepMemoryWithinTheBound|KeepsMemoryWithinTheBound|TestAnUploadChangingOneTokenWritesASmallUpdateOverOpenAnchors|TestAnUploadLeavesTheAnchorsOnTheTextItKeeps|TestAnUploadMovingAnAnchorsQuoteWhereItsMarkIsNotAllowedIsRefused|TestAnUploadCopyingAnAnchorsQuoteWhereItsMarkIsNotAllowedKeepsTheAnchorOnTheOriginal|TestAReanchorErrorIsTheCallersOnlyWhenTheMarkIsNotAllowed' -count=1 -v; cd packages/dispatch && DATABASE_URL=… PLAYWRIGHT_BROWSERS_PATH=… bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/block-references.e2e.ts e2e/anchors.e2e.ts",
-      "observed": "The build is clean and everything passes in 64.6 s: 200 one-token uploads 680 B per upload against 880 B stored; 250 writes 1,963 B per write against 927 B stored; 400 writes in the production mix 1,492 B per write against 2,092 B stored, each inside its stored-plus-2-MiB bound. Both anchor oracles pass, the comment-into-a-code-block case among them; all six refusal rows and both copy rows pass; the eight reanchorError cases pass. The browser run gives 7 passed (35.3s).",
-      "headSha": "37f334f05032",
-      "negativeControl": "Round 1, on a clean tree of main bb9fe49c with the same test files: every room bound exceeded (97,907,216 B against 18,933,230 B; 79,822,416 B against 17,521,628 B; 14,948,664 B against 8,032,262 B), the pmdoc carry test reporting 1,658 of 1,658 ids changed, and the browser test failing at block-references.e2e.ts:275 with 'element(s) not found'."
+      "criterion": "The race skip fires only under the race detector, so acceptance 3's room-memory bounds are still measured in the normal build",
+      "surface": "the real docs.Service on a live room over its websocket on Postgres 16, built twice: once with the race detector and once without",
+      "command": "cd packages/envoy && CGO_ENABLED=1 GOMAXPROCS=4 DISPATCH_TEST_DATABASE_URL=… go test -race -p 2 -parallel 4 ./internal/dispatch/docs/ -run 'KeepMemoryWithinTheBound|KeepsMemoryWithinTheBound' -count=1 -v; then the same without -race, in the wider subset that also runs the anchor oracles and the refusal table",
+      "observed": "Under -race: --- SKIP for all three, 0.00 s each, package ok in 1.121 s. Without -race: all three run and pass - 200 one-token uploads 673 B per upload against 883 B stored; 250 writes 1,959 B per write against 927 B stored; 400 writes in the production mix 1,499 B per write against 2,088 B stored - each inside its stored-plus-2-MiB bound. The same run passes both anchor oracles, all six refusal rows, both copy rows and the eight reanchorError cases, in 68.7 s. Note for anyone repeating it in this pod: go env CGO_ENABLED is 0 here, so -race refuses to build until CGO_ENABLED=1 is set; gcc is present.",
+      "headSha": "b0a59b0b5c6a808af33504d9dabfaf39e7299e56",
+      "negativeControl": "The non-race run is the control for the skip: if skipUnderRace fired on the ordinary build the three tests would report SKIP there too and acceptance 3 would be unmeasured. They report their bounds instead."
     },
     {
-      "criterion": "The refusal a person meets is unchanged by this round, since no production code moved",
-      "surface": "the diff itself, read over packages/envoy, and the real-server HTTP drives of round 7 that it leaves standing",
-      "command": "jj diff --from 4be0d238b669 --to 37f334f05032 --stat, then the two file diffs",
-      "observed": "Two files: pmdoc/find.go, four comment lines of the At field, and docs/upload_anchors_test.go, one table row of seven lines. No production statement changes, so round 7's HTTP measurements still name this head - two separate code blocks read 'two code blocks ... out of them', one code block holding the quote twice reads 'a code block ... out of it', an ask at the end of a long document whose quote lands in a code block where it stood and the front matter far above reads 'a code block and the front matter', the two copies are accepted 201 with the anchor on the original block, and no refusal writes a version or a level=ERROR line.",
-      "headSha": "37f334f05032",
-      "negativeControl": "Round 7's control stands: at the previous code head e0629eed two separate code blocks read 'a code block ... out of it', and on main bb9fe49c every one of these uploads was 500 DOC_SCHEMA with a server ERROR line."
+      "criterion": "The gates main's required checks never run: packages/envoy compiles and vets, and every TypeScript package this PR touches typechecks, at the merged head",
+      "surface": "the Go toolchain over packages/envoy and bun's tsc over packages/dispatch, the one TypeScript package in this PR's diff; packages/envoy/infra is not touched by this PR, so its separate-module vet does not apply",
+      "command": "cd packages/envoy && go build ./... && go vet ./...; cd packages/dispatch && bunx tsc --noEmit",
+      "observed": "All three exit 0. The pair over packages/envoy costs 30.4 s and 27.2 s with a sampled peak of 3.64 GiB of the pod's 19.0 GiB, measured before as 2.77 GiB; tsc adds about 25 s. This is the first round where tsc over packages/dispatch matters, since it is what the review's finding 1 failed on.",
+      "headSha": "b0a59b0b5c6a808af33504d9dabfaf39e7299e56",
+      "negativeControl": "The review's own run is the control: at 37f334f0 the same tsc failed with e2e/block-references.e2e.ts(235,30) Cannot find name 'getArtifactText'. It exits 0 here because the merge restored the import."
+    },
+    {
+      "criterion": "The reader-facing proof still holds at the merged head: a block reference a person made survives an upload that leaves its block alone",
+      "surface": "Dispatch's own browser suite - the built web app in Chromium and on the phone profile against a real server on Postgres 16",
+      "command": "cd packages/dispatch && DATABASE_URL=… PLAYWRIGHT_BROWSERS_PATH=… bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/block-references.e2e.ts e2e/anchors.e2e.ts",
+      "observed": "7 passed (35.5s). The block-reference file's six tests pass at their new line numbers after main's rewrite of its import block (the upload case is now at :210), and the anchored-comment test passes on Chromium and on the phone profile.",
+      "headSha": "b0a59b0b5c6a808af33504d9dabfaf39e7299e56",
+      "negativeControl": "Round 1, on a clean tree of main bb9fe49c with the same test file: the upload case failed with 'element(s) not found', because every upload re-minted the block's id."
     }
   ],
   "risks": [
-    "No code head of this pull request has finished its CI lanes, and that is now a pattern rather than one bad push: each round's push cancels the previous head's run before the Go and browser lanes settle. The only required lane that has ever finished on this branch is `lint`, green at e0629eed. If the rounds keep landing at this pace, the reviewer will be asked to approve a head whose checks have never run, and the merge will then wait on required checks that start only after the last push. This is for the architect to weigh, not a defect of the change; I raise it with my report.",
-    "The 200-upload room test stays noisy: 674 to 2,979 B per upload across eight runs of this change, 680 B at this head. The bound holds with at least 2.8x margin in every run and the main-side control is 489,536 B per upload. Already on the PR body's Not proven line.",
-    "The place counting is quadratic in the number of refused places, which the review measured at about a second for 65,536 refused code blocks and recorded under Not proven. I did not re-measure it; it is on the error path only."
+    "#2480 is CONFLICTING again. GitHub reports mergeable CONFLICTING, mergeStateStatus DIRTY at 65a535e1, and main moved to a2f72e8e while I tested. git merge-tree of main with 65a535e1 conflicts in one file, packages/dispatch/e2e/block-references.e2e.ts, the same file as last time; AGENTS.md, cmd/dispatch/README.md and pmdoc/parse.go auto-merge. Another forward merge is needed before READY, and while the head conflicts GitHub runs no pull-request checks on it.",
+    "The 200-upload room test stays noisy: 673 to 2,979 B per upload across nine runs of this change, 673 B here. The bound holds with at least 2.8x margin in every run and the main-side control is 489,536 B per upload. Already on the PR body's Not proven line.",
+    "The place counting is quadratic in the number of refused places, which the review measured at about a second for 65,536 refused code blocks. On the error path only; I did not re-measure it."
   ],
   "ci": {
-    "head": "37f334f0 is the code head; the pull-request head 7cf7f3b6 is the handoff-only push",
-    "read": "GitHub, 2026-10-29T19:44Z, not re-run and not waited for",
-    "state": "At 37f334f0 only `changes` and two `pr-title` runs exist, all queued; the CI workflow has created no job check runs yet. At 4be0d238 `changes` finished green and the rest were cancelled by the reviewer's comment push; at 8ca80716 every lane was cancelled by this round's push. A queued lane is read as queued; a required red that settles later sends the work back from testing on its own, and the reviewer reads the head's checks before it approves.",
-    "mergeability": "GitHub reports #2480 mergeable MERGEABLE, mergeStateStatus BLOCKED (the base's required review), reviewDecision CHANGES_REQUESTED from the round-6 review this round answers."
+    "head": "b0a59b0b is the code head; the pull-request head 65a535e1 is the handoff-only push",
+    "read": "GitHub, 2026-10-30T02:13Z, not re-run and not waited for",
+    "state": "At last the lanes have settled, and they are green: changes, ci-filters, lint, test, pr-title, envoy-go, envoy-go-race, envoy-go-race-docs, dispatch-memory, dispatch-multiprocess, dispatch-browser-multiprocess, docs, envoy-infra-go, envoy-session-stall, envoy-smoke, listener-server-change and worker-image / build all success at b0a59b0b; typecheck and nine package lanes skipped; dispatch still in_progress at my read, which I did not wait for. The required set is lint, typecheck, test and pr-title: three green and typecheck skipped. This is the first code head of this pull request whose long suites have finished, which answers the risk I filed with round 8.",
+    "mergeability": "mergeable CONFLICTING, mergeStateStatus DIRTY at 65a535e1, reviewDecision CHANGES_REQUESTED from the round-7 review this round answers. The conflict is the risk above."
   },
   "notRun": [
     "The cluster hour was not re-run: the copy is down, and A2 is verified by re-deriving it from that run's own files, done in rounds 1 and 2.",
-    "The real-server HTTP drivers were not re-run this round: no production code changed since round 7, which the diff shows, so round 7's drives name this head.",
-    "The whole internal/dispatch/pmdoc package was not re-run; this container needs more than go test's default 10-minute package timeout for it, where it passed in 701 s at an earlier head, and CI's envoy-go lane is what judges it.",
-    "No CI lane was re-run as evidence, and no queued lane was waited for."
+    "The real-server upload-memory driver of round 1 was not re-run; the three room-memory tests at this head measure the same thing through the same service and pass.",
+    "The whole internal/dispatch/pmdoc package was not re-run in this pod, where it needs more than go test's default 10-minute package timeout; CI's envoy-go lane is green at this head and judges it.",
+    "No CI lane was re-run as evidence, and the dispatch lane, in progress at my read, was not waited for."
   ]
 }
