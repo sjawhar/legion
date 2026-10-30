@@ -55,6 +55,16 @@ A Dispatch that reaches NATS only through a SOCKS5 proxy, such as a tailnet side
 `ENVOY_NATS_SOCKS5_PROXY` to the proxy's `host:port` (for example `127.0.0.1:1055`) with
 `ENVOY_ALLOW_REMOTE_NATS=1`, and every NATS connection then goes through the proxy, which is
 handed each server's host name unresolved.
+Dispatch's server creates and updates the `ENVOY_NOTIFICATIONS` stream as the Envoy listener
+does, so give it the listener's `ENVOY_NATS_REPLICAS` and `ENVOY_STREAM_MAX_BYTES`
+([Running the listener](/legion/dispatch/envoy/#running-the-listener)): it creates the stream and
+its webhook redelivery bucket with that many copies, raises one it finds with fewer, raises a
+smaller byte limit, or none, to its own, never lowers either, and with no byte limit of its own
+keeps the one the stream has. The stream holds the most copies and the largest limit any Envoy
+program of the deployment carries, so a clustered deployment sets both alike in every listener and
+in Dispatch's server. Like the listener, it reads the stream again every 30 seconds and raises
+copies and a limit a start with other settings lowered
+([Keeping the stream](/legion/dispatch/envoy/#keeping-the-stream)).
 
 People sign in through a Cognito sign-in pool or with Google directly by default, and Dispatch
 names each person by their lowercase email. `DISPATCH_IDENTITY=header:<Header-Name>` names people by a request header instead; it is for
@@ -354,12 +364,12 @@ one. Three things have to be true first; Dispatch checks the first for you.
   rather than rolling it (Kubernetes `strategy: Recreate`), until a single-publisher lock lands.
 
 A second server also costs connections, and Postgres counts them per server. Each server opens up
-to 64 connections for requests, up to 12 for the periodic work it runs once across the servers, up
+to 64 connections for requests, up to 13 for the periodic work it runs once across the servers, up
 to 4 for loading documents, one for the health check, and one for the events outbox, and it holds
 four more open for as long as it runs: one each for the three things that wait on Postgres
 notifications, which are delivery, the live socket's event-feed relay, and closing a document
 session another server has written to, and one for its entry in the list of running servers, which
-it renews every five seconds. That is 86 connections for one server at its ceiling, and twice that
+it renews every five seconds. That is 87 connections for one server at its ceiling, and twice that
 for two, past a default Postgres's limit of 100. Check the database's connection
 limit before you start the second server: a limit sized for one server, with whatever else uses
 that database counted in, is the thing that runs out.
@@ -435,8 +445,11 @@ first; above one replica, scale to zero before the new version starts. Releases 
 again. Rolling it back brings the hazard back the other way: a tab still open, and a `dispatch`
 client that saw this version keep keys in the last five minutes, retry a write whose answer was
 lost against the earlier server, which runs it again. So fix it forward, as above; if you must roll
-back, stop this version first, knowing a write in flight at that moment may land twice. A tab
-opened before the deploy needs a reload: its event route is gone and it shows
+back, stop this version first, knowing a write in flight at that moment may land twice. Once a
+later release has dropped the broadcast send's old key table (migration `0141`), rolling back past
+this version also stops broadcasts: the earlier version's broadcast send reads and writes that
+table, so every broadcast send fails while the rest of that version keeps working. A tab opened
+before the deploy needs a reload: its event route is gone and it shows
 **Live updates unavailable**, and its broadcast body still carries a field the new server refuses.
 
 From that release on, every page write that could otherwise happen twice carries an

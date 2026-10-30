@@ -354,6 +354,13 @@ export const DOC_EDIT_OPS = [
   "delete_column",
 ] as const;
 
+/** What dispatch_issue and dispatch_ask print about the related-item check their write ran. */
+const RELATED_CHECK_RESULT =
+  "Dispatch then runs the related-item check (waiting at most five seconds; dispatch related runs " +
+  "it without writing), and the result says, right after the line naming what was created, " +
+  "which items it found and how it searched, that it searched and found nothing, or that no " +
+  "check was made, why, and the dispatch search to run instead.";
+
 export const dispatchToolSpecs = [
   {
     name: "dispatch_issue",
@@ -363,6 +370,7 @@ export const dispatchToolSpecs = [
       "When passing a spec, before calling, have a fresh read-only reader check it against the code and the human's words, then resolve every finding; a Legion architect uses `plan-gap-analyst`. " +
       "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " +
       "Create a project only when a person asks for one; work that spans projects goes in the project that owns most of it. " +
+      `${RELATED_CHECK_RESULT} With --force, the result also names each issue whose title you forced past. ` +
       `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       project: z.string().describe("Project key for the new issue."),
@@ -597,7 +605,8 @@ export const dispatchToolSpecs = [
       "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " +
       `reference — it must be answerable from its own text and anchor alone, never "see above". ` +
       `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` +
-      `the lines images appends included, and has at most 8 options. ${OWNER_REFERENCE}`,
+      `the lines images appends included, and has at most 8 options. ${RELATED_CHECK_RESULT} ` +
+      `An ask among the related items says whether it is answered, by whom and with which options. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -814,7 +823,9 @@ export const dispatchToolSpecs = [
         .string()
         .describe(
           "A comment id (uuid); replying to any comment in a thread continues that thread (an " +
-            "ask's clarification thread included). To reply to an ask, use reply_to_ask with the " +
+            "ask's clarification thread included). A block reference to one block of the comment " +
+            "(dispatch://KEY/comment/<id>#b-<block id>) replies to that comment and names the " +
+            "passage the reply answers. To reply to an ask, use reply_to_ask with the " +
             "ask id instead."
         )
         .optional(),
@@ -909,6 +920,8 @@ export const dispatchToolSpecs = [
         .describe(
           "Optional message id or dispatch://KEY/message/<id> reference to reply to, threading " +
             "this message under it so the reply stays with the original in the Conversation. " +
+            "A block reference to one block of the message (dispatch://KEY/message/<id>#b-<block id>) " +
+            "replies to that message and names the passage the reply answers. " +
             "A bare id with no issue answers a human's direct message to this session; a " +
             "dispatch://KEY/message/<id> names the issue its message lives on, so that form is a " +
             "reply on that issue."
@@ -942,6 +955,7 @@ export const dispatchToolSpecs = [
       "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " +
       "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " +
       "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards. " +
+      "Each decision block the edit adds gets the related-item check dispatch ask gets, waiting at most five seconds for all of them together: the result prints, after its first line, `Decision block <id>:` and what that check found, that it found nothing, or that it was not made and why. " +
       "A block id written as {#id} longer than 256 bytes is stored, but its block is no graph node, so no reference reaches it. " +
       `The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
     arguments: (z) => ({
@@ -1059,7 +1073,7 @@ export const dispatchToolSpecs = [
       "Do not use it for issue status, asks, or events; " +
       "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " +
       "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " +
-      "After the markdown it prints every open thread anchored on the document in full: an open ask with its id and question and each reply's author, time and text, and a comment thread with its root's id, author, quote and text and each reply's author, time and text, in order; a resolved thread, and an ask that is answered or resolved, is not printed. " +
+      "After the markdown it prints every open thread anchored on the document in full: an open ask with its id and question and each reply's author, time and text, and a comment thread with its root's id, author, time, quote and text and each reply's author, time and text, in order; a resolved thread, and an ask that is answered or resolved, is not printed. " +
       "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " +
       "any other file that is not UTF-8 text is described, with the route that serves its bytes. " +
       OWNER_REFERENCE,
@@ -1291,6 +1305,47 @@ export const dispatchToolSpecs = [
     },
   },
   {
+    name: "dispatch_related",
+    example: { project: "CORE", title: "Retry failed webhook deliveries" },
+    description:
+      "Run the related-item check that dispatch issue, dispatch ask and a new decision block in " +
+      "dispatch doc-edit run on their own write, and write nothing: it lists the three items of " +
+      "one project most like a title and a text (at most one per issue or document, open ones " +
+      "first), each ask with whether it is answered, and a past decision that already answers " +
+      "the same question. Use it to check a draft before filing it. It searches by meaning and by " +
+      "the text's rarest words, and says how it searched; when meaning search cannot run it " +
+      "searches by keywords only and says why. When it could not search at all it says why and " +
+      "names the dispatch search to run instead. exclude_issue leaves that issue's own items out, " +
+      "as a check on that issue's own write does; keywords_only skips meaning search.",
+    arguments: (z) => ({
+      project: z.string().describe("Project key to search within, such as CORE."),
+      title: z
+        .string({ max: ISSUE_TITLE_MAX })
+        .describe("Optional title to check, as an issue title; at most 1,000 characters.")
+        .optional(),
+      text: z
+        .string()
+        .describe("Optional text to check, such as a draft spec or a question.")
+        .optional(),
+      exclude_issue: z
+        .string()
+        .describe("Optional issue key in the project whose own items are left out.")
+        .optional(),
+      keywords_only: z
+        .boolean()
+        .describe("Search by keywords only, skipping meaning search.")
+        .optional(),
+    }),
+    // The key rides in the request path; a missing project is the schema's own refusal.
+    validation: {
+      check: (value) => {
+        const { project } = value as { readonly project?: unknown };
+        return typeof project !== "string" || PROJECT_KEY_PATTERN.test(project);
+      },
+      message: `project is not a project key: ${PROJECT_KEY_RULE}`,
+    },
+  },
+  {
     name: "dispatch_issues",
     example: { project: "PROJ", limit: 250, offset: 250 },
     description:
@@ -1437,6 +1492,19 @@ export const dispatchToolSpecs = [
         )
         .optional(),
     }),
+    strict: true,
+  },
+  {
+    name: "dispatch_answers",
+    example: {},
+    description:
+      "List every answer and comment a person wrote to this session in the last 72 hours, newest first, each in full: " +
+      "answers to its asks, replies on its asks and in its comment threads, comments on its documents and on issues routed to it, " +
+      "mentions of it, messages to it and replies to its messages. Each item names its time, its writer, what it is, its " +
+      "dispatch:// reference and its issue or document, an answer's question and choices, and the words, never cut. " +
+      "Run it when the list of people's answers on a model request says it left older items out. " +
+      "It reads this session's id from CLAUDE_CODE_SESSION_ID under Claude Code and DISPATCH_SESSION_ID elsewhere, so a subagent reads its parent's.",
+    arguments: () => ({}),
     strict: true,
   },
   {

@@ -106,11 +106,13 @@ const validCalls = {
   dispatch_artifact: { issue: "DSP-1", name: "design.pdf", path: "design.pdf" },
   dispatch_read: { issue: "DSP-1" },
   dispatch_search: { query: "astrolabe" },
+  dispatch_related: { project: "CORE", title: "Retry failed webhook deliveries" },
   dispatch_issues: { project: "ACME" },
   dispatch_project: { key: "CORE", name: "Core" },
   dispatch_projects: {},
   dispatch_architecture_sync: { project: "CORE" },
   dispatch_open_asks: {},
+  dispatch_answers: {},
   dispatch_whoami: {},
 } as const;
 
@@ -170,11 +172,13 @@ describe("dispatchToolSpecs", () => {
       "dispatch_artifact",
       "dispatch_read",
       "dispatch_search",
+      "dispatch_related",
       "dispatch_issues",
       "dispatch_project",
       "dispatch_projects",
       "dispatch_architecture_sync",
       "dispatch_open_asks",
+      "dispatch_answers",
       "dispatch_whoami",
     ]);
 
@@ -219,6 +223,18 @@ describe("dispatchToolSpecs", () => {
         "description says what that approach costs"
       );
     }
+  });
+
+  test("dispatch_related takes a project key and refuses anything else by name", () => {
+    const schema = schemaFor("dispatch_related");
+
+    expect(schema.safeParse({ project: "CORE", text: "a draft spec" }).success).toBe(true);
+    expect(schema.safeParse({ title: "no project" }).success).toBe(false);
+    const lower = schema.safeParse({ project: "core", title: "Retry deliveries" });
+    expect(lower.success).toBe(false);
+    expect(lower.error?.issues.map((issue) => issue.message)).toEqual([
+      `project is not a project key: ${PROJECT_KEY_RULE}`,
+    ]);
   });
 
   test("dispatch_search rejects a one-character query and a limit above 50", () => {
@@ -332,6 +348,14 @@ describe("dispatchToolSpecs", () => {
     expect(schema.safeParse({}).success).toBe(true);
     expect(schema.safeParse({ project: "ACME" }).success).toBe(true);
     expect(schema.safeParse({ session_id: "another-session" }).success).toBe(false);
+  });
+
+  test("dispatch_answers accepts no arguments and rejects any key", () => {
+    const schema = schemaFor("dispatch_answers");
+
+    expect(schema.safeParse({}).success).toBe(true);
+    expect(schema.safeParse({ session_id: "another-session" }).success).toBe(false);
+    expect(schema.safeParse({ since: "2026-10-27T00:00:00Z" }).success).toBe(false);
   });
 
   test("dispatch_issues requires a project and accepts only a nonnegative integer offset", () => {

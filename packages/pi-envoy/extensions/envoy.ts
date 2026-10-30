@@ -53,9 +53,11 @@ import { forgetShownPictures, shownPictures } from "@legion/envoy-client/dispatc
 import { pictureAddresses } from "@legion/envoy-client/dispatch-pictures";
 import {
   sessionDirectory as dispatchSessionDirectory,
+  sessionStateRoot,
+} from "@legion/envoy-client/dispatch-session-directory";
+import {
   readResultsSince,
   resultsEnd,
-  sessionStateRoot,
   writeSessionTitle,
 } from "@legion/envoy-client/dispatch-session-state";
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe";
@@ -79,6 +81,10 @@ import {
   replaySuppressed,
   routeReplayNotice,
 } from "@legion/envoy-client/replay";
+import {
+  readSessionAnswers,
+  sessionAnswersFailureLine,
+} from "@legion/envoy-client/session-answers";
 import {
   sessionConfigFile,
   sessionDispatchSettings,
@@ -165,6 +171,7 @@ import {
   replaySnapshot,
 } from "../src/missed-messages";
 import { opensAsk } from "../src/opens-ask";
+import { withSessionAnswers } from "../src/session-answers-context";
 import { sideTurn } from "../src/side-turn";
 import { TypedPictures } from "../src/typed-pictures";
 import { type CardDelivery, UnwrittenFrames, unwrittenCardKeys } from "../src/unwritten-frames";
@@ -1402,14 +1409,17 @@ export default function envoyExtension(pi: PiApi): void {
     receivedAt: number
   ): Promise<void> => {
     const rendered = renderInbound(raw, sessionID, subject);
-    // Acknowledge first. The listener's role lane waits two seconds for this
-    // receipt and reports a miss as a failed delivery, which the daemon answers
-    // by re-sending the message (LEGION-101); everything below — the inbox
-    // update, a Dispatch round trip, the injection — can outlast that window
-    // under load. A frame renderInbound throws on never reaches this line, so
-    // an undecodable frame is still not acknowledged. A receipt that cannot be
-    // published is logged and delivery goes on: the message must not be lost
-    // locally because the acknowledgement was.
+    // Acknowledge first. The listener waits two seconds for this receipt: its
+    // publish route, which forwards a role message or an ad-hoc topic's copy
+    // here, forwards again until a receipt arrives within its four-second window
+    // and answers a miss to the sender as an error, which the daemon answers by
+    // re-sending the message; its role lane, for a role topic published straight
+    // onto NATS, reports a miss as a failed delivery (LEGION-101). Everything
+    // below — the inbox update, a Dispatch round trip, the injection — can
+    // outlast that window under load. A frame renderInbound throws on never
+    // reaches this line, so an undecodable frame is still not acknowledged. A
+    // receipt that cannot be published is logged and delivery goes on: the
+    // message must not be lost locally because the acknowledgement was.
     const directSubject = agentSubject(sessionID);
     if (
       expectsLaneReceipt({
@@ -3362,12 +3372,68 @@ export default function envoyExtension(pi: PiApi): void {
     registerEnvoyWhoamiCommand(pi, replyAddress);
   }
 
+  // What people wrote to the session in the last 72 hours, as the list of
+  // `@legion/envoy-client/session-answers` renders it: the session `replyAddress` names, which is
+  // the top-level session's own and for a `task` subagent its parent's, the session it writes to
+  // Dispatch as (`DISPATCH_SESSION_ID`). Dispatch is resolved with `commands: "kept"`, so no `!`
+  // token command runs on the request path, and the read waits at most
+  // `SESSION_ANSWERS_DEADLINE_MS` before the last list read stands in. A subagent this process
+  // cannot place carries no list rather than another session's.
+  const sessionAnswersText = async (context: SessionContext): Promise<string | undefined> => {
+    const session = await replyAddress(context, context.sessionManager.getSessionId());
+    if (session === "") return undefined;
+    try {
+      const read = await readSessionAnswers({
+        session,
+        dispatch: sessionDispatchSettings(CONFIG_FILE, process.env, {
+          cwd: process.cwd(),
+          commands: "kept",
+        }).dispatch,
+        env: process.env,
+      });
+      return read.text;
+    } catch (error) {
+      // Oh My Pi drops all a `context` handler returns when it throws, the dispatch-first skill
+      // with it, so a read that throws instead of answering with its failure line still costs
+      // only the list: the request says the list could not be read, and why.
+      logger.warn(`envoy: people's answers could not be read: ${messageFor(error)}`);
+      return sessionAnswersFailureLine(messageFor(error));
+    }
+  };
+
   if (atStart.dispatch.enabled) {
     // Every session that reaches Dispatch, Legion panes and `task` subagents included, carries
-    // the dispatch-first skill on every request: any of them can file, ask, or start work.
-    pi.on("context", async (event) => {
-      const messages = withDispatchFirst(event.messages, DISPATCH_FIRST_CONTEXT);
-      return messages === undefined ? undefined : { messages };
+    // the dispatch-first skill on every request at the head, where its bytes never change, and
+    // on every request of its main loop what people wrote to it at the tail, where a change in
+    // the list re-reads no cached prefix. The host runs this handler on its side turns, its
+    // handoff prompt and a remote compaction's conversions too; `withSessionAnswers` leaves the
+    // list off those. Oh My Pi hands this handler no abort signal: it races the handler against
+    // the run's own and drops what an aborted handler returns, and the read it shares goes on to
+    // fill the cache.
+    pi.on("context", async (event, context) => {
+      const withSkill = withDispatchFirst(event.messages, DISPATCH_FIRST_CONTEXT);
+      const messages = await withSessionAnswers(withSkill ?? event.messages, {
+        branch: () => context.sessionManager.getBranch?.() ?? [],
+        session: context.sessionManager,
+        // Read off the live `AgentSession` (18.12.2), whose getters the declared host surface
+        // leaves out: `get isCompacting() { return this.#C.isCompacting; }` and
+        // `get compactionSpeculation() { return this.#C.speculationState; }`, the compaction
+        // controller's `this.#i !== undefined || this.#u !== undefined || this.#l !== undefined`
+        // (an automatic or manual compaction, or a handoff) and `e.armed ? "armed" : "running"`
+        // for a speculative one. A session the registry does not list (a `task` subagent's)
+        // reads as not compacting.
+        compacting: () => {
+          const live = liveAgentSession(context.sessionManager.getSessionId());
+          return (
+            live !== undefined &&
+            (("isCompacting" in live && live.isCompacting === true) ||
+              ("compactionSpeculation" in live && live.compactionSpeculation === "running"))
+          );
+        },
+        read: () => sessionAnswersText(context),
+      });
+      const result = messages ?? withSkill;
+      return result === undefined ? undefined : { messages: result };
     });
   }
 

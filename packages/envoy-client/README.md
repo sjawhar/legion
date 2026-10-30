@@ -362,7 +362,11 @@ Dispatch alone, now: `{ dispatch, warnings, missing }`, Dispatch's resolution be
 read found and did not read and the missing-file record, for a command, which says the `warnings`
 itself, and for a plugin whose Dispatch calls follow a file that changes. `activeDispatchSettings`
 turns its `dispatch` into the configuration a caller uses, null when nothing configures Dispatch,
-or a `dispatch config: <reason>` throw. `sessionEnvoySettings(file, env, { cwd, nats })` reads
+or a `dispatch config: <reason>` throw. `sessionDispatchUrl(file, env, { cwd })` is the URL alone
+(`dispatchUrl`), resolved without reading the token, so no `!` command runs, or undefined when
+Dispatch is off before its token is read: what a caller on a deadline names to
+`readSessionAnswers` as `dispatchUrl` while a kept resolution is off with an error, so only the list
+read from that URL stands in. `sessionEnvoySettings(file, env, { cwd, nats })` reads
 Envoy alone, for a command such as `envoy-send`.
 
 ## Dispatch

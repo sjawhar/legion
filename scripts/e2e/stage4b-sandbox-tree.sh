@@ -395,6 +395,8 @@ blocked() {
 . "$root/scripts/e2e/lib/namespace-rig.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
 . "$root/scripts/e2e/lib/leftovers.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/session-db.sh
+. "$root/scripts/e2e/lib/session-db.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/role-namespaces.sh
 . "$root/scripts/e2e/lib/role-namespaces.sh"
 
@@ -953,37 +955,11 @@ bash_legion_commands() {
 # keys a session by the path its file would have had (internal/ompsessions): the session file a
 # claim records is that key, and so is a subagent's <parent's stem>/<id>.jsonl beside it. No pod
 # holds a file at either, so every read of a pod's session goes to the table, through the database
-# container the run started (session_db_container), with no client on the devbox and no input
-# beyond the ones that start it. The operator's controller runs on this machine, outside the sandbox
-# runtime, and keeps its sessions as files in the run's profile, which are read as files.
+# container the run started (session_db_container) with lib/session-db.sh's readers, with no client
+# on the devbox and no input beyond the ones that start it. The operator's controller runs on this
+# machine, outside the sandbox runtime, and keeps its sessions as files in the run's profile, which
+# are read as files.
 
-# session_psql NAME VALUE runs the SQL on stdin in the session database as its owner, legion, with
-# VALUE the psql variable NAME, which the SQL quotes as a literal (:'NAME'), so no value is ever
-# spliced into it; the SQL comes on stdin because psql interpolates no variable into a -c command.
-# The output is unaligned and tuples-only (-A -t): each value exactly as the server sent it, with no
-# padding, wrapping, quoting, escaping, header or row count, so a transcript's quotes, backslashes
-# and newlines arrive as Oh My Pi wrote them, and psql ends the last row with one newline of its own.
-# The aligned default pads and wraps a value of many lines, and COPY's text and CSV formats escape
-# or quote one, so each would corrupt the JSONL. ON_ERROR_STOP makes an SQL error psql's exit status.
-session_psql() {
-  docker exec -i -e PGCLIENTENCODING=UTF8 "$session_db_container" \
-    psql -X -q -A -t -v ON_ERROR_STOP=1 -U legion -d sessions -v "$1=$2"
-}
-# session_text PATH prints the session the table holds at PATH whole, as Oh My Pi reads it and
-# ompsessions.Read does: the row's content, then each of its parts in start_offset order, in one
-# statement so both come from one snapshot. The statement answers one row for a session the table
-# holds and none otherwise, so psql's closing newline is what tells a held session, however short,
-# from none: it is taken off, and none fails naming PATH, as the `cat` of a missing file did. The x
-# after psql's output keeps the substitution from stripping the session's own trailing newlines.
-session_text() {
-  local out
-  out=$(session_psql path "$1" <<<"SELECT f.content || coalesce((SELECT string_agg(p.content, '' ORDER BY p.start_offset)
-    FROM omp_session_files_parts p WHERE p.path = f.path), '') FROM omp_session_files f WHERE f.path = :'path';" && printf x) ||
-    { echo "the session database $session_db_container could not be read for the session $1" >&2; return 1; }
-  out=${out%x}
-  [ -n "$out" ] || { echo "the session database $session_db_container holds no session $1" >&2; return 1; }
-  printf '%s' "${out%$'\n'}"
-}
 # session_copy PREFIX AREA STEM copies every session the table holds under the key prefix PREFIX into
 # the directory STEM of AREA, one of the evidence directories this function names for itself:
 # `transcripts`, `daemon-controller` (transcripts/daemon-controller) or `review-pair`, under
@@ -2594,11 +2570,13 @@ fixture_markers() {
 # assignment (the daemon's task, a user message) its worker answered with the legion tool's
 # handoff_complete, the calls that got no result, how many results succeeded, and whether the phase
 # stall recorded `closed` after the call that succeeded (the extension records it inside the call,
-# before Oh My Pi writes the result); and how many phase-stall follow-ups came after the session's
+# before Oh My Pi writes the result); and how many phase reminders came after the session's
 # last successful completion. It is the 4b.13b acceptance's stall check
 # (stage3-4b13b-acceptance.sh, phase-stall-follow-up) for a pod's session: a worker
 # stopped while its handoff_complete call runs leaves that call with no result and no `closed`
-# (LEGION-283), and a worker resumed from such a session may report the phase again.
+# (LEGION-283), and a worker resumed from such a session may report the phase again. The reminder
+# comes at the end of every turn a phase stays open through, and none at all once it is closed,
+# which is what the count after the last success reads.
 completion_verdict() {
   jq -R -s -c --arg followup "Your turn ended with your Legion phase still open" '
     [split("\n")[] | fromjson?] | to_entries
@@ -2630,7 +2608,7 @@ completion_verdict() {
 }
 # completions_answered FILE: every assignment its worker answered with handoff_complete got a
 # result for each call, exactly one success (the report, made once), and `closed` after the call
-# that succeeded, and no phase-stall follow-up came after the last success.
+# that succeeded, and no phase reminder came after the last success.
 completions_answered() {
   completion_verdict <"$1" | jq -e '(.segments | length) > 0
     and all(.segments[]; (.unanswered | length) == 0 and .succeeded == 1 and .closed)
@@ -3315,30 +3293,17 @@ while IFS= read -r line; do note "$line"; done <<<"$built"
 # The build's source is the run's recorded source, or the tree changed between the two.
 [ "$(sed -n 's/^source: //p' <<<"$built")" = "$(jq -r .revision "$evidence/run.json")" ] ||
   fail "the tree changed between prerequisites ($(jq -r .revision "$evidence/run.json")) and the build ($(sed -n 's/^source: //p' <<<"$built"))"
-docker run -d --name "$pg_container" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql/data \
+docker run -d --name "$pg_container" --cpus 2 --memory 2g --mount type=tmpfs,destination=/var/lib/postgresql \
   -e POSTGRES_USER=legion -e POSTGRES_PASSWORD="$(cat "$work/postgres-password")" -e POSTGRES_DB=legion \
-  -p "127.0.0.1::5432" postgres:16 >/dev/null
+  -p "127.0.0.1::5432" mirror.gcr.io/library/postgres@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4 >/dev/null
 port_pg=$(docker port "$pg_container" 5432/tcp | sed -n '1s/.*://p')
 until_true 60 "Postgres to accept TCP connections" docker exec "$pg_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d legion
-# The run's session database, a second throwaway Postgres: every pod's Oh My Pi keeps its session
-# in it (session_store postgres: the daemon requires a store that keeps sessions in a database), so
-# a role's conversation outlives the issue pod whose disk dies with it. It is its own container and
-# its own credential, never the daemon's own database above: that one holds the daemon's state, and
-# its URL reaches every pod through the providers Secret, which no pod may be given a way into. It
-# binds the devbox's private address, not loopback, since the pods dial it as they dial the worker
-# stream; its password reaches docker through an owner-only env file, never an argument, and its URL
-# is written only to an owner-only file the providers Secret reads, and is never printed.
-session_db_password=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
-(
-  umask 077
-  printf 'POSTGRES_USER=legion\nPOSTGRES_DB=sessions\nPOSTGRES_PASSWORD=%s\n' "$session_db_password" >"$work/session-db.env"
-  printf 'postgres://legion:%s@%s:%s/sessions?sslmode=disable\n' "$session_db_password" "$host" "$port_session_db" >"$work/session-dsn"
-)
-unset session_db_password
-docker run -d --name "$session_db_container" --cpus 2 --memory 4g --mount type=tmpfs,destination=/var/lib/postgresql \
-  --env-file "$work/session-db.env" -p "$host:$port_session_db:5432" "$session_db_image" >/dev/null ||
-  fail "docker could not start the scratch session database $session_db_container on $host:$port_session_db"
-until_true 60 "the session database to accept TCP connections" docker exec "$session_db_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d sessions
+# The run's session database (lib/session-db.sh's session_db_start), a second throwaway Postgres:
+# every pod's Oh My Pi keeps its session in it (session_store postgres: the daemon requires a store
+# that keeps sessions in a database), so a role's conversation outlives the issue pod whose disk
+# dies with it. It binds the devbox's private address, not loopback, since the pods dial it as they
+# dial the worker stream.
+session_db_start "$host" --cpus 2 --memory 4g
 note "container $session_db_container: database sessions on $host:$port_session_db ($session_db_image), which every pod reads through the providers Secret's $session_dsn_key (the URL is in an owner-only file, not printed)"
 mkdir -p "$state"
 cat >"$work/instructions.md" <<'EOF'
@@ -3557,8 +3522,8 @@ gate_open() {
 # "Approve <name> (version N)?", a human answered at least one of the spec's decision blocks, and no
 # approval request it made on the spec named a version holding one open or came before a human
 # answered one raised before the human's turn on that request. While the root waits on the human (a
-# question, or a closed gate it registered) it is in awaiting_person without a slot and its
-# architect is suspended; the approval answers it, and nothing of its tree advances until it holds a
+# question, or a closed gate it registered) it is in awaiting_person without a slot while its
+# architect stays live; the approval answers it, and nothing of its tree advances until it holds a
 # slot again. Tree 1 is the run's one root under admission_cap 2, so a slot stands free for it.
 drive_gated_spec() {
   local issue=$1 artifact approved asks events version verdict request early blocks requested_versions waits

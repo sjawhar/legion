@@ -1,8 +1,8 @@
 # Legion worker image: every Legion agent process under `runtime: kubernetes` runs from this image.
 # Build context: the repo root. Built by .github/workflows/worker-image.yaml on the GitHub-hosted runner
 # (called from release.yaml beside its publish job, build only, then attested by a second call after
-# publish; on every head of a pull request against main that touches a file it builds from; or
-# dispatched post-merge). Never build it on a workstation — no `docker build`,
+# publish; from ci.yaml's worker-image job on every head of a pull request that touches a file it
+# builds from; or dispatched post-merge). Never build it on a workstation — no `docker build`,
 # `docker buildx`, or `docker compose build` (Sami, 2026-09-12); the CI runner is not a workstation.
 #
 # Contents: pinned Bun; the Go `legion` (packages/daemon) compiled from this checkout at go.work's
@@ -18,7 +18,18 @@
 # @bopstack/pi-codegraph (installed at /opt/omp-plugins from the committed lockfile at
 # packages/daemon/docker/omp-plugins), the one plugin linked into the isolated OMP profile
 # `legion`, where discovery loads it — backed by the CodeGraph CLI (@colbymchenry/codegraph, pinned) at
-# /opt/codegraph/bin; jj; git at /usr/bin/git (>= 2.42, from the debian:trixie-slim runtime base — jj's
+# /opt/codegraph/bin; @sjawhar/claude-envoy built from this checkout's packages/claude-envoy at
+# /opt/legion/claude-envoy, the plugin root a phase worker on the `claude` backend loads (its
+# dist/envoy-channel.js is that worker's one MCP server, its legion/ the generated Legion plugin
+# Claude Code loads beside it), which the plugin stage builds from source; the pin of Claude Code
+# and nothing else of it — packages/daemon/docker/claude-code's
+# package.json and package-lock.json, which pin @anthropic-ai/claude-code exactly with the npm
+# integrity of every tarball, at /opt/legion/claude-code. The image carries no Claude Code: its
+# license reserves every right and grants no redistribution, and this image is public, so a pod
+# whose role runs on the `claude` backend installs that pinned release from npm at every launch,
+# verified against the lockfile's integrity and the pinned version, and fails the launch if it
+# cannot (claudeCodeBlock, packages/daemon/internal/runtime/sandbox/plugins.go) — the pin is in
+# every image, whatever a deployment's worker_backends names; jj; git at /usr/bin/git (>= 2.42, from the debian:trixie-slim runtime base — jj's
 # git backend requires it); gh; trixie's socat, which carries a connection over `kubectl exec` to a
 # loopback port inside the pod (the runtime-base stage says why); what the capability check
 # (packages/daemon/internal/capabilities, which `legion probe-image` runs) requires of the image: the Go
@@ -39,9 +50,11 @@
 # runs every toolchain command, the language servers', Python's and the browser's included; the last
 # runs `legion version` and `legion probe-image`, which runs the three launch probes (the daemon's two
 # plus the session-storage probe), holds the Legion plugin to the daemon API contract and proves it
-# loads with the Envoy plugin, checks every image-site capability and TLS client against this image,
-# and prints their results before the OK line the daemon's probe Sandbox reads. A broken image never
-# publishes.
+# loads with the Envoy plugin, holds the claude-envoy root the same way — its built channel server,
+# its generated Legion plugin and the daemon API contract its manifest declares — and holds Claude
+# Code's pin to one a pod can install and verify, checks every image-site capability and TLS client
+# against this image, and prints their results before the OK line the daemon's probe Sandbox reads.
+# A broken image never publishes.
 #
 # The `legion` profile carries no model route, and neither does Legion: an operator's pod supplies it
 # (runtime.kubernetes.pod, docs/kubernetes.md). In a pod, the Go `legion` starts Oh My Pi on Legion's
@@ -197,6 +210,26 @@ RUN jq '.omp.extensions = ["dist/legion.js"]' package.json > tmp.json \
     && rm -f ./*.tgz && bun pm pack \
     && mkdir -p /out/pi-legion \
     && tar xzf ./*.tgz -C /out/pi-legion --strip-components=1
+
+# claude-envoy ships as a build of this checkout's source rather than a pack: no workflow releases
+# it, its skills/ are relative symlinks into the repository's skills/ that its package.json `files`
+# does not list, and a Claude Code marketplace install takes the git tree itself. That tree's dist/
+# and legion/ are no input here: a pull request never commits them, and main's Rebuild Claude Envoy
+# plugin workflow commits them only after each merge, so they lag the source they were built from.
+# `scripts/build.ts --out` writes /out/claude-envoy from the source instead: the plugin's own files
+# with its skills symlinks resolved, since the image carries no repository root for them to point
+# into, and a fresh dist/ and legion/. It refuses any Bun but the one .bun-version pins, which this
+# stage's base image is (ARG BUN_VERSION; .github/scripts/check-bun-version.sh holds the two equal).
+# The copy drops group and other write, which a checkout's umask may have left, since the runtime
+# stage's final step refuses a plugin file anyone but root can write.
+COPY .bun-version /repo/.bun-version
+COPY packages/claude-envoy /repo/packages/claude-envoy
+WORKDIR /repo/packages/claude-envoy
+RUN set -eu; \
+    bun scripts/build.ts --out /out/claude-envoy; \
+    chmod -R go-w /out/claude-envoy; \
+    test -f /out/claude-envoy/dist/envoy-channel.js; \
+    test -f /out/claude-envoy/legion/.claude-plugin/plugin.json
 
 # ------------------------------------------------------------------------------------------------
 # tools: mise resolves the pinned OMP fork build, jj, and gh — the same backend and pin string the
@@ -555,6 +588,7 @@ COPY --from=debian-packages /debian-packages /in/debian-packages
 COPY --from=go /out/go-notices /in/go-notices
 COPY --from=plugin /out/pi-envoy/dist/THIRD_PARTY_NOTICES /in/pi-envoy-notices
 COPY --from=plugin /out/pi-legion/dist/THIRD_PARTY_NOTICES /in/pi-legion-notices
+COPY --from=plugin /out/claude-envoy/dist/THIRD_PARTY_NOTICES /in/claude-envoy-notices
 COPY --from=toolchain /opt/node/LICENSE /in/node-LICENSE
 COPY --from=toolchain /out/licenses/aws-cli-THIRD_PARTY_LICENSES /in/aws-cli-THIRD_PARTY_LICENSES
 COPY --from=toolchain /opt/language-servers/node_modules/typescript/LICENSE.txt /in/typescript-LICENSE.txt
@@ -569,6 +603,7 @@ RUN set -eu; mkdir -p /out; . /in/tags.env; \
       "Go modules compiled into /opt/legion/bin/legion and /opt/legion/bin/agent-secrets" /in/go-notices \
       "npm packages inlined into the pi-envoy plugin, /opt/legion/pi-envoy (also its dist/THIRD_PARTY_NOTICES)" /in/pi-envoy-notices \
       "npm packages inlined into the pi-legion plugin, /opt/legion/pi-legion (also its dist/THIRD_PARTY_NOTICES)" /in/pi-legion-notices \
+      "npm packages inlined into the claude-envoy plugin, /opt/legion/claude-envoy (also its dist/THIRD_PARTY_NOTICES)" /in/claude-envoy-notices \
       "Bun ${BUN_VERSION}, /usr/local/bin/bun: LICENSE.md of github.com/oven-sh/bun at bun-v${BUN_VERSION}" /in/bun-LICENSE.md \
       "Oh My Pi, /opt/omp and the native module it extracted into /home/legion/.omp/natives: LICENSE of github.com/${omp_repo} at ${omp_tag}" /in/omp-LICENSE \
       "Oh My Pi: THIRD-PARTY-NOTICES.txt of github.com/${omp_repo} at ${omp_tag}" /in/omp-THIRD-PARTY-NOTICES.txt \
@@ -604,7 +639,7 @@ RUN ln -s bun /usr/local/bin/bunx
 COPY --from=tools /opt/omp /opt/omp
 COPY --from=tools /opt/tools/jj /usr/local/bin/jj
 COPY --from=tools /opt/tools/gh /usr/local/bin/gh
-# The two plugins are root's like the rest of /opt/legion: every role of an issue pod that does not
+# The three plugins are root's like the rest of /opt/legion: every role of an issue pod that does not
 # install the plugins loads them from here, one container's filesystem, so a role that could write
 # them could change the plugin code its siblings load. A launch that installs the plugins loads them
 # from the role's state home on the issue volume instead, which every role of the issue can write;
@@ -612,6 +647,12 @@ COPY --from=tools /opt/tools/gh /usr/local/bin/gh
 # root's or is writable by anyone else.
 COPY --from=plugin /out/pi-envoy /opt/legion/pi-envoy
 COPY --from=plugin /out/pi-legion /opt/legion/pi-legion
+# claude-envoy, the plugin root a phase worker on the `claude` backend loads: its package root
+# beside the two Oh My Pi roots (names.go's claudePluginDir), holding the build of this checkout
+# the plugin stage made — `dist/envoy-channel.js`, the worker's one MCP server, and `legion/`, the
+# generated Legion plugin Claude Code loads as a second --plugin-dir (claudelaunch).
+# Every Claude role of an issue pod loads this one copy, so it is root's too.
+COPY --from=plugin /out/claude-envoy /opt/legion/claude-envoy
 # CodeGraph CLI (@colbymchenry/codegraph): the self-contained per-platform bundle alone (bundled
 # Node runtime + app), never the npm package's own launcher shim — see the plugin stage's comment.
 COPY --from=plugin /out/codegraph /opt/codegraph
@@ -766,6 +807,15 @@ RUN set -eu; \
     flock --version; \
     psql --version; redis-cli --version; sqlite3 --version; nc -h; dig -v; \
     rm -rf "$scratch"
+# Claude Code's pin, packages/daemon/docker/claude-code's package.json and package-lock.json, at
+# /opt/legion/claude-code (claudeCodePin, packages/daemon/internal/runtime/sandbox/names.go):
+# root's, under the root-owned /opt/legion the final step checks, and all of Claude Code this
+# image carries. A Claude role's start script copies both into its generation's directory on the
+# issue's volume and runs `npm ci --ignore-scripts --omit=dev` from them there, then holds the
+# installed binary's --version to this package.json's pin (claudeCodeBlock,
+# packages/daemon/internal/runtime/sandbox/plugins.go). After the toolchain step, so a pin bump
+# reruns no layer above it.
+COPY packages/daemon/docker/claude-code/package.json packages/daemon/docker/claude-code/package-lock.json /opt/legion/claude-code/
 # The notices stage's file, after the toolchain step so a notices change never reruns it, and before
 # `legion`, which changes on every commit while the notices change only with a dependency, a pin, or
 # runtime-base's package set.
@@ -786,8 +836,9 @@ COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 # directory holds (packages/daemon/internal/runtime/workerbin).
 COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # The final step: /opt/legion and /opt/legion/bin are root's with mode 0755, so the runtime user can
-# neither rename nor replace what they hold; everything under /opt/legion/pi-envoy and
-# /opt/legion/pi-legion is root's and writable by no one else, so no role changes the image's copy
+# neither rename nor replace what they hold; everything under /opt/legion/pi-envoy,
+# /opt/legion/pi-legion and /opt/legion/claude-envoy is root's and writable by no one else, so no
+# role changes the image's copy
 # of the plugin code (a launch that installs the plugins loads them instead from the role's state
 # home on the issue volume, which every role of the issue can write); the role mount points under
 # /var/run/legion are root's, mode 0755 and empty;
@@ -799,12 +850,15 @@ COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # other path, so git's absolute path is as fixed as jj's and the real gh's (/usr/local/bin, copied
 # above) and a pod environment can name all three; gh resolves to the /opt/legion/bin/gh script and
 # the real gh behind it runs. flock is pinned the same way, and for a reason the other gates do not
-# cover: the install Legion renders for an installing launch calls it as /usr/bin/flock
-# (installBlock, packages/daemon/internal/runtime/sandbox/plugins.go), while the apt line, the
-# toolchain check above and the toolchain capability row all ask only that `flock` be on PATH — so
-# a base that kept flock and moved it would pass every one of those and fail every installing
-# launch. The declaration and the use have to agree on the path, and this is where they are held
-# to it. nc is pinned for the neighbouring reason: it is the one name here the alternatives system
+# cover: the installs Legion renders call it as /usr/bin/flock — the plugin pair's for an
+# installing launch (installBlock) and Claude Code's for every Claude launch (claudeCodeBlock), both
+# packages/daemon/internal/runtime/sandbox/plugins.go — while the apt line, the toolchain check
+# above and the toolchain capability row all ask only that `flock` be on PATH, so a base that kept
+# flock and moved it would pass every one of those and fail every such launch. The declaration and
+# the use have to agree on the path, and this is where they are held to it. npm is pinned at
+# /usr/local/bin/npm for the same reason: claudeCodeBlock calls it by that path, while the
+# toolchain check asks only that `npm` be on PATH.
+# nc is pinned for the neighbouring reason: it is the one name here the alternatives system
 # supplies rather than its own package (netcat-openbsd ships /usr/bin/nc.openbsd), so the
 # alternatives link is what the name resolves through and a base that changed it would pass every
 # other gate. The Envoy plugin's `dispatch` shim runs its bundled CLI under
@@ -819,12 +873,26 @@ COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # task agent and skill Legion's prompts name (shipped in the Legion plugin's agents/ and the two
 # plugins' dist/skills directories). It leaves those agents' models unresolved
 # (--skip-agent-models): the build has none of the operator's model configuration, which the pod
-# brings. It then checks every image-site capability as a worker's Oh My Pi would find each:
+# brings. --claude-root and --claude-code-pin name the Claude lane's two paths — the image's own,
+# which they default to, named here so this line says what it checks: the claude-envoy root's
+# built channel server (dist/envoy-channel.js) and generated Legion plugin
+# (legion/.claude-plugin/plugin.json), each a regular file, and that root's manifest held to the
+# same daemon API contract the Legion plugin is; and Claude Code's pin at /opt/legion/claude-code,
+# which must pin one exact version and lock it and its linux-x64 package with the sha512 integrity
+# `npm ci` holds each tarball to — so an image whose Claude worker could not start fails here
+# rather than at a pod's first claim. The image carries no Claude Code, and this step fetches none:
+# what it proves is that the image is self-consistent, and the fetch itself is proved where it
+# happens, by every Claude launch's start script, which fails that launch when the fetch fails or
+# does not verify (verifyClaude, packages/daemon/internal/daemon/bootgate.go, says why the probe
+# reads the pin rather than installing from it). Then it checks every image-site capability as a
+# worker's Oh My Pi would find each:
 # `omp setup python --check`; the chromium on PATH (or the browser a PUPPETEER_EXECUTABLE_PATH names)
 # with --version; gopls, typescript-language-server and pyright-langserver on PATH; the CodeGraph CLI
 # on PATH with its plugin enabled in the profile's lock; and go, gcc, curl, wget, python3, node, bun,
 # uv, kubectl, jq, ssh-keygen, flock, psql, redis-cli, sqlite3, nc and dig on PATH with `go version`
-# running (packages/daemon/internal/capabilities/image.go). It then has node, bun, omp's embedded bun,
+# running, and the claude-code row's claude-envoy root and Claude Code pin as the lane held them
+# with npm and node on PATH (packages/daemon/internal/capabilities/image.go). It then has node, bun,
+# omp's embedded bun,
 # CodeGraph's Node, uv, the AWS CLI, curl, Python, gh and Chromium refuse each compromised chain while
 # reaching the control. It
 # prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per row, every TLS
@@ -850,7 +918,7 @@ RUN set -eu; \
     for dir in /var/run/legion/gh /var/run/legion/private /var/run/legion/state /var/run/legion/agent-secrets; do \
       test -z "$(ls -A "$dir")"; \
     done; \
-    plugins="$(find /opt/legion/pi-envoy /opt/legion/pi-legion \( ! -user 0 -o ! -group 0 -o -perm /022 \) -print)"; \
+    plugins="$(find /opt/legion/pi-envoy /opt/legion/pi-legion /opt/legion/claude-envoy \( ! -user 0 -o ! -group 0 -o -perm /022 \) -print)"; \
     echo "plugin files not root's alone: ${plugins:-none}"; test -z "$plugins"; \
     stat -c '%a %n' /usr/lib/openssh/ssh-keysign /usr/bin/ssh-agent; \
     setid="$(find /usr/lib/openssh /usr/bin/ssh-agent -perm /6000)"; echo "set-id bits: ${setid:-none}"; test -z "$setid"; \
@@ -859,6 +927,7 @@ RUN set -eu; \
     nc="$(command -v nc)"; echo "nc: $nc"; test "$nc" = /usr/bin/nc; \
     legion="$(command -v legion)"; echo "legion: $legion"; test "$legion" = /opt/legion/bin/legion; \
     gh="$(command -v gh)"; echo "gh: $gh"; test "$gh" = /opt/legion/bin/gh; /usr/local/bin/gh --version; \
+    npm="$(command -v npm)"; echo "npm: $npm"; test "$npm" = /usr/local/bin/npm; \
     DISPATCH_HOST=omp DISPATCH_SESSION_ID=image-check HOME=/tmp \
       /opt/legion/pi-envoy/bin/dispatch --help > /tmp/dispatch-help; \
     echo "dispatch: $(sed -n 1p /tmp/dispatch-help)"; grep -q '^Usage: dispatch ' /tmp/dispatch-help; \
@@ -870,7 +939,7 @@ RUN set -eu; \
       expected="$(printf '%s\nplugins @sjawhar/pi-legion %s @sjawhar/pi-envoy %s' "$expected" "$PI_LEGION_VERSION" "$PI_ENVOY_VERSION")"; \
     fi; \
     test "$version" = "$expected"; \
-    legion probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models; \
+    legion probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --claude-root /opt/legion/claude-envoy --claude-code-pin /opt/legion/claude-code --skip-agent-models; \
     agent-secrets --help >/dev/null; \
     rm -rf /home/legion/.omp/profiles/legion/logs /home/legion/.config/go
 # The Kubernetes runtime sets every container's command explicitly
@@ -879,5 +948,6 @@ RUN set -eu; \
 # worker-shim --connect tcp://<daemon>:<worker_stream_port> --boot-token-file … -- omp --mode rpc …`.
 # This ENTRYPOINT therefore only makes `docker run <image> version` and `docker run <image>
 # probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy
+# --claude-root /opt/legion/claude-envoy --claude-code-pin /opt/legion/claude-code
 # --skip-agent-models` work.
 ENTRYPOINT ["legion"]

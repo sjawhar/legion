@@ -1,5 +1,30 @@
 # Changelog
 
+## [13.5.0] - 2026-10-30
+
+### Added
+
+- The Dispatch tools take a block reference in `reply_to` and `in_reply_to` to answer one block of a comment or message, and read a block of a comment or message by its reference.
+
+## [13.3.0] - 2026-10-29
+
+### Changed
+
+- `dispatch read` asks for each referenced document's latest version only (`GET /api/v1/issues/{key}/references?versions=latest`), so Dispatch builds a fraction of the answer; the printed `References:` section is unchanged, also against a Dispatch that does not know the parameter.
+
+## [13.2.0] - 2026-10-29
+
+### Changed
+
+- The shipped `envoy` skill and the bundled `envoy_publish` description say when a publish errs,
+  now that the listener confirms a role or ad-hoc topic message with its recipients before it
+  answers: a role message errs when its holder did not confirm it within about 4 seconds (seen
+  after about 8, since the client tries once more), and a team or other ad-hoc topic errs naming
+  each session registered on it, the sender excepted, that did not confirm; a session named with
+  `receipt_timeout` gets the message back from its inbox through the replay once its connection
+  returns. The README, `AGENTS.md` and the delivery comment say the listener's publish route
+  waits for the receipt the session sends for a forwarded frame.
+
 ## [12.0.0] - 2026-10-29
 
 ### Added

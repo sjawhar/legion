@@ -1,5 +1,39 @@
 # Changelog
 
+## [main@49e23926228d] - 2026-10-30
+
+### Added
+
+- The Dispatch types carry comment and message blocks: `ReplyBlock` and `reply_block` on `Comment` and `Message` and their event payloads, `reply_to_block` and `in_reply_to_block` on the reply inputs, `blocks` and `base_revision` on `EditCommentInput`, `ItemBlocks`, and the shared reference tables' comment and message block forms.
+
+### Changed
+
+- `relatedCheckFormOf` judges which of the related-item check's three forms a `Suggestions`
+  holds, and `relatedCheckModeWords` and `relatedCheckSearchWords` give the words each form
+  names. The CLI's lines and the Dispatch dashboard's new-issue dialog both read this one
+  answer and only word it, so a later change to the outcome enum, the search modes or the
+  branch order reaches both surfaces at once.
+
+## [main@1f5b08286a6d] - 2026-10-29
+
+### Added
+
+- The related-item check's result. `Suggestions` gains `outcome`
+  (`RelatedCheckOutcome`: `found` | `none` | `not_made`), `search` (`RelatedCheckSearch`:
+  `meaning_and_keywords` | `keywords_only`), `search_note`, `search_query` and `title_matches`
+  (`DuplicateCandidate[]`, a forced issue create's title overlaps), each optional so an older
+  server's shape still reads; `missing` stays, set whenever the check was not made.
+  `SearchResult` and `WriteSuggestion` gain `ask?: SearchAsk`, where an ask hit stands
+  (`{state: "open"}`, `{state: "answered", answer}` or `{state: "resolved", resolution, answer?}`).
+  `WriteAdvice` gains `decision_block_checks?: DecisionBlockCheck[]` (`{block_id, question,
+  suggestions}`) for a document edit's new decision blocks. `RelatedCheckInput` is the body of
+  `POST /api/v1/projects/{key}/related`, and `RelatedChecksReport` / `RelatedCheckTiming` the
+  answer of `GET /api/v1/related-checks`. `dispatchToolSpecs` gains `dispatch_related` (the check
+  on a `title` and `text` of a `project`, with `exclude_issue` and `keywords_only`, writing
+  nothing), and `dispatch_issue`, `dispatch_ask` and `dispatch_doc_edit` say the result names what
+  the check found, that it found nothing, or that it was not made and why, after at most five
+  seconds.
+
 ## [main@c4cea404651d] - 2026-10-29
 
 ### Added

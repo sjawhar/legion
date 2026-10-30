@@ -18,11 +18,14 @@ import (
 )
 
 type commentInput struct {
-	Body     string             `json:"body"`
-	Anchor   *model.AnchorInput `json:"anchor"`
-	ReplyTo  *string            `json:"reply_to"`
-	AskID    *string            `json:"ask_id"`
-	Mentions []struct {
+	Body    string             `json:"body"`
+	Anchor  *model.AnchorInput `json:"anchor"`
+	ReplyTo *string            `json:"reply_to"`
+	// ReplyToBlock is the id of the block of comment ReplyTo the reply answers ("b2"), checked
+	// against that comment before reply_to climbs to the thread's head.
+	ReplyToBlock *string `json:"reply_to_block"`
+	AskID        *string `json:"ask_id"`
+	Mentions     []struct {
 		Target string `json:"target"`
 	} `json:"mentions"`
 	Delivery *string `json:"delivery"`
@@ -91,6 +94,9 @@ type commentThreadTarget struct {
 	// AskMoved says the ask is an approval request a version moved past the one its agent last
 	// handed to the human (approvalMoved): it waits on its agent whatever a reply's turn says.
 	AskMoved bool
+	// ReplyBlock is the block of the comment reply_to named that the reply answers, nil when it
+	// names none: that comment's, not the thread head's that ReplyTo then holds.
+	ReplyBlock *namedBlock
 }
 
 // openAsk says the thread hangs under an open ask, the only kind with a turn.
@@ -233,6 +239,12 @@ func (s *server) normalizeCommentThreadTarget(
 	if input.Suggestion != nil && (input.ReplyTo != nil || input.AskID != nil) {
 		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "replies cannot carry suggestions")
 	}
+	if input.ReplyToBlock != nil && input.AskID != nil {
+		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", replyBlockInAskThread)
+	}
+	if input.ReplyToBlock != nil && input.ReplyTo == nil {
+		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to_block requires reply_to, the comment whose block it names")
+	}
 	if input.ReplyTo != nil {
 		if strings.TrimSpace(*input.ReplyTo) == "" {
 			return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to must be a full comment id")
@@ -244,7 +256,19 @@ func (s *server) normalizeCommentThreadTarget(
 		if err != nil {
 			return commentThreadTarget{}, err
 		}
-		return s.threadHeadOf(ctx, tx, owner, parent)
+		target, err := s.threadHeadOf(ctx, tx, owner, parent)
+		if err != nil || input.ReplyToBlock == nil {
+			return target, err
+		}
+		if target.AskID != nil {
+			return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", replyBlockInAskThread)
+		}
+		// The block is the named comment's, which the climb left locked after the owner.
+		target.ReplyBlock, err = s.replyBlockOf(ctx, tx, refs.ItemComment, parent.ID, *input.ReplyToBlock, "reply_to_block", "INVALID_COMMENT")
+		if err != nil {
+			return commentThreadTarget{}, err
+		}
+		return target, nil
 	}
 	if input.AskID == nil {
 		return commentThreadTarget{}, nil
@@ -552,10 +576,11 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	}
 	var comment model.Comment
 	if err := tx.QueryRow(r.Context(), `
-		insert into comments (id, issue_key, artifact_id, author, body, anchor, reply_to, ask_id, turn, suggestion)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		insert into comments (id, issue_key, artifact_id, author, body, anchor, reply_to, ask_id, turn, suggestion, replies_to_block)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		returning created_at
-	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Body, anchorJSON, input.ReplyTo, input.AskID, turn, suggestionJSON).Scan(&comment.CreatedAt); err != nil {
+	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Body, anchorJSON, input.ReplyTo, input.AskID, turn, suggestionJSON,
+		threadTarget.ReplyBlock.nodeID()).Scan(&comment.CreatedAt); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -585,6 +610,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	comment.Suggestion = suggestion
 	comment.Mentions = mentions
 	comment.Deliveries = []model.CommentDelivery{}
+	comment.RepliesToBlock = threadTarget.ReplyBlock.nodeID()
 	if comment.Anchor != nil {
 		if err := s.deps.Docs.ProjectMark(documentCtx, comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, nil, projectionKind), actor); err != nil {
 			s.writeHandlerError(w, err)
@@ -662,7 +688,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			return
 		}
 	}
-	referenceChanges, err := s.replaceReferences(r.Context(), tx, "comment", comment.ID, comment.Body)
+	referenceChanges, err := refs.ReplaceCountedItem(r.Context(), tx, refs.ItemComment, comment.ID, comment.Body, s.deps.ServerURL, comment.CreatedAt)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -677,7 +703,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		events = append(events, snapshotEvent)
 	}
 	if reopenedRoot != nil {
-		payload, err := s.commentEventPayload(r.Context(), tx, *reopenedRoot, reopenedArtifactName, commentEventThread{}, model.ReferenceChanges{})
+		payload, err := s.commentEventPayload(r.Context(), tx, reopenedRoot, reopenedArtifactName, commentEventThread{}, model.ReferenceChanges{})
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -694,7 +720,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		events = append(events, event)
 	}
 	payload, err := s.commentEventPayload(
-		r.Context(), tx, comment, artifactName, threadTarget.eventThread(waitingOn), referenceChanges,
+		r.Context(), tx, &comment, artifactName, threadTarget.eventThread(waitingOn), referenceChanges,
 	)
 	if err != nil {
 		s.writeHandlerError(w, err)

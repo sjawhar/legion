@@ -14042,6 +14042,13 @@ var CommentDeliverySchema = object({
   reply_id: string2().nullable(),
   created_at: string2()
 });
+var ReplyBlockSchema = object({
+  node: string2(),
+  ref: string2().optional(),
+  block_id: string2(),
+  text: string2(),
+  removed: boolean2()
+});
 var CommentEventPayloadSchema = object({
   id: string2().optional(),
   artifact_name: string2().optional(),
@@ -14067,6 +14074,7 @@ var CommentEventPayloadSchema = object({
   created_at: string2().optional(),
   mentions: array(CommentMentionSchema).optional(),
   deliveries: array(CommentDeliverySchema).optional(),
+  reply_block: ReplyBlockSchema.nullish(),
   thread_logins: array(string2()).optional()
 }).passthrough();
 var MessageEventPayloadSchema = object({
@@ -14077,6 +14085,7 @@ var MessageEventPayloadSchema = object({
   reply_body: string2().optional(),
   thread_target: string2().optional(),
   author: object({ kind: string2(), id: string2() }).optional(),
+  reply_block: ReplyBlockSchema.nullish(),
   thread_logins: array(string2()).optional()
 });
 var DispatchTargetedResourceIDSchema = uuid2();
@@ -14451,11 +14460,12 @@ var DOC_EDIT_OPS = [
   "delete_row",
   "delete_column"
 ];
+var RELATED_CHECK_RESULT = "Dispatch then runs the related-item check (waiting at most five seconds; dispatch related runs " + "it without writing), and the result says, right after the line naming what was created, " + "which items it found and how it searched, that it searched and found nothing, or that no " + "check was made, why, and the dispatch search to run instead.";
 var dispatchToolSpecs = [
   {
     name: "dispatch_issue",
     example: { project: "DSP", title: "Native workspace" },
-    description: "Create a native Dispatch issue for newly tracked work. Search first with dispatch search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless --force is set after reading them. " + "When passing a spec, before calling, have a fresh read-only reader check it against the code and the human's words, then resolve every finding; a Legion architect uses `plan-gap-analyst`. " + "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " + "Create a project only when a person asks for one; work that spans projects goes in the project that owns most of it. " + `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
+    description: "Create a native Dispatch issue for newly tracked work. Search first with dispatch search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless --force is set after reading them. " + "When passing a spec, before calling, have a fresh read-only reader check it against the code and the human's words, then resolve every finding; a Legion architect uses `plan-gap-analyst`. " + "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " + "Create a project only when a person asks for one; work that spans projects goes in the project that owns most of it. " + `${RELATED_CHECK_RESULT} With --force, the result also names each issue whose title you forced past. ` + `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       project: z.string().describe("Project key for the new issue."),
       title: z.string({ max: ISSUE_TITLE_MAX }).describe("Concise issue title, at most 1,000 characters."),
@@ -14528,7 +14538,7 @@ var dispatchToolSpecs = [
         }
       ]
     },
-    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch doc-edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch request-approval. Do not use this tool for a status " + "update or discussion; use dispatch message instead. Never create an issue to park a " + "question: the question is an ask on the issue it concerns. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. Measure what you can first, and put the measurement and the size of the " + "population it covers in the question; drop an option that cannot fix most of that " + "population, never offer it cut down, and keep an option not to act (Hold). Set urgency high " + "when your work halts on the answer, and keep working on everything else. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` + `the lines images appends included, and has at most 8 options. ${OWNER_REFERENCE}`,
+    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch doc-edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch request-approval. Do not use this tool for a status " + "update or discussion; use dispatch message instead. Never create an issue to park a " + "question: the question is an ask on the issue it concerns. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. Measure what you can first, and put the measurement and the size of the " + "population it covers in the question; drop an option that cannot fix most of that " + "population, never offer it cut down, and keep an option not to act (Hold). Set urgency high " + "when your work halts on the answer, and keep working on everything else. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` + `the lines images appends included, and has at most 8 options. ${RELATED_CHECK_RESULT} ` + `An ask among the related items says whether it is answered, by whom and with which options. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -14630,7 +14640,7 @@ var dispatchToolSpecs = [
       quote: z.string().describe("Optional exact quoted document text.").optional(),
       occurrence: z.number({ int: true, min: 0 }).describe("Optional zero-based occurrence of quote.").optional(),
       body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Review comment, at most ${DISPATCH_BODY_MAX} characters.`),
-      reply_to: z.string().describe("A comment id (uuid); replying to any comment in a thread continues that thread (an " + "ask's clarification thread included). To reply to an ask, use reply_to_ask with the " + "ask id instead.").optional(),
+      reply_to: z.string().describe("A comment id (uuid); replying to any comment in a thread continues that thread (an " + "ask's clarification thread included). A block reference to one block of the comment " + "(dispatch://KEY/comment/<id>#b-<block id>) replies to that comment and names the " + "passage the reply answers. To reply to an ask, use reply_to_ask with the " + "ask id instead.").optional(),
       reply_to_ask: z.string().describe("Optional ask id to reply to, threading this comment under that question. Mutually " + "exclusive with reply_to.").optional(),
       turn: z.enum(["agent", "human"]).describe("Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " + "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " + "you need the human to act - the ask returns to 'Waiting on you'.").optional(),
       images: imagesArgument(z, "the issue (or the project document's project)", `the ${DISPATCH_BODY_MAX}-character body limit`)
@@ -14665,7 +14675,7 @@ var dispatchToolSpecs = [
     arguments: (z) => ({
       issue: z.string().describe(`${ISSUE_REFERENCE} Omit it only when in_reply_to answers a human's direct message to this session.`).optional(),
       body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Update text, at most ${DISPATCH_BODY_MAX} characters.`),
-      in_reply_to: z.string().describe("Optional message id or dispatch://KEY/message/<id> reference to reply to, threading " + "this message under it so the reply stays with the original in the Conversation. " + "A bare id with no issue answers a human's direct message to this session; a " + "dispatch://KEY/message/<id> names the issue its message lives on, so that form is a " + "reply on that issue.").optional(),
+      in_reply_to: z.string().describe("Optional message id or dispatch://KEY/message/<id> reference to reply to, threading " + "this message under it so the reply stays with the original in the Conversation. " + "A block reference to one block of the message (dispatch://KEY/message/<id>#b-<block id>) " + "replies to that message and names the passage the reply answers. " + "A bare id with no issue answers a human's direct message to this session; a " + "dispatch://KEY/message/<id> names the issue its message lives on, so that form is a " + "reply on that issue.").optional(),
       images: imagesArgument(z, "the issue (a reply to a direct message: your own conversation, dispatch://agent/<your session id>)", `the ${DISPATCH_BODY_MAX}-character body limit`)
     }),
     validation: messageValidation
@@ -14678,7 +14688,7 @@ var dispatchToolSpecs = [
       ops: [{ op: "delete_column", block: "table-123", index: 1 }],
       precondition: { blocks: [{ id: "table-123", token: "sha256:current-table-token" }] }
     },
-    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " + `For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, \`code\`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find="## Old", with="## New") gives '## New', and a different level applies only when find named the heading's actual level (find "## Old" with "### New" makes it an h3), since '# ' selects a heading without naming its level. A task item (\`- [ ]\` / \`- [x]\`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find="Write it", with="[x] Write it") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. ` + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has an odd run of backslashes right before a | cannot be stored in a cell and is INVALID_OP, naming the cell. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + `Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block's id, type, opening words and token, and each table's rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ` + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from dispatch doc-read --blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards. " + "A block id written as {#id} longer than 256 bytes is stored, but its block is no graph node, so no reference reaches it. " + `The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
+    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " + `For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, \`code\`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find="## Old", with="## New") gives '## New', and a different level applies only when find named the heading's actual level (find "## Old" with "### New" makes it an h3), since '# ' selects a heading without naming its level. A task item (\`- [ ]\` / \`- [x]\`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find="Write it", with="[x] Write it") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. ` + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has an odd run of backslashes right before a | cannot be stored in a cell and is INVALID_OP, naming the cell. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + `Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block's id, type, opening words and token, and each table's rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ` + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from dispatch doc-read --blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards. " + "Each decision block the edit adds gets the related-item check dispatch ask gets, waiting at most five seconds for all of them together: the result prints, after its first line, `Decision block <id>:` and what that check found, that it found nothing, or that it was not made and why. " + "A block id written as {#id} longer than 256 bytes is stored, but its block is no graph node, so no reference reaches it. " + `The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -14788,6 +14798,25 @@ var dispatchToolSpecs = [
       check: (value) => {
         const { project } = value;
         return typeof project !== "string" || project === "" || PROJECT_KEY_PATTERN.test(project);
+      },
+      message: `project is not a project key: ${PROJECT_KEY_RULE}`
+    }
+  },
+  {
+    name: "dispatch_related",
+    example: { project: "CORE", title: "Retry failed webhook deliveries" },
+    description: "Run the related-item check that dispatch issue, dispatch ask and a new decision block in " + "dispatch doc-edit run on their own write, and write nothing: it lists the three items of " + "one project most like a title and a text (at most one per issue or document, open ones " + "first), each ask with whether it is answered, and a past decision that already answers " + "the same question. Use it to check a draft before filing it. It searches by meaning and by " + "the text's rarest words, and says how it searched; when meaning search cannot run it " + "searches by keywords only and says why. When it could not search at all it says why and " + "names the dispatch search to run instead. exclude_issue leaves that issue's own items out, " + "as a check on that issue's own write does; keywords_only skips meaning search.",
+    arguments: (z) => ({
+      project: z.string().describe("Project key to search within, such as CORE."),
+      title: z.string({ max: ISSUE_TITLE_MAX }).describe("Optional title to check, as an issue title; at most 1,000 characters.").optional(),
+      text: z.string().describe("Optional text to check, such as a draft spec or a question.").optional(),
+      exclude_issue: z.string().describe("Optional issue key in the project whose own items are left out.").optional(),
+      keywords_only: z.boolean().describe("Search by keywords only, skipping meaning search.").optional()
+    }),
+    validation: {
+      check: (value) => {
+        const { project } = value;
+        return typeof project !== "string" || PROJECT_KEY_PATTERN.test(project);
       },
       message: `project is not a project key: ${PROJECT_KEY_RULE}`
     }
@@ -14939,7 +14968,82 @@ var LEGION_ROLES = [
   "reviewer",
   "merger"
 ];
+var PROJECT_TOKEN = /^[a-z0-9]+$/;
 var DISPATCH_KEY_PATTERN = /^([A-Z][A-Z0-9]*)-([0-9]+)$/;
+function roleForPhase(phase) {
+  switch (phase) {
+    case "planning":
+      return "planner";
+    case "implementing":
+    case "retro":
+      return "implementer";
+    case "testing":
+      return "tester";
+    case "reviewing":
+      return "reviewer";
+    case "accepting":
+      return "architect";
+    case "merging":
+      return "merger";
+    default:
+      return;
+  }
+}
+function isLegionProjectToken(project) {
+  return PROJECT_TOKEN.test(project);
+}
+function assertLegionProjectToken(project) {
+  if (!isLegionProjectToken(project)) {
+    throw new Error(`Invalid Legion project token: ${project}`);
+  }
+}
+function roleToken(project, issue, role) {
+  assertLegionProjectToken(project);
+  const dispatchMatch = DISPATCH_KEY_PATTERN.exec(issue);
+  if (!dispatchMatch)
+    throw new Error(`Invalid IssueKey: ${issue}`);
+  const [, dispatchProject, number] = dispatchMatch;
+  return `legion-${project}-${dispatchProject?.toLowerCase()}-${number}-${role}`;
+}
+// ../contracts/src/related-forms.ts
+function relatedCheckFormOf(suggestions) {
+  const { outcome, missing } = suggestions;
+  const searchQuery = suggestions.search_query;
+  if (outcome === "not_made" || outcome === undefined && missing !== undefined) {
+    return { form: "not_made", reason: missing ?? "the server gave no reason", searchQuery };
+  }
+  const mode = relatedCheckModeWords(suggestions);
+  if (suggestions.related.length > 0) {
+    return { form: "items", mode, related: suggestions.related };
+  }
+  if (outcome === undefined) {
+    return {
+      form: "not_made",
+      reason: "the server did not say whether it searched",
+      searchQuery
+    };
+  }
+  if (outcome === "found" || outcome === "none") {
+    return { form: "nothing", mode };
+  }
+  return {
+    form: "not_made",
+    reason: `the server answered an outcome this client does not know (${String(outcome)})`,
+    searchQuery
+  };
+}
+function relatedCheckModeWords(suggestions) {
+  const { search, search_note: note } = suggestions;
+  if (search === undefined)
+    return;
+  if (search === "meaning_and_keywords")
+    return "meaning and keywords";
+  const words = search === "keywords_only" ? "keywords only" : String(search);
+  return note === undefined || note === "" ? words : `${words}: ${note}`;
+}
+function relatedCheckSearchWords(text) {
+  return (text.match(/[\p{L}\p{N}_]+/gu) ?? []).filter((word) => (word.match(/\p{L}/gu) ?? []).length >= 4).slice(0, 3).join(" ");
+}
 // ../contracts/src/repo.ts
 function canonicalRepo(owner, repo) {
   return `${owner.trim().toLowerCase()}/${repo.trim().toLowerCase().replace(/\.git$/, "")}`;
@@ -15858,7 +15962,8 @@ class DispatchClient {
     this.#signal = requestSignal(signal);
   }
   async issue(input) {
-    return this.#json("POST", ["api", "v1", "issues"], input);
+    const answer = await this.#jsonAnswer("POST", ["api", "v1", "issues"], input);
+    return { ...answer.payload, created: answer.status === 201 };
   }
   async resolveIssue(issueReference) {
     return this.#resolveIssue(issueReference);
@@ -15907,6 +16012,9 @@ class DispatchClient {
   }
   async search(query, options = {}) {
     return this.#json("GET", ["api", "v1", "search"], undefined, { q: query, ...options });
+  }
+  async related(project, input) {
+    return this.#json("POST", ["api", "v1", "projects", project, "related"], input);
   }
   async getIssue(issue) {
     return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue)]);
@@ -16121,6 +16229,12 @@ class DispatchClient {
   async artifactBlocks(id) {
     return this.#json("GET", ["api", "v1", "artifacts", id, "blocks"]);
   }
+  async commentBlocks(id) {
+    return this.#json("GET", ["api", "v1", "comments", id, "blocks"]);
+  }
+  async messageBlocks(id, session) {
+    return this.#json("GET", ["api", "v1", "messages", id, "blocks"], undefined, session === undefined ? undefined : { session });
+  }
   async docEdit(id, input) {
     return this.#json("POST", ["api", "v1", "artifacts", id, "edits"], input);
   }
@@ -16152,13 +16266,7 @@ class DispatchClient {
     return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"]);
   }
   async getIssueReferences(issue) {
-    return this.#json("GET", [
-      "api",
-      "v1",
-      "issues",
-      await this.#resolveIssue(issue),
-      "references"
-    ]);
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "references"], undefined, { versions: "latest" });
   }
   async getReferences(query) {
     return this.#json("GET", ["api", "v1", "references"], undefined, {
@@ -16427,10 +16535,26 @@ function dispatchDocumentRef(owner, slug) {
 function dispatchChildRef(ownerRef, kind, id) {
   return `${ownerRef}/${kind}/${id}`;
 }
-function parseBlockRef(document, fragment) {
-  const target = parseBlockFragment(fragment);
-  const parsed = parseDispatchRef(document);
-  if (target === undefined || parsed === null || parsed.version !== undefined || parsed.kind !== "spec" && parsed.kind !== "artifact") {
+function parseBlockRef(holder, fragment) {
+  const target = holder.includes("@") ? undefined : parseBlockFragment(fragment);
+  const parsed = parseDispatchRef(holder);
+  if (target === undefined || parsed === null) {
+    return null;
+  }
+  const pin = target.pin === undefined ? {} : { pin: target.pin };
+  const artifact = parsed.artifact === undefined ? {} : { artifact: parsed.artifact };
+  if (parsed.kind === "comment" || parsed.kind === "message" && target.pin === undefined) {
+    return {
+      owner: parsed.owner,
+      kind: "block",
+      id: parsed.id,
+      block: target.block,
+      item: { kind: parsed.kind, id: parsed.id },
+      ...artifact,
+      ...pin
+    };
+  }
+  if (parsed.kind !== "spec" && parsed.kind !== "artifact") {
     return null;
   }
   return {
@@ -16438,9 +16562,9 @@ function parseBlockRef(document, fragment) {
     kind: "block",
     id: parsed.id,
     block: target.block,
-    document,
+    document: holder,
     ...parsed.owner.kind === "project" ? { artifact: parsed.id } : {},
-    ...target.pin === undefined ? {} : { pin: target.pin }
+    ...pin
   };
 }
 function parseDispatchRef(ref) {
@@ -17162,6 +17286,110 @@ function searchAnswer(search, query, offset, configUrl) {
   };
 }
 
+// ../envoy-client/src/related-check.ts
+function relatedCheckLines(suggestions, context) {
+  if (suggestions === null || suggestions === undefined) {
+    return [notMadeLine("the server sent no check result", context)];
+  }
+  let lines;
+  try {
+    lines = relatedCheckForm(suggestions, context);
+  } catch (error) {
+    lines = [
+      notMadeLine(`this client could not read the check result (${messageFor(error)})`, context)
+    ];
+  }
+  try {
+    const { decision } = suggestions;
+    if (decision !== undefined && decision !== null) {
+      const when = decision.answered_at === undefined ? "" : ` on ${decision.answered_at}`;
+      lines.push(`A past decision may already answer this: ${suggestionLabel(decision)}, answered by ${decision.answered_by}${when} \u2192 ${absoluteHref(decision.href, context.configUrl)}`);
+      lines.push(...askLines(decision.ask));
+    }
+    for (const match of suggestions.title_matches ?? []) {
+      lines.push(`Title overlaps you forced past: ${match.key} [${match.status}] ${match.title} \u2192 ${absoluteHref(match.href, context.configUrl)}`);
+    }
+  } catch (error) {
+    lines.push(`The check's past decision or title overlaps could not be shown: ${messageFor(error)}`);
+  }
+  return lines;
+}
+function decisionBlockLines(advice, context) {
+  try {
+    const checks = advice?.decision_block_checks;
+    if (checks === undefined || checks === null) {
+      const added = advice?.decision_blocks_added ?? 0;
+      if (added === 0)
+        return [];
+      return [
+        `${added} new decision ${added === 1 ? "block" : "blocks"}:`,
+        notMadeLine("the server sent no check result", context)
+      ];
+    }
+    return checks.flatMap((check) => [
+      `Decision block ${check.block_id}:`,
+      ...relatedCheckLines(check.suggestions, { ...context, text: check.question ?? "" })
+    ]);
+  } catch (error) {
+    return [
+      notMadeLine(`this client could not read the decision blocks' checks (${messageFor(error)})`, context)
+    ];
+  }
+}
+function relatedCheckForm(suggestions, context) {
+  const form = relatedCheckFormOf(suggestions);
+  if (form.form === "not_made") {
+    return [notMadeLine(form.reason, context, form.searchQuery)];
+  }
+  if (form.form === "items") {
+    const header = form.mode === undefined ? "Related items:" : `Related items (searched by ${form.mode}):`;
+    return [header, ...form.related.flatMap((item) => relatedItemLines(item, context.configUrl))];
+  }
+  return [
+    form.mode === undefined ? "Related-item check searched and found nothing." : `Related-item check searched (${form.mode}) and found nothing.`
+  ];
+}
+function relatedItemLines(item, configUrl) {
+  try {
+    const lines = [`- ${suggestionLabel(item)} \u2192 ${absoluteHref(item.href, configUrl)}`];
+    if (item.kind === "ask") {
+      lines.push(...askLines(item.ask));
+    }
+    return lines;
+  } catch (error) {
+    const href = item?.href;
+    return [`- ${String(href)} (this client could not show it: ${messageFor(error)})`];
+  }
+}
+function askLines(ask) {
+  try {
+    const lines = askStateLines(ask ?? undefined);
+    if (!Array.isArray(lines))
+      throw new Error(`unknown ask state ${String(ask?.state)}`);
+    return lines;
+  } catch (error) {
+    return [`  This client could not show where the ask stands: ${messageFor(error)}`];
+  }
+}
+function suggestionLabel(item) {
+  if (item.owner.kind === "issue") {
+    return `${item.owner.key} [${item.owner.status}] ${item.owner.title}`;
+  }
+  return `${item.owner.name} (${item.owner.project}/${item.owner.slug})`;
+}
+function absoluteHref(href, configUrl) {
+  try {
+    return new URL(href, configUrl).toString();
+  } catch {
+    return String(href);
+  }
+}
+function notMadeLine(reason, context, searchQuery) {
+  const words = searchQuery?.trim() || relatedCheckSearchWords(context.text);
+  const query = words === "" ? " with two or three of its words as --query" : ` --query '${words.replaceAll("'", "'\\''")}'`;
+  return `No related-item check was made: ${reason}. Search before you rely on this being new: dispatch search --project ${context.project}${query}`;
+}
+
 // ../envoy-client/src/dispatch-execute.ts
 function documentTopic(artifact) {
   return documentTopicOf(artifact.project, artifact.slug);
@@ -17221,31 +17449,12 @@ function renderAdvice(tool, key, advice, opts) {
   }
   return lines;
 }
-function renderSuggestions(suggestions, configUrl) {
-  if (suggestions === undefined)
-    return [];
-  if (suggestions.missing !== undefined) {
-    return [`Related-item search was skipped: ${suggestions.missing}.`];
+async function otherAdviceLines(render) {
+  try {
+    return await render();
+  } catch (error) {
+    return [`Other advice could not be shown: ${messageFor(error)}`];
   }
-  const lines = [];
-  if (suggestions.related.length > 0) {
-    lines.push("Possibly related, found by search:");
-    for (const item of suggestions.related) {
-      lines.push(`- ${suggestionLabel(item)} \u2192 ${new URL(item.href, configUrl).toString()}`);
-    }
-  }
-  if (suggestions.decision !== undefined) {
-    const item = suggestions.decision;
-    const when = item.answered_at === undefined ? "" : ` on ${item.answered_at}`;
-    lines.push(`A past decision may already answer this: ${suggestionLabel(item)}, answered by ${item.answered_by}${when} \u2192 ${new URL(item.href, configUrl).toString()}`);
-  }
-  return lines;
-}
-function suggestionLabel(item) {
-  if (item.owner.kind === "issue") {
-    return `${item.owner.key} [${item.owner.status}] ${item.owner.title}`;
-  }
-  return `${item.owner.name} (${item.owner.project}/${item.owner.slug})`;
 }
 function documentResultDetails(artifact) {
   return {
@@ -17298,6 +17507,7 @@ var issueFreeTools = {
   dispatch_resolve_comment: true,
   dispatch_follow: true,
   dispatch_search: true,
+  dispatch_related: true,
   dispatch_issues: true,
   dispatch_project: true,
   dispatch_projects: true,
@@ -17441,7 +17651,7 @@ function normalizeUUID(value) {
 }
 var askIdProblem = "ask must be a bare ask id or a dispatch://.../ask/<id> reference";
 var commentIdProblem = "comment must be a bare comment id or a dispatch://.../comment/<id> reference";
-var messageIdProblem = "in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference";
+var messageIdProblem = "in_reply_to must be a full message id (uuid), a dispatch://KEY/message/<id> reference, or a block of one (dispatch://KEY/message/<id>#b-<block id>)";
 function askId(args) {
   const ask = stringArg(args, "ask");
   return ask.startsWith("dispatch://") ? parseDispatchRef(ask)?.id ?? ask : ask;
@@ -17452,6 +17662,28 @@ function messageIdOf(value) {
     return reference?.kind === "message" ? reference.id : undefined;
   })() : value;
   return id === undefined ? undefined : normalizeUUID(id);
+}
+function itemBlockOf(value) {
+  const ref = parseDispatchRef(value);
+  return ref?.item === undefined || ref.block === undefined ? undefined : { ...ref, item: ref.item, block: ref.block };
+}
+function replyBlockProblem(field, kind, value) {
+  if (!/^dispatch:\/\/[^#]*#b-/.test(value))
+    return;
+  const form = `dispatch://KEY/${kind}/<id>#b-<block id>`;
+  const ref = parseDispatchRef(value);
+  if (ref?.kind !== "block") {
+    return `${field} ${value} names no block; a block of a ${kind} reads ${form}`;
+  }
+  const other = ref.item?.kind;
+  if (other !== kind) {
+    const answer = other === "comment" ? `; answer it with ${commandLine("dispatch_comment", { reply_to: value })}` : other === "message" ? `; answer it with ${commandLine("dispatch_message", { in_reply_to: value })}` : "";
+    return `${field} ${value} names a block of ${other === undefined ? "a document" : `a ${other}`}, but a ${kind} reply answers a block of a ${kind} (${form})${answer}`;
+  }
+  if (ref.pin !== undefined) {
+    return `${field} ${value} names revision ${ref.pin} of the block, but a reply answers the block whatever its text becomes: drop @v${ref.pin}`;
+  }
+  return;
 }
 var idPrefixPattern = /^[0-9a-f][0-9a-f-]{7,}$/i;
 function refOwnerName(ref) {
@@ -17562,7 +17794,20 @@ async function resolveAskArgument(tool, args, client, sessionId) {
 }
 function messageInReplyTo(args) {
   const inReplyTo = optionalString(args, "in_reply_to");
-  return inReplyTo === undefined ? undefined : messageIdOf(inReplyTo);
+  if (inReplyTo === undefined)
+    return;
+  const block = itemBlockOf(inReplyTo);
+  if (block !== undefined && block.item.kind !== "message")
+    return;
+  const id = messageIdOf(block?.item.id ?? inReplyTo);
+  return id === undefined ? undefined : { id, ...block === undefined ? {} : { block: block.block } };
+}
+function commentReplyTo(args) {
+  const replyTo = optionalString(args, "reply_to");
+  if (replyTo === undefined)
+    return;
+  const block = itemBlockOf(replyTo);
+  return block === undefined ? { id: replyTo } : { id: block.item.id, block: block.block };
 }
 function argumentProblems(tool, args) {
   const problems = [];
@@ -17597,15 +17842,21 @@ function argumentProblems(tool, args) {
       if (optionalString(args, "quote") !== undefined && optionalString(args, "artifact") === undefined) {
         problems.push("artifact is required when quote is supplied");
       }
-      if (optionalString(args, "reply_to") !== undefined && optionalString(args, "reply_to_ask") !== undefined) {
+      const replyTo = optionalString(args, "reply_to");
+      if (replyTo !== undefined && optionalString(args, "reply_to_ask") !== undefined) {
         problems.push("reply_to and reply_to_ask cannot both be set");
       }
+      const replyBlock = replyTo === undefined ? undefined : replyBlockProblem("reply_to", "comment", replyTo);
+      if (replyBlock !== undefined)
+        problems.push(replyBlock);
       break;
     }
     case "dispatch_message": {
       const inReplyTo = optionalString(args, "in_reply_to");
-      if (inReplyTo !== undefined && messageIdOf(inReplyTo) === undefined) {
-        problems.push(messageIdProblem);
+      if (inReplyTo !== undefined) {
+        const problem = replyBlockProblem("in_reply_to", "message", inReplyTo) ?? (messageInReplyTo(args) === undefined ? messageIdProblem : undefined);
+        if (problem !== undefined)
+          problems.push(problem);
       }
       break;
     }
@@ -17685,7 +17936,7 @@ function dispatchRefFromUrl(value, serverUrl) {
   };
   const blockOf = (versionName) => {
     const id = url.hash.startsWith("#b-") ? decodeBlockId(url.hash.slice(3)) : undefined;
-    return id === undefined || url.searchParams.get(versionName) ? "" : `#b-${encodeBlockId(id)}`;
+    return id === undefined || versionName !== undefined && url.searchParams.get(versionName) ? "" : `#b-${encodeBlockId(id)}`;
   };
   const issuePage = url.pathname.match(/^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/);
   if (issuePage) {
@@ -17711,9 +17962,9 @@ function dispatchRefFromUrl(value, serverUrl) {
     if (ask !== undefined)
       return `dispatch://${key}/ask/${ask}`;
     if (comment !== undefined)
-      return `dispatch://${key}/comment/${comment}`;
+      return `dispatch://${key}/comment/${comment}${blockOf()}`;
     if (message !== undefined)
-      return `dispatch://${key}/message/${message}`;
+      return `dispatch://${key}/message/${message}${blockOf()}`;
     return `dispatch://${key}`;
   }
   const agentArtifactPage = url.pathname.match(/^\/agents\/([^/]+)\/artifacts\/([^/]+)\/?$/);
@@ -17736,7 +17987,7 @@ function dispatchRefFromUrl(value, serverUrl) {
     return;
   return item === undefined ? `${document}${versionOf("version")}${blockOf("version")}` : `${document}/${item.kind}/${item.id}`;
 }
-var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), " + "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " + "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " + "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " + "dispatch read), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
+var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), " + "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " + "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " + "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " + "dispatch read), dispatch://KEY-1/comment/<uuid>#b-<block id>, " + "dispatch://PROJECT/artifact/<slug>/comment/<uuid>#b-<block id> or " + "dispatch://KEY-1/message/<uuid>#b-<block id> (one block of a comment or message, a " + "comment's optionally pinned to a revision of the comment with @v<N> after it; for dispatch " + "read), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
 var ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSUE";
 function innerRefProblem(tool, ref, refText) {
   if (ref.kind !== "ask" && ref.kind !== "comment" && ref.kind !== "message" && ref.kind !== "log" && ref.kind !== "children" && ref.kind !== "block") {
@@ -17745,10 +17996,11 @@ function innerRefProblem(tool, ref, refText) {
   if (tool === "dispatch_read" || tool === "dispatch_ask")
     return;
   const owner = refOwnerName(ref);
-  const documentArgument = ref.kind === "block" && tool !== "dispatch_comment" ? ` and artifact ${ref.id}` : tool === "dispatch_suggest" ? " and artifact <the document's slug>" : "";
+  const itemKind = ref.item?.kind ?? ref.kind;
+  const documentArgument = ref.kind === "block" && ref.item === undefined && tool !== "dispatch_comment" ? ` and artifact ${ref.id}` : tool === "dispatch_suggest" ? " and artifact <the document's slug>" : "";
   const ownerArguments = ref.owner.kind === "issue" ? `issue ${ref.owner.issue}${documentArgument}` : `project ${ref.owner.project} and artifact ${ref.artifact}`;
-  const fix = tool === "dispatch_comment" && ref.kind === "ask" ? `reply under it with reply_to_ask ${ref.id} and ${ownerArguments}` : tool === "dispatch_comment" && ref.kind === "comment" ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}` : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
-  const item = ref.kind === "ask" ? "an ask" : ref.kind === "log" ? "the event log" : ref.kind === "children" ? "the children" : ref.kind === "block" ? `block ${ref.block}` : `a ${ref.kind}`;
+  const fix = tool === "dispatch_comment" && itemKind === "ask" ? `reply under it with reply_to_ask ${ref.id} and ${ownerArguments}` : tool === "dispatch_comment" && itemKind === "comment" ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}` : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
+  const item = ref.kind === "ask" ? "an ask" : ref.kind === "log" ? "the event log" : ref.kind === "children" ? "the children" : ref.kind === "block" ? `block ${ref.block}${ref.item === undefined ? "" : ` of a ${ref.item.kind}`}` : `a ${ref.kind}`;
   return `ref ${refText} names ${item} on ${owner}; dispatch ${commandName(tool)} would act on ${owner} and drop the ${ref.kind}: ${fix}`;
 }
 var documentItemPattern = /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)\/artifact\/[^/@]+(?:@v\d+)?\/(ask|comment)\/([^/]+)$/;
@@ -17775,7 +18027,7 @@ function ownerConflictProblems(tool, args, parsedRef, refText) {
   const artifact = optionalString(args, "artifact");
   const version = optionalNumber(args, "version");
   const ref = tool === "dispatch_ask" && (issue !== undefined || project !== undefined) ? null : parsedRef;
-  const refDocument = ref === null ? undefined : ref.owner.kind === "project" ? ref.artifact ?? ref.id : ref.kind === "spec" || ref.kind === "artifact" || ref.kind === "block" ? ref.id : undefined;
+  const refDocument = ref === null ? undefined : ref.owner.kind === "project" ? ref.artifact ?? ref.id : ref.kind === "spec" || ref.kind === "artifact" || ref.kind === "block" && ref.item === undefined ? ref.id : undefined;
   if (ref !== null && refText !== undefined) {
     const refOwner = refOwnerName(ref);
     if (issue !== undefined && (ref.owner.kind !== "issue" || nativeIssueKeyPattern.test(issue) && issue !== ref.owner.issue)) {
@@ -18182,9 +18434,12 @@ function referenceLines(read) {
   if (read.edges.length === 0)
     return ["- none"];
   return read.edges.map((edge) => {
+    const { node } = edge;
     const excerpt = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} \xB7 `;
     const block = edge.block === undefined ? "" : ` (block ${edge.block.ref ?? edge.block.id})`;
-    return `- ${edge.kind} ${edge.node.kind} ${edge.node.ref ?? edge.node.id} (${excerpt}${edge.created_at})${block}`;
+    const item = node.kind === "block" && node.document === undefined && (node.parent?.kind === "comment" || node.parent?.kind === "message") ? node.parent : undefined;
+    const source = item === undefined ? `${node.kind} ${node.ref ?? node.id}` : `${item.kind} ${item.ref ?? item.id} block ${node.block_id ?? node.id}`;
+    return `- ${edge.kind} ${source} (${excerpt}${edge.created_at})${block}`;
   });
 }
 function unavailableReason(error) {
@@ -18227,27 +18482,32 @@ function nodeLine(node) {
   const made = fact(node.made_by, node.made_at);
   const changed = fact(node.changed_by, node.changed_at);
   const { parent } = node;
-  const partOf = parent == null ? "" : ` \xB7 part of ${parent.ref ?? `${parent.kind} ${parent.id}`}${node.parent_version == null ? "" : ` (version ${node.parent_version})`}`;
+  const partOf = parent == null ? "" : ` \xB7 part of ${parent.ref ?? `${parent.kind} ${parent.id}`}${node.parent_version == null ? "" : ` (${parent.kind === "comment" ? "revision" : "version"} ${node.parent_version})`}`;
   return [
     `Node: ${node.kind} ${node.ref ?? node.id} \xB7 made by ${made} \xB7 changed by ${changed}${partOf}`
   ];
 }
 function blockLines(node, ref) {
-  const head = [
-    `Block: ${node.block_id ?? ref.block}`,
+  const unit = ref.item === undefined ? "version" : "revision";
+  const blockID = node.block_id ?? ref.block;
+  const head = ref.item === undefined ? [
+    `Block: ${blockID}`,
     `Document: ${node.document ?? ref.document}`,
     ...node.changed_version === undefined ? [] : [`Changed in version: ${node.changed_version}`],
     ...node.text === undefined ? [] : ["Text:", node.text]
+  ] : [
+    `Block ${blockID} of ${ref.item.kind} ${ref.item.id}${node.changed_version === undefined ? "" : ` (changed in revision ${node.changed_version})`}:`,
+    ...node.text === undefined ? [] : [node.text]
   ];
   const { pin } = node;
   if (pin === undefined)
     return head;
-  const state = pin.state === "unchanged" ? `Unchanged since version ${pin.version}.` : pin.state === "changed" ? `Changed since version ${pin.version}; last changed in version ${node.changed_version}.` : `Removed in version ${pin.removed_version}.`;
+  const state = pin.state === "unchanged" ? `Unchanged since ${unit} ${pin.version}.` : pin.state === "changed" ? `Changed since ${unit} ${pin.version}; last changed in ${unit} ${node.changed_version}.` : `Removed in ${unit} ${pin.removed_version}.`;
   return [
     ...head,
-    `Pinned to version: ${pin.version}`,
+    `Pinned to ${unit}: ${pin.version}`,
     state,
-    `Text at version ${pin.version}:`,
+    `Text at ${unit} ${pin.version}:`,
     pin.text
   ];
 }
@@ -18394,11 +18654,13 @@ function commentSummary({ comment, replies }, graph) {
   const root = [
     `${comment.id} \xB7 ${actorText(comment.author)}`,
     ...anchorLines(comment),
+    ...replyBlockLines(comment),
     `Body: ${comment.body}`
   ];
   const chain = replies.flatMap((reply) => [
     `${reply.id} \xB7 ${actorText(reply.author)}`,
     ...anchorLines(reply),
+    ...replyBlockLines(reply),
     `Body: ${reply.body}`
   ]);
   return [
@@ -18409,6 +18671,14 @@ function commentSummary({ comment, replies }, graph) {
     ...graph
   ].join(`
 `);
+}
+function replyBlockLines(record) {
+  const block = record.reply_block;
+  if (block === undefined || block === null)
+    return [];
+  return [
+    block.removed ? `Re: block ${block.block_id} (removed)` : `Re: block ${block.block_id}: ${textHead(block.text)}`
+  ];
 }
 function anchorLines(record) {
   return [
@@ -18433,9 +18703,14 @@ function positionText(block) {
   ].join(" \u203A ");
 }
 function messageSummary({ message, replies }, graph) {
-  const root = [`${message.id} \xB7 ${actorText(message.author)}`, `Body: ${message.body}`];
+  const root = [
+    `${message.id} \xB7 ${actorText(message.author)}`,
+    ...replyBlockLines(message),
+    `Body: ${message.body}`
+  ];
   const chain = replies.flatMap((reply) => [
     `${reply.id} \xB7 ${actorText(reply.author)}`,
+    ...replyBlockLines(reply),
     `Body: ${reply.body}`
   ]);
   return [
@@ -18857,20 +19132,27 @@ async function executeDispatchTool(input) {
           ...Array.isArray(labels) ? { labels } : {},
           actor
         });
-        refuseUnsavedRepository("created", created, repo);
-        const componentGuidance = await architectureGuidance(client, created.project, created.components);
-        const adviceLines = [
-          ...renderAdvice(input.tool, created.key, created.advice, {
-            isPrimarySpec: spec !== undefined
-          }),
-          ...componentGuidance === undefined ? [] : [componentGuidance],
-          ...renderSuggestions(created.advice?.suggestions, linkBase)
-        ];
+        refuseUnsavedRepository(created.created ? "created" : "already holds", created, repo);
+        const adviceLines = await otherAdviceLines(async () => {
+          const componentGuidance = await architectureGuidance(client, created.project, created.components);
+          return [
+            ...renderAdvice(input.tool, created.key, created.advice, {
+              isPrimarySpec: spec !== undefined
+            }),
+            ...componentGuidance === undefined ? [] : [componentGuidance]
+          ];
+        });
         const href = new URL(`/issues/${encodeURIComponent(created.key)}`, linkBase).toString();
         const assigned = created.assignee === undefined ? "" : created.assignee === null ? "; unassigned" : `; assigned to ${created.assignee}`;
+        const suffixes = `${assigned}${await notSubscribed(issueTopic(created.key), input.subscriptions)}`;
         return {
           text: [
-            `Created ${created.key}: ${created.title} \u2192 ${href}${assigned}${await notSubscribed(issueTopic(created.key), input.subscriptions)}`,
+            created.created ? `Created ${created.key}: ${created.title} \u2192 ${href}${suffixes}` : `Dispatch already holds ${created.key}: ${created.title} \u2192 ${href}; nothing was created${suffixes}`,
+            ...created.created ? relatedCheckLines(created.advice?.suggestions, {
+              project: created.project,
+              text: title,
+              configUrl: linkBase
+            }) : [],
             ...adviceLines
           ].join(`
 `),
@@ -19058,6 +19340,29 @@ async function executeDispatchTool(input) {
       });
       return searchAnswer(search, query, offset, linkBase);
     }
+    case "dispatch_related": {
+      const project = stringArg(args, "project");
+      const title = optionalString(args, "title");
+      const text = optionalString(args, "text");
+      const excludeIssue = optionalString(args, "exclude_issue");
+      const keywordsOnly = optionalBoolean(args, "keywords_only");
+      const suggestions = await client.related(project, {
+        ...title === undefined ? {} : { title },
+        ...text === undefined ? {} : { text },
+        ...excludeIssue === undefined ? {} : { exclude_issue: excludeIssue },
+        ...keywordsOnly === undefined ? {} : { keywords_only: keywordsOnly }
+      });
+      return {
+        text: relatedCheckLines(suggestions, {
+          project,
+          text: [title, text].filter((part) => part !== undefined).join(`
+`),
+          configUrl: linkBase
+        }).join(`
+`),
+        details: { project, suggestions }
+      };
+    }
     case "dispatch_issues": {
       const project = stringArg(args, "project");
       const status = optionalString(args, "status");
@@ -19220,14 +19525,17 @@ async function executeDispatchTool(input) {
       };
       const ask = resolved?.owner.kind === "project" ? await client.artifactAsk(resolved.artifact.id, askInput) : await client.ask(issue(), askInput);
       const askOwner = ask.issue_key !== null ? issueTopic(ask.issue_key) : resolved === undefined ? issueTopic(issue()) : documentTopic(resolved.artifact);
-      const adviceLines = [
-        ...renderSuggestions(ask.advice?.suggestions, linkBase),
-        ...renderAdvice(input.tool, askOwner.label, ask.advice, {})
-      ];
+      const checkLines = relatedCheckLines(ask.advice?.suggestions, {
+        project: resolved?.artifact.project ?? (ask.issue_key ?? "").replace(/-[0-9]+$/, ""),
+        text: stringArg(args, "question"),
+        configUrl: linkBase
+      });
+      const adviceLines = await otherAdviceLines(() => renderAdvice(input.tool, askOwner.label, ask.advice, {}));
       return {
         text: [
-          `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}
-${await followsAsk(askOwner, input.subscriptions)}`,
+          `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}`,
+          ...checkLines,
+          await followsAsk(askOwner, input.subscriptions),
           ...adviceLines
         ].join(`
 `),
@@ -19260,7 +19568,7 @@ ${await followsAsk(askOwner, input.subscriptions)}`,
       const owner = documentOwner();
       const resolved = owner.kind === "project" || artifactReference === undefined ? owner.kind === "project" ? await resolveDocument(owner, artifactReference) : undefined : await resolveDocument(owner, artifactReference);
       const anchored = resolved ? anchor(resolved.artifact, args) : undefined;
-      const replyTo = optionalString(args, "reply_to");
+      const replyTo = commentReplyTo(args);
       const replyToAskReference = optionalString(args, "reply_to_ask");
       const replyToAsk = replyToAskReference === undefined ? undefined : normalizeUUID(replyToAskReference);
       if (replyToAskReference !== undefined && replyToAsk === undefined) {
@@ -19277,7 +19585,8 @@ ${await followsAsk(askOwner, input.subscriptions)}`,
       const commentInput = {
         body,
         ...anchored === undefined ? {} : { anchor: anchored },
-        ...replyTo === undefined ? {} : { reply_to: replyTo },
+        ...replyTo === undefined ? {} : { reply_to: replyTo.id },
+        ...replyTo?.block === undefined ? {} : { reply_to_block: replyTo.block },
         ...replyToAsk === undefined ? {} : { ask_id: replyToAsk },
         ...requestedTurn === undefined ? {} : { turn: requestedTurn },
         actor
@@ -19337,7 +19646,8 @@ ${await followsAsk(askOwner, input.subscriptions)}`,
       };
     }
     case "dispatch_message": {
-      const inReplyTo = messageInReplyTo(args);
+      const target = messageInReplyTo(args);
+      const inReplyTo = target?.id;
       const written = stringArg(args, "body");
       const bodyLimit = {
         cap: DISPATCH_BODY_MAX,
@@ -19384,6 +19694,7 @@ ${await followsAsk(askOwner, input.subscriptions)}`,
       const message = await client.message(issueKey, {
         body,
         ...inReplyTo === undefined ? {} : { in_reply_to: inReplyTo },
+        ...target?.block === undefined ? {} : { in_reply_to_block: target.block },
         actor
       });
       const messageRef = dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id);
@@ -19424,11 +19735,18 @@ ${await followsAsk(askOwner, input.subscriptions)}`,
       const lostOps = edited.lost_ops;
       const lostText = lostOps === undefined || lostOps !== null && lostOps.length === 0 ? "" : lostOps === null ? "; could not confirm this edit survived, because the live document is being reloaded or holds a tree too deep to read \u2014 re-read it" : `; ${versionText} carries text the live document no longer has: a concurrent change removed what ${lostOps.length === 1 ? "operation" : "operations"} ${lostOps.join(", ")} wrote \u2014 re-read the document`;
       const applied = `${head}${unchangedText}${lostText}`;
-      const adviceLines = renderAdvice(input.tool, resolvedTopic(resolved).label, edited.advice, {});
+      const editAskText = ops.map((operation) => /^:{3,}ask\{.*\n([\s\S]*)/mu.exec(operation.markdown ?? operation.with ?? "")?.[1]).find((text) => text !== undefined) ?? resolved.issue?.title ?? "";
+      const checkLines = decisionBlockLines(edited.advice, {
+        project: resolved.artifact.project,
+        text: editAskText,
+        configUrl: linkBase
+      });
+      const adviceLines = await otherAdviceLines(() => renderAdvice(input.tool, resolvedTopic(resolved).label, edited.advice, {}));
       const tokenTrailer = edited.token === undefined ? [] : [`Document token: ${edited.token}`];
       return {
         text: [
           `${applied}${await notSubscribed(resolvedTopic(resolved), input.subscriptions)}`,
+          ...checkLines,
           ...tokenTrailer,
           ...adviceLines
         ].join(`
@@ -19671,10 +19989,11 @@ Document token: ${listed.token}`,
       if (ownerArguments.ref?.kind === "block") {
         const ref = ownerArguments.ref;
         const blockRef = stringArg(args, "ref");
+        const holder = blockRef.slice(0, blockRef.indexOf("#"));
         const [incoming, outgoing] = await Promise.all([
           client.getReferences({ to: blockRef }).catch((error) => {
             if (ref.pin === undefined && dispatchAnswered(error, 404)) {
-              throw new Error(`No block ${ref.block} in ${ref.document}.`);
+              throw new Error(`No block ${ref.block} in ${holder}.`);
             }
             throw error;
           }),

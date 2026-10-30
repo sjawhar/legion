@@ -1,5 +1,63 @@
 # Changelog
 
+## [main@49e23926228d] - 2026-10-30
+
+### Added
+
+- `dispatch comment --reply-to` and `dispatch message --in-reply-to` take a block reference to answer one block, `dispatch read` prints the block a reply answers (`Re: block b2: …`) and reads a block of a comment or message by its reference, and `commentBlocks` and `messageBlocks` read an item's blocks.
+
+### Changed
+
+- The `envoy_publish` description says when a publish errs: a role message errs when its holder
+  did not confirm it within the listener's window, and a team or other ad-hoc topic, which the
+  listener now confirms with each other session that holds its own NATS connection and registered
+  the topic, errs naming each session that did not confirm. A session that stopped without
+  unregistering stays registered for up to 5 minutes and is named in that time, and a named
+  session is not a failed delivery to the other sessions. A session on a serve port is not
+  confirmed.
+- `dispatch read` asks for each referenced document's latest version only (`GET /api/v1/issues/{key}/references?versions=latest`), so Dispatch builds a fraction of the answer; the printed `References:` section is unchanged, also against a Dispatch that does not know the parameter.
+- The related-item check's lines take which form an answer holds from `@legion/contracts`'
+  `relatedCheckFormOf` rather than judging it here, and word that form exactly as before. For
+  every answer a Dispatch server sends, no line a reader sees changes; an answer whose `related`
+  is not an array, which the contract does not allow, now prints the not-made line naming why.
+
+## [main@1f5b08286a6d] - 2026-10-29
+
+### Added
+
+- `dispatch related --project <KEY> [--title <title>] [--text <text>] [--exclude-issue <KEY>]
+  [--keywords-only]` runs the related-item check a new issue or ask gets, through
+  `POST /api/v1/projects/{key}/related` (`DispatchClient.related`), writes nothing, and prints the
+  check's form as `dispatch issue` does. Use it to check a draft before filing it.
+
+### Changed
+
+- `dispatch issue`, `dispatch ask` and `dispatch doc-edit` print the related-item check their
+  write got right under the line naming what was written, in exactly one of three forms, so a
+  check that never ran cannot read as one that found nothing: `Related items (searched
+  by meaning and keywords):` (or `keywords only: <why>`) with one line per item, an ask item
+  followed by the lines `dispatch search` prints under an ask hit (`Open: no answer yet.`,
+  `Answered by <who> at <when> · options chosen: <options>` and its `Answer text:`, `Closed with
+  no answer: …` or `Closed after an answer: …` and its `Last answer by …`, or `Answer state not
+  reported by this Dispatch; open the link to read the ask.` from a server that sends none);
+  `Related-item check searched (<mode>) and found nothing.`; or `No related-item check was made:
+  <reason>. Search before you rely on this being new: dispatch search --project <KEY> --query
+  '<words>'`, the words the server's `search_query` or else the first three words of four or
+  more letters of the text it checked. A past decision, followed by the same lines for its ask,
+  and, for a forced create, `Title overlaps you forced past: <KEY> [<status>] <title> → <link>`
+  follow the form. A
+  `dispatch doc-edit` that adds decision blocks prints `Decision block <id>:` and that block's
+  form for each, in document order. These replace `Possibly related, found by search:` and
+  `Related-item search was skipped: <reason>.`. A server that sends no check result, or the
+  older shapes (`missing` alone, items with no `outcome`, nothing with no `outcome`, a count of
+  new decision blocks with no checks), maps to one of the forms, the not-made one when it says
+  nothing; a result this client cannot read prints the not-made form, and advice that fails to
+  render prints `Other advice could not be shown: <error>` in place of the rest, keeping the
+  `Created` line and the form. `dispatch issue` on an external issue Dispatch already holds says
+  it already holds it and that nothing was created (`Dispatch already holds <KEY>: <title> →
+  <link>; nothing was created`), instead of `Created`, and prints no related-item check
+  (`DispatchClient.issue` answers `created`, true only for Dispatch's 201).
+
 ## [main@c4cea404651d] - 2026-10-29
 
 ### Added

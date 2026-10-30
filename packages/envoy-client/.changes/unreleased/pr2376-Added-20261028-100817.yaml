@@ -1,0 +1,8 @@
+kind: Added
+body: |-
+    `dispatch answers` prints every item people wrote to the session in the last 72 hours, newest
+    first, in the same item format with no cap; against a Dispatch older than the route it prints
+    `This Dispatch (<url>) has no answers route yet: its build is older than the answers route.` and exits 1.
+time: 2026-10-28T10:08:17.145796894Z
+custom:
+    Issue: pr2376
