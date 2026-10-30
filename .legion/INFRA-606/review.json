@@ -2,48 +2,38 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-606",
-  "completed": "2026-10-29T23:49:40Z",
-  "round": 5,
-  "headReviewed": "34c57fb35fb39677374b97cebfb17c17d6f6c5c3",
-  "codeHead": "74779becb2c8",
+  "completed": "2026-10-30T06:18:12Z",
+  "round": 6,
+  "headReviewed": "bc17bd8cc7e7426a1c2404657d6c2810ecebcc35",
+  "codeHead": "5a26d3ab1b6f7d3638ac6e496622cbbbc1e91fd6",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 1,
-  "minor": 4,
-  "ci": "CI at the code head 74779bec was queued at review time (the PR is MERGEABLE again after df929648). The next approval waits for the required set (lint, typecheck, test, pr-title) and for envoy-go, envoy-go-race, dispatch, dispatch-multiprocess and the Dispatch browser job, all green at the code head. Known red on main: close-withdraws-asks.e2e.ts:126 (INFRA-138).",
-  "tests": "The thermonuclear pair ran at 34c57fb3 on local Postgres 16: go vet api and outbox clean; go test pgmigrate, the store migration tests, the api Mention/Sweep/HeldLane/Replay/Keyed tests, the outbox Fallback/Mention tests and cmd/dispatch TestSIGTERMSettles... pass.",
+  "important": 2,
+  "minor": 1,
+  "ci": "Run 40989024117 (attempt 2, re-run by the architect) at 5a26d3ab was still queued at review time; it does not gate a request for changes, and the next code push starts a new run. The next approval waits for the required set and envoy-go, envoy-go-race, envoy-go-race-docs, dispatch, dispatch-multiprocess and dispatch-browser-multiprocess, read green in the run at the next code head.",
+  "tests": "The deep reviewer ran at 5a26d3ab on local Postgres 16, with -p 2 -parallel 4 and memory about 2 GB before each run: the outbox, model and store packages pass; the api Mention/Fallback/Sweep/Retry/CommentDelivery/Queued/Lane/Drain/Routes tests pass except an intermittent failure of TestAClaimantWhoseResentMentionFailsStillHearsTheComment (1 of 4 with -count=4, finding 2). A throwaway overlay test (not committed) reproduces finding 1: with the failed Retry, comment.created stays unpublished; without it, the event publishes in about 0.5 s with one held fallback row.",
   "threadsAnswered": [
-    "PRRT_kwDORFy7ds6xwRsB",
-    "PRRT_kwDORFy7ds6xwRsN",
-    "PRRT_kwDORFy7ds6xwRsS"
+    "PRRT_kwDORFy7ds6xzA9K",
+    "PRRT_kwDORFy7ds6xzA9Q",
+    "PRRT_kwDORFy7ds6xzA9Y"
   ],
-  "round4Status": "All five fixed: forward merge and 0142; queued attempts hold a refreshed claim so the sweep cannot reach a live queue; a waiting fallback row waits mentionPendingDelay or retryInterval; comment_fallback_copies is in seed.ts; the stale prose is corrected at every named site.",
+  "round5Status": "Fixed: the mention's own attempt queued past a lease is resumed (fallback row, event published); the drain releases on its own context; a keyed repeat records its new claim; a held-lane test with a real refresh tick and a negative control; a Retry while attempt 1 is queued supersedes attempt 1 and leaves one copy. The PR body names the order risk across a rolling update or a kill, as the architect asked. Migration 0145 follows main's 0144 and every reference says 0145.",
   "keyFindings": [
     {
       "severity": "important",
+      "file": "packages/envoy/internal/dispatch/model/model.go",
+      "description": "MentionResumedSQL (via mentionAttemptPastClaimLapseSQL) and MentionAbandonedSQL both miss an attempt that a later attempt overtook while its lane still holds and refreshes its claim, so MentionLiveSQL counts it live for as long as the lane is held. After a Retry that fails within the first lease, the outbox defers the comment's comment.created every 2 s until the lane supersedes attempt 1: every destination of the comment waits minutes, against the one-lease bound stated in publisher.go:299-302, outbox/mentions.go:24-26 and 36-41, model.go:1313-1314, AGENTS.md and the changelog. Reproduced by an overlay test. Fix: a pending attempt older than a lease and not abandoned is resumed, whoever holds it; add the reproduction as a test."
+    },
+    {
+      "severity": "important",
       "file": "packages/envoy/internal/dispatch/outbox/mentions.go",
-      "description": "With the claim refreshed, a queued attempt is live (MentionLiveSQL) for its whole lane wait, so the outbox keeps that comment.created deferred (errMentionPending) and re-reads it every retry tick (~5 s) until the lane reaches it: 100 comments behind a silent listener stay deferred about 8 minutes, each re-polled. mentions.go:21-25 and 34-40 and AGENTS.md:3333-3337 still bound the deferral, and the edit-before-creation window hosts are told about, at about a minute; publisher.go:299-300 says the claim bounds it. Bound it (a claimed attempt older than a lease is treated as resumed: fallback row and publish) or back off the deferral and state the real bound."
+      "description": "claimFallbackCopies runs its autocommit claim on the pass's ctx; a context cancelled after the statement commits returns context canceled, the pass returns with no records, and the claimed rows stay claimed for claimWindow (1 minute), contrary to the documented release at once on a stop. It makes TestAClaimantWhoseResentMentionFailsStillHearsTheComment fail intermittently (eventDeliveries cancels its outbox in the tick the fallback pass claims), a flaky required test. Run the claim on context.WithoutCancel(ctx) with a timeout, as the record step does."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/comment_mention_sender.go",
-      "description": "wait() releases the unstarted claims on m.ctx (:355), which a timer cancels mentionDrainTimeout (10 s) after the lifetime ends (:166), while mentions.wait() runs last in waitBackground after the HTTP drain and document shutdown. A stop slower than 10 s logs an Error and leaves the claims to lapse instead of handing them over at once. Release on context.WithoutCancel(m.lifetime) with a timeout of its own."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/comment_mention_sender.go",
-      "description": "On the held path (:214-216) a keyed repeat that re-claimed an attempt this process still queues does not record the new claim in m.claims, so later refreshes no-op on the row, the new claim lapses a lease later, and the sweep can send that attempt out of order. Set m.claims[key] to the new claim; also the refresh comment at :394 says an unmatched row is dropped, which the code does not do."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/comment_delivery_sender_test.go",
-      "description": "Round 4 asked for a test with a lane held longer than a lease while the sweep runs. The held-lane test (:857-917) ages only created_at and calls refreshHeldClaims directly; no claim gets older than a lease, so it passes with keepClaims deleted. Age claimed_at past the lease with and without a refresh (negative control) while a sweep pass runs."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/comment_delivery.go",
-      "description": "A POST /api/v1/comments/{id}/deliveries while attempt 1 is queued now opens attempt 2, and the lane still sends attempt 1 (the bound path does not check MentionLatestAttemptSQL); in a different mode the keys differ and the recipient gets two copies. Only an API caller can do this (the UI retries failed attempts only); make the bound send skip an attempt that is no longer the latest, or refuse a retry of a pending claimed attempt. Prose in the same round: the 0142 migration header (next_attempt_at's waiting release), AGENTS.md:3286 MentionLiveSQL wording."
+      "file": "packages/envoy/AGENTS.md",
+      "description": "Prose: 'the lane's own send settles the row' (AGENTS.md:1423, comment_mention_sender.go:108) - the fallback pass settles it; AGENTS.md:1405-1406 is garbled; cmd/dispatch/README.md:1311-1314 describes the 0145 rows as only the sweep's resend, not a send still queued past a lease; AGENTS.md:3513-3519's MentionLiveSQL wording must match finding 1's fix."
     }
   ],
-  "notRaised": "Under the architect's round cap: structural items (duplicated claims snapshot loop, mentionSend.claimed duplicating m.claims, newMentionSender's single-caller callbacks)."
+  "notRaised": "Under the architect's round cap: comment_delivery.go passes 1000 lines with the supersede path; supersedeCommentDelivery copies completeCommentDelivery's settle closures; a keyed repeat racing next() (needs refresh failing for a whole lease; no duplicate)."
 }
