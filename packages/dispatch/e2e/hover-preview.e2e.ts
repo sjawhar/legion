@@ -14,14 +14,36 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-/** Hold the page's clock still, so a check about the close delay cannot race it. `pauseAt` takes
- * a time on the page's own installed clock, and the Node process's `Date.now()` can already be
- * behind that clock, which would ask it to move backwards: a lead of `+ 1` ms failed 11 runs of
- * 12, and a second is past any skew. `pauseAt` runs every page timer that falls due inside the
- * jump; at all three call sites the card is open, so its open timer has already fired and no
- * close is armed, and the jump fires no close. */
+/** Hold the page's clock still, so a check about an open or a close delay cannot race it.
+ * `pauseAt` takes a time on the page's own installed clock, and the Node process's `Date.now()`
+ * can already be behind that clock, which would ask it to move backwards: a lead of `+ 1` ms
+ * failed 11 runs of 12, and a second is past any skew. `pauseAt` runs every page timer that falls
+ * due inside the jump, so no call site may have one armed that the jump must not fire: at three
+ * of them the card is open, so its open timer has fired and no close is armed, and at the fourth
+ * the card is closed under a held button, which arms nothing at all. */
 async function pauseClock(page: Page): Promise<void> {
   await page.clock.pauseAt(Date.now() + 1000);
+}
+
+/** Put a board card in the middle of the board's scroller, clear of both edge zones. dnd-kit
+ * scrolls the board while a card is held near either edge (`IssueBoard.tsx` turns the mandatory
+ * snapping off for a lift for that very reason), and how far it scrolls is how long the hold
+ * lasts: the Todo column sits inside the right-hand zone at 1280 px, so a hold that outlives one
+ * frame - every hold on a loaded machine - runs the board to its far end and drops the card into
+ * whichever column has arrived under the pointer. With the card centred no hold scrolls the
+ * board at all, and the drop lands where it was picked up however long the gesture takes. */
+async function centreInBoard(page: Page, key: string): Promise<void> {
+  await page.evaluate((cardKey) => {
+    const scroller = document.querySelector<HTMLElement>('[data-testid="board-scroll-container"]');
+    const card = document.querySelector<HTMLElement>(`[data-board-card="${cardKey}"]`);
+    if (scroller === null || card === null) {
+      throw new Error(`the board scroller or the card ${cardKey} is not on the page`);
+    }
+    const scrollerBox = scroller.getBoundingClientRect();
+    const cardBox = card.getBoundingClientRect();
+    scroller.scrollLeft +=
+      cardBox.left + cardBox.width / 2 - (scrollerBox.left + scrollerBox.width / 2);
+  }, key);
 }
 
 async function seedReference() {
@@ -96,6 +118,8 @@ test("hovering a board card previews the issue and moving onto the card keeps it
     await page.getByRole("button", { name: "Board" }).click();
     const todo = page.getByRole("region", { name: "Todo" });
     const link = todo.getByRole("link", { name: `${target.key} Hover target` });
+    await expect(link).toBeVisible();
+    await centreInBoard(page, target.key);
     await link.hover();
     const card = page.getByRole("tooltip");
     await expect(card).toBeVisible();
@@ -104,7 +128,13 @@ test("hovering a board card previews the issue and moving onto the card keeps it
     await page.screenshot({ path: testInfo.outputPath("hover-preview-board-1280.png") });
 
     // A drag lift closes the card: the title link is the whole-card drag activator, and the
-    // trailing click that would otherwise dismiss the card is swallowed by the drag.
+    // trailing click that would otherwise dismiss the card is swallowed by the drag. A click the
+    // board let through would follow the anchor and load the issue page as a new document, so
+    // this mark on the current one catches that at the drop instead of as a stalled hover three
+    // steps later.
+    await page.evaluate(() => {
+      document.documentElement.dataset.boardAlive = "yes";
+    });
     const box = await link.boundingBox();
     if (box === null) {
       throw new Error("board card is not visible");
@@ -114,9 +144,17 @@ test("hovering a board card previews the issue and moving onto the card keeps it
     await page.mouse.move(box.x + box.width / 2 + 12, box.y + box.height / 2 + 12, { steps: 4 });
     await expect(card).toHaveCount(0);
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 4 });
+    // The drop leaves the pointer resting on the reference, and a resting pointer is a hover
+    // like any other: it opens a card of its own once the open delay passes. So the clock is
+    // held still across the drop - under a held button no hover is pending and the closed card
+    // armed nothing, so the jump fires nothing - and what the drop itself left is counted on a
+    // clock that cannot reach that delay.
+    await pauseClock(page);
     await page.mouse.up();
     await expect(page).toHaveURL(/\/projects\/CORE/);
+    await expect(page.locator("html")).toHaveAttribute("data-board-alive", "yes");
     await expect(page.getByRole("tooltip")).toHaveCount(0);
+    await page.clock.resume();
 
     // Hovering again reopens it - and the drop left keyboard focus on the title link, so the
     // press on the card must not blur the card away. The hover bridge still holds: the pointer
