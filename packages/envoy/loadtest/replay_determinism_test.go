@@ -30,7 +30,7 @@ const rpDetIssues = 24
 // and a resolve in an anchored thread, edits, uploads, creates and a typed ask's answer.
 func rpDetBundle(t *testing.T) *replayBundle {
 	t.Helper()
-	st := replayState{Project: "LINUX", At: rpAt, Until: rpAt.Add(39 * time.Minute)}
+	st := replayState{Project: "ACME", At: rpAt, Until: rpAt.Add(39 * time.Minute)}
 	files := map[string]string{}
 	var lines []string
 	id := int64(0)
@@ -40,7 +40,7 @@ func rpDetBundle(t *testing.T) *replayBundle {
 	}
 	cut := "--- a\n+++ b\n@@ -1,1 +1,1 @@\n-x\n+y\n… (truncated)\n"
 	for i := 1; i <= rpDetIssues; i++ {
-		key, n := "LINUX-"+itoa(i), itoa(i)
+		key, n := "ACME-"+itoa(i), itoa(i)
 		text := replaySynthDoc(1500+37*i, uint64(i))
 		fsize := 100 + i
 		files["docs/DD"+n+".md"] = text
@@ -54,7 +54,7 @@ func rpDetBundle(t *testing.T) *replayBundle {
 			Asks: []replayAsk{{ID: "K" + n, Kind: "question", State: "open", Question: "q", Author: rpSession,
 				BlockID: &blk, BlockArtifactID: &dd}}})
 		quote := fallbackCandidates(text)[0]
-		child, cn := "LINUX-"+itoa(100+i), itoa(100+i)
+		child, cn := "ACME-"+itoa(100+i), itoa(100+i)
 		at := func(k int) time.Duration { return time.Duration(i)*time.Millisecond + time.Duration(k)*20*time.Second }
 		ev("comment.created", key, rpSession, at(0), map[string]any{"id": "A" + n + "a", "body": "b", "anchor": map[string]any{"artifact_id": "DD" + n, "quote": quote}})
 		ev("comment.created", key, rpUser, at(1), map[string]any{"id": "A" + n + "b", "body": "b", "anchor": map[string]any{"artifact_id": "DD" + n, "quote": "No such quote here."}})
@@ -159,7 +159,7 @@ func sendShuffled(t *testing.T, p *replayPlan, o replayOptions, b *replayBundle)
 		time.Sleep(delay)
 		h := sha256.Sum256([]byte(r.Method + " " + rest + " " + string(body)))
 		x := hex.EncodeToString(h[:])
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": "loc-" + x[:12], "key": "LINUX-L" + x[:6], "primary_artifact_id": "pa-" + x[:12],
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "loc-" + x[:12], "key": "ACME-L" + x[:6], "primary_artifact_id": "pa-" + x[:12],
 			"last_seq": 25, "edited_at": "2026-10-26T23:00:00Z"})
 	}))
 	defer srv.Close()
@@ -345,9 +345,9 @@ func TestReplayReadsPrecedeTheirWrite(t *testing.T) {
 	for i := range 40 {
 		off := time.Duration(i+1) * time.Second
 		if i%2 == 0 {
-			lines = append(lines, rpEvent(int64(i+1), "comment.created", "LINUX-1", rpSession, off, map[string]any{"id": "W" + itoa(i), "body": "b"}))
+			lines = append(lines, rpEvent(int64(i+1), "comment.created", "ACME-1", rpSession, off, map[string]any{"id": "W" + itoa(i), "body": "b"}))
 		} else {
-			lines = append(lines, rpEvent(int64(i+1), "artifact.created", "LINUX-1", rpSession, off,
+			lines = append(lines, rpEvent(int64(i+1), "artifact.created", "ACME-1", rpSession, off,
 				map[string]any{"artifact": map[string]any{"id": "W" + itoa(i), "name": "n" + itoa(i), "kind": "doc", "versions": []any{map[string]any{"size": 50}}}}))
 		}
 	}

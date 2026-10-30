@@ -20,10 +20,10 @@ REPLAY_MIGRATION=114
 REPLAY_PATCH=$here/replay-seed-len16.patch
 REPLAY_DB=dispatch_replay_build
 # The replay's inputs (replay-get) and templates (replay-prepare, reset --replay): the manifest
-# that names the bundle's and the seed dump's parts, the Dispatch issue they are file artifacts of,
-# the restored seed's template database and how many prepared templates are kept.
+# that names the bundle's and the seed dump's parts, the restored seed's template database and how
+# many prepared templates are kept. The manifest names no Dispatch issue: the parts are file
+# artifacts of an issue the operator names in LOADTEST_REPLAY_ISSUE, which replay-get requires.
 REPLAY_MANIFEST=$here/replay-2026-10-26.json
-REPLAY_ISSUE=INFRA-639
 REPLAY_DIR=$ROOT/replay
 REPLAY_SEED_DB=dispatch_replay_seed
 REPLAY_KEEP=3
@@ -331,14 +331,16 @@ cmd_replay_manifest() {
   fi
   # A part's slug is its file name lower-cased with every character outside [a-z0-9] a '-'; its
   # version is --part-version (default 1: each part uploaded once; a part uploaded again under the
-  # same name is a later version of the same artifact). The seed check's *_list fields are dropped:
-  # a passing check has none, and they would name production issues.
+  # same name is a later version of the same artifact). The manifest names no Dispatch issue, so a
+  # part is {file, slug, version, bytes, sha256} alone and replay-get takes the issue from
+  # LOADTEST_REPLAY_ISSUE. The seed check's *_list fields are dropped: a passing check has none,
+  # and they would name production issues.
   # shellcheck disable=SC2016
-  jq -n --arg issue "$REPLAY_ISSUE" --argjson version "$part_version" --slurpfile pack "$pack" --slurpfile meta "$bundle/$BUNDLE_META" "${seed_args[@]}" '
+  jq -n --argjson version "$part_version" --slurpfile pack "$pack" --slurpfile meta "$bundle/$BUNDLE_META" "${seed_args[@]}" '
     def part: (.file | ascii_downcase | gsub("[^a-z0-9]"; "-")) as $s |
-      {file, slug: $s, ref: "dispatch://\($issue)/artifact/\($s)", version: $version, bytes, sha256};
+      {file, slug: $s, version: $version, bytes, sha256};
     $meta[0] as $m | $pack[0] as $p | $seed[0] as $s |
-    {schema: 1, project: $m.project, window: {from: $m.at, to: $m.until}, issue: $issue,
+    {schema: 1, project: $m.project, window: {from: $m.at, to: $m.until},
      bundle: {tar_zst_sha256: $p.tar_zst_sha256, bytes: $p.bytes, fetched_at: $m.fetched_at,
               counts: $m.counts, parts: [$p.parts[] | part]},
      seed: (if $s == null then null else
@@ -468,6 +470,10 @@ cmd_replay_get() {
       *) die "unknown argument '$1'; $usage" ;;
     esac
   done
+  # The manifest names no Dispatch issue: the operator names the issue its parts are file
+  # artifacts of, and replay-get refuses before it reads or downloads anything without it.
+  [ -n "${LOADTEST_REPLAY_ISSUE:-}" ] ||
+    die "LOADTEST_REPLAY_ISSUE is not set: set it to the issue the replay's parts are file artifacts of (the manifest names none)"
   [ -f "$manifest" ] || die "no replay manifest at $manifest"
   [ "$(jq -r .schema "$manifest")" = 1 ] || die "$manifest is not a schema 1 replay manifest"
   [ -z "$from_dir" ] || [ -d "$from_dir" ] || die "--from-dir $from_dir is not a directory"
@@ -478,8 +484,7 @@ cmd_replay_get() {
   if [ "$has_seed" = true ]; then
     running postgres || die "Postgres is not running; stack.sh start first (replay-get restores the seed into it)"
   fi
-  local issue entry started=$SECONDS
-  issue=$(jq -er .issue "$manifest")
+  local issue=$LOADTEST_REPLAY_ISSUE entry started=$SECONDS
   mkdir -p -- "$REPLAY_DIR/parts"
 
   local bundle_parts=()

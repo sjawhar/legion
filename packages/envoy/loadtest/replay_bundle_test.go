@@ -16,7 +16,7 @@ func TestKeepIssueDeterministicAndProportional(t *testing.T) {
 		kept := 0
 		const n = 20000
 		for i := 1; i <= n; i++ {
-			key := fmt.Sprintf("LINUX-%d", i)
+			key := fmt.Sprintf("ACME-%d", i)
 			k := keepIssue(7, key, f)
 			if k != keepIssue(7, key, f) {
 				t.Fatalf("keepIssue(%s) not deterministic", key)
@@ -30,14 +30,14 @@ func TestKeepIssueDeterministicAndProportional(t *testing.T) {
 		}
 	}
 	for i := range 100 {
-		key := fmt.Sprintf("LINUX-%d", i)
+		key := fmt.Sprintf("ACME-%d", i)
 		if !keepIssue(1, key, 1) || keepIssue(1, key, 0) {
 			t.Fatalf("f=1 must keep and f=0 drop %s", key)
 		}
 	}
 	differ := false
 	for i := 0; i < 100 && !differ; i++ {
-		key := fmt.Sprintf("LINUX-%d", i)
+		key := fmt.Sprintf("ACME-%d", i)
 		differ = keepIssue(1, key, 0.5) != keepIssue(2, key, 0.5)
 	}
 	if !differ {
@@ -126,21 +126,21 @@ func TestReplayPlannerHandlesEveryTypeItNames(t *testing.T) {
 		typ, key string
 		payload  any
 	}{
-		{evCommentCreated, "LINUX-1", map[string]any{"id": "C9", "body": "b"}},
-		{evCommentResolved, "LINUX-1", map[string]any{"id": "C1", "resolved": true}},
-		{evArtifactVersion, "LINUX-1", map[string]any{"artifact_id": "D1", "name": "spec",
+		{evCommentCreated, "ACME-1", map[string]any{"id": "C9", "body": "b"}},
+		{evCommentResolved, "ACME-1", map[string]any{"id": "C1", "resolved": true}},
+		{evArtifactVersion, "ACME-1", map[string]any{"artifact_id": "D1", "name": "spec",
 			"version": map[string]any{"number": 2, "named": false, "size": size}}},
-		{evArtifactCreated, "LINUX-1", map[string]any{"artifact": map[string]any{"id": "D9", "name": "notes", "kind": "doc",
+		{evArtifactCreated, "ACME-1", map[string]any{"artifact": map[string]any{"id": "D9", "name": "notes", "kind": "doc",
 			"versions": []any{map[string]any{"number": 1, "size": 512}}}}},
-		{evIssueUpdated, "LINUX-1", map[string]any{"status": "in_progress"}},
-		{evIssueClosed, "LINUX-1", map[string]any{"status": "done"}},
-		{evIssueClaimed, "LINUX-2", map[string]any{"claim": map[string]any{"actor": rpSession}}},
-		{evMessageCreated, "LINUX-2", map[string]any{"body": "m"}},
-		{evAskOpened, "LINUX-2", map[string]any{"id": "A9", "state": "open", "kind": "decision", "question": "q", "author": rpSession}},
-		{evAskAnswered, "LINUX-2", map[string]any{"id": "A9", "state": "answered", "kind": "decision", "author": rpSession}},
-		{evAskResolved, "LINUX-2", map[string]any{"id": "A9", "state": "resolved", "kind": "decision", "author": rpSession,
+		{evIssueUpdated, "ACME-1", map[string]any{"status": "in_progress"}},
+		{evIssueClosed, "ACME-1", map[string]any{"status": "done"}},
+		{evIssueClaimed, "ACME-2", map[string]any{"claim": map[string]any{"actor": rpSession}}},
+		{evMessageCreated, "ACME-2", map[string]any{"body": "m"}},
+		{evAskOpened, "ACME-2", map[string]any{"id": "A9", "state": "open", "kind": "decision", "question": "q", "author": rpSession}},
+		{evAskAnswered, "ACME-2", map[string]any{"id": "A9", "state": "answered", "kind": "decision", "author": rpSession}},
+		{evAskResolved, "ACME-2", map[string]any{"id": "A9", "state": "resolved", "kind": "decision", "author": rpSession,
 			"resolution": map[string]any{"kind": "withdrawn", "reason": "r", "actor": rpSession}}},
-		{evIssueCreated, "LINUX-3", map[string]any{"title": "three", "status": "open"}},
+		{evIssueCreated, "ACME-3", map[string]any{"title": "three", "status": "open"}},
 	}
 	var lines []string
 	for i, p := range payloads {

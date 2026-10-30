@@ -56,7 +56,9 @@
 #                           copied from DIR or downloaded from DISPATCH_URL with DISPATCH_TOKEN_FILE's
 #                           token, and refused on a sha256 mismatch; the bundle unpacked into
 #                           replay/bundle and verified file by file; the seed dump restored once into
-#                           the template dispatch_replay_seed (replay/seed-restored.json). Needs
+#                           the template dispatch_replay_seed (replay/seed-restored.json). The
+#                           manifest names no issue: LOADTEST_REPLAY_ISSUE names the issue the parts
+#                           are file artifacts of and is required, even with --from-dir. Needs
 #                           Postgres running when the manifest names a seed.
 #   stack.sh replay-prepare this build's replay template dispatch_replay_<key> (key: the first 16 hex
 #                           of bin/envoy-dispatch.json's dispatch_binary_sha256): from
@@ -80,7 +82,8 @@
 # LOADTEST_LISTENER_PORT, LOADTEST_DISPATCH_PORT and LOADTEST_PPROF_PORT each override their own
 # port, read by setup into stack.json (`stack.sh status` prints them); LOADTEST_PROXY_RTT (1ms);
 # LOADTEST_PG_DIRECT=1 starts Dispatch on Postgres without the proxy;
-# LOADTEST_DISPATCH_COMMIT (setup, above); LOADTEST_GOMAXPROCS, Dispatch's GOMAXPROCS (default: nproc).
+# LOADTEST_DISPATCH_COMMIT (setup, above); LOADTEST_GOMAXPROCS, Dispatch's GOMAXPROCS (default: nproc);
+# LOADTEST_REPLAY_ISSUE, the issue the replay's parts are file artifacts of (replay-get, above).
 #
 # Every stack process starts under `env -i` with an explicit environment, so this shell's
 # DISPATCH_URL, ENVOY_URL, ENVOY_NATS_URL, AWS_*, HOME and XDG_* never reach it, and every process is

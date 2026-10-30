@@ -15,8 +15,8 @@
 # Asserts that: (a) a second run-step.sh is refused while a run-step.sh holds the root; (b) a
 # run-series.sh is refused while a run-step.sh holds it; (c) a run-step.sh is refused while a
 # run-series.sh holds it; (d) once the first run has exited, a new run on the root is not refused;
-# (e) a --replay step refuses --events, and a --dispatch-commit that names no commit, before its
-# build.
+# (e) a --replay step refuses --events, a --dispatch-commit that names no commit, and a missing
+# LOADTEST_REPLAY_ISSUE, before its build.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -164,3 +164,5 @@ expect_refused_before_build "a --replay step with --events" "--events is not a r
   bash "$run_step" replay-step --replay --events 1
 expect_refused_before_build "a --replay step with --dispatch-commit deadbeef" "--dispatch-commit 'deadbeef' names no commit" \
   bash "$run_step" replay-step --replay --dispatch-commit deadbeef
+expect_refused_before_build "a --replay step without LOADTEST_REPLAY_ISSUE" "LOADTEST_REPLAY_ISSUE is required" \
+  env -u LOADTEST_REPLAY_ISSUE bash "$run_step" replay-step --replay

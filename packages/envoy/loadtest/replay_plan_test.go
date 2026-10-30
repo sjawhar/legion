@@ -27,7 +27,7 @@ var rpAt = time.Date(2026, 10, 26, 22, 55, 0, 0, time.UTC)
 
 var (
 	rpSession = replayActor{Kind: "session", ID: "s-1"}
-	rpDaemon  = replayActor{Kind: "session", ID: "legion-daemon:LINUX"}
+	rpDaemon  = replayActor{Kind: "session", ID: "legion-daemon:ACME"}
 	rpUser    = replayActor{Kind: "user", ID: "person-a"}
 )
 
@@ -37,22 +37,22 @@ const rpDocText = "# Plan\n\nAlpha bravo charlie delta echo foxtrot golf. Hotel 
 // rpEvent is one window.jsonl line.
 func rpEvent(id int64, typ, key string, actor replayActor, off time.Duration, payload any) string {
 	p, _ := json.Marshal(payload)
-	ev := map[string]any{"id": id, "issue_key": key, "project": "LINUX", "seq": id, "type": typ, "actor": actor,
+	ev := map[string]any{"id": id, "issue_key": key, "project": "ACME", "seq": id, "type": typ, "actor": actor,
 		"notify": false, "created_at": rpAt.Add(off), "payload": json.RawMessage(p)}
 	b, _ := json.Marshal(ev)
 	return string(b)
 }
 
-// rpState is two issues: LINUX-1 with document D1 (rpDocText) and comment C1, LINUX-2 with a file
+// rpState is two issues: ACME-1 with document D1 (rpDocText) and comment C1, ACME-2 with a file
 // F2, claimed by session s-1.
 func rpState() replayState {
 	size := len(rpDocText)
 	fsize := 100
-	return replayState{Project: "LINUX", At: rpAt, Until: rpAt.Add(39 * time.Minute), Issues: []replayIssue{
-		{Key: "LINUX-1", Number: 1, Exists: true, Title: "one", Status: "open",
+	return replayState{Project: "ACME", At: rpAt, Until: rpAt.Add(39 * time.Minute), Issues: []replayIssue{
+		{Key: "ACME-1", Number: 1, Exists: true, Title: "one", Status: "open",
 			Artifacts: []replayArtifact{{ID: "D1", Name: "spec", Kind: "doc", Primary: true, Version: 1, TextPath: "docs/D1.md", TextVersion: 1, VersionSizes: []int{size}}},
 			Comments:  []replayComment{{ID: "C1", Actor: rpSession, Body: "first", Open: true}}},
-		{Key: "LINUX-2", Number: 2, Exists: true, Title: "two", Status: "open", Claim: &replayClaim{Actor: rpSession},
+		{Key: "ACME-2", Number: 2, Exists: true, Title: "two", Status: "open", Claim: &replayClaim{Actor: rpSession},
 			Artifacts: []replayArtifact{{ID: "F2", Name: "blob.bin", Kind: "file", Version: 1, Size: &fsize}}},
 	}}
 }
@@ -146,7 +146,7 @@ func lastBody(a *replayAction) map[string]any {
 
 func TestReplayAnchoredRoot(t *testing.T) {
 	quote := "Oscar papa quebec romeo sierra tango uniform."
-	p := rpPlan(t, rpOptions(), []string{rpEvent(1, "comment.created", "LINUX-1", rpSession, time.Second,
+	p := rpPlan(t, rpOptions(), []string{rpEvent(1, "comment.created", "ACME-1", rpSession, time.Second,
 		map[string]any{"id": "C9", "body": "b", "anchor": map[string]any{"artifact_id": "D1", "quote": quote}})}, nil)
 	a := onlyWrite(t, p)
 	wantRoutes(t, a, []string{"GET /api/v1/issues/{key} [anchored]"}, []string{"POST /api/v1/issues/{key}/comments [anchored]"})
@@ -156,7 +156,7 @@ func TestReplayAnchoredRoot(t *testing.T) {
 	}
 
 	// A quote the client's text lacks is substituted by one it holds exactly once.
-	p = rpPlan(t, rpOptions(), []string{rpEvent(1, "comment.created", "LINUX-1", rpSession, time.Second,
+	p = rpPlan(t, rpOptions(), []string{rpEvent(1, "comment.created", "ACME-1", rpSession, time.Second,
 		map[string]any{"id": "C9", "body": "b", "anchor": map[string]any{"artifact_id": "D1", "quote": "not in the text at all"}})}, nil)
 	a = onlyWrite(t, p)
 	q := lastBody(a)["anchor"].(map[string]any)["quote"].(string)
@@ -166,7 +166,7 @@ func TestReplayAnchoredRoot(t *testing.T) {
 }
 
 func TestReplayReply(t *testing.T) {
-	p := rpPlan(t, rpOptions(), []string{rpEvent(1, "comment.created", "LINUX-1", rpSession, time.Second,
+	p := rpPlan(t, rpOptions(), []string{rpEvent(1, "comment.created", "ACME-1", rpSession, time.Second,
 		map[string]any{"id": "C9", "body": "b", "reply_to": "C1"})}, nil)
 	a := onlyWrite(t, p)
 	wantRoutes(t, a, []string{"POST /api/v1/issues/{key}/comments [reply]"})
@@ -179,7 +179,7 @@ func TestReplayReply(t *testing.T) {
 }
 
 func TestReplayPlainRoot(t *testing.T) {
-	p := rpPlan(t, rpOptions(), []string{rpEvent(1, "comment.created", "LINUX-1", rpSession, time.Second, map[string]any{"id": "C9", "body": "b"})}, nil)
+	p := rpPlan(t, rpOptions(), []string{rpEvent(1, "comment.created", "ACME-1", rpSession, time.Second, map[string]any{"id": "C9", "body": "b"})}, nil)
 	a := onlyWrite(t, p)
 	wantRoutes(t, a, []string{"POST /api/v1/issues/{key}/comments [plain]"})
 	body := lastBody(a)
@@ -192,7 +192,7 @@ func TestReplayPlainRoot(t *testing.T) {
 const rpDiff = "--- v1\n+++ v2\n@@ -6,2 +6,2 @@\n \n-The quick brown fox jumps over the lazy dog today.\n+The quick brown fox jumps over the lazy cat today.\n"
 
 func rpVersionEvent(id int64, actor replayActor, named bool, diff *string, summary *string, size int) string {
-	return rpEvent(id, "artifact.version", "LINUX-1", actor, time.Second, map[string]any{"artifact_id": "D1", "name": "spec", "diff": diff,
+	return rpEvent(id, "artifact.version", "ACME-1", actor, time.Second, map[string]any{"artifact_id": "D1", "name": "spec", "diff": diff,
 		"version": map[string]any{"number": 2, "named": named, "size": size, "summary": summary}})
 }
 
@@ -330,7 +330,7 @@ func TestReplayVersionsNotSent(t *testing.T) {
 	s := "s"
 	p := rpPlan(t, rpOptions(), []string{
 		rpVersionEvent(1, rpSession, true, nil, &s, len(rpDocText)),
-		rpEvent(2, "artifact.version", "LINUX-1", rpUser, 2*time.Second, map[string]any{"artifact_id": "D1", "name": "spec", "version": map[string]any{"number": 3, "size": 10}}),
+		rpEvent(2, "artifact.version", "ACME-1", rpUser, 2*time.Second, map[string]any{"artifact_id": "D1", "name": "spec", "version": map[string]any{"number": 3, "size": 10}}),
 	}, nil)
 	if p.Counts.WriteActions != 0 || p.Counts.NotSent["settlement:artifact.version"] != 1 || p.Counts.NotSent["browser:artifact.version"] != 1 {
 		t.Fatalf("writes %d, not sent %v", p.Counts.WriteActions, p.Counts.NotSent)
@@ -338,11 +338,11 @@ func TestReplayVersionsNotSent(t *testing.T) {
 }
 
 func rpIssueUpdate(id int64, actor replayActor, fields map[string]any) string {
-	payload := map[string]any{"key": "LINUX-1", "title": "one", "status": "open", "parent": nil, "priority": nil, "labels": []string{}, "route": nil, "blocked_by": []string{}}
+	payload := map[string]any{"key": "ACME-1", "title": "one", "status": "open", "parent": nil, "priority": nil, "labels": []string{}, "route": nil, "blocked_by": []string{}}
 	for k, v := range fields {
 		payload[k] = v
 	}
-	return rpEvent(id, "issue.updated", "LINUX-1", actor, time.Second, payload)
+	return rpEvent(id, "issue.updated", "ACME-1", actor, time.Second, payload)
 }
 
 func TestReplayStatusChange(t *testing.T) {
@@ -356,12 +356,12 @@ func TestReplayStatusChange(t *testing.T) {
 func TestReplayDaemonWrites(t *testing.T) {
 	a := onlyWrite(t, rpPlan(t, rpOptions(), []string{rpIssueUpdate(1, rpDaemon, map[string]any{"status": "done"})}, nil))
 	wantRoutes(t, a, []string{"GET /api/v1/issues/{key} [daemon]"}, []string{"PATCH /api/v1/issues/{key} [daemon]"})
-	a = onlyWrite(t, rpPlan(t, rpOptions(), []string{rpEvent(1, "message.created", "LINUX-1", rpDaemon, time.Second, map[string]any{"body": "m"})}, nil))
+	a = onlyWrite(t, rpPlan(t, rpOptions(), []string{rpEvent(1, "message.created", "ACME-1", rpDaemon, time.Second, map[string]any{"body": "m"})}, nil))
 	wantRoutes(t, a, []string{"GET /api/v1/issues/{key}/events?order=desc&limit=200 [daemon-message]"}, []string{"POST /api/v1/issues/{key}/messages [daemon-message]"})
 	// An issue.closed alone is its PATCH's only event.
 	a = onlyWrite(t, rpPlan(t, rpOptions(), []string{
-		rpEvent(1, "issue.closed", "LINUX-1", rpDaemon, time.Second, map[string]any{"key": "LINUX-1", "status": "done", "title": "one"}),
-		rpEvent(2, "child.status", "LINUX-9", rpDaemon, time.Second, map[string]any{}),
+		rpEvent(1, "issue.closed", "ACME-1", rpDaemon, time.Second, map[string]any{"key": "ACME-1", "status": "done", "title": "one"}),
+		rpEvent(2, "child.status", "ACME-9", rpDaemon, time.Second, map[string]any{}),
 	}, nil))
 	wantRoutes(t, a, []string{"GET /api/v1/issues/{key} [daemon]"}, []string{"PATCH /api/v1/issues/{key} [daemon]"})
 }
@@ -369,7 +369,7 @@ func TestReplayDaemonWrites(t *testing.T) {
 func TestReplayOtherUpdateSendsChangedFields(t *testing.T) {
 	p := rpPlan(t, rpOptions(), []string{
 		rpIssueUpdate(1, rpSession, map[string]any{"title": "renamed", "assignee": "x"}),
-		rpEvent(2, "issue.updated", "LINUX-1", rpSession, 2*time.Second, map[string]any{"key": "LINUX-1", "title": "renamed", "status": "open",
+		rpEvent(2, "issue.updated", "ACME-1", rpSession, 2*time.Second, map[string]any{"key": "ACME-1", "title": "renamed", "status": "open",
 			"parent": nil, "priority": nil, "labels": []string{"a"}, "route": nil, "blocked_by": []string{}, "assignee": "y"}),
 	}, nil)
 	if len(p.Actions) != 2 {
@@ -387,8 +387,8 @@ func TestReplayOtherUpdateSendsChangedFields(t *testing.T) {
 
 func TestReplayIssueCreated(t *testing.T) {
 	p := rpPlan(t, rpOptions(), []string{
-		rpEvent(1, "issue.created", "LINUX-3", rpSession, time.Second, map[string]any{"key": "LINUX-3", "title": "new", "parent": "LINUX-1", "primary_artifact_id": "D3"}),
-		rpEvent(2, "artifact.version", "LINUX-3", rpSession, 2*time.Second, map[string]any{"artifact_id": "D3", "name": "spec",
+		rpEvent(1, "issue.created", "ACME-3", rpSession, time.Second, map[string]any{"key": "ACME-3", "title": "new", "parent": "ACME-1", "primary_artifact_id": "D3"}),
+		rpEvent(2, "artifact.version", "ACME-3", rpSession, 2*time.Second, map[string]any{"artifact_id": "D3", "name": "spec",
 			"version": map[string]any{"number": 2, "named": false, "size": 777}}),
 	}, nil)
 	a := p.Actions[0]
@@ -398,13 +398,13 @@ func TestReplayIssueCreated(t *testing.T) {
 	wantRoutes(t, a, []string{"POST /api/v1/issues [issue-create]"}, []string{"GET /api/v1/projects/{project}/architecture-sources [issue-create]"},
 		[]string{"GET /api/v1/projects/{project}/architecture-source [issue-create]"})
 	b := a.Stages[0][0].Body
-	if len(b["spec"].(string)) != 777 || b["parent"] != (replayRef{idIssue, "LINUX-1"}) || b["force"] != true || b["project"] != "LINUX" {
+	if len(b["spec"].(string)) != 777 || b["parent"] != (replayRef{idIssue, "ACME-1"}) || b["force"] != true || b["project"] != "ACME" {
 		t.Fatalf("spec %d bytes, parent %v", len(b["spec"].(string)), b["parent"])
 	}
 	if a.Stages[1][0].Tolerate != http.StatusNotFound || p.Counts.SpecSizes["first_version"] != 1 {
 		t.Fatal("architecture-sources must tolerate 404; the spec's size is its first logged version's")
 	}
-	wantProduce := []replayProduce{{Ref: replayRef{idIssue, "LINUX-3"}, Field: "key"}, {Ref: replayRef{idArtifact, "D3"}, Field: "primary_artifact_id"}}
+	wantProduce := []replayProduce{{Ref: replayRef{idIssue, "ACME-3"}, Field: "key"}, {Ref: replayRef{idArtifact, "D3"}, Field: "primary_artifact_id"}}
 	if !reflect.DeepEqual(a.Stages[0][0].Produces, wantProduce) {
 		t.Fatalf("produces %v", a.Stages[0][0].Produces)
 	}
@@ -413,16 +413,16 @@ func TestReplayIssueCreated(t *testing.T) {
 func TestReplayIssueCreatedVersion1Spec(t *testing.T) {
 	text := "Created spec version one, for the test.\n"
 	lines := []string{
-		rpEvent(1, "issue.created", "LINUX-3", rpSession, time.Second, map[string]any{"key": "LINUX-3", "title": "new", "primary_artifact_id": "D3"}),
-		rpEvent(2, "artifact.version", "LINUX-3", rpSession, 2*time.Second, map[string]any{"artifact_id": "D3", "name": "spec",
+		rpEvent(1, "issue.created", "ACME-3", rpSession, time.Second, map[string]any{"key": "ACME-3", "title": "new", "primary_artifact_id": "D3"}),
+		rpEvent(2, "artifact.version", "ACME-3", rpSession, 2*time.Second, map[string]any{"artifact_id": "D3", "name": "spec",
 			"version": map[string]any{"number": 2, "named": false, "size": 777}}),
 		// No primary_artifact_id: the bundle's created_specs names the spec.
-		rpEvent(3, "issue.created", "LINUX-4", rpSession, 3*time.Second, map[string]any{"key": "LINUX-4", "title": "newer"}),
+		rpEvent(3, "issue.created", "ACME-4", rpSession, 3*time.Second, map[string]any{"key": "ACME-4", "title": "newer"}),
 		// No readable version 1: a synthetic spec of the created documents' median.
-		rpEvent(4, "issue.created", "LINUX-5", rpSession, 4*time.Second, map[string]any{"key": "LINUX-5", "title": "newest", "primary_artifact_id": "D5"}),
+		rpEvent(4, "issue.created", "ACME-5", rpSession, 4*time.Second, map[string]any{"key": "ACME-5", "title": "newest", "primary_artifact_id": "D5"}),
 	}
 	b := rpBundle(t, rpState(), lines, map[string]string{"created-docs/D3.md": text, "created-docs/D4.md": text + text})
-	b.Meta.CreatedSpecs = map[string]string{"LINUX-3": "D3", "LINUX-4": "D4"}
+	b.Meta.CreatedSpecs = map[string]string{"ACME-3": "D3", "ACME-4": "D4"}
 	p, err := planReplay(b, rpOptions())
 	if err != nil {
 		t.Fatal(err)
@@ -433,17 +433,17 @@ func TestReplayIssueCreatedVersion1Spec(t *testing.T) {
 			creates[a.Issue] = a
 		}
 	}
-	if got := creates["LINUX-3"].Stages[0][0].Body["spec"]; got != text {
-		t.Fatalf("LINUX-3 spec %q, want its version 1", got)
+	if got := creates["ACME-3"].Stages[0][0].Body["spec"]; got != text {
+		t.Fatalf("ACME-3 spec %q, want its version 1", got)
 	}
-	if got := creates["LINUX-4"].Stages[0][0].Body["spec"]; got != text+text {
-		t.Fatalf("LINUX-4 spec %q, want its version 1", got)
+	if got := creates["ACME-4"].Stages[0][0].Body["spec"]; got != text+text {
+		t.Fatalf("ACME-4 spec %q, want its version 1", got)
 	}
-	if got := creates["LINUX-4"].Stages[0][0].Produces[1]; got.Ref != (replayRef{idArtifact, "D4"}) {
-		t.Fatalf("LINUX-4 produces %v, want the created_specs id", got)
+	if got := creates["ACME-4"].Stages[0][0].Produces[1]; got.Ref != (replayRef{idArtifact, "D4"}) {
+		t.Fatalf("ACME-4 produces %v, want the created_specs id", got)
 	}
-	if got := len(creates["LINUX-5"].Stages[0][0].Body["spec"].(string)); got != 4096 {
-		t.Fatalf("LINUX-5 spec %d bytes, want the 4096-byte default", got)
+	if got := len(creates["ACME-5"].Stages[0][0].Body["spec"].(string)); got != 4096 {
+		t.Fatalf("ACME-5 spec %d bytes, want the 4096-byte default", got)
 	}
 	if want := map[string]int{"version1_text": 2, "created_docs_median": 1}; !reflect.DeepEqual(p.Counts.SpecSizes, want) {
 		t.Fatalf("spec sizes %v, want %v", p.Counts.SpecSizes, want)
@@ -452,7 +452,7 @@ func TestReplayIssueCreatedVersion1Spec(t *testing.T) {
 
 func TestReplayDocCreated(t *testing.T) {
 	text := "Created document text for the test, one sentence.\n"
-	a := onlyWrite(t, rpPlan(t, rpOptions(), []string{rpEvent(1, "artifact.created", "LINUX-1", rpSession, time.Second,
+	a := onlyWrite(t, rpPlan(t, rpOptions(), []string{rpEvent(1, "artifact.created", "ACME-1", rpSession, time.Second,
 		map[string]any{"artifact": map[string]any{"id": "D5", "name": "notes", "kind": "doc", "versions": []any{map[string]any{"size": len(text)}}}})},
 		map[string]string{"created-docs/D5.md": text}))
 	wantRoutes(t, a, []string{"POST /api/v1/issues/{key}/artifacts [doc-create]"})
@@ -464,9 +464,9 @@ func TestReplayDocCreated(t *testing.T) {
 func TestReplayFileWrites(t *testing.T) {
 	mime := "image/png"
 	p := rpPlan(t, rpOptions(), []string{
-		rpEvent(1, "artifact.created", "LINUX-2", rpSession, time.Second,
+		rpEvent(1, "artifact.created", "ACME-2", rpSession, time.Second,
 			map[string]any{"artifact": map[string]any{"id": "F7", "name": "pic.png", "kind": "image", "versions": []any{map[string]any{"size": 300, "mime": mime}}}}),
-		rpEvent(2, "artifact.version", "LINUX-2", rpSession, 2*time.Second, map[string]any{"artifact_id": "F2", "name": "blob.bin",
+		rpEvent(2, "artifact.version", "ACME-2", rpSession, 2*time.Second, map[string]any{"artifact_id": "F2", "name": "blob.bin",
 			"version": map[string]any{"number": 2, "named": true, "size": 500, "mime": "application/octet-stream"}}),
 	}, nil)
 	if len(p.Actions) != 2 {
@@ -488,7 +488,7 @@ func TestReplayFileWrites(t *testing.T) {
 }
 
 func TestReplayResolve(t *testing.T) {
-	a := onlyWrite(t, rpPlan(t, rpOptions(), []string{rpEvent(1, "comment.resolved", "LINUX-1", rpSession, time.Second, map[string]any{"id": "C1"})}, nil))
+	a := onlyWrite(t, rpPlan(t, rpOptions(), []string{rpEvent(1, "comment.resolved", "ACME-1", rpSession, time.Second, map[string]any{"id": "C1"})}, nil))
 	wantRoutes(t, a, []string{"POST /api/v1/comments/{id}/resolve [resolve]"})
 	if *a.Stages[0][0].Params["id"].Ref != (replayRef{idComment, "C1"}) {
 		t.Fatal("resolve does not name C1")
@@ -496,17 +496,17 @@ func TestReplayResolve(t *testing.T) {
 }
 
 func TestReplaySessionMessage(t *testing.T) {
-	a := onlyWrite(t, rpPlan(t, rpOptions(), []string{rpEvent(1, "message.created", "LINUX-1", rpSession, time.Second, map[string]any{"body": "m"})}, nil))
+	a := onlyWrite(t, rpPlan(t, rpOptions(), []string{rpEvent(1, "message.created", "ACME-1", rpSession, time.Second, map[string]any{"body": "m"})}, nil))
 	wantRoutes(t, a, []string{"POST /api/v1/issues/{key}/messages [message]"})
 }
 
 func TestReplayAsksAndClaim(t *testing.T) {
 	p := rpPlan(t, rpOptions(), []string{
-		rpEvent(1, "ask.opened", "LINUX-1", rpSession, 1*time.Second, map[string]any{"id": "A1", "question": "q", "kind": "question",
+		rpEvent(1, "ask.opened", "ACME-1", rpSession, 1*time.Second, map[string]any{"id": "A1", "question": "q", "kind": "question",
 			"options": []any{map[string]any{"label": "x"}}, "urgency": "high"}),
-		rpEvent(2, "ask.answered", "LINUX-1", rpUser, 2*time.Second, map[string]any{"id": "A1", "answer": map[string]any{"user": "person-a", "selected": []string{"x"}}}),
-		rpEvent(3, "ask.resolved", "LINUX-1", rpSession, 3*time.Second, map[string]any{"id": "A1", "resolution": map[string]any{"kind": "done", "reason": "r"}}),
-		rpEvent(4, "issue.claimed", "LINUX-1", rpSession, 4*time.Second, map[string]any{"claim": map[string]any{"actor": rpSession}}),
+		rpEvent(2, "ask.answered", "ACME-1", rpUser, 2*time.Second, map[string]any{"id": "A1", "answer": map[string]any{"user": "person-a", "selected": []string{"x"}}}),
+		rpEvent(3, "ask.resolved", "ACME-1", rpSession, 3*time.Second, map[string]any{"id": "A1", "resolution": map[string]any{"kind": "done", "reason": "r"}}),
+		rpEvent(4, "issue.claimed", "ACME-1", rpSession, 4*time.Second, map[string]any{"claim": map[string]any{"actor": rpSession}}),
 	}, nil)
 	want := [][][]string{
 		{{"POST /api/v1/issues/{key}/asks [ask-open]"}},
@@ -528,11 +528,11 @@ func TestReplayAsksAndClaim(t *testing.T) {
 
 func TestReplayDerivedNotSent(t *testing.T) {
 	p := rpPlan(t, rpOptions(), []string{
-		rpEvent(1, "child.status", "LINUX-1", rpSession, time.Second, map[string]any{}),
-		rpEvent(2, "comment.anchor_refreshed", "LINUX-1", rpSession, 2*time.Second, map[string]any{"id": "C1"}),
-		rpEvent(3, "comment.reopened", "LINUX-1", rpSession, 3*time.Second, map[string]any{"id": "C1"}),
-		rpEvent(4, "message.delivery", "LINUX-1", rpSession, 4*time.Second, map[string]any{}),
-		rpEvent(5, "user_state.read", "LINUX-1", rpUser, 5*time.Second, map[string]any{}),
+		rpEvent(1, "child.status", "ACME-1", rpSession, time.Second, map[string]any{}),
+		rpEvent(2, "comment.anchor_refreshed", "ACME-1", rpSession, 2*time.Second, map[string]any{"id": "C1"}),
+		rpEvent(3, "comment.reopened", "ACME-1", rpSession, 3*time.Second, map[string]any{"id": "C1"}),
+		rpEvent(4, "message.delivery", "ACME-1", rpSession, 4*time.Second, map[string]any{}),
+		rpEvent(5, "user_state.read", "ACME-1", rpUser, 5*time.Second, map[string]any{}),
 	}, nil)
 	if p.Counts.Actions != 0 || len(p.Counts.NotSent) != 5 {
 		t.Fatalf("actions %d, not sent %v", p.Counts.Actions, p.Counts.NotSent)
@@ -543,10 +543,10 @@ func TestReplayTransactionGrouping(t *testing.T) {
 	// One actor at one instant is one write; the same instant by another actor is another.
 	p := rpPlan(t, rpOptions(), []string{
 		rpIssueUpdate(1, rpSession, map[string]any{"status": "done"}),
-		rpEvent(2, "child.status", "LINUX-9", rpSession, time.Second, map[string]any{}),
-		rpEvent(3, "comment.created", "LINUX-1", rpUser, time.Second, map[string]any{"id": "C9", "body": "b"}),
-		rpEvent(4, "comment.created", "LINUX-1", rpSession, 2*time.Second, map[string]any{"id": "C10", "body": "b", "reply_to": "C1"}),
-		rpEvent(5, "comment.reopened", "LINUX-1", rpSession, 2*time.Second, map[string]any{"id": "C1"}),
+		rpEvent(2, "child.status", "ACME-9", rpSession, time.Second, map[string]any{}),
+		rpEvent(3, "comment.created", "ACME-1", rpUser, time.Second, map[string]any{"id": "C9", "body": "b"}),
+		rpEvent(4, "comment.created", "ACME-1", rpSession, 2*time.Second, map[string]any{"id": "C10", "body": "b", "reply_to": "C1"}),
+		rpEvent(5, "comment.reopened", "ACME-1", rpSession, 2*time.Second, map[string]any{"id": "C1"}),
 	}, nil)
 	if p.Counts.TransactionsPlanned != 3 || p.Counts.WriteActions != 3 || p.Counts.NotSent["derived:child.status"] != 1 || p.Counts.NotSent["derived:comment.reopened"] != 1 {
 		t.Fatalf("transactions %d writes %d not sent %v", p.Counts.TransactionsPlanned, p.Counts.WriteActions, p.Counts.NotSent)
@@ -567,7 +567,7 @@ func rpManyIssues(t *testing.T, n int) (*replayBundle, map[string]int) {
 	per := map[string]int{}
 	id := int64(0)
 	for i := 3; i < 3+n; i++ {
-		key := "LINUX-" + itoa(i)
+		key := "ACME-" + itoa(i)
 		st.Issues = append(st.Issues, replayIssue{Key: key, Number: i, Exists: true, Title: "t", Status: "open"})
 		for m := range 3 {
 			id++
@@ -631,7 +631,7 @@ func issuesOf(p *replayPlan) []string {
 
 func TestReplaySubWindow(t *testing.T) {
 	line := func(id int64, off time.Duration) string {
-		return rpEvent(id, "comment.created", "LINUX-1", rpSession, off, map[string]any{"id": "X" + itoa(int(id)), "body": "b"})
+		return rpEvent(id, "comment.created", "ACME-1", rpSession, off, map[string]any{"id": "X" + itoa(int(id)), "body": "b"})
 	}
 	o := rpOptions()
 	o.from, o.to = time.Minute, 2*time.Minute
@@ -725,7 +725,7 @@ func TestReplayReadsWithFractionAndMix(t *testing.T) {
 	// On an issue with documents and comments the mix holds for every kind.
 	var lines []string
 	for i := range 2000 {
-		lines = append(lines, rpEvent(int64(i+1), "comment.created", "LINUX-1", rpSession, time.Duration(i)*time.Second, map[string]any{"id": "Z" + itoa(i), "body": "b"}))
+		lines = append(lines, rpEvent(int64(i+1), "comment.created", "ACME-1", rpSession, time.Duration(i)*time.Second, map[string]any{"id": "Z" + itoa(i), "body": "b"}))
 	}
 	o.reads = 1
 	p = rpPlan(t, o, lines, nil)
@@ -753,7 +753,7 @@ func TestReplayReadsWithFractionAndMix(t *testing.T) {
 		t.Fatalf("read sequences\n got %q\nwant %q", seen, want)
 	}
 	// A claimed issue's read also lists the agents.
-	p = rpPlan(t, o, []string{rpEvent(1, "comment.created", "LINUX-2", rpSession, time.Second, map[string]any{"id": "Q", "body": "b"})}, nil)
+	p = rpPlan(t, o, []string{rpEvent(1, "comment.created", "ACME-2", rpSession, time.Second, map[string]any{"id": "Q", "body": "b"})}, nil)
 	if r := p.Actions[0]; r.Kind == rkRead && !slices.Contains(routes(r)[2], "GET /api/v1/agents [read]") {
 		t.Fatalf("read of a session-claimed issue: %q", routes(r))
 	}
@@ -822,14 +822,14 @@ func TestReplaySendResolvesAndSkips(t *testing.T) {
 	}))
 	defer srv.Close()
 	p := rpPlan(t, rpOptions(), []string{
-		rpEvent(1, "comment.created", "LINUX-1", rpSession, time.Second, map[string]any{"id": "N1", "body": "b"}),
-		rpEvent(2, "comment.created", "LINUX-1", rpSession, 2*time.Second, map[string]any{"id": "N2", "body": "b", "reply_to": "N1"}),
-		rpEvent(3, "comment.created", "LINUX-1", rpSession, 3*time.Second, map[string]any{"id": "N3", "body": "b", "reply_to": "UNKNOWN"}),
-		rpEvent(4, "comment.created", "LINUX-1", rpSession, 4*time.Second, map[string]any{"id": "N4", "body": "fail"}),
-		rpEvent(5, "comment.created", "LINUX-1", rpSession, 5*time.Second, map[string]any{"id": "N5", "body": "b", "reply_to": "N4"}),
+		rpEvent(1, "comment.created", "ACME-1", rpSession, time.Second, map[string]any{"id": "N1", "body": "b"}),
+		rpEvent(2, "comment.created", "ACME-1", rpSession, 2*time.Second, map[string]any{"id": "N2", "body": "b", "reply_to": "N1"}),
+		rpEvent(3, "comment.created", "ACME-1", rpSession, 3*time.Second, map[string]any{"id": "N3", "body": "b", "reply_to": "UNKNOWN"}),
+		rpEvent(4, "comment.created", "ACME-1", rpSession, 4*time.Second, map[string]any{"id": "N4", "body": "fail"}),
+		rpEvent(5, "comment.created", "ACME-1", rpSession, 5*time.Second, map[string]any{"id": "N5", "body": "b", "reply_to": "N4"}),
 	}, nil)
 	rr := &replayRun{setup: &replaySetup{plan: p, opt: rpOptions()}, futures: map[replayRef]*replayFuture{},
-		ids: map[[2]string]string{{idIssue, "LINUX-1"}: "LINUX-1"}, writes: map[string]*replayWriteCount{}, skipped: map[string]int{}}
+		ids: map[[2]string]string{{idIssue, "ACME-1"}: "ACME-1"}, writes: map[string]*replayWriteCount{}, skipped: map[string]int{}}
 	for _, a := range p.Actions {
 		if rr.writes[a.Kind] == nil {
 			rr.writes[a.Kind] = &replayWriteCount{}
@@ -867,18 +867,18 @@ func TestReplaySendResolvesAndSkips(t *testing.T) {
 }
 
 func TestReplayRenderArgs(t *testing.T) {
-	is, c := replayRef{idIssue, "LINUX-1"}, replayRef{idComment, "C1"}
-	local := map[replayRef]string{is: "LINUX-1", c: "l-c1"}
+	is, c := replayRef{idIssue, "ACME-1"}, replayRef{idComment, "C1"}
+	local := map[replayRef]string{is: "ACME-1", c: "l-c1"}
 	state := &replayActionState{}
 	state.observe([]byte(`{"last_seq":42,"ask":{"edited_at":"2026-01-01T00:00:00Z"}}`))
 	if got := renderArg(replayArg{After: true}, local, state); got != "32" {
 		t.Fatalf("after %s", got)
 	}
-	if got := renderArg(replayArg{Ref: &is, Sub: &c, URI: true}, local, state); got != "dispatch%3A%2F%2FLINUX-1%2Fcomment%2Fl-c1" {
+	if got := renderArg(replayArg{Ref: &is, Sub: &c, URI: true}, local, state); got != "dispatch%3A%2F%2FACME-1%2Fcomment%2Fl-c1" {
 		t.Fatalf("comment ref %s", got)
 	}
 	body := renderBody(map[string]any{"reply_to": c, "e": replayPrevEditedAt{}, "a": map[string]any{"artifact": is}}, local, state).(map[string]any)
-	if body["reply_to"] != "l-c1" || string(body["e"].(json.RawMessage)) != `"2026-01-01T00:00:00Z"` || body["a"].(map[string]any)["artifact"] != "LINUX-1" {
+	if body["reply_to"] != "l-c1" || string(body["e"].(json.RawMessage)) != `"2026-01-01T00:00:00Z"` || body["a"].(map[string]any)["artifact"] != "ACME-1" {
 		t.Fatalf("body %v", body)
 	}
 }
