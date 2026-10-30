@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-607",
-  "completed": "2026-10-29T22:05:00Z",
+  "completed": "2026-10-30T02:20:00Z",
   "proof": [
+    {
+      "criterion": "Forward merge of main cd5ca7c3 (no rebase) keeps the PR's own diff: one text-only README conflict resolved with both sides kept, migrations renumbered past main's 0144, connection count re-derived",
+      "surface": "jj diff fingerprints, go build/vet in packages/envoy and packages/envoy/infra, go test on the real Postgres 16 test database at the merge head; diff-check comment on the PR",
+      "command": "$TMPDIR/infra607/fp.sh (plain and migration-normalised fingerprints) at bc54fc4f and e8337760; cd packages/envoy && go vet ./... && go vet -tags multiprocess ./cmd/dispatch/ && (cd infra && go vet ./... && go vet -tags natslive ./core/); go test -p 2 -parallel 4 -count=1 -timeout 30m ./internal/dispatch/{store,duty,api,docs,refs}/ one at a time",
+      "observed": "normalised fingerprint 6fa0b746c92d at both heads (plain 9c3fe489e68a -> 9854397f0d59, renumbering only); no line of main's removed; migrations 0145-0151 after main's 0142-0144; ConnectionsPerProcess 64+4+1+13+1+1+4 = 88 = dispatchConnectionsPerPod; vet clean, go.work.sum unchanged; store, duty, docs, refs ok; api ok but for main's rank-collation guard, which refuses this pod's C-locale database. PR comment 6512920542.",
+      "headSha": "e8337760317bebcbaad8ea54cf4e02f62856e76b",
+      "negativeControl": "before the renumbering the merged tree held two migrations at each of 0142, 0143 and 0144; after it, the migrations directory lists main's 0142-0144 and the branch's 0145-0151 with no duplicate number. Main's README paragraph was first renumbered by mistake inside the conflict hunk (its '+' lines were not main's lines verbatim); the diff from main@origin showed it, and the paragraph was restored from main verbatim"
+    },
     {
       "criterion": "Forward merge of main 5455925b (no rebase) keeps the branch's behaviour: one README conflict resolved keeping both sides, migrations renumbered past main's 0141, connection count re-derived",
       "surface": "go build/vet and go test on the real Postgres 16 test database at the merge head; diff-check comment on the PR",
@@ -38,6 +46,7 @@
     }
   ],
   "filesChanged": [
+    "e8337760 (forward merge of main cd5ca7c3): cmd/dispatch/README.md conflict (main's 0142-0144 paragraphs, then the branch's); branch migrations renamed 0142-0148 -> 0145-0151 with every branch-only reference",
     "bc54fc4f (forward merge of main 5455925b): cmd/dispatch/README.md conflict; branch migrations renamed 0141-0147 -> 0142-0148 with every branch reference (migration headers, Go comments/tests, README, AGENTS.md, .dispatch/architecture, pr2391 changelog fragments, learnings)",
     "84d139a3: api/maintenance_test.go (check inside the pass); prose: .dispatch/architecture/dispatch-api.md and dispatch-server.md (maintenance sweep's lease and timer), cmd/dispatch/main.go (four timers), cmd/dispatch/README.md and api/suggestion_outcomes.go (the embedding queue takes no lease either), cmd/dispatch/multiprocess_test.go (why suggestion-outcomes is unobserved)",
     "Forward merge of main 7c2effba (a01bc655): migrations renumbered to 0141-0147; leasePoolSize 13 on main, so ConnectionsPerProcess and dispatchConnectionsPerPod 88; #2397's issue-spec embedding trigger kept (it calls embeddings_enqueue, so it notifies)",
