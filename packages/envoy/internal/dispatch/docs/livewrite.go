@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"weak"
 
 	"github.com/reearth/ygo/crdt"
@@ -61,7 +60,7 @@ type liveWrite struct {
 	// point is the room the transaction's read of the document found, at an exact commit position
 	// (Service.readPoint): its cursor, the durable version the fork's basis stands at, which
 	// gates each append of the write (heldThrough), and seq, the room's updates the fork holds,
-	// which the write stores ahead of its own (Ledger.flushRead). The fork never takes in what the
+	// which the write stores ahead of its own (Ledger.flushThrough). The fork never takes in what the
 	// room commits after that read (forkLive). A cold fork has the zero point: no room behind it,
 	// no update to store, and no cursor to gate its appends (coldFork, appendingCursor).
 	// forkedFrom is the room document that read found, held weakly: a write open across a room's
@@ -95,7 +94,7 @@ type liveWrite struct {
 	// nil while it has stored none: the room holds them already, so they are never published, but
 	// they are this transaction's appends all the same (withOwnAppends).
 	versions []persistence.Version
-	flushed  *roomFlush
+	flushed  *RoomFlush
 	// shadow is the shadow the write's commit left its room (newShadow), until its publish ends:
 	// the publish of its last update names it, so the drain that hands that update over closes
 	// its window (reachShadow).
@@ -340,7 +339,7 @@ func (s *Service) awaitLiveWriter(ctx context.Context, artifactID string) error 
 // Every later call returns that fork as the transaction's operations left it, and takes in nothing
 // the room commits after the read, so each operation of the transaction, and the version it
 // writes, is made on exactly the state its appends follow in the store: the room's updates through
-// the read, which the write stores ahead of its own (Ledger.flushRead), then its own. A browser
+// the read, which the write stores ahead of its own (Ledger.flushThrough), then its own. A browser
 // edit the room commits after the read reaches the write at its publish, and a version at the
 // settlement that follows.
 //
@@ -372,8 +371,11 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 // errForkReleased refuses a write to a document whose transaction's fork is gone and cannot be
 // built again: the write has ended, or an operation abandoned the fork after the transaction had
 // appended and the room has committed since the transaction read it, so the state its appends were
-// made on is no longer anywhere to be read.
-var errForkReleased = errors.New("the transaction can no longer write this document: the write has ended, or an operation failed after it changed the document and the document has changed since")
+// made on is no longer anywhere to be read. It is ErrServiceUnavailable, which is what it is for a
+// caller - this transaction cannot serve the write, and the retry that follows reads the room
+// afresh - rather than the 500 an error that maps to no status becomes (SetBlockAttributes
+// retries in the same transaction, and reaches this when the room has committed since its read).
+var errForkReleased = fmt.Errorf("%w: the transaction can no longer write this document: the write has ended, or an operation failed after it changed the document and the document has changed since", ErrServiceUnavailable)
 
 // rebuildFork builds write's fork again, after an operation abandoned it (applyLive), on the state
 // the transaction's read found and with the transaction's own writes applied: the store's for a
@@ -592,14 +594,10 @@ func (w *liveWrite) heldThrough() int64 {
 // write publishes, so every head read inside its transaction counts them and no cursor does. An
 // accept writes its text change and its margin projection as two appends of one transaction, so
 // without this the second would find the head one past the fork and be refused. The room updates
-// the transaction flushed are its appends too, interleaved with its own by version.
+// the transaction flushed are its appends too, interleaved with its own by version
+// (RoomFlush.appended).
 func (w *liveWrite) withOwnAppends(base int64) int64 {
-	if w.flushed == nil || len(w.flushed.versions) == 0 {
-		return foldAppended(base, w.versions)
-	}
-	appended := slices.Concat(w.versions, w.flushed.versions)
-	slices.Sort(appended)
-	return foldAppended(base, appended)
+	return foldAppended(base, w.flushed.appended(w.versions))
 }
 
 // rendering is the write's rendering of fork - its tree, markdown and offsets - and whether it has

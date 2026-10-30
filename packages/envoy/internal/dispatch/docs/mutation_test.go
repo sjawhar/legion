@@ -585,7 +585,7 @@ func TestNamedVersionCreditsNoAuthorOfAnEditMadeAfterItsForkRead(t *testing.T) {
 
 // A room-backed snapshot bounds the in-flight credits it lists before it reads the room. A browser
 // edit between those steps is in that snapshot, and the snapshot stores its update, with its
-// credit, before it versions (Ledger.storeRead), so the edit's append writes its author to the
+// credit, before it versions (Ledger.flushThrough), so the edit's append writes its author to the
 // pending authors the snapshot then lists: the snapshot credits the author although the credit
 // followed the bound, and no later version credits them again.
 func TestSnapshotCreditsAnEditMadeBetweenItsCreditBoundAndReadOnce(t *testing.T) {

@@ -154,7 +154,7 @@ func (op *liveOperation) change(mutate func() error) (*marginWatch, error) {
 // rendered is the fork's tree as the change left it with that tree's rendering, and contentChanged
 // whether the change moved the rendered markdown, the class its update is appended with. It
 // refuses a live state ygo could not decode (refuseUndecodable), stores the room's updates the
-// write's read point holds ahead of its own (Ledger.flushRead), appends the update, refuses a
+// write's read point holds ahead of its own (Ledger.flushThrough), appends the update, refuses a
 // write whose room failed before that append, keeps the rendering on the transaction's write for a
 // version it writes later, and refreshes the document's anchors against the tree in the same
 // transaction (writeVersionTx). Only once all of that is done is op recorded, so a refusal anywhere
@@ -177,9 +177,9 @@ func (s *Service) recordLiveOperation(ctx context.Context, op *liveOperation, ac
 		return err
 	}
 	// The room's updates the fork holds and the store does not go first, in the room's order, so
-	// this update follows in the store the state it was made on (Ledger.flushRead). A second
+	// this update follows in the store the state it was made on (Ledger.flushThrough). A second
 	// operation of the transaction stores nothing more: the read point never moves.
-	if err := ledgerFrom(ctx).flushRead(ctx, op.write); err != nil {
+	if err := ledgerFrom(ctx).flushThrough(ctx, op.tx, op.write.artifactID, op.write.point); err != nil {
 		return fmt.Errorf("store the room's updates ahead of a live document write: %w", err)
 	}
 	version, err := s.persistence.AppendUpdateTx(ctx, op.tx, op.write.artifactID, update, contentChanged)
@@ -1580,7 +1580,7 @@ func (s *Service) registerStampedAskBlocks(ctx context.Context, room string, sta
 // which every write to the pending authors and every in-flight credit's landing hold, so the
 // authors it reads stay where it read them until the version's transaction ends. It reads the room
 // at an exact commit position (readPoint) and stores every update of the room through it that no
-// writer has stored yet before the version (Ledger.storeRead), so the version's
+// writer has stored yet before the version (Ledger.flushThrough), so the version's
 // doc_update_version, the head it reads in this transaction, holds every update its text does.
 // It lists the pending authors it reads after those appends, which wrote the authors of the
 // updates they stored, and the in-flight credits observed before its read: a credit observed
@@ -1649,7 +1649,7 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	var tree *pmdoc.Node
 	if behind {
 		tree, err = s.storedTree(ctx, room)
-	} else if err = ledgerFrom(ctx).storeRead(ctx, tx, room, point); err == nil {
+	} else if err = ledgerFrom(ctx).flushThrough(ctx, tx, room, point); err == nil {
 		tree, err = stateTree(read)
 	}
 	if err != nil {
@@ -1672,7 +1672,7 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 // captureWrite is captureLiveTextAndAuthors for a transaction with a write of its own to room: the
 // version records the write's own state, its fork as the write's last operation left it, which
 // holds the room as the write's one read found it (forkLive) and nothing the room committed after
-// that read. The write stores that read's room updates ahead of its own (Ledger.flushRead), so the
+// that read. The write stores that read's room updates ahead of its own (Ledger.flushThrough), so the
 // state is the fold of the stored updates through the write's last, the version's
 // doc_update_version (writeVersionTx reads it in this transaction, whose last append is the
 // write's). A browser edit the room committed after the read is in no update stored before the
@@ -1691,7 +1691,7 @@ func (s *Service) captureWrite(ctx context.Context, tx pgx.Tx, room string, writ
 	if err != nil {
 		return renderedTree{}, authorCapture{}, err
 	}
-	if err := ledgerFrom(ctx).flushRead(ctx, write); err != nil {
+	if err := ledgerFrom(ctx).flushThrough(ctx, tx, room, write.point); err != nil {
 		return renderedTree{}, authorCapture{}, fmt.Errorf("store the room's updates ahead of a version: %w", err)
 	}
 	capture, err := s.capturePendingAuthors(ctx, tx, room, write, actor, write.forkSeq)

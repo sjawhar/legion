@@ -68,12 +68,15 @@ type Deps struct {
 }
 
 // VersionedStore is Dispatch's transactional extension of ygo's durable room
-// store. AppendUpdateWithCredit is the one way a room's own persistence reaches the store: it
-// appends the update, classified as content or not, with the browser edit's in-flight credit, which
-// it takes and lands under the document's advisory lock (UpdateCredit), after the room's earlier
-// updates no writer has stored yet (flushThrough). AppendRoomUpdateTx appends one of those room
-// updates inside a durable writer's transaction, with the class and credit the room's update
-// observer recorded for it (flushThrough). Document writes that join an API transaction use
+// store. AppendRoomFlush is the one way a room's own persistence reaches the store for an update
+// its update observer classified: in one transaction, under the document's advisory lock, it
+// stores every update of the room instance through that one's commit position that no writer has
+// stored yet, the handed update last (flushThrough), each with the class and the in-flight credit
+// the observer recorded for it (UpdateCredit, taken and landed under that lock).
+// AppendUpdateWithCredit appends one update of a room the same way, which is what the room's
+// persistence does with an update no class was recorded for. AppendRoomUpdateTx appends one
+// update of such a flush inside a durable writer's transaction, gated on the flush
+// (flushThrough). Document writes that join an API transaction use
 // AppendUpdateTx, classifying the update the way the room's update observer
 // classifies a live one. RebuildTx replaces an unreadable history inside the rebuild's
 // transaction, through the same persistence boundary as its preflight load. Head is the version
@@ -83,8 +86,9 @@ type Deps struct {
 // caches its rendering by (coldRead).
 type VersionedStore interface {
 	persistence.VersionedPersistence
+	AppendRoomFlush(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit) (persistence.Version, error)
 	AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error)
-	AppendRoomUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error)
+	AppendRoomUpdateTx(ctx context.Context, tx pgx.Tx, room string, flush *RoomFlush, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error)
 	AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error)
 	RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error)
 	Head(ctx context.Context, room string) (persistence.Version, error)
@@ -1208,7 +1212,7 @@ type settlementRead struct {
 
 // readSettlementTree is a read of doc, the room instance a settlement holds, for that settlement:
 // the room at an exact commit position (readPoint), every update of the instance through which the
-// settlement stores before it versions the read (Ledger.storeRead), so the version holds no update
+// settlement stores before it versions the read (Ledger.flushThrough), so the version holds no update
 // the store lacks at the head it records. It bounds first the in-flight credits that
 // version lists: an update observer credits a change only once the room holds it, so each credit
 // observed before the read is for a change the read holds. afterTake runs between that bound and
@@ -1242,7 +1246,7 @@ func (s *Service) readSettlementTree(state *roomState, doc *crdt.Doc, room strin
 // (settlementAuthors): the pending authors and the document's latest person sender, both read in
 // tx under the document's advisory lock, and the room's in-flight credits no committed version has
 // listed that were observed before the read. Taken once the settlement has stored the room's
-// updates through the read (Ledger.storeRead), the pending authors hold the authors those appends
+// updates through the read (Ledger.flushThrough), the pending authors hold the authors those appends
 // wrote, so a credit observed after the bound whose update the settlement stored is listed too;
 // one whose update the read lacks stays pending for the next version.
 func settlementCredit(ctx context.Context, tx pgx.Tx, state *roomState, room string, read settlementRead) (settlementVersionCredit, error) {
@@ -1492,7 +1496,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	//
 	// The cursor is the one this settlement marked its context with, read through the accessor
 	// its repairs' appends read (appendingCursor), so the two can never disagree.
-	if err := refuseRoomBehindHead(room, appendingCursor(ctx, room), head); err != nil {
+	if err := refuseRoomBehindHead(room, appendingCursor(ctx, room, nil), head); err != nil {
 		// The rollback releases the document's advisory lock, which the room's close needs: a close
 		// flushes the room's persistence, whose appends take that lock.
 		_ = tx.Rollback(ctx)
@@ -1661,7 +1665,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// updates through its read, then each repair it wrote into the room after the room's updates
 	// before it (storeRepair), then, for a settlement that wrote any, the room's updates through the
 	// read its version is rendered from.
-	if err := ledger.storeRead(ctx, tx, room, first.point); err != nil {
+	if err := ledger.flushThrough(ctx, tx, room, first.point); err != nil {
 		return abandon(fmt.Errorf("store the room's updates through the settlement's read: %w", err))
 	}
 	if stamp != nil {
@@ -1702,7 +1706,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		if versionRead, err = s.readSettlementTree(state, doc, room, s.afterSettleAuthorsTake, true); err != nil {
 			return abandon(err)
 		}
-		if err := ledger.storeRead(ctx, tx, room, versionRead.point); err != nil {
+		if err := ledger.flushThrough(ctx, tx, room, versionRead.point); err != nil {
 			return abandon(fmt.Errorf("store the room's updates through the settlement's version read: %w", err))
 		}
 		versioned = versionRead.tree
@@ -1895,10 +1899,8 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 func (s *Service) commitSettlement(ctx context.Context, tx pgx.Tx, ledger *Ledger, room string, committed authorCapture, ended func(error)) (advanced bool, err error) {
 	captures := []roomCapture{{room: room, capture: committed}}
 	if flush := ledger.flushFor(room); flush != nil {
-		appended := flush.appended()
-		for _, version := range appended {
-			advanceRoomCursor(flush.cursor, version)
-		}
+		appended := flush.appended(nil)
+		advanceRoomCursorThrough(flush.cursor, appended)
 		advanced = len(appended) > 0
 		captures = append(captures, flushCapture(flush))
 	}
@@ -2232,8 +2234,8 @@ func (s *Service) ScheduleSettlement(artifactID string) {
 }
 
 // SettleNow arms the document's settlement to run at once rather than at the end of the settle
-// window, as a settlement retry is armed (retrySettleSoon): it replaces the timer a write armed, and
-// a settlement with nothing owed writes nothing. Nothing in production calls it. It exists for
+// window (settleAfter with no delay): it replaces the timer a write armed, and a settlement with
+// nothing owed writes nothing. Nothing in production calls it. It exists for
 // tests that hold a write unsettled across a window wide enough to land another write in it: once
 // that write has landed, the test settles the document now instead of waiting the window out.
 func (s *Service) SettleNow(artifactID string) {
@@ -2289,10 +2291,6 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 	}
 
 	backfillCtx := withOwnerVerified(ctx)
-	// The backfill writes the same closure the settlement does, so its row is classified the same
-	// way: stamping a block a rendering never names changes no text, while re-minting a typed
-	// block's repeated id changes the `#id` its directive carries.
-	var stampedChanged bool
 	var renamed []stampedAsk
 	// The cursor of the room instance the stamp is written into, taken inside the Apply that
 	// holds that instance: the backfill appends a durable version of its own below, and a room
@@ -2310,14 +2308,12 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 		if s.afterBackfillRead != nil {
 			s.afterBackfillRead(artifactID)
 		}
-		before, beforeErr := renderTree(read)
-		stamped, minted, stampRenamed, err := stampBlockIDs(doc, origin)
+		_, minted, stampRenamed, err := stampBlockIDs(doc, origin)
 		report.Stamped = minted
 		renamed = stampRenamed
 		if err != nil {
 			return false, err
 		}
-		stampedChanged = closureChangedMarkdown(before, beforeErr, stamped)
 		return minted > 0, nil
 	})
 	if slot == nil {
@@ -2344,19 +2340,29 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 	if err := s.srv.BroadcastUpdate(backfillCtx, artifactID, update); err != nil {
 		return abandon(fmt.Errorf("broadcast identity update: %w", err))
 	}
-	tx, err := s.store.Pool.Begin(ctx)
+	// The stamp is stored the way a settlement stores its own: every update of the room instance
+	// this process has not stored yet first, in the room's commit order, then the stamp, with the
+	// class the room measured for it (storeRepair), and the commit takes that instance through
+	// the versions the transaction appended (commitSettlement). The ledger is settlement's shape,
+	// a transaction no caller joined, because this one is the backfill's own.
+	//
+	// The transaction takes the document's advisory lock at its first append rather than before
+	// it reads the room's queue, which is the one way this writer is not the settlement: the
+	// backfill is a command, and the service its subcommand builds serves no browser
+	// (cmd/dispatch/subcommands.go), so no room of this process commits between the two. The
+	// window that leaves is the one
+	// TestARoomLoadingWhileAStampCommitsStandsBehindTheHeadAndReloads holds open.
+	ledger := &Ledger{service: s, settling: true}
+	storeCtx := withRoomCursor(withLedger(ctx, ledger), cursor)
+	tx, err := s.store.Pool.Begin(storeCtx)
 	if err != nil {
 		return abandon(fmt.Errorf("begin document transaction: %w", err))
 	}
-	defer tx.Rollback(ctx)
-	stamped, err := s.persistence.AppendUpdateTx(withRoomCursor(ctx, cursor), tx, artifactID, update, stampedChanged)
-	if err != nil {
+	defer tx.Rollback(storeCtx)
+	if err := ledger.storeRepair(storeCtx, tx, artifactID, cursor, update); err != nil {
 		return abandon(fmt.Errorf("append identity update: %w", err))
 	}
-	// The stamp is in the room, so that instance takes the version it is stored at, under the
-	// advisory lock this transaction holds until it commits. A rollback fails the room (abandon).
-	advanceRoomCursor(cursor, stamped)
-	if err := tx.Commit(ctx); err != nil {
+	if _, err := s.commitSettlement(storeCtx, tx, ledger, artifactID, authorCapture{}, nil); err != nil {
 		return abandon(fmt.Errorf("commit identity update: %w", err))
 	}
 	s.finishSuppressedPersistence(slot, update)

@@ -1506,7 +1506,10 @@ order must give every row's `content_changed` (measured against the render the r
 to, true when either side does not render) and every version's markdown at its
 `doc_update_version`, and no row may leave the fold holding parked structs. It reads
 `DATABASE_URL` as the other subcommands do and runs no migration; with no `--artifact` it checks
-every document. Each document is read in one repeatable-read transaction.
+every document. Each document is read in one repeatable-read transaction, which stays open while
+the check renders the document at every checked update: tens of thousands of updates hold one
+snapshot for minutes, and an open snapshot on the primary holds back vacuum. On production, pass
+`--since` or point `DATABASE_URL` at a read replica.
 
 The oldest retained row is the base: compaction folds older history into it and a rebuild seeds
 the history there, so its own class is not checked and a version recorded before it is skipped. A

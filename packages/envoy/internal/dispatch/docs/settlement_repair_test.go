@@ -216,7 +216,7 @@ func latestVersionAuthors(t *testing.T, service *Service, artifactID string) []m
 // A repairing settlement's version holds a browser's edit the room took during the settlement's
 // database work, and the settlement stores that edit's update itself, in the room's commit order:
 // before the repair the room committed after it (storeRepair), and before the version
-// (Ledger.storeRead). The edit's own append waits on the document's lock the settlement holds,
+// (Ledger.flushThrough). The edit's own append waits on the document's lock the settlement holds,
 // so the update is unstored when the repair is appended. The version never stands ahead of the
 // store - the stored updates through its doc_update_version fold to its text, whatever becomes of
 // the edit's own append - and the edit's own settlement finds the document already versioned

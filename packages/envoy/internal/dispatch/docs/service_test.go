@@ -4262,6 +4262,13 @@ func (s failingVersionedStore) AppendUpdateWithCredit(ctx context.Context, room 
 	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
 }
 
+func (s failingVersionedStore) AppendRoomFlush(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit) (persistence.Version, error) {
+	if s.appendErr != nil {
+		return 0, s.appendErr
+	}
+	return s.VersionedStore.AppendRoomFlush(ctx, room, flush, through, credit)
+}
+
 type failingBackfillVersionedStore struct {
 	VersionedStore
 	err error
@@ -4303,6 +4310,14 @@ func (s *blockingFirstAppendStore) AppendUpdateWithCredit(ctx context.Context, r
 		<-s.release
 	}
 	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
+}
+
+func (s *blockingFirstAppendStore) AppendRoomFlush(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit) (persistence.Version, error) {
+	if s.blocked.CompareAndSwap(false, true) {
+		close(s.entered)
+		<-s.release
+	}
+	return s.VersionedStore.AppendRoomFlush(ctx, room, flush, through, credit)
 }
 
 // room is the state the service holds for room now, created when it holds none, for a test to read

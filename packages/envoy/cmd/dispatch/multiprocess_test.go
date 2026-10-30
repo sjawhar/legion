@@ -920,8 +920,9 @@ func TestTheRefusedNotificationClosesARoomThatOwesASettlement(t *testing.T) {
 // (DISPATCH_TEST_SETTLE_DELAY, under the test hooks) is not by itself that removal, and the
 // claim that no settlement of A's can fire under it would be false: s.settle gates only the
 // timer-armed path (scheduleSettleLocked), while settleLastPeer - wired as OnLastPeer - settles
-// at once when the last browser leaves whatever timer is armed, retrySettleSoon re-arms at a
-// fixed 10 ms, and a mark's expiry arms its own. What makes the delay enough here is that the
+// at once when the last browser leaves whatever timer is armed, and a mark's expiry arms its own.
+// A settlement that fails re-arms on the gated path, at A's own delay (retrySettleLocked). What
+// makes the delay enough here is that the
 // close this row measures, the evictor's (closeRoomBehindHead), stops the room's armed settle
 // timer as it reserves the room and arms it again at A's own thirty-minute delay, and that the
 // row then excludes the settlements that could themselves have closed the room: a settlement the

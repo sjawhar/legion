@@ -95,11 +95,11 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 // StoreUpdateContext stores a room's update: it appends, in one transaction under the document's
 // advisory lock, every update of the same room instance its update observer recorded before this
 // one and no writer has stored yet, then this one, in the room's commit order, each with the
-// in-flight credit and the class its observer recorded (flushThrough). So the order ygo's
-// persistence hands updates on in never decides the order they are stored in, and an update
-// another writer stored first is skipped. Each append is gated on that observer's record of which
-// room instance the update was made in (documentUpdateClass.cursor) standing at the durable head,
-// and advances it when it commits (appendUpdate). An update that never reaches the store - its
+// in-flight credit and the class its observer recorded (AppendRoomFlush, flushThrough). So the
+// order ygo's persistence hands updates on in never decides the order they are stored in, and an
+// update another writer stored first is skipped. Each append is gated on that observer's record of
+// which room instance the update was made in (documentUpdateClass.cursor) standing at the durable
+// head, and advances it when it commits. An update that never reaches the store - its
 // room failed, or a live write or a settlement already made it durable - lands its credit here
 // instead: the room drops it with the update, which the browser resends.
 func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room string, update []byte) error {
@@ -134,12 +134,24 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 		return nil
 	}
 	ctx = withRoomCursor(ctx, class.cursor)
-	var flush *roomFlush
-	if found {
-		flush = &roomFlush{room: room, cursor: class.cursor}
-		ctx = withWorkerFlush(ctx, a.service, flush, class.seq)
+	if !found {
+		// An update no class was recorded for is stored on its own: the room's queue holds
+		// nothing to flush it with, and the gate reads the cursor marked above.
+		if _, err := a.store.AppendUpdateWithCredit(ctx, room, update, class.contentChanged, class.credit); err != nil {
+			a.service.failRoom(room, err)
+			return err
+		}
+		return nil
 	}
-	if _, err := a.store.AppendUpdateWithCredit(ctx, room, update, class.contentChanged, class.credit); err != nil {
+	// The update must read back into a fresh copy before anything of the room's is stored, as a
+	// single append checks (PgVersioned.appendUpdate): one the room took but a copy cannot decode
+	// fails the room, which reloads the document from the store.
+	if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
+		a.service.failRoom(room, err)
+		return err
+	}
+	flush := &RoomFlush{service: a.service, room: room, cursor: class.cursor}
+	if _, err := a.store.AppendRoomFlush(ctx, room, flush, class.seq, class.credit); err != nil {
 		a.service.failRoom(room, err)
 		return err
 	}

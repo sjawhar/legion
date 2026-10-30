@@ -71,7 +71,7 @@ func (w *liveWrite) newShadow() *roomShadow {
 // installShadowLocked makes shadow room's shadow, once the write that left it has committed and
 // before its state, held across that commit (commitConsuming), lets a durable writer queued on the
 // document's advisory lock read the room's queue. It replaces the state's earlier shadow, whose
-// provisional classes the write stored ahead of its own (Ledger.flushRead): each lies before the
+// provisional classes the write stored ahead of its own (Ledger.flushThrough): each lies before the
 // earlier write's last published update, which the write's read held. A cold write's shadow names
 // the instance resident now, else the load under way; with neither, the room that loads next reads
 // the write from the store and needs none. A shadow it does not install lets go of its document,

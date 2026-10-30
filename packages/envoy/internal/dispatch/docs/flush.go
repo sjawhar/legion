@@ -95,20 +95,24 @@ func (s *Service) committedSince(room string, live *crdt.Doc, point roomPoint) b
 	return seq != point.seq
 }
 
-// roomFlush is what one transaction's flushThrough calls stored of one room instance, the one
+// RoomFlush is what one transaction's flushThrough calls stored of one room instance, the one
 // cursor names: the classes, in commit order, with the version each was appended at, the class it
 // was stored with (changed) and the credit its append took (credits; storedClasses). repairs are
 // the versions of the repairs a settlement wrote into the instance and stored between its flushes
 // (storeRepair). state is the record whose queue the classes were last taken from, which a joined
 // transaction's commit holds locked while it commits and marks them (commitConsuming). through is
-// the position through which the transaction has stored every unstored durable class, once ran is
-// set.
-type roomFlush struct {
+// the position through which the transaction has stored every unstored durable class. service is
+// the service the flushed room belongs to, which the store calls back into to run the flush
+// (AppendRoomFlush).
+//
+// It crosses VersionedStore, which a test store outside this package wraps, so it is exported
+// with its fields unexported: such a store can only pass it on, as it can an UpdateCredit.
+type RoomFlush struct {
+	service  *Service
 	room     string
 	cursor   *roomCursor
 	state    *roomState
 	through  uint64
-	ran      bool
 	classes  []*queuedClass
 	versions []persistence.Version
 	changed  []bool
@@ -116,13 +120,19 @@ type roomFlush struct {
 	repairs  []persistence.Version
 }
 
-// appended is every version the flush's transaction appended for the instance, ascending: the room
-// updates it flushed and the repairs it stored between them.
-func (f *roomFlush) appended() []persistence.Version {
-	if len(f.repairs) == 0 {
+// appended is the run of versions one transaction appended for the instance, ascending: the room
+// updates the flush stored, the repairs it stored between them, and own, the versions the caller
+// appended for that same instance itself - a write's of this transaction (withOwnAppends,
+// takeRoomCursors). It is the one fold of the two, which every reader of what a transaction
+// appended for one room instance takes. A nil flush stored none of them, so the run is own alone.
+func (f *RoomFlush) appended(own []persistence.Version) []persistence.Version {
+	if f == nil || (len(f.versions) == 0 && len(f.repairs) == 0) {
+		return own
+	}
+	if len(f.repairs) == 0 && len(own) == 0 {
 		return f.versions
 	}
-	appended := slices.Concat(f.versions, f.repairs)
+	appended := slices.Concat(f.versions, f.repairs, own)
 	slices.Sort(appended)
 	return appended
 }
@@ -131,14 +141,14 @@ func (f *roomFlush) appended() []persistence.Version {
 // flush's transaction sees it: the instance's cursor with the versions the transaction has
 // appended for it folded in (appended), which gates each next append of the flush
 // (appendingCursor).
-func (f *roomFlush) heldThrough() int64 {
-	return foldAppended(f.cursor.heldThrough(), f.appended())
+func (f *RoomFlush) heldThrough() int64 {
+	return foldAppended(f.cursor.heldThrough(), f.appended(nil))
 }
 
 // storedContentChange reports whether f stored an update as a change to the document's content,
 // for which a settlement is owed, whether or not the room's shadow measured it again. A nil flush
 // stored nothing.
-func (f *roomFlush) storedContentChange() bool {
+func (f *RoomFlush) storedContentChange() bool {
 	return f != nil && slices.Contains(f.changed, true)
 }
 
@@ -151,15 +161,6 @@ func foldAppended(base int64, versions []persistence.Version) int64 {
 		}
 	}
 	return base
-}
-
-// flushGateContextKey marks the context of flushThrough's appends with the flush they belong to,
-// whose instance gates them (appendingCursor).
-type flushGateContextKey struct{}
-
-func flushGateFrom(ctx context.Context) *roomFlush {
-	flush, _ := ctx.Value(flushGateContextKey{}).(*roomFlush)
-	return flush
 }
 
 // flushThrough stores, in tx, every update of flush's room instance that its update observer
@@ -175,8 +176,10 @@ func flushGateFrom(ctx context.Context) *roomFlush {
 // before its own append. The classes are read under that lock, and every writer marks what it
 // stored before the lock passes on, so no update is stored twice. Every class is measured before
 // the first append: between its appends it renders and decodes nothing, so it is the lock, the
-// read of the room's queue, the measures, and the appends.
-func (s *Service) flushThrough(ctx context.Context, tx pgx.Tx, flush *roomFlush, through uint64) error {
+// read of the room's queue, the measures, and the appends. The one caller that takes the lock at
+// the first append here instead is the block-id backfill, a command whose service serves no
+// browser, so nothing commits into its rooms between the two (backfillBlockIDs).
+func (s *Service) flushThrough(ctx context.Context, tx pgx.Tx, flush *RoomFlush, through uint64) error {
 	state := s.lockExistingState(flush.room)
 	if state == nil {
 		return nil
@@ -184,7 +187,7 @@ func (s *Service) flushThrough(ctx context.Context, tx pgx.Tx, flush *roomFlush,
 	var taking []*queuedClass
 	for _, class := range state.updateClasses {
 		if class.cursor != flush.cursor || !class.durable || class.seq > through || class.stored.Load() ||
-			(flush.ran && class.seq <= flush.through) {
+			class.seq <= flush.through {
 			continue
 		}
 		taking = append(taking, class)
@@ -193,11 +196,9 @@ func (s *Service) flushThrough(ctx context.Context, tx pgx.Tx, flush *roomFlush,
 	s.unlockState(flush.room, state)
 	flush.state = state
 	flush.through = max(flush.through, through)
-	flush.ran = true
 	stored := storedClasses(flush.room, window, taking)
-	gated := context.WithValue(ctx, flushGateContextKey{}, flush)
 	for index, class := range taking {
-		version, err := s.persistence.AppendRoomUpdateTx(gated, tx, flush.room, class.update, stored[index].changed, stored[index].credit)
+		version, err := s.persistence.AppendRoomUpdateTx(ctx, tx, flush.room, flush, class.update, stored[index].changed, stored[index].credit)
 		if err != nil {
 			return err
 		}
@@ -215,7 +216,7 @@ func (s *Service) flushThrough(ctx context.Context, tx pgx.Tx, flush *roomFlush,
 // update as no change. A credit whose state locked reports its caller holds lands through
 // landedLocked; the others are returned, for the caller to land once it holds no state lock. A nil
 // locked holds none.
-func (f *roomFlush) markStored(locked func(*roomState) bool) (unlanded []*UpdateCredit) {
+func (f *RoomFlush) markStored(locked func(*roomState) bool) (unlanded []*UpdateCredit) {
 	for index, class := range f.classes {
 		class.stored.Store(true)
 		f.credits[index].held(f.versions[index])
@@ -232,27 +233,6 @@ func (f *roomFlush) markStored(locked func(*roomState) bool) (unlanded []*Update
 	return unlanded
 }
 
-// workerFlush is the flush the room's persistence runs for its own update (StoreUpdateContext):
-// through is that update's commit position.
-type workerFlush struct {
-	service *Service
-	flush   *roomFlush
-	through uint64
-}
-
-type workerFlushContextKey struct{}
-
-// withWorkerFlush marks ctx, the context of the room's persistence's append of its own update, with
-// the flush that append runs in its transaction (PgVersioned.appendFlushing).
-func withWorkerFlush(ctx context.Context, service *Service, flush *roomFlush, through uint64) context.Context {
-	return context.WithValue(ctx, workerFlushContextKey{}, &workerFlush{service: service, flush: flush, through: through})
-}
-
-func workerFlushFrom(ctx context.Context) *workerFlush {
-	worker, _ := ctx.Value(workerFlushContextKey{}).(*workerFlush)
-	return worker
-}
-
 // flushThrough is Service.flushThrough for a transaction joined to l (or settlement's own), which
 // keeps one flush per document for the whole transaction: its commit advances the instance's
 // cursor with the versions the flush appended (takeRoomCursors), marks the classes stored
@@ -260,10 +240,21 @@ func workerFlushFrom(ctx context.Context) *workerFlush {
 // same transaction to the document folds them into the head it is gated on (withOwnAppends). A
 // transaction flushes one instance of a document: a later read point of another instance, one
 // that replaced the room since, is refused, as the gate would refuse its appends.
+//
+// It is what every writer that records durable state without a write of its own - a settlement's
+// version, a snapshot's, a named version's, a repair's (storeRepair) - stores before it records
+// the room's state at a read point of it (readPoint): the stored updates then fold to that state,
+// so the head after them, which the version records as its doc_update_version, holds every update
+// its text does. A write of its own stores them ahead of its first append, for the same reason
+// (recordLiveOperation). A point of no room instance has nothing unstored and stores nothing: a
+// cold fork, read from the store, and a document no room of this process holds.
 func (l *Ledger) flushThrough(ctx context.Context, tx pgx.Tx, room string, through roomPoint) error {
+	if through.cursor == nil {
+		return nil
+	}
 	flush := l.flushFor(room)
 	if flush == nil {
-		flush = &roomFlush{room: room, cursor: through.cursor}
+		flush = &RoomFlush{service: l.service, room: room, cursor: through.cursor}
 		l.flushes = append(l.flushes, flush)
 		if write := l.liveWriteFor(room); write != nil {
 			write.flushed = flush
@@ -274,20 +265,9 @@ func (l *Ledger) flushThrough(ctx context.Context, tx pgx.Tx, room string, throu
 	return l.service.flushThrough(ctx, tx, flush, through.seq)
 }
 
-// flushRead stores, in l's transaction, the room's updates through write's read point that no
-// writer has stored yet (flushThrough): what write's fork holds beyond the store, stored ahead of
-// every append of the write, so the write's own updates follow, in the store, the very
-// state they were made on. The write holds the document's advisory lock from that read on
-// (readFork), so nothing it stores here can have been stored by another writer since. A second
-// call stores nothing more, since the point never moves (forkLive). A cold fork has no read point
-// and stores nothing: it was read from the store.
-func (l *Ledger) flushRead(ctx context.Context, write *liveWrite) error {
-	return l.storeRead(ctx, l.tx, write.artifactID, write.point)
-}
-
 // flushFor is the flush this transaction keeps for room, nil while it has flushed nothing of it
 // and for no transaction at all.
-func (l *Ledger) flushFor(room string) *roomFlush {
+func (l *Ledger) flushFor(room string) *RoomFlush {
 	if l == nil {
 		return nil
 	}
@@ -299,20 +279,6 @@ func (l *Ledger) flushFor(room string) *roomFlush {
 	return nil
 }
 
-// storeRead stores, in l's transaction, every update of room through point, a read point of it
-// (readPoint), that no writer has stored yet (flushThrough): what a version written without a write
-// of its own - a settlement's, a snapshot's, a named version's - does before it records the room's
-// state at point. The stored updates then fold to that state, so the head after them,
-// which the version records as its doc_update_version, holds every update its text does. A point
-// of no room instance stores nothing: no update of it was recorded. The caller holds the
-// document's advisory lock in tx from before point was read.
-func (l *Ledger) storeRead(ctx context.Context, tx pgx.Tx, room string, point roomPoint) error {
-	if point.cursor == nil {
-		return nil
-	}
-	return l.flushThrough(ctx, tx, room, point)
-}
-
 // errUnclassifiedRepair refuses to store a repair whose commit position in its room is unknown:
 // the room's update observer recorded no class for it (classifyDrained).
 var errUnclassifiedRepair = errors.New("the room recorded no class for a repair written into it")
@@ -322,7 +288,7 @@ var errUnclassifiedRepair = errors.New("the room recorded no class for a repair 
 // the room committed before it that no writer has stored first (flushThrough), then the repair,
 // with the class the room measured for it (repairClass). Stored ahead of those updates, the repair
 // would sit before updates made without it, and they after it. Its version joins the flush's
-// (roomFlush.repairs), which gate the transaction's later appends and which the instance takes in
+// (RoomFlush.repairs), which gate the transaction's later appends and which the instance takes in
 // just before the settlement commits (commitSettlement): a settlement can still end without
 // committing - its room closed under it - and the room's persistence then stores the room's
 // updates against the head the store still stands at.

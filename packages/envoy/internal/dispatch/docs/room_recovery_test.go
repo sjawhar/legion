@@ -667,6 +667,13 @@ func (s *failingBrowserAppendStore) AppendUpdateWithCredit(ctx context.Context, 
 	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
 }
 
+func (s *failingBrowserAppendStore) AppendRoomFlush(ctx context.Context, room string, flush *RoomFlush, through uint64, credit *UpdateCredit) (persistence.Version, error) {
+	if err := s.fail(); err != nil {
+		return 0, err
+	}
+	return s.VersionedStore.AppendRoomFlush(ctx, room, flush, through, credit)
+}
+
 func (s *failingBrowserAppendStore) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {
 	if hook := s.beforeTx.Swap(nil); hook != nil {
 		(*hook)()

@@ -1,7 +1,6 @@
 package docs
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -51,7 +50,7 @@ type Ledger struct {
 	copies []string
 	// flushes are the room updates this transaction stored ahead of its own appends, one flush
 	// per document (flushThrough), which its commit marks stored.
-	flushes []*roomFlush
+	flushes []*RoomFlush
 }
 
 type ledgerVersion struct {
@@ -231,31 +230,24 @@ func (l *Ledger) commit(ctx context.Context) error {
 // The room updates the transaction flushed (flushThrough) are already in the instance they were
 // made in, and only there: they advance that instance's cursor and reach no other, as a repair's
 // append does (advanceRoomCursor). A flush and a write of one instance interleave their versions
-// (an operation's flush, its append, the next operation's flush), and a cursor advances only by
-// the version after the one it stands at, so the instance takes them in version order.
+// (an operation's flush, its append, the next operation's flush), so the instance takes one run
+// of both, in version order (RoomFlush.appended): a cursor advances only by the version after
+// the one it stands at. A write whose room is not the flushed instance - a cold write, or one
+// whose room was replaced since its fork - takes in its own versions alone.
 func (l *Ledger) takeRoomCursors() {
-	type taken struct {
-		cursor  *roomCursor
-		version persistence.Version
-	}
-	var advances []taken
 	for _, flush := range l.flushes {
-		for _, version := range flush.versions {
-			advances = append(advances, taken{cursor: flush.cursor, version: version})
+		var own []persistence.Version
+		if write := l.live[flush.room]; write != nil && write.point.cursor == flush.cursor {
+			own = write.versions
 		}
+		advanceRoomCursorThrough(flush.cursor, flush.appended(own))
 	}
 	for _, artifactID := range l.order {
 		write := l.live[artifactID]
-		for _, version := range write.versions {
-			advances = append(advances, taken{cursor: write.point.cursor, version: version})
+		if flush := l.flushFor(artifactID); flush == nil || flush.cursor != write.point.cursor {
+			advanceRoomCursorThrough(write.point.cursor, write.versions)
 		}
-	}
-	slices.SortStableFunc(advances, func(a, b taken) int { return cmp.Compare(a.version, b.version) })
-	for _, advance := range advances {
-		advanceRoomCursor(advance.cursor, advance.version)
-	}
-	for _, artifactID := range l.order {
-		for _, version := range l.live[artifactID].versions {
+		for _, version := range write.versions {
 			l.service.tookResidentVersion(artifactID, version)
 		}
 	}
@@ -267,18 +259,18 @@ func (l *Ledger) takeRoomCursors() {
 type roomCapture struct {
 	room    string
 	capture authorCapture
-	flush   *roomFlush
+	flush   *RoomFlush
 	shadow  *roomShadow
 }
 
 // flushCapture is the roomCapture of flush, which locks the state flush took its updates from.
-func flushCapture(flush *roomFlush) roomCapture {
+func flushCapture(flush *RoomFlush) roomCapture {
 	return roomCapture{room: flush.room, capture: authorCapture{state: flush.state}, flush: flush}
 }
 
 // commitConsuming commits tx, which wrote the versions captures lists and the room updates their
 // flushes stored, and once it has committed marks the in-flight credits each version listed
-// consumed and each flushed update stored, its credit held and landed (roomFlush.markStored), frees
+// consumed and each flushed update stored, its credit held and landed (RoomFlush.markStored), frees
 // a shadow left with nothing to measure (dropDrainedShadowLocked), and installs each live write's
 // shadow (installShadowLocked), in captures' order. Each capture's state is locked (state.mu) from
 // before the commit until then: an append queued behind the document's advisory lock, which tx

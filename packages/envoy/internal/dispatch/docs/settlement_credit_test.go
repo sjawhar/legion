@@ -347,7 +347,7 @@ func TestAVersionedAuthorIsNotCreditedAgainAfterACrashRestart(t *testing.T) {
 
 // A browser edit the room observes while an API edit's transaction holds the document, and before
 // that edit reads it, is listed only once. The edit's read takes carol's update in, its transaction
-// stores the update ahead of its own (Ledger.flushRead), and its version reads carol's in-flight
+// stores the update ahead of its own (Ledger.flushThrough), and its version reads carol's in-flight
 // credit (the room holds it from the moment it observes her edit, before her own durable append
 // runs) and marks it consumed, and her update stored, as it commits; carol's own durable append -
 // queued behind the transaction, which holds the document's advisory lock for its whole duration -

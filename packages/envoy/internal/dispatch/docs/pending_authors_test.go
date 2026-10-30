@@ -207,7 +207,7 @@ func countVersionAuthor(t *testing.T, database *store.Store, artifactID string, 
 // it lands, puts nothing back: once the room has gone and another process loads the document, the
 // next version lists only its own author. The append is held by holding the edit's update observer
 // once it has credited alice, before ygo hands the update to persistence. The settlement stores the
-// held edit itself, with alice's credit, before its version (Ledger.storeRead), so the held
+// held edit itself, with alice's credit, before its version (Ledger.flushThrough), so the held
 // append stores nothing when it lands.
 func TestASettlementsListedEditIsNotOwedAgainWhenItsHeldAppendLands(t *testing.T) {
 	service, artifactID := newTestService(t)
