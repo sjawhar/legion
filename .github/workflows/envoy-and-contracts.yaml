@@ -983,16 +983,42 @@ jobs:
         run: go test -race -timeout 30m ./internal/dispatch/docs/ ./internal/dispatch/api/ ./internal/dispatch/pmdoc/... ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/
         working-directory: packages/envoy
 
-  # The real-process memory tests (packages/envoy/cmd/dispatch/memory_test.go, LEGION-481): each
-  # row starts a Dispatch server, drives it over HTTP and the document websocket and reads its
-  # resident memory from /proc, and together they run past go test's default ten-minute deadline,
-  # which took envoy-go red at 600 s (run 37116639565). They build only under the `memory` tag, so
-  # envoy-go's unit run leaves them out and this job runs them with a deadline of its own.
-  dispatch-memory:
+  # The real-process memory tests (packages/envoy/cmd/dispatch/memory_test.go and the other files
+  # built under the `memory` tag, LEGION-481): each row starts a Dispatch server, drives it over
+  # HTTP and the document websocket and reads its resident memory from /proc. They build only
+  # under the `memory` tag, so envoy-go's unit run leaves them out: that run is under go test's
+  # default ten-minute package deadline, which they took red at 600 s (run 37116639565).
+  #
+  # The package is sharded because one job no longer holds it. The browser-room rows
+  # (browser_memory_test.go) drive a server for up to 602 s each, and the 107 tests the package
+  # builds under the tag measure 5754 s of test time in one pass on the development pod - a
+  # gVisor sandbox roughly two and a half times slower than a GitHub runner, where the same
+  # package without the browser rows is 3081 s against the twenty minutes the unsharded job took
+  # on main. A single run was already past a 60-minute deadline on the pod. Six shards divide it
+  # into 667-1854 s there, the worst being the shard that drew the three heaviest rows, which is
+  # about twelve minutes on a runner: the 40-minute deadline below holds that even if every heavy
+  # row fell into one shard (3211 s on the pod, under 21 minutes on a runner).
+  #
+  # A shard takes its tests from the package's own list, `go test -tags memory -list '.*'
+  # ./cmd/dispatch`: the n-th name of that list, counted from one, belongs to shard
+  # ((n - 1) mod shards) + 1, and the shard runs exactly those names under `-run '^(…)$'`. Every
+  # test therefore lands in exactly one shard, a new one with no edit here, and because the heavy
+  # rows sit next to each other in their files, dealing the list round-robin spreads them across
+  # the shards rather than piling them into one. A shard that lists no test fails instead of
+  # passing on an empty run, which is what a package that stopped building, or a shard number
+  # past the end of the matrix, would otherwise look like.
+  dispatch-memory-shard:
+    name: dispatch-memory (shard ${{ matrix.shard }} of ${{ strategy.job-total }})
     needs: changes
     if: needs.changes.outputs.envoy == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 50
+    strategy:
+      # Every shard's verdict is wanted at once: a red shard must not cancel its siblings, since
+      # which rows fail is the finding.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
     services:
       postgres:
         image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
@@ -1014,8 +1040,40 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
       - name: Memory tests of the Dispatch server
-        run: go test -tags memory -count=1 -timeout 60m -v ./cmd/dispatch
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ strategy.job-total }}
+        run: |
+          go test -tags memory -list '.*' ./cmd/dispatch > "$RUNNER_TEMP/memory-tests.txt"
+          all=$(grep -E '^(Test|Example|Fuzz)' "$RUNNER_TEMP/memory-tests.txt")
+          mine=$(printf '%s\n' "$all" | awk -v shard="$SHARD" -v shards="$SHARDS" '(NR - 1) % shards + 1 == shard')
+          [ -n "$mine" ] || { echo "::error::shard $SHARD of $SHARDS takes none of the $(printf '%s\n' "$all" | grep -c . ) tests ./cmd/dispatch lists"; exit 1; }
+          echo "shard $SHARD of $SHARDS runs $(printf '%s\n' "$mine" | wc -l) of $(printf '%s\n' "$all" | wc -l) tests:"
+          printf '%s\n' "$mine"
+          go test -tags memory -count=1 -timeout 40m -v -run "^($(printf '%s\n' "$mine" | paste -sd'|' -))$" ./cmd/dispatch
         working-directory: packages/envoy
+
+  # One verdict over the shards above, under the name the job carried before it was sharded, so a
+  # reader or a check list that names `dispatch-memory` still finds a single pass or fail. (The
+  # branch ruleset on `main` required only `lint`, `typecheck`, `test` and `pr-title` when this
+  # was written, read through `gh api repos/sjawhar/legion/rulesets/12331919`; the branch lines
+  # this work merges onto require no check at all and are read by hand.) A matrix job's `result`
+  # is `success` only when every shard succeeded, so a failed, cancelled or skipped shard takes
+  # this red. Its condition runs on `always()` for the reason release.yaml gives at its head:
+  # without it, one skipped shard would skip this job rather than fail it, and a skipped job is
+  # not a pass that anything should read as one.
+  dispatch-memory:
+    needs: [changes, dispatch-memory-shard]
+    if: always() && needs.changes.result == 'success' && needs.changes.outputs.envoy == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every memory shard passed
+        env:
+          SHARDS_RESULT: ${{ needs.dispatch-memory-shard.result }}
+        run: |
+          echo "the memory shards together: $SHARDS_RESULT"
+          [ "$SHARDS_RESULT" = success ] || { echo "::error::a dispatch-memory shard did not succeed (shards together: $SHARDS_RESULT)"; exit 1; }
 
   # The two-process tests (packages/envoy/cmd/dispatch/multiprocess_test.go, INFRA-66): each row
   # starts two real envoy-dispatch processes against one Postgres and one NATS - which is what

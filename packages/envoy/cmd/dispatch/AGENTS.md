@@ -571,13 +571,17 @@ env DISPATCH_TEST_DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dis
 go vet ./...
 ```
 
-The real-process memory tests (`memory_test.go`, LEGION-481) start a Dispatch server per row and
-read its resident memory from `/proc`, so they build only under the `memory` tag and run in their
-own CI job (`dispatch-memory` in `.github/workflows/envoy-and-contracts.yaml`), past `go test`'s
-default ten-minute deadline:
+The real-process memory tests (`memory_test.go` and the other files built under the `memory` tag,
+LEGION-481) start a Dispatch server per row and read its resident memory from `/proc`, so they
+build only under the `memory` tag and run in CI jobs of their own, past `go test`'s default
+ten-minute deadline. The whole package measures about two hours on a development pod, more than
+one job's deadline holds, so `.github/workflows/envoy-and-contracts.yaml` runs it as the six
+`dispatch-memory-shard` jobs — each deals itself every sixth name of `go test -tags memory -list
+'.*' ./cmd/dispatch`, so a test added here needs no edit there — and reports their joint verdict
+as `dispatch-memory`. Locally the package runs in one go, with a deadline that fits it:
 
 ```sh
-env DISPATCH_TEST_DATABASE_URL=… go test -tags memory -count=1 -timeout 60m ./cmd/dispatch
+env DISPATCH_TEST_DATABASE_URL=… go test -tags memory -count=1 -timeout 3h ./cmd/dispatch
 ```
 
 The two-process tests (`multiprocess_test.go`, INFRA-66) start two real Dispatch servers on one

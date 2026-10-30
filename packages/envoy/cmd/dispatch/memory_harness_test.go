@@ -36,8 +36,9 @@ import (
 // The real-process harness the memory tests (memory_test.go) drive Dispatch through: a test
 // binary that runs main as a Dispatch server on the shared test database (memoryTestServeEnv), the
 // server's resident memory read from /proc, and requests over HTTP and the document websocket.
-// Both files build only under the `memory` tag, which the dispatch-memory CI job sets: their rows
-// run past go test's default deadline, so the unit run of every Go package leaves them out.
+// Both files build only under the `memory` tag, which the dispatch-memory-shard CI jobs set:
+// their rows run past go test's default deadline, so the unit run of every Go package leaves
+// them out.
 
 const memoryTestToken = "memory-test-token"
 
