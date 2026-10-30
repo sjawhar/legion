@@ -23,67 +23,114 @@ const (
 	// into one read instead of one read each. It is 25 ms rather than the second the delivery
 	// hub's catch-up waits before a failed read, or the 250 ms it settles a dirty view for
 	// (viewQuiet): those feed a dashboard tile, while this is the delay a person watching a page
-	// sees between a comment being posted and its frame arriving.
+	// sees between a comment being posted and its frame arriving. A read that left a gap open
+	// takes the next notification without it (eventGapReread.eager): that read is the one that
+	// closes the gap, and the events it publishes have waited already.
 	eventRelayCoalesce = 25 * time.Millisecond
 	// eventRelayRetry is how long the relay waits before reading again after a read failed, the
 	// delivery hub's retry (catchUp). The notification that woke the failed read does not come
 	// again, so nothing but the relay itself will ask for those rows.
 	eventRelayRetry = time.Second
-	// eventRelayGapMin and eventRelayGapMax bound the re-read the relay schedules while a gap
-	// stands open above the safe horizon (Horizon.Pending): it first waits eventRelayGapMin,
-	// doubles the wait up to eventRelayGapMax while the horizon stays where it was, and starts
-	// again from eventRelayGapMin each time the horizon moves. A commit's notification can wake
-	// the read before the horizon covers that commit: only a later observation proves an earlier
-	// one safe, and nothing notifies again once the open lower ids have ended, so without this
-	// re-read an event the read held back would wait for the next unrelated commit.
+	// eventRelayGapMin and eventRelayGapMax bound the fallback re-read a reader schedules while a
+	// gap stands open above the safe horizon held by an older transaction (events.GapHeld): it
+	// first waits eventRelayGapMin, doubles the wait up to eventRelayGapMax while the horizon
+	// stays where it was, and starts again from eventRelayGapMin each time the horizon moves. The
+	// transaction holding the gap is usually a write whose commit notifies, and that notification
+	// reads at once; the fallback is for one that ends without notifying (a write that appends no
+	// event, another database's transaction on the instance, another process's observation), which
+	// nothing else would announce. It runs only while a gap is open.
 	eventRelayGapMin = 10 * time.Millisecond
 	eventRelayGapMax = 250 * time.Millisecond
 )
 
 // eventGapReread schedules a reader's re-read while a gap stands open above the safe horizon,
-// shared by the relay (run) and the delivery hub (intake): timer is the scheduled re-read, nil
-// while none is; wait the current delay, zero while no gap is open; and safe the horizon the read
-// that scheduled it read through. Its one owner's goroutine alone touches it, and receives the
-// re-read from due.
+// shared by the relay (run) and the delivery hub (intake), on the cadence the horizon's package
+// documentation describes ("Cadence"): at once when the read's own observation is the only one
+// unproven (events.GapUnproven), since observing again proves it unless an older transaction id
+// is still running; otherwise (events.GapHeld) on the next commit notification, read without the
+// coalescing window (eager), or after the fallback delay (eventRelayGapMin to eventRelayGapMax),
+// whichever comes first. Nothing is scheduled while no gap is open, so an idle reader observes
+// nothing.
+//
+// The re-reads it asks for at once are bounded by the event log's own commits: a read gets one
+// only when the horizon moved since the read before (or the gap is new), and the horizon moves
+// only past ids that committed, so a gap an older transaction holds open falls back to the
+// notification and the timer. Likewise a notification skips the coalescing window only on the
+// first read after the gap is found held or the horizon moved: one that leaves the horizon where
+// it was sends the next back through the window.
+//
+// first is the fallback's first delay, zero for eventRelayGapMin (a test sets it); timer is the
+// fallback, nil while none is scheduled, and now an immediate re-read; wait the fallback's current
+// delay, zero while no gap is open; safe the horizon the read that scheduled it read through;
+// held whether that read found the gap held; eager whether the next notification reads without
+// the coalescing window. Its one owner's goroutine alone touches it, and receives the re-read
+// from due.
 type eventGapReread struct {
+	first time.Duration
 	timer *time.Timer
+	now   bool
 	wait  time.Duration
 	safe  int64
+	held  bool
+	eager bool
 }
 
-// schedule replaces the scheduled re-read, if any, with the one a read through safe needs: none
-// when it left no gap open (gap false), otherwise after eventRelayGapMin for the first gap or a
-// horizon that moved, or after the last delay doubled up to eventRelayGapMax.
-func (g *eventGapReread) schedule(safe int64, gap bool) {
+// gapRereadNow is the channel due returns for an immediate re-read: closed, so it always delivers.
+var gapRereadNow = func() <-chan time.Time {
+	now := make(chan time.Time)
+	close(now)
+	return now
+}()
+
+// schedule replaces the scheduled re-read, if any, with the one a read through safe that left gap
+// needs (see eventGapReread): none for no gap; at once for a gap only the read's own observation
+// holds, when the horizon moved or the gap is new; otherwise the fallback, from its first delay
+// when the horizon moved or the gap was not held before, else after the last delay doubled up to
+// eventRelayGapMax.
+func (g *eventGapReread) schedule(safe int64, gap events.Gap) {
 	g.stop()
-	switch {
-	case !gap:
-		g.wait = 0
+	if gap == events.GapNone {
+		g.wait, g.held, g.eager = 0, false, false
 		return
-	case g.wait == 0 || safe != g.safe:
-		g.wait = eventRelayGapMin
-	default:
-		g.wait = min(2*g.wait, eventRelayGapMax)
 	}
+	first := g.first
+	if first == 0 {
+		first = eventRelayGapMin
+	}
+	moved := g.wait == 0 || safe != g.safe
 	g.safe = safe
+	if gap == events.GapUnproven && moved {
+		g.now, g.wait, g.held, g.eager = true, first, false, true
+		return
+	}
+	if moved || !g.held {
+		g.wait, g.eager = first, true
+	} else {
+		g.wait, g.eager = min(2*g.wait, max(eventRelayGapMax, first)), false
+	}
+	g.held = true
 	g.timer = time.NewTimer(g.wait)
 }
 
-// stop drops the scheduled re-read, if any; a stopped timer delivers nothing on due afterwards.
+// stop drops the scheduled re-read, if any; a stopped one delivers nothing on due afterwards.
 func (g *eventGapReread) stop() {
+	g.now = false
 	if g.timer != nil {
 		g.timer.Stop()
 		g.timer = nil
 	}
 }
 
-// due delivers the scheduled re-read once its delay has passed; nil, which never delivers, while
-// none is scheduled.
+// due delivers the scheduled re-read: at once for an immediate one, once its delay has passed for
+// the fallback, and never (nil) while none is scheduled.
 func (g *eventGapReread) due() <-chan time.Time {
-	if g.timer == nil {
-		return nil
+	switch {
+	case g.now:
+		return gapRereadNow
+	case g.timer != nil:
+		return g.timer.C
 	}
-	return g.timer.C
+	return nil
 }
 
 // eventStreamRelay is the live source of every events subscription on this process (the event
@@ -124,7 +171,9 @@ type eventStreamRelay struct {
 	listenIdle, pingTimeout time.Duration
 	backoff                 func(attempt int) time.Duration
 	// coalesce is the window a notification waits before its read; zero is eventRelayCoalesce.
-	coalesce time.Duration
+	// gapFallback is the first delay of a held gap's fallback re-read (eventGapReread.first);
+	// zero is eventRelayGapMin.
+	coalesce, gapFallback time.Duration
 	// beforeAdvance, when a test sets it before the relay starts, runs after each page is
 	// published and before the cursor moves over it, with mu held: the one moment a subscriber
 	// must not be let in (publish). Nil outside tests.
@@ -486,19 +535,23 @@ func (r *eventStreamRelay) onNotify(_, _ string) { signal(r.wake) }
 func (r *eventStreamRelay) onConnected() { signal(r.wake) }
 
 // run publishes what each wake announced, until ctx ends. A wake waits the coalescing window
-// before its read; a notification arriving during a read leaves the one signal the channel holds,
-// which becomes exactly one more read after it.
+// before its read, unless a gap is open and the read is the one that can close it (eager); a
+// notification arriving during a read leaves the one signal the channel holds, which becomes
+// exactly one more read after it.
 //
 // A read that leaves a gap open above the horizon (an observed id the horizon does not yet cover)
-// schedules a re-read of its own, eventRelayGapMin doubling to eventRelayGapMax while the horizon
-// stands still and back to eventRelayGapMin whenever it moves. The timer runs only while a gap is
-// open, so an idle relay observes nothing; a notification arriving meanwhile reads at once, as
-// ever. A gap re-read skips the reset check: it asks only whether the horizon has moved, on the
+// schedules a re-read of its own on the horizon's cadence (eventGapReread): at once when its own
+// observation is the only one unproven, which the next observation proves unless an older
+// transaction id is still running; and while an older transaction holds the gap, on that
+// transaction's commit notification, read at once, or after the fallback delay, eventRelayGapMin
+// doubling to eventRelayGapMax while the horizon stands still and back to eventRelayGapMin
+// whenever it moves. Nothing is scheduled while no gap is open, so an idle relay observes nothing.
+// A gap re-read skips the reset check: it asks only whether the horizon has moved, on the
 // horizon's own connection, and reads the shared pool only once there is something to publish,
 // so a gap held open by a long transaction costs no request a connection. A reset is still caught
 // at the next notification, which the refill's own inserts send.
 func (r *eventStreamRelay) run(ctx context.Context) {
-	var gaps eventGapReread
+	gaps := eventGapReread{first: r.gapFallback}
 	defer gaps.stop()
 	for {
 		checkReset := true
@@ -506,11 +559,23 @@ func (r *eventStreamRelay) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-r.wake:
-			if !waitFor(ctx, r.window()) {
+			if !gaps.eager && !waitFor(ctx, r.window()) {
 				return
 			}
 		case <-gaps.due():
 			checkReset = false
+			// A notification that arrived while this re-read was due is answered by this read:
+			// the re-read runs at once, as that notification's own read would (eager), so the
+			// notification has nothing left to wait for, and its reset check rides along rather
+			// than running a coalescing window after it. Without this the relay reads twice, and
+			// the second read, which carries the check, lands a window later.
+			if gaps.eager {
+				select {
+				case <-r.wake:
+					checkReset = true
+				default:
+				}
+			}
 		}
 		gaps.stop()
 		safe, gap, ok := r.read(ctx, checkReset)
@@ -532,10 +597,10 @@ func (r *eventStreamRelay) run(ctx context.Context) {
 // next read's. A log that was reset under the cursor is answered first, and publishes nothing
 // (resetCursor); checkReset false skips that check (run's gap re-read).
 //
-// It answers the horizon it read through and whether a gap stands open above it (Pending): an
-// event observed above the horizon that this read could not publish, which run re-reads for.
+// It answers the horizon it read through and what a gap open above it waits for (Horizon.Gap):
+// an event observed above the horizon that this read could not publish, which run re-reads for.
 // ok false is a read that failed.
-func (r *eventStreamRelay) read(ctx context.Context, checkReset bool) (safe int64, gap, ok bool) {
+func (r *eventStreamRelay) read(ctx context.Context, checkReset bool) (safe int64, gap events.Gap, ok bool) {
 	tracked := store.WithTransactionTracking(ctx)
 	horizon := r.server.horizon()
 	if checkReset {
@@ -544,9 +609,9 @@ func (r *eventStreamRelay) read(ctx context.Context, checkReset bool) (safe int6
 			if ctx.Err() == nil {
 				slog.Warn("dispatch: the event stream relay could not check its cursor against the event log; retrying", "error", err)
 			}
-			return 0, false, false
+			return 0, events.GapNone, false
 		case reset:
-			return resetSafe, horizon.Pending(), true
+			return resetSafe, horizon.Gap(), true
 		}
 	}
 	safe, err := horizon.Safe(tracked)
@@ -554,23 +619,23 @@ func (r *eventStreamRelay) read(ctx context.Context, checkReset bool) (safe int6
 		if ctx.Err() == nil {
 			slog.Warn("dispatch: the event stream relay could not observe the event log's safe horizon; retrying", "error", err)
 		}
-		return 0, false, false
+		return 0, events.GapNone, false
 	}
 	for {
 		cursor, _ := r.at()
 		if cursor >= safe {
-			return safe, horizon.Pending(), true
+			return safe, horizon.Gap(), true
 		}
 		page, err := r.server.readEventsAfterID(tracked, cursor, safe)
 		if err != nil {
 			if ctx.Err() == nil {
 				slog.Warn("dispatch: the event stream relay could not read the committed events; retrying", "error", err)
 			}
-			return 0, false, false
+			return 0, events.GapNone, false
 		}
 		r.publish(page)
 		if len(page) < maxEventReplay {
-			return safe, horizon.Pending(), true
+			return safe, horizon.Gap(), true
 		}
 	}
 }
