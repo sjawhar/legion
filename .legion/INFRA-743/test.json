@@ -2,64 +2,67 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-743",
-  "completed": "2026-10-29T22:43:00Z",
-  "round": 4,
+  "completed": "2026-10-30T01:40:00Z",
+  "round": 5,
   "implementerProof": {
     "verdict": "verified",
-    "how": "The fingerprint decided the shape of this round: the branch's own lines hash b2166d30… at the head my round-3 evidence names (40e9841d) and 2538a250… at this round's merge head (806dbdaf), so a full round ran rather than the bare gates. That is right on the merits too: the merge resolves #2377 inside Rewatch, whose body now reads w.watch(kv, conn, 0) with no reportFailedRepair call (internal/kvwatch/kvwatch.go:240), so the code path this issue changed is the one the merge touched. Each of the implementer's four entries was then re-driven here with my own scripts, my own binary built from this workspace at the merge head ($TMPDIR/t/listener-r4) and ports of my own: the deny scenario, the idle and plain-restart windows, the transient failure, the alarm pattern against the lines the real binary wrote, and the 200-run loop against #2377's rewritten test body. Its fourth entry, that the pull request carries CI again, I read on GitHub rather than take: the merge head has lanes, and the conflict is gone."
+    "how": "A full round, as the fingerprint required: the branch's own lines hash 2538a250… at the head my round-4 evidence names (806dbdaf) and 47ab5624… at this round's code head (0ae1b454), and the change behind it is a runtime one - the reviewer's a7e0ec28 moves the HookStall branch below every 503 check in healthzHandler (cmd/listener/main.go, now at the end, after the durable consumer's checks). Each of the implementer's four entries was re-driven here with my own scripts, my own binary built from this workspace at that head ($TMPDIR/t/listener-r5) and ports of my own, and the ordering claim got a scenario of its own that I wrote for this round ($TMPDIR/t/ordering.sh), since the move is exactly the kind of change a smoke of the happy path cannot see."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "A KV watch rebuild stalled past bus.RepairGrace answers /healthz 200 degraded naming the KV watch rebuild, the answer under the grace is unchanged, no probe takes the listener out for it, and the caches follow their buckets again once the fault is lifted - at the head that merges, with #2377's resume path in Rewatch.",
-      "surface": "The built envoy-listener binary (go build -o $TMPDIR/t/listener-r4 ./cmd/listener in this workspace at 806dbdaf) against a real nats-server v2.10.29 with JetStream on 127.0.0.1:24322; /healthz over HTTP on 29220, read every second both as a body and with the probes' own command curl -sf, whose exit status the ECS container health check, GKE readiness and the image's HEALTHCHECK act on.",
-      "command": "bash $TMPDIR/t/tester-smoke2.sh $TMPDIR/t/listener-r4 r4 - step 4 restarts the server under a configuration denying only $JS.API.CONSUMER.CREATE.KV_envoy_{interests,roles,sessions}.> and samples 150 times; step 5 lifts the deny and samples 120 times.",
-      "observed": "Deny window: code 200 at 150 of 150 samples, status healthy for 55 then degraded for 95, turning at +55 s on 'KV watch rebuild unavailable: rewatch interest cache: watch interest registry KV bucket: context deadline exceeded\\nrewatch session cache: … (no rebuild has succeeded for 1m1s)', and curl -sf exited 0 at every one of the 150 samples, so no probe would have replaced or unrouted the task. Repair window: degraded at +0 s, healthy at +1 s, 120 of 120 code 200, and an interest written then served by GET /v1/interests/. The log carries the WARN lines under the grace and 'ERROR envoy nats reconnect hooks have not succeeded' past it. The same result as rounds 2 and 3, so #2377's resume path changed none of it.",
-      "headSha": "806dbdaf2a1b3ee44a433fb5d24c7838dcb29e03",
-      "negativeControl": "The same script family against a listener built from main 1f5b0828 ($TMPDIR/t/base/listener.log, 15:07-15:15Z this session): 150 of 150 samples in the same deny window answered 200 with status healthy and no word for the state."
+      "criterion": "Review round 2's finding: while a KV watch rebuild is stalled past bus.RepairGrace, a worse fault still answers 503, and 200 degraded is the answer only when nothing worse holds.",
+      "surface": "The built envoy-listener binary from this head against a real nats-server v2.10.29 with JetStream on 127.0.0.1:26222; /healthz over HTTP on 29320, read every second as a body and with the probes' own curl -sf.",
+      "command": "bash $TMPDIR/t/ordering.sh $TMPDIR/t/listener-r5 r5 - stage 1 restarts the server denying only $JS.API.CONSUMER.CREATE.KV_envoy_{interests,roles,sessions}.> and samples 80 s to establish the stall; stage 2 stops the server outright while the stall stands and samples 30 s; stage 3 brings it back with the deny lifted and samples 90 s.",
+      "observed": "Stage 1: 80 samples, code 200 throughout, status healthy for 55 then degraded for 25, the turn at +55 s on '(no rebuild has succeeded for 1m0s)'. Stage 2, the worse fault while the stall stands: 30 of 30 samples 503 with status unhealthy and body {\"error\":\"nats unavailable\",\"status\":\"unhealthy\"} - degraded 0, 200 0 - and curl -sf exited 22 at every one, so a real outage still takes the task out. Stage 3: healthy on the second sample after the server returned, 89 of 90 healthy. The stall never stood in for the outage, which is the finding's requirement.",
+      "headSha": "0ae1b454076b687b3593e51c1c62f077d8acb813",
+      "negativeControl": "Stage 1 of the same run is the control for stage 2: with the stall standing and nothing else broken, the answer is 200 degraded; the only difference in stage 2 is the fault beneath it, and the answer changes to 503 unhealthy. The two stages differ in one thing and give the two answers the finding asks for."
     },
     {
-      "criterion": "The degraded answer never appears on a healthy listener: not on an idle one past the bound, not over a plain NATS restart, and a transient failure the retry repairs logs no reconnect-hook ERROR and leaves the caches current.",
-      "surface": "The same binary and server; /healthz every second as a body and with curl -sf, plus the listener's log and GET /v1/interests/.",
-      "command": "The same run, steps 2 and 3 (75 idle samples, then a stop and start of nats-server with 100 samples), and bash $TMPDIR/t/transient.sh $TMPDIR/t/listener-r4 r4 (a deny restart with the deny lifted after 25 s, well inside the grace).",
-      "observed": "Idle: code 200=75, status healthy=75, degraded=0, curl -sf exit 0 at all 75. Plain restart: code 200=100, status healthy=100, degraded=0, curl -sf exit 0 at all 100, 0 ERROR lines, 0 WARN hook lines, interest written after it served. Transient: one 'WARN envoy nats reconnect hook failed; it is retried … stall_ms=25007' and no reconnect-hook ERROR at all - the only ERROR lines are the 8 'envoy nats async error … Permissions Violation' the deny itself causes - with /healthz 200 healthy after the repair and both ses_before and ses_after served.",
-      "headSha": "806dbdaf2a1b3ee44a433fb5d24c7838dcb29e03",
-      "negativeControl": "The same transient scenario on a main 1f5b0828 binary ($TMPDIR/t/base-transient/listener.log): 'ERROR envoy nats reconnect hook failed …' and 'ERROR envoy nats recovery resubscribe failed … attempt=1' for a failure the retry repaired, which is the line restart_test.go fails the flaky test on."
+      "criterion": "The behaviour this issue is about is unchanged by the move: a stalled rebuild with everything else healthy is 200 degraded naming the KV watch rebuild, the answer under the grace is unchanged, no probe takes the listener out for it, and the caches follow their buckets again when the fault lifts.",
+      "surface": "The same binary and a real nats-server on 127.0.0.1:24322; /healthz on 29220 every second as a body and with curl -sf; GET /v1/interests/.",
+      "command": "bash $TMPDIR/t/tester-smoke2.sh $TMPDIR/t/listener-r5 r5, steps 4 and 5.",
+      "observed": "Deny window: code 200 at 150 of 150 samples, status healthy for 54 then degraded for 96, turning at +54 s on 'KV watch rebuild unavailable: rewatch interest cache: … \\nrewatch session cache: … (no rebuild has succeeded for 1m0s)', curl -sf exit 0 at all 150. Repair: degraded at +0 s, healthy at +1 s, 120 of 120 code 200, interest written then served. The same numbers as rounds 2, 3 and 4, so moving the branch below the 503 checks changed none of it.",
+      "headSha": "0ae1b454076b687b3593e51c1c62f077d8acb813",
+      "negativeControl": "The same script family against a listener built from main 1f5b0828 ($TMPDIR/t/base/listener.log, 15:07-15:15Z on 2026-10-29): 150 of 150 samples in the same deny window answered 200 with status healthy and no word for the state."
     },
     {
-      "criterion": "The stalled state pages through a signal that counts the ERROR line the real binary writes and not the WARN below the grace.",
-      "surface": "The rendered CloudWatch metric filter pattern of the alarm reconnect-hooks-stalled, read from packages/envoy/infra/aws/rendering/metricfilters.go at this head, applied to the lines this round's own listener wrote.",
-      "command": "bash $TMPDIR/t/filtercheck.sh $TMPDIR/t/r4/listener.log",
-      "observed": "Pattern read from the source at this head: [date=%^\\d{4}/\\d{2}/\\d{2}$%, time=%^\\d{2}:\\d{2}:\\d{2}$%, level=ERROR, w1=envoy, w2=nats, w3=reconnect, w4=hooks, w5=have, w6=not, w7=succeeded, ...]. The four ERROR lines of the stall each match; the two WARN lines do not ('no match: level token WARN, the pattern wants ERROR'). The check applies CloudWatch's space-delimited rules token by token; it is not a call to CloudWatch, which this pod cannot reach.",
-      "headSha": "806dbdaf2a1b3ee44a433fb5d24c7838dcb29e03",
-      "negativeControl": "The WARN line is the control and fails the pattern on two independent terms: level WARN where the pattern requires ERROR, and the fourth word 'hook' where it requires 'hooks'."
+      "criterion": "No false report on a healthy listener, and a transient failure the retry repairs logs no reconnect-hook ERROR and leaves the caches current; the paging signal counts the ERROR and not the WARN.",
+      "surface": "The same binary and server; /healthz every second, the listener's log, GET /v1/interests/, and the rendered metric filter pattern read from packages/envoy/infra/aws/rendering/metricfilters.go at this head.",
+      "command": "The same smoke, steps 2 and 3 (75 idle samples, then a stop and start with 100 samples); bash $TMPDIR/t/transient.sh $TMPDIR/t/listener-r5 r5; bash $TMPDIR/t/filtercheck.sh $TMPDIR/t/r5/listener.log.",
+      "observed": "Idle: 200=75, healthy=75, degraded=0, curl -sf exit 0 at all 75. Plain restart: 200=100, healthy=100, degraded=0, 0 ERROR lines, 0 WARN hook lines, interest after it served. Transient: one 'WARN … it is retried … stall_ms=25010', no reconnect-hook ERROR at all (the only ERRORs are the 8 'envoy nats async error … Permissions Violation' the deny itself causes), /healthz healthy after the repair and both interests served. Filter: the four ERROR lines of the stall match the pattern, the WARN line does not.",
+      "headSha": "0ae1b454076b687b3593e51c1c62f077d8acb813",
+      "negativeControl": "The WARN line against the same pattern: 'no match: level token WARN, the pattern wants ERROR', and its fourth word is 'hook' where the pattern wants 'hooks'. On a main 1f5b0828 binary the same transient failure logs 'ERROR envoy nats reconnect hook failed' and 'ERROR envoy nats recovery resubscribe failed … attempt=1' ($TMPDIR/t/base-transient/listener.log)."
     },
     {
-      "criterion": "Acceptance 3 at the head that merges: TestListenerFollowsTheInterestRegistryAcrossNATSRestarts passes 200 of 200 isolated runs, now against #2377's rewritten test body, which asserts the resumed warm-up after each restart.",
-      "surface": "The listener's own test harness, which builds and runs the listener binary against a real NATS, driven from packages/envoy/cmd/listener in this workspace.",
-      "command": "go test -c -o $TMPDIR/t/listener-tester.test . then 200 serial runs of it with -test.run '^TestListenerFollowsTheInterestRegistryAcrossNATSRestarts$' -test.count=1, one process per run, no -race ($TMPDIR/t/loop200.sh).",
-      "observed": "FINAL PASS=200 FAIL=0, 22:15Z to 22:39Z, in blocks of 25. Across the four rounds this change has now passed 861 isolated runs here with no failure.",
-      "headSha": "806dbdaf2a1b3ee44a433fb5d24c7838dcb29e03",
+      "criterion": "Acceptance 3 and the build at the head that merges: 200 of 200 isolated runs of TestListenerFollowsTheInterestRegistryAcrossNATSRestarts, and the branch's own packages build and vet clean against the main this merge brought in.",
+      "surface": "The listener's own harness against a real NATS, driven from packages/envoy/cmd/listener in this workspace; and the Go toolchain over packages/envoy and the separate packages/envoy/infra module.",
+      "command": "go test -c -o $TMPDIR/t/listener-tester.test . then 200 serial runs with -test.run '^TestListenerFollowsTheInterestRegistryAcrossNATSRestarts$' -test.count=1, one process per run, no -race; then (cd packages/envoy && go build ./... && go vet ./...) and (cd packages/envoy/infra && go vet ./... && go vet -tags natslive ./core/).",
+      "observed": "FINAL PASS=200 FAIL=0, 01:11Z to 01:33Z. Across the five rounds this change has passed 1061 isolated runs here with no failure. go build ./... and go vet ./... in packages/envoy exit 0; go vet ./... and go vet -tags natslive ./core/ in packages/envoy/infra exit 0, and jj status is clean afterwards, so no go.work.sum churn to restore.",
+      "headSha": "0ae1b454076b687b3593e51c1c62f077d8acb813",
       "negativeControl": "The failure the loop watches for, produced deterministically rather than sampled: the base binary logs 'ERROR envoy nats reconnect hook failed …' for a transient rewatch failure the retry repairs, and restart_test.go fails the test on any ERROR line. At this head the same failure logs only WARN."
     }
   ],
-  "ciAtMergeHead": {
-    "head": "806dbdaf2a1b3ee44a433fb5d24c7838dcb29e03",
-    "readAt": "2026-10-29T22:40:19Z",
-    "note": "Read on GitHub, not re-run, and no lane has failed. Completed and successful: lint, typecheck, docs, changes, ci-filters, dispatch-browser-multiprocess, listener-server-change, worker-image / build, pr-title (an earlier pr-title run of this head is cancelled, superseded by the one that succeeded). Still running at the read: envoy-go, envoy-go-race, envoy-e2e-local, envoy-smoke, envoy-session-stall, envoy-infra-go, dispatch, dispatch-memory, dispatch-multiprocess, pi-legion, test. A lane still running is read as running; the reviewer reads them again at its own head. The conflict is gone: gh pr view answers mergeable MERGEABLE, mergeStateStatus BLOCKED at head 4bb954fd, read 22:41:15Z (BLOCKED is the base's required checks, which are the lanes above, and the review this round has not had yet)."
+  "ciAtCodeHead": {
+    "head": "0ae1b454076b687b3593e51c1c62f077d8acb813",
+    "readAt": "2026-10-30T01:34:49Z",
+    "note": "Read on GitHub, not re-run, and no lane has failed - but most have not started. Completed and successful: changes and pr-title. Queued at my read: lint, typecheck, test, ci-filters, docs, envoy-go, envoy-go-race, envoy-e2e-local, envoy-smoke, envoy-session-stall, envoy-infra-go, dispatch, dispatch-memory, dispatch-multiprocess, dispatch-browser-multiprocess, listener-server-change, pi-legion, worker-image / build. The CI run for this head was created at 00:21:06Z and was still queued 73 minutes later; the repository has 70 queued runs and 8 in progress, so this is a runner backlog, not a check judging anything of ours. A lane still running is read as running and never waited on: the reviewer reads them at its own head, and the four main requires (lint, typecheck, test, pr-title) are among them. My own build and vet above cover what those four do not compile."
   },
   "siblingTrialMerges": {
-    "note": "#2377 (INFRA-514) merged to main at dfd128f1 and is this round's forward merge, so one sibling is left. Run at this head in $TMPDIR/merge-trial, and also against main alone, to tell this change's overlap from the sibling's own drift.",
+    "note": "One sibling is left, and it has merged main since round 4, which sharpens the picture.",
     "pr2446": {
-      "head": "aedc52258 (its own 'merge main into INFRA-594', older than current main)",
-      "result": "conflicts with main alone in 8 files; against this head in 11. The three this change adds are packages/envoy/cmd/listener/main.go, packages/envoy/internal/bus/nats.go and docs/site/src/content/docs/dispatch/envoy.md.",
-      "resolution": "main.go: keep #2446's role-lane 503 branch and this change's 200 degraded branch, both in the /healthz handler and both named in its doc comment; nats.go: keep both method blocks (RepairGrace, HookStall, now, markHooksDueLocked, and #2446's currentConn); envoy.md: both sides' health rows. Confirmed in writing by INFRA-594's implementer (message f25d2190, 19:03:55Z): this change's degraded branch is taken, its own 503 branch is kept, and the side that merges second takes this change's kvwatch deletions."
+      "head": "5d9b5df9c",
+      "result": "merges into main alone with no conflict at all (exit 0, 0 files); against this head it conflicts in exactly four files, so all four are this change's own overlap: docs/site/src/content/docs/dispatch/envoy.md, packages/envoy/AGENTS.md, packages/envoy/cmd/listener/main.go and packages/envoy/internal/bus/nats.go.",
+      "resolution": "main.go: keep #2446's role-lane 503 branch and this change's 200 degraded branch, with the degraded branch last, below every 503 check, as this round made it; nats.go: keep both method blocks; the two documents keep both sides' health rows. Confirmed in writing by INFRA-594's implementer (message f25d2190, 2026-10-29T19:03:55Z)."
     }
   },
+  "memory": {
+    "note": "The architect's memory rule, applied. This pod is cgroup v1 under gVisor: memory.usage_in_bytes, memory.soft_limit_in_bytes and memory.limit_in_bytes exist; memory.current, memory.peak and memory.max_usage_in_bytes do not. Read before each heavy step and sampled by hand through the round: 2.67 GiB at the round's start, 2.68 before the smoke, 2.71 during it, 2.64 before the 200-run loop, 2.73 during it, 2.62 after, of a 19.00 GiB limit. One heavy run at a time: the smoke, the ordering scenario, the transient scenario and the loop ran one after another, never together, and the loop is one test process at a time. No subagent of mine ran a suite, a build or a harness."
+  },
   "observations": [
-    "The merge's own resolution is what this round really tested: Rewatch now takes conn for #2377's resume and still reports nothing of its own on failure (kvwatch.go:240), and the listener's restart test, which #2377 rewrote to assert the resumed warm-up, is the body the 200-run loop drove 200 times without a failure. Both changes' behaviour is present at once.",
-    "The census row the architect asked for is in the body and now matches the tree: the two pr-2362 fragments are gone with main's fold, and the row names packages/envoy/CHANGELOG.md lines 64 and 93 and says this pull request does not correct them.",
-    "Nothing of the issue's own code changed this round, and the three windows gave the same numbers as rounds 2 and 3 (healthy under the grace, degraded past it at a stall of a minute, healthy again a second after the repair, no degraded answer on a healthy listener)."
+    "The ordering move is the round's real content, and a happy-path smoke cannot see it: with the stall standing, the difference between 'degraded' and 'unhealthy' appears only when a worse fault is present. That is why this round has a scenario of its own, stopping the server outright while the rebuild is stalled, and the answer there is 503 'nats unavailable' at 30 of 30 samples.",
+    "CI at this head is a runner backlog, not a verdict: 70 runs queued repository-wide at my read, with this head's CI run created at 00:21:06Z and still queued. Nothing has failed, and nothing of this change is waiting on anything but runners.",
+    "#2446 is now clean against main and conflicts only with this change's own four files, so when it merges second the whole resolution is the one its implementer already holds in writing."
   ]
 }
