@@ -2,50 +2,46 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-562",
-  "completed": "2026-10-28T21:06:29Z",
-  "round": 10,
-  "testedHead": "53b9570a8c96d5198569953fb73f3e54b77ccd16",
-  "codeHead": "d84220d07717",
-  "fingerprint": {
-    "previousVerifiedHead": "1b8e04a89167747a517c1f36a49acf9c11c84f08",
-    "previous": "59d17ba89a018d1d6bc5bb3e7d353ecf4a4e2ae80c8e780a1648dbe9f99b0f54",
-    "current": "6da0418f4a9d7bd0fe8f09ffb400b99db28fb2290c0fe8fc598a24f75cf8f76a",
-    "verdict": "changed (migrations renumbered 0136-0139 -> 0137-0140 after main's #2323): full test round run"
-  },
+  "completed": "2026-10-30T04:53:41Z",
+  "round": 11,
+  "testedHead": "7f1779e577ade061d2b9929a67236e45ec5e4003",
+  "codeHead": "c2378eb6b6e6",
+  "scope": "Full round on the cutover (architect's ruling): item 2 rides on main's #2449 delivery sweep (resumeOwedDeliveries, inside RunSuggestionOutcomeSweep at SuggestionSweepInterval = 1 min); this PR's RunDeliveryResume, its 'delivery-resume' lease and its 1 h horizon are gone.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran at 53b9570a (code d84220d0, merged with main 8b6ea377; GitHub MERGEABLE against main c24ea568, whose two later commits add no migration): `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -count=1 -v -run 'TestMigrationSetIsNumberedOneToN|TestMigrateRefusesTwoMigrationsSharingAVersion' ./internal/dispatch/store/` -> both PASS; `go test -tags multiprocess -count=1 -timeout 50m -v ./cmd/dispatch` -> ok 1088.182s, 124 PASS, 0 FAIL, 0 '--- SKIP'; `go test -count=1 ./internal/pgmigrate/...` -> ok; `go test -count=1 ./internal/dispatch/store/` against a freshly created database (DISPATCH_TEST_DATABASE_URL=.../infra562_clean) -> ok 220.592s. The same store run against the pod's long-lived `postgres` database failed 7 tests with 'apply migration 140: relation \"delivery_run_warnings\" already exists': that database recorded versions 135-139 from this branch's earlier numberings (0135-0138 rounds ago) and has no dashboard_assets; an environment artifact of this pod's own test database, which no deployment can hold since no build of this branch was deployed. Logs: $TMPDIR/guard-53b9570a.log, mp-53b9570a.log, store-53b9570a.log."
+    "how": "Re-ran at 7f1779e5 (code c2378eb6, merged with main through de546ed2 #2516): `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -tags multiprocess -count=1 -timeout 50m -v ./cmd/dispatch` -> ok 1044.849s, 133 top-level PASS, 0 FAIL, 0 '--- SKIP' (TestADeliveryAKilledProcessLeftPendingIsSentByTheOther 137.07s on main's sweep at its 1-minute interval, no interval override, rows back-dated; TestASendWhoseRequestIsCancelledAfterItsCommitReachesItsRecipient 12.75s; take-over row 106.15s with killed_during_the_wait 69.00s on the sweep). The delivery-work api tests: `go test -count=1 -v -run '^(<every test in delivery_bound_send_test.go, listener_takeover_test.go, comment_mention_takeover_test.go, listener_unauthorized_test.go, database_clock_test.go>|TestTheDeliverySweepResumesAnAttemptWithTheUrgencyItRecorded|TestARetryCarriesTheUrgencyOfTheAttemptItResumesAndNoneOnANewAttempt|TestARouteStatusFilterAnswersAFailedRosterReadAsTheDatabases)$' ./internal/dispatch/api/` -> 19 PASS, 0 FAIL, 0 SKIP; TestTheDeliverySweepResumesAnAttemptWithTheUrgencyItRecorded and TestAResumedMentionOfARoutedCommentReachesTheRouteHolderOnce ('the delivery sweep' case) both call main's resumeOwedDeliveries. Logs: $TMPDIR/mp-c2378eb6.log, apidel-c2378eb6.log, sweepoff-c2378eb6.log."
   },
   "failed": 0,
   "failures": [],
-  "migrationChecks": [
-    "main@origin c24ea568's newest migration is 0136_dashboard_assets; the branch's are 0137_message_delivery_urgency, 0138_route_roster, 0139_github_rate_limits, 0140_delivery_run_warnings, each file's first line naming itself. References: cmd/dispatch/README.md:1192,1211,1222,1232, api/delivery.go:755 (0140), githubapp/ratelimit/ratelimit.go:2 (0139), api/issue_route_status.go:26 (0138), and the pr2387 changelog fragments name 0137-0140 only. The remaining 0135/0136 mentions in the tree (e2e/seed.ts, dashboard_builds.go, dashboard.go) are main's server_processes and dashboard tables, correctly numbered.",
-    "leasePoolSize 13 (main 12 + delivery-resume); ConnectionsPerProcess unchanged in shape; infra/gcp dispatchConnectionsPerPod test passed last round with 87 and main added no pool since."
+  "cutoverChecks": [
+    "Item 2 on main's sweep in real time, nothing back-dated or overridden: throwaway two-process probe (deleted after; nothing committed) on real envoy-dispatch binaries - a direct message and a mention whose sends the fake listener held, process A SIGKILLed with both held -> both delivered once, attempt 1 sent, 1m59s after the kill (a 1-minute claim lapse plus the survivor's next 1-minute sweep).",
+    "Negative control, sweep off: throwaway edit `ResumeDeliveries: nil` in api.Register (server.go:448; restored after) -> TestADeliveryAKilledProcessLeftPendingIsSentByTheOther killed_while_sending FAIL 'the direct message reads [1:pending] 2m30s after the row began waiting' (mention and broadcast recipient the same), killed_before_the_claim FAIL '[1:pending] 2m30s after', and TestASendDuringAListenerTakeOverReachesItsSession/killed_during_the_wait FAIL '[1:pending] 2m30s after'.",
+    "Removal: `git grep -nE 'RunDeliveryResume|deliveryResumeLease|delivery-resume|DISPATCH_TEST_DELIVERY_RESUME_INTERVAL|DeliveryResumeInterval' -- packages ':!*CHANGELOG.md'` -> no hit. leasePoolSize 13 and infra/gcp dispatchConnectionsPerPod 87 equal main's at the merge point (de546ed2) and at main@origin 49e23926; `cd packages/envoy/infra && go test -count=1 -run TestDispatchConnectionsPerPodIsTheServers ./gcp/...` -> ok. The pool.go diff against main adds only the test-hooks listener's description.",
+    "Urgency on the sweep: deliverMessageResuming reads the bound attempt's urgency from message_deliveries (message_delivery.go:368-372), so main's resumeOwedDelivery, which passes none, sends the recorded urgency; TestTheDeliverySweepResumesAnAttemptWithTheUrgencyItRecorded asserts {key <id>:steer, target s1, urgency high} from resumeOwedDeliveries.",
+    "Migrations on real binaries: envoy-dispatch built at main's merge point de546ed2 booted on a fresh database (schema_migrations max 141); the head's build then booted beside it, still serving, on the same database -> versions 142 143 144 145 applied, /healthz 200 and POST /api/v1/agents/{session}/messages 201 on each build. pg_indexes on that database lists exactly one pending-row index per table (message_deliveries_pending, comment_deliveries_pending, main's 0138): 0142 adds only the urgency column and its check."
   ],
-  "breakAttempts": [
-    "A roll on real binaries: built envoy-dispatch from main@origin c24ea568 and from the head. Main's build booted on a fresh database (schema_migrations max 136); the head's build then booted beside it, still serving, on the same database: schema_migrations 135 136 137 138 139 140, /healthz 200 on both, POST /api/v1/agents/{session}/messages answered 201 on each build (attempt 1 recorded; the old build's row has urgency null, as the plan says rows an old build writes do).",
-    "Negative control for the review's finding: main's tree with this branch's urgency migration added back as 0136_message_delivery_urgency, built and booted on a fresh database -> exit 1, 'migrations refused, none applied: migrations 0136_dashboard_assets.up.sql and 0136_message_delivery_urgency.up.sql share version 136 ...', no schema_migrations table created. Scratch databases dropped, processes stopped, build trees removed."
-  ],
-  "ci": "Read on GitHub at 21:06Z at code head d84220d0: changes, build, lint, test, typecheck, pr-title and the daemon Postgres 16 suite queued. Not waited for.",
+  "mergeState": "Recorded, not a failure (architect's instruction: it waits for the merge queue for its last merge). GitHub reports PR #2387 CONFLICTING at 04:53Z; no CI runs (no check run at c2378eb6). main@origin 49e23926 now carries 0142_item_blocks, 0143_comments_item_blocks_trigger and 0144_messages_item_blocks_trigger, which take this branch's 0142-0144: main@origin's tree plus this branch's four migrations, built and booted on a fresh database, exits 1 'migrations refused, none applied: migrations 0142_item_blocks.up.sql and 0142_message_delivery_urgency.up.sql share version 142'. The last merge must renumber this branch's four migrations above main's newest (0145-0148 today) with every in-file name and every code, doc and fragment reference, and the tester re-reads that merge by fingerprint.",
+  "ci": "No check run exists at code head c2378eb6 (GitHub runs none on a conflicting head). Not waited for.",
   "observations": [
+    "Spec-level change the architect chose: main's sweep resends an owed attempt up to contracts.DeliveryDuplicateWindow (72 h) and settles undeliverable ones failed, in place of this PR's accepted 1-hour horizon; the plan's departure 3 no longer holds and the reviewer should see that the PR body and fragments say so. The only 'one hour' left in AGENTS.md, cmd/dispatch/README.md and the pr2387 fragments is README.md:141, the webhook redelivery sweep's lookback, which is unrelated.",
     "Unchanged and not failures: a person's Retry during a take-over wait opens attempt 2 beside the renewed attempt 1 (existing rule); a resumed comment attempt opened by another person's Retry names the comment's author as actor; the test-hook fan-out (DISPATCH_TEST_HOOKS only) can miss a process whose LISTEN connection redials between the caller's pg_locks read and its NOTIFY; a claim or ask follow made during a comment request mid take-over can still give that session two copies."
   ],
   "proof": [
     {
-      "criterion": "Items 1, 2 and 8: a cancelled or killed sender's attempt reaches its recipient; a send during a listener take-over reaches its session",
-      "surface": "Dispatch HTTP API on two real envoy-dispatch processes over one Postgres 17 and one NATS, with a fake Envoy listener",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -tags multiprocess -count=1 -timeout 50m -v ./cmd/dispatch",
-      "observed": "ok 1088.182s, 124 PASS, 0 FAIL, 0 SKIP; TestADeliveryAKilledProcessLeftPendingIsSentByTheOther 29.94s, TestASendWhoseRequestIsCancelledAfterItsCommitReachesItsRecipient 17.15s, TestASendDuringAListenerTakeOverReachesItsSession 63.00s",
-      "headSha": "53b9570a8c96d5198569953fb73f3e54b77ccd16",
-      "negativeControl": "sent_to_a_session_the_listener_never_knows: a session the listener never knows settles failed: no live session after the real 12 s window (24.89 s)"
+      "criterion": "Item 2 on main's delivery sweep: a message and a mention a killed sender left pending reach their recipient without a retry, at production's 1-minute sweep with no override",
+      "surface": "Dispatch HTTP API (POST /api/v1/agents/{session}/messages, POST /api/v1/issues/{key}/comments with a mention) on two real envoy-dispatch processes over one Postgres 17 and one NATS, with a fake Envoy listener holding the sends",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -tags multiprocess -count=1 -v -run TestZZProbeAKilledSendersAttemptsAreSentInRealTime ./cmd/dispatch (throwaway real-time variant of the kill row, nothing back-dated, deleted after); and the committed kill rows in the whole suite",
+      "observed": "both delivered once, attempt 1 sent, 1m59s after process A was SIGKILLed; whole suite ok 1044.849s, 133 PASS, 0 SKIP",
+      "headSha": "7f1779e577ade061d2b9929a67236e45ec5e4003",
+      "negativeControl": "ResumeDeliveries set to nil (sweep off, throwaway) -> the kill rows FAIL '[1:pending] 2m30s after the row began waiting'"
     },
     {
-      "criterion": "Review round 5: no migration version is taken twice after the merge with main's #2323, and the branch's build takes over a database main's build migrated",
-      "surface": "the envoy-dispatch binary's boot-time migration on a real Postgres 17, main's build and the head's build serving one database",
-      "command": "boot dispatch-main (main@origin c24ea568) on a fresh database, then dispatch-branch (head) beside it on the same database; curl /healthz and POST /api/v1/agents/{session}/messages on each",
-      "observed": "versions 135-140 applied, both builds 200 on /healthz and 201 on a send",
-      "headSha": "53b9570a8c96d5198569953fb73f3e54b77ccd16",
-      "negativeControl": "main's tree plus this branch's migration numbered 0136 -> boot exits 1, 'migrations refused, none applied: ... share version 136'"
+      "criterion": "The cutover's migration 0142 applies on a database main migrated and no longer duplicates main's 0138 indexes",
+      "surface": "the envoy-dispatch binary's boot-time migration, main's build (de546ed2) and the head's build serving one Postgres 17 database",
+      "command": "boot dispatch-main on a fresh database, then dispatch-branch beside it; read schema_migrations and pg_indexes; curl /healthz and POST a message on each",
+      "observed": "141 -> 142-145 applied; one pending-row index per table; both builds 200 /healthz and 201 on a send",
+      "headSha": "7f1779e577ade061d2b9929a67236e45ec5e4003",
+      "negativeControl": "main@origin 49e23926 plus this branch's four migrations -> boot exits 1 'share version 142', none applied"
     }
   ]
 }
