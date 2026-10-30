@@ -12,10 +12,13 @@
 # exports them as LOADTEST_SRC and LOADTEST_ROOT.
 #
 # stack_ports ROOT: the stack's ports for ROOT, "KEY PORT" a line. The defaults follow the root's
-# physical path (port_block, default_port), so two roots get two sets of ports that never meet and
-# a root always gets the same set; each LOADTEST_*_PORT (PORT_VAR) overrides its own port. So two
-# Legion roles of one pod, each with its own LOADTEST_ROOT, run a stack each with no port variable
-# set. stack.sh setup records the ports in ROOT/stack.json, and `stack.sh status` prints them.
+# physical path (port_block, default_port): a root always gets the same block of 7 ports, and two
+# roots get two blocks out of 200, so they share every port about 1 pair of roots in 200 (the block
+# is a hash modulo 200, not a per-root reservation). Each LOADTEST_*_PORT (PORT_VAR) overrides its
+# own port. So two Legion roles of one pod, each with its own LOADTEST_ROOT, almost always run a
+# stack each with no port variable set; when their blocks do collide, check_port refuses the second
+# stack and the roles set the LOADTEST_*_PORT variables (or pick another root). stack.sh setup
+# records the ports in ROOT/stack.json, and `stack.sh status` prints them.
 #
 # lock_root ROOT: one run at a time per root (README.md, "One run at a time"). It takes an
 # exclusive, non-blocking flock on ROOT/.run.lock and keeps it on file descriptor 9. The lock lasts
@@ -75,9 +78,12 @@ resolve_paths() {
 # ---- the stack's ports ---------------------------------------------------------------------------
 
 # The stack's default ports follow LOADTEST_ROOT, so two roots on one machine (two Legion roles of
-# one pod, each with its own root and its own PID namespace) run side by side with no port variable
-# set. PORT_KEYS names stack.json's ports, PORT_VAR each one's environment variable and PORT_OFFSET
-# its place in a root's block of ports.
+# one pod, each with its own root and its own PID namespace) almost always run side by side with no
+# port variable set: each root hashes to one of PORT_BLOCKS blocks, so two roots land in one block
+# about 1 pair in 200, and then every port of the two stacks is the same one (check_port refuses
+# the second stack; the remedy is the LOADTEST_*_PORT variables). PORT_KEYS names stack.json's
+# ports, PORT_VAR each one's environment variable and PORT_OFFSET its place in a root's block of
+# ports.
 PORT_KEYS=(postgres proxy nats nats_monitor listener dispatch pprof)
 declare -A PORT_VAR=(
   [postgres]=LOADTEST_PG_PORT [proxy]=LOADTEST_PROXY_PORT [nats]=LOADTEST_NATS_PORT
@@ -103,8 +109,9 @@ port_block() {
 #
 #   PORT_BASE + BLOCK * PORT_STRIDE + PORT_OFFSET[KEY] = 15000 + 10k + 0..6
 #
-# The 7 offsets differ and all are below the stride, so no two ports of a block and no two blocks
-# ever meet; every port is between 15000 and 16996, inside 1024-65535 and below the ephemeral range.
+# The 7 offsets differ and all are below the stride, so no two ports of a block and no two ports of
+# two different blocks ever meet (two roots in one block hold the same 7 ports);
+# every port is between 15000 and 16996, inside 1024-65535 and below the ephemeral range.
 default_port() { printf '%s\n' "$((PORT_BASE + $2 * PORT_STRIDE + PORT_OFFSET[$1]))"; }
 
 # stack_ports ROOT: ROOT's ports, "KEY PORT" a line in PORT_KEYS' order: the block's default port,

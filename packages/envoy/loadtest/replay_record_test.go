@@ -67,7 +67,8 @@ func TestReplayRecordFromReads(t *testing.T) {
 	var m map[string]any
 	_ = json.Unmarshal(b, &m)
 	for _, k := range []string{"inputs", "window_s", "cpu_source", "dispatch_cpu_s", "cores_full_rate", "idle_cores_before", "cores_full_rate_idle_corrected",
-		"drain_cpu_s", "writes", "skipped_missing_dep", "substitutes", "edits", "inflight_at_end", "timeouts", "saturated", "saturated_reasons", "roster"} {
+		"drain_cpu_s", "writes", "skipped_missing_dep", "substitutes", "edits", "inflight_at_end", "timeouts", "saturated", "saturated_reasons",
+		"saturation_cores", "saturation_cores_from", "roster"} {
 		if _, ok := m[k]; !ok {
 			t.Fatalf("summary.json replay block lacks %s", k)
 		}
@@ -103,6 +104,48 @@ func TestReplaySaturationRules(t *testing.T) {
 		if sat != (len(c.want) > 0) || !slices.Equal(reasons, c.want) {
 			t.Fatalf("%s: saturated %v %v, want %v", c.name, sat, reasons, c.want)
 		}
+	}
+	// The threshold's base is the least of GOMAXPROCS, nproc and the cgroup quota in cores.
+	for _, c := range []struct {
+		name       string
+		gomaxprocs int
+		nproc      int
+		cpuMax     string
+		wantCores  float64
+		wantFrom   string
+	}{
+		{"GOMAXPROCS 3 on a 2-core box", 3, 2, "max 100000", 2, "nproc"},
+		{"no cgroup file", 3, 2, "", 2, "nproc"},
+		{"a 1.5-core quota below both", 3, 2, "150000 100000", 1.5, "cgroup_cpu_max"},
+		{"a quota above both", 2, 2, "400000 100000", 2, "gomaxprocs"},
+		{"GOMAXPROCS 1 on a 2-core box", 1, 2, "200000 100000", 1, "gomaxprocs"},
+	} {
+		cores, from := saturationCores(c.gomaxprocs, c.nproc, c.cpuMax)
+		if !near(cores, c.wantCores) || from != c.wantFrom {
+			t.Fatalf("%s: %v cores from %s, want %v from %s", c.name, cores, from, c.wantCores, c.wantFrom)
+		}
+	}
+	// GOMAXPROCS 3 with nproc 2: a window at 1.9 cores in 10% of the samples is saturated, which
+	// 0.9 x 3 = 2.7 cores never is on a 2-core box.
+	satCores, _ := saturationCores(3, 2, "max 100000")
+	at19 := func(high, low int) []float64 {
+		var out []float64
+		for range high {
+			out = append(out, 1.9)
+		}
+		for range low {
+			out = append(out, 0.5)
+		}
+		return out
+	}
+	if sat, reasons := replaySaturation(at19(10, 90), satCores, 0, 0); !sat || !slices.Equal(reasons, []string{saturatedCPU}) {
+		t.Fatalf("1.9 cores in 10%% of samples at nproc 2: %v %v", sat, reasons)
+	}
+	if sat, _ := replaySaturation(at19(9, 91), satCores, 0, 0); sat {
+		t.Fatalf("1.9 cores in 9%% of samples: saturated")
+	}
+	if sat, _ := replaySaturation(at19(10, 90), 3, 0, 0); sat {
+		t.Fatalf("1.9 cores against GOMAXPROCS 3: saturated")
 	}
 	// The 5 s samples: Dispatch's cores between consecutive in-window samples.
 	t0 := time.Now()

@@ -73,9 +73,10 @@
 #
 # Environment: LOADTEST_ROOT (default ${TMPDIR:-/tmp}/dispatch-loadtest); LOADTEST_SRC (default: the
 # checkout holding this script); the ports, which follow LOADTEST_ROOT (common.sh: the root's block
-# k of the path's sha256 gives postgres 15000+10k, proxy 15001+10k, nats 15002+10k, nats_monitor
-# 15003+10k, listener 15004+10k, dispatch 15005+10k, pprof 15006+10k), so two roots on one machine
-# never meet; LOADTEST_PG_PORT, LOADTEST_PROXY_PORT, LOADTEST_NATS_PORT, LOADTEST_NATS_MONITOR_PORT,
+# k of the path's sha256 modulo 200 gives postgres 15000+10k, proxy 15001+10k, nats 15002+10k,
+# nats_monitor 15003+10k, listener 15004+10k, dispatch 15005+10k, pprof 15006+10k), so two roots on
+# one machine hold the same 7 ports about 1 pair in 200 and otherwise none, and a collision is
+# refused by setup, not shared; LOADTEST_PG_PORT, LOADTEST_PROXY_PORT, LOADTEST_NATS_PORT, LOADTEST_NATS_MONITOR_PORT,
 # LOADTEST_LISTENER_PORT, LOADTEST_DISPATCH_PORT and LOADTEST_PPROF_PORT each override their own
 # port, read by setup into stack.json (`stack.sh status` prints them); LOADTEST_PROXY_RTT (1ms);
 # LOADTEST_PG_DIRECT=1 starts Dispatch on Postgres without the proxy;
@@ -363,15 +364,19 @@ port_holder() {
 }
 
 # check_port NAME PORT_KEY: refuse a port another process holds, naming it when this PID namespace
-# can see it, and saying that it cannot when it cannot.
+# can see it, and saying that it cannot when it cannot. A port this namespace cannot see is most
+# often another Legion role of the pod whose LOADTEST_ROOT hashed into this root's block of ports
+# (common.sh: a block out of 200, so about 1 pair of roots in 200 collides), and then all 7 ports
+# are the same, so the refusal names the block and both remedies.
 check_port() {
-  local name=$1 key=$2 p holders
+  local name=$1 key=$2 p holders block
   p=$(port "$key")
   port_open "$p" || return 0
   holders=$(port_holder "$p")
   [ -n "$holders" ] &&
     die "port $p ($key, for $name) is already in use by $holders, which is not this stack's; stop it or set ${PORT_VAR[$key]} and rerun stack.sh setup"
-  die "port $p ($key, for $name) is already in use, and no process of this PID namespace holds it: another Legion role of this pod, or another PID namespace, may hold it, in the network namespace they share. Stop that stack from the role that started it, or run this one on a LOADTEST_ROOT of its own (the default ports follow the root), or set ${PORT_VAR[$key]} and rerun stack.sh setup"
+  block=$(port_block "$LOADTEST_ROOT")
+  die "port $p ($key, for $name) is already in use, and no process of this PID namespace holds it: another Legion role of this pod, or another PID namespace, may hold it, in the network namespace they share. This root is in port block $block of $PORT_BLOCKS (the block is the hash of $LOADTEST_ROOT modulo $PORT_BLOCKS), and a second root in block $block holds these same 7 ports. Stop that stack from the role that started it, or set the LOADTEST_*_PORT variables (${PORT_VAR[$key]} for this one) to ports no one holds, or move this stack to another LOADTEST_ROOT, which picks another block with probability $((PORT_BLOCKS - 1))/$PORT_BLOCKS; then rerun stack.sh setup"
 }
 
 ports_of() {
@@ -781,13 +786,20 @@ cmd_seed() {
       'ref_sources', (select count(*) from artifacts where name = 'references.md'),
       'artifact_refs', (select count(*) from refs where to_kind = 'artifact'),
       'events', (select count(*) from events))")
+  # The seed is made by the Dispatch in $BIN, which is the checkout's build only when setup ran
+  # without LOADTEST_DISPATCH_COMMIT, so the record names both: build_commit is the checkout's,
+  # dispatch_commit and dispatch_build the binary's.
+  [ -f "$BIN/envoy-dispatch.json" ] || die "no Dispatch build record at $BIN/envoy-dispatch.json; run stack.sh setup"
   jq -n --argjson migration "$migration" --arg commit "$(build_commit)" --argjson dirty "$(build_dirty)" \
     --argjson counts "$counts" --arg at "$(date -u +%FT%TZ)" --arg pg "$("$PGBIN/postgres" --version)" \
-    --argjson seconds "$((SECONDS - started))" \
-    '{migration: $migration, build_commit: $commit, build_dirty: $dirty, created_at: $at,
+    --argjson seconds "$((SECONDS - started))" --slurpfile build "$BIN/envoy-dispatch.json" \
+    '$build[0] as $b |
+     {migration: $migration, build_commit: $commit, build_dirty: $dirty,
+      dispatch_commit: $b.dispatch_commit, dispatch_binary_sha256: $b.dispatch_binary_sha256,
+      dispatch_build: $b, created_at: $at,
       seed_seconds: $seconds, postgres_version: $pg, counts: $counts}' >"$SEED_META"
   sql postgres 'alter database dispatch rename to dispatch_seed' >/dev/null
-  note "seed done in $((SECONDS - started)) s: template database dispatch_seed; $(jq -c . "$SEED_META")"
+  note "seed done in $((SECONDS - started)) s: template database dispatch_seed; $(jq -c 'del(.dispatch_build)' "$SEED_META")"
 }
 
 cmd_reset() {

@@ -188,7 +188,7 @@ type replayFlags struct {
 func registerReplayFlags(fs *flag.FlagSet) *replayFlags {
 	return &replayFlags{
 		inputs:   fs.String("replay-inputs", "", "replay bundle directory (required with -source replay)"),
-		rate:     fs.Float64("replay-rate", 0.1, "rate factor F: the share of issues replayed, whole (0 < F <= 1)"),
+		rate:     fs.Float64("replay-rate", 0.05, "rate factor F: the share of issues replayed, whole (0 < F <= 1)"),
 		reads:    fs.Float64("replay-reads", 1, "read actions before each write (a fraction is a Bernoulli draw)"),
 		mix:      fs.String("replay-read-mix", defaultReplayReadMix, "read action mix kind=weight,... over "+strings.Join(replayReadKinds, ", ")),
 		uploads:  fs.Float64("replay-uploads", 0.25, "share of named versions with a diff re-sent as a whole-document upload"),

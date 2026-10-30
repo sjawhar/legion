@@ -107,10 +107,14 @@ same step before and after its change, and compares the two rows.
 
 Every process listens on `127.0.0.1`. The default ports follow `LOADTEST_ROOT`: the root's block
 `k` is the first 8 hex digits of the sha256 of its physical path, modulo 200, and each port is
-`15000 + 10k` plus the offset above, so every port lies between 15000 and 16996, no two ports of a
-root meet, and no two roots meet. Two Legion roles of one pod, each with its own `LOADTEST_ROOT`,
-therefore run a stack each with no port variable set. Each `LOADTEST_*_PORT` overrides its own
-port.
+`15000 + 10k` plus the offset above, so every port lies between 15000 and 16996 and no two ports of
+a root meet. The block is a hash, not a reservation: two roots land in one block about 1 pair in
+200, and then they hold the same 7 ports. Two Legion roles of one pod, each with its own
+`LOADTEST_ROOT`, therefore almost always run a stack each with no port variable set; on a collision
+`stack.sh setup` refuses the second stack (`check_port`, so no stack is ever shared) and the
+refusal names the block and the remedies: set the `LOADTEST_*_PORT` variables, or move to another
+`LOADTEST_ROOT`, which picks another block with probability 199/200. Each `LOADTEST_*_PORT`
+overrides its own port.
 
 `stack.sh setup` writes the ports into `$LOADTEST_ROOT/stack.json`, and `stack.sh status` prints
 them with the path of that file. A later `setup` keeps the ports the file records and moves only
@@ -383,7 +387,10 @@ project, `artifact_id` (the spec), `spec_name`, `spec_bytes`, `quotes` (the requ
 for the issue keys.
 
 `$LOADTEST_ROOT/seed.meta.json` records `migration` (the highest Dispatch migration applied),
-`build_commit`, `build_dirty`, `created_at`, `seed_seconds`, `postgres_version` and `counts`:
+`build_commit` and `build_dirty` (the checkout), `dispatch_commit`, `dispatch_binary_sha256` and
+`dispatch_build` (the whole of `$LOADTEST_ROOT/bin/envoy-dispatch.json`: the Dispatch that made the
+seed, another commit than `build_commit` when `setup` ran with `LOADTEST_DISPATCH_COMMIT`),
+`created_at`, `seed_seconds`, `postgres_version` and `counts`:
 projects, issues, comments, artifacts, artifact versions, `ref_targets` (the artifacts named like
 `ref-target-%`), `ref_target_versions` (their versions), `ref_sources` (the artifacts named
 `references.md`), `artifact_refs` (the rows of `refs` that point at an artifact) and events. The
@@ -599,11 +606,11 @@ over the stack's Postgres URL, before the window.
 
 ```bash
 # One replay step (setup, start, replay-get, replay-prepare, reset --replay, loadgen run, tables):
-packages/envoy/loadtest/run-step.sh replay-f0.1 --replay --rate 0.1
+packages/envoy/loadtest/run-step.sh replay-f0.05 --replay --rate 0.05
 # The same on Dispatch at production's commit of 2026-10-26, Dispatch on one core:
-packages/envoy/loadtest/run-step.sh replay-f0.1-35ef --replay --rate 0.1 --dispatch-commit 35efd326 --gomaxprocs 1
+packages/envoy/loadtest/run-step.sh replay-f0.05-35ef --replay --rate 0.05 --dispatch-commit 35efd326 --gomaxprocs 1
 # What a run would send, without a stack (counts only):
-packages/envoy/loadtest/stack.sh loadgen replay-plan -replay-inputs "$LOADTEST_ROOT/replay/bundle" -replay-rate 0.1
+packages/envoy/loadtest/stack.sh loadgen replay-plan -replay-inputs "$LOADTEST_ROOT/replay/bundle" -replay-rate 0.05
 ```
 
 **The bundle** (`loadgen replay-fetch`, read-only from a Dispatch; `replay_bundle.go`) is LINUX's
@@ -729,7 +736,7 @@ their count. The flags `run-step.sh` keeps for itself:
 | `--rng-seed N` | `1` | `loadgen run -rng-seed`: the issue sampling, the reads, the upload split and every substitute (Planning, below). |
 | `--warmup D` | `30s` | The warm-up before the window: the roster registers, the dashboard streams open, no replay request. |
 | `--gomaxprocs N` | nproc | `LOADTEST_GOMAXPROCS`, Dispatch's `GOMAXPROCS`. |
-| `--dispatch-commit REV` | the checkout | `LOADTEST_DISPATCH_COMMIT`: `envoy-dispatch` alone is built from REV; `loadgen`, the listener and the manifest's seed stay the same. `meta.json` records the commit. |
+| `--dispatch-commit REV` | the checkout | `LOADTEST_DISPATCH_COMMIT`: `envoy-dispatch` alone is built from REV; `loadgen`, the listener and the manifest's seed stay the same. Every step's `meta.json` records that build as `dispatch_commit`, `dispatch_binary_sha256` and `dispatch_build`, beside the checkout's `build_commit`. |
 | `--manifest FILE` | `replay-2026-10-26.json` | The manifest `replay-get` reads. |
 | `--out DIR` | `$LOADTEST_ROOT/runs/<name>` | The step directory. |
 
@@ -815,7 +822,7 @@ The flags of `loadgen run -source replay`:
 | Flag | Default | What it sets |
 | --- | --- | --- |
 | `-replay-inputs` | (required) | The bundle directory. |
-| `-replay-rate` | `0.1` | The rate factor F, more than 0 and at most 1: the share of issues replayed, each issue kept or dropped whole (`keepIssue` of `-rng-seed` and the key; an issue created in the window is its own unit). Times are not scaled. |
+| `-replay-rate` | `0.05` | The rate factor F, more than 0 and at most 1: the share of issues replayed, each issue kept or dropped whole (`keepIssue` of `-rng-seed` and the key; an issue created in the window is its own unit). Times are not scaled. F 0.1 and 0.15 were flagged saturated on the 2-core pod, so the default is 0.05. |
 | `-replay-reads` | `1` | Read actions before each write, rho; a fraction is a Bernoulli draw per write. |
 | `-replay-read-mix` | `read=0.55,docread=0.30,commentref=0.10,search=0.05` | The read actions' kinds and weights. |
 | `-replay-uploads` | `0.25` | U: the share of named versions with a diff re-sent as a whole-document upload (the rest are edits), drawn per event from `-rng-seed`. |
@@ -977,7 +984,8 @@ Dispatch binary (`$LOADTEST_ROOT/bin/envoy-dispatch` until the next `stack.sh se
 | `substitutes` | `quote`: anchored roots sent with a substitute quote; `edit`: versions (edits and uploads) whose content is a substitute. |
 | `edits` | Edit requests by derivation: `diff`, `substitute`. |
 | `inflight_at_end`, `timeouts` | Actions in flight at the window end; actions that hit the 60 s deadline. |
-| `saturated`, `saturated_reasons` | Saturated when Dispatch's 5 s cores reach 0.9 × GOMAXPROCS in at least 10% of the window's samples (`dispatch_cpu`), an action timed out (`timeouts`), or more than 20 actions were in flight at the end (`inflight_at_end`). |
+| `saturated`, `saturated_reasons` | Saturated when Dispatch's 5 s cores reach 0.9 × `saturation_cores` in at least 10% of the window's samples (`dispatch_cpu`), an action timed out (`timeouts`), or more than 20 actions were in flight at the end (`inflight_at_end`). |
+| `saturation_cores`, `saturation_cores_from` | The cores the CPU criterion was measured against: the least of Dispatch's `GOMAXPROCS`, the box's nproc and the cgroup's CPU quota in cores (`/sys/fs/cgroup/cpu.max`, `<quota> <period>`; `max` is no quota), and which of the three set it (`gomaxprocs`, `nproc` or `cgroup_cpu_max`). `--gomaxprocs 3` on a 2-core pod is measured against 2 cores, not 3. |
 | `roster` | Sessions registered. |
 | `roster_skipped` | Bundle roster ids the listener refuses as a session key, replaced by synthetic ids. |
 | `doc_order_waits` | Writes that found the previous write on their document still running and waited for it (Sending, above). |
@@ -989,7 +997,10 @@ Dispatch binary (`$LOADTEST_ROOT/bin/envoy-dispatch` until the next `stack.sh se
 when absent), `heap_start_at`, `heap_end_at`, `dispatch_build` (the build JSON:
 `dispatch_commit`, `dispatch_tree`, `dispatch_pprof_overlay`, `dispatch_binary_sha256`,
 `go_version`, `newest_migration`) and `last_reset` (`replay/last-reset.json`: the template,
-`seed_dump_sha256`, `checksum`, ...); `nproc`, `build_commit` and `pg_direct` are `meta.json`'s own.
+`seed_dump_sha256`, `checksum`, ...); `nproc`, `build_commit` and `pg_direct` are `meta.json`'s
+own. Every step, replay or not, records that same build JSON at `meta.json`'s own top level, as
+`dispatch_build` with `dispatch_commit` and `dispatch_binary_sha256` beside it (The step directory,
+below).
 
 **Measuring a change.** This README states no merge rule; the rule is in dispatch://INFRA-512/spec.
 It states how to run a comparison and what to compare.
@@ -1009,8 +1020,8 @@ interleaved on one box in one session; runs from two sessions, or two boxes, are
 
 ```bash
 for i in 1 2 3; do
-  packages/envoy/loadtest/run-step.sh base-$i --replay --rate 0.1 --rng-seed 1 --gomaxprocs 2 --dispatch-commit B
-  packages/envoy/loadtest/run-step.sh head-$i --replay --rate 0.1 --rng-seed 1 --gomaxprocs 2 --dispatch-commit H
+  packages/envoy/loadtest/run-step.sh base-$i --replay --rate 0.05 --rng-seed 1 --gomaxprocs 2 --dispatch-commit B
+  packages/envoy/loadtest/run-step.sh head-$i --replay --rate 0.05 --rng-seed 1 --gomaxprocs 2 --dispatch-commit H
 done
 ```
 
@@ -1139,7 +1150,7 @@ Every percentile in the harness is the lower nearest rank: the value at index
 | --- | --- |
 | `summary.json` | The step's results. Every table cell comes from it (The tables, below). `config.marker_nonce` is the run's marker nonce (Event kinds, above). `config.dashboard` is the dashboard stream the build under test served, `live` or `sse` (The dashboard stream, above), and `config.live` their count. `stack_exits` is there only when a stack process exited during the step: each entry's `name`, `pid` and `first_seen_gone`. Such a step failed. `events.commits_error` is there only when the run's commit rows could not be read (Delivery latency, above). Such a step failed too. |
 | `TABLES.md` | The tables of this step. `loadgen tables` writes it. |
-| `meta.json` | Mode 600 (owner only). The step name and arguments (`args`: the normalized flag list, each flag given to `loadgen run` once as `-name=value` in name order, with the values of `-token` and `-listener-token` replaced by `<redacted>`, the URL of each of `-url`, `-listener`, `-nats-mon` and `-pprof` read whole by Go's `net/url` and written without its userinfo and its `password` parameter, and `-nats` split at commas as nats.go splits it, each server without its own userinfo; the user name goes too, since nats.go takes a user name with no password as the NATS token. `-pg` is written from pgx's own parse of it (`pgconn.ParseConfig`, the parser `pgx.Connect` uses), never from the text given: `postgres://`, each host and port pgx would try, comma-separated (a port the URL leaves out as pgx fills it in, such as 5432), then `/` and the database, such as `postgres://127.0.0.1:15432/dispatch`; never its user, password, `sslpassword` or any other parameter, and `<redacted>` when pgx does not read it as a URL. No file of the step, and no line that `loadgen run` prints, holds a token, a URL password or a NATS token), `start`, `window_start`, `window_end`, `end`, `nproc`, CPU model, kernel, `box_busy_before` and `box_busy_before_window_s` (5), `GOMAXPROCS` of Dispatch (`unset` by default), the Postgres version (`postgres_version`: empty when it could not be read, and then `postgres_version_error` says why), the build commit and `build_dirty`, the seed meta, the `stack.json` path, `pg_direct` (always `false` under `-allow-foreign`, which takes nothing about the target from `stack.json`), `allow_foreign`, the pids and `marker_nonce`. `box_busy_before` is the share of the box's CPU time, all CPUs, that was not idle or I/O wait over 5 s just before the step, from two `/proc/stat` reads: `run-step.sh` reads it with `loadgen box-busy` before its reset and passes it as `-box-busy-before`; a `loadgen run` without that flag reads it itself (Requirements, above). `null` when `/proc/stat` gave no ticks. |
+| `meta.json` | Mode 600 (owner only). The step name and arguments (`args`: the normalized flag list, each flag given to `loadgen run` once as `-name=value` in name order, with the values of `-token` and `-listener-token` replaced by `<redacted>`, the URL of each of `-url`, `-listener`, `-nats-mon` and `-pprof` read whole by Go's `net/url` and written without its userinfo and its `password` parameter, and `-nats` split at commas as nats.go splits it, each server without its own userinfo; the user name goes too, since nats.go takes a user name with no password as the NATS token. `-pg` is written from pgx's own parse of it (`pgconn.ParseConfig`, the parser `pgx.Connect` uses), never from the text given: `postgres://`, each host and port pgx would try, comma-separated (a port the URL leaves out as pgx fills it in, such as 5432), then `/` and the database, such as `postgres://127.0.0.1:15432/dispatch`; never its user, password, `sslpassword` or any other parameter, and `<redacted>` when pgx does not read it as a URL. No file of the step, and no line that `loadgen run` prints, holds a token, a URL password or a NATS token), `start`, `window_start`, `window_end`, `end`, `nproc`, CPU model, kernel, `box_busy_before` and `box_busy_before_window_s` (5), `GOMAXPROCS` of Dispatch (`unset` by default), the Postgres version (`postgres_version`: empty when it could not be read, and then `postgres_version_error` says why), `build_commit` and `build_dirty` (the checkout `stack.sh` built from), `dispatch_commit`, `dispatch_binary_sha256` and `dispatch_build` (the whole of `$LOADTEST_ROOT/bin/envoy-dispatch.json`: the Dispatch binary this step ran, which `--dispatch-commit`/`LOADTEST_DISPATCH_COMMIT` makes another commit than `build_commit`; empty, and `run.log` says so, when that file is absent), the seed meta, the `stack.json` path, `pg_direct` (always `false` under `-allow-foreign`, which takes nothing about the target from `stack.json`), `allow_foreign`, the pids and `marker_nonce`. `box_busy_before` is the share of the box's CPU time, all CPUs, that was not idle or I/O wait over 5 s just before the step, from two `/proc/stat` reads: `run-step.sh` reads it with `loadgen box-busy` before its reset and passes it as `-box-busy-before`; a `loadgen run` without that flag reads it itself (Requirements, above). `null` when `/proc/stat` gave no ticks. |
 | `run.log` | `loadgen run`'s log: the configuration with the marker nonce, the guard, the dashboard choice (the stream count, `live` or `sse`, and the URL), a warning when `box_busy_before` is above 10%, the sampler's pids, the NATS subscriptions, the registrations, the window, failed writes, the first three failed reads of each Postgres probe and of the 5 s sampler's Postgres, pprof and NATS reads (and each one's total, past three), a failed read of the commit rows, of the transaction ids or of the Postgres version, the result line, and the failure line when a stack process exited or the commit rows were not read. An endpoint that a line names is written without its URL password. |
 | `samples.json` | The 5 s samples: CPU ticks and RSS per process, `/proc/stat` ticks, Postgres connections by state, goroutines, pool waiters, heap (every 15 s), NATS `/varz`. `failed_reads` names a sample's reads that failed (`postgres`, `goroutines`, `heap`, `nats`); their values in that sample are 0 (`nats` empty) and enter no statistic. A read that failed once the run had ended is neither named nor counted. |
 | `cpu.pprof` | Dispatch's CPU profile over the whole window. |

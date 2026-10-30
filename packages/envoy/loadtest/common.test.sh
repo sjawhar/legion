@@ -23,9 +23,10 @@
 # such a holder, under a record of another PID namespace, never name each other as the holder: both
 # are refused as "not visible"; (g) a record of another PID namespace whose pid is a live process
 # here (this test's own) is refused as "not visible", without naming that process as the holder;
-# (i) two roots get two sets of ports that share none, a root always gets the same set, every port
-# of every block lies in 1024-65535 and no two of them meet, and a LOADTEST_*_PORT overrides its
-# own port alone.
+# (i) a root always gets the same set of ports, these two roots get two sets that share none (two
+# roots in general share all 7 when their paths hash into one block of the 200, which stack.sh
+# refuses), every port of every block lies in 1024-65535 and no two ports of two blocks meet, and a
+# LOADTEST_*_PORT overrides its own port alone.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -431,8 +432,10 @@ ports_for() {
 }
 
 # case_stack_ports: the stack's default ports follow LOADTEST_ROOT, so two Legion roles of one pod,
-# each on its own root, start a stack each with no port variable set: each root's path picks the
-# block of ports, and no two ports of one block or of two blocks meet.
+# each on its own root, almost always start a stack each with no port variable set: each root's path
+# picks one of the 200 blocks of ports, and no two ports of one block or of two different blocks
+# meet. Two roots whose paths pick one block (about 1 pair in 200) hold the same 7 ports; the two
+# roots below do not.
 case_stack_ports() {
   out=""
   local one two again overlap
@@ -470,7 +473,7 @@ case_stack_ports() {
   [ "$(grep -v '^postgres ' <<<"$set_pg")" = "$(grep -v '^postgres ' <<<"$one")" ] ||
     { out="$set_pg" fail "(i) LOADTEST_PG_PORT moved another port than Postgres'"; return; }
   out=""
-  printf 'PASS: the default ports follow LOADTEST_ROOT, two roots never meet, and each LOADTEST_*_PORT overrides its own\n'
+  printf 'PASS: the default ports follow LOADTEST_ROOT, two roots in two blocks share no port, and each LOADTEST_*_PORT overrides its own\n'
 }
 
 failed=0

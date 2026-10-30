@@ -334,10 +334,17 @@ type metaFile struct {
 	GOMAXPROCS           string   `json:"gomaxprocs"`
 	// PostgresVersion is select version() on -pg, "" when it could not be read, and then
 	// PostgresVersionError is why.
-	PostgresVersion      string          `json:"postgres_version"`
-	PostgresVersionError string          `json:"postgres_version_error,omitempty"`
-	BuildCommit          string          `json:"build_commit"`
-	BuildDirty           bool            `json:"build_dirty"`
+	PostgresVersion      string `json:"postgres_version"`
+	PostgresVersionError string `json:"postgres_version_error,omitempty"`
+	BuildCommit          string `json:"build_commit"`
+	BuildDirty           bool   `json:"build_dirty"`
+	// DispatchCommit, DispatchBinarySHA256 and DispatchBuild are the Dispatch the step ran, from
+	// $LOADTEST_ROOT/bin/envoy-dispatch.json (stack.sh's build record): the commit that binary was
+	// built from, which LOADTEST_DISPATCH_COMMIT (--dispatch-commit) sets otherwise than
+	// BuildCommit, its sha256, and the whole record. Empty when that file is missing or not JSON.
+	DispatchCommit       string          `json:"dispatch_commit"`
+	DispatchBinarySHA256 string          `json:"dispatch_binary_sha256"`
+	DispatchBuild        json.RawMessage `json:"dispatch_build,omitempty"`
 	SeedMeta             json.RawMessage `json:"seed_meta,omitempty"`
 	Stack                string          `json:"stack"`
 	PGDirect             bool            `json:"pg_direct"`
@@ -885,7 +892,38 @@ func collectMeta(ctx context.Context, cfg runConfig, lg *log.Logger) metaFile {
 	if b, err := os.ReadFile(filepath.Join(loadtestRoot(), "seed.meta.json")); err == nil && json.Valid(b) {
 		m.SeedMeta = b
 	}
+	// The Dispatch binary the step ran, which is this checkout's build only when the step set no
+	// LOADTEST_DISPATCH_COMMIT.
+	if bld, ok := readDispatchBuild(loadtestRoot()); ok {
+		m.DispatchCommit, m.DispatchBinarySHA256, m.DispatchBuild = bld.commit, bld.binarySHA256, bld.raw
+	} else {
+		lg.Printf("meta: no Dispatch build record at %s", filepath.Join(loadtestRoot(), "bin", "envoy-dispatch.json"))
+	}
 	return m
+}
+
+// dispatchBuild is $LOADTEST_ROOT/bin/envoy-dispatch.json, stack.sh's record of the Dispatch binary
+// the stack runs: dispatch_commit, dispatch_tree, build_dirty, patch, patch_sha256,
+// dispatch_pprof_overlay, dispatch_binary_sha256, go_version and newest_migration.
+type dispatchBuild struct {
+	raw          json.RawMessage
+	commit       string
+	binarySHA256 string
+}
+
+// readDispatchBuild reads bin/envoy-dispatch.json under root; ok is false when it is absent or
+// holds no JSON.
+func readDispatchBuild(root string) (dispatchBuild, bool) {
+	b, err := os.ReadFile(filepath.Join(root, "bin", "envoy-dispatch.json"))
+	if err != nil || !json.Valid(b) {
+		return dispatchBuild{}, false
+	}
+	var r struct {
+		Commit       string `json:"dispatch_commit"`
+		BinarySHA256 string `json:"dispatch_binary_sha256"`
+	}
+	_ = json.Unmarshal(b, &r)
+	return dispatchBuild{raw: b, commit: r.Commit, binarySHA256: r.BinarySHA256}, true
 }
 
 // postgresVersion reads select version() on the Postgres at url.

@@ -100,7 +100,11 @@ type replayRecord struct {
 	Timeouts          int                         `json:"timeouts"`
 	Saturated         bool                        `json:"saturated"`
 	SaturatedReasons  []string                    `json:"saturated_reasons"`
-	Roster            int                         `json:"roster"`
+	// SaturationCores is the cores the CPU criterion was measured against (saturationCores), and
+	// SaturationCoresFrom names which limit set it: "gomaxprocs", "nproc" or "cgroup_cpu_max".
+	SaturationCores     float64 `json:"saturation_cores"`
+	SaturationCoresFrom string  `json:"saturation_cores_from"`
+	Roster              int     `json:"roster"`
 	// RosterSkipped counts the bundle roster's ids the listener refuses as a key (natsKey), which
 	// synthetic sessions replace.
 	RosterSkipped int `json:"roster_skipped"`
@@ -171,13 +175,9 @@ func collectReplayMeta(in replayInputs, pid int, root string) replayMetaRecord {
 		}
 	}
 	in.GOMAXPROCS = dispatchGOMAXPROCS(pid)
-	if b, err := os.ReadFile(filepath.Join(root, "bin", "envoy-dispatch.json")); err == nil && json.Valid(b) {
-		m.DispatchBuild = b
-		var r struct {
-			Commit string `json:"dispatch_commit"`
-		}
-		_ = json.Unmarshal(b, &r)
-		in.DispatchCommit = r.Commit
+	if bld, ok := readDispatchBuild(root); ok {
+		m.DispatchBuild = bld.raw
+		in.DispatchCommit = bld.commit
 	}
 	if b, err := os.ReadFile("/sys/fs/cgroup/cpu.max"); err == nil {
 		m.CgroupCPUMax = strings.TrimSpace(string(b))
@@ -241,15 +241,45 @@ func dispatchCoreSamples(ss []sample) []float64 {
 	return out
 }
 
+// cgroupQuotaCores is the CPU quota of a /sys/fs/cgroup/cpu.max text ("<quota> <period>", both in
+// microseconds) in cores; ok is false when no quota is set ("max") or the text is not that shape.
+func cgroupQuotaCores(cpuMax string) (float64, bool) {
+	q, p, ok := strings.Cut(strings.TrimSpace(cpuMax), " ")
+	if !ok {
+		return 0, false
+	}
+	quota, qErr := strconv.ParseFloat(q, 64)
+	period, pErr := strconv.ParseFloat(strings.TrimSpace(p), 64)
+	if qErr != nil || pErr != nil || quota <= 0 || period <= 0 {
+		return 0, false
+	}
+	return quota / period, true
+}
+
+// saturationCores are the cores Dispatch can in fact use: the least of its GOMAXPROCS, the box's
+// nproc and the cgroup's CPU quota in cores when one is set. GOMAXPROCS alone is not a limit a
+// 2-core box can reach (--gomaxprocs 3 there), and neither is a GOMAXPROCS above the cgroup quota.
+// from names which of the three set the figure.
+func saturationCores(gomaxprocs, nproc int, cgroupCPUMax string) (float64, string) {
+	cores, from := float64(gomaxprocs), "gomaxprocs"
+	if nproc > 0 && float64(nproc) < cores {
+		cores, from = float64(nproc), "nproc"
+	}
+	if q, ok := cgroupQuotaCores(cgroupCPUMax); ok && q < cores {
+		cores, from = q, "cgroup_cpu_max"
+	}
+	return cores, from
+}
+
 // replaySaturation says whether the run saturated and why: Dispatch's 5 s cores reached 0.9 x
-// GOMAXPROCS in at least 10% of the window's samples, an action hit its deadline, or more than 20
-// actions were in flight at the window end.
-func replaySaturation(cores []float64, gomaxprocs, timeouts, inflightAtEnd int) (bool, []string) {
+// satCores (saturationCores) in at least 10% of the window's samples, an action hit its deadline,
+// or more than 20 actions were in flight at the window end.
+func replaySaturation(cores []float64, satCores float64, timeouts, inflightAtEnd int) (bool, []string) {
 	reasons := []string{}
-	if len(cores) > 0 && gomaxprocs > 0 {
+	if len(cores) > 0 && satCores > 0 {
 		high := 0
 		for _, c := range cores {
-			if c >= 0.9*float64(gomaxprocs) {
+			if c >= 0.9*satCores {
 				high++
 			}
 		}
@@ -302,7 +332,8 @@ func (rr *replayRun) record(ss []sample, windowS float64) *replayRecord {
 			rec.DrainCPUS = &drain
 		}
 	}
-	rec.Saturated, rec.SaturatedReasons = replaySaturation(dispatchCoreSamples(ss), rec.Inputs.GOMAXPROCS, rec.Timeouts, rec.InflightAtEnd)
+	rec.SaturationCores, rec.SaturationCoresFrom = saturationCores(rec.Inputs.GOMAXPROCS, runtime.NumCPU(), rr.meta.CgroupCPUMax)
+	rec.Saturated, rec.SaturatedReasons = replaySaturation(dispatchCoreSamples(ss), rec.SaturationCores, rec.Timeouts, rec.InflightAtEnd)
 	return rec
 }
 
