@@ -1356,7 +1356,7 @@ func TestHandedAddressesAreEveryAddressAPodCarries(t *testing.T) {
 				}
 			}
 			handed := map[string]string{}
-			for _, a := range r.handedAddresses() {
+			for _, a := range r.handedAddresses(l.enrolls(r)) {
 				if a.value != "" {
 					handed[a.name] = a.value
 				}

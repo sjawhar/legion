@@ -211,8 +211,9 @@ func displaced(v view, loc runtime.Locator, obs observation) bool {
 // drifted from the configuration is never StaleAddress (PodDrift): its roles keep running until
 // every worker of the pod has answered its update round, which is the whole point of the round —
 // repointing one of them would end the pod's turns mid-flight, which this verdict must never do.
-// A role running its recorded generation whose Sandbox records it was
-// started with other addresses than a generation started now is handed (movedEnvironment) is
+// A role running its recorded generation whose Sandbox records it was started with other
+// addresses than a generation started now in its pod is handed (movedEnvironment, which reads the
+// pod for the one thing that pod decides, whether the generation holds the secrets broker) is
 // StaleAddress too. Either names each moved address, never its credentials.
 func (r *Runtime) verdict(ctx context.Context, loc runtime.Locator, v view) observation {
 	observe := func(kind runtime.ObservationKind, format string, args ...any) observation {
@@ -270,7 +271,7 @@ func (r *Runtime) verdict(ctx context.Context, loc runtime.Locator, v view) obse
 	// Kubernetes restarts it.
 	state, connected := r.launchers.state(loc.Claim, loc.Sandbox.PodUID)
 	if connected && state.Child != nil && state.Child.Generation == loc.Sandbox.Generation {
-		moved, err := r.movedEnvironment(v.sandbox, role, loc.Sandbox.Generation)
+		moved, err := r.movedEnvironment(v.sandbox, pod, role, loc.Sandbox.Generation)
 		if err != nil {
 			return observe(runtime.StaleAddress, "pod %s (uid %s) role %s runs generation %d, whose addresses cannot be compared: %v",
 				name, pod.UID, role, state.Child.Generation, err)

@@ -266,17 +266,15 @@ func forgetPodShape(t *testing.T, g *rig, r *Runtime, name string) {
 // named role's overlays, the secrets broker's enrollment, and the session store — are read by
 // PodDrift, and no observation of the pod names one any more: a role whose pod holds one keeps
 // running until it has answered its round, where a StaleAddress naming it would have the
-// supervisor repoint it mid-turn. A deployment that enrolls with the broker only now also moves
-// AGENT_SECRETS_URL, which the running generation carries in its environment: that is a moved
-// address still (movedEnvironment), and the one the detail names.
+// supervisor repoint it mid-turn. A deployment that enrolls with the broker only now moves no
+// address of the running generation either: that generation runs in a pod carrying no enrollment,
+// so it was handed no AGENT_SECRETS_URL and is handed none now (Runtime.enrollsIn,
+// movedEnvironment). Each role of such a pod is Alive until its round replaces the pod.
 func TestPodDriftReadsTheFacetsThatAreNoLongerStaleAddresses(t *testing.T) {
 	const overlay = "/etc/legion-operator-extra/fallback.yml"
 	for name, tc := range map[string]struct {
 		now  func(*Options)
 		says string
-		// stale is the address the running generation's environment also moved, "" for none: its
-		// own rule, and never the pod's.
-		stale string
 	}{
 		"a role's overlays": {now: func(o *Options) {
 			withOperatorMount(o)
@@ -284,7 +282,7 @@ func TestPodDriftReadsTheFacetsThatAreNoLongerStaleAddresses(t *testing.T) {
 		}, says: "role_config_files.tester " + overlay},
 		"the broker's enrollment": {now: func(o *Options) {
 			o.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
-		}, says: agentSecretsTokenVolume, stale: "AGENT_SECRETS_URL"},
+		}, says: agentSecretsTokenVolume},
 		"the session store": {now: func(o *Options) { o.SessionStore = cloudSQLStore }, says: "the session store"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -304,11 +302,8 @@ func TestPodDriftReadsTheFacetsThatAreNoLongerStaleAddresses(t *testing.T) {
 			if strings.Contains(obs.Detail, tc.says) {
 				t.Errorf("%s (%s) names %s, which is its round's to act on and no repoint's", obs.Kind, obs.Detail, tc.says)
 			}
-			switch {
-			case tc.stale == "" && obs.Kind != runtime.Alive:
+			if obs.Kind != runtime.Alive {
 				t.Errorf("%s (%s), want the role alive: a drifted pod is its round's to replace, never a repoint's", obs.Kind, obs.Detail)
-			case tc.stale != "" && (obs.Kind != runtime.StaleAddress || !strings.Contains(obs.Detail, tc.stale+" ")):
-				t.Errorf("%s (%s), want StaleAddress naming the generation's own %s", obs.Kind, obs.Detail, tc.stale)
 			}
 		})
 	}

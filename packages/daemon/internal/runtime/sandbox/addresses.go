@@ -55,9 +55,11 @@ type recordedAddress struct {
 // environmentAddresses are what a generation of role carries in its environment that a daemon
 // restarted under another configuration would hand otherwise: handedAddresses but the stream its
 // launcher dials, and, for the controller, the project's Slack channels (slackChannelsVariable),
-// so a changed list relaunches it, resuming its session, as a moved address does.
-func (r *Runtime) environmentAddresses(role claim.Role) []handedAddress {
-	addresses := slices.DeleteFunc(r.handedAddresses(), func(a handedAddress) bool { return a.name == connectFlag })
+// so a changed list relaunches it, resuming its session, as a moved address does. enrolled is the
+// one enrollment decision for the generation (Runtime.enrollsIn), which decides its
+// AGENT_SECRETS_URL exactly as it decides the two variables mainEnvironment sets.
+func (r *Runtime) environmentAddresses(role claim.Role, enrolled bool) []handedAddress {
+	addresses := slices.DeleteFunc(r.handedAddresses(enrolled), func(a handedAddress) bool { return a.name == connectFlag })
 	if role == claim.RoleController {
 		addresses = append(addresses, handedAddress{slackChannelsVariable, r.slackChannelsValue()})
 	}
@@ -91,10 +93,12 @@ func addressDigest(value string) string {
 }
 
 // recordFor is the record of the addresses a generation of role started now is handed, encoded as
-// its annotation holds it.
-func (r *Runtime) recordFor(role claim.Role, generation uint64) (string, error) {
+// its annotation holds it. enrolled is the launch's own enrollment decision for the pod that
+// generation runs in (launch.enrolls, Runtime.enrollsIn), so a generation started in a kept pod
+// that carries no enrollment is recorded as carrying no broker URL — which is what it was handed.
+func (r *Runtime) recordFor(role claim.Role, generation uint64, enrolled bool) (string, error) {
 	record := addressRecord{Generation: generation}
-	for _, a := range r.environmentAddresses(role) {
+	for _, a := range r.environmentAddresses(role, enrolled) {
 		record.Addresses = append(record.Addresses, recordedAddress{Variable: a.name, Name: r.addressName(a), SHA256: addressDigest(a.value)})
 	}
 	encoded, err := json.Marshal(record)
@@ -105,12 +109,13 @@ func (r *Runtime) recordFor(role claim.Role, generation uint64) (string, error) 
 }
 
 // recordAddresses records on s, the issue Sandbox as read, the addresses a generation of role
-// started now is handed: a merge patch of role's one annotation, so the other roles' records stand.
+// started now with the enrollment decision enrolled is handed: a merge patch of role's one
+// annotation, so the other roles' records stand.
 // The patch carries s's uid, which the API server refuses to change on a live object, so a Sandbox
 // deleted and recreated in between is never written. It runs before the generation's start command
 // is sent, so a generation that runs has its record.
-func (r *Runtime) recordAddresses(ctx context.Context, s *sandbox, role claim.Role, generation uint64) error {
-	record, err := r.recordFor(role, generation)
+func (r *Runtime) recordAddresses(ctx context.Context, s *sandbox, role claim.Role, generation uint64, enrolled bool) error {
+	record, err := r.recordFor(role, generation, enrolled)
 	if err != nil {
 		return err
 	}
@@ -146,13 +151,16 @@ func describeMoved(moved []movedAddress) string {
 	return strings.Join(named, "; ")
 }
 
-// movedEnvironment compares role's recorded generation with the addresses a generation launched now
-// is handed, one movedAddress for each that moved, its held name the record's. A Sandbox with no
-// record of role, or a record of another generation, has nothing to compare: a generation started
-// before records existed is never read as stale for want of one. A record that cannot be read is an
-// error, which proves nothing about the generation's addresses: evaluate reads it as stale, and the
-// relaunch that follows writes a fresh one.
-func (r *Runtime) movedEnvironment(s *sandbox, role claim.Role, generation uint64) ([]movedAddress, error) {
+// movedEnvironment compares role's recorded generation with the addresses a generation launched
+// now in pod, the live pod that generation runs in, is handed, one movedAddress for each that
+// moved, its held name the record's. The pod is what decides the broker: a generation in a pod
+// that carries no enrollment is handed no broker URL now, as it was handed none when it started
+// (Runtime.enrollsIn), so moving the broker's URL leaves such a generation alive and its pod to
+// its update round. A Sandbox with no record of role, or a record of another generation, has
+// nothing to compare: a generation started before records existed is never read as stale for want
+// of one. A record that cannot be read is an error, which proves nothing about the generation's
+// addresses: evaluate reads it as stale, and the relaunch that follows writes a fresh one.
+func (r *Runtime) movedEnvironment(s *sandbox, pod *corev1.Pod, role claim.Role, generation uint64) ([]movedAddress, error) {
 	raw, ok := s.Annotations[addressesAnnotation(role)]
 	if !ok {
 		return nil, nil
@@ -165,7 +173,7 @@ func (r *Runtime) movedEnvironment(s *sandbox, role claim.Role, generation uint6
 		return nil, nil
 	}
 	var moved []movedAddress
-	for _, a := range r.environmentAddresses(role) {
+	for _, a := range r.environmentAddresses(role, r.enrollsIn(&pod.Spec, role)) {
 		i := slices.IndexFunc(record.Addresses, func(held recordedAddress) bool { return held.Variable == a.name })
 		switch {
 		case i < 0:
@@ -419,8 +427,13 @@ func (r *Runtime) heldRoleOverlays(pod corev1.PodSpec, role claim.Role) ([]strin
 // which its agent-secrets client keeps its key in (agentSecretsVolumes). They are the two the
 // shim's agent-secrets flags name, and it stats both and exits 1 when either is absent
 // (launcherCommand, shim.ReadAgentSecretsFlags), so a launch that keeps a pod carrying neither —
-// one created before the runtime enrolled — starts its role without those flags (relaunch's
-// keptBy). A pod's volumes are fixed when it is created; the update round replaces such a pod.
+// one created before the runtime enrolled — starts its role without those flags, and without the
+// two variables that would tell it it holds a broker. A pod's volumes are fixed when it is
+// created; the update round replaces such a pod.
+//
+// It is the pod's half of the one enrollment decision, and is read through that decision alone
+// (Runtime.enrollsIn), never on its own: a caller that read it beside r.agentSecrets would be
+// free to disagree with the generation's argv, which is the split INFRA-484 closed.
 func carriesEnrollment(pod corev1.PodSpec, role claim.Role) bool {
 	token, key := false, false
 	for _, volume := range pod.Volumes {

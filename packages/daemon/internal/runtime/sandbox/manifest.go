@@ -246,9 +246,10 @@ type launch struct {
 // It can still push its work and answer the round, which a process that refused to start could
 // not.
 type keptPod struct {
-	// enrolled is whether the pod carries the secrets broker's enrollment for the role: both the
-	// projected token volume and the role's own key volume, the two the shim's agent-secrets flags
-	// name and stat (carriesEnrollment, launcherCommand).
+	// enrolled is the enrollment decision (Runtime.enrollsIn) read of this pod when the launch
+	// began: the runtime enrols its pods and the pod carries that enrollment for the role, both
+	// the projected token volume and the role's own key volume, the two the shim's agent-secrets
+	// flags name and stat (carriesEnrollment, launcherCommand).
 	enrolled bool
 	// overlays are the role's own overlay files (Options.RoleConfigFiles) the pod's container
 	// actually holds, in configuration order: the only ones its generation's PI_CONFIG_FILES may
@@ -256,11 +257,38 @@ type keptPod struct {
 	overlays []string
 }
 
-// enrolls is whether this launch's start command tells the shim to enrol with the secrets broker
-// (launcherCommand): the runtime enrols its pods, and the pod the role will run in carries that
-// enrollment — a kept pod's own answer, and always so for a launch that builds the pod itself.
+// enrollsIn is the one decision whether a generation of role started now in a pod holds the
+// secrets broker: the runtime enrols its pods at all (runtime.kubernetes.agent_secrets), and the
+// pod that generation runs in carries that enrollment — the broker's projected token volume and
+// the role's own key volume (carriesEnrollment). A nil pod is a launch that builds the pod
+// itself, which carries the configuration as it now reads.
+//
+// Everything a generation's broker reaches reads this one answer, so its argv and its environment
+// can never disagree again (INFRA-484): the shim's three agent-secrets flags (launcherCommand)
+// and the AGENT_SECRETS_URL and AGENT_SECRETS_KEY_DIR an agent reads to decide it holds a broker
+// at all (mainEnvironment), both through launch.enrolls; the record of what the generation was
+// handed (handedAddresses, recordFor, from the launch's own answer); and the comparison an
+// observation makes against that record (movedEnvironment, from the live pod the generation runs
+// in). A role in a kept pod that carries no enrollment is told of none, so it reports a resource
+// it cannot reach rather than a secrets grant it never had, and its generation is recorded as
+// carrying no broker URL, so moving the broker's URL never reads as StaleAddress and never
+// repoints that role mid-turn: the update round replaces its pod once every worker has answered.
+//
+// The launch reads the pod from the Sandbox's stored template, the pod's own build (keptBy), and
+// an observation from the live pod; neither a kubelet nor an admission webhook takes a volume off
+// a pod, so the two read the same enrollment.
+func (r *Runtime) enrollsIn(pod *corev1.PodSpec, role claim.Role) bool {
+	return r.agentSecrets != nil && (pod == nil || carriesEnrollment(*pod, role))
+}
+
+// enrolls is this launch's reading of that one decision: of the live pod it keeps, as the launch
+// read that pod's stored template when it began (keptPod.enrolled), or of the pod it builds
+// itself.
 func (l launch) enrolls(r *Runtime) bool {
-	return r.agentSecrets != nil && (l.kept == nil || l.kept.enrolled)
+	if l.kept != nil {
+		return l.kept.enrolled
+	}
+	return r.enrollsIn(nil, l.spec.Role)
 }
 
 // overlays are this launch's role's own settings overlays, which its generation is told in
@@ -651,8 +679,9 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 // admission policy permits one volume per audience) and one private memory key directory per role
 // of roles, the controller's included; none when the runtime enrolls no pod. Every role of every pod
 // enrolls, so the broker can grant a pod of the Legion daemon's service the secrets that service
-// owns, such as the controller's Slack bot token; the mounts (agentSecretsMounts), the shim's flags
-// (launcherCommand), mainEnvironment and handedAddresses read the same r.agentSecrets.
+// owns, such as the controller's Slack bot token. This builds the pod, so it reads r.agentSecrets
+// whole, as its mounts do (agentSecretsMounts); what a generation is handed reads the enrollment
+// decision instead (enrollsIn), since the pod a launch keeps is never rebuilt.
 func (r *Runtime) agentSecretsVolumes(roles []claim.Role) []corev1.Volume {
 	broker := r.agentSecrets
 	if broker == nil {
@@ -1105,8 +1134,12 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	add("PI_SHELL_PREFIX", shellprefix.For(legionDir))
 	add("GIT_TERMINAL_PROMPT", "0")
 	env = append(env, gitConfigEnv()...)
-	if broker := r.agentSecrets; broker != nil {
-		add("AGENT_SECRETS_URL", broker.URL)
+	// The two variables an agent reads to decide it holds a broker at all, gated on the same one
+	// decision as the shim's agent-secrets flags (enrollsIn, launcherCommand): a generation in a
+	// kept pod that carries no enrollment is started with neither the flags nor these, so its
+	// role reports a resource it cannot reach rather than a secrets grant it never had.
+	if l.enrolls(r) {
+		add("AGENT_SECRETS_URL", r.agentSecrets.URL)
 		add("AGENT_SECRETS_KEY_DIR", AgentSecretsKeyDir)
 	}
 	if spec.Role == claim.RoleController {
@@ -1229,15 +1262,17 @@ type handedAddress struct{ name, value string }
 // worker stream listener its launcher dials (podKind.launcherContainer, fixed when the pod is created),
 // then the daemon's API, NATS, Envoy, Dispatch and the secrets broker as the agent's environment
 // names them (mainEnvironment, carried by each generation's start command, launcherCommand), the
-// broker only when the runtime enrolls pods. The stream is fixed for the pod's life, so a pod a
-// daemon created under another stream dials it until the pod is replaced; the other five are fixed
-// for the generation's life, and the Sandbox records them per role (recordAddresses) so a daemon
-// restarted under other addresses can tell (evaluate).
+// broker only where enrolled, the one enrollment decision that generation's environment and argv
+// are built from (enrollsIn), and unset otherwise — so the record of a generation in a pod that
+// carries no enrollment says what it was handed, which is no broker at all. The stream is fixed
+// for the pod's life, so a pod a daemon created under another stream dials it until the pod is
+// replaced; the other five are fixed for the generation's life, and the Sandbox records them per
+// role (recordAddresses) so a daemon restarted under other addresses can tell (evaluate).
 // TestHandedAddressesAreEveryAddressAPodCarries keeps this list equal to what those two build.
-func (r *Runtime) handedAddresses() []handedAddress {
+func (r *Runtime) handedAddresses(enrolled bool) []handedAddress {
 	brokerURL := ""
-	if broker := r.agentSecrets; broker != nil {
-		brokerURL = broker.URL
+	if enrolled {
+		brokerURL = r.agentSecrets.URL
 	}
 	return []handedAddress{
 		{connectFlag, r.streamURL},

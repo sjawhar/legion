@@ -110,7 +110,8 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 		return objects
 	}
 	// recordUnder is the tester's record of generation, as a runtime with testOptions edited by edit
-	// writes it when it starts that generation.
+	// writes it when it starts that generation, from the launch's own enrollment decision
+	// (Runtime.enrollsIn): a launch that builds its pod carries the configuration as it reads.
 	recordUnder := func(edit func(*Options), generation uint64) string {
 		opts := testOptions()
 		edit(&opts)
@@ -118,7 +119,7 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		record, err := r.recordFor(claim.RoleTester, generation)
+		record, err := r.recordFor(claim.RoleTester, generation, r.enrollsIn(nil, claim.RoleTester))
 		if err != nil {
 			t.Fatal(err)
 		}

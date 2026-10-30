@@ -242,7 +242,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 			return fail(fmt.Sprintf("stop its earlier generation %d", stale), err)
 		}
 	}
-	if err := r.recordAddresses(starting, s, spec.Role, spec.Generation); err != nil {
+	if err := r.recordAddresses(starting, s, spec.Role, spec.Generation, l.enrolls(r)); err != nil {
 		return fail("record the addresses its generation is handed", err)
 	}
 	if err := r.launchers.start(starting, spec.Claim, string(pod.UID), launcherCommand(l, r)); err != nil {
@@ -253,12 +253,15 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 }
 
 // keptBy is what the live pod of the Sandbox read as s was built with, for the role l starts in
-// it: whether it carries the secrets broker's enrollment for that role (carriesEnrollment) and
-// which of the role's own overlays its container holds (heldRoleOverlays). A launch that keeps
-// such a pod builds its start command from these rather than from the configuration as it now
-// reads, so the role is started as its pod was built (launcherCommand, roleOperatorEnv) and runs
-// degraded until the update round replaces the pod — able to push its work and answer that round,
-// where a start naming what its pod cannot carry would refuse to run at all (keptPod, INFRA-484).
+// it: the enrollment decision for that role in that pod (enrollsIn, which reads the broker's
+// volumes the pod carries) and which of the role's own overlays its container holds
+// (heldRoleOverlays). A launch that keeps such a pod builds its start command from these rather
+// than from the configuration as it now reads, so the role is started as its pod was built
+// (launcherCommand, roleOperatorEnv) and runs degraded until the update round replaces the pod —
+// able to push its work and answer that round, where a start naming what its pod cannot carry
+// would refuse to run at all (keptPod, INFRA-484).
+// The same decision writes the generation's address record (recordAddresses), so the record says
+// what the start said.
 //
 // It reads the Sandbox's stored pod template, the build of the pod the controller made from it,
 // and not the pod-shape annotation (podShapeAnnotation): the annotation is written only by this
@@ -272,7 +275,7 @@ func (r *Runtime) keptBy(s *sandbox, l launch) (keptPod, bool) {
 	if !readable {
 		return keptPod{}, false
 	}
-	return keptPod{enrolled: carriesEnrollment(spec, l.spec.Role), overlays: overlays}, true
+	return keptPod{enrolled: r.enrollsIn(&spec, l.spec.Role), overlays: overlays}, true
 }
 
 // stopIssuedChild stops generation of token's launcher in podUID after its Start returned startErr,

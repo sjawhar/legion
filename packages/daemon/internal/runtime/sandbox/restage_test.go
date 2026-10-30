@@ -238,10 +238,11 @@ func TestARoleToldAStaleDaemonURLGetsANewGenerationInTheSamePod(t *testing.T) {
 // and the shim refuses to start without its token file. The pod has drifted, so PodDrift names the
 // projection the pod lacks and the daemon opens an update round over it; no observation of the
 // role names that projection any more, and its relaunch keeps the pod, since ending it under the
-// roles working in it is the thing the round exists to avoid. (Enrolling also moves the running
-// generation's own AGENT_SECRETS_URL, which is a moved address still and what the detail names.)
-// Once the round has ended the pod (ReplacePod), the next launch
-// makes one mounting both for every role, and a sibling resumes into that same new pod.
+// roles working in it is the thing the round exists to avoid. The running generation's own
+// AGENT_SECRETS_URL moves with nothing: it runs in a pod that carries no enrollment, so it was
+// handed no broker URL and is handed none now (Runtime.enrollsIn), and its role is Alive. Once
+// the round has ended the pod (ReplacePod), the next launch makes one mounting both for every
+// role, and a sibling resumes into that same new pod.
 func TestEnrollingWithTheSecretsBrokerDriftsAnIssuePodMadeWithoutIt(t *testing.T) {
 	g := newRig(t, nil)
 	tester, reviewer := workerSpec(t), testSpec(t, otherToken, claim.RoleReviewer, testTree)
@@ -258,6 +259,10 @@ func TestEnrollingWithTheSecretsBrokerDriftsAnIssuePodMadeWithoutIt(t *testing.T
 	if strings.Contains(obs.Detail, agentSecretsTokenVolume) {
 		t.Fatalf("%s at %+v names the pod's token projection (%s), which is its round's to act on, not a repoint's",
 			obs.Kind, obs.Locator, obs.Detail)
+	}
+	if obs.Kind != runtime.Alive {
+		t.Fatalf("%s (%s), want the tester alive: its generation runs in a pod that carries no enrollment, so it holds no broker URL to move",
+			obs.Kind, obs.Detail)
 	}
 	want := (movedAddress{agentSecretsTokenVolume, "(unset)", enrollmentName(brokerTokenProjection(broker))}).String()
 	if drifted := driftOf(t, g.ctx, r2, testerLoc); !slices.Contains(drifted, want) {
@@ -515,11 +520,13 @@ func heldInPod(r *Runtime, pod *corev1.Pod, roles []claim.Role) []movedAddress {
 // that pod (movedInPod): a role whose pod holds a move its workers cannot be asked about — the
 // stream its launcher dials — is reported StaleAddress naming it, and its relaunch replaces the
 // pod. An address carried in the generation's environment alone (the daemon's API, the broker's
-// URL with its enrollment unchanged) is stale too, but its relaunch starts a new generation in the
-// same pod. What has drifted instead is neither: the broker's enrollment, configured only now or
-// changed, leaves the role Alive and its pod kept, and is read by PodDrift alone, for its update
-// round to act on once its workers have pushed. A role holding nothing moved and whose pod has
-// drifted from nothing is alive and its pod kept.
+// URL with its pod's enrollment unchanged) is stale too, but its relaunch starts a new generation
+// in the same pod. What has drifted instead is neither: the broker's enrollment, configured only
+// now or changed, leaves the role Alive and its pod kept, and is read by PodDrift alone, for its
+// update round to act on once its workers have pushed — and enrolling only now moves no address
+// of the running generation, which runs in a pod carrying no enrollment and so holds no broker
+// URL to move (Runtime.enrollsIn). A role holding nothing moved and whose pod has drifted from
+// nothing is alive and its pod kept.
 func TestEvaluateReadsAPodStaleExactlyWhenRelaunchReplacesIt(t *testing.T) {
 	broker := AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
 	enrolled := func(edit func(*AgentSecrets)) func(*Options) {
@@ -541,7 +548,7 @@ func TestEvaluateReadsAPodStaleExactlyWhenRelaunchReplacesIt(t *testing.T) {
 		"nothing moved":                 {before: func(*Options) {}, now: func(*Options) {}},
 		"the worker stream moved":       {before: func(*Options) {}, now: moveStream, where: connectFlag, replaced: true},
 		"the daemon's API moved":        {before: func(*Options) {}, now: func(o *Options) { o.DaemonURL = movedDaemonURL }, where: "LEGION_DAEMON_URL"},
-		"the broker enrolled only now":  {before: func(*Options) {}, now: enrolled(unchanged), where: "AGENT_SECRETS_URL", drifts: agentSecretsTokenVolume},
+		"the broker enrolled only now":  {before: func(*Options) {}, now: enrolled(unchanged), drifts: agentSecretsTokenVolume},
 		"the broker's audience changed": {before: enrolled(unchanged), now: enrolled(func(a *AgentSecrets) { a.Audience = "agent-secrets-next" }), drifts: agentSecretsTokenVolume},
 		"the broker's expiry changed":   {before: enrolled(unchanged), now: enrolled(func(a *AgentSecrets) { a.TokenExpiry = 30 * time.Minute }), drifts: agentSecretsTokenVolume},
 		"the broker's URL moved alone":  {before: enrolled(unchanged), now: enrolled(func(a *AgentSecrets) { a.URL = "https://secrets-next.internal.example" }), where: "AGENT_SECRETS_URL"},

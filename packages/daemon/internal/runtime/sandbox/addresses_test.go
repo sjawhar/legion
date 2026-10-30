@@ -35,11 +35,13 @@ func addressRuntime(t *testing.T, edit func(*Options)) *Runtime {
 }
 
 // movedSince is what a runtime named now reads of a tester launched under launched: the stream its
-// issue pod's launcher dials, then its generation-1 record.
+// issue pod's launcher dials, then its generation-1 record, written with that pod's own
+// enrollment decision (Runtime.enrollsIn) and compared against what a generation started in that
+// same pod would be handed now.
 func movedSince(t *testing.T, launched, now *Runtime) []movedAddress {
 	t.Helper()
 	pod := &corev1.Pod{Spec: podOf(t, launched, workerSpec(t))}
-	record, err := launched.recordFor(claim.RoleTester, 1)
+	record, err := launched.recordFor(claim.RoleTester, 1, launched.enrollsIn(&pod.Spec, claim.RoleTester))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +50,7 @@ func movedSince(t *testing.T, launched, now *Runtime) []movedAddress {
 	if stream, ok := now.movedStream(pod, podContainer(claim.RoleTester)); ok {
 		moved = append(moved, stream)
 	}
-	environment, err := now.movedEnvironment(s, claim.RoleTester, 1)
+	environment, err := now.movedEnvironment(s, pod, claim.RoleTester, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +183,7 @@ func TestAMovedAddressIsDescribedAsItHoldsThenWhatItIsHandedNow(t *testing.T) {
 func TestAnUnreadableAddressRecordIsAnError(t *testing.T) {
 	r := addressRuntime(t, nil)
 	s := &sandbox{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{addressesAnnotation(claim.RoleTester): "{not json"}}}
-	if moved, err := r.movedEnvironment(s, claim.RoleTester, 1); err == nil || !strings.Contains(err.Error(), "is unreadable") {
+	if moved, err := r.movedEnvironment(s, &corev1.Pod{}, claim.RoleTester, 1); err == nil || !strings.Contains(err.Error(), "is unreadable") {
 		t.Fatalf("movedEnvironment = %+v, %v; want the record's unreadability", moved, err)
 	}
 }
@@ -197,7 +199,7 @@ func TestTheAddressRecordHoldsNoCredential(t *testing.T) {
 		o.DispatchURL = "https://legion:dispatch-password@dispatch.internal.example"
 		o.AgentSecrets.URL = "https://secrets.internal.example/?token=broker-query"
 	})
-	record, err := r.recordFor(claim.RoleTester, 7)
+	record, err := r.recordFor(claim.RoleTester, 7, r.enrollsIn(nil, claim.RoleTester))
 	if err != nil {
 		t.Fatal(err)
 	}
