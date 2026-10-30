@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-639",
-  "completed": "2026-10-30T10:35:00Z",
+  "completed": "2026-10-30T13:20:00Z",
   "proof": [
     {
       "criterion": "1 CLI-shaped writes at log offsets scaled by F, reads at a configurable assumption",
@@ -23,10 +23,10 @@
     {
       "criterion": "3, 9 inputs recorded with the Dispatch CPU-seconds; cores at full rate = dispatch_cpu_s / window_s / F",
       "surface": "summary.json replay block of any replay step",
-      "command": "LOADTEST_ROOT=$TMPDIR/lt-r7 run-step.sh r7-gmp3 --replay --dispatch-commit 35efd326 --gomaxprocs 3 --from 0 --to 10m (2-core pod)",
-      "observed": "replay.inputs.gomaxprocs 3; replay.saturation_cores 2 from nproc (nproc 2, no cgroup quota), so the CPU criterion uses 0.9 x 2 cores; 36 of 36 writes, 0 failed, not saturated; TestReplaySaturationRules covers GOMAXPROCS above nproc, a cgroup quota below both, and no quota",
-      "headSha": "ff76e646ce911385c3937c29e9a0489157171909",
-      "negativeControl": "TestReplaySaturationRules: 1.9 cores in 10% of samples is saturated against 2 cores, and not against GOMAXPROCS 3"
+      "command": "LOADTEST_ROOT=$TMPDIR/lt-r7 run-step.sh r8-v1 --replay --dispatch-commit 35efd326 --gomaxprocs 3 --from 0 --to 5m (this pod: cgroup v1, /sys/fs/cgroup/cpu/cpu.cfs_quota_us 300000, cpu.cfs_period_us 100000, no cpu.max, nproc 2)",
+      "observed": "meta.json build_commit b1106b94 (clean), replay.cgroup_cpu_quota {version 1, quota_us 300000, period_us 100000}, cgroup_cpu_max empty; summary.json saturation_cores 2 from nproc with GOMAXPROCS 3; 18 of 18 writes, 0 failed. TestReadCgroupCPUQuota covers the v2 file, v2 max, the v1 files, v1 -1 and neither; TestReplaySaturationRules has a v1 quota below nproc naming cgroup_cpu_quota",
+      "headSha": "2e7cce662cc7a4ffcdf8283fe9cfa463ade449b8",
+      "negativeControl": "TestReadCgroupCPUQuota: a v1 quota of -1 reads as no quota (the arm is skipped, not taken as a negative core count); TestReplaySaturationRules: 1.9 cores in 10% of samples is saturated against 2 cores, not against GOMAXPROCS 3"
     },
     {
       "criterion": "4 cores at the full rate at 35efd326 beside 10.9-14.0, and what is not reproduced",
@@ -80,7 +80,8 @@
     "Main's #2449 removed GET /api/v1/events; the replay opens SSE streams for builds without /ws/live (35efd326) and live sockets otherwise, recorded as config.dashboard.",
     "Acceptance 4, per the INFRA-512 architect's ruling of 2026-10-29T19:41Z: the report states both measurement sets with their times and that the absolute figure depends on the machine and the hour; no single number is claimed.",
     "The round also merged main twice (8a911ecc, then dfd128f1 at 8492aacb) because the pull request conflicted; api.go takes main's keyed writes beside the replay's callRaw.",
-    "Round 2 merged main at 95356727 because CI must run on a head carrying main's new jobs; the merge was clean."
+    "Round 2 merged main at 95356727 because CI must run on a head carrying main's new jobs; the merge was clean.",
+    "Round 3 (review 2, capped to its six items by the INFRA-512 architect): main merged in again at d9aee5bf, clean."
   ],
   "openQuestions": [
     "Whether production's named versions were uploads or edits is not logged; the same-session U bracket is 12.73-15.53 cores."
