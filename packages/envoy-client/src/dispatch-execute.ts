@@ -320,6 +320,18 @@ function renderAdvice(
     }
   }
 
+  // The gate line is last for the document tools, for the reason the cadence line is last for
+  // the others: behind `| tail -1` it is the only line the agent sees, and it is the one line of
+  // a document write that someone else has to act on. It describes this one write - the version
+  // it stored and the approval that version replaced - rather than a rule about editing a spec,
+  // because the server sends it only on the write that superseded the approval.
+  const superseded = advice.superseded_approval;
+  if (superseded !== undefined && (tool === "dispatch_doc_edit" || tool === "dispatch_artifact")) {
+    lines.push(
+      `Stored version ${superseded.version}, superseding version ${superseded.approved_version}, which ${superseded.approved_by} approved. That approval is stale until someone approves version ${superseded.version}, and no undo restores it: a Legion design gate on this document is closed meanwhile, so every READY in its tree is refused. Meant to change the approved design? Request approval with \`dispatch request-approval\`. Meant a correction beside it? Tell the tree's architect, and keep the next one in a comment or in the plan.`
+    );
+  }
+
   // The cadence line comes last and opens by saying the write went through: behind `| tail -1`
   // it is the only line an agent sees, and "Stop posting" alone reads as a refusal.
   if (

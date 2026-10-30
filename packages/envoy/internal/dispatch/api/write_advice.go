@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -37,6 +38,9 @@ type writeAdvice struct {
 	*documentBlocks
 	// editBlocks is set by a document edit; nil omits its field.
 	*editBlocks
+	// SupersededApproval is set by a document write that stored a version replacing the one a
+	// person had approved; nil (omitted) everywhere else.
+	SupersededApproval *supersededApproval `json:"superseded_approval,omitempty"`
 	// Suggestions is the related-item check's result, set only on an issue or ask
 	// creation; nil (omitted) everywhere else.
 	Suggestions *model.Suggestions `json:"suggestions,omitempty"`
@@ -267,6 +271,100 @@ type decisionBlockCheck struct {
 	BlockID     string             `json:"block_id"`
 	Question    string             `json:"question"`
 	Suggestions *model.Suggestions `json:"suggestions"`
+}
+
+// supersededApproval is what a document write reports when the version it stored replaced the
+// version a person had approved: that approval is now stale, and nothing but a person's review of
+// the new version restores it. Legion's design gate is exactly such an approval - a person's
+// approval of a root issue's spec at a version - so a write that supersedes it closes that gate,
+// and every READY in the tree is refused until a person approves again. The writer is the only
+// one who can be told in time, and only the write that superseded the approval is told: a write
+// on a document whose approval was already stale closed nothing.
+type supersededApproval struct {
+	// ApprovedVersion is the version a person approved, the one this write superseded.
+	ApprovedVersion int `json:"approved_version"`
+	// Version is the version this write stored.
+	Version int `json:"version"`
+	// ApprovedBy is who gave that approval, as its review records the actor's id.
+	ApprovedBy string `json:"approved_by"`
+}
+
+// supersededApprovalAdvice reports the approval the write of version just made stale, or nil when
+// it made none, which is every write of a document nobody has approved. It runs inside the write's
+// own transaction, after the version row and the approval carry (docs.carryApproval) are written,
+// so it reads what the write left: a carried approval is pinned to version itself and reports
+// nothing, which is right - the gate reopens on that carry's own artifact.approved event.
+//
+// The read is the newest review of the document, one lookup of artifact_reviews_by_artifact. It
+// reports only when that review is an approval of the version right below this one: an older
+// approval was already stale before this write, and a newer changes request had already closed
+// the gate.
+//
+// Like every other advice query this runs behind a savepoint, because a failed statement aborts
+// the transaction it ran in and this must never fail the write it describes. It writes nothing,
+// so the savepoint is always rolled back, which also restores the statement_timeout it set.
+func (s *server) supersededApprovalAdvice(
+	ctx context.Context,
+	tx pgx.Tx,
+	route string,
+	issueKey string,
+	artifactID string,
+	version int,
+) *supersededApproval {
+	adviceTx, err := tx.Begin(ctx)
+	if err != nil {
+		s.logAdviceError(route, issueKey, "superseded_approval", err)
+		return nil
+	}
+	defer func() { _ = adviceTx.Rollback(ctx) }()
+	if _, err := adviceTx.Exec(ctx, "set local statement_timeout = '500ms'"); err != nil {
+		s.logAdviceError(route, issueKey, "superseded_approval", err)
+		return nil
+	}
+	approval, err := newestReviewAsApproval(ctx, adviceTx, artifactID, version)
+	if err != nil {
+		s.logAdviceError(route, issueKey, "superseded_approval", err)
+		return nil
+	}
+	return approval
+}
+
+// newestReviewAsApproval is supersededApprovalAdvice's rule, over whatever queryer the caller
+// holds: the newest review of artifactID, reported when it approves the version right below
+// version. A document with no review at all, an approval of an older version, an approval of
+// version itself (the approval carry's own review) and a changes request each report nothing.
+func newestReviewAsApproval(ctx context.Context, q queryer, artifactID string, version int) (*supersededApproval, error) {
+	var (
+		approvedVersion int
+		state           string
+		approvedBy      string
+	)
+	if err := q.QueryRow(ctx, `
+		select version, state, coalesce(actor->>'id', '')
+		from artifact_reviews
+		where artifact_id = $1
+		order by created_at desc, id desc
+		limit 1
+	`, artifactID).Scan(&approvedVersion, &state, &approvedBy); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read the document's newest review: %w", err)
+	}
+	if state != "approved" || approvedVersion != version-1 {
+		return nil, nil
+	}
+	return &supersededApproval{ApprovedVersion: approvedVersion, Version: version, ApprovedBy: approvedBy}, nil
+}
+
+// documentWriteAdvice is the whole advice of a document write with no issue state to report: a
+// project document's write, or an issue document's whose bounded issue-advice read failed. It
+// carries the document half of writeAdvice - the block report its route produces, and the
+// approval the write superseded - so neither depends on the issue advice beside it.
+type documentWriteAdvice struct {
+	*documentBlocks
+	*editBlocks
+	SupersededApproval *supersededApproval `json:"superseded_approval,omitempty"`
 }
 
 const (

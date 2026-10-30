@@ -489,7 +489,17 @@ lists each block the edit added, in document order (`docs.EditOutcome.AddedAskBl
 edit has committed (`decisionBlockChecks`), the first five checked at once under one 5 s
 allowance and each past them answered, and recorded, as not made; it is omitted when the edit
 added none. A conditional edit releases its document's edit gate at the commit, before those
-checks run, so they never hold the next conditional edit. Issue-state advice is computed in the
+checks run, so they never hold the next conditional edit. A document write that stored a version
+replacing the one a person approved reports `superseded_approval`
+(`{approved_version, version, approved_by}`), on an issue document's advice and in the document
+report of a project document's: a document edit, and an upload that replaced an existing
+document, each read their transaction's newest review of the document after writing their own
+version and any approval carry it made (`supersededApprovalAdvice`,
+`artifact_reviews_by_artifact`, behind a savepoint of its own that is always rolled back), and
+report only an approval of the version right below the one they stored. A document nobody
+approved, an approval that was already stale, a newer changes request, and a version the carry
+approved itself each report nothing, so the field names the write that closed a Legion design
+gate and no other. Issue-state advice is computed in the
 write transaction after its event is appended, so it includes that write. A stored document's
 decision blocks and unparsed openers are read from one parse of the canonical Markdown after the
 write transaction commits (`readDocumentBlocks`). Advice queries run
