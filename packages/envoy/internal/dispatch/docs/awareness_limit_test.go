@@ -32,7 +32,7 @@ func (s *scriptedSocket) SetWriteDeadline(time.Time) error { return nil }
 
 // socketSending is the filter over a socket sending frames.
 func socketSending(frames ...[]byte) *awarenessLimitConn {
-	return newAwarenessLimitConn(&scriptedSocket{frames: bytes.NewReader(bytes.Join(frames, nil))}, limitRoom)
+	return newAwarenessLimitConn(&scriptedSocket{frames: bytes.NewReader(bytes.Join(frames, nil))}, limitRoom, nil)
 }
 
 // clientFrame is one websocket frame as a browser sends it (RFC 6455 section 5.2): masked, with

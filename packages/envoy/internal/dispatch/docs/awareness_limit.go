@@ -84,10 +84,12 @@ const (
 
 // awarenessLimitWriter is a document socket's response writer: the connection ygo's websocket
 // upgrade hijacks through it is an awarenessLimitConn, which holds the socket to
-// maxAwarenessClientsPerSocket awareness clients. gorilla reads the upgraded connection through
-// the net.Conn this hands it - directly, or through the hijacked buffered reader, which it resets
-// onto that connection first (gorilla/websocket server.go:180-204, 330-341) - so every frame the
-// socket sends passes the filter before ygo sees it.
+// maxAwarenessClientsPerSocket awareness clients. The upgrade reads the socket either through
+// that connection or through the hijacked buffered reader, whichever gorilla this build
+// resolves: v1.5.3 resets that reader onto the connection the hijack returned
+// (server.go:330-341, bufioReaderSize), while the v1.5.4 pre-release the workspace builds keeps
+// it on the connection underneath (server.go:192-195), where the filter would never see a frame.
+// So Hijack resets the reader onto the filter itself, which holds whichever of the two reads it.
 type awarenessLimitWriter struct {
 	http.ResponseWriter
 	room string
@@ -98,7 +100,18 @@ func (w *awarenessLimitWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return newAwarenessLimitConn(conn, w.room), buffers, nil
+	// What the HTTP server read past the request and has not handed on - a client that sent a
+	// frame without waiting for the upgrade's answer - is the socket's first bytes, and the
+	// reset below drops the buffer holding them. So the filter is given them to read first.
+	// Peek of what the reader already holds reads nothing and cannot fail.
+	var pending []byte
+	if held := buffers.Reader.Buffered(); held > 0 {
+		head, _ := buffers.Reader.Peek(held)
+		pending = bytes.Clone(head)
+	}
+	filtered := newAwarenessLimitConn(conn, w.room, pending)
+	buffers.Reader.Reset(filtered)
+	return filtered, buffers, nil
 }
 
 // Unwrap gives http.ResponseController the writer underneath.
@@ -130,8 +143,14 @@ type awarenessLimitConn struct {
 	key [4]byte
 }
 
-func newAwarenessLimitConn(conn net.Conn, room string) *awarenessLimitConn {
-	return &awarenessLimitConn{Conn: conn, room: room, live: make(map[uint64]struct{}), src: bufio.NewReader(conn)}
+// newAwarenessLimitConn is the filter over conn, reading pending - what the upgrade's hijack
+// held of the socket already (Hijack) - before conn itself.
+func newAwarenessLimitConn(conn net.Conn, room string, pending []byte) *awarenessLimitConn {
+	var source io.Reader = conn
+	if len(pending) > 0 {
+		source = io.MultiReader(bytes.NewReader(pending), conn)
+	}
+	return &awarenessLimitConn{Conn: conn, room: room, live: make(map[uint64]struct{}), src: bufio.NewReader(source)}
 }
 
 // Read hands ygo the rewritten stream: it reads whole frames from the socket until it has bytes

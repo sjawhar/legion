@@ -669,21 +669,24 @@ process holds its own room for a document. Postgres is the only channel between 
   (`ErrRoomBehindHead`). A settlement catches its room up under the document's lock and then
   continues. A version whose room is behind is rendered from the stored document (`storedTree`).
 - **Cursors and presence.** Each process relays its rooms' awareness on `dispatch_doc_awareness`
-  through its NOTIFY connection. It sends the changes of one room once per 50 ms at most. A room
-  that loads for a reader, and a reader that joins a loaded room, ask the other processes for
-  their readers' states, so a reader who opens second sees the first reader's cursor at once. A
-  room forgets a client it hears nothing from for 30 seconds (`AwarenessExpiry`), so a cursor
-  relayed from a process that stopped without a word goes away. A document socket may hold at
-  most four awareness clients at once (`maxAwarenessClientsPerSocket`), one more than a browser
-  tab ever announces: the clients a frame names past that are taken out of it before ygo applies
-  it (`awareness_limit.go`), so a tab claiming thousands of client ids neither fills a room's
-  memory, nor shows the room's other readers thousands of cursors, nor becomes thousands of
-  notifications. A socket's clients go when it does, and a client that leaves gives its entry
-  back at once rather than two expiries later (`reclaimAwarenessSlots`), so a reader who joins
-  after such a frame is taken in and relayed at once. A room also holds about 2 MB of its
-  clients' states (`MaxAwarenessBytesPerRoom`) and, as a last resort, as many client entries as
-  the process has connections to give (`maxAwarenessClientsPerRoom`), which is above every
-  reader it can admit.
+  through its NOTIFY connection. It sends the changes of one room once per 50 ms at most, and
+  each send carries every reader who moved within that window, at the state the room holds when
+  it ends, so readers moving at the same moment all cross rather than the last of them: the relay
+  reads each room's awareness itself (`watchRoomAwareness`) rather than taking ygo's outbound
+  lane, which keeps one awareness blob per room. A room that loads for a reader, and a reader
+  that joins a loaded room, ask the other processes for their readers' states, so a reader who
+  opens second sees the first reader's cursor at once. A room forgets a client it hears nothing
+  from for 30 seconds (`AwarenessExpiry`), so a cursor relayed from a process that stopped
+  without a word goes away. A document socket may hold at most four awareness clients at once
+  (`maxAwarenessClientsPerSocket`), one more than a browser tab ever announces: the clients a
+  frame names past that are taken out of it before ygo applies it (`awareness_limit.go`), so a
+  tab claiming thousands of client ids neither fills a room's memory, nor shows the room's other
+  readers thousands of cursors, nor becomes thousands of notifications. A socket's clients go
+  when it does, and a client that leaves gives its entry back at once rather than two expiries
+  later (`reclaimAwarenessSlots`), so a reader who joins after such a frame is taken in and
+  relayed at once. A room also holds about 2 MB of its clients' states
+  (`MaxAwarenessBytesPerRoom`) and, as a last resort, 256 client entries
+  (`maxAwarenessClientsPerRoom`), far past the handful of tabs any document has.
 - **Issue close and reopen.** Migration `0142`'s trigger notifies `dispatch_issue_open_changed`
   when an issue's `closed_at` changes, whichever process or build wrote it. Every process of this
   build then closes its rooms of the issue's documents, and their browsers reconnect read-only or

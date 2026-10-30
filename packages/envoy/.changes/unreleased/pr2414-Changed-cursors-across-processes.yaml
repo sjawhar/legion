@@ -1,10 +1,12 @@
 kind: Changed
 body: |-
   Cursors and presence cross processes. Each process relays its rooms' awareness on
-  `dispatch_doc_awareness`, at most once per 50 ms per room. A reader who opens a document second
-  sees the first reader's cursor at once, and a reader who leaves on one process leaves on the
-  other. A room forgets a client it hears nothing from for 30 s, so a cursor relayed from a process
-  that stopped without a word goes away. A document socket may hold at most four awareness
+  `dispatch_doc_awareness`, at most once per 50 ms per room, and a flush carries every reader who
+  moved within that window, so readers moving at the same moment all reach the other process
+  rather than the last of them. A reader who opens a document second sees the first reader's
+  cursor at once, and a reader who leaves on one process leaves on the other. A room forgets a
+  client it hears nothing from for 30 s, so a cursor relayed from a process that stopped without
+  a word goes away. A document socket may hold at most four awareness
   clients at once, where a browser tab announces one, and the clients a frame names past that
   are dropped before the room applies it, so one tab claiming thousands of client ids neither
   grows a room's memory, nor shows the document's other readers thousands of cursors, nor fans

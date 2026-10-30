@@ -873,13 +873,18 @@ history another process then replaced, is closed whenever its issue closed, rath
 resident with text the store no longer holds until its idle minute runs out.
 
 Cursors and presence cross processes too (`docs/awareness_relay.go`). The service attaches an
-`awarenessRelay` to ygo (`Server.AttachRelay`). It drops document updates, and sends each room's
-awareness changes, coalesced per room and client over 50 ms, on `dispatch_doc_awareness` through
-the sender. A process applies another's awareness (`Server.Inject`) only to a room it holds with a
-reader of its own connected (`holdsRoomForReaders`), so relayed heartbeats never load a document or
-keep a room resident. A room that loads for a reader, and a reader that joins a resident room,
-query the other processes, which answer with their local clients' states. Before the service
-closes a room itself, it removes its local clients' states, so the removal is relayed
+`awarenessRelay` to ygo (`Server.AttachRelay`), which drops everything ygo hands `Publish`: ygo's
+outbound lane keeps one awareness blob per room, the latest only, so readers moving in the same
+instant would reach it as one of them. The relay watches each resident room's awareness itself
+instead (`RoomActivated`, `watchRoomAwareness`), which names every client a change touched, and
+sends each room's changes, coalesced per room and client over 50 ms - each client at the state the
+room holds when the window ends - on `dispatch_doc_awareness` through the sender. A client another
+process's notification is being applied for is left to that process rather than relayed back
+(`inbound`, `received`). A process applies another's awareness (`Server.Inject`) only to a room it
+holds with a reader of its own connected (`holdsRoomForReaders`), so relayed heartbeats never load
+a document or keep a room resident. A room that loads for a reader, and a reader that joins a
+resident room, query the other processes, which answer with their local clients' states. Before
+the service closes a room itself, it removes its local clients' states, so the removal is relayed
 (`removeLocalAwareness`). `AwarenessExpiry` is 30 s, so a cursor relayed from a process that died
 without a word expires. A document socket may hold at most `maxAwarenessClientsPerSocket` (4)
 awareness clients at once, where a browser tab announces one: ygo applies and broadcasts a peer's
@@ -889,12 +894,12 @@ on the connection the upgrade hijacks, before ygo reads the frame (`docs/awarene
 every other process see the same clients, and it is what keeps a peer's frame of invented ids
 from growing a room's awareness map and the relay's fan-out. ygo removes the clients a peer owned
 as it disconnects, and a client that leaves gives its entry back as it goes rather than two
-expiries later - the room's own departure watcher frees it (`watchAwarenessDepartures`,
+expiries later - the room's own observer frees it (`watchRoomAwareness`,
 `reclaimAwarenessSlots`), as does the arrival of another process's awareness. A room also holds
 at most `maxAwarenessBytesPerRoom` (about 2 MB) of its clients' states and, as a last resort,
-`maxAwarenessClientsPerRoom` client entries (ygo's `MaxAwarenessClientsPerRoom`,
-`docs/service.go`), which is `maxRoomConnections` sockets at their own bound and so above every
-reader this process can admit.
+`maxAwarenessClientsPerRoom` (256) client entries (ygo's `MaxAwarenessClientsPerRoom`,
+`docs/service.go`), far past the handful of tabs any document has: it is what bounds a room's
+memory if any path other than a socket ever reaches its awareness.
 
 An issue's close and reopen reach every process through migration 0142's trigger, which notifies
 `dispatch_issue_open_changed` with the issue's key when `closed_at` changes, whoever wrote it. Each
