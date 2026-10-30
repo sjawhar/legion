@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-590",
-  "completed": "2026-10-30T14:44:00Z",
+  "completed": "2026-10-30T19:14:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2395",
   "head": "811dced0a4dc90f503b3e5b89befe365df32c2d4",
-  "round": "18 (the round-14 review, changes requested at 14170450): a window Request reads #2508's per-subject denial record under its own send time (sentAt before PublishMsg; read on the answer goroutine when the flush settles and before the timeout return), so a denied role forward under concurrent denials answers ErrPublishDenied naming its own subject and is counted denied; a forward held pending by its holder's resolution counts holder, a confirmed forward with no receipt counts unanswered (bus.ErrPublishUnconfirmed exported to tell them apart); HELP, README and running-dispatch.md list the five reasons; the review's doc fixes done (4fc3e0d2). Then a forward merge of main a4af034182 (811dced0): migrations renumbered to 0149_duty_holds/0150_outbox_claim above main's 0148_asks_anchor_artifact_id; the README conflict keeps both sides; one ci.yaml line (api/testdata for listener_server_change), which main's own filter check needs on main. Code pushed first, handoff second.",
+  "round": "19 (the daemon sent the round back on a red required `test` at ac662be1): the failure is TestARecoveryTellsTheArchitectOfTheChildrenItDidNotRecord in packages/daemon/internal/daemon, a package this PR does not change. It passes 20 of 20 locally at 811dced0 and 20 of 20 at main's tip d126b19d; the failed job's one re-run (run 41074105291, attempt 2) passed, test and envoy-go green. No code change; code head stays 811dced0. The round-18 diff check (comment 6530419615) and the PR body record the merge's resolutions and both results.",
   "proof": [
     {
       "criterion": "Exactly one process publishes at a time through a lease on the outbox's own database connection; /healthz carries boolean outbox_publisher",
@@ -190,6 +190,14 @@
       "observed": "At 4fc3e0d2: the two new bus tests 10/10 pass, -race ok (102.6 s), bus ok (344.1 s), outbox ok (296.4 s) with TestAForwardHeldByItsHoldersResolutionIsCountedUnderTheHolder and TestAForwardNoHolderAnsweredIsCountedUnanswered passing. At 811dced0: build and vet clean, store ok 335.3 s, outbox ok 313.0 s, duty ok 26.9 s, cmd/dispatch ok 343.4 s; main's CI filter check 0 uncovered; TestDispatchConnectionsPerPodIsTheServers ok at 89.",
       "headSha": "811dced0a4dc90f503b3e5b89befe365df32c2d4",
       "negativeControl": "At 14170450, TestEveryDeniedRequestOfOneWindowNamesItsOwnSubject fails: 'the Request to notifications.role.denied-0 answered ... Permissions Violation for Publish to \"notifications.role.denied-7\", want ErrPublishDenied'; the two outbox tests read 'envoy_dispatch_outbox_publish_failures_total{reason=\"failed\"} 1'. Main's own tree fails its CI filter check on api/testdata for listener_server_change."
+    },
+    {
+      "criterion": "The red required test at ac662be1 is not this pull request's: the failing daemon test passes at the head and at main's tip, and the re-run of the failed job is green.",
+      "surface": "packages/daemon/internal/daemon on Postgres 17 and a local NATS 2.10.29 with JetStream; GitHub Actions CI run 41074105291",
+      "command": "cd packages/daemon && LEGION_TEST_PG_DSN=<pod Postgres> LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go test -count=20 -run 'TestARecoveryTellsTheArchitectOfTheChildrenItDidNotRecord$' ./internal/daemon/ (at 811dced0 and at main d126b19d); gh run rerun 41074105291 --failed",
+      "observed": "ok 20.28 s at 811dced0 (20 of 20) and ok 20.15 s at d126b19d (20 of 20); run 41074105291 attempt 2: test success, envoy-go success.",
+      "headSha": "811dced0a4dc90f503b3e5b89befe365df32c2d4",
+      "negativeControl": "Attempt 1 of the same run failed in that test ('mapping_refresh_test.go:1489: LEGION-1603 = <nil>, want the recovery to record it in LEGION-1600's tree'); the PR changes 0 files under packages/daemon."
     }
   ],
   "filesChanged": [
