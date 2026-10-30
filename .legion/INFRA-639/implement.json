@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-639",
-  "completed": "2026-10-30T13:20:00Z",
+  "completed": "2026-10-30T19:45:00Z",
   "proof": [
     {
       "criterion": "1 CLI-shaped writes at log offsets scaled by F, reads at a configurable assumption",
@@ -51,6 +51,14 @@
       "observed": "meta.json build_commit 8492aacb (build_dirty false), dispatch_commit dfd128f1; replay-prepare migrated 114 -> 141 in 462 s (backfill 316 s), backfill_empty true at the window; 174/174 writes, 0 failed; 3.63 cores; the client read the build's text for its documents (2 differed, replanned)",
       "headSha": "8492aacb0addaf131d840aec21237bb09feabbcd",
       "negativeControl": "--dispatch-commit deadbeef -> refused before any build (run-step.test.sh case); a build at migration 113 -> replay-prepare refused it as older than the seed's 114"
+    },
+    {
+      "criterion": "No Dispatch issue key in the public diff (the tree's ruling, accepting round at 6b840b6c)",
+      "surface": "the pull request's diff against main; stack.sh replay-get; loadgen replay-plan",
+      "command": "git diff origin/main...4f6d4d8e -- . ':(exclude).legion/**' | grep -E '^\\+.*(INFRA|LINUX)-[0-9]+'; loadgen replay-plan -replay-inputs <bundle> -replay-rate 0.05 and 1 against a loadgen built from 6b840b6c; stack.sh replay-get without LOADTEST_REPLAY_ISSUE",
+      "observed": "the grep prints nothing; replay-plan JSON byte-identical to 6b840b6c's at F 0.05 (3b938c4d...) and F 1 (d595a46f...), with no issue variable needed; go test ./loadtest, common.test.sh and run-step.test.sh green, no digest re-pinned; the manifest keeps schema, project, window, bundle and seed with parts {file, slug, version, bytes, sha256}; the changelog fragment is pr2466-Added-20261030-191551.yaml with the same kind and body",
+      "headSha": "4f6d4d8e08aa40cc77263351f62fa24db0f42108",
+      "negativeControl": "stack.sh replay-get with LOADTEST_REPLAY_ISSUE unset -> 'LOADTEST_REPLAY_ISSUE is not set: set it to the issue the replay's parts are file artifacts of (the manifest names none)', exit 1, before any download; run-step.sh --replay without it -> refused before its build (run-step.test.sh case)"
     }
   ],
   "filesChanged": [
@@ -81,7 +89,8 @@
     "Acceptance 4, per the INFRA-512 architect's ruling of 2026-10-29T19:41Z: the report states both measurement sets with their times and that the absolute figure depends on the machine and the hour; no single number is claimed.",
     "The round also merged main twice (8a911ecc, then dfd128f1 at 8492aacb) because the pull request conflicted; api.go takes main's keyed writes beside the replay's callRaw.",
     "Round 2 merged main at 95356727 because CI must run on a head carrying main's new jobs; the merge was clean.",
-    "Round 3 (review 2, capped to its six items by the INFRA-512 architect): main merged in again at d9aee5bf, clean."
+    "Round 3 (review 2, capped to its six items by the INFRA-512 architect): main merged in again at d9aee5bf, clean.",
+    "Round 5: the issue holding the replay's parts is a required operator input, LOADTEST_REPLAY_ISSUE; the manifest names no issue."
   ],
   "openQuestions": [
     "Whether production's named versions were uploads or edits is not logged; the same-session U bracket is 12.73-15.53 cores."
