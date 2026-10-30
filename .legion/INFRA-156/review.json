@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-156",
+  "completed": "2026-10-30T23:36:00Z",
+  "decision": "approved",
+  "round": "14 (confirmation after the landing merge 6b29d18f of main e018f1d3)",
+  "headReviewed": "32100b14586c37abeb5e294139f3ee84d4348ac7",
+  "codeHead": "6b29d18f4160",
+  "previousReview": "5712321246 (APPROVE at 398176c1)",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "fingerprint": "bd0deaf226b9d4d26590990ce67b0376362fc394b4cbbdba5e8711286e4e80c6 (398176c1) -> 00fee600336cc67f… (32100b14). The diff of the two PR diffs holds only: the migration renamed 0148_block_pointer_links -> 0150_block_pointer_links with its header, census comment and five doc and fragment lines; the two /api/v1/references table rows in cmd/dispatch AGENTS.md and README.md, where main's new row text is taken and the PR's block[] sentences are kept; and ci.yaml, where main's split race job gets an envoy_go_race_pmdoc filter carrying this PR's contracts/src line plus internal/dispatch/model/*, text/* and text/testdata/** (pmdoc's schema.go and pointers.go import model and text). No code changed. The 0148 mentions left in the tree are main's own migration 0148.",
+  "ci": "Not waited for, on the architect's explicit fast path: the merger and the merge lane read CI at the READY head.",
+  "migrations": "Checked just before confirming: main's highest is 0149_event_horizon, which touches no graph table; 0150_block_pointer_links is free. GitHub reports MERGEABLE.",
+  "threads": "20, all resolved.",
+  "keyFindings": []
+}
