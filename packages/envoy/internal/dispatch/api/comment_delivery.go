@@ -617,6 +617,8 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		Attempt int          `json:"attempt"`
 		Body    *string      `json:"body"`
 		Error   *string      `json:"error"`
+		// ReplyToBlock is the id of the block of comment {id} the reply answers ("b2").
+		ReplyToBlock *string `json:"reply_to_block"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
@@ -632,6 +634,10 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.Body != nil && strings.TrimSpace(*input.Body) == "" {
 		writeError(w, "MENTION_INPUT", http.StatusBadRequest, "comment body is required")
+		return
+	}
+	if input.ReplyToBlock != nil && input.Body == nil {
+		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "reply_to_block names the block a reply's body answers; an error report has none")
 		return
 	}
 
@@ -716,6 +722,10 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
+		if err := hydrateCommentReplyBlocks(r.Context(), tx, &reply); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 		if err := tx.Commit(r.Context()); err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -772,14 +782,28 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// A block the reply names is one of the comment it answers, which lockedComment holds after
+	// its owner.
+	var block *namedBlock
+	if input.ReplyToBlock != nil {
+		if thread.AskID != nil {
+			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, replyBlockInAskThread)
+			return
+		}
+		block, err = s.replyBlockOf(r.Context(), tx, refs.ItemComment, comment.ID, *input.ReplyToBlock, "reply_to_block", "INVALID_COMMENT")
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
 	// A callback reply requests no turn, so it hands the turn back the way any session reply
 	// with no `turn` does.
 	turn := thread.replyTurn(actor, nil)
 	reply, err := scanComment(tx.QueryRow(r.Context(), `
-		insert into comments (issue_key, artifact_id, author, body, reply_to, ask_id, turn)
-		values ($1, $2, $3, $4, $5, $6, $7)
+		insert into comments (issue_key, artifact_id, author, body, reply_to, ask_id, turn, replies_to_block)
+		values ($1, $2, $3, $4, $5, $6, $7, $8)
 		returning `+commentColumns+`
-	`, comment.IssueKey, comment.ArtifactID, author, *input.Body, thread.ReplyTo, thread.AskID, turn))
+	`, comment.IssueKey, comment.ArtifactID, author, *input.Body, thread.ReplyTo, thread.AskID, turn, block.nodeID()))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -791,7 +815,7 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	referenceChanges, err := s.replaceReferences(r.Context(), tx, "comment", reply.ID, reply.Body)
+	referenceChanges, err := refs.ReplaceCountedItem(r.Context(), tx, refs.ItemComment, reply.ID, reply.Body, s.deps.ServerURL, reply.CreatedAt)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -809,7 +833,7 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload, err := s.commentEventPayload(
-		r.Context(), tx, reply, artifactName, thread.eventThread(waitingOn), referenceChanges,
+		r.Context(), tx, &reply, artifactName, thread.eventThread(waitingOn), referenceChanges,
 	)
 	if err != nil {
 		s.writeHandlerError(w, err)
