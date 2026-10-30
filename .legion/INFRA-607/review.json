@@ -2,18 +2,24 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-607",
-  "completed": "2026-10-29T23:37:08Z",
+  "completed": "2026-10-30T05:57:30Z",
   "decision": "approved",
-  "reviewedCodeHead": "bc54fc4fdd2ee70e20f101e4d4f098b0f3e4ce13",
-  "round": 7,
+  "reviewedCodeHead": "e8337760317bebcbaad8ea54cf4e02f62856e76b",
+  "round": 8,
   "critical": 0,
   "important": 0,
-  "minor": 0,
-  "scope": "bc54fc4f is a forward merge of main 5455925b into 84d139a3, which I approved at 419ac85e. Unchanged-diff fingerprint at 419ac85e b2755e7f470f, at 5f5f8647 9c3fe489e68a: different, so a new round. With the branch's migration numbers shifted by one (main took 0141_drop_broadcast_idempotency_keys; 0141-0147 became 0142-0148) the two PR diffs are byte-identical (0 differing lines of 10,005), and the only textual conflict was cmd/dispatch/README.md, both sides kept. The thermonuclear pair audited main's 17 new commits against the PR's runtime code.",
+  "minor": 1,
+  "scope": "Full round: e8337760 forward-merges main cd5ca7c3 into bc54fc4f (approved at d6536c1c), and main changed 8 of the PR's files. The PR's own diff is byte-identical to bc54fc4f's (0 differing lines of 10,005) once the branch's migrations shift by three to 0145-0151, matching the implementer's diff-check comment 6512920542; the only textual conflict was cmd/dispatch/README.md, both sides kept.",
   "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at bc54fc4f (no finding): main adds no loop, lease, listener, NOTIFY, embedding trigger or shutdown step; 0141 drops a table the maintenance sweep does not read; migrations 0139-0148 in order; every migration number reference points at its file",
-    "codeQuality": "Verdict: APPROVE at bc54fc4f (no finding)"
+    "deepReview": "Verdict: APPROVE at e8337760 (one Minor): main's item-block index writes comment/message block refs, never artifact refs, so the 0147 excerpt trigger never fires for it; RecordExcerpts records every artifact row whatever TargetOf kind; no new embedding trigger, loop, lease, listener or shutdown step; 88 connections holds; migrations 0142-0151 in order beside main's release; go vet passes for docs, api, cmd/dispatch and infra/gcp",
+    "codeQuality": "Verdict: APPROVE at e8337760 (no finding)"
   },
-  "ci": "CI head bc54fc4f (newest pull_request run); compare bc54fc4f...5f5f8647 is .legion/ only. Required lint, typecheck, test, pr-title: success at 23:36Z. Non-required: envoy-go, the multiprocess jobs, dispatch-memory, envoy-e2e-local, envoy-smoke, envoy-session-stall, envoy-infra-go, listener-server-change, docs, pi-legion and the worker-image build success; dispatch and envoy-go-race still running.",
-  "keyFindings": []
+  "ci": "CI head e8337760 (the run was cancelled by the 02:10Z drain; I re-ran its failed and cancelled jobs once at 04:32Z); compare e8337760...30692a3c is .legion/ only. Green at e8337760: lint, typecheck, test, pr-title, envoy-go, envoy-go-race, envoy-go-race-docs, envoy-infra-go, dispatch (the architect's nine). ci-filters red: six 'envoy-go-race-docs reads packages/envoy/internal/dispatch/itemblocks/* which its filter does not match' errors, identical on main e4c9ab85 (run 40996989713), and the PR changes no file under .github: main's red, fixed on main by 49e23926. ci-ok was queued behind it.",
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/store/migrations/0145-0151",
+      "description": "A local or test database that applied this branch's migrations under their earlier numbers would skip main's 0142-0144 (the runner keys by version) and fail at 0146; recreate such a database. No deployment ran this branch."
+    }
+  ]
 }
