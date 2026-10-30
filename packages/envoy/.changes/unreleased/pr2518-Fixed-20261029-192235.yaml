@@ -1,0 +1,5 @@
+kind: Fixed
+body: 'A document, a past version of it and a comment holding the same markdown read alike: no mark reaches an inline leaf (raw HTML, a picture, a hard break, a footnote reference), an inline HTML declaration (`<!` and any ASCII letter) is raw HTML to both readers and is stored unescaped, and an autolink inside a link label carries its own link while the label keeps its own on the runs around it, which makes such a document storable instead of refused. A line that begins, after up to three spaces, with `<!` and an ASCII letter now opens an HTML block, as the browser editor reads it, so a write holding one is refused (`block HTML is not accepted by Proof`): `<!doctype html> starts every page.` was stored escaped and is refused here.'
+time: 2026-10-29T19:22:35.356101818Z
+custom:
+    Issue: pr2518

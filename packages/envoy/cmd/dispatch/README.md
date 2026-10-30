@@ -698,7 +698,7 @@ and nothing due they hold no timer and send no statement. The four that run pass
 replaced, so under load each runs no more often than that ticker did.
 
 - The embedding queue (`embedqueue.Run`) scans when `embeddings_enqueue`, which every embedding
-  trigger calls, writes a row: it notifies `dispatch_embeddings` (migration `0148`) for a new item
+  trigger calls, writes a row: it notifies `dispatch_embeddings` (migration `0149`) for a new item
   or a text whose hash changed, and an update that leaves the text as it was notifies nothing. The
   rows the coverage pass writes wake it in process. Scans start at least 5 s apart. After each
   scan it reads when the earliest pending row falls due (a failed row's retry, or another
@@ -706,11 +706,11 @@ replaced, so under load each runs no more often than that ticker did.
   away. A throttled batch waits 5 s plus its backoff before the next. It takes no lease: its claim
   keeps two processes' scans off each other's rows.
 - The reference excerpt reconciliation (`docs.Service.RunReferenceExcerptReconciliation`, lease
-  `reference-excerpts`) is woken by a row trigger on `refs` (`0150`) that notifies
+  `reference-excerpts`) is woken by a row trigger on `refs` (`0151`) that notifies
   `dispatch_excerpts_owed` for each document mention left owed an excerpt, whichever build or
   command wrote it (`rebuild-refs` included). Batches of 20 documents start at least 2 s apart, the
   next as soon as that allows while a full batch leaves documents it can still record. A document
-  it cannot read or record is deferred in `reference_excerpt_backoff` (`0149`), keyed by the
+  it cannot read or record is deferred in `reference_excerpt_backoff` (`0150`), keyed by the
   version that failed: one minute after the first failure, doubling to at most six hours, plus up
   to a fifth again of jitter; a success deletes the row, and a newer version starts again from
   one. A deferred document stays out of the batches until it falls due, so documents that keep
@@ -718,7 +718,7 @@ replaced, so under load each runs no more often than that ticker did.
   earliest due time is the loop's only timer. Each process's first pass also marks owed the
   excerpts a pre-`0092` build left stale (`refs.MarkStaleExcerpts`), once.
 - The edit notice sweep (`docs.Service.RunEditNotices`, lease `edit-notices`) is woken by a row
-  trigger on `document_edit_notices` (`0154`) that notifies `dispatch_edit_notices` each time a
+  trigger on `document_edit_notices` (`0155`) that notifies `dispatch_edit_notices` each time a
   writer gives a notice a due time: a person's settled version opening or moving its quiet
   window, from either build. A sweep sends the notices that are due, each as one
   `artifact.human_edited` event, and then reads the earliest due time left
@@ -730,8 +730,8 @@ replaced, so under load each runs no more often than that ticker did.
 - The suggestion outcome sweep (`api.RunSuggestionOutcomeSweep`) is woken by `dispatch_events`
   (`0107`), which every event commit notifies whichever process made it. Passes start at least
   60 s apart. A pass reads the events after its cursor
-  (`suggestion_outcome_cursor`, `0151`) and the suggestions no pass has judged yet
-  (`write_suggestions.swept`, `0152`), in pages of 1,000, each page in a transaction that holds the
+  (`suggestion_outcome_cursor`, `0152`) and the suggestions no pass has judged yet
+  (`write_suggestions.swept`, `0153`), in pages of 1,000, each page in a transaction that holds the
   cursor row `for update`, and judges only the pending suggestions those can resolve: the newly
   recorded ones, against all their events, and those whose source issue, source document or
   suggested issue a page's event names. An event or suggestion less than 60 s old waits for a
@@ -740,12 +740,12 @@ replaced, so under load each runs no more often than that ticker did.
   suggestion once, as every pass of the release before it did. A failed pass is retried a minute
   later. Like the embedding queue, it takes no lease: the cursor row each page holds is what
   serialises two processes woken by one commit, the first pass included, since the row is there
-  from `0151` with a null `event_id`. The second process's page waits on the row and then reads
+  from `0152` with a null `event_id`. The second process's page waits on the row and then reads
   the cursor the first advanced, so it judges what the first did not rather than the same page
   twice, and no wake is given up to another process's pass.
 - The delivery settings both GitHub intakes route by are one cache per process
   (`delivery.SettingsCache`), read at start and again when `delivery_settings` changes:
-  `delivery_settings_changed` notifies `dispatch_delivery_settings` (`0153`) for a change to any
+  `delivery_settings_changed` notifies `dispatch_delivery_settings` (`0154`) for a change to any
   column but the freshness ones every GitHub event and reconcile pass rewrite. A settings change
   reaches a running intake without a restart, and neither intake reads the row per message or on
   a timer; a read that fails is tried again 30 s later. The release before this one polls the row
@@ -1519,36 +1519,51 @@ message included (a message is never edited), and owes an index to every message
 reading `messages` once. Its trigger takes `SHARE ROW EXCLUSIVE` on `messages` alone, so a message
 write waits behind it while a read does not. Its census answers `0` for the same reasons.
 
-Migrations `0148`–`0154` let the background loops wait for a change instead of polling for one
+Migration `0148_asks_anchor_artifact_id` creates `asks_anchor_artifact_id`, an index over the asks
+whose `anchor` is set of `case when anchor->>'artifact_id' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (anchor->>'artifact_id')::uuid end`:
+the uuid cast `comments_anchor_artifact` (`0032`) indexes, guarded by the form every
+server-written anchor carries, since an unguarded cast would fail the boot over an anchor an
+earlier release could store. Settlement's sweep reads through it the marks a document's asks
+record, by the anchor's document alone, so an ask that also names an ask block on another document
+(`block_artifact_id`) keeps its mark on the document its anchor names. Building it takes `SHARE`
+on `asks`, so ask writes wait for the build; it rewrites no row and refuses none, so its census
+answers `0`. An anchor whose artifact id is not a lower-case document id is left out of the index,
+which costs the read nothing — its text comparison never matched such a spelling either — and
+each boot logs the count of those asks with a warning when there are any. The release before it
+never reads the index and serves beside it unchanged, except that its sweep still drops the mark
+of an ask holding both columns (no such row is written today), and rolling Dispatch back past
+`0148` is an image rollback alone: the index is left for the next release that reads it.
+
+Migrations `0149`–`0155` let the background loops wait for a change instead of polling for one
 (Background loops, above). Each is additive: the release before them never reads the new tables
 or column, its writes reach the two replaced functions through the same triggers as before, it
 never listens on the new channels, and it keeps polling beside them during the roll. Every census
 answers `0`.
 
-- `0148_embeddings_notify` and `0153_delivery_settings_notify` each replace a function's body and
+- `0149_embeddings_notify` and `0154_delivery_settings_notify` each replace a function's body and
   lock no table. `embeddings_enqueue` (0118's body otherwise unchanged) also notifies
   `dispatch_embeddings` when its upsert writes a row, and `delivery_settings_changed` (0100's,
   which 0106's trigger keeps calling by name) also notifies `dispatch_delivery_settings` in the
   branch that logs a settings change.
-- `0149_reference_excerpt_backoff` creates `reference_excerpt_backoff`, one row per document the
+- `0150_reference_excerpt_backoff` creates `reference_excerpt_backoff`, one row per document the
   excerpt reconciliation failed on: its version, the failures in a row there, and when it is tried
   again.
-- `0150_refs_excerpts_owed_notify` adds a row trigger on `refs`, after an insert or an update of
+- `0151_refs_excerpts_owed_notify` adds a row trigger on `refs`, after an insert or an update of
   `excerpt_version` that leaves a document mention owed an excerpt, which notifies
   `dispatch_excerpts_owed`. It is a trigger rather than a notify in Go so that what the release
   before it writes, and `rebuild-refs` from either build, wakes the loop too; a migration of its
   own, so its transaction holds `refs`' lock alone, for milliseconds.
-- `0151_suggestion_outcome_cursor` creates `suggestion_outcome_cursor`, a one-row table holding the
+- `0152_suggestion_outcome_cursor` creates `suggestion_outcome_cursor`, a one-row table holding the
   highest event id the outcome sweep has judged by, inserted null so that the first pass judges
   every pending suggestion once.
-- `0152_write_suggestions_swept` adds `write_suggestions.swept`, whether a pass has judged the row
+- `0153_write_suggestions_swept` adds `write_suggestions.swept`, whether a pass has judged the row
   against all its events, with the constant default `true`, so the column is added without
   rewriting the table and every existing row counts as swept, and then sets the default to `false`
   for the rows inserted after it, the release before's included. It also creates two partial
   indexes: `write_suggestions_unswept`, the pass's read of the rows not yet swept, and
   `write_suggestions_pending_artifact`, its lookup of the pending suggestions by a new event's
   document.
-- `0154_document_edit_notices_notify` adds a row trigger on `document_edit_notices`, after an
+- `0155_document_edit_notices_notify` adds a row trigger on `document_edit_notices`, after an
   insert or an update that leaves a notice with a due time, which notifies
   `dispatch_edit_notices`. Every writer of such a row — a settlement, a named or snapshot version,
   a person's rebuild — writes a version and appends its event in the same transaction, which

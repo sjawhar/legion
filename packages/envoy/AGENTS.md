@@ -48,7 +48,7 @@ events to the right session.
 | Migration runners' shared rules | `internal/pgmigrate/` | Dispatch's and the secrets broker's runners: the set loader that refuses a set before anything applies (`Load`), the lock bound on every migration (`LockTimeout`), the watch that names the lock a timed-out migration wanted, and the pre-deploy census of pending migrations (`Census`, and `CensusTables`, its one reading of what a migration locks; the `<version>_<name>.census.sql` a migration declares; `envoy-dispatch census`); a migration runs while the build before it is still serving, which is what it may add and what it must split across two releases (`cmd/dispatch/README.md`, "Database migrations") |
 | Postgres LISTEN loop's shared rules | `internal/pglisten/` | Dispatch's and the secrets broker's listeners: one LISTEN connection that dials, reports each notification, pings itself when idle, wakes a caller on its own goroutine, and redials on every failure (`Listener`, `Run`, `RedialBackoff`), because a connection waiting for a notification must outlive every failure between it and the server. Shared the way `internal/pgmigrate` is, since the broker's cross-pod secret-reread fan-out (`internal/broker/reread`) listens on the same kind of connection as Dispatch's delivery hub and event stream relay (`internal/dispatch/api`) and its stale-room evictor (`internal/dispatch/docs`); each caller sets `Listener.Owner`, the prefix of the one line the loop logs, and an unset `Owner` logs `dispatch`. `Hub` shares one `Listener` among many subscribers and channels: `cmd/dispatch` runs one per process (`dispatch background wakes`) for its woken background loops, and every `Wake` is signalled after each successful LISTEN as well as on each notification, so a subscriber catches up then on what it missed while the listener had no connection (`cmd/dispatch/README.md`, "Background loops") |
 | GitHub webhook redelivery | `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go` | Dispatch's sweep of the App webhook's failed deliveries; `internal/dispatch/githubapp/githubapptest` fakes GitHub's delivery API |
-| Meaning search's embedder and coverage | `internal/dispatch/embed/`, `internal/dispatch/embedqueue/`, `cmd/dispatch/embedder.go` | Cohere Embed v4 on AWS Bedrock (`bedrock.go`, the default) or Azure AI Foundry (`azure.go`, `azuretoken.go` for the keyless Entra exchange), chosen by `DISPATCH_EMBEDDER`; each client's `Identity` is what `embeddings.model` records and search compares, and its `Limits` pace the queue, which scans when `embeddings_enqueue` notifies `dispatch_embeddings` (migration 0148) or a pending row falls due. `embedqueue/coverage.go` is the coverage pass the server runs once at start (no backfill subcommand), whose identity steps alone run again while another identity's rows remain, and the report `GET /api/v1/search/coverage` serves (`cmd/dispatch/README.md`, "Search") |
+| Meaning search's embedder and coverage | `internal/dispatch/embed/`, `internal/dispatch/embedqueue/`, `cmd/dispatch/embedder.go` | Cohere Embed v4 on AWS Bedrock (`bedrock.go`, the default) or Azure AI Foundry (`azure.go`, `azuretoken.go` for the keyless Entra exchange), chosen by `DISPATCH_EMBEDDER`; each client's `Identity` is what `embeddings.model` records and search compares, and its `Limits` pace the queue, which scans when `embeddings_enqueue` notifies `dispatch_embeddings` (migration 0149) or a pending row falls due. `embedqueue/coverage.go` is the coverage pass the server runs once at start (no backfill subcommand), whose identity steps alone run again while another identity's rows remain, and the report `GET /api/v1/search/coverage` serves (`cmd/dispatch/README.md`, "Search") |
 | Document tree (Proof schema) | `internal/dispatch/pmdoc/` | render/parse/diff of Proof documents; fixtures from the fork's headless engine |
 | Delivery measures | `internal/dispatch/delivery/measures/` | pure DORA computation (`measures.go`) and the Pipeline page's timings (`pipeline.go`), each ported formula by formula from the delivery prototype; `api/delivery_measures.go` serves the first as `GET /api/v1/delivery/measures`, and as the timeline's `measures`, over the timeline's facet pipeline (`filteredDeliveryPullRequests`), and `api/delivery_pipeline.go` the second as `GET /api/v1/delivery/pipeline`, its clock `?at=` or now; `delivery/reconcile_backfill.go`'s `backfillRuns` fills older runs' `head_branch` and `event` once, and deploy runs' `created_at` once more under its own step; a pull request ships with the earliest-finishing successful production deploy whose run GitHub created after its merge (`delivery/containment.go`, `DeliveryRun.Created`) |
 | `issue.deployed`: a merged pull request reached production | `internal/dispatch/delivery/deployed.go` | The delivery timeline writes one `issue.deployed` event on a pull request's issue the moment it first knows which production run shipped it, by intake (`intake.go`) or by the reconcile (`reconcile.go`), once per pull request, as the system actor `delivery-timeline`; the outbox publishes it on the issue's subject (`notifications.dispatch.issue.<KEY>.issue.deployed`), where the Legion daemon consumes it to wake the production check the issue's close opened. Payload shape: `IssueDeployedEventPayload` in `packages/contracts/src/dispatch-api.ts` |
@@ -1541,7 +1541,7 @@ inserts, and every mention of an upload whose replacement left the document as i
 version write that records no rendering (`refs.ClearExcerpts`, which keeps the payload the row
 holds for the reconciliation but sets its version null). `cmd/dispatch` runs
 `docs.Service.RunReferenceExcerptReconciliation`, a woken loop (`duty.RunWoken`, lease
-`reference-excerpts`): a row trigger on `refs` (migration 0150) notifies `dispatch_excerpts_owed`
+`reference-excerpts`): a row trigger on `refs` (migration 0151) notifies `dispatch_excerpts_owed`
 whenever a mention is left owed, whoever wrote it, and the loop, woken through the server's shared
 listener (`pglisten.Hub`), reads owed rows through the partial index `refs_excerpt_drift` (an
 empty index once it has caught up) and stores one batch of 20 documents per pass, passes at least
@@ -1550,7 +1550,7 @@ process's first pass also marks owed, once, the excerpts a version written by a 
 0092 left behind (`refs.MarkStaleExcerpts`); every build since records them in each version write.
 A document the reconciliation cannot read for any reason but an unloadable history or a tree
 outside the schema (which it records as having no block), or whose excerpts it cannot store, is
-logged at ERROR and deferred in `reference_excerpt_backoff` (migration 0149, `refs.DeferExcerpts`):
+logged at ERROR and deferred in `reference_excerpt_backoff` (migration 0150, `refs.DeferExcerpts`):
 one minute after its first failure at that version, doubling to at most six hours, plus up to a
 fifth again of jitter; its mentions stay owed, and `refs.DriftedExcerpts` leaves it out of the
 batches until it falls due, so one document never holds back the rest of its batch, the batches
@@ -2094,10 +2094,17 @@ its parser unquotes back. Marks are read as that parser reads them, as a set, wh
 them: a mark opened where the same mark is already open adds nothing, and its close ends the mark
 for the rest of the text around it, up to the node that opened it (`parseInlineMarks`), so
 `*x *y* z*` is
-`x y` in emphasis and ` z` without, and `****a****` is strong once. An image is read without the
-marks around it, a link among them, as the browser editor's store (y-prosemirror, which keeps a
-mark on text alone) holds it, so a linked image is stored without its link (LEGION-365) rather than
-refused. Delimiter runs pair as that parser pairs them: CommonMark's rule of three is judged on the
+`x y` in emphasis and ` z` without, and `****a****` is strong once. An inline leaf - a node that is
+inline, holds no content of its own and is not text: raw HTML, an image, a hard break, a footnote
+reference - is read without the marks around it, a link among them, by both readers, since a mark
+lives on text alone, as the browser editor's store (y-prosemirror) holds it and as the engine
+itself reads it; so a linked image is stored without its link (LEGION-365) rather than refused,
+and a comment and a past version draw what the document stores. An autolink inside a link label
+carries its own link, in place of the label's, on its own text (the autolink arm of
+`parseInlineMarks`, where a mark excludes another of its own type), and the label's link covers the
+runs around it: stacking the two would put a text under two links, a tree ProseMirror cannot hold,
+and the write would be refused. Delimiter runs
+pair as that parser pairs them: CommonMark's rule of three is judged on the
 lengths two runs have left after the pairs already made from them (`emphasisDelimiters`), where
 goldmark judged the lengths they were written with, so in `***a.****&#32;b*` the closer's last `**`
 is text. A run of `*` or `_` can also open where another `*` or `_` follows it and close where one
@@ -2293,7 +2300,16 @@ grammar decides, since an escaped `<` reads as text in both: goldmark reads a de
 `<!` and an uppercase letter, and an unquoted attribute value holding no control character, where
 CommonMark 0.31 and the engine also read a lowercase one (`<!doctype x;[a@b.cc](mailto:a@b.cc)>`)
 and a U+0001 in an unquoted value as raw HTML. Only a `<` the run's first writing reads so is
-escaped, so a run that reads back keeps its bytes. A text `<` first after its line's container
+escaped, so a run that reads back keeps its bytes. The reader opens a declaration by the rule the
+scan already judged it by (`opensDeclaration`, which `rawHTMLCloser` asks for the reader and for the
+scan alike): `<!` and any ASCII letter, as CommonMark 0.31 and the engine open one, where goldmark's
+raw HTML parser opens one only after an uppercase letter, so `p <!a> q` is read as inline raw HTML
+and stored unescaped. Every kind of inline raw HTML that ends at a closer of its own is read by the
+one parser (`inlineRawHTMLParser`), which walks a block to its end at most once per kind: the first
+opener of a kind whose walk finds no closer is recorded (`unclosedRawHTML` for a parse,
+`rawHTMLScan.ends` for a write) and every later opener of it in that block is refused without a
+walk, so a kind added to `rawHTMLCloser` keeps that guarantee only by recording what its own walk
+answered. A text `<` first after its line's container
 prefix is also escaped where micromark's html-flow start conditions open an HTML block there, judged
 in `endLine` on the line as written across nodes (`htmlBlockStart`), since goldmark can read a
 paragraph there: `<span title=a=b;[a@b.cc](mailto:a@b.cc)>` alone on a paragraph's first line is a
@@ -3512,7 +3528,7 @@ blind republishing.
   never to a person. Dispatch appends it once a document has been quiet for 30 seconds after a
   person's last settled browser version (`document_edit_notices`, migration 0129, sent by
   `docs.RunEditNotices` under the `edit-notices` lease, a woken loop that the row trigger of
-  migration 0154 wakes and that waits for the earliest due time, sweeps at least 5 s apart); its
+  migration 0155 wakes and that waits for the earliest due time, sweeps at least 5 s apart); its
   actor is the last person the window knows edited, and its payload names the document, the two
   versions the quiet window spans, each person
   who edited, and the unified diff of the two versions, cut at its last line end within 4,096

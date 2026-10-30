@@ -117,7 +117,7 @@ func (s *Service) recordEditNotice(ctx context.Context, tx pgx.Tx, artifactID st
 
 // EditNoticesChannel is the Postgres notification channel a document's edit notice announces itself
 // on at commit each time a writer gives it a due time (document_edit_notices_notify, migration
-// 0154): the channel whose pglisten.Hub wake the server passes to RunEditNotices.
+// 0155): the channel whose pglisten.Hub wake the server passes to RunEditNotices.
 const EditNoticesChannel = "dispatch_edit_notices"
 
 // editNoticeLease names the lease one sweep runs under, editNoticeBatch the most due notices one

@@ -1,7 +1,7 @@
--- 0152_write_suggestions_swept.up.sql
+-- 0153_write_suggestions_swept.up.sql
 -- Which suggestions the outcome sweep (api.RunSuggestionOutcomeSweep) has yet to judge against
 -- every event of theirs. A pass reads the event log after its cursor (suggestion_outcome_cursor,
--- migration 0151), but a suggestion is recorded after its write commits, outside the events'
+-- migration 0152), but a suggestion is recorded after its write commits, outside the events'
 -- commit-order lock (api.persistSuggestions), so it can commit after an event that started later
 -- than it and that a pass has already read. write_suggestions.id is a uuid, and no id or timestamp
 -- of a row written outside that lock commits in order, so no cursor can find such a row. swept is
