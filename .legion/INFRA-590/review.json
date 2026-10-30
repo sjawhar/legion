@@ -2,23 +2,26 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-590",
-  "completed": "2026-10-30T10:55:00Z",
-  "round": 13,
-  "reviewedCodeHead": "bcf50ed5282d0655405e648be162f1df774ab173",
+  "completed": "2026-10-30T13:33:30Z",
+  "round": 14,
+  "reviewedCodeHead": "141704508a7254de319a64f0b5ee602343f78d1f",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
-  "minor": 0,
-  "roundShape": "PR diff at c60e2b72 vs bcf50ed5 (each against its own fork point with main, excluding .legion/ and docs/solutions/): differing files are the renumbered migrations (0145/0146 -> 0148_duty_holds/0149_outbox_claim), docs (.dispatch/architecture/dispatch-outbox.md, packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md, the changelog fragment), .github/workflows/ci.yaml (the itemblocks line left the PR diff because main's #2537 added it) and two test files (internal/dispatch/api/session_answers_test.go, internal/dispatch/outbox/session_answers_test.go, setup only): a confirmation round under the 10:27Z rule.",
-  "ci": "At bcf50ed5 (compare to eb717dc9 handoffs only): lint, typecheck, test, pr-title, envoy-go-race, envoy-go-race-docs, dispatch, dispatch-multiprocess success; envoy-go failed on TestARequestWhoseConnectionIsLostAnswersUnavailable (internal/bus/window_request_test.go:163, 'no answer within 10s'), a test this PR adds, so not main's.",
-  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at bcf50ed5 over the merge; both approve the merge with no finding.",
+  "important": 1,
+  "minor": 1,
+  "roundShape": "Full round: merge 3760e51c resolves runtime conflicts with main's #2508 (outbox/publisher.go, outbox/batch.go, internal/bus/async.go, confirm.go, nats.go, recovery.go, cmd/dispatch/main.go), then fix 14170450.",
+  "ci": "At 14170450 only pr-title had a result when read (lint, typecheck, test and the long suites queued since 12:30Z). A request for changes does not wait on CI.",
+  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at 14170450; both request changes on the finding below.",
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/bus/async.go:355", "description": "window.request's answer goroutine calls confirmFlushed, whose conn.FlushTimeout runs for the request's whole remaining timeout when nats.go already moved the connection to RECONNECTING (nats.go v1.50 clears pending flushes only at the CONNECTED->RECONNECTING transition, nats.go:3329-3341, and FlushTimeout queues a new PING that no server answers). So a Request whose connection drops before its flush starts answers ErrUnavailable only after its timeout, not once the loss is seen, which its doc and TestARequestWhoseConnectionIsLostAnswersUnavailable assert; the test went red in envoy-go at bcf50ed5. Probe (go test -overlay): confirmFlushed on a connection nats.go saw drop returned 'nats: timeout after 3.001s'. Fix: do not wait on the flush past a connection change (watch ConnectionChanged while flushing, or skip the flush when the window's connection is no longer current)."},
-    {"severity": "important", "file": "PR #2395 (mergeability)", "description": "GitHub reports the head CONFLICTING: main took #2508 (9535672730) after a21100c5bc, which changes runtime files this PR rewrites: internal/dispatch/outbox/publisher.go (envelope() adds a quiet field from events.Quiet; Deps.PublishFailures and countPublishFailure counting denied, failed and refused publishes), internal/bus/async.go, confirm.go, denials.go (new), nats.go, recovery.go, cmd/dispatch/main.go, cmd/listener/api.go. The forward merge resolves runtime conflicts, so it is a full round."}
+    {"severity": "important", "file": "packages/envoy/internal/bus/async.go:375", "description": "A window Request never reads #2508's per-subject denial record: its flush finds a denial only through conn.LastError() (confirmPublished -> publishDenial, confirm.go:132-162), one slot per connection, so when another violation lands between a Request's publish and the read, a denied role forward comes back errPublishUnconfirmed, waits out roleReceiptTimeout, ends ErrNotAcknowledged, is counted reason=\"failed\" (batch.go:541-545) and backs off with a publish_error naming another subject's violation. The merge comment says a Request reaches the record; it does not. DeepReview15's scratch probe: 8 concurrent denied Requests on one window, 1 of 8 answered ErrPublishDenied in 3 of 3 runs (2-3 under -race); with sentAt taken before PublishMsg (async.go:355) and deniedPublish(subject, sentAt) read on the request goroutine both when the flush comes back unconfirmed and in the timer arm, 8 of 8. Fix that way, with a several-Requests test."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/outbox/batch.go:544", "description": "Role-forward outcomes that are not NATS failures are counted reason=\"failed\": a route held pending by forward.err (stale holder, kept claim, churned claim, failed read) and a holder that sent no receipt after a confirmed flush. The metric's HELP (cmd/dispatch/main.go:431) and docs say failed means the send did not reach NATS, so a stale holder reads as an outage on every retry. Give them their own reason, or say so in the HELP and docs; settle after the finding above."}
   ],
+  "judgement": "Events held behind a denied head with no attempt or log line of their own: no finding. Nothing is lost (main never delivered the denied subject either and retried forever; the branch delivers the head and then its followers in order once the grant returns, where main's build delivered comment 1 after 2-5). The head logs slog.Error \"dispatch outbox: publish event\" on every attempt, naming the denied subject, which is what INFRA-749's filter matches; held events carry the head's next_attempt_at. One stall main lacked: an owner's notifications.dispatch.* subjects share one key, so a hand-written grant denying one event type of the family holds the others; every shipped grant allows notifications.>.",
   "verifiedCorrect": [
-    "Merge bcf50ed5: the PR's own diff is unchanged apart from the renumbering, the dispatch-outbox.md text conflict (main's #2376 sentence kept) and setup-only changes to main's two session-answers tests; files both sides touched equal a clean git merge-file of base 10fc3b77a, branch c60e2b72 and main a21100c5bc, apart from renumbered lines.",
-    "sessionanswers against the PR's published_destinations: no event listed that a session did not receive, none omitted, no duplicate; a role forward is recorded under the role topic, as on main.",
-    "Main's 0145-0147 indexes do not touch the outbox's partial indexes or reads; #2506's bus files merged byte for byte."
+    "quiet in every envelope: envelope() is the only builder; retries and role forwards reuse it.",
+    "Every settled send counted once in settle: refused, denied, failed (ErrUnavailable included); fenced and ctx-cut sends count nothing; held sends are never issued.",
+    "The window's acknowledged reads deniedPublish first under the send's own time; install and onReconnect clear the record; /metrics and PublishFailures wired in cmd/dispatch/main.go; cmd/listener/api.go keeps #2508's change.",
+    "TestRunCountsADeniedSubjectOncePerRefusedMessage on two issues is required by per-issue order; assertions unchanged.",
+    "Fix 14170450: no race between flush result, reply and connection change; the flush goroutine never blocks and ends by the deadline; a flush denial is still reported; the test failed 2 of 2 against the old synchronous flush."
   ]
 }
