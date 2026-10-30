@@ -523,8 +523,9 @@ func TestEditsThatKeepAnEdgeNameItsTargetWhenItsExcerptMoves(t *testing.T) {
 	}
 	editComment("Still waiting on " + cited + ".")
 	requireReferencesChanged(t, handler, source.Key, "comment.edited", commentID, want)
-	// Past the excerpt's 240 characters an edit moves nothing the panel shows.
-	head := "Still waiting on " + cited + ". " + strings.Repeat("x", 260)
+	// The panel shows the citing block's excerpt, its first 480 characters (refs.BlockExcerptRunes):
+	// an edit past them moves nothing the panel shows.
+	head := "Still waiting on " + cited + ". " + strings.Repeat("x", 500)
 	editComment(head + " One.")
 	requireReferencesChanged(t, handler, source.Key, "comment.edited", commentID, want)
 	editComment(head + " Two.")
@@ -736,15 +737,16 @@ func TestReferenceWritesNameTheDocumentsTheyCite(t *testing.T) {
 	}
 	requireReferencesChanged(t, handler, source.Key, "ask.opened", decodeBody[writtenRecord](t, ask).ID, []model.ChangedReference{notesNamed})
 
-	// The edit keeps all three edges but moves the head of the comment, which is each panel's
-	// excerpt; an edit past the excerpt moves nothing a panel shows.
+	// The edit keeps all three edges but moves the citing block's text, which is each panel's
+	// excerpt; an edit past that excerpt (refs.BlockExcerptRunes, 480 runes) moves nothing a panel
+	// shows.
 	editComment := func(body string) {
 		t.Helper()
 		if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/comments/"+commentID, map[string]any{"body": body}, "alice"); response.Code != http.StatusOK {
 			t.Fatalf("edit comment: status=%d body=%s", response.Code, response.Body.String())
 		}
 	}
-	head := "First follow " + runbookRef + " and " + notesRef + ", then " + specRef + ". " + strings.Repeat("x", 260)
+	head := "First follow " + runbookRef + " and " + notesRef + ", then " + specRef + ". " + strings.Repeat("x", 500)
 	editComment(head)
 	requireReferencesChanged(t, handler, source.Key, "comment.edited", commentID, []model.ChangedReference{runbookNamed, notesNamed, specNamed})
 	editComment(head + " More.")
