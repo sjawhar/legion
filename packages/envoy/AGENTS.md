@@ -504,7 +504,8 @@ advice answered, and when the advice was omitted its result rides a suggestions-
 (`withSuggestions`). The consecutive-write query counts only the
 calling actor's own events (it runs for a session caller alone; any other actor reports zero with no
 query) and materializes the last-human fence so its `max(id)` runs once, and relies on the
-`events (issue_key, seq)` unique index's issue prefix and commit-ordered event ids; the open-ask
+`events (issue_key, seq)` unique index's issue prefix and on one issue's event ids running in commit
+order (the broker draws them under the issue's row lock); the open-ask
 query relies on the `asks_open (issue_key) where state = 'open'` partial index; the
 `legion_managed_status` query is `legionManagedStatus`
 (`internal/dispatch/api/issue_parent.go`), which both claim routes read too through the
@@ -1347,7 +1348,9 @@ are deliberately unguarded — a load or a probe taken under an open transaction
 not refused, and a separate pool cannot close the cycle the guard prevents. The events outbox
 claims, reads and records its batches on a pool of its own too (`store.Pool.Outbox`, one
 connection): it runs one statement at a time, and a full shared pool must not hold back
-publishing.
+publishing. So does the event log's safe horizon (`store.Pool.Horizon`, two connections, the
+server's one `events.Horizon`): an observation queued behind requests would hold back every live
+reader of the event log.
 
 The migration runner takes one more connection outside the shared pool. `pgmigrate.Exec`, which
 applies every migration, first sets the transaction's `lock_timeout` to `pgmigrate.LockTimeout`
@@ -2495,8 +2498,9 @@ since migration 0127), so the text has to match as well, since an author-chosen 
 such as `decision` can name unrelated questions on two documents. A match on an earlier wording
 counts only while the ask is open, or when its answer or resolution was given while that wording was
 current: its `ask.answered` or `ask.resolved` event comes after the event that made the wording
-current and before the `ask.edited` that retired it, ordered by `events.id`, which the broker
-allocates in commit order (`askHistory.shownBy`). An answer or resolution given after the rewording
+current and before the `ask.edited` that retired it, ordered by `events.id`, which runs in commit
+order for one ask's events, all on the ask's owner, under whose row lock the broker draws them
+(`askHistory.shownBy`). An answer or resolution given after the rewording
 decides a question the block does not ask, so the block is no copy of that ask and opens its own, as
 a block whose options differ does. Where several asks match, the earliest asked is the source,
 whether it matched on its current wording or an earlier one, so two unrelated asks of one owner
@@ -2533,17 +2537,20 @@ project's copy bookkeeping - a settlement's copy-source read, and every marking 
 takes a transaction advisory lock keyed on the project (`lockProjectCopies`), so nothing that locks
 the project's row waits on it. It is the two-key form, `pg_advisory_xact_lock(copiedAsksLockNamespace,
 hashtext(project))`, whose key space Postgres keeps apart from the single-key locks every other
-advisory lock here takes (a document's room, a project's rank allocation, the events' commit
-order), so it never waits on one of those; two projects whose hashes collide only take turns on
-their copy bookkeeping. Every holder takes it before any `doc_settlements_pending` row and before
-the events' commit-order lock (`TestCopyLockComesBeforeEveryPendingRowAndEvent`, a static check
-of every Dispatch function's calls in statement order), and a settlement deletes its own pending
-row before it appends its first event, since a route marking that document owed holds the row
-while it waits for the commit-order lock. Every other writer of a document's own pending row takes
-it before it appends an event too: an upload's or a seed's document write marks it
-(`appendUpdateTxClass`) before the route appends its event, so `Ledger.Commit`'s later record of
+advisory lock here takes (a document's room, a project's rank allocation), so it never waits on one
+of those; two projects whose hashes collide only take turns on their copy bookkeeping. Every holder
+takes it before any `doc_settlements_pending` row and before any event append
+(`TestCopyLockComesBeforeEveryPendingRowAndEvent`, a static check of every Dispatch function's calls
+in statement order), and its own appends then lock only the owner row it took before the copy lock,
+so the transaction waiting on it holds nothing the holder goes on to take. A settlement deletes its
+own pending row before it appends its first event, and every other writer of a document's own
+pending row takes it before it appends an event too: an upload's or a seed's document write marks
+it (`appendUpdateTxClass`) before the route appends its event, so `Ledger.Commit`'s later record of
 the edit source touches a row the transaction already holds
-(`TestAnUploadOfACopyAndAnAnswerToItsSourceBothTakeTheCopysPendingRowBeforeTheirEvents`). A
+(`TestAnUploadOfACopyAndAnAnswerToItsSourceBothTakeTheCopysPendingRowBeforeTheirEvents`). An event
+append locks only its own owner's row, so neither order is what keeps these writers from a deadlock
+with a route marking the document owed: that route appends on its source's owner, a row the writer
+never takes. A
 copy whose text is changed and an id no ask of the owner indexes open an ask as any new block does
 (LEGION-651). A project document's lookups read `artifacts_project_documents` (migration 0091), an
 issue document's `artifacts_issue_key`, and the owed copies' latest versions `artifact_versions`'
@@ -2593,10 +2600,34 @@ fields it names: the row holds the question as plain text, so rebuilding the who
 flatten an untouched question's formatting and links and mint fresh ids for the paragraphs a
 comment anchors into. Naming `urgency` or `multiple` alone therefore goes through the attribute
 path and leaves every child node, mark and inner block id exactly as it was; naming `question`
-or `options` replaces that part with what the markdown pipeline parses, so it carries the same
-list attributes any other document write gives it, and anchors inside the text actually replaced
-are affected as they are by any document edit. A field named but unchanged is not rewritten, so
-an idempotent retry of the whole ask writes nothing, versions nothing and keeps every anchor.
+replaces the question's paragraphs with what the markdown pipeline parses, so they carry the
+attributes any other document write gives them, and anchors inside the text actually replaced are
+affected as they are by any document edit. Naming `options` writes only the lines it sends: each
+sent option is paired with the list item already holding it, first the unused item that says
+exactly what the option says, label and description, then the first unused item holding its
+label, so an option the edit does not change keeps its own node - its line as it stands, its
+block id, its marks and the sub-list, second paragraph or link a person wrote under it - and
+one whose description it changes keeps every block under its line, which is rewritten in place
+(`editedOptionList` in `docs/ask_option_merge.go`). An item no sent option matches is dropped only
+where it holds nothing but its plain line, and a line is rewritten only where it writes nothing
+but its text; otherwise the whole edit is refused `400 ASK_BLOCK_TEXT` with field `options`,
+nothing written, quoting that item or that line whole and naming the `dispatch doc-edit` that
+removes or rewrites it, since the ask row shows an option's label and description alone and the
+sender cannot see what dropping it deletes - which is what a removal, a rename and an edit
+sending no option at all come to - or what rewriting a line holding a link's address, bold,
+code or an image deletes. What those refusals weigh is what the markdown writes, never what the
+nodes hold, so a mark no reader sees -
+the editor's own on every character a person types - is nothing to lose. Settlement's restore of a
+decided ask's recorded wording goes through the same merge with no caller to answer a refusal
+(`writeDecidedWording`), so it drops an item no decided option is paired with, whatever that item
+holds, and rewrites a line this route would refuse: a block left disagreeing with the row of the
+ask it was decided on would disagree for good. The items the caller sends - a new option's item
+whole, a rewritten line alone - are parsed on the write's own budget beside the question, and
+the merged list is rendered and parsed back as any other document write is, on a budget of its
+own, since what it carries under an option is the document's text and not the caller's, and the list's
+and the kept items' own block ids and nodes are put back afterwards. A field named but unchanged
+is not rewritten, so an idempotent retry of the whole ask writes nothing, versions nothing and
+keeps every anchor.
 Text the block cannot carry unchanged is refused `400 ASK_BLOCK_TEXT` naming the field, with
 nothing written. The rule is a round trip through settlement's own parser and the canonical
 markdown a version records, never a list of forbidden characters: whatever the block cannot carry
@@ -2617,13 +2648,39 @@ after them, then edit the ask, which the route then applies as for any valid ask
 has no id or an id repeats in the document (before settlement stamps ids), it names no delete and
 says to retry once the document settles. The one edit it names also deletes, by id, the extra
 blocks of every decision nested in the blocks it keeps that breaks its own rule, so one doc-edit
-repairs them together; before naming it, the refusal checks that, with those deletes applied, the
+repairs them together, and a nested decision the rule leaves nothing of - one no paragraph of
+which holds text - is named whole, by its own block id, rather than its children, since deleting
+its children would leave a block no parse reads as a decision; before naming it, the refusal
+checks that, with those deletes applied, the
 ask, every nested decision losing a block and every decision holding the ask read strictly, as
-doc-edit requires (`planAskRepair`). When no such edit exists - a delete here would leave a
+doc-edit requires (`planAskRepair`). A delete list naming a decision block carries one more
+clause, since a document edit may not take a decision out of the document while its ask is open
+(`refuseRemovingOpenDecisionBlocks` in `packages/envoy-client`): that ask is answered or resolved,
+or the decision repaired by hand, before the delete. A decision that never held a question never
+had a row, so the common case passes that guard untouched. When no such edit exists - a delete
+here would leave a
 decision holding this one unreadable, or a decision needs words written rather than blocks
 deleted - it names no delete and no ask edit of another decision, and says the decision is
-repaired in the document editor. An ask with no paragraph holding text is refused earlier, as having an empty
-question. Tests follow the refusal for every body of up to five blocks drawn from paragraphs,
+repaired in the document editor. An ask no paragraph of which holds text is weighed on that
+question instead of its content rule: no document edit repairs it, since an insert anchored on one of
+its blocks lands beside the decision rather than in it (`pmdoc.BlockBoundary` reads the
+document-level block holding the anchor) and a delete may not leave a decision asking nothing, so
+an ask edit carrying a question is what repairs it. Such an edit is written into the block
+whatever its content rule says, the question's paragraphs followed by every bullet list the block
+holds, each the node the document already holds (`askBlockChildren`); every paragraph it
+replaces holds no text, and one holding what is no text - an image, a link whose text is empty -
+is refused instead, quoted, naming the two places the question is written without losing it: an
+upload of the document as a new version, which carries such a block and is the path an agent has,
+and the document editor, where a person writes it. A repair that leaves the block holding more
+than one list says so (`docs.AskBlockText.SeveralOptionLists`), since what that block parses back
+to joins the options of every one of its lists, the reading a row must not take: the route writes
+the question, `multiple` and `urgency` into the row and keeps the options the row holds, which
+settlement leaves alone while the block reads as no decision (`editAsk`). An edit of such a block
+carrying no question is refused `400 ASK_BLOCK_TEXT` with field `block`, naming that step, and one naming
+`options` on a block holding more than one list is refused with field `options`, since no sent
+option can say which list it is in. A decision that still breaks its content rule once it asks
+something is refused as above, and the document edit that refusal names then applies.
+Tests follow the refusal for every body of up to five blocks drawn from paragraphs,
 empty paragraphs, lists and lists holding a nested list, and for every body of up to four that
 adds an option holding a decision of up to three such blocks. Before, an edit naming only `urgency` or `multiple` wrote the
 options joined across both lists to the row.
@@ -2641,7 +2698,9 @@ breaks its content rule, a second bullet list or a paragraph after its list, whi
 can leave and the browser editor keeps - carries the server-owned `invalid` attribute naming the
 reason and emits `block.invalid`. An open ask's indexed row stays open and unchanged; an answered
 or resolved ask keeps its decided row and answer. Repairing its body clears `invalid` before
-updating the ask row, and writes a decided ask's decided wording back into the block.
+updating the ask row, and writes a decided ask's decided wording back into the block. An emptied
+question is repaired by an ask edit carrying one, the route's own path above; every other reading
+failure is repaired where a person writes it, or by the document edit the refusal names.
 Markdown that becomes a whole document - a spec at issue creation, an uploaded document or version -
 is refused with `400 INVALID_ASK_BLOCK` when an ask's body breaks its content rule,
 `paragraph+ bullet_list?` - one or more paragraphs, then at most one bullet list, last
@@ -2742,7 +2801,7 @@ read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy census").
 - `GET /api/v1/inbox` rows carry the owning issue's nullable `priority` and `last_reply` (`{author, created_at}` of the newest comment with that `ask_id`, or null) beside `waiting_on`. It orders rows by the owning issue's priority first (`P0` on top, unset priorities last; a document ask has none), then by whose turn it is (`waiting_on: human` before `agent`), then by recency (newest reply, else the ask's creation), so a P0 ask an agent is still working on outranks a P2 ask nobody has answered; the SPA partitions by `waiting_on` and keeps this order inside each section. The client uses the same open-ask response to surface every `waiting_on: human` row under `Waiting on you` and its `Blocked on you` count; `waiting_on: agent` rows are `Waiting on agents`, whoever replied last. `GET /api/v1/issues/{key}` carries the same `last_reply` and `waiting_on` on every `open_asks` row (`issueOpenAsk`, `issue_queries.go`), so the issue header applies the inbox's whose-turn rule without the human-only inbox. A `comment.created` payload that replies to an ask carries `ask_state` (the ask's state at posting time) beside `ask_question`, so an agent can tell a clarification request on its open ask from discussion after the answer.
 - `GET /api/v1/inbox?assignee=me|unassigned|<email>` (one value, combining with `project`) narrows the human-only inbox by the owning issue's assignee (`inboxAssigneeFilter`, `api/inbox.go`): `me` is the caller's lowercase email; an `<email>` is canonicalised (`strings.ToLower(strings.TrimSpace(...))`) before it is looked up in `people`, so a shared `?assignee=Alice@example.com` link never 400s, while an email nobody has signed in with is `400 ASSIGNEE_NOT_ALLOWED`; `me` / `<email>` keep issue-owned asks with `i.assignee = $login`, `unassigned` keeps asks on unassigned issues **and every project-document ask** (a document has no assignee, so it is unassigned by definition); no value returns everything. This is the contract for shareable links and humans' scripts: the SPA asks for no assignee at all. It fetches the unfiltered inbox once (the one `["inbox"]` query every surface shares) and splits it client-side by the reader's own `?assignee=` filter, whose values are repeated on the page's URL and are a lowercase login or the literal `unassigned` (`features/refs/routes.ts`, `inAssigneeFilter` in `features/inbox/sections.ts`): no `assignee` at all is the reader's own work, every visit and nothing remembered, and the single value `everyone` is the cleared filter. The two `?assignee=` vocabularies spell their default the opposite way round on purpose — absent means everybody here and the reader alone there — because the page must keep reading the whole list: its counts stay about the reader while the list on screen widens. A row's `Assign to me` PATCH is offered wherever an issue-owned row with no assignee is listed, and a project-document row never carries one.
 - `GET /api/v1/asks/open` takes exactly one scope selector. `?author_session=<session-id>` lists every active open ask authored by that session across open issues and unlinked project documents; `?project=<KEY>` lists every active open ask in that project whoever authored it, covering both ownership paths (issue-owned via `issues.project_key`, document-owned via `artifacts.project_key`, the same `coalesce` the inbox uses). Neither selector is `400 AUTHOR_SESSION_OR_PROJECT_REQUIRED`; both together are `400 AUTHOR_SESSION_OR_PROJECT_CONFLICT`. Either scope returns the same row shape: exact counts split by whose reply is next plus the full oldest-first inventory, with `session_id` echoing the selector (empty under project scope). `[&since=<RFC3339>]` reports `opened_since` over all asks in scope so a just-closed ask still disarms an automatic reminder.
-- Event IDs are the events view's resume cursor on `/ws/live`. `events.Broker.Append` takes one global transaction-scoped advisory lock after it locks the event owner and before inserting, so IDs are allocated in commit order. A transaction that appends to multiple owners must call `LockOwners` with every owner before its first append; it locks them deterministically before any transaction can hold the global lock. This deliberately serializes concurrent event-producing transactions across every owner; do not bypass the broker with direct event inserts. An events subscription's `events_start` says `replay_complete: true` (`LiveEventsStart`, `feedEvents` in `api/live_events.go`) when its resume is at or below the log's head when it subscribed: it is replayed every event after the resume before it goes live, so the page missed nothing and may skip the refresh it owes a gap. A subscription with no resume, and a resume above the head (an id of a log that was reset), say `false`.
+- Event IDs are the events view's resume cursor on `/ws/live`, but they do not commit in id order across owners. `events.Broker.Append` takes only its owner's row lock (none for an ownerless, session-addressed event), so one owner's events commit in id order and two owners' never wait for each other. A transaction that appends to multiple owners must call `LockOwners` with every owner before its first append, so two such transactions never take shared owners in opposite orders. Every reader that pages the log by a global id cursor — the event stream relay that feeds every events subscription, the delivery hub, `GET /api/v1/references?since=` — reads only up to the safe horizon of the process's one `events.Horizon` (`events/horizon.go`) and delivers in id order, and GET /auth/whoami's `event_head`, which a page resumes its first events subscription from, is an id at or below which every event is already final (`eventFeedHead`, `api/events.go`). Append takes its transaction id before the insert draws the event id, which the horizon's proof needs, and `events_id_seq` must keep `CACHE 1`; do not bypass the broker with direct event inserts (`TestOnlyTheBrokerInsertsEvents`). An events subscription's `events_start` says `replay_complete: true` (`LiveEventsStart`, `feedEvents` in `api/live_events.go`) when its resume is at or below the log's newest id when it subscribed: it is replayed every event after the resume before it goes live, so the page missed nothing and may skip the refresh it owes a gap. A subscription with no resume, and a resume above the newest id (an id of a log that was reset), say `false` and start at the relay's published cursor; a subscription that finds the relay still on a reset log's cursor waits for the relay's reset before it starts.
 - Project creation, repository mappings, and architecture sources own project-scoped events (`project.created`, `project.updated`, `settings.repo_project.updated`, `settings.architecture_source.updated`, and the importer's `architecture.synced` `{repo, branch, commit, components}` / `architecture.sync_failed` `{repo, branch, error}`, each naming the one source it judges (`components` is that source's count; events retained from before migration `0117` carry no `repo` or `branch`), authored by the system actor `{kind: "system", id: "architecture-importer"}` and emitted only on that source's state change: a new commit, a recovery, or an error whose text first appears or changes); per-user issue-state writes, and a person's snooze or un-snooze of an Inbox row, emit project-owned `user_state.updated` (`{login, state, changed}`; a snooze's is only `{login, changed: ["snoozed"]}`, owned by its ask's issue's or document's project) and do not advance an issue unread sequence. These events are retained on `notifications.dispatch.project.<PROJECT>.<type>` but never wake agents or take a direct agent/role route.
 - The architecture importer (`internal/dispatch/architecture`, migrations `0037` and `0117`) imports each architecture source of a project on its own: a project has any number of sources, one per repository (`architecture_sources` keyed `(project_key, id)`, unique on `(project_key, repo)`; a source that predates `0117` is `id` 0), and its component model is every source's components together, each `components` row carrying `source_id`, a foreign key to its source with `on delete cascade`. For one source it reads every regular `*.md` (mode 100644/100755; symlinks and nested directories skipped) directly inside `.dispatch/architecture/` at that source's branch head commit with one subtree read (`GET /git/trees/{commit}:.dispatch/architecture`, never the recursive repository tree; GitHub's 404 is an empty model) and one blob read per file (an entry listed over 1 MiB is a typed `file too large` failure before any blob is fetched), validates the set whole (`Parse`: slug file names, text PostgreSQL can store (`text.Storable`: valid UTF-8 without NUL) in the file's bytes and in each decoded front-matter string, since YAML spells U+0000 in ASCII as `"\0"`, front matter via yaml.v3 with unknown keys rejected — the closer is a line that is exactly `---`, and an empty block is defaults — duplicate ids, unknown parent/depends_on, containment cycles, path hygiene; `parent` and `depends_on` name components of the same source's files only), and projects it in one transaction: an immutable `architecture_snapshots` row per `(project, commit)`, delete+reinsert of that source's own `components`/`component_depends` (every other source's stay), when each component it projects was made and last changed (`component_facts`, migration `0132`; "References form one graph"), and the source row's `last_sync_at`/`last_commit`/`last_tree_sha`/`last_error`. Component ids are project-wide: a model holding an id another source of the project currently projects fails for the importing source alone, naming each id and the repository that holds it (`component id "x" is already a component of P from owner/name`), and the source holding the id keeps it. An invalid set, a colliding id, or a projection PostgreSQL refuses only records `last_error` on that source's row (capped at 4 KiB: the first problems and a count of the rest, the same text the `sync_failed` payload carries); the source's previous projection, and every other source's, stays up. `graph_edges` gains the `part_of`/`depends_on` arms over node kind `component` (`<project>/<id>`), never rows in `refs`. Every sync runs under a two-minute deadline and, in-process, a per-project mutex; `project()` opens with `select … for update` on every source row of the project in id order and `recordFailure()` on its own source row alone, so two server processes never deadlock inside delete+reinsert nor both claim one component id, and a sync whose branch changed or whose source was deleted while it was fetching writes nothing. A healthy source whose head is the recorded commit only refreshes `last_sync_at` (no fetch, no event); a moved head whose subtree sha equals `last_tree_sha` records the commit without re-fetching or re-projecting — so a caller looping a sync route is bounded to the head lookups. Triggers: a five-minute jittered ticker in `cmd/dispatch/main.go` (idle without App credentials) that syncs every enabled source by project and then id, going on past a failure; `POST /api/v1/projects/{key}/architecture-sources/{owner}/{repo}/sync` (one source; authAny; 200 with `last_error` on a recorded failure, 409 `SOURCE_ACCESS` for credential/branch problems, 404 `SOURCE_NOT_FOUND` when the repository is not a source of the project); `POST /api/v1/projects/{key}/architecture-sources/sync` (every source of the project in id order, each attempted whatever another's import did; 200 with every row, each carrying its own `last_error`, a credential or branch problem included; 404 without a source); `POST /api/v1/projects/{key}/architecture-source/sync`, kept for `dispatch` clients older than this release and logged at warn on every call (the every-source import, answering one row: the first in id order whose `last_error` is set, else the first; 404 without a source); and the `dispatch architecture-sync` command of this release riding the every-source route, or the one-source route with `--repo`. `DELETE /api/v1/projects/{key}/architecture-sources/{owner}/{repo}` deletes that source's `components` by the foreign key's cascade, and their `component_depends` by theirs, in the same transaction (the graph loses those component arms), then the `component_facts` rows whose component no source of the project projects any more (`architecture.DeleteOrphanComponentFacts`); every other source's components stay, and snapshots remain as history. A sync that hits its own two-minute deadline while the caller is still alive is recorded on the row like any other failure (the record write runs on a cancel-free context); a caller that has gone away records nothing. The state-change decision behind both events is made from the source's row as read under its lock, so the second of two server processes that fetched the same head (or hit the same failure) stays silent. A `PUT` that re-saves a source (changing its branch) resets `last_tree_sha` with the other sync columns, so a byte-identical architecture directory on the new branch still re-projects once.
 - Issue component attachment (`api/issue_components.go`, migration `0038`): `issue_components(issue_key pk, mode in (explicit, none), reason)` is an issue's own attachment and `issue_component_members(issue_key, project_key, component_id)` its explicit set; no row means inherit. Members reference `components` softly (no FK), so a re-import that retires a component leaves the link in place and every read reports the id under `unknown` instead of dropping it. `POST`/`PATCH /api/v1/issues[/{key}]` take `components` as a tri-state raw field like `parent`: `null`/`{mode: inherit}` deletes the row, `explicit` needs one to fifty slug ids that are components of the issue's project, from any of its sources, and not `external` (`400 COMPONENTS_INPUT` names each unknown, retired, external, or other-project id), `none` needs a non-blank `reason`; the closed-issue gate exempts `components` like `rank`, and a write bumps `issues.updated_at` and rides the ordinary `issue.updated` event with the whole issue. Resolution is on read, never stored: `issueComponentsLateral` is one `left join lateral` (a depth-capped `union` walk up `parent_key` to the nearest row of either mode — `none` is inherited exactly like `explicit` — splitting members into live and retired ids) that `loadIssue`, both list queries, and the tree route share, so every `Issue`/`IssueSummary` carries `components {mode, ids, unknown, reason, inherited_from}` from the same query. `GET /api/v1/projects/{key}/architecture` (`api/architecture_tree.go`, authAny, `404 SOURCE_NOT_FOUND`) computes the counting rule once: every project issue's effective set joined to the component containment closure (recursive over `components.parent`, depth-capped), one row per (issue, component) with the strongest way it qualified (`direct` > `inherited` > `contained` with `via`), aggregated in Go into `done`/`total` (distinct issues, icebox and closed included) and `own_*` (those naming the component itself), plus the `unassigned` (no row anywhere), `not_architectural` (a `none` row, own or inherited), and `retired_links` (non-empty `unknown`) lists and `totals` (`components_without_work` counts non-external components with `total == 0`). `graph_edges` gains the `affects` arm (`issue` → `component` per explicit member, `created_at` the row's `updated_at`; inherited attachments are not edges), `refs.Kinds` learns `part_of`/`depends_on`/`affects`, `refs.resolveNodes` loads `component` nodes from the current model (a retired id resolves to nothing and its edges are omitted), and `text.Extract` parses `dispatch://<PROJECT>/component/<id>` so a mention of a component is an ordinary `mentions` edge.

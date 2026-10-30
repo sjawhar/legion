@@ -13,7 +13,7 @@ import (
 )
 
 // activeIdentity returns the embedder identity the embedding queue of every server process works
-// for, the one row of embedder_active (migration 0151), deciding it first when it must. Two
+// for, the one row of embedder_active (migration 0152), deciding it first when it must. Two
 // processes, of one build or of two builds a release runs side by side, may be configured with
 // different embedders; each one's coverage pass drops every vector another identity made, so
 // without one identity they would drop each other's vectors in turn for as long as both serve.

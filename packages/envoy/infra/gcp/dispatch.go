@@ -94,7 +94,7 @@ const (
 // counted pools and its permanent listeners. The listener's and the front door's pods open none.
 // TestDispatchConnectionsPerPodIsTheServers fails when a counted pool's size changes and this
 // does not.
-const dispatchConnectionsPerPod = 91
+const dispatchConnectionsPerPod = 93
 
 // Autopilot's bounds for the app pod's total request, the general-purpose compute class's for a pod
 // with pod anti-affinity, which every Dispatch pod carries, or with the safe-to-evict annotation,

@@ -174,17 +174,18 @@ const copiedAsksLockNamespace int32 = 0x434F5059
 //
 // It takes the two-key form, whose key space Postgres keeps apart from the single-key one: every
 // other advisory lock here - a document's room (lockDocumentRoom), a project's rank allocation, an
-// agent's artifacts, the events' commit order, the migration runner's - is a single key, so a copy
-// lock never waits on one of those, whatever the project's name hashes to. Within the two-key
-// space only the copy locks take copiedAsksLockNamespace: the one other namespace of it anywhere
-// in the server is internal/dispatch/duty's (duty.leaseNamespace), under which a background loop
-// holds the lease that keeps one process at a time running its periodic pass, so a copy lock
-// cannot collide with a lease either. hashtext is 32 bits wide, so two projects can still share
-// the second key. They then take turns on their copy bookkeeping and on nothing else, and cannot
-// deadlock: a holder takes the copy lock before any doc_settlements_pending row and before the
-// events' commit-order lock (TestCopyLockComesBeforeEveryPendingRowAndEvent), so the transaction
-// waiting on it holds nothing the holder goes on to take. A settlement takes it right after its
-// owner row and room lock, an answer or a resolution after its owner row and ask row. The
+// agent's artifacts, the migration runner's - is a single key, so a copy lock never waits on one of
+// those, whatever the project's name hashes to. Within the two-key space only the copy locks take
+// copiedAsksLockNamespace: the one other namespace of it anywhere in the server is
+// internal/dispatch/duty's (duty.leaseNamespace), under which a background loop holds the lease
+// that keeps one process at a time running its periodic pass, so a copy lock cannot collide with a
+// lease either. hashtext is 32 bits wide, so two projects can still share the second key. They
+// then take turns on their copy bookkeeping and on nothing else, and cannot deadlock: a holder
+// takes the copy lock before any doc_settlements_pending row and before any event append
+// (TestCopyLockComesBeforeEveryPendingRowAndEvent), and an append locks only its event owner's row,
+// which for the holder's appends is the owner row it took before the copy lock, so the
+// transaction waiting on it holds nothing the holder goes on to take. A settlement takes it right
+// after its owner row and room lock, an answer or a resolution after its owner row and ask row. The
 // copy-source read is the next statement, so under READ COMMITTED its snapshot holds every ask a
 // sibling's settlement committed while this one waited, and the ask createAskBlock opens commits
 // in this transaction, which holds the lock until then. A settlement whose blocks all have asks
@@ -292,9 +293,9 @@ func owedCopiesOf(ctx context.Context, tx pgx.Tx, documents ...documentAsks) ([]
 // latest version holds the block of one of that document's asks with no ask of its own under that
 // block's id (copiesOf). A document's latest version is read for the block's opener
 // (`:::ask{#<id> …}`), so one that quotes the opener elsewhere, in code, is settled for nothing.
-// The caller has taken no pending row and not the events' commit-order lock: a copy's settlement
-// deletes its own row before it appends an event, so the two can wait on each other in only one
-// direction.
+// The caller has taken no pending row and appended no event. A copy's settlement waits on the row
+// this marks holding its own owner row and room lock, which the caller never takes, and deletes its
+// own row before it appends an event, so the two can wait on each other in only one direction.
 func lockedCopiesOf(ctx context.Context, tx pgx.Tx, documents ...documentAsks) ([]string, error) {
 	var projects []string
 	for _, document := range documents {
@@ -364,7 +365,7 @@ func documentOwner(ctx context.Context, tx pgx.Tx, artifactID string) (artifactO
 // it, rather than at its own next edit. ask is a block ask, its BlockID and BlockArtifactID set.
 // The caller holds ask's owner row and ask row, and calls this before it writes the source's block
 // or appends an event: the copy lock and the copies' pending rows come before the source's room
-// lock, its own pending row and the events' commit-order lock.
+// lock, its own pending row and its events.
 func (s *Service) SettleCopiesOf(ctx context.Context, ask model.Ask) error {
 	tx, joined := txFromContext(ctx)
 	if !joined {
@@ -401,17 +402,19 @@ func (block askBlock) asks(content model.AskEditPrevious) bool {
 // it opened, an ask.edited event its wording after the edit and before it (previous), an
 // ask.answered event an answer, an ask.resolved event a resolution. Its type list is a subset of
 // events_ask_payload_id's, which the planner needs to use that index (migration 0030). askHistories
-// puts the rows in commit order itself: an order by id here would offer the planner a walk of the
-// events' primary key in place of that index.
+// puts the rows in id order itself, which for one ask's events is commit order (askHistory): an
+// order by id here would offer the planner a walk of the events' primary key in place of that index.
 const copiedAskHistoryQuery = `
 	select id, payload->>'id', type, payload
 	from events
 	where type in ('ask.opened', 'ask.edited', 'ask.answered', 'ask.resolved') and payload->>'id' = any($1)
 `
 
-// askHistory is what one ask asked and decided, from its events in commit order: events.id, which
-// the broker allocates under its commit-order lock (events.Broker.Append), so an edit and an answer
-// committed a moment apart keep the order they committed in, whatever their clocks say.
+// askHistory is what one ask asked and decided, from its events in commit order: events.id. One
+// ask's events all belong to the ask's owner (its issue, or the unlinked document it is on), and the
+// broker draws an owner's event ids under that owner's row lock (events.Broker.Append), so an edit
+// and an answer committed a moment apart keep the order they committed in, whatever their clocks
+// say. Ids of different owners' events carry no such order, and no history compares two asks'.
 type askHistory struct {
 	// wordings are each wording the ask asked, with the event that made it current (from) and the
 	// ask.edited event that retired it (until, 0 for the wording it still asks).
