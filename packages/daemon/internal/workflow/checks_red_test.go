@@ -310,13 +310,13 @@ func TestAHeadArrivingOverAKnownPushThatCompletesTheCarryOfARedSendsTheWorkBackF
 	}
 }
 
-// An issue in awaiting_merge has every worker suspended and a READY a human was told to merge. A
-// red that then stands for its head by the head's own CI - a required check failing on a rerun,
-// or a newly required one - keeps GitHub from merging it, and no worker would hear of it: the
-// issue goes back to implementing exactly as a red in testing does, the implementer's task and the
-// architect's checks-red notice naming the red checks, the project's merge queue role told the
-// READY is withdrawn, the return counted as a round, and the round returns through testing, review
-// and READY. A head a push that changed only .legion/ reached is no exception, as it is none before
+// An issue in awaiting_merge has no worker with an active phase task and a READY a human was told
+// to merge. A red that then stands for its head by the head's own CI — a required check failing on
+// a rerun, or a newly required one — keeps GitHub from merging it, so the issue goes back to
+// implementing exactly as a red in testing does: the implementer's task and the architect's
+// checks-red notice name the red checks, the project's merge queue role is told the READY is
+// withdrawn, the return is counted as a round, and the round returns through testing, review and
+// READY. A head a push that changed only .legion/ reached is no exception, as it is none before
 // READY either: no worker is at work in awaiting_merge, and only the implementer can change the
 // red. A red carried to the READY head from the code head before it moves nothing: that red stood
 // before the READY and says nothing new about the submitted head. Nor does a red only on a check

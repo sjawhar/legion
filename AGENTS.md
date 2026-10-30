@@ -297,19 +297,18 @@ from the ask events, a registration's read of the approval request and the boot 
 decides from the record alone on every admission pass (a live fact, a tick, the boot read), so the
 same record gives the same decision. The mirror is the same whatever order the events arrive in,
 but a decision acts on the record as each event leaves it, so some orders differ (listed below). A
-root enters `awaiting_person` — gives up its slot at once, and its architect's session is
-suspended after its current turn, kept for the resume — when all of these hold: its architect
-handed something to the person since the daemon last gave it work (a question a session of its
-tree opened on the root, a tree session's reply leaving such a question, or an approval request of
-the closed gate's document, with the person, or a registration of a closed gate whose request
-waits on the person; `declared_seq`, the newest such hand-back, and `declared_at`, Dispatch's time
-of it); something is still with the person (an open tree question on the person's turn, or an
-approval request of the closed, armed gate's document on the person's turn); no other issue of its
-tree is in a phase; it could resume (its label is on, and no person or session outside the tree
-holds its Dispatch claim); and its architect has taken the work it was last given (no start
-queued, its claim not still starting, its task confirmed), so a suspension never cancels a resume
-before its turn runs. The wait begins at that hand-back and names the design gate at its latest
-version when its request is with the person, else the oldest question that is. When nothing it
+root enters `awaiting_person` — gives up its slot at once, and its architect stays live and idle
+until the answer's task — when all of these hold: its architect handed something to the person
+since the daemon last gave it work (a question a session of its tree opened on the root, a tree
+session's reply leaving such a question, or an approval request of the closed gate's document, with
+the person, or a registration of a closed gate whose request waits on the person; `declared_seq`,
+the newest such hand-back, and `declared_at`, Dispatch's time of it); something is still with the
+person (an open tree question on the person's turn, or an approval request of the closed, armed
+gate's document on the person's turn); no other issue of its tree is in a phase; it could resume
+(its label is on, and no person or session outside the tree holds its Dispatch claim); and its
+architect has taken the work it was last given (no start queued, its claim not still starting, its
+task confirmed). The wait begins at that hand-back and names the design gate at its latest version
+when its request is with the person, else the oldest question that is. When nothing it
 handed back is still with the person, the hand-back is taken in (`declared_seq` cleared), so an
 answer the running architect already had never starts or ends a later wait. When a person already
 acted after that hand-back, the root keeps its slot and its architect is given the resume task
@@ -376,17 +375,17 @@ once its design gate is open, and they start with its resume, each once. Taking 
 off a waiting root, or a person or a session outside the tree claiming it, takes it out of the
 workflow with an `unslotted` notice; it is never resumed under another owner. A session outside
 the tree writing a lifecycle status on a waiting root is set back, as on a root holding its slot,
-and its architect is told when it resumes. A root whose Dispatch claim a person or outside session
-already holds keeps its slot at `admitted` while its architect asks that holder to release it, and
+and its live architect is told. A root whose Dispatch claim a person or outside session already
+holds keeps its slot at `admitted` while its architect asks that holder to release it, and
 so does an admitted root whose label was taken off, since only a labelled root is resumed.
 Deliveries out of Dispatch's order can decide otherwise than the same events in order, each
 decision being right for the record it read: a person's act around the hand-back — say the
 architect's request that a person release the root's claim, the person's answer, then the
-release — applied in the order release, then answer, suspends the root and resumes it, where in
-order the answer is taken in and the slot kept; a tree session's hand-back reply applied before
-its question's opening declares nothing, so the root keeps its slot until the architect's next
-hand-back; and a person's answer of an approval request applied before the gate is registered on
-its document answers a waiting root as an act on an ask, where after the registration it is a
+release — applied in the order release, then answer, starts the wait and gives the live architect
+its answer task, where in order the answer is taken in and the slot kept; a tree session's hand-back
+reply applied before its question's opening declares nothing, so the root keeps its slot until the
+architect's next hand-back; and a person's answer of an approval request applied before the gate is
+registered on its document answers a waiting root as an act on an ask, where after the registration it is a
 review. Between boots nothing re-reads a waiting root's asks: if the event of a person's answer
 never reaches the daemon, the root waits until any newer act of a person on any ask of the root,
 or a review of its spec, reaches it, or until the daemon's next boot, whose catch-up applies the
