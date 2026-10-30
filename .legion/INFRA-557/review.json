@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-557",
+  "completed": "2026-10-30T22:53:40Z",
+  "round": 12,
+  "scope": "The merge of main's #2542 (git show --remerge-diff a14ba02f) and CI (architect, 20:47Z), widened at 22:52Z and 22:53Z: request changes for a lease holder whose receive connection alone is cut, which keeps the lease for about 10 minutes, with a no-bounce requirement from INFRA-14's architect.",
+  "reviewedHead": "a14ba02f6f85a6f55d2c9fc4f2db9e5d7e30fd8e",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 0,
+  "ci": "At a14ba02f the CI run had not started at 22:53Z (two check runs queued); no required check has completed at this head.",
+  "merge": "faithful: live_topics.go keeps this branch's instance-named client and stream-subject follow with #2542's WithSilentCutDetection; main.go's conflict is the listenerStreamOptions doc, which keeps both sentences, and the main client gets WithSilentCutDetection; stream_replicas_test.go takes main's bustest helper with KV_envoy_listener added; AGENTS.md takes main's settings.go row; silent_cut_test.go and cut_rewatch_test.go match the instance-suffixed client names. The tester's fingerprint: only these files' branch-side diffs changed.",
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/cmd/listener/lease.go:517", "description": "A lease holder whose receive (bus) connection alone is cut silently, its lease connection up, notices in about 2 s (#2542) and answers /healthz 503 'subscription inactive', but renew keeps renewing, so no standby takes over until self-health terminates the pod: the tester (round 17, https://github.com/sjawhar/legion/pull/2404#issuecomment-6535168335) measured the standby taking the lease 602.4 s after the cut, num_pending past 2,600, nothing delivered. Required: a holder that has not been receiving for a bound of a few seconds (the signal behind the 503) stops renewing and releases with no clean-hand-back mark, so a standby takes over and holds 7 s; a reconnect inside the bound keeps the lease; a pod that released for this reason does not take the lease again while its receive connection is still down, and stands by again once it is back. A two-pod row under the rendered grant that cuts only the receive connection must fail first (no take-over within 60 s today) and then show the standby delivering in order within 15 s of the cut, no bounce back while the cut lasts, and the pod standing by after it heals."}
+  ]
+}
