@@ -54,7 +54,11 @@ type Pointer struct {
 // pair dates instead from the document's own refs row for that target, when one exists. The
 // version is recorded as indexed, and as the version the document's blocks stand at
 // (document_block_versions). It returns the targets of the pairs it inserted or deleted, or whose
-// to_types it changed, whose counts moved: a node is counted once for each block citing it.
+// to_types it changed, whose counts moved: a node is counted once for each block citing it. It
+// also returns what else a Referenced by panel or a link shows that the version moved: the target
+// of each pair it kept in a block whose text it changed (the block's text is that link's excerpt),
+// and each block it changed or deleted that some source cites (citedBlocks), whose text every
+// link to it and its own panel show.
 func IndexBlocks(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -132,10 +136,26 @@ func IndexBlocks(
 		}
 	}
 
-	moved, err := replaceBlockRefs(ctx, tx, artifactID, version, versionAt, firstIndexing, blockPairs(nodes, located, pointers))
+	pairs := blockPairs(nodes, located, pointers)
+	moved, err := replaceBlockRefs(ctx, tx, artifactID, version, versionAt, firstIndexing, pairs)
 	if err != nil {
 		return nil, err
 	}
+	changedBlocks := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		changedBlocks[id] = struct{}{}
+	}
+	for _, pair := range pairs {
+		if _, changed := changedBlocks[pair.blockID]; changed {
+			moved = append(moved, pair.target)
+		}
+	}
+	// textIDs is every block this version changed, restored or deleted.
+	cited, err := citedBlocks(ctx, tx, artifactID, textIDs)
+	if err != nil {
+		return nil, err
+	}
+	moved = append(moved, cited...)
 	if _, err := tx.Exec(ctx, `
 		insert into document_indexed_versions (artifact_id, version) values ($1, $2)
 		on conflict (artifact_id, version) do nothing
@@ -151,6 +171,28 @@ func IndexBlocks(
 		return nil, fmt.Errorf("record the blocks of %s indexed at version %d: %w", artifactID, version, err)
 	}
 	return moved, nil
+}
+
+// citedBlocks is, of the document's blocks named by ids, each that a source cites (a refs or a
+// block_refs row points at its node), as a block target.
+func citedBlocks(ctx context.Context, tx pgx.Tx, artifactID string, ids []string) ([]Target, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	cited, err := scanTargets(tx.Query(ctx, `
+		select 'block', b.node_id
+		from (
+			select a.ref_key || '#' || t.id as node_id
+			from unnest($2::text[]) as t (id)
+			cross join (select ref_key from artifacts where id = $1::uuid) a
+		) b
+		where exists (select 1 from refs r where r.to_kind = 'block' and r.to_id = b.node_id)
+		   or exists (select 1 from block_refs r where r.to_kind = 'block' and r.to_id = b.node_id)
+	`, artifactID, ids))
+	if err != nil {
+		return nil, fmt.Errorf("read the cited blocks of %s: %w", artifactID, err)
+	}
+	return cited, nil
 }
 
 // BlockTextSum is the sha256 (hex) of a block's text (markdown[From:To]), as document_blocks
@@ -212,7 +254,7 @@ func blockPairs(nodes []model.ArtifactBlock, located []text.Located, pointers []
 		if holders[i] < 0 {
 			continue
 		}
-		target, ok := targetOf(mention.Ref)
+		target, ok := TargetOf(mention.Ref)
 		if !ok {
 			continue
 		}
@@ -264,7 +306,7 @@ func pointerPairs(nodes []model.ArtifactBlock, pointers []Pointer) ([]blockPair,
 		if typ, ok := nodeTypes[pointer.Block]; !ok || typ != pointer.BlockType {
 			continue
 		}
-		target, _ := targetOf(pointer.Target)
+		target, _ := TargetOf(pointer.Target)
 		held := heldTarget{blockID: pointer.Block, target: target}
 		pointed[held]++
 		key := pointerKey{held: held, kind: pointer.Kind}

@@ -43,6 +43,13 @@ function renderDialog(
   onClose = () => {}
 ) {
   const listProjects = spyOn(api, "listProjects").mockResolvedValue(projects);
+  // Every row types a title, so the dialog's related-item check is answered here instead of
+  // reaching the network.
+  const relatedItems = spyOn(api, "relatedItems").mockResolvedValue({
+    outcome: "none",
+    related: [],
+    search: "keywords_only",
+  });
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
@@ -61,6 +68,7 @@ function renderDialog(
       view.unmount();
       queryClient.clear();
       listProjects.mockRestore();
+      relatedItems.mockRestore();
     },
   };
 }
@@ -103,12 +111,14 @@ test("preselects the route's project, submits title and spec, and opens the crea
   }
 });
 
-test("a failed create keeps the dialog and draft, shows the server message, and retries", async () => {
+// A 5xx is no verdict: the write is tried again under its key on its own. Dispatch's refusal is
+// one, so the dialog keeps the draft, says why, and Retry asks again.
+test("a refused create keeps the dialog and draft, shows the server message, and retries", async () => {
   let attempts = 0;
   const view = renderDialog(async (input) => {
     attempts += 1;
     if (attempts === 1) {
-      throw new ApiError(500, { error: "database unavailable" });
+      throw new ApiError(409, { code: "PROJECT_LOCKED", error: "the project is being moved" });
     }
     return issue(input, "CORE-3");
   });
@@ -120,7 +130,7 @@ test("a failed create keeps the dialog and draft, shows the server message, and 
     fireEvent.submit(screen.getByRole("dialog", { name: "Create issue" }));
 
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("database unavailable");
+    expect(alert.textContent).toContain("the project is being moved");
     expect(screen.getByRole<HTMLInputElement>("textbox", { name: "Title" }).value).toBe(
       "Flaky create"
     );
@@ -130,6 +140,45 @@ test("a failed create keeps the dialog and draft, shows the server message, and 
       expect(screen.getByTestId("current-route").textContent).toBe("/issues/CORE-3")
     );
     expect(attempts).toBe(2);
+  } finally {
+    view.unmount();
+  }
+});
+
+// Dispatch made the issue and lost its answer (`409 KEY_COMMITTED`): the dialog has no issue to
+// open, so it lets go of the draft and says what was made - and a second press, with the draft
+// gone, sends nothing, where the old draft would have made a second issue.
+test("a create answered KEY_COMMITTED drops the draft, says the issue was made, and a second press sends nothing", async () => {
+  let attempts = 0;
+  let closed = 0;
+  const view = renderDialog(
+    async () => {
+      attempts += 1;
+      throw new ApiError(409, { code: "KEY_COMMITTED", error: "already made" });
+    },
+    "/",
+    () => {
+      closed += 1;
+    }
+  );
+  try {
+    await screen.findByRole("combobox", { name: "Project" });
+    const title = screen.getByRole<HTMLInputElement>("textbox", { name: "Title" });
+    fireEvent.change(title, { target: { value: "Made once" } });
+    fireEvent.submit(screen.getByRole("dialog", { name: "Create issue" }));
+
+    const made = await screen.findByTestId("landed-without-answer");
+    expect(made.textContent).toBe(
+      "The issue “Made once” was made, but Dispatch lost its answer, so it may take a moment to appear."
+    );
+    expect(title.value).toBe("");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByTestId("current-route").textContent).toBe("/");
+
+    fireEvent.submit(screen.getByRole("dialog", { name: "Create issue" }));
+    await Bun.sleep(20);
+    expect(attempts).toBe(1);
+    expect(closed).toBe(0);
   } finally {
     view.unmount();
   }

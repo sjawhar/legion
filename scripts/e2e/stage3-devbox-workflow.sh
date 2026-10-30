@@ -492,7 +492,7 @@ rig_sessions_json() {
 # rig session authored, any event naming this rig's project key, and any rig session on the
 # production Envoy listener. The baseline event itself is the positive control that the replay ran.
 production_audit() {
-  local sessions header events envoy found=0
+  local sessions bearer events envoy found=0
   audited=1
   sessions=$(rig_sessions_json)
   printf '%s\n' "$sessions" >"$evidence/rig-sessions.json"
@@ -507,14 +507,21 @@ production_audit() {
     printf 'no user-level Dispatch configuration exists, so no production Dispatch fallback was possible\n'
     return "$found"
   fi
-  header=$(prod_header_file)
-  curl -sS -N --max-time 25 -H "@$header" "$prod_dispatch_url/api/v1/events?since=$((prod_baseline - 1))" \
-    >"$work/production-events.sse" 2>/dev/null || true
-  rm -f "$header"
-  events=$(sed -n 's/^data: //p' "$work/production-events.sse" | jq -s -c --argjson ids "$sessions" --arg project "$project" --argjson baseline "$prod_baseline" '
+  bearer=$work/production-dispatch-bearer
+  (umask 077 && printf '%s\n' "$prod_token" >"$bearer")
+  # A refusal of the feed is printed on stderr; the replay's close, resubscribe and duplicate lines
+  # carry no event and are not counted, so an event a redial repeats counts once. The probe takes
+  # its cursor from Dispatch's own events_start, so a --since the server clamps to its head leaves
+  # the events after that head counted, not written off as duplicates.
+  bun "$root/scripts/e2e/lib/dispatch-live-events.ts" \
+    --url "$prod_dispatch_url" --bearer-file "$bearer" --since "$((prod_baseline - 1))" --timeout 25 \
+    >"$work/production-events.jsonl" || true
+  rm -f "$bearer"
+  events=$(jq -s -c --argjson ids "$sessions" --arg project "$project" --argjson baseline "$prod_baseline" '
+    [.[] | .event | select(. != null)] |
     {control: any(.[]; .id == $baseline), count: length,
      rig: [.[] | select((.actor.id as $a | $ids | index($a)) or (tostring | contains($project)))
-       | {id, issue_key, type, actor: .actor.id, created_at}]}')
+       | {id, issue_key, type, actor: .actor.id, created_at}]}' "$work/production-events.jsonl")
   printf '%s\n' "$events" >"$evidence/production-dispatch-audit.json"
   if ! jq -e '.control' >/dev/null <<<"$events"; then
     printf 'production Dispatch replay did not return its baseline event %s\n' "$prod_baseline"
@@ -817,7 +824,7 @@ begin panes-pinned-to-the-rig-before-any-agent-turn
 # The two admitted architects are the only panes before any phase worker: each takes its first turn
 # from the daemon's catch-up notice, not from the proof. Every later pane is checked when it
 # registers and again before each instruction. An architect whose root already waits on a person
-# (it registered its closed gate and was suspended) was checked by the pane watcher at its launch.
+# (it registered its closed gate and stays live) was checked by the pane watcher at its launch.
 wait_for_architect "$root_issue"
 wait_for_architect "$held_issue"
 note "$(wc -l <"$evidence/pane-endpoints-checked.txt") pane checks: DISPATCH_URL=http://127.0.0.1:$port_dispatch, DISPATCH_TOKEN_FILE=$state/secrets/dispatch-token, ENVOY_URL=http://127.0.0.1:$port_listener, ENVOY_NATS_URL=nats://127.0.0.1:$port_nats"
@@ -1221,13 +1228,13 @@ fi
 # no_change_close: a root whose human decides at the design gate that no change is needed. The
 # no-change root took the slot the first or held root gave back at its registration early in the
 # run, its architect registered its own closed gate, and it has waited on a person since, without a
-# slot and with its architect suspended. The human requests changes saying no change is needed: that
+# slot while its architect stays live. The human requests changes saying no change is needed: that
 # answers the wait, and the root takes a slot back at admitted (the held root holds the other one),
-# its architect's session resumed with a task naming the changes request. close_root is refused
-# while a root is not at admitted holding its slot, so the proof waits for both before it tells the
-# architect to end the tree itself. The daemon posts the architect's reason on the issue before it
-# writes done, and the freed slot goes to the next answered or waiting root with no human status
-# write. Each step of the tree's close is one journal line.
+# its architect receives a task naming the changes request. close_root is refused while a root is
+# not at admitted holding its slot, so the proof waits for both before it tells the architect to end
+# the tree itself. The daemon posts the architect's reason on the issue before it writes done, and
+# the freed slot goes to the next answered or waiting root with no human status write. Each step of
+# the tree's close is one journal line.
 no_change_close() {
   begin architect-closes-a-no-change-root
   local artifact reason token
@@ -1238,7 +1245,7 @@ no_change_close() {
   dispatch_human POST "artifacts/$artifact/reviews" "$(jq -cn --arg reason "$reason" '{state: "changes_requested", reason: $reason}')" >/dev/null
   await_answered_slot "$nochange_issue" "Stage 3 no-change proof"
   wait_for_phase "$nochange_issue" admitted 60
-  until_true 300 "the no-change architect's session to resume once its root holds its slot" issue_worker_live "$nochange_issue" architect
+  until_true 300 "the live no-change architect to receive its task once its root holds its slot" issue_worker_live "$nochange_issue" architect
   send_agent "$nochange_issue" architect "Stage 3 no-change proof: the human reviewing your spec requested changes: \"$reason\" End your tree as your role says, and change nothing else."
   until_true 600 "the no-change root to be done in Dispatch" dispatch_status_is "$nochange_issue" "done"
   dispatch_events "$nochange_issue" >"$evidence/nochange-events.json"

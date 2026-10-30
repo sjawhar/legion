@@ -57,6 +57,8 @@ events and sends them to the current Claude Code session as supported
   after a reconnect, on every heartbeat and after a new follow, and delivers each missed message
   once, the same way as a live one, with a line saying when it was published while the connection
   was down. It runs nothing: a Dispatch delivery recovered this way is that event and no more.
+  The server pings NATS every 10 seconds and drops a connection that leaves two pings unanswered,
+  so a connection that stops answering without closing is left within 30 seconds and redialed.
   Role messages and team or other ad-hoc topics are live only and are not recovered, and neither
   is anything older than 72 hours, from before the session followed the topic, or from before it
   first ran this version of the plugin; a `/clear` starts afresh, as a new session does. What the
@@ -271,18 +273,20 @@ every third-party package they inline, written from Bun's metafile by
 
 - Main's tree carries the bundles and `legion/`; a pull request never commits them. Main's Rebuild
   Claude Envoy plugin workflow (`.github/workflows/claude-envoy-rebuild.yaml`) builds main's tip
-  after each merge and commits `dist/` and `legion/` when they differ, so main's built files lag
-  its sources by one run of that workflow, its two jobs' runner queues included (more than an
-  hour when the Actions queue is long). In that window `hooks/hooks.json`, `.mcp.json`, `bin/`
-  and `.claude-plugin/` from the merge are live beside the previous build, so an install then gets
-  a hook or server entry that names a bundle the previous build lacks; add a bundle in one pull
-  request and the entry that runs it in a later one. `scripts/build.ts` takes exactly one mode
-  and refuses a run that names none (exit 2); neither mode writes the package's own `dist/` or
-  `legion/`. `--check` (`bun run check-dist`) builds into a scratch directory and fails when the
-  committed files differ from it; `--out <dir>` makes a new or empty directory outside the
-  repository a runnable copy of the plugin built from the tree (its manifests, `.mcp.json`,
-  `bin/`, `hooks/`, `package.json` and skills, the skill links dereferenced, with a fresh `dist/`
-  and `legion/`), which is how to run an unmerged tree.
+  after each merge and commits `dist/` and `legion/` when they differ, onto main's tip at the time
+  it lands even when main moved meanwhile, unless main already holds a newer build; when a build
+  input (`scripts/build-inputs.txt`) changed in between, it starts a fresh run too. So main's
+  built files are a build of a recent main, at most one run behind its inputs, its two jobs'
+  runner queues included (more than an hour when the Actions queue is long). In that window
+  `hooks/hooks.json`, `.mcp.json`, `bin/` and `.claude-plugin/` from the merge are live beside the
+  previous build, so an install then gets a hook or server entry that names a bundle the previous
+  build lacks; add a bundle in one pull request and the entry that runs it in a later one.
+  `scripts/build.ts` takes exactly one mode and refuses a run that names none (exit 2); neither
+  mode writes the package's own `dist/` or `legion/`. `--check` (`bun run check-dist`) builds into
+  a scratch directory and fails when the committed files differ from it; `--out <dir>` makes a new
+  or empty directory outside the repository a runnable copy of the plugin built from the tree (its
+  manifests, `.mcp.json`, `bin/`, `hooks/`, `package.json` and skills, the skill links
+  dereferenced, with a fresh `dist/` and `legion/`), which is how to run an unmerged tree.
 - `bun run verify-build <tar>` (`scripts/verify-build.sh`) is that workflow's build step: it builds
   the plugin twice into a scratch directory outside the repository and says so when the two builds
   differ, runs the private-name check over the first build's `dist/` and `legion/`, refuses a

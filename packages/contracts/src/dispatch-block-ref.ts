@@ -71,11 +71,12 @@ const MAX_BLOCK_PIN = 9223372036854775807n;
 
 /**
  * The block a `#b-` fragment (`encoded`, after the `b-`) names, and the version `pin` it pins when
- * it ends in `@v<N>`, as the server's `text.parseBlock` reads it: a raw `@` only as the start of
- * a well-formed pin (`N` a positive integer with no leading zero, at most MAX_BLOCK_PIN), and the
- * id before it as `decodeBlockId` reads it. Undefined for any other fragment. `pin` is N's decimal
- * digits as written, so a pin past the integers a JavaScript number holds exactly is carried and
- * written back unrounded.
+ * it ends in `@v<N>` (a version of a document, or a revision of a comment; whether the block's
+ * holder takes a pin, which an issue message does not, is its caller's to ask), as the server's
+ * `text.parseBlock` reads it: a raw `@` only as the start of a well-formed pin (`N` a positive
+ * integer with no leading zero, at most MAX_BLOCK_PIN), and the id before it as `decodeBlockId`
+ * reads it. Undefined for any other fragment. `pin` is N's decimal digits as written, so a pin past
+ * the integers a JavaScript number holds exactly is carried and written back unrounded.
  */
 export function parseBlockFragment(encoded: string): { block: string; pin?: string } | undefined {
   const at = encoded.indexOf("@");
@@ -125,6 +126,30 @@ const BLOCK_REFERENCE = new RegExp(
   `^dispatch://(?:(${ISSUE_KEY})/spec|(${ISSUE_KEY}|${PROJECT_KEY})/artifact/(${DOCUMENT_SLUG}))#b-(.*)$`,
   "s"
 );
+// A block of a comment (an issue's, or a project document's) or of an issue message, as Go's
+// `text.parseBlock` reads one: the item's kind, then the `#b-` fragment.
+const ITEM_BLOCK_REFERENCE = new RegExp(
+  `^dispatch://(?:${ISSUE_KEY}/(comment|message)|(?:${ISSUE_KEY}|${PROJECT_KEY})/artifact/${DOCUMENT_SLUG}/(comment))/[^/?#]+#b-(.*)$`,
+  "s"
+);
+
+/**
+ * The kind of item (`comment` or `message`) whose block `value` names, as Go's `text.Ref.Item`
+ * reads it, or undefined when it names no block of a comment or message: a message never changes,
+ * so a pinned message block is no reference.
+ */
+function itemBlockKind(value: string): "comment" | "message" | undefined {
+  const match = ITEM_BLOCK_REFERENCE.exec(value);
+  if (match === null) {
+    return undefined;
+  }
+  const kind = (match[1] ?? match[2]) as "comment" | "message";
+  const fragment = parseBlockFragment(match[3] ?? "");
+  if (fragment === undefined || (kind === "message" && fragment.pin !== undefined)) {
+    return undefined;
+  }
+  return kind;
+}
 
 /**
  * A block reference as every writer writes one: `dispatch://<ISSUE>/spec` for a block of an
@@ -209,13 +234,19 @@ export function blockPointerValueProblem(value: string): string | undefined {
 }
 
 /**
- * Why `values` are not the pointers of a `block[]` attribute - one is not a canonical block
- * reference (`parseCanonicalBlockReference`), or one is named twice - following the wording of
- * Go's `pmdoc.validateBlockPointerValues`, quoted as above, or undefined when they are.
+ * Why `values` are not the pointers of a `block[]` attribute - one is a block of a comment or a
+ * message, which a pointer never names (a `block[]` attribute points at blocks of documents, whose
+ * types its targets limit, and an item's block has no type), one is otherwise not a canonical
+ * block reference (`parseCanonicalBlockReference`), or one is named twice - following the wording
+ * of Go's `pmdoc.validateBlockPointerValues`, quoted as above, or undefined when they are.
  */
 export function blockPointersProblem(values: readonly string[]): string | undefined {
   const seen = new Set<string>();
   for (const value of values) {
+    const item = itemBlockKind(value);
+    if (item !== undefined) {
+      return `${JSON.stringify(value)} is a block of a ${item}: a block[] attribute points only at a block of a document`;
+    }
     if (parseCanonicalBlockReference(value) === undefined) {
       return `${JSON.stringify(value)} is not a block reference as Dispatch writes one: dispatch://<ISSUE>/spec#b-<id>, or dispatch://<ISSUE or PROJECT>/artifact/<slug>#b-<id>, the id percent-encoded in upper-case hex except ASCII letters, digits and -, optionally pinned @v<N>`;
     }
@@ -229,103 +260,141 @@ export function blockPointersProblem(values: readonly string[]): string | undefi
 
 const atIdBound = `dispatch://CORE-1/spec#b-${"x".repeat(MAX_BLOCK_ID_BYTES)}`;
 
-/** Every value a `block[]` attribute may hold (`ok`) or not, and why. */
-export const DISPATCH_BLOCK_POINTER_VALUES: readonly { value: string; ok: boolean; why: string }[] =
-  [
-    {
-      value: "dispatch://CORE-1/spec#b-x",
-      ok: true,
-      why: "a block of an issue's primary document",
-    },
-    {
-      value: "dispatch://CORE-1/artifact/notes-md#b-x",
-      ok: true,
-      why: "a block of an issue's document",
-    },
-    {
-      value: "dispatch://CORE/artifact/handbook-md#b-x",
-      ok: true,
-      why: "a block of a project's document",
-    },
-    {
-      value: "dispatch://CORE/artifact/spec#b-x",
-      ok: true,
-      why: "a project's document whose slug is spec",
-    },
-    { value: "dispatch://CORE-1/spec#b-d%C3%A9cision%3A1", ok: true, why: "a Unicode id" },
-    { value: "dispatch://CORE-1/spec#b-x@v2", ok: true, why: "a pinned block" },
-    { value: "dispatch://CORE-1/spec#b-x@v9223372036854775807", ok: true, why: "the largest pin" },
-    {
-      value: "dispatch://CORE-1/spec#b-x dispatch://CORE/artifact/handbook-md#b-y",
-      ok: true,
-      why: "two references separated by one space",
-    },
-    { value: "", ok: true, why: "no pointers" },
-    { value: atIdBound, ok: true, why: "an id of exactly 256 bytes" },
-    {
-      value: "dispatch://CORE-1/artifact/spec#b-x",
-      ok: false,
-      why: "an issue's primary document is written /spec",
-    },
-    { value: "dispatch://CORE-1/spec", ok: false, why: "a document, not a block" },
-    {
-      value: "dispatch://agent/s1/artifact/x#b-y",
-      ok: false,
-      why: "an agent's document has no blocks to point at",
-    },
-    { value: "dispatch://CORE-1/spec#b-d%c3%a9", ok: false, why: "lower-case hex" },
-    { value: "dispatch://CORE-1/spec#b-%41", ok: false, why: "an over-encoded ASCII letter" },
-    { value: "dispatch://CORE-1/spec#b-x%2Dy", ok: false, why: "an over-encoded -" },
-    { value: "dispatch://CORE-1/spec#b-%FF", ok: false, why: "invalid UTF-8" },
-    { value: "dispatch://CORE-1/spec#b-%0A", ok: false, why: "a control character" },
-    { value: "dispatch://CORE-1/spec#x", ok: false, why: "a fragment that is not b-" },
-    { value: "dispatch://CORE-1/spec#c-x", ok: false, why: "a fragment that is not b-" },
-    { value: "dispatch://CORE-1/spec#b-", ok: false, why: "an empty id" },
-    { value: `${atIdBound}x`, ok: false, why: "an id over 256 bytes" },
-    { value: "dispatch://CORE-1/artifact/notes-md@v2#b-x", ok: false, why: "a versioned document" },
-    { value: "dispatch://CORE-1#b-x", ok: false, why: "an issue names no document" },
-    {
-      value: "dispatch://CORE-1/spec#b-x@v9223372036854775808",
-      ok: false,
-      why: "a pin past the largest",
-    },
-    { value: "dispatch://CORE-1/spec#b-x@v01", ok: false, why: "a pin with a leading zero" },
-    { value: "dispatch://CORE-1/spec#b-x@v0", ok: false, why: "a pin of zero" },
-    {
-      value: "https://dispatch.example/issues/CORE-1/spec#b-x",
-      ok: false,
-      why: "a dashboard URL of a block",
-    },
-    { value: "dispatch://CORE-1/spec#b-x.", ok: false, why: "trailing punctuation" },
-    { value: "dispatch://CORE-1/spec#b-x)", ok: false, why: "a trailing parenthesis" },
-    {
-      value: "dispatch://CORE-1/spec#b-x,dispatch://CORE-1/spec#b-y",
-      ok: false,
-      why: "references joined by a comma",
-    },
-    {
-      value: "dispatch://CORE-1/spec#b-x dispatch://CORE-1/spec#b-x",
-      ok: false,
-      why: "a repeated reference",
-    },
-    {
-      value: "dispatch://CORE-1/spec#b-x  dispatch://CORE-1/spec#b-y",
-      ok: false,
-      why: "a doubled space",
-    },
-    { value: " dispatch://CORE-1/spec#b-x", ok: false, why: "a leading space" },
-    { value: "dispatch://CORE-1/spec#b-x ", ok: false, why: "a trailing space" },
-    {
-      value: "dispatch://CORE-1/spec#b-x\tdispatch://CORE-1/spec#b-y",
-      ok: false,
-      why: "a tab between references",
-    },
-    {
-      value: "dispatch://CORE-1/spec#b-x\uFEFFdispatch://CORE-1/spec#b-y",
-      ok: false,
-      why: "U+FEFF between references",
-    },
-  ];
+/**
+ * Every value a `block[]` attribute may hold (`ok`) or not, and why; `problem`, where a row has
+ * one, is a part of the reason both parsers must give for refusing it.
+ */
+export const DISPATCH_BLOCK_POINTER_VALUES: readonly {
+  value: string;
+  ok: boolean;
+  why: string;
+  problem?: string;
+}[] = [
+  {
+    value: "dispatch://CORE-1/spec#b-x",
+    ok: true,
+    why: "a block of an issue's primary document",
+  },
+  {
+    value: "dispatch://CORE-1/artifact/notes-md#b-x",
+    ok: true,
+    why: "a block of an issue's document",
+  },
+  {
+    value: "dispatch://CORE/artifact/handbook-md#b-x",
+    ok: true,
+    why: "a block of a project's document",
+  },
+  {
+    value: "dispatch://CORE/artifact/spec#b-x",
+    ok: true,
+    why: "a project's document whose slug is spec",
+  },
+  { value: "dispatch://CORE-1/spec#b-d%C3%A9cision%3A1", ok: true, why: "a Unicode id" },
+  { value: "dispatch://CORE-1/spec#b-x@v2", ok: true, why: "a pinned block" },
+  { value: "dispatch://CORE-1/spec#b-x@v9223372036854775807", ok: true, why: "the largest pin" },
+  {
+    value: "dispatch://CORE-1/spec#b-x dispatch://CORE/artifact/handbook-md#b-y",
+    ok: true,
+    why: "two references separated by one space",
+  },
+  { value: "", ok: true, why: "no pointers" },
+  { value: atIdBound, ok: true, why: "an id of exactly 256 bytes" },
+  {
+    value: "dispatch://CORE-1/artifact/spec#b-x",
+    ok: false,
+    why: "an issue's primary document is written /spec",
+  },
+  { value: "dispatch://CORE-1/spec", ok: false, why: "a document, not a block" },
+  {
+    value: "dispatch://agent/s1/artifact/x#b-y",
+    ok: false,
+    why: "an agent's document has no blocks to point at",
+  },
+  { value: "dispatch://CORE-1/spec#b-d%c3%a9", ok: false, why: "lower-case hex" },
+  { value: "dispatch://CORE-1/spec#b-%41", ok: false, why: "an over-encoded ASCII letter" },
+  { value: "dispatch://CORE-1/spec#b-x%2Dy", ok: false, why: "an over-encoded -" },
+  { value: "dispatch://CORE-1/spec#b-%FF", ok: false, why: "invalid UTF-8" },
+  { value: "dispatch://CORE-1/spec#b-%0A", ok: false, why: "a control character" },
+  { value: "dispatch://CORE-1/spec#x", ok: false, why: "a fragment that is not b-" },
+  { value: "dispatch://CORE-1/spec#c-x", ok: false, why: "a fragment that is not b-" },
+  { value: "dispatch://CORE-1/spec#b-", ok: false, why: "an empty id" },
+  { value: `${atIdBound}x`, ok: false, why: "an id over 256 bytes" },
+  { value: "dispatch://CORE-1/artifact/notes-md@v2#b-x", ok: false, why: "a versioned document" },
+  { value: "dispatch://CORE-1#b-x", ok: false, why: "an issue names no document" },
+  {
+    value: "dispatch://CORE-1/spec#b-x@v9223372036854775808",
+    ok: false,
+    why: "a pin past the largest",
+  },
+  { value: "dispatch://CORE-1/spec#b-x@v01", ok: false, why: "a pin with a leading zero" },
+  { value: "dispatch://CORE-1/spec#b-x@v0", ok: false, why: "a pin of zero" },
+  {
+    value: "https://dispatch.example/issues/CORE-1/spec#b-x",
+    ok: false,
+    why: "a dashboard URL of a block",
+  },
+  { value: "dispatch://CORE-1/spec#b-x.", ok: false, why: "trailing punctuation" },
+  { value: "dispatch://CORE-1/spec#b-x)", ok: false, why: "a trailing parenthesis" },
+  {
+    value: "dispatch://CORE-1/spec#b-x,dispatch://CORE-1/spec#b-y",
+    ok: false,
+    why: "references joined by a comma",
+  },
+  {
+    value: "dispatch://CORE-1/spec#b-x dispatch://CORE-1/spec#b-x",
+    ok: false,
+    why: "a repeated reference",
+  },
+  {
+    value: "dispatch://CORE-1/spec#b-x  dispatch://CORE-1/spec#b-y",
+    ok: false,
+    why: "a doubled space",
+  },
+  { value: " dispatch://CORE-1/spec#b-x", ok: false, why: "a leading space" },
+  { value: "dispatch://CORE-1/spec#b-x ", ok: false, why: "a trailing space" },
+  {
+    value: "dispatch://CORE-1/spec#b-x\tdispatch://CORE-1/spec#b-y",
+    ok: false,
+    why: "a tab between references",
+  },
+  {
+    value: "dispatch://CORE-1/spec#b-x\uFEFFdispatch://CORE-1/spec#b-y",
+    ok: false,
+    why: "U+FEFF between references",
+  },
+  {
+    value: "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b2",
+    ok: false,
+    why: "a block of an issue's comment",
+    problem: "a block[] attribute points only at a block of a document",
+  },
+  {
+    value: "dispatch://CORE-1/comment/11111111-1111-4111-8111-111111111111#b-b2@v1",
+    ok: false,
+    why: "a block of a revision of an issue's comment",
+    problem: "a block[] attribute points only at a block of a document",
+  },
+  {
+    value: "dispatch://CORE/artifact/handbook-md/comment/88888888-8888-4888-8888-888888888888#b-b2",
+    ok: false,
+    why: "a block of a project document's comment",
+    problem: "a block[] attribute points only at a block of a document",
+  },
+  {
+    value: "dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b2",
+    ok: false,
+    why: "a block of an issue message",
+    problem: "a block[] attribute points only at a block of a document",
+  },
+  {
+    value:
+      "dispatch://CORE-1/spec#b-x dispatch://CORE-1/message/33333333-3333-4333-8333-333333333333#b-b2",
+    ok: false,
+    why: "a document's block, then an issue message's",
+    problem: "a block[] attribute points only at a block of a document",
+  },
+];
 
 /**
  * Each character a typed block's written `#id` cannot hold. The browser editor's parser

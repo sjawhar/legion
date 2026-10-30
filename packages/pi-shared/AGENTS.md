@@ -15,7 +15,8 @@ shipped code imports the other's: that rule covers every non-test `.ts` under ea
 `packages/pi-envoy/extensions/envoy.ts` by relative path, and the harness's Legion pane runner
 (`runLegionPane`, below) names both plugin entries by path for the Oh My Pi child it spawns —
 paths, not imports — which the two Legion omp tests (`legion-phase-stall-omp.test.ts`,
-`legion-role-tools-omp.test.ts`) run through.
+`legion-role-tools-omp.test.ts`) run through; `controller-start-omp.test.ts` names both by path
+for the interactive Oh My Pi it starts through `spawnInteractive`.
 
 ## The interface (`src/interface.ts`)
 
@@ -41,6 +42,24 @@ publishes nothing, so the first publisher wins. The object carries:
   tagged custom messages (the `skill-prompt` a `/skill:` creates) against that record.
 - `bootstrappedSession` — the transcript of the session this process bootstrapped as its Legion
   identity (`src/subagent-session.ts`).
+- `startupTurn` — `{session, sentAt}` or undefined: the session whose first turn a start that runs
+  after Oh My Pi's startup owns, and when that start was sent (milliseconds since the epoch;
+  undefined while the start is due and not sent yet). The Legion entry sets it
+  (`src/startup-turn.ts`): the operator-launched controller marks its session unsent at
+  `session_start` (`markStartupTurnPending`), since it claims and sends only from
+  `/legion-controller-start`, which Oh My Pi runs after its startup; any claim that sends the
+  operator's controller its start message to an idle session marks it sent right before the send
+  (`markStartupTurnSent`: the claim `/legion-controller-start` runs, a later
+  `/legion-claim-controller`, or a re-claim after a session change); and the daemon-launched
+  controller marks it sent right before `claims/ready`. A start message queued as a follow-up behind
+  a turn the operator already started marks nothing: that run, the session's first, has already
+  started, and its `agent_start` cleared the unsent mark. That session's first `agent_start`, and
+  its `session_shutdown`, clear it, and so does a start command whose claim fails before the send or
+  hands over to a new session (`clearStartupTurn`; `packages/pi-legion/AGENTS.md`, "The
+  controller's start turn"). The Envoy entry reads it (`packages/pi-envoy/src/card-wake.ts`): while
+  it names the Envoy entry's own live session and its start was sent under 30 s ago, or is unsent
+  and the Envoy entry first read that unsent mark under 30 s ago (re-read every second until then),
+  a card that finds the session idle starts no turn and the startup wake waits for the start turn.
 
 Every consumer resolves the object at each use through `envoyPluginInterface()`; nothing caches it
 at module scope, and `resetEnvoyPluginInterfaceForTests()` is the one test seam.
@@ -58,11 +77,14 @@ exact `Symbol.for` strings, so renaming one is a daemon change too):
 it, bumps `ENVOY_PLUGIN_INTERFACE_VERSION`; both plugins release from the same commit, and the
 daemon's gate refuses a pair whose versions differ.
 
-**The current version, 3.** Version 2 told the two separately bundled plugins that typed turns are
+**The current version, 5.** Version 2 told the two separately bundled plugins that typed turns are
 tag-matched rather than text-matched and that a tagged `skill-prompt` is the person's turn;
-version 3 adds `roleClaim.slackRoleOwned`. The real readers are the Legion load marker
-(`extensions/legion.ts`), `readEnvoyPluginInterface`, the Envoy publisher's mismatch refusal and
-the daemon probe (`packages/daemon/probe.mjs`), which take `ENVOY_PLUGIN_INTERFACE_VERSION`, and
+version 3 adds `roleClaim.slackRoleOwned`; version 4 adds `startupTurn`; version 5 lets
+`startupTurn.sentAt` be undefined (a start due and not sent yet) and has the Envoy entry read the
+mark. The real readers are the
+Legion load marker (`extensions/legion.ts`), `readEnvoyPluginInterface`, the Envoy publisher's
+mismatch refusal and the daemon probe (`packages/daemon/probe.mjs`), which take
+`ENVOY_PLUGIN_INTERFACE_VERSION`, and
 the real-plugin OMP test (`packages/daemon/internal/daemon/promptreferences_omp_test.go`), which
 spells the number and is changed with it. The stage 1/2 shell stubs and fake Go probes
 deliberately print 1 for **both** plugins: the boot gate compares their numbers with each other,
@@ -83,9 +105,15 @@ stays the one listener slot it is, written only by the paths that establish a Le
 `test/host-registry.ts` is the `AgentRegistry` stand-in every plugin suite's mock spreads in.
 `spawnRpc` takes **absolute** extension paths — this module lives in another package than its
 callers, so `import.meta.dir` here is not the caller's — and pi-envoy's `dispatch-first-omp.test.ts`
-passes `path.join(import.meta.dir, "envoy.ts")`. `runLegionPane` runs one Legion pane on the real
-binary: a stand-in for the daemon's claim and grant routes (`claims/register` answered from
-`contracts/fixtures/daemon-api/register.json`, `claims/ready`, `grants`, which the `legion` tool's
+passes `path.join(import.meta.dir, "envoy.ts")`. `spawnInteractive` starts interactive `omp` (the
+TUI) with `spawnRpc`'s flags and environment under a pseudo-terminal (`Bun.Terminal`, 120 × 40 by
+default), `TERM=xterm-256color` and `OMP_SKIP_SETUP=1`, then the caller's words on its command
+line, and feeds every byte omp writes to a headless xterm (`@xterm/headless`) whose rendered
+screen, scrollback included, a case polls (`screen`); `write` types keystrokes, and `exited`
+resolves once the screen holds everything read before the exit. `runLegionPane` runs one Legion
+pane on the real binary: a stand-in for the daemon's claim and grant routes (`claims/register`
+answered from `contracts/fixtures/daemon-api/register.json`, `claims/ready`, `grants`, which the
+`legion` tool's
 own operations mint on) and the Envoy listener, a model gateway answering scripted replies and the
 run-end self-check, and both plugin entries by path; no stand-in `legion` is on the pane's PATH,
 since nothing in a pane runs `legion` from bash (LEGION-631). `name` keys every fixture string a

@@ -36,7 +36,7 @@ type BlockPointer struct {
 // count here, because only their ids are written in markdown, and so are the same in the tree a
 // version write indexes and in the markdown the reconciliation reads back: the rendering writes a
 // typed block's id so that it reads back as the tree holds it (TypedBlockIDAttribute), each U+0000
-// aside, which it writes U+FFFD (writeNulsAsReplacement), so each block is listed under its id as
+// aside, which it writes U+FFFD (withNulsWritten), so each block is listed under its id as
 // written. A paragraph's id is not written in markdown, and a list item or table cell has no
 // offset, so it is never the index's node. An earlier holder that is not typed but has an offset
 // (a paragraph) is caught by the index itself, which writes a pointer only from a node of the

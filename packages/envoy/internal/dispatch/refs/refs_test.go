@@ -333,11 +333,15 @@ func TestEveryTargetIDIsTheNodeIDTheGraphStores(t *testing.T) {
 		{"dispatch://CORE-1/comment/c%3B1", "comment", "c;1"},
 		{"https://dispatch.example/issues/CORE-1/spec?comment=c2", "comment", "c2"},
 		{"dispatch://CORE-1/message/m1", "message", "m1"},
+		{"dispatch://CORE-1/comment/c1#b-b2@v1", "comment_block", "comment/c1#b2"},
+		{"dispatch://CORE/artifact/handbook-md/comment/c2#b-b%31", "comment_block", "comment/c2#b1"},
+		{"https://dispatch.example/issues/CORE-1/messages/m1#b-b2", "message_block", "message/m1#b2"},
 	} {
 		t.Run(test.reference, func(t *testing.T) {
 			ref, ok := text.ParseRef(test.reference, server)
-			if !ok || ref.Kind != test.kind || text.TargetID(ref) != test.node {
-				t.Fatalf("%s parsed as %#v (%t), whose target id is %q; want a %s at %q", test.reference, ref, ok, text.TargetID(ref), test.kind, test.node)
+			target, _ := TargetOf(ref)
+			if !ok || target.Kind != test.kind || target.ID != test.node {
+				t.Fatalf("%s parsed as %#v (%t), whose target is %#v; want a %s at %q", test.reference, ref, ok, target, test.kind, test.node)
 			}
 			if _, err := replaceRefs(ctx, tx, "comment", from, text.Extract("See "+test.reference+".", server), nil); err != nil {
 				t.Fatalf("write the reference: %v", err)
@@ -592,5 +596,129 @@ func TestGraphReadsSkipANodeKindThisBuildCannotAddress(t *testing.T) {
 		t.Errorf("count issue backlinks excluding mentions: %v", err)
 	} else if len(excluded) != 0 {
 		t.Errorf("issue backlink counts excluding mentions = %v; want none", excluded)
+	}
+}
+
+// A cited document or file is named as its Referenced by panel is opened - its uuid and its
+// dispatch:// address, an issue's primary document as its spec - beside the issues and asks; a
+// block of a document by its node id, its reference and its document's uuid, whatever block the
+// document holds now; a citation that resolves to nothing is not named. Each kind is capped on its
+// own: an index citing 25 documents names every one, and past CountedChangeLimit documents the
+// event names none of them, says documents were cut and still names the issue and the block,
+// with the truncated flag an older reader falls back on set.
+func TestCountedChangesNamesCitedDocumentsWithinTheCap(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	createReferenceProject(t, tx, "CORE")
+	createReferenceIssue(t, tx, "CORE-1", "CORE")
+	runbookID, runbookKey := createReferenceArtifact(t, tx, "", "CORE", "runbook")
+	specID, specKey := createReferenceArtifact(t, tx, "CORE-1", "CORE", "spec")
+	var shotID, shotKey string
+	if err := tx.QueryRow(ctx, `
+		insert into artifacts (session_id, slug, name, kind, created_by)
+		values ('session-1', 'shot-png', 'shot.png', 'image', '{"kind":"session","id":"session-1"}')
+		returning id::text, ref_key
+	`).Scan(&shotID, &shotKey); err != nil {
+		t.Fatalf("create agent artifact: %v", err)
+	}
+
+	changes, err := CountedChanges(ctx, tx, []Target{
+		{Kind: "artifact", ID: runbookKey},
+		{Kind: "issue", ID: "CORE-1"},
+		{Kind: "artifact", ID: specKey},
+		{Kind: "artifact", ID: "CORE/missing"},
+		{Kind: "artifact", ID: shotKey},
+		{Kind: "artifact", ID: runbookKey},
+		{Kind: "block", ID: specKey + "#ship_it"},
+		{Kind: "block", ID: "CORE/missing#intro"},
+		{Kind: "block", ID: specKey + "#ship_it"},
+	})
+	if err != nil {
+		t.Fatalf("resolve changed targets: %v", err)
+	}
+	want := model.ReferenceChanges{Targets: []model.ChangedReference{
+		{Kind: "artifact", ID: runbookID, Ref: "dispatch://CORE/artifact/runbook"},
+		{Kind: "issue", ID: "CORE-1"},
+		{Kind: "artifact", ID: specID, Ref: "dispatch://CORE-1/spec"},
+		{Kind: "artifact", ID: shotID, Ref: "dispatch://agent/session-1/artifact/shot-png"},
+		{Kind: "block", ID: specKey + "#ship_it", ArtifactID: &specID, Ref: "dispatch://CORE-1/spec#b-ship%5Fit"},
+	}}
+	if !reflect.DeepEqual(changes, want) {
+		t.Fatalf("changed targets = %#v, want %#v", changes, want)
+	}
+
+	documents := make([]Target, 0, CountedChangeLimit+1)
+	for index := range CountedChangeLimit + 1 {
+		_, key := createReferenceArtifact(t, tx, "", "CORE", "doc-"+strconv.Itoa(index))
+		documents = append(documents, Target{Kind: "artifact", ID: key})
+	}
+	for _, count := range []int{25, CountedChangeLimit} {
+		named, err := CountedChanges(ctx, tx, documents[:count])
+		if err != nil {
+			t.Fatalf("resolve %d documents: %v", count, err)
+		}
+		if named.Truncated() || len(named.Targets) != count {
+			t.Fatalf("%d documents named %d (truncated kinds %v), want every one", count, len(named.Targets), named.TruncatedKinds)
+		}
+	}
+	pastCap, err := CountedChanges(ctx, tx, append(documents[:CountedChangeLimit+1:CountedChangeLimit+1],
+		Target{Kind: "issue", ID: "CORE-1"}, Target{Kind: "block", ID: specKey + "#ship_it"}))
+	if err != nil {
+		t.Fatalf("resolve targets past the cap: %v", err)
+	}
+	wantPastCap := model.ReferenceChanges{
+		Targets: []model.ChangedReference{
+			{Kind: "issue", ID: "CORE-1"},
+			{Kind: "block", ID: specKey + "#ship_it", ArtifactID: &specID, Ref: "dispatch://CORE-1/spec#b-ship%5Fit"},
+		},
+		TruncatedKinds: []string{"artifact"},
+	}
+	if !reflect.DeepEqual(pastCap, wantPastCap) {
+		t.Fatalf("%d documents, an issue and a block = %#v, want %#v", CountedChangeLimit+1, pastCap, wantPastCap)
+	}
+	if payload := model.NewReferenceChangesPayload(pastCap); !payload.ReferencesChangedTruncated {
+		t.Fatalf("payload past the cap = %#v, want the truncated flag set", payload)
+	}
+}
+
+// Two counted parts of one write merge into what one CountedChanges over both would name: each
+// target once, a kind either part truncated named by neither, and the cap applied to the sum.
+func TestMergeChangesNamesEachTargetOnceWithinTheCap(t *testing.T) {
+	issue := func(key string) model.ChangedReference { return model.ChangedReference{Kind: "issue", ID: key} }
+	ask := model.ChangedReference{Kind: "ask", ID: "ask-1"}
+	merged := MergeChanges(
+		model.ReferenceChanges{Targets: []model.ChangedReference{issue("CORE-1"), ask}, TruncatedKinds: []string{"artifact"}},
+		model.ReferenceChanges{Targets: []model.ChangedReference{
+			issue("CORE-2"), issue("CORE-1"), {Kind: "artifact", ID: "doc"},
+		}},
+	)
+	want := model.ReferenceChanges{
+		Targets:        []model.ChangedReference{issue("CORE-1"), ask, issue("CORE-2")},
+		TruncatedKinds: []string{"artifact"},
+	}
+	if !reflect.DeepEqual(merged, want) {
+		t.Fatalf("merged = %#v, want %#v", merged, want)
+	}
+	if empty := MergeChanges(model.ReferenceChanges{}, model.ReferenceChanges{}); !reflect.DeepEqual(empty, model.ReferenceChanges{}) {
+		t.Fatalf("two empty parts merged = %#v, want nothing named", empty)
+	}
+
+	first, second := model.ReferenceChanges{}, model.ReferenceChanges{Targets: []model.ChangedReference{ask}}
+	for index := range CountedChangeLimit + 1 {
+		part := &first
+		if index%2 == 1 {
+			part = &second
+		}
+		part.Targets = append(part.Targets, issue("CORE-"+strconv.Itoa(index+10)))
+	}
+	if pastCap := MergeChanges(first, second); !reflect.DeepEqual(pastCap, model.ReferenceChanges{
+		Targets: []model.ChangedReference{ask}, TruncatedKinds: []string{"issue"},
+	}) {
+		t.Fatalf("%d issues over two parts merged = %#v, want the issue kind truncated and the ask named", CountedChangeLimit+1, pastCap)
 	}
 }

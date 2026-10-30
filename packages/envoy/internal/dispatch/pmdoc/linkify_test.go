@@ -4,23 +4,12 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-
-	"github.com/yuin/goldmark/util"
 )
 
-// The guard's local-part table is goldmark's: a byte the guard reads as a local-part character is
-// one util.FindEmailIndex reads as one, and no other.
-func TestLinkifyGuardReadsGoldmarksLocalPartCharacters(t *testing.T) {
-	for c := range 256 {
-		goldmarks := util.FindEmailIndex([]byte{byte(c), '@', 'x', '.', 'y'}) > 0
-		if goldmarks != emailLocal[c] {
-			t.Errorf("byte %q: goldmark reads it as a local-part character: %v; the guard: %v", byte(c), goldmarks, emailLocal[c])
-		}
-	}
-}
-
-// The guard links exactly what goldmark's linkify links, and leaves text where goldmark did.
-func TestLinkifyGuardLinksWhatGoldmarkLinks(t *testing.T) {
+// Go links exactly what the browser editor's engine (remark-gfm) links, and leaves text where the
+// engine does. Each row's expectation is the engine's reading (gen/differential.ts), an email's
+// href its mailto: URL.
+func TestLinkifyReadsWhatTheEngineReads(t *testing.T) {
 	for _, test := range []struct{ markdown, want string }{
 		{"mail alice@example.com now", `text "mail " | text "alice@example.com" link mailto:alice@example.com | text " now"`},
 		{"(bob@example.org)", `text "(" | text "bob@example.org" link mailto:bob@example.org | text ")"`},
@@ -30,6 +19,10 @@ func TestLinkifyGuardLinksWhatGoldmarkLinks(t *testing.T) {
 		{"see https://example.com/a_b and www.example.org/x", `text "see " | text "https://example.com/a_b" link https://example.com/a_b | text " and " | text "www.example.org/x" link http://www.example.org/x`},
 		{"@start of a line", `text "@start of a line"`},
 		{"end.@dot", `text "end.@dot"`},
+		{"x;https://x.test/a_ b", `text "x;" | text "https://x.test/a" link https://x.test/a | text "_ b"`},
+		{"see http\\://x.test/a_ b", `text "see " | text "http://x.test/a_" link http://x.test/a_ | text " b"`},
+		{"x;https://a.test/*b* c", `text "x;" | text "https://a.test/*b" link https://a.test/*b | text "* c"`},
+		{"\"www.a.test/?u=https://b.test\"", `text "\"" | text "www.a.test/?u=" link http://www.a.test/?u= | text "https://b.test" link https://b.test | text "\""`},
 	} {
 		doc, err := Parse(test.markdown)
 		if err != nil {
@@ -70,8 +63,8 @@ func TestLiteralURLReadsEachOffsetAsAFreshRead(t *testing.T) {
 				continue
 			}
 			shared.base = offset
-			got, _, _ := literalURL(line[offset:], shared)
-			fresh, _, _ := literalURL(line[offset:], &literalDomains{from: -1, end: -1, base: offset})
+			got, _ := literalURL(line[offset:], shared)
+			fresh, _ := literalURL(line[offset:], &literalDomains{from: -1, end: -1, base: offset})
 			if got != fresh {
 				t.Errorf("%q at %d: %d with the line's record, %d read fresh", test.line, offset, got, fresh)
 			}

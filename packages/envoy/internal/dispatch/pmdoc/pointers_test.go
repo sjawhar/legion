@@ -93,7 +93,8 @@ func TestABlockPointerSchemaDeclaresANameAndTargets(t *testing.T) {
 }
 
 // A block[] value is decided by the one table @legion/contracts holds, the same way whether it is
-// read from markdown or checked in a tree: `testdata/block-pointer-values.json` is generated from
+// read from markdown or checked in a tree, and a refused one with the reason its row's problem
+// names, where it names one: `testdata/block-pointer-values.json` is generated from
 // DISPATCH_BLOCK_POINTER_VALUES, which `packages/contracts/src/dispatch-block-ref.test.ts` holds
 // this file to.
 func TestABlockPointerAttributeDecidesTheSharedCorpus(t *testing.T) {
@@ -102,9 +103,10 @@ func TestABlockPointerAttributeDecidesTheSharedCorpus(t *testing.T) {
 		t.Fatalf("read table: %v", err)
 	}
 	var rows []struct {
-		Value string `json:"value"`
-		OK    bool   `json:"ok"`
-		Why   string `json:"why"`
+		Value   string `json:"value"`
+		OK      bool   `json:"ok"`
+		Why     string `json:"why"`
+		Problem string `json:"problem"`
 	}
 	if err := json.Unmarshal(raw, &rows); err != nil {
 		t.Fatalf("parse table: %v", err)
@@ -126,6 +128,9 @@ func TestABlockPointerAttributeDecidesTheSharedCorpus(t *testing.T) {
 			}
 			if !named {
 				t.Errorf("ParseBlockPointerValue(%q) (%s) = %v, want the refusal to name the value", row.Value, row.Why, err)
+			}
+			if !strings.Contains(err.Error(), row.Problem) {
+				t.Errorf("ParseBlockPointerValue(%q) (%s) = %v, want the refusal to say %q", row.Value, row.Why, err, row.Problem)
 			}
 		}
 		if row.OK && strings.Join(parsed, " ") != row.Value {

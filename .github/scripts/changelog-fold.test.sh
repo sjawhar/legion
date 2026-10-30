@@ -10,11 +10,14 @@
 # per kind, a body written as a plain `|-` block whose second paragraph follows a blank line, one
 # without `time:`) and one written by `changie new`, all shipped by a bump-shaped release tag (on
 # a child of the built commit, as the npm releases tag it); the fold indents that body's
-# continuation lines two spaces under the bullet and leaves its blank line empty. push-fold
+# continuation lines two spaces under the bullet and leaves its blank line empty. The release's
+# major is one above that of the copied CHANGELOG.md's first `## [x.y.z]` heading, its newest
+# release since the fold keeps the file newest first, so the fold, which places a release's block
+# among the others by version, puts it on top whatever pi-legion has released since. push-fold
 # reaches a bare origin as release-push.test.sh's push-main cases do: through a deploy key, with
 # the GitHub URL rewritten to the local origin by GIT_CONFIG_*, and a stub `gh` that logs each
-# call. A last case gives fold-notes a fragment of an unknown kind, which changie refuses without
-# naming the file, and checks fold-notes names it.
+# call. A last case gives fold-notes a fragment of an unknown kind, in a later release of the same
+# major, which changie refuses without naming the file, and checks fold-notes names it.
 #
 # Needs changie v1.26.0 on PATH (.github/actions/install-changie installs it) and exits 1 without
 # it: the test never passes by skipping.
@@ -40,9 +43,9 @@ trap 'rm -rf "$work"' EXIT
 # shellcheck source=.github/scripts/test-lib.sh
 source "$script_dir/test-lib.sh"
 
-# The repository: clone a, whose main holds the fragments; the release tag pi-legion-v1.2.3 on a
-# child of main's tip, committed at 20:00 on June 30 in UTC-6, which is July 1 in UTC; and a bare
-# origin whose main is that tip.
+# The repository: clone a, whose main holds the fragments; the release tag pi-legion-v<version> on
+# a child of main's tip, committed at 20:00 on June 30 in UTC-6, which is July 1 in UTC; and a bare
+# origin whose main is that tip. The version is <major>.2.3 and the one before it <major>.2.2.
 a="$work/a"
 pkg="$a/packages/pi-legion"
 unreleased="$pkg/.changes/unreleased"
@@ -52,7 +55,12 @@ git -C "$a" config user.name "fold test"
 git -C "$a" config user.email "fold-test@example.com"
 cp "$package_src/.changie.yaml" "$package_src/CHANGELOG.md" "$pkg/"
 cp "$pkg/CHANGELOG.md" "$work/old-CHANGELOG.md"
-printf '{"name": "@sjawhar/pi-legion", "version": "1.2.2"}\n' > "$pkg/package.json"
+# The major: one above the copy's first `## [x.y.z]` heading's, read from the copy the fold is
+# compared with; 1 when it names no release.
+newest=$(sed -nE '/^## \[([0-9]+)\.[0-9]+\.[0-9]+\].*/{s//\1/p;q;}' "$work/old-CHANGELOG.md")
+major=$((10#${newest:-0} + 1))
+version="$major.2.3"
+printf '{"name": "@sjawhar/pi-legion", "version": "%s"}\n' "$major.2.2" > "$pkg/package.json"
 git -C "$a" add -A
 git -C "$a" commit -q -m "chore: seed"
 
@@ -90,10 +98,10 @@ git -C "$a" add -A
 git -C "$a" commit -q -m "feat: the entries"
 base=$(git -C "$a" rev-parse HEAD)
 git -C "$a" checkout -q --detach
-printf '{"name": "@sjawhar/pi-legion", "version": "1.2.3"}\n' > "$pkg/package.json"
+printf '{"name": "@sjawhar/pi-legion", "version": "%s"}\n' "$version" > "$pkg/package.json"
 git -C "$a" add -A
-GIT_COMMITTER_DATE=2026-06-30T20:00:00-06:00 git -C "$a" commit -q -m "chore: release pi-legion v1.2.3 [skip ci]"
-git -C "$a" tag pi-legion-v1.2.3
+GIT_COMMITTER_DATE=2026-06-30T20:00:00-06:00 git -C "$a" commit -q -m "chore: release pi-legion v$version [skip ci]"
+git -C "$a" tag "pi-legion-v$version"
 git -C "$a" checkout -q main
 git clone -q --bare "$a" "$work/origin.git"
 git -C "$a" checkout -q --detach
@@ -125,18 +133,18 @@ echo "Case: the fold of a release's fragments, from the plan to origin's CHANGEL
 check "changie new writes a fragment named for its issue" "$([ -n "$written" ] && echo true || echo false)"
 run fold-plan
 check "fold-plan: exits 0" "$(is "$rc" 0)"
-check "fold-plan: plans the six fragments under 1.2.3, dated in UTC" \
-  "$(is "$(cut -f1-3 <<<"$out" | sort -u)|$(wc -l <<<"$out")" "packages/pi-legion	1.2.3	2026-07-01|6")"
+check "fold-plan: plans the six fragments under $version, dated in UTC" \
+  "$(is "$(cut -f1-3 <<<"$out" | sort -u)|$(wc -l <<<"$out")" "packages/pi-legion	$version	2026-07-01|6")"
 run fold-notes "$work/notes"
 check "fold-notes: exits 0" "$(is "$rc" 0)"
-check "fold-notes: writes the one notes file of the release" "$(is "$(ls "$work/notes")" "pi-legion_1.2.3.md")"
+check "fold-notes: writes the one notes file of the release" "$(is "$(ls "$work/notes")" "pi-legion_$version.md")"
 run push-fold "$base" "$work/notes"
 check "push-fold: exits 0, origin's main one commit over the base" \
   "$(is "$rc|$(git -C "$work/origin.git" rev-list --count "$base..main")|$(git -C "$work/origin.git" log -1 --format=%P main)" "0|1|$base")"
 check "push-fold: calls no gh" "$(is "$(<"$work/calls")" "")"
 git -C "$work/origin.git" show main:packages/pi-legion/CHANGELOG.md > "$work/new-CHANGELOG.md"
 first=$(grep -n -m 1 '^## ' "$work/old-CHANGELOG.md" | cut -d: -f1)
-block='## [1.2.3] - 2026-07-01
+block="## [$version] - 2026-07-01"'
 
 ### Added
 
@@ -180,10 +188,10 @@ printf 'kind: Fixed\nbody: a good fix\n' > "$unreleased/INFRA-14-good.yaml"
 printf 'kind: Deprecated\nbody: no such kind\n' > "$unreleased/INFRA-14-bogus.yaml"
 git -C "$a" add -A
 git -C "$a" commit -q -m "feat: more entries"
-git -C "$a" tag pi-legion-v1.2.4
+git -C "$a" tag "pi-legion-v$major.2.4"
 run fold-notes "$work/notes-bogus"
 check "an unknown kind: fold-notes exits 1 with an ::error:: naming the package and the label" \
-  "$(is "$rc|$(contains "$out" "^::error::release-push.sh fold-notes: changie could not render packages/pi-legion's notes for 1\.2\.4")" "1|true")"
+  "$(is "$rc|$(contains "$out" "^::error::release-push.sh fold-notes: changie could not render packages/pi-legion's notes for $major\.2\.4")" "1|true")"
 check "an unknown kind: the error names the fragment, and only that one" \
   "$(contains "$out" "refused alone: packages/pi-legion/\.changes/unreleased/INFRA-14-bogus\.yaml; changie said: .*Deprecated")"
 

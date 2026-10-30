@@ -40,14 +40,17 @@ func TestExpiryFor_ZeroTTLNeverExpires(t *testing.T) {
 	}
 }
 
-func TestList_PrunesExpiredEntries(t *testing.T) {
+func TestList_ExpiredEntryReadsAbsentAndLeavesAtItsDeadline(t *testing.T) {
 	now := time.Now()
+	updated := now.Add(-6 * time.Minute).UnixMilli()
 	r := &SessionRegistry{
 		ttl: 5 * time.Minute,
 		cache: map[string]cachedSession{
 			"ses_live":    {entry: SessionEntry{Port: 1}, expiresAt: now.Add(time.Minute)},
-			"ses_expired": {entry: SessionEntry{Port: 2}, expiresAt: now.Add(-time.Minute)},
+			"ses_expired": {entry: SessionEntry{Port: 2, UpdatedAt: updated}, expiresAt: now.Add(-time.Minute)},
 		},
+		cacheRevisions: map[string]uint64{"ses_live": 1, "ses_expired": 2},
+		lastSeen:       map[string]lastSeenSession{},
 	}
 	entries, err := r.List()
 	if err != nil {
@@ -56,25 +59,53 @@ func TestList_PrunesExpiredEntries(t *testing.T) {
 	if len(entries) != 1 || entries[0].SessionID != "ses_live" {
 		t.Fatalf("expected only ses_live, got %v", entries)
 	}
-	// The expired entry must be pruned from the cache, not just filtered.
-	if r.CacheSize() != 1 {
-		t.Fatalf("expected cache size 1 after prune, got %d", r.CacheSize())
+	// A read changes nothing: the expired entry stays cached until its deadline is processed.
+	if r.CacheSize() != 2 {
+		t.Fatalf("cache size after List = %d, want 2", r.CacheSize())
+	}
+	before := r.LastSeen("ses_expired")
+	if before != updated {
+		t.Fatalf("LastSeen before removal = %d, want the expired entry's UpdatedAt %d", before, updated)
+	}
+
+	// The entry went into the cache directly, so nothing scheduled its deadline yet. Schedule it as
+	// cacheSessionLocked does; the expiry timer then removes it with no read.
+	r.mu.Lock()
+	r.scheduleLocked("ses_expired", expireLive, r.cache["ses_expired"].expiresAt)
+	r.mu.Unlock()
+	waitForCacheSize(t, r, 1)
+	if after := r.LastSeen("ses_expired"); after != before {
+		t.Fatalf("LastSeen after removal = %d, want %d as before it", after, before)
+	}
+	if _, err := r.Get("ses_live"); err != nil {
+		t.Fatalf("Get(ses_live) after the expiry: %v", err)
 	}
 }
 
-func TestGet_ExpiredReturnsKeyNotFound(t *testing.T) {
-	now := time.Now()
-	r := &SessionRegistry{
-		ttl: 5 * time.Minute,
-		cache: map[string]cachedSession{
-			"ses_expired": {entry: SessionEntry{Port: 2}, expiresAt: now.Add(-time.Second)},
-		},
-	}
+func TestGet_ExpiredEntryReadsAbsentAndLeavesAtItsDeadline(t *testing.T) {
+	const ttl = 300 * time.Millisecond
+	r := newTestRegistry(ttl)
+	r.cache["ses_expired"] = cachedSession{entry: SessionEntry{Port: 2}, expiresAt: time.Now().Add(-time.Second)}
 	if _, err := r.Get("ses_expired"); !errors.Is(err, natsgo.ErrKeyNotFound) {
 		t.Fatalf("expected ErrKeyNotFound for expired entry, got %v", err)
 	}
-	if r.CacheSize() != 0 {
-		t.Fatalf("expected expired entry pruned, cache size %d", r.CacheSize())
+	if r.CacheSize() != 1 {
+		t.Fatalf("cache size after Get = %d, want 1: a read removes nothing", r.CacheSize())
+	}
+
+	// An entry the watcher delivers leaves at its deadline, one TTL after it was written, with no
+	// read; the expired entry nothing scheduled stays.
+	created := time.Now()
+	r.applyWatched(watchedPut(t, "ses_short", 1, created, SessionEntry{Port: 3, UpdatedAt: created.UnixMilli()}))
+	if _, err := r.Get("ses_short"); err != nil {
+		t.Fatalf("Get(ses_short) before its deadline: %v", err)
+	}
+	waitForCacheSize(t, r, 1)
+	if _, err := r.Get("ses_short"); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		t.Fatalf("Get(ses_short) after its deadline = %v, want ErrKeyNotFound", err)
+	}
+	if got := r.LastSeen("ses_short"); got != created.UnixMilli() {
+		t.Fatalf("LastSeen(ses_short) after removal = %d, want %d", got, created.UnixMilli())
 	}
 }
 
@@ -95,35 +126,34 @@ func TestGet_ValidReturnsEntry(t *testing.T) {
 	}
 }
 
-func TestPingPrunesExpiredLastSeen(t *testing.T) {
-	client := setupNATS(t)
-	registry, err := OpenSessionRegistry(
-		client.Conn,
-		WithSessionReplicas(1),
-		WithSessionTTL(time.Minute),
-	)
-	if err != nil {
-		t.Fatalf("open session registry: %v", err)
+func TestExpiredLastSeenReadsZeroAndLeavesAtItsDeadline(t *testing.T) {
+	const ttl = 200 * time.Millisecond
+	r := newTestRegistry(ttl)
+	r.lastSeen["ses_lapsed"] = lastSeenSession{
+		lastSeen:  time.Now().Add(-2 * time.Minute).UnixMilli(),
+		expiresAt: time.Now().Add(-time.Minute),
 	}
-	registry.mu.Lock()
-	registry.lastSeen = map[string]lastSeenSession{
-		"ses_lapsed": {
-			lastSeen:  time.Now().Add(-2 * time.Minute).UnixMilli(),
-			expiresAt: time.Now().Add(-time.Minute),
-		},
+	if got := r.LastSeen("ses_lapsed"); got != 0 {
+		t.Fatalf("LastSeen(ses_lapsed) = %d, want 0 for an expired record", got)
 	}
-	registry.mu.Unlock()
+	if !lastSeenHeld(r, "ses_lapsed") {
+		t.Fatal("LastSeen removed a record: a read must change nothing")
+	}
 
-	if err := registry.Ping(); err != nil {
-		t.Fatalf("ping session registry: %v", err)
+	// A record the registry writes when a session leaves leaves lastSeen at its own deadline, one
+	// TTL later, with no read and no Ping.
+	created := time.Now()
+	r.applyWatched(watchedPut(t, "ses_gone", 1, created, SessionEntry{Port: 1, UpdatedAt: created.UnixMilli()}))
+	r.applyWatched(watchedDelete("ses_gone", 2))
+	if got := r.LastSeen("ses_gone"); got != created.UnixMilli() {
+		t.Fatalf("LastSeen(ses_gone) = %d, want %d", got, created.UnixMilli())
 	}
-	registry.mu.RLock()
-	_, retained := registry.lastSeen["ses_lapsed"]
-	registry.mu.RUnlock()
-	if retained {
-		t.Fatal("Ping retained an expired last-seen timestamp")
+	waitUntil(t, func() bool { return !lastSeenHeld(r, "ses_gone") })
+	if got := r.LastSeen("ses_gone"); got != 0 {
+		t.Fatalf("LastSeen(ses_gone) after its deadline = %d, want 0", got)
 	}
 }
+
 func TestLastSeenRetentionDoesNotRestoreLiveSession(t *testing.T) {
 	now := time.Now()
 	r := &SessionRegistry{

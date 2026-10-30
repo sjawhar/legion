@@ -54,7 +54,7 @@ func TestTypedBlockDirectiveRoundTrips(t *testing.T) {
 // which `packages/contracts/src/dispatch-block-ref.test.ts` holds this file to. A typed block always
 // has an id, so the table's empty one, which the renderer refuses, is checked against the writer
 // alone. One case is this test's own: U+0000 is written U+FFFD, as markdown reads it
-// (writeNulsAsReplacement), so the id reads back with each U+0000 as U+FFFD.
+// (withNulsWritten), so the id reads back with each U+0000 as U+FFFD.
 func TestATypedBlockIDReadsBackAsWritten(t *testing.T) {
 	raw, err := os.ReadFile("testdata/typed-block-id-spellings.json")
 	if err != nil {

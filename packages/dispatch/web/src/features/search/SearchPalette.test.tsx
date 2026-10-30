@@ -10,8 +10,9 @@ import { api } from "../../api/client";
 import type { SearchResponse, SearchResult, SearchResultsPage } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { appKeymap } from "../shell/keymap";
+import { ANSWER_PREVIEW_CHARS } from "./AskHitStatus";
 import { SearchButton } from "./SearchButton";
-import { ANSWER_PREVIEW_CHARS, type PaletteMode, SearchPalette } from "./SearchPalette";
+import { type PaletteMode, SearchPalette } from "./SearchPalette";
 import { optionId } from "./search-model";
 
 const results: SearchResult[] = [
@@ -416,7 +417,8 @@ test("a refetch that re-ranks the hits leaves the highlight on the hit the reade
     const shown = input.getAttribute("aria-activedescendant");
     expect(shown).toBe(screen.getAllByRole("option")[0]?.id ?? "");
 
-    // A focus refetch, or the event stream's reconnect, answers the same query re-ranked.
+    // A focus refetch, or the refresh after a gap in the live socket, answers the same query
+    // re-ranked.
     search.mockResolvedValue(searchAnswer([second, first]));
     await view.queryClient.refetchQueries();
     await waitFor(() => expect(screen.getAllByRole("option")[0]?.id).not.toBe(shown));

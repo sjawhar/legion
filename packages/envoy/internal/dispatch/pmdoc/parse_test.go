@@ -77,19 +77,44 @@ func TestParseRejectsBlockHTML(t *testing.T) {
 
 // The browser editor's parser reads a line of `=` or `-` continuing the paragraph of a footnote
 // definition inside another as a setext underline, where CommonMark reads it as the paragraph's
-// text, and resolves a reference to a definition inside a typed block only from inside a typed
-// block or after it, so a definition inside either is refused.
-func TestParseRefusesAFootnoteDefinitionInsideAnotherOrATypedBlock(t *testing.T) {
+// text, so a definition inside another is refused.
+func TestParseRefusesAFootnoteDefinitionInsideAnother(t *testing.T) {
 	for _, test := range []struct{ markdown, reason string }{
 		{"Ref[^n].\n\n[^n]: a\n\n    [^1]: x\n", "a footnote definition inside another"},
 		{"Ref[^n].\n\n[^n]: a\n\n    [^1]: x\n    =\n", "a footnote definition inside another"},
 		{"Ref[^n].\n\n[^n]: > a\n    >\n    > [^1]: x\n", "a footnote definition inside another"},
-		{"Ref[^1].\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n[^1]: x\n:::\n", "a footnote definition inside a typed block"},
-		{":::callout{#c1 kind=\"note\" title=\"T\"}\n> [^1]: x\n:::\n\nRef[^1].\n", "a footnote definition inside a typed block"},
 	} {
 		_, err := Parse(test.markdown)
 		if !errors.Is(err, ErrSchema) || !strings.Contains(err.Error(), test.reason) {
 			t.Errorf("Parse(%q) error = %v, want a schema refusal naming %s", test.markdown, err, test.reason)
+		}
+	}
+}
+
+// Since the browser editor reads a `:::` block as a container like a quote (INFRA-581), a footnote
+// definition inside a typed block defines its footnote for a call anywhere in the text: before the
+// block, inside it and after it, as a definition inside a quote does. A document write reads such
+// a definition as the browser editor does and keeps it where it was written; refusing it, or
+// giving as its reason that the editor refers to it only from inside the block or after it, would
+// tell the writer something the editor does not do.
+func TestParseReadsAFootnoteDefinitionInsideATypedBlockAsTheBrowserDoes(t *testing.T) {
+	for _, markdown := range []string{
+		"Ref[^1].\n\n:::callout{#c1 kind=\"note\" title=\"T\"}\n[^1]: x\n:::\n",
+		":::callout{#c1 kind=\"note\" title=\"T\"}\n> [^1]: x\n:::\n\nRef[^1].\n",
+	} {
+		doc, err := Parse(markdown)
+		if err != nil {
+			t.Errorf("Parse(%q) = %v, want it read as the browser editor reads it", markdown, err)
+			continue
+		}
+		if firstNodeOfType(doc, "footnote_reference") == nil {
+			t.Errorf("Parse(%q) read no footnote reference; the browser editor reads Ref[^1] as one", markdown)
+		}
+		if callout := firstNodeOfType(doc, "callout"); callout == nil || firstNodeOfType(callout, "footnote_definition") == nil {
+			t.Errorf("Parse(%q) holds no footnote definition inside its callout", markdown)
+		}
+		if rendered, err := Render(doc); err != nil || rendered != markdown {
+			t.Errorf("Render(Parse(%q)) = %q, %v, want the markdown as written", markdown, rendered, err)
 		}
 	}
 }
@@ -432,6 +457,53 @@ func TestParseJoinsAParagraphsLinesOnce(t *testing.T) {
 	}
 	if allocated > 64<<20 {
 		t.Errorf("allocated %d bytes, want at most %d", allocated, 64<<20)
+	}
+}
+
+// Each top-level block starts where its own markdown does: front matter at 0, a heading at its
+// marker, a paragraph at its first line, a fenced code block at its opening fence, a table at its
+// header row and a callout at its opener. The tree is the one Parse reads, and the empty paragraph
+// of a document with no blocks starts nowhere.
+func TestParseWithSourceStartsPlacesEveryTopLevelBlock(t *testing.T) {
+	openings := []string{
+		"---\ntitle: x\n---",
+		"# Heading",
+		"A paragraph\nsecond line.",
+		"```go\ncode\n```",
+		"| a | b |\n|---|---|\n| 1 | 2 |",
+		":::callout{kind=\"note\"}\nInside.\n:::",
+	}
+	markdown := strings.Join(openings, "\n\n") + "\n"
+	doc, starts, err := ParseWithSourceStarts(markdown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := Parse(markdown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !doc.Equal(parsed) {
+		got, _ := doc.JSON()
+		want, _ := parsed.JSON()
+		t.Fatalf("tree differs from Parse\n got: %s\nwant: %s", got, want)
+	}
+	types := []string{"frontmatter", "heading", "paragraph", "code_block", "table", "callout"}
+	if len(doc.Children) != len(types) || len(starts) != len(types) {
+		t.Fatalf("children = %d, starts = %v, want %d of each", len(doc.Children), starts, len(types))
+	}
+	for index, opening := range openings {
+		want := strings.Index(markdown, opening)
+		if doc.Children[index].Type != types[index] || starts[index] != want {
+			t.Errorf("child %d = %s at %d, want %s at %d", index, doc.Children[index].Type, starts[index], types[index], want)
+		}
+	}
+
+	_, starts, err = ParseWithSourceStarts(" \n\n\t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(starts) != 1 || starts[0] != -1 {
+		t.Errorf("starts of a body of whitespace = %v, want [-1]", starts)
 	}
 }
 
