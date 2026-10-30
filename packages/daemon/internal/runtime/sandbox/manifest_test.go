@@ -2111,6 +2111,7 @@ func TestAClaudePodsAgentCommandIsClaudeCodeUnderTheBridge(t *testing.T) {
 	want := []string{
 		"/opt/legion/bin/legion", "claude-bridge", "--", claude(spec.Generation),
 		"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+		"--replay-user-messages",
 		"--permission-mode", "bypassPermissions",
 		"--strict-mcp-config", "--mcp-config", generationDir(spec.Generation) + "/claude-mcp.json",
 		"--plugin-dir", "/opt/legion/claude-envoy",

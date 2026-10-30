@@ -101,8 +101,9 @@ func writeReplayReadError(w http.ResponseWriter, err error) {
 
 // replayHandler answers POST /v1/replay: the messages the notification stream holds for a
 // session's own agent subject and the topics registered as its interests, after a cursor per
-// subject, so a session that receives on its own NATS subscriptions can read what it missed while
-// they were down.
+// subject, so a session on the core fallback — one whose plugin or listener predates session
+// consumers, or whose listener has no session-consumer grant (packages/envoy/AGENTS.md, "Session
+// consumers") — can read what it missed while its own subscriptions were down.
 //
 // The watermark is the stream's last sequence, read once at the start; each subject is read from
 // its after+1 up to the watermark. A subject with no after returns nothing and the watermark, which

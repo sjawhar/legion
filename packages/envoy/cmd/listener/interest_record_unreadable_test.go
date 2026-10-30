@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -46,6 +48,23 @@ func TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering(t *testing.
 	if err != nil {
 		t.Fatalf("open the interest registry: %v", err)
 	}
+	t.Cleanup(registry.StopWatch)
+	// The registry routes answer a session's roles from the role claim view (sessionInfoFor reads
+	// store.Registry.RolesHeldBy), and a view that has not delivered every claim refuses as a read
+	// that did not answer (store.ErrRoleViewNotReady), never as "holds no roles": an answer of no
+	// roles before the view is complete could be false. That refusal is the bus-unavailable 503
+	// this test tells apart from an unreadable record, so the test reads only once the view is
+	// complete. Ready is not enough on its own: a first claim scan nats.go's idle timer ended
+	// leaves the view incomplete until its rescan, which a slow CI runner hits.
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer readyCancel()
+	if err := registry.WaitForCacheReady(readyCtx); err != nil {
+		t.Fatalf("wait for the interest and role claim caches: %v", err)
+	}
+	waitFor(t, 10*time.Second, "the role claim view to be complete", func() bool {
+		_, err := registry.RolesHeldBy(readable)
+		return err == nil
+	})
 	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
 	if err != nil {
 		t.Fatalf("open the session registry: %v", err)
@@ -94,7 +113,7 @@ func TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering(t *testing.
 	}{
 		{"/v1/sessions", sessionsHandler(registry, sessions)},
 		{"/v1/registry/" + unreadable, sessionEntryHandler(state)},
-		{"/v1/interests/" + unreadable, adminInterestsHandler(registry, sessions)},
+		{"/v1/interests/" + unreadable, adminInterestsHandler(registry, sessions, nil)},
 	} {
 		t.Run(route.path, func(t *testing.T) {
 			recorder := get(route.handler, route.path)

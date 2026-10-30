@@ -31,9 +31,11 @@ const (
 	// ReasonPushFailed is a record that named a serve port the push did not land on: an
 	// unreachable peer, a session process restarting, a connection refused, or a server that
 	// answered with anything but 204. The attempt failed and cannot tell whether the session
-	// took the prompt, so a caller may ask again only at the cost of repeating it; the
-	// listener's delivery retries it once (pushFailedDeferrals,
-	// cmd/listener/unplaceable_delivery.go).
+	// took the prompt, so a caller may ask again only at the cost of repeating it. The listener's
+	// delivery never reaches its unplaceable policy with it: on the durable path a serving-port
+	// session's push is its worker's, which pushes until the port accepts it
+	// (cmd/listener/serve_port_workers.go), and on the live and core lanes a failed push comes
+	// back through the interest path, which reports it delivery_failed and NAKs.
 	ReasonPushFailed
 )
 
@@ -56,6 +58,11 @@ func reasonFor(err error) HandleAgentReason {
 type HandleAgentResult struct {
 	Delivered bool
 	Skipped   bool
+	// Push is set by ResolveStoredAgentMessage for a serving-port session this listener owns, with its
+	// entry: the caller pushes the message to the session's port (Deliverer.Push). HandleAgentMessage
+	// makes that push itself, and never sets it.
+	Push  bool
+	Entry SessionEntry
 	// OwnedElsewhere reports a session another listener owns (see ErrWrongMachine). That listener
 	// reads the same inbox message from its own durable and delivers it, so this one acknowledges
 	// it with nothing to report: no delivery, no exception, no NAK.
@@ -87,16 +94,46 @@ func HandleAgentMessage(
 	entry *SessionEntry,
 	deliverer *Deliverer,
 ) HandleAgentResult {
+	return handleAgentMessage(item, sessionID, machineID, interest, entry, deliverer.DeliverWithResultForEntry)
+}
+
+// ResolveStoredAgentMessage is HandleAgentMessage for the durable path's copy of a stored message
+// of stream sequence storedSeq, without the push to a serving port: a session it would push to
+// comes back with Push set and its entry, for the caller to push to. The sequence decides whether
+// a session on consumer delivery is already held this message by its own consumer
+// (Deliverer.Resolve).
+func ResolveStoredAgentMessage(
+	item contracts.Envelope,
+	sessionID string,
+	machineID string,
+	interest *store.Interest,
+	entry *SessionEntry,
+	deliverer *Deliverer,
+	storedSeq uint64,
+) HandleAgentResult {
+	return handleAgentMessage(item, sessionID, machineID, interest, entry, func(item contracts.Envelope, interest store.Interest, entry *SessionEntry) (DeliveryResult, error) {
+		return deliverer.Resolve(item, interest, entry, storedSeq)
+	})
+}
+
+func handleAgentMessage(
+	item contracts.Envelope,
+	sessionID string,
+	machineID string,
+	interest *store.Interest,
+	entry *SessionEntry,
+	deliver func(contracts.Envelope, store.Interest, *SessionEntry) (DeliveryResult, error),
+) HandleAgentResult {
 	// Interest path: the stored subscription names this listener, which owns the session.
 	if interest != nil && interest.MachineID == machineID {
-		delivery, err := deliverer.DeliverWithResultForEntry(item, *interest, entry)
+		delivery, err := deliver(item, *interest, entry)
 		if errors.Is(err, ErrWrongMachine) {
 			return HandleAgentResult{OwnedElsewhere: true}
 		}
 		if err != nil {
 			return HandleAgentResult{ShouldNAK: true, Err: err, Reason: reasonFor(err)}
 		}
-		return HandleAgentResult{Delivered: true, Skipped: delivery.Skipped}
+		return delivered(delivery)
 	}
 	// A stored subscription naming another listener makes the session that listener's, whatever
 	// listener the session last registered through: the stored MachineID is the one its topics
@@ -108,7 +145,7 @@ func HandleAgentMessage(
 	// No stored subscription names an owner, so the session registry entry does: an interest
 	// naming no machine leaves the decision to the entry's MachineID. The entry is the one the
 	// caller resolved, delivered through directly rather than read a second time.
-	delivery, err := deliverer.DeliverWithResultForEntry(item, store.Interest{SessionID: sessionID}, entry)
+	delivery, err := deliver(item, store.Interest{SessionID: sessionID}, entry)
 	if errors.Is(err, ErrWrongMachine) {
 		return HandleAgentResult{OwnedElsewhere: true}
 	}
@@ -116,6 +153,14 @@ func HandleAgentMessage(
 		// Session not found or delivery failed without interest — don't NAK,
 		// another listener may own this session.
 		return HandleAgentResult{Delivered: false, Reason: reasonFor(err)}
+	}
+	return delivered(delivery)
+}
+
+// delivered is the result of a delivery that succeeded, or that Resolve left a push to the caller.
+func delivered(delivery DeliveryResult) HandleAgentResult {
+	if delivery.Push {
+		return HandleAgentResult{Push: true, Entry: delivery.Entry}
 	}
 	return HandleAgentResult{Delivered: true, Skipped: delivery.Skipped}
 }

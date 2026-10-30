@@ -1,0 +1,5 @@
+kind: Changed
+body: |-
+  A BTW's side turn and every Dispatch reply run off the frame that started them, so the frames
+  after it wait for neither the model call nor the reply, on the core path and the consumer path
+  alike (INFRA-594).
