@@ -426,6 +426,9 @@ func (c *Conn) logNotAFrame(line []byte, err error) {
 // are not facts the daemon supervises on, and are dropped here, except an extension's failure,
 // which leaves the agent running without what the extension gives it (the Legion plugin's tool,
 // when its session_start fails) and is on no other record the daemon reads, so it is logged.
+//
+// A prompt_result whose request id names no delivery is dropped: every prompt this daemon sends
+// carries one (Prompt), so such a frame answers a `prompt` command something else wrote.
 func (c *Conn) dispatch(frame shimwire.Frame) {
 	switch frame := frame.(type) {
 	case shimwire.AgentStart:
@@ -435,6 +438,12 @@ func (c *Conn) dispatch(frame shimwire.Frame) {
 		c.acked = nil
 		c.mu.Unlock()
 		c.events.push(TurnEnd{Claim: c.claim})
+	case shimwire.PromptResult:
+		if delivery := promptDelivery(frame.ID); delivery != "" {
+			c.events.push(PromptResult{
+				Claim: c.claim, DeliveryID: delivery, AgentInvoked: frame.AgentInvoked, Error: frame.Error,
+			})
+		}
 	case shimwire.Response:
 		c.answer(frame)
 	case shimwire.Raw:

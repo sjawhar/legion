@@ -398,6 +398,9 @@ func TestEnvoyDeliveriesBecomeUserTurns(t *testing.T) {
 	r.prompt("p1", "inbox the CI is green")
 	r.expect("agent_start", nil)
 	r.expect("agent_end", nil)
+	// The prompt's turn is over and the bridge says so: the frame that names the prompt, which an
+	// agent_end never does (shimwire.PromptResult).
+	r.expect("prompt_result", map[string]any{"id": "p1", "agentInvoked": true})
 	recorded := r.recorded()
 	if !strings.Contains(recorded, `inbox-answer {"id":"ev1","ok":true}`) {
 		t.Fatalf("the inbox did not answer the delivery: %s", recorded)
@@ -443,7 +446,9 @@ const (
 // A background task that finishes between turns wakes Claude Code into a turn of its own, which
 // the daemon is told of as a turn: agent_start when the init of that turn arrives, agent_end when
 // its result does, and in between only what Claude Code's own lines carry. The prompt's turn ends
-// on its own result first, so the daemon sees two turns, not one long one.
+// on its own result first, so the daemon sees two turns, not one long one — and only the first
+// carries a prompt_result behind it, which is the whole of how the daemon tells them apart (A3,
+// A7).
 func TestATurnClaudeCodeStartsByItselfIsATurnOfTheDaemons(t *testing.T) {
 	r := newRig(t, "-p", "--resume", sessionID)
 	r.prompt("p1", backgroundTurn)
@@ -459,7 +464,7 @@ func TestATurnClaudeCodeStartsByItselfIsATurnOfTheDaemons(t *testing.T) {
 	// The prompt's turn carries one tool call, the background Bash command, which the bridge shows
 	// on the pane; the turn Claude Code started by itself calls no tool, so the bridge writes
 	// nothing of its own between that turn's start and its end.
-	want := []string{"agent_start", "tool_execution_start", "agent_end", "agent_start", "agent_end"}
+	want := []string{"agent_start", "tool_execution_start", "agent_end", "prompt_result", "agent_start", "agent_end"}
 	if !slices.Equal(types, want) {
 		t.Fatalf("the daemon saw %q, want %q", types, want)
 	}
@@ -482,6 +487,7 @@ func TestABackgroundTaskFinishingDuringATurnDoesNotEndIt(t *testing.T) {
 	r.quiet()
 	r.open()
 	r.expect("agent_end", nil)
+	r.expect("prompt_result", map[string]any{"id": "p1", "agentInvoked": true})
 	r.quiet()
 }
 
@@ -493,6 +499,7 @@ func TestAPromptDuringAClaudeStartedTurnIsRefusedBusy(t *testing.T) {
 	r.prompt("p1", backgroundTurn)
 	r.expect("agent_start", nil)
 	r.expect("agent_end", nil)
+	r.expect("prompt_result", map[string]any{"id": "p1", "agentInvoked": true})
 	r.expect("agent_start", nil)
 	if !r.state("g1") {
 		t.Error("isStreaming during the turn Claude Code started is false")
@@ -518,6 +525,7 @@ func TestAnEnvoyDeliveryDuringAClaudeStartedTurnFollowsIt(t *testing.T) {
 	r.prompt("p1", backgroundTurn)
 	r.expect("agent_start", nil)
 	r.expect("agent_end", nil)
+	r.expect("prompt_result", map[string]any{"id": "p1", "agentInvoked": true})
 	r.expect("agent_start", nil)
 	conn, err := net.Dial("unix", inboxPathOf(t, r))
 	if err != nil {

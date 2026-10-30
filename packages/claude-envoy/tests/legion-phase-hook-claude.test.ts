@@ -251,17 +251,26 @@ function hookRuns(log: string): HookRun[] {
   return runs
 }
 
-/** `${stop_hook_active}` as the real server received it, one line per `Stop` it answered for a
- * pane whose claim has booted: the endpoint logs it at debug before it settles the machine, and
- * the pane's log is the server's stderr (`logLegion`). */
-function stopHookActive(paneLog: readonly string[]): string[] {
-  const seen: string[] = []
+/** What the real server recorded for each `Stop` it answered for a pane whose claim has booted:
+ * `${stop_hook_active}` as it received it, and whether it read the turn as ending with background
+ * work of the worker's own still running (`${background_tasks}`). The endpoint logs both at debug
+ * before it settles the machine, and the pane's log is the server's stderr (`logLegion`). */
+function settleLines(paneLog: readonly string[]): {
+  readonly stopHookActive: string[]
+  readonly backgroundWork: boolean[]
+} {
+  const stopHookActive: string[] = []
+  const backgroundWork: boolean[] = []
   for (const line of paneLog) {
     if (!line.includes("a Claude Code phase worker's turn is settling")) continue
-    const parsed = JSON.parse(line.slice(line.indexOf("{"))) as { stopHookActive?: unknown }
-    seen.push(String(parsed.stopHookActive))
+    const parsed = JSON.parse(line.slice(line.indexOf("{"))) as {
+      stopHookActive?: unknown
+      backgroundWork?: unknown
+    }
+    stopHookActive.push(String(parsed.stopHookActive))
+    backgroundWork.push(parsed.backgroundWork === true)
   }
-  return seen
+  return { stopHookActive, backgroundWork }
 }
 
 /** What one worker run left behind. */
@@ -276,6 +285,9 @@ interface WorkerRun {
   readonly mcpHookCalls: readonly string[]
   /** `${stop_hook_active}` as the real server received it, in order. */
   readonly stopHookActive: readonly string[]
+  /** Whether the real server read each settling turn as leaving background work of the worker's
+   * own running (`${background_tasks}`), in order. */
+  readonly backgroundWork: readonly boolean[]
   /** The phase-stall record the real server left on disk (`phaseStallFile`). */
   readonly record: unknown
   /** Claude Code's whole `--debug` log, for a failure's sake. */
@@ -299,6 +311,12 @@ async function runWorker(options: {
   readonly binary: string
   readonly prompts: readonly string[]
   readonly replies: readonly (readonly Block[])[]
+  /**
+   * How many runs end before stdin closes, which ends the session. It defaults to one per prompt,
+   * and a case that expects a run nothing prompted — a background task's result waking the
+   * session — asks for more, so stdin stays open until that run has ended too.
+   */
+  readonly runs?: number
 }): Promise<WorkerRun> {
   const plugin = await builtPlugin()
   const root = await mkdtemp(join(tmpdir(), "claude-envoy-phase-hook-"))
@@ -462,6 +480,7 @@ async function runWorker(options: {
   const reader = child.stdout.getReader()
   let buffered = ""
   let sent = 1
+  let ended = 0
   for (;;) {
     const { done, value } = await reader.read()
     if (done) break
@@ -473,12 +492,13 @@ async function runWorker(options: {
       const event = JSON.parse(line) as Record<string, unknown>
       events.push(event)
       // One `result` per run: a `Stop` that continued the turn carries on under the same run, so
-      // the next prompt is sent, and the last one's end closes stdin and ends the session.
+      // the next prompt is sent, and stdin closes once every run the case expects has ended.
       if (event["type"] !== "result") continue
+      ended += 1
       const next = options.prompts[sent]
       sent += 1
       if (next === undefined) {
-        child.stdin.end()
+        if (ended >= (options.runs ?? options.prompts.length)) child.stdin.end()
         continue
       }
       await ready.promise
@@ -500,7 +520,7 @@ async function runWorker(options: {
       const match = /Hooks: mcp_tool calling (\S+) with \d+ arg\(s\)$/.exec(line)
       return match === null ? [] : [match[1] ?? ""]
     }),
-    stopHookActive: stopHookActive(paneLog),
+    ...settleLines(paneLog),
     record,
     debug,
   }
@@ -647,6 +667,62 @@ test.skipIf(claude === undefined)(
       lastMessage: "Done for now.",
     })
     expect(run.stopHookActive.slice(-2)).toEqual(["false", "true"])
+  },
+  180_000,
+)
+
+// A3/R8. A turn that ends while a background task of the worker's own is still running is a
+// worker waiting to be woken, not a stalled one: the `Stop` carries `${background_tasks}` with
+// that task `"status":"running"` (measured on 2.1.310), the endpoint buys the quiet wait instead
+// of a reminder, and the task's own result starts the next turn with nothing prompting it. Only
+// the real binary shows all three: that the substitution reaches an `mcp_tool` hook's input at
+// all, that the run then ends rather than continuing, and that Claude Code wakes itself.
+test.skipIf(claude === undefined)(
+  "a turn that ends with a background task running earns no reminder, and the task's result starts the next turn",
+  async () => {
+    if (claude === undefined) throw new Error("LEGION_TEST_CLAUDE is unset")
+    const run = await runWorker({
+      binary: claude,
+      prompts: ["Seed the session.", `Implement ${ISSUE}.`],
+      // The seed's run, the assignment's run, and the run the finished task wakes: stdin stays
+      // open until that third one has ended.
+      runs: 3,
+      replies: [
+        [{ type: "text", text: "WAITING on the daemon's assignment." }],
+        [
+          {
+            type: "tool_use",
+            name: "Bash",
+            input: { command: "sleep 5; echo background-done", run_in_background: true },
+          },
+        ],
+        [{ type: "text", text: "I started the build; I will be woken when it is done." }],
+        [{ type: "text", text: "WAITING on nothing more." }],
+      ],
+    })
+
+    // 1. The real server read the assignment's settling turn as leaving background work running,
+    // and the woken turn's as leaving none. Only the last two are read: the seed's `Stop` races
+    // the claim boot and records nothing when it wins, as in the cases above.
+    expect(run.backgroundWork.slice(-2)).toEqual([true, false])
+    // 2. No reminder followed: every hook answered with nothing, and no `Stop hook feedback`
+    // message was ever written into the session.
+    expect(run.hooks.map(({ answer }) => answer)).toEqual(run.hooks.map(() => ({})))
+    expect(syntheticMessages(run)).toEqual([])
+    expect(run.stopHookActive.slice(-2)).toEqual(["false", "false"])
+    // 3. The task's result started the next turn: a fourth model request nothing prompted,
+    // carrying the task's own output, after a `system` `init` of its own.
+    expect(run.turns).toHaveLength(4)
+    expect(userText(run.turns[3] as Request)).toContain("background-done")
+    expect(run.events.filter((event) => event["subtype"] === "init")).toHaveLength(3)
+    // 4. The phase is still open underneath, waiting: the quiet is a wait the host's waiting
+    // delay ends, never a phase the reminder has forgotten.
+    expect(run.record).toEqual({
+      state: "waiting",
+      count: 0,
+      reported: false,
+      lastMessage: "WAITING on nothing more.",
+    })
   },
   180_000,
 )

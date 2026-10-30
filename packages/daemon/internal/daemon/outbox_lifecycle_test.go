@@ -255,9 +255,7 @@ func TestAPhaseCompletionLeavesTheWorkerResidentUntilItsIssueCloses(t *testing.T
 		t.Fatalf("while its turn still runs the planner is %s, want working", got)
 	}
 
-	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: planner}); err != nil {
-		t.Fatalf("end the planning turn: %v", err)
-	}
+	endTurn(ctx, t, machine, planner)
 	run("the rows due after the turn")
 	after := machine.Claim()
 	if after.State != supervise.StateIdle || after.Generation != before.Generation || after.Session != before.Session || after.SessionFile != before.SessionFile ||
@@ -270,11 +268,10 @@ func TestAPhaseCompletionLeavesTheWorkerResidentUntilItsIssueCloses(t *testing.T
 
 	// Another role's question arrives through Envoy, which starts a turn of the planner's own with no
 	// delivery behind it; then its architect asks one through the daemon, a task of no phase.
-	for _, ev := range []supervise.Event{supervise.StreamTurnStart{Claim: planner}, supervise.StreamTurnEnd{Claim: planner}} {
-		if err := machine.Handle(ctx, ev); err != nil {
-			t.Fatalf("answer the Envoy question: handle %T: %v", ev, err)
-		}
+	if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: planner}); err != nil {
+		t.Fatalf("answer the Envoy question: %v", err)
 	}
+	endTurn(ctx, t, machine, planner)
 	const question = "Why does the plan keep the old API?"
 	prompted := len(conn.Prompts())
 	if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: planner, Task: question}); err != nil {
@@ -284,11 +281,10 @@ func TestAPhaseCompletionLeavesTheWorkerResidentUntilItsIssueCloses(t *testing.T
 	if sent := conn.Prompts()[prompted]; sent.Message != question {
 		t.Fatalf("the planner was sent %q, want the architect's question", sent.Message)
 	}
-	for _, ev := range []supervise.Event{supervise.StreamTurnStart{Claim: planner, DeliveryID: machine.Claim().Pending.ID}, supervise.StreamTurnEnd{Claim: planner}} {
-		if err := machine.Handle(ctx, ev); err != nil {
-			t.Fatalf("answer the architect's question: handle %T: %v", ev, err)
-		}
+	if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: planner, DeliveryID: machine.Claim().Pending.ID}); err != nil {
+		t.Fatalf("answer the architect's question: %v", err)
 	}
+	endTurn(ctx, t, machine, planner)
 	// Answering, it completes again, and the completion changes nothing.
 	result, err := intake.ApplyFact(ctx, pool, "api", "handoff:planner:after", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RolePlanner, Claim: planner, Commit: "plan-2"}, engine)
 	if err != nil || result.Refusal == nil || result.Refusal.Code != "HANDOFF_NOT_CURRENT_PHASE" {
@@ -388,9 +384,7 @@ func TestAnIssuesCloseWaitsForTheWorkersTurnToEnd(t *testing.T) {
 			machine.Claim().State, rows, attempts, len(rt.CallsOf("Suspend")))
 	}
 
-	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: planner}); err != nil {
-		t.Fatalf("end the planning turn: %v", err)
-	}
+	endTurn(ctx, t, machine, planner)
 	if got := machine.Claim(); got.State != supervise.StateSuspended || got.Session != "ses-plan" || got.SessionFile != "/tmp/plan.jsonl" || len(rt.CallsOf("Suspend")) != 1 {
 		t.Fatalf("after its turn the planner is %s on %q with %d suspensions, want suspended once with its session kept", got.State, got.Session, len(rt.CallsOf("Suspend")))
 	}
@@ -501,9 +495,7 @@ func TestACIRedStartsTheImplementerWhileTheTesterIsStillInItsTurn(t *testing.T) 
 		t.Fatalf("while the implementer started the tester is %s, want working: its turn is its own", during.State)
 	}
 
-	if err := tester.Handle(ctx, supervise.StreamTurnEnd{Claim: before.Token}); err != nil {
-		t.Fatalf("end the tester's turn: %v", err)
-	}
+	endTurn(ctx, t, tester, before.Token)
 	run("the rows due after the tester's turn ends")
 	after := tester.Claim()
 	if after.State != supervise.StateIdle || after.Generation != before.Generation || after.Session != before.Session || after.Locator == nil ||
@@ -862,9 +854,7 @@ func TestASameRoleBackwardMoveNeverStopsTheWorkerInItsNewPhase(t *testing.T) {
 		takeTask()
 	}
 	run()
-	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: token}); err != nil {
-		t.Fatalf("end the retro turn: %v", err)
-	}
+	endTurn(ctx, t, machine, token)
 	run()
 
 	// The runtime recovers, and every row runs to its end.

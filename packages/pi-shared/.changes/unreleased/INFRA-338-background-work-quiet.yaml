@@ -1,0 +1,10 @@
+kind: Fixed
+body: |-
+    The phase reminder no longer fires at a worker whose turn ended while a background job of its
+    own was still running: that job's result starts the next turn, so the worker is waiting to be
+    woken rather than stalled. A settle that reports background work buys the same quiet wait a
+    WAITING line does, which is also what bounds it — a job that never finishes is a wait the
+    host's waiting delay ends, and the reminder comes again then.
+time: 2026-10-30T19:40:00Z
+custom:
+    Issue: INFRA-338

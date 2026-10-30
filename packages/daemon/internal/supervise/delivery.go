@@ -348,6 +348,15 @@ func (m *Machine) confirm(ctx context.Context) error {
 // one of them: it takes the task whose turn it ended back first (interrupted), so settle finds
 // nothing of it to retire.
 //
+// Which turn was the delivery's is what the prompt's own result answers, and until it has, no
+// turn that ends is taken for it (resultPending). Oh My Pi's agent_end names no prompt at all,
+// and with background work on for every role a background result wakes a settled session and
+// starts a turn the daemon never prompted: a confirmed task retired at that turn's end would be
+// one the role never worked, and the turn that really is its own would serve no run. The result
+// lands on the heels of the agent_end of the turn the prompt ran, so the wait is milliseconds;
+// a prompt the agent refused or a daemon restart leaves none outstanding, and the turn's end
+// decides as it always did.
+//
 // A daemon suspension ends the claim's phase, so a task queued for a phase is the finished phase's
 // and goes with it; the next resume is handed its new phase's task, never that one. An operator
 // suspension is different: the operator resumes this same claim, so its pending phase task waits
@@ -363,7 +372,7 @@ func (m *Machine) settle(ctx context.Context) error {
 			m.log.Warn("supervise: the pending delivery is still not written", "delivery", p.ID, "error", err)
 		}
 	}
-	turnOver := !p.ConfirmedAt.IsZero() && m.claim.State != StateWorking
+	turnOver := !p.ConfirmedAt.IsZero() && m.claim.State != StateWorking && !m.resultPending()
 	suspended := m.claim.State == StateSuspended && p.Phase != "" && m.claim.SuspendedBy != SuspendedByOperator
 	if !turnOver && !suspended {
 		return nil
@@ -410,6 +419,7 @@ func (m *Machine) interrupted(ctx context.Context, why string) error {
 		return nil
 	}
 	m.log.Warn("supervise: "+why+"; the task waits for the relaunch", "delivery", p.ID)
+	m.awaitingResult = ""
 	next := *p
 	next.ID, next.ConfirmedAt, next.Interrupted = rand.Text(), time.Time{}, true
 	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, next); err != nil {
@@ -465,6 +475,7 @@ func (m *Machine) markUnread(ctx context.Context) error {
 // settle writes it again under the id it kept (saved).
 func (m *Machine) takeBackPending(ctx context.Context, read bool) error {
 	m.disarm(TimerTurn)
+	m.awaitingResult = ""
 	p := m.claim.Pending
 	p.ConfirmedAt = time.Time{}
 	if !read {

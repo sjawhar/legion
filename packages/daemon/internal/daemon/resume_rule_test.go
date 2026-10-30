@@ -149,9 +149,7 @@ func TestTheLingersSuspensionWaitsForTheArchitectsTurnToEnd(t *testing.T) {
 		t.Fatalf("three stop timeouts into the turn the architect is %s after %d suspensions, want its turn still running",
 			got, len(rt.CallsOf("Suspend")))
 	}
-	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: architect}); err != nil {
-		t.Fatalf("the turn's end: %v", err)
-	}
+	endTurn(ctx, t, machine, architect)
 	if got := machine.Claim().State; got != supervise.StateSuspended || len(rt.CallsOf("Suspend")) != 1 {
 		t.Fatalf("after its turn the architect is %s after %d suspensions, want suspended once", got, len(rt.CallsOf("Suspend")))
 	}

@@ -40,6 +40,7 @@ type Conn struct {
 	tokenReads  int
 	shutdowns   int
 	state       runtime.ConnState
+	unresulted  string
 	failures    map[string]error
 }
 
@@ -66,7 +67,24 @@ func (c *Conn) Prompt(_ context.Context, deliveryID, message string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.prompts = append(c.prompts, Prompt{DeliveryID: deliveryID, Message: message})
-	return c.failures["Prompt"]
+	if err := c.failures["Prompt"]; err != nil {
+		return err
+	}
+	c.unresulted = deliveryID
+	return nil
+}
+
+// TakePromptResult is the agent reporting how one prompt's work ended, which Oh My Pi writes as a
+// prompt_result frame behind the agent_end of the turn that prompt ran (shimwire.PromptResult).
+// It answers the delivery of the prompt this connection acknowledged and has not reported the end
+// of yet, once, and false when there is none: a prompt the connection refused reaches no turn and
+// reports no result, and a turn the daemon never prompted ends with none behind it.
+func (c *Conn) TakePromptResult() (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delivery := c.unresulted
+	c.unresulted = ""
+	return delivery, delivery != ""
 }
 
 func (c *Conn) GetState(_ context.Context) (runtime.ConnState, error) {

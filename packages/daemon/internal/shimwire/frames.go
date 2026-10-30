@@ -29,6 +29,7 @@ const (
 	TypeGetState               = "get_state"
 	TypeAgentStart             = "agent_start"
 	TypeAgentEnd               = "agent_end"
+	TypePromptResult           = "prompt_result"
 	TypeShutdown               = "shutdown"
 	TypeAdoptWorkingCopy       = "adopt-working-copy"
 	TypeAdoptWorkingCopyResult = "adopt-working-copy-result"
@@ -271,6 +272,26 @@ type AgentStart struct {
 // is the frame that arrives chunked.
 type AgentEnd struct{}
 
+// PromptResult is Oh My Pi reporting how one prompt's work ended, and the only frame that names
+// the prompt a turn belonged to: ID is the `prompt` command's own request id, where AgentEnd
+// carries no prompt identity at all ("that frame carries no prompt identity, so correlate
+// prompts through `prompt_result`", omp://rpc.md). An accepted prompt completes exactly once,
+// either as `data.agentInvoked: false` on its response — it finished locally and started no turn
+// — or as this frame, always written after that response.
+//
+// AgentInvoked is false for a prompt that ran no turn of its own. Status is Oh My Pi's own word
+// for how the work ended (`completed`, `aborted`, `error`), and Error its reason when it has one.
+// SessionSettled is whether the session had nothing left running when the prompt ended; it is
+// false while a background job the turn started is still going, which is exactly the case this
+// frame was taken up for.
+type PromptResult struct {
+	ID             string `json:"id"`
+	AgentInvoked   bool   `json:"agentInvoked"`
+	Status         string `json:"status,omitempty"`
+	Error          string `json:"error,omitempty"`
+	SessionSettled bool   `json:"sessionSettled,omitempty"`
+}
+
 // Shutdown asks the shim to end the wrapped process: SIGTERM, then SIGKILL if it is still running
 // when the shim's grace runs out. The shim acts on it and never forwards it.
 type Shutdown struct{}
@@ -317,6 +338,7 @@ func (Response) FrameType() string                     { return TypeResponse }
 func (GetState) FrameType() string                     { return TypeGetState }
 func (AgentStart) FrameType() string                   { return TypeAgentStart }
 func (AgentEnd) FrameType() string                     { return TypeAgentEnd }
+func (PromptResult) FrameType() string                 { return TypePromptResult }
 func (Shutdown) FrameType() string                     { return TypeShutdown }
 func (AdoptWorkingCopy) FrameType() string             { return TypeAdoptWorkingCopy }
 func (AdoptWorkingCopyResult) FrameType() string       { return TypeAdoptWorkingCopyResult }
@@ -368,6 +390,11 @@ func (f AgentStart) MarshalJSON() ([]byte, error) {
 }
 
 func (AgentEnd) MarshalJSON() ([]byte, error) { return marshalFrame(TypeAgentEnd, struct{}{}) }
+
+func (f PromptResult) MarshalJSON() ([]byte, error) {
+	type plain PromptResult
+	return marshalFrame(TypePromptResult, plain(f))
+}
 
 func (Shutdown) MarshalJSON() ([]byte, error) { return marshalFrame(TypeShutdown, struct{}{}) }
 
@@ -595,6 +622,8 @@ func Decode(line []byte) (Frame, error) {
 		return decodeInto[AgentStart](trimmed)
 	case TypeAgentEnd:
 		return AgentEnd{}, nil
+	case TypePromptResult:
+		return decodeInto[PromptResult](trimmed)
 	case TypeShutdown:
 		return Shutdown{}, nil
 	case TypeAdoptWorkingCopy:

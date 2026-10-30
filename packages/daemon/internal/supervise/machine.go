@@ -197,9 +197,9 @@ type ClaimView struct {
 func (c Claim) treeRoot() bool { return claim.IsTreeArchitect(c.Role, c.Issue, c.Tree) }
 
 // Event is everything that reaches a machine. The set is sealed: RuntimeObservation,
-// StreamHello, StreamTurnStart, StreamTurnEnd, StreamClosed, StreamLateRefusal, PromptAcked,
-// PromptRefused, Timer, StalePlugin, and the nine requests. The transition table has a row or a
-// named ignore for every one of them in every state.
+// StreamHello, StreamTurnStart, StreamTurnEnd, StreamPromptResult, StreamClosed,
+// StreamLateRefusal, PromptAcked, PromptRefused, Timer, StalePlugin, and the nine requests. The
+// transition table has a row or a named ignore for every one of them in every state.
 type Event interface{ isEvent() }
 
 // Store is the persistence a machine writes through. A claim and its pending delivery are
@@ -421,6 +421,14 @@ type Machine struct {
 	// (takesBackConfirmed). A send always goes through the connection registered last, so it only
 	// rises, and a relaunch leaves it: the new process's connections are registered later still.
 	sentThrough uint64
+	// awaitingResult is the id of the pending delivery whose prompt Oh My Pi acknowledged and has
+	// not yet reported the end of (shimwire.PromptResult). While it is set, a turn that ends is
+	// not known to be that prompt's — with background work on, a role's own background result
+	// wakes it and starts turns the daemon never prompted — so the delivery's life ends at its
+	// result rather than at any agent_end (turnEnded, promptResulted). It is memory only: a
+	// restart has no prompt of its own outstanding and asks the agent where it is instead
+	// (askFirst).
+	awaitingResult string
 	// askFirst is a restored claim whose agent an earlier daemon was talking to: a pending
 	// delivery it may already have sent, or a turn it saw start and may not have seen end. The
 	// machine asks the agent (get_state) before it acts on either.
@@ -796,6 +804,13 @@ func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 	case StreamTurnStart:
 		if ev.DeliveryID != "" && (pending == nil || pending.ID != ev.DeliveryID) {
 			m.dropStale("StreamTurnStart", "delivery", ev.DeliveryID, pendingID(pending))
+			return false, nil
+		}
+	case StreamPromptResult:
+		// The result of a prompt for a delivery the claim no longer holds — retired, or taken back
+		// under a new id — answers a question nothing is still asking.
+		if pending == nil || pending.ID != ev.DeliveryID {
+			m.dropStale("StreamPromptResult", "delivery", ev.DeliveryID, pendingID(pending))
 			return false, nil
 		}
 	case StreamLateRefusal:
@@ -1320,6 +1335,8 @@ func claimOf(ev Event) claim.Token {
 	case StreamTurnStart:
 		return ev.Claim
 	case StreamTurnEnd:
+		return ev.Claim
+	case StreamPromptResult:
 		return ev.Claim
 	case StreamClosed:
 		return ev.Claim

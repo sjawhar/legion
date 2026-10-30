@@ -56,6 +56,19 @@ func TestEveryExchangedFrameRoundTripsItsWireLine(t *testing.T) {
 		{"agent_start", `{"type":"agent_start"}`, AgentStart{}},
 		{"replayed agent_start", `{"type":"agent_start","deliveryId":"d1"}`, AgentStart{DeliveryID: "d1"}},
 		{"agent_end", `{"type":"agent_end"}`, AgentEnd{}},
+		{
+			// Oh My Pi's own, measured against the pinned binary: it follows the agent_end of the
+			// turn the prompt ran, and sessionSettled is false while a background job that turn
+			// started is still going.
+			"prompt_result",
+			`{"type":"prompt_result","id":"d1.XYZ","agentInvoked":true,"status":"completed"}`,
+			PromptResult{ID: "d1.XYZ", AgentInvoked: true, Status: "completed"},
+		},
+		{
+			"prompt_result of a prompt that ran no turn",
+			`{"type":"prompt_result","id":"d1.XYZ","agentInvoked":false,"status":"error","error":"no model"}`,
+			PromptResult{ID: "d1.XYZ", AgentInvoked: false, Status: "error", Error: "no model"},
+		},
 		{"shutdown", `{"type":"shutdown"}`, Shutdown{}},
 		{
 			"adopt-working-copy",

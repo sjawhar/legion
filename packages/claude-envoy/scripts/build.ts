@@ -127,6 +127,10 @@ const LEGION_HOOKS: readonly {
       event: "Stop",
       lastAssistantMessage: "${last_assistant_message}",
       stopHookActive: "${stop_hook_active}",
+      // The session's own background tasks, each `{ id, type, status, description, command }`,
+      // rendered as JSON text: a turn that ends with one still running is a worker waiting to be
+      // woken by it rather than a stalled one, and earns no reminder (INFRA-338 R8).
+      backgroundTasks: "${background_tasks}",
     },
     // The `Stop` answer waits on the reminder's record check, which bounds its own daemon read at
     // 5 s (RECORD_READ_BOUND_MS, packages/pi-shared/src/phase-reminder.ts); the others answer from

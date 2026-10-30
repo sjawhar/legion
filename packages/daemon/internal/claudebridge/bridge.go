@@ -81,6 +81,12 @@ type bridge struct {
 	// from the `system` `init` line that begins every turn (systemInit) — it is in a turn with no
 	// step of its own open, and that turn's one result ends it.
 	inRun, stepping bool
+	// promptRun is the request id of the daemon's prompt whose turn is running, and "" in a turn
+	// no prompt of the daemon's started — an Envoy delivery's, or one Claude Code started by
+	// itself when a background task finished. The bridge reports it as Oh My Pi reports its own
+	// (shimwire.PromptResult), right behind that turn's agent_end: with background work on it is
+	// the only thing that tells the daemon which of the turns it saw was its task's.
+	promptRun string
 	// queue is the Envoy deliveries waiting for the next step or turn.
 	queue []delivery
 
@@ -387,7 +393,7 @@ func (b *bridge) prompt(p shimwire.Prompt) {
 		b.respond(shimwire.Response{ID: p.ID, Command: shimwire.TypePrompt, Success: false, Error: Busy})
 		return
 	}
-	b.startRun(p.Message)
+	b.startRun(p.Message, p.ID)
 }
 
 // deliver queues an Envoy delivery: between turns it starts one at once; during a turn of the
@@ -400,12 +406,14 @@ func (b *bridge) deliver(d delivery) {
 		return
 	}
 	b.log.Printf("Envoy delivery %s starts a turn", d.id)
-	b.startRun(d.content)
+	b.startRun(d.content, "")
 }
 
-// startRun tells the daemon a turn of the bridge's own starts and sends its first message.
-func (b *bridge) startRun(message string) {
-	b.inRun = true
+// startRun tells the daemon a turn of the bridge's own starts and sends its first message. prompt
+// is the request id of the daemon's prompt that started it, and "" for a turn nothing of the
+// daemon's did.
+func (b *bridge) startRun(message, prompt string) {
+	b.inRun, b.promptRun = true, prompt
 	b.emit(shimwire.AgentStart{})
 	b.step(message)
 }
@@ -513,7 +521,7 @@ func (b *bridge) result(subtype string, isError bool, errs []string) {
 		if !b.inRun && len(b.queue) > 0 {
 			next := b.queue[0]
 			b.queue = b.queue[1:]
-			b.startRun(next.content)
+			b.startRun(next.content, "")
 		}
 		return
 	}
@@ -539,10 +547,17 @@ func (b *bridge) result(subtype string, isError bool, errs []string) {
 	}
 	b.inRun = false
 	b.emit(shimwire.AgentEnd{})
+	if prompt := b.promptRun; prompt != "" {
+		// The turn that ran the daemon's prompt is over, and this is what says it was that
+		// prompt's: an agent_end names no prompt, and a turn Claude Code started by itself when a
+		// background task finished ends with one just like it.
+		b.promptRun = ""
+		b.emit(shimwire.PromptResult{ID: prompt, AgentInvoked: true})
+	}
 	if len(b.queue) > 0 {
 		next := b.queue[0]
 		b.queue = b.queue[1:]
-		b.startRun(next.content)
+		b.startRun(next.content, "")
 	}
 }
 
