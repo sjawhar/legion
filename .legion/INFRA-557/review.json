@@ -2,34 +2,30 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-557",
-  "completed": "2026-10-30T06:27:34Z",
-  "round": 6,
-  "scope": "Narrowed by the INFRA-63 architect (2026-10-30 03:34Z): the eight round-5 items, any merge of main, the required checks at the code head. A new finding counts only if it is a correctness defect the round-6 change introduces; anything else is a required change in this review.",
-  "reviewedHead": "a908e64f4c0898759f84ba1398b0f3b8af6db29d",
+  "completed": "2026-10-30T10:51:48Z",
+  "round": 7,
+  "scope": "The INFRA-63 architect's rule (2026-10-30 06:30Z): explicit, default-safe clean-hand-back mark; 3 s only on the mark read after the successor's flush, 7 s otherwise; the two round-6 gaps as rows that fail first; a clean graceful stop within 10 s; the four round-6 required changes. The architect ruled at 10:51Z that the six other findings are required changes now (the 17:02Z no-deferral rule wins), and that the next round checks exactly these six and CI.",
+  "reviewedHead": "a8a5d08a1046bf5c5a3b1e614f2af3aa0a8f0f55",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
+  "important": 1,
   "minor": 5,
-  "ci": "Required set (rulesets) lint, typecheck, test, pr-title. At a908e64f the CI run 41011370664 had lint, typecheck and test queued at 06:27Z (28 check runs queued, one success); no required check has completed at the code head.",
-  "thermonuclear": "deep-review: CHANGES at a908e64f (no new correctness defect introduced; two gaps left in items 1 and 2); code-quality: CHANGES at a908e64f. Each finding below was checked in the code by the reviewer.",
-  "roundFiveItems": {
-    "1 timeout exit vs a successor inside the window": "closed for a slow prepare, correct or retried subscribe (the window is judged before each begin, elapsed never understates, linger deadline raised to the floor, HandBackLapsed keeps the debt); still open where begin's flush fails or is slow (keyFindings[0])",
-    "2 Release with an expired context": "closed (done checked first in Release, Stop, waitLoops, the monitor wait); its now-reliable late write leaves keyFindings[1]",
-    "3 RaiseMaxAge": "closed: MaxAge 0 counts as enough; raiseBucketSetting shared with raiseReplicas",
-    "4 stale texts": "closed for the texts named; new stale ones in keyFindings[3]",
-    "5 exception helpers": "closed",
-    "6 report one snapshot": "closed",
-    "7 test comments without branch shas": "closed; two new 'Before this fix' notes (keyFindings[4])",
-    "8 linger gate": "closed",
-    "merge a908e64f": "faithful: the conflict was one doc comment in internal/bus/kv.go; main's overlap-retry sentence moved to raiseBucketSetting, and updateStream's overlapSends loop is kept"
+  "ci": "Required set (rulesets) lint, typecheck, test, pr-title. CI run 41038750792 at a8a5d08a queued since 10:10Z; lint, typecheck and test had not started at 10:51Z. A request for changes does not wait on it.",
+  "thermonuclear": "deep-review: APPROVE at a8a5d08a (no correctness defect introduced; ran the new targeted tests, internal/testnats, infra core Permissions and gcp golden tests); code-quality: CHANGES at a8a5d08a (structural only). Each item below was checked in the code by the reviewer.",
+  "ruleChecks": {
+    "every unmarked path gets 7 s": "holds: hold starts at settleCap (receive.go), ends at 3 s only on a mark read for the replaced revision (receive_term.go:321-336, lease_handback.go:77-97); failed or slow flush, timed-out release and late release, linger timeout or not taken, unconfirmed drain, stale_binding, expiry or lapse, give-up, stop before subscribing, failed mark write or read, other revision all give 7 s",
+    "round-6 gaps rows": "TestASuccessorWhoseSubscribeTheServerNeverGotSettlesForTheAckWait and TestLeaseAReleaseThatTimedOutLeavesTheTermOwingTheAckWait; implementer's negative controls quoted in implement.json",
+    "clean graceful stop within 10 s": "mark read every settlePoll; tester: 254 messages, slowest 7.31 s, holds ended 'handed back' at 3.0 s",
+    "four round-6 required changes": "done: HandBackMarked is the one judgement, lease.go 786 lines, awaitDone at all four waits, test comments state rules",
+    "grant": "handback.listener-<m>.> in ListenerPermissions, goldens, fixtures; grant_test.go refuses another machine's mark",
+    "merge a8a5d08a": "faithful: sessionanswers in one ci.yaml filter; the infra/README.md alarm paragraph keeps this branch's subscribe-exhausted text and main's redelivery sentence"
   },
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/cmd/listener/receive.go:807", "description": "The hand-back window is judged before the SUB is sent, not once the server has it. begin returns nil when FlushTimeout fails, so the term keeps the 3 s cap and its handle goroutine starts the hold while nats.go sends the SUB only after reconnecting, past the stopping pod's 1.25 s floor; resubscribe's SetReceiving then clears ack_wait_owed because handedBack is still true. A flush that succeeds after 250 ms-1 s is accepted the same way though the design leaves the SUB 250 ms. Judge the window when the flush returns; on a flush error or past the window, call HandBackLapsed and use the 7 s cap (t.hold is read only by handle)."},
-    {"severity": "important", "file": "packages/envoy/cmd/listener/receive_stop.go:116", "description": "When handBack's Release times out (2 s), the linger reads its own unreleased record as not taken, ends at the floor and drains; Stop's second Release (now reliable since item 2) then writes the record released and unsettled with ack_wait_owed as the term stands, after the subscription is gone. A standby taking it within 1 s counts a hand-back and holds 3 s with no linger behind it. Only the lapse check usually adds ack_wait_owed, by coincidence of the numbers; a renew that started at stop() and succeeded in just under 2 s extends validity past the late write. On a failed release, record the term's ack-wait debt before lingering."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/receive.go:530", "description": "The hand-back judgement is split across the lease boundary: leaseStatus.HandedBack, leaseStatus.handBack, lease.handedBack, lease.handBack and serve's local, with a two-call protocol (HandedBackAt then HandBackLapsed) and the receiver's time.Now() against the lease's injected l.now(). One lease method that judges and clears under l.mu with l.now()."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/lease.go:355", "description": "lease.go is 1051 lines (962 before this range): move the bucket opening or the record types out. Stale texts: lease.go:355, 366, 847 say the bridge is zero for a non-hand-back term though acquire sets it for every take with a previous record; lease.go:204-224 say a hand-back is decided at the take and its debt ends at the subscribe."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/lease.go:682", "description": "The 'done before ctx' nested select is pasted at lease.go:682-690, receive.go:333-341, main.go:1471-1479 and waitLoops: one awaitDone(ctx, done) helper beside waitUnlessDone."},
-    {"severity": "minor", "file": "packages/envoy/cmd/listener/lease_test.go:348", "description": "'Before this fix' history notes at lease_test.go:348 and receive_stop_test.go:335 (item 7's kind); receive_stop_test.go:383 'The window has not passed yet' is false after <-stopped."}
-  ],
-  "proseNotFixedByReviewer": "The texts change with the two code fixes, and a push from the reviewer would cancel the queued CI run of a908e64f."
+    {"severity": "important", "file": "packages/envoy/cmd/listener/receive_stop.go:259", "description": "settleInHand returns after inflightCancelWait even when the handler is still running, and markHandBack does not know: the stop marks the hand-back clean, the stuck message's InProgress stops with the term, it returns at its 6 s ack wait after the successor's 3 s hold, behind newer messages of its session. Predates the mark, which now claims to cover it. A stop whose handler is still running after its cancel must write no mark (architect, 10:51Z)."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/lease.go:459", "description": "released and releasedStale are set by every letGo (give-up included) and never reset in startTermLocked, so after a give-up and a later timed-out release MarkHandBack writes a mark for the old revision and logs hand_back_marked true, against its doc. Reset them per term or pass the revision Release returned."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/receive_stop_test.go:306", "description": "The row 'the term had a lost node's binding open' ends 'not taken', so it never reaches the stale check in MarkHandBack; the drained gate has no row. Add a row with a receiving successor and a stale term, and one with a drain that times out."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/README.md:198", "description": "The stop-budget sums (README.md:197-198, main.go:1450-1452) leave out the mark write: 3 + 1 + 3 + 2 + 2 = 11 s, not 9 s. Correct them, or bound the write by what is left of the 10 s."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/receive.go:756", "description": "The hand-back flag is carried leaseStatus.HandBack -> termStart -> receiveTerm.fromHandBack and then checked again inside HandBackMarked; delete termStart and fromHandBack and let HandBackMarked answer for non-candidates."},
+    {"severity": "minor", "file": "packages/envoy/cmd/listener/receive_term.go:321", "description": "Move the mark read with its log-once state into a helper on receiveTerm; give the linger's end a type (lingerEnd) with three named constants instead of 'timeout' and 'not taken' literals compared in markHandBack and the tests."}
+  ]
 }
