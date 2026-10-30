@@ -18,7 +18,9 @@ import {
   type ChangedReference,
   type Comment,
   CommentEventPayloadSchema,
+  type CreateAgentMessageInput,
   type CreateCommentInput,
+  type CreateMessageInput,
   type CreateProjectInput,
   DELIVERY_CAPABILITIES,
   type DeliveryCapability,
@@ -38,12 +40,17 @@ import {
   type IdempotencyLandedCode,
   IssueDeployedEventPayloadSchema,
   IssueEventPayloadSchema,
+  type ItemBlocks,
+  type Message,
   MessageDeliveryEventPayloadSchema,
   type MessageDeliveryMode,
   MessageEventPayloadSchema,
+  type MessageReplyInput,
   type MyAnswersResponse,
   type MyRepliesResponse,
   type ReferenceChangesPayload,
+  type ReplyBlock,
+  ReplyBlockSchema,
   retriesUnderKey,
   serviceSubjectLabel,
   type UserStateUpdatedEventPayload,
@@ -927,6 +934,98 @@ test("parses a message reply's in_reply_to, reply_body preview, and thread targe
   ).toBeUndefined();
 });
 
+test("a reply names the block it answers, and an event recorded before reads no block", () => {
+  const actor: Actor = { id: "bob", kind: "user" };
+  const commentInput: CreateCommentInput = {
+    body: "On the second paragraph.",
+    reply_to: "comment-1",
+    reply_to_block: "b2",
+  };
+  const messageInput: CreateMessageInput = {
+    body: "On two.",
+    in_reply_to: "message-1",
+    in_reply_to_block: "b2",
+  };
+  const agentInput: CreateAgentMessageInput = {
+    body: "On two.",
+    delivery: "steer",
+    in_reply_to: "message-1",
+    in_reply_to_block: "b2",
+  };
+  const replyInput: MessageReplyInput = {
+    actor: { id: "s1", kind: "session" },
+    attempt: 1,
+    body: "On two.",
+    in_reply_to_block: "b2",
+  };
+  expect([
+    commentInput.reply_to_block,
+    messageInput.in_reply_to_block,
+    agentInput.in_reply_to_block,
+    replyInput.in_reply_to_block,
+  ]).toEqual(["b2", "b2", "b2", "b2"]);
+
+  const block: ReplyBlock = {
+    block_id: "b2",
+    node: "comment/comment-1#b2",
+    ref: "dispatch://DSP-1/comment/comment-1#b-b2",
+    removed: false,
+    text: "Beta.",
+  };
+  // A direct message's block has no address, so it carries no ref.
+  const directBlock: ReplyBlock = {
+    block_id: "b2",
+    node: "message/message-1#b2",
+    removed: true,
+    text: "Two.",
+  };
+  const reply: Message = {
+    author: actor,
+    body: "On two.",
+    created_at: "2026-09-10T00:00:01Z",
+    deliveries: [],
+    id: "message-2",
+    in_reply_to: "message-1",
+    issue_key: null,
+    reply_block: directBlock,
+    target: null,
+  };
+  const comment: Comment = {
+    anchor: null,
+    ask_id: null,
+    author: actor,
+    body: "On the second paragraph.",
+    created_at: "2026-09-10T00:00:01Z",
+    deliveries: [],
+    edited_at: null,
+    id: "comment-2",
+    issue_key: "DSP-1",
+    mentions: [],
+    reply_block: block,
+    reply_to: "comment-1",
+    resolved: false,
+    resolved_at: null,
+    resolved_by: null,
+    suggestion: null,
+    turn: null,
+  };
+  expect(ReplyBlockSchema.parse(block)).toEqual(block);
+  expect(ReplyBlockSchema.parse(directBlock)).toEqual(directBlock);
+  expect(ReplyBlockSchema.safeParse({ block_id: "b2", node: "comment/c#b2" }).success).toBe(false);
+
+  expect(CommentEventPayloadSchema.parse(comment).reply_block).toEqual(block);
+  expect(MessageEventPayloadSchema.parse(reply).reply_block).toEqual(directBlock);
+  expect(MessageEventPayloadSchema.parse({ ...reply, reply_block: null }).reply_block).toBeNull();
+
+  // An event recorded before replies named blocks carries no reply_block at all.
+  const before = { id: "comment-3", author: actor, body: "Older.", reply_to: "comment-1" };
+  expect(CommentEventPayloadSchema.parse(before).reply_block).toBeUndefined();
+  expect(
+    MessageEventPayloadSchema.parse({ id: "message-3", author: actor, in_reply_to: "message-1" })
+      .reply_block
+  ).toBeUndefined();
+});
+
 test("accepts complete targeted-message payloads while ignoring future fields", () => {
   const payload = {
     id: "11111111-1111-4111-8111-111111111111",
@@ -1041,6 +1140,45 @@ test("keeps document read tokens optional for older Dispatch servers", () => {
 
   expect(block.token).toBeUndefined();
   expect(text.token).toBeUndefined();
+});
+
+test("models a comment's and a direct message's blocks", () => {
+  const comment = "11111111-1111-4111-8111-111111111111";
+  const commentBlocks: ItemBlocks = {
+    item: {
+      kind: "comment",
+      id: comment,
+      issue_key: "CORE-1",
+      ref: `dispatch://CORE-1/comment/${comment}`,
+    },
+    revision: 2,
+    indexed: true,
+    blocks: [
+      {
+        id: "b1",
+        type: "paragraph",
+        text: "Alpha 😀.",
+        ref: `dispatch://CORE-1/comment/${comment}#b-b1`,
+        from: 0,
+        to: "Alpha 😀.".length,
+        changed_revision: 1,
+        changed_at: "2026-10-28T00:00:00Z",
+      },
+    ],
+  };
+  // A direct message has no address and no revision; neither has any of its blocks.
+  const directBlocks: ItemBlocks = {
+    item: { kind: "message", id: "33333333-3333-4333-8333-333333333333" },
+    indexed: true,
+    blocks: [{ id: "b1", type: "paragraph", text: "Where?", from: 0, to: 6 }],
+  };
+  // An item owed an index lists no block.
+  const owed: ItemBlocks = { ...commentBlocks, indexed: false, blocks: [] };
+
+  expect(commentBlocks.blocks[0]?.to).toBe(9);
+  expect(directBlocks.revision).toBeUndefined();
+  expect(directBlocks.blocks[0]?.ref).toBeUndefined();
+  expect(owed.blocks).toEqual([]);
 });
 
 test("a Kubernetes service subject renders as namespace/name, and anything else renders whole", () => {

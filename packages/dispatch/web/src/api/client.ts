@@ -70,6 +70,7 @@ import type {
   IssueReferenceSummary,
   IssueReferences,
   IssueSummary,
+  ItemBlocks,
   ListUsersResponse,
   MachineLoginsResponse,
   Message,
@@ -1077,6 +1078,12 @@ export class DispatchApiClient {
       { body: input, method: "PATCH", path: `/api/v1/comments/${pathSegment(id)}` },
       bounds
     );
+  }
+
+  /** The comment's current blocks, each with its span in the stored body, and its revision: what
+   *  the editor carries block ids from (`editComment`'s `blocks` and `base_revision`). */
+  commentBlocks(id: string): Promise<ItemBlocks> {
+    return this.json<ItemBlocks>(`/api/v1/comments/${pathSegment(id)}/blocks`);
   }
 
   acceptComment(id: string, bounds: WriteBounds): Promise<Comment> {

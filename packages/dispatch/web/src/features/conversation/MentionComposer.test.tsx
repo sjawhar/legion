@@ -5,7 +5,7 @@ import { type ReactNode, useState } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
-import type { Agent, Comment, Message } from "../../api/types";
+import type { Agent, Comment, ItemBlock, ItemBlocks, Message } from "../../api/types";
 import { useSending } from "../../hooks/useSending";
 import { KEYED_SEND_ATTEMPT_MS, SEND_DEADLINE_MS, SendStoppedError } from "../writes/keyed-write";
 import type { ComposerOwner, ReplyTarget } from "./composer-model";
@@ -813,6 +813,193 @@ test("editing a comment patches only its body and never creates a delivery", asy
     view.unmount();
     editComment.mockRestore();
     createComment.mockRestore();
+  }
+});
+
+/** The blocks route's answer for a two-paragraph comment, `Alpha` and `Beta`. */
+function alphaBetaBlocks(indexed: boolean): ItemBlocks {
+  const blocks: ItemBlock[] = [
+    { from: 0, id: "b1", text: "Alpha", to: 5, type: "paragraph" },
+    { from: 7, id: "b2", text: "Beta", to: 11, type: "paragraph" },
+  ];
+  return {
+    blocks: indexed ? blocks : [],
+    indexed,
+    item: { id: "comment-1", issue_key: "CORE-1", kind: "comment" },
+    revision: 3,
+  };
+}
+
+/** Opens the edit of `Alpha\n\nBeta` once the blocks route answers `blocks`, types a word at
+ *  the end of `Beta`, saves, and hands back what the save sent: the comment id and the input. */
+async function saveEditOfAlphaBeta(blocks: Promise<ItemBlocks>): Promise<unknown[]> {
+  const commentBlocks = spyOn(api, "commentBlocks").mockReturnValue(blocks);
+  const editComment = spyOn(api, "editComment").mockResolvedValue(createdComment);
+  const { view } = renderComposer({ edit: { body: "Alpha\n\nBeta", id: "comment-1" } });
+  try {
+    await waitFor(() => expect(commentBlocks).toHaveBeenCalledWith("comment-1"));
+    await act(async () => {
+      await blocks.catch(() => {});
+    });
+    fireEvent.change(screen.getByLabelText("Edit comment"), {
+      target: { value: "Alpha\n\nBeta gamma  " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(editComment).toHaveBeenCalledTimes(1));
+    return [...(editComment.mock.calls[0] ?? [])];
+  } finally {
+    view.unmount();
+    commentBlocks.mockRestore();
+    editComment.mockRestore();
+  }
+}
+
+test("an edit's save carries each block's id and the revision the blocks route answered", async () => {
+  expect(await saveEditOfAlphaBeta(Promise.resolve(alphaBetaBlocks(true)))).toEqual([
+    "comment-1",
+    {
+      base_revision: 3,
+      blocks: [
+        { from: 0, id: "b1" },
+        { from: 7, id: "b2" },
+      ],
+      body: "Alpha\n\nBeta gamma",
+    },
+    keyedAttempt,
+  ]);
+});
+
+test("an edit's save carries no block ids while the comment is not indexed or the route fails", async () => {
+  expect(await saveEditOfAlphaBeta(Promise.resolve(alphaBetaBlocks(false)))).toEqual([
+    "comment-1",
+    { body: "Alpha\n\nBeta gamma" },
+    keyedAttempt,
+  ]);
+  // An older server has no blocks route.
+  expect(
+    await saveEditOfAlphaBeta(
+      Promise.reject(new ApiError(404, { code: "NOT_FOUND", error: "not found" }))
+    )
+  ).toEqual(["comment-1", { body: "Alpha\n\nBeta gamma" }, keyedAttempt]);
+});
+
+// A browser's textarea holds LF where the value it was given had CR LF, as the followed spans do,
+// while the composer's own draft keeps the comment's stored text. A save made without typing
+// works out its ids from the body it sends, the field's text, so it carries them.
+test("an unchanged edit of a comment stored with CR LF carries each block's id", async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value");
+  if (descriptor?.get === undefined || descriptor.set === undefined) {
+    throw new Error("expected HTMLTextAreaElement.prototype.value to be an accessor");
+  }
+  const { get, set } = descriptor;
+  Object.defineProperty(HTMLTextAreaElement.prototype, "value", {
+    ...descriptor,
+    get(this: HTMLTextAreaElement) {
+      return (get.call(this) as string).replaceAll("\r\n", "\n");
+    },
+    set(this: HTMLTextAreaElement, value: string) {
+      set.call(this, value);
+    },
+  });
+  const commentBlocks = spyOn(api, "commentBlocks").mockResolvedValue({
+    blocks: [
+      { from: 0, id: "b1", text: "Alpha", to: 5, type: "paragraph" },
+      { from: 9, id: "b2", text: "Beta", to: 13, type: "paragraph" },
+    ],
+    indexed: true,
+    item: { id: "comment-1", issue_key: "CORE-1", kind: "comment" },
+    revision: 3,
+  });
+  const editComment = spyOn(api, "editComment").mockResolvedValue(createdComment);
+  const { view } = renderComposer({ edit: { body: "Alpha\r\n\r\nBeta", id: "comment-1" } });
+  try {
+    await waitFor(() => expect(commentBlocks).toHaveBeenCalledWith("comment-1"));
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(editComment).toHaveBeenCalledTimes(1));
+    expect(editComment.mock.calls[0]).toEqual([
+      "comment-1",
+      {
+        base_revision: 3,
+        blocks: [
+          { from: 0, id: "b1" },
+          { from: 7, id: "b2" },
+        ],
+        body: "Alpha\n\nBeta",
+      },
+      keyedAttempt,
+    ]);
+  } finally {
+    view.unmount();
+    Object.defineProperty(HTMLTextAreaElement.prototype, "value", descriptor);
+    commentBlocks.mockRestore();
+    editComment.mockRestore();
+  }
+});
+
+test("an edit's save an older server refuses keeps the draft", async () => {
+  const commentBlocks = spyOn(api, "commentBlocks").mockResolvedValue(alphaBetaBlocks(true));
+  const editComment = spyOn(api, "editComment").mockRejectedValueOnce(
+    new ApiError(400, { code: "INVALID_JSON", error: 'json: unknown field "blocks"' })
+  );
+  const { view } = renderComposer({ edit: { body: "Alpha\n\nBeta", id: "comment-1" } });
+
+  try {
+    await waitFor(() => expect(commentBlocks).toHaveBeenCalledWith("comment-1"));
+    await act(async () => {});
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Edit comment");
+    fireEvent.change(field, { target: { value: "Alpha\n\nBeta gamma" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect((await screen.findByRole("alert")).textContent).toContain('unknown field "blocks"');
+    expect(field.value).toBe("Alpha\n\nBeta gamma");
+    expect(editComment).toHaveBeenCalledTimes(1);
+  } finally {
+    view.unmount();
+    commentBlocks.mockRestore();
+    editComment.mockRestore();
+  }
+});
+
+// The field reads each edit's type from the browser's own `beforeinput`, which a cut and a paste
+// fire and React's `onBeforeInput` (the `textInput` event) never carries.
+test("a block cut and pasted elsewhere keeps its id in the edit's save", async () => {
+  const commentBlocks = spyOn(api, "commentBlocks").mockResolvedValue(alphaBetaBlocks(true));
+  const editComment = spyOn(api, "editComment").mockResolvedValue(createdComment);
+  const { view } = renderComposer({ edit: { body: "Alpha\n\nBeta", id: "comment-1" } });
+  const beforeInput = (field: HTMLTextAreaElement, start: number, end: number, type: string) => {
+    field.setSelectionRange(start, end);
+    field.dispatchEvent(
+      new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType: type })
+    );
+  };
+
+  try {
+    await waitFor(() => expect(commentBlocks).toHaveBeenCalledWith("comment-1"));
+    await act(async () => {});
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Edit comment");
+    // Cut `Alpha` with the blank line after it, then paste it after `Beta`.
+    beforeInput(field, 0, 7, "deleteByCut");
+    fireEvent.change(field, { target: { value: "Beta" } });
+    beforeInput(field, 4, 4, "insertFromPaste");
+    fireEvent.change(field, { target: { value: "Beta\n\nAlpha" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(editComment).toHaveBeenCalledTimes(1));
+    expect(editComment.mock.calls[0]).toEqual([
+      "comment-1",
+      {
+        base_revision: 3,
+        blocks: [
+          { from: 0, id: "b2" },
+          { from: 6, id: "b1" },
+        ],
+        body: "Beta\n\nAlpha",
+      },
+      keyedAttempt,
+    ]);
+  } finally {
+    view.unmount();
+    commentBlocks.mockRestore();
+    editComment.mockRestore();
   }
 });
 

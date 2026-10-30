@@ -1,0 +1,10 @@
+kind: Fixed
+body: |-
+  A document upload keeps the block ids of the untyped blocks it leaves unchanged, and writes the
+  open anchors on text it keeps without stripping and adding them again. A block reference or
+  pinned block link a person made into a document now keeps resolving after an upload that edits,
+  adds or removes other blocks and leaves its block alone; before, every upload gave every block a
+  new id, so the reference pointed at nothing. An upload that moves a block still gives new ids to
+  that block and to the blocks it moves past. The same re-minting, with every open anchor
+  re-marked, made a live room keep about half a megabyte more for each upload of a 25 KB spec; a
+  one-token upload now adds about 2 KB, near what it stores.

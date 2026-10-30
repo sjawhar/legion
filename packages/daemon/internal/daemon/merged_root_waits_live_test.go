@@ -110,22 +110,37 @@ func newMergedRootWaitsLive(t *testing.T) *mergedRootWaitsLive {
 	if err != nil {
 		t.Fatal(err)
 	}
+	parent, child := proof.cfg.Project+"-1", proof.cfg.Project+"-2"
+	childPR := int(number) + 2
 	r := &mergedRootWaitsLive{
-		liveProof: proof, rt: fake.NewRuntime(), built: &built{},
-		parent: proof.cfg.Project + "-1", child: proof.cfg.Project + "-2",
-		parentPR: int(number) + 1, childPR: int(number) + 2, openedPR: int(number) + 3,
-		github: mergedRootWaitsGitHub(t), seq: 1,
+		liveProof: proof, rt: newRuntime(), built: &built{},
+		parent: parent, child: child,
+		parentPR: int(number) + 1, childPR: childPR, openedPR: int(number) + 3,
+		github: mergedRootWaitsGitHub(t, "legion/"+child, childPR), seq: 1,
 	}
 	r.seedTree()
 	r.boot()
 	return r
 }
 
+// newRuntime is the fake runtime every boot of this proof runs on. It provisions each claim's
+// workspace itself (fake.Runtime's InPod), as the two sibling proofs do, so a launch reaches the
+// fake without the daemon cloning acme/widgets from github.com, which the tmux answer would have
+// it try and which no machine can do: that repository does not exist. The restart builds its
+// runtime here too: a boot on a runtime without InPod relaunches the child implementer with host
+// workspaces, and the daemon then runs that clone.
+func newRuntime() *fake.Runtime {
+	rt := fake.NewRuntime()
+	rt.InPod = true
+	return rt
+}
+
 // mergedRootWaitsGitHub is GitHub as this proof's daemon reads it: every repository of the
-// mapping has default branch main, and its GraphQL root answers that it knows no pull request, so
-// each disarm the workflow queues finishes with nothing armed to take back. Nothing else is
+// mapping has default branch main, its GraphQL root answers that it knows no pull request, so
+// each disarm the workflow queues finishes with nothing armed to take back, and its open pull
+// requests are number on branch, which the child's implementer's completion reads. Nothing else is
 // answered, and nothing reaches github.com.
-func mergedRootWaitsGitHub(t *testing.T) string {
+func mergedRootWaitsGitHub(t *testing.T, branch string, number int) string {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rest, isRepository := strings.CutPrefix(r.URL.Path, "/repos/")
@@ -134,6 +149,8 @@ func mergedRootWaitsGitHub(t *testing.T) string {
 			_, _ = io.WriteString(w, `{"data":{"repository":{"pullRequest":null}}}`)
 		case r.Method == http.MethodGet && isRepository && len(parts) == 2:
 			_, _ = io.WriteString(w, `{"full_name":"`+parts[0]+"/"+parts[1]+`","default_branch":"main"}`)
+		case r.Method == http.MethodGet && isRepository && len(parts) == 3 && parts[2] == "pulls":
+			_, _ = fmt.Fprintf(w, `[{"number":%d,"state":"open","head":{"ref":%q,"sha":"head-child"},"base":{"ref":"main"},"updated_at":"2026-10-28T00:00:00Z"}]`, number, branch)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = io.WriteString(w, `{"message":"Not Found"}`)
@@ -216,7 +233,7 @@ func (r *mergedRootWaitsLive) restart() {
 	r.t.Helper()
 	r.d.stop()
 	rebindHeldPorts(r.t, &r.cfg)
-	r.rt, r.built = fake.NewRuntime(), &built{}
+	r.rt, r.built = newRuntime(), &built{}
 	r.boot()
 }
 
