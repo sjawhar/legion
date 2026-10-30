@@ -3021,14 +3021,11 @@ export async function executeDispatchTool(
   // A factory, not one instance: the constructor starts the request deadline, and the main
   // path resolves the origin (a subprocess) before it needs a client.
   const dispatchClient = (): DispatchClient =>
-    new DispatchClient(
-      configUrl,
-      configToken,
-      fetchImpl,
-      input.signal,
-      input.writeRetry,
-      input.sleep
-    );
+    new DispatchClient(configUrl, configToken, fetchImpl, {
+      signal: input.signal,
+      writeRetry: input.writeRetry,
+      sleep: input.sleep,
+    });
   if (input.tool === "dispatch_open_asks") {
     const client = dispatchClient();
     const project = optionalString(ownerArguments.args, "project");

@@ -417,14 +417,9 @@ export async function readSessionAnswers(
   }
   let read = current.inFlight;
   if (read === undefined) {
-    const client = new DispatchClient(
-      url,
-      dispatch.token,
-      options.fetchImpl ?? fetch,
-      undefined,
-      undefined,
-      options.sleep
-    );
+    const client = new DispatchClient(url, dispatch.token, options.fetchImpl ?? fetch, {
+      sleep: options.sleep,
+    });
     const started = client
       .sessionAnswers(session, {
         maxChars: SESSION_ANSWERS_MAX_CHARS,

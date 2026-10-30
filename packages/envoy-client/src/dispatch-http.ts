@@ -692,18 +692,22 @@ export class DispatchClient {
   readonly #resolvedIssues = new Map<string, Promise<string>>();
   readonly #signal: AbortSignal;
   readonly #sleep: Sleep;
+  readonly writeRetry: DispatchWriteRetry;
 
   constructor(
     baseUrl: string,
     readonly token: string,
     readonly fetchImpl: typeof fetch = fetch,
-    signal?: AbortSignal,
-    readonly writeRetry: DispatchWriteRetry = DISPATCH_WRITE_RETRY,
-    wait: Sleep = sleep
+    options: {
+      readonly signal?: AbortSignal | undefined;
+      readonly writeRetry?: DispatchWriteRetry | undefined;
+      readonly sleep?: Sleep | undefined;
+    } = {}
   ) {
     this.#baseUrl = baseUrl.replace(/\/+$/, "");
-    this.#signal = requestSignal(signal);
-    this.#sleep = wait;
+    this.#signal = requestSignal(options.signal);
+    this.writeRetry = options.writeRetry ?? DISPATCH_WRITE_RETRY;
+    this.#sleep = options.sleep ?? sleep;
   }
 
   /**

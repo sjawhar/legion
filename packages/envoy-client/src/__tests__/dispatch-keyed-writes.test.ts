@@ -152,7 +152,10 @@ const posted = {
 } as unknown as CommentWriteResponse;
 
 function client(fetchImpl: typeof fetch, retry: DispatchWriteRetry, signal?: AbortSignal) {
-  return new DispatchClient("http://dispatch.test", "secret", fetchImpl, signal, retry);
+  return new DispatchClient("http://dispatch.test", "secret", fetchImpl, {
+    signal,
+    writeRetry: retry,
+  });
 }
 
 function failure(call: Promise<unknown>): Promise<Error> {
@@ -909,9 +912,8 @@ describe("DispatchClient's uploads on a real connection", () => {
   beforeEach(forgetKeyedLayerMemory);
 
   const upload = (url: string, silenceMs: number, size: number) =>
-    new DispatchClient(url, "secret", fetch, undefined, {
-      ...DISPATCH_WRITE_RETRY,
-      silenceMs,
+    new DispatchClient(url, "secret", fetch, {
+      writeRetry: { ...DISPATCH_WRITE_RETRY, silenceMs },
     }).artifact("DSP-1", {
       name: "build.tar",
       file: new Blob([new Uint8Array(size).fill(97)]),

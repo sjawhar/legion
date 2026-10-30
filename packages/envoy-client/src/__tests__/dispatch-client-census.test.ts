@@ -113,13 +113,9 @@ test("every DispatchClient method reaches Dispatch through its one request funct
         });
         return Response.json({});
       }) as typeof fetch;
-      const client = new DispatchClient(
-        "http://dispatch.test",
-        "secret",
-        recording,
-        undefined,
-        DISPATCH_WRITE_RETRY
-      );
+      const client = new DispatchClient("http://dispatch.test", "secret", recording, {
+        writeRetry: DISPATCH_WRITE_RETRY,
+      });
 
       await call(client).catch(() => undefined);
 

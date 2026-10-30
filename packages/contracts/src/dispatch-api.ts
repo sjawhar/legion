@@ -3229,7 +3229,7 @@ export const sleep: Sleep = (ms, signal) => {
 };
 
 /** `ms` jittered by ±25 %: a wait of `NO_ROUTE_RETRY_DELAYS_MS`, as a client waits it. */
-export function jitteredDelay(ms: number): number {
+function jitteredDelay(ms: number): number {
   return ms * (0.75 + Math.random() * 0.5);
 }
 
@@ -3248,7 +3248,7 @@ export async function retryNoRoute<T>(
   attempt: () => Promise<T>,
   isNoRoute: (error: unknown) => boolean,
   options: {
-    readonly exhausted: () => unknown;
+    readonly exhausted: () => Error;
     readonly sleep?: Sleep;
     readonly signal?: AbortSignal | null;
   }

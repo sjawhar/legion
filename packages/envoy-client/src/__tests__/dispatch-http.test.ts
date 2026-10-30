@@ -638,10 +638,8 @@ describe("DispatchClient", () => {
       page(429, "Too Many Requests"),
       page(404, "Not Found"),
     ]);
-    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl, undefined, {
-      ...DISPATCH_WRITE_RETRY,
-      pausesMs: [],
-      withinMs: 0,
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl, {
+      writeRetry: { ...DISPATCH_WRITE_RETRY, pausesMs: [], withinMs: 0 },
     });
     const refusal = () =>
       client.message("DSP-1", { body: "Shipped.", actor }).then(
@@ -1165,14 +1163,9 @@ describe("listArchitectureSources against a server older than the list route", (
     ["a row as that one source", jsonResponse(source), [source]],
   ])("reads the singular route's %s", async (_answer, singular, want) => {
     const { fetchImpl, requests } = fakeFetch([...noRoutes(noRoute), singular]);
-    const client = new DispatchClient(
-      "http://dispatch.test",
-      "secret",
-      fetchImpl,
-      undefined,
-      undefined,
-      noWait
-    );
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl, {
+      sleep: noWait,
+    });
 
     expect(await client.listArchitectureSources("CORE")).toEqual(want);
     expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
@@ -1186,14 +1179,9 @@ describe("listArchitectureSources against a server older than the list route", (
       ...noRoutes(noRoute),
       jsonResponse({ code: "NOT_FOUND", error: "not found" }, 404),
     ]);
-    const client = new DispatchClient(
-      "http://dispatch.test",
-      "secret",
-      fetchImpl,
-      undefined,
-      undefined,
-      noWait
-    );
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl, {
+      sleep: noWait,
+    });
 
     await expect(client.listArchitectureSources("CORE")).rejects.toMatchObject({
       code: "NOT_FOUND",
@@ -1244,14 +1232,9 @@ describe("syncArchitectureSources against a server older than the every-source s
 
   test("returns the singular sync's row as that one source", async () => {
     const { fetchImpl, requests } = fakeFetch([...noRoutes(noRoute), jsonResponse(source)]);
-    const client = new DispatchClient(
-      "http://dispatch.test",
-      "secret",
-      fetchImpl,
-      undefined,
-      undefined,
-      noWait
-    );
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl, {
+      sleep: noWait,
+    });
 
     expect(await client.syncArchitectureSources("CORE")).toEqual([source]);
     expect(
@@ -1267,14 +1250,9 @@ describe("syncArchitectureSources against a server older than the every-source s
       ...noRoutes(noRoute),
       jsonResponse({ code: "SOURCE_NOT_FOUND", error: "no architecture source configured" }, 404),
     ]);
-    const client = new DispatchClient(
-      "http://dispatch.test",
-      "secret",
-      fetchImpl,
-      undefined,
-      undefined,
-      noWait
-    );
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl, {
+      sleep: noWait,
+    });
 
     await expect(client.syncArchitectureSources("CORE")).rejects.toMatchObject({
       code: "SOURCE_NOT_FOUND",
@@ -1327,14 +1305,9 @@ describe("a request a Dispatch process answers with no route", () => {
       jsonResponse([{ key: "CORE", name: "Core" }]),
     ]);
     const wait = recordedSleep();
-    const client = new DispatchClient(
-      "http://dispatch.test",
-      "secret",
-      fetchImpl,
-      undefined,
-      undefined,
-      wait.sleep
-    );
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl, {
+      sleep: wait.sleep,
+    });
 
     expect(await client.listProjects()).toEqual([{ key: "CORE", name: "Core" }] as never);
     expect(requests).toHaveLength(2);
@@ -1349,14 +1322,9 @@ describe("a request a Dispatch process answers with no route", () => {
       Array.from({ length: 4 }, () => noRoute("GET", "/api/v1/projects"))
     );
     const wait = recordedSleep();
-    const client = new DispatchClient(
-      "http://dispatch.test",
-      "secret",
-      fetchImpl,
-      undefined,
-      undefined,
-      wait.sleep
-    );
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl, {
+      sleep: wait.sleep,
+    });
 
     const error = await client.listProjects().catch((thrown: unknown) => thrown);
     expect(error).toBeInstanceOf(DispatchNoRouteError);
@@ -1383,14 +1351,9 @@ describe("a request a Dispatch process answers with no route", () => {
       noRoute("POST", "/api/v1/projects"),
       jsonResponse({ key: "CORE", name: "Core" }, 201),
     ]);
-    const client = new DispatchClient(
-      "http://dispatch.test",
-      "secret",
-      fetchImpl,
-      undefined,
-      undefined,
-      noWait
-    );
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl, {
+      sleep: noWait,
+    });
 
     await client.createProject({ key: "CORE", name: "Core" });
     expect(requests).toHaveLength(2);
@@ -1412,14 +1375,10 @@ describe("a request a Dispatch process answers with no route", () => {
       controller.abort(reason);
       return waiting;
     };
-    const client = new DispatchClient(
-      "http://dispatch.test",
-      "secret",
-      fetchImpl,
-      controller.signal,
-      undefined,
-      wait
-    );
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl, {
+      signal: controller.signal,
+      sleep: wait,
+    });
 
     await expect(client.listProjects()).rejects.toBe(reason);
     expect(requests).toHaveLength(1);

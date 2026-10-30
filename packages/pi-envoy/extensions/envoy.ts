@@ -328,7 +328,9 @@ function timedDispatchClient(timeoutMs: number): DispatchClient | undefined {
   );
   return config === null
     ? undefined
-    : new DispatchClient(config.url, config.token, fetch, AbortSignal.timeout(timeoutMs));
+    : new DispatchClient(config.url, config.token, fetch, {
+        signal: AbortSignal.timeout(timeoutMs),
+      });
 }
 
 /**
