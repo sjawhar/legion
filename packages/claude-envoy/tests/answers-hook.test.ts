@@ -255,6 +255,11 @@ function expectReadBudget(run: HookRun, waitedMs: number): void {
 /** A read the hook gave up on, as its line names it: Dispatch's answer missed the hook's wait. */
 const READ_MISSED = /^Dispatch did not answer within \d+ ms$/
 
+/** The same read, held to the least wait the design gives it, 150 ms (`ANSWERS_LEAST_WAIT_MS`):
+ *  a hook whose start-up spent the whole deadline still waits that long, so a line naming a
+ *  shorter wait, "within 0 ms" above all, fails the test. */
+const READ_MISSED_LEAST_WAIT = /^Dispatch did not answer within (1[5-9]\d|[2-9]\d\d|\d{4,}) ms$/
+
 /** A refresher the hook gave up on, as its line names it for `run`'s own deadline. */
 function refresherMissed(run: HookRun): RegExp {
   return new RegExp(`^${notFinishedReason(run).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`)
@@ -302,6 +307,35 @@ function contextOf(run: HookRun, event: string): string {
   // Claude Code keeps an additionalContext string whole only up to 10,000 characters.
   expect(context.length).toBeLessThan(10_000)
   return context
+}
+
+/** Runs `startup` hooks, four at most, until one has left what Dispatch answers in `answers.json`
+ *  for the hooks after it, and gives back what was saved. Each run is held to what the design
+ *  allows a hook reading a list that adds nothing: it prints nothing, its read having landed on
+ *  an empty list, or it prints the failure line naming the wait its read was given. A hook whose
+ *  read missed that wait also exits soon after printing, which the read it left behind need not
+ *  beat, so on a loaded host one run does not always fill the cache. */
+async function fillAnswersCache(
+  env: Record<string, string>,
+  home: string,
+  state: string,
+): Promise<{ readonly items: readonly SessionAnswer[] }> {
+  const file = join(state, "sessions", SESSION, "answers.json")
+  const attempts = 4
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const run = await runHook(env, sessionStart("startup", home))
+    expect(run.exitCode).toBe(0)
+    if (run.stdout !== "") {
+      expect(allowedOutcome(contextOf(run, "SessionStart"), [], READ_MISSED_LEAST_WAIT)).toBe(
+        "failure",
+      )
+    }
+    const saved = await readFile(file, "utf8")
+      .then((text): { items: SessionAnswer[] } => JSON.parse(text))
+      .catch(() => undefined)
+    if (saved !== undefined) return saved
+  }
+  throw new Error(`no hook left what Dispatch answered in ${file} within ${attempts} runs`)
 }
 
 test("puts the list into context at every SessionStart source and at SubagentStart, read for the session the input names", async () => {
@@ -396,11 +430,10 @@ test("with Dispatch hanging after a read gave an empty list, the failure line na
     DISPATCH_URL: dispatch.base,
     DISPATCH_TOKEN: "hook-token",
   }
-  expect(await runHook(env, sessionStart("startup", home))).toMatchObject({
-    exitCode: 0,
-    stdout: "",
-  })
-  const cache = JSON.parse(await readFile(join(state, "sessions", SESSION, "answers.json"), "utf8"))
+  // The hang the case is about starts only once the empty list Dispatch holds is in the cache:
+  // a hook whose read missed its wait prints the failure line and saves nothing, so the read is
+  // repeated until it lands.
+  const cache = await fillAnswersCache(env, home, state)
   expect(cache.items).toEqual([])
 
   dispatch.route = { kind: "hang" }
