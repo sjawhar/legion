@@ -42,6 +42,7 @@ NATS=sha256:0a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f6071
 BUN=sha256:1b2c3d4e5f6071821b2c3d4e5f6071821b2c3d4e5f6071821b2c3d4e5f607182
 BUN_SLIM=sha256:2c3d4e5f607182932c3d4e5f607182932c3d4e5f607182932c3d4e5f60718293
 GOLANG=sha256:3d4e5f60718293a43d4e5f60718293a43d4e5f60718293a43d4e5f60718293a4
+GOLANG_NEXT=sha256:5f60718293a4b5c65f60718293a4b5c65f60718293a4b5c65f60718293a4b5c6
 UNKNOWN=sha256:9f8e7d6c5b4a30219f8e7d6c5b4a30219f8e7d6c5b4a30219f8e7d6c5b4a3021
 REGISTRY=ghcr.io/sjawhar/legion/ci
 
@@ -190,6 +191,16 @@ run_check() {
   set -e
 }
 
+# golang_next_row <root>: appends the row a Go bump's first commit lands, the next release
+# beside the one ARG GO_VERSION pins.
+golang_next_row() {
+  cat >> "$1/.github/ci-images.yaml" <<YAML
+  - upstream: docker.io/library/golang:1.26.3-alpine
+    tag: golang-1.26.3-alpine-5f607182
+    digest: $GOLANG_NEXT
+YAML
+}
+
 echo "case: a tree whose every image is a row of .github/ci-images.yaml"
 root=$(fixture green)
 run_check tree "$root"
@@ -271,16 +282,23 @@ run_check tree "$root"
 check "a second row on one tag fails" "$(is "$status" 1)"
 check "says the copy would move the tag" "$(contains "$out" 'would move the tag off the first')"
 
-echo "case: rule 2 — a tag that does not end with its row's digest"
-# The suffix is what makes a shared tag impossible: without it the nats row's tag is the tag
-# every digest that image ever has can take, and a later copy moves it off the digest this
-# tree's consumers pin.
+echo "case: rule 2 — a tag that is not the one its row's upstream and digest give it"
+# The whole string is read. The eight characters at its end are what makes a shared tag
+# impossible: without them the nats row's tag is the tag every digest that image ever has can
+# take, and a later copy moves it off the digest this tree's consumers pin.
 root=$(fixture tag-without-digest)
 sed -i 's/tag: nats-2.10-0a1b2c3d/tag: nats-2.10/' "$root/.github/ci-images.yaml"
 run_check tree "$root"
 check "a tag without those characters fails" "$(is "$status" 1)"
-check "names the characters it wants" "$(contains "$out" 'tag nats-2.10 does not end with 0a1b2c3d')"
+check "names the tag it read" "$(contains "$out" 'tag nats-2.10 is not nats-2.10-0a1b2c3d')"
 check "and the tag the row should carry" "$(contains "$out" 'Name this row nats-2.10-0a1b2c3d')"
+
+root=$(fixture tag-suffix-alone)
+sed -i 's/tag: nats-2.10-0a1b2c3d/tag: anything-0a1b2c3d/' "$root/.github/ci-images.yaml"
+run_check tree "$root"
+check "a tag that ends with them and names another image fails" "$(is "$status" 1)"
+check "naming the whole tag the rule gives it" \
+  "$(contains "$out" 'tag anything-0a1b2c3d is not nats-2.10-0a1b2c3d')"
 
 root=$(fixture tag-without-digest-untagged-upstream)
 cat >> "$root/.github/ci-images.yaml" <<YAML
@@ -317,10 +335,8 @@ cat >> "$root/.github/ci-images.yaml" <<YAML
   - upstream: docker.io/oven/bun:1.4.2-slim
     tag: bun-1.4.2-slim-4e5f6071
     digest: sha256:4e5f60718293a4b54e5f60718293a4b54e5f60718293a4b54e5f60718293a4b5
-  - upstream: docker.io/library/golang:1.26.3-alpine
-    tag: golang-1.26.3-alpine-5f607182
-    digest: sha256:5f60718293a4b5c65f60718293a4b5c65f60718293a4b5c65f60718293a4b5c6
 YAML
+golang_next_row "$root"
 run_check tree "$root"
 check "a row for the next Bun and Go, beside the pinned rows, passes" "$(is "$status" 0)"
 
@@ -352,7 +368,30 @@ check "a digest outside the file fails" "$(is "$status" 1)"
 check "names the file to add it to" "$(contains "$out" 'names a digest no row of .github/ci-images.yaml holds')"
 check "and the line to edit" "$(contains "$out" 'nats-server.ts:1:')"
 
-echo "case: rule 7 — a row the package does not hold"
+echo "case: rule 7 — a reference on a golang row at another version than ARG GO_VERSION"
+# A bump's first commit lands the next Go's row beside the pinned one, and rule 3 admits it. A
+# FROM moved onto that row before the ARG would build its stage with a Go the worker's toolchain
+# stage never downloads, so every reference is read against the ARG.
+root=$(fixture golang-from-off-the-arg)
+golang_next_row "$root"
+sed -i "s|$GOLANG|$GOLANG_NEXT|" "$root/packages/envoy/docker/Dockerfile"
+run_check tree "$root"
+check "a FROM on the other golang row fails" "$(is "$status" 1)"
+check "names the row and the Go it copies" \
+  "$(contains "$out" 'the row for docker.io/library/golang:1.26.3-alpine on line .*, which copies Go 1.26.3-alpine')"
+check "and the ARG it disagrees with" "$(contains "$out" 'pins ARG GO_VERSION=1.25.0')"
+check "and the line of the FROM" "$(contains "$out" 'packages/envoy/docker/Dockerfile:1:')"
+
+# The second commit of a bump: the ARG and every golang FROM move to the new row together.
+root=$(fixture golang-from-moved-with-the-arg)
+golang_next_row "$root"
+sed -i "s|$GOLANG|$GOLANG_NEXT|" "$root/packages/envoy/docker/Dockerfile"
+sed -i 's|ARG GO_VERSION=1.25.0|ARG GO_VERSION=1.26.3|' \
+  "$root/packages/daemon/docker/worker.Dockerfile"
+run_check tree "$root"
+check "the ARG and the FROM moved together passes" "$(is "$status" 0)"
+
+echo "case: rule 8 — a row the package does not hold"
 root=$(fixture not-published)
 MISSING=$GOLANG run_check package "$root"
 check "a row ghcr.io answers 404 for fails" "$(is "$status" 1)"

@@ -17,7 +17,7 @@
 #             pgvector row, whose upstream names a digest alone, carries pgvector-2358fcba. The
 #             digest in the tag gives each digest a tag of its own: a row that moves to a new
 #             digest takes a new tag with it, and the digest it leaves keeps the tag it had.
-#             .github/scripts/check-ci-images.sh refuses a tag that ends with anything else.
+#             .github/scripts/check-ci-images.sh refuses a tag that is not that whole string.
 #   digest    the manifest digest. `crane copy` keeps it, so the copy's digest and the upstream's
 #             are one string, and every consumer names this digest.
 #

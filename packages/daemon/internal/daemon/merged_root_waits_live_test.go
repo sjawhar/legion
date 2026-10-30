@@ -110,14 +110,8 @@ func newMergedRootWaitsLive(t *testing.T) *mergedRootWaitsLive {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The runtime provisions each claim's workspace itself (fake.Runtime's InPod), as the two
-	// sibling proofs do, so the architect's launch reaches the fake without the daemon cloning
-	// acme/widgets from github.com, which the tmux answer would have it try and which no machine
-	// can do: that repository does not exist.
-	rt := fake.NewRuntime()
-	rt.InPod = true
 	r := &mergedRootWaitsLive{
-		liveProof: proof, rt: rt, built: &built{},
+		liveProof: proof, rt: newRuntime(), built: &built{},
 		parent: proof.cfg.Project + "-1", child: proof.cfg.Project + "-2",
 		parentPR: int(number) + 1, childPR: int(number) + 2, openedPR: int(number) + 3,
 		github: mergedRootWaitsGitHub(t), seq: 1,
@@ -125,6 +119,18 @@ func newMergedRootWaitsLive(t *testing.T) *mergedRootWaitsLive {
 	r.seedTree()
 	r.boot()
 	return r
+}
+
+// newRuntime is the fake runtime every boot of this proof runs on. It provisions each claim's
+// workspace itself (fake.Runtime's InPod), as the two sibling proofs do, so a launch reaches the
+// fake without the daemon cloning acme/widgets from github.com, which the tmux answer would have
+// it try and which no machine can do: that repository does not exist. The restart builds its
+// runtime here too: a boot on a runtime without InPod relaunches the child implementer with host
+// workspaces, and the daemon then runs that clone.
+func newRuntime() *fake.Runtime {
+	rt := fake.NewRuntime()
+	rt.InPod = true
+	return rt
 }
 
 // mergedRootWaitsGitHub is GitHub as this proof's daemon reads it: every repository of the
@@ -222,7 +228,7 @@ func (r *mergedRootWaitsLive) restart() {
 	r.t.Helper()
 	r.d.stop()
 	rebindHeldPorts(r.t, &r.cfg)
-	r.rt, r.built = fake.NewRuntime(), &built{}
+	r.rt, r.built = newRuntime(), &built{}
 	r.boot()
 }
 

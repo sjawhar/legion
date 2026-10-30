@@ -34,29 +34,36 @@
 #      `tag` or `digest`, or a digest that is not `sha256:` and 64 hex characters. A tag is
 #      required because an untagged manifest is a package version nothing names, and a retention
 #      policy may delete a digest a job pins.
-#   2. two rows with the same digest, two rows with the same tag, or a tag that does not end
-#      with the first eight hex characters of its own row's digest. The row is what says which
-#      image a digest is — which upstream it copies, and which version that upstream carries —
-#      so one digest names one row and one row names one tag. The digest in the tag is what
-#      makes one tag name one digest: a row that moves to a new digest takes a new tag with it,
-#      the digest it leaves keeps the tag it had, and no copy moves a tag off a digest a
-#      consumer pins. The tag a row must carry is the upstream repository's last path element,
-#      then the upstream tag when the row names one, then those eight characters.
+#   2. two rows with the same digest, two rows with the same tag, or a tag that is not the one
+#      its own row's upstream and digest give it. The row is what says which image a digest is
+#      — which upstream it copies, and which version that upstream carries — so one digest
+#      names one row and one row names one tag. The digest in the tag is what makes one tag
+#      name one digest: a row that moves to a new digest takes a new tag with it, the digest it
+#      leaves keeps the tag it had, and no copy moves a tag off a digest a consumer pins. The
+#      tag a row must carry is the upstream repository's last path element, then the upstream
+#      tag when the row names one, then the first eight hex characters of the digest. This
+#      check reads the whole string, not the eight characters alone.
 #   3. a version this repository pins elsewhere that no row carries: no `oven/bun` row at the
 #      version `.bun-version` locks, with or without the `-slim` suffix, or no `library/golang`
 #      row at `ARG GO_VERSION` of packages/daemon/docker/worker.Dockerfile. A row for another
 #      version is admitted, so raising Bun or Go is two commits: the new version's row first,
 #      which ci.yaml's ci-images job copies, then the pin and every FROM. One commit holding
 #      both would let a consumer job pull the new digest while that same run's copy is still
-#      landing it.
+#      landing it. Rule 7 below is what keeps a Go FROM on the row the ARG names.
 #   4. a reference in CI's reach that names a registry other than ghcr.io/sjawhar/legion/ci,
 #   5. a reference in CI's reach that is not pinned by digest (`@sha256:` and 64 hex characters):
 #      a tag is a name the registry can move, so only a digest names the bytes a job ran,
-#   6. a reference in CI's reach whose digest no row of .github/ci-images.yaml holds.
+#   6. a reference in CI's reach whose digest no row of .github/ci-images.yaml holds,
+#   7. a reference in CI's reach whose row copies library/golang at a version other than
+#      ARG GO_VERSION of packages/daemon/docker/worker.Dockerfile. Rule 3 asks for one row at
+#      that version and admits a row beside it, so without this rule a FROM could name the
+#      other row: that stage would build with the other Go, and the worker's toolchain stage
+#      downloads the ARG's. A bump's second commit moves the ARG and every FROM together, so it
+#      passes. .github/scripts/check-bun-version.sh holds a Bun FROM to .bun-version this way.
 #
 # IN PACKAGE MODE:
 #
-#   7. a row whose digest the package does not hold: the manifest is read with an anonymous
+#   8. a row whose digest the package does not hold: the manifest is read with an anonymous
 #      `HEAD` against ghcr.io. Its message names .github/ci-images.yaml and says that ci.yaml's
 #      ci-images job copies a row before this mode reads the package, so the usual remedy is to
 #      merge the row and let that job run.
@@ -102,7 +109,7 @@
 # Files are discovered by walking the tree, not by asking git, so an unsnapshotted change cannot
 # read green locally.
 #
-# CHECK 7 AND THE NETWORK. The package mode's read of the package is one anonymous token request
+# CHECK 8 AND THE NETWORK. The package mode's read of the package is one anonymous token request
 # (`GET https://ghcr.io/token?scope=repository:sjawhar/legion/ci:pull&service=ghcr.io`) and one
 # `HEAD https://ghcr.io/v2/sjawhar/legion/ci/manifests/<digest>` per row, with an `Accept` naming
 # the four index and manifest media types. CI_IMAGES_MANIFEST_HEAD is the seam that read hangs
@@ -192,6 +199,10 @@ MIRROR_SCRIPT = ".github/scripts/mirror-ci-images.sh"
 MIRROR_JOB = "ci.yaml's ci-images job"
 BUN_PIN = Path(".bun-version")
 WORKER_DOCKERFILE = Path("packages/daemon/docker/worker.Dockerfile")
+# The two upstream repositories a pin of this repository names: rule 3 asks for a row at each
+# pin, and rule 7 holds every reference on a GOLANG_REPOSITORY row to ARG GO_VERSION.
+BUN_REPOSITORY = "oven/bun"
+GOLANG_REPOSITORY = "library/golang"
 MIRROR = "mirror.gcr.io"
 # The directories workflow_paths.walk skips (.git, .jj, node_modules, .venv, vendor) are every
 # directory this sweep skips but one, and this set holds that one.
@@ -448,7 +459,7 @@ def verdict(what: str, summary: str) -> None:
     raise SystemExit(0)
 
 
-# ---------------------------------------------------------------- rule 7: the package
+# ---------------------------------------------------------------- rule 8: the package
 def manifest_status(digests: list[str]) -> dict[str, str]:
     """The HTTP status of an anonymous manifest HEAD, per digest. CI_IMAGES_MANIFEST_HEAD stands
     in for the read, so a test drives this check without the network."""
@@ -522,12 +533,13 @@ def upstream_parts(upstream: str) -> tuple[str, str, str, str]:
     return split_reference(upstream) or ("", "", "", "")
 
 
-def tag_rule(upstream: str, digest: str) -> tuple[str, str]:
-    """(the eight characters a row's tag ends with, the whole tag the rule gives that row)."""
-    short = digest.partition(":")[2][:8]
+def tag_rule(upstream: str, digest: str) -> str:
+    """The tag the rule gives a row: the upstream repository's last path element, then the
+    upstream tag when the row names one, then the first eight hex characters of the digest."""
     _, path, carried, _ = upstream_parts(upstream)
+    short = digest.partition(":")[2][:8]
     parts = [part for part in (path.rpartition("/")[2], carried, short) if part]
-    return short, "-".join(parts)
+    return "-".join(parts)
 
 
 by_digest: dict[str, tuple[int, str, str, str]] = {}
@@ -552,13 +564,14 @@ for row in readable:
         )
     else:
         by_tag[tag] = row
-    short, wanted = tag_rule(upstream, digest)
-    if not tag.endswith(short):
+    wanted = tag_rule(upstream, digest)
+    if tag != wanted:
         problems.append(
-            f"{CI_IMAGES}:{line}: tag {tag} does not end with {short}, the first eight characters "
-            f"of this row's digest. A tag without them is a tag another digest of the same image "
-            f"can take, and the copy that takes it moves the tag off the digest consumers pin. "
-            f"Name this row {wanted}."
+            f"{CI_IMAGES}:{line}: tag {tag} is not {wanted}, the tag this row's upstream and "
+            f"digest give it. The last eight characters are what keeps one tag on one digest. A "
+            f"tag without them is a tag another digest of the same image can take, and the copy "
+            f"that takes it moves the tag off the digest consumers pin. The rest names the image "
+            f"a reader of the package sees. Name this row {wanted}."
         )
 
 
@@ -566,8 +579,9 @@ for row in readable:
 # is enough, and a row for another version is admitted, because a bump lands its row in the
 # commit before the pin: ci.yaml's ci-images job copies the row, and the commit that moves the
 # pin and the FROMs then pulls a digest the package already holds. Nothing loosens by admitting
-# the extra row. Rule 6 refuses a FROM whose digest no row holds, and
-# .github/scripts/check-bun-version.sh refuses a FROM on a row of any Bun but the pinned one.
+# the extra row. Rule 6 refuses a FROM whose digest no row holds, rule 7 refuses a FROM on a
+# library/golang row of any Go but the pinned one, and .github/scripts/check-bun-version.sh
+# refuses a FROM on a row of any Bun but the pinned one.
 if not BUN_PIN.is_file():
     fatal(f"{BUN_PIN} is missing: the oven/bun rows of {CI_IMAGES} carry the version it pins")
 bun_pin = BUN_PIN.read_text().strip()
@@ -585,19 +599,19 @@ for text in worker_text.splitlines():
 if not go_pin:
     fatal(f"{WORKER_DOCKERFILE} declares no ARG GO_VERSION=<version>, which a golang row copies")
 
-carried_by: dict[str, list[str]] = {"oven/bun": [], "library/golang": []}
+carried_by: dict[str, list[str]] = {BUN_REPOSITORY: [], GOLANG_REPOSITORY: []}
 for _, upstream, _, _ in readable:
     _, repository, carried, _ = upstream_parts(upstream)
     if repository in carried_by:
         carried_by[repository].append(carried)
-if not any(carried in {bun_pin, f"{bun_pin}-slim"} for carried in carried_by["oven/bun"]):
+if not any(carried in {bun_pin, f"{bun_pin}-slim"} for carried in carried_by[BUN_REPOSITORY]):
     problems.append(
         f"{CI_IMAGES}:{key_line(document, 'images')}: no row copies oven/bun:{bun_pin}, and "
         f"{BUN_PIN} locks {bun_pin}. Add that row (the `-slim` suffix is a row of its own) and "
         f"name its digest, and {MIRROR_JOB} publishes it. Raising Bun is two commits: this row "
         f"first, then {BUN_PIN}, the ARG and every FROM."
     )
-if not any(carried.partition("-")[0] == go_pin for carried in carried_by["library/golang"]):
+if not any(carried.partition("-")[0] == go_pin for carried in carried_by[GOLANG_REPOSITORY]):
     problems.append(
         f"{CI_IMAGES}:{key_line(document, 'images')}: no row copies library/golang at the "
         f"version {WORKER_DOCKERFILE} pins ARG GO_VERSION={go_pin}. Add the row "
@@ -636,7 +650,7 @@ def note(path: Path, line: int, text: str, how: str) -> None:
 
 
 def judge(path: str, line: int, text: str, how: str) -> None:
-    """Rules 4, 5 and 6: one reference, read against the rows."""
+    """Rules 4, 5, 6 and 7: one reference, read against the rows."""
     parts = split_reference(text)
     if parts is None:
         problems.append(
@@ -660,10 +674,24 @@ def judge(path: str, line: int, text: str, how: str) -> None:
             f"name the digest instead: {REGISTRY}@<digest> from {CI_IMAGES}."
         )
         return
-    if digest not in by_digest:
+    row = by_digest.get(digest)
+    if row is None:
         problems.append(
             f"{path}:{line}: {how} names a digest no row of {CI_IMAGES} holds, so nothing copies "
             f"it into the package. Add its row to that file, and {MIRROR_JOB} publishes it."
+        )
+        return
+    # Rule 7. Rule 3 admits a library/golang row beside the one the ARG names, which is what a
+    # bump's first commit lands, so the row a Go FROM names is read here against that ARG.
+    _, row_repository, carried, _ = upstream_parts(row[1])
+    if row_repository == GOLANG_REPOSITORY and carried.partition("-")[0] != go_pin:
+        version = one_line(carried) if carried else "no version this check can read"
+        problems.append(
+            f"{path}:{line}: {how} names the row for {one_line(row[1])} on line {row[0]} of "
+            f"{CI_IMAGES}, which copies Go {version}, and {WORKER_DOCKERFILE} pins "
+            f"ARG GO_VERSION={go_pin}. A stage that builds with another Go is not the Go the "
+            f"worker's toolchain stage downloads, so name the row at {go_pin} here. Raising Go "
+            f"is two commits: that row first, then the ARG and every FROM together."
         )
 
 

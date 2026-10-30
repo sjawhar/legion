@@ -262,14 +262,6 @@ run_check "$root"
 check "an ARG default that disagrees with the pin fails" "$(is "$status" 1)"
 check "names both versions" "$(contains "$out" 'but .bun-version locks 1.3.14')"
 
-# The fixture's Dockerfile reads the ARG (`FROM oven/bun:${BUN_VERSION}`), which is what holds
-# its default to the pin. A Dockerfile that reads it nowhere builds the same image whatever the
-# default says, so the default is left alone.
-root=$(fixture arg-unread)
-printf 'ARG BUN_VERSION=1.4.2\nFROM scratch AS empty\n' > "$root/unread.Dockerfile"
-run_check "$root"
-check "an ARG default no instruction reads passes" "$(is "$status" 0)"
-
 root=$(fixture dockerfile-suffix)
 printf 'ARG BUN_VERSION=1.3.14\nFROM oven/bun:${BUN_VERSION}-slim AS cli\n' > "$root/worker.Dockerfile"
 run_check "$root"

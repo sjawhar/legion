@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 # Tests for `mirror-ci-images.sh`: it copies the rows the package does not hold, it copies no row
-# the package already holds, it asks for the row's digest and not the row's upstream tag, and it
-# fails naming the row when a copy lands at another digest.
+# the package already holds, it asks for the row's digest and not the row's upstream tag, it
+# refuses a row whose upstream tag names another digest, and it fails naming the row when a copy
+# lands at another digest.
 #
 # NO CASE REACHES THE NETWORK. Every case puts a stand-in `crane` first on PATH, which reads and
-# writes a stand-in registry under $CRANE_STATE: `tags` is one `<registry>:<tag>\t<digest>` line
-# per tag the registry holds, `upstreams` is one `<reference>\t<digest>` line per reference a copy
-# can read, `package` is one digest per line, and `copied` is one reference per line the stand-in
-# copied. A reference the script asks for is `<upstream repository>@<the row's digest>`, so a
-# fixture that also names an upstream tag says where a run that read the tag would land. The
-# first four cases build a miniature repository under a temporary directory and symlink the real
-# script into it, so the script under test is the file CI runs: it resolves its root from its own
-# path (`cd "$(dirname "$0")/../.."`), which the symlink puts at the fixture root.
+# writes a stand-in registry under $CRANE_STATE: `tags` is one `<reference>\t<digest>` line per
+# tag `crane digest` can read, in the package and upstream both, `upstreams` is one
+# `<reference>\t<digest>` line per reference a copy can read, `package` is one digest per line,
+# and `copied` is one reference per line the stand-in copied. A later line of `tags` wins, so a
+# case moves an upstream tag by appending one. The reference the script copies from is the row's
+# upstream at the row's digest, so a fixture line on the upstream tag alone says where a run that
+# read the tag would land. The first five cases build a miniature repository under a temporary
+# directory and symlink the real script into it, so the script under test is the file CI runs: it
+# resolves its root from its own path (`cd "$(dirname "$0")/../.."`), which the symlink puts at
+# the fixture root.
 #
 # The last case is the ordering ci.yaml's ci-images job keeps: the package mode of
 # check-ci-images.sh reads which rows the package holds, so the copy for this change must run
@@ -89,9 +92,10 @@ SH
 chmod +x "$head_script"
 
 # fixture <name>: a tree of two rows, with a stand-in registry that holds the first row's tag and
-# not the second's, and can read each row's digest reference. Echoes the fixture root. Each case
-# names its own tree: two cases sharing a name would share a tree, so a repeated name is refused
-# here rather than surfacing as the `ln -s` below failing.
+# not the second's, that reads each row's digest reference, and that answers each row's upstream
+# tag with that row's digest. Echoes the fixture root. Each case names its own tree: two cases
+# sharing a name would share a tree, so a repeated name is refused here rather than surfacing as
+# the `ln -s` below failing.
 fixture() {
   local root="$work/$1"
   if [ -e "$root" ]; then
@@ -111,9 +115,11 @@ images:
     tag: bun-1.3.14-1b2c3d4e
     digest: $BUN
 YAML
-  printf '%s\t%s\n' "docker.io/library/nats@$NATS" "$NATS" > "$root/state/upstreams"
-  printf '%s\t%s\n' "docker.io/oven/bun@$BUN" "$BUN" >> "$root/state/upstreams"
+  printf '%s\t%s\n' "docker.io/library/nats:2.10@$NATS" "$NATS" > "$root/state/upstreams"
+  printf '%s\t%s\n' "docker.io/oven/bun:1.3.14@$BUN" "$BUN" >> "$root/state/upstreams"
   printf '%s\t%s\n' "$REGISTRY:nats-2.10-0a1b2c3d" "$NATS" > "$root/state/tags"
+  printf '%s\t%s\n' "docker.io/library/nats:2.10" "$NATS" >> "$root/state/tags"
+  printf '%s\t%s\n' "docker.io/oven/bun:1.3.14" "$BUN" >> "$root/state/tags"
   printf '%s\n' "$NATS" > "$root/state/package"
   : > "$root/state/copied"
   echo "$root"
@@ -135,10 +141,11 @@ echo "case: a row the package does not hold"
 root=$(fixture copies-the-missing-row)
 run_mirror "$root"
 check "exits 0" "$(is "$status" 0)"
-check "names the copy" "$(contains "$out" "copy   docker.io/oven/bun@$BUN -> $REGISTRY:bun-1.3.14-1b2c3d4e")"
+check "names the copy" "$(contains "$out" "copy   docker.io/oven/bun:1.3.14@$BUN -> $REGISTRY:bun-1.3.14-1b2c3d4e")"
+check "read the row's label first" "$(contains "$out" "label  docker.io/oven/bun:1.3.14 is $BUN, this row's digest")"
 check "and the digest it landed at" "$(contains "$out" "copied $REGISTRY:bun-1.3.14-1b2c3d4e $BUN")"
 check "counts the row it held" "$(contains "$out" '^1 row(s) already in the package, 1 copied$')"
-check "copied that row alone" "$(is "$(cat "$root/state/copied")" "docker.io/oven/bun@$BUN")"
+check "copied that row alone" "$(is "$(cat "$root/state/copied")" "docker.io/oven/bun:1.3.14@$BUN")"
 check "and the package now holds its digest" "$(contains "$(cat "$root/state/package")" "$BUN")"
 
 echo "case: a row the package already holds"
@@ -151,30 +158,43 @@ check "holds both rows" "$(contains "$out" "held   $REGISTRY:bun-1.3.14-1b2c3d4e
 check "copies nothing" "$(is "$(cat "$root/state/copied")" "")"
 check "and says so" "$(contains "$out" '^2 row(s) already in the package, 0 copied$')"
 
-echo "case: an upstream tag that has moved since the row was written"
-# The row's upstream names docker.io/oven/bun:1.3.14, and that tag now points at another digest,
-# as a floating upstream tag does between two runs. The copy asks for the row's digest, so it
-# lands at the row's digest and the run passes.
+echo "case: an upstream tag that has moved since a held row was written"
+# The nats row is in the package already, and its upstream tag now points at another digest, as a
+# floating upstream tag does between two runs. Nothing copies a held row, so nothing reads its
+# label: the comparison below belongs to the copy, which writes its row now.
 root=$(fixture upstream-tag-moved)
-printf '%s\t%s\n' "docker.io/oven/bun:1.3.14" "$OTHER" >> "$root/state/upstreams"
+printf '%s\t%s\n' "docker.io/library/nats:2.10" "$OTHER" >> "$root/state/tags"
+printf '%s\t%s\n' "docker.io/library/nats:2.10" "$OTHER" >> "$root/state/upstreams"
 run_mirror "$root"
 check "exits 0" "$(is "$status" 0)"
-check "asked for the row's digest" "$(is "$(cat "$root/state/copied")" "docker.io/oven/bun@$BUN")"
-check "and landed there" "$(contains "$out" "copied $REGISTRY:bun-1.3.14-1b2c3d4e $BUN")"
-check "and the package holds the row's digest, not the tag's" \
+check "holds the row whose upstream tag moved" "$(contains "$out" "held   $REGISTRY:nats-2.10-0a1b2c3d $NATS")"
+check "asked for the other row's digest" "$(is "$(cat "$root/state/copied")" "docker.io/oven/bun:1.3.14@$BUN")"
+check "and the package holds no digest a moved tag names" \
   "$(is "$(contains "$(cat "$root/state/package")" "$OTHER")" false)"
+
+echo "case: an upstream tag that names another digest than the row it labels"
+# The row says oven/bun:1.3.14 and its digest holds other bytes. Every gate of this repository
+# reads that label and never the bytes, so the copy is the one place the two are compared.
+root=$(fixture upstream-tag-disagrees)
+printf '%s\t%s\n' "docker.io/oven/bun:1.3.14" "$OTHER" >> "$root/state/tags"
+run_mirror "$root"
+check "fails" "$(is "$status" 1)"
+check "names the upstream and both digests" \
+  "$(contains "$out" "docker.io/oven/bun:1.3.14 is $OTHER, and this row's digest is $BUN")"
+check "says the label and the bytes disagree" "$(contains "$out" "The row's label and its bytes disagree")"
+check "and copies nothing" "$(is "$(cat "$root/state/copied")" "")"
 
 echo "case: a copy that lands at another digest"
 root=$(fixture copy-lands-elsewhere)
-printf '%s\t%s\n' "docker.io/oven/bun@$BUN" "$OTHER" > "$root/state/upstreams"
+printf '%s\t%s\n' "docker.io/oven/bun:1.3.14@$BUN" "$OTHER" > "$root/state/upstreams"
 run_mirror "$root"
 check "fails" "$(is "$status" 1)"
 check "names the row and both digests" \
   "$(contains "$out" "$REGISTRY:bun-1.3.14-1b2c3d4e landed at $OTHER, and the row says $BUN")"
-check "names the reference it copied" "$(contains "$out" "This copy read docker.io/oven/bun@$BUN")"
+check "names the reference it copied" "$(contains "$out" "This copy read docker.io/oven/bun:1.3.14@$BUN")"
 check "and says what to do" "$(contains "$out" 're-run the ci-images job')"
 
-echo "case: the gate's check 7 before the copy, and after it"
+echo "case: the gate's check 8 before the copy, and after it"
 # ci.yaml's ci-images job runs this script and then the gate's package mode, in that order,
 # because that mode reads which rows the package holds. Here the stand-in package holds every row
 # of .github/ci-images.yaml but the last one.
@@ -189,19 +209,19 @@ import yaml
 repository, state = sys.argv[1], sys.argv[2]
 document = yaml.safe_load(open(f"{repository}/.github/ci-images.yaml"))
 registry, rows = document["registry"], document["images"]
-with open(f"{state}/upstreams", "w") as upstreams:
+with open(f"{state}/upstreams", "w") as upstreams, open(f"{state}/tags", "w") as tags:
     for row in rows:
-        # What the script asks `crane copy` for: the upstream's repository at the row's digest.
-        # A row's upstream tag is in no line here, so a run that read one copies nothing.
-        name = row["upstream"].partition("@")[0]
-        head, slash, last = name.rpartition("/")
-        if ":" in last:
-            name = head + slash + last.partition(":")[0]
-        upstreams.write(f"{name}@{row['digest']}\t{row['digest']}\n")
-with open(f"{state}/tags", "w") as tags, open(f"{state}/package", "w") as package:
-    for row in rows[:-1]:
-        tags.write(f"{registry}:{row['tag']}\t{row['digest']}\n")
-        package.write(f"{row['digest']}\n")
+        # The row's upstream without the digest it may carry. The script copies from that string
+        # at the row's digest, and reads the row's label from the string itself, so the stand-in
+        # answers both. A row whose upstream names no tag is never read as a label, and the line
+        # that holds it here is a line the script asks for nothing.
+        labelled = row["upstream"].partition("@")[0]
+        upstreams.write(f"{labelled}@{row['digest']}\t{row['digest']}\n")
+        tags.write(f"{labelled}\t{row['digest']}\n")
+    with open(f"{state}/package", "w") as package:
+        for row in rows[:-1]:
+            tags.write(f"{registry}:{row['tag']}\t{row['digest']}\n")
+            package.write(f"{row['digest']}\n")
 print(rows[-1]["tag"])
 PY
 )
