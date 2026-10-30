@@ -11,7 +11,6 @@ date: 2026-10-30
 status: active
 module: packages/envoy/internal/dispatch/docs
 related_issues:
-  - "INFRA-721"
   - "sjawhar/legion#2525"
 ---
 
@@ -47,7 +46,7 @@ related_issues:
 
 ## Evidence
 
-INFRA-721 rewrote this one guard three times under review, in
+sjawhar/legion#2525 rewrote this one guard three times under review, in
 `packages/envoy/internal/dispatch/docs/ask_option_merge.go` and `ask_block_text.go`:
 
 1. It read marks (`plainInline`). Every option a person had typed in the browser was refused a

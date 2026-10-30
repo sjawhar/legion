@@ -11,7 +11,6 @@ date: 2026-10-30
 status: active
 module: packages/envoy/internal/dispatch/docs
 related_issues:
-  - "INFRA-721"
   - "sjawhar/legion#2525"
 ---
 
@@ -56,7 +55,7 @@ bold - follows these rules.
 
 ## Evidence
 
-INFRA-721, in `packages/envoy/internal/dispatch/docs/ask_option_merge.go`,
+sjawhar/legion#2525, in `packages/envoy/internal/dispatch/docs/ask_option_merge.go`,
 `ask_block_text.go` and `packages/envoy/internal/dispatch/api/asks.go`. An agent's options edit of
 a Dispatch decision rebuilt the whole bullet list, so a sub-list, a second paragraph, a link's
 address and bold under an option were deleted unseen; the ask row shows an option's label and
