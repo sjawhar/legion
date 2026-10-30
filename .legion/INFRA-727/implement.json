@@ -2,47 +2,68 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-727",
-  "completed": "2026-10-30T14:49:00Z",
-  "round": 2,
+  "completed": "2026-10-30T21:40:00Z",
+  "round": 3,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2548",
-  "head": "e04a7137afa8",
-  "answers": "Both of the tester's findings (test.json, failures 1 and 2), with its two red rows unmodified.",
+  "head": "8ac732495fe0",
+  "answers": "The tester's failure (test.json round 2) and its blocker, plus the architect's amended decision on the re-anchor (PR comment 6529852930).",
   "proof": [
     {
-      "criterion": "The tester's first red row: a comment on words that read twice keeps the reading its author selected (its failure 1, against plan acceptance 2 and the PR's Outcome)",
+      "criterion": "The tester's red row, unmodified: a comment keeps its own reading when another writer adds an earlier one - and the rule it rests on, that a record on a passage the reader never selected is worse than a refusal",
       "surface": "Dispatch's web app in Chromium through Playwright, against the real Go server and PostgreSQL 17.11 with pgvector",
       "command": "cd packages/dispatch && bun run e2e -- compose-wait",
-      "observed": "7 passed (4.7m) at e04a7137afa8: the tester's two rows green and the five earlier rows still green. The repeated-quote row creates the comment, its anchor quote is 'the lazy dog', it is not orphaned, and its mark covers paragraph offset 62 - the second reading, the one the reader selected - after the tab was offline past the sweep's TTL and the editor was rebuilt by the reconnect.",
-      "headSha": "e04a7137afa8",
-      "negativeControl": "The same row is the tester's own red test: at b2f225b841ca it failed at theComment with 'Expected: 1, Received: 0' and the composer showed the changed-or-deleted refusal. Neither red row was edited this round (jj diff over packages/dispatch/e2e is empty)."
+      "observed": "9 passed (4.6m) at 8ac732495fe0. The tester's row is green: the paragraph gains 'Zero the lazy dog. ' in front of the reader's reading and takes the mark with the same edit, and the comment lands on the reader's own words, which the text around them names.",
+      "headSha": "8ac732495fe0",
+      "negativeControl": "The same row is the tester's own red test, failing at 299187ea with 'offset 25 received, 44 expected' - the comment on 'Alpha the lazy dog', a passage the reader never selected. The proof-editor unit suite also pins the cap: the row 'the surroundings the cap keeps tell those readings apart where a shorter prefix would not' fails those two readings apart only at the chosen length."
     },
     {
-      "criterion": "The tester's second red row: an ask's refusal does not call itself a comment (its failure 2)",
+      "criterion": "The architect's amended decision: words somewhere else with different surroundings are a different passage, so Send refuses and keeps the draft rather than moving the comment there",
       "surface": "The same",
       "command": "cd packages/dispatch && bun run e2e -- compose-wait",
-      "observed": "The Ask composer whose selected text another writer deleted keeps 'Which dog?' in the field, says 'Your draft is kept', and its text no longer holds 'this comment'. The comment row that asserts the original sentence word for word is still green, so the comment wording did not move.",
-      "headSha": "e04a7137afa8",
-      "negativeControl": "At b2f225b841ca that row failed on the Ask composer showing '...so this comment has nothing to attach to...'."
+      "observed": "New row 'a comment whose own paragraph lost the words is not moved to another paragraph': another writer replaces 'Alpha the lazy dog sits here.' with 'Nothing of the sort.' while 'Beta the lazy dog sits there.' still reads the selected words. No comment is created, the draft 'Which dog is this?' stays in the field, the composer says the draft is kept, and it does not claim the words were changed or deleted, since they are on the page. No mark is left in the document.",
+      "headSha": "8ac732495fe0",
+      "negativeControl": "The tester measured exactly this case at the previous head and recorded the comment attaching silently to 'Beta the lazy dog sits there.' (test.json, verifiedAtThisHead). The row is red at that head for that reason and green here."
+    },
+    {
+      "criterion": "The tester's blocker: the pull request conflicted with main, so GitHub ran no checks on any head since 7cfe1f0c",
+      "surface": "GitHub, and the browser rows at the merge head before any new work",
+      "command": "jj new legion/INFRA-727 main@origin, resolve, then cd packages/dispatch && bun run e2e -- compose-wait at 95644a6234b0",
+      "observed": "One text conflict, in packages/envoy/internal/dispatch/docs/marks_test.go, where both sides added tests at the same place; both kept. At the merge head, before the selector work: 7 passed, 1 failed, the one failure being the tester's own red row, so main's 36-file move under pmdoc broke nothing of this change. go test ./internal/dispatch/docs/ -run 'Unrecorded|VerifyMark|Sweep|Settle' ok (149s), go vet clean, both typechecks and biome green. GitHub now runs the pull request: changes, ci-filters, dispatch-browser-multiprocess, dispatch-multiprocess, envoy-infra-go, envoy-session-stall, envoy-smoke, lint, listener-server-change, pr-title and test are green, the rest still running when I read them, which I did not wait for.",
+      "headSha": "95644a6234b0",
+      "negativeControl": "The fingerprint over the pull request's own lines changed across the merge (48aa1bdf -> 45df1954), as it must when the base's copy of these files moved; the comparison and both values are on the pull request, with the per-row result at the merge head."
+    },
+    {
+      "criterion": "Nothing else in the application broke",
+      "surface": "The whole Chromium e2e project",
+      "command": "cd packages/dispatch && bun run e2e -- --project=chromium",
+      "observed": "932 passed, 1 failed (1.1h) at 8ac732495fe0. The one failure is e2e/hover-preview.e2e.ts:87, 'hovering a board card previews the issue and moving onto the card keeps it open'.",
+      "headSha": "8ac732495fe0",
+      "negativeControl": "That row is not this change's: I ran it on main@origin (0be366cf) in this same pod, with nothing of this branch in the tree, and it fails there too, at the same 30 s default timeout. The tester saw it and could not compare; this settles it. It is a two-core timing failure of a row that installs a fake clock and takes screenshots without raising its timeout."
     }
   ],
   "filesChanged": [
-    "packages/proof-editor/src/record-mark-retype.ts (placementOf, readingsInBlock/readingsInDoc/blockWithId, the five-step remarkRange, the 'unplaceable' refusal)",
-    "packages/proof-editor/src/dispatch-marks.ts (RecordMarkPlacement on MarkAction), src/dispatch-action-bar.ts, src/lib.ts",
+    "packages/envoy/internal/dispatch/docs/marks_test.go (merge resolution only: both sides' new tests kept)",
+    "packages/proof-editor/src/dispatch-marks.ts (RecordMarkPlacement is blockId + prefix + suffix), src/record-mark-retype.ts (QUOTE_CONTEXT_CHARS, surroundings matching, the new resolution order), src/dispatch-action-bar.ts, src/lib.ts",
     "packages/proof-editor/tests/record-mark-retype.test.ts, tests/comment-on-selection.test.ts",
-    "packages/dispatch/web/src/features/margin/margin-context.tsx (REANCHOR_REFUSALS: one sentence per reason, the composer's kind in each), margin-context.test.ts (new), Margin.test.tsx, MentionComposer.margin.test.tsx",
     "packages/dispatch/web/src/features/conversation/composer-model.ts, held-sends.ts",
-    "packages/dispatch/web/src/features/doc/ProofDocument.tsx, ProofDocument.test.tsx, editor.ts"
+    "packages/dispatch/web/src/features/margin/margin-context.tsx, MentionComposer.margin.test.tsx, features/doc/ProofDocument.test.tsx",
+    "packages/dispatch/e2e/compose-wait.e2e.ts (my own additions only: the new ninth row, and presentAt in my round-1 helper; no row of the tester's was touched)"
   ],
   "trickyParts": [
-    "What survives an editor rebuild had to live outside the editor: the composer keeps the mark's block id and the index of that reading inside the block, both computed by the editor at selection, and hands them back at the re-anchor. No count crosses the browser-server boundary, and VerifyMark still checks the mark that was written.",
-    "Resolution order is now: the live mark, the tracked range, the remembered reading in the remembered block (its last reading when the block now holds fewer; refused when it holds none), then the sole reading in the document when the block is gone.",
-    "The refusal tells two cases apart: words that read nowhere were changed or deleted; words still on the page that cannot be placed say so. Each names comment, ask or suggestion."
+    "The remembered reading index was the defect: an index names a position in a list another writer can prepend to. The selector names the passage instead - the words plus the text immediately before and after them, as the editor read it at selection - so a reading added in front changes nothing about the reader's own.",
+    "The resolution order keeps one deliberate asymmetry. Inside the block the reader selected in, a single reading of the quote is taken even when the words around it changed, because the block they chose holding their words once is their passage; that is what keeps the sentence-rewrite row green. Outside it, nothing is taken without matching surroundings.",
+    "The context cap is 32 characters each side, chosen by measuring this repository's own prose rather than picked: of 13,876 phrases that read more than once inside one block, 32 characters separate 90.4% of them, against 81.1% at 16 and 53.0% at 4. A unit test pins it against a shorter cap that would not separate the tester's two readings.",
+    "presentAt in packages/dispatch/e2e/compose-wait.e2e.ts asked for an exact second label, and the sampler loses a second now and then on a two-core box, which made my own round-1 row flake once here. It now reads the first sample at or after the second it asks about. That helper and the new ninth row are the only changes under packages/dispatch/e2e, and no row the tester wrote was touched."
   ],
-  "deviations": [],
+  "deviations": [
+    "The plain 'the only reading in the whole document' fallback, which the architect accepted in its first decision and which round 2 shipped, is gone: it is what moved a comment to another paragraph silently. Its replacement is the amended decision's surroundings match."
+  ],
   "openQuestions": [
-    "The reported 'about ten seconds' is still unexplained, as round 1 recorded."
+    "The reported 'about ten seconds' is still unexplained, as rounds 1 and 2 recorded.",
+    "e2e/hover-preview.e2e.ts:87 fails in this pod on main as well as here. It is not this change's, and CI is the place to watch it now that the merge lets CI run."
   ],
   "discoveredComplexity": [
-    "The e2e Postgres is shared with the other roles of this pod: running pg_ctl start against a data directory whose server is already up makes that server shut itself down, which cost one e2e run this round. Check pg_isready before starting it."
+    "The simplify pass was spent in round 1 (ce-simplify-code at 96a647eb, applied, new head de1a0322). This round answers a tester failure, so it runs no second pass.",
+    "The e2e Postgres lives at /legion/scratch/harness and is shared with the other roles of this pod: check pg_isready before pg_ctl start, since starting a second server against a live data directory shuts the live one down."
   ]
 }
