@@ -2,56 +2,65 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-592",
-  "completed": "2026-10-30T01:22:00Z",
-  "round": 3,
-  "headSha": "89071a763735c3448ed730f3561d90fa9e37d6de",
-  "codeHeadSha": "c2ce589bbc13e17faab60ebaded8b279936fda47",
-  "fingerprint": "b323dae437bf7abaffe46966880038c796a984d929108d33cbd2d5e73f35ae76 (the same at 89071a76 and c2ce589b; computed as skill://legion-worker/references/conflicts-and-rewrites.md gives it, base main)",
+  "completed": "2026-10-30T05:44:00Z",
+  "round": 4,
+  "headSha": "1759bd4c7db9d83ef099b19a308aa257eaedfac0",
+  "codeHeadSha": "b7892ad2e20da894e66f7809ef300ecdf4bf4671",
+  "fingerprint": "273de245beee7bfe0bd78d18109bd47ed1d68d20b2516676366516553be6a545 at b7892ad2 (was b323dae4 at 89071a76): the forward merge of main's #2463 changed the PR's own diff (api/comment_actions.go, comment_create.go, messages.go, docs/block_index.go), so a full round",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran their real-binary proof myself at the head build (89071a76, LOADTEST_ROOT=lt2, demo.sh): the waiting statistics refresh is dispatch-background at 2, 5 and 10 s, logs items=2 duration=18.97s after the holder rolls back (theirs 18.74 s). Their 10x step at the same head (r4-head-10x): 80,824 reads and 6,744 writes refused 429 OVERLOADED (theirs 80,751 / 6,748), 147.4 reads/s served (theirs about 148), 2.34 events/s committed (theirs 2.32), read refusal p99 91 ms (theirs 108), 0 connection failures. Their 1x (r4-head-1x): 0 refusals, 3.99 of 3.99 events/s committed."
+    "how": "Re-ran at the head build on their lt3 seed: their 10x (t4-head-10x): 89,930 reads and 6,862 writes refused 429 OVERLOADED (theirs 88,874 / 6,847), 96.8 reads/s served (theirs about 103), 1.68 events/s committed (theirs 1.77), 0 connection failures, at most 9 goroutines waiting (theirs 14). Their edit smoke's negative control (blocks without base_revision -> 400 INVALID_COMMENT) reproduced. Their 1x (0 refusals) did not reproduce in my one run (192 reads, 33 writes refused, without #2392, in a run whose sampler gap reached 8 s); recorded as measured, as in earlier rounds."
   },
   "failed": 1,
   "failures": [
     {
-      "criterion": "CI read green at the tested head (the architect's checks 3, 4 and 5: envoy-go's TestTheWriterGateAdmitsAWriteAndRefusesAPinnedRead, ci-filters, envoy-go-race and envoy-go-race-docs)",
-      "evidence": "gh pr view 2402 --json mergeable,mergeStateStatus -> CONFLICTING / DIRTY at 89071a76. git merge-tree --write-tree main@origin(10fc3b77) 89071a76 -> CONFLICT (content) in .github/workflows/ci.yaml, .github/workflows/docs-pages.yaml, packages/envoy-client/src/__tests__/dispatch-http.test.ts, packages/envoy/internal/dispatch/api/comment_actions.go, packages/envoy/internal/dispatch/api/comment_create.go, from main's #2463 'comments and messages are collections of blocks' (10fc3b77, committed 00:43:29Z). GitHub computes no merge ref for a conflicting head, so it ran nothing: GET repos/sjawhar/legion/commits/<sha>/check-runs total_count 0 for both 89071a76 and c2ce589b, and gh run list --commit lists no run. The implementer's forward merge of main is needed; the architect directed this round to fail on it (Envoy 00:53Z). No red test: this is a base conflict, not a code defect. The PR's own diff touches api/comment_create.go and api/comment_actions.go, which main changed, so under the architect's 00:58Z rule the forward merge is a full round: envoy-go, envoy-go-race and the dispatch lanes must be read green at the merged head."
+      "criterion": "Architect check 2: a comment edit's writer gate and #2463's carried-edit check are ordered so a refused edit holds no gate",
+      "evidence": "api/comment_actions.go editComment takes s.gateComment (the anchored document's writer gate) at line 158 before the input-only refusal 'blocks: requires base_revision' at lines 165-168, so an edit that can never succeed queues behind every writer of the document, takes the gate, and only then answers 400; under a full queue it gets 429 EDIT_QUEUE_FULL, which the agent CLI retries (waitsOut) though no retry can succeed. Real binary (lt3 stack, head build, /legion/scratch/tmp/infra-592-tester/r5-demo.sh, in dispatch://INFRA-592/artifact/infra-592-tester-round4-tar-gz): with an anchored comment's valid edit holding the gate (its row held by psql for 12 s), the invalid edit answered '400 INVALID_COMMENT' after 8.93 s; with no gate held the same request answered in 0.010 s. Red test: packages/envoy/internal/dispatch/api/document_writer_gate_test.go TestACommentEditRefusedForItsInputWaitsOnNoWriterGate (commit 22fcdcdf 'test(dispatch): red test: a comment edit refused for its input waits on no writer gate'): holds the document's writer gate with service.AcquireDocumentWriter and requires the PATCH with blocks and no base_revision to answer 400 within 2 s. `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://... go test ./internal/dispatch/api/ -run TestACommentEditRefusedForItsInputWaitsOnNoWriterGate -count=1` fails 3 of 3 at the head: 'an edit with blocks and no base_revision is still unanswered 2 s into another writer's hold of the document's gate (1 writers queued), want its 400 at once'. Main's #2463 ran that check before its transaction with no gate to wait on."
     }
   ],
   "architectChecks": {
-    "redTestAndRealBinary": "PASS. TestARefreshTheRelatedCheckStartedHoldsNoRequestPoolConnection is unmodified (git diff 5f658520..89071a76 of related_terms_test.go is empty) and passes 5 of 5; the real binary shows the waiting refresh as dispatch-background, not dispatch-requests.",
-    "settlementPoolAndBudget": "PASS. docs/service.go's warm-up reads through s.store.Pool.Settlements() via withQueryPool (commit 0bb66ea0). store.ConnectionsPerProcess = requests 48 + background 6 + live 4 + settlements 4 + rooms 4 + health 1 + leases 15 (13 names + 2) + outbox 1 + registry 1 + permanent listeners 3 = 87; infra/gcp dispatchConnectionsPerPod = 87 and TestDispatchConnectionsPerPodIsTheServers passes; cmd/dispatch/README.md, packages/envoy/AGENTS.md, store/pool.go comments, docs/site running-dispatch.md, .dispatch/architecture/dispatch-store.md and the INFRA-592-connection-budget fragment all say 87.",
-    "writerGateTestLocally": "TestTheWriterGateAdmitsAWriteAndRefusesAPinnedRead passes 5 of 5 locally at the head; on CI it cannot be read (failure above).",
-    "ciFiltersAndRace": "Not readable: no CI ran (failure above).",
-    "gate": "PASS. Local merge of #2392's current head 422d1890 into 89071a76 (53ed5e38 in /legion/scratch/tmp/infra-592-tester/m2392: built on the round-2 merge 27f908c1, two text conflicts in routes_table.go route descriptions and two docs, budget 89, TestDispatchConnectionsPerPodIsTheServers passes, go build and go vet clean): g3-1x-a/b/c each refused 0 of about 10,750 reads and 0 of 720 writes, 3.99 of 3.99 events/s committed, read p99 177-247 ms, box 1% busy before each run."
+    "blockIndexOnBackground": "PASS. docs/block_index.go ReconcileBlockIndex takes s.backgroundPool() for owedDocuments, indexOwedDocument's transaction, OwedItems, ReindexOwedItem, OwedItemBlocks, IndexOwedItemBlocks and the owed counts. Real binary: with an owed comment's row held by psql, the pass waited as 'dispatch-background|active|Lock|select true from comments where id = $1::uuid for no key update' 15 s in, and owed_at was null (indexed) once the holder ended.",
+    "writerGateOrder": "FAIL on the refused edit (above). A held gate refuses no read: with the gate held by an edit waiting on its comment's row, GET comment blocks 200 in 0.060 s, GET issue 200 in 0.113 s, GET spec 200 in 0.025 s; the held edit then landed 200 and a later edit 200 in 0.16 s.",
+    "errorAnswers": "#2463 added seven s.writeHandlerError calls (comment_actions.go, comment_delivery.go, item_blocks.go, message_delivery.go); every one is now writeHandlerError(w, r, err) (no (w, err) left in api/), so DATABASE_BUSY, REQUEST_TIMEOUT and the admission refusal map through the one function request_bounds_test.go pins (TestARequestPastTheAdmissionLimitIsRefusedOverloaded, TestAReadHeldPastItsDeadlineAnswersRequestTimeout, TestARequestOnAFullPoolAnswersDatabaseBusy). #2463's own new answers are input refusals (400 INVALID_COMMENT/INVALID_MESSAGE/INVALID_REFERENCE, 404 NOT_FOUND), the carried-edit one typed (itemblocks.CarriedError) so no database error is answered 400. The two new GET routes (/api/v1/comments/{id}/blocks, /api/v1/messages/{id}/blocks) go through serveRoute like every table route (pinned, 20 s deadline, admitted): during t4-head-10x, 78 of 100 probes of the comment-blocks route answered 429 OVERLOADED, 22 answered 200.",
+    "connections87": "PASS. ConnectionsPerProcess = 48+6+4+4+4+1+15(13 names+2)+1+1+3 = 87 = infra/gcp dispatchConnectionsPerPod; cmd/dispatch/README.md, packages/envoy/AGENTS.md, store/pool.go, running-dispatch.md, dispatch-store.md, the changelog fragment and CHANGELOG all say 87; main's block-index lease is duty.BlockIndexLease, already one of the 13 names.",
+    "gate": "Local merge of #2392 005075ed into 1759bd4c (aaece0e0 in /legion/scratch/tmp/infra-592-tester/m2392, built on the round-3 merge; one doc-comment and two docs conflicts; references.go's writeHandlerError arity fixed; budget 89; build and vet clean). g4-1x-a/c/d/e/f refused 0 reads and 0 writes, 3.99 events/s committed. g4-1x-b refused 576 reads (5.36%) and 31 writes (4.31%), every one in a burst at 04:46:24-34 during which loadgen's own 5 s sampler (a separate process from Dispatch) recorded a 12 s gap, against 5 s in every clean run, and Dispatch's GC pause sum moved 0.008 s: a box-wide stall [INFERENCE: the cause outside Dispatch is not identified]. I re-ran three more (d/e/f) rather than count it as the gate's verdict; the architect decides.",
+    "ci": "At b7892ad2: ci-filters, dispatch, dispatch-multiprocess, envoy-go-race, envoy-go-race-docs, lint, typecheck, test, pr-title success. envoy-go failure (job 123871446794): only TestTwoAnnouncersAtOnceAnnounceAndPublishOnce (internal/dispatch/startup) 'started_test.go:271: FleetCommit = <nil>'; api 521.8 s and docs 577.5 s ok. A/B under 8 CPU hogs, test binaries built unloaded, -count=20 x3 per side: head 15/60, main 10fc3b77 16/60, same assertion; unloaded 0/30 on both: main's flake, not this PR's. ci-ok is red because envoy-go is."
   },
   "observations": [
-    "Memory rule followed: one heavy run at a time; go test with -p 2 -parallel 4; the pod's memory cgroup read 1.37 GB used of 20.4 GB before the load steps.",
-    "The next round's fingerprint comparison starts from b323dae4 at 89071a76."
+    "Under 10x the invalid-edit probe on an unanchored comment answered 429 OVERLOADED 95 of 100 times: admission is the outermost layer, so it refuses before any validation; that is the design, not the gate finding.",
+    "createComment's input refusals (reply_to_block without reply_to and the rest of commentThreadTarget) run inside the gated transaction too; they gate only when the comment writes a document (anchored, or a reply in an anchored thread), and that ordering predates the #2463 merge."
   ],
   "proof": [
     {
-      "criterion": "Background work takes connections from limits of its own: the related-item check's statistics refresh holds no request-pool connection",
-      "surface": "the real envoy-dispatch on the load stack (head build 89071a76), a person's HTTP create of a new project's first issue, Postgres pg_stat_activity",
-      "command": "LOADTEST_ROOT=lt2 stack.sh reset; demo.sh (psql holds search_term_totals for the new project 20 s; POST /api/v1/issues as X-Dispatch-User alice; pg_stat_activity at 2, 5, 10 s)",
-      "observed": "create 201 in 0.32 s; dispatch-background|active|Lock|insert into search_term_totals ... at 2, 5 and 10 s; log 'search term statistics refreshed for a project the related-item check found without them' items=2 duration=18.971s; the row reads items 2 afterwards",
-      "headSha": "89071a763735c3448ed730f3561d90fa9e37d6de",
-      "negativeControl": "the same demo at round 2's head 8e87c0d8 showed dispatch-requests holding the wait; the red test failed 3 of 3 there and passes 5 of 5 here"
+      "criterion": "Background work on limits of its own: #2463's block-index pass runs on the background pool",
+      "surface": "the real envoy-dispatch on the load stack (head build), Postgres pg_stat_activity",
+      "command": "r5-demo.sh part A: set comment_block_state.owed_at for a new comment, hold its row 'for update' in psql, poll pg_stat_activity",
+      "observed": "after 15 s: dispatch-background|active|Lock|select true from comments where id = $1::uuid for no key update; owed_at null after the holder ended",
+      "headSha": "1759bd4c7db9d83ef099b19a308aa257eaedfac0",
+      "negativeControl": "main 10fc3b77's block_index.go runs the same statements on s.store.Pool, the request pool"
     },
     {
-      "criterion": "Excess load refused early with a retryable status; 1x served",
+      "criterion": "A held writer gate refuses no read",
+      "surface": "the real binary, a person's HTTP reads while an anchored comment's edit holds its document's gate",
+      "command": "r5-demo.sh part B: psql holds the comment's row 12 s; PATCH the comment (holds the gate, waits on the row); GET comment blocks, issue, spec meanwhile",
+      "observed": "reads 200 in 0.060 / 0.113 / 0.025 s; the held edit 200 in 11.2 s once the row was released",
+      "headSha": "1759bd4c7db9d83ef099b19a308aa257eaedfac0",
+      "negativeControl": "the invalid edit sent at the same moment waited 8.93 s for that gate (the failure above)"
+    },
+    {
+      "criterion": "Excess load refused early with a retryable status; the new routes admitted",
       "surface": "INFRA-589's 2-core load reproduction, Dispatch built from the head",
-      "command": "LOADTEST_ROOT=lt2 run-step.sh r4-head-1x --events 4 --sessions 400 --requests 60; run-step.sh r4-head-10x --events 40 --sessions 1000 --requests 600",
-      "observed": "1x: 0 refusals, 3.99 of 3.99 events/s committed, read p99 156 ms; 10x: every refusal 429 OVERLOADED (80,824 reads, 6,744 writes; read refusal p50 17 ms p99 91 ms), 147.4 reads/s served, 2.34 events/s committed, 0 connection failures, at most 12 goroutines waiting for a pool connection",
-      "headSha": "89071a763735c3448ed730f3561d90fa9e37d6de",
-      "negativeControl": "main e9398987 at 10x on the same harness (round 2, r3-main-10x): 5 of 107,355 reads 2xx, 107,350 timed out at 30 s, 19,713 goroutines waiting"
+      "command": "LOADTEST_ROOT=lt3 run-step.sh t4-head-1x / t4-head-10x with the README's flags; r5-probe.sh during t4-head-10x",
+      "observed": "every refusal 429 OVERLOADED, 0 connection failures and 0 other non-2xx; 10x 89,930 reads and 6,862 writes refused, read refusal p99 157 ms, 96.8 reads/s served, 1.68 events/s committed, at most 9 goroutines waiting; GET /api/v1/comments/{id}/blocks 78 x 429, 22 x 200",
+      "headSha": "1759bd4c7db9d83ef099b19a308aa257eaedfac0",
+      "negativeControl": "main e9398987 at 10x on the same harness (round 2): 5 of 107,355 reads 2xx, 19,713 goroutines waiting"
     },
     {
-      "criterion": "1x refusals within 0-0.1% of reads and 0.7-1.5% of writes on #2402 merged after #2392 (the architect's gate)",
-      "surface": "the same harness, Dispatch built from a local merge of #2392 422d1890 into 89071a76",
-      "command": "LOADTEST_SRC=<merge clone 53ed5e38> run-step.sh g3-1x-{a,b,c} --events 4 --sessions 400 --requests 60",
-      "observed": "0 reads and 0 writes refused in each run; 3.99 events/s committed; read p99 177-247 ms; 0-1 goroutines waiting",
-      "headSha": "89071a763735c3448ed730f3561d90fa9e37d6de merged with 422d1890 (local 53ed5e38)",
+      "criterion": "1x refusals within the band on #2402 merged after #2392 (the architect's gate)",
+      "surface": "the same harness, Dispatch built from a local merge of #2392 005075ed into 1759bd4c",
+      "command": "LOADTEST_SRC=<merge clone aaece0e0> run-step.sh g4-1x-{a,b,c,d,e,f} --events 4 --sessions 400 --requests 60",
+      "observed": "5 of 6 runs 0 reads and 0 writes refused, 3.99 events/s committed; g4-1x-b 576 reads and 31 writes refused in one burst during a 12 s sampler gap",
+      "headSha": "1759bd4c7db9d83ef099b19a308aa257eaedfac0 merged with 005075ed (local aaece0e0)",
       "negativeControl": "round 1: the head alone without #2392 refused up to 1.53% of reads and 5.0% of writes at 1x"
     }
   ]
