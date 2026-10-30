@@ -309,10 +309,10 @@ func requireIssueEventPublished(t *testing.T, process *cmdtest.Process, conn *na
 // person, so such a reader shows a session its peers' silence on the issue it watches. The
 // payload is read as raw JSON so a frame carrying no quiet at all fails here; decoded into a
 // bool, a missing field would read as false and the check would pass on the frames that keep the
-// stored 72 hours quiet. The create is forced because it is this project's second issue and so
-// meets the related-item check, which would otherwise refuse it as a possible duplicate of the
-// issue requireIssueEventPublished created, and what is under test here is the published frame,
-// not duplicate detection.
+// stored 72 hours quiet. The create is forced because its title shares "example", the only word
+// of the title requireIssueEventPublished created, so the title-overlap check
+// (duplicateCandidates) would refuse it 409 POSSIBLE_DUPLICATE; what is under test here is the
+// published frame, not duplicate detection.
 func requireCommentQuietPublished(t *testing.T, process *cmdtest.Process, conn *natsgo.Conn, port int) {
 	t.Helper()
 	client := &http.Client{Timeout: 10 * time.Second}
