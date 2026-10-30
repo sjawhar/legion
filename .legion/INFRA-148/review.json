@@ -2,28 +2,28 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-148",
-  "completed": "2026-10-28T14:35:06Z",
-  "round": 7,
+  "completed": "2026-10-30T03:22:11Z",
+  "round": 8,
   "decision": "approved",
-  "reviewedCodeHead": "d52a5e7fe5ebccbf4769b29cf326512d047e8c3f",
-  "scope": "What changed since the round-6 approval at 62c29c73: the test-only commit 7cb6847c (the two test minors) and the merge of main 6d96a55f.",
+  "reviewedCodeHead": "2397209e488c8a6fff8bcf62a57812ac604125bc",
+  "proseFix": "855d6679 (mine): dispatch doc-read's help now names the root comment's time (spec acceptance line 49: the help says it prints author, time and full text; main's #2366 text gave a time only for replies), and packages/contracts/AGENTS.md counts twenty-five Dispatch specs. Contracts dispatch-tools tests 77 pass; envoy-client dispatch-execute and dispatch-cli 359 pass; biome clean.",
+  "scope": "A new round: the PR's own diff changed since the approval at 6792409c. Merges of main 421055ab and 10fc3b77 replaced this branch's outbox routing and doc-read printing with main's #2366, renumbered the migrations to 0145-0147, and moved CI to ci.yaml; 865c9a6c refactors the related-item check's bounds; three answers-hook test commits.",
   "critical": 0,
   "important": 0,
-  "minor": 1,
+  "minor": 4,
   "keyFindings": [
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/session_answers_test.go:618",
-      "description": "Acceptance note: the new test simulates a mention retry by flipping the one delivery row from failed to sent, where a real retry adds a second sent attempt row; the list query only asks whether a sent row exists, so the coverage holds."
-    }
+    {"severity": "minor", "file": "packages/claude-envoy/tests/answers-hook.test.ts:997", "description": "Acceptance note: the slow-start case repeats READ_MISSED_LEAST_WAIT's regex inline; the file passed 1,000 lines, and its harness (lines 1-339) could move to a harness module as channel-session-harness.ts does."},
+    {"severity": "minor", "file": "packages/envoy-client/src/dispatch-http.ts:1443", "description": "Acceptance note: #json/#jsonAnswer accept a signal that #send honours only on the read, PUT and DELETE path; the one caller, sessionAnswers, is a GET."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/api/suggestions.go:531", "description": "Acceptance note: 865c9a6c changes no behaviour (ended(timedOut) already returned the cancelled answer when the caller had gone); its commit subject says refactor, but the PR body and the implementer's account describe a fix."},
+    {"severity": "minor", "file": "PR body", "description": "Acceptance note: 'Measured for the reviewer' names migrations 0135/0136 (now 0145/0146), and thread PRRT_kwDORFy7ds6woeHY describes loadThreadRoot, which the PR no longer carries since main's #2366 replaced it."}
   ],
   "verified": [
-    "TestSessionAnswersListsACommentBothTheRouteAndAMentionHoldOnce puts one comment in both the route source and the mention source and asserts one item as a mention; removing sessionanswers.go's `group by id` would make it fail (Total = 2).",
-    "answers-hook.test.ts:499-500 now asserts the request count in both branches; 16 pass here.",
-    "Merge 6d96a55f: the PR's own diff before (0a921021..7cb6847c) and after (5fbd8391..6d96a55f) is identical in every file; no conflicts; main's changes in shared files (ask resolution kind `withdrawn`, exported transientStatus) touch nothing the PR depends on; migrations 0135-0137 follow main's 0134.",
-    "Required checks at d52a5e7f: lint, typecheck, test, pr-title all success."
+    "PR diff before (5fbd8391..6792409c) and after (10fc3b77..2397209e): the PR no longer changes publisher.go, comment_create.go or their tests, nor doc-read's printing; main's #2366 delivers both, and the spec's list cases still reach the session through main's routes (every route records into published_destinations; mentions through comment_deliveries sent).",
+    "Migrations 0145-0147 follow main's 0141-0144; no reference to the old numbers for these indexes is left.",
+    "claude-envoy dist is main's by the current convention (tests/dist-fresh.test.ts builds a fresh dist; a pull request never commits dist/).",
+    "ci.yaml installs the pinned Claude Code for the claude-envoy job and its filters name sessionanswers and itemblocks."
   ],
-  "ci": "Required set lint, typecheck, test, pr-title (rulesets). CI head d52a5e7f; the compare to c1832496 is .legion/ only. All four completed success at 14:34Z. The two failures the controller named as main's (a dispatch e2e test and an envoy-infra gcp test) are not required checks and are not this PR's.",
-  "thermonuclear": "deep-review: APPROVE. code-quality: APPROVE. Both at c1832496.",
-  "threads": "17 review threads, all carrying my answer, all accepted and resolved; no new thread since round 6."
+  "ci": "Required set lint, typecheck, test, pr-title. The approval waits on these checks at the prose-fix head being green.",
+  "thermonuclear": "deep-review: APPROVE. code-quality: CHANGES for two test-file cleanups (file size, duplicate regex), recorded as acceptance notes under the architect's narrowed scope. Both at 2397209e.",
+  "threads": "17 review threads, all carrying my answer, all accepted and resolved."
 }
