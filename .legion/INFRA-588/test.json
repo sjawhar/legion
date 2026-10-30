@@ -2,47 +2,62 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-588",
-  "completed": "2026-10-29T23:40:00Z",
-  "round": 9,
-  "head": "6e51627ac30abd4aa2b7c754050f4725f9ae84e9",
-  "codeHead": "0288986f2521c4350029355134ab7989a6a9876b",
-  "roundNote": "Round 9 tests the fix for round 8's finding. 0288986f records where each runner's numbered series closed, in migrationid.Closed (daemon 0061_pull_request_head_run.up.sql at 61, Dispatch 0141_drop_broadcast_idempotency_keys.up.sql at 141), and Check refuses a number above the closing file a set holds. Since round 8 it changes only migrationid.go and its test, embed.go (3 lines), pgmigrate/set.go (comment) and cmd/dispatch/README.md. So round 8's proofs of autodeploy.sh, the loadtest seed check and the forward merge, and round 7's rolling-deploy proofs, still apply.",
+  "completed": "2026-10-30T00:40:00Z",
+  "round": 10,
+  "head": "1bb810ca9a1c01545e69119147f3f5b99e6decc2",
+  "codeHead": "073ea88737c4f30bf562b53c4d1e20fbc8f95c9e",
+  "roundNote": "Round 10 tests the answer to review round 7 (073ea887): 'packages/envoy/migrationid/**' in ci.yaml's worker_image filter; migrationid's closing files become an unexported slice, and Check needs exactly one of them present (none or two is an error), with CheckClosedAt for crafted sets; autodeploy.sh's two-form comparison in one schema_changed helper; and docs. My three red tests (017d1df01dcb, 7feb642d6bbb, a25cec37291a) are unchanged. Dispatch's store code is unchanged since round 7, so the rolling-deploy proofs still apply.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I re-ran the implementer's claim myself. Both red tests (7feb642d6bbb, a25cec37291a) pass at this head, their files unchanged. In a scratch clone, round 8's case is now refused on each branch alone. Timestamped branches pass alone and merged. The daemon's real Migrate boots on this head, fresh and after main, and refuses a next-number set at boot, on my own PostgreSQL 18.6."
+    "how": "I re-ran the claims myself. The red tests pass at this head, their files unchanged. In a scratch clone off this head, a next-number branch is refused and timestamped branches pass alone and merged. The image-trigger and filter checks pass, and the image check fails when migrationid is taken out of the filter. The daemon's real Migrate boots on this head on my own PostgreSQL 18.6. autodeploy.sh's refactored functions give round 8's five outcomes on real psql output."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Migration identifiers two concurrent pull requests cannot both claim, for both runners (plan item 1; round 8's finding)",
-      "surface": "each runner's identifier check on real branches in a scratch clone of the repository, built off this head: the daemon's migrations package tests (Load runs migrationid.Check) and Dispatch's TestMigrationSetTakesNumbersThenTimestamps",
-      "command": "branches nx and ny off 0288986f each add daemon 0062_t588_<n>.up.sql and Dispatch 0142_t588_<n>.up.sql + .census.sql; branches ta and tb add the same files named 20261029230000 and 20261029231000; git merge-tree of each pair; go test on each branch and each merged tree",
-      "observed": "nx alone and ny alone each fail both checks: 'migration 0062_t588_nx.up.sql takes version 62: the numbered migrations ended at 0061_pull_request_head_run.up.sql…' and 'migration 0142_t588_nx.up.sql takes version 142: the numbered migrations ended at 0141_drop_broadcast_idempotency_keys.up.sql…'. ta, tb and their merge (tree 63a5f3580652) pass both: ok",
-      "headSha": "6e51627ac30abd4aa2b7c754050f4725f9ae84e9",
-      "negativeControl": "the same next-number branches off round 8's code 9ce23f73 passed alone (round 8's finding), and the nx+ny merge still fails 'share version 62' and 'share version 142'"
+      "criterion": "Migration identifiers two concurrent pull requests cannot both claim, for both runners; and a set that lost its closing file is refused rather than checked without a boundary",
+      "surface": "each runner's identifier check on real branches in a scratch clone off this head: the daemon's migrations package tests (Load runs migrationid.Check) and Dispatch's TestMigrationSetTakesNumbersThenTimestamps",
+      "command": "branch nx adds daemon 0062_t588_nx and Dispatch 0142_t588_nx (+census); branches ta and tb add 20261030090000 and 20261030091000; branch rn renames daemon 0061_pull_request_head_run.up.sql to 0061_head_run_renamed.up.sql and Dispatch 0141_drop_broadcast_idempotency_keys.{up,census}.sql to 0141_renamed.*; git merge-tree ta tb; go test on each branch and the merge",
+      "observed": "nx refused in both: 'migration 0062_t588_nx.up.sql takes version 62: the numbered migrations ended at 61…' and '…0142… ended at 141…'. ta, tb and their merge: ok in both. rn refused in both: 'the migration set holds none of the files a numbered series closed at, so it is no runner's set this rule knows…'",
+      "headSha": "1bb810ca9a1c01545e69119147f3f5b99e6decc2",
+      "negativeControl": "round 9's code fell back to 1..N with no boundary for a renamed closing file (my round-9 observation); here the rename is refused"
     },
     {
-      "criterion": "The round-8 red tests pass unmodified, with the identifier tests",
+      "criterion": "The red tests pass unmodified, with the identifier tests",
       "surface": "go test in the issue workspace at this head",
-      "command": "cd packages/daemon && go test ./internal/store/migrations/ -run '^TestLoadRefusesANewMigrationNumberedAfterTheShippedSet$' -count=1 -v; cd packages/envoy && go test ./migrationid/ && go test ./internal/dispatch/store/ -run '^(TestMigrationSetRefusesANewMigrationNumberedAfterTheShippedSet|TestMigrationSetTakesNumbersThenTimestamps|TestEveryMigrationFileIsEmbedded)$' -count=1 -v",
-      "observed": "all PASS; jj diff a25cec37..0288986f over both next_number_test.go files: 0 files changed",
-      "headSha": "6e51627ac30abd4aa2b7c754050f4725f9ae84e9",
-      "negativeControl": "both red tests failed at 9ce23f73: 'Load accepted the shipped set plus 0062_next_number.up.sql' and 'the identifier check accepted the shipped set plus 0142_next_number.up.sql'"
+      "command": "daemon: go test ./internal/store/migrations/ -run '^TestLoadRefusesANewMigrationNumberedAfterTheShippedSet$'; envoy: go test ./migrationid/ and ./internal/dispatch/store/ -run '^(TestMigrationSetRefusesANewMigrationNumberedAfterTheShippedSet|TestMigrationSetTakesNumbersThenTimestamps)$'",
+      "observed": "all PASS; jj diff a25cec37..073ea887 over both next_number_test.go files and migrate_out_of_order_test.go: 0 files changed",
+      "headSha": "1bb810ca9a1c01545e69119147f3f5b99e6decc2",
+      "negativeControl": "both next-number red tests failed at 9ce23f73 (round 8)"
     },
     {
-      "criterion": "The daemon still boots and migrates with the boundary in place, and refuses a next-number set at boot",
-      "surface": "the daemon's real store.Open + Migrate + SchemaVersion, from binaries built at main 08c2e8ad, this head, the merged timestamped tree and the nx branch, on PostgreSQL 18.6",
-      "command": "fresh database f1: this head; database f2: main, then this head, then the merged timestamped tree; database f3: the nx branch",
-      "observed": "f1 applied=61 version=61; f2 main applied=61, this head applied=0, the merged tree applied=2 version=20261029231000; f3 refused with 'migration 0062_t588_nx.up.sql takes version 62: the numbered migrations ended at 0061_pull_request_head_run.up.sql…', applied=0, and no schema_version table was created",
-      "headSha": "6e51627ac30abd4aa2b7c754050f4725f9ae84e9",
-      "negativeControl": "the f3 refusal above"
+      "criterion": "The worker image trigger covers migrationid, and the CI filters still cover every file their jobs read (review round 7, finding 1)",
+      "surface": ".github/scripts/check-image-trigger-paths.sh (the required lint job's check) and .github/scripts/check-ci-filters.sh, run on this head",
+      "command": "uv run --no-project --with pyyaml==6.0.2 -- bash .github/scripts/check-image-trigger-paths.sh; same for check-ci-filters.sh; then the image check in a git scratch copy of the tree with ci.yaml line 1026 ('packages/envoy/migrationid/**') removed",
+      "observed": "image check exit 0, 'every image trigger covers every input its build reads (5 image build(s))'; filter check exit 0, 25 gates",
+      "headSha": "1bb810ca9a1c01545e69119147f3f5b99e6decc2",
+      "negativeControl": "without the migrationid line: exit 1, '::error file=.github/workflows/ci.yaml::… jobs.changes filter worker_image) does not cover packages/envoy (packages/daemon/docker/worker.Dockerfile:299)…'"
+    },
+    {
+      "criterion": "The daemon boots and migrates under the new rule and refuses a set with no closing file at boot",
+      "surface": "the daemon's real store.Open + Migrate + SchemaVersion on PostgreSQL 18.6, from binaries built at this head, the merged timestamped tree and the rename branch",
+      "command": "fresh database g1: this head, then the merged tree; fresh database g2: the rename branch",
+      "observed": "g1: applied=61 version=61, then applied=2 version=20261030091000; g2: refused, 'the migration set holds none of the files a numbered series closed at…', applied=0, and no schema_version table was created",
+      "headSha": "1bb810ca9a1c01545e69119147f3f5b99e6decc2",
+      "negativeControl": "the g2 refusal above"
+    },
+    {
+      "criterion": "The auto-deployer's rollback guard behaves as before after the schema_changed refactor (review round 7, finding 4)",
+      "surface": "autodeploy.sh's schema_applied, schema_changed, schema_label and roll_back_or_stop, extracted as written, against real psql output; only docker stubbed",
+      "command": "database ad with 1..141 and 20261029210000; roll_back_or_stop after (1) nothing applied, (2) 20261029200000 applied below the max, (3) a legacy bare-max baseline with that, (4) a legacy baseline with the max raised, (5) an unreachable database",
+      "observed": "(1) rolls back, exit 0; (2) 'refusing to roll back … changed the applied migrations to 20261029210000 (143 applied)', exit 1; (3) rolls back (legacy form, as documented); (4) refused, exit 1; (5) 'could not read the schema version … so refusing', exit 1. These are round 8's five outcomes",
+      "headSha": "1bb810ca9a1c01545e69119147f3f5b99e6decc2",
+      "negativeControl": "the previous deployer (650e3cb5) rolled back in case (2) (round 8)"
     }
   ],
   "observations": [
-    "CI at code head 0288986f: only changes (queued) and pr-title exist; no lint, typecheck or test result. 6e51627a is handoff-only.",
-    "migrationid.Closed is keyed by the closing file's name. A set that holds none of those files is held to 1..N with no gap, as a test's crafted set is. So a branch that renamed 0061_pull_request_head_run.up.sql or 0141_drop_broadcast_idempotency_keys.up.sql would lose the boundary. Renaming a migration a database has already recorded is a change no one should make, and I do not count it as a failure.",
-    "The README and code comments say Closed is raised only when a forward merge brings a numbered migration main took before this rule reached it. Another open pull request that adds a numbered migration and merges first would need that step here.",
+    "CI at code head 073ea887: only changes (queued) and pr-title runs exist; no lint, typecheck or test result. 1bb810ca is handoff-only.",
+    "The pod's python3 has no PyYAML, so the two .github checks ran with uv run --with pyyaml==6.0.2. CI runs them on the runner's Python.",
     "Round 7's release-order note (this release before any carrying a timestamped migration), round 4's squash-body note and round 1's `since`-edge note still apply."
   ]
 }
