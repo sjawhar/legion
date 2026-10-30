@@ -6,18 +6,18 @@ import (
 	"testing"
 )
 
-// 0062 adds parked_decisions and readmitted_approvals: a root keeps one decision row per Dispatch
+// 0065 adds parked_decisions and readmitted_approvals: a root keeps one decision row per Dispatch
 // reference and one approval below its spec's latest version, and both go with the issue they name.
-func TestParkedDecisionsArriveWith0062AndGoWithTheirRoot(t *testing.T) {
+func TestParkedDecisionsArriveWith0065AndGoWithTheirRoot(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
-	migrateThrough(t, store, 61)
+	migrateThrough(t, store, 64)
 	var exists bool
 	if err := store.Pool().QueryRow(ctx, `select to_regclass('parked_decisions') is not null`).Scan(&exists); err != nil {
-		t.Fatalf("look for parked_decisions at 0061: %v", err)
+		t.Fatalf("look for parked_decisions at 0064: %v", err)
 	}
 	if exists {
-		t.Fatal("parked_decisions exists at 0061, want it added by 0062")
+		t.Fatal("parked_decisions exists at 0064, want it added by 0065")
 	}
 	if _, err := store.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)

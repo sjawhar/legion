@@ -4,7 +4,7 @@ body: |-
     keeps it until the start or catch-up that names it reaches the architect. A start that reached
     no architect, or a catch-up a newer one replaced, hands the decision in one transaction to a
     fresh catch-up of the root's current architect. A claim records each start row whose task it
-    took (migration 0063, `claims.delivered_rows`), so a retried start never tells it twice, and a
+    took (migration 0066, `claims.delivered_rows`), so a retried start never tells it twice, and a
     root architect's start task waits while its tree is parked, lingering or waiting for its slot.
 time: 2026-10-30T07:00:00Z
 custom:

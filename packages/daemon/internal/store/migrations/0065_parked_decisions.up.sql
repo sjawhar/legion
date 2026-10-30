@@ -1,4 +1,4 @@
--- 0062_parked_decisions.up.sql — what a person decided on a parked tree waits for its root's architect.
+-- 0065_parked_decisions.up.sql — what a person decided on a parked tree waits for its root's architect.
 --
 -- A person's decision on a tree nobody in it could hear, which the daemon relayed to the controller
 -- (a parked-decision notice), kept until the architect start task or catch-up that names it has
