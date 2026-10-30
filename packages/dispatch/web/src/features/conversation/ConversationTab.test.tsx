@@ -390,6 +390,45 @@ test("Conversation holds Reply while its composer sends", async () => {
   }
 });
 
+test("a message reply that names a passage quotes it, and says so once the passage is removed", async () => {
+  const passage = {
+    block_id: "b2",
+    node: "message/message-1#b2",
+    ref: "dispatch://CORE-1/message/message-1#b-b2",
+    removed: false,
+    text: "Beta.",
+  };
+  const reply = (id: string, overrides: Partial<Message>) =>
+    message(id, { created_at: "2026-09-09T00:01:00Z", in_reply_to: "message-1", ...overrides });
+  const stub = stubLists({
+    messages: [
+      thread(message("message-1", { body: "Alpha.\n\nBeta." }), [
+        reply("message-2", { body: "Agreed.", reply_block: passage }),
+        reply("message-3", { body: "Still?", reply_block: { ...passage, removed: true } }),
+        reply("message-4", { body: "All of it.", reply_block: null }),
+      ]),
+    ],
+  });
+  const view = render(tab({ "CORE-1": issueState() }, true, newQueryClient()));
+  const turn = (id: string) => view.container.querySelector(`[data-turn="message:${id}"]`);
+
+  try {
+    await screen.findByText("Agreed.");
+    await waitFor(() =>
+      expect(turn("message-2")?.textContent).toContain("Replying to alice's passage — Beta.")
+    );
+    expect(turn("message-3")?.textContent).toContain(
+      "Replying to alice's passage — This passage was removed."
+    );
+    expect(turn("message-3")?.textContent).not.toContain("Beta.");
+    // A reply that names no block quotes the whole parent, as before.
+    expect(turn("message-4")?.textContent).toContain("Replying to alice — Alpha.");
+  } finally {
+    view.unmount();
+    stub.restore();
+  }
+});
+
 // W22. Each pin is a write of the one store, in press order on its issue: the ones Dispatch refuses
 // stay refused in the shell's indicator, the Pin buttons stay live, and each Retry re-sends its own
 // pin over the state Dispatch holds then, so after both land the issue holds both.
