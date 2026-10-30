@@ -9,7 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sjawhar/envoy/infra/gcp"
-	"github.com/sjawhar/envoy/infra/internal/pulumitest"
 )
 
 // dispatchSandboxArgs are the inputs of a sandbox Dispatch: the tailnet group and the sign-in
@@ -36,35 +35,6 @@ func dispatchSandboxArgs() *gcp.DispatchArgs {
 // dispatchSandboxURL is where a sandbox Dispatch is reached: its own Service in its namespace, on
 // the 8766 that Service publishes, over http because that Service terminates no TLS.
 const dispatchSandboxURL = "http://example-dispatch.dispatch.svc.cluster.local:8766"
-
-// readDispatchSandboxURL runs a sandbox and reads its url output inside the program, which is
-// where the engine resolves the component's outputs: await runs on the test's goroutine there,
-// so the value is read after the engine resolved it rather than awaited once the program has
-// returned. Both providers are given, which a sandbox needs as the default mode does: it builds
-// the same database and the same generated passwords.
-func readDispatchSandboxURL(t *testing.T, args *gcp.DispatchArgs) (*pulumitest.Mocks, string) {
-	t.Helper()
-	var url string
-	m := newMocks()
-	err := m.Run(func(ctx *pulumi.Context) error {
-		gcpProvider, err := newGCPProvider(ctx)
-		if err != nil {
-			return err
-		}
-		randomProvider, err := newRandomProvider(ctx)
-		if err != nil {
-			return err
-		}
-		dispatch, err := gcp.NewDispatch(ctx, "example-dispatch", args, pulumi.Providers(gcpProvider, randomProvider))
-		if err != nil {
-			return err
-		}
-		url = await(t, dispatch.Url)
-		return nil
-	})
-	require.NoError(t, err)
-	return m, url
-}
 
 // dispatchSandboxFrontDoor is the front door, as the default mode's registration golden holds it:
 // the tailnet pods' Deployment, the Service the two NATS clients dial their SOCKS5 proxy at, the
@@ -124,14 +94,16 @@ func TestDispatchSandboxRegistrations(t *testing.T) {
 }
 
 // With no front door hosting a tailnet name, Dispatch is reached at its own Service inside the
-// cluster, and that is what it tells a reader it is at: the url output a consumer reads and the
-// DISPATCH_SERVER_URL the app builds its own links from are one address, so a browser the app
-// sends somewhere and a client the output sends somewhere arrive at the same server.
+// cluster, and that is the address the app builds its own links from. The url output a consumer
+// reads is the same address: dispatchSandboxURL is what this file holds it to, and
+// TestConstructDispatchSandbox is what holds the output to that constant, over the wire a
+// consumer's SDK reads it on. A browser the app sends somewhere and a client the output sends
+// somewhere then arrive at the same server.
 func TestDispatchSandboxServesInTheCluster(t *testing.T) {
-	m, url := readDispatchSandboxURL(t, dispatchSandboxArgs())
+	m, err := runDispatch(t, dispatchSandboxArgs(), true)
+	require.NoError(t, err)
 
-	require.Equal(t, dispatchSandboxURL, url)
-	require.Equal(t, url, appEnv(t, m)["DISPATCH_SERVER_URL"], "the output and the app agree on where Dispatch is")
+	require.Equal(t, dispatchSandboxURL, appEnv(t, m)["DISPATCH_SERVER_URL"])
 }
 
 // Without the sign-in inputs the app runs no browser sign-in at all: it is given no sign-in
@@ -146,6 +118,38 @@ func TestDispatchSandboxRendersNoSignIn(t *testing.T) {
 	}
 	require.ElementsMatch(t, []string{"DATABASE_URL", "DISPATCH_AGENT_TOKEN", "DISPATCH_SIGNING_KEY"},
 		secretDataKeys(dispatchSecretData(t, m)))
+}
+
+// dispatchTailnetWithoutSignInArgs is the whole tailnet group with the sign-in group unset: the
+// default fixture less its three sign-in inputs, so the front door's own inputs are the ones
+// every other default-mode test sends.
+func dispatchTailnetWithoutSignInArgs() *gcp.DispatchArgs {
+	args := dispatchArgs()
+	args.SignInClientId = ""
+	args.SignInClientSecret = nil
+	args.SignInDomain = ""
+	return args
+}
+
+// The tailnet group set with the sign-in group unset is the one half-set pair the component
+// allows, and it builds the whole front door: Dispatch is then served at an https tailnet name,
+// an origin an OAuth provider takes as a redirect, so leaving the sign-in group unset says only
+// that this deployment runs no browser sign-in. The reverse is refused, since a sign-in input
+// with no tailnet asks a provider to redirect to an in-cluster http:// address
+// (TestDispatchSandboxRefusesWhatItDoesNotBuild). The app this renders is the cookie server with
+// no DISPATCH_SIGNIN_* setting: it signs nobody in, and it refuses every dsession cookie an
+// earlier sign-in minted, since its DISPATCH_SIGNING_KEY still verifies them and no membership
+// check is left (cmd/dispatch's TestABootWithNoSignInRefusesACookieIssuedWhileSignInWasOn).
+func TestDispatchSandboxSignInGroupUnsetKeepsTheFrontDoor(t *testing.T) {
+	m, err := runDispatch(t, dispatchTailnetWithoutSignInArgs(), true)
+	require.NoError(t, err)
+
+	require.Equal(t, readGolden(t, "dispatch-registrations.golden"), dispatchRegistrations(m))
+	for name := range appEnv(t, m) {
+		require.False(t, strings.HasPrefix(name, "DISPATCH_SIGNIN_"), "%s configures browser sign-in", name)
+	}
+	require.NotContains(t, secretDataKeys(dispatchSecretData(t, m)), "DISPATCH_SIGNIN_CLIENT_SECRET",
+		"the Secret holds an OAuth credential the deployment never got")
 }
 
 // The hub a sandbox's pods use runs in their own cluster, and both NATS clients dial it

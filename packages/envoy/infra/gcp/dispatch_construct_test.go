@@ -520,8 +520,8 @@ func TestConstructRefusesADispatchInputWithClusterOnly(t *testing.T) {
 // the two groups are absent from the call, as an SDK leaves out what the program never set, and
 // not sent as empty values. tailnetAuthKey and signInClientSecret arrive as nothing at all there,
 // so the component reads neither as an Input it could resolve, and answers with the in-cluster
-// address and a declaration holding no front-door resource: no tailnet Deployment, Service,
-// policy, account or Secret, and no serve ConfigMap.
+// address and a declaration holding no front-door resource at all, as dispatchSandboxFrontDoor
+// names them.
 func TestConstructDispatchSandbox(t *testing.T) {
 	inputs := dispatchConstructInputs()
 	// The nine inputs of the two groups, from the groups' own lists, so a group that gains an
@@ -541,8 +541,6 @@ func TestConstructDispatchSandbox(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, dispatchSandboxURL, url.AsString())
 	for _, registration := range m.Registrations() {
-		require.NotContains(t, []string{
-			"example-dispatch-tailnet", "example-dispatch-tailnet-auth-key", "example-dispatch-tailnet-tls", "example-dispatch-serve",
-		}, registration.Name, "%s is a front door's", registration.Type)
+		require.NotContains(t, dispatchSandboxFrontDoor, registration.Type+" "+registration.Name, "a front door's resource registered")
 	}
 }

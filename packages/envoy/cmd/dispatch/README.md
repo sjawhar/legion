@@ -224,12 +224,19 @@ lowercase email:
   what is wrong (`checkSignInSettings`).
 
   With no `DISPATCH_SIGNIN_*` setting at all the server boots and runs no
-  browser sign-in: it issues no `dsession` cookie, nobody signs in, and it
-  serves its agent-token API as it always does, answering `GET /auth/start`
-  `503 SIGNIN_UNCONFIGURED`. That is what a sandbox deployment runs
-  (`envoy-infra:gcp:Dispatch` with its tailnet inputs unset, which has no
-  origin an OAuth provider takes). A partial set is still half a sign-in and
-  refuses the boot, naming every setting it misses (`checkSignInSettings`).
+  browser sign-in: it issues no `dsession` cookie, and it refuses every one
+  it has issued, answering each browser request `401 NO_IDENTITY`
+  (`requestIdentityFor`). A cookie minted while sign-in was on still
+  verifies for its thirty days, since the key signing it is the deployment's
+  `DISPATCH_SIGNING_KEY` and outlives the configuration, and with no issuer
+  nothing is left to confirm that the person it names may still use
+  Dispatch. The agent-token API is served as it always is, and
+  `GET /auth/start` answers `503 SIGNIN_UNCONFIGURED`. That is what a
+  sandbox deployment runs (`envoy-infra:gcp:Dispatch` with its tailnet
+  inputs unset, which has no origin an OAuth provider takes). A partial set
+  is still half a sign-in and refuses the boot, naming every setting it
+  misses (`checkSignInSettings`). Dev sign-in (`DISPATCH_DEV_SIGNIN`, below)
+  sets none of these either and keeps its cookies: it mints them itself.
 
   The issuer's discovery document is read in the background from boot, on the
   service-account issuer's schedule (above), and an issuer that cannot be
