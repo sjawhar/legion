@@ -33,10 +33,10 @@ body: |-
     scans on a period any more: a LISTEN on new events and on the hold's release, the process's own
     commits, a NATS reconnect and a timer to the earliest due retry wake it. Each process uses one
     more Postgres connection (the outbox's pool is two, so its hold's renewal never waits behind a
-    batch) and holds one more LISTEN connection: 89 connections per process at its ceiling, from 87
-    (`store.ConnectionsPerProcess`). Migrations `0149_duty_holds` (a new table) and
-    `0150_outbox_claim` (three partial indexes on `events`, `events.publish_error`, and the drop of
-    `events_unpublished` and `events_unpublished_ready`) apply at boot. `0150` builds its indexes
+    batch) and holds one more LISTEN connection: 91 connections per process at its ceiling, from 89
+    (`store.ConnectionsPerProcess`). Migrations `0150_duty_holds` (a new table) and
+    `0151_outbox_claim` (three partial indexes on `events`, `events.publish_error`, and the drop of
+    `events_unpublished` and `events_unpublished_ready`) apply at boot. `0151` builds its indexes
     first, holding writes to `events` while they run (1.1 s on a million rows), and only then adds
     the column and drops the two old indexes, whose `ACCESS EXCLUSIVE` lock makes reads of `events`
     wait for those last milliseconds and the commit. A process of the release before this one takes

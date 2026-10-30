@@ -1,6 +1,6 @@
 -- The outbox reads its batch through three partial indexes and writes an event once,
 -- when it records what the event came to (outbox.readBatch, outbox.recordBatch). One process
--- publishes at a time (the dispatch-outbox hold, migration 0149), so no row is claimed any more:
+-- publishes at a time (the dispatch-outbox hold, migration 0150), so no row is claimed any more:
 -- next_attempt_at is only a back-off, or the back-off of the earlier event a later one waits on.
 --
 -- Every predicate spells "not a pending subscription command" the one way the outbox's queries

@@ -3,8 +3,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 
-import { isRetryableQueryError } from "./api/client";
-import { DispatchQueryClient, queryRetryDelay } from "./api/query-client";
+import { DispatchQueryClient, queryRetry, queryRetryDelay } from "./api/query-client";
 import { App } from "./app";
 import {
   DeploymentResilience,
@@ -18,10 +17,10 @@ import "./styles.css";
 const queryClient = new DispatchQueryClient({
   defaultOptions: {
     queries: {
-      // An auth outcome (401) is definitive — everything else (a dropped connection,
-      // a 5xx) is worth a couple of quick retries before we show an error, after the wait a
+      // Two quick retries for a transient failure, none for a 401, and the sign-in check's
+      // EVENT_HEAD_UNAVAILABLE for as long as it lasts (`queryRetry`), each after the wait a
       // server refusing excess load asks for (`Retry-After`, `queryRetryDelay`), or 500 ms.
-      retry: (failureCount, error) => failureCount < 2 && isRetryableQueryError(error),
+      retry: queryRetry,
       retryDelay: queryRetryDelay,
       // The live socket's event feed is the source of freshness; a stale query still gets
       // invalidated the moment a relevant event arrives. This just avoids an unconditional
