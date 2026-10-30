@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-598",
-  "completed": "2026-10-30T18:08:16Z",
+  "completed": "2026-10-30T18:29:17Z",
   "proof": [
+    {
+      "criterion": "Tester round 4: main's required lint and test checks pass at the code head (check-ci-images tree mode)",
+      "surface": "the repository's own CI check scripts, run in the workspace as CI runs them",
+      "command": "uv run --no-project --with pyyaml==6.0.2 bash .github/scripts/check-ci-images.sh tree; uv run --no-project --with pyyaml==6.0.2 bash .github/scripts/check-ci-images.test.sh",
+      "observed": "tree mode exit 0: '.github/ci-images.yaml holds 12 row(s); 36 reference(s) in 32 file(s) of CI's reach name one of those rows; of 6647 text file(s) swept, the 32 that name mirror.gcr.io are all in the exception list'; its test 'Results: 99 passed, 0 failed'",
+      "headSha": "34d2d17d2a2a",
+      "negativeControl": "at 9e0fc70a tree mode exits 1 with '4 problem(s) between .github/ci-images.yaml and the images CI fetches', naming cluster.sh:204, cluster.test.sh:1700, render-nats.sh:28 and manifests/nats.yaml:6; the check's test then reports 97 passed, 2 failed (the tester's job 124219909613)"
+    },
     {
       "criterion": "Review round 2 finding: the disk watcher never outlives its step after a SIGKILL and never stops another run's job",
       "surface": "GKE namespace loadtest, from this Legion worker pod, Dispatch 9b92ac14",
@@ -120,7 +128,8 @@
   "deviations": [
     "The reference-seed rerun of the full curves and the hour (results v5) runs after INFRA-707's passes, as the architect decided; this round's 100Gi default rests on a 20-minute typed replay's 9.4 GiB peak, and each step of that rerun records its pg-disk.json peak.",
     "A typed replay still loses edits where typing changed the logged text (68 named and 44 unnamed edits in the 20-minute r16-typing); the README says typed replays are not compared with the outage.",
-    "The tester's cases (o) and (p) keep their shellcheck notes; CI runs no shellcheck on cluster.test.sh."
+    "The tester's cases (o) and (p) keep their shellcheck notes; CI runs no shellcheck on cluster.test.sh.",
+    "The four cluster files are exceptions under 'a CI job runs it, and it fetches nothing' rather than the architect's suggested 'no CI job runs it' for three of them: envoy-go runs cluster.test.sh, which sources cluster.sh, templates nats.yaml and runs render-nats.sh --pin-from, so 'no CI job runs it' would be false; none of them hands an image to a registry in CI."
   ],
   "openQuestions": []
 }
