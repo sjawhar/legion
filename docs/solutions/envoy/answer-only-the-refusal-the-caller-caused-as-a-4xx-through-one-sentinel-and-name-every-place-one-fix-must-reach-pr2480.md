@@ -9,7 +9,6 @@ date: 2026-10-30
 status: active
 module: packages/envoy
 related_issues:
-  - "INFRA-715"
   - "sjawhar/legion#2480"
 ---
 
