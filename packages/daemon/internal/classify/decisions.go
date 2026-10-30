@@ -811,16 +811,19 @@ func carriesApproval(p record.ClassifiedPush) bool {
 // the same two heads, so a redelivered handoff push - the webhook's, or the daemon's own read of
 // GitHub's compare (daemon's handoffPush) - is recorded once; every other push is recorded in
 // delivery order beside any earlier push of the same two heads, a delivery being applied once
-// (intake.ApplyFact). A push whose own move the record has made is spent as it arrives
-// (unspentPushes), the move keeping it as its own push or as a repeat (pushedMoves); and the
-// pushes waiting for a link are bounded (boundedPushes). A push delivered late, after its head
-// arrived and the branch moved on, is that move's: it is taken for the same two heads pushed again
-// only by a head's next arrival by that move (arrivalPushes). While a head run is open - a head
-// arrived before every push of its move was recorded - the push joins the run's pushes, the run
-// drops what the record's bound let go, and the run is replayed (replayRun): the moves made and
-// the CI settlement that stands become those every push arriving before every head would have
-// given. With no run open no head waits for a push of its move - or the run that held one was cut
-// to its bound (maxRunSteps) - and a push changes no judgement until a head arrives.
+// (intake.ApplyFact). A push whose changed paths are unknown takes those of a recorded push of the
+// same two heads that knows them (knownPaths), so the webhook's copy of a push the daemon rebuilt
+// with its whole list, arriving later cut short, changes nothing that list showed. A push whose
+// own move the record has made is spent as it arrives (unspentPushes), the move keeping it as its
+// own push or as a repeat (pushedMoves); and the pushes waiting for a link are bounded
+// (boundedPushes). A push delivered late, after its head arrived and the branch moved on, is that
+// move's: it is taken for the same two heads pushed again only by a head's next arrival by that
+// move (arrivalPushes). While a head run is open - a head arrived before every push of its move
+// was recorded - the push joins the run's pushes, the run drops what the record's bound let go, and
+// the run is replayed (replayRun): the moves made and the CI settlement that stands become those
+// every push arriving before every head would have given. With no run open no head waits for a
+// push of its move - or the run that held one was cut to its bound (maxRunSteps) - and a push
+// changes no judgement until a head arrives.
 func ApplyPush(pr record.PullRequest, push record.ClassifiedPush) record.PullRequest {
 	pr, _ = ApplyPushDropping(pr, push)
 	return pr
@@ -837,6 +840,7 @@ type Dropped struct {
 
 // ApplyPushDropping is ApplyPush, and what it let go (Dropped).
 func ApplyPushDropping(pr record.PullRequest, push record.ClassifiedPush) (record.PullRequest, Dropped) {
+	push = knownPaths(pr.Pushes, push)
 	var dropped Dropped
 	pr.Moves, dropped.Repeat = pushedMoves(pr.Moves, push)
 	unspent, copied := cappedCopies(unspentPushes(withPush(pr.Pushes, push), pr.Moves, false), push)
@@ -883,6 +887,28 @@ func cappedCopies(pushes []record.ClassifiedPush, push record.ClassifiedPush) ([
 	}
 	gone := pushes[at[1]]
 	return append(append(make([]record.ClassifiedPush, 0, len(pushes)-1), pushes[:at[1]]...), pushes[at[1]+1:]...), &gone
+}
+
+// knownPaths is push with the changed paths of a recorded push of the same two heads when push's
+// own are unknown (Unknown: GitHub's limit cut the list, the push listed none, or the listener sent
+// none) and the recorded push's are known and describe the two heads - it did not rewrite history,
+// whose paths list only the commits it added. What a push changed between two commits is a fact
+// about them, true whenever it is learned: the push webhook arriving after the daemon's per-issue
+// read rebuilt the same push from GitHub's compare (daemon's handoffPush) must not unlearn a
+// handoff-only push, which an approval and a CI settlement are carried across. Only the paths are
+// taken; the rest of push is its own, so a forced copy may still change code, and a push whose
+// paths are known is recorded as it came.
+func knownPaths(pushes []record.ClassifiedPush, push record.ClassifiedPush) record.ClassifiedPush {
+	if push.Unknown == "" {
+		return push
+	}
+	for _, p := range pushes {
+		if pushKey(p) == pushKey(push) && p.Unknown == "" && !p.Forced {
+			push.HandoffOnly, push.Unknown = p.HandoffOnly, ""
+			return push
+		}
+	}
+	return push
 }
 
 // withPush is pushes with push recorded, after every earlier push. A push that carries an approval

@@ -48,6 +48,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testpg"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
@@ -61,7 +62,7 @@ func testDSN(t *testing.T) string {
 	dsn := os.Getenv("LEGION_TEST_PG_DSN")
 	if dsn == "" {
 		t.Skip("LEGION_TEST_PG_DSN is unset, so there is no Postgres to test against. Start one and set it:\n" +
-			"  docker run -d --name legion-pg --cpus 2 --memory 2g -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 postgres:16\n" +
+			"  docker run -d --name legion-pg --cpus 2 --memory 2g -e POSTGRES_USER=legion -e POSTGRES_PASSWORD=legion -e POSTGRES_DB=legion -p 127.0.0.1::5432 " + testpg.Image + "\n" +
 			"  port=$(docker port legion-pg 5432/tcp | head -1 | sed 's/.*://')\n" +
 			"  LEGION_TEST_PG_DSN=postgres://legion:legion@127.0.0.1:$port/legion go test ./internal/daemon/")
 	}
@@ -1458,15 +1459,25 @@ func (r *workflowTokenRecorder) InstalledOn(_ context.Context, role appauth.AppR
 }
 
 // servedMapping answers Dispatch's repository mapping, acme/widgets the default of project, and
-// reports whether r asked for it.
+// its webhook App check, Dispatch's GitHub App installed on every repository, and reports whether
+// r asked for either.
 func servedMapping(t *testing.T, w http.ResponseWriter, r *http.Request, project string) bool {
 	t.Helper()
-	if r.Method != http.MethodGet || r.URL.Path != "/api/v1/settings/repo-projects" {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	var body any
+	switch {
+	case r.URL.Path == "/api/v1/settings/repo-projects":
+		body = []map[string]any{{"repo": "acme/widgets", "project": project, "default": true}}
+	case strings.HasPrefix(r.URL.Path, "/api/v1/github/app-installation/"):
+		body = map[string]bool{"installed": true}
+	default:
 		return false
 	}
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode([]map[string]any{{"repo": "acme/widgets", "project": project, "default": true}}); err != nil {
-		t.Errorf("write the repository mapping: %v", err)
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		t.Errorf("write %s: %v", r.URL.Path, err)
 	}
 	return true
 }

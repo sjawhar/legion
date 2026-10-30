@@ -63,13 +63,12 @@ wake gives it>; `todo` with the `legion` label queues it again". Other admission
 ## `awaiting-person on <KEY>` (`{kind: "awaiting-person", reason}`)
 
 A root whose architect asked a person a question, or handed its spec to a person for approval, and
-now waits only on them: the daemon returned
-its slot and suspends the architect after its turn, keeping its session. Read
-`issues.<KEY>.waitingOn`. Do not park it or start anything, and take nothing for the slot it
-returned: it is no reason to label or admit an issue ([Free
+now waits only on them: the daemon returned its slot while the architect stays live to read the
+person's comments and replies. Read `issues.<KEY>.waitingOn`. Do not park it or start anything, and
+take nothing for the slot it returned: it is no reason to label or admit an issue ([Free
 slots](skill://legion-controller/SKILL.md#free-slots)). The person's answer puts it at the front of
-`admission.waiting` by itself, and the next free slot resumes its architect. A lost label or a
-foreign Dispatch claim sends the separate `unslotted` wake.
+`admission.waiting` by itself, and the next free slot delivers its task. A lost label or a foreign
+Dispatch claim sends the separate `unslotted` wake.
 
 ## `held on <KEY>` (`{kind: "held", phase, role?, reason?}`)
 

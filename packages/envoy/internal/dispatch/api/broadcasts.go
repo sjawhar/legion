@@ -443,6 +443,10 @@ func (s *server) writeBroadcast(
 		if err != nil {
 			return broadcastRead{}, nil, err
 		}
+		// Each copy is a direct message: its blocks are indexed, and it writes no mention.
+		if _, err := s.indexMessage(ctx, tx, message); err != nil {
+			return broadcastRead{}, nil, err
+		}
 		// A broadcast message is a thread root that answers nothing, so its event says what
 		// every other root's does; the broadcast it belongs to is read from the message row.
 		event, err := s.appendEvent(ctx, tx, messageEvent(
@@ -687,6 +691,9 @@ func (s *server) loadBroadcastRecipients(ctx context.Context, broadcastID string
 	}
 	replies, err := s.loadMessageReplyChains(ctx, s.deps.Store.Pool, ids)
 	if err != nil {
+		return nil, err
+	}
+	if err := hydrateThreadReplyBlocks(ctx, s.deps.Store.Pool, messages, replies); err != nil {
 		return nil, err
 	}
 	recipients := make([]broadcastRecipient, 0, len(messages))

@@ -23,13 +23,13 @@ const (
 // CI; a settlement of another head than the recorded one starts the fence afresh. A check_run
 // delivery the listener lost is recovered only by Dispatch's webhook redelivery sweep
 // (packages/envoy/internal/dispatch/redeliver: it runs only where Dispatch has the App key and
-// NATS, every two minutes, and resends deliveries GitHub recorded as failed since the sweep's
-// window starts: the last hour while it runs without a gap, back to its stored cursor after one,
-// never past GitHub's three-day horizon, and the last hour on a first sweep with no cursor) or by
-// the check's next run. Nothing on the Go path corrects the rest: a check_run with no
-// pull_requests yields no observation, a deleted check's failure stands for the life of the head
-// and of the handoff heads after it, and a rerun whose completion is never observed holds the last
-// verdict until the check runs again.
+// NATS, every two minutes, and asks GitHub again for each delivery GitHub recorded as failed until
+// GitHub records it OK or 72 hours after its first failed attempt; its listing starts at the last
+// hour while it runs without a gap, at its stored cursor after one, and 72 hours back on a first
+// sweep with no cursor) or by the check's next run. Nothing on the Go path corrects the rest: a
+// check_run with no pull_requests yields no observation, a deleted check's failure stands for the
+// life of the head and of the handoff heads after it, and a rerun whose completion is never
+// observed holds the last verdict until the check runs again.
 type SettlementCandidate struct {
 	// Head is the commit the settlement is for, which need not be the pull request's head
 	// (SettlementFor).

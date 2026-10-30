@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -69,6 +70,14 @@ func readRuntime(pool *pgxpool.Pool, api string, log *slog.Logger) *workflowRunt
 	}
 	w.handlers = []intake.Handler{engine, mergeStateTrigger{runtime: w}}
 	return w
+}
+
+// servedAcme is the repository mapping of a project that serves acme/widgets alone, the one a
+// read's own spelling of a repository is resolved against.
+func servedAcme() *repositories {
+	served := newRepositories("CAPTURE")
+	served.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
+	return served
 }
 
 func capturePhase(t *testing.T, pool *pgxpool.Pool) (phase.Phase, *record.PullRequest) {

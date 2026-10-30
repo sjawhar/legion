@@ -1,0 +1,11 @@
+kind: Fixed
+body: |-
+  An upload that moves an open anchor's quote where that anchor cannot stand, and leaves no copy
+  of it where it can, is answered `400 INVALID_MARKDOWN`, naming the anchor, its quote and where
+  the text landed, so the uploader can move the text or resolve the anchor first. That is an ask's
+  quote moved into a code block, or the quote of any open ask, comment or suggestion moved into the
+  front matter. Before, it was answered `500 DOC_SCHEMA` and logged as the server's error. An
+  upload that copies anchored text where that anchor cannot stand (an ask's quote into a code
+  block, any anchor's into the front matter) and keeps the original is taken, and the anchor stays
+  on the original; before, it was answered 500 too. A comment's or suggestion's quote in a code
+  block is still re-anchored there, as before.

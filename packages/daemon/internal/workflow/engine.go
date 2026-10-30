@@ -140,6 +140,8 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.merged(ctx, tx, fact)
 	case intake.PullRequestClosed:
 		return e.closed(ctx, tx, fact)
+	case intake.PullRequestMissing:
+		return e.pullRequestMissing(ctx, tx, fact)
 	case intake.ClaimReady:
 		return e.claimReady(ctx, tx, fact)
 	case intake.ClaimFailed:
@@ -232,15 +234,14 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 
 // sessionStatusWrite takes a lifecycle status change written by a session whose write the workflow
 // does not act on. A session holding a claim in the issue's tree is an agent, never a human move,
-// since a phase ends only by its completion (the `legion` tool's `handoff_complete`) and a tree only by the
-// architect's sign-off. Any other session on the root of a running tree — one holding its admission
-// slot, or one waiting on a person, whose tree stays live while it gave its slot back — another
-// tree's agent, or one outside Legion that took the issue for its own, has no part in the tree it
-// would end or park, so the tree's architect is told who wrote what (held until a waiting root's
-// architect resumes). Either way the workflow does not react:
-// the observation is recorded with the status kept (keepStatus), and the daemon re-asserts its own
-// status through the outbox. A person's move and the daemon's own write carry no session
-// (intake.DispatchIssue.ActorSession): they are the workflow's to act on.
+// since a phase ends only by its completion (the `legion` tool's `handoff_complete`) and a tree
+// only by the architect's sign-off. Any other session on the root of a running tree — one holding
+// its admission slot, or one waiting on a person, whose tree stays live while it gave its slot
+// back — another tree's agent, or one outside Legion that took the issue for its own, has no part
+// in the tree it would end or park, so the tree's architect is told who wrote what. Either way the
+// workflow does not react: the observation is recorded with the status kept (keepStatus), and the
+// daemon re-asserts its own status through the outbox. A person's move and the daemon's own write
+// carry no session (intake.DispatchIssue.ActorSession): they are the workflow's to act on.
 func (e *Engine) sessionStatusWrite(ctx context.Context, tx pgx.Tx, issue record.Issue, fact intake.DispatchIssue) (bool, error) {
 	if fact.ActorSession == "" {
 		return false, nil
@@ -391,17 +392,16 @@ func recordedResolution(issue record.Issue) Resolution {
 
 // ReenterChild takes a recorded child set back to todo into a new run under its live tree, the way
 // recordChildUnderLiveTree enters an unrecorded one: the run is the child's next generation, so no
-// row its previous run queued acts on it; the run it interrupted is stopped, the previous run's
-// facts are cleared, and the tree's architect is told. A child whose
-// tree is not live is an orphan, which admission, running after this handler, admits as a root of
-// its own. fact carries the values the new generation takes — a live todo event's for a reopened
-// child, or the child's own already-recorded ones for admission's promotion of a stranded child no
-// live event ever reopened, so the run is exported for that caller too: one re-entry, not two.
+// row its previous run queued acts on it; the previous run's facts are cleared, and the tree's
+// architect is told. A child whose tree is not live is an orphan, which admission, running after
+// this handler, admits as a root of its own. fact carries the values the new generation takes — a
+// live todo event's for a reopened child, or the child's own already-recorded ones for admission's
+// promotion of a stranded child no live event ever reopened, so the run is exported for that caller
+// too: one re-entry, not two.
 //
-// A done child's open production check closes as not run before the new run starts (the record
-// alone: markCheckClosed), since the rerun reuses the implementer's claim and the pod, and a look
-// would otherwise collide with the new run's task. A look open at the re-entry is interrupted as
-// the phase worker's run is: the implementer is suspended under the new generation's stamp.
+// A done child's open production check closes as not run before the new run starts
+// (markCheckClosed). The run's generation fences a completion left by an interrupted phase, and
+// the closed check refuses an old look's report, so both claims stay live.
 func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue, fact intake.DispatchIssue) error {
 	root, err := e.store.Issue(ctx, tx, child.Tree)
 	if err != nil || root == nil {
@@ -412,34 +412,17 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 		return err
 	}
 	next := child.Generation + 1
-	// The worker of the phase the child was taken out of is still working the interrupted run, and
-	// would report that run's handoff into the new one. Its claim carries no generation, so the
-	// stop is stamped with the generation the child is about to hold: that stamp is only the
-	// outbox's fence, and a row stamped with the run being left is dropped. The roles that finished
-	// earlier phases of the run stay live, as they do between phases, and the new run's starts hand
-	// them its tasks.
-	if role := RoleFor(child.Phase); role != "" && role != claim.RoleArchitect {
-		interrupted := child
-		interrupted.Generation = next
-		if err := e.suspend(ctx, tx, interrupted, role, fmt.Sprintf("%s was set back to todo", child.Key)); err != nil {
-			return err
-		}
-	}
+	// The worker of the phase the child was taken out of may still finish its old turn, but its
+	// completion serves the generation it took and the API refuses it once this generation begins.
+	// Roles that finished earlier phases of the run stay live, as they do between phases, and the
+	// new run's starts hand them their tasks.
 	check, err := e.store.ProductionCheck(ctx, tx, child.Key)
 	if err != nil {
 		return err
 	}
 	if check != nil && check.Open() {
-		lookOpen := check.LookOpen
 		if err := e.markCheckClosed(ctx, tx, check, record.CheckNotRun); err != nil {
 			return err
-		}
-		if lookOpen {
-			interrupted := child
-			interrupted.Generation = next
-			if err := e.suspend(ctx, tx, interrupted, claim.RoleImplementer, fmt.Sprintf("%s was set back to todo in a look of its production check", child.Key)); err != nil {
-				return err
-			}
 		}
 	}
 	if err := e.store.ClearGeneration(ctx, tx, child.Key); err != nil {
@@ -472,7 +455,7 @@ func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, f
 	if err := e.store.PutIssue(ctx, tx, child); err != nil {
 		return err
 	}
-	rows, err := blockers.Load(ctx, tx, e.store, e.cfg.Project)
+	rows, err := blockers.Load(ctx, tx, e.store, e.cfg.Project, []string{child.Key})
 	if err != nil {
 		return err
 	}
@@ -831,7 +814,7 @@ func (e *Engine) signOff(ctx context.Context, tx pgx.Tx, fact intake.SignOff) (i
 }
 
 func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, trigger TriggerKind, target phase.Phase, handoff record.PhaseRow, pr *record.PullRequest, reason string) error {
-	row, ok := e.row(issue.Phase, trigger, target, Snapshot{Phase: issue.Phase, HasPR: pr != nil})
+	row, ok := e.row(issue.Phase, trigger, target, Snapshot{Phase: issue.Phase, HasOpenOrMergedPR: record.LetsImplementationMove(pr)})
 	if !ok {
 		return nil
 	}
@@ -1012,7 +995,7 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 	if err != nil {
 		return err
 	}
-	rows, err := blockers.Load(ctx, tx, e.store, e.cfg.Project)
+	rows, err := blockers.Load(ctx, tx, e.store, e.cfg.Project, blockers.Judged(members, nil))
 	if err != nil {
 		return err
 	}
@@ -1196,18 +1179,10 @@ func (e *Engine) ownPullRequest(ctx context.Context, tx pgx.Tx, pr *record.PullR
 	return pr, nil
 }
 
+// treeMembers is every issue of root's tree, the root included, read by tree (record.Store.TreeIssues),
+// never from the project's whole record.
 func (e *Engine) treeMembers(ctx context.Context, tx pgx.Tx, root record.Issue) ([]record.Issue, error) {
-	issues, err := e.store.Issues(ctx, tx)
-	if err != nil {
-		return nil, err
-	}
-	members := []record.Issue{}
-	for _, issue := range issues {
-		if issue.Tree == root.Tree {
-			members = append(members, issue)
-		}
-	}
-	return members, nil
+	return e.store.TreeIssues(ctx, tx, root.Tree)
 }
 
 func (e *Engine) gateForIssue(ctx context.Context, tx pgx.Tx, issue record.Issue) (*record.DesignGate, error) {

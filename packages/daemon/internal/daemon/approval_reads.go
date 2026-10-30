@@ -2,9 +2,7 @@ package daemon
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -32,9 +30,9 @@ import (
 // after followHead and readReviews, so it compares with the head GitHub shows and judges the
 // decision a review just read recorded.
 //
-// ctx bounds the apply, and read the reads before it. It says whether the pass must stop: ctx
+// ctx bounds the apply, and read the reads before it. It says whether the read must stop: ctx
 // ended, or GitHub answered the compare with its rate limit. Any other failure is logged and
-// applies nothing, and the next pass reads again.
+// applies nothing, and the next read of the issue asks again.
 func (w *workflowRuntime) readApprovalCarry(ctx, read context.Context, github githubrest.Client, listed record.PullRequest) bool {
 	approved, pr, err := w.approvalSetAside(read, listed)
 	if err != nil {
@@ -48,7 +46,8 @@ func (w *workflowRuntime) readApprovalCarry(ctx, read context.Context, github gi
 		return false
 	}
 	compared := fmt.Sprintf("%s#%d:%s...%s", pr.Repo, pr.Number, approved, pr.HeadSHA)
-	if w.carryRefused(compared) {
+	eventID := w.readEventID("approval-carry", pr.Repo, pr.Number, approved+"..."+pr.HeadSHA)
+	if w.carryRefused(compared) || !w.unapplied(ctx, eventID) {
 		return false
 	}
 	push, aside, err := handoffPush(read, github, *pr, approved, pr.HeadSHA)
@@ -56,17 +55,10 @@ func (w *workflowRuntime) readApprovalCarry(ctx, read context.Context, github gi
 		if ctx.Err() != nil {
 			return true
 		}
-		attributes := []any{"repo", pr.Repo, "pullRequest", pr.Number, "issue", pr.Issue, "approved", approved, "head", pr.HeadSHA, "error", err}
-		var answer *githubrest.Answer
-		if errors.As(err, &answer) {
-			attributes = append(attributes, "status", answer.Status)
-		}
-		if answer != nil && answer.RateLimited {
-			w.log.Error("compare a pull request's approved head with its head: GitHub's rate limit; this pass reads no more pull requests", attributes...)
-			return true
-		}
-		w.log.Error("compare a pull request's approved head with its head; the approval stays set aside until a later pass or the push's webhook carries it", attributes...)
-		return false
+		return w.logReadFailure(err,
+			"compare a pull request's approved head with its head: GitHub's rate limit; this read asks GitHub no more",
+			"compare a pull request's approved head with its head; the approval stays set aside until a later read of the issue or the push's webhook carries it",
+			"repo", pr.Repo, "pullRequest", pr.Number, "issue", pr.Issue, "approved", approved, "head", pr.HeadSHA)
 	}
 	if aside != "" {
 		w.log.Info("workflow: the reviewer's approval stays set aside below the head; only an APPROVE of the head or a REQUEST_CHANGES ends the round", "reason", aside,
@@ -76,7 +68,6 @@ func (w *workflowRuntime) readApprovalCarry(ctx, read context.Context, github gi
 	}
 	w.log.Warn("workflow: only the issue's handoffs changed above the approved head, and no recorded push says so; applying the push GitHub's compare shows",
 		"repo", pr.Repo, "pullRequest", pr.Number, "issue", pr.Issue, "approved", approved, "head", pr.HeadSHA, "paths", *push.ChangedPaths)
-	eventID := fmt.Sprintf("approval-carry:%s:%s:%s#%d:%d", w.dispatchProject, w.bootID, pr.Repo, pr.Number, time.Now().UnixNano())
 	if _, err := intake.ApplyFact(ctx, w.pool, "github", eventID, push, w.handlers...); err != nil {
 		w.log.Warn("apply a handoff-only push read from GitHub's compare", "repo", pr.Repo, "pullRequest", pr.Number, "error", err)
 	}
@@ -86,8 +77,8 @@ func (w *workflowRuntime) readApprovalCarry(ctx, read context.Context, github gi
 // carryRefused is whether GitHub has already answered the comparison compared - a repository, a
 // pull request and the two heads - with something that does not carry the approval, and
 // refuseCarry records one it has: the compare of two fixed commits never changes its answer, so it
-// is asked for once. The two-minute pass and the per-issue read (readIssuePullRequest) both ask,
-// each on a goroutine of its own, so the set is kept under readMemoMu.
+// is asked for once. The per-issue read (readIssuePullRequest) and the outbox's approval carry
+// both ask, each on a goroutine of its own, so the set is kept under readMemoMu.
 func (w *workflowRuntime) carryRefused(compared string) bool {
 	w.readMemoMu.Lock()
 	defer w.readMemoMu.Unlock()
@@ -107,7 +98,7 @@ func (w *workflowRuntime) refuseCarry(compared string) {
 // recorded now, when that approval is set aside at the recorded head with no push that may change
 // code on its way: the issue is in reviewing, listed is still its open pull request, the reviewer's
 // recorded decision is an approval naming a head, and the approval does not stand. A nil pull
-// request says it is not. The record is read afresh, since the pass's earlier reads of listed (a
+// request says it is not. The record is read afresh, since the read's earlier reads of listed (a
 // head it followed, a review it applied) can have changed it.
 func (w *workflowRuntime) approvalSetAside(ctx context.Context, listed record.PullRequest) (string, *record.PullRequest, error) {
 	var approved string

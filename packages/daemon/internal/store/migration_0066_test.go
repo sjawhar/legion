@@ -3,37 +3,32 @@ package store
 import (
 	"context"
 	"testing"
+	"time"
 )
 
-// 0066 records the commit a push left a pull request's base branch at. No release before it
-// recorded a push onto a base at all, so a pull request written before it has none to carry: the
-// column takes the empty value, which reads as "no push onto the base recorded", and the next
-// two-minute pass reads the pull request regardless.
-func TestAPullRequestRecordedBefore0066HasNoMovedBase(t *testing.T) {
+// 0066 records the turn each claim last started and the one it last ended. A claim written before
+// it recorded neither, and nothing in the row says when its agent last worked, so both columns
+// stay null rather than taking a time the migration would have to invent: a reader tells "no turn
+// is recorded" from a turn that happened by the null.
+func TestAClaimRecordedBefore0066HasNoTurnTimes(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
 	migrateThrough(t, store, 65)
-	if _, err := store.Pool().Exec(ctx, `insert into issues
-		(key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
-		values ('LEGION-208', 'LEGION-208', 'LEGION', 'root', 'reviewing', 1, 'needs_review', 'A', 1)`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Pool().Exec(ctx, `insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at,
-		failing, cancelled, fix_attempts, blocked_attempts, check_runs, generation, snapshot, head_counted, planned_red,
-		review_seen, state, checked_head, required_workflows, required_workflows_head, mergeability, merge_state, base)
-		values ('LEGION-208', 'sjawhar/legion', 1208, 'legion/LEGION-208', 'h4', now(), '[]', '[]', 0, 0, '[]',
-		 1, '', '', false, 0, 'open', '', '[]', '', 'MERGEABLE', 'clean', 'main')`); err != nil {
+	if _, err := store.Pool().Exec(ctx, `insert into claims (token, project, tree, issue, role, generation, session, session_file, state,
+		launch_failures, prompt_failures, prompt_retires, uncertain_streak)
+		values ('legion-LEGION-209-implementer', 'legion', 'LEGION-208', 'LEGION-209', 'implementer', 1, 'ses_implementer', '', 'idle', 0, 0, 0, 0)`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	var moved string
+	var started, ended *time.Time
 	if err := store.Pool().QueryRow(ctx,
-		`select base_moved from pull_requests where issue = 'LEGION-208'`).Scan(&moved); err != nil {
-		t.Fatalf("read the pull request after 0066: %v", err)
+		`select last_turn_start, last_turn_end from claims where token = 'legion-LEGION-209-implementer'`).
+		Scan(&started, &ended); err != nil {
+		t.Fatalf("read the claim after 0066: %v", err)
 	}
-	if moved != "" {
-		t.Fatalf("base_moved after 0066 = %q, want empty for a pull request recorded before it", moved)
+	if started != nil || ended != nil {
+		t.Fatalf("turn times after 0066 = %v and %v, want both null for a claim that ran before them", started, ended)
 	}
 }

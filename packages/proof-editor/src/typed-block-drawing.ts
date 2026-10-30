@@ -1,13 +1,9 @@
-import { schemaCtx } from "@milkdown/core";
-import type { Root } from "@milkdown/kit/transformer";
-import { $remark } from "@milkdown/kit/utils";
 import {
   MarkType,
   NodeType,
   type Node as ProseMirrorNode,
   type Schema,
 } from "@milkdown/prose/model";
-import type { Transformer } from "unified";
 
 /** The part of an mdast node the typed-block decision reads. */
 export type MdastNode = {
@@ -205,24 +201,13 @@ export function remarkDecideTypedBlocks(schema: Schema, accepts: (node: MdastNod
 }
 
 /**
- * The default mode's content-rule step, run after `remarkTypedBlocks` (which has already thrown
- * for every directive the block schema refuses) and after the mark plugins, so a block-level
- * mark span is a mark node by the time its blocks are checked. Milkdown drops a typed block
- * whose content breaks its content rule, silently and with all its text; checked against the
- * ProseMirror `schema` the parse builds with, such a block is drawn instead as its literal fence
- * lines around its formatted content, so every word of it stays in the document.
+ * The headless engine's default-mode content-rule step, run after `remarkTypedBlocks` (which has
+ * already thrown for every directive the block schema refuses) and after the mark plugins, so a
+ * block-level mark span is a mark node by the time its blocks are checked. Milkdown drops a
+ * typed block whose content breaks its content rule, silently and with all its text; checked
+ * against the ProseMirror `schema` the parse builds with, such a block is drawn instead as its
+ * literal fence lines around its formatted content, so every word of it stays in the document.
  */
 export function remarkUnfitTypedBlocks(schema: Schema) {
   return remarkDecideTypedBlocks(schema, () => true);
 }
-
-/**
- * `remarkUnfitTypedBlocks` for the live editor, reading the editor's schema when it parses (the
- * remark processor is built before the schema is). It must be registered after the mark plugins.
- */
-export const unfitTypedBlocksRemarkPlugin = $remark(
-  "remarkUnfitTypedBlocks",
-  (ctx) => () =>
-    ((tree: MdastNode, file: { toString(): string }) =>
-      remarkUnfitTypedBlocks(ctx.get(schemaCtx))(tree, file)) as unknown as Transformer<Root, Root>
-);

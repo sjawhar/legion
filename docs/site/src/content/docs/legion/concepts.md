@@ -99,13 +99,13 @@ of its own, inside the same tree.
 
 ## Phase workers
 
-The daemon starts each phase's worker itself, one phase at a time, in the order below. When a phase
-ends its worker is suspended: its pod goes away and its conversation is kept, so the same agent
-comes back, with everything it knew, the next time its role is needed.
+The daemon starts each phase's worker itself, one phase at a time, in the order below. A role stays
+live and idle between its assignments until its issue leaves the workflow, so its next task reaches
+the same session.
 
 | Phase | Worker | What it does | GitHub identity |
 | --- | --- | --- | --- |
-| `awaiting_person` | none | The root returned its admission slot while its architect waits on a person's answer to a question on the root. The architect's session is suspended until the answer brings the root back through admission. | none |
+| `awaiting_person` | none | The root returned its admission slot while its live architect waits for and reads a person's answer to a question on the root. | none |
 | `planning` | planner | Writes the implementation plan into its handoff and the issue's document. | review App |
 | `implementing` | implementer | Writes the change, proves it works, pushes `legion/<KEY>` and opens the pull request. | implement App |
 | `testing` | tester | Runs the changed surface for real, tries to break it, judges whether the tests would catch what breaks, and reads CI for everything static; reports `pass` or `fail`. | review App |
@@ -149,18 +149,17 @@ off a waiting root takes it out of line; taking it off a running tree does not s
 A root whose architect asked you a question and now waits only on your answer gives its slot back
 rather than holding the project up: once nothing else of its tree runs and the architect has taken
 the task it was last given, the root moves to `awaiting_person` and the slot goes to the next root
-in line at once, while its architect's session is suspended once its current turn ends, and kept.
-Its tree stays live for its children, and `waitingOn` in `legion state` names the question and
-when the wait began. Your act on any ask of the root answers it, whichever ask the wait names:
-your answer, resolution, or reply that hands an open ask back to the agent; so does your approval
-or changes request of the root's spec, and so does the spec's design gate standing open. The wait
-also ends when nothing is asked of you any more: Dispatch retracts the question because its
-decision block left the spec, a session closes it, or a session hands it back to the agent's
-turn. The answered root goes to the front of the waiting line, ahead of every root that never
-ran, and the next free slot resumes the same
-architect session with a task naming what answered it and what is still with you. An agent's
-answer or resolution of another ask answers nothing, and an act of yours from before the wait
-began is one the architect already read. Taking the label off, or a person or an outside session
+in line at once. Its architect stays live and reads your comments and replies as they arrive. Its
+tree stays live for its children, and `waitingOn` in `legion state` names the question and when the
+wait began. Your act on any ask of the root answers it, whichever ask the wait names: your answer,
+resolution, or reply that hands an open ask back to the agent; so does your approval or changes
+request of the root's spec, and so does the spec's design gate standing open. The wait also ends
+when nothing is asked of you any more: Dispatch retracts the question because its decision block
+left the spec, a session closes it, or a session hands it back to the agent's turn. The answered
+root goes to the front of the waiting line, ahead of every root that never ran, and the next free
+slot gives the same architect session a task naming what answered it and what is still with you. An
+agent's answer or resolution of another ask answers nothing, and an act of yours from before the
+wait began is one the architect already read. Taking the label off, or a person or an outside session
 claiming the root on Dispatch, takes it out of the workflow instead: Legion never resumes work
 another owner took. A root whose architect requested approval of its spec and registered that version waits the same way, on the design gate, until the person reviews the spec or a newer version hands the request back to the architect. The slot
 a waiting root returns is no reason for the controller to label or admit anything: a root you
@@ -235,6 +234,10 @@ Legion uses GitHub's own review mechanisms rather than labels:
   such a head and runs no check on it, so no CI result would ever arrive: the daemon takes the
   issue back to `implementing` from `testing`, `reviewing`, `accepting`, `retro` or `merging`,
   starts the implementer with the base to merge forward, and tells the architect.
+- **An implementer that completes with no pull request** is refused (`HANDOFF_NO_PULL_REQUEST`)
+  until one is open on its branch, and the daemon's read of that issue tells its architect
+  `pull-request-missing`, once per handoff commit, so an issue never waits in `implementing`
+  unnoticed.
 - **Review threads** close one by one, and only once the thread's opener (or, for a thread a bot
   opened, Legion's reviewer) accepts the reply.
 - One limit flags a loop: after `review_round_cap` rounds (three by default) the daemon posts a

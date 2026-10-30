@@ -75,6 +75,33 @@ func TestThePerIssueReadFindsThePullRequestOfTheIssuesBranch(t *testing.T) {
 	}
 }
 
+// An implementer that completed with no pull request open on its branch leaves its issue waiting in
+// implementing with nobody told. The per-issue read, the one its completion queues, finds no open
+// pull request there and tells the issue's architect - once per handoff commit, however often the
+// read runs.
+func TestThePerIssueReadTellsTheArchitectOfAMissingPullRequest(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	seedUnrecorded(t, pool, "handoff")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/repos/acme/widgets/pulls") {
+			_, _ = w.Write([]byte("[]"))
+			return
+		}
+		http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
+	}))
+	t.Cleanup(server.Close)
+	w := readRuntime(pool, server.URL, quietLogger())
+	for range 2 {
+		if err := w.readIssuePullRequest(context.Background(), "CAPTURE-1"); err != nil {
+			t.Fatalf("read the issue's pull request: %v", err)
+		}
+	}
+	reasons := noticeReasons(t, pool, "pull-request-missing")
+	if len(reasons) != 1 || !strings.Contains(reasons[0], "legion/CAPTURE-1") || !strings.Contains(reasons[0], "handoff") {
+		t.Fatalf("two reads told pull-request-missing %q, want one naming the branch and the handoff commit", reasons)
+	}
+}
+
 // The daemon reads an issue's pull request when one of its agents hands off: the completion is the
 // moment it decides the issue's next step, and the state it decides by must be GitHub's own. The
 // read is queued by the completion and made on the runtime's own goroutine, for that issue alone -

@@ -440,9 +440,10 @@ func TestARootWithNoOpenTreeClosesAtItsMerge(t *testing.T) {
 }
 
 // A merged root stands in merging for as long as its tree runs, so the facts that would take an
-// open pull request back to implementing can land on a merge GitHub already made: a push past the
-// head the merger merged moves nothing there, and a red check moves nothing anywhere. There is
-// nothing left to merge or to re-implement.
+// open pull request back to implementing can land on a merge GitHub already made: a synchronize
+// past the head the merger merged is older than the merge, since GitHub synchronizes only an open
+// pull request, and moves nothing there (pullRequestSynchronized), and a red check moves nothing
+// anywhere. There is nothing left to merge or to re-implement.
 func TestNothingMovesAWaitingMergedRoot(t *testing.T) {
 	for _, tc := range []struct {
 		name string

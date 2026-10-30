@@ -1,5 +1,349 @@
 # Changelog
 
+## [23.0.0] - 2026-10-29
+
+### Changed
+
+- Editing an ask through the ask-edit route (`PATCH /api/v1/asks/{id}`, `dispatch edit-ask`) now
+  refuses, with HTTP 400 `ASK_BLOCK_TEXT`, every edit of a decision that breaks its content rule
+  (a second option list, or a block after its options, which two people's concurrent edits can
+  leave), so the route never moves or drops what another person wrote. The reason quotes every
+  block of the decision in full with its block id as quoted data, and names the path: delete the
+  blocks it lists, all in one document edit (`dispatch doc-edit`), which keeps the question's
+  paragraphs and the first list after them and does the same inside any decision nested in those
+  blocks, so one document edit repairs them together, then edit the ask; where one edit cannot
+  (a decision holding this one is broken too, or a decision needs words written rather than
+  blocks deleted), it names no delete and says the decision is repaired in the document
+  editor; before the document has settled its block ids it says to
+  retry instead. Before, an edit of only its urgency or
+  `multiple` wrote its options, joined across both lists, to the ask.
+- **Breaking:** migration 0141 drops `broadcast_idempotency_keys`, the broadcast send's own key
+  table from before every write took an `Idempotency-Key` header (INFRA-258). No value anything
+  reads is lost: since 0137 a broadcast's key is a `request_keys` row, and the send route no
+  longer takes the body key the dropped rows recorded. Rollback floor: once 0141 has applied, a
+  task older than legion-envoy v21.0.0, the release that added 0137, still boots, but its
+  broadcast send fails with SQLSTATE 42P01 (undefined table), since it writes
+  `broadcast_idempotency_keys`. v21.0.0 and every later release neither read nor write it. The
+  drop takes `ACCESS EXCLUSIVE` on `broadcasts` for the instant its transaction lasts, so a
+  broadcast read or send waits that instant.
+
+### Fixed
+
+- An ask that two people's concurrent edits leave holding two option lists, or a paragraph after
+  its options, now keeps every word in every editor and in the stored document, stays open or
+  decided as it was, and shows as a malformed decision until its text is fixed. The browser editor
+  refused to build such an ask, so y-prosemirror deleted it, with all its text, from the shared
+  document every editor and the server read, and settlement then retracted it. The editor now builds
+  an ask holding any non-empty run of the blocks the server accepts in one, and inside such an ask
+  an input whose edit it cannot make, such as Enter twice to leave a list, Backspace joining a list
+  item into the question, typing over a selection, cutting or dropping, is declined instead of
+  being applied by the browser; an input method that starts composing over a selection across
+  blocks types at the selection's start without deleting it; and an edit the browser makes itself,
+  such as a writing extension's `document.execCommand`, is refused when it would delete any of an
+  option list or paragraph the person did not select. Its own edits,
+  input rules, pastes, markdown imports and retyping a block as an ask still hold an ask to
+  `paragraph+ bullet_list?`.
+- Settlement now reads an ask that parses but breaks its content rule, a second bullet list or a
+  paragraph after its list, as malformed: it marks the block `invalid` with the content rule's
+  reason (`pmdoc.AskContentError`) and emits `block.invalid`. An open ask's row stays open and
+  unchanged, as it already did for an ask holding a heading; an answered or resolved ask keeps its
+  decided row and answer. An edit that makes the ask conform clears `invalid`, updates the row, and
+  writes a decided ask's decided wording back into it. It used to index such an ask as valid, with
+  its option lists concatenated and its question's paragraphs joined. This changes how such a
+  document is read: at the time of the change, a census of every live document in all 11 Dispatch
+  projects (6,029 documents, 636 ask blocks, 19 of them open) found no ask it newly marks.
+- The document editor now draws a pasted container directive it refuses, an unknown typed block
+  such as `:::note` or a typed block with a refused attribute, as its literal lines around its
+  formatted content, and so does a past version's view that holds one. It threw, so a paste fell
+  back to the browser's own plain-text paste, with the lines joined. A past version's view also
+  keeps an answered decision's answer. The editor also no longer refuses the paragraph-line
+  directive forms: a line opening `::name` (a leaf directive), a `:name{…}` text directive, and a
+  malformed `:::` line such as a Pandoc `::: warning` fence now stay the text they are, which the
+  server escapes when it saves them. Only those inputs read differently: a pasted ask with two
+  option lists or a paragraph after its list is still drawn as its lines, and the headless
+  engine's default mode, which the server's parity fixtures are generated with, still refuses
+  all of them.
+- On `/ws/live`, a subscription that replaces a delivery view under the same sub no longer has its
+  first frame written ahead of the hub's answer to the view it replaced. The socket's writer let the
+  stream in when its look found the hub's queue empty, and a hub frame that arrived before its pick
+  then went out in either order, so a page could read the replaced view's answer, such as
+  `DELIVERY_NOT_CONFIGURED`, after the events or agent subscription that took its place had begun.
+  A stream frame the pick takes while a hub frame waits is now written once the hub's queue is empty.
+
+## [22.3.1] - 2026-10-29
+
+### Fixed
+
+- Indented code keeps the whitespace-only lines after it that the browser keeps (four or more
+  columns past its container, and the shorter blank lines between them), and those lines no longer
+  spread a list or a list item, so a document reads in the editor as in a comment and a past
+  version. A whitespace-only line in fenced code whose fence is indented, holding fewer columns
+  than the fence, is an empty line of the code, as the browser reads it. A document's last line
+  with no line feed reads as the browser reads it too: it keeps the columns its containers leave of
+  a tab, a typed block indented in its container takes its indentation from it, and in fenced code
+  one holding nothing past the fence's indentation is no line of the code. A stored document is
+  read anew at its next read.
+- A `bus.ConnectOwningStream` whose stream reconcile the server refuses (more copies than it has
+  servers, a byte limit it cannot reserve) leaves no connection open. The constructor closed the
+  connection it had dialled, but that close started a recovery of the client it never returned,
+  which dialled and installed a replacement no caller could close; once its server went, that
+  connection reconnected for the rest of the process and logged `envoy nats reconnect attempt
+  failed` once a minute. The client is now stopped before the close, so the recovery dials nothing.
+- A Dispatch suggestion comment no longer reads its whole document again to learn the suggestion's
+  kind: a read inside a write transaction (`SuggestionKind`, `BlockForQuote`, `VerifyMark`) uses the
+  rendering the transaction's last write already made of its fork, as the version capture and the
+  margin write do, through one rule (`liveWrite.rendering`). On real-size specs this makes the
+  kind read about 80% faster and the whole suggestion comment about 10% faster. A document write
+  whose change panics now always drops its transaction's fork, so a later write in the same
+  transaction can no longer build on a fork no recorded update describes and write a version the
+  committed document does not hold.
+
+## [22.3.0] - 2026-10-29
+
+### Changed
+
+- `POST /v1/messages/publish` answers a role or ad-hoc topic message once its recipient confirmed
+  it, or 504, so a message sent through a listener reaches its recipient or its sender gets an
+  error, also while the hub's NATS servers change under the recipient. A role topic is
+  no longer published on the role lane: the listener forwards the envelope to the live holder's
+  agent subject itself with a receipt, resolving the holder again and forwarding the same envelope
+  (one `event_id`, dedupe key `envoy.role.forward.<key>`) 100 ms after each miss, each forward
+  waiting at most 2 s, until a receipt arrives or 4 s from the request's arrival have passed. It
+  answers `200` with the envelope and `holder` once the holder's receipt arrived, and also,
+  forwarding nothing, when `source_session` holds the role or the holder already confirmed the
+  dedupe key through the route; `404` with `reason` `unclaimed` or `holder_lapsed`, as before,
+  and for a first resolution of the holder that fails the answer `GET /v1/roles/<role>` gives (the
+  503 with `Retry-After: 1` for a read that did not answer within 3.5 s of the request's arrival
+  or for a lost race for the claim, the 500 for a claim record no read can decode);
+  `403 {"error":…,"reason":"capability","holder":…}` when the holder does not advertise the
+  payload's delivery mode, where the role lane dropped such a message after the 200; and
+  `504 {"error":…,"reason":…,"event_id":…,"dedupe_key":…,"holder":…,"attempts":N}` once the 4 s
+  passed, `reason` being `receipt_timeout` (the last forward reached the server and drew no
+  receipt) or `delivery_failed` (no live holder, a read that failed or ran out of time, a forward
+  not shown to have reached the server). An ad-hoc topic (one no stream subject captures,
+  `bus.UsesCoreTransport`) is still published over core NATS, then forwarded the same way,
+  `event_id` and `dedupe_key` unchanged, to the agent subject of each live `self_subscribed`
+  session registered on it on any machine
+  (`store.Registry.MatchAll`), the sender excepted; it answers `200` once it was published and
+  each confirmed or there was none. Its own publish not reaching NATS, the 4 s ending first or the
+  publish failing at once for any reason but a refusal, answers `504 {"error":"<topic> was not
+  published within 4s: <cause>; no session was sent it","reason":"publish_failed","event_id":…,
+  "dedupe_key":…}` and forwards to no one; a refusal keeps its 400 or 413, and a publish the
+  listener's grant denies its 403. A topic published
+  that some recipient did not confirm answers `504 {"error":…,"reason":"not_confirmed",
+  "event_id":…,"dedupe_key":…,"delivered":[…],"undelivered":[{"session_id":…,"reason":…}]}`. Only
+  a receipt that arrived through the route counts as a recipient's confirmation: the route keeps a
+  record of its own of who confirmed each dedupe key, which a re-send of the key reads, since the
+  live topics lane's fanout records a self-subscribed session whose push it skipped in the
+  delivery handlers' dedupe cache without hearing from it. A session that stopped without
+  unregistering stays registered for up to 5 minutes and is named in `undelivered` in that time; a
+  named session is not a failed delivery to the others. A session served on a port is not
+  confirmed and keeps the live topics lane's delivery. A topic the stream captures is unchanged:
+  stored before the 200, and read back through `POST /v1/replay` by a session that missed it. The
+  route publishes no delivery exception. The role lane now carries only a role topic a client
+  publishes straight onto NATS (a listener of an earlier release, an operator's `nats pub`), and
+  still forwards it once and reports a failure as an exception. Every answer is written with the
+  route's one `listener publish` record line, its `outcome` `accepted`, `role_unclaimed`,
+  `role_lapsed`, `capability_refused`, `receipt_timeout`, `delivery_failed`, `not_confirmed`,
+  `publish_failed` or a refusal's own, beside the send's own `listener publish role send` or
+  `listener publish topic send` line.
+- Every receipt-backed forward to a session's agent subject (`bus.Client.RequestCoreTo`) carries a
+  `Nats-Msg-Id` of its dedupe key and subject (`bus.ForwardMsgID`), so the stream, which captures
+  agent subjects, keeps one copy per message and recipient however many attempts the route makes;
+  `RequestCoreTo` takes as a receipt only a reply with no data and no header field, since the
+  stream's acknowledgement of that copy carries data and the server's no-responders answer a
+  `Status` header. A listener's durable acknowledges an envelope stored on an agent subject whose
+  topic is not that subject (a stored forward copy) without delivering it. During a rollout a
+  listener of an earlier release sends a stored ad-hoc forward copy to its fanout, which pushes it
+  to its serve-port sessions subscribed to the topic once per key. A soak test
+  (`cmd/listener/server_change_test.go`, build tag `serverchange`) runs both listener binaries
+  over a three-server in-process NATS cluster and proves every role, ad-hoc and captured message
+  sent every 250 ms arrives or errs across lame-duck and killed servers; CI runs it as its own
+  job, `listener-server-change`.
+- The Legion daemon reads the new answers (`packages/daemon/internal/notify`,
+  `internal/daemon/outbox.go`; the daemon keeps no CHANGELOG of its own). A 504 `receipt_timeout`
+  queues the notice again on the existing capped schedule, at most three copies; a 504
+  `delivery_failed` is retried on the row's backoff without a cap, so a hub outage drops no notice;
+  a 403 `capability`, and the 403 whose error opens with the listener's grant-denial prefix
+  (`notify.ErrPublishDenied`), each finish the row undelivered with one log line naming the reason,
+  so no later notice waits behind it, and for a merge-queue packet post a Dispatch message naming
+  the refusal. It still re-holds from the role-lane exceptions a listener of an
+  earlier release raises. **Release order:** a deployment's Legion daemons take this release
+  before its listeners do. An earlier daemon reads both new answers, the 504 and the 403
+  `capability`, as a generic error and retries the notice without a cap, and every later notice to
+  that architect waits behind it (`earlierNoticeFor`): behind a 504 until the holder confirms or its
+  registration lapses, behind a 403 until another session holds the role. Neither answer refuses
+  input an earlier listener accepted: each reports a message that an earlier listener answered
+  200 and then failed to deliver (a forward without a receipt, or a holder that does not advertise
+  the payload's delivery mode). A role held by a session served on a port, which holds no NATS
+  connection to confirm a forward, now answers 504 `receipt_timeout`; an earlier listener answered
+  200 and the forward reached nobody.
+
+## [22.2.1] - 2026-10-29
+
+### Changed
+
+- A Dispatch document read that misses the cache validates the document tree once instead of five times, and reads each text from its Yjs items directly instead of through ygo's `ToDelta` (`pmdoc.ReadUnshared`, `pmdoc.ValidDocument`). A live `/blocks` read builds its blocks from the tree it read with one validation instead of four. Tokens, `/text`, `/blocks` and every refusal are byte for byte the same. The token encoder `pmdoc.AppendTokenJSON` is now `pmdoc.EncodeTokenJSON`, which allocates its own buffer.
+
+## [22.2.0] - 2026-10-29
+
+### Added
+
+- Dispatch tells whoever files an issue, an ask or a decision block what it already holds on the
+  same subject. After an issue create, an ask (on an issue or a project document) or a
+  document edit that adds decision blocks commits, the related-item check searches the project by
+  the text's rarest words (at most 25, each scored by its count in the text times its BM25 idf
+  over the project's items, with too-common words, numbers and hashes dropped, and the keyword
+  arms ranked by idf-weighted coordination of those words) and, where an embedder is configured,
+  by meaning, and the response waits for it at most 5 s. `advice.suggestions` now always says what
+  it did: `outcome` `found`, `none` or `not_made` (with the reason in `missing`), `search`
+  `meaning_and_keywords` or `keywords_only` (with `search_note` saying why), `search_query` for a
+  reader's own `dispatch search`, `related` (each ask item with `ask`, its state, latest answer,
+  who gave it, when and the options chosen; no item carries `ask`, and there is no `decision`,
+  when the asks' states could not be read) and `decision`; a forced issue create also lists the
+  titles it forced past in `title_matches`. A document edit's advice gains
+  `decision_block_checks`, `{block_id, question, suggestions}` for each block it added in
+  document order, the first five checked together under the one 5 s bound and the rest answered
+  as not made. `GET /api/v1/projects/{key}/related` (title and text at most 1,000 characters
+  together) and `POST` (a spec-length text) run the same check and write nothing.
+  `GET /api/v1/related-checks?project=&source_kind=&from=&to=` counts the recorded checks by
+  source, outcome, search mode and reason, with p50, p95, maximum and over-300 ms counts of their
+  keyword and total times. Migration `0139_related_checks` adds `related_checks` (one row per check
+  of a write) and `search_term_stats` / `search_term_totals`, the word statistics the new
+  term-statistics refresh (`api.RunSearchTermStatsRefresh`, lease `search-term-stats`, so the
+  lease pool holds 13 connections) rebuilds for every project at boot and every 10 minutes.
+  Migration `0140_issue_embedding_spec` makes an issue's meaning-search text its title and its
+  spec, re-queued on a spec edit; the coverage pass re-embeds existing issues once an embedder
+  runs. Both censuses answer `0`.
+
+### Changed
+
+- A write's related items no longer come from LEGION-550's 300 ms keyword step
+  (`writeSuggestionTimeout`, removed): an issue create, an ask or a document edit adding decision
+  blocks can now take up to 5 s longer, the related-item check's bound, and a check that runs out
+  of time says it was not made instead of looking like one that found nothing. The
+  route descriptions of `POST /api/v1/issues`, `POST /api/v1/issues/{key}/asks` and
+  `POST /api/v1/artifacts/{id}/asks` say so.
+  A Dispatch server process now opens up to 87 database connections, one more for the
+  term-statistics refresh's lease, and envoy-infra's `gcp:Dispatch` sizes an app pod by that count.
+
+## [22.1.0] - 2026-10-29
+
+### Changed
+
+- `ENVOY_NOTIFICATIONS` and every key-value bucket Envoy opens (`envoy_interests`, `envoy_roles`,
+  `envoy_sessions`, `envoy_ci_state`, `envoy_webhook_redelivery`) now hold the deployment's
+  replica count, `ENVOY_NATS_REPLICAS`: a whole number from 1 to 5, default 1. A start creates the
+  stream or a bucket at that count and raises one it finds with fewer copies; the keeper (below)
+  raises it again after a concurrent start lowered it. The copies stay at the setting only when
+  every program of a deployment carries the same value: a clustered deployment sets it in every
+  envoy-listener and in the Dispatch server. Lowering copies is an operator step that needs every
+  program's setting lowered first, or the keeper raises it back
+  (`nats stream edit <stream> --replicas=<n>`). The listener reads it in `config.Load`, and now
+  refuses 0, a negative number, more than 5 and a non-integer at load, naming the variable, where
+  it took any integer. Dispatch's server reads it from a new settings table row, where it created
+  the stream and its redelivery bucket with a single replica, and so does
+  `envoy-dispatch redeliver-webhooks`. More than 1 needs a clustered NATS: a single server
+  (nats-server v2.15.1 included) refuses both a create and a raise above 1, and the listener's start
+  then stops with an error naming `ENVOY_NATS_REPLICAS=<n>` (Dispatch's server, which connects in
+  the background, serves on and logs `envoy nats reconnect hook failed` with that error); a refused bucket raise names the bucket
+  too, as `raise KV_envoy_interests: ENVOY_NATS_REPLICAS=3: context deadline exceeded` (a grant
+  without `$JS.API.STREAM.UPDATE.KV_<bucket>` shows as that timeout after 10 seconds). A cluster
+  with one of three servers stopped creates a new stream at 3 copies, one offline peer assigned,
+  and the start succeeds on nats-server v2.15.1; v2.10.29 refuses that create.
+- `ENVOY_STREAM_MAX_BYTES`, new, read by the listener and by Dispatch's server (a new settings
+  table row): a positive whole number of bytes, the stream's byte limit. A full stream refuses a
+  new publish (`DiscardNew`, now set on every start and switching a deployed `DiscardOld` stream)
+  and keeps every stored message, which leaves only by age, so the stream still holds every
+  message it took for its whole 72-hour duplicate window and the limit drops none; size the limit
+  above the stream's 72-hour volume. The refused publish's sender gets
+  `bus.ErrStreamFull` (`stream ENVOY_NOTIFICATIONS is full: nats: maximum bytes exceeded`, the
+  server's error 10077 kept inside), which is not a `bus.ErrRefused` and so is retried: the webhook
+  listener answers GitHub 503 and Dispatch's redelivery sweep has GitHub redeliver it, Dispatch's
+  outbox retries the event on its backoff, the CI store settles again on a later tick, and
+  `/v1/messages/send` and `/v1/messages/publish` answer `503` with `Retry-After: 1` and the body
+  `envoy: the message bus refused the message because its stream is full: …`, their request record's
+  outcome `stream_full` rather than `bus_unavailable`, since the bus answered. Unset, the stream is
+  created with no byte limit and a start keeps a deployed limit. Neither a start nor the keeper
+  (below) ever lowers a deployed limit, as for the copies: each raises a smaller limit, or none, to
+  its setting and keeps a larger one, so an operator's raise of a full stream
+  (`nats stream edit ENVOY_NOTIFICATIONS --max-bytes=<n>`) stands, and programs with different
+  limits do not fight over the stream: the largest stands. A concurrent start can still put back
+  the smaller limit it read over another's (below) until that program's keeper raises it again.
+  Lowering or removing a limit is an operator step that needs every program's setting lowered or
+  removed first (`--max-bytes=<n>`, or `--max-bytes=-1` for none). 0, a negative number or a
+  non-integer is refused at load naming the variable, and a limit above what the server can
+  reserve is refused at create or update: the listener's start then stops with an error naming
+  `ENVOY_STREAM_MAX_BYTES=<n>`, and Dispatch's server, which connects in the background, serves on
+  and logs `envoy nats reconnect hook failed` with that error at each retry.
+- A JetStream publish the server acknowledges as a duplicate with no sequence (`bus.ErrNotStored`,
+  `stream ENVOY_NOTIFICATIONS acknowledged a duplicate of a message it does not hold`) is now sent
+  once more without its `Nats-Msg-Id`, through `Publish`, `PublishReportingDuplicate` and a
+  window's send, where it was taken as published. A clustered nats-server (v2.10.29 among them)
+  records a publish's `Nats-Msg-Id` at sequence 0 before it stores the message and keeps that
+  record on the stream's leader for the 72-hour duplicate window, a purge notwithstanding, when a
+  full stream refuses it, so every retry under the id (a GitHub redelivery, a Dispatch outbox
+  retry) was acknowledged `{"seq":0,"duplicate":true}` though the stream never stored the message.
+  The send without the id is stored as soon as the stream has room, with no leader step-down, and
+  the publish succeeds; while the stream is still full it is refused too, and the publish fails
+  with an error wrapping `bus.ErrNotStored` and the send's own error (`stream ENVOY_NOTIFICATIONS
+  acknowledged a duplicate of a message it does not hold, and its publish without its id failed:
+  stream ENVOY_NOTIFICATIONS is full: nats: maximum bytes exceeded`), which is not a
+  `bus.ErrRefused` and is retried as `bus.ErrStreamFull` is: the webhook listener answers 503, the
+  outbox backs off, the send routes answer the full stream's `503` when the second publish was
+  refused as full. The stream drops no repeat of a message sent
+  without its id: a retry of a message still being stored, also acknowledged a duplicate with no
+  sequence, stores a second copy, and once a refused message is stored, every later publish under
+  its id stores another while the leader keeps the record, so the stream's consumers see each copy.
+- Every update of `ENVOY_NOTIFICATIONS` a start sends now starts from the deployed configuration
+  and changes only what Envoy owns: the subjects (reconciled as before), the 72-hour age and
+  duplicate window, the replicas (the deployed count or the setting, whichever is more), the byte
+  limit (the deployed one or the setting, whichever is more; the setting on a stream with none, the
+  deployed one when unset) and `DiscardNew`. Every other deployed field
+  (`MaxMsgsPerSubject`, `MaxMsgSize`, placement, compression and the rest) is kept beside the
+  metadata, `envoy_stream_id` included, where an update that changed subjects, age or window wrote
+  this binary's configuration over them, its replica count scaling a replicated stream down to the
+  starting program's count, which for Dispatch's server was always 1. A start that finds the
+  stream as it should be sends no update.
+- The listener and Dispatch's server, the programs that own `ENVOY_NOTIFICATIONS`, now keep it
+  while they run. JetStream's stream update has no compare-and-swap, so a start with other or no
+  settings, or another subject list, that reads the stream before another start's write and writes
+  after it puts the old subjects, copies, byte limit and metadata back. Every 30 seconds each
+  program's keeper reads the stream again and puts back copies below its `ENVOY_NATS_REPLICAS`, a
+  byte limit below its `ENVOY_STREAM_MAX_BYTES` or none (when set), a missing `envoy_stream_id`, the
+  72-hour age and duplicate window and `DiscardNew` (compiled into every release alike, logged as
+  `discard DiscardOld -> DiscardNew` when it puts it back), and adds
+  back each subject its binary compiles that the stream lacks, unless it overlaps a subject the
+  stream carries or captures a role lane, logging the WARN line
+  `envoy nats keeper restored the stream` with, for example,
+  `restored="replicas 1 -> 3, max_bytes -1 -> 2000000, envoy_stream_id added as <id>, subjects added notifications.legion.>"`.
+  It only adds subjects: it removes and replaces none, so two releases with different subject
+  lists do not switch the stream back and forth, and each release's keeper adds back its own
+  subject that a concurrent write dropped. A stream that still carries role-lane subjects it
+  leaves to a start, which moves them off: when that stream needs anything, it sends nothing and
+  logs that it could not restore it. It also raises
+  the buckets its program opens (the listener's `envoy_interests`, `envoy_roles`,
+  `envoy_sessions` and `envoy_ci_state`, Dispatch's `envoy_webhook_redelivery`) back to
+  `ENVOY_NATS_REPLICAS`, logging `envoy nats keeper raised a bucket` with `replicas="1 -> 3"`. A
+  failed pass logs `envoy nats keeper could not restore the stream` or
+  `envoy nats keeper could not raise a bucket` and the next period tries again; it never stops
+  the program. With mixed settings during a rollout the stream can sit below the setting for up
+  to one period after the last start.
+- envoy-infra: `ListenerPermissions`, and through it `HostPermissions` and `DispatchPermissions`,
+  gains `$JS.API.STREAM.UPDATE.KV_<bucket>` for each bucket the listener opens, and
+  `DispatchPermissions` the same for the webhook redelivery bucket: the update a start, and the
+  keeper every 30 seconds after it, sends to raise a bucket's copies. `gcp:NatsHub` renders it
+  into the users it derives from those sets, so moving a hub with a `listener`, a `machineId` user
+  or a `dispatchMachineId` user to this release replaces its VM once. A hub must hold the new
+  grant (`gcp:NatsHub` moved to this release, or the subject added to a hand-written grant such as
+  an `aws:NatsService` `authorization`) before a program with `ENVOY_NATS_REPLICAS` above a
+  bucket's copies starts, or that raise times out after 10 seconds and the start stops naming the
+  bucket and the setting: `raise KV_envoy_interests: ENVOY_NATS_REPLICAS=3: context deadline
+  exceeded`.
+- envoy-infra: `aws:WebhookListener` refuses a `natsReplicas` above 5, and
+  `envoy-infra render webhook-listener-env` a `--nats-replicas` above 5, since the listener
+  refuses more at load.
+
 ## [21.1.2] - 2026-10-29
 
 ### Fixed

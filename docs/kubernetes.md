@@ -498,7 +498,8 @@ mutable; the daemon must know exactly what it probed, so a tag reference is refu
 
 Where the digest is published:
 
-- the job summary of every `Worker Image` run (Actions → Worker Image → the run → Summary);
+- the job summary of every run that builds the image: `release.yaml`'s run on `main`, `ci.yaml`'s run on a
+  pull request (its `worker-image` job), or a dispatched `Worker Image` run (Actions → the run → Summary);
 - the body of the `legion-v<version>` GitHub release, under "Worker image", when `release.yaml` released
   `legion` in the same run (`gh release view legion-v<version> --json body -q .body`);
 - `docker buildx imagetools inspect ghcr.io/sjawhar/legion-worker:<tag>` for a `sha-` or
@@ -555,20 +556,25 @@ The attestation is separate from the image's own BuildKit provenance, which the 
 ### How it is built — and the iteration rule
 
 `.github/workflows/worker-image.yaml` builds on the GitHub-hosted runner with `docker/setup-buildx-action`
-+ `docker/build-push-action` (the pair `release-envoy-listener.yaml` uses), layer cache in GitHub Actions
-cache under the image's own scope (`cache-from: type=gha,scope=worker-image`, and on `main` only
-`cache-to: type=gha,mode=max,scope=worker-image`), read by every build and written only by a build on
-`main`, pushed with the workflow's own `GITHUB_TOKEN`
-— no third-party builder, no project variable, no extra credential. It runs (1) from `release.yaml` on
-every `main` run (its push paths include every file the image builds from): a build-only call beside the
-`publish` job, linking the plugin pair `legion_build` decided, then an attest-only call after `publish`;
-(2) on a pull request against `main` whose diff touches any of those files — building
-the PR head and publishing `sha-` only — and (3) by `gh workflow run worker-image.yaml --ref <ref>` once the
-workflow exists on `main`. Trigger (2) does not build every head. A draft's head builds no image and
-publishes no `sha-` tag. Marking the pull request ready builds that head. A newer push to the pull
-request cancels the build of an older head, waiting or running, so that older head gets no image.
-Closing the pull request cancels its build too. No `main`, `release.yaml` or `workflow_dispatch` run is
-ever cancelled this way. A reopen within about a minute of the close can race the `closed` run:
+and `docker/build-push-action` (the pair `release-envoy-listener.yaml` uses). Its layer cache is the
+GitHub Actions cache under the image's own scope (`cache-from: type=gha,scope=worker-image`). Only a
+build on `main` writes it, only the final image's layers (`cache-to: type=gha,mode=min,scope=worker-image,ignore-error=true`); a pull
+request's build reads what main wrote and writes none, because a newer head can cancel that build in
+the middle of a cache export, and because GitHub never lets a `main` run restore a branch's entries, so
+no pull request can put a layer into the attested release build. The image is pushed with the
+workflow's own `GITHUB_TOKEN`: no third-party builder, no project variable, no extra credential. It runs
+(1) from `release.yaml` on every `main` run (its push paths include every file the image builds from): a
+build-only call beside the `publish` job, linking the plugin pair `legion_build` decided, then an
+attest-only call after `publish`; (2) from the `worker-image` job of `ci.yaml` on every head of a pull
+request, on any base, whose diff its `worker_image` filter matches — building the PR head and publishing
+`sha-` only (a stacked pull request publishes a `sha-` tag too, which a pin never accepts) — and (3) by
+`gh workflow run worker-image.yaml --ref <ref>`. Trigger (2) does not build every head. A draft's head
+builds no image and publishes no `sha-` tag (ci.yaml's `changes` skips a draft). Marking the pull request
+ready builds that head. A pull request's builds share one concurrency group, so a newer push to the pull
+request cancels the build of an older head, waiting or running, and that older head gets no image.
+Closing the pull request cancels its build too: `.github/workflows/tests-closed.yaml` joins ci.yaml's
+concurrency group and cancels its run. No `main`, `release.yaml` or `workflow_dispatch` run is ever
+cancelled this way. A reopen within about a minute of the close can race that closed run:
 `.github/workflows/tests-closed.yaml` says what happens and what to do. The
 files the image builds from are every context source `worker.Dockerfile` copies: the root manifest,
 lockfile, patches and each root workspace's `package.json` (the frozen install); the packages it copies
@@ -576,7 +582,8 @@ whole — the Dockerfile (`packages/daemon/docker/**`), the two plugins and what
 `packages/pi-legion/**`, `packages/pi-shared/**`, `packages/envoy-client/**`, `packages/contracts/**`), the skills (`skills/**`) and the
 prepack that stages them (`scripts/pi-plugin-prepack.sh`); the OMP pin
 (`.omp-pin`); the whole Go module the image compiles `legion` from (`packages/daemon/**`) and its build
-inputs; the context's `.dockerignore`; and the workflow itself. What a pod executes is part of the image's
+inputs; the context's `.dockerignore`; and the workflows (`worker-image.yaml`, and `ci.yaml`, which calls
+it on a pull request). What a pod executes is part of the image's
 behaviour — the command a Sandbox pod runs, the launch probes `legion probe-image` runs in the image's
 final step and in the Go daemon's probe Sandbox, and every package they import — so a change to any of it
 builds the image it is proven on, and a change that breaks the image fails on its own pull request rather
@@ -584,15 +591,19 @@ than merging and publishing nothing. The Go build inputs are `go.work`, `go.work
 (copied whole for the `agent-secrets` binary the image also builds): the image compiles the Go `legion` at
 `go.work`'s Go version, so a change that moves it past the build stage's Go fails on its own pull request
 rather than in the next image build.
-`.github/scripts/check-image-trigger-paths.sh` (the lint job of `pr-and-main.yaml`) parses the Dockerfile
-and fails when trigger (1) or (2) misses a file it reads, so these lists cannot drift from it.
-Trigger (2) is `pull_request`, not `push`: GitHub evaluates `pull_request` path filters against the whole PR
-diff, so a later commit that touches none of those paths (a handoff, a docs fix) still gets the check and the
-PR head never loses it; a `push` trigger filters on the pushed commits alone and would leave such a head
-unguarded. The workflow's `packages`/`contents` permissions apply to same-repo pull requests (this
-repository takes no fork PRs, whose token would be read-only). The `attest` job's `id-token` and
-`attestations` scopes reach a pull request run only if it drops that job's `if:`, and its attestation
-then names `refs/pull/<n>/merge`, which the verify command above refuses.
+`.github/scripts/check-image-trigger-paths.sh` (the lint job of `ci.yaml`) parses the Dockerfile
+and fails when trigger (1) or (2) misses a file it reads, so these lists cannot drift from it. It also
+fails when trigger (2)'s `worker_image` filter matches a file the build does not read (one the
+`.dockerignore` drops, or one no `COPY` names), since a pull request touching only that file would build
+an image for nothing; the filter's `!` patterns drop those, under its step's `some-with-excludes`.
+Trigger (2) selects by the pull request's whole diff: on `pull_request`, the `changes` job of `ci.yaml`
+reads the pull request's file list, so a later commit that touches none of those paths (a handoff, a docs
+fix) still gets the build and the PR head never loses it, unless that head carries `skip-checks: true`,
+which starts no run at all. A filter on the pushed commits alone would leave such a head unguarded. The
+`worker-image` job of `ci.yaml` grants the called workflow its `packages`/`contents` permissions, which
+apply to same-repo pull requests (this repository takes no fork PRs, whose token would be read-only). The
+`attest` job's `id-token` and `attestations` scopes reach a pull request run only if it drops that job's
+`if:`, and its attestation then names `refs/pull/<n>/merge`, which the verify command above refuses.
 
 **The image is built only by this workflow, on the GitHub-hosted runner.** Never build it on a workstation
 — no `docker build`, `docker buildx`, or `docker compose build`: an unrelated buildx job took the devbox
@@ -605,8 +616,10 @@ or by pushing the branch again. In a `release.yaml` run, `--failed` keeps the bu
 and a failed `publish` reruns whole, each step safe to repeat: npm reuses a published version, the tag step
 accepts its own tag, the push to `main` pushes nothing once `main` holds that version, and the release step
 reuses a published release. A whole-run rerun of `release.yaml`, or a `workflow_dispatch` of it while main's
-tip still carries a `legion-v` tag, re-executes `legion_build`, which decides the same version (it holds no
-credential), and `publish` releases that tag again, each step safe to repeat: the image is rebuilt,
+tip still carries a `legion-v` tag, re-executes `legion_build`, which reads that tag and decides the same
+version (`release-push.sh version` releases again a tag that names the run's commit; the job holds only
+`contents: read` and no secret, so its rerun writes nothing), and `publish` releases that tag again, each
+step safe to repeat: the image is rebuilt,
 `worker_image_release` moves the `<legion version>` tag to the rebuild's digest, and the release body's
 "Worker image" names that digest. `release-envoy-listener.yaml` needs no re-run when its `release_publish` finds, at "Confirm the
 version", that another run took the tag first: it publishes nothing and, when its commit still needs a release
@@ -2649,9 +2662,13 @@ connection authenticates as. That user's grants, which `legion-pane` does not ho
 the connection uses: publish `$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS`,
 `$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.>`, `$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.>`,
 `$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` and `$JS.ACK.ENVOY_NOTIFICATIONS.>` (which its
-two durable consumers, `legion-go-<project>-dispatch` and `legion-go-<project>-github`, use, though
-the trailing `>` reaches every consumer of the stream, each host's listener consumer included, and
-lets the seed create a push consumer that delivers stream messages to any subject), and
+three durable consumers, `legion-go-<project>-dispatch`, `legion-go-<project>-dispatch-server` and
+`legion-go-<project>-github`, use, though the trailing `>` reaches every consumer of the stream,
+each host's listener consumer included, and lets the seed create a push consumer that delivers
+stream messages to any subject), `$JS.API.STREAM.MSG.GET.ENVOY_NOTIFICATIONS` (the stored-message
+get `legion state` reads each consumer's oldest waiting message with; without it the state's
+`consumers` show `unavailable: read the oldest waiting message: context deadline exceeded` on each
+consumer with messages waiting, its waiting count still shown), and
 subscribe `notifications.envoy.exceptions.notifications.role.>` and `_INBOX.>` (which receives
 every reply any client on the server gets, key-value reads and watch updates included, such as
 the listener's `envoy_roles` and `envoy_sessions` watchers). It publishes on no core
@@ -2660,7 +2677,11 @@ over the worker stream, so the Go daemon needs no `legion.ctl` grant. These subj
 live: a server granting exactly them logged no refusal across a boot creating both durables, a
 restart onto the existing ones, Dispatch and GitHub events acknowledged and a poison message
 terminated, and its trace showed no other API subject (no `$JS.API.INFO`, no
-`CONSUMER.DURABLE.CREATE`, which the TypeScript daemon uses instead). It is read by the same rule
+`CONSUMER.DURABLE.CREATE`, which the TypeScript daemon uses instead); the daemon's permission test
+(`internal/daemon/nats_permissions_test.go`) reads the consumers' lag under the same grant and
+expects no refusal. The stored-message get reaches a deployment with the envoy-infra release that
+carries it: until then the daemon runs as before, and only the lag's oldest message is
+`unavailable`. The daemon's seed is read by the same rule
 and refusals as the pane seed, the
 group-readable mount included, and neither seed falls back to the other: an unusable
 daemon seed refuses boot even beside a good pane seed. Unset, the daemon connects as the pane
@@ -3223,6 +3244,44 @@ daemon-launched controller's container differs: of these eleven names its agent 
 names no repository and the default is then the project's owners sorted and the first taken
 (`appauth.GitHubCredential`, `credential.go`);
 [Daemon-launched controller](#daemon-launched-controller) has the rest of it.
+
+The token behind `DISPATCH_TOKEN_FILE` is the daemon's own, not the role's. The daemon reads it
+once at boot from `dispatch_token_file` (`readBoot`,
+`packages/daemon/internal/daemon/bootreads.go`) and puts it in every launch's secrets as
+`DISPATCH_TOKEN` (`secrets[dispatchTokenKey]`,
+`packages/daemon/internal/runtime/sandbox/manifest.go`, the key from `names.go`), and the role's
+launcher writes it into the generation's `g<generation>` directory beside the generation's other
+launch credentials. The daemon-launched controller takes the same path, because `prepare` adds
+that secret to every launch it builds, whichever kind of pod the role names. So every role of
+every issue of the project, and that controller, present the same bytes.
+
+When `dispatch_token_file` holds one of the deployment's shared agent tokens
+(`DISPATCH_AGENT_TOKEN`), Dispatch matches the bytes against them (`MatchesSharedAgentToken`,
+`packages/envoy/internal/dispatch/auth/agent_token.go`) and reads no person, no service and no
+project from them. Whatever the bearer, the acting session is the one the request body names
+(`bearerSessionActor`, `packages/envoy/internal/dispatch/api/server.go`), which for the daemon's
+own writes is `legion-daemon:<PROJECT>` (`DaemonSession`,
+`packages/daemon/internal/dispatch/client.go`), so a shared agent token names nobody. Dispatch
+takes any other bearer as a service token or a personal token (`optionalActor`, `server.go`), and
+every role's session then carries that token's service or owner as well.
+`dispatch whoami` in a role tells the two apart: for a shared agent token it answers
+`Session <id> runs under the shared token: no owner, …`
+(`packages/envoy-client/src/dispatch-execute.ts`).
+
+The one Kubernetes service-account token this runtime projects for a role is the broker's,
+`agent-secrets-token` under `runtime.kubernetes.agent_secrets` (`agentSecretsVolumes`,
+`manifest.go`), and it reaches the secrets broker and nothing else. Dispatch can verify a projected
+token minted for its own audience (`DISPATCH_OIDC_AUDIENCE` in
+`packages/envoy/cmd/dispatch/settings.go`, checked by
+`serviceTokenActor` in `packages/envoy/internal/dispatch/api/server.go`), and the runtime projects
+none. The operator's own pod volumes are outside this statement: the operator controls them.
+An operator-launched controller can differ: `legion controller start` points
+`DISPATCH_TOKEN_FILE` at the controller file's own `dispatch_token_file`
+(`controllerEnvironment`, `packages/daemon/cmd/legion/controller.go`), so it presents the token
+that file holds, which need not be the daemon's. What the broker can already issue is
+[The Dispatch identity the broker can issue](#the-dispatch-identity-the-broker-can-issue).
+`dispatch://INFRA-267` is where Legion's pods and its daemon get tokens of their own, and
+`dispatch://INFRA-264` is where Dispatch accepts one.
 
 Every role is told `LEGION_GH_OWNERS_DIR=/var/run/legion/gh`, the bundle's root (its own, bound
 there in its namespaces),
@@ -4246,13 +4305,13 @@ spec:
         <the compute-class selector the deployment's declaration names>
       containers:
         - name: db
-          image: mirror.gcr.io/library/postgres:16   # the mirror, as every image here is pulled
+          image: mirror.gcr.io/library/postgres@sha256:979bccfde35445db618c65107d27d08c6c21339d8dc3ad4c830c6633947be0e4   # the mirror, as every image here is pulled
           terminationMessagePolicy: FallbackToLogsOnError   # an exited server's last lines stay in its status
           env:
             - { name: POSTGRES_PASSWORD, value: "$password" }
           resources:
             requests: { cpu: "4", memory: 8Gi }      # the largest container asks at least 4 CPU
-          volumeMounts: [{ name: data, mountPath: /var/lib/postgresql/data }]
+          volumeMounts: [{ name: data, mountPath: /var/lib/postgresql }]
       volumes:
         - name: data
           emptyDir: {}                    # dies with the pod, by design
@@ -4438,7 +4497,7 @@ it names the class of the failure, which is what the readings below key on.
 
 It loops because `kubectl wait` cannot tell a role the server is listening. The pod carries no
 readiness probe, so `condition=Ready` means the container started, and a database spends its
-first seconds initialising with its listener closed — `postgres:16`'s entrypoint does exactly
+first seconds initialising with its listener closed — `postgres:18`'s entrypoint does exactly
 that. A connection *refused* in those first seconds is the workload reachable and not listening
 yet: the loop retries and it answers. When the minute runs out, the check prints the class of its
 last attempt alone, with a reading for it, and each reading is the next thing to check rather than
@@ -5879,6 +5938,67 @@ issue's pod (every role of it alike) and the image probe's.
   failed key is the fallback the gate exists to stop. Nothing restarts the Go daemon on its own: it
   runs off the cluster, and whoever started it starts it again.
 
+#### The Dispatch identity the broker can issue
+
+The secrets broker also serves an RFC 8693 token exchange at `POST /v1/oauth/token`, which every
+caller reaches with `client_id=dispatch-token-exchange` (`ExchangeClientID`,
+`packages/envoy/internal/broker/oauthwire`). It takes three kinds of subject token, each under its
+own `subject_token_type`: a pod's projected Kubernetes service-account token, minted for the
+exchange's own audience (`SubjectTokenTypeKubernetes`), a GitHub Actions workflow run's token
+(`SubjectTokenTypeGitHub`), and a machine login's own access token
+(`SubjectTokenTypeAccessToken`).
+
+The exchange answers with an opaque Dispatch access token, bound to the key the request's DPoP
+proof names (`exchangeGrant`, `packages/envoy/internal/broker/oauth/exchange.go`). The token
+lives `BROKER_ACCESS_TOKEN_SECONDS`, 900 seconds by default
+(`packages/envoy/internal/broker/config/config.go`).
+An issued token carries these claims and no others:
+
+- `session` — the session the token's writes are recorded as.
+- `person` — the person the session acts for.
+- `project_scope` — `named` or `person`, which says what `project` means.
+- `project` — the one project key a `named` token may write. A `person` token carries none.
+
+The subject token's own kind decides those claims
+(`packages/envoy/internal/broker/exchange/exchange.go`). A pod's token needs an entry for its
+service account, which gives the project and the person and may fix the session, and Kubernetes
+must have bound that token to a pod (`Set.Pod`). A workflow run's token needs an entry for its
+repository, its workflow path and its ref (`Set.Workflow`). A machine login's token needs no entry
+at all: the person is the login's approver, the scope is `person`, and the token names no project
+(`Set.Machine`). A session name belongs to one principal — the service account, the workflow, or
+the person — and the broker refuses `invalid_grant` to another principal that names it
+(`claimSession`, `packages/envoy/internal/broker/oauth/exchange.go`). A claim holds the name for
+`oauthstore.SessionRetention`, 90 days, past the expiry of the token the claim was made for
+(`BindSession`, `packages/envoy/internal/broker/oauthstore/exchange.go`). A name an entry fixes is
+held for that entry with no expiry: the broker reserves it for the entry unless another principal
+holds it (`ReserveSessions`, the same file), and the entry's own exchange takes it from any other
+holder.
+
+A resource server reads such a token back with `POST /v1/oauth/introspect`
+(`packages/envoy/internal/broker/api/handlers_introspect.go`). It authenticates with its own
+Kubernetes service-account token, of an account the broker lists in `BROKER_API_ACCOUNTS`. The
+answer carries `active` and, for a live token, the four claims, `exp`, `client_id` and `jkt`
+(`Introspection`, `packages/envoy/internal/broker/oauth/introspect.go`).
+
+A broker that sets neither `BROKER_EXCHANGE_K8S_AUDIENCE` nor `BROKER_EXCHANGE_GITHUB_ISSUER`
+accepts no pod's token and no workflow run's token, and says so at boot with the log line
+`token exchange state=unconfigured`. With either one set it logs `token exchange state=on`, naming
+which issuers it accepts and how many entries it holds (`packages/envoy/cmd/broker/main.go`). A
+machine login's access token is exchanged in both cases, because its subject type is always
+registered (`ExchangeConfig.tokenTypes`, `packages/envoy/internal/broker/oauth/exchange.go`). For
+the settings themselves, read the broker's generated configuration reference, which
+`docs/site/generators/broker-reference.sh` writes from the doc comments in
+`packages/envoy/internal/broker/config/config.go`, and the
+walk-through in `docs/site/src/content/docs/broker/guides/run-locally.md`, its section "Exchange a
+pod's token".
+
+Nothing Legion runs presents such a token at this release. A pod, the daemon, a tmux pane and the
+daemon-launched controller present the daemon's shared bearer that
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod) describes. An operator-launched controller
+presents the token its own file names. Dispatch accepts no broker token yet.
+`dispatch://INFRA-264` is where Dispatch accepts one and reads the session, the person and the
+project from it. `dispatch://INFRA-267` is where Legion's pods and its daemon get tokens of their
+own, and the daemon hands none out.
 
 #### Network shares
 

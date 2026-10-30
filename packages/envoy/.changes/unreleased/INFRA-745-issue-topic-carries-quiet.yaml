@@ -1,0 +1,14 @@
+kind: Fixed
+body: |-
+    A session that subscribed to an issue's topic now hears what the agents on that issue do.
+    Every published event's payload carries `quiet` (`events.Quiet`), whether the event carries
+    nothing for a reader following its owner topic: a delivery receipt, an anchor refresh,
+    settings or per-viewer bookkeeping, a targeted message its session already had, an ask edit
+    that only moved a version, or a version nobody named. That is the half of `Notify` that does
+    not depend on who acted, and it is what a reader skips on. Readers skipped on `notify`, which
+    answers whether to wake the issue's route and claimant and is false for every event an agent
+    wrote, so `envoy_subscribe notifications.dispatch.issue.<KEY>.>` delivered a person's
+    activity and silently dropped every agent's. `Notify` itself is unchanged.
+time: 2026-10-29T06:00:00.000000000Z
+custom:
+    Issue: INFRA-745

@@ -45,6 +45,15 @@ Agent messages  --/       |
 ## Listener API
 
 All `/v1/*` endpoints answer 503 until NATS is connected and the interest and session caches are warm; they do not wait for the durable consumer.
+A listener's caches follow their buckets through watchers (`internal/kvwatch`): the interest and
+session buckets, and the CI bucket on a listener that mounts the GitHub webhook route. A start
+reads each bucket in full. A rewatch, after a NATS reconnect or a self-health rebuild, resumes
+after the last revision its cache applied, so it delivers only what was written since; it reads in
+full again when it cannot resume (a recreated bucket, or a scan that did not complete), and when
+its resuming watcher cannot be created, which it logs at WARN. JetStream
+delivers no event when the session bucket's 5m `MaxAge` expires a key, so the session cache gives
+each entry a deadline one TTL after its write: a read reports an entry past it as absent and
+changes nothing, and a timer removes the entry at that deadline.
 Every `/v1` request with a body must set `Content-Type: application/json` (parameters such as
 `charset=utf-8` are accepted). The listener returns a JSON 415 error otherwise. Webhook routes
 retain their signature and content handling.
@@ -64,7 +73,7 @@ requires a bearer checks no `Host`.
 | `/v1/registry/{session_id}` | GET | The authoritative answer for one session — reads through the cache to the session bucket, so a session the cache has not refilled is still found, and returns the same body a `/v1/sessions` row carries, roles from the claims included. A live session whose id only the interest bucket refuses as a key is a 200 with no topics, as the list shows it, logged at WARN naming it: Dispatch's envoy client reads a 413 or 400 here as a session that cannot exist. It refuses with 413 or 400 for an id the session bucket will not take as a key, `404 {"error":"no live session <id>"}` only for a key the bucket does not hold, the unreadable-interest-record 500 `/v1/interests/{session_id}` gives, and 503 with `Retry-After: 1` for a read that did not answer, the session's, its interest record's or the claims view's, all within a 3.5 s budget |
 | `/v1/sessions/{session_id}` | DELETE | Remove a live session registration. A write route |
 | `/v1/messages/send` | POST | Send a direct agent-to-agent message. The target is read from the session store itself, so a 404 means the store says that session's key is gone; a store read or a publish the bus did not answer is a 503 with `Retry-After: 1` (see “Send and publish answers” below). |
-| `/v1/messages/publish` | POST | Publish an event. Required `message` becomes the human `payload_summary`; optional `payload` is distinct machine data in `payload`. Role topics and ad-hoc topics (any `notifications.` topic the stream does not capture, such as `notifications.team.deploy-squad`) use core NATS and reach the sessions subscribed at that moment; JetStream acknowledgement for every topic the stream captures is bounded to five seconds. A publish the bus did not serve, and a role-holder read that did not answer, are both the 503 below rather than a 500. |
+| `/v1/messages/publish` | POST | Publish an event. Required `message` becomes the human `payload_summary`; optional `payload` is distinct machine data in `payload`. A topic the stream captures is answered once JetStream stored it, bounded to five seconds. A role topic is forwarded to its live holder, and an ad-hoc topic (any `notifications.` topic the stream does not capture, such as `notifications.team.deploy-squad`) is published over core NATS and forwarded to each self-subscribed session registered on it; both are answered once each recipient confirmed the message, or with a 504 naming each that did not after four seconds (see "Role delivery and exceptions"). A publish of a captured topic the bus did not serve, and a role-holder read at a role send's first resolution that did not answer, are both the 503 below rather than a 500. |
 | `/healthz` | GET | Health check (always available, even during startup); its bus checks answer within 3 s (see “Webhook and health check bounds” below) |
 
 ## Send and publish answers
@@ -83,20 +92,30 @@ attempt:
 | The target is live but does not advertise the frame's `delivery.mode`, or that mode cannot be read unambiguously | `403` naming the session, and the mode when it could be read |
 | The publish is refused as too large (`bus.ErrTooLarge`) | `413` naming the size against the server's max payload |
 | The publish is refused for its subject or key (`bus.ErrRefused`) | `400` naming the refusal, with no `Retry-After` |
+| The server denies the publish under this listener's own grant (`bus.ErrPublishDenied`) | `403 {"error":"envoy: the message bus denied the publish under this listener's own permissions: <reason>"}` with no `Retry-After`, recorded `publish_denied` (below) |
 | Any other publish failure | `503` with the same prefix and `Retry-After: 1`, carrying the bus's own reason |
 
-`POST /v1/messages/publish` answers a publish failure, and a role-holder read that did not answer,
-exactly the same way; its role-holder resolution (the claim read, the holder's session read and the
-release of a lapsed claim) runs inside the same 3.5 s budget, and one the budget runs out on is that
-503 too, naming the call that did not answer. Its 413, its 400s and its role 404s (`unclaimed`,
-`holder_lapsed`) are unchanged. Two refusals are its own. A publish the server denies under this
-listener's own grant (`bus.ErrPublishDenied`) is
-`403 {"error":"envoy: the message bus denied the publish under this listener's own permissions: <reason>"}`
-with no `Retry-After`, recorded `publish_denied`. Only a topic the stream does not capture — a
-role lane or an ad-hoc topic, which go over core NATS — can be denied this way, since that error is
-made only where a core publish is confirmed (`confirmPublished`, `internal/bus/confirm.go`); a send
-publishes `notifications.agent.<id>`, which the stream captures, so it goes through JetStream and
-never meets it. The other is a publish that lost the race for the role's claim — every one
+`POST /v1/messages/publish` answers the publish of a topic the stream captures that failed, and a
+role send's first role-holder resolution that did not answer, exactly the same way; that
+resolution (the claim read, the holder's session read and the release of a lapsed claim) runs
+inside the same 3.5 s budget, and one the budget runs out on is that 503 too, naming the call that
+did not answer. Its 413, its 400s, its 403 for a denied publish and its role 404s (`unclaimed`,
+`holder_lapsed`) are unchanged; a role or ad-hoc topic's confirmed send then runs on within its
+own 4 s and answers its 200, 403 `capability` or 504 as "Role delivery and exceptions" says.
+
+A publish the server denies under this listener's own grant (`bus.ErrPublishDenied`) is the
+table's `403` on either route. A publish on either transport can be denied this way: a core
+publish reads the denial from the connection's last error across its flush (`confirmPublished`,
+`internal/bus/confirm.go`), and a JetStream publish, which the stream acknowledges with nothing
+when the server refuses it, reads the violation the server reported under its own subject
+(`deniedPublish`, `internal/bus/denials.go`). So a topic the stream captures is answered that 403
+too, and so is `POST /v1/messages/send`, which publishes `notifications.agent.<id>` over
+JetStream. That is a change for a client: such a publish and such a send were the retried `503`
+with `Retry-After: 1` before, and are now a `403` with none, which
+`packages/envoy-client/src/transport.ts` does not retry (it retries every status at or past 500 and
+none below it).
+
+One refusal is the publish route's own: a publish that lost the race for the role's claim — every one
 of the two resolution attempts spent on a supersession (`errRoleHolderChanged`) — keeps the 503
 and the `Retry-After: 1`, since a fresh read wins that race as soon as the replacement claim
 settles, but answers its own body,
@@ -125,14 +144,15 @@ read; a view that is not complete (`store.ErrRoleViewNotReady`) leaves them out,
 on.
 
 A publish whose caller's context has already ended puts nothing on the wire; on these two routes it
-is answered the 503 above. A core publish (a role lane or an ad-hoc topic) checks its context
+is answered the 503 above, and an ad-hoc topic's confirmed send its 504 `publish_failed`. A core
+publish (a role send's forward or an ad-hoc topic) checks its context
 immediately before it publishes (`publishConfirmed`, `internal/bus/confirm.go`): one check sees
 both a spent deadline and a cancel while the deadline is still ahead, so a cancel during a wait for
 a reconnect sends nothing (a cancel after that check cannot be undone); the
 JetStream path has no check of its own and relies on nats.go's, whose request returns the context's
-error before it sends anything. It matters because the publish route's role-holder resolution runs
-before the publish under the same budget, and one that answers just as the budget ends leaves the
-publish none: a core subject has no duplicate window, and the client retries every 5xx
+error before it sends anything. It matters because a route's reads run before its publish under the
+same deadline, and one that answers just as the deadline ends leaves the publish none: a core
+subject has no duplicate window, and the client retries every 5xx
 (`packages/envoy-client/src/transport.ts`), so a message emitted behind a failure answer would
 reach its subscriber twice.
 
@@ -140,8 +160,11 @@ Each inbound send and publish is recorded in one line, INFO when accepted and WA
 `listener send` (`target_session`) and `listener publish` (`topic`), both carrying `event_id`,
 `source`, `source_session`, `payload_summary`, `outcome` and `status`, and `holder` as well when a
 role topic resolved one. `outcome` is one of `accepted`, `invalid_request`, `too_large` and
-`bus_unavailable`, plus `no_live_session` and `capability_refused` for send and `publish_denied`,
-`role_unclaimed`, `role_lapsed`, `role_holder_changed` and `role_claim_unreadable` for publish. Two
+`bus_unavailable`, plus `no_live_session` for send, `capability_refused` for send and a role send,
+`publish_denied` for send and publish alike, since a publish on either transport can be denied,
+and `role_unclaimed`, `role_lapsed`, `role_holder_changed`,
+`role_claim_unreadable` and a confirmed send's 504 reason (`receipt_timeout`, `delivery_failed`,
+`not_confirmed`, `publish_failed`) for publish. Two
 refusals carry no such line, because neither reaches a handler: the 401 the API auth wrapper
 writes, and a request the starting gate turns away while the routes are still opening, which logs
 `request refused while starting` itself.
@@ -213,18 +236,45 @@ state even while an interest registration or cleanup request is delayed or unava
 
 ## Role delivery and exceptions
 
-`notifications.role.<role>` is a live, exactly-one-holder lane. The listener's core-NATS
-queue subscriber resolves the current live role holder at delivery time, then sends a
-receipt-backed request with the original role topic to `notifications.agent.<session_id>`.
-The extension's agent pump replies after accepting that envelope. The outcome is one of three
-exception reasons: `no_holder` when no session claims the role; `delivery_failed` when a claim
-exists but the message is not known to have reached the holder (the holder lookup failed, the
-holder's registration is stale, or the publish or the flush to the server failed or timed out);
+`notifications.role.<role>` is a live, exactly-one-holder lane. A role message sent through
+`/v1/messages/publish` is delivered by the route itself: it resolves the current live role holder,
+sends a receipt-backed request with the original role topic to `notifications.agent.<session_id>`,
+and the extension's agent pump replies after accepting that envelope. Without a reply inside two
+seconds the route resolves the holder again and forwards the same envelope (one `event_id`)
+100 ms later, until a reply arrives or four seconds from the request's arrival have passed. It
+answers `200` with the `holder` once the holder replied; `404` with `reason` `unclaimed` or
+`holder_lapsed` when no live session holds the role; the 503 or 500 `GET /v1/roles/<role>` gives
+when its first resolution of the holder, within 3.5 s of the request's arrival, fails (see "Send
+and publish answers"); `403` with `reason: "capability"` when the holder does not take the
+payload's delivery mode; and `504` with `reason`, `event_id`, `dedupe_key`, `holder` and
+`attempts` once the four seconds passed. The reason is
 `receipt_timeout` when the message was forwarded and flushed to the server and the registered,
-live holder sent no receipt inside the two-second window (`bus.ErrReceiptTimeout`, which the
-client returns from the receipt wait alone — never from the flush, whose own timeout is the same
-`nats.ErrTimeout` value). A role claimant does not subscribe directly to its role subject, and a
-role message is not retained for a future claimant.
+live holder sent no receipt (`bus.ErrReceiptTimeout`, which the client returns from the receipt
+wait alone — never from the flush, whose own timeout is the same `nats.ErrTimeout` value), and
+`delivery_failed` when the message is not known to have reached the holder (no live holder to
+forward to, a holder lookup that failed or ran out of time, or a publish or flush to the server
+that failed or timed out). The route publishes no exception: its sender has the answer.
+
+An ad-hoc topic sent through the route is published over core NATS, then forwarded the same way
+to each session registered on it, on any machine, that holds its own NATS connection
+(`self_subscribed`), other than the sender. It answers `200` once the topic was published and
+each recipient confirmed, there being none included; `504` with `reason: "publish_failed"` and no
+recipient list when the topic's own publish did not reach NATS, whether the four seconds ended
+first or the publish failed at once for any reason but a refusal, since nothing was forwarded;
+and otherwise `504` with `reason: "not_confirmed"`, `delivered` and `undelivered` (each
+`{session_id, reason}`). Only a receipt that arrived through the route counts as a confirmation:
+the route keeps its own record of who confirmed each dedupe key, apart from the delivery handlers'
+dedupe cache, where the live topics lane records a self-subscribed session whose push it skipped.
+A session that stopped without unregistering stays registered for up to five minutes and is
+named in `undelivered` in that time; it is not a failed delivery to the others. A session served
+on a port is not confirmed. Every forward carries a `Nats-Msg-Id`, so the stream keeps one copy
+per message and recipient, and listeners acknowledge that stored copy without delivering it.
+
+The role lane, a core-NATS queue subscriber in each listener, carries a role topic a client
+publishes straight onto NATS rather than through the route. It resolves the holder at delivery
+time and forwards once, and its outcome is one of three exception reasons: `no_holder` when no
+session claims the role, `delivery_failed` or `receipt_timeout` as above. A role claimant does not
+subscribe directly to its role subject, and a role message is not retained for a future claimant.
 
 When a control delivery has no holder, cannot be forwarded, or draws no receipt, Envoy emits an
 envelope on `notifications.envoy.exceptions.<original-topic>`. The exception payload preserves

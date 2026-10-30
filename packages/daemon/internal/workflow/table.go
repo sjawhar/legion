@@ -39,10 +39,13 @@ const (
 )
 
 // Snapshot is the record state a row guard reads. Guards are pure and contain no side effects.
+// HasOpenOrMergedPR is whether the issue's pull request record is open or merged. A merged record
+// counts: the work landed, the merge told the architect (pr-merged), and the workflow runs on. A
+// completion never moves an issue on a pull request closed without merging, nor with none recorded.
 type Snapshot struct {
-	Phase    phase.Phase
-	HasPR    bool
-	GateOpen bool
+	Phase             phase.Phase
+	HasOpenOrMergedPR bool
+	GateOpen          bool
 }
 
 // Row is one declarative workflow transition. The engine interprets its effects transactionally.
@@ -62,7 +65,7 @@ func allow(Snapshot) bool { return true }
 var Table = append([]Row{
 	{From: phase.Admitted, Trigger: TriggerGateOpened, Guard: allow, To: phase.Planning, Effects: []EffectKind{EffectStart, EffectNotice}},
 	{From: phase.Planning, Trigger: TriggerPlannerCompleted, Guard: allow, To: phase.Implementing, Effects: []EffectKind{EffectStart, EffectNotice}},
-	{From: phase.Implementing, Trigger: TriggerImplementationReady, Guard: func(s Snapshot) bool { return s.HasPR }, To: phase.Testing, Status: "testing", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
+	{From: phase.Implementing, Trigger: TriggerImplementationReady, Guard: func(s Snapshot) bool { return s.HasOpenOrMergedPR }, To: phase.Testing, Status: "testing", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
 	{From: phase.Testing, Trigger: TriggerTesterPassed, Guard: allow, To: phase.Reviewing, Status: "needs_review", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
 	{From: phase.Testing, Trigger: TriggerTesterFailed, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
 	{From: phase.Reviewing, Trigger: TriggerReviewApproved, Guard: allow, To: phase.Accepting, Effects: []EffectKind{EffectNotice}},

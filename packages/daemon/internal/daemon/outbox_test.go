@@ -24,6 +24,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -125,6 +126,7 @@ func (d *outboxDispatch) BuildCommit(context.Context) (string, error) {
 func (d *outboxDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
 	return nil, nil
 }
+func (d *outboxDispatch) WebhookAppInstalled(context.Context, string) (bool, error) { return true, nil }
 
 func TestOutboxStatusWriteCallsDispatchOnlyForItsObservedStatus(t *testing.T) {
 	row := mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, time.Now())
@@ -664,6 +666,39 @@ func TestOutboxNoticeReturnsPublisherFailure(t *testing.T) {
 
 	if err := (&outbox{pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup}).execute(context.Background(), row); err == nil || !strings.Contains(err.Error(), "listener unavailable") {
 		t.Fatalf("notice failure = %v, want listener failure", err)
+	}
+}
+
+// A role whose holder does not advertise the message's delivery mode (403 capability) refuses
+// every attempt until another session holds the role, and the listener's own NATS grant denies
+// every forward (403 with no reason) until an operator changes it, as a role with no holder does:
+// the row is done either way, since the message reports a moment that has passed by then. A holder
+// that did not confirm the message in time (504 receipt_timeout or delivery_failed) is retried.
+func TestOutboxRoleMessageAnswersOfTheConfirmedPublishRoute(t *testing.T) {
+	row := mustOutboxRow(t, "LEGION-2", record.RoleMessage{Role: "implementer", Body: "CI settled at head"}, time.Now())
+	row.ID = 59
+	publisher := &outboxPublisher{err: fmt.Errorf(`publish notice to notifications.role.implementer: listener returned 403 Forbidden: {"reason":"capability","holder":"ses_impl"}: %w`,
+		notify.ErrRefusedByHolder{Holder: "ses_impl"})}
+	client := &outboxDispatch{}
+	runner := &outbox{log: quietLogger(), notices: publisher, dispatch: client}
+
+	if err := runner.execute(context.Background(), row); err != nil {
+		t.Fatalf("execute a role message its holder refused: %v", err)
+	}
+	const denial = `envoy: the message bus denied the publish under this listener's own permissions: bus: NATS denied the publish to "notifications.agent.ses_impl"`
+	publisher.err = fmt.Errorf(`publish notice to notifications.role.implementer: listener returned 403 Forbidden: {"error":%q}: %w`, denial, notify.ErrPublishDenied{Message: denial})
+	if err := runner.execute(context.Background(), row); err != nil {
+		t.Fatalf("execute a role message the listener was denied: %v", err)
+	}
+	for _, reason := range []string{notify.ReasonReceiptTimeout, notify.ReasonDeliveryFailed} {
+		publisher.err = fmt.Errorf("publish notice to notifications.role.implementer: listener returned 504 Gateway Timeout: %w", notify.ErrNotDelivered{Reason: reason, Holder: "ses_impl"})
+		var notDelivered notify.ErrNotDelivered
+		if err := runner.execute(context.Background(), row); !errors.As(err, &notDelivered) || notDelivered.Reason != reason {
+			t.Fatalf("a role message answered %s = %v, want the answer as a failure, retried", reason, err)
+		}
+	}
+	if got := client.messages; len(got) != 0 {
+		t.Fatalf("Dispatch messages = %q, want none: a role message posts nothing to the issue", got)
 	}
 }
 

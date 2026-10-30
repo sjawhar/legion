@@ -5,7 +5,7 @@
 # script into it, so the script under test is the file CI runs.
 #
 # Run from anywhere: .github/scripts/check-gh-version.test.sh
-# CI runs it in the Tests workflow (pr-and-main.yaml, job test).
+# CI runs it in ci.yaml's test job.
 set -euo pipefail
 shopt -s inherit_errexit
 

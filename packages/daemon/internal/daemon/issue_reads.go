@@ -13,6 +13,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
@@ -26,10 +27,10 @@ const issueRead = 30 * time.Second
 // webhook would have: the head GitHub holds it at (followHead, and the handoff-only push that
 // reached it), whether that head can be merged into its base and GitHub's own merge state
 // (applyMergeability), a deciding review the daemon has not recorded (readReviews), and the push
-// that carries an approval set aside below the head (readApprovalCarry), in the order the
-// two-minute pass applies them. An issue whose record holds no open pull request is looked up by
-// its branch instead (openPullRequestOn), and the opened its webhook would have carried is applied
-// first, so the reads that follow judge the pull request that leaves.
+// that carries an approval set aside below the head (readApprovalCarry), in that order. An issue
+// whose record holds no open pull request is looked up by its branch instead (openPullRequestOn),
+// and the opened its webhook would have carried is applied first, so the reads that follow judge
+// the pull request that leaves.
 //
 // It is the backstop for a webhook that never arrived: GitHub can fail to deliver one, and
 // Dispatch's redelivery sweep gives up after five attempts, which leaves the record holding a head,
@@ -41,10 +42,10 @@ const issueRead = 30 * time.Second
 // reads one issue, not every open pull request, so a handoff costs the reads of its own pull
 // request alone.
 //
-// Every fact it applies goes through intake.ApplyFact under an event id of its own, as the pass's
-// do, and the workflow's own fences decide each against the record: a second read of a pull request
-// nothing changed on applies nothing the workflow records. A failed read is returned to the caller,
-// which logs it; the record then stands as it was, and the next read of the issue asks again.
+// Every fact it applies goes through intake.ApplyFact under an event id of its own, and the
+// workflow's own fences decide each against the record: a second read of a pull request nothing
+// changed on applies nothing the workflow records. A failed read is returned to the caller, which
+// logs it; the record then stands as it was, and the next read of the issue asks again.
 func (w *workflowRuntime) readIssuePullRequest(ctx context.Context, issue string) error {
 	recorded, err := w.issuePullRequest(ctx, issue)
 	if err != nil || recorded == nil {
@@ -61,8 +62,8 @@ func (w *workflowRuntime) readIssuePullRequest(ctx context.Context, issue string
 		if ctx.Err() != nil {
 			return nil
 		}
-		// The reads below go on against the record as it stands, as the pass's do when a comparison
-		// GitHub keeps failing stops it following the head: the next read of the issue follows it.
+		// The reads below go on against the record as it stands when a comparison GitHub keeps
+		// failing stops this one following the head: the next read of the issue follows it.
 		w.log.Warn("follow the head GitHub shows for an issue's pull request; this read judges it at the recorded head",
 			"repo", pr.Repo, "pullRequest", pr.Number, "issue", pr.Issue, "recorded", pr.HeadSHA, "head", pull.Head.SHA, "error", err)
 	}
@@ -84,8 +85,9 @@ func (w *workflowRuntime) readIssuePullRequest(ctx context.Context, issue string
 // naming the repository as that webhook's fact would (heardSpelling), a reopen when the record
 // holds the same pull request closed - and read back as the workflow recorded it. It is nil for an
 // issue the daemon does not record, one with no repository to read, one whose branch GitHub holds
-// no open pull request on, and one whose opened the workflow declined, which leaves the record as
-// it was and nothing for the reads that follow to judge.
+// no open pull request on - which an implementing issue's architect is told of (tellMissing) - and
+// one whose opened the workflow declined, which leaves the record as it was and nothing for the
+// reads that follow to judge.
 func (w *workflowRuntime) issuePullRequest(ctx context.Context, key string) (*record.PullRequest, error) {
 	issue, pr, err := w.issueRecord(ctx, key)
 	if err != nil || issue == nil {
@@ -105,6 +107,7 @@ func (w *workflowRuntime) issuePullRequest(ctx context.Context, key string) (*re
 		return nil, fmt.Errorf("list the open pull requests of %s on %s: %w", issue.GitHubRepo, branch, err)
 	}
 	if !found {
+		w.tellMissing(ctx, *issue, pr)
 		return nil, nil
 	}
 	repo := w.heardSpelling(issue.GitHubRepo)
@@ -128,6 +131,50 @@ func (w *workflowRuntime) issuePullRequest(ctx context.Context, key string) (*re
 	return after, nil
 }
 
+// tellMissing tells issue's architect that its implementer completed and GitHub lists no open pull
+// request on the issue's branch, with none open or merged recorded either
+// (intake.PullRequestMissing, which the workflow decides and tells: workflow's pullRequestMissing).
+// The per-issue read reaches it where the pass once did: an implementer's completion queues the
+// read of its own issue (handoffCompleted), and the daemon's start reads every issue whose
+// implementer completed with no pull request recorded (readIssuesAtStart). An issue in any other
+// phase, or one whose record lets the implementation move, is told nothing. The event id names the
+// issue's generation and the handoff commit, so the architect is told once per handoff commit,
+// whichever read finds it, and again only for a completion at another commit. A failed read or
+// apply is logged, and the next read of the issue tells it.
+func (w *workflowRuntime) tellMissing(ctx context.Context, issue record.Issue, pr *record.PullRequest) {
+	if issue.Phase != phase.Implementing || record.LetsImplementationMove(pr) {
+		return
+	}
+	var rows []record.PhaseRow
+	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
+		var err error
+		rows, err = w.records.Phases(ctx, tx, issue.Key)
+		return err
+	}); err != nil {
+		if ctx.Err() == nil {
+			w.log.Warn("read the phases of an issue GitHub lists no open pull request for", "issue", issue.Key, "error", err)
+		}
+		return
+	}
+	commit := ""
+	for _, row := range rows {
+		if row.Role == claim.RoleImplementer {
+			commit = row.HandoffCommit
+		}
+	}
+	if commit == "" {
+		return
+	}
+	branch := claim.IssueBranch(issue.Key)
+	eventID := fmt.Sprintf("pull-request-missing:%s:%s:%d:%s", w.dispatchProject, issue.Key, issue.Generation, commit)
+	w.log.Warn("workflow: GitHub lists no open pull request on the branch of an issue whose implementer completed; telling its architect",
+		"repo", issue.GitHubRepo, "issue", issue.Key, "branch", branch, "handoff", commit)
+	fact := intake.PullRequestMissing{Issue: issue.Key, Repo: issue.GitHubRepo, Branch: branch, HandoffCommit: commit}
+	if _, err := intake.ApplyFact(ctx, w.pool, "github", eventID, fact, w.handlers...); err != nil {
+		w.log.Warn("apply a missing pull request read from GitHub", "repo", issue.GitHubRepo, "issue", issue.Key, "error", err)
+	}
+}
+
 // issueRecord is key's issue record and its pull request record, both nil for what is not
 // recorded, read in one transaction.
 func (w *workflowRuntime) issueRecord(ctx context.Context, key string) (*record.Issue, *record.PullRequest, error) {
@@ -148,12 +195,12 @@ func (w *workflowRuntime) issueRecord(ctx context.Context, key string) (*record.
 
 // readIssuesAtStart reads the pull request of each issue in the workflow once as the runtime starts
 // (readIssuePullRequest): every issue with an open pull request recorded, and every issue whose
-// implementer completed with none recorded, which is the pull request this read looks up by the
-// branch. It is what covers a daemon that was down while GitHub made the deliveries nothing
-// redelivers, and it runs beside the two-minute pass rather than instead of it. A read that fails
-// is logged and the boot goes on, since the pass reads the same pull request within its interval;
-// GitHub's rate limit ends the start read there, because every read after it on the same
-// installation meets the same limit, and the panes share it.
+// implementer completed with none open or merged recorded, which is the pull request this read
+// looks up by the branch. It is what covers a daemon that was down while GitHub made the
+// deliveries nothing redelivers. A read that fails is logged and the boot goes on, since the
+// issue's next handoff reads the same pull request; GitHub's rate limit ends the start read there,
+// because every read after it on the same installation meets the same limit, and the panes share
+// it.
 func (w *workflowRuntime) readIssuesAtStart(ctx context.Context) {
 	issues, err := w.issuesInWorkflow(ctx)
 	if err != nil {
@@ -172,28 +219,28 @@ func (w *workflowRuntime) readIssuesAtStart(ctx context.Context) {
 		}
 		var answer *githubrest.Answer
 		if errors.As(err, &answer) && answer.RateLimited {
-			w.log.Error("read an issue's pull request as the daemon starts: GitHub's rate limit; the start reads no more issues, and the pass reads them",
+			w.log.Error("read an issue's pull request as the daemon starts: GitHub's rate limit; the start reads no more issues, and each issue's next handoff reads it",
 				"issue", issue, "error", err)
 			return
 		}
-		w.log.Warn("read an issue's pull request as the daemon starts; the pass reads it within its interval", "issue", issue, "error", err)
+		w.log.Warn("read an issue's pull request as the daemon starts; the issue's next handoff reads it", "issue", issue, "error", err)
 	}
 }
 
 // issuesInWorkflow is every issue of the project the per-issue read has something to read for, by
 // key: those with an open pull request recorded, and those whose implementer completed with none
-// recorded (record.Store.HandedOffWithoutPullRequest), whose pull request GitHub may hold open with
-// its opened lost. An issue with neither - one still being planned - has no pull request to read,
-// and costs no GitHub call.
+// open or merged recorded (record.Store.HandedOffWithoutOpenOrMergedPullRequest), whose pull
+// request GitHub may hold open with its opened lost. An issue with neither - one still being
+// planned - has no pull request to read, and costs no GitHub call.
 func (w *workflowRuntime) issuesInWorkflow(ctx context.Context) ([]string, error) {
 	var open []record.PullRequest
-	var waiting []record.Issue
+	var waiting []record.HandedOff
 	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
 		var err error
 		if open, err = w.records.OpenPullRequests(ctx, tx, w.dispatchProject); err != nil {
 			return err
 		}
-		waiting, err = w.records.HandedOffWithoutPullRequest(ctx, tx, w.dispatchProject)
+		waiting, err = w.records.HandedOffWithoutOpenOrMergedPullRequest(ctx, tx, w.dispatchProject)
 		return err
 	}); err != nil {
 		return nil, err
@@ -202,8 +249,8 @@ func (w *workflowRuntime) issuesInWorkflow(ctx context.Context) ([]string, error
 	for _, pr := range open {
 		keys[pr.Issue] = true
 	}
-	for _, issue := range waiting {
-		keys[issue.Key] = true
+	for _, handedOff := range waiting {
+		keys[handedOff.Issue.Key] = true
 	}
 	return slices.Sorted(maps.Keys(keys)), nil
 }

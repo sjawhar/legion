@@ -2,68 +2,38 @@ package store
 
 import (
 	"context"
-	"strings"
 	"testing"
 )
 
-// The merger merges, so `merging` runs to the merge and `awaiting_merge` is gone. An issue the old
-// daemon left there, and a hold taken from there, stand in `merging` after 0069, where the new
-// daemon reads them; the phase and held_from constraints then refuse the old value.
-func TestAwaitingMergeMigratesToMergingAndTheConstraintsSwap(t *testing.T) {
+// 0069 records the commit a push left a pull request's base branch at. No release before it
+// recorded a push onto a base at all, so a pull request written before it has none to carry: the
+// column takes the empty value, which reads as "no push onto the base recorded", and the next
+// two-minute pass reads the pull request regardless.
+func TestAPullRequestRecordedBefore0069HasNoMovedBase(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
 	migrateThrough(t, store, 68)
 	if _, err := store.Pool().Exec(ctx, `insert into issues
-		(key, tree, project, title, phase, generation, status, rank, last_dispatch_seq, held_from)
-		values ('LEGION-208', 'LEGION-208', 'LEGION', 'awaiting root', 'awaiting_merge', 1, 'retro', 'A', 1, null),
-		       ('LEGION-209', 'LEGION-208', 'LEGION', 'held child', 'held', 1, 'retro', 'B', 1, 'awaiting_merge'),
-		       ('LEGION-210', 'LEGION-208', 'LEGION', 'reviewing child', 'reviewing', 1, 'needs_review', 'C', 1, null)`); err != nil {
+		(key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
+		values ('LEGION-208', 'LEGION-208', 'LEGION', 'root', 'reviewing', 1, 'needs_review', 'A', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Pool().Exec(ctx, `insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at,
+		failing, cancelled, fix_attempts, blocked_attempts, check_runs, generation, snapshot, head_counted, planned_red,
+		review_seen, state, checked_head, required_workflows, required_workflows_head, mergeability, merge_state, base)
+		values ('LEGION-208', 'sjawhar/legion', 1208, 'legion/LEGION-208', 'h4', now(), '[]', '[]', 0, 0, '[]',
+		 1, '', '', false, 0, 'open', '', '[]', '', 'MERGEABLE', 'clean', 'main')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	for _, want := range []struct{ key, phase, heldFrom string }{
-		{"LEGION-208", "merging", ""},
-		{"LEGION-209", "held", "merging"},
-		{"LEGION-210", "reviewing", ""},
-	} {
-		var phase string
-		var heldFrom *string
-		if err := store.Pool().QueryRow(ctx, `select phase, held_from from issues where key = $1`, want.key).Scan(&phase, &heldFrom); err != nil {
-			t.Fatalf("read %s: %v", want.key, err)
-		}
-		got := ""
-		if heldFrom != nil {
-			got = *heldFrom
-		}
-		if phase != want.phase || got != want.heldFrom {
-			t.Fatalf("%s after 0069 is phase %q held from %q, want %q and %q", want.key, phase, got, want.phase, want.heldFrom)
-		}
+	var moved string
+	if err := store.Pool().QueryRow(ctx,
+		`select base_moved from pull_requests where issue = 'LEGION-208'`).Scan(&moved); err != nil {
+		t.Fatalf("read the pull request after 0069: %v", err)
 	}
-	for _, statement := range []string{
-		`update issues set phase = 'awaiting_merge' where key = 'LEGION-210'`,
-		`update issues set phase = 'held', held_from = 'awaiting_merge' where key = 'LEGION-210'`,
-	} {
-		if _, err := store.Pool().Exec(ctx, statement); err == nil {
-			t.Fatalf("%q was accepted after 0069, want the constraint to refuse awaiting_merge", statement)
-		} else if !strings.Contains(err.Error(), "check") {
-			t.Fatalf("%q failed with %v, want a check constraint violation", statement, err)
-		}
-	}
-	// The stopped columns keep what they hold, so a rollback to a daemon that reads them finds its
-	// data: neither is dropped.
-	for _, column := range []struct{ table, name string }{
-		{"issues", "ready_pending_version"},
-		{"phases", "merge_note"},
-	} {
-		var exists bool
-		if err := store.Pool().QueryRow(ctx, `select exists (select 1 from information_schema.columns
-			where table_name = $1 and column_name = $2)`, column.table, column.name).Scan(&exists); err != nil {
-			t.Fatal(err)
-		}
-		if !exists {
-			t.Fatalf("%s.%s is gone after 0069, want it stopped and left in place", column.table, column.name)
-		}
+	if moved != "" {
+		t.Fatalf("base_moved after 0069 = %q, want empty for a pull request recorded before it", moved)
 	}
 }

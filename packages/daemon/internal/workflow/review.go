@@ -500,7 +500,8 @@ func (e *Engine) reviewRound(issue record.Issue, row record.PhaseRow, pr *record
 }
 
 // implementationReady moves issue from implementing to testing on the implementer's completion of
-// the round that row records, once the pull request pr is known (TriggerImplementationReady). It
+// the round that row records, once the pull request pr is recorded open or merged
+// (TriggerImplementationReady: a record closed without merging, or none, moves nothing). It
 // reads no CI result: a settlement that arrived while the implementer worked moved nothing and
 // moves nothing now, since the roles were told what it said when it arrived (checks,
 // dispatch://INFRA-714/spec R1).

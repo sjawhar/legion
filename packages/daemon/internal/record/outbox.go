@@ -738,10 +738,10 @@ func validateOutboxPayload(payload OutboxPayload) error {
 
 // validNoticeKind is every notice kind the daemon publishes, and `ready-refused`, which it writes
 // no more: READY went with the daemon's merge, and the kind is kept only so a row an older daemon
-// queued that migration 0070's delete missed still decodes rather than failing its row for good.
+// queued that migration 0073's delete missed still decodes rather than failing its row for good.
 func validNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "child-release-stalled", "child-not-recorded", "catch-up", "checks-red", "review-stuck", "status-reasserted":
+	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "pull-request-missing", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "child-release-stalled", "child-not-recorded", "catch-up", "checks-red", "review-stuck", "status-reasserted":
 		return true
 	default:
 		return false

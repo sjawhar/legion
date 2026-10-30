@@ -36402,6 +36402,13 @@ var CommentDeliverySchema = object({
   reply_id: string2().nullable(),
   created_at: string2()
 });
+var ReplyBlockSchema = object({
+  node: string2(),
+  ref: string2().optional(),
+  block_id: string2(),
+  text: string2(),
+  removed: boolean2()
+});
 var CommentEventPayloadSchema = object({
   id: string2().optional(),
   artifact_name: string2().optional(),
@@ -36427,6 +36434,7 @@ var CommentEventPayloadSchema = object({
   created_at: string2().optional(),
   mentions: array(CommentMentionSchema).optional(),
   deliveries: array(CommentDeliverySchema).optional(),
+  reply_block: ReplyBlockSchema.nullish(),
   thread_logins: array(string2()).optional()
 }).passthrough();
 var MessageEventPayloadSchema = object({
@@ -36437,6 +36445,7 @@ var MessageEventPayloadSchema = object({
   reply_body: string2().optional(),
   thread_target: string2().optional(),
   author: object({ kind: string2(), id: string2() }).optional(),
+  reply_block: ReplyBlockSchema.nullish(),
   thread_logins: array(string2()).optional()
 });
 var DispatchTargetedResourceIDSchema = uuid2();
@@ -36811,11 +36820,12 @@ var DOC_EDIT_OPS = [
   "delete_row",
   "delete_column"
 ];
+var RELATED_CHECK_RESULT = "Dispatch then runs the related-item check (waiting at most five seconds; dispatch related runs " + "it without writing), and the result says, right after the line naming what was created, " + "which items it found and how it searched, that it searched and found nothing, or that no " + "check was made, why, and the dispatch search to run instead.";
 var dispatchToolSpecs = [
   {
     name: "dispatch_issue",
     example: { project: "DSP", title: "Native workspace" },
-    description: "Create a native Dispatch issue for newly tracked work. Search first with dispatch search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless --force is set after reading them. " + "When passing a spec, before calling, have a fresh read-only reader check it against the code and the human's words, then resolve every finding; a Legion architect uses `plan-gap-analyst`. " + "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " + "Create a project only when a person asks for one; work that spans projects goes in the project that owns most of it. " + `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
+    description: "Create a native Dispatch issue for newly tracked work. Search first with dispatch search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless --force is set after reading them. " + "When passing a spec, before calling, have a fresh read-only reader check it against the code and the human's words, then resolve every finding; a Legion architect uses `plan-gap-analyst`. " + "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " + "Create a project only when a person asks for one; work that spans projects goes in the project that owns most of it. " + `${RELATED_CHECK_RESULT} With --force, the result also names each issue whose title you forced past. ` + `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       project: z.string().describe("Project key for the new issue."),
       title: z.string({ max: ISSUE_TITLE_MAX }).describe("Concise issue title, at most 1,000 characters."),
@@ -36888,7 +36898,7 @@ var dispatchToolSpecs = [
         }
       ]
     },
-    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch doc-edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch request-approval. Do not use this tool for a status " + "update or discussion; use dispatch message instead. Never create an issue to park a " + "question: the question is an ask on the issue it concerns. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. Measure what you can first, and put the measurement and the size of the " + "population it covers in the question; drop an option that cannot fix most of that " + "population, never offer it cut down, and keep an option not to act (Hold). Set urgency high " + "when your work halts on the answer, and keep working on everything else. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` + `the lines images appends included, and has at most 8 options. ${OWNER_REFERENCE}`,
+    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch doc-edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch request-approval. Do not use this tool for a status " + "update or discussion; use dispatch message instead. Never create an issue to park a " + "question: the question is an ask on the issue it concerns. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. Measure what you can first, and put the measurement and the size of the " + "population it covers in the question; drop an option that cannot fix most of that " + "population, never offer it cut down, and keep an option not to act (Hold). Set urgency high " + "when your work halts on the answer, and keep working on everything else. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` + `the lines images appends included, and has at most 8 options. ${RELATED_CHECK_RESULT} ` + `An ask among the related items says whether it is answered, by whom and with which options. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -36990,7 +37000,7 @@ var dispatchToolSpecs = [
       quote: z.string().describe("Optional exact quoted document text.").optional(),
       occurrence: z.number({ int: true, min: 0 }).describe("Optional zero-based occurrence of quote.").optional(),
       body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Review comment, at most ${DISPATCH_BODY_MAX} characters.`),
-      reply_to: z.string().describe("A comment id (uuid); replying to any comment in a thread continues that thread (an " + "ask's clarification thread included). To reply to an ask, use reply_to_ask with the " + "ask id instead.").optional(),
+      reply_to: z.string().describe("A comment id (uuid); replying to any comment in a thread continues that thread (an " + "ask's clarification thread included). A block reference to one block of the comment " + "(dispatch://KEY/comment/<id>#b-<block id>) replies to that comment and names the " + "passage the reply answers. To reply to an ask, use reply_to_ask with the " + "ask id instead.").optional(),
       reply_to_ask: z.string().describe("Optional ask id to reply to, threading this comment under that question. Mutually " + "exclusive with reply_to.").optional(),
       turn: z.enum(["agent", "human"]).describe("Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " + "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " + "you need the human to act - the ask returns to 'Waiting on you'.").optional(),
       images: imagesArgument(z, "the issue (or the project document's project)", `the ${DISPATCH_BODY_MAX}-character body limit`)
@@ -37025,7 +37035,7 @@ var dispatchToolSpecs = [
     arguments: (z) => ({
       issue: z.string().describe(`${ISSUE_REFERENCE} Omit it only when in_reply_to answers a human's direct message to this session.`).optional(),
       body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Update text, at most ${DISPATCH_BODY_MAX} characters.`),
-      in_reply_to: z.string().describe("Optional message id or dispatch://KEY/message/<id> reference to reply to, threading " + "this message under it so the reply stays with the original in the Conversation. " + "A bare id with no issue answers a human's direct message to this session; a " + "dispatch://KEY/message/<id> names the issue its message lives on, so that form is a " + "reply on that issue.").optional(),
+      in_reply_to: z.string().describe("Optional message id or dispatch://KEY/message/<id> reference to reply to, threading " + "this message under it so the reply stays with the original in the Conversation. " + "A block reference to one block of the message (dispatch://KEY/message/<id>#b-<block id>) " + "replies to that message and names the passage the reply answers. " + "A bare id with no issue answers a human's direct message to this session; a " + "dispatch://KEY/message/<id> names the issue its message lives on, so that form is a " + "reply on that issue.").optional(),
       images: imagesArgument(z, "the issue (a reply to a direct message: your own conversation, dispatch://agent/<your session id>)", `the ${DISPATCH_BODY_MAX}-character body limit`)
     }),
     validation: messageValidation
@@ -37038,7 +37048,7 @@ var dispatchToolSpecs = [
       ops: [{ op: "delete_column", block: "table-123", index: 1 }],
       precondition: { blocks: [{ id: "table-123", token: "sha256:current-table-token" }] }
     },
-    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " + `For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, \`code\`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find="## Old", with="## New") gives '## New', and a different level applies only when find named the heading's actual level (find "## Old" with "### New" makes it an h3), since '# ' selects a heading without naming its level. A task item (\`- [ ]\` / \`- [x]\`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find="Write it", with="[x] Write it") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. ` + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has an odd run of backslashes right before a | cannot be stored in a cell and is INVALID_OP, naming the cell. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + `Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block's id, type, opening words and token, and each table's rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ` + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from dispatch doc-read --blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards. " + "A block id written as {#id} longer than 256 bytes is stored, but its block is no graph node, so no reference reaches it. " + `The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
+    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " + `For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, \`code\`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find="## Old", with="## New") gives '## New', and a different level applies only when find named the heading's actual level (find "## Old" with "### New" makes it an h3), since '# ' selects a heading without naming its level. A task item (\`- [ ]\` / \`- [x]\`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find="Write it", with="[x] Write it") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. ` + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. In a table cell, with is the cell's text: write a | in it bare, in code too, since code whose text has an odd run of backslashes right before a | cannot be stored in a cell and is INVALID_OP, naming the cell. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + `Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block's id, type, opening words and token, and each table's rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ` + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from dispatch doc-read --blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + "One replace per paragraph: more new paragraphs go in one insert after the last one you rewrote, since two inserts at one anchor come out reversed; read the passage back with dispatch doc-read afterwards. " + "Each decision block the edit adds gets the related-item check dispatch ask gets, waiting at most five seconds for all of them together: the result prints, after its first line, `Decision block <id>:` and what that check found, that it found nothing, or that it was not made and why. " + "A block id written as {#id} longer than 256 bytes is stored, but its block is no graph node, so no reference reaches it. " + `The spec holds requirements, design, and decisions - never progress, status, or timestamps; a record of open items or progress is a document of its own. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -37071,7 +37081,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_doc_read",
     example: { issue: "DSP-1" },
-    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " + "After the markdown it prints every open thread anchored on the document in full: an open ask with its id and question and each reply's author, time and text, and a comment thread with its root's id, author, quote and text and each reply's author, time and text, in order; a resolved thread, and an ask that is answered or resolved, is not printed. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
+    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " + "After the markdown it prints every open thread anchored on the document in full: an open ask with its id and question and each reply's author, time and text, and a comment thread with its root's id, author, time, quote and text and each reply's author, time and text, in order; a resolved thread, and an ask that is answered or resolved, is not printed. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -37153,6 +37163,25 @@ var dispatchToolSpecs = [
     }
   },
   {
+    name: "dispatch_related",
+    example: { project: "CORE", title: "Retry failed webhook deliveries" },
+    description: "Run the related-item check that dispatch issue, dispatch ask and a new decision block in " + "dispatch doc-edit run on their own write, and write nothing: it lists the three items of " + "one project most like a title and a text (at most one per issue or document, open ones " + "first), each ask with whether it is answered, and a past decision that already answers " + "the same question. Use it to check a draft before filing it. It searches by meaning and by " + "the text's rarest words, and says how it searched; when meaning search cannot run it " + "searches by keywords only and says why. When it could not search at all it says why and " + "names the dispatch search to run instead. exclude_issue leaves that issue's own items out, " + "as a check on that issue's own write does; keywords_only skips meaning search.",
+    arguments: (z) => ({
+      project: z.string().describe("Project key to search within, such as CORE."),
+      title: z.string({ max: ISSUE_TITLE_MAX }).describe("Optional title to check, as an issue title; at most 1,000 characters.").optional(),
+      text: z.string().describe("Optional text to check, such as a draft spec or a question.").optional(),
+      exclude_issue: z.string().describe("Optional issue key in the project whose own items are left out.").optional(),
+      keywords_only: z.boolean().describe("Search by keywords only, skipping meaning search.").optional()
+    }),
+    validation: {
+      check: (value) => {
+        const { project } = value;
+        return typeof project !== "string" || PROJECT_KEY_PATTERN.test(project);
+      },
+      message: `project is not a project key: ${PROJECT_KEY_RULE}`
+    }
+  },
+  {
     name: "dispatch_issues",
     example: { project: "PROJ", limit: 250, offset: 250 },
     description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, open-ask count, progress (its spec's task-list items and " + "its direct children, each done of total, as `tasks 3/7 \xB7 children 2/5`, each only when it has " + "any), and route with whether it reaches anyone, " + "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " + "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " + "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " + 'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' + "session that is not running, as of the server's copy of the listener's session list, at " + "most 5 s old, whatever its priority. A restarting " + "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " + "Do not use it to search by keyword or phrase; dispatch search remains the keyword surface. " + "Dispatch pages the list: limit sets the page size (default " + `${DEFAULT_ISSUE_PAGE_LIMIT}, max ${MAX_ISSUE_PAGE_LIMIT}) and offset selects where it starts ` + "(default 0), and the answer names how many issues match, so repeat with the next offset to " + "walk every matching issue. A walk is exact only while the list does not change: an issue " + "that enters or leaves what the filters match, or whose status or rank changes, between two " + "pages shifts rows across a page boundary, so one issue can come back twice and another never. " + "all takes the whole filtered list in one read instead, for a caller that must not miss or " + "repeat a row while other writers change the list, and especially for one whose own writes " + "move issues out of what it filtered on.",
@@ -37210,6 +37239,13 @@ var dispatchToolSpecs = [
     arguments: (z) => ({
       project: z.string().describe("Project key; when supplied, lists every open ask in the project instead of only this session's own.").optional()
     }),
+    strict: true
+  },
+  {
+    name: "dispatch_answers",
+    example: {},
+    description: "List every answer and comment a person wrote to this session in the last 72 hours, newest first, each in full: " + "answers to its asks, replies on its asks and in its comment threads, comments on its documents and on issues routed to it, " + "mentions of it, messages to it and replies to its messages. Each item names its time, its writer, what it is, its " + "dispatch:// reference and its issue or document, an answer's question and choices, and the words, never cut. " + "Run it when the list of people's answers on a model request says it left older items out. " + "It reads this session's id from CLAUDE_CODE_SESSION_ID under Claude Code and DISPATCH_SESSION_ID elsewhere, so a subagent reads its parent's.",
+    arguments: () => ({}),
     strict: true
   },
   {
@@ -37335,6 +37371,45 @@ function roleToken(project, issue, role) {
     throw new Error(`Invalid IssueKey: ${issue}`);
   const [, dispatchProject, number] = dispatchMatch;
   return `legion-${project}-${dispatchProject?.toLowerCase()}-${number}-${role}`;
+}
+// ../contracts/src/related-forms.ts
+function relatedCheckFormOf(suggestions) {
+  const { outcome, missing } = suggestions;
+  const searchQuery = suggestions.search_query;
+  if (outcome === "not_made" || outcome === undefined && missing !== undefined) {
+    return { form: "not_made", reason: missing ?? "the server gave no reason", searchQuery };
+  }
+  const mode = relatedCheckModeWords(suggestions);
+  if (suggestions.related.length > 0) {
+    return { form: "items", mode, related: suggestions.related };
+  }
+  if (outcome === undefined) {
+    return {
+      form: "not_made",
+      reason: "the server did not say whether it searched",
+      searchQuery
+    };
+  }
+  if (outcome === "found" || outcome === "none") {
+    return { form: "nothing", mode };
+  }
+  return {
+    form: "not_made",
+    reason: `the server answered an outcome this client does not know (${String(outcome)})`,
+    searchQuery
+  };
+}
+function relatedCheckModeWords(suggestions) {
+  const { search, search_note: note } = suggestions;
+  if (search === undefined)
+    return;
+  if (search === "meaning_and_keywords")
+    return "meaning and keywords";
+  const words = search === "keywords_only" ? "keywords only" : String(search);
+  return note === undefined || note === "" ? words : `${words}: ${note}`;
+}
+function relatedCheckSearchWords(text) {
+  return (text.match(/[\p{L}\p{N}_]+/gu) ?? []).filter((word) => (word.match(/\p{L}/gu) ?? []).length >= 4).slice(0, 3).join(" ");
 }
 // ../contracts/src/repo.ts
 function canonicalRepo(owner, repo) {
@@ -38670,7 +38745,8 @@ class DispatchClient {
     this.#signal = requestSignal(signal);
   }
   async issue(input) {
-    return this.#json("POST", ["api", "v1", "issues"], input);
+    const answer = await this.#jsonAnswer("POST", ["api", "v1", "issues"], input);
+    return { ...answer.payload, created: answer.status === 201 };
   }
   async resolveIssue(issueReference) {
     return this.#resolveIssue(issueReference);
@@ -38720,6 +38796,9 @@ class DispatchClient {
   async search(query, options = {}) {
     return this.#json("GET", ["api", "v1", "search"], undefined, { q: query, ...options });
   }
+  async related(project, input) {
+    return this.#json("POST", ["api", "v1", "projects", project, "related"], input);
+  }
   async getIssue(issue) {
     return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue)]);
   }
@@ -38767,6 +38846,12 @@ class DispatchClient {
   }
   async openAsksForProject(project) {
     return this.#json("GET", ["api", "v1", "asks", "open"], undefined, { project });
+  }
+  async sessionAnswers(sessionID, options = {}) {
+    return this.#json("GET", ["api", "v1", "agents", sessionID, "answers"], undefined, {
+      ...options.since === undefined ? {} : { since: options.since },
+      ...options.maxChars === undefined ? {} : { max_chars: options.maxChars }
+    }, options.signal);
   }
   async listAgents() {
     return this.#json("GET", ["api", "v1", "agents"]);
@@ -38933,6 +39018,12 @@ class DispatchClient {
   async artifactBlocks(id) {
     return this.#json("GET", ["api", "v1", "artifacts", id, "blocks"]);
   }
+  async commentBlocks(id) {
+    return this.#json("GET", ["api", "v1", "comments", id, "blocks"]);
+  }
+  async messageBlocks(id, session) {
+    return this.#json("GET", ["api", "v1", "messages", id, "blocks"], undefined, session === undefined ? undefined : { session });
+  }
   async docEdit(id, input) {
     return this.#json("POST", ["api", "v1", "artifacts", id, "edits"], input);
   }
@@ -38964,13 +39055,7 @@ class DispatchClient {
     return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"]);
   }
   async getIssueReferences(issue) {
-    return this.#json("GET", [
-      "api",
-      "v1",
-      "issues",
-      await this.#resolveIssue(issue),
-      "references"
-    ]);
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue), "references"], undefined, { versions: "latest" });
   }
   async getReferences(query) {
     return this.#json("GET", ["api", "v1", "references"], undefined, {
@@ -38996,12 +39081,12 @@ class DispatchClient {
       throw error;
     }
   }
-  async#json(method, path, body, query) {
-    return (await this.#jsonAnswer(method, path, body, query)).payload;
+  async#json(method, path, body, query, signal) {
+    return (await this.#jsonAnswer(method, path, body, query, signal)).payload;
   }
-  async#jsonAnswer(method, path, body, query) {
+  async#jsonAnswer(method, path, body, query, signal) {
     const url = this.#url(path, query);
-    const response = await this.#send(method, url, body === undefined ? undefined : { content: JSON.stringify(body), type: "application/json" });
+    const response = await this.#send(method, url, body === undefined ? undefined : { content: JSON.stringify(body), type: "application/json" }, undefined, signal);
     return { status: response.status, payload: await this.#response(method, url, response) };
   }
   async#upload(path, input) {
@@ -39024,7 +39109,7 @@ class DispatchClient {
     const response = await this.#send(method, url, { content, type });
     return this.#response(method, url, response);
   }
-  async#send(method, url, body, accept = "application/json") {
+  async#send(method, url, body, accept = "application/json", signal) {
     const headers = {
       Accept: accept,
       Authorization: `Bearer ${this.token}`
@@ -39035,7 +39120,7 @@ class DispatchClient {
       return this.fetchImpl(url, {
         method,
         headers,
-        signal: this.#signal,
+        signal: signal === undefined ? this.#signal : AbortSignal.any([this.#signal, signal]),
         ...body === undefined ? {} : { body: body.content }
       });
     }
@@ -39221,6 +39306,9 @@ class DispatchClient {
 function documentLabel(project, slug) {
   return `${project}/${slug}`;
 }
+function ownerTitle(owner) {
+  return "issue" in owner ? `${owner.issue.key}: ${owner.issue.title}` : `${owner.document.project} / ${owner.document.name}`;
+}
 function issueTopic(key) {
   return { label: key, topic: dispatchIssueSubject(key, ">") };
 }
@@ -39239,10 +39327,26 @@ function dispatchDocumentRef(owner, slug) {
 function dispatchChildRef(ownerRef, kind, id) {
   return `${ownerRef}/${kind}/${id}`;
 }
-function parseBlockRef(document, fragment) {
-  const target = parseBlockFragment(fragment);
-  const parsed = parseDispatchRef(document);
-  if (target === undefined || parsed === null || parsed.version !== undefined || parsed.kind !== "spec" && parsed.kind !== "artifact") {
+function parseBlockRef(holder, fragment) {
+  const target = holder.includes("@") ? undefined : parseBlockFragment(fragment);
+  const parsed = parseDispatchRef(holder);
+  if (target === undefined || parsed === null) {
+    return null;
+  }
+  const pin = target.pin === undefined ? {} : { pin: target.pin };
+  const artifact = parsed.artifact === undefined ? {} : { artifact: parsed.artifact };
+  if (parsed.kind === "comment" || parsed.kind === "message" && target.pin === undefined) {
+    return {
+      owner: parsed.owner,
+      kind: "block",
+      id: parsed.id,
+      block: target.block,
+      item: { kind: parsed.kind, id: parsed.id },
+      ...artifact,
+      ...pin
+    };
+  }
+  if (parsed.kind !== "spec" && parsed.kind !== "artifact") {
     return null;
   }
   return {
@@ -39250,9 +39354,9 @@ function parseBlockRef(document, fragment) {
     kind: "block",
     id: parsed.id,
     block: target.block,
-    document,
+    document: holder,
     ...parsed.owner.kind === "project" ? { artifact: parsed.id } : {},
-    ...target.pin === undefined ? {} : { pin: target.pin }
+    ...pin
   };
 }
 function parseDispatchRef(ref) {
@@ -39874,6 +39978,7 @@ function parseDispatchFrame(rawPayload) {
       return {
         event: targeted.data.event,
         notify: wireFrame.event.notify,
+        quiet: wireFrame.event.quiet,
         delivery: targeted.data.delivery
       };
     }
@@ -39907,6 +40012,7 @@ function parseDispatchFrame(rawPayload) {
   return {
     event: parsed.data,
     notify: wireEvent.notify,
+    quiet: wireEvent.quiet,
     delivery: undefined
   };
 }
@@ -39963,7 +40069,8 @@ function renderInbound(raw, sessionID, subject) {
     } else {
       const frame = parseDispatchFrame(envelope.payload);
       if ("event" in frame) {
-        if (frame.notify === false && topic?.startsWith(DISPATCH_TOPIC_PREFIX) === true) {
+        const quiet = frame.quiet === undefined ? frame.notify === false : frame.quiet === true;
+        if (quiet && topic?.startsWith(DISPATCH_TOPIC_PREFIX) === true) {
           return { skip: true, content: "", envelope };
         }
         if (frame.event.actor.kind === "session" && frame.event.actor.id === sessionID) {
@@ -40141,24 +40248,52 @@ ${trailer}`,
   };
 }
 
+// ../envoy-client/src/dispatch-session-directory.ts
+import { randomUUID } from "crypto";
+import { renameSync, rmSync, writeFileSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
+var SESSION_ID = /^[A-Za-z0-9._-]{1,128}$/;
+var PRIVATE_FILE = 384;
+function sessionStateRoot(env) {
+  const stateDir = env["DISPATCH_STATE_DIR"];
+  if (stateDir)
+    return stateDir;
+  return join(env["XDG_STATE_HOME"] || join(homedir(), ".local", "state"), "dispatch");
+}
+function sessionDirectory(env, sessionId) {
+  if (!SESSION_ID.test(sessionId) || sessionId === "." || sessionId === "..") {
+    throw new Error(`dispatch: the session id ${JSON.stringify(sessionId)} is not 1-128 letters, digits, ".", "_" or "-"`);
+  }
+  return join(sessionStateRoot(env), "sessions", sessionId);
+}
+function writeAtomically(path, text) {
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, text, { mode: PRIVATE_FILE });
+    renameSync(temporary, path);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
+}
+
 // ../envoy-client/src/dispatch-session-state.ts
 import { createHash as createHash2 } from "crypto";
 import {
   appendFileSync,
   closeSync as closeSync2,
   fstatSync,
-  mkdirSync as mkdirSync2,
+  mkdirSync as mkdirSync3,
   openSync as openSync2,
   readdirSync as readdirSync2,
-  readFileSync as readFileSync2,
+  readFileSync as readFileSync3,
   readSync,
-  renameSync as renameSync2,
-  rmSync as rmSync2,
+  rmSync as rmSync3,
   statSync as statSync2,
-  writeFileSync as writeFileSync2
+  writeFileSync as writeFileSync3
 } from "fs";
-import { homedir } from "os";
-import { join as join2 } from "path";
+import { join as join4 } from "path";
 
 // ../envoy-client/src/askgate-marker.ts
 import { createHash, randomBytes } from "crypto";
@@ -40169,13 +40304,13 @@ import {
   openSync,
   readdirSync,
   readFileSync,
-  renameSync,
-  rmSync,
+  renameSync as renameSync2,
+  rmSync as rmSync2,
   statSync,
   unlinkSync,
-  writeFileSync
+  writeFileSync as writeFileSync2
 } from "fs";
-import { isAbsolute, join, resolve } from "path";
+import { isAbsolute, join as join2, resolve } from "path";
 var ASKGATE_RECORD = "askgate";
 var MARKER_MAX_AGE_MS = 2 * 60 * 60000;
 var MARKERS = "markers";
@@ -40278,7 +40413,7 @@ var STORE_NAME = /^([1-9][0-9]*)(?:-([0-9]+))?$/;
 function storeTouched(store) {
   const own = statSync(store).mtimeMs;
   try {
-    return Math.max(own, statSync(join(store, MARKERS)).mtimeMs);
+    return Math.max(own, statSync(join2(store, MARKERS)).mtimeMs);
   } catch (error) {
     if (hasErrnoCode(error, "ENOENT"))
       return own;
@@ -40286,7 +40421,7 @@ function storeTouched(store) {
   }
 }
 function sweepStores(root, now) {
-  const parent = join(root, "askgate");
+  const parent = join2(root, "askgate");
   let names;
   try {
     names = readdirSync(parent);
@@ -40297,18 +40432,18 @@ function sweepStores(root, now) {
     const match = STORE_NAME.exec(name);
     if (match === null)
       continue;
-    const store = join(parent, name);
+    const store = join2(parent, name);
     try {
       if (ownerLive({ pid: Number(match[1]), start: match[2] ?? null, store }))
         continue;
       if (now - storeTouched(store) <= MARKER_MAX_AGE_MS)
         continue;
-      rmSync(store, { recursive: true, force: true });
+      rmSync2(store, { recursive: true, force: true });
     } catch {}
   }
 }
 function askgateState(dir) {
-  const record = join(dir, ASKGATE_RECORD);
+  const record = join2(dir, ASKGATE_RECORD);
   let names;
   try {
     names = readdirSync(record);
@@ -40321,7 +40456,7 @@ function askgateState(dir) {
   for (const name of names) {
     if (!name.endsWith(OWNER_FILE))
       continue;
-    const file = join(record, name);
+    const file = join2(record, name);
     let text;
     try {
       text = readFileSync(file, "utf-8");
@@ -40340,7 +40475,7 @@ function askgateState(dir) {
     return { kind: "off" };
   for (const { file, store } of live) {
     try {
-      if (!statSync(join(store, MARKERS)).isDirectory())
+      if (!statSync(join2(store, MARKERS)).isDirectory())
         throw new Error("not a directory");
     } catch (error) {
       return {
@@ -40392,17 +40527,17 @@ function consumeMarker(stores, argv, args, files, now) {
   let expired = false;
   const usable = [];
   for (const store of stores) {
-    const dir = join(store, MARKERS);
+    const dir = join2(store, MARKERS);
     for (const name of readdirSync(dir)) {
       if (!name.startsWith(`${key}.`))
         continue;
-      const file = join(dir, name);
+      const file = join2(dir, name);
       const marker = readMarker(file);
       if (marker === undefined || marker.argv !== key)
         continue;
       if (now - marker.createdAt > MARKER_MAX_AGE_MS) {
         expired = true;
-        rmSync(file, { force: true });
+        rmSync2(file, { force: true });
         continue;
       }
       if (marker.args !== null) {
@@ -41120,6 +41255,357 @@ function searchAnswer(search, query, offset, configUrl) {
   };
 }
 
+// ../envoy-client/src/related-check.ts
+function relatedCheckLines(suggestions, context) {
+  if (suggestions === null || suggestions === undefined) {
+    return [notMadeLine("the server sent no check result", context)];
+  }
+  let lines;
+  try {
+    lines = relatedCheckForm(suggestions, context);
+  } catch (error) {
+    lines = [
+      notMadeLine(`this client could not read the check result (${messageFor(error)})`, context)
+    ];
+  }
+  try {
+    const { decision } = suggestions;
+    if (decision !== undefined && decision !== null) {
+      const when = decision.answered_at === undefined ? "" : ` on ${decision.answered_at}`;
+      lines.push(`A past decision may already answer this: ${suggestionLabel(decision)}, answered by ${decision.answered_by}${when} \u2192 ${absoluteHref(decision.href, context.configUrl)}`);
+      lines.push(...askLines(decision.ask));
+    }
+    for (const match of suggestions.title_matches ?? []) {
+      lines.push(`Title overlaps you forced past: ${match.key} [${match.status}] ${match.title} \u2192 ${absoluteHref(match.href, context.configUrl)}`);
+    }
+  } catch (error) {
+    lines.push(`The check's past decision or title overlaps could not be shown: ${messageFor(error)}`);
+  }
+  return lines;
+}
+function decisionBlockLines(advice, context) {
+  try {
+    const checks = advice?.decision_block_checks;
+    if (checks === undefined || checks === null) {
+      const added = advice?.decision_blocks_added ?? 0;
+      if (added === 0)
+        return [];
+      return [
+        `${added} new decision ${added === 1 ? "block" : "blocks"}:`,
+        notMadeLine("the server sent no check result", context)
+      ];
+    }
+    return checks.flatMap((check) => [
+      `Decision block ${check.block_id}:`,
+      ...relatedCheckLines(check.suggestions, { ...context, text: check.question ?? "" })
+    ]);
+  } catch (error) {
+    return [
+      notMadeLine(`this client could not read the decision blocks' checks (${messageFor(error)})`, context)
+    ];
+  }
+}
+function relatedCheckForm(suggestions, context) {
+  const form = relatedCheckFormOf(suggestions);
+  if (form.form === "not_made") {
+    return [notMadeLine(form.reason, context, form.searchQuery)];
+  }
+  if (form.form === "items") {
+    const header = form.mode === undefined ? "Related items:" : `Related items (searched by ${form.mode}):`;
+    return [header, ...form.related.flatMap((item) => relatedItemLines(item, context.configUrl))];
+  }
+  return [
+    form.mode === undefined ? "Related-item check searched and found nothing." : `Related-item check searched (${form.mode}) and found nothing.`
+  ];
+}
+function relatedItemLines(item, configUrl) {
+  try {
+    const lines = [`- ${suggestionLabel(item)} \u2192 ${absoluteHref(item.href, configUrl)}`];
+    if (item.kind === "ask") {
+      lines.push(...askLines(item.ask));
+    }
+    return lines;
+  } catch (error) {
+    const href = item?.href;
+    return [`- ${String(href)} (this client could not show it: ${messageFor(error)})`];
+  }
+}
+function askLines(ask) {
+  try {
+    const lines = askStateLines(ask ?? undefined);
+    if (!Array.isArray(lines))
+      throw new Error(`unknown ask state ${String(ask?.state)}`);
+    return lines;
+  } catch (error) {
+    return [`  This client could not show where the ask stands: ${messageFor(error)}`];
+  }
+}
+function suggestionLabel(item) {
+  if (item.owner.kind === "issue") {
+    return `${item.owner.key} [${item.owner.status}] ${item.owner.title}`;
+  }
+  return `${item.owner.name} (${item.owner.project}/${item.owner.slug})`;
+}
+function absoluteHref(href, configUrl) {
+  try {
+    return new URL(href, configUrl).toString();
+  } catch {
+    return String(href);
+  }
+}
+function notMadeLine(reason, context, searchQuery) {
+  const words = searchQuery?.trim() || relatedCheckSearchWords(context.text);
+  const query = words === "" ? " with two or three of its words as --query" : ` --query '${words.replaceAll("'", "'\\''")}'`;
+  return `No related-item check was made: ${reason}. Search before you rely on this being new: dispatch search --project ${context.project}${query}`;
+}
+
+// ../envoy-client/src/session-answers.ts
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync2 } from "fs";
+import { join as join3 } from "path";
+var SESSION_ANSWERS_WINDOW_MS = 72 * 3600000;
+var SESSION_ANSWERS_MAX_CHARS = 8000;
+var SESSION_ANSWERS_DEADLINE_MS = 800;
+var READ_TIMEOUT_MS = 1e4;
+var NO_ROUTE_BACKOFF_MS = 5 * 60000;
+var QUESTION_MAX = 200;
+var SESSION_ANSWERS_MARKER = "[Dispatch: what people wrote to this session in the last 72 hours, newest first, word for word. Reference, not a new request.]";
+var FAILURE_MARKER = "[Dispatch: people's answers from the last 72 hours could not be read (";
+var NO_ANSWERS_ROUTE_REASON = "this Dispatch build has no answers route";
+var RELATION_PHRASES = {
+  answered_your_ask: "answered your ask",
+  replied_on_your_ask: "replied on your ask",
+  replied_in_a_comment_thread: "replied in a comment thread",
+  commented_on_a_document: "commented on a document",
+  commented_on_an_issue: "commented on an issue",
+  mentioned_you: "mentioned you",
+  sent_you_a_message: "sent you a message",
+  replied_to_your_message: "replied to your message"
+};
+function isNoAnswersRoute(error) {
+  return error instanceof DispatchServiceError && error.status === 404;
+}
+function renderSessionAnswerItem(item) {
+  const relation = `${RELATION_PHRASES[item.relation]}${item.replaced === true ? " (replaces an earlier answer)" : ""}`;
+  const head = [item.at, `user ${item.author.id}`, relation];
+  if (item.edited_at !== undefined)
+    head.push(`edited ${item.edited_at}`);
+  const owner = item.owner === null ? undefined : ownerTitle(item.owner);
+  const where = item.ref === null ? `Direct message ${item.id}, on no issue` : owner === undefined ? item.ref : `${item.ref} \xB7 ${owner}`;
+  const lines = [head.join(" \xB7 "), where];
+  if (item.ask !== undefined) {
+    const question = item.ask.question.replace(/\s+/g, " ").trim();
+    lines.push(`Question: ${question.length > QUESTION_MAX ? `${question.slice(0, QUESTION_MAX)}\u2026` : question}`);
+  }
+  if (item.kind === "answer") {
+    const selected = item.selected ?? [];
+    lines.push(`Selected: ${selected.length === 0 ? "none" : selected.join(", ")}`);
+  }
+  if (item.text !== "")
+    lines.push(item.text);
+  return lines.join(`
+`);
+}
+function withinWindow(items, now) {
+  const start = now - SESSION_ANSWERS_WINDOW_MS;
+  return items.filter((item) => Date.parse(item.at) >= start);
+}
+var MAX_CHARS_TEXT = SESSION_ANSWERS_MAX_CHARS.toLocaleString("en-US");
+function leftOutLine(count) {
+  return `${count} older ${count === 1 ? "item" : "items"} left out to stay under ${MAX_CHARS_TEXT} characters: run \`dispatch answers\` to read every one in full.`;
+}
+function renderSessionAnswers(items, options) {
+  const shown = withinWindow(items, Number(options.now));
+  const unsent = shown.length === items.length ? Math.max(0, (options.total ?? items.length) - items.length) : 0;
+  const count = shown.length + unsent;
+  if (count === 0)
+    return;
+  const header = options.cached === undefined ? SESSION_ANSWERS_MARKER : `${SESSION_ANSWERS_MARKER}
+As read at ${options.cached.readAt}; this read failed: ${failureSentence(options.cached.reason)}`;
+  const blocks = [];
+  let length = header.length;
+  for (const item of shown) {
+    const block = renderSessionAnswerItem(item);
+    const after = count - blocks.length - 1;
+    const needed = length + 2 + block.length + (after === 0 ? 0 : 2 + leftOutLine(after).length);
+    if (needed >= SESSION_ANSWERS_MAX_CHARS)
+      break;
+    blocks.push(block);
+    length += 2 + block.length;
+  }
+  const leftOut = count - blocks.length;
+  return [header, ...blocks, ...leftOut === 0 ? [] : [leftOutLine(leftOut)]].join(`
+
+`);
+}
+function renderSessionAnswersList(items, options) {
+  const shown = withinWindow(items, Number(options.now));
+  if (shown.length === 0)
+    return "No person wrote to this session in the last 72 hours.";
+  return [
+    `${shown.length} ${shown.length === 1 ? "item" : "items"} people wrote to this session in the last 72 hours, newest first, word for word:`,
+    ...shown.map(renderSessionAnswerItem)
+  ].join(`
+
+`);
+}
+function failureSentence(reason) {
+  const text = reason.replace(/\s+/g, " ").trim();
+  return /[.?!]$/.test(text) ? text : `${text}.`;
+}
+function sessionAnswersFailureLine(reason) {
+  return `${FAILURE_MARKER}${reason.replace(/\s+/g, " ").trim()}); run \`dispatch answers\`.]`;
+}
+var STATE_KEY = Symbol.for("legion.pi-envoy.session-answers.v2");
+var processGlobal = globalThis;
+var state = processGlobal[STATE_KEY] ?? {
+  sessions: new Map,
+  noRouteUntil: new Map
+};
+processGlobal[STATE_KEY] = state;
+var CACHE_FILE = "answers.json";
+function readCacheFile(directory, url) {
+  try {
+    const value = JSON.parse(readFileSync2(join3(directory, CACHE_FILE), "utf-8"));
+    if (typeof value === "object" && value !== null && "dispatch_url" in value && typeof value.dispatch_url === "string" && value.dispatch_url === url && "read_at" in value && typeof value.read_at === "string" && "total" in value && typeof value.total === "number" && "items" in value && Array.isArray(value.items)) {
+      return {
+        dispatch_url: value.dispatch_url,
+        read_at: value.read_at,
+        total: value.total,
+        items: value.items
+      };
+    }
+  } catch {}
+  return;
+}
+async function settleWithin(promise, ms, signal) {
+  if (signal?.aborted === true)
+    return "aborted";
+  let timer;
+  let onAbort;
+  const stop = new Promise((resolve) => {
+    timer = setTimeout(() => resolve("deadline"), ms);
+    onAbort = () => resolve("aborted");
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([promise, stop]);
+  } finally {
+    clearTimeout(timer);
+    if (onAbort !== undefined)
+      signal?.removeEventListener("abort", onAbort);
+  }
+}
+async function readSessionAnswers(options) {
+  const now = options.now ?? Date.now;
+  const { dispatch, session } = options;
+  if (!dispatch.enabled && dispatch.error === null) {
+    return { text: undefined, source: "off", reason: dispatch.notice };
+  }
+  let directory;
+  try {
+    directory = sessionDirectory(options.env, session);
+  } catch {}
+  const entries = state.sessions.get(session) ?? new Map;
+  state.sessions.set(session, entries);
+  const carry = (cache, reason) => {
+    const text = cache === undefined ? undefined : renderSessionAnswers(cache.items, {
+      now: now(),
+      total: cache.total,
+      cached: { readAt: cache.read_at, reason }
+    });
+    if (cache === undefined || text === undefined) {
+      return { text: sessionAnswersFailureLine(reason), source: "failure", reason };
+    }
+    return { text, source: "cache", readAt: cache.read_at, reason };
+  };
+  if (!dispatch.enabled) {
+    const url = options.dispatchUrl;
+    if (url === undefined)
+      return carry(undefined, dispatch.error);
+    const cache = entries.get(url)?.cache ?? (directory === undefined ? undefined : readCacheFile(directory, url));
+    return carry(cache, dispatch.error);
+  }
+  const { url } = dispatch;
+  const current = entries.get(url) ?? {
+    cache: undefined,
+    inFlight: undefined,
+    overdue: false
+  };
+  entries.set(url, current);
+  if (current.cache === undefined && directory !== undefined) {
+    current.cache = readCacheFile(directory, url);
+  }
+  if ((state.noRouteUntil.get(url) ?? 0) > now()) {
+    return carry(current.cache, NO_ANSWERS_ROUTE_REASON);
+  }
+  if (current.inFlight !== undefined && current.overdue) {
+    return carry(current.cache, "an earlier read is still waiting on Dispatch");
+  }
+  let read = current.inFlight;
+  if (read === undefined) {
+    const client = new DispatchClient(url, dispatch.token, options.fetchImpl ?? fetch);
+    const started = client.sessionAnswers(session, {
+      maxChars: SESSION_ANSWERS_MAX_CHARS,
+      signal: AbortSignal.timeout(READ_TIMEOUT_MS)
+    }).then((response) => {
+      if (!Array.isArray(response?.items) || typeof response.total !== "number") {
+        return { failure: "Dispatch answered with something that is not an answers list" };
+      }
+      const cache = {
+        dispatch_url: url,
+        read_at: new Date(now()).toISOString(),
+        total: response.total,
+        items: response.items
+      };
+      current.cache = cache;
+      if (directory !== undefined) {
+        try {
+          mkdirSync2(directory, { recursive: true, mode: 448 });
+          writeAtomically(join3(directory, CACHE_FILE), JSON.stringify(cache));
+        } catch {}
+      }
+      return { cache };
+    }, (error) => {
+      if (isNoAnswersRoute(error)) {
+        state.noRouteUntil.set(url, now() + NO_ROUTE_BACKOFF_MS);
+        return { failure: NO_ANSWERS_ROUTE_REASON };
+      }
+      return { failure: messageFor(error) };
+    });
+    read = started.finally(() => {
+      if (current.inFlight === read) {
+        current.inFlight = undefined;
+        current.overdue = false;
+      }
+    });
+    current.inFlight = read;
+    current.overdue = false;
+  }
+  const deadlineMs = options.deadlineMs ?? SESSION_ANSWERS_DEADLINE_MS;
+  const outcome = await settleWithin(read, deadlineMs, options.signal);
+  if (outcome === "deadline") {
+    if (current.inFlight === read)
+      current.overdue = true;
+    return carry(current.cache, `Dispatch did not answer within ${deadlineMs} ms`);
+  }
+  if (outcome === "aborted") {
+    return carry(current.cache, "the request was cancelled before Dispatch answered");
+  }
+  if ("failure" in outcome)
+    return carry(current.cache, outcome.failure);
+  return {
+    text: renderSessionAnswers(outcome.cache.items, {
+      now: now(),
+      total: outcome.cache.total
+    }),
+    source: "fresh",
+    readAt: outcome.cache.read_at
+  };
+}
+async function sessionAnswersSettled(session) {
+  await Promise.all(Array.from(state.sessions.get(session)?.values() ?? [], (entry) => entry.inFlight));
+}
+
 // ../envoy-client/src/dispatch-execute.ts
 function documentTopic(artifact) {
   return documentTopicOf(artifact.project, artifact.slug);
@@ -41179,31 +41665,12 @@ function renderAdvice(tool, key, advice, opts) {
   }
   return lines;
 }
-function renderSuggestions(suggestions, configUrl) {
-  if (suggestions === undefined)
-    return [];
-  if (suggestions.missing !== undefined) {
-    return [`Related-item search was skipped: ${suggestions.missing}.`];
+async function otherAdviceLines(render) {
+  try {
+    return await render();
+  } catch (error) {
+    return [`Other advice could not be shown: ${messageFor(error)}`];
   }
-  const lines = [];
-  if (suggestions.related.length > 0) {
-    lines.push("Possibly related, found by search:");
-    for (const item of suggestions.related) {
-      lines.push(`- ${suggestionLabel(item)} \u2192 ${new URL(item.href, configUrl).toString()}`);
-    }
-  }
-  if (suggestions.decision !== undefined) {
-    const item = suggestions.decision;
-    const when = item.answered_at === undefined ? "" : ` on ${item.answered_at}`;
-    lines.push(`A past decision may already answer this: ${suggestionLabel(item)}, answered by ${item.answered_by}${when} \u2192 ${new URL(item.href, configUrl).toString()}`);
-  }
-  return lines;
-}
-function suggestionLabel(item) {
-  if (item.owner.kind === "issue") {
-    return `${item.owner.key} [${item.owner.status}] ${item.owner.title}`;
-  }
-  return `${item.owner.name} (${item.owner.project}/${item.owner.slug})`;
 }
 function documentResultDetails(artifact) {
   return {
@@ -41256,10 +41723,12 @@ var issueFreeTools = {
   dispatch_resolve_comment: true,
   dispatch_follow: true,
   dispatch_search: true,
+  dispatch_related: true,
   dispatch_issues: true,
   dispatch_project: true,
   dispatch_projects: true,
   dispatch_open_asks: true,
+  dispatch_answers: true,
   dispatch_whoami: true,
   dispatch_architecture_sync: true
 };
@@ -41399,7 +41868,7 @@ function normalizeUUID(value) {
 }
 var askIdProblem = "ask must be a bare ask id or a dispatch://.../ask/<id> reference";
 var commentIdProblem = "comment must be a bare comment id or a dispatch://.../comment/<id> reference";
-var messageIdProblem = "in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference";
+var messageIdProblem = "in_reply_to must be a full message id (uuid), a dispatch://KEY/message/<id> reference, or a block of one (dispatch://KEY/message/<id>#b-<block id>)";
 function askId(args) {
   const ask = stringArg(args, "ask");
   return ask.startsWith("dispatch://") ? parseDispatchRef(ask)?.id ?? ask : ask;
@@ -41410,6 +41879,28 @@ function messageIdOf(value) {
     return reference?.kind === "message" ? reference.id : undefined;
   })() : value;
   return id === undefined ? undefined : normalizeUUID(id);
+}
+function itemBlockOf(value) {
+  const ref = parseDispatchRef(value);
+  return ref?.item === undefined || ref.block === undefined ? undefined : { ...ref, item: ref.item, block: ref.block };
+}
+function replyBlockProblem(field, kind, value) {
+  if (!/^dispatch:\/\/[^#]*#b-/.test(value))
+    return;
+  const form = `dispatch://KEY/${kind}/<id>#b-<block id>`;
+  const ref = parseDispatchRef(value);
+  if (ref?.kind !== "block") {
+    return `${field} ${value} names no block; a block of a ${kind} reads ${form}`;
+  }
+  const other = ref.item?.kind;
+  if (other !== kind) {
+    const answer = other === "comment" ? `; answer it with ${commandLine("dispatch_comment", { reply_to: value })}` : other === "message" ? `; answer it with ${commandLine("dispatch_message", { in_reply_to: value })}` : "";
+    return `${field} ${value} names a block of ${other === undefined ? "a document" : `a ${other}`}, but a ${kind} reply answers a block of a ${kind} (${form})${answer}`;
+  }
+  if (ref.pin !== undefined) {
+    return `${field} ${value} names revision ${ref.pin} of the block, but a reply answers the block whatever its text becomes: drop @v${ref.pin}`;
+  }
+  return;
 }
 var idPrefixPattern = /^[0-9a-f][0-9a-f-]{7,}$/i;
 function refOwnerName(ref) {
@@ -41520,7 +42011,20 @@ async function resolveAskArgument(tool, args, client, sessionId) {
 }
 function messageInReplyTo(args) {
   const inReplyTo = optionalString(args, "in_reply_to");
-  return inReplyTo === undefined ? undefined : messageIdOf(inReplyTo);
+  if (inReplyTo === undefined)
+    return;
+  const block = itemBlockOf(inReplyTo);
+  if (block !== undefined && block.item.kind !== "message")
+    return;
+  const id = messageIdOf(block?.item.id ?? inReplyTo);
+  return id === undefined ? undefined : { id, ...block === undefined ? {} : { block: block.block } };
+}
+function commentReplyTo(args) {
+  const replyTo = optionalString(args, "reply_to");
+  if (replyTo === undefined)
+    return;
+  const block = itemBlockOf(replyTo);
+  return block === undefined ? { id: replyTo } : { id: block.item.id, block: block.block };
 }
 function argumentProblems(tool, args) {
   const problems = [];
@@ -41555,15 +42059,21 @@ function argumentProblems(tool, args) {
       if (optionalString(args, "quote") !== undefined && optionalString(args, "artifact") === undefined) {
         problems.push("artifact is required when quote is supplied");
       }
-      if (optionalString(args, "reply_to") !== undefined && optionalString(args, "reply_to_ask") !== undefined) {
+      const replyTo = optionalString(args, "reply_to");
+      if (replyTo !== undefined && optionalString(args, "reply_to_ask") !== undefined) {
         problems.push("reply_to and reply_to_ask cannot both be set");
       }
+      const replyBlock = replyTo === undefined ? undefined : replyBlockProblem("reply_to", "comment", replyTo);
+      if (replyBlock !== undefined)
+        problems.push(replyBlock);
       break;
     }
     case "dispatch_message": {
       const inReplyTo = optionalString(args, "in_reply_to");
-      if (inReplyTo !== undefined && messageIdOf(inReplyTo) === undefined) {
-        problems.push(messageIdProblem);
+      if (inReplyTo !== undefined) {
+        const problem = replyBlockProblem("in_reply_to", "message", inReplyTo) ?? (messageInReplyTo(args) === undefined ? messageIdProblem : undefined);
+        if (problem !== undefined)
+          problems.push(problem);
       }
       break;
     }
@@ -41643,7 +42153,7 @@ function dispatchRefFromUrl(value, serverUrl) {
   };
   const blockOf = (versionName) => {
     const id = url.hash.startsWith("#b-") ? decodeBlockId(url.hash.slice(3)) : undefined;
-    return id === undefined || url.searchParams.get(versionName) ? "" : `#b-${encodeBlockId(id)}`;
+    return id === undefined || versionName !== undefined && url.searchParams.get(versionName) ? "" : `#b-${encodeBlockId(id)}`;
   };
   const issuePage = url.pathname.match(/^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/);
   if (issuePage) {
@@ -41669,9 +42179,9 @@ function dispatchRefFromUrl(value, serverUrl) {
     if (ask !== undefined)
       return `dispatch://${key}/ask/${ask}`;
     if (comment !== undefined)
-      return `dispatch://${key}/comment/${comment}`;
+      return `dispatch://${key}/comment/${comment}${blockOf()}`;
     if (message !== undefined)
-      return `dispatch://${key}/message/${message}`;
+      return `dispatch://${key}/message/${message}${blockOf()}`;
     return `dispatch://${key}`;
   }
   const agentArtifactPage = url.pathname.match(/^\/agents\/([^/]+)\/artifacts\/([^/]+)\/?$/);
@@ -41694,7 +42204,7 @@ function dispatchRefFromUrl(value, serverUrl) {
     return;
   return item === undefined ? `${document}${versionOf("version")}${blockOf("version")}` : `${document}/${item.kind}/${item.id}`;
 }
-var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), " + "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " + "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " + "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " + "dispatch read), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
+var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), " + "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " + "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " + "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " + "dispatch read), dispatch://KEY-1/comment/<uuid>#b-<block id>, " + "dispatch://PROJECT/artifact/<slug>/comment/<uuid>#b-<block id> or " + "dispatch://KEY-1/message/<uuid>#b-<block id> (one block of a comment or message, a " + "comment's optionally pinned to a revision of the comment with @v<N> after it; for dispatch " + "read), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
 var ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSUE";
 function innerRefProblem(tool, ref, refText) {
   if (ref.kind !== "ask" && ref.kind !== "comment" && ref.kind !== "message" && ref.kind !== "log" && ref.kind !== "children" && ref.kind !== "block") {
@@ -41703,10 +42213,11 @@ function innerRefProblem(tool, ref, refText) {
   if (tool === "dispatch_read" || tool === "dispatch_ask")
     return;
   const owner = refOwnerName(ref);
-  const documentArgument = ref.kind === "block" && tool !== "dispatch_comment" ? ` and artifact ${ref.id}` : tool === "dispatch_suggest" ? " and artifact <the document's slug>" : "";
+  const itemKind = ref.item?.kind ?? ref.kind;
+  const documentArgument = ref.kind === "block" && ref.item === undefined && tool !== "dispatch_comment" ? ` and artifact ${ref.id}` : tool === "dispatch_suggest" ? " and artifact <the document's slug>" : "";
   const ownerArguments = ref.owner.kind === "issue" ? `issue ${ref.owner.issue}${documentArgument}` : `project ${ref.owner.project} and artifact ${ref.artifact}`;
-  const fix = tool === "dispatch_comment" && ref.kind === "ask" ? `reply under it with reply_to_ask ${ref.id} and ${ownerArguments}` : tool === "dispatch_comment" && ref.kind === "comment" ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}` : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
-  const item = ref.kind === "ask" ? "an ask" : ref.kind === "log" ? "the event log" : ref.kind === "children" ? "the children" : ref.kind === "block" ? `block ${ref.block}` : `a ${ref.kind}`;
+  const fix = tool === "dispatch_comment" && itemKind === "ask" ? `reply under it with reply_to_ask ${ref.id} and ${ownerArguments}` : tool === "dispatch_comment" && itemKind === "comment" ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}` : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
+  const item = ref.kind === "ask" ? "an ask" : ref.kind === "log" ? "the event log" : ref.kind === "children" ? "the children" : ref.kind === "block" ? `block ${ref.block}${ref.item === undefined ? "" : ` of a ${ref.item.kind}`}` : `a ${ref.kind}`;
   return `ref ${refText} names ${item} on ${owner}; dispatch ${commandName(tool)} would act on ${owner} and drop the ${ref.kind}: ${fix}`;
 }
 var documentItemPattern = /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)\/artifact\/[^/@]+(?:@v\d+)?\/(ask|comment)\/([^/]+)$/;
@@ -41733,7 +42244,7 @@ function ownerConflictProblems(tool, args, parsedRef, refText) {
   const artifact = optionalString(args, "artifact");
   const version = optionalNumber(args, "version");
   const ref = tool === "dispatch_ask" && (issue !== undefined || project !== undefined) ? null : parsedRef;
-  const refDocument = ref === null ? undefined : ref.owner.kind === "project" ? ref.artifact ?? ref.id : ref.kind === "spec" || ref.kind === "artifact" || ref.kind === "block" ? ref.id : undefined;
+  const refDocument = ref === null ? undefined : ref.owner.kind === "project" ? ref.artifact ?? ref.id : ref.kind === "spec" || ref.kind === "artifact" || ref.kind === "block" && ref.item === undefined ? ref.id : undefined;
   if (ref !== null && refText !== undefined) {
     const refOwner = refOwnerName(ref);
     if (issue !== undefined && (ref.owner.kind !== "issue" || nativeIssueKeyPattern.test(issue) && issue !== ref.owner.issue)) {
@@ -42140,9 +42651,12 @@ function referenceLines(read) {
   if (read.edges.length === 0)
     return ["- none"];
   return read.edges.map((edge) => {
+    const { node } = edge;
     const excerpt = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} \xB7 `;
     const block = edge.block === undefined ? "" : ` (block ${edge.block.ref ?? edge.block.id})`;
-    return `- ${edge.kind} ${edge.node.kind} ${edge.node.ref ?? edge.node.id} (${excerpt}${edge.created_at})${block}`;
+    const item = node.kind === "block" && node.document === undefined && (node.parent?.kind === "comment" || node.parent?.kind === "message") ? node.parent : undefined;
+    const source = item === undefined ? `${node.kind} ${node.ref ?? node.id}` : `${item.kind} ${item.ref ?? item.id} block ${node.block_id ?? node.id}`;
+    return `- ${edge.kind} ${source} (${excerpt}${edge.created_at})${block}`;
   });
 }
 function unavailableReason(error) {
@@ -42185,27 +42699,32 @@ function nodeLine(node) {
   const made = fact(node.made_by, node.made_at);
   const changed = fact(node.changed_by, node.changed_at);
   const { parent } = node;
-  const partOf = parent == null ? "" : ` \xB7 part of ${parent.ref ?? `${parent.kind} ${parent.id}`}${node.parent_version == null ? "" : ` (version ${node.parent_version})`}`;
+  const partOf = parent == null ? "" : ` \xB7 part of ${parent.ref ?? `${parent.kind} ${parent.id}`}${node.parent_version == null ? "" : ` (${parent.kind === "comment" ? "revision" : "version"} ${node.parent_version})`}`;
   return [
     `Node: ${node.kind} ${node.ref ?? node.id} \xB7 made by ${made} \xB7 changed by ${changed}${partOf}`
   ];
 }
 function blockLines(node, ref) {
-  const head = [
-    `Block: ${node.block_id ?? ref.block}`,
+  const unit = ref.item === undefined ? "version" : "revision";
+  const blockID = node.block_id ?? ref.block;
+  const head = ref.item === undefined ? [
+    `Block: ${blockID}`,
     `Document: ${node.document ?? ref.document}`,
     ...node.changed_version === undefined ? [] : [`Changed in version: ${node.changed_version}`],
     ...node.text === undefined ? [] : ["Text:", node.text]
+  ] : [
+    `Block ${blockID} of ${ref.item.kind} ${ref.item.id}${node.changed_version === undefined ? "" : ` (changed in revision ${node.changed_version})`}:`,
+    ...node.text === undefined ? [] : [node.text]
   ];
   const { pin } = node;
   if (pin === undefined)
     return head;
-  const state = pin.state === "unchanged" ? `Unchanged since version ${pin.version}.` : pin.state === "changed" ? `Changed since version ${pin.version}; last changed in version ${node.changed_version}.` : `Removed in version ${pin.removed_version}.`;
+  const state = pin.state === "unchanged" ? `Unchanged since ${unit} ${pin.version}.` : pin.state === "changed" ? `Changed since ${unit} ${pin.version}; last changed in ${unit} ${node.changed_version}.` : `Removed in ${unit} ${pin.removed_version}.`;
   return [
     ...head,
-    `Pinned to version: ${pin.version}`,
+    `Pinned to ${unit}: ${pin.version}`,
     state,
-    `Text at version ${pin.version}:`,
+    `Text at ${unit} ${pin.version}:`,
     pin.text
   ];
 }
@@ -42322,12 +42841,9 @@ function openAskAge(ageSeconds) {
   const days = Math.floor(hours / 24);
   return `${days}d${hours % 24 === 0 ? "" : ` ${hours % 24}h`}`;
 }
-function openAskOwner(ask) {
-  return "issue" in ask.owner ? `${ask.owner.issue.key}: ${ask.owner.issue.title}` : `${ask.owner.document.project} / ${ask.owner.document.name}`;
-}
 function openAskLine(ask, baseUrl) {
   const priority = ask.priority === null ? "" : `P${ask.priority} \xB7 `;
-  return `- ${openAskAge(ask.age_seconds)} \xB7 ${priority}${openAskOwner(ask)} \xB7 ${ask.question} \xB7 ${new URL(ask.ref, baseUrl).toString()}`;
+  return `- ${openAskAge(ask.age_seconds)} \xB7 ${priority}${ownerTitle(ask.owner)} \xB7 ${ask.question} \xB7 ${new URL(ask.ref, baseUrl).toString()}`;
 }
 function formatOpenAsksSummary(response, baseUrl) {
   const scope = "active open asks you authored on open issues and project documents";
@@ -42352,11 +42868,13 @@ function commentSummary({ comment, replies }, graph) {
   const root = [
     `${comment.id} \xB7 ${actorText(comment.author)}`,
     ...anchorLines(comment),
+    ...replyBlockLines(comment),
     `Body: ${comment.body}`
   ];
   const chain = replies.flatMap((reply) => [
     `${reply.id} \xB7 ${actorText(reply.author)}`,
     ...anchorLines(reply),
+    ...replyBlockLines(reply),
     `Body: ${reply.body}`
   ]);
   return [
@@ -42367,6 +42885,14 @@ function commentSummary({ comment, replies }, graph) {
     ...graph
   ].join(`
 `);
+}
+function replyBlockLines(record) {
+  const block = record.reply_block;
+  if (block === undefined || block === null)
+    return [];
+  return [
+    block.removed ? `Re: block ${block.block_id} (removed)` : `Re: block ${block.block_id}: ${textHead(block.text)}`
+  ];
 }
 function anchorLines(record) {
   return [
@@ -42391,9 +42917,14 @@ function positionText(block) {
   ].join(" \u203A ");
 }
 function messageSummary({ message, replies }, graph) {
-  const root = [`${message.id} \xB7 ${actorText(message.author)}`, `Body: ${message.body}`];
+  const root = [
+    `${message.id} \xB7 ${actorText(message.author)}`,
+    ...replyBlockLines(message),
+    `Body: ${message.body}`
+  ];
   const chain = replies.flatMap((reply) => [
     `${reply.id} \xB7 ${actorText(reply.author)}`,
+    ...replyBlockLines(reply),
     `Body: ${reply.body}`
   ]);
   return [
@@ -42728,6 +43259,24 @@ async function executeDispatchTool(input) {
     const response = await client.openAsks(sessionId);
     return { text: formatOpenAsksSummary(response, linkBase), details: { ...response } };
   }
+  if (input.tool === "dispatch_answers") {
+    const sessionId = input.sessionId?.trim();
+    if (!sessionId)
+      throw new Error("host session id is required for dispatch answers");
+    let response;
+    try {
+      response = await dispatchClient().sessionAnswers(sessionId);
+    } catch (error) {
+      if (isNoAnswersRoute(error)) {
+        throw new Error(`This Dispatch (${configUrl}) has no answers route yet: its build is older than the answers route.`);
+      }
+      throw error;
+    }
+    return {
+      text: renderSessionAnswersList(response.items, { now: Date.now() }),
+      details: { session: sessionId, since: response.since, total: response.total }
+    };
+  }
   if (input.tool === "dispatch_whoami") {
     const sessionId = input.sessionId?.trim();
     if (!sessionId)
@@ -42815,20 +43364,27 @@ async function executeDispatchTool(input) {
           ...Array.isArray(labels) ? { labels } : {},
           actor
         });
-        refuseUnsavedRepository("created", created, repo);
-        const componentGuidance = await architectureGuidance(client, created.project, created.components);
-        const adviceLines = [
-          ...renderAdvice(input.tool, created.key, created.advice, {
-            isPrimarySpec: spec !== undefined
-          }),
-          ...componentGuidance === undefined ? [] : [componentGuidance],
-          ...renderSuggestions(created.advice?.suggestions, linkBase)
-        ];
+        refuseUnsavedRepository(created.created ? "created" : "already holds", created, repo);
+        const adviceLines = await otherAdviceLines(async () => {
+          const componentGuidance = await architectureGuidance(client, created.project, created.components);
+          return [
+            ...renderAdvice(input.tool, created.key, created.advice, {
+              isPrimarySpec: spec !== undefined
+            }),
+            ...componentGuidance === undefined ? [] : [componentGuidance]
+          ];
+        });
         const href = new URL(`/issues/${encodeURIComponent(created.key)}`, linkBase).toString();
         const assigned = created.assignee === undefined ? "" : created.assignee === null ? "; unassigned" : `; assigned to ${created.assignee}`;
+        const suffixes = `${assigned}${await notSubscribed(issueTopic(created.key), input.subscriptions)}`;
         return {
           text: [
-            `Created ${created.key}: ${created.title} \u2192 ${href}${assigned}${await notSubscribed(issueTopic(created.key), input.subscriptions)}`,
+            created.created ? `Created ${created.key}: ${created.title} \u2192 ${href}${suffixes}` : `Dispatch already holds ${created.key}: ${created.title} \u2192 ${href}; nothing was created${suffixes}`,
+            ...created.created ? relatedCheckLines(created.advice?.suggestions, {
+              project: created.project,
+              text: title,
+              configUrl: linkBase
+            }) : [],
             ...adviceLines
           ].join(`
 `),
@@ -43016,6 +43572,29 @@ async function executeDispatchTool(input) {
       });
       return searchAnswer(search, query, offset, linkBase);
     }
+    case "dispatch_related": {
+      const project = stringArg(args, "project");
+      const title = optionalString(args, "title");
+      const text = optionalString(args, "text");
+      const excludeIssue = optionalString(args, "exclude_issue");
+      const keywordsOnly = optionalBoolean(args, "keywords_only");
+      const suggestions = await client.related(project, {
+        ...title === undefined ? {} : { title },
+        ...text === undefined ? {} : { text },
+        ...excludeIssue === undefined ? {} : { exclude_issue: excludeIssue },
+        ...keywordsOnly === undefined ? {} : { keywords_only: keywordsOnly }
+      });
+      return {
+        text: relatedCheckLines(suggestions, {
+          project,
+          text: [title, text].filter((part) => part !== undefined).join(`
+`),
+          configUrl: linkBase
+        }).join(`
+`),
+        details: { project, suggestions }
+      };
+    }
     case "dispatch_issues": {
       const project = stringArg(args, "project");
       const status = optionalString(args, "status");
@@ -43178,14 +43757,17 @@ async function executeDispatchTool(input) {
       };
       const ask = resolved?.owner.kind === "project" ? await client.artifactAsk(resolved.artifact.id, askInput) : await client.ask(issue(), askInput);
       const askOwner = ask.issue_key !== null ? issueTopic(ask.issue_key) : resolved === undefined ? issueTopic(issue()) : documentTopic(resolved.artifact);
-      const adviceLines = [
-        ...renderSuggestions(ask.advice?.suggestions, linkBase),
-        ...renderAdvice(input.tool, askOwner.label, ask.advice, {})
-      ];
+      const checkLines = relatedCheckLines(ask.advice?.suggestions, {
+        project: resolved?.artifact.project ?? (ask.issue_key ?? "").replace(/-[0-9]+$/, ""),
+        text: stringArg(args, "question"),
+        configUrl: linkBase
+      });
+      const adviceLines = await otherAdviceLines(() => renderAdvice(input.tool, askOwner.label, ask.advice, {}));
       return {
         text: [
-          `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}
-${await followsAsk(askOwner, input.subscriptions)}`,
+          `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}`,
+          ...checkLines,
+          await followsAsk(askOwner, input.subscriptions),
           ...adviceLines
         ].join(`
 `),
@@ -43218,7 +43800,7 @@ ${await followsAsk(askOwner, input.subscriptions)}`,
       const owner = documentOwner();
       const resolved = owner.kind === "project" || artifactReference === undefined ? owner.kind === "project" ? await resolveDocument(owner, artifactReference) : undefined : await resolveDocument(owner, artifactReference);
       const anchored = resolved ? anchor(resolved.artifact, args) : undefined;
-      const replyTo = optionalString(args, "reply_to");
+      const replyTo = commentReplyTo(args);
       const replyToAskReference = optionalString(args, "reply_to_ask");
       const replyToAsk = replyToAskReference === undefined ? undefined : normalizeUUID(replyToAskReference);
       if (replyToAskReference !== undefined && replyToAsk === undefined) {
@@ -43235,7 +43817,8 @@ ${await followsAsk(askOwner, input.subscriptions)}`,
       const commentInput = {
         body,
         ...anchored === undefined ? {} : { anchor: anchored },
-        ...replyTo === undefined ? {} : { reply_to: replyTo },
+        ...replyTo === undefined ? {} : { reply_to: replyTo.id },
+        ...replyTo?.block === undefined ? {} : { reply_to_block: replyTo.block },
         ...replyToAsk === undefined ? {} : { ask_id: replyToAsk },
         ...requestedTurn === undefined ? {} : { turn: requestedTurn },
         actor
@@ -43295,7 +43878,8 @@ ${await followsAsk(askOwner, input.subscriptions)}`,
       };
     }
     case "dispatch_message": {
-      const inReplyTo = messageInReplyTo(args);
+      const target = messageInReplyTo(args);
+      const inReplyTo = target?.id;
       const written = stringArg(args, "body");
       const bodyLimit = {
         cap: DISPATCH_BODY_MAX,
@@ -43342,6 +43926,7 @@ ${await followsAsk(askOwner, input.subscriptions)}`,
       const message = await client.message(issueKey, {
         body,
         ...inReplyTo === undefined ? {} : { in_reply_to: inReplyTo },
+        ...target?.block === undefined ? {} : { in_reply_to_block: target.block },
         actor
       });
       const messageRef = dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id);
@@ -43382,11 +43967,18 @@ ${await followsAsk(askOwner, input.subscriptions)}`,
       const lostOps = edited.lost_ops;
       const lostText = lostOps === undefined || lostOps !== null && lostOps.length === 0 ? "" : lostOps === null ? "; could not confirm this edit survived, because the live document is being reloaded or holds a tree too deep to read \u2014 re-read it" : `; ${versionText} carries text the live document no longer has: a concurrent change removed what ${lostOps.length === 1 ? "operation" : "operations"} ${lostOps.join(", ")} wrote \u2014 re-read the document`;
       const applied = `${head}${unchangedText}${lostText}`;
-      const adviceLines = renderAdvice(input.tool, resolvedTopic(resolved).label, edited.advice, {});
+      const editAskText = ops.map((operation) => /^:{3,}ask\{.*\n([\s\S]*)/mu.exec(operation.markdown ?? operation.with ?? "")?.[1]).find((text) => text !== undefined) ?? resolved.issue?.title ?? "";
+      const checkLines = decisionBlockLines(edited.advice, {
+        project: resolved.artifact.project,
+        text: editAskText,
+        configUrl: linkBase
+      });
+      const adviceLines = await otherAdviceLines(() => renderAdvice(input.tool, resolvedTopic(resolved).label, edited.advice, {}));
       const tokenTrailer = edited.token === undefined ? [] : [`Document token: ${edited.token}`];
       return {
         text: [
           `${applied}${await notSubscribed(resolvedTopic(resolved), input.subscriptions)}`,
+          ...checkLines,
           ...tokenTrailer,
           ...adviceLines
         ].join(`
@@ -43629,10 +44221,11 @@ Document token: ${listed.token}`,
       if (ownerArguments.ref?.kind === "block") {
         const ref = ownerArguments.ref;
         const blockRef = stringArg(args, "ref");
+        const holder = blockRef.slice(0, blockRef.indexOf("#"));
         const [incoming, outgoing] = await Promise.all([
           client.getReferences({ to: blockRef }).catch((error) => {
             if (ref.pin === undefined && dispatchAnswered(error, 404)) {
-              throw new Error(`No block ${ref.block} in ${ref.document}.`);
+              throw new Error(`No block ${ref.block} in ${holder}.`);
             }
             throw error;
           }),
@@ -43731,9 +44324,8 @@ function asObject(value) {
 }
 
 // ../envoy-client/src/dispatch-session-state.ts
-var SESSION_ID = /^[A-Za-z0-9._-]{1,128}$/;
 var PRIVATE_DIR = 448;
-var PRIVATE_FILE = 384;
+var PRIVATE_FILE2 = 384;
 var IDLE_SESSION_MS = 14 * 86400000;
 var PRUNE_INTERVAL_MS = 86400000;
 var PRUNED_STAMP = ".pruned";
@@ -43743,40 +44335,23 @@ var PICTURE_EXTENSIONS = {
   "image/gif": "gif",
   "image/webp": "webp"
 };
-function sessionStateRoot(env) {
-  const stateDir = env["DISPATCH_STATE_DIR"];
-  if (stateDir)
-    return stateDir;
-  return join2(env["XDG_STATE_HOME"] || join2(homedir(), ".local", "state"), "dispatch");
-}
-function sessionDirectory(env, sessionId) {
-  if (!SESSION_ID.test(sessionId) || sessionId === "." || sessionId === "..") {
-    throw new Error(`dispatch: the session id ${JSON.stringify(sessionId)} is not 1-128 letters, digits, ".", "_" or "-"`);
-  }
-  return join2(sessionStateRoot(env), "sessions", sessionId);
-}
 function ensureDirectory(dir) {
-  mkdirSync2(dir, { recursive: true, mode: PRIVATE_DIR });
+  mkdirSync3(dir, { recursive: true, mode: PRIVATE_DIR });
 }
 function readIfPresent(path) {
   try {
-    return readFileSync2(path, "utf-8");
+    return readFileSync3(path, "utf-8");
   } catch (error) {
     if (hasErrnoCode(error, "ENOENT"))
       return;
     throw error;
   }
 }
-function writeAtomically(path, text) {
-  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync2(temporary, text, { mode: PRIVATE_FILE });
-  renameSync2(temporary, path);
-}
 function stringList(value) {
   return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
 }
 function loadSessionMemory(dir, sessionId) {
-  const path = join2(dir, "state.json");
+  const path = join4(dir, "state.json");
   const text = readIfPresent(path);
   if (text === undefined)
     return new Set;
@@ -43800,7 +44375,7 @@ function writeMemory(dir, sessionId, follows) {
     pictures: [...shownPictures(sessionId)],
     follows: [...follows]
   };
-  writeAtomically(join2(dir, "state.json"), `${JSON.stringify(state)}
+  writeAtomically(join4(dir, "state.json"), `${JSON.stringify(state)}
 `);
 }
 function appendResult(dir, entry) {
@@ -43809,8 +44384,8 @@ function appendResult(dir, entry) {
 }
 function writeResult(dir, entry) {
   const line = { at: new Date().toISOString(), ...entry };
-  appendFileSync(join2(dir, "results.jsonl"), `${JSON.stringify(line)}
-`, { mode: PRIVATE_FILE });
+  appendFileSync(join4(dir, "results.jsonl"), `${JSON.stringify(line)}
+`, { mode: PRIVATE_FILE2 });
 }
 function recordOutcome(dir, sessionId, follows, entry) {
   ensureDirectory(dir);
@@ -43820,11 +44395,11 @@ function recordOutcome(dir, sessionId, follows, entry) {
 function writePicture(dir, image) {
   const bytes = Buffer.from(image.data, "base64");
   const name = createHash2("sha256").update(bytes).digest("hex").slice(0, 16);
-  const pictures = join2(dir, "pictures");
-  const path = join2(pictures, `${name}.${PICTURE_EXTENSIONS[image.mimeType]}`);
+  const pictures = join4(dir, "pictures");
+  const path = join4(pictures, `${name}.${PICTURE_EXTENSIONS[image.mimeType]}`);
   ensureDirectory(pictures);
   try {
-    writeFileSync2(path, bytes, { mode: PRIVATE_FILE, flag: "wx" });
+    writeFileSync3(path, bytes, { mode: PRIVATE_FILE2, flag: "wx" });
   } catch (error) {
     if (!hasErrnoCode(error, "EEXIST"))
       throw error;
@@ -43832,21 +44407,21 @@ function writePicture(dir, image) {
   return { path, bytes: bytes.length };
 }
 function writeLongOutput(dir, text) {
-  const out = join2(dir, "out");
+  const out = join4(dir, "out");
   ensureDirectory(out);
-  const path = join2(out, `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}.md`);
-  writeFileSync2(path, text, { mode: PRIVATE_FILE });
+  const path = join4(out, `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}.md`);
+  writeFileSync3(path, text, { mode: PRIVATE_FILE2 });
   return path;
 }
 function writeSessionTitle(dir, title) {
   ensureDirectory(dir);
-  writeAtomically(join2(dir, "title"), title);
+  writeAtomically(join4(dir, "title"), title);
 }
 function readSessionTitle(dir) {
-  return readIfPresent(join2(dir, "title")) || undefined;
+  return readIfPresent(join4(dir, "title")) || undefined;
 }
 function pruneSessions(root, now) {
-  const stamp = join2(root, PRUNED_STAMP);
+  const stamp = join4(root, PRUNED_STAMP);
   try {
     if (now - statSync2(stamp).mtimeMs < PRUNE_INTERVAL_MS)
       return;
@@ -43854,7 +44429,7 @@ function pruneSessions(root, now) {
     if (!hasErrnoCode(error, "ENOENT"))
       throw error;
   }
-  const sessions = join2(root, "sessions");
+  const sessions = join4(root, "sessions");
   let entries = [];
   try {
     entries = readdirSync2(sessions, { withFileTypes: true });
@@ -43865,10 +44440,10 @@ function pruneSessions(root, now) {
   for (const entry of entries) {
     if (!entry.isDirectory())
       continue;
-    const dir = join2(sessions, entry.name);
+    const dir = join4(sessions, entry.name);
     try {
       if (now - statSync2(dir).mtimeMs > IDLE_SESSION_MS && askgateState(dir).kind === "off") {
-        rmSync2(dir, { recursive: true, force: true });
+        rmSync3(dir, { recursive: true, force: true });
       }
     } catch (error) {
       if (!hasErrnoCode(error, "ENOENT"))
@@ -43877,7 +44452,7 @@ function pruneSessions(root, now) {
   }
   sweepStores(root, now);
   ensureDirectory(root);
-  writeFileSync2(stamp, "", { mode: PRIVATE_FILE });
+  writeFileSync3(stamp, "", { mode: PRIVATE_FILE2 });
 }
 
 // ../envoy-client/src/nats-auth.ts
@@ -43923,9 +44498,9 @@ import {
   lstatSync,
   mkdtempSync,
   openSync as openSync3,
-  readFileSync as readFileSync4,
+  readFileSync as readFileSync5,
   readlinkSync,
-  rmSync as rmSync3,
+  rmSync as rmSync4,
   statSync as statSync3
 } from "fs";
 import { homedir as homedir2, tmpdir } from "os";
@@ -44018,14 +44593,14 @@ function jsonErrorPosition(text) {
 }
 
 // ../envoy-client/src/secret-file.ts
-import { readFileSync as readFileSync3 } from "fs";
+import { readFileSync as readFileSync4 } from "fs";
 function sendable(value) {
   return !/[\s\p{Cc}]/u.test(value);
 }
 function readSecretFile(variable, filePath) {
   let contents;
   try {
-    contents = readFileSync3(filePath, "utf8");
+    contents = readFileSync4(filePath, "utf8");
   } catch (error) {
     throw new Error(`${variable} names ${filePath}, which could not be read: ${messageFor(error)}`);
   }
@@ -44160,7 +44735,7 @@ function danglingLink(filePath) {
 function parseFile(filePath, schema, checkout) {
   let raw;
   try {
-    raw = readFileSync4(filePath, "utf-8");
+    raw = readFileSync5(filePath, "utf-8");
   } catch (error) {
     if (hasErrnoCode(error, "ENOENT") || hasErrnoCode(error, "ENOTDIR")) {
       return { kind: "absent", link: danglingLink(filePath) };
@@ -44191,9 +44766,9 @@ function parseFile(filePath, schema, checkout) {
 }
 var FAILURE_KEPT_MS = 60000;
 var COMMAND_OUTCOMES = Symbol.for("legion.envoy-config.commands.v1");
-var processGlobal = globalThis;
-var commandOutcomes = processGlobal[COMMAND_OUTCOMES] ?? new Map;
-processGlobal[COMMAND_OUTCOMES] = commandOutcomes;
+var processGlobal2 = globalThis;
+var commandOutcomes = processGlobal2[COMMAND_OUTCOMES] ?? new Map;
+processGlobal2[COMMAND_OUTCOMES] = commandOutcomes;
 function runCommand(command, env, cwd) {
   const childEnv = {};
   for (const [name, variable] of Object.entries(env)) {
@@ -44236,7 +44811,7 @@ function runCommand(command, env, cwd) {
         timedOut: false
       };
     }
-    const value = readFileSync4(output, "utf-8").trim();
+    const value = readFileSync5(output, "utf-8").trim();
     if (value.length === 0)
       return { failure: "printed nothing", timedOut: false };
     if (!sendable(value)) {
@@ -44247,10 +44822,10 @@ function runCommand(command, env, cwd) {
     }
     return { value };
   } finally {
-    rmSync3(directory, { recursive: true, force: true });
+    rmSync4(directory, { recursive: true, force: true });
   }
 }
-function fileValue(value, field, filePath, env) {
+function fileValue(value, field, filePath, env, commands = "run") {
   if (!value.startsWith("!")) {
     if (!sendable(value)) {
       throw new Error(`${filePath}: ${field} holds whitespace or a control character`);
@@ -44261,7 +44836,11 @@ function fileValue(value, field, filePath, env) {
   const cwd = path.dirname(path.resolve(filePath));
   const key = JSON.stringify([command, filePath, cwd]);
   let outcome = commandOutcomes.get(key);
-  if (outcome === undefined || "failure" in outcome && !outcome.timedOut && Date.now() - outcome.at >= FAILURE_KEPT_MS) {
+  if (commands === "kept") {
+    if (outcome === undefined) {
+      throw new Error(`${filePath}: ${field}'s command has not run in this process yet, and this read does not run it`);
+    }
+  } else if (outcome === undefined || "failure" in outcome && !outcome.timedOut && Date.now() - outcome.at >= FAILURE_KEPT_MS) {
     outcome = { ...runCommand(command, env, cwd), at: Date.now() };
     commandOutcomes.set(key, outcome);
   }
@@ -44371,7 +44950,7 @@ function bearerSource(env, section, written) {
   const bearer = written();
   return bearer === undefined ? { kind: "none" } : { kind: "file", ...bearer };
 }
-function fileBearer(bearer, url, section, env) {
+function fileBearer(bearer, url, section, env, commands = "run") {
   const named = httpUrl2(url)?.origin;
   const paired = httpUrl2(bearer.server)?.origin;
   if (named !== paired) {
@@ -44383,7 +44962,7 @@ function fileBearer(bearer, url, section, env) {
   if (bearer.token === "") {
     throw new Error(`${bearer.field} in ${bearer.path} must be a non-empty bearer token`);
   }
-  return fileValue(bearer.token, bearer.field, bearer.path, env);
+  return fileValue(bearer.token, bearer.field, bearer.path, env, commands);
 }
 
 // ../envoy-client/src/envoy-settings.ts
@@ -45548,7 +46127,34 @@ function writtenToken(config, checkout) {
     checkout: false
   };
 }
-function dispatchSettings(env, config) {
+function dispatchSettings(env, config, options = {}) {
+  const target = dispatchTarget(env, config);
+  if (!target.enabled)
+    return target;
+  const { url, source } = target;
+  let token;
+  try {
+    token = source.kind === "variable" ? source.token : fileBearer(source, url, "DISPATCH", env, options.commands);
+  } catch (error) {
+    return offWithError(messageFor(error));
+  }
+  const publicUrl = nonEmpty(env.DISPATCH_PUBLIC_URL);
+  const publicParsed = publicUrl === undefined ? undefined : httpUrl2(publicUrl);
+  if (publicUrl !== undefined && (publicParsed === undefined || publicParsed.port === "0")) {
+    return offWithError("DISPATCH_PUBLIC_URL must be an http or https URL");
+  }
+  return {
+    enabled: true,
+    url,
+    token,
+    ...publicUrl === undefined ? {} : { publicUrl: publicUrl.replace(/\/+$/, "") }
+  };
+}
+function dispatchUrl(env, config) {
+  const target = dispatchTarget(env, config);
+  return target.enabled ? target.url : undefined;
+}
+function dispatchTarget(env, config) {
   if (config.kind === "failed")
     return offWithError(config.error);
   const explicitUrl = nonEmpty(env.DISPATCH_URL);
@@ -45571,27 +46177,17 @@ function dispatchSettings(env, config) {
   if (explicitUrl !== undefined && httpUrl2(explicitUrl) === undefined) {
     return offWithError("DISPATCH_URL must be an http or https URL");
   }
+  let source;
   try {
-    const source = checkout !== null && checkoutServer !== undefined ? checkoutPair(checkout, checkoutServer) : bearerSource(env, "DISPATCH", () => writtenToken(config, checkout));
-    if (source.kind === "none") {
-      return offWithError(explicitUrl === undefined ? `${config.path}: dispatch is enabled and no token is: set dispatch.token, or DISPATCH_TOKEN or DISPATCH_TOKEN_FILE` : `DISPATCH_URL is set and no token is: set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or dispatch.token in ${config.path}`);
-    }
-    const url = (explicitUrl ?? (source.kind === "file" ? source.server : own.serverUrl ?? DEFAULT_SERVER_URL)).replace(/\/+$/, "");
-    const token = source.kind === "variable" ? source.token : fileBearer(source, url, "DISPATCH", env);
-    const publicUrl = nonEmpty(env.DISPATCH_PUBLIC_URL);
-    const publicParsed = publicUrl === undefined ? undefined : httpUrl2(publicUrl);
-    if (publicUrl !== undefined && (publicParsed === undefined || publicParsed.port === "0")) {
-      return offWithError("DISPATCH_PUBLIC_URL must be an http or https URL");
-    }
-    return {
-      enabled: true,
-      url,
-      token,
-      ...publicUrl === undefined ? {} : { publicUrl: publicUrl.replace(/\/+$/, "") }
-    };
+    source = checkout !== null && checkoutServer !== undefined ? checkoutPair(checkout, checkoutServer) : bearerSource(env, "DISPATCH", () => writtenToken(config, checkout));
   } catch (error) {
     return offWithError(messageFor(error));
   }
+  if (source.kind === "none") {
+    return offWithError(explicitUrl === undefined ? `${config.path}: dispatch is enabled and no token is: set dispatch.token, or DISPATCH_TOKEN or DISPATCH_TOKEN_FILE` : `DISPATCH_URL is set and no token is: set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or dispatch.token in ${config.path}`);
+  }
+  const url = (explicitUrl ?? (source.kind === "file" ? source.server : own.serverUrl ?? DEFAULT_SERVER_URL)).replace(/\/+$/, "");
+  return { enabled: true, url, source };
 }
 
 // ../envoy-client/src/session-settings.ts
@@ -45667,10 +46263,15 @@ function sessionDispatchSettings(file, env, options) {
     return { dispatch: offWithError(file.error), warnings: [], missing: null };
   const config = readEnvoyConfig(file.path, env, options);
   return {
-    dispatch: dispatchSettings(env, config),
+    dispatch: dispatchSettings(env, config, { commands: options.commands }),
     warnings: config.kind === "read" ? config.warnings : [],
     missing: config.kind === "read" ? config.missing : null
   };
+}
+function sessionDispatchUrl(file, env, options) {
+  if (file.path === null)
+    return;
+  return dispatchUrl(env, readEnvoyConfig(file.path, env, options));
 }
 function sessionEnvoySettings(file, env, options) {
   if (file.path === null)
@@ -46047,7 +46648,7 @@ var envoyToolSpecs = [
   },
   {
     name: "envoy_publish",
-    description: `Publish an Envoy message to a notifications. topic. A role or built-in topic is delivered as its guide says; any other notifications. topic you name (a team topic such as notifications.team.deploy-squad.all) is live only: it reaches every session subscribed to it when you publish, and is not retained. A session that holds its own NATS connection receives it directly, yours included; a session the listener delivers to over a serve port, such as an OpenCode agent, receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
+    description: `Publish an Envoy message to a notifications. topic. A role or built-in topic is delivered as its guide says; a role message errs when its holder did not confirm it within the listener's window. Any other notifications. topic you name (a team topic such as notifications.team.deploy-squad.all) reaches every session subscribed to it when you publish, and is not kept for a session that subscribes later. The listener confirms it with each other session that holds its own NATS connection and registered the topic, and errs naming each session that did not confirm; a session that stopped without unregistering stays registered for up to 5 minutes and is named in that time, and a named session is not a failed delivery to the other sessions. A session that holds its own NATS connection receives it directly, yours included; a session the listener delivers to over a serve port, such as an OpenCode agent, is not confirmed and receives it through its machine's listener when that listener subscribes to every topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1; the shared hub's listener does not). ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
     operation: EnvoyToolOperation.publish
   },
@@ -46336,7 +46937,17 @@ var legionRepositories = strictObject({
     cache: legionCacheView.optional()
   })),
   refused: array(strictObject({ repo: nonEmptyString, reason: nonEmptyString })),
+  withoutWebhookApp: array(strictObject({ repo: nonEmptyString, reason: nonEmptyString })),
   caches: array(legionCacheView)
+});
+var legionConsumerLag = strictObject({
+  name: nonEmptyString,
+  waiting: number2().int().nonnegative(),
+  oldestAt: timestamp.nullable(),
+  oldestAgeSeconds: number2().int().nullable(),
+  lastHandledAt: timestamp.nullable(),
+  stalled: boolean2(),
+  unavailable: nonEmptyString.optional()
 });
 var LegionStateResponse = strictObject({
   daemon: daemonInfo,
@@ -46349,7 +46960,8 @@ var LegionStateResponse = strictObject({
   agentSecretsLogin: legionAgentSecretsLoginView.optional(),
   capabilities: array(legionCapabilityState),
   repositories: legionRepositories,
-  settings: legionSettings
+  settings: legionSettings,
+  consumers: array(legionConsumerLag)
 });
 var LegionRegisterResponse = strictObject({
   claimToken: nonEmptyString,
@@ -49183,7 +49795,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 var name = "@sjawhar/claude-envoy";
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 42
+  daemonApiVersion: 43
 };
 
 // src/channel-forwarder.ts
@@ -49313,9 +49925,9 @@ function createChannelForwarder(connection, options) {
 
 // src/claude-channel.ts
 import { spawnSync } from "child_process";
-import { readdirSync as readdirSync3, readFileSync as readFileSync5, readlinkSync as readlinkSync2 } from "fs";
+import { readdirSync as readdirSync3, readFileSync as readFileSync6, readlinkSync as readlinkSync2 } from "fs";
 import { homedir as homedir3 } from "os";
-import { basename as basename2, join as join4, resolve as resolve3, sep } from "path";
+import { basename as basename2, join as join6, resolve as resolve3, sep } from "path";
 var PLUGIN_SERVER = "envoy";
 var CHANNEL_FLAGS = {
   "--channels": false,
@@ -49553,7 +50165,7 @@ function claudeChannelGate(input) {
     why: `${asked} is not on Claude Code's approved channels allowlist (allowedChannelPlugins in ${MANAGED_SETTINGS_HINT})`
   };
 }
-var MANAGED_SETTINGS_HINT = `${join4(managedSettingsDirectory(), "managed-settings.json")}, or in the server-managed settings when the account receives them`;
+var MANAGED_SETTINGS_HINT = `${join6(managedSettingsDirectory(), "managed-settings.json")}, or in the server-managed settings when the account receives them`;
 function cacheDirectoryName(marketplace) {
   return marketplace.replace(/[^a-zA-Z0-9\-_]/g, "-");
 }
@@ -49596,7 +50208,7 @@ function processCommandLine(pid, executable = processExecutable) {
   let commandLine;
   if (process.platform === "linux") {
     try {
-      const pieces = readFileSync5(`/proc/${pid}/cmdline`, "utf8").split("\x00");
+      const pieces = readFileSync6(`/proc/${pid}/cmdline`, "utf8").split("\x00");
       let trailing = 0;
       while (pieces.length > 0 && pieces.at(-1) === "") {
         pieces.pop();
@@ -49633,7 +50245,7 @@ function processCommandLine(pid, executable = processExecutable) {
 function parentProcess(pid) {
   try {
     if (process.platform === "linux") {
-      const stat = readFileSync5(`/proc/${pid}/stat`, "utf8");
+      const stat = readFileSync6(`/proc/${pid}/stat`, "utf8");
       const parent = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
       return Number.isInteger(parent) && parent > 0 ? parent : undefined;
     }
@@ -49729,7 +50341,7 @@ var COMPOSITION_KEYS = new Set([
 ]);
 function readChannelSettings(file, asSource = false) {
   try {
-    const value = JSON.parse(readFileSync5(file, "utf8"));
+    const value = JSON.parse(readFileSync6(file, "utf8"));
     if (typeof value !== "object" || value === null || Array.isArray(value))
       return;
     if (asSource && Object.keys(value).every((key) => COMPOSITION_KEYS.has(key)))
@@ -49745,15 +50357,15 @@ function readChannelSettings(file, asSource = false) {
   }
 }
 function channelAllowlist(directories) {
-  const remote = readChannelSettings(join4(directories.configDirectory, "remote-settings.json"), true);
-  const dropIns = join4(directories.managedDirectory, "managed-settings.d");
+  const remote = readChannelSettings(join6(directories.configDirectory, "remote-settings.json"), true);
+  const dropIns = join6(directories.managedDirectory, "managed-settings.d");
   let dropInFiles = [];
   try {
-    dropInFiles = readdirSync3(dropIns).filter((name) => name.endsWith(".json") && !name.startsWith(".")).sort().map((name) => join4(dropIns, name));
+    dropInFiles = readdirSync3(dropIns).filter((name) => name.endsWith(".json") && !name.startsWith(".")).sort().map((name) => join6(dropIns, name));
   } catch {
     dropInFiles = [];
   }
-  const files = [join4(directories.managedDirectory, "managed-settings.json"), ...dropInFiles].map((file) => readChannelSettings(file)).filter((settings) => settings !== undefined);
+  const files = [join6(directories.managedDirectory, "managed-settings.json"), ...dropInFiles].map((file) => readChannelSettings(file)).filter((settings) => settings !== undefined);
   const lists = files.map((settings) => settings.list).filter((list) => list !== undefined);
   const fileList = lists.length === 0 ? undefined : lists.flat();
   const behavior = remote?.behavior ?? files.find((settings) => settings.behavior)?.behavior;
@@ -49767,7 +50379,7 @@ function detectClaudeChannel(input) {
     return { loaded: true };
   if (override === "0")
     return { loaded: false, why: "ENVOY_CHANNEL_LOADED=0" };
-  const configDirectory = input.environment["CLAUDE_CONFIG_DIR"]?.trim() || join4(homedir3(), ".claude");
+  const configDirectory = input.environment["CLAUDE_CONFIG_DIR"]?.trim() || join6(homedir3(), ".claude");
   const commandLine = claudeCommandLine(input.claudePid);
   const pluginRoot = input.environment["CLAUDE_PLUGIN_ROOT"]?.trim();
   const plugin = pluginRoot ? {
@@ -49797,12 +50409,12 @@ function claudeProjectDirectory(environment, fallback) {
 
 // src/session-identity.ts
 import { readFile } from "fs/promises";
-import { basename as basename3, join as join6 } from "path";
+import { basename as basename3, join as join8 } from "path";
 
 // src/session-state.ts
-import { readFileSync as readFileSync6 } from "fs";
+import { readFileSync as readFileSync7 } from "fs";
 import { mkdir, readdir, rename, rm, stat, utimes, writeFile } from "fs/promises";
-import { dirname as dirname2, join as join5 } from "path";
+import { dirname as dirname2, join as join7 } from "path";
 async function writeAtomicStateFile(file, contents) {
   await mkdir(dirname2(file), { recursive: true, mode: 448 });
   const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
@@ -49820,7 +50432,7 @@ async function pruneStateDirectory(directory, isStale) {
     throw error;
   });
   for (const entry of entries) {
-    const file = join5(directory, entry);
+    const file = join7(directory, entry);
     if (!await isStale(file))
       continue;
     await rm(file, { recursive: true, force: true });
@@ -49835,7 +50447,7 @@ async function writtenLongAgo(file) {
 }
 var TITLES_DIRECTORY = "titles";
 function sessionTitleFile(stateDirectory, sessionId) {
-  return join5(stateDirectory, TITLES_DIRECTORY, `${encodeURIComponent(sessionId)}.txt`);
+  return join7(stateDirectory, TITLES_DIRECTORY, `${encodeURIComponent(sessionId)}.txt`);
 }
 async function writeChosenTitle(file, title) {
   await writeAtomicStateFile(file, `${title}
@@ -49846,7 +50458,7 @@ async function removeChosenTitle(file) {
 }
 function readChosenTitleSync(file) {
   try {
-    return readFileSync6(file, "utf8");
+    return readFileSync7(file, "utf8");
   } catch {
     return;
   }
@@ -49863,7 +50475,7 @@ async function recordChosenTitle(sessionId, title) {
     await writeChosenTitle(file, chosen);
 }
 async function pruneStaleSessionTitles(stateDirectory) {
-  await pruneStateDirectory(join5(stateDirectory, TITLES_DIRECTORY), writtenLongAgo);
+  await pruneStateDirectory(join7(stateDirectory, TITLES_DIRECTORY), writtenLongAgo);
 }
 
 // src/session-identity.ts
@@ -49884,14 +50496,14 @@ class SessionIdentity {
   }
 }
 function sessionHandoffDirectory(stateDirectory, claudePid) {
-  return join6(stateDirectory, "sessions", String(claudePid));
+  return join8(stateDirectory, "sessions", String(claudePid));
 }
 function sessionHandoffFile(stateDirectory, claudePid) {
-  return join6(sessionHandoffDirectory(stateDirectory, claudePid), "session-id");
+  return join8(sessionHandoffDirectory(stateDirectory, claudePid), "session-id");
 }
 var ROLES_DIRECTORY = "roles";
 function roleStateFile(stateDirectory, sessionId) {
-  return join6(stateDirectory, ROLES_DIRECTORY, `${encodeURIComponent(sessionId)}.json`);
+  return join8(stateDirectory, ROLES_DIRECTORY, `${encodeURIComponent(sessionId)}.json`);
 }
 
 class UnparseableRoleRecordError extends Error {
@@ -49942,14 +50554,14 @@ function processExists(pid) {
   }
 }
 async function pruneStaleSessionHandoffs(stateDirectory) {
-  await pruneStateDirectory(join6(stateDirectory, "sessions"), (file) => {
+  await pruneStateDirectory(join8(stateDirectory, "sessions"), (file) => {
     const pid = basename3(file);
     return /^\d+$/.test(pid) && !processExists(Number(pid));
   });
 }
 async function pruneStaleSessionRoles(stateDirectory, currentSessionId) {
   const own = roleStateFile(stateDirectory, currentSessionId);
-  await pruneStateDirectory(join6(stateDirectory, ROLES_DIRECTORY), async (file) => file !== own && await writtenLongAgo(file));
+  await pruneStateDirectory(join8(stateDirectory, ROLES_DIRECTORY), async (file) => file !== own && await writtenLongAgo(file));
 }
 
 // src/envoy-off.ts
@@ -49999,7 +50611,7 @@ async function serveEnvoyOff(serverInfo, refusal) {
 
 // src/legion-claim.ts
 import { readdir as readdir2, stat as stat2 } from "fs/promises";
-import { join as join7 } from "path";
+import { join as join9 } from "path";
 import { setTimeout as delay } from "timers/promises";
 
 // ../pi-shared/src/legion-claim-core.ts
@@ -50089,12 +50701,12 @@ function stopPane(why) {
   endPane();
 }
 async function waitForTranscript(configDir, sessionID, signal, pollMs = 100) {
-  const projects = join7(configDir, "projects");
+  const projects = join9(configDir, "projects");
   const name = `${sessionID}.jsonl`;
   for (;; ) {
     signal.throwIfAborted();
     for (const directory of await readdir2(projects).catch(() => [])) {
-      const file = join7(projects, directory, name);
+      const file = join9(projects, directory, name);
       if (await isFile(file))
         return file;
     }
@@ -50156,7 +50768,7 @@ function startLegionClaim(deps) {
 }
 
 // src/legion-inbox.ts
-import { randomUUID } from "crypto";
+import { randomUUID as randomUUID2 } from "crypto";
 import { createConnection } from "net";
 var INBOX_VARIABLE = "LEGION_CLAUDE_INBOX";
 var INBOX_CAPABILITIES = [
@@ -50215,7 +50827,7 @@ function createInboxNotifier(socketPath) {
   };
   return {
     notification(notification) {
-      const id = notification.params.meta["event_id"] ?? randomUUID();
+      const id = notification.params.meta["event_id"] ?? randomUUID2();
       const settle = Promise.withResolvers();
       waiting.push({ id, settle });
       connected().write(`${JSON.stringify({ id, content: notification.params.content })}
@@ -50226,12 +50838,12 @@ function createInboxNotifier(socketPath) {
 }
 
 // src/legion-phase-hook.ts
-import { randomUUID as randomUUID3 } from "crypto";
-import { readFileSync as readFileSync7, renameSync as renameSync3, rmSync as rmSync4, writeFileSync as writeFileSync3 } from "fs";
-import { dirname as dirname3, join as join8 } from "path";
+import { randomUUID as randomUUID4 } from "crypto";
+import { readFileSync as readFileSync8, renameSync as renameSync3, rmSync as rmSync5, writeFileSync as writeFileSync4 } from "fs";
+import { dirname as dirname3, join as join10 } from "path";
 
 // ../pi-shared/src/phase-reminder.ts
-import { randomUUID as randomUUID2 } from "crypto";
+import { randomUUID as randomUUID3 } from "crypto";
 
 // ../pi-shared/src/phase-stall.ts
 var WAITING_REPLY = /^\W*WAITING\b/m;
@@ -50410,7 +51022,7 @@ function createPhaseReminder(deps) {
       });
       return;
     }
-    reportKey ??= randomUUID2();
+    reportKey ??= randomUUID3();
     const key = reportKey;
     writeEntry();
     const phase = record?.phase ?? "unknown";
@@ -50615,7 +51227,7 @@ function phaseHookToolDefinition() {
   };
 }
 function phaseStallFile(configDir, sessionID) {
-  return join8(configDir, `legion-phase-stall-${sessionID}.json`);
+  return join10(configDir, `legion-phase-stall-${sessionID}.json`);
 }
 function paneReminderLog(write) {
   const line = (level, message, context) => {
@@ -50630,7 +51242,7 @@ var NO_RECORD = { entry: undefined, recreatedNoticeSent: false };
 function readPhaseStallRecord(file, log) {
   let raw;
   try {
-    raw = readFileSync7(file, "utf8");
+    raw = readFileSync8(file, "utf8");
   } catch (error) {
     const missing = typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
     if (!missing) {
@@ -50668,12 +51280,12 @@ function readPhaseStallRecord(file, log) {
   };
 }
 function writePhaseStallRecord(file, entry, recreatedNoticeSent, log) {
-  const temporary = join8(dirname3(file), `.legion-phase-stall-${randomUUID3()}`);
+  const temporary = join10(dirname3(file), `.legion-phase-stall-${randomUUID4()}`);
   try {
-    writeFileSync3(temporary, JSON.stringify({ ...entry, ...recreatedNoticeSent ? { recreatedNoticeSent } : {} }), { mode: 384 });
+    writeFileSync4(temporary, JSON.stringify({ ...entry, ...recreatedNoticeSent ? { recreatedNoticeSent } : {} }), { mode: 384 });
     renameSync3(temporary, file);
   } catch (error) {
-    rmSync4(temporary, { force: true });
+    rmSync5(temporary, { force: true });
     log.warn("legion: the phase-stall state is not recorded for a relaunch", {
       file,
       error: messageFor(error)
@@ -50871,7 +51483,7 @@ var PHASE_OP_SENTENCES = {
   requestBackwardMove: "request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; " + "the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. "
 };
 function legionToolDescription(host) {
-  return "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " + (host.before ?? "") + "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase, " + "and the implementer's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for the " + "architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " + "any other role there) and pass|pending|fail from the implementer on a production check report (pending: production does not carry the merge " + "yet), `ready: true` for the merger's READY. A handoff is a committed " + "file, `.legion/<issue>/<phase>.json`: the pushed commit carrying it is found here, with the pane's jj, and reported, so write it, commit it and " + "push the branch (`jj git push`) before calling; this call refuses, posting nothing, a handoff still in the working copy, missing, not committed " + "on this branch, carried by another pane's commit, or not yet on `legion/<issue>@origin`, each naming the remedy. A production check report " + "(the task whose first line is `Production check of <KEY>`, handed to the implementer once the merge closed its issue) needs no handoff and no " + "commit: it carries its verdict and summary alone, and the daemon refuses it when no check is open (CHECK_NOT_OPEN). The daemon refuses " + "HANDOFF_NOT_NEW (the commit is the one you reported for your previous phase: write and commit this phase's handoff) and, for READY, each " + "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " + "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " + (host.after ?? "") + `What a later phase needs goes in your handoff; a question for another live role goes to its role topic with ${host.envoyPublish}.`;
+  return "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " + (host.before ?? "") + "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase, " + "and the implementer's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for the " + "architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " + "any other role there) and pass|pending|fail from the implementer on a production check report (pending: production does not carry the merge " + "yet), `ready: true` for the merger's READY. A handoff is a committed " + "file, `.legion/<issue>/<phase>.json`: the pushed commit carrying it is found here, with the pane's jj, and reported, so write it, commit it and " + "push the branch (`jj git push`) before calling; this call refuses, posting nothing, a handoff still in the working copy, missing, not committed " + "on this branch, carried by another pane's commit, or not yet on `legion/<issue>@origin`, each naming the remedy. A production check report " + "(the task whose first line is `Production check of <KEY>`, handed to the implementer once the merge closed its issue) needs no handoff and no " + "commit: it carries its verdict and summary alone, and the daemon refuses it when no check is open (CHECK_NOT_OPEN). The daemon refuses " + "HANDOFF_NOT_NEW (the commit is the one you reported for your previous phase: write and commit this phase's handoff), the implementer's " + "completion of implementing with no open pull request on `legion/<issue>` and none recorded merged (HANDOFF_NO_PULL_REQUEST: open it; one " + "naming a closed pull request is the architect's to decide) and, for READY, each " + "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " + "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " + (host.after ?? "") + `What a later phase needs goes in your handoff; a question for another live role goes to its role topic with ${host.envoyPublish}.`;
 }
 async function mintClaimGrant(daemon, claim) {
   const { grantId } = await daemon.grant({
@@ -50988,9 +51600,9 @@ async function executeLegionTool(runtime, input, signal) {
 
 // src/replay-state.ts
 import { readFile as readFile2 } from "fs/promises";
-import { join as join9 } from "path";
+import { join as join11 } from "path";
 function replayStateFile(stateDirectory, sessionId) {
-  return join9(stateDirectory, `replay-${encodeURIComponent(sessionId)}.json`);
+  return join11(stateDirectory, `replay-${encodeURIComponent(sessionId)}.json`);
 }
 async function readReplayState(file) {
   let text;
@@ -51019,7 +51631,7 @@ async function writeReplayState(file, snapshot) {
 
 // src/session-title.ts
 import { execFileSync } from "child_process";
-import { readFileSync as readFileSync8 } from "fs";
+import { readFileSync as readFileSync9 } from "fs";
 import { basename as basename4 } from "path";
 var TMUX_PANE_FORMAT = [
   "#{session_name}",
@@ -51042,7 +51654,7 @@ function visible(value) {
 function parentPid(pid) {
   try {
     if (process.platform === "linux") {
-      const stat = readFileSync8(`/proc/${pid}/stat`, "utf8");
+      const stat = readFileSync9(`/proc/${pid}/stat`, "utf8");
       const parent = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
       return Number.isInteger(parent) ? parent : undefined;
     }
@@ -51245,7 +51857,7 @@ function createChannelDelivery(input) {
         content,
         meta: sanitizeChannelMetadata({
           producer: envelope?.source ?? "unknown",
-          topic: subject,
+          topic: envelope?.topic || subject,
           event_id: envelope?.event_id,
           dedupe_key: envelope?.dedupe_key,
           urgency: envelope?.urgency,

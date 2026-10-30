@@ -1,6 +1,7 @@
 package pmdoc
 
 import (
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -241,10 +242,10 @@ func validateTypedBlock(n *Node, typ BlockTypeSchema) error {
 			return fmt.Errorf("%w: typed block %q content %q requires one or more blocks", ErrSchema, n.Type, typ.Content)
 		}
 	case BlockContentParagraphsOptionalBulletList:
-		// Browser edits can transiently put another block in an ask. Retain that
-		// structurally valid body so Dispatch can stamp its semantic parse error;
-		// uploads and edits refuse an ask they write that breaks the rule
-		// (AskContentError).
+		// Concurrent browser edits can leave an ask holding blocks off its content rule (two
+		// bullet lists, a paragraph after its list), and the browser keeps it. Retain that
+		// structurally valid body so settlement can mark it `invalid`; uploads and edits refuse
+		// an ask they write that breaks the rule (AskContentError).
 		if n.Type == "ask" {
 			if len(n.Children) == 0 || !childrenAreBlocks(n.Children) {
 				return fmt.Errorf("%w: typed block %q requires block children", ErrSchema, n.Type)
@@ -288,8 +289,9 @@ func validateTypedBlock(n *Node, typ BlockTypeSchema) error {
 
 // AskContentError reports the first ask block in node that breaks its content rule, paragraph+
 // bullet_list? - one or more paragraphs, then at most one bullet list, last - or nil. Validate
-// lets an ask hold other blocks, since a browser edit can briefly leave one there and settlement
-// flags it; markdown written in whole is held to the rule, as the browser editor's parser holds it.
+// lets an ask hold other blocks, since concurrent browser edits can leave one there, the browser
+// keeps it, and settlement marks the ask `invalid`; markdown written in whole is held to the rule,
+// as the browser editor's parser holds it.
 func AskContentError(node *Node) error {
 	var found error
 	walk(node, func(ask *Node, _ []int, _, _ int) bool {
@@ -431,14 +433,33 @@ func childrenAreInline(children []*Node) bool {
 	return true
 }
 
-func isBlockNodeType(typeName string) bool {
-	switch typeName {
-	case "paragraph", "heading", "blockquote", "bullet_list", "ordered_list", "code_block", "hr", "table", "footnote_definition", "frontmatter":
-		return true
-	default:
-		_, typed := typedBlock(typeName)
-		return typed
+// blockNodeTypesJSON lists the block node types besides the typed blocks. The proof editor's
+// schema drift test reads the same file, so the editor's `block` group and this set stay equal.
+//
+//go:embed schema/block-node-types.json
+var blockNodeTypesJSON []byte
+
+var blockNodeTypes = func() map[string]struct{} {
+	var names []string
+	if err := json.Unmarshal(blockNodeTypesJSON, &names); err != nil {
+		panic(fmt.Sprintf("pmdoc: decode embedded block node types: %v", err))
 	}
+	if len(names) == 0 {
+		panic("pmdoc: embedded block node types are empty")
+	}
+	set := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		set[name] = struct{}{}
+	}
+	return set
+}()
+
+func isBlockNodeType(typeName string) bool {
+	if _, ok := blockNodeTypes[typeName]; ok {
+		return true
+	}
+	_, typed := typedBlock(typeName)
+	return typed
 }
 
 func isInlineNodeType(typeName string) bool {

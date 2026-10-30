@@ -422,11 +422,10 @@ gate_send() {
   gate_artifacts[$issue]=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
   architect_registers_gate "$issue" "$issue"
 }
-# gate_finish ISSUE: the root waits on a person at its closed gate without a slot, its architect
-# suspended (await_gate_wait); the proof human approves, the root takes a slot back
+# gate_finish ISSUE: the root waits on a person at its closed gate without a slot while its
+# architect stays live (await_gate_wait); the proof human approves, the root takes a slot back
 # (await_answered_slot), and only then reaches planning. admission_cap 3 is the run's three roots
-# (the child takes none), so the slots every waiting root gave back stand free and the answered root
-# takes one at once.
+# (the child takes none), so the slots every waiting root gave back stand free and the answered root takes one at once.
 gate_finish() {
   local issue=$1 artifact=${gate_artifacts[$1]}
   until_true 600 "$issue architect to register primary artifact $artifact" sh -c \

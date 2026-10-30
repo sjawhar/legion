@@ -271,7 +271,7 @@ func placedAfter(root record.Issue, mark record.EventMark) bool {
 // one the gate seed or the boot catch-up re-read. Only an approval that opens the gate a root waits
 // on is exempt, on purpose: a gate wait can begin after an approval whose own event was lost, and
 // every later read of that approval finds the gate already open, so nothing else would answer it
-// and the root would stay suspended with its gate open. An approval that changes no gate state has
+// and the root would keep waiting with its gate open. An approval that changes no gate state has
 // no such claim, and answers only a wait it follows.
 func (e *Engine) answerAwaitedGate(ctx context.Context, tx pgx.Tx, key string, fact intake.DispatchArtifact, carried, gateUnchanged bool) (bool, error) {
 	issue, err := e.store.Issue(ctx, tx, key)
@@ -695,9 +695,9 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 // tellChangesOnce tells fact's changes request to its issue's architect once, by a notice or by the
 // task that resumes it, never both. A request that answered the root's wait is named by that task.
 // So is one placed after the wait began that the gate records as told (recorded), whatever
-// answered the wait: a notice held for the suspended architect could reach it after the resume
-// task, and a later approval the task tells as the design-approved wake would then read as
-// superseded by the older request. Otherwise the notice tells it.
+// answered the wait: the resume task carries the current gate state, and an earlier changes notice
+// would make a later approval's design-approved wake read as superseded. Otherwise the notice tells
+// it.
 func (e *Engine) tellChangesOnce(ctx context.Context, tx pgx.Tx, fact intake.DispatchArtifact, recorded bool) error {
 	issue, err := e.store.Issue(ctx, tx, fact.Key)
 	if err != nil || issue == nil {
