@@ -5,6 +5,7 @@ import { comment, getMarks, marksPluginKey } from "proof-sdk-upstream/src/editor
 import { createAskMark } from "../src/dispatch-marks";
 import {
   findRecordMark,
+  placementOf,
   RECORD_MARK_TYPES,
   remarkRecordMark,
   removeRecordMark,
@@ -105,6 +106,7 @@ test("retypeMark refuses, changing nothing, a mark the document does not hold an
     expect(marksInDoc(view)).toEqual(before);
     expect(retypeMark(view, start.id, "comment", BY)).toEqual({
       markId: start.id,
+      placement: { blockId: expect.any(String), reading: 0 },
       quote: "quick brown",
     });
     expect(marksInDoc(view)).toEqual(before);
@@ -305,6 +307,12 @@ function rewriteParagraph(view: EditorView, text: string): void {
   );
 }
 
+/** Another writer deleting the whole paragraph the composer was opened in: the block that held
+ *  the mark leaves the document, taking its id with it. */
+function dropParagraph(view: EditorView): void {
+  view.dispatch(view.state.tr.delete(0, view.state.doc.child(0).nodeSize));
+}
+
 /** Another writer taking the record mark `markId` off the text it covers while leaving that text
  *  as it is - the mark is gone, its words are not - which no `removeRecordMark` tells the
  *  tracking about. */
@@ -319,28 +327,48 @@ function dropMark(view: EditorView, markId: string): void {
 /** The editor rebuilt around the document it holds: a fresh `EditorState` over the same doc,
  *  where every plugin starts again and the tracking remembers no mark at all. The browser meets
  *  this - y-prosemirror applies a remote update by rebuilding the document rather than through a
- *  mapping, and a reconnect rebuilds the editor - so the composer's quote is all the recovery has
- *  left to find the words by. */
+ *  mapping, and a reconnect rebuilds the editor - so the quote and the placement the composer
+ *  kept are all the recovery has left to find the words by. */
 function rebuildEditorState(view: EditorView): void {
   view.updateState(EditorState.create({ doc: view.state.doc, plugins: view.state.plugins }));
 }
+
+/** The placement the selection bar reports for the mark it writes over `range`, which is what a
+ *  composer keeps beside its quote; the test's marks are written by the creators directly, so it
+ *  asks for it the way the bar does. */
+function placementFor(view: EditorView, range: { from: number; to: number }, quote: string) {
+  const placement = placementOf(view.state.doc, range, quote);
+  if (placement === null) throw new Error(`no placement for: ${quote}`);
+  return placement;
+}
+
+/** A paragraph whose quoted words read twice, as a phrase a reader picks out of a specification
+ *  often does, and the second reading of them: the one the rows below select. The paragraph
+ *  opens at 0 and its text at 1, so a text offset is one less than the position. */
+const TWICE = "The quick brown fox jumps over the lazy dog. The vet looks at the lazy dog again.";
+const REPEATED = "the lazy dog";
+const SECOND = TWICE.indexOf(REPEATED, TWICE.indexOf(REPEATED) + 1) + 1;
+const SECOND_RANGE = { from: SECOND, to: SECOND + REPEATED.length };
 
 test("remarkRecordMark re-marks the text the document still holds the mark on, under a fresh id", async () => {
   await withMarksEditor(PARAGRAPH, ({ view }) => {
     const range = quoteRange();
     const start = comment(view, QUOTE, BY, "", range);
+    const placement = placementFor(view, range, QUOTE);
 
-    const again = remarkRecordMark(view, start.id, "comment", BY, QUOTE);
+    const again = remarkRecordMark(view, start.id, "comment", BY, QUOTE, placement);
     if ("refused" in again) throw new Error(`the re-mark was refused: ${again.refused}`);
     // The kind did not change and the id did: the server refused the mark it was sent, so the
     // retry carries one it has never judged.
     expect(again.markId).not.toBe(start.id);
     expect(again.quote).toBe(QUOTE);
+    // The mark it wrote is placed as the bar's own was, so a second recovery is as well placed.
+    expect(again.placement).toEqual(placement);
     expect(marksInDoc(view)).toEqual([
       expect.objectContaining({ type: "proofComment", id: again.markId, ...range }),
     ]);
 
-    const third = remarkRecordMark(view, again.markId, "comment", BY, QUOTE);
+    const third = remarkRecordMark(view, again.markId, "comment", BY, QUOTE, again.placement);
     if ("refused" in third) throw new Error(`the re-mark was refused: ${third.refused}`);
     expect(third.markId).not.toBe(again.markId);
   });
@@ -349,6 +377,7 @@ test("remarkRecordMark re-marks the text the document still holds the mark on, u
 test("remarkRecordMark keeps to the tracked range when the mark is gone, even where the same words read elsewhere", async () => {
   await withMarksEditor(PARAGRAPH, ({ view }) => {
     const start = comment(view, QUOTE, BY, "", quoteRange());
+    const placement = placementFor(view, quoteRange(), QUOTE);
     // Transactions that leave the mark alone: the reader types ahead of it, and the tracked range
     // follows that text rather than staying where it was written.
     view.dispatch(view.state.tr.insertText("Note: ", 1));
@@ -360,7 +389,7 @@ test("remarkRecordMark keeps to the tracked range when the mark is gone, even wh
     dropMark(view, start.id);
     expect(findRecordMark(view.state.doc, start.id)).toBeNull();
 
-    const again = remarkRecordMark(view, start.id, "comment", BY, QUOTE);
+    const again = remarkRecordMark(view, start.id, "comment", BY, QUOTE, placement);
     if ("refused" in again) throw new Error(`the re-mark was refused: ${again.refused}`);
     expect(again.quote).toBe(QUOTE);
     expect(marksInDoc(view)).toEqual([
@@ -369,11 +398,12 @@ test("remarkRecordMark keeps to the tracked range when the mark is gone, even wh
   });
   await withMarksEditor(`${PARAGRAPH}\n\nAnd again: ${QUOTE}.`, ({ view }) => {
     const start = comment(view, QUOTE, BY, "", quoteRange());
+    const placement = placementFor(view, quoteRange(), QUOTE);
     dropMark(view, start.id);
 
     // The quote reads twice in the document, so the search by quote alone would refuse; the
     // tracked range is the reader's own passage, and it is asked first.
-    const again = remarkRecordMark(view, start.id, "comment", BY, QUOTE);
+    const again = remarkRecordMark(view, start.id, "comment", BY, QUOTE, placement);
     if ("refused" in again) throw new Error(`the re-mark was refused: ${again.refused}`);
     expect(marksInDoc(view)).toEqual([
       expect.objectContaining({ type: "proofComment", id: again.markId, ...quoteRange() }),
@@ -381,36 +411,110 @@ test("remarkRecordMark keeps to the tracked range when the mark is gone, even wh
   });
 });
 
-test("remarkRecordMark finds the quoted words once in their block when the run around them was rewritten", async () => {
-  await withMarksEditor(PARAGRAPH, ({ view }) => {
-    const start = comment(view, QUOTE, BY, "", quoteRange());
-    // What the browser measures on this branch when another writer replaces the sentence: the
-    // mark is gone, the quoted words are still there.
-    rewriteParagraph(view, `The swift red fox ${QUOTE}.`);
-    expect(findRecordMark(view.state.doc, start.id)).toBeNull();
+test("remarkRecordMark puts the mark back on the remembered reading, in a block that still holds both", async () => {
+  await withMarksEditor(TWICE, ({ view }) => {
+    const start = comment(view, REPEATED, BY, "", SECOND_RANGE);
+    const placement = placementFor(view, SECOND_RANGE, REPEATED);
+    expect(placement).toEqual({ blockId: expect.any(String), reading: 1 });
+    // The tab was away past the sweep and came back: the mark is gone, the reconnect rebuilt the
+    // editor, and the document's text never changed. Only the composer's own copy is left.
+    dropMark(view, start.id);
+    rebuildEditorState(view);
 
-    const again = remarkRecordMark(view, start.id, "comment", BY, QUOTE);
+    const again = remarkRecordMark(view, start.id, "comment", BY, REPEATED, placement);
     if ("refused" in again) throw new Error(`the re-mark was refused: ${again.refused}`);
-    expect(again.quote).toBe(QUOTE);
+    expect(again.placement).toEqual(placement);
     expect(marksInDoc(view)).toEqual([
-      expect.objectContaining({
-        type: "proofComment",
-        id: again.markId,
-        ...quoteRange(`The swift red fox ${QUOTE}.`),
-      }),
+      expect.objectContaining({ type: "proofComment", id: again.markId, ...SECOND_RANGE }),
     ]);
   });
 });
 
-test("remarkRecordMark marks the one place the quote reads in the document when nothing tracks the mark", async () => {
+test("remarkRecordMark falls to the block's last reading where it now holds fewer, and refuses where it holds none", async () => {
+  const kept = "The vet looks at the lazy dog again.";
+  await withMarksEditor(TWICE, ({ view }) => {
+    const start = comment(view, REPEATED, BY, "", SECOND_RANGE);
+    const placement = placementFor(view, SECOND_RANGE, REPEATED);
+    // Another writer cut the sentence the reader's own reading was the second of. The block
+    // reads those words once now, and that one is the nearest thing to the reader's.
+    rewriteParagraph(view, kept);
+    rebuildEditorState(view);
+
+    const again = remarkRecordMark(view, start.id, "comment", BY, REPEATED, placement);
+    if ("refused" in again) throw new Error(`the re-mark was refused: ${again.refused}`);
+    const only = kept.indexOf(REPEATED) + 1;
+    expect(again.placement).toEqual({ blockId: placement.blockId, reading: 0 });
+    expect(marksInDoc(view)).toEqual([
+      expect.objectContaining({
+        type: "proofComment",
+        id: again.markId,
+        from: only,
+        to: only + REPEATED.length,
+      }),
+    ]);
+  });
+  await withMarksEditor(`${TWICE}\n\nAnd again: ${REPEATED}.`, ({ view }) => {
+    const start = comment(view, REPEATED, BY, "", SECOND_RANGE);
+    const placement = placementFor(view, SECOND_RANGE, REPEATED);
+    rewriteParagraph(view, "The swift red fox naps.");
+    rebuildEditorState(view);
+
+    // The reader's own block reads those words nowhere now. Another block still does, and it is
+    // not the passage they selected, so nothing is marked - and they were not deleted either.
+    expect(remarkRecordMark(view, start.id, "comment", BY, REPEATED, placement)).toEqual({
+      refused: "unplaceable",
+    });
+    expect(marksInDoc(view)).toEqual([]);
+  });
+});
+
+test("remarkRecordMark takes the one place the quote reads once the remembered block is gone, and refuses two", async () => {
+  const after = `And again: ${QUOTE}.`;
+  await withMarksEditor(`${PARAGRAPH}\n\n${after}`, ({ view }) => {
+    const start = comment(view, QUOTE, BY, "", quoteRange());
+    const placement = placementFor(view, quoteRange(), QUOTE);
+    // Another writer deleted the whole paragraph the composer was opened in: the block the
+    // placement names is gone, and the words read in one other place.
+    dropParagraph(view);
+    rebuildEditorState(view);
+
+    const again = remarkRecordMark(view, start.id, "comment", BY, QUOTE, placement);
+    if ("refused" in again) throw new Error(`the re-mark was refused: ${again.refused}`);
+    const only = after.indexOf(QUOTE) + 1;
+    expect(marksInDoc(view)).toEqual([
+      expect.objectContaining({
+        type: "proofComment",
+        id: again.markId,
+        from: only,
+        to: only + QUOTE.length,
+      }),
+    ]);
+  });
+  await withMarksEditor(`${PARAGRAPH}\n\n${after}\n\nOnce more: ${QUOTE}.`, ({ view }) => {
+    const start = comment(view, QUOTE, BY, "", quoteRange());
+    const placement = placementFor(view, quoteRange(), QUOTE);
+    dropParagraph(view);
+    rebuildEditorState(view);
+
+    // Two readings left and nothing to tell them apart: a record on the passage the reader never
+    // selected is worse than one they can attach again themselves.
+    expect(remarkRecordMark(view, start.id, "comment", BY, QUOTE, placement)).toEqual({
+      refused: "unplaceable",
+    });
+    expect(marksInDoc(view)).toEqual([]);
+  });
+});
+
+test("remarkRecordMark marks the one place the quote reads in the document when nothing was remembered", async () => {
   await withMarksEditor(PARAGRAPH, ({ view }) => {
     const start = comment(view, QUOTE, BY, "", quoteRange());
-    // The mark is gone and the editor was rebuilt around the words it covered: nothing tracks it
-    // any more, and the quote the composer carries reads in exactly one place.
+    // The mark is gone, the editor was rebuilt around the words it covered, and the composer
+    // kept no placement - a quote that runs across two blocks has none. The quote the composer
+    // carries reads in exactly one place.
     dropMark(view, start.id);
     rebuildEditorState(view);
 
-    const again = remarkRecordMark(view, start.id, "comment", BY, QUOTE);
+    const again = remarkRecordMark(view, start.id, "comment", BY, QUOTE, null);
     if ("refused" in again) throw new Error(`the re-mark was refused: ${again.refused}`);
     expect(again.quote).toBe(QUOTE);
     expect(marksInDoc(view)).toEqual([
@@ -422,9 +526,11 @@ test("remarkRecordMark marks the one place the quote reads in the document when 
     dropMark(view, start.id);
     rebuildEditorState(view);
 
-    // Two readings of those words and nothing left to tell them apart: a record on the passage
-    // the reader never selected is worse than one they can attach again themselves.
-    expect(remarkRecordMark(view, start.id, "comment", BY, QUOTE)).toEqual({ refused: "gone" });
+    // Two readings of those words and nothing left to tell them apart. They are still on the
+    // page, so the refusal is not that they were changed or deleted.
+    expect(remarkRecordMark(view, start.id, "comment", BY, QUOTE, null)).toEqual({
+      refused: "unplaceable",
+    });
     expect(marksInDoc(view)).toEqual([]);
   });
 });
@@ -432,26 +538,36 @@ test("remarkRecordMark marks the one place the quote reads in the document when 
 test("remarkRecordMark refuses when the words are gone, when the block reads them twice, and for a quote the document never held", async () => {
   await withMarksEditor(PARAGRAPH, ({ view }) => {
     const start = comment(view, QUOTE, BY, "", quoteRange());
+    const placement = placementFor(view, quoteRange(), QUOTE);
     rewriteParagraph(view, "The swift red fox naps.");
-    expect(remarkRecordMark(view, start.id, "comment", BY, QUOTE)).toEqual({ refused: "gone" });
+    expect(remarkRecordMark(view, start.id, "comment", BY, QUOTE, placement)).toEqual({
+      refused: "gone",
+    });
     expect(marksInDoc(view)).toEqual([]);
   });
   await withMarksEditor(PARAGRAPH, ({ view }) => {
     const start = comment(view, QUOTE, BY, "", quoteRange());
-    // A second reading of the same words in the block: marking either one could put the record on
-    // the passage the reader never selected, so nothing is marked.
+    // A second reading of the same words in the block, with nothing remembered about the
+    // reader's own: marking either one could put the record on the passage they never selected.
     rewriteParagraph(view, `${QUOTE}, and ${QUOTE}.`);
-    expect(remarkRecordMark(view, start.id, "comment", BY, QUOTE)).toEqual({ refused: "gone" });
+    expect(remarkRecordMark(view, start.id, "comment", BY, QUOTE, null)).toEqual({
+      refused: "unplaceable",
+    });
     expect(marksInDoc(view)).toEqual([]);
   });
   await withMarksEditor(PARAGRAPH, ({ view }) => {
     const start = comment(view, QUOTE, BY, "", quoteRange());
+    const placement = placementFor(view, quoteRange(), QUOTE);
     // The composer ended and the sentence went with it: nothing tracks the mark, and the words
     // its quote names read nowhere in the document - not even for an id no mark ever had.
     removeRecordMark(view, start.id);
     rewriteParagraph(view, "The swift red fox naps.");
-    expect(remarkRecordMark(view, start.id, "comment", BY, QUOTE)).toEqual({ refused: "gone" });
-    expect(remarkRecordMark(view, "never", "comment", BY, QUOTE)).toEqual({ refused: "gone" });
+    expect(remarkRecordMark(view, start.id, "comment", BY, QUOTE, placement)).toEqual({
+      refused: "gone",
+    });
+    expect(remarkRecordMark(view, "never", "comment", BY, QUOTE, placement)).toEqual({
+      refused: "gone",
+    });
   });
 });
 
@@ -459,8 +575,9 @@ test("remarkRecordMark writes the mark each composer kind anchors to", async () 
   for (const kind of ["comment", "suggest", "ask"] as const) {
     await withMarksEditor(PARAGRAPH, ({ view }) => {
       const start = comment(view, QUOTE, BY, "", quoteRange());
+      const placement = placementFor(view, quoteRange(), QUOTE);
       rewriteParagraph(view, `The swift red fox ${QUOTE}.`);
-      const again = remarkRecordMark(view, start.id, kind, BY, QUOTE);
+      const again = remarkRecordMark(view, start.id, kind, BY, QUOTE, placement);
       if ("refused" in again) throw new Error(`the ${kind} re-mark was refused: ${again.refused}`);
       const range = quoteRange(`The swift red fox ${QUOTE}.`);
       expect(marksInDoc(view)).toEqual([

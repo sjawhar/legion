@@ -195,7 +195,14 @@ const keptComposerSend = shape.record({
   mutationKey: shape.array(shape.string),
   request: shape.record({
     anchor: shape.optional(
-      shape.record({ artifact: shape.string, mark_id: shape.string, quote: shape.string })
+      shape.record({
+        artifact: shape.string,
+        mark_id: shape.string,
+        // The reading the reader selected, which the recovery from `ANCHOR_MISSING` needs after
+        // a reload as much as the quote beside it (`ComposerAnchor.placement`).
+        placement: shape.optional(shape.record({ blockId: shape.string, reading: shape.number })),
+        quote: shape.string,
+      })
     ),
     ask: keptAsk,
     draft: keptDraft,

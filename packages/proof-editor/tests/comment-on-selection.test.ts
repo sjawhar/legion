@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import type { MarkAction } from "../src/lib";
+import { blockIdOf } from "../src/lib";
 import { withMarksEditor } from "./marks-editor";
 
 const SENTENCE = "The quick brown fox";
@@ -33,7 +34,14 @@ test("commentOnSelection marks the selection as a comment and hands it to onMark
       select(view, RANGE.from, RANGE.to);
       expect(handle.commentOnSelection()).toBe(true);
       expect(actions).toEqual([
-        { from: 5, kind: "comment", markId: expect.any(String), quote: "quick brown", to: 16 },
+        {
+          from: 5,
+          kind: "comment",
+          markId: expect.any(String),
+          placement: { blockId: expect.any(String), reading: 0 },
+          quote: "quick brown",
+          to: 16,
+        },
       ]);
       expect(commentSpans(view)).toEqual([{ from: 5, id: actions[0]?.markId, to: 16 }]);
     },
@@ -86,7 +94,14 @@ test("the selection bar's Comment button takes the same path: a mark, then onMar
       select(view, RANGE.from, RANGE.to);
       button.click();
       expect(actions).toEqual([
-        { from: 5, kind: "comment", markId: expect.any(String), quote: "quick brown", to: 16 },
+        {
+          from: 5,
+          kind: "comment",
+          markId: expect.any(String),
+          placement: { blockId: expect.any(String), reading: 0 },
+          quote: "quick brown",
+          to: 16,
+        },
       ]);
       expect(commentSpans(view)).toEqual([{ from: 5, id: actions[0]?.markId, to: 16 }]);
 
@@ -95,6 +110,37 @@ test("the selection bar's Comment button takes the same path: a mark, then onMar
       handle.setReadOnly(true);
       button.click();
       expect(actions).toHaveLength(1);
+    },
+    { onMarkAction: (action) => void actions.push(action) }
+  );
+});
+
+test("the mark the bar writes carries which reading of the quote it covers", async () => {
+  const actions: MarkAction[] = [];
+  const repeated = "The vet sees the lazy dog, then the lazy dog again";
+  const quote = "the lazy dog";
+  // Where the second reading of those words starts: the paragraph opens at 0 and its text at 1,
+  // so a text offset is one less than the position.
+  const second = repeated.indexOf(quote, repeated.indexOf(quote) + 1) + 1;
+  await withMarksEditor(
+    repeated,
+    ({ handle, view }) => {
+      const blockId = blockIdOf(view.state.doc.child(0));
+      if (blockId === null) throw new Error("the paragraph has no block id");
+      select(view, second, second + quote.length);
+      expect(handle.commentOnSelection()).toBe(true);
+      // The quote alone cannot say which reading the reader selected, and the host keeps this
+      // for the day the mark is gone and the editor remembers nothing (`remarkRecordMark`).
+      expect(actions).toEqual([
+        {
+          from: second,
+          kind: "comment",
+          markId: expect.any(String),
+          placement: { blockId, reading: 1 },
+          quote,
+          to: second + quote.length,
+        },
+      ]);
     },
     { onMarkAction: (action) => void actions.push(action) }
   );

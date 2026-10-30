@@ -8,6 +8,7 @@ import { MARKS_MAP_NAME } from "./roots";
 
 export type {
   MarkAction,
+  RecordMarkPlacement,
   RemarkOutcome,
   RemarkRefusal,
   RetypeOutcome,

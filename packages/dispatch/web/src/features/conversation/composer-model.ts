@@ -1,4 +1,5 @@
 import type { Actor, DeliveryCapability } from "../../api/types";
+import type { RecordMarkPlacement } from "../doc/editor";
 
 /** The composer's data model: where a draft goes, what kind it is, and what it carries. The
  *  composer (`MentionComposer.tsx`), the request it freezes (`send-request.ts`) and every host read
@@ -14,6 +15,12 @@ export type ComposerKind = "ask" | "comment" | "suggestion";
 export interface ComposerAnchor {
   readonly artifact: string;
   readonly mark_id: string;
+  /** Which reading of `quote`, in which block, the editor wrote the mark over, as it reported
+   *  when the selection bar made it. The composer keeps it because the editor keeps nothing a
+   *  rebuilt document or a reconnect does not take with it, and the margin hands it back when
+   *  the mark has to be written again (`DocumentBridge.remarkMark`). Absent where the editor had
+   *  none to give, which leaves that recovery the quote alone. */
+  readonly placement?: RecordMarkPlacement;
   readonly quote: string;
 }
 

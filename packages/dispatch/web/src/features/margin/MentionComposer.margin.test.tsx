@@ -8,6 +8,7 @@ import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
 import type { ComposerAnchor, ComposerKind } from "../conversation/composer-model";
 import { MentionComposer } from "../conversation/MentionComposer";
+import type { RecordMarkPlacement } from "../doc/editor";
 import { buildIssuePath, composerReferences } from "../refs/routes";
 import { Margin } from "./Margin";
 import { type DocumentBridge, MarginProvider, useMargin } from "./margin-context";
@@ -391,6 +392,9 @@ test("Escape after typing only an ask option prompts before discarding", async (
 const MARK_ANCHOR = {
   artifact: specArtifact.id,
   mark_id: "m-1",
+  // The second reading of those words in their block: what the editor reported when the bar
+  // wrote the mark, and all the margin has to find them by once the mark is gone.
+  placement: { blockId: "b-1", reading: 1 },
   quote: "jumps over the lazy dog",
 };
 
@@ -408,12 +412,12 @@ function RegisterDocument({ bridge }: { bridge: DocumentBridge }): ReactNode {
   return null;
 }
 
-function ComposeOnMark(): ReactNode {
+function ComposeOnMark({ kind }: { kind: ComposerKind }): ReactNode {
   const { composeForMark } = useMargin();
   return (
     <button
       onClick={() => {
-        void composeForMark({ anchor: MARK_ANCHOR, kind: "comment" }).catch(() => {});
+        void composeForMark({ anchor: MARK_ANCHOR, kind }).catch(() => {});
       }}
       type="button"
     >
@@ -424,7 +428,7 @@ function ComposeOnMark(): ReactNode {
 
 /** The margin of an issue whose document `bridge` is, with the selection bar's compose on a
  *  press, as the document page renders it. */
-function renderMarginCompose(bridge: DocumentBridge) {
+function renderMarginCompose(bridge: DocumentBridge, kind: ComposerKind = "comment") {
   const queryClient = new QueryClient({
     defaultOptions: {
       mutations: { retry: false },
@@ -441,7 +445,7 @@ function renderMarginCompose(bridge: DocumentBridge) {
       <QueryClientProvider client={queryClient}>
         <MarginProvider>
           <RegisterDocument bridge={bridge} />
-          <ComposeOnMark />
+          <ComposeOnMark kind={kind} />
           <Margin />
         </MarginProvider>
       </QueryClientProvider>
@@ -458,12 +462,22 @@ async function sendMarginComment(body: string): Promise<HTMLElement> {
   return composer;
 }
 
+/** Writes the draft `question` in the margin's ask composer and presses Ask. */
+async function sendMarginAsk(question: string): Promise<HTMLElement> {
+  fireEvent.click(screen.getByRole("button", { name: "Compose on the selection" }));
+  const composer = await screen.findByRole("form", { name: "Comment composer" });
+  fireEvent.change(within(composer).getByLabelText("Question"), { target: { value: question } });
+  // The last "Ask" in the composer is its submit; the first is the kind switch's own button.
+  fireEvent.click(within(composer).getAllByRole("button", { name: "Ask" }).at(-1) as HTMLElement);
+  return composer;
+}
+
 test("the margin marks the words again and sends once more, under a key of its own, when the server refuses the anchor", async () => {
-  const remarked: [string, string, string][] = [];
+  const remarked: [string, string, string, RecordMarkPlacement | null][] = [];
   const bridge = stubDocumentBridge(specArtifact.id, {
-    remarkMark(markId, kind, quote) {
-      remarked.push([markId, kind, quote]);
-      return { markId: "m-2", quote: MARK_ANCHOR.quote };
+    remarkMark(markId, kind, quote, placement) {
+      remarked.push([markId, kind, quote, placement]);
+      return { markId: "m-2", placement, quote: MARK_ANCHOR.quote };
     },
   });
   let attempts = 0;
@@ -477,9 +491,10 @@ test("the margin marks the words again and sends once more, under a key of its o
   try {
     await sendMarginComment("Please revise.");
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
-    // The words the refused send itself carries reach the editor: it may hold nothing else by
-    // the time another writer's change has rebuilt the document.
-    expect(remarked).toEqual([["m-1", "comment", MARK_ANCHOR.quote]]);
+    // The words the refused send itself carries reach the editor, and the reading of them the
+    // composer kept with them: the editor may hold nothing else by the time another writer's
+    // change has rebuilt the document.
+    expect(remarked).toEqual([["m-1", "comment", MARK_ANCHOR.quote, MARK_ANCHOR.placement]]);
     expect(createComment.mock.calls[0]?.[1].anchor).toEqual({
       artifact: MARK_ANCHOR.artifact,
       mark_id: "m-1",
@@ -506,7 +521,7 @@ test("a second missing anchor after the margin re-anchored is the reader's to se
     remarkMark(markId) {
       remarked.push(markId);
       minted += 1;
-      return { markId: `m-${minted}`, quote: MARK_ANCHOR.quote };
+      return { markId: `m-${minted}`, placement: null, quote: MARK_ANCHOR.quote };
     },
   });
   const createComment = spyOn(api, "createComment").mockRejectedValue(ANCHOR_MISSING);
@@ -556,6 +571,34 @@ test("a refused re-anchor tells the reader the words are gone and keeps the draf
   } finally {
     view.unmount();
     createComment.mockRestore();
+  }
+});
+
+// What the reader is told is about what they are writing. An ask is no comment, and a refusal
+// that calls it one tells them about something they never wrote (dispatch://INFRA-727).
+test("a refused re-anchor on an ask calls it an ask, and never a comment", async () => {
+  const bridge = stubDocumentBridge(specArtifact.id, {
+    remarkMark: () => ({ refused: "gone" }),
+  });
+  const createAsk = spyOn(api, "createAsk").mockRejectedValue(ANCHOR_MISSING);
+  const view = renderMarginCompose(bridge, "ask");
+
+  try {
+    const composer = await sendMarginAsk("Which dog?");
+    await waitFor(() =>
+      expect(
+        within(composer).getByText(
+          "The text you selected was changed or deleted, so this ask has nothing to attach to. Your draft is kept — select the text again to attach it."
+        )
+      ).toBeTruthy()
+    );
+    expect(composer.textContent).not.toContain("this comment");
+    expect(within(composer).getByLabelText<HTMLTextAreaElement>("Question").value).toBe(
+      "Which dog?"
+    );
+  } finally {
+    view.unmount();
+    createAsk.mockRestore();
   }
 });
 

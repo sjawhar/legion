@@ -515,8 +515,8 @@ export function ProofDocument({
         },
         focusMark: (markId) => focusInEditor(() => handle.focusMark(markId)),
         removeMark: (markId) => handle.removeMark(markId),
-        remarkMark: (markId, kind, quote) =>
-          handle.remarkMark(markId, selectionBarKindFor(kind), quote),
+        remarkMark: (markId, kind, quote, placement) =>
+          handle.remarkMark(markId, selectionBarKindFor(kind), quote, placement),
         retypeMark: (markId, kind) => handle.retypeMark(markId, selectionBarKindFor(kind)),
         setActiveBlocks: (blockIds) => handle.setActiveBlocks(blockIds),
         setActiveMarks: (markIds) => handle.setActiveMarks(markIds),
@@ -677,6 +677,7 @@ export function ProofDocument({
                         anchor: {
                           artifact: artifact.id,
                           mark_id: action.markId,
+                          placement: action.placement ?? undefined,
                           quote: action.quote,
                         },
                         kind: composerKindFor(action.kind),

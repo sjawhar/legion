@@ -19,17 +19,26 @@
  * A mark the document has lost is `remarkRecordMark`'s case: the reader held the composer open
  * while another writer rewrote the sentence, or their tab was away past the provisional mark's
  * time, so the mark is gone and the send the server refuses (`409 ANCHOR_MISSING`) has nothing to
- * anchor to. The margin hands back the words the composer is anchored to - the quote its own
- * request carries - and the fresh mark goes over the first of these that holds: the mark's own
- * range, while the document still has it; the tracked range the plugin below keeps, when its text
- * reads as that quote; the one place the quote reads in the textblock that range starts in; the
- * one place the quote reads in the whole document. That last one needs no tracking at all, which
- * is what carries the recovery through a change another writer made: y-prosemirror applies a
- * remote update by rebuilding the document rather than through a mapping a local step would give,
- * and a reconnect can rebuild the editor, taking every plugin's state with it. One place, one
- * meaning: a second reading of those words would anchor the record to a passage the reader never
- * selected, which no refusal would ever tell them about, so two readings and no usable tracked
- * range is a refusal.
+ * anchor to. The margin hands back what the composer kept of the selection: the quote its own
+ * request carries, and the placement the bar reported for it (`RecordMarkPlacement` - the id of
+ * the textblock those words sat in, and which reading of them inside that block was the
+ * reader's). The fresh mark goes over the first of these that holds: the mark's own range, while
+ * the document still has it; the tracked range the plugin below keeps, when its text reads as
+ * that quote; inside the remembered block, while the document still has it, that reading of the
+ * quote, or its last one when the block now holds fewer; the one place the quote reads in the
+ * whole document, once that block is gone.
+ *
+ * Only the first two steps ask this editor's state for anything, and nothing of it survives
+ * another writer's change: y-prosemirror applies a remote update by rebuilding the document
+ * rather than through a mapping a local step would give, and a reconnect rebuilds the editor,
+ * taking every plugin's state with it. The placement is what carries the reader's own reading
+ * through that, because the composer keeps it outside the editor and the editor resolves it by
+ * reading the document alone - no browser-versus-server counting. Where no reading can be
+ * chosen - the remembered block holds those words no longer, or it is gone and they read in more
+ * than one place - the re-mark is refused rather than anchored to a passage the reader never
+ * selected, which no refusal would ever tell them about. The refusal says which case it was: the
+ * words read nowhere (`"gone"`), or they are still in the document and no reading of them is the
+ * reader's own to take (`"unplaceable"`), which the margin puts to the reader in different words.
  *
  * `removeRecordMark` is the precise removal both this module and the handle's `removeMark` use:
  * span by span, by id, whatever the mark's type. Upstream's `deleteMark` is not it - it cannot
@@ -46,8 +55,9 @@ import type { EditorView } from "@milkdown/kit/prose/view";
 import { $prose } from "@milkdown/kit/utils";
 import type { MarkRange } from "proof-sdk-upstream/src/editor/plugins/marks";
 import { comment, suggestReplace } from "proof-sdk-upstream/src/editor/plugins/marks";
-import type { SelectionBarActionKind } from "./dispatch-marks";
+import type { RecordMarkPlacement, SelectionBarActionKind } from "./dispatch-marks";
 import { createAskMark } from "./dispatch-marks";
+import { blockIdOf } from "./editor/schema/block-ids";
 
 const MARK_TYPE_FOR_KIND: Record<SelectionBarActionKind, string> = {
   ask: "dispatchAsk",
@@ -59,6 +69,9 @@ export const RECORD_MARK_TYPES: ReadonlySet<string> = new Set(Object.values(MARK
 
 export interface RetypedMark {
   readonly markId: string;
+  /** Where the mark sits, for the composer that owns it to keep beside the quote; null when
+   *  there is nothing to keep (`placementOf`). */
+  readonly placement: RecordMarkPlacement | null;
   readonly quote: string;
 }
 
@@ -71,11 +84,13 @@ export interface RetypeRefusal {
 export type RetypeOutcome = RetypedMark | RetypeRefusal;
 
 /** Why a re-mark changed nothing: the new kind cannot be written over the text, as a retype's
- *  `"unmarkable"` says, or the words the mark was written over are no longer there to mark
- *  (`"gone"`). A re-mark never answers `"missing"`: a mark the document has lost is the case it
- *  is for. */
+ *  `"unmarkable"` says; the words the mark was written over read nowhere in the document any
+ *  more (`"gone"`); or they are still in the document and no reading of them can be taken for
+ *  the reader's own (`"unplaceable"`). The last two are not the same thing to say to a reader,
+ *  so they are not the same answer. A re-mark never answers `"missing"`: a mark the document has
+ *  lost is the case it is for. */
 export interface RemarkRefusal {
-  readonly refused: "gone" | "unmarkable";
+  readonly refused: "gone" | "unmarkable" | "unplaceable";
 }
 
 export type RemarkOutcome = RetypedMark | RemarkRefusal;
@@ -255,7 +270,9 @@ function createRecordMark(
 }
 
 /** Replaces the record mark `markId` with a fresh mark of `kind` over the same text, written by
- *  `by`, and answers the new mark - or the mark as it is, when it already has that kind. Refused,
+ *  `by`, and answers the new mark - or the mark as it is, when it already has that kind - with
+ *  the placement to remember for it, computed as the selection bar computes the one it reports,
+ *  so a re-mark after a kind switch is as well placed as one after the bar's own mark. Refused,
  *  with nothing changed, when the document does not hold `markId` or when `kind` cannot be marked
  *  over its text. */
 export function retypeMark(
@@ -267,76 +284,145 @@ export function retypeMark(
   const held = findRecordMark(view.state.doc, markId);
   if (held === null) return { refused: "missing" };
   const quote = view.state.doc.textBetween(held.range.from, held.range.to, "\n", "\n");
-  if (held.type === MARK_TYPE_FOR_KIND[kind]) return { markId, quote };
+  const placement = placementOf(view.state.doc, held.range, quote);
+  if (held.type === MARK_TYPE_FOR_KIND[kind]) return { markId, placement, quote };
   const created = createRecordMark(view, kind, held.range, quote, by);
   if (created === null) return { refused: "unmarkable" };
   removeRecordMark(view, markId);
-  return { markId: created, quote };
+  return { markId: created, placement, quote };
 }
 
-/** The one place `quote` reads inside `scope`, as a range in the document, where `scope`'s own
- *  content starts at position `base`: a textblock scope is read on its own, any other node
- *  textblock by textblock. The text is read as the selection bar reads a quote out of the
- *  document - `textBetween` with a newline for each break - so a quote that runs across two
- *  blocks is never found here. Null when the quote reads nowhere, and null when it reads twice:
- *  the second reading could be the passage the reader selected just as well as the first, and a
- *  record on the wrong passage is worse than a refusal the reader can act on. */
-function soleOccurrence(scope: ProseMirrorNode, base: number, quote: string): MarkRange | null {
-  if (quote === "") return null;
+/** Every reading of `quote` in the textblock `block`, whose own content starts at position
+ *  `base`, in the order the block's text reads them, at most `limit` of them. The block's text
+ *  is read as the selection bar reads a quote out of the document - `textBetween` with a newline
+ *  for each break - so a quote that runs across two blocks is never found in one. An inline atom
+ *  stands for one character there, as it does in the block's positions, so a text offset is a
+ *  position offset. */
+function readingsInBlock(
+  block: ProseMirrorNode,
+  base: number,
+  quote: string,
+  limit: number
+): MarkRange[] {
   const found: MarkRange[] = [];
-  const readBlock = (block: ProseMirrorNode, start: number): void => {
-    // An inline atom stands for one character here, as it does in the block's positions, so a
-    // text offset is a position offset.
-    const text = block.textBetween(0, block.content.size, "\n", "\n");
-    for (let at = text.indexOf(quote); at !== -1; at = text.indexOf(quote, at + 1)) {
-      found.push({ from: start + at, to: start + at + quote.length });
-      if (found.length > 1) return;
-    }
-  };
-  if (scope.isTextblock) {
-    readBlock(scope, base);
-  } else {
-    scope.descendants((node, pos) => {
-      if (found.length > 1) return false;
-      if (!node.isTextblock) return true;
-      // `descendants` counts from the start of `scope`'s content, and a block's own content opens
-      // one position inside it.
-      readBlock(node, base + pos + 1);
-      return false;
-    });
+  if (quote === "" || limit < 1) return found;
+  const text = block.textBetween(0, block.content.size, "\n", "\n");
+  for (let at = text.indexOf(quote); at !== -1; at = text.indexOf(quote, at + 1)) {
+    found.push({ from: base + at, to: base + at + quote.length });
+    if (found.length === limit) break;
   }
-  return found.length === 1 ? found[0] : null;
+  return found;
 }
 
-/** Where the record mark `markId` was written, as the document reads now, for a composer anchored
- *  to `quote`: the tracked range, when its text still reads as that quote, else the one place the
- *  quote reads in the textblock that range starts in. Null when nothing tracks the mark - the
- *  state the mark was written in is gone - and null when neither reading is the one place those
- *  words are, which leaves the whole document to `remarkRecordMark`'s last step. */
+/** Every reading of `quote` in `doc`, textblock by textblock, at most `limit` of them. */
+function readingsInDoc(doc: ProseMirrorNode, quote: string, limit: number): MarkRange[] {
+  const found: MarkRange[] = [];
+  if (quote === "" || limit < 1) return found;
+  doc.descendants((node, pos) => {
+    if (found.length === limit) return false;
+    if (!node.isTextblock) return true;
+    // `descendants` counts from the start of the document's content, and a block's own content
+    // opens one position inside it.
+    found.push(...readingsInBlock(node, pos + 1, quote, limit - found.length));
+    return false;
+  });
+  return found;
+}
+
+/** The textblock `blockId` names and where its content starts, or null once the document holds
+ *  no such block. */
+function blockWithId(
+  doc: ProseMirrorNode,
+  blockId: string
+): { base: number; block: ProseMirrorNode } | null {
+  let found: { base: number; block: ProseMirrorNode } | null = null;
+  doc.descendants((node, pos) => {
+    if (found !== null || !node.isBlock) return false;
+    if (!node.isTextblock) return true;
+    if (blockIdOf(node) === blockId) found = { base: pos + 1, block: node };
+    // A textblock holds inline content alone, and no block id sits below one.
+    return false;
+  });
+  return found;
+}
+
+/** Where a mark written over `range` sits, for the composer that owns it to remember: the id of
+ *  the textblock that holds it, and which reading of `quote` inside that block's text it is,
+ *  counted from 0. Null when there is nothing to remember - the range is not inside a textblock,
+ *  that block carries no id, or the range does not read as `quote` - which leaves a later
+ *  re-mark the quote alone to go by. */
+export function placementOf(
+  doc: ProseMirrorNode,
+  range: MarkRange,
+  quote: string
+): RecordMarkPlacement | null {
+  if (quote === "") return null;
+  const $start = doc.resolve(range.from);
+  if (!$start.parent.isTextblock) return null;
+  const blockId = blockIdOf($start.parent);
+  if (blockId === null) return null;
+  const text = $start.parent.textBetween(0, $start.parent.content.size, "\n", "\n");
+  const offset = range.from - $start.start();
+  if (text.slice(offset, offset + quote.length) !== quote) return null;
+  let reading = 0;
+  for (let at = text.indexOf(quote); at !== -1 && at < offset; at = text.indexOf(quote, at + 1)) {
+    reading += 1;
+  }
+  return { blockId, reading };
+}
+
+/** The range the tracking kept for `markId`, mapped to the document as it reads now, when the
+ *  text there is exactly `quote`: the precise answer while this editor's own state stands, and
+ *  the only one that needs no reading of the words at all. Null when nothing tracks the mark -
+ *  the state it was written in is gone - and null when the text there has changed, which leaves
+ *  those words to the steps after it. */
 function trackedRange(state: EditorState, markId: string, quote: string): MarkRange | null {
   const tracked = recordMarkTracking.getState(state)?.get(markId);
   if (tracked === undefined || quote === "") return null;
   const size = state.doc.content.size;
   const from = Math.min(tracked.from, size);
   const to = Math.min(tracked.to, size);
-  if (to > from && state.doc.textBetween(from, to, "\n", "\n") === quote) {
-    return { from, to };
+  return to > from && state.doc.textBetween(from, to, "\n", "\n") === quote ? { from, to } : null;
+}
+
+/** Where the fresh mark goes, by the order this module's banner gives; null when no reading of
+ *  `quote` can be taken for the one the composer was opened over. */
+function remarkRange(
+  state: EditorState,
+  markId: string,
+  quote: string,
+  placement: RecordMarkPlacement | null
+): MarkRange | null {
+  const held = findRecordMark(state.doc, markId);
+  if (held !== null) return held.range;
+  const tracked = trackedRange(state, markId, quote);
+  if (tracked !== null) return tracked;
+  if (placement !== null) {
+    const block = blockWithId(state.doc, placement.blockId);
+    if (block !== null) {
+      // While the reader's own block stands, it is the only place to look: a reading outside it
+      // is not the passage they selected, however alike it reads. An edit inside the block can
+      // have taken readings away, and the last one left is the nearest thing to theirs.
+      const readings = readingsInBlock(block.block, block.base, quote, placement.reading + 1);
+      if (readings.length === 0) return null;
+      return readings[Math.min(placement.reading, readings.length - 1)];
+    }
   }
-  // A textblock holds inline content alone, so no ancestor of a parent that is not one can be a
-  // textblock either: the mapped start either sits in text or in nothing this can mark.
-  const $start = state.doc.resolve(from);
-  return $start.parent.isTextblock ? soleOccurrence($start.parent, $start.start(), quote) : null;
+  // One place, one meaning: a second reading of those words would anchor the record to a passage
+  // the reader never selected, which no refusal would ever tell them about.
+  const readings = readingsInDoc(state.doc, quote, 2);
+  return readings.length === 1 ? readings[0] : null;
 }
 
 /**
  * Writes a fresh mark of `kind`, by `by`, over `quote` - the words the composer that owns the
  * record mark `markId` is anchored to - wherever they are now, takes the old mark out, and answers
- * the mark it wrote. The first of these that holds: the mark's own range, while the document still
- * holds it; the tracked range, when its text reads as `quote`; the one place `quote` reads in the
- * textblock that range starts in; the one place `quote` reads in the whole document. The last step
- * asks the tracking for nothing, so it still answers after a remote update rebuilt the document or
- * a reconnect rebuilt the editor; the two before it are the precise answers while this editor's
- * own state stands, and the only ones that tell two readings of the same words apart.
+ * the mark it wrote with the placement to remember for it. The first of these that holds: the
+ * mark's own range, while the document still holds it; the tracked range, when its text reads as
+ * `quote`; the reading `placement` names inside the block it names, or that block's last reading
+ * of the quote where it now holds fewer; the one place `quote` reads in the whole document, once
+ * that block is gone. A remembered block the document still holds that reads those words nowhere
+ * is a refusal: the reader's own passage is what went, whatever reads like it elsewhere.
  *
  * The id is always a fresh one. The server refuses a send because it cannot see the mark, and a
  * mark it has dropped whose local copy has not caught up would be refused again under that id, so
@@ -347,18 +433,23 @@ export function remarkRecordMark(
   markId: string,
   kind: SelectionBarActionKind,
   by: string,
-  quote: string
+  quote: string,
+  placement: RecordMarkPlacement | null
 ): RemarkOutcome {
-  const range =
-    findRecordMark(view.state.doc, markId)?.range ??
-    trackedRange(view.state, markId, quote) ??
-    soleOccurrence(view.state.doc, 0, quote);
-  if (range === null) return { refused: "gone" };
+  const range = remarkRange(view.state, markId, quote, placement);
+  if (range === null) {
+    // Only the document can say which refusal this is, and the margin needs to know: telling the
+    // reader the words were changed or deleted while they are plainly on the page is false.
+    const onThePage = readingsInDoc(view.state.doc, quote, 1).length > 0;
+    return { refused: onThePage ? "unplaceable" : "gone" };
+  }
   // What the mark ends up over, which is the quote itself except under a mark the document still
   // holds over text that has changed since: the record is re-addressed to the words it marks.
   const marked = view.state.doc.textBetween(range.from, range.to, "\n", "\n");
+  // Read while the positions are still the ones `range` is in, and before the old mark goes.
+  const placed = placementOf(view.state.doc, range, marked);
   const created = createRecordMark(view, kind, range, marked, by);
   if (created === null) return { refused: "unmarkable" };
   removeRecordMark(view, markId);
-  return { markId: created, quote: marked };
+  return { markId: created, placement: placed, quote: marked };
 }

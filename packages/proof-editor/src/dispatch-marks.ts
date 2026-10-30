@@ -33,8 +33,28 @@ import type { MarkRange } from 'proof-sdk-upstream/src/editor/plugins/marks';
 export type SelectionBarActionKind = 'comment' | 'ask' | 'suggest';
 export type PopoverActionKind = 'reply' | 'resolve' | 'unresolve' | 'accept' | 'reject' | 'delete';
 
+/** Which reading of a quote a record mark was written over, in a form that outlives this editor:
+ *  the id of the textblock that held the mark, and the index of that reading of the quote inside
+ *  that block's text, counted as the editor reads the block. A remote change arrives as a rebuilt
+ *  document and a reconnect rebuilds the editor, so nothing the editor keeps survives either; a
+ *  host that keeps this beside the quote can have the mark written again over the reading its
+ *  reader selected rather than the first one those words read in (`remarkRecordMark`). */
+export interface RecordMarkPlacement {
+  readonly blockId: string;
+  readonly reading: number;
+}
+
 export type MarkAction =
-  | { kind: SelectionBarActionKind; markId: string; quote: string; from: number; to: number }
+  | {
+      kind: SelectionBarActionKind;
+      markId: string;
+      quote: string;
+      from: number;
+      to: number;
+      /** Null where there is none to keep: a textblock with no id, or a quote whose reading in
+       *  that block cannot be counted. */
+      placement: RecordMarkPlacement | null;
+    }
   | { kind: 'reply'; markId: string; text: string }
   | { kind: Exclude<PopoverActionKind, 'reply'>; markId: string };
 

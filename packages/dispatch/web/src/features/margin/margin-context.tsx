@@ -13,7 +13,13 @@ import { isAnchorMissing } from "../../api/client";
 import type { AnchorRefusal, ComposerAnchor, ComposerKind } from "../conversation/composer-model";
 import type { HeldSend } from "../conversation/held-sends";
 import { heldSends } from "../conversation/held-sends";
-import type { RemarkOutcome, RetypeOutcome, RetypeRefusal } from "../doc/editor";
+import type {
+  RecordMarkPlacement,
+  RemarkOutcome,
+  RemarkRefusal,
+  RetypeOutcome,
+  RetypeRefusal,
+} from "../doc/editor";
 import type { MarkPlacement } from "./useMarginItems";
 
 export interface DocumentBridge {
@@ -27,9 +33,15 @@ export interface DocumentBridge {
   /** Writes the provisional mark `markId` again, as one of `kind` under a fresh id, over `quote` -
    *  the words the refused send is anchored to - wherever they read now, so a send the server
    *  refused for a mark it cannot see has something to anchor to. The words travel with the
-   *  request because the editor may have kept nothing: another writer's change reaches it as a
-   *  rebuilt document, and a reconnect rebuilds the editor. */
-  remarkMark(markId: string, kind: ComposerKind, quote: string): RemarkOutcome;
+   *  request, and `placement` - which reading of them in which block the editor wrote the mark
+   *  over - with them, because the editor may have kept nothing: another writer's change reaches
+   *  it as a rebuilt document, and a reconnect rebuilds the editor. */
+  remarkMark(
+    markId: string,
+    kind: ComposerKind,
+    quote: string,
+    placement: RecordMarkPlacement | null
+  ): RemarkOutcome;
   /** Replaces the provisional mark `markId` with one of `kind` over the same text. */
   retypeMark(markId: string, kind: ComposerKind): RetypeOutcome;
   setActiveBlocks(blockIds: readonly string[]): void;
@@ -47,14 +59,26 @@ const KIND_SWITCH_REFUSALS: Record<RetypeRefusal["refused"], string> = {
     "A suggestion needs whole words inside one table cell. Comment or ask about this selection instead, or close this composer and select again.",
 };
 
+/** The tail every re-anchor refusal ends on: whichever of them the reader meets, a fresh
+ *  selection is the way out of it, and the draft is waiting where they left it. */
+const DRAFT_KEPT = "Your draft is kept — select the text again to attach it.";
+
 /** What the composer says in place of the server's `ANCHOR_MISSING` words when the margin could
- *  not write the mark again: the words the send is anchored to read nowhere in the document, or
- *  they read in more than one place and nothing the editor kept says which one the reader
- *  selected - either way only a fresh selection can give the draft an anchor, which is what this
- *  says and the only thing it says. The server's own message is unchanged - agents' clients read
- *  it - and this one is the reader's. */
-const REANCHOR_REFUSAL =
-  "The text you selected was changed or deleted, so this comment has nothing to attach to. Your draft is kept — select the text again to attach it.";
+ *  not write the mark again: what became of the words the send is anchored to, about the thing
+ *  the reader is writing. A `ComposerKind` reads as its own word - comment, ask, suggestion -
+ *  and this is the one place that puts it in a sentence. The three cases are three different
+ *  things to be told: the words read nowhere in the document; they are still there but not where
+ *  the reader selected them, so no reading of them can be taken for theirs; or they cannot carry
+ *  a suggestion's mark at all. The server's own message is unchanged - agents' clients read it -
+ *  and this one is the reader's. */
+export const REANCHOR_REFUSALS: Record<RemarkRefusal["refused"], (kind: ComposerKind) => string> = {
+  gone: (kind) =>
+    `The text you selected was changed or deleted, so this ${kind} has nothing to attach to. ${DRAFT_KEPT}`,
+  unmarkable: (kind) =>
+    `A suggestion needs whole words inside one table cell, so this ${kind} cannot be marked over the text you selected. ${DRAFT_KEPT}`,
+  unplaceable: (kind) =>
+    `The text you selected is still in the document, but no longer where you selected it, so this ${kind} cannot be attached on its own. ${DRAFT_KEPT}`,
+};
 
 /** How long the margin waits for the mark it wrote again to reach the server before it sends the
  *  draft again. The document's pending count holds every tab's rows, and this page cannot make
@@ -238,24 +262,39 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       const anchor = held.request.anchor;
       if (anchor === undefined) return;
       const bridge = bridgeRef.current;
+      const kind = held.request.kind;
       // The compose's own document is not on screen, so there is no mark to write again: as far
       // as this page can tell, the words the reader selected are gone.
       if (bridge === undefined || bridge.artifactId !== anchor.artifact) {
-        setAnchorRefusal({ markId: anchor.mark_id, text: REANCHOR_REFUSAL });
+        setAnchorRefusal({ markId: anchor.mark_id, text: REANCHOR_REFUSALS.gone(kind) });
         return;
       }
-      // The quote the refused send itself carries: the words the composer was opened over, which
-      // outlive both the mark and the editor state that wrote it.
-      const outcome = bridge.remarkMark(anchor.mark_id, held.request.kind, anchor.quote);
+      // What the refused send itself carries: the words the composer was opened over, and which
+      // reading of them in which block the editor wrote its mark over. Both outlive the mark and
+      // the editor state that wrote it, which is why the composer is the one that keeps them.
+      const outcome = bridge.remarkMark(
+        anchor.mark_id,
+        kind,
+        anchor.quote,
+        anchor.placement ?? null
+      );
       if ("refused" in outcome) {
-        setAnchorRefusal({ markId: anchor.mark_id, text: REANCHOR_REFUSAL });
+        setAnchorRefusal({
+          markId: anchor.mark_id,
+          text: REANCHOR_REFUSALS[outcome.refused](kind),
+        });
         return;
       }
       remarked.current.add(outcome.markId);
       setAnchorRefusal(undefined);
       store.readdress(held.mutationKey, {
         ...held.request,
-        anchor: { ...anchor, mark_id: outcome.markId, quote: outcome.quote },
+        anchor: {
+          ...anchor,
+          mark_id: outcome.markId,
+          placement: outcome.placement ?? undefined,
+          quote: outcome.quote,
+        },
       });
       await bridge.whenSent(REANCHOR_SEND_WAIT_MS);
       store.retry(held.mutationKey);
@@ -362,7 +401,12 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       if ("refused" in outcome) {
         return KIND_SWITCH_REFUSALS[outcome.refused];
       }
-      const retyped = { ...anchor, mark_id: outcome.markId, quote: outcome.quote };
+      const retyped = {
+        ...anchor,
+        mark_id: outcome.markId,
+        placement: outcome.placement ?? undefined,
+        quote: outcome.quote,
+      };
       if (open !== undefined) {
         publishCompose({ ...open, request: { ...open.request, anchor: retyped, kind } });
       } else if (held !== undefined) {

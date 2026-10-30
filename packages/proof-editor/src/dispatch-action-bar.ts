@@ -35,6 +35,7 @@ import { comment, suggestReplace, deleteMark } from 'proof-sdk-upstream/src/edit
 import type { MarkRange } from 'proof-sdk-upstream/src/editor/plugins/marks';
 import { createAskMark, removeAskMark } from './dispatch-marks';
 import type { MarkAction, SelectionBarActionKind } from './dispatch-marks';
+import { placementOf } from './record-mark-retype';
 
 const actionBarKey = new PluginKey('dispatch-action-bar');
 const MARGIN = 12;
@@ -310,7 +311,16 @@ class ActionBarController {
     const onMarkAction = this.options.onMarkAction;
     if (!onMarkAction) return;
 
-    const action: MarkAction = { kind, markId, quote, from: range.from, to: range.to };
+    // Which reading of the quote this is, for the host to keep: the mark it names can be swept
+    // away or lost with the editor, and only the host's copy outlives that (`remarkRecordMark`).
+    const action: MarkAction = {
+      kind,
+      markId,
+      quote,
+      from: range.from,
+      to: range.to,
+      placement: placementOf(this.view.state.doc, range, quote),
+    };
     try {
       await onMarkAction(action);
     } catch (error) {

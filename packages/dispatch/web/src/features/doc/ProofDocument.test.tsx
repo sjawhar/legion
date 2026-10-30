@@ -550,7 +550,14 @@ test("a selection-bar action opens the margin composer for the mark and settles 
     let comment: Promise<void> | undefined;
     act(() => {
       comment = Promise.resolve(
-        onMarkAction({ from: 11, kind: "comment", markId: "m-9", quote: "brown", to: 16 })
+        onMarkAction({
+          from: 11,
+          kind: "comment",
+          markId: "m-9",
+          placement: { blockId: "b-1", reading: 0 },
+          quote: "brown",
+          to: 16,
+        })
       );
       void comment.catch(() => {});
     });
@@ -558,7 +565,12 @@ test("a selection-bar action opens the margin composer for the mark and settles 
       throw new Error("The comment action did not return a promise.");
     }
     expect(margin.current?.pendingCompose).toMatchObject({
-      anchor: { artifact: artifact.id, mark_id: "m-9", quote: "brown" },
+      anchor: {
+        artifact: artifact.id,
+        mark_id: "m-9",
+        placement: { blockId: "b-1", reading: 0 },
+        quote: "brown",
+      },
       kind: "comment",
     });
     act(() => sendOpenCompose());
@@ -569,7 +581,14 @@ test("a selection-bar action opens the margin composer for the mark and settles 
     let suggest: Promise<void> | undefined;
     act(() => {
       suggest = Promise.resolve(
-        onMarkAction({ from: 11, kind: "suggest", markId: "m-10", quote: "brown", to: 16 })
+        onMarkAction({
+          from: 11,
+          kind: "suggest",
+          markId: "m-10",
+          placement: null,
+          quote: "brown",
+          to: 16,
+        })
       );
       void suggest.catch(() => {});
     });
@@ -584,7 +603,14 @@ test("a selection-bar action opens the margin composer for the mark and settles 
     let ask: Promise<void> | undefined;
     act(() => {
       ask = Promise.resolve(
-        onMarkAction({ from: 11, kind: "ask", markId: "m-11", quote: "brown", to: 16 })
+        onMarkAction({
+          from: 11,
+          kind: "ask",
+          markId: "m-11",
+          placement: null,
+          quote: "brown",
+          to: 16,
+        })
       );
       void ask.catch(() => {});
     });
