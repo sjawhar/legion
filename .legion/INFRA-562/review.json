@@ -2,25 +2,25 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-562",
-  "completed": "2026-10-30T09:15:36Z",
-  "round": 9,
-  "scope": "Narrowed by the INFRA-63 architect: the renumbering merge by fingerprint, that main@origin holds no migration sharing a version with this PR's (git ls-tree), and the required checks at the code head; approve if they hold, and do not hold for a migration that lands after the read.",
-  "reviewedHead": "080dcd011d364e2ee2963c265d511f39161d3e94",
-  "codeHead": "05185b3369a9282872ee34baa4f17836db16eab1",
+  "completed": "2026-10-30T11:32:00Z",
+  "round": 10,
+  "scope": "Narrowed by the INFRA-63 architect: the forward merge by fingerprint (accepted diff plus the conflict resolution, with #2478's redeliver change and item 3's retry both kept), migration versions against main, and CI at the code head. Approve when they hold; a later text-only conflict with main does not hold the approval.",
+  "reviewedHead": "0eac5e95ae35880d639053c3c3c2f7e802afcf6c",
+  "codeHead": "51702b24f103",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
   "minor": 0,
   "scopeResults": {
-    "renumberingMerge": "Holds. I compared the PR's patch over 3c2691a7 -> 79a62abe with its patch over 71e31498 -> 05185b33. With migration numbers masked, the only remaining difference is README's 'It follows `0144_messages_item_blocks_trigger`' becoming 'It follows `0147_message_deliveries_session_created`', which is the correct new predecessor. The migrations are 0148_message_delivery_urgency, 0149_route_roster, 0150_github_rate_limits and 0151_delivery_run_warnings. AGENTS.md's route_roster reference reads 0149. go vet is clean; TestMigrationSetIsNumberedOneToN passes at 05185b33.",
-    "noSharedVersion": "Holds at main@origin 202d0168 (fetched 09:10Z): git ls-tree lists main's highest migration as 0147, and none of 0148-0151 is on main. The branch holds no duplicate version."
+    "forwardMerge": "Holds. I compared the PR's patch over 71e31498 -> 05185b33 with its patch over 96a7e5ea -> 51702b24, file by file. Only redeliver/sweep.go, sweep_test.go, cmd/dispatch/AGENTS.md and README.md differ, all from resolving against #2478's schedule (every failed delivery asked again on a backoff until OK or 72 h, Waiting/Expired). Item 3 survives: a record carries InFlight and ClaimedAt (sweep.go:238-244); a claim younger than claimDeadline (3 x RequestTimeout) reads ClaimedElsewhere, and an older one is voided and the delivery decided and asked again (sweep.go:522-531). The listing-independent read brings back an open in-flight record too (sweep.go:~457-487). Tests: sweep_test.go's TestADeliveryWhoseSweeperDiedBeforeItsRequestIsRequestedPastTheClaimDeadline, TestALiveClaimantsDeliveryIsClaimedElsewhereInsideTheDeadline and TestADryRunReportsAClaimByItsDeadline; tester round 14 ran the two-process TestAWebhookRedeliveryWhoseProcessDiedAfterItsClaimIsRequestedAgain (PASS, GitHub got exactly one request, from the second process). go vet (with and without -tags multiprocess) and gofmt are clean.",
+    "migrationVersions": "Hold at main@origin 3d5548da (git ls-tree, 10:29Z): main's highest is 0147; this PR's 0148-0151 are not on main, and TestMigrationSetIsNumberedOneToN passes at the head."
   },
-  "ci": "Does not hold. No workflow ran at the code head 05185b33 (GET actions/runs?head_sha=05185b33 returns none): the push's head was the implementer's handoff commit carrying skip-checks: true. The newest pull_request CI head is still my 79a62abe, all green there, but the compare from it to this head is 159 files including main's merge, so it does not stand for this code. GitHub also reports the PR CONFLICTING again: main moved to 202d0168 (#2508 at 08:36Z, #2478 at 08:59Z). Both touch files this PR changes: packages/envoy/AGENTS.md, cmd/dispatch/{AGENTS.md,README.md,main.go}, api/routes_table.go, githubapp/{client.go,deliveries.go}, redeliver/{sweep.go,sweep_test.go} and docs/site/.../dispatch/envoy.md. Without a merge ref no pull_request CI can run.",
+  "ci": "Does not hold. The CI workflow run 41037662914 at d77a4ae0 (code 51702b24 plus implement.json): the required 'test' job FAILED in 'Test the Go daemon': packages/daemon/internal/intake TestADeliveryNATSRefusedIsRedeliveredByTheSweepAndApplied, redelivered_test.go:153, 'envoy-dispatch redeliver-webhooks --since 1h: exit status 2 ... redeliver-webhooks: DATABASE_URL is required'. lint success, typecheck skipped, pr-title success. envoy-go and dispatch-multiprocess still queued at 11:32Z.",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "PR #2387 (CI and merge state)",
-      "description": "The required checks have not run on this code, and they cannot run while the PR conflicts with main. Merge main forward once more (keep both sides; #2508 and #2478 touch githubapp, redeliver and the dispatch docs this PR changes), renumber again only if main has passed 0147 by then, and push with no skip-checks trailer on the pushed head, so the code head gets its own lint, typecheck, test, pr-title and envoy-go runs. The next round reads that by fingerprint."
+      "file": "packages/daemon/internal/intake/redelivered_test.go:140",
+      "description": "main's #2478 (202d0168) added this daemon test. It runs the real `envoy-dispatch redeliver-webhooks --since 1h` with only HOME, XDG_CONFIG_HOME, NATS_URLS, the App credentials and DISPATCH_GITHUB_API_BASE. This PR makes that command refuse without DATABASE_URL (its Breaking change, census item 1), so the merged tree fails the required `test` job. It is a consumer the census could not list, since it landed after. Give the test a database this release has migrated and pass DATABASE_URL (redeliver-webhooks migrates nothing). Add the hit to the census's item 1 with its disposition, and show `test` green at the new code head."
     }
   ]
 }
