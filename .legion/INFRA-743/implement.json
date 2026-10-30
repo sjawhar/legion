@@ -2,57 +2,46 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-743",
-  "completed": "2026-10-30T06:05:00Z",
-  "round": 6,
-  "summary": "Review round 3: main is merged forward (the pull request was CONFLICTING again, resolved in packages/envoy/AGENTS.md by keeping both bullets), the duplicated test fixture is folded into setupUnboundDurableFixture, and the five minor points are fixed. No behaviour changed: every 503 check still runs before the stall, which is still /healthz's last decision.",
+  "completed": "2026-10-30T07:35:00Z",
+  "round": 7,
+  "summary": "The forward merge only: GitHub reported #2504 CONFLICTING with main again, which would have refused READY, so main at 96a7e5ea is merged in with two conflicts resolved (internal/bus/recovery.go's onReconnect and packages/envoy/infra/README.md's alarm paragraph, each keeping both sides). No behaviour of this pull request changed; the acceptance evidence at 999ce53f stands.",
   "proof": [
     {
-      "criterion": "The fixture fold and the five minor fixes change no behaviour: the tests that cover the recreated durable, the stalled rebuild and the self-health rebuild all still hold, on one shared fixture rather than two copies.",
-      "surface": "The repository's Go test harness for cmd/listener, over a real embedded NATS with a real durable and the real interest and session caches - the five tests the fold touches are TestHealthzReportsARecreatedDurableUnhealthy, TestTheSelfHealthMonitorRebindsARecreatedDurable, TestABoundDurableNeverFailsItsProbe, TestHealthzAnswersAHookStallPastTheRepairGrace and TestHealthzReportsARecreatedDurableThroughAHookStall.",
-      "command": "cd packages/envoy && go build ./... && go vet ./internal/bus/ ./internal/kvwatch/ ./cmd/listener/ && go test -p 2 -parallel 4 ./cmd/listener/ -count=1 -timeout 40m -skip '<the four Docker-only TestDispatch tests>' && go test -p 2 -parallel 4 ./internal/bus/ ./internal/kvwatch/ -count=1",
-      "observed": "build and vet exit 0; ok cmd/listener 437.383s, ok internal/bus 297.295s, ok internal/kvwatch 62.562s. The five named tests are in that run (none is in the skip set).",
-      "headSha": "999ce53ff0295cf6e217a42acca310001904f113",
-      "negativeControl": "The ordering lock the fold must not weaken is still the control: TestHealthzReportsARecreatedDurableThroughAHookStall fails (200 degraded where 503 is wanted) if the stall check is moved back above the durable checks, as the deep review showed in a scratch copy at the previous head."
+      "criterion": "The merge keeps both sides' behaviour where they meet in code: this branch's markHooksDueLocked still counts the connection event the reconnect hooks must cover, and main's clearPublishDenials still runs on the same reconnect.",
+      "surface": "The repository's Go test harness for the packages the conflict touches, over a real embedded NATS: internal/bus (the reconnect, recovery and hook-stall tests), internal/kvwatch and cmd/listener.",
+      "command": "cd packages/envoy && go build ./... && go vet ./internal/bus/ ./internal/kvwatch/ ./cmd/listener/ && go test -p 2 -parallel 4 ./internal/bus/ ./internal/kvwatch/ -count=1 -timeout 30m && go test -p 2 -parallel 4 ./cmd/listener/ -count=1 -timeout 40m -skip '<the four Docker-only TestDispatch tests>'",
+      "observed": "build and vet exit 0; ok internal/bus 309.937s, ok internal/kvwatch 62.509s, ok cmd/listener 435.807s. internal/bus's suite is the one that covers both halves of the resolved line: the hook-stall tests read what markHooksDueLocked recorded, and main's publish-denial tests exercise clearPublishDenials on the same reconnect.",
+      "headSha": "4f22b8aa51aad3bd9cfc460e8012aa55f650141f",
+      "negativeControl": "The unresolved merge is the control: with jj's conflict markers in place the tree does not compile (go build fails in internal/bus/recovery.go), so the build above passes only because both statements were kept; dropping either side's line is a compile error or a silently lost call that the bus suite's hook-stall and publish-denial tests catch."
     },
     {
-      "criterion": "The behaviour this issue delivers is unchanged at the merged head: a stalled KV watch rebuild answers /healthz 200 degraded naming the rebuild, a rebuild the retry repairs is silent, and the caches follow their buckets again when the fault lifts.",
-      "surface": "The built envoy-listener binary against a real nats-server v2.10.29 with JetStream, restarted under a configuration denying only $JS.API.CONSUMER.CREATE.KV_envoy_interests/.roles/.sessions; /healthz and GET /v1/interests/ over HTTP.",
-      "command": "cd packages/envoy && go build -o $TMPDIR/smoke/envoy-listener ./cmd/listener && bash $TMPDIR/smoke/smoke.sh (the script was rewritten after the pod recreation wiped $TMPDIR; its two pitfalls are in its header comment)",
-      "observed": "200 healthy at start; 200 healthy after a plain NATS restart, with the interest written after it served and 0 ERROR lines; with the deny in place 200 healthy inside the grace, then 200 {\"error\":\"KV watch rebuild unavailable: rewatch interest cache: watch interest registry KV bucket: context deadline exceeded\\nrewatch session cache: watch session registry KV bucket: context deadline exceeded (no rebuild has succeeded for 1m0s)\",\"status\":\"degraded\"}; 200 healthy again once the deny was lifted, with a second interest served.",
-      "headSha": "999ce53ff0295cf6e217a42acca310001904f113",
-      "negativeControl": "At this branch's base 88840d35, as Go probes in a throwaway copy of the tree: TestBaseHealthzAnswersAHookStallPastAMinute fails ('/healthz 75 s into a rebuild that never succeeded = 200 map[... status:healthy]') and TestBaseRewatchRetryAfterAReconnectLogsNoError fails on the ERROR the base logs for a rewatch the retry repairs."
+      "criterion": "The merged alarm paragraph still renders as the AWS reference expects, so this change's reconnect-hooks-stalled alarm and main's new publish-failure wording coexist.",
+      "surface": "The separate packages/envoy/infra Go module, whose tests render a WebhookListener's children and compare them with the reference list.",
+      "command": "cd packages/envoy/infra && go build ./... && go vet ./... && go test -p 2 -parallel 4 ./aws/... ./render/... -count=1",
+      "observed": "build and vet exit 0; ok infra/aws 4.852s, ok infra/aws/rendering 0.010s, ok infra/render 0.138s.",
+      "headSha": "4f22b8aa51aad3bd9cfc460e8012aa55f650141f",
+      "negativeControl": "The reference list in infra/aws/webhooklistener_test.go is the control: it is one of the eight files main also changed in this window, and a resolution that dropped this change's signal from the production list, or main's from the reference, fails that comparison."
     },
     {
-      "criterion": "Acceptance 3 and 4a at the head that merges: 200 of 200 isolated runs of TestListenerFollowsTheInterestRegistryAcrossNATSRestarts, and every suite this change can reach locally green, including the separate infra module.",
-      "surface": "The listener's own harness against a real NATS, and the repository's Go test harness for cmd/listener, internal/bus, internal/kvwatch, cmd/dispatch and packages/envoy/infra.",
-      "command": "cd packages/envoy/cmd/listener && go test -c -o \"$TMPDIR/listener-r6.test\" . && 200 serial runs of it with -test.run '^TestListenerFollowsTheInterestRegistryAcrossNATSRestarts$' -test.count=1; and go test -p 2 -parallel 4 ./cmd/dispatch/ -run 'Settings|Boot|Replica|Stream' -count=1; and cd packages/envoy/infra && go build ./... && go vet ./... && go vet -tags natslive ./core/ && go test -p 2 -parallel 4 ./aws/... ./render/... -count=1",
-      "observed": "200 PASS, 0 FAIL at 999ce53f. ok cmd/dispatch 35.306s; infra build, vet and natslive vet exit 0, ok infra/aws 4.716s, ok infra/aws/rendering 0.013s, ok infra/render 0.158s, and jj status was clean afterwards, so that vet rewrote no go.work.sum.",
-      "headSha": "999ce53ff0295cf6e217a42acca310001904f113",
-      "negativeControl": "The same loop with 49 runs at the base 88840d35: 48 PASS, 1 FAIL, the failure being this issue's symptom (ERROR envoy nats reconnect hook failed ... rewatch session cache: open session registry KV bucket: context deadline exceeded)."
-    },
-    {
-      "criterion": "The forward merge resolves the conflict and loses nothing of either side, and the round is classified as the architect's rule asks.",
-      "surface": "The branch's own diff against its base, by the unchanged-diff fingerprint, and the resolved file itself.",
-      "command": "jj new legion/INFRA-743 main@origin; resolve; then jj diff --from \"fork_point(main@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum",
-      "observed": "One conflict, packages/envoy/AGENTS.md: this branch's stream-reconcile bullet kept as it was, main's new bullet about two programs updating one stream kept beside it, no marker left. Fingerprint 47ab5624... at 704ce8d1 to e619bffd... at 999ce53f, changed - a full round, which is also what main's touching AGENTS.md required - so the suites, the smoke and the 200-run loop were all re-run above.",
-      "headSha": "999ce53ff0295cf6e217a42acca310001904f113",
-      "negativeControl": "The previous merge is the contrast: at 0ae1b454 the fingerprint did not move and nothing conflicted, yet main had changed three files of this pull request's diff, which is why that round was run in full too."
+      "criterion": "The round is classified as the architect's rule asks, so the right checks are read at this head.",
+      "surface": "The branch's own diff against its base, and the file-name intersection of main's merged window with this pull request's files.",
+      "command": "jj diff --from \"fork_point(main@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, at f140c718 and again at 4f22b8aa; and comm -12 of jj diff --from 3c2691a7 --to 96a7e5ea --name-only with the pull request's own file list",
+      "observed": "Fingerprint f85181b8... to 8070cbb3..., changed. Main's window is 341 files, the pull request 24, and the intersection is eight: docs/site/src/content/docs/dispatch/envoy.md, packages/envoy/AGENTS.md, packages/envoy/docs/architecture.md, packages/envoy/infra/README.md, packages/envoy/infra/aws/rendering/metricfilters.go, packages/envoy/infra/aws/webhooklistener_test.go, packages/envoy/internal/bus/nats.go, packages/envoy/internal/bus/recovery.go. Both tests say a full round, so the listener lanes are the ones to read at this head and the suites above were all re-run.",
+      "headSha": "4f22b8aa51aad3bd9cfc460e8012aa55f650141f",
+      "negativeControl": "The merge at 0ae1b454 is the contrast: its fingerprint did not move, yet main had changed three of this pull request's files, which is the case that made the architect add the intersection test; here both tests agree."
     }
   ],
   "filesChanged": [
-    "packages/envoy/cmd/listener/durable_unbound_test.go: setupUnboundDurableFixture takes the client and returns only get(); its three callers pass setupTestNATS(t)'s client; the cache-ready budget is 10 s and the caches field is listenerCaches(registry, sessions, nil).",
-    "packages/envoy/cmd/listener/healthz_hook_stall_test.go: hookStallFixture is the clocked client plus that call; failReconnectHooks carries the pasted hook-failure steps and their comment; the expected durable text is built from errDurableUnbound.Error(); six imports dropped.",
-    "packages/envoy/cmd/listener/main.go: the GKE citation is (infra/gcp/dispatch_kube.go, readyProbe), and the healthy response map is built below every check, just above the 200 answer.",
-    "packages/envoy/internal/bus/nats.go: HookStall's doc states the rule - the error is nil when no run has failed since the last run that succeeded - lists the in-flight case, and names reportHookFailure as a second reader.",
-    "packages/envoy/AGENTS.md: the merge's one conflict, resolved by keeping both bullets."
+    "packages/envoy/internal/bus/recovery.go: the conflict in onReconnect resolved - this branch's c.markHooksDueLocked() where c.connEvents++ was, then main's comment and c.clearPublishDenials() unchanged.",
+    "packages/envoy/infra/README.md: the conflict in the listener's alarm paragraph resolved - this branch's <N>-reconnect-hooks-stalled entry kept in the list, main's new sentences about <N>-publish-failure and <N>-webhook-refused kept after it, main's closing sentence kept.",
+    "Nothing else: this round is the forward merge only."
   ],
   "trickyParts": [
-    "The two fixtures differed in two details the fold had to settle, both named in the shared fixture's doc: the cache-ready budget is now 10 s (a failure path only), and the caches field uses listenerCaches rather than an inline literal of the same value.",
-    "The pod was recreated between rounds, so $TMPDIR lost the smoke script and the nats-server binary; both were rebuilt from the recipe in this branch's earlier handoffs, and the script's header now carries the two pitfalls (a NATS permissions block must be one key per line, and KV_* is no NATS wildcard, so each KV stream is denied by its full name)."
+    "The two sides met inside one statement list in onReconnect, so the resolution had to keep this branch's replacement of c.connEvents++ and main's two added lines in main's order; a resolution that took either side whole loses a call."
   ],
   "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": [
-    "envoy-go was still queued at 999ce53f when this round completed, so its verdict is the daemon's to read. The failure at 0ae1b454 was TestAnAskBlockWhoseIDIsPastTheBoundSettles in internal/dispatch/docs, a package this pull request neither changes nor depends on, and main passed it at the same base (run 40976699333); if it fails again at this head, the architect asked for one re-run of the job and both results reported."
+    "main changed eight of this pull request's 24 files in one window, five of them documentation; the pull request's own fingerprint moved only because two of them conflicted. That is why the round is full rather than a confirmation."
   ]
 }
