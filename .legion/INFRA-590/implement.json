@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-590",
-  "completed": "2026-10-29T23:10:00Z",
+  "completed": "2026-10-30T01:20:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2395",
-  "head": "bb6c22f975342594a32f777ac87c66b8059aa32d",
-  "round": "14 (acceptance held at 5d0cf73b but GitHub reported CONFLICTING): forward merge of main dfd128f14 (4f2995f2) with migrations renumbered to 0142_duty_holds/0143_outbox_claim above main's 0141_drop_broadcast_idempotency_keys, connections (89) and ci.yaml filters unchanged; then TestCoreRoleDeliverySkipsAHolderThatStoppedHeartbeating (bb6c22f9), the gap the tester found: the role lane delivers nothing to a holder whose session stopped heartbeating. Code pushed first, handoff second. Diff-check comment 6509670093.",
+  "head": "74bcfc093f230af602bf983b3a57774cf1b46e1b",
+  "round": "15 (acceptance held at e8f61f55 but GitHub reported CONFLICTING): forward merge of main 10fc3b77a (74bcfc09). Migrations renumbered to 0145_duty_holds/0146_outbox_claim above main's #2463 0142-0144; one ci.yaml filter line (internal/dispatch/itemblocks/* for envoy_go_race_docs) that main's filter check names; connections 89 unchanged; the README text conflict keeps both sides. A full round under the architect's rule (main changed files the PR changes: cmd/dispatch/main_test.go, infra/gcp/dispatch.go, store/store_test.go). Code pushed first, handoff second. Diff-check comment 6512805615.",
   "proof": [
     {
       "criterion": "Exactly one process publishes at a time through a lease on the outbox's own database connection; /healthz carries boolean outbox_publisher",
@@ -158,6 +158,14 @@
       "observed": "The stale-holder subtest: nothing reaches the holder's subject, the delivery exception is delivery_failed, the claim is released; the fresh-holder subtest is delivered to and keeps its claim. listener ok 491.0 s; store, outbox, cmd/dispatch ok; bus ok 332.2 s; kvwatch, session, roles ok; multiprocess ok 910.8 s at the merge 4f2995f2.",
       "headSha": "bb6c22f975342594a32f777ac87c66b8059aa32d",
       "negativeControl": "laneHolderFresh returning true (and roles.Registered(entry)) fails the test: 'the role lane delivered event ... to ses_role_heartbeat on notifications.agent.ses_role_heartbeat, whose session entry last heartbeated 6m0s ago - longer than session.ClaimStaleAfter (5m0s)'; the fresh subtest passes under both mutants."
+    },
+    {
+      "criterion": "The head merged forward with main 10fc3b77a keeps the reviewed outbox behaviour, with its migrations above main's and the connection count unchanged.",
+      "surface": "store, outbox, duty, deliveryaudit and cmd/dispatch packages on pod Postgres 17 (fresh UTF8 database) and the repository multiprocess harness (two real envoy-dispatch processes, one Postgres, one NATS)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -p 2 -parallel 4 -count=1 ./internal/dispatch/store/ ./internal/dispatch/outbox/ ./internal/dispatch/duty/ ./internal/dispatch/deliveryaudit/ && go test -p 2 -parallel 4 -count=1 ./cmd/dispatch/ && go test -p 2 -parallel 4 -count=1 -tags multiprocess -timeout 25m ./cmd/dispatch",
+      "observed": "store ok 282.0 s, outbox ok 267.5 s, duty ok 24.1 s, deliveryaudit ok 3.2 s, cmd/dispatch ok 290.3 s, multiprocess ok 916.1 s with the pod's memory peaking at 3.5 GB; go vet clean in packages/envoy and packages/envoy/infra; main's CI filter check 0 uncovered; TestDispatchConnectionsPerPodIsTheServers ok at 89.",
+      "headSha": "74bcfc093f230af602bf983b3a57774cf1b46e1b",
+      "negativeControl": "Before the renumbering, main's 0142_item_blocks and 0143_comments_item_blocks_trigger share versions 142 and 143 with this branch's migrations; before the filter line, main's CI filter check reported 6 itemblocks files uncovered by envoy_go_race_docs."
     }
   ],
   "filesChanged": [
@@ -178,7 +186,8 @@
     "Round 11 merges: cmd/dispatch/{main.go,main_test.go,shutdown.go,shutdown_test.go,README.md}, internal/bus/{async.go,publish_not_stored_test.go,stream_replicas_test.go}, migrations renamed to 0141_duty_holds/0142_outbox_claim and references, infra/gcp/dispatch.go (89), running-dispatch.md, .github/workflows/{ci.yaml,docs-pages.yaml}, the changelog fragment",
     "Round 12: packages/envoy/internal/bus/async.go, new packages/envoy/internal/bus/request_not_stored_test.go",
     "Round 13 merge: packages/envoy/AGENTS.md, cmd/listener/{api.go,api_test.go,confirmed.go,delivery.go,publish_refusal_answers_test.go,role_holder.go}, internal/bus/{async.go,nats.go,request_core_test.go}",
-    "Round 14: merge (packages/envoy/AGENTS.md, cmd/dispatch/README.md, migrations renamed to 0142_duty_holds/0143_outbox_claim and references); new cmd/listener/delivery_role_stale_holder_test.go"
+    "Round 14: merge (packages/envoy/AGENTS.md, cmd/dispatch/README.md, migrations renamed to 0142_duty_holds/0143_outbox_claim and references); new cmd/listener/delivery_role_stale_holder_test.go",
+    "Round 15 merge: cmd/dispatch/README.md, migrations renamed to 0145_duty_holds/0146_outbox_claim and references, .github/workflows/ci.yaml (one filter line)"
   ],
   "trickyParts": [
     "Blocked events take their blocker's next_attempt_at (no attempt), so they are not re-read on every wake while the blocker waits out a back-off; an owner whose first 100 events all wait has its later due event deferred to the earliest of them (deferPastWindow).",
