@@ -2,36 +2,46 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-750",
-  "completed": "2026-10-30T10:44:30Z",
-  "round": 2,
-  "reviewedCodeHead": "73196dfca8cd",
-  "previousReview": "5709787545, REQUEST_CHANGES at d6ec45a43b79 (code d5dbcf927aa7), two minors",
-  "decision": "approved",
+  "completed": "2026-10-30T12:04:00Z",
+  "round": 3,
+  "reviewedCodeHead": "3de30a206f8e",
+  "previousReview": "5711144669, APPROVE at 3b7030c01a68 (code 73196dfca8cd)",
+  "forwardMerge": {
+    "merge": "3de30a206f8e brings main 88818a3b9b14 into the branch",
+    "fingerprintBefore": "47c0c5cf22cfd099e0ba99c934efcfdfe59118461d1ec5e8f7b6942ca9ad312f at 3b7030c01a68",
+    "fingerprintAfter": "2210db3128b1bcee1b8f4aa8e8b891486c1ecdfacbff948536802197c5a14d9f at b5e0b681d0c2",
+    "verdict": "changed, so a new round: the PR's own lines differ only in packages/envoy/docs/architecture.md's outcome list, where the merge joined this PR's stream_full and main's publish_denied correctly (architecture.md:95-96, :163-166, matching cmd/listener/request_record.go's constants)"
+  },
+  "decision": "changes_requested",
   "critical": 0,
   "important": 0,
-  "minor": 0,
-  "keyFindings": [],
-  "threads": [
-    "PRRT_kwDORFy7ds6x5O3- (kvwatch.go:212): fixed in 73196dfc. The line reads `<cache> first watch failed after a rewatch replaced it; the replacement feeds the cache`, the test constant matches, and Start's doc gives the condition as no watcher current. watch returns an error only at kvwatch.go:516 and :528, before the install at :601. Reviewer reply 4421861619 accepts it; the implementer resolved it.",
-    "PRRT_kwDORFy7ds6x5O4E (cut_rewatch_test.go:43-65): fixed in 73196dfc. freezeUntilBothClientsReportTheCut (silent_cut_test.go:51-94) serves both tests, the output reader is still taken before the freeze, and the thaw is a sync.OnceFunc (internal/testnats/nats.go:701-723). Reviewer reply 4421861827 accepts it; the implementer resolved it."
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/webhook/github_test.go:645-659",
+      "description": "Main added TestAGitHubDeliveryAnsweredNotStoredIsRepublishedWithoutItsID with its own copy of the fill loop, line for line what bustest.FillStream does, so on the new base this pull request's bustest docs are false: bustest.go:1-6 says only package bus keeps copies, and bustest.go:150-151 names one caller. Replace the loop with `bustest.FillStream(t, client, 64)` (github_test.go already imports bustest) and name both callers in FillStream's doc. Code, so it goes through the tester."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/AGENTS.md:1441-1442",
+      "description": "Fixed by the reviewer in cb63e006 (prose only): the duplicate-window paragraph named only the outbox window as the send without its id, while the listener's send and publish routes make the same resend in publishJetStream (internal/bus/nats.go:1294). It now names both."
+    }
   ],
-  "notDefects": [
-    "The test name TestAFailedFirstStartLogsItsErrorOnlyWhileItIsTheLiveWatch keeps the phrase the doc dropped; the meaning is right (the first watch is the live one exactly while no replacement is current), so it is left as it is.",
-    "Start's doc says the error is recorded while no watcher is current, and the code skips that after Stop (kvwatch.go:208); the base doc had the same omission and the behaviour is unchanged."
+  "mergeChecks": [
+    "recovery.go on main still sets hookedEvents only after a successful hook run (recovery.go:198-215), and ConnectOwningStream still registers its reconcile inside the constructor (nats.go:414), so HookedConnectionEvents holds.",
+    "workflow.go on main still dials through natsauth.Connect alone (workflow.go:364).",
+    "api.go's writeBusUnavailable checks ErrPublishDenied first, then errors.Is(err, ErrStreamFull), so an ErrNotStored-wrapped full stream still answers stream_full as full_stream_answer_test.go asserts.",
+    "The async.go and publisher.go doc corrections still describe main's code; both resends still exist."
   ],
   "ci": {
-    "requiredChecks": ["lint", "typecheck", "test", "pr-title"],
-    "ciHead": "73196dfca8cd51012fffd0ed1a7d8ec4a38adc0e",
-    "required": "lint, typecheck, test and pr-title completed success (run 41026772876, read 10:43Z)",
-    "alsoGreen": "envoy-go, envoy-go-race, envoy-infra-go, envoy-session-stall, envoy-client, claude-envoy, envoy-e2e-local, envoy-smoke, listener-server-change, docs, pi-legion, envoy-plugin, worker-image build",
-    "notGreen": "pi-envoy failed: card-delivery-omp.test.ts, the same failure main shows at a21100c5 (push run 41016236644); this pull request touches neither packages/pi-envoy nor packages/pi-shared. Reported to the controller, which tracks it as dispatch://INFRA-826 (fix sjawhar/legion#2550). `dispatch` was still in progress. Neither is a required check.",
-    "handoffsOnlySinceCiHead": true
+    "ciHead": "3de30a206f8e",
+    "state": "run 41045708436 still queued at 11:58Z; a request for changes does not wait on it"
   },
   "thermonuclear": {
-    "head": "d75e3dc52a96a357b31a9bd11357cbe5a8fdfb25",
-    "deepReview": "APPROVE, no findings; go vet and gofmt clean on cmd/listener and internal/kvwatch",
-    "codeQuality": "APPROVE, no findings"
+    "head": "b5e0b681d0c29ae363eae222c39e8e51707c7aed",
+    "deepReview": "APPROVE; one minor (the fill-loop copy main added), not a correctness defect; read-only, no builds",
+    "codeQuality": "CHANGES on one low doc finding (AGENTS.md:1439-1442), fixed by the reviewer in cb63e006"
   },
-  "bodyEdits": "The E2E (implementer) opening sentence named the code head d5dbcf927aa7; it now names 73196dfca8cd and the Round 3 section. Body edit only, no commit.",
-  "security": "no sensitive surface in this round's diff; the whole PR's rows stand as round 1 recorded them (natsauth.go:162,195-198; packages/envoy/AGENTS.md:40,1420-1423)."
+  "security": "agent-def: AGENTS.md edits are factual corrections with no instructions to agents (packages/envoy/AGENTS.md:40,1439-1443,2812-2813); no other sensitive surface."
 }
