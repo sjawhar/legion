@@ -2,39 +2,43 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-177",
-  "completed": "2026-10-30T22:13:00Z",
-  "round": 17,
-  "headTested": "4e5e6c5037b6df0f21a2a0337b6b0ec08ff1e57e (code head 20bd9186cb49)",
-  "scope": "Per the architect: review round 13's findings (20bd9186: two e2e-scripts.json rows, two corrected learnings, the superseding note, a reflow of packages/envoy/AGENTS.md). No merge with main. Tested what moved, and the required test job.",
-  "mergeability": "gh pr view 2354 -> MERGEABLE.",
-  "ci": "Read 22:12Z: CI run 41135952773 at 4e5e6c50 (code head 20bd9186's tree plus .legion/) is queued, its changes job queued; 20bd9186 itself has no check run. The required test job has not run, so it has not settled green: read as running, not waited for.",
+  "completed": "2026-10-30T23:09:00Z",
+  "round": 18,
+  "headTested": "1064e2183d3d098d8d980b711875c1f153da84bc (286a15f5's learnings census, ae40b8e1's handoff, and the forward merge 1064e218 with main e018f1d3)",
+  "scope": "Per the architect: 36 learnings corrected in place and 4 superseded (286a15f5), the census in the PR body, and one merge with main (fingerprint unchanged). Checked: no active docs/solutions note still teaches handoff-only heads, the trailer on a handoff push or the verdict carry; corrected notes keep their other rules; no rename; superseded notes name their successor; the required test job.",
+  "fingerprint": "unchanged across the merge: ae40b8e1 and 1064e218 both a9d4f392304a5d1b25f78868efea6361c0bd070b1f4bcc7952518315ff9e7fec (conflicts-and-rewrites.md's command).",
+  "mergeability": "gh pr view 2354 -> MERGEABLE at 1064e218.",
+  "ci": "Read 23:08Z at 1064e218: changes queued; the required test job has not run, so it has not settled green. Read as running, not waited for.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "`bash .github/scripts/select-e2e-proofs.test.sh` -> 97 passed, 0 failed; handoff-records.sh runs as the new row runs it (HANDOFF_RECORDS_EVIDENCE_DIR set) and passes."
+    "how": "Read 286a15f5's diff over docs/solutions: each corrected note puts its handoff clause in the past tense beside what holds now and keeps its other rules (sampled: webhook-rule-across-listener-and-daemon, conflicting-pr-gets-no-pull-request-ci, gh-run-list-commit-…-INFRA-92, a-decision-that-binds-a-later-phase-…, the-private-names-check-…-LEGION-781, the-record-is-not-the-reader-…, proving-a-refusals-absence-…). No file renamed: git diff --name-status -M f4023bcb..1064e218 -- docs/solutions shows only added files, all main's. Every note marked 'status: superseded by sjawhar/legion#2354' names the successor note (10 of 10)."
   },
   "failures": [
     {
-      "criterion": "Review round 13: every docs/solutions learning that teaches the handoff push as today's rule is corrected or superseded (the reviewer's pr2512 and pr2504 findings, and this PR's superseding note, which lists the notes it supersedes or corrects)",
-      "evidence": "docs/solutions/legion/gh-run-list-commit-takes-the-full-sha-and-an-empty-answer-is-not-a-measurement-INFRA-92.md (status: active) still teaches the removed mechanism in the present tense, at lines 26-32: 'A branch whose head is a handoff-only commit — which carries `skip-checks: true` by design and starts no workflow — shows only the checks the pull-request event itself produced, while the code beneath it is being checked at its own commit. … That shape is the designed one: the daemon carries the code head's verdict to the handoff head.' After this PR no phase pushes a handoff commit, no push carries the trailer, and the daemon carries no verdict to any head. The note is neither under the superseding note's `supersedes:` (docs/solutions/legion/handoffs-are-dispatch-records-and-the-notes-that-teach-handoff-commits-are-superseded-pr2354.md) nor among its corrected-in-place notes, and it was not changed in 20bd9186. Found with: grep -rlE 'skip-checks: true|\\.legion/[^ ]*-only commit|push the handoff' docs/solutions, minus the notes the superseding note lists, minus notes already marked superseded; of the five left, three are status: superseded by other changes and one (…-INFRA-149.md, 'the pull-request body is shared state') states the trailer only as past evidence. The INFRA-92 note's other two rules (gh run list --commit takes the full sha; an empty answer is not a measurement) stand, so a correction in place, as for pr2504, fits. No red test: a test of a learning's wording would be a source-text test, which the testing rules forbid."
+      "criterion": "No active docs/solutions note still teaches handoff-only heads, the trailer on a handoff push, or the verdict carry as today's rule",
+      "evidence": "docs/solutions/legion/the-trailer-on-a-pushs-tip-suppresses-the-runs-of-every-code-commit-beneath-it-pr2542.md (status: active, date 2026-10-30) arrived with the forward merge 1064e218 from main (it is on main, added by #2542 after this round's census) and teaches the removed mechanism in the present tense: line 18-19 'a push whose tip is another role's handoff commit starts no run at all'; line 25-26 'A role resuming a round inherits the previous role's trailered handoff commit as `@-`, so the trailer arrives without anybody writing one'; lines 27-30, the cure, 'rewriting only your own commits leaves the other role's trailered handoff as the tip … rewriting that commit rewrites the one the daemon recorded as that role's handoff'; lines 31-33 'A handoff-only head with a trailer, where the code beneath it was checked at its own commit (the designed shape, …INFRA-117.md)'. After this PR no role pushes a handoff commit and nothing carries the trailer, so with this PR merged main holds an active note that tells a resuming role to expect a trailered handoff at @-. It is neither corrected nor listed in docs/solutions/legion/handoffs-are-dispatch-records-and-the-notes-that-teach-handoff-commits-are-superseded-pr2354.md (grep -c 'the-trailer-on-a-pushs-tip' -> 0). Its general rule (GitHub reads the tip's message; read the tip before a code push) stands, so a correction in place fits. Found by: grep -rlE 'skip-checks|\\.legion/[^ ]*-only|handoff-only|handoff commit|push the handoff|handoff push|verdict to the handoff' docs/solutions, dropping notes whose status is superseded, then reading each remaining hit; every other active hit uses the mechanism as dated history or evidence, or (INFRA-825) a skip-checks trailer on scratch-repository heads, which is not a handoff. No red test: a test of a learning's wording would be a source-text test."
     }
   ],
   "failed": 1,
+  "notes": [
+    "docs/solutions/legion/a-branch-whose-every-round-pushes-never-settles-a-required-check-pr2512.md is listed under the superseding note's `supersedes:` (line 20) yet is status: active and corrected in place; the other ten listed notes are superseded. Either move it to the corrected-in-place list or mark it superseded."
+  ],
   "proof": [
     {
-      "criterion": "select-e2e-proofs.test.sh passes with the two new e2e-scripts.json rows, and each row selects as its kind says",
-      "surface": ".github/scripts/select-e2e-proofs.sh, as e2e.yaml's select job runs it (EVENT, REQUESTED, GITHUB_OUTPUT), and its test",
-      "command": "bash .github/scripts/select-e2e-proofs.test.sh; EVENT=workflow_dispatch REQUESTED=handoff-records.sh …; EVENT=workflow_dispatch REQUESTED=handoff-cutover-github.sh …; EVENT=schedule REQUESTED= …",
-      "observed": "97 passed, 0 failed. handoff-records.sh is emitted as one proof with go_version_file packages/daemon/go.mod, bun true, jj true, evidence_variable HANDOFF_RECORDS_EVIDENCE_DIR, timeout 25; the schedule run includes it and not handoff-cutover-github.sh; handoff-records.sh run with HANDOFF_RECORDS_EVIDENCE_DIR=$TMPDIR/hr-evidence passes (9 checks, 41 s) and writes daemon.log, dispatch.log, nats.log, proof.log and transcript.log there",
-      "headSha": "4e5e6c5037b6df0f21a2a0337b6b0ec08ff1e57e",
-      "negativeControl": "with the handoff-records.sh row removed (file restored after): 77 passed, 17 failed; REQUESTED=handoff-cutover-github.sh exits 1 with '::error::scripts/e2e/handoff-cutover-github.sh needs gh acting as an App installed on sjawhar/legion-smoke … so this workflow runs it nowhere.'"
+      "criterion": "The merge with main changed none of this PR's own lines outside docs/solutions",
+      "surface": "the PR's own diff against its fork point at ae40b8e1 and 1064e218",
+      "command": "the fingerprint command of skill://legion-worker/references/conflicts-and-rewrites.md",
+      "observed": "a9d4f392… at both heads",
+      "headSha": "1064e2183d3d098d8d980b711875c1f153da84bc",
+      "negativeControl": "the same comparison saw the 0136 -> 0137 renumber in round 12"
     },
     {
-      "criterion": "The two corrected learnings, the superseding note and the envoy guide reflow",
-      "surface": "the files at the head",
-      "command": "git diff 75919928 4e5e6c50 -- docs/solutions packages/envoy/AGENTS.md; every path the superseding note names checked to exist; the envoy guide compared with whitespace collapsed",
-      "observed": "pr2504 and pr2512 put their handoff-push clauses in the past tense beside the present rule; the superseding note lists pr2512 under supersedes and pr2504 among the corrected notes, every listed path exists (the three … paths resolve by prefix); packages/envoy/AGENTS.md's words are unchanged, only reflowed",
-      "headSha": "4e5e6c5037b6df0f21a2a0337b6b0ec08ff1e57e",
-      "negativeControl": "the INFRA-92 note above, which the same search finds, is neither corrected nor listed"
+      "criterion": "Superseded notes name their successor, and no note was renamed",
+      "surface": "docs/solutions at the head",
+      "command": "for each note with 'status: superseded by sjawhar/legion#2354', grep for the successor's path; git diff --name-status -M f4023bcb 1064e218 -- docs/solutions",
+      "observed": "10 of 10 name handoffs-are-dispatch-records-…-pr2354.md; the name-status list holds only A lines (24 notes main added), no R or D",
+      "headSha": "1064e2183d3d098d8d980b711875c1f153da84bc",
+      "negativeControl": "the pr2542 trailer note above, which the same search finds active and uncorrected"
     }
   ]
 }
