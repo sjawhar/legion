@@ -186,7 +186,7 @@ func TestAFirstStartFailingAfterARewatchLeavesTheLiveWatcherHealthy(t *testing.T
 // every such cut runs its caches through that replacement path.
 func TestAFailedFirstStartLogsItsErrorOnlyWhileItIsTheLiveWatch(t *testing.T) {
 	const failed = "test cache watch failed"
-	const replaced = "test cache first watch ended because a rewatch replaced it"
+	const replaced = "test cache first watch failed after a rewatch replaced it; the replacement feeds the cache"
 
 	t.Run("no replacement", func(t *testing.T) {
 		uri := testnats.URL(t)

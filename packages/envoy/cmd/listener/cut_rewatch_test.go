@@ -47,22 +47,7 @@ func TestASilentCutRewatchesTheCachesWithNoErrorLine(t *testing.T) {
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "cut-rewatch", liveLaneEnv...)
 	listener.waitHealthy(t)
 
-	// Only what the listener logs from the freeze on is judged, so neither a line from its start
-	// nor one from before the cut can stand in for the cut's own.
-	logged := len(listener.Output.String())
-	output := func() string { return listener.Output.String()[logged:] }
-	thaw := server.Freeze(t)
-	// Cleanups run last-in first-out, so this thaw precedes the server's shutdown. Thawing twice
-	// is harmless.
-	t.Cleanup(thaw)
-	cut := time.Now()
-	for !disconnectedUnderName(output(), "envoy") || !disconnectedUnderName(output(), liveTopicsClientName) {
-		if time.Since(cut) > silentCutBound {
-			t.Fatalf("the listener did not report the cut within %s:\n%s", silentCutBound, output())
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Logf("both clients reported the cut %s after it began", time.Since(cut).Round(time.Millisecond))
+	thaw, output := freezeUntilBothClientsReportTheCut(t, server, listener)
 	thaw()
 
 	// Every cache is rewatched on the reconnect, and each replacement's warm-up line says so.

@@ -45,20 +45,30 @@ func TestBothOfTheListenersNATSClientsReportASilentCutWithinSeconds(t *testing.T
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "silent-cut", liveLaneEnv...)
 	listener.waitHealthy(t)
 
-	// Only what the listener logs from the freeze is read, so a disconnect line from earlier in the
-	// run could not stand in for one the cut caused.
+	freezeUntilBothClientsReportTheCut(t, server, listener)
+}
+
+// freezeUntilBothClientsReportTheCut freezes the hub under a healthy listener and returns once
+// each of the listener's two clients has logged the dropped connection, within silentCutBound. It
+// fails the test naming every client whose line is missing, with what the listener logged. It
+// returns the thaw, which the caller runs itself when it needs the traffic back, and a reader of
+// everything the listener logged from the freeze on: a line from the listener's start, or from
+// before the cut, could otherwise stand in for one the cut caused.
+func freezeUntilBothClientsReportTheCut(t *testing.T, server *testnats.Server, listener *listenerProcess) (thaw func(), output func() string) {
+	t.Helper()
 	logged := len(listener.Output.String())
-	thaw := server.Freeze(t)
-	// Cleanups run last-in first-out, so this thaw precedes the server's shutdown.
+	output = func() string { return listener.Output.String()[logged:] }
+	thaw = server.Freeze(t)
+	// Cleanups run last-in first-out, so this thaw precedes the server's shutdown. Thawing twice
+	// is harmless, so a caller may run it itself.
 	t.Cleanup(thaw)
 	cut := time.Now()
 
 	names := []string{"envoy", liveTopicsClientName}
 	reported := make(map[string]time.Duration, len(names))
 	for {
-		output := listener.Output.String()[logged:]
 		for _, name := range names {
-			if _, done := reported[name]; !done && disconnectedUnderName(output, name) {
+			if _, done := reported[name]; !done && disconnectedUnderName(output(), name) {
 				reported[name] = time.Since(cut)
 			}
 		}
@@ -73,11 +83,12 @@ func TestBothOfTheListenersNATSClientsReportASilentCutWithinSeconds(t *testing.T
 				}
 			}
 			t.Fatalf("no disconnect line for %s %s into a silent cut:\n%s",
-				strings.Join(missing, " and "), time.Since(cut).Round(time.Millisecond), output)
+				strings.Join(missing, " and "), time.Since(cut).Round(time.Millisecond), output())
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	for _, name := range names {
 		t.Logf("%s reported the cut %s after it began", name, reported[name].Round(time.Millisecond))
 	}
+	return thaw, output
 }
