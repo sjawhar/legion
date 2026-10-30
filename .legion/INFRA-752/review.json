@@ -2,72 +2,52 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-752",
-  "completed": "2026-10-29T23:34:00Z",
-  "round": 1,
-  "reviewedHead": "6dc06c24728584d98c7db94e34753eec28c0ef78",
-  "codeHead": "e3e93747d320e11414141f546795574f195a032d",
+  "completed": "2026-10-30T06:35:00Z",
+  "round": 2,
+  "reviewedCodeHead": "cfa7155d82cbd9a923d413f0979e082f22f40e17",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 3,
-  "minor": 7,
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection none. CI head e3e93747d320 (compare to 6dc06c24: handoffsOnly true, 2 files). At 23:30Z typecheck completed skipped, pr-title and changes success, lint, test, envoy-go, envoy-go-race, dispatch and the rest queued (the Actions queue is backed up). No required check red; none decided for lint or test yet. A request for changes does not wait on it.",
-  "thermonuclear": "Both run once at 6dc06c24: thermonuclear-deep-review Verdict CHANGES (one Medium, Security[transport], the quadratic declaration parse; two Minor), thermonuclear-code-quality Verdict CHANGES (five code findings, three prose findings). Every finding below was checked against the code or a run before it was kept.",
+  "important": 2,
+  "minor": 6,
+  "roundOneFindings": "All nine are fixed, and I checked each against the code. The quadratic parse is fixed with a per-block record for each kind (the declaration walk and goldmark's comment, PI and CDATA walks). It is sound because goldmark gives up only when no closer follows (goldmark v1.8.6 parser/raw_html.go:80-119). A 57-document differential I wrote against the fork point, mixing unclosed and closed openers across blocks and containers, gave head stores 194/194 as the engine reads them. The deep review's fuzz of the record on against off found 0 differences in 60,000 documents. At 1 MiB, Parse/ParseForWrite take under 1 s, and TestUnclosedRawHTMLShapesParseAndRenderLinearly passes. The anchor-span alt keeps the span's characters inside an image label and changes nothing outside one. The new differential gate fails on the tester's mutation. I replied on each of the nine threads, and the implementer had already resolved all of them.",
+  "ci": "Required set (rulesets): lint, typecheck, test, pr-title. CI head cfa7155d82cb (compare to 80223ced: handoffsOnly true, 2 files). lint success, test success, typecheck skipped, pr-title success. Not required and still in progress at 06:00Z: envoy-go, envoy-go-race, dispatch, envoy-smoke. No check red.",
+  "thermonuclear": "Both ran once at 80223ced (code cfa7155d82cb). thermonuclear-deep-review: APPROVE (no Medium or High; two minor prose items, the stale body lines, which I fixed, and emphasis.go:16-17). thermonuclear-code-quality: CHANGES (three code findings, five prose findings). I checked the code findings against render_inline.go:296-316 and raw_html_declaration.go before keeping them.",
   "keyFindings": [
     {
       "severity": "important",
+      "file": "packages/envoy/internal/dispatch/pmdoc/render_inline.go",
+      "description": "The writer keeps two memos of 'no closer from here', and the new one is never read on the writer's path. opensAt returns false at :298-299 (ends[kind] == htmlEndNone) before it reaches rawHTMLParser.Parse, and it sets htmlEndNone at :311 whenever the parser returns nil. That parser call is also the only one that writes declarationBlock.unclosed. So the record the writer's context holds is written and never read. The pc field (:274) and its allocation per scan (:329) serve only that unread write, and the two sentinel conventions (htmlEndUnasked/htmlEndNone against htmlUnclosedUnwalked) need two comments to tell apart. Fix: make one memo answer. Either the writer keeps only found ends and lets the record refuse in O(1), or the parser skips the record when it is given no context."
+    },
+    {
+      "severity": "important",
       "file": "packages/envoy/internal/dispatch/pmdoc/raw_html_declaration.go",
-      "description": "Security[transport]: declarationParser.Parse (line 59) walks to the block's end from every `<!` and letter with no `>`, and keeps nothing between tries, so parsing is quadratic. Measured by the reviewer: Parse of `p ` + `<!a` repeated to 1 MiB takes 9.9 s at the head against 0.22 s at the fork point 08c2e8ad; ParseForWrite accepts that 1 MiB write after 18.9 s; `<!A` doubles (10.0 s to 19.5 s for Parse, 48.9 s for ParseForWrite) because goldmark's raw HTML parser at 400 repeats the same walk after this one fails. The deep review measured the multi-line form (`x <!a` per line) at 9.6 s for 64 KiB and about 4x per doubling (≈7 min of one core per 1 MiB write). Fix: remember in parser.Context where no `>` remains in the block, as rawHTMLScan.ends already does on the writer side; read every declaration with one parser (wrap goldmark's raw HTML parser in place at 400, as declarationBlockParser wraps the block parser) so `<!A` is not scanned twice; add single-line and multi-line `<!a` and `<!A` shapes to linear_test.go. The pre-existing goldmark walks for `<!--`, `<?` and CDATA (linear_test.go:306-307) are reported to the INFRA-138 architect."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/pmdoc/parse.go",
-      "description": "parseImage's new comment (line 845) states as parity that an anchored label holds its text alone in the alt. The engine does not: bun gen/differential.ts reads `![a <span data-proof=\"comment\" data-id=\"c1\" data-by=\"user:x\">b</span> c](i.png)` with alt holding the span's characters, where Go reads `a b c`. Same alt-divergence class as the round-1 finding, in the function this change rewrote: make the alt keep the span's characters as mdast-util-to-string writes an html node's value (a row in TestParseKeepsRawHTMLInAnImageAltText and the corpus), or send the case to the architect with evidence if it cannot be stored."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/pmdoc/differential_test.go",
-      "description": "With dropUnstoredMarks gone, an engine reading that puts a mark on an inline leaf is refused by FromJSON and counted under `engine cannot read`, a bucket no GATE line reads (the new comment at line 111 says so). The invariant this change establishes, that the engine never marks a leaf, therefore has no gate in the differential: a later engine regression drops documents out of the measurement and nothing fails. Fix: count an engine reading Go's schema refuses apart from an engine throw, with a GATE line (0 at this head per the implementer's two-engine measurement)."
+      "description": "The names and the file no longer match what the code owns. declarationParser is now the package's inline raw HTML parser for every kind. declarationBlock, declarationBlockKey and declarationBlockOf record comment, PI and CDATA closers too, and they share a prefix with declarationBlockParser, the unrelated block parser in the same file. The reader also switches on rawHTMLCloser and the htmlComment..htmlCloserKinds constants, which still live in the writer's render_inline.go. Fix: rename the parser and its record for what they cover, and move rawHTMLCloser and the kind constants beside opensDeclaration. Also write the record once at the end of Parse rather than in two places with two copies of the soundness comment (move the declaration walk into its own function)."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/pmdoc/marks.go",
-      "description": "addToMarkSet (line 215) claims ProseMirror's addToSet semantics and that one mark of a type is all a text carries; false for anchor marks, which may overlap (node.go:48-49). One caller, with a link. Inline it at the autolink arm (the idiom of render_table.go:126) or narrow it to links."
+      "file": "packages/envoy/internal/dispatch/pmdoc/raw_html_declaration.go",
+      "description": "The same timing tables appear in this file (:45-64) and in linear_test.go (:330-350), and they contradict each other on walk counts: 'walked once where it was walked three times' against 'once rather than twice'. Both say 'this pull request's fork point'. Keep the numbers in the test comment alone, and state the invariant in the type's doc."
     },
     {
       "severity": "minor",
-      "file": "packages/proof-editor/src/nested-links.ts",
-      "description": "The run-grouping loop is written twice (lines 84 and 114), differing only in the two wrap functions; one helper. `link.children ?? []` after holdsLink is unreachable."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/e2e/leaf-marks.e2e.ts",
-      "description": "The comment test retypes expectCommentReading's navigation (editor.ts:276-293) and drops its `[data-markdown-fallback]` check; expectEngineReading repeats expectParagraphReadings' frame. Reuse the helpers, parameterising the paragraph reader."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/pmdoc/parse_test.go",
-      "description": "The comment over TestParseKeepsRawHTMLInAnImageAltText (lines 71-90) describes the defect as present (`parseImage takes text and nested images alone`, `The server stores neither`, `are dropped now`) and carries a Dispatch key (`INFRA-752`), which plan D11 keeps out of the tree."
+      "file": "packages/envoy/internal/dispatch/pmdoc/raw_html_declaration.go",
+      "description": "The list of the rule's callers at :18-21 is wrong now: declarationParser asks rawHTMLCloser, which asks opensDeclaration. packages/envoy/AGENTS.md:2080 says the same thing. AGENTS.md also states no per-block guarantee for unclosed raw HTML that a new kind must keep."
     },
     {
       "severity": "minor",
       "file": "packages/envoy/internal/dispatch/pmdoc/render_inline.go",
-      "description": "Line 211: rawHTMLParser is said to be what every reader reads raw HTML with; the reader now reads declarations with declarationParser first. True again once the first finding's single wrapped parser is used."
+      "description": ":308 'The raw HTML parser reads no parent' is false: the record is keyed by parent. The scan's nil parent keys its one block."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/pmdoc/gen/leaf-marks-corpus.ts",
-      "description": "Change history written as current prose: the corpus header (lines 20, 25) says a lowercase declaration `is text in Go` and `Go stacks the label's link`; escape.go:354 `is no longer one of them`, parse.go:986 `which this arm did`, packages/envoy/AGENTS.md:1881 `were stacked before`, packages/proof-editor/tests/leaf-marks.test.ts:9 `in this pull request`. State the rule as it stands."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/.changes/unreleased/pr2518-Fixed-20261029-192235.yaml",
-      "description": "The fragment does not name the new refusal: any line beginning with `<!` and a letter is now an HTML block and the write is refused (`<!doctype html> starts every page.` was stored escaped on main). The PR body's Change bullet was corrected by the reviewer."
+      "file": "packages/envoy/internal/dispatch/pmdoc/emphasis.go",
+      "description": ":16-17 'so a `<` is read by one parser' is not true: goldmark's autolink parser at 300 also triggers on `<`. The claim holds for raw HTML."
     }
   ],
   "proseFixedByReviewer": [
-    "PR body only (no commit): the Change bullet on the declaration block now names every line opening with `<!` and a letter, the Size line is measured (27 files, +13038/−6330; 26 files, +1519/−101 without fixtures.json), the wide backstop census is attributed to the round-1 head binary, and Look at first / Not proven / risk are filled."
+    "PR body only, no commit: the Look at first, Not proven / risk and Size lines are rewritten for cfa7155d82cb, which removes the round-1 risks that this round fixed."
   ],
-  "proseLeftToImplementer": "The prose findings in code comments, the corpus header and the changelog fragment sit in files the code findings also change, so they go back with them in one push instead of a reviewer commit that would start a full CI run of its own in a backed-up queue.",
-  "threads": "0 review threads on the pull request (gh api graphql at 23:33Z); none to answer.",
+  "proseLeftToImplementer": "The four prose findings in code comments and AGENTS.md sit in the same files as the two code findings, so they go back with them in one push.",
+  "threads": "Nine threads, all mine from round 1, all resolved by the implementer. I replied on each, accepting each fix by commit.",
   "e2eLines": "E2E (implementer) and E2E (tester) both present in the body."
 }
