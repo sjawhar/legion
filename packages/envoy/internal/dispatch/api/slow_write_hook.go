@@ -21,7 +21,7 @@ func (s *server) armSlowWrite(w http.ResponseWriter, r *http.Request) {
 		Path    string `json:"path"`
 		DelayMS int64  `json:"delay_ms"`
 	}
-	if err := decodeJSON(r, &input); err != nil {
+	if err := decodeJSONTestHook(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

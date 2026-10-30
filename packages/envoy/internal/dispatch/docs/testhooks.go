@@ -100,9 +100,11 @@ type OutsideSchemaCorruptionForTest struct {
 // OutsideSchemaCorruptionsForTest are the stored trees outside the Proof schema a document can
 // come to hold: one the reader refuses, one only the renderer refuses, one whose paragraph text
 // carries an embed, one whose text carries a mark nested past what ygo's text writers take, and the
-// malformed marks pmdoc's own tests refuse - a mark where the schema keeps marks off, an unknown
-// mark, and a mark whose value is not an object. Tests here and in package api put a document
-// through every one of them.
+// malformed marks pmdoc's own tests refuse - a mark where the schema keeps marks off, and a mark
+// whose value is not an object. A mark no manifest of this build names is not one of them: it is
+// an element this build does not know, which a newer build serving the same database can have
+// written, so it reads as newer content (NewerContentError) and no repair applies to it. Tests
+// here and in package api put a document through every one of them.
 var OutsideSchemaCorruptionsForTest = []OutsideSchemaCorruptionForTest{
 	{Name: "a tree the reader refuses", Corrupt: appendSchemaInvalidUpdate,
 		Refusal: `typed block "callout" content "block+" requires one or more blocks`},
@@ -114,8 +116,6 @@ var OutsideSchemaCorruptionsForTest = []OutsideSchemaCorruptionForTest{
 		Refusal: `mark "link" attribute "nested" nests more than 99 arrays and objects`},
 	{Name: "a mark on a code block's text", Corrupt: appendMarkedCodeBlock,
 		Refusal: `code block cannot contain mark "strong"`},
-	{Name: "an unknown mark", Corrupt: appendTextMark(crdt.Attributes{"unknown": map[string]any{}}),
-		Refusal: `mark "unknown"`},
 	{Name: "a mark whose value is not an object", Corrupt: appendTextMark(crdt.Attributes{"strong": true}),
 		Refusal: `mark "strong" attributes: want object, got bool`},
 }

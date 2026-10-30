@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 	"sync/atomic"
 
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -264,8 +265,12 @@ func hasLiveResume(raw json.RawMessage) bool {
 	return len(raw) > 0 && !bytes.Equal(raw, []byte("null"))
 }
 
-// decodeLiveResume decodes a subscribe frame's resume as T, refusing a member T does not declare,
-// so a resume of another kind's shape is refused; it is nil when the frame carried none.
+// decodeLiveResume decodes a subscribe frame's resume as T; it is nil when the frame carried
+// none. A member T does not declare is refused by name, where a member of the frame around it is
+// ignored (decodeSocketClientFrame): a resume is the point the view restarts from, so one of
+// another kind's shape, or one carrying a member this build drops, would start the view somewhere
+// other than where the page left it - rows it never sees, or sees twice - which is a loss the
+// page is told about rather than served.
 func decodeLiveResume[T any](raw json.RawMessage) (*T, error) {
 	if !hasLiveResume(raw) {
 		return nil, nil
@@ -273,6 +278,9 @@ func decodeLiveResume[T any](raw json.RawMessage) (*T, error) {
 	var resume T
 	if err := decodeSocketClientFrame(raw, &resume); err != nil {
 		return nil, err
+	}
+	if undeclared := undeclaredMembers(&resume, raw); len(undeclared) > 0 {
+		return nil, errors.New("this view's resume does not take " + strings.Join(undeclared, ", "))
 	}
 	return &resume, nil
 }

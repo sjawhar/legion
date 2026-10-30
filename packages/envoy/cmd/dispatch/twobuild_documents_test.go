@@ -357,7 +357,8 @@ func corpusFiles(t *testing.T, dir string) []string {
 // opened with X's page parameters is admitted writable and stays open. A version X wrote holding
 // every typed block of X's manifest is approved, the answer to its decision block makes Y write the
 // next version, and the approval is carried to it. A body holding every reference form of X's
-// text/testdata keeps its refs rows after Y rewrites it.
+// text/testdata keeps its refs rows after Y rewrites it, but for the edges a Y from before the
+// unknown-kind guard drops, which it logs (requireRefsKept).
 func TestTwoBuildsReadAndEditEachOthersDocuments(t *testing.T) {
 	builds := newTwoBuilds(t)
 	env := map[string]string{"DISPATCH_SERVER_URL": referenceServerURL}
@@ -625,40 +626,65 @@ func requireReferencesKeptAcrossBuilds(t *testing.T, builds *twoBuilds, writer, 
 	if len(written) == 0 {
 		t.Fatalf("the %s wrote no refs rows for the body holding every reference form of its text/testdata", writer.name)
 	}
+	// Whether Y keeps an edge to a node kind it does not know when it rewrites the body: the
+	// guard that keeps one (refs.replaceRefs) ships with the node list this release added to the
+	// block manifest, so a build whose manifest names its nodes carries it, and one from before
+	// the release deletes every edge of the source it rewrites.
+	keepsUnknownKinds := len(reader.manifest.Nodes) > 0
 	appendParagraph(t, reader.process, artifactID, "Rewritten on the "+reader.name+".")
-	requireRefsKept(t, documentRefs(t, builds, artifactID), written, "after the "+reader.name+" rewrote the body", writer.name)
+	requireRefsKept(t, documentRefs(t, builds, artifactID), written, "after the "+reader.name+" rewrote the body", writer, reader, keepsUnknownKinds)
 	time.Sleep(referencesSettle)
-	requireRefsKept(t, documentRefs(t, builds, artifactID), written, "after the "+reader.name+"'s rewrite settled", writer.name)
-	t.Logf("the %d refs rows the %s wrote survived the %s's rewrite", len(written), writer.name, reader.name)
+	dropped := requireRefsKept(t, documentRefs(t, builds, artifactID), written, "after the "+reader.name+"'s rewrite settled", writer, reader, keepsUnknownKinds)
+	t.Logf("%d of the %d refs rows the %s wrote survived the %s's rewrite", len(written)-len(dropped), len(written), writer.name, reader.name)
 }
 
-// requireRefsKept fails unless got holds every row of written: Y keeps each edge X wrote, and an
-// edge of a kind Y does not know survives Y's rewrite. Y may add rows, but only of a kind that
-// written holds no row of: a kind Y extracts and X does not, such as `block` from a `#b-` link
-// when X is a build before the block graph. A row Y adds of a kind X wrote means the two builds
-// read one reference form as different targets.
-func requireRefsKept(t *testing.T, got, written []string, when, writerName string) {
+// requireRefsKept fails unless got holds every row of written that Y owes it: every edge of a kind
+// Y extracts from the body, and, from a Y that keeps edges to the node kinds it does not know
+// (keepsUnknownKinds), those edges too. A Y from before that guard deletes every edge of the
+// source it rewrites, so each edge of a kind it extracts none of is logged as dropped rather than
+// failed: the protection binds from the release after the one that carries it (see "Two builds at
+// once" in the README), and until a build that knows those kinds rewrites the body the edges are
+// gone. The kinds Y extracts are the kinds its rewrite left a row of. Y may add rows, but only of
+// a kind that written holds no row of: a kind Y extracts and X does not, such as `block` from a
+// `#b-` link when X is a build before the block graph. A row Y adds of a kind X wrote means the
+// two builds read one reference form as different targets. It returns the edges Y dropped.
+func requireRefsKept(t *testing.T, got, written []string, when string, writer, reader documentSide, keepsUnknownKinds bool) []string {
 	t.Helper()
 	kinds := map[string]bool{}
 	for _, row := range written {
 		kind, _, _ := strings.Cut(row, " ")
 		kinds[kind] = true
 	}
-	var lost, added []string
+	extracted := map[string]bool{}
+	for _, row := range got {
+		kind, _, _ := strings.Cut(row, " ")
+		extracted[kind] = true
+	}
+	var lost, dropped, added []string
 	for _, row := range written {
-		if !slices.Contains(got, row) {
-			lost = append(lost, row)
+		if slices.Contains(got, row) {
+			continue
 		}
+		if kind, _, _ := strings.Cut(row, " "); !keepsUnknownKinds && !extracted[kind] {
+			dropped = append(dropped, row)
+			continue
+		}
+		lost = append(lost, row)
 	}
 	for _, row := range got {
 		if kind, _, _ := strings.Cut(row, " "); kinds[kind] && !slices.Contains(written, row) {
 			added = append(added, row)
 		}
 	}
+	if len(dropped) > 0 {
+		t.Logf("%s, the %s dropped %d of the %d edges the %s wrote, each to a node kind it extracts none of and keeps no edge to:\n%s",
+			when, reader.name, len(dropped), len(written), writer.name, refRowsText(dropped))
+	}
 	if len(lost) > 0 || len(added) > 0 {
 		t.Fatalf("%s, the body's refs rows lack %d of the %d the %s wrote\n%s\nand hold %d rows of kinds the %s wrote that it did not write\n%s\nall rows now:\n%s",
-			when, len(lost), len(written), writerName, refRowsText(lost), len(added), writerName, refRowsText(added), refRowsText(got))
+			when, len(lost), len(written), writer.name, refRowsText(lost), len(added), writer.name, refRowsText(added), refRowsText(got))
 	}
+	return dropped
 }
 
 // refRowsText is rows one per line, each row longer than 120 bytes cut to its first 120 and its

@@ -1062,13 +1062,39 @@ func (maxBytesDiscarder) WriteHeader(int)                 {}
 // value does not declare is ignored, because two builds of Dispatch serve one database while a
 // release rolls out, and a body a newer build's client sends can reach the older build. A member
 // whose loss would change what a request does therefore ships as a new route, never as a member.
-// The ignored top-level members are logged at debug with the route (logUndeclaredMembers). A
-// string the body holds anywhere that carries U+0000 is refused, naming where it stands
-// (unstorableJSON).
+// The ignored top-level members are logged at debug with the route (logUndeclaredMembers); the
+// test hooks, which no other build calls, refuse them instead (decodeJSONTestHook). A string the
+// body holds anywhere that carries U+0000 is refused, naming where it stands (unstorableJSON).
 func decodeJSON(r *http.Request, value any) error {
+	body, err := readJSONBody(r, value)
+	if err != nil {
+		return err
+	}
+	logUndeclaredMembers(r, value, body)
+	return nil
+}
+
+// decodeJSONTestHook is decodeJSON for a route this tree alone calls: the test hooks, mounted only
+// under Deps.TestHooksEnabled. No page or command of another build reaches one, so a member the
+// hook does not declare is a mistake in the test that sent it, and is refused by name rather than
+// ignored.
+func decodeJSONTestHook(r *http.Request, value any) error {
+	body, err := readJSONBody(r, value)
+	if err != nil {
+		return err
+	}
+	if undeclared := undeclaredMembers(value, body); len(undeclared) > 0 {
+		return errorf(http.StatusBadRequest, "INVALID_JSON", "the hook does not take: %s", strings.Join(undeclared, ", "))
+	}
+	return nil
+}
+
+// readJSONBody decodes r's body into value and returns the bytes it read, for the caller to judge
+// the members value does not declare by.
+func readJSONBody(r *http.Request, value any) ([]byte, error) {
 	contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || (contentType != "application/json" && !strings.HasSuffix(contentType, "+json")) {
-		return errorf(http.StatusUnsupportedMediaType, "JSON_CONTENT_TYPE", "JSON mutations require Content-Type application/json")
+		return nil, errorf(http.StatusUnsupportedMediaType, "JSON_CONTENT_TYPE", "JSON mutations require Content-Type application/json")
 	}
 	r.Body = http.MaxBytesReader(maxBytesDiscarder{}, r.Body, maxJSONRequestBytes)
 	var read bytes.Buffer
@@ -1076,18 +1102,17 @@ func decodeJSON(r *http.Request, value any) error {
 	if err := decoder.Decode(value); err != nil {
 		var maxBytes *http.MaxBytesError
 		if errors.As(err, &maxBytes) {
-			return errJSONTooLarge
+			return nil, errJSONTooLarge
 		}
-		return errorf(http.StatusBadRequest, "INVALID_JSON", "invalid JSON body: %v", err)
+		return nil, errorf(http.StatusBadRequest, "INVALID_JSON", "invalid JSON body: %v", err)
 	}
 	if decoder.More() {
-		return errorf(http.StatusBadRequest, "INVALID_JSON", "request body must contain one JSON value")
+		return nil, errorf(http.StatusBadRequest, "INVALID_JSON", "request body must contain one JSON value")
 	}
 	if refusal := unstorableJSON("", read.Bytes()); refusal != nil {
-		return refusal
+		return nil, refusal
 	}
-	logUndeclaredMembers(r, value, read.Bytes())
-	return nil
+	return read.Bytes(), nil
 }
 
 // WriteJSON writes body as the JSON response with the given status.

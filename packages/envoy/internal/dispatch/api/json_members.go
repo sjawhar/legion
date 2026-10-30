@@ -62,22 +62,17 @@ func collectDeclaredMembers(t reflect.Type, names map[string]struct{}) {
 	}
 }
 
-// logUndeclaredMembers logs at debug, with r's route pattern, the top-level members of body that
-// value's type does not declare, so a caller sending a member this build ignores can be found. It
-// does no work while debug logging is off. encoding/json matches a member to a field ignoring
-// case, so this does too.
-func logUndeclaredMembers(r *http.Request, value any, body []byte) {
-	ctx := r.Context()
-	if !slog.Default().Enabled(ctx, slog.LevelDebug) {
-		return
-	}
+// undeclaredMembers is the top-level members of body that value's type does not declare, sorted,
+// and nil when value is no struct or body is no JSON object. encoding/json matches a member to a
+// field ignoring case, so this does too.
+func undeclaredMembers(value any, body []byte) []string {
 	declared := membersDeclaredBy(reflect.TypeOf(value))
 	if declared == nil {
-		return
+		return nil
 	}
 	var members map[string]json.RawMessage
 	if json.Unmarshal(body, &members) != nil {
-		return
+		return nil
 	}
 	var undeclared []string
 	for member := range members {
@@ -85,10 +80,22 @@ func logUndeclaredMembers(r *http.Request, value any, body []byte) {
 			undeclared = append(undeclared, member)
 		}
 	}
+	slices.Sort(undeclared)
+	return undeclared
+}
+
+// logUndeclaredMembers logs at debug, with r's route pattern, the top-level members of body that
+// value's type does not declare, so a caller sending a member this build ignores can be found. It
+// does no work while debug logging is off.
+func logUndeclaredMembers(r *http.Request, value any, body []byte) {
+	ctx := r.Context()
+	if !slog.Default().Enabled(ctx, slog.LevelDebug) {
+		return
+	}
+	undeclared := undeclaredMembers(value, body)
 	if len(undeclared) == 0 {
 		return
 	}
-	slices.Sort(undeclared)
 	slog.DebugContext(ctx, "dispatch: request body members the route does not declare were ignored", "route", r.Pattern, "members", undeclared)
 }
 

@@ -704,7 +704,11 @@ each surface the two builds share, this is what build N+1 may change while build
   `jsonArtifactUpload`), and logs the ignored top-level names at debug with the route. So a member
   whose loss changes what a request does (a precondition, a guard, a member that makes the request
   do something else) ships as a new route, never as a new member: build N would ignore it and do
-  the request without it.
+  the request without it. A member a route stops taking stays declared and is refused by name, so
+  a page or command that still sends it is told rather than silently served without it: `primary`
+  on the JSON upload, `idempotency_key` on a broadcast, whose key is the `Idempotency-Key` header.
+  A test hook (`/_test/…`, mounted only under `DISPATCH_TEST_HOOKS`) refuses every member it does
+  not declare (`decodeJSONTestHook`): no client of another build calls one.
 - **Routes.** A route is added freely. Build N answers a route that only build N+1 serves with the
   JSON `404 NOT_FOUND` `no route for <METHOD> <path>`, and it answers a known path asked with a
   method it does not serve the same way (Routes, below). The page (`web/src/api/client.ts`) and the
@@ -722,7 +726,9 @@ each surface the two builds share, this is what build N+1 may change while build
   member a frame does not declare (`decodeSocketClientFrame`). A new frame type or view kind
   degrades on build N, which answers it `INVALID_FRAME`: the page then closes the socket and
   reconnects with the backoff of a lost socket (`web/src/api/delivery-live.ts`), until it reaches a
-  process that serves the frame.
+  process that serves the frame. A subscribe frame's `resume` is the exception to the ignoring: it
+  is the point the view restarts from, so a member the view's resume does not take is refused by
+  name (`decodeLiveResume`) rather than dropped, which would restart the view somewhere else.
 - **Response members.** A new member is optional to every reader: a page or command of build N+1
   works when build N answers without it. A member is removed only once no page or command still
   serving reads it.
@@ -839,8 +845,11 @@ holds that takes the lease next creates the durable with its own config: the eve
 delivers from the stream's first message, which replays up to 72 hours of GitHub events, and the
 jobs durable from the next new message, which skips every job the old durable had not
 acknowledged. A take-over of the new build that takes the lease first creates the durable at the
-recorded start instead. The file store and the embedder also bind only from the release after
-their rule: a build before the rule writes no embedder identity and no `file_store`, or no
+recorded start instead. A body's reference edges bind from that release too: a build before the
+guard rewrites a body by deleting every edge its source holds, so it drops the edges to the node
+kinds it does not know — a comment's and a message's blocks among them — until a build that knows
+those kinds rewrites the body. The file store and the embedder also bind only from the release
+after their rule: a build before the rule writes no embedder identity and no `file_store`, or no
 `server_processes` row at all, and drops the vectors of every identity but its own. So turn on the
 file store, or change the embedder, no sooner than the release after the first one that carries
 the rule, and only after every process of the earlier release is gone.

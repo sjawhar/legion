@@ -135,9 +135,19 @@ func (s *server) createBroadcast(w http.ResponseWriter, r *http.Request) {
 		Body       string   `json:"body"`
 		Delivery   string   `json:"delivery"`
 		SessionIDs []string `json:"session_ids"`
+		// `idempotency_key` stays declared, though the key is the Idempotency-Key header now,
+		// so that a body still carrying one - a tab opened before the cutover, which sends the
+		// member and no header - is refused by name rather than ignored: a send whose key was
+		// dropped would be sent a second time by the press that meant to replay the first.
+		IdempotencyKey json.RawMessage `json:"idempotency_key"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
+		return
+	}
+	if input.IdempotencyKey != nil {
+		writeError(w, "INVALID_JSON", http.StatusBadRequest,
+			"idempotency_key is the Idempotency-Key header, not a body member")
 		return
 	}
 	requested, err := validateBroadcastInput(input.Body, input.Delivery, input.SessionIDs)

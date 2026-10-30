@@ -390,20 +390,23 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 // transaction (writeVersionTx) as every applyLive operation does - on an anchored comment's root
 // that refresh is the first to see the comment's new row. Between those steps:
 //
-//   - It reads no tree before the write and renders none. applyLive reads and renders it to
-//     compare with what the write leaves - the content class (updateChangesMarkdown's measure),
-//     the ask blocks added (addedAskBlockIDs), the anchor marks gained - and here both are the
-//     same fragment: the update changes no content, adds no ask block, and credits actor with
-//     nothing (creditLiveWrite).
+//   - It reads no tree to compare the write against and renders none. applyLive reads and renders
+//     it to tell what the write leaves - the content class (updateChangesMarkdown's measure), the
+//     ask blocks added (addedAskBlockIDs), the anchor marks gained - and here both are the same
+//     fragment: the update changes no content, adds no ask block, and credits actor with nothing
+//     (creditLiveWrite).
 //   - The tree and rendering it records are the ones the transaction's last operation left on its
 //     write (liveWrite.rendering, taken through reuseRendering), when this operation's own forkLive
 //     kept them: forkLive drops them whenever the fork moves (buildFork, releaseFork), and so does
 //     a refused operation (abandon), so kept, they describe the fork's fragment exactly, and this
-//     write does not move it. Otherwise it reads and renders the fork once (readFork). A tree the
-//     reader or only the renderer refuses is then the document's OutsideSchemaError (treeOf,
-//     documentMarkdownWithOffsets), the one applyLive answers from the tree it started from
-//     (joinedSchemaError), which is this same fragment, and it comes before any growth refusal, as
-//     there.
+//     write does not move it. Otherwise it reads and renders the fork once (readFork), before the
+//     write rather than after it, which the unmoved fragment makes the same reading: that is where
+//     applyLive refuses a tree holding an element this build does not know (NewerContentError),
+//     before anything of the write, so both leave the fork alike. A tree the reader or only the
+//     renderer refuses is the document's OutsideSchemaError (treeOf, documentMarkdownWithOffsets),
+//     the one applyLive answers from the tree it started from (joinedSchemaError), which is this
+//     same fragment; applyLive answers it after its write, since a write can repair it, so this
+//     one does too, and it comes before any growth refusal, as there.
 //   - Of the growth weigh (refuseGrowth) only the margin bound applies (marginWatch). The anchor
 //     marks the weigh counts (anchorWatch) are on the unchanged tree, so they carry what they
 //     carried and their weigh never refuses - it walks every mark of the tree to say so
@@ -424,6 +427,26 @@ func (s *Service) applyMargin(ctx context.Context, artifactID string, actor mode
 		return err
 	}
 	defer op.abandon()
+	// The tree and rendering the record keeps, read before the write: the marks map it sets is
+	// outside the document's fragment, so the fork reads the same on either side of the write, and
+	// a tree this build cannot read is refused before the write moves the fork, where applyLive
+	// refuses it. A tree outside the Proof schema is held back to after the write, as applyLive
+	// holds it back: a write over such a tree can repair it, and a refused one leaves the write's
+	// fork released, not standing.
+	rendered, reused := s.reuseRendering(op.write, op.fork, "margin")
+	var outsideSchema error
+	if !reused {
+		rendered.tree, err = s.readFork(op.fork)
+		if err == nil {
+			rendered.markdown, rendered.offsets, err = documentMarkdownWithOffsets(rendered.tree)
+		}
+		if err != nil {
+			if !errors.Is(err, ErrDocOutsideSchema) {
+				return err
+			}
+			outsideSchema = err
+		}
+	}
 	margin, err := op.change(func() error {
 		marks := op.fork.GetMap(marksMapName)
 		op.fork.Transact(func(txn *crdt.Transaction) {
@@ -434,14 +457,8 @@ func (s *Service) applyMargin(ctx context.Context, artifactID string, actor mode
 	if err != nil {
 		return err
 	}
-	rendered, reused := s.reuseRendering(op.write, op.fork, "margin")
-	if !reused {
-		if rendered.tree, err = s.readFork(op.fork); err != nil {
-			return err
-		}
-		if rendered.markdown, rendered.offsets, err = documentMarkdownWithOffsets(rendered.tree); err != nil {
-			return err
-		}
+	if outsideSchema != nil {
+		return outsideSchema
 	}
 	if err := margin.refusal(); err != nil {
 		return err
