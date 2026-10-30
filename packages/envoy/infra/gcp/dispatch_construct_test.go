@@ -515,3 +515,33 @@ func TestConstructRefusesADispatchInputWithClusterOnly(t *testing.T) {
 		"which clusterOnly does not build: unset it, or unset clusterOnly")
 	require.Empty(t, m.Types())
 }
+
+// A sandbox reaches the plugin over the same wire a consumer's pulumi up uses: the nine inputs of
+// the two groups are absent from the call, as an SDK leaves out what the program never set, and
+// not sent as empty values. tailnetAuthKey and signInClientSecret arrive as nothing at all there,
+// so the component reads neither as an Input it could resolve, and answers with the in-cluster
+// address and a declaration holding no front-door resource: no tailnet Deployment, Service,
+// policy, account or Secret, and no serve ConfigMap.
+func TestConstructDispatchSandbox(t *testing.T) {
+	inputs := dispatchConstructInputs()
+	for _, input := range []string{
+		"tailnetDnsName", "tags", "tailnetAuthKey", "tailnetService", "tailscaleImage", "frontDoorToolsImage",
+		"signInClientId", "signInClientSecret", "signInDomain",
+	} {
+		delete(inputs, input)
+	}
+	inputs["allowedNamespaces"] = property.New(property.NewArray([]property.Value{property.New("legion")}))
+	inputs["natsUrl"] = property.New(inClusterNatsURL)
+	inputs["natsSeedSecret"] = property.New("projects/example-project/secrets/example-nats-seed")
+
+	m, response, err := constructDispatch(t, inputs, false)
+	require.NoError(t, err)
+	url, ok := response.State.GetOk("url")
+	require.True(t, ok)
+	require.Equal(t, dispatchSandboxURL, url.AsString())
+	for _, registration := range m.Registrations() {
+		require.NotContains(t, []string{
+			"example-dispatch-tailnet", "example-dispatch-tailnet-auth-key", "example-dispatch-tailnet-tls", "example-dispatch-serve",
+		}, registration.Name, "%s is a front door's", registration.Type)
+	}
+}
