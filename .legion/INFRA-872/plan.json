@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-872",
+  "completed": "2026-10-30T22:45:00Z",
+  "plan": "dispatch://INFRA-872/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker — the phase worker's whole contract: the shared workspace, the handoff, the push and handoff_complete.",
+      "skill://legion-worker/references/pr-body.md — the pull request body, and what a proof is: this issue's four acceptance lines each need a criterion, surface, command, observed, headSha and negative control.",
+      "skill://legion-worker/references/conflicts-and-rewrites.md — sjawhar/legion#2553 merged into main after this branch's base and rewrites the same five files, so the base comes into the branch before the first commit and again before the last push.",
+      "skill://legion-worker/references/skip-checks-trailer.md — the code pushes carry no trailer; only a push that touches `.legion/INFRA-872/` alone does.",
+      "skill://legion-worker/references/default-branch-check.md — the App identity check before each push, since every role shares this workspace.",
+      "skill://legion-worker/references/tools.md — the pod has no Docker and no Postgres server, and the two-process acceptance line needs one unpacked onto the issue volume.",
+      "skill://ce-simplify-code — the simplify pass over the settled change before the handoff.",
+      "skill://dispatch and skill://dispatch-writing-specs — any comment or ask this phase writes.",
+      "skill://asd-ste100 — every Envoy message to another role.",
+      "Repository rules, not skills but binding: packages/envoy/infra/AGENTS.md (its own go.work; resolve, then require, then register; every refusal names the input; the release contract), the root AGENTS.md (public repository, changelog fragments, releases only from main), STRATEGY.md, docs/testing.md."
+    ],
+    "test": [
+      "skill://legion-worker — the tester's phase, its handoff and its completion.",
+      "skill://legion-worker/references/pr-body.md — the tester's evidence and the negative control each proof needs; the plan's acceptance table names one per line.",
+      "skill://legion-worker/references/tools.md — the Postgres the two-process line needs, unpacked onto the issue volume, and the rule that a role names the packages its pod cannot run and cites CI instead (here: the two `mkfs.ext4` tests of `gcp/data_disk_test.go`).",
+      "skill://dispatch — any finding this phase records.",
+      "Repository rules: packages/envoy/cmd/dispatch/AGENTS.md for the multiprocess suite's command, packages/envoy/infra/AGENTS.md for running every go command from that directory, docs/testing.md."
+    ],
+    "review": [
+      "skill://legion-worker — the reviewer's phase and the rule that a prose-only finding is the reviewer's own fix.",
+      "skill://legion-worker/references/review-threads.md — replying on, listing and resolving threads, and judging a bot's finding.",
+      "skill://legion-worker/references/merge-gate.md — approving the head by SHA and what the gate needs after it.",
+      "skill://legion-worker/references/pr-body.md — checking each proof against its surface rather than against the text.",
+      "skill://asd-ste100 — the review's own wording.",
+      "Repository rules: the root AGENTS.md (no Dispatch issue key in a commit subject, a changelog fragment or a doc; the release contract's conventional-commit subject, which decides the version), packages/envoy/infra/AGENTS.md, STRATEGY.md."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1 (blocking). How the component gets Tailscale credentials is unstated, and dispatch://INFRA-561's plan (wave B2) expects an OAuth record passed to the component rather than a provider.",
+        "answer": "Decision D1: the consumer passes a Services-scoped `tailscale` provider and the component calls `providers.Require(ctx.Context(), dispatchType, \"tailscale\", opts...)` beside the gcp and random calls. Reason in the plan: it is this module's stated rule and Pulumi's standard shape, and it keeps the credential out of the schema, the state and the refusal surface; a consumer may hold two `tailscale.Provider`s and name the other one explicitly on its own `TailnetKey`. The plan-reviewer checked the mechanism (`mergeProviders` copies the component's providers and `getProvider` falls back by package). The cross-child contract change was sent to the tree's architect for INFRA-561."
+      },
+      {
+        "finding": "F2 (blocking). Item 2's input contradicts INFRA-561's D4, which assumes `pulumi.DependsOn` on `NewDispatch` orders the component's children; the Go SDK gives that dependency to the component's own options alone (`pulumi/sdk/v3/go/pulumi/provider.go:174-178`).",
+        "answer": "Decision D5 and task T4: the explicit `databaseWaitsFor` input ships, because the spec requires it and the acceptance names it; T4 extends `pulumitest.Construct` to pass `ConstructRequest.Dependencies` and measures whether a child's request carries the URN. The reading goes to the architect for INFRA-561 either way."
+      },
+      {
+        "finding": "F3 (blocking). Removing `tailnetService` collides with open pull request #2553, which makes it a member of the tailnet group that switches the component's mode.",
+        "answer": "The plan's \"Merge main first\" section: #2553 merged at 2026-10-30T22:18:47Z as ecbc2c8f, after this branch's base. The implementer brings main into the branch before its first commit and again before its last push, `tailnetService` leaves the tailnet group while the remaining five still read the mode, and the Service and the Tailscale requirement run only under `s.frontDoor && !s.clusterOnly`. T7 updates `dispatch_sandbox_test.go`'s tables and the clause text."
+      },
+      {
+        "finding": "F4 (blocking design). The staged rotation cannot be made safe from inputs alone; two integers admit transitions that sign people out.",
+        "answer": "Decision D3: one ordered list input, `signingKeyGenerations []int`, default `[0]`, which is the shape `ParseSigningKeys` reads; refusals for a negative and a repeated generation, which removes the `primary == second` case. The transitions the component cannot see (`[0]`→`[1]`, `[0,1]`→`[1]`, a promote removed sooner than the 30-day cookie life, a rollback to a dropped generation) are named in D3 and written into the README rewrite (T9) as preconditions of the procedure, not as guarantees the component makes."
+      },
+      {
+        "finding": "F5 (blocking). Nothing pins that the first apply of the new release leaves the live signing key alone.",
+        "answer": "Criterion E1 in task T7: with default inputs the component registers exactly one `RandomPassword` named `<hostname>-signing-key` whose inputs are unchanged (Length 64, Special false, no keepers), and the Secret's `DISPATCH_SIGNING_KEY` equals that one result with no separator, so the live Secret's data is byte-identical. The golden already fails on a rename or reparent. The plan says plainly that mocks cannot prove what the live stack would plan: only a `pulumi preview` on the real stack can, and that is INFRA-561's (risk R4, and the \"What no surface in this pod reaches\" section)."
+      },
+      {
+        "finding": "F6 (blocking acceptance). \"The release tag is named in the handoff\" cannot be satisfied before the merge that cuts the tag.",
+        "answer": "Decision D8 and the acceptance table's third row: the implementer records the predicted version, computed read-only on the branch by the release line's own `release-push.sh version envoy-infra-v …`, with the command and its output; the subject `feat(envoy-infra)!:` on every branch commit and on the pull-request title makes it a major, and the newest tag today is `envoy-infra-v6.4.0`, so the prediction is `envoy-infra-v7.0.0`. The real tag is read after the merge, in the production check, and given to the architect for INFRA-561. Risk R5 covers another `packages/envoy/**` release landing in between."
+      },
+      {
+        "finding": "F7 (blocking acceptance). \"No Dispatch issue key appears in a commit subject, changelog fragment or doc\" has no CI gate and files on main break it.",
+        "answer": "Decision D9: this is the repository's existing rule (the root AGENTS.md already requires `--custom Issue=pr<number>` and `<slug>-pr<number>.md`), so no new repository gate is built (STRATEGY.md: climb the enforcement ladder only as far as needed). The check is the implementer's own grep for `INFRA-` over this branch's commit subjects and over the files `jj diff --from main --name-only` names, with its negative control, as the acceptance table's fourth row says."
+      },
+      {
+        "finding": "F8 (blocking). The two-process test proves nothing about the component unless the plan names the seam, and the existing test already covers only the middle step.",
+        "answer": "Tasks T7.5 and T8: the component test pins the rendered `DISPATCH_SIGNING_KEY` for `[0]`, `[0,1]`, `[1,0]` and `[1]` byte for byte, single space included, and the new multiprocess test walks all three steps with those exact strings, signing a person in before each step and reading with that cookie after it. Its negative control is the skipped step `K0`→`K1`, which `requireRefusedToStart` already asserts."
+      },
+      {
+        "finding": "F9 (blocking for the tester). The two-process test cannot run in this pod as it stands: no Docker, no Postgres server, `DISPATCH_TEST_DATABASE_URL` unset.",
+        "answer": "The plan's \"The Postgres the second line needs\" section: the documented rootless recipe (INFRA-42 and the PGDG-18 sibling), the package list, pgvector as mandatory, the ICU `initdb` line, a TCP listener because `dispatchPair.databaseURL` rebuilds a host:port DSN, the `pg_isready` guard instead of `pg_ctl status`, and the rule that only the role that started a server stops it. It is named as its own task, for the implementer first and the tester after."
+      },
+      {
+        "finding": "F10. The acceptance's dependency assertions are mode-dependent: `frontDoorResources` is filled only when `!natsInCluster`, and every Construct test sets `natsInCluster: true`.",
+        "answer": "Decision D6 and task T7: the four Service, front-door, server and listener edges are asserted on the direct path with `dispatchArgs()`, which leaves `natsInCluster` unset, and the consumer-wait edge on the Construct path, which is the only path carrying a consumer's output."
+      },
+      {
+        "finding": "F11. `pulumi.Protect(true)` inside a remote component cannot be unset by the consumer.",
+        "answer": "Decision D4: the Service's `Protect` is tied to `deletionProtection`, which already guards the cluster and the database and which the README already tells an operator to turn off before a deliberate teardown."
+      },
+      {
+        "finding": "F12. Whether `svc:dispatch` already exists in the tailnet is unverified, and `tailscale.NewService` would fail on the first apply if it does.",
+        "answer": "Risk R2: unverifiable in this pod, which holds no Tailscale credential. The read is `GET /api/v2/tailnet/<tailnet>/vip-services`, to be run before INFRA-561's cutover by whoever holds that credential; sent to the tree's architect with the plan's completion."
+      },
+      {
+        "finding": "F13. Smaller items: `dependsOnInput` lives in `aws`, which `gcp` may not import; the two complete-by-construction cluster-only tables; the goldens and the resource counts; the dependency goes in the module's own go.mod; and this release alone changes no pod template.",
+        "answer": "Decision D7 (a `gcp`-local helper, with the inline copy at `dispatch_frontdoor.go:643` moved onto it) and tasks T1, T3 and T7, which name `dispatchClusterOnlyRefusals`, `TestDispatchEveryInputIsLiveOrRefusedUnderClusterOnly`, `dispatch-registrations.golden`, the count at `dispatch_test.go:766` and the cluster-only filter. The plan states that the server already waits for the instance through `database.instance.ConnectionName` on its pod, so only the Service and the front-door Deployment need the new edge."
+      },
+      {
+        "finding": "F14. Three citations in the planner's working context were wrong: the running-dispatch page's path, `keySetsShared`'s line range, and INFRA-561's D8, which is already true.",
+        "answer": "Corrected in the plan: `docs/site/src/content/docs/dispatch/running-dispatch.md:163` in task T9, `processes.go:297-308` reached through `cmd/dispatch/registry.go:42` in \"What is true today\"; INFRA-561's D8 is already satisfied by `dispatch_frontdoor.go:497-498` and is named to the architect as work nobody owes."
+      },
+      {
+        "finding": "F15. What the reviewer and the tester need that the plan must name.",
+        "answer": "The plan's closing \"What each later role needs\" section lists both, and the acceptance table gives each line its surface, its command and its negative control."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": []
+}
