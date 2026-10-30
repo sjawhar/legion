@@ -220,7 +220,7 @@
 // shutdown's cut — writes one line to the host's plain log (`runtimeLogger`) and appends one
 // `advisor-gate-record` entry carrying `toolCallId`, `tool` and `recordError`; the `advisor-gate`
 // entry it belongs to is written already, so `askgate-report.ts` counts the gated call from that
-// one and the follow-up as a record lost. At shutdown the handler waits for what is still
+// one and the follow-up as a record not confirmed. At shutdown the handler waits for what is still
 // pending, before the markers are released, so a record still lands before the session is sealed;
 // what ends that wait is the cut the entry owns (`askgate.ts`, `RECORD_CUT_DELAY_MS`). The records
 // of one session are written one at a time, and each carries the time the gate made it, which is

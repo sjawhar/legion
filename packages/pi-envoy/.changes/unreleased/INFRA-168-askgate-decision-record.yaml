@@ -39,8 +39,9 @@ body: |-
   intent Dispatch runs once: a key that finished is replayed, `409 KEY_COMMITTED` and
   `422 KEY_REUSED` send the recorder to the read and then the append, and no create of a session's
   document given up here can replace the records written since by committing late. Each append
-  carries a key of its own, the sha256 of the session and the record's id, so a record written
-  again is replayed rather than appended twice. Keys belong to the login that sent them — every
+  carries a key of its own, the sha256 of the session and the record's id, so an append Dispatch
+  ran late is replayed rather than written twice, and the same record sent again with another time
+  in its body gets `422 KEY_REUSED` and is not written. Keys belong to the login that sent them — every
   Legion pod writes under the shared agent token, which is one login — and Dispatch keeps one
   24 h, well past the 10 minutes a create's run can hold it.
   The records of one session are written one at a time, each carrying the time the gate made it,

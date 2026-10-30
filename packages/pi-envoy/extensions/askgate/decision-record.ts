@@ -47,7 +47,8 @@
 // token, which is one login for all of them, so two pods serving one session share these keys;
 // Dispatch keeps a key 24 h (`IdempotencyKeyTTL`), which outlives the 10 minutes a create's run
 // can hold it (`keyedHandlerLimit`). Each append carries a key of its own, the sha256 of the
-// session and the record's id, so a late or repeated append is replayed rather than written twice.
+// session and the record's id, so a late append is replayed rather than written twice, and the
+// same record sent again with another body gets `422 KEY_REUSED` and is not written.
 //
 // How long a write runs: until Dispatch has answered it or the session's shutdown cuts it. The
 // client asks again under the call's key (`DISPATCH_WRITE_RETRY`, 30 s,
@@ -365,7 +366,8 @@ export function createDecisionRecorder(deps: RecordDeps): DecisionRecorder {
       documents.set(sessionId, held);
       // Every record, this session's first included, is appended: the document's text is written
       // once, by the create, so no write of this session can replace what another wrote. The key
-      // is this record's own, so a late or repeated append is replayed rather than written twice.
+      // is this record's own, so a late append is replayed rather than written twice, and the same
+      // record sent again with another body is refused (`422 KEY_REUSED`), never written twice.
       await client.docEdit(
         held,
         { ops: [{ op: "insert", markdown: block, after: "end" }], actor },
