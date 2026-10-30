@@ -636,7 +636,7 @@ func normalizeAskOptions(options []model.AskOption) []model.AskOption {
 // paragraph. The upload is named with the owner the document belongs to, since the command does
 // not address the document without one, and both spellings of that owner stand in one clause,
 // since an agent holding a project document would read a step it cannot run were the issue named
-// alone. The refusal says this is the one case a document edit cannot reach: an agent reading it
+// alone. The refusal says a document edit reaches this block for nothing: an agent reading it
 // has been told to change a document with a document edit rather than to upload its name again
 // (the dispatch_artifact tool's own description), and only the reason above lets it do otherwise
 // here. The block and the paragraph are quoted as data (quotedAskChild), never written into the
@@ -653,7 +653,7 @@ func refuseEmptyQuestionEdit(block askBlock, edit AskBlockEdit) error {
 		return &ErrAskBlockUnrepresentable{Field: "block", Reason: fmt.Sprintf(
 			"ask block %q has an empty question, and writing a question into it would delete what one of its "+
 				"paragraphs holds, which is no text: %s; no document edit writes a paragraph into a "+
-				"decision, so this is the one case a document edit cannot reach - upload the document again "+
+				"decision, so none reaches this block - upload the document again "+
 				"as a new version with the question written beside that paragraph (dispatch artifact "+
 				"--issue <KEY>, or --project <KEY> for a project's document, --name <the document> "+
 				"--content-file -), or write the question beside it in "+

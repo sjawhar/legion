@@ -1109,7 +1109,7 @@ func TestEditAskOfAnEmptyQuestionNamesTheStep(t *testing.T) {
 		want := `block: ask block "ask-lists" has an empty question, and writing a question into it would delete ` +
 			`what one of its paragraphs holds, which is no text: block ` + strconv.Quote(photo) +
 			` (paragraph) reads "![a photo](/photo.png)"; no document edit writes a paragraph into a decision, ` +
-			`so this is the one case a document edit cannot reach - upload the document again as a new version ` +
+			`so none reaches this block - upload the document again as a new version ` +
 			`with the question written beside that paragraph (dispatch artifact --issue <KEY>, or ` +
 			`--project <KEY> for a project's document, --name <the document> --content-file -), or write the ` +
 			`question beside it in the document editor; ` +
