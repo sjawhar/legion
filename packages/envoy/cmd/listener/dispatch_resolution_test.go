@@ -143,14 +143,8 @@ func startListenerDelivery(t *testing.T, d *listenerDeps) {
 		deferredUnplaceable: newUnplaceableDeferrals(),
 	}
 	// The durable path's pushes to serving-port sessions and the role lane's forwards run off the
-	// handler, as main.go wires them.
-	config.servePorts = startServePortWorkers(config)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		config.servePorts.stop(ctx)
-	})
-	config.roleForwards = newRoleForwarder(config)
+	// handler, as main.go wires them (wireDeliveryWorkers).
+	config = wireTestDeliveryWorkers(t, config)
 	subscription, err := startListenerSubscription(
 		d.client, "listener-dispatch-"+id.New(), jetStreamDeliveryHandler(config))
 	if err != nil {

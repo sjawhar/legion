@@ -150,13 +150,13 @@ const (
 // each relay runs on a goroutine of its own.
 type sessionRelays struct {
 	delivery  *sessionDelivery
-	sessions  *session.SessionRegistry
 	registry  *store.Registry
 	deliverer *session.Deliverer
 	// client publishes the exception of a stored message a serving-port relay refuses to push.
 	client *bus.Client
 	// rules are the refusals a message on a topic the session follows is judged by
-	// (judgeFollowedTopic), the durable path's fan-out and this relay alike.
+	// (judgeFollowedTopic), the durable path's fan-out and this relay alike; its sessions are the
+	// session entries this relay reads too.
 	rules     followedTopicRules
 	machineID string
 	logger    *logging.Logger
@@ -285,7 +285,6 @@ func startSessionRelays(delivery *sessionDelivery, cfg listenerDeliveryHandlerCo
 	inbox := nats.NewInbox()
 	m := &sessionRelays{
 		delivery:    delivery,
-		sessions:    cfg.sessions,
 		registry:    cfg.registry,
 		deliverer:   cfg.deliverer,
 		client:      cfg.client,
@@ -396,7 +395,7 @@ func (m *sessionRelays) loop() {
 			return
 		case <-prune.C:
 			// Each lapse it finds is a change, which onChange hears.
-			m.sessions.PruneLapsed()
+			m.rules.sessions.PruneLapsed()
 			continue
 		case <-m.wake:
 		}
@@ -415,7 +414,7 @@ func (m *sessionRelays) loop() {
 				m.stopAll()
 				continue
 			}
-			entries, err := m.sessions.List()
+			entries, err := m.rules.sessions.List()
 			if err != nil {
 				m.logger.Warn("session relays could not list the session cache", slog.String("error", err.Error()))
 			}
@@ -485,7 +484,7 @@ func (m *sessionRelays) wanted(sessionID string) (want, servingPort bool) {
 	if !m.owned.Load() {
 		return false, false
 	}
-	entry, err := m.sessions.Get(sessionID)
+	entry, err := m.rules.sessions.Get(sessionID)
 	if err != nil || entry.Delivery != session.DeliveryConsumer {
 		return false, false
 	}
@@ -894,7 +893,7 @@ func (m *sessionRelays) pushUntilAccepted(ctx context.Context, sessionID string,
 // push makes one prompt_async push of item to the session's port at the address its current entry
 // gives, keeping msg in progress first.
 func (m *sessionRelays) push(ctx context.Context, sessionID string, item contracts.Envelope, msg bus.SessionMessage) error {
-	entry, err := m.sessions.Get(sessionID)
+	entry, err := m.rules.sessions.Get(sessionID)
 	if err != nil {
 		return err
 	}
@@ -912,7 +911,8 @@ func (m *sessionRelays) refuseFollowedTopic(sessionID string, item contracts.Env
 	if isControlTopic(item.Topic) {
 		return false
 	}
-	verdict, _, err := judgeFollowedTopic(m.rules, sessionID, item, envelopeTargetedMode(item))
+	mode, modeErr := envelopeDeliveryMode(item)
+	verdict, _, err := judgeFollowedTopic(m.rules, sessionID, item, mode, modeErr)
 	switch verdict {
 	case takeFollowedTopic:
 		return false

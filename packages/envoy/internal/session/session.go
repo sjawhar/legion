@@ -80,6 +80,16 @@ func (d Deliverer) DeliverWithResultForEntry(item contracts.Envelope, interest s
 	return DeliveryResult{}, d.Push(context.Background(), item, interest.SessionID, result.Entry)
 }
 
+// ConsumerRelaysStored reports whether the session's own consumer holds the stored message of
+// stream sequence storedSeq on topic, so the relay of that consumer (cmd/listener's sessionRelays)
+// is what delivers it and no other path may push it, nor record anything about it: the dedupe and
+// attempt records of such a message are the relay's to write, from its own push, or the relay
+// would find a record nothing pushed and ack a copy the session never received. A topic the stream
+// does not capture is in no consumer whatever the session's delivery is, so it is pushed as before.
+func (e SessionEntry) ConsumerRelaysStored(topic string, storedSeq uint64) bool {
+	return e.ConsumerHoldsStored(storedSeq) && bus.StreamCaptures(topic)
+}
+
 // Resolve decides DeliverWithResultForEntry's delivery of item to interest's session at entry
 // without making its push: a result with Push set is a serving-port session this listener owns,
 // for the caller to push to (Push); one with Skipped set needs nothing pushed; an error is the
@@ -92,7 +102,7 @@ func (d Deliverer) Resolve(item contracts.Envelope, interest store.Interest, ent
 	if entry == nil {
 		return DeliveryResult{}, fmt.Errorf("%w for session %s", ErrNoSessionRecord, interest.SessionID)
 	}
-	if entry.ConsumerHoldsStored(storedSeq) && bus.StreamCaptures(item.Topic) {
+	if entry.ConsumerRelaysStored(item.Topic, storedSeq) {
 		// The session's consumer holds this stored message, and the listener that owns the session
 		// relays it from there, serving port or not: the durable path pushes nothing and reports
 		// nothing for it. A topic the stream does not store reaches the session as before (the

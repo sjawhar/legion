@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -81,13 +80,7 @@ func requirePushes(t *testing.T, port *scriptedPort, within time.Duration, want 
 // the refused message, NAKed back to the durable, is passed by the second.
 func TestServePortWorkersAHangingPortHoldsUpNoOtherSessionAndItsOwnMessagesStayInOrder(t *testing.T) {
 	harness := newListenerDeliveryHarness(t, nil)
-	cfg := harness.config
-	cfg.servePorts = startServePortWorkers(cfg)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		cfg.servePorts.stop(ctx)
-	})
+	cfg := wireTestDeliveryWorkers(t, harness.config)
 	slow := startScriptedPort(t, "ses_slow_"+id.New(), http.StatusInternalServerError)
 	release := slow.hold()
 	t.Cleanup(release)

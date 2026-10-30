@@ -1419,9 +1419,9 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		// set to the topics just stored before the registration answers, so a message published on
 		// a newly followed stored topic after the answer is the consumer's to deliver.
 		delivery := d.consumers.register(r.Context(), body, item.Topics)
-		if body.Port > 0 || body.SelfSubscribed || delivery.relayed {
+		if body.Port > 0 || body.SelfSubscribed || delivery.relayed() {
 			epochChanged := false
-			if delivery.relayed {
+			if delivery.relayed() {
 				previous, err := d.sessions.Get(body.SessionID)
 				epochChanged = err != nil || previous.Delivery != session.DeliveryConsumer || previous.Epoch != delivery.epoch
 			}
@@ -1430,8 +1430,9 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 				writeStoreError(ctx, w, fmt.Errorf("session registry unavailable: %w", err), http.StatusServiceUnavailable)
 				return
 			}
-			if delivery.relayed {
-				d.consumers.registered(body.SessionID, epochChanged)
+			if delivery.relayed() {
+				// The relay serves every registration answered consumer, so there is one to tell.
+				d.consumers.relay.registered(body.SessionID, epochChanged)
 			}
 		}
 		warningCtx, cancelWarnings := context.WithTimeout(ctx, unwiredRepositoryWarningTimeout)

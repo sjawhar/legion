@@ -115,6 +115,17 @@ type servePortPush struct {
 	timer   metrics.Timer
 }
 
+// storedSubject is the subject push's message is stored on, which with storedSeq says whether the
+// session's consumer holds it (session.SessionEntry.ConsumerRelaysStored): the envelope's own
+// topic, except for the stored copy of a role forward, which is stored on the holder's agent
+// subject while keeping the role topic of the message it carries.
+func (p servePortPush) storedSubject() string {
+	if p.forward {
+		return contracts.AgentSubject(p.sessionID)
+	}
+	return p.item.Topic
+}
+
 // servePortWorkers pushes the durable path's messages to serving-port sessions off the durable's
 // handler: one FIFO worker per session with pushes queued, which pushes its head message until the
 // port answers 204, with a wait that doubles from pushRetryFirst to pushRetryMax between tries, and
@@ -243,6 +254,18 @@ func (w *servePortWorkers) pushUntilSettled(push servePortPush) (retry, ended bo
 	ended = pushWithBackoff(w.ctx, cfg.logger, push.sessionID, push.item, func(attempt int) (bool, error) {
 		entry, verdict := w.target(push)
 		switch verdict {
+		case servePortConsumerRelays:
+			// The session's consumer holds this message after all - its entry moved to consumer
+			// delivery while the push waited - and the relay of that consumer pushes it. The
+			// attempt the path that handed this push over recorded is cleared and no dedupe key
+			// is recorded: only a real push writes what the relay reads
+			// (session.SessionEntry.ConsumerRelaysStored).
+			applyDeliveryOutcome(cfg, push.item, deliveryOutcome{
+				sessionID:    push.sessionID,
+				metricStatus: push.metricStatus("skipped"),
+				clearAttempt: true,
+			})
+			return true, nil
 		case servePortSkip:
 			applyDeliveryOutcome(cfg, push.item, deliveryOutcome{
 				sessionID:    push.sessionID,
@@ -304,24 +327,32 @@ type servePortVerdict uint8
 const (
 	// servePortPushIt: the session is a serving port this listener owns; push to it.
 	servePortPushIt servePortVerdict = iota
-	// servePortSkip: the session takes the message without a push (its consumer holds it, or it
-	// subscribes on NATS itself); the message is delivered.
+	// servePortConsumerRelays: the session's own consumer holds the message and its relay pushes
+	// it; this push is dropped and nothing is recorded for it.
+	servePortConsumerRelays
+	// servePortSkip: the session takes the message without a push (it subscribes on NATS itself);
+	// the message is delivered.
 	servePortSkip
 	// servePortGone: the session is gone, or no longer this listener's serving port; the message
 	// goes back to the durable.
 	servePortGone
 )
 
-// target reads push's session's current state: its entry, and what to do with the push. A message
-// on the durable path is stored, so a session whose consumer holds it, or that takes stored
-// messages itself another way, has it; one stored below that consumer's start is in no consumer,
-// and this push is how the session gets it.
+// target reads push's session's current state: its entry, and what to do with the push. The
+// verdicts are session.Deliverer.Resolve's, read again at each try because the entry may have
+// moved since the path that handed the push over resolved it: a session whose consumer holds this
+// stored message is relayed from there, one that subscribes on NATS itself with no port has it,
+// and a message stored below a consumer's start is in no consumer, so this push is how the session
+// gets it.
 func (w *servePortWorkers) target(push servePortPush) (session.SessionEntry, servePortVerdict) {
 	entry, err := w.cfg.sessions.Get(push.sessionID)
 	if err != nil {
 		return session.SessionEntry{}, servePortGone
 	}
-	if takesStoredMessagesItself(entry, push.storedSeq) {
+	if entry.ConsumerRelaysStored(push.storedSubject(), push.storedSeq) {
+		return entry, servePortConsumerRelays
+	}
+	if entry.SelfSubscribed && entry.Port == 0 {
 		return entry, servePortSkip
 	}
 	if !ownsServingPortSession(w.cfg, push.sessionID, entry) {

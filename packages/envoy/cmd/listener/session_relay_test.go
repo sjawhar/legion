@@ -21,14 +21,18 @@ import (
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
+	"github.com/sjawhar/envoy/internal/session"
+	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 // relayRig is a listener's /v1 routes over the in-process server, its session consumers relayed as
-// main relays them, by a listener holding its machine's durable binding.
+// main relays them, by a listener holding its machine's durable binding (relays, which a test that
+// orders the paths itself hands the binding to when it chooses).
 type relayRig struct {
 	*sessionConsumerRig
-	url string
+	relays *sessionRelays
+	url    string
 }
 
 func newRelayRig(t *testing.T) *relayRig {
@@ -37,9 +41,20 @@ func newRelayRig(t *testing.T) *relayRig {
 }
 
 // newRelayRigPausing is newRelayRig with the backoff a paused relay waits before it sends the
-// session its unanswered messages again bounded by first and max, so a test need not wait the
+// session's unanswered messages again bounded by first and max, so a test need not wait the
 // production bounds out.
 func newRelayRigPausing(t *testing.T, first, max time.Duration) *relayRig {
+	t.Helper()
+	rig := newRelayRigUnowned(t, first, max)
+	rig.relays.setOwned(true)
+	return rig
+}
+
+// newRelayRigUnowned is newRelayRigPausing for a task that does not hold its machine's durable
+// binding yet: it relays nothing, and no relay starts, until the test calls
+// rig.relays.setOwned(true). A test that must run the durable path before any relay orders them
+// this way rather than by timing.
+func newRelayRigUnowned(t *testing.T, first, max time.Duration) *relayRig {
 	t.Helper()
 	url := testnats.URL(t)
 	client, err := bus.ConnectOwningStream([]string{url}, bus.WithReplicas(1))
@@ -57,10 +72,9 @@ func newRelayRigPausing(t *testing.T, first, max time.Duration) *relayRig {
 		defer cancel()
 		relays.stop(ctx)
 	})
-	// Set before the first relay starts, which gaining the binding below is what does.
+	// Set before the first relay starts, which gaining the binding is what does.
 	relays.pauseFirst, relays.pauseMax = first, max
-	relays.setOwned(true)
-	return &relayRig{sessionConsumerRig: rig, url: url}
+	return &relayRig{sessionConsumerRig: rig, relays: relays, url: url}
 }
 
 // consumerRegistration is the registration body of a session in consumer mode at epoch, following
@@ -883,24 +897,7 @@ func TestServePortMessageStoredBelowTheConsumerStartReachesThePort(t *testing.T)
 	// The durable delivers it now, as the server redelivers a NAKed message. It is bound on this
 	// session's subject alone: the package's NATS server is shared, and this message is the one
 	// the durable must deliver here.
-	durable := "listener-below-start-" + id.New()
-	config := natsgo.ConsumerConfig{
-		Durable:        durable,
-		DeliverSubject: natsgo.NewInbox(),
-		FilterSubject:  agent,
-		AckPolicy:      natsgo.AckExplicitPolicy,
-		AckWait:        consumerAckWait,
-		MaxAckPending:  consumerMaxAckPending,
-		MaxDeliver:     consumerMaxDeliver,
-	}
-	if _, err := rig.harness.client.JS().AddConsumer(bus.Stream, &config); err != nil {
-		t.Fatalf("create the listener's durable: %v", err)
-	}
-	subscription, err := rig.harness.client.Subscribe(agent, jetStreamDeliveryHandler(rig.harness.config), natsgo.Bind(bus.Stream, durable), natsgo.ManualAck())
-	if err != nil {
-		t.Fatalf("bind the listener's durable: %v", err)
-	}
-	t.Cleanup(func() { _ = subscription.Unsubscribe() })
+	bindTestDurable(t, rig, "listener-below-start-"+id.New(), agent)
 
 	select {
 	case body := <-pushes:
@@ -913,6 +910,195 @@ func TestServePortMessageStoredBelowTheConsumerStartReachesThePort(t *testing.T)
 	select {
 	case body := <-pushes:
 		t.Fatalf("the port was pushed the message a second time:\n%s", body)
+	case <-time.After(2 * time.Second):
+	}
+}
+
+// bindTestDurable binds a durable of this test's own, filtered on subject, to the listener's
+// durable handler: the package's NATS server is shared, so a test binds the one subject whose
+// messages its durable path must read.
+func bindTestDurable(t *testing.T, rig *relayRig, name, subject string) {
+	t.Helper()
+	config := natsgo.ConsumerConfig{
+		Durable:        name,
+		DeliverSubject: natsgo.NewInbox(),
+		FilterSubject:  subject,
+		AckPolicy:      natsgo.AckExplicitPolicy,
+		AckWait:        consumerAckWait,
+		MaxAckPending:  consumerMaxAckPending,
+		MaxDeliver:     consumerMaxDeliver,
+	}
+	if _, err := rig.harness.client.JS().AddConsumer(bus.Stream, &config); err != nil {
+		t.Fatalf("create the listener's durable: %v", err)
+	}
+	subscription, err := rig.harness.client.Subscribe(subject, jetStreamDeliveryHandler(rig.harness.config), natsgo.Bind(bus.Stream, name), natsgo.ManualAck())
+	if err != nil {
+		t.Fatalf("bind the listener's durable: %v", err)
+	}
+	t.Cleanup(func() { _ = subscription.Unsubscribe() })
+}
+
+// A message on a topic a serving-port session on consumer delivery follows reaches its port once
+// when another interest on that topic sends the same message down the durable path: the session's
+// consumer holds it and its relay is what pushes it, so the durable path records neither an
+// attempt nor a dedupe key for it (session.SessionEntry.ConsumerRelaysStored). A record written
+// for a session nothing was pushed to is one the relay then reads as a copy the session already
+// has, and acks unpushed: the message would be lost with no exception. It holds whichever path
+// runs first (INFRA-594).
+func TestServePortRelayPushesAFollowedTopicTheDurablePathAlsoReads(t *testing.T) {
+	const (
+		relayedPort = 4096
+		corePort    = 4097
+	)
+	for _, tc := range []struct {
+		name       string
+		relayFirst bool
+	}{
+		{name: "the durable path runs first"},
+		{name: "the relay runs first", relayFirst: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The relay gains the durable binding when this test says so: unowned, no relay runs,
+			// so the durable path below runs first by construction rather than by timing.
+			rig := newRelayRigUnowned(t, relayPauseFirst, relayPauseMax)
+			if tc.relayFirst {
+				rig.relays.setOwned(true)
+			}
+			relayed := "ses_relayed_" + id.New()
+			core := "ses_core_" + id.New()
+			topic := "notifications.github.acme.relay-" + id.New() + ".mention"
+			relayedPushes := make(chan string, 8)
+			corePushes := make(chan string, 8)
+			rig.harness.config.deliverer.HTTPClient = &http.Client{Transport: listenerTransport(func(request *http.Request) (*http.Response, error) {
+				body, err := io.ReadAll(request.Body)
+				if err != nil {
+					return nil, err
+				}
+				if strings.HasSuffix(request.URL.Host, strconv.Itoa(relayedPort)) {
+					relayedPushes <- string(body)
+				} else {
+					corePushes <- string(body)
+				}
+				return listenerDeliveryResponse(http.StatusNoContent), nil
+			})}
+
+			// The session under test: a serving port on consumer delivery, following the topic.
+			rig.subscribe(t, `{"session_id":"`+relayed+`","port":`+strconv.Itoa(relayedPort)+`,"host":"127.0.0.1","topics":["`+topic+`"]}`)
+			if entry := rig.entry(t, relayed); entry.Delivery != session.DeliveryConsumer {
+				t.Fatalf("the session's entry records delivery %q, want the consumer's", entry.Delivery)
+			}
+			// A second interest on the topic, a serving-port session of this machine on the core
+			// path: the durable path must deliver to it, so it reads the message and fans it out
+			// over every interest, this machine's consumer-delivery session included
+			// (durableNeedsDelivery).
+			if _, err := rig.harness.registry.Upsert(store.Interest{SessionID: core, MachineID: "test-machine"}, []string{topic}); err != nil {
+				t.Fatalf("register %s's interest: %v", core, err)
+			}
+			if err := rig.harness.sessions.Put(core, session.SessionEntry{Port: corePort, MachineID: "test-machine", Host: "127.0.0.1"}); err != nil {
+				t.Fatalf("register %s's entry: %v", core, err)
+			}
+
+			item := listenerTestEnvelope(topic, "followed-both-paths-"+id.New())
+			if tc.relayFirst {
+				// Stored with no durable bound: the relay pushes it from the consumer, and the
+				// durable created below reads the stored message after that.
+				if _, err := rig.harness.client.JS().Publish(topic, marshalListenerEnvelope(t, item)); err != nil {
+					t.Fatalf("store the message: %v", err)
+				}
+				requireRelayedPush(t, relayedPushes, item)
+				bindTestDurable(t, rig, "listener-relay-after-"+id.New(), topic)
+			} else {
+				bindTestDurable(t, rig, "listener-relay-before-"+id.New(), topic)
+				if _, err := rig.harness.client.JS().Publish(topic, marshalListenerEnvelope(t, item)); err != nil {
+					t.Fatalf("store the message: %v", err)
+				}
+			}
+			// The durable path has read the message once the core-path session's port has it.
+			select {
+			case body := <-corePushes:
+				if !strings.Contains(body, item.EventID) {
+					t.Fatalf("the core-path session's port was pushed:\n%s\nwant %s", body, item.EventID)
+				}
+			case <-time.After(15 * time.Second):
+				t.Fatal("the durable path never pushed the message to the core-path session")
+			}
+			if !tc.relayFirst {
+				rig.relays.setOwned(true)
+				requireRelayedPush(t, relayedPushes, item)
+			}
+			select {
+			case body := <-relayedPushes:
+				t.Fatalf("the relayed session's port was pushed the message a second time:\n%s", body)
+			case <-time.After(2 * time.Second):
+			}
+		})
+	}
+}
+
+// requireRelayedPush reads the one push the relayed session's port is expected, and fails the test
+// when it does not arrive or carries another message.
+func requireRelayedPush(t *testing.T, pushes <-chan string, item contracts.Envelope) {
+	t.Helper()
+	select {
+	case body := <-pushes:
+		if !strings.Contains(body, item.EventID) {
+			t.Fatalf("the relayed session's port was pushed:\n%s\nwant %s", body, item.EventID)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatalf("the message %s never reached the relayed session's port", item.EventID)
+	}
+}
+
+// The stored copy of a role forward to a serving-port holder, stored below that holder's consumer
+// start, reaches its port: the copy is in no consumer -- it was stored while the holder had none,
+// and the holder's consumer starts above it -- so the durable path pushes it, as it does for any
+// other message stored below the start. The forward was stored-only (roleForwardStoredOnly), so
+// its sender was already told it was delivered: acknowledging the copy on the holder's delivery
+// mode alone loses the message with no exception (INFRA-594).
+func TestServePortRoleForwardStoredBelowTheConsumerStartReachesThePort(t *testing.T) {
+	rig := newRelayRig(t)
+	sessionID := "ses_below_start_forward_" + id.New()
+	agent := contracts.AgentSubject(sessionID)
+	pushes := make(chan string, 8)
+	rig.harness.config.deliverer.HTTPClient = &http.Client{Transport: listenerTransport(func(request *http.Request) (*http.Response, error) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			return nil, err
+		}
+		pushes <- string(body)
+		return listenerDeliveryResponse(http.StatusNoContent), nil
+	})}
+
+	// The forward as the role lane publishes it to a holder that answers no receipt: the role
+	// message under the role-forward dedupe key, stored on the holder's agent subject while the
+	// holder has no consumer, as a listener restart with the copy unacked leaves it.
+	forward := roleForward{
+		item:       listenerTestEnvelope(contracts.RoleTopicPrefix+"below-start-"+id.New(), "below-start-forward-"+id.New()),
+		sessionID:  sessionID,
+		storedOnly: true,
+	}.forwarded()
+	ack, err := rig.harness.client.JS().Publish(agent, marshalListenerEnvelope(t, forward))
+	if err != nil {
+		t.Fatalf("store the forward's copy: %v", err)
+	}
+	rig.subscribe(t, `{"session_id":"`+sessionID+`","port":4096,"host":"127.0.0.1","topics":[]}`)
+	if start := rig.entry(t, sessionID).ConsumerStart; start <= ack.Sequence {
+		t.Fatalf("the holder's consumer starts at %d, want above the copy stored at %d", start, ack.Sequence)
+	}
+
+	bindTestDurable(t, rig, "listener-below-start-forward-"+id.New(), agent)
+
+	select {
+	case body := <-pushes:
+		if !strings.Contains(body, forward.EventID) {
+			t.Fatalf("the port was pushed:\n%s\nwant the role forward stored below the consumer's start, %s", body, forward.EventID)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the role forward stored below the consumer's start never reached the port")
+	}
+	select {
+	case body := <-pushes:
+		t.Fatalf("the port was pushed the role forward a second time:\n%s", body)
 	case <-time.After(2 * time.Second):
 	}
 }

@@ -104,11 +104,11 @@ func TestCoreRoleDeliveryReresolvesSupersededLapsedHolder(t *testing.T) {
 		forwardedSubjects = append(forwardedSubjects, subject)
 		return nil
 	})
-	settle := withRoleForwards(t, &config)
+	config = wireTestDeliveryWorkers(t, config)
 
 	item := listenerTestEnvelope(roleSubject, "core-role-supersession-race")
 	roleTopicDelivery(config, deliveryMessage{mode: coreDelivery}, item)
-	settle()
+	config.roleForwards.settled(t)
 	if err := harness.client.Conn.Flush(); err != nil {
 		t.Fatalf("flush post-delivery publications: %v", err)
 	}

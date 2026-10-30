@@ -76,16 +76,20 @@ type deliveryAnswer struct {
 type sessionDeliveryOutcome struct {
 	// answer is the registration answer's delivery field, nil when the answer carries none.
 	answer *deliveryAnswer
-	// relayed is set when the session's entry records consumer delivery
-	// (session.DeliveryConsumer): the consumer is held and the relay serves it, so the durable path
-	// skips the session's stored messages.
-	relayed bool
-	// epoch is the plugin's epoch, recorded on the entry when relayed.
+	// epoch is the plugin's epoch, recorded on the entry when the session is relayed.
 	epoch string
 	// consumerStart is the stream sequence the session's consumer starts at, recorded on the entry
 	// beside the epoch: the durable path still delivers a stored message below it, which is in no
 	// consumer (session.SessionEntry.ConsumerStart).
 	consumerStart uint64
+}
+
+// relayed reports whether the session's entry records consumer delivery (session.DeliveryConsumer):
+// its consumer is held and the relay serves it, so the durable path skips the stored messages that
+// consumer holds. It is the answer's own mode, so the entry the registration writes and the answer
+// the session reads can never say different things.
+func (o sessionDeliveryOutcome) relayed() bool {
+	return o.answer != nil && o.answer.Mode == deliveryModeConsumer
 }
 
 // sessionRelay is what the relay of session consumers hears from registrations.
@@ -224,7 +228,6 @@ func (m *sessionDelivery) register(ctx context.Context, body subscribeBody, topi
 			StreamID: streamID,
 			Gap:      &gap,
 		},
-		relayed:       true,
 		epoch:         epoch,
 		consumerStart: start.StartSeq,
 	}
@@ -276,13 +279,6 @@ func (m *sessionDelivery) granted() {
 	defer m.grantMu.Unlock()
 	m.noGrantUntil = time.Time{}
 	m.noGrantLogged = false
-}
-
-// registered tells the relay of a registration that recorded consumer delivery for sessionID
-// (sessionRelay.registered). Only a registration the relay serves gets here
-// (sessionDeliveryOutcome.relayed), so there is always a relay to tell.
-func (m *sessionDelivery) registered(sessionID string, epochChanged bool) {
-	m.relay.registered(sessionID, epochChanged)
 }
 
 // refollow sets the filter of sessionID's consumer to its stored interest topics after a change

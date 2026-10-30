@@ -900,14 +900,13 @@ func main() {
 		deferredUnplaceable: newUnplaceableDeferrals(),
 	}
 	// The durable path's pushes to serving-port sessions run off its handler, on one worker per
-	// session (servePortWorkers), so a port slow to accept holds up no other session's delivery.
-	servePorts := startServePortWorkers(deliveryConfig)
-	deliveryConfig.servePorts = servePorts
-	// The role lane's forwards run off its handler (roleForwarder): the handler resolves each role
+	// session (servePortWorkers), so a port slow to accept holds up no other session's delivery;
+	// the role lane's forwards run off its handler (roleForwarder): the handler resolves each role
 	// message's holder and hands the forward over, and the forwards to one holder are published in
-	// order while each waits for its outcome on its own.
-	roleForwards := newRoleForwarder(deliveryConfig)
-	deliveryConfig.roleForwards = roleForwards
+	// order while each waits for its outcome on its own. Both are wired here, last, so every seam
+	// of the configuration they copy is set (wireDeliveryWorkers).
+	deliveryConfig, stopWorkers := wireDeliveryWorkers(deliveryConfig)
+	roleForwards := deliveryConfig.roleForwards
 
 	// The role lane is a core-NATS queue subscription on a connection of its own with finite pending
 	// limits (bus.RoleLanePendingMsgs, bus.RoleLanePendingBytes; bus.ConnectRoleLane), in the queue
@@ -969,14 +968,14 @@ func main() {
 	// The parts a shutdown ends, gathered once: every end of a start that serves /v1 passes them
 	// to shutdownListener.
 	parts := listenerParts{
-		server:     server,
-		client:     client,
-		lane:       lane,
-		live:       live,
-		delivery:   delivery,
-		relays:     relays,
-		servePorts: servePorts,
-		caches:     caches,
+		server:      server,
+		client:      client,
+		lane:        lane,
+		live:        live,
+		delivery:    delivery,
+		relays:      relays,
+		stopWorkers: stopWorkers,
+		caches:      caches,
 	}
 
 	// From here a SIGTERM or SIGINT is an ordered shutdown: /v1 serves from the next step, and the
@@ -1144,17 +1143,17 @@ type listenerLoops struct {
 // listenerParts are the parts of a started listener that shut down: server is the /v1 HTTP server,
 // client the main bus connection, lane the role lane, live the live topics lane's client (nil when
 // the lane is off), delivery the session-consumer connection, relays the relay of its consumers
-// (nil when it does not run), servePorts the workers that push the durable path's messages to
-// serving ports, and caches the KV caches whose watchers are retired last.
+// (nil when it does not run), stopWorkers the end of the delivery workers (wireDeliveryWorkers),
+// and caches the KV caches whose watchers are retired last.
 type listenerParts struct {
-	server     *http.Server
-	client     *bus.Client
-	lane       roleLane
-	live       *bus.Client
-	delivery   *sessionDelivery
-	relays     *sessionRelays
-	servePorts *servePortWorkers
-	caches     []listenerCache
+	server      *http.Server
+	client      *bus.Client
+	lane        roleLane
+	live        *bus.Client
+	delivery    *sessionDelivery
+	relays      *sessionRelays
+	stopWorkers func(context.Context)
+	caches      []listenerCache
 }
 
 // shutdownListener is the ordered shutdown every end of a start that serves /v1 comes to, a
@@ -1173,7 +1172,7 @@ func shutdownListener(logger *logging.Logger, parts listenerParts, loops listene
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	parts.relays.stop(shutdownCtx)
-	parts.servePorts.stop(shutdownCtx)
+	parts.stopWorkers(shutdownCtx)
 	if err := parts.server.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("http shutdown error", slog.String("error", err.Error()))
 	}

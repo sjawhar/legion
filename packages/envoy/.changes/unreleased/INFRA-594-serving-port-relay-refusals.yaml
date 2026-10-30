@@ -5,8 +5,14 @@ body: |-
   the durable path's own rules (one predicate both apply): a copy under a dedupe key the session
   already took or is already being sent is acked unpushed, and the key is recorded once the port
   answers 204, so one GitHub comment published on a pull request's mention topic and the
-  repository's reaches the port once rather than once per topic. A session consumer's start
-  sequence is recorded on the session's entry, and the durable path skips only the stored messages
-  at or after it: a message stored below that start -- a push NAKed back to the durable, or one
-  deferred as unplaceable, before the session's first consumer was created -- is in no consumer, so
-  the durable still pushes it to the port instead of acknowledging it as delivered (INFRA-594).
+  repository's reaches the port once rather than once per topic. Only a real push records what the
+  relay reads: a path that skips a session because its own consumer holds the message -- the
+  durable path's fan-out, and a serving-port worker whose session moved to consumer delivery --
+  records neither an attempt nor a dedupe key for it, so a message another interest on the topic
+  sends down the durable path still reaches the port rather than being acked as a copy the session
+  already has. A session consumer's start sequence is recorded on the session's entry, and the
+  durable path skips only the stored messages at or after it: a message stored below that start --
+  a push NAKed back to the durable, or one deferred as unplaceable, before the session's first
+  consumer was created -- is in no consumer, so the durable still pushes it to the port instead of
+  acknowledging it as delivered, the stored copy of a role forward to a serving-port holder
+  included (INFRA-594).

@@ -79,7 +79,7 @@ func sessionEntryFromSubscribe(body subscribeBody, machineID string, delivery se
 		Plugin:         strings.TrimSpace(body.Plugin),
 		PluginVersion:  strings.TrimSpace(body.PluginVersion),
 	}
-	if delivery.relayed {
+	if delivery.relayed() {
 		entry.Delivery = session.DeliveryConsumer
 		entry.Epoch = delivery.epoch
 		entry.ConsumerStart = delivery.consumerStart

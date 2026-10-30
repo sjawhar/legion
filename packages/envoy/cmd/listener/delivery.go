@@ -50,13 +50,12 @@ type listenerDeliveryHandlerConfig struct {
 	// forward is not known to have reached the holder. storedOnly asks for a forward that counts as
 	// delivered on the stream's acknowledgement alone (roleForwardStoredOnly).
 	forwardRole func(subject string, item contracts.Envelope, timeout time.Duration, storedOnly bool) (wait func() error, err error)
-	// roleForwards runs the role lane's forwards off its handler (roleForwarder); every delivery
-	// path hands its forwards to it, so main.go sets it once the config is otherwise built, and a
-	// test that overrides a seam of the config builds its own from the copy.
-	roleForwards *roleForwarder
-	// servePorts pushes the durable path's messages to serving-port sessions off its handler, one
-	// worker per session (servePortWorkers); every durable push goes through it, so main.go and a
-	// test alike start the workers from the config they deliver with.
+	// roleForwards runs the role lane's forwards off its handler (roleForwarder), and servePorts
+	// pushes the durable path's messages to serving-port sessions off its handler, one worker per
+	// session (servePortWorkers); every delivery path hands its forwards and pushes to them, so
+	// both are always set: wireDeliveryWorkers starts them from the configuration they report
+	// through, once it is otherwise built, and main.go and every test alike wire them there.
+	roleForwards      *roleForwarder
 	servePorts        *servePortWorkers
 	registry          *store.Registry
 	sessions          *session.SessionRegistry
@@ -85,6 +84,19 @@ type listenerDeliveryHandlerConfig struct {
 	// drawing a private set, since a set per handler is a second budget beside the first on the
 	// very rebind this retry exists for. A test that builds a config sets its own.
 	deferredUnplaceable *unplaceableDeferrals
+}
+
+// wireDeliveryWorkers starts the workers every delivery path hands its work to and returns cfg
+// carrying them, with the stop that ends them. Each worker keeps the configuration it is built
+// from by value, so a caller wires them last, once every seam of cfg is set: a seam set after this
+// is one the workers do not have. The role forwarder is built from a configuration that already
+// carries the serving-port workers, since the stored copy of a forward it publishes is pushed by
+// them. Stopping ends the serving-port workers; the forwarder has no loop of its own, and the role
+// lane's drain waits for the forwards it holds (roleLane.drain).
+func wireDeliveryWorkers(cfg listenerDeliveryHandlerConfig) (listenerDeliveryHandlerConfig, func(context.Context)) {
+	cfg.servePorts = startServePortWorkers(cfg)
+	cfg.roleForwards = newRoleForwarder(cfg)
+	return cfg, cfg.servePorts.stop
 }
 
 type deliveryMode uint8
@@ -300,6 +312,9 @@ type deliveryOutcome struct {
 	// clearAttempt below.
 	exceptionFailureClearsAttempt bool
 
+	// recordAttempt records the attempt-cache entry, before the exception below so that a failure
+	// to publish it can clear the record again (exceptionFailureClearsAttempt).
+	recordAttempt bool
 	// clearAttempt unconditionally rolls back the attempt-cache record.
 	clearAttempt bool
 	// recordDedupe marks the dedupe-cache entry as sent.
@@ -314,6 +329,9 @@ type deliveryOutcome struct {
 // attempt/dedupe cache updates — and reports whether the attempt should be
 // retried (NAKed).
 func applyDeliveryOutcome(cfg listenerDeliveryHandlerConfig, item contracts.Envelope, outcome deliveryOutcome) bool {
+	if outcome.recordAttempt {
+		cfg.attemptCache.Record(item.DedupeKey, outcome.sessionID)
+	}
 	if outcome.metricStatus != "" {
 		cfg.messagesDelivered.Inc([2]string{"delivery_status", outcome.metricStatus})
 		if outcome.duration != nil {
@@ -780,19 +798,6 @@ func (cfg listenerDeliveryHandlerConfig) followedTopicRules() followedTopicRules
 	return followedTopicRules{sessions: cfg.sessions, dedupeCache: cfg.dedupeCache, attemptCache: cfg.attemptCache}
 }
 
-// targetedMode is the delivery mode an envelope targets, read once per message rather than once
-// per recipient (envelopeTargetedMode): mode is "" when it targets none, and err is set when the
-// payload names one that cannot be read unambiguously.
-type targetedMode struct {
-	mode string
-	err  error
-}
-
-func envelopeTargetedMode(item contracts.Envelope) targetedMode {
-	mode, err := envelopeDeliveryMode(item)
-	return targetedMode{mode: mode, err: err}
-}
-
 // followedTopicVerdict is what a delivery path does with a message on a topic a session follows.
 type followedTopicVerdict uint8
 
@@ -821,9 +826,13 @@ const (
 // topics (contracts/normalize.go) reaches it once. An echo of the session's own message, and a
 // delivery mode its entry does not advertise, are refused too.
 //
+// mode is the delivery mode the envelope targets, "" when it targets none, and modeErr the failure
+// of reading it (envelopeDeliveryMode): both are read once per message rather than once per
+// recipient.
+//
 // It returns the session's live entry when one was read, so a caller that delivers through the
 // entry does not read it again, and the error behind a mode refusal for the caller to report.
-func judgeFollowedTopic(rules followedTopicRules, sessionID string, item contracts.Envelope, targeted targetedMode) (followedTopicVerdict, *session.SessionEntry, error) {
+func judgeFollowedTopic(rules followedTopicRules, sessionID string, item contracts.Envelope, mode string, modeErr error) (followedTopicVerdict, *session.SessionEntry, error) {
 	if rules.dedupeCache.Seen(item.DedupeKey, sessionID) {
 		return followedTopicDeduped, nil, nil
 	}
@@ -833,8 +842,8 @@ func judgeFollowedTopic(rules followedTopicRules, sessionID string, item contrac
 	if item.SourceSession != "" && item.SourceSession == sessionID {
 		return followedTopicEcho, nil, nil
 	}
-	if targeted.err != nil {
-		return followedTopicModeUnreadable, nil, targeted.err
+	if modeErr != nil {
+		return followedTopicModeUnreadable, nil, modeErr
 	}
 	entry, err := rules.sessions.Get(sessionID)
 	if err != nil {
@@ -842,15 +851,17 @@ func judgeFollowedTopic(rules followedTopicRules, sessionID string, item contrac
 		// read, and a mode nobody advertises cannot be judged against an entry there is none of.
 		return takeFollowedTopic, nil, nil
 	}
-	if targeted.mode != "" && !hasCapability(entry.Capabilities, targeted.mode) {
-		return followedTopicModeNotAdvertised, &entry, errors.New("the session does not advertise delivery mode " + targeted.mode)
+	if mode != "" && !hasCapability(entry.Capabilities, mode) {
+		return followedTopicModeNotAdvertised, &entry, errors.New("the session does not advertise delivery mode " + mode)
 	}
 	return takeFollowedTopic, &entry, nil
 }
 
 // fanoutRefusalOutcome is how the fan-out reports a refusal judgeFollowedTopic returned, each
-// under the line and the metric status it has always had.
-func fanoutRefusalOutcome(sessionID string, item contracts.Envelope, verdict followedTopicVerdict, err error, mode string) deliveryOutcome {
+// under the line and the metric status it has always had. A mode refusal records the attempt, so
+// an identical redelivery inside the attempt window is the dedupe skip above rather than a second
+// exception; a refusal the caches themselves made records nothing.
+func fanoutRefusalOutcome(sessionID string, item contracts.Envelope, verdict followedTopicVerdict, mode string) deliveryOutcome {
 	switch verdict {
 	case followedTopicDeduped:
 		return deliveryOutcome{
@@ -885,6 +896,7 @@ func fanoutRefusalOutcome(sessionID string, item contracts.Envelope, verdict fol
 			},
 			exceptionReason:               "delivery_failed",
 			fanoutRefusal:                 true,
+			recordAttempt:                 true,
 			exceptionFailureClearsAttempt: true,
 		}
 	default:
@@ -896,6 +908,7 @@ func fanoutRefusalOutcome(sessionID string, item contracts.Envelope, verdict fol
 			},
 			exceptionReason:               "delivery_failed",
 			fanoutRefusal:                 true,
+			recordAttempt:                 true,
 			exceptionFailureClearsAttempt: true,
 		}
 	}
@@ -916,7 +929,7 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 		message.finalize(false)
 		return
 	}
-	targeted := envelopeTargetedMode(item)
+	mode, modeErr := envelopeDeliveryMode(item)
 	resolve := cfg.deliverer.DeliverWithResultForEntry
 	if message.mode == durableDelivery {
 		resolve = func(item contracts.Envelope, interest store.Interest, entry *session.SessionEntry) (session.DeliveryResult, error) {
@@ -927,16 +940,26 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 	var failed bool
 	var deadDeliveries int
 	for _, interest := range items {
-		verdict, target, verdictErr := judgeFollowedTopic(cfg.followedTopicRules(), interest.SessionID, item, targeted)
+		verdict, target, _ := judgeFollowedTopic(cfg.followedTopicRules(), interest.SessionID, item, mode, modeErr)
 		if verdict != takeFollowedTopic {
-			if verdict == followedTopicModeUnreadable || verdict == followedTopicModeNotAdvertised {
-				cfg.attemptCache.Record(item.DedupeKey, interest.SessionID)
-			}
-			applyDeliveryOutcome(cfg, item, fanoutRefusalOutcome(interest.SessionID, item, verdict, verdictErr, targeted.mode))
+			applyDeliveryOutcome(cfg, item, fanoutRefusalOutcome(interest.SessionID, item, verdict, mode))
+			continue
+		}
+		deliveryTimer := metrics.NewTimer()
+		if target != nil && target.ConsumerRelaysStored(item.Topic, message.storedSeq()) {
+			// The session's own consumer holds this message and the relay of that consumer pushes
+			// it (sessionRelays.pushUntilAccepted), which is also what records its dedupe key, on
+			// the port's 204. Nothing is recorded here: an attempt or dedupe record this path
+			// wrote for a session it does not push to is one the relay would find and ack a copy
+			// the session never received by (session.SessionEntry.ConsumerRelaysStored).
+			applyDeliveryOutcome(cfg, item, deliveryOutcome{
+				sessionID:    interest.SessionID,
+				metricStatus: "skipped",
+				duration:     &deliveryTimer,
+			})
 			continue
 		}
 		cfg.attemptCache.Record(item.DedupeKey, interest.SessionID)
-		deliveryTimer := metrics.NewTimer()
 		delivery, err := resolve(item, interest, target)
 		if err == nil && delivery.Push {
 			if !handOverPush(cfg, servePortPush{item: item, sessionID: interest.SessionID, settle: message.settle, storedSeq: message.storedSeq(), timer: deliveryTimer}) {

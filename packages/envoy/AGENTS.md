@@ -3033,6 +3033,9 @@ listener's NATS user manages the consumer: it creates, reads, pulls, acknowledge
   unpushed, and one whose delivery mode the session does not advertise is acked with a
   `delivery_failed` exception. So one upstream event published on several of a session's topics
   under one dedupe key (`contracts/normalize.go`) reaches its port once.
+  Because the relay reads those two caches, only a real push may write what it reads: a path that
+  does not push to the session records nothing for it (the bullet below), so a record the relay
+  finds always names a copy the session has.
 - **No consumer:** a listener whose consumer call the server refuses for want of a grant
   (`bus.ErrConsumerNotGranted`) answers `core` with `no_grant`, logs one WARN for the episode, and
   answers `no_grant` without a server call for 10 minutes (`noGrantBackoff`); any other failed call
@@ -3040,13 +3043,19 @@ listener's NATS user manages the consumer: it creates, reads, pulls, acknowledge
   above): its own subscriptions, the durable's `Skipped`, and catch-up through `/v1/replay`. The
   durable path acknowledges, unread, a stored message for a live session whose entry records
   consumer delivery and whose consumer covers it (`takesStoredMessagesItself`): the message waits
-  in the session's consumer. The entry records the sequence that consumer starts at
-  (`consumer_start`, written by the registration from `bus.SessionConsumers.Ensure`), and only a
-  message at or after it is the consumer's: one stored below that start -- a push NAKed back to
-  the durable, or one deferred as unplaceable, before the session's first consumer was created --
-  is in no consumer, so the durable path delivers it as it would for a session with none. An entry
-  an earlier release wrote carries no start, which reads as today: the consumer holds every stored
-  message of it.
+  in the session's consumer. It records nothing for such a session -- no attempt, no dedupe key
+  (`session.SessionEntry.ConsumerRelaysStored`, which the fan-out and the serving-port workers
+  both skip by) -- since the relay of that consumer is what delivers the message and what records
+  its key on the port's 204; a record written for a session nothing was pushed to is one the relay
+  reads as a copy the session already has, and acks unpushed. The entry records the sequence that
+  consumer starts at (`consumer_start`, written by the registration from
+  `bus.SessionConsumers.Ensure`), and only a message at or after it is the consumer's: one stored
+  below that start -- a push NAKed back to the durable, or one deferred as unplaceable, before the
+  session's first consumer was created -- is in no consumer, so the durable path delivers it as it
+  would for a session with none, the stored copy of a role forward included
+  (`roleForwardCopyDelivery`, which reads the copy's own sequence rather than the holder's
+  delivery mode). An entry an earlier release wrote carries no start, which reads as today: the
+  consumer holds every stored message of it.
 - **Lane receipts do not change:** a role forward waits for the holder's empty receipt on its core
   agent-subject subscription, which the plugin answers in both modes (the role-lane bullet under
   "Critical conventions").

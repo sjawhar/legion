@@ -2834,7 +2834,7 @@ func TestListenerDeliveryHandler_RoleLaneForwardsToAHolderItsSessionCacheHasNotS
 		forwardedTo = append(forwardedTo, subject)
 		return nil
 	})
-	settle := withRoleForwards(t, &cfg)
+	cfg = wireTestDeliveryWorkers(t, cfg)
 	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "unseen-holder-delivery")
 	item.Payload = `{"type":"worker-queued"}`
 	probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
@@ -2847,7 +2847,7 @@ func TestListenerDeliveryHandler_RoleLaneForwardsToAHolderItsSessionCacheHasNotS
 	}
 
 	coreNATSDeliveryHandler(cfg)(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
-	settle()
+	cfg.roleForwards.settled(t)
 	if len(forwardedTo) != 1 || forwardedTo[0] != contracts.AgentSubject(holderID) {
 		t.Fatalf("the role message was forwarded to %v, want once to %s", forwardedTo, contracts.AgentSubject(holderID))
 	}
@@ -2874,7 +2874,7 @@ func TestListenerDeliveryHandler_RoleForwardPublishErrorEmitsDeliveryFailed(t *t
 		forwards.Add(1)
 		return errors.New("nats: connection closed")
 	})
-	settle := withRoleForwards(t, &cfg)
+	cfg = wireTestDeliveryWorkers(t, cfg)
 	handler := coreNATSDeliveryHandler(cfg)
 	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "forward-publish-error")
 	item.Payload = `{"type":"worker-queued"}`
@@ -2889,10 +2889,10 @@ func TestListenerDeliveryHandler_RoleForwardPublishErrorEmitsDeliveryFailed(t *t
 	}
 
 	handler(&natsgo.Msg{Data: data})
-	settle()
+	cfg.roleForwards.settled(t)
 	assertDeliveryException(t, probe, item, "delivery_failed")
 	handler(&natsgo.Msg{Data: data})
-	settle()
+	cfg.roleForwards.settled(t)
 	assertDeliveryException(t, probe, item, "delivery_failed")
 
 	if got := forwards.Load(); got != 2 {
@@ -2930,7 +2930,7 @@ func TestListenerDeliveryHandler_RoleForwardRefusesUnadvertisedDeliveryMode(t *t
 		forwards.Add(1)
 		return nil
 	})
-	settle := withRoleForwards(t, &cfg)
+	cfg = wireTestDeliveryWorkers(t, cfg)
 	handler := coreNATSDeliveryHandler(cfg)
 	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "refuse-unadvertised-mode")
 	item.Payload = `{"event":{"id":0,"issue_key":"CORE-1"},"delivery":{"attempt":1,"mode":"btw"}}`
@@ -2945,7 +2945,7 @@ func TestListenerDeliveryHandler_RoleForwardRefusesUnadvertisedDeliveryMode(t *t
 	}
 
 	handler(&natsgo.Msg{Data: data})
-	settle()
+	cfg.roleForwards.settled(t)
 	assertDeliveryException(t, probe, item, "delivery_failed")
 
 	if got := forwards.Load(); got != 0 {
@@ -2985,7 +2985,7 @@ func TestListenerDeliveryHandler_RoleForwardDedupeSkipsCapabilityRecheckOnRedeli
 		forwards.Add(1)
 		return nil
 	})
-	settle := withRoleForwards(t, &cfg)
+	cfg = wireTestDeliveryWorkers(t, cfg)
 	handler := coreNATSDeliveryHandler(cfg)
 	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "dedupe-before-guard")
 	item.Payload = `{"event":{"id":0,"issue_key":"CORE-1"},"delivery":{"attempt":1,"mode":"btw"}}`
@@ -3001,7 +3001,7 @@ func TestListenerDeliveryHandler_RoleForwardDedupeSkipsCapabilityRecheckOnRedeli
 
 	// 1. First delivery: the holder advertises "btw", the frame asks for "btw" -- forwarded.
 	handler(&natsgo.Msg{Data: data})
-	settle()
+	cfg.roleForwards.settled(t)
 	if _, err := probe.NextMsg(250 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {
 		t.Fatalf("first delivery: unexpected exception (or probe failed): %v", err)
 	}
@@ -3023,7 +3023,7 @@ func TestListenerDeliveryHandler_RoleForwardDedupeSkipsCapabilityRecheckOnRedeli
 	// zero forwards, zero exceptions -- never a fresh capability recheck against the now-
 	// changed set.
 	handler(&natsgo.Msg{Data: data})
-	settle()
+	cfg.roleForwards.settled(t)
 	if _, err := probe.NextMsg(250 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {
 		t.Fatalf("redelivery: unexpected exception (or probe failed) -- must be a silent dedupe skip: %v", err)
 	}
@@ -3069,7 +3069,7 @@ func TestListenerDeliveryHandler_RoleForwardErrorSelectsTheReason(t *testing.T) 
 			}
 			cfg := harness.config
 			cfg.forwardRole = inlineForward(func(string, contracts.Envelope, time.Duration) error { return tc.forwardErr })
-			settle := withRoleForwards(t, &cfg)
+			cfg = wireTestDeliveryWorkers(t, cfg)
 			handler := coreNATSDeliveryHandler(cfg)
 			item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "forward-error-kind-"+role)
 			item.Payload = `{"type":"worker-queued"}`
@@ -3083,7 +3083,7 @@ func TestListenerDeliveryHandler_RoleForwardErrorSelectsTheReason(t *testing.T) 
 			}
 
 			handler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
-			settle()
+			cfg.roleForwards.settled(t)
 			assertDeliveryException(t, probe, item, tc.reason)
 
 			logs := harness.logs.String()
@@ -3694,15 +3694,10 @@ func newListenerDeliveryHarnessOn(t *testing.T, client *bus.Client, transport ht
 	}
 	// The durable path's pushes to serving-port sessions run on the workers, and the role lane's
 	// forwards on the role forwarder, as main.go wires them: both are the one path those messages
-	// take. A test that overrides a seam of the config builds its own forwarder from its copy
-	// (withRoleForwards).
-	deliveryConfig.servePorts = startServePortWorkers(deliveryConfig)
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		deliveryConfig.servePorts.stop(ctx)
-	})
-	deliveryConfig.roleForwards = newRoleForwarder(deliveryConfig)
+	// take. They are wired last, from the configuration above, so a test that overrides a seam of
+	// the harness's config wires its copy again (wireTestDeliveryWorkers), since each worker keeps
+	// the configuration it was built from.
+	deliveryConfig = wireTestDeliveryWorkers(t, deliveryConfig)
 	return listenerDeliveryHarness{
 		client:      client,
 		registry:    registry,
@@ -3754,19 +3749,29 @@ func (w *servePortWorkers) settled(t *testing.T) {
 	}
 }
 
-// withRoleForwards gives cfg the role forwarder main.go wires, built from cfg itself so the
-// forwards go through the seams the test set, and returns the wait a test makes before it reads
-// what a forward did: the forwarder publishes and reports off the handler.
-func withRoleForwards(t *testing.T, cfg *listenerDeliveryHandlerConfig) func() {
+// wireTestDeliveryWorkers wires cfg's delivery workers as main.go wires them
+// (wireDeliveryWorkers) and ends them when the test does. A test that overrides a seam of a
+// config - the harness's, or one of its own - wires the copy it overrode, so its forwards and
+// pushes go through that seam.
+func wireTestDeliveryWorkers(t *testing.T, cfg listenerDeliveryHandlerConfig) listenerDeliveryHandlerConfig {
 	t.Helper()
-	cfg.roleForwards = newRoleForwarder(*cfg)
-	return func() {
-		t.Helper()
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	wired, stop := wireDeliveryWorkers(cfg)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if !cfg.roleForwards.wait(ctx) {
-			t.Fatalf("%d role forwards were still outstanding after 20s", cfg.roleForwards.outstanding())
-		}
+		stop(ctx)
+	})
+	return wired
+}
+
+// settled waits until every forward the forwarder holds has been reported, within 20 s: a test
+// reads what a forward did after it, since the forwarder publishes and reports off the handler.
+func (f *roleForwarder) settled(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if !f.wait(ctx) {
+		t.Fatalf("%d role forwards were still outstanding after 20s", f.outstanding())
 	}
 }
 
