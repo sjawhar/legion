@@ -31,6 +31,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -71,12 +72,15 @@ const (
 // come within.
 var mpHTTP = &http.Client{Timeout: 10 * time.Second}
 
-// mpPod is one listener process of the machine, behind its own relay to NATS.
+// mpPod is one listener process of the machine, behind its own relay to NATS: a listenerRelay,
+// which fails the whole link (mpStartPod), or an mpLaneRelay, which fails one of the pod's
+// connections and leaves the others (mpStartPodBehindLanes); the other is nil.
 type mpPod struct {
 	*cmdtest.Process
 	instance string
 	port     int
 	relay    *listenerRelay
+	lanes    *mpLaneRelay
 }
 
 // mpStartPod starts binary as instance of mpMachine, on a loopback port the kernel chose and the
@@ -86,16 +90,43 @@ type mpPod struct {
 // output's tail is logged when the test failed.
 func mpStartPod(t *testing.T, binary, natsURL, instance string, env ...string) *mpPod {
 	t.Helper()
-	seed, granted := mpSeeds.Load(natsURL)
-	if !granted {
-		t.Fatalf("%s is no NATS server mpStartNATS started: every pod connects as its machine's granted user", natsURL)
-	}
+	relay := startListenerRelay(t, mpServerURL(t, natsURL))
+	pod := mpStartPodAt(t, binary, natsURL, relay.relayed, instance, env...)
+	pod.relay = relay
+	return pod
+}
+
+// mpStartPodBehindLanes starts instance as mpStartPod does, behind an mpLaneRelay rather than a
+// listenerRelay: a row that fails one of the pod's NATS connections alone - its receive
+// connection while its lease connection renews on - cuts it by name there.
+func mpStartPodBehindLanes(t *testing.T, binary, natsURL, instance string, env ...string) *mpPod {
+	t.Helper()
+	lanes := startMPLaneRelay(t, mpServerURL(t, natsURL))
+	pod := mpStartPodAt(t, binary, natsURL, lanes.relayed, instance, env...)
+	pod.lanes = lanes
+	return pod
+}
+
+// mpServerURL is natsURL without the admin user every row's own clients connect as: what a relay
+// dials, since each pod connects as mpMachine's granted nkey user instead.
+func mpServerURL(t *testing.T, natsURL string) string {
+	t.Helper()
 	server, err := url.Parse(natsURL)
 	if err != nil {
 		t.Fatalf("parse %s: %v", natsURL, err)
 	}
 	server.User = nil
-	relay := startListenerRelay(t, server.String())
+	return server.String()
+}
+
+// mpStartPodAt starts the pod of mpStartPod, dialling NATS at dial, the address of the relay the
+// caller put in front of the server natsURL names.
+func mpStartPodAt(t *testing.T, binary, natsURL, dial, instance string, env ...string) *mpPod {
+	t.Helper()
+	seed, granted := mpSeeds.Load(natsURL)
+	if !granted {
+		t.Fatalf("%s is no NATS server mpStartNATS started: every pod connects as its machine's granted user", natsURL)
+	}
 	held := cmdtest.HoldPort(t)
 	cmd := exec.Command(binary)
 	cmd.Env = append([]string{
@@ -103,18 +134,234 @@ func mpStartPod(t *testing.T, binary, natsURL, instance string, env ...string) *
 		"ENVOY_LISTEN_HOST=127.0.0.1",
 		"ENVOY_MACHINE_ID=" + mpMachine,
 		"ENVOY_INSTANCE_ID=" + instance,
-		"NATS_URLS=" + relay.relayed,
+		"NATS_URLS=" + dial,
 		"NATS_NKEY_SEED=" + seed.(string),
 		"ENVOY_API_TOKEN=" + mpToken,
 	}, env...)
 	held.Pass(cmd, "ENVOY_LISTEN_FD")
-	pod := &mpPod{Process: cmdtest.Start(t, "the listener "+instance, cmd), instance: instance, port: held.Port, relay: relay}
+	pod := &mpPod{Process: cmdtest.Start(t, "the listener "+instance, cmd), instance: instance, port: held.Port}
 	t.Cleanup(func() {
 		if t.Failed() {
 			t.Logf("%s's output, but for each delivery's lines (last 150 lines):\n%s", instance, mpTail(mpLinesWithout(pod.Output.String()), 150))
 		}
 	})
 	return pod
+}
+
+// mpReceiveConnection is the client name of a pod's main NATS connection, the one the machine's
+// durable is received on (`bus.Dial`, cmd/listener/main.go): every connection a pod opens names
+// itself in its CONNECT frame, and the delivery lease's own connection, `envoy-listener-lease
+// <instance>`, is a second socket to the same server under a name of its own. An mpLaneRelay
+// tells them apart by that name.
+func mpReceiveConnection(instance string) string { return "envoy-listener " + instance }
+
+// mpConnectName reads the client name out of a CONNECT frame's JSON.
+var mpConnectName = regexp.MustCompile(`"name":"([^"]*)"`)
+
+// mpLaneRelay stands between one pod and its NATS server and tells the pod's connections apart
+// by the client name in each CONNECT frame (mpReceiveConnection), so a row can fail one of them
+// and leave the rest: a holder whose receive connection is lost while its lease connection
+// renews on is the fault cut answers. Every connection is forwarded until cut names it.
+type mpLaneRelay struct {
+	listener net.Listener
+	target   string
+	relayed  string
+	done     chan struct{}
+	closing  sync.Once
+
+	mu sync.Mutex
+	// cuts holds one open gate per client name that is cut: every copy of such a connection waits
+	// for it to close, which healing does.
+	cuts  map[string]chan struct{}
+	links []*mpLaneLink
+}
+
+// mpLaneLink is one connection through the relay: the pod's socket, the server's, and the client
+// name the pod's CONNECT frame carried, which is empty until the relay has read it.
+type mpLaneLink struct {
+	client, server net.Conn
+
+	mu   sync.Mutex
+	name string
+	seen []byte
+}
+
+func startMPLaneRelay(t *testing.T, uri string) *mpLaneRelay {
+	t.Helper()
+	server, err := url.Parse(uri)
+	if err != nil {
+		t.Fatalf("parse NATS URL %q: %v", uri, err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for the lane relay: %v", err)
+	}
+	relayed := *server
+	relayed.Host = listener.Addr().String()
+	relay := &mpLaneRelay{
+		listener: listener,
+		target:   server.Host,
+		relayed:  relayed.String(),
+		done:     make(chan struct{}),
+		cuts:     map[string]chan struct{}{},
+	}
+	t.Cleanup(relay.close)
+	go relay.serve()
+	return relay
+}
+
+// cut takes the pod's connection named name down and keeps it down: the relay stops moving its
+// bytes in either direction, every socket left open as a lost node leaves them, and closes each
+// connection the pod opens under that name from its CONNECT frame on, as a refused dial does, so
+// nats.go's reconnects never land. The pod's other connections are untouched. The returned func
+// heals it, however often it is called.
+func (r *mpLaneRelay) cut(name string) (heal func()) {
+	r.mu.Lock()
+	gate, cutting := r.cuts[name]
+	if !cutting {
+		gate = make(chan struct{})
+		r.cuts[name] = gate
+	}
+	r.mu.Unlock()
+	return sync.OnceFunc(func() {
+		r.mu.Lock()
+		owned := r.cuts[name] == gate
+		if owned {
+			delete(r.cuts, name)
+		}
+		r.mu.Unlock()
+		if owned {
+			close(gate)
+		}
+	})
+}
+
+func (r *mpLaneRelay) serve() {
+	for {
+		client, err := r.listener.Accept()
+		if err != nil {
+			return
+		}
+		go r.relay(client)
+	}
+}
+
+// relay copies what the pod sends to the server, and starts the copy of what the server sends
+// back. It reads the client name out of the CONNECT frame as it passes, and closes a connection
+// opened under a name that is cut.
+func (r *mpLaneRelay) relay(client net.Conn) {
+	server, err := net.Dial("tcp", r.target)
+	if err != nil {
+		_ = client.Close()
+		return
+	}
+	link := &mpLaneLink{client: client, server: server}
+	r.mu.Lock()
+	r.links = append(r.links, link)
+	r.mu.Unlock()
+	defer func() { _ = server.Close() }()
+	go r.toClient(link)
+	buffer := make([]byte, 32*1024)
+	for {
+		// Waiting before the read as well as before the write leaves a cut connection's sockets
+		// as a lost node leaves them: the relay never reads the pod's close, so the server keeps
+		// the connection, and with it the durable's push binding.
+		r.pass(link)
+		n, err := client.Read(buffer)
+		if n > 0 {
+			if name, learned := link.named(buffer[:n]); learned && r.gate(name) != nil {
+				return
+			}
+			r.pass(link)
+			if _, writeErr := server.Write(buffer[:n]); writeErr != nil {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// toClient copies what the server sends to the pod, and nothing while the connection is cut.
+func (r *mpLaneRelay) toClient(link *mpLaneLink) {
+	defer func() { _ = link.client.Close() }()
+	buffer := make([]byte, 32*1024)
+	for {
+		r.pass(link)
+		n, err := link.server.Read(buffer)
+		if n > 0 {
+			r.pass(link)
+			if _, writeErr := link.client.Write(buffer[:n]); writeErr != nil {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// pass waits while the link's connection is cut, and returns at once while it is not, once it is
+// healed, or once the relay is closed.
+func (r *mpLaneRelay) pass(link *mpLaneLink) {
+	gate := r.gate(link.lane())
+	if gate == nil {
+		return
+	}
+	select {
+	case <-gate:
+	case <-r.done:
+	}
+}
+
+// gate is the open gate of a cut connection name, nil while connections under that name pass.
+func (r *mpLaneRelay) gate(name string) chan struct{} {
+	if name == "" {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cuts[name]
+}
+
+// named records what the pod has sent until its CONNECT frame names the client, and reports that
+// name and whether this read is the one that completed it.
+func (l *mpLaneLink) named(data []byte) (string, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.name != "" {
+		return l.name, false
+	}
+	l.seen = append(l.seen, data...)
+	match := mpConnectName.FindSubmatch(l.seen)
+	if match == nil {
+		return "", false
+	}
+	l.name, l.seen = string(match[1]), nil
+	return l.name, true
+}
+
+// lane is the client name of the link's connection, empty until its CONNECT frame was read.
+func (l *mpLaneLink) lane() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.name
+}
+
+func (r *mpLaneRelay) close() {
+	r.closing.Do(func() {
+		close(r.done)
+		_ = r.listener.Close()
+	})
+	r.mu.Lock()
+	links := r.links
+	r.links = nil
+	r.mu.Unlock()
+	for _, link := range links {
+		_ = link.client.Close()
+		_ = link.server.Close()
+	}
 }
 
 // mpSeeds maps the URL each row's own clients reach its NATS server at (mpStartNATS) to the seed

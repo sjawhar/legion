@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -259,6 +260,142 @@ func TestTwoPodsNodeLossHandsOverInOrderWithin15s(t *testing.T) {
 	time.Sleep(mpQuiet)
 	serving.requireOnce(t, messages)
 	watch.requireServed(t, frozen)
+}
+
+// The active pod's receive connection alone is lost: the relay freezes the connection its main
+// client holds, the one the machine's durable is received on, in both directions and closes every
+// reconnect it makes under that name, while the delivery lease's own connection - a second socket
+// of the same pod, `envoy-listener-lease pod-a` - goes on renewing the lease record. A message is
+// published every 100 ms from before the cut. The standby must take the lease over and deliver:
+// every message reaches its session exactly once, in publish order, the first published after the
+// cut within 15 s of it; the cut pod must hold the lease again at no poll of the 20 s that
+// follow, while the standby keeps delivering; and once the cut heals the old pod must answer
+// /healthz 200 role standby. Before this round the cut pod renews the record on its own
+// connection for as long as that one is up - answering /healthz 503 `subscription inactive` and
+// delivering nothing meanwhile - so no standby takes over until the pod's self-health monitor
+// kills it, ten minutes on.
+func TestTwoPodsReceiveConnectionLostHandsOverWithin15s(t *testing.T) {
+	uri := mpNATS(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	a := mpStartPodBehindLanes(t, binary, uri, "pod-a")
+	mpWaitActive(t, a, 30*time.Second)
+	b := mpStartPod(t, binary, uri, "pod-b")
+	mpWaitStandby(t, b, 30*time.Second)
+	serving := mpStartServingPort(t)
+	sessions := []string{"ses_mp_recvlost_one", "ses_mp_recvlost_two"}
+	for _, sessionID := range sessions {
+		a.registerPort(t, serving, sessionID)
+	}
+	watch := mpWatchSessions(t, b, sessions...)
+	publisher := mpConnectPublisher(t, uri)
+
+	stop := publisher.every(100*time.Millisecond, sessions...)
+	mpEventually(t, 10*time.Second, "the first messages to arrive", func() bool { return len(publisher.all()) >= 20 })
+	var heal func()
+	cut := publisher.quiesce(t, serving, func() { heal = a.lanes.cut(mpReceiveConnection(a.instance)) })
+	t.Cleanup(func() { heal() })
+
+	mpEventually(t, mpHardBound, b.instance+" to take the lease over", b.active)
+	taken := time.Since(cut)
+	released := mpLineWith(a.Output.String(), `"msg":"listener lease released: the receive connection is down"`)
+	if released == "" {
+		t.Fatalf("%s released the lease without logging why:\n%s", a.instance, mpTail(mpLinesWithout(a.Output.String()), 40))
+	}
+	if lines := strings.Count(a.Output.String(), "listener lease released: the receive connection is down"); lines != 1 {
+		t.Fatalf("%s logged the release of its lost receive connection %d times, want one line: %s", a.instance, lines, released)
+	}
+	t.Logf("%s logged %s", a.instance, released)
+	// The cut pod takes the lease back at no poll while its receive connection is down, and the
+	// standby holds the record and goes on delivering throughout.
+	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(mpPoll) {
+		record := publisher.stored(t, bus.ListenerStateBucket, bus.ListenerLeaseKey(mpMachine))
+		if record["holder"] != b.instance || record["released"] == true {
+			t.Fatalf("%s into the cut the lease record names %v (released %v), want %s holding it",
+				time.Since(cut).Round(time.Millisecond), record["holder"], record["released"], b.instance)
+		}
+		if a.active() {
+			_, body := a.health()
+			t.Fatalf("%s into the cut %s reports itself active again: %v", time.Since(cut).Round(time.Millisecond), a.instance, body)
+		}
+	}
+	stop()
+
+	messages := publisher.since(cut)
+	serving.awaitAll(t, messages, mpHardBound+5*time.Second)
+	serving.requireWithin(t, messages, mpHardBound, cut)
+	serving.requireOrder(t, messages)
+	serving.requireOnce(t, messages)
+	first, _ := serving.first(sessions[0], messages[0].event)
+	t.Logf("%s took the lease %s after the cut of %s's receive connection; the first message published after it reached its session %s after the cut, %d messages in all",
+		b.instance, taken.Round(time.Millisecond), a.instance, first.Sub(cut).Round(time.Millisecond), len(messages))
+
+	heal()
+	mpWaitStandby(t, a, 30*time.Second)
+	time.Sleep(mpQuiet)
+	serving.requireOnce(t, messages)
+	watch.requireServed(t, cut)
+}
+
+// The active pod's receive connection comes back inside the bound: the relay freezes it only
+// until the pod's client has noticed the cut, then heals it, so nats.go reconnects on the same
+// relay about a second later, inside leaseReceiveLost. The pod keeps the lease in the term it
+// held across the cut, the standby never receives, and every message reaches its session once and
+// within 10 s of its publish.
+func TestTwoPodsReceiveConnectionBackInsideTheBoundKeepsTheLease(t *testing.T) {
+	uri := mpNATS(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	a := mpStartPodBehindLanes(t, binary, uri, "pod-a")
+	mpWaitActive(t, a, 30*time.Second)
+	b := mpStartPod(t, binary, uri, "pod-b")
+	mpWaitStandby(t, b, 30*time.Second)
+	serving := mpStartServingPort(t)
+	sessions := []string{"ses_mp_recvback_one", "ses_mp_recvback_two"}
+	for _, sessionID := range sessions {
+		a.registerPort(t, serving, sessionID)
+	}
+	publisher := mpConnectPublisher(t, uri)
+	acquisitions := strings.Count(a.Output.String(), `"msg":"listener lease acquired"`)
+	reconnects := mainClientReconnects(a.Output.String())
+
+	stop := publisher.every(100*time.Millisecond, sessions...)
+	mpEventually(t, 10*time.Second, "the first messages to arrive", func() bool { return len(publisher.all()) >= 20 })
+	heal := a.lanes.cut(mpReceiveConnection(a.instance))
+	t.Cleanup(heal)
+	cut := time.Now()
+	mpEventually(t, 15*time.Second, a.instance+"'s client to notice the cut", func() bool {
+		return strings.Contains(a.Output.String(), `envoy nats disconnected name="`+mpReceiveConnection(a.instance)+`"`)
+	})
+	noticed := time.Now()
+	heal()
+	mpEventually(t, 15*time.Second, a.instance+" to reconnect", func() bool {
+		return mainClientReconnects(a.Output.String()) > reconnects
+	})
+	back := time.Since(noticed)
+	time.Sleep(5 * time.Second) // publish on past the bound the holder would have released at
+	stop()
+
+	messages := publisher.all()
+	serving.awaitAll(t, messages, 30*time.Second)
+	serving.requireWithin(t, messages, mpGracefulBound, time.Time{})
+	serving.requireOnce(t, messages)
+	t.Logf("%s noticed the cut %s after it and was back %s later, inside the %s bound",
+		a.instance, noticed.Sub(cut).Round(time.Millisecond), back.Round(time.Millisecond), leaseReceiveLost)
+	if back >= leaseReceiveLost {
+		t.Fatalf("%s was back %s after it noticed the cut, past the bound %s: the row tested nothing", a.instance, back, leaseReceiveLost)
+	}
+	if !a.active() {
+		_, body := a.health()
+		t.Fatalf("%s is not the active pod after a cut it reconnected inside the bound from: %v", a.instance, body)
+	}
+	if took := strings.Count(a.Output.String(), `"msg":"listener lease acquired"`); took != acquisitions {
+		t.Fatalf("%s acquired the lease %d times across the cut, want the term it held throughout", a.instance, took-acquisitions)
+	}
+	if strings.Contains(a.Output.String(), "listener lease released: the receive connection is down") {
+		t.Fatalf("%s released the lease for a receive connection that was back inside the bound", a.instance)
+	}
+	if strings.Contains(b.Output.String(), "durable receiving") {
+		t.Fatalf("%s received the durable across %s's short receive cut", b.instance, a.instance)
+	}
 }
 
 // A graceful stop: the active pod is in hand on a prompt that never answers when it is sent

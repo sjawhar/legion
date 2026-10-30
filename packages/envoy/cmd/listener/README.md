@@ -53,6 +53,7 @@ replace, and revisions never repeat, so an old mark is never read as a newer han
 | `leaseTTL` | 5 s | A standby takes an unreleased record that has not changed for this long, measured on its own monotonic clock from when it first saw that revision. |
 | `leaseMargin` | 1 s | The holder counts itself the holder until the start of its last successful renewal plus `leaseTTL` minus this, so its term ends before any standby can take the record. |
 | `leaseStandbyPoll` | 500 ms | How often a standby reads the record. |
+| `leaseReceiveLost` | 3 s | How long this pod's receive connection may be down before the holder stops renewing and releases the record ("Take-over" below). |
 
 A standby takes an absent record with a create, a released one at once, and an unreleased one
 only once the TTL has passed; no wall clocks are compared. A holder whose renewal finds its record
@@ -61,6 +62,17 @@ subscription on the durable's deliver subject, never `nats.Bind`, and handles a 
 it holds the lease: one received while it does not (the moment before an unsubscribe lands, or a
 subscription nats.go sent again after a reconnect in place) is dropped with no ack and no NAK, and
 the durable redelivers it to the holder after its ack wait.
+
+Renewing is not the whole of holding. The lease renews on a NATS connection of its own
+(`envoy-listener-lease <instance>`), while the durable is received on the pod's main client
+(`envoy-listener <instance>`), so the one can be up while the other is down. The receive loop
+gives the lease one signal for that (`durableReceiver.receiveUp`, `lease.SetReceiveSignal`),
+the same state that makes `/healthz` 503 on the active pod: the main client's connection is
+connected, and a term that is receiving holds a subscription that is valid on that connection. A
+pod still preparing - reading the durable, waiting out a binding, settling before it has
+subscribed - counts as receiving, as `/healthz` counts it a standby rather than an inactive
+subscription. The lease judges that signal once a round, for the holder's release and the
+standby's take alike ("Take-over" below).
 
 The durable's ack wait is 6 s (`consumerAckWait`). The holder sends `InProgress` every 2 s for
 every message it has received and not settled, queued or in hand, so a message waits out the ack
@@ -165,6 +177,29 @@ wait only once the pod holding it has died or lost the lease.
   term. A listener without a lease has no one to give it to: it keeps retrying and logs the line
   again every 5 min
   (`durableTakeoverAlarmEvery`).
+- **A holder whose receive connection is lost.** The lease and the durable ride two connections,
+  so a pod can renew a lease it receives nothing on: the main client's link freezes or its hub
+  stops answering, nats.go declares the connection stale two to three seconds later
+  (`bus.WithSilentCutDetection`) and reconnects about a second after that, while the lease's own
+  connection renews throughout. A holder whose receive signal has been down for `leaseReceiveLost`
+  (3 s) stops renewing and releases the record with the WARN `listener lease released: the receive
+  connection is down`, naming `down_ms`; a connection back inside those 3 s costs it nothing, not
+  even a new term. The release carries `unsettled`, `ack_wait_owed` and `stale_binding`, whatever
+  the term's own flags stood at: what the durable pushed to the lost connection comes back only at
+  its ack wait, and that connection's subscription can still be bound at the server. So the
+  standby takes the released record at its next poll, subscribes at once beside that binding and
+  holds its full 7 s cap, and no clean-hand-back mark vouches for a release no hand-over went
+  through. The receive loop ends the term as it ends any lost lease - it drops the subscription
+  and leaves what it queued to come back at its ack wait - since nothing can be NAKed over a
+  connection that is down. A message published as the connection was cut reaches its session
+  about 13 s later (3 s detection, the 3 s bound, a standby poll and the 7 s hold), inside the
+  15 s a hard take-over is bounded at. No pod takes the lease while its own receive connection is
+  down - not an absent record, not a released one, not an expired one, and a holder that has
+  lapsed does not resume - so the cut pod does not take back what it just released; it stands by
+  again, and may take the lease, once the connection is up. A release the bucket does not take
+  keeps the hold: nothing was handed over, so the pod goes on as a holder whose bucket calls fail,
+  its renewals lapse, a standby takes its record once it expires, and it tries the release again
+  at its next turn.
 
 The lines to read are `listener lease acquired` (with `from`: `absent`, `released` or `expired`,
 and `settle`, `stale_binding`, `hand_back` - the term is a hand-back candidate - and `replaced`,
@@ -184,7 +219,8 @@ settles for an ack wait` (with `error`),
 `durable consumer read failed; retrying` and `durable subscribe failed;
 retrying` (with `error`), `lease holder cannot deliver from the durable` (ERROR, with `reason` and
 `waited_ms`), `giving the listener lease up: this pod cannot deliver from the durable`, `listener
-lease lost: another listener holds it` and `listener lease released`.
+lease lost: another listener holds it`, `listener lease released: the receive connection is down`
+(WARN, with `down_ms` and the `revision` it released) and `listener lease released`.
 
 ### Graceful stop order
 
@@ -230,7 +266,7 @@ answered by then makes the answer `503 {"status":"unhealthy"}`.
 | `200 {"status":"healthy","role":"active",…}` | The pod receives the durable. The body carries the durable's lag, `num_pending` and `num_ack_pending`. |
 | `200 {"status":"healthy","role":"standby",…}` | The pod is ready, does not deliver, and another pod of the machine holds the lease: `active_instance` names it. |
 | `200 {"status":"degraded",…}` | A transient KV failure the monitor and the NATS reconnect retry, or, on the active pod, a durable whose lag could not be read. Also a pod that is the machine's deliverer and does not receive yet - it holds the lease, or runs without one, or has read no holder at all, or the record still names this pod while it no longer holds it (its renewals lapsed, and no other pod has taken the record yet): nothing of the durable reaches a session until it receives, so no such answer is healthy. `role` is `standby` and `receive` says what it waits for (`preparing the durable`, or `waiting for another subscriber's push binding to end`); when its reads, creations, corrections or subscribes of the durable fail, `error` is `durable consumer unavailable: <failure>` and `receive_failing_ms` how long it has failed. It stays `200`, as a standby does, so a readiness probe keeps it in service. |
-| `503 {"status":"unhealthy",…}` | A NATS flush failed (`nats unavailable`), the role lane's subscription is not valid (`role subscription inactive`), the live topics lane is disconnected or refused (`live subscription inactive`), a cache watcher stopped; on the active pod also its subscription is not valid, the durable is gone, or the durable delivers to another subject than its subscription's (`not bound to this listener's subscription`, which a durable deleted and created again under it leaves). Also the failing durable above once it has failed for 135 s: a lease holder gives the lease up then and answers as a standby, so only a listener without a lease, which keeps retrying, stays unready. |
+| `503 {"status":"unhealthy",…}` | A NATS flush failed (`nats unavailable`), the role lane's subscription is not valid (`role subscription inactive`), the live topics lane is disconnected or refused (`live subscription inactive`), a cache watcher stopped; on the active pod also its subscription is not valid, the durable is gone, or the durable delivers to another subject than its subscription's (`not bound to this listener's subscription`, which a durable deleted and created again under it leaves). An active pod answers `subscription inactive` for `leaseReceiveLost` (3 s) at most: the lease reads the same signal and releases the record, after which the pod answers as a standby ("Take-over" above). Also the failing durable above once it has failed for 135 s: a lease holder gives the lease up then and answers as a standby, so only a listener without a lease, which keeps retrying, stays unready. |
 
 Every healthy answer also carries the body fields it always did (`live_topics`, `ci_cache`, the
 session registry's fields). A standby is ready: route traffic to it. A pod answers `503 starting`

@@ -23,13 +23,28 @@ import (
 // on its own monotonic clock, measured from when it first saw that revision. No wall clocks are
 // compared: the holder's validity ends at its renewal's start + 4 s, and a standby takes no
 // earlier than that write + 5 s, which is safe while the two pods' clock rates differ by less
-// than 20 %.
+// than 20 %. Renewing is not the whole of holding: a holder whose receive connection has been
+// down for leaseReceiveLost releases the record however well its own renewals land, and a
+// standby takes none while its receive connection is down (lease.receiveDown).
 const (
 	leaseRenewEvery  = time.Second
 	leaseTTL         = 5 * time.Second
 	leaseMargin      = time.Second
 	leaseStandbyPoll = 500 * time.Millisecond
 )
+
+// leaseReceiveLost is how long this pod's receive connection may be down before the holder stops
+// renewing and releases the record (lease.releaseReceiveLost): a pod that is not receiving the
+// durable delivers nothing, however well its own connection to the lease bucket renews.
+//
+// 3 s is chosen between the two bounds it sits in. Below it: nats.go notices a silent cut in two
+// to three seconds (bus.WithSilentCutDetection) and reconnects about a second after that, a
+// second attempt about a second later again, so a link that comes back keeps the lease and only
+// one that stays down loses it. Above it: the standby takes the released record at its next poll
+// (leaseStandbyPoll) and then holds its settle cap (7 s), so a message published as the
+// connection was cut reaches its session about 13 s after the cut, inside the 15 s a hard
+// take-over is bounded at.
+const leaseReceiveLost = 3 * time.Second
 
 // leaseConfig carries the lease's timing, so a test of this package shortens it;
 // productionLeaseConfig is the only value the listener runs with.
@@ -38,10 +53,19 @@ type leaseConfig struct {
 	ttl         time.Duration
 	margin      time.Duration
 	standbyPoll time.Duration
+	// receiveLost is how long the holder's receive connection may be down before it releases the
+	// record (leaseReceiveLost).
+	receiveLost time.Duration
 }
 
 func productionLeaseConfig() leaseConfig {
-	return leaseConfig{renewEvery: leaseRenewEvery, ttl: leaseTTL, margin: leaseMargin, standbyPoll: leaseStandbyPoll}
+	return leaseConfig{
+		renewEvery:  leaseRenewEvery,
+		ttl:         leaseTTL,
+		margin:      leaseMargin,
+		standbyPoll: leaseStandbyPoll,
+		receiveLost: leaseReceiveLost,
+	}
 }
 
 // leaseAcquisition is how a pod took the lease: what the record was when it wrote over it. The
@@ -136,14 +160,16 @@ type lease struct {
 
 	// The loop's own state, read and written only by step (and by Release once the loop ended):
 	// the revision a standby is timing and when it first saw it, whether the holder's lapse has
-	// been signalled, whether a streak of failed bucket calls has been logged, and the revision
-	// of the record this process last released on giving the lease up and when (GiveUp).
-	seenRev        uint64
-	seenAt         time.Time
-	lapseSignalled bool
-	failing        bool
-	givenUpRev     uint64
-	givenUpAt      time.Time
+	// been signalled, whether a streak of failed bucket calls has been logged, the revision
+	// of the record this process last released on giving the lease up and when (GiveUp), and
+	// when this pod's receive connection went down, zero while it is up (receiveDown).
+	seenRev          uint64
+	seenAt           time.Time
+	lapseSignalled   bool
+	failing          bool
+	givenUpRev       uint64
+	givenUpAt        time.Time
+	receiveDownSince time.Time
 
 	mu         sync.Mutex
 	held       bool
@@ -182,8 +208,10 @@ type lease struct {
 	releasedStale bool
 	// giveUpTerm is the term GiveUp asked the loop to give up.
 	giveUpTerm uint64
-	stop       context.CancelFunc
-	done       chan struct{}
+	// receiveUp is the receiver's signal, nil until it is wired (SetReceiveSignal).
+	receiveUp func() bool
+	stop      context.CancelFunc
+	done      chan struct{}
 }
 
 // newLease makes machineID's lease over kv for this process, instance, with timing cfg and now
@@ -204,6 +232,17 @@ func newLease(kv bus.KeyValue, machineID, instance string, cfg leaseConfig, now 
 		changes:      make(chan struct{}, 1),
 		renewals:     make(chan struct{}, 1),
 	}
+}
+
+// SetReceiveSignal gives the lease the one signal it judges this pod's receiving by: up reports
+// whether this pod's receive connection is up now, which only the receive loop knows
+// (durableReceiver.receiveUp). The lease reads nothing of the receiver itself; a lease with no
+// signal - a test's, or one whose receiver is not wired yet - is never down. It is set once,
+// before Start.
+func (l *lease) SetReceiveSignal(up func() bool) {
+	l.mu.Lock()
+	l.receiveUp = up
+	l.mu.Unlock()
 }
 
 // Start runs the lease until ctx ends or Release stops it: a standby polls and takes the record,
@@ -440,15 +479,35 @@ func (l *lease) Release(ctx context.Context) error {
 // had already taken it (no error), or the write failed (its error).
 func (l *lease) letGo() (uint64, error) {
 	l.mu.Lock()
-	held, lapsed, rev, record := l.held, l.held && !l.holdingLocked(), l.rev, l.record
-	record.StaleBinding, record.Unsettled, record.AckWaitOwed, record.Receiving = l.staleBinding, l.unsettled || lapsed, l.ackWaitOwed || lapsed, false
+	held, rev := l.held, l.rev
+	record := l.releasedRecordLocked(l.held && !l.holdingLocked())
 	l.held, l.validUntil = false, time.Time{}
 	l.mu.Unlock()
 	if !held {
 		return 0, nil
 	}
 	defer l.signal()
+	return l.writeRelease(record, rev)
+}
+
+// releasedRecordLocked is the record a release of this term writes: the record as this process
+// last wrote or read it, marked released and no longer receiving, keeping service_since,
+// stale_binding and former_boots as they stand and writing unsettled and ack_wait_owed as the
+// term stands, or both of them set when lapsed says the term's validity had run out (letGo).
+// Callers must hold l.mu.
+func (l *lease) releasedRecordLocked(lapsed bool) leaseRecord {
+	record := l.record
+	record.StaleBinding, record.Unsettled, record.AckWaitOwed, record.Receiving = l.staleBinding, l.unsettled || lapsed, l.ackWaitOwed || lapsed, false
 	record.Released = true
+	return record
+}
+
+// writeRelease writes record, a released record of this term, over revision rev, and records the
+// revision it wrote and the stale_binding it wrote there, which a clean-hand-back mark of a stop
+// would vouch for (MarkHandBack). It returns the released record's revision, or zero when it
+// wrote none: another pod had already taken the record (no error), or the write failed (its
+// error).
+func (l *lease) writeRelease(record leaseRecord, rev uint64) (uint64, error) {
 	value, err := record.encode()
 	if err != nil {
 		return 0, fmt.Errorf("encode the released lease record: %w", err)
@@ -477,20 +536,51 @@ func (l *lease) signal() {
 	}
 }
 
+// receiveDown reports whether this pod's receive connection is down at now and how long it has
+// been down. It is the one place the receiver's signal is judged (SetReceiveSignal), for the
+// holder's release (releaseReceiveLost) and the standby's take (poll) alike, and only the loop
+// calls it, so the moment it went down needs no lock. A connection that is up forgets that
+// moment, so a reconnect inside the bound costs the holder nothing and the next cut is timed
+// from itself.
+func (l *lease) receiveDown(now time.Time) (bool, time.Duration) {
+	l.mu.Lock()
+	up := l.receiveUp
+	l.mu.Unlock()
+	if up == nil || up() {
+		l.receiveDownSince = time.Time{}
+		return false, 0
+	}
+	if l.receiveDownSince.IsZero() {
+		l.receiveDownSince = now
+	}
+	return true, now.Sub(l.receiveDownSince)
+}
+
 // step does one round of the lease, renewing it as the holder, giving it up when GiveUp asked for
-// the current term, or reading and maybe taking it as a standby, and returns how long to wait
-// before the next.
+// the current term, releasing it when this pod's receive connection has been down for the bound,
+// or reading and maybe taking it as a standby, and returns how long to wait before the next. It
+// is where the receiver's signal is read, once a round, for the holder and the standby alike
+// (receiveDown).
 func (l *lease) step() time.Duration {
+	down, lasted := l.receiveDown(l.now())
 	l.mu.Lock()
 	held, givingUp := l.held, l.held && l.giveUpTerm == l.term
 	l.mu.Unlock()
 	switch {
 	case givingUp:
 		return l.giveUp()
+	case held && down && lasted >= l.cfg.receiveLost:
+		return l.releaseReceiveLost(lasted)
 	case held:
-		return l.renew()
+		wait := l.renew()
+		if down {
+			// Wake at the bound rather than at the next renewal, so the release lands at it:
+			// every renewal past it renews a record this pod delivers nothing from.
+			wait = min(wait, l.cfg.receiveLost-lasted)
+		}
+		return wait
 	}
-	return l.poll()
+	return l.poll(down)
 }
 
 // giveUp releases the record as letGo does and leaves the loop a standby that does not take that
@@ -503,6 +593,50 @@ func (l *lease) giveUp() time.Duration {
 	}
 	l.seenRev, l.lapseSignalled = 0, false
 	l.givenUpRev, l.givenUpAt = rev, l.now()
+	return l.cfg.standbyPoll
+}
+
+// releaseReceiveLost stops renewing and releases the record of a holder whose receive connection
+// has been down for cfg.receiveLost (receiveDown), down: this pod receives nothing of the
+// durable, so the machine's lease must go to a pod that can. The record goes unsettled, owing its
+// successor an ack wait and carrying stale_binding, as a lapse's release does and whatever this
+// term's own flags stood at: what the durable pushed to the lost connection comes back only at
+// its ack wait, and that connection's subscription can still be bound at the server. So the pod
+// that takes it settles for the full ack wait, subscribing at once beside that binding, and no
+// clean-hand-back mark is written for a release no hand-over went through (MarkHandBack). The
+// loop does not take the record back for two standby polls, as a give-up does, and takes none at
+// all while the connection stays down (poll). A record another pod has already taken writes
+// nothing and is no error: the revision logged is then zero, and this pod stops holding it all
+// the same.
+//
+// A release the bucket does not take keeps the hold: nothing was handed over, so this pod goes on
+// as a holder whose bucket calls fail - its renewals lapse and a standby takes its record once it
+// expires, as before this bound - and it tries the release again at its next turn. The receive
+// loop ends the term as it ends any lost lease, dropping the subscription on the dead connection
+// with no hand-back possible on it (durableReceiver.endLost).
+func (l *lease) releaseReceiveLost(down time.Duration) time.Duration {
+	l.mu.Lock()
+	held, rev := l.held, l.rev
+	record := l.releasedRecordLocked(true)
+	record.StaleBinding = true
+	l.mu.Unlock()
+	if !held {
+		return l.cfg.standbyPoll
+	}
+	next, err := l.writeRelease(record, rev)
+	if err != nil {
+		l.noteFailure("release after the receive connection went down", err)
+		return l.renew()
+	}
+	l.mu.Lock()
+	l.held, l.validUntil = false, time.Time{}
+	l.mu.Unlock()
+	l.logger.Warn("listener lease released: the receive connection is down",
+		slog.String("lease", l.key), slog.Int64("down_ms", down.Milliseconds()),
+		slog.Uint64("revision", next))
+	l.signal()
+	l.seenRev, l.lapseSignalled = 0, false
+	l.givenUpRev, l.givenUpAt = next, l.now()
 	return l.cfg.standbyPoll
 }
 
@@ -631,7 +765,12 @@ func (l *lease) ownRevision() (uint64, bool, error) {
 // at its revision, at once) or unchanged for a full ttl since this process first saw its
 // revision (Update at that revision). The released revision this process wrote on giving the
 // lease up it takes only two standby polls after that (GiveUp), so another standby takes it first.
-func (l *lease) poll() time.Duration {
+//
+// down is whether this pod's receive connection is down (receiveDown): it then reads the record,
+// so its /healthz still names the holder, and takes none, since a pod that receives nothing would
+// hold the machine's lease and deliver nothing from it. It forgets the revision it was timing
+// with it, so once the connection is back it stands by again from that poll on.
+func (l *lease) poll(down bool) time.Duration {
 	entry, err := l.kv.Get(l.key)
 	seen := l.now()
 	if errors.Is(err, nats.ErrKeyNotFound) {
@@ -640,6 +779,9 @@ func (l *lease) poll() time.Duration {
 		l.record = leaseRecord{}
 		l.mu.Unlock()
 		l.seenRev = 0
+		if down {
+			return l.cfg.standbyPoll
+		}
 		return l.acquire(nil, leaseRecord{}, leaseTakenAbsent)
 	}
 	if err != nil {
@@ -661,6 +803,9 @@ func (l *lease) poll() time.Duration {
 	l.record = record
 	l.mu.Unlock()
 	switch {
+	case down:
+		l.seenRev = 0
+		return l.cfg.standbyPoll
 	case record.Released && entry.Revision() == l.givenUpRev && seen.Sub(l.givenUpAt) < 2*l.cfg.standbyPoll:
 		return l.cfg.standbyPoll
 	case record.Released:

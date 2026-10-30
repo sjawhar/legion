@@ -49,9 +49,10 @@ func handBackTiming() receiveConfig {
 	return timing
 }
 
-// testLeaseTiming is a lease that a standby takes within a second of its holder going quiet.
+// testLeaseTiming is a lease that a standby takes within a second of its holder going quiet, and
+// whose holder releases the record 300 ms after its receive connection goes down.
 func testLeaseTiming() leaseConfig {
-	return leaseConfig{renewEvery: 100 * time.Millisecond, ttl: 600 * time.Millisecond, margin: 200 * time.Millisecond, standbyPoll: 50 * time.Millisecond}
+	return leaseConfig{renewEvery: 100 * time.Millisecond, ttl: 600 * time.Millisecond, margin: 200 * time.Millisecond, standbyPoll: 50 * time.Millisecond, receiveLost: 300 * time.Millisecond}
 }
 
 // receivedMessage is one message a test receiver's handler took, and the delivery count the

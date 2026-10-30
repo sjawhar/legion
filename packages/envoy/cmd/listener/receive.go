@@ -59,6 +59,15 @@ import (
 // listener without a lease has no one to give it to: it keeps retrying and logs the line again
 // every durableTakeoverAlarmEvery.
 //
+// A holder whose receive connection goes down keeps none of that: the lease reads the signal
+// this loop gives it (durableReceiver.receiveUp) and, once the connection has been down for
+// leaseReceiveLost, releases the record, so a standby takes it while this pod's own connection
+// to the lease bucket is still renewing (lease.releaseReceiveLost). The term then ends as any
+// lost lease's does - the subscription on the dead connection is dropped and what is queued is
+// left to come back at its ack wait (durableReceiver.endLost) - since no hand-back can be NAKed
+// over a connection that is down. This pod takes no lease back while the connection stays down,
+// and stands by as any other pod once it is up.
+//
 // The holder sends InProgress every inProgressEvery for every message it has received and not
 // settled, queued or in hand, so none waits out the ack wait while this pod is alive. On a
 // shutdown the message in hand gets inflightGrace to finish before its handling context is
@@ -368,6 +377,27 @@ func (r *durableReceiver) reconnected(conn *nats.Conn) error {
 // holding reports whether this pod may deliver now: it holds the lease, or runs without one.
 func (r *durableReceiver) holding() bool {
 	return r.lease == nil || r.lease.Holding()
+}
+
+// receiveUp is the signal the delivery lease judges this pod's receiving by
+// (lease.SetReceiveSignal): the lease holder releases the record once it has been down for
+// leaseReceiveLost, and no pod takes the record while it is down. It is what makes /healthz 503
+// on the active pod, read here rather than there: the client's connection is not connected, or
+// the term is receiving and its subscription is no longer valid on that connection, which a
+// connection the client replaced leaves until the resubscribe (report, repair). A holder that is
+// still preparing - reading the durable, waiting out a pre-lease build's binding, settling
+// before it has subscribed - is receiving as far as this goes, as /healthz counts it a standby
+// rather than an inactive subscription: its connection is up and its term is on its way.
+func (r *durableReceiver) receiveUp() bool {
+	if !r.client.Connected() {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.state != receiveActive || r.term == nil {
+		return true
+	}
+	return r.term.sub != nil && r.term.sub.IsValid() && r.term.conn == r.conn
 }
 
 func (r *durableReceiver) setState(state receiveState) {

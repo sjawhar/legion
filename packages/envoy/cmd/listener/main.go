@@ -1417,6 +1417,13 @@ func main() {
 	// A replaced connection invalidates the subscription; the receive loop subscribes again on the
 	// connection the client now holds.
 	client.AddReconnectHook(receiver.reconnected)
+	// The lease judges this pod's receiving by that same connection: a holder whose receive
+	// connection has been down for leaseReceiveLost releases the record, so a standby delivers
+	// while this pod's lease connection, which is another connection, still renews; and no pod
+	// takes the record while its receive connection is down (lease.SetReceiveSignal).
+	if deliveryLease != nil {
+		deliveryLease.SetReceiveSignal(receiver.receiveUp)
+	}
 
 	ready := &listenerDeps{
 		client:      client,

@@ -35,7 +35,11 @@ func TestLeaseRunningStandbyTakesAReleasedLeaseWithoutTheTTL(t *testing.T) {
 	if elapsed := took.Sub(released); elapsed > leaseStandbyPoll+time.Second {
 		t.Fatalf("standby took the released lease %s after the release, want within a poll (%s) and no ttl wait", elapsed, leaseStandbyPoll)
 	}
-	if !drainChanges(b) {
+	// acquire signals the change after it releases its mutex, so the signal can land just after
+	// Holding reads true.
+	select {
+	case <-b.Changes():
+	case <-time.After(time.Second):
 		t.Fatal("the take signalled no change")
 	}
 	if how := b.Status().How; how != leaseTakenReleased {
@@ -157,7 +161,7 @@ func TestLeaseRenewalAfterAnOutageResumes(t *testing.T) {
 // than the acquiring write, since no pod of the machine was serving in between.
 func TestLeaseServiceSinceStartsAgainOverAnUnreleasedRecordOlderThanTwoTTL(t *testing.T) {
 	kv := leaseBucket(t)
-	cfg := leaseConfig{renewEvery: 20 * time.Millisecond, ttl: 100 * time.Millisecond, margin: 20 * time.Millisecond, standbyPoll: 10 * time.Millisecond}
+	cfg := leaseConfig{renewEvery: 20 * time.Millisecond, ttl: 100 * time.Millisecond, margin: 20 * time.Millisecond, standbyPoll: 10 * time.Millisecond, receiveLost: 50 * time.Millisecond}
 	clock := newFakeLeaseClock()
 	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	putLease(t, kv, fmt.Sprintf(`{"holder":"pod-old","boot":"0011223344556677","service_since":%q,"released":false}`, old.Format(time.RFC3339Nano)))
