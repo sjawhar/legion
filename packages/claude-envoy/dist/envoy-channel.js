@@ -46937,7 +46937,17 @@ var legionRepositories = strictObject({
     cache: legionCacheView.optional()
   })),
   refused: array(strictObject({ repo: nonEmptyString, reason: nonEmptyString })),
+  withoutWebhookApp: array(strictObject({ repo: nonEmptyString, reason: nonEmptyString })),
   caches: array(legionCacheView)
+});
+var legionConsumerLag = strictObject({
+  name: nonEmptyString,
+  waiting: number2().int().nonnegative(),
+  oldestAt: timestamp.nullable(),
+  oldestAgeSeconds: number2().int().nullable(),
+  lastHandledAt: timestamp.nullable(),
+  stalled: boolean2(),
+  unavailable: nonEmptyString.optional()
 });
 var LegionStateResponse = strictObject({
   daemon: daemonInfo,
@@ -46950,7 +46960,8 @@ var LegionStateResponse = strictObject({
   agentSecretsLogin: legionAgentSecretsLoginView.optional(),
   capabilities: array(legionCapabilityState),
   repositories: legionRepositories,
-  settings: legionSettings
+  settings: legionSettings,
+  consumers: array(legionConsumerLag)
 });
 var LegionRegisterResponse = strictObject({
   claimToken: nonEmptyString,
@@ -49784,7 +49795,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 var name = "@sjawhar/claude-envoy";
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 42
+  daemonApiVersion: 43
 };
 
 // src/channel-forwarder.ts
@@ -51472,7 +51483,7 @@ var PHASE_OP_SENTENCES = {
   requestBackwardMove: "request_backward_move returns an issue to an earlier phase (`to`, `reason`): a phase worker moves its own issue; " + "the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which counts a review round. "
 };
 function legionToolDescription(host) {
-  return "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " + (host.before ?? "") + "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase, " + "and the implementer's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for the " + "architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " + "any other role there) and pass|pending|fail from the implementer on a production check report (pending: production does not carry the merge " + "yet), `ready: true` for the merger's READY. A handoff is a committed " + "file, `.legion/<issue>/<phase>.json`: the pushed commit carrying it is found here, with the pane's jj, and reported, so write it, commit it and " + "push the branch (`jj git push`) before calling; this call refuses, posting nothing, a handoff still in the working copy, missing, not committed " + "on this branch, carried by another pane's commit, or not yet on `legion/<issue>@origin`, each naming the remedy. A production check report " + "(the task whose first line is `Production check of <KEY>`, handed to the implementer once the merge closed its issue) needs no handoff and no " + "commit: it carries its verdict and summary alone, and the daemon refuses it when no check is open (CHECK_NOT_OPEN). The daemon refuses " + "HANDOFF_NOT_NEW (the commit is the one you reported for your previous phase: write and commit this phase's handoff) and, for READY, each " + "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " + "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " + (host.after ?? "") + `What a later phase needs goes in your handoff; a question for another live role goes to its role topic with ${host.envoyPublish}.`;
+  return "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " + (host.before ?? "") + "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase, " + "and the implementer's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for the " + "architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " + "any other role there) and pass|pending|fail from the implementer on a production check report (pending: production does not carry the merge " + "yet), `ready: true` for the merger's READY. A handoff is a committed " + "file, `.legion/<issue>/<phase>.json`: the pushed commit carrying it is found here, with the pane's jj, and reported, so write it, commit it and " + "push the branch (`jj git push`) before calling; this call refuses, posting nothing, a handoff still in the working copy, missing, not committed " + "on this branch, carried by another pane's commit, or not yet on `legion/<issue>@origin`, each naming the remedy. A production check report " + "(the task whose first line is `Production check of <KEY>`, handed to the implementer once the merge closed its issue) needs no handoff and no " + "commit: it carries its verdict and summary alone, and the daemon refuses it when no check is open (CHECK_NOT_OPEN). The daemon refuses " + "HANDOFF_NOT_NEW (the commit is the one you reported for your previous phase: write and commit this phase's handoff), the implementer's " + "completion of implementing with no open pull request on `legion/<issue>` and none recorded merged (HANDOFF_NO_PULL_REQUEST: open it; one " + "naming a closed pull request is the architect's to decide) and, for READY, each " + "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " + "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " + (host.after ?? "") + `What a later phase needs goes in your handoff; a question for another live role goes to its role topic with ${host.envoyPublish}.`;
 }
 async function mintClaimGrant(daemon, claim) {
   const { grantId } = await daemon.grant({
