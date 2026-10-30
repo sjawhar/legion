@@ -106,14 +106,6 @@ const SCHEMA_REFUSAL_DELAYS_MS = [0, 1_000, 2_000, 4_000, 8_000] as const;
 const NEEDS_REBUILD_CONFIRMATION =
   "Rebuild this document from its current text? Every browser connected to it, this one included, drops the edits it has not sent yet.";
 
-/** An edit the server refused, as the editor tells the person about it: the sentence that says
- * why, and whether the document must be rebuilt before it takes such an edit, which the page then
- * offers. */
-interface RefusedEdit {
-  readonly notice: string;
-  readonly needsRebuild: boolean;
-}
-
 /** The document chrome reports its state upward so an issue can place its controls in the active
  * Spec tab row. Project document pages retain their artifact-header toolbar. */
 export interface DocumentToolbar {
@@ -204,9 +196,10 @@ export function ProofDocument({
   const [loadError, setLoadError] = useState<string | undefined>(undefined);
   // The server refused this browser's last edit, as one that would take the document past its size
   // bound, one it could not merge quickly enough, or one the document cannot take until it is
-  // rebuilt: the sentence that says which. The edit is gone and the notice stays until the person
-  // dismisses it or rebuilds the document.
-  const [refusedEdit, setRefusedEdit] = useState<RefusedEdit | undefined>(undefined);
+  // rebuilt: the close reason that says which, which the notice and the rebuild offer below are
+  // read from. The edit is gone and the notice stays until the person dismisses it or rebuilds the
+  // document.
+  const [refusedEdit, setRefusedEdit] = useState<string | undefined>(undefined);
   // The server is out of room for open documents: the connection keeps trying, and the edits it
   // could not send wait in this browser.
   const [busy, setBusy] = useState(false);
@@ -589,10 +582,7 @@ export function ProofDocument({
               // the document afresh from the server, then replays the rows that are left.
               teardown();
               setBusy(false);
-              setRefusedEdit({
-                notice: refusedEditNotice(reason),
-                needsRebuild: reason === DOCUMENT_NEEDS_REBUILD_CLOSE_REASON,
-              });
+              setRefusedEdit(reason);
               setConnection("connecting");
               admit();
             },
@@ -739,7 +729,7 @@ export function ProofDocument({
       {refusedEdit !== undefined ? (
         <div className="space-y-3" role="alert">
           <div className="flex flex-wrap items-center gap-3">
-            <p className={dangerText}>{refusedEdit.notice}</p>
+            <p className={dangerText}>{refusedEditNotice(refusedEdit)}</p>
             <button
               className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
               onClick={() => setRefusedEdit(undefined)}
@@ -751,7 +741,7 @@ export function ProofDocument({
           {/* The rebuild route is human-only (requireHuman), and every person the dashboard signs
           in is a user, so the offer goes to everyone the refusal reaches; a refusal of the
           rebuild itself, a 409 for a document no longer near its caps among them, shows below. */}
-          {refusedEdit.needsRebuild ? (
+          {refusedEdit === DOCUMENT_NEEDS_REBUILD_CLOSE_REASON ? (
             <div className="flex flex-wrap items-center gap-3">
               <p>
                 Rebuilding replaces the document's edit history with its current text, so it can

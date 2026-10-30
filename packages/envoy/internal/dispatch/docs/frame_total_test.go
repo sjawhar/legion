@@ -97,8 +97,8 @@ func TestAnUpdateThatWouldTakeTheFrameTotalPastTheHeaviestHandoffIsRefused(t *te
 	if err, called := weighInto(service, room, first); err != nil || !called {
 		t.Fatalf("a paste taking the frame total to F was answered %v (applied %t), want it admitted", err, called)
 	}
-	if running, _ := total.runningFrame(); running != heaviestHandoffBound {
-		t.Fatalf("after the paste the frame total is %d, want F, %d", running, uint64(heaviestHandoffBound))
+	if running, _ := total.runningTotals(); running.frame != heaviestHandoffBound {
+		t.Fatalf("after the paste the frame total is %d, want F, %d", running.frame, uint64(heaviestHandoffBound))
 	}
 	for _, refused := range []struct {
 		name   string
@@ -114,8 +114,8 @@ func TestAnUpdateThatWouldTakeTheFrameTotalPastTheHeaviestHandoffIsRefused(t *te
 	if counts.Load() != 1 {
 		t.Fatalf("the hook counted the room %d times before its refusals, want one confirmation", counts.Load())
 	}
-	if unrendered, _ := total.runningUnrendered(); unrendered >= maxUnrenderedBytes/2 {
-		t.Fatalf("the room's unrendered total is %d, want it far under the %d-byte bound, so that only the frame total refused", unrendered, maxUnrenderedBytes)
+	if running, _ := total.runningTotals(); running.unrendered >= maxUnrenderedBytes/2 {
+		t.Fatalf("the room's unrendered total is %d, want it far under the %d-byte bound, so that only the frame total refused", running.unrendered, maxUnrenderedBytes)
 	}
 	runtime.KeepAlive(replica)
 }
@@ -128,8 +128,8 @@ func TestADeleteOnlyUpdateIsAdmittedAtTheFrameTotal(t *testing.T) {
 	service, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n\nAnother paragraph.\n", 0)
 	held := countRoom(room).frame
 	total, counts := framePadded(t, replica, room, heaviestHandoffBound+1-held)
-	if running, stale := total.runningFrame(); running <= heaviestHandoffBound || stale {
-		t.Fatalf("the frame total is %d (stale %t), want it counted past F, %d", running, stale, uint64(heaviestHandoffBound))
+	if running, stale := total.runningTotals(); running.frame <= heaviestHandoffBound || stale {
+		t.Fatalf("the frame total is %d (stale %t), want it counted past F, %d", running.frame, stale, uint64(heaviestHandoffBound))
 	}
 	for _, admitted := range []struct {
 		name   string
@@ -206,10 +206,10 @@ func TestTheFrameTotalIsNeverBelowTheRoomsWholeStateFrame(t *testing.T) {
 				t.Fatalf("the update was answered %v (applied %t), want it admitted", err, called)
 			}
 			after := crdt.EncodeStateAsUpdateV1(room, nil)
-			running, stale := replica.structs.runningFrame()
-			t.Logf("a %d-byte update took the frame from %d bytes to %d; the frame total is %d", len(update), before, len(after), running)
-			if stale || running < uint64(len(after)) {
-				t.Fatalf("the frame total is %d (stale %t), want at least the room's %d-byte frame", running, stale, len(after))
+			running, stale := replica.structs.runningTotals()
+			t.Logf("a %d-byte update took the frame from %d bytes to %d; the frame total is %d", len(update), before, len(after), running.frame)
+			if stale || running.frame < uint64(len(after)) {
+				t.Fatalf("the frame total is %d (stale %t), want at least the room's %d-byte frame", running.frame, stale, len(after))
 			}
 			runtime.KeepAlive(replica)
 		})
@@ -429,10 +429,10 @@ func TestTheStoredFrameNeverPassesTheHeaviestHandoffWhateverTheMixOfUpdates(t *t
 		}
 		err, called := weighInto(service, room, update)
 		frame := uint64(len(crdt.EncodeStateAsUpdateV1(room, nil)))
-		running, stale := total.runningFrame()
-		if stale || frame+pad > running {
+		running, stale := total.runningTotals()
+		if stale || frame+pad > running.frame {
 			t.Fatalf("after %s (step %d, %d bytes, answered %v) the room's frame is %d bytes and the frame total %d less the pad (stale %t), want the total never below the frame",
-				kind, steps, len(update), err, frame, running-pad, stale)
+				kind, steps, len(update), err, frame, running.frame-pad, stale)
 		}
 		if err == nil && called {
 			admitted[kind]++
@@ -447,12 +447,12 @@ func TestTheStoredFrameNeverPassesTheHeaviestHandoffWhateverTheMixOfUpdates(t *t
 		}
 		weighed := weighedPeer(t, room, update)
 		if added := weighed.addition(); refusal.Reason == contracts.DocumentTooLargeCloseReason &&
-			added.inserts && running+added.frame > heaviestHandoffBound {
+			added.inserts && running.frame+added.frame > heaviestHandoffBound {
 			refusedBy = kind
 			continue
 		}
 		if kind == paste || kind == reencode {
-			t.Fatalf("%s (step %d) was refused %v with the frame total at %d of F, want only the frame total to refuse it", kind, steps, refusal, running)
+			t.Fatalf("%s (step %d) was refused %v with the frame total at %d of F, want only the frame total to refuse it", kind, steps, refusal, running.frame)
 		}
 		// Another rule refused it: the browser drops what it sent and builds afresh, as the
 		// editor does on 4413.
@@ -460,9 +460,9 @@ func TestTheStoredFrameNeverPassesTheHeaviestHandoffWhateverTheMixOfUpdates(t *t
 		browsers[from] = fresh()
 	}
 	frame := uint64(len(crdt.EncodeStateAsUpdateV1(room, nil)))
-	running, _ := total.runningFrame()
+	running, _ := total.runningTotals()
 	t.Logf("after %d steps in %s the frame total refused %s: the room's frame is %d bytes and the total %d, with a pad of %d against F's %d; %d counts; admitted %v; refused before %v",
-		steps, time.Since(started).Round(time.Millisecond), refusedBy, frame+pad, running, pad, uint64(heaviestHandoffBound), counts.Load(), admitted, refused)
+		steps, time.Since(started).Round(time.Millisecond), refusedBy, frame+pad, running.frame, pad, uint64(heaviestHandoffBound), counts.Load(), admitted, refused)
 	if refusedBy == "" {
 		t.Fatalf("the frame total refused nothing in %d steps; the room's frame is %d bytes of F's %d", steps, frame+pad, uint64(heaviestHandoffBound))
 	}

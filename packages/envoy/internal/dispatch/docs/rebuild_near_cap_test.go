@@ -452,7 +452,7 @@ func TestRebuildingADocumentNearTheScanTotalLeavesItWithASmallScanTotalAndReadin
 	if err != nil {
 		t.Fatal(err)
 	}
-	scans, counted := historyScans(history)
+	scans, counted := historyScans(crdt.EncodeStateAsUpdateV1(history, nil))
 	if !counted {
 		t.Fatal("the tangled history's re-scan could not be counted")
 	}
@@ -482,7 +482,7 @@ func TestRebuildingADocumentNearTheScanTotalLeavesItWithASmallScanTotalAndReadin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rescans, _ := historyScans(rebuilt); rescans >= honestHandoffScans || after != before {
+	if rescans, _ := historyScans(crdt.EncodeStateAsUpdateV1(rebuilt, nil)); rescans >= honestHandoffScans || after != before {
 		t.Fatalf("the rebuilt history re-scans %d items and reads %d bytes, want fewer than %d and the %d it read before", rescans, len(after), honestHandoffScans, len(before))
 	}
 }

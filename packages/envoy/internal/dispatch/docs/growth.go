@@ -359,24 +359,15 @@ func elements(size pmdoc.DocumentSize) string {
 // publish applies every one of them to the room (publishLiveWrite), so the question is asked of
 // all of them together.
 //
-// The fork cannot answer for the room. It is a decode of the room's state, and ygo merges into
-// one struct each run of typing a decode delivers at once (squashRuns, crdt/transaction.go:168-323
-// in sjawhar/ygo v1.51.3-sami.7), which the room took keystroke by keystroke and holds a struct a
-// keystroke - a thousand one-character transactions counted 1,000 structs on the document they
-// were typed into and 1 on its copy - so a fork can count far below the room it was forked from,
-// and a write the fork's count clears could carry the room past the cap once published. The room
-// is asked instead as the three server writes outside applyLive ask it (leavesPastDecodeCap), each
-// step answering only where the one before cannot:
-//
-//   - the ceiling of the room's struct total (structCeiling) and what the transaction's updates add
-//     at most (updatesAdd): within the cap, the write fits. It costs no encode and clears every
-//     document well short of the cap.
-//   - in the measurer's turn (elementMeasurer.structsAfter), the room's exact struct total: past
-//     the cap, the write is refused; with what the updates add at most and still within the cap,
-//     the write fits.
-//   - in the same turn, the transaction's updates applied to a copy of the room, whose struct
-//     total they raise by as much as they raise the room's at least (leavesPastDecodeCap gives
-//     why): within the cap with that added, the write fits.
+// The fork cannot answer for the room. It is a decode of the room's state, and a decode merges
+// into one struct each run of typing it delivers at once, where the room, which took them
+// keystroke by keystroke, holds a struct a keystroke (leavesPastDecodeCap, which names ygo's
+// merge and what the difference measures), so a fork can count far below the room it was forked
+// from, and a write the fork's count clears could carry the room past the cap once published.
+// The room is asked instead, by leavesPastDecodeCap itself, as the three server writes outside
+// applyLive ask it: the ceiling of its struct total with what the transaction's updates add at
+// most (updatesAdd), then its exact struct total in the measurer's turn, then the transaction's
+// updates applied to a copy of it, each step answering only where the one before cannot.
 //
 // What the turn costs, and why it runs one at a time, is leavesPastDecodeCap's. Nothing the
 // operation holds here is a transaction on the room: it wrote the fork, and the fork's read of the
@@ -414,11 +405,8 @@ func (s *Service) leavesRoomPastDecodeCap(write *liveWrite, fork *crdt.Doc, upda
 	}
 	transaction := append(append(make([][]byte, 0, len(write.updates)+len(updates)), write.updates...), updates...)
 	adds, bounded := updatesAdd(transaction)
-	if bounded && structCeiling(live)+adds <= maxUpdateItems {
-		return false
-	}
 	unapplied := false
-	after := s.measurer.structsAfter(live, serverWrite{adds: adds, bounded: bounded, apply: func(copied *crdt.Doc) {
+	past := s.leavesPastDecodeCap(live, serverWrite{adds: adds, bounded: bounded, apply: func(copied *crdt.Doc) {
 		if err := applyTransactionWrites(copied, transaction); err != nil {
 			// Each update applied to the fork, a decode of the same room; one that does not
 			// apply to the copy leaves a count that cannot be trusted to hold all of it.
@@ -426,7 +414,7 @@ func (s *Service) leavesRoomPastDecodeCap(write *liveWrite, fork *crdt.Doc, upda
 			unapplied = true
 		}
 	}})
-	return unapplied || after > maxUpdateItems
+	return unapplied || past
 }
 
 // updatesAdd is the most structs applying updates, a transaction's own writes, can add to a
@@ -497,10 +485,11 @@ type serverWrite struct {
 
 // leavesPastDecodeCap reports whether write would leave doc, a room's live document, with a
 // struct total (countRoomStructs) past the decode cap: the question each server write outside
-// applyLive asks before it writes (errPastDecodeCap). Those write into the live document itself,
-// where the sweep's single transaction (unmarkExpired) cannot be rolled back once it has begun,
-// so the question is answered before the write rather than of what it left. Each step answers
-// only where the one before cannot:
+// applyLive asks before it writes (errPastDecodeCap), and the one an API write's transaction asks
+// of its updates and the room its fork was read from (leavesRoomPastDecodeCap). The server writes
+// write into the live document itself, where the sweep's single transaction (unmarkExpired) cannot
+// be rolled back once it has begun, so the question is answered before the write rather than of
+// what it left. Each step answers only where the one before cannot:
 //
 //   - the ceiling of doc's struct total (structCeiling) and what the write adds at most: within
 //     the cap, the write fits. It costs no encode and clears every document well short of the cap.

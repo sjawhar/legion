@@ -371,7 +371,7 @@ func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() er
 	}
 	own := weighed.ownApplyHeap(len(info.Update))
 	weighs := own > unweighedApplyHeapBytes
-	heap := weighed.applyHeap(len(info.Update), structs.roomStructs(info.Doc))
+	heap := own + weighed.roomApplyHeap(structs.roomStructs(info.Doc))
 	if heap > applyTooHeavyBytes {
 		return fmt.Errorf("%w: its apply is estimated to allocate %d bytes, past the %d bytes the pod lets any apply hold, even alone",
 			errApplyTooHeavy, heap, uint64(applyTooHeavyBytes))
@@ -598,7 +598,13 @@ func (w *peerWeighing) walkedGroup(client, clock, structs uint64) {
 }
 
 func (w *peerWeighing) walkedStruct(walked updateStruct) {
-	cost := structApplyHeap(walked)
+	w.weighStruct(walked, structApplyHeap(walked))
+}
+
+// weighStruct weighs walked, whose share of the apply's estimate is cost. It is walkedStruct's
+// body with that share passed in, so that a weighing no reader of the estimate holds pays no walk
+// for it (writtenWeighing.walkedStruct).
+func (w *peerWeighing) weighStruct(walked updateStruct, cost applyCost) {
 	w.decoded += cost.decode
 	if walked.kind == structSkip {
 		return
@@ -1241,18 +1247,6 @@ func (t *structTotal) running() (total uint64, stale bool) {
 	return totals.structs, stale
 }
 
-// runningUnrendered is the unrendered total as it stands, as running is the struct total.
-func (t *structTotal) runningUnrendered() (total uint64, stale bool) {
-	totals, stale := t.runningTotals()
-	return totals.unrendered, stale
-}
-
-// runningFrame is the frame total as it stands, as running is the struct total.
-func (t *structTotal) runningFrame() (total uint64, stale bool) {
-	totals, stale := t.runningTotals()
-	return totals.frame, stale
-}
-
 // runningTotals is the three totals as they stand, and whether a write the hook did not see has
 // landed since the count. Each inflight is read before its admitted (structTotal gives why).
 func (t *structTotal) runningTotals() (total roomCount, stale bool) {
@@ -1494,9 +1488,7 @@ const applyHeapBound = heapAboveTheReserve / 3
 // GKE Autopilot deployment names no runtimeClassName and no GKE Sandbox node pool
 // (infra/gcp/dispatch_kube.go:492-501) - so what is charged there is what the limit bounds. The
 // 4,302 and 4,424 MiB earlier runs of that drive recorded were VmRSS read on this sandbox, not
-// memory any pod was charged, and holding the collector to a tighter ratio than the runtime's own
-// bought nothing: following the room budget's charge the same drive peaked at 3,691 to 3,695 MiB
-// charged in 539 and 547 s.
+// memory any pod was charged.
 const heapSlackBytes = heapAboveTheReserve / 3
 
 // applyTooHeavyBytes is the estimate (peerWeighing.applyHeap) past which the hook refuses an
@@ -1513,12 +1505,9 @@ const heapSlackBytes = heapAboveTheReserve / 3
 // holding each (TestAnHonestHandoffAtTheHeaviestFrameIsNeverRefusedAsTooHeavy): 904,378,600 bytes
 // for the heaviest, the long-edited document typed on until 4,096 structs short of the decode cap
 // and padded to F by text nested under the margin, 276,737,406 under this line; 657,900,131 for
-// the long-edited fixture padded the same way, and 404,291,526 for a paragraph. The line before
-// it was the whole apply bound, 724,775,731 bytes before the pressure reserve came out of the
-// bounds and 590,558,003 after, which refused the first of those, and at 590,558,003 the second
-// too. A frame of null values at the message floor, 56,623,059 bytes, which the editor never
-// sends, is estimated at 3,737,127,910 (TestAnUpdateHeavierThanAnyApplyMayHoldIsNeverApplied),
-// past it, and refused.
+// the long-edited fixture padded the same way, and 404,291,526 for a paragraph. A frame of null
+// values at the message floor, 56,623,059 bytes, which the editor never sends, is estimated at
+// 3,737,127,910 (TestAnUpdateHeavierThanAnyApplyMayHoldIsNeverApplied), past it, and refused.
 const applyTooHeavyBytes = heapAboveTheReserve
 
 // unweighedApplyHeapBytes is the update's own share of its estimate (peerWeighing.ownApplyHeap)
@@ -1565,7 +1554,7 @@ func (h *applyHeaps) hold(heap uint64) (release func()) {
 // set from TestEveryApplysTransientHeapIsWithinItsEstimate's measurement of ygo's apply at scale
 // (runtime.MemStats.TotalAlloc across one apply, which bounds what the apply holds at its peak
 // from above), into a room's bounded document (newRoomScans) with an update observer, as every
-// room is. It is the update's own share (ownApplyHeap) and the room's:
+// room is. It is the update's own share (ownApplyHeap) and the room's (roomApplyHeap):
 //
 //   - the room's state vector, which ygo's apply copies into maps before it reads a struct
 //     (crdt/update.go:552) and its transaction twice more (crdt/doc.go:742, :818), each a slot
@@ -1600,13 +1589,20 @@ func (h *applyHeaps) hold(heap uint64) (release func()) {
 // can see: an item or a delete range splitting a room's Any or JSON item copies the values right of
 // the split (ContentAny.Splice, crdt/content.go:170-174).
 func (w *peerWeighing) applyHeap(frame int, roomStructs uint64) uint64 {
+	return w.ownApplyHeap(frame) + w.roomApplyHeap(roomStructs)
+}
+
+// roomApplyHeap is the room's share of applyHeap: the three terms above that the room the update
+// reaches decides - its clients, the structs reachable in it, and the marks the update's scans
+// can make. The hook weighs the update's own share on its own (unweighedApplyHeapBytes) and adds
+// this to it, rather than estimating the apply twice (weighPeerUpdate).
+func (w *peerWeighing) roomApplyHeap(roomStructs uint64) uint64 {
 	reachable := roomStructs + w.applyStructs()
 	var marks uint64
 	if w.structs > 0 {
 		marks = bytesOfAScanMark * min(reachable, perFrameScanCeiling)
 	}
-	return w.ownApplyHeap(frame) + applyHeapPerRoomClient*uint64(len(w.held)) +
-		applyHeapPerRoomStruct*reachable + marks
+	return applyHeapPerRoomClient*uint64(len(w.held)) + applyHeapPerRoomStruct*reachable + marks
 }
 
 // applyStructs is the most structs the walked update's apply can hold in the room's store before

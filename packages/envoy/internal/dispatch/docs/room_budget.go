@@ -799,30 +799,33 @@ func (b *roomBudget) load(room string, heap int64) *roomCharge {
 	return charge
 }
 
-// adds charges the room content bytes of content a transaction added (contentAdded) to its
-// uncounted part, at the densest price at both copies until a count of a rendering holding them
-// re-bases it (measured). Nil, a replica no room's load charged (a test's), charges nothing.
-func (c *roomCharge) adds(content int64) {
-	if c == nil || content == 0 {
+// charged moves the room's charge by content in its uncounted content part and by structure in
+// its structure part, and re-weighs its entry under the budget's lock: the one body the four
+// charges below share. A nil charge, a replica no room's load charged (a test's), charges
+// nothing, and so does a move of nothing in either part.
+func (c *roomCharge) charged(content, structure int64) {
+	if c == nil || (content == 0 && structure == 0) {
 		return
 	}
 	c.budget.mu.Lock()
 	defer c.budget.unlock()
 	c.content += content
+	c.structure += structure
 	c.budget.reweighLocked(c)
+}
+
+// adds charges the room content bytes of content a transaction added (contentAdded) to its
+// uncounted part, at the densest price at both copies until a count of a rendering holding them
+// re-bases it (measured). Nil, a replica no room's load charged (a test's), charges nothing.
+func (c *roomCharge) adds(content int64) {
+	c.charged(content, 0)
 }
 
 // grew charges the room structure more in its structure part, which no count clears: what an
 // update the peer hook admitted adds that the rendering does not price (peerWeighing.
 // structureHeap). Nil charges nothing.
 func (c *roomCharge) grew(structure int64) {
-	if c == nil || structure == 0 {
-		return
-	}
-	c.budget.mu.Lock()
-	defer c.budget.unlock()
-	c.structure += structure
-	c.budget.reweighLocked(c)
+	c.charged(0, structure)
 }
 
 // wrote charges the room what update added, one transaction's update the peer hook did not apply -
@@ -836,9 +839,10 @@ func (c *roomCharge) grew(structure int64) {
 // the content no rendering prices. It refuses nothing: the write has committed, and its charge only
 // raises the budget's figures, so the budget refuses browsers and closes unused rooms sooner. The
 // update's delete ranges, and the structs it integrated deleted, are listed as the room's
-// (deletedRuns.record). One walk reads the content and the structure both. An update the walk
-// cannot read is charged its bytes as content, as contentAdded charges it, and the structure the
-// walk read before it refused. Nil, a replica no room's load charged (a test's), charges nothing.
+// (deletedRuns.record), once the charge has given the budget's lock back. One walk reads the
+// content and the structure both. An update the walk cannot read is charged its bytes as content,
+// as contentAdded charges it, and the structure the walk read before it refused. Nil, a replica no
+// room's load charged (a test's), charges nothing and walks nothing.
 func (c *roomCharge) wrote(update []byte) {
 	if c == nil {
 		return
@@ -849,13 +853,7 @@ func (c *roomCharge) wrote(update []byte) {
 	if err != nil {
 		content = int64(len(update))
 	}
-	if structure := weighed.structure.structureHeap(); content != 0 || structure != 0 {
-		c.budget.mu.Lock()
-		c.content += content
-		c.structure += structure
-		c.budget.reweighLocked(c)
-		c.budget.unlock()
-	}
+	c.charged(content, weighed.structure.structureHeap())
 	if err == nil {
 		c.deleted.record(update, tally.deletesAt, weighed.structure.born)
 	}
@@ -870,9 +868,13 @@ type writtenWeighing struct {
 	structure peerWeighing
 }
 
+// walkedStruct weighs walked as the peer hook's weighing does, but for the apply-heap estimate
+// (structApplyHeap), which wrote never reads: it reads the structure (structureHeap) and whether
+// a struct integrated deleted (born) alone, so the estimate's re-walk of Any and JSON content is
+// not paid for a server write.
 func (w *writtenWeighing) walkedStruct(walked updateStruct) {
 	w.content.walkedStruct(walked)
-	w.structure.walkedStruct(walked)
+	w.structure.weighStruct(walked, applyCost{})
 }
 
 func (w *writtenWeighing) walkedDelete(client, clock, length uint64) {
@@ -884,13 +886,7 @@ func (w *writtenWeighing) walkedDelete(client, clock, length uint64) {
 // took back out whole (newRoomScans), so the room holds none of what it was charged for. Nil
 // gives back nothing.
 func (c *roomCharge) gaveBack(structure int64) {
-	if c == nil || structure == 0 {
-		return
-	}
-	c.budget.mu.Lock()
-	defer c.budget.unlock()
-	c.structure -= structure
-	c.budget.reweighLocked(c)
+	c.charged(0, -structure)
 }
 
 // growWithin charges charge structure more, as grew does, where the charges and reservations then
@@ -1268,14 +1264,14 @@ func (s *Service) storedRoomReservation(ctx context.Context, room string) (int64
 	if err != nil {
 		return 0, fmt.Errorf("read the number of the document's latest version: %w", err)
 	}
-	if heap, ok := s.budget.stored.get(room, number); ok {
-		return roomWeight(heap, 0, 0), nil
-	}
-	heap, err := s.budget.stored.await(ctx, room, number, func(wanted context.Context) (int64, error) {
-		return s.countStoredVersion(wanted, room, number)
-	})
-	if err != nil {
-		return 0, err
+	heap, kept := s.budget.stored.get(room, number)
+	if !kept {
+		heap, err = s.budget.stored.await(ctx, room, number, func(wanted context.Context) (int64, error) {
+			return s.countStoredVersion(wanted, room, number)
+		})
+		if err != nil {
+			return 0, err
+		}
 	}
 	return roomWeight(heap, 0, 0), nil
 }

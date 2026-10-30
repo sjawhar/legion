@@ -106,9 +106,9 @@ func TestAnUpdateThatAddsNoUnrenderedBytesIsNeverRefusedByTheUnrenderedBound(t *
 	}
 	total, counts := countedStructTotal(t, replica)
 	total.recountLive()
-	held, stale := total.runningUnrendered()
-	if stale || held <= maxUnrenderedBytes {
-		t.Fatalf("the room's unrendered total is %d (stale %t), want it counted past the %d-byte bound", held, stale, maxUnrenderedBytes)
+	running, stale := total.runningTotals()
+	if stale || running.unrendered <= maxUnrenderedBytes {
+		t.Fatalf("the room's unrendered total is %d (stale %t), want it counted past the %d-byte bound", running.unrendered, stale, maxUnrenderedBytes)
 	}
 	counts.Store(0)
 	for _, admitted := range []struct {
@@ -149,7 +149,8 @@ func TestAnUpdateThatAddsNoUnrenderedBytesIsNeverRefusedByTheUnrenderedBound(t *
 func TestTheUnrenderedTotalALoadCountsIsTheWalkOfTheRoomsEncodedState(t *testing.T) {
 	service, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
 	service.measurer.interval = noInterval
-	held, stale := replica.structs.runningUnrendered()
+	counted, stale := replica.structs.runningTotals()
+	held := counted.unrendered
 	if stale || held != countRoom(room).unrendered || held == 0 {
 		t.Fatalf("the load counted %d unrendered bytes (stale %t), want the walk's %d of a document whose elements carry names and ids", held, stale, countRoom(room).unrendered)
 	}
@@ -159,31 +160,31 @@ func TestTheUnrenderedTotalALoadCountsIsTheWalkOfTheRoomsEncodedState(t *testing
 		t.Fatalf("the hook answered %v (applied %t), want the record admitted", err, called)
 	}
 	want := held + marginRecordUnrendered("c-1", "a comment's text")
-	if running, stale := replica.structs.runningUnrendered(); running != want || stale || countRoom(room).unrendered != want {
+	if running, stale := replica.structs.runningTotals(); running.unrendered != want || stale || countRoom(room).unrendered != want {
 		t.Fatalf("after the record the total is %d (stale %t) and the room counts %d, want the load's %d and the record's wire, %d",
-			running, stale, countRoom(room).unrendered, held, want)
+			running.unrendered, stale, countRoom(room).unrendered, held, want)
 	}
 
 	if err := crdt.ApplyUpdateV1(room, marginRecord(9, 0, "c-2", "the server's record"), "server"); err != nil {
 		t.Fatal(err)
 	}
-	if _, stale := replica.structs.runningUnrendered(); !stale {
+	if _, stale := replica.structs.runningTotals(); !stale {
 		t.Fatal("the total reads fresh after a server write, want it stale")
 	}
 	rendering := headings(1)
 	replica.publishSize(&rendering)
 	service.measurer.waitIdle()
 	// The room is held across the count, as it is while a room is resident: the total holds the
-	// live document weakly (structTotal.live, peer_update.go:978) and nothing here holds it but
+	// live document weakly (structTotal.live, peer_update.go:984) and nothing here holds it but
 	// this frame - the service lists a room's replica under the document weakly too
 	// (listResident, tree.go:685) - so a room collected between the publication and the count
 	// leaves recountLive nothing to re-base on, and the total stays the load's count plus the
 	// hook's admission, stale.
 	runtime.KeepAlive(room)
 	want += marginRecordUnrendered("c-2", "the server's record")
-	if running, stale := replica.structs.runningUnrendered(); running != want || stale || countRoom(room).unrendered != want {
+	if running, stale := replica.structs.runningTotals(); running.unrendered != want || stale || countRoom(room).unrendered != want {
 		t.Fatalf("after the measurer's count the total is %d (stale %t) and the room counts %d, want the room's %d",
-			running, stale, countRoom(room).unrendered, want)
+			running.unrendered, stale, countRoom(room).unrendered, want)
 	}
 	runtime.KeepAlive(replica)
 }
@@ -206,8 +207,8 @@ func TestAStaleUnrenderedTotalNearTheBoundIsConfirmedBeforeItAdmits(t *testing.T
 		t.Run(row.name, func(t *testing.T) {
 			service, room, replica := peerUpdateRoom(t, "# Title\n\nOne paragraph of ordinary prose.\n", 0)
 			total, counts := countedStructTotal(t, replica)
-			held, _ := total.runningUnrendered()
-			total.admittedUnrendered.Add(maxUnrenderedBytes - row.short - held)
+			running, _ := total.runningTotals()
+			total.admittedUnrendered.Add(maxUnrenderedBytes - row.short - running.unrendered)
 			if row.stale {
 				text := firstText(room.GetXmlFragment(fragmentName))
 				room.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "s", nil) }, "server")

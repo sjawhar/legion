@@ -32,13 +32,14 @@ type RebuildReport struct {
 // splits it can cause.
 const smallestReplacementAdds = 1 + splitsAStructCanCause + splitsAStructCanCause
 
-// historyScans is how many items a re-scan of history's state scans - its encoded state applied
-// into a fresh document in one remote transaction (rescan), ygo's count of that transaction's
-// scans (Transaction.IntegrateScanned, sjawhar/ygo v1.51.3-sami.7, crdt/transaction.go:95-108) -
-// and whether it could be counted: a history the decode refused is not. It is the count a room's
-// load starts the room's scan total at (roomScans), from the same decode of the same state.
-func historyScans(history *crdt.Doc) (uint64, bool) {
-	scans, err := rescan(crdt.EncodeStateAsUpdateV1(history, nil))
+// historyScans is how many items a re-scan of state, a document's encoded Yjs state, scans - the
+// state applied into a fresh document in one remote transaction (rescan), ygo's count of that
+// transaction's scans (Transaction.IntegrateScanned, sjawhar/ygo v1.51.3-sami.7,
+// crdt/transaction.go:95-108) - and whether it could be counted: a state the decode refused is
+// not. It is the count a room's load starts the room's scan total at (roomScans), from the same
+// decode of the same state.
+func historyScans(state []byte) (uint64, bool) {
+	scans, err := rescan(state)
 	return scans, err == nil
 }
 
@@ -48,13 +49,18 @@ func historyScans(history *crdt.Doc) (uint64, bool) {
 // smallestReplacementAdds pass maxUpdateItems, so refuseUndecodable refuses every write that
 // changes the text, as it refuses the write of a document no room holds by the count of its fork,
 // a decode of the same history (leavesRoomPastDecodeCap). Near the scan total means a re-scan of
-// its state (historyScans) scans at least roomScanTotal less honestHandoffScans items.
+// its state (historyScans) scans at least roomScanTotal less honestHandoffScans items. Both tests
+// read the one encode of doc's state below, taken after its parked structs as countRoomStructs
+// takes them, so neither pays an encode of its own and both answer for the same state.
 func nearACap(doc *crdt.Doc) (why string, near bool) {
-	if structs := countRoomStructs(doc); structs+smallestReplacementAdds > maxUpdateItems {
+	pending := doc.PendingStats()
+	state := crdt.EncodeStateAsUpdateV1(doc, nil)
+	tally, err := walkUpdate(state, fromRoom, nil)
+	if structs := structTotalOf(tally, err, pending); structs+smallestReplacementAdds > maxUpdateItems {
 		return fmt.Sprintf("the document's live state holds %d structs, and a write's smallest replacement, %d more, would carry it past the %d ygo decodes in one update",
 			structs, smallestReplacementAdds, maxUpdateItems), true
 	}
-	if scans, counted := historyScans(doc); counted && scans+honestHandoffScans >= roomScanTotal {
+	if scans, counted := historyScans(state); counted && scans+honestHandoffScans >= roomScanTotal {
 		return fmt.Sprintf("a re-scan of the document's live state scans %d items, within %d of the %d a room's history may scan",
 			scans, honestHandoffScans, roomScanTotal), true
 	}
@@ -139,7 +145,7 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 		}
 		// The loads its browsers make as they reconnect are refused until this transaction
 		// ends (refuseIfRebuilding), so the room stays closed while the history is replaced.
-		if err := s.evictRoom(artifactID, s.invalidateForEviction(artifactID)); err != nil {
+		if err := s.Evict(ctx, artifactID); err != nil {
 			return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: close document %s before its rebuild: %v", ErrServiceUnavailable, artifactID, err)
 		}
 	}

@@ -220,10 +220,19 @@ func (m *elementMeasurer) count(replica weak.Pointer[renderedReplica]) {
 // doc's state is encoded, which takes doc's lock, and given back with the copy. Its wait has no
 // deadline, as the turn's has none: no holder of the bound waits for the turn or for anything a
 // waiter holds (copyHeaps).
+//
+// The one encode of doc's state below is both doc's own total, counted from it as countRoomStructs
+// counts a room's (its parked structs read first), and what the copy is decoded from, so a turn
+// that reaches the copy pays one encode rather than two, and the two totals answer for the same
+// state. A turn the first two cases answer pays what it paid before: the parked structs, that
+// encode and a walk of it.
 func (m *elementMeasurer) structsAfter(doc *crdt.Doc, write serverWrite) uint64 {
 	m.turn.Lock()
 	defer m.turn.Unlock()
-	live := countRoomStructs(doc)
+	pending := doc.PendingStats()
+	state := crdt.EncodeStateAsUpdateV1(doc, nil)
+	tally, err := walkUpdate(state, fromRoom, nil)
+	live := structTotalOf(tally, err, pending)
 	switch {
 	case live > maxUpdateItems:
 		m.writeMeasured(false)
@@ -233,7 +242,6 @@ func (m *elementMeasurer) structsAfter(doc *crdt.Doc, write serverWrite) uint64 
 		return live + write.adds
 	}
 	m.writeMeasured(true)
-	state := crdt.EncodeStateAsUpdateV1(doc, nil)
 	defer holdServerCopy(len(state))()
 	copied := newDocumentCopy(crdt.WithClientID(doc.ClientID()))
 	if err := crdt.ApplyUpdateV1(copied, state, nil); err != nil {

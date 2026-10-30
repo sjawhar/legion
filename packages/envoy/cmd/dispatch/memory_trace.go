@@ -108,6 +108,11 @@ func startMemoryTrace(ctx context.Context, path string) {
 // a newline. samples holds memoryTraceClasses' metrics, which it reads.
 func memoryTraceLine(samples []metrics.Sample) string {
 	metrics.Read(samples)
+	// The one read of /proc/self/status this sample costs (memoryTraceInterval), which every
+	// field below is pulled from. A read that fails leaves no line any field matches, so each
+	// field is -1, as a field this kernel keeps no line for is.
+	raw, _ := os.ReadFile("/proc/self/status")
+	status := string(raw)
 	line := make([]string, 0, len(samples)+len(memoryTraceStatus)+2)
 	line = append(line, "time="+time.Now().UTC().Format(time.RFC3339Nano))
 	for index, class := range memoryTraceClasses {
@@ -118,19 +123,16 @@ func memoryTraceLine(samples []metrics.Sample) string {
 		line = append(line, class.field+"="+strconv.FormatInt(value, 10))
 	}
 	for _, field := range memoryTraceStatus {
-		line = append(line, strings.ToLower(field)+"="+strconv.FormatInt(procStatusBytes(field), 10))
+		line = append(line, strings.ToLower(field)+"="+strconv.FormatInt(procStatusBytes(status, field), 10))
 	}
 	return strings.Join(line, " ") + " cgroup_memory_current=" + strconv.FormatInt(cgroupMemoryCurrent(), 10) + "\n"
 }
 
-// procStatusBytes is the named field of /proc/self/status in bytes, or -1 where this kernel keeps
-// no such line: gVisor keeps no VmHWM, RssAnon or RssFile.
-func procStatusBytes(field string) int64 {
-	status, err := os.ReadFile("/proc/self/status")
-	if err != nil {
-		return -1
-	}
-	for line := range strings.SplitSeq(string(status), "\n") {
+// procStatusBytes is the named field of status, one read of /proc/self/status, in bytes, or -1
+// where the read failed, where this kernel keeps no such line - gVisor keeps no VmHWM, RssAnon or
+// RssFile - or where the line does not parse.
+func procStatusBytes(status, field string) int64 {
+	for line := range strings.SplitSeq(status, "\n") {
 		value, ok := strings.CutPrefix(line, field+":")
 		if !ok {
 			continue

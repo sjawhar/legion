@@ -104,9 +104,9 @@ const (
 	// mirrors bytesOfHeapAStruct (:154), what the structure part charges each struct an update adds,
 	// bytesOfHeapASplitForTest bytesOfHeapASplit (:181), what it charges each split that struct can
 	// cause, splitsAStructCanCauseForTest splitsAStructCanCause
-	// (peer_update.go:652), and bytesOfHeapAByteOfTextForTest bytesOfHeapAByteOfText
+	// (peer_update.go:658), and bytesOfHeapAByteOfTextForTest bytesOfHeapAByteOfText
 	// (room_budget.go:190), what it charges each byte of text an update's struct carries as the
-	// walk reads it, its length prefix included (unrenderedContentHeap, peer_update.go:697-713).
+	// walk reads it, its length prefix included (unrenderedContentHeap, peer_update.go:703-719).
 	// TestARoomFedOnlyByAPIWritesIsChargedTheStructsTheyAdd weighs a room's growth against them; a
 	// wrong mirror moves only how much growth it asks for, and its log line prints each figure
 	// beside the server's own. TestTheRoomBudgetDoesNotOverchargeTypingAndPasting prices each
@@ -1193,7 +1193,7 @@ func TestTheRoomBudgetRefusesWhereItsOwnArithmeticSays(t *testing.T) {
 // part (roomCharge, :318-362): each update's struct at bytesOfHeapAStruct with the two splits its
 // integration can cause at bytesOfHeapASplit, and its text as the walk reads it, its length prefix
 // included, at bytesOfHeapAByteOfText, all at both copies (peerWeighing.structureHeap,
-// peer_update.go:677-680): 2,048 bytes a keystroke and 18,432 for the paste, 428,032 a room. An
+// peer_update.go:683-686): 2,048 bytes a keystroke and 18,432 for the paste, 428,032 a room. An
 // admission reserves the stored version's count, which is what the room's load charges until its
 // browser types. Rooms are typed into two at a time, the server's two processors' worth, each pair
 // admitted one after the other before either types, so the second of a pair is admitted beside the
@@ -1680,7 +1680,7 @@ func TestTheRoomBudgetFollowsGrowingRoomsAndClosesTheGoneOnesFirst(t *testing.T)
 // for the next browser's refusal reads. Meanwhile an API write to a document no room holds is taken,
 // and the unrecorded-mark sweep writes, in a room a browser holds and in one no room held when the
 // budget filled: each such room the server's own work opened over the budget is closed once its
-// settlement has ended (closeIfOpenedOverBudget, :1507-1532), read from its absence (roomLive) and
+// settlement has ended (closeIfOpenedOverBudget, :1647-1672), read from its absence (roomLive) and
 // from the line the server logs for the close. The memory a pod's kernel would charge the server
 // stays under the pod's throughout, and what its Go memory limit bounds within that limit
 // (requireUnderThePod).
@@ -2071,7 +2071,7 @@ const gcFloodClient = 5_000_000
 //
 // The struct total counts each struct of an update with its two splits against the decode cap,
 // and confirms a refusal by the exact count of the structs the room holds (countRoomStructs,
-// internal/dispatch/docs/peer_update.go:1400), so a room takes an update while what it holds and
+// internal/dispatch/docs/peer_update.go:1394), so a room takes an update while what it holds and
 // three times the update's structs stay within the cap. Each update's GC runs are 128 clocks long,
 // which lib0 writes in two bytes, three with the struct's info byte: a frame just under the byte
 // bound then holds about as many structs as one update may add to a room holding the small
@@ -2190,7 +2190,7 @@ func TestABrowserThatIsNotTheEditorIsChargedWhatItAdds(t *testing.T) {
 // server. A room is brought near the cap by an update of GC structs its struct total admits, and two
 // updates that would take it past - one of GC structs, one of delete ranges, each sized from the
 // structs the room's encoded state holds, the count the room confirms a refusal by
-// (countRoomStructs, internal/dispatch/docs/peer_update.go:1400) - are each refused with 4413 and
+// (countRoomStructs, internal/dispatch/docs/peer_update.go:1394) - are each refused with 4413 and
 // DOC_TOO_LARGE, and the room is left as it was. Each GC struct counts itself and the two splits its
 // integration can cause against the cap; each delete range of a client the room does not hold
 // counts the two ends it can split and the parked range its tail leaves (peerWeighing.walkedDelete,
@@ -2387,7 +2387,7 @@ const (
 	// and its structs (copyHeap, :615-625), from which storedShape computes what an admission
 	// reserves; the struct-dense drives fail unless the server's refusals name that reservation.
 	bytesOfHeapARenderedByteForTest = 12
-	// applyHeapBoundForTest mirrors applyHeapBound (internal/dispatch/docs/peer_update.go:1465)
+	// applyHeapBoundForTest mirrors applyHeapBound (internal/dispatch/docs/peer_update.go:1459)
 	// and copyHeapBoundForTest copyHeapBound (copy_heap.go:54): a third each of what the Go limit
 	// leaves above the room budget, the cold reads' cache and the pressure reserve. The server
 	// names its bound in the line it logs for a grant (heapGrantLine), and the heaviest-apply drive
@@ -2399,7 +2399,7 @@ const (
 	// granted the whole copy bound and decodes alone among the copies.
 	copyHeapPerByteForTest = 48
 	// heaviestHandoffEstimate is the hook's estimate of the heaviest honest handoff at F, measured
-	// into the room holding it (peerWeighing.applyHeap, internal/dispatch/docs/peer_update.go:1602):
+	// into the room holding it (peerWeighing.applyHeap, internal/dispatch/docs/peer_update.go:1591):
 	// the long-edited document typed on until 4,096 structs short of the decode cap and padded to
 	// F, the shape the heaviest-apply drive hands back. The server logs no estimate, only that
 	// each handoff held the whole apply bound (heapGrantLine), which an estimate past

@@ -57,6 +57,33 @@ func (s *Service) HoldNextAdmissionForTest(artifactID string, wait time.Duration
 	s.admissionHolds.Store(artifactID, wait)
 }
 
+// chainOrigin is the id of the last character of artifactID's last written text, the item the two
+// tangle hooks below chain onto. It closes artifactID's room if this server holds it, so the next
+// load reads the history the hook appends to, and decodes the stored history into a copy of its
+// own, as a load decodes it.
+func (s *Service) chainOrigin(ctx context.Context, artifactID string) (crdt.ID, error) {
+	if err := s.Evict(ctx, artifactID); err != nil {
+		return crdt.ID{}, err
+	}
+	loaded, err := s.persistence.Load(ctx, artifactID)
+	if err != nil {
+		return crdt.ID{}, err
+	}
+	doc := newDocumentCopy()
+	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
+		return crdt.ID{}, err
+	}
+	text := lastWrittenText(doc.GetXmlFragment(fragmentName))
+	if text == nil {
+		return crdt.ID{}, fmt.Errorf("document %s holds no text to chain onto", artifactID)
+	}
+	last := crdt.CreateRelativePositionFromIndex(text, text.Len()-1, 0).Item
+	if last == nil {
+		return crdt.ID{}, fmt.Errorf("document %s's last text has no item for its last character", artifactID)
+	}
+	return *last, nil
+}
+
 // The tangle UseUpScanTotalForTest appends: a chain of usedUpChain one-character items, each of a
 // client of its own from usedUpChainClient on, and items of client usedUpScanClient that each scan
 // the chain to its end. A browser's client ID is a random 32-bit number, so these few collide
@@ -81,39 +108,16 @@ const (
 // refuses to return without error unless the stored history's re-scan reaches roomScanTotal. It
 // is mounted only through Dispatch's test-hook route.
 func (s *Service) UseUpScanTotalForTest(ctx context.Context, artifactID string) error {
-	if err := s.Evict(ctx, artifactID); err != nil {
-		return err
-	}
-	loaded, err := s.persistence.Load(ctx, artifactID)
+	origin, err := s.chainOrigin(ctx, artifactID)
 	if err != nil {
 		return err
-	}
-	doc := newDocumentCopy()
-	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
-		return err
-	}
-	text := lastWrittenText(doc.GetXmlFragment(fragmentName))
-	if text == nil {
-		return fmt.Errorf("document %s holds no text to chain onto", artifactID)
-	}
-	last := crdt.CreateRelativePositionFromIndex(text, text.Len()-1, 0).Item
-	if last == nil {
-		return fmt.Errorf("document %s's last text has no item for its last character", artifactID)
 	}
 	// Each scanner passes the chain after its first item and stops at the scanner before it, of
 	// its own client and naming the same origins: about usedUpChain scans each.
 	scanners := roomScanTotal/usedUpChain + 2
 	frame := encoding.NewEncoder()
 	frame.WriteVarUint(usedUpChain + 1) // client groups: the chain's, then the scanners'
-	origin := *last
-	for i := range usedUpChain {
-		client := uint64(usedUpChainClient + i)
-		frame.WriteVarUint(1) // structs in the group
-		frame.WriteVarUint(client)
-		frame.WriteVarUint(0) // first clock
-		writeOriginString(frame, origin, "a")
-		origin = crdt.ID{Client: crdt.ClientID(client), Clock: 0}
-	}
+	writeChain(frame, origin, usedUpChain, usedUpChainClient)
 	frame.WriteVarUint(uint64(scanners))
 	frame.WriteVarUint(usedUpScanClient)
 	frame.WriteVarUint(0)
@@ -172,36 +176,13 @@ const (
 // insert at the chain's head scans past that ceiling. It is mounted only through Dispatch's
 // test-hook route.
 func (s *Service) TangleBeyondOneApplyForTest(ctx context.Context, artifactID string) error {
-	if err := s.Evict(ctx, artifactID); err != nil {
-		return err
-	}
-	loaded, err := s.persistence.Load(ctx, artifactID)
+	origin, err := s.chainOrigin(ctx, artifactID)
 	if err != nil {
 		return err
 	}
-	doc := newDocumentCopy()
-	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
-		return err
-	}
-	text := lastWrittenText(doc.GetXmlFragment(fragmentName))
-	if text == nil {
-		return fmt.Errorf("document %s holds no text to chain onto", artifactID)
-	}
-	last := crdt.CreateRelativePositionFromIndex(text, text.Len()-1, 0).Item
-	if last == nil {
-		return fmt.Errorf("document %s's last text has no item for its last character", artifactID)
-	}
 	frame := encoding.NewEncoder()
 	frame.WriteVarUint(tangledChain) // client groups: one for each item of the chain
-	origin := *last
-	for i := range tangledChain {
-		client := uint64(tangledChainClient + i)
-		frame.WriteVarUint(1) // structs in the group
-		frame.WriteVarUint(client)
-		frame.WriteVarUint(0) // first clock
-		writeOriginString(frame, origin, "a")
-		origin = crdt.ID{Client: crdt.ClientID(client), Clock: 0}
-	}
+	writeChain(frame, origin, tangledChain, tangledChainClient)
 	frame.WriteVarUint(0) // no delete set
 	if _, err := NewPgVersioned(s.store).AppendUpdate(ctx, artifactID, frame.Bytes()); err != nil {
 		return fmt.Errorf("persist the tangle: %w", err)
@@ -221,7 +202,7 @@ func (s *Service) TangleBeyondOneApplyForTest(ctx context.Context, artifactID st
 	}
 	// What a browser's insert at the chain's head scans, measured as the room's apply measures it
 	// (decodeCountingScans): the probe is that insert's shape, of a client past the chain's.
-	scans, err := decodeCountingScans(state.doc, tangleProbe(*last))
+	scans, err := decodeCountingScans(state.doc, tangleProbe(origin))
 	if err != nil {
 		return err
 	}
@@ -254,6 +235,21 @@ func writeOriginString(frame *encoding.Encoder, origin crdt.ID, content string) 
 	frame.WriteVarUint(uint64(origin.Client))
 	frame.WriteVarUint(origin.Clock)
 	frame.WriteVarString(content)
+}
+
+// writeChain writes a chain of chain one-character items onto frame, the first naming origin as
+// its left origin and each later one the item before it, each of a client of its own from
+// firstClient on so none merges with its neighbour. Each item is a client group of its own, which
+// the caller counts in the header it wrote before this.
+func writeChain(frame *encoding.Encoder, origin crdt.ID, chain, firstClient int) {
+	for i := range chain {
+		client := uint64(firstClient + i)
+		frame.WriteVarUint(1) // structs in the group
+		frame.WriteVarUint(client)
+		frame.WriteVarUint(0) // first clock
+		writeOriginString(frame, origin, "a")
+		origin = crdt.ID{Client: crdt.ClientID(client), Clock: 0}
+	}
 }
 
 // lastWrittenText is the last text under node that holds a character, or nil.
