@@ -1438,8 +1438,9 @@ are `streamDuplicateWindow`, `internal/bus/stream.go`) and is reconciled on ever
 `Retry-After: 1` under `streamFullPrefix`, recorded as `stream_full`) rather than drop a stored
 one, so every message it took stays, and is recognised as a repeat, for the whole window. A copy
 sent without its `Nats-Msg-Id` is the exception: the stream recognises no repeat without that id,
-so it stores that copy as a message of its own (the outbox window's send again after an
-`ErrNotStored` acknowledgement, `internal/bus/async.go`).
+so it stores that copy as a message of its own: the send again after an `ErrNotStored`
+acknowledgement, on the send and publish routes' own path (`publishJetStream`,
+`internal/bus/nats.go`) and in the outbox window (`sendJetStream`, `internal/bus/async.go`).
 A retry in a DIFFERENT mode is a different key and genuinely does deliver again, which is what
 the dashboard's retry row says: its **Retry** re-sends the attempt's own mode, and the two
 mode-change actions say "instead". A mode change never rides on a stranded attempt - resuming it
