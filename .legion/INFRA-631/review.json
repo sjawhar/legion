@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-631",
+  "completed": "2026-10-30T06:16:42Z",
+  "round": 20,
+  "headReviewed": "the handoff commit this file is pushed in (code head 2204ae29, merge of main 9d60d92f onto retro's 15d98a8e)",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "reason": "the controller's fast path for the forward merge (architect 2026-10-30 06:07Z)",
+  "fingerprint": {
+    "approvedDiff": "5c24f711 against main de546ed2",
+    "newDiff": "5f8e6f83 against main 9d60d92f",
+    "sameChange": "the same 17 files outside .legion/, with byte-identical +/- lines in every file but the two guides",
+    "conflictResolution": [
+      "restructure.ts changes only its migration constant (0141 -> 0144, with 0142-0144 on main) and two split anchors of the existing kind for main's longer reference graph item",
+      "both guides: the head's restructure.ts --strict on main 9d60d92f's files exits 0 and is byte-identical to the head"
+    ]
+  },
+  "verified": [
+    "checker exit 0 on both guides; bunx biome check and strict bunx tsc --noEmit: exit 0; bun test of both test files: 90 pass; check-private-names.sh and check-body-embed-limit.sh exit 0",
+    "required checks at code head 2204ae29: none red (router run queued at 06:16Z)",
+    "GitHub reports MERGEABLE; main is still 9d60d92f"
+  ],
+  "keyFindings": [],
+  "thermonuclear": "not run: the fast path, and no code of the pull request changed since approved code head e6f60222"
+}
