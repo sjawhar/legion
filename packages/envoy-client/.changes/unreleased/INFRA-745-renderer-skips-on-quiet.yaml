@@ -1,0 +1,12 @@
+kind: Fixed
+body: |-
+    `renderInbound` now skips a Dispatch frame on a `notifications.dispatch.*` topic by the
+    event's `quiet` flag rather than by `notify`. `notify` answers whether to wake the owner's
+    route and is false for every event an agent wrote, so a session that subscribed to an issue's
+    topic was shown nothing any agent did on it, and the skip recorded nothing while the replay
+    cursor moved past it. A frame carrying no `quiet` was published before Dispatch stated it and
+    is still judged by `notify`, so a replay of the 72 hours the stream holds shows no delivery
+    receipts or autosaves.
+time: 2026-10-29T06:00:01.000000000Z
+custom:
+    Issue: INFRA-745
