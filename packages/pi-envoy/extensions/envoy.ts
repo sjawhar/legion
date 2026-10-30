@@ -48,7 +48,6 @@ import {
   dispatchFirstSkillFile,
   readDispatchFirstContext,
 } from "@legion/envoy-client/dispatch-first";
-import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import { forgetShownPictures, shownPictures } from "@legion/envoy-client/dispatch-picture-tools";
 import { pictureAddresses } from "@legion/envoy-client/dispatch-pictures";
 import {
@@ -86,6 +85,7 @@ import {
   sessionAnswersFailureLine,
 } from "@legion/envoy-client/session-answers";
 import {
+  type SessionConfigFile,
   sessionConfigFile,
   sessionDispatchSettings,
   sessionSettings,
@@ -152,6 +152,7 @@ import {
 import { CardWake } from "../src/card-wake";
 import { transcriptPictures, withDeliveredPictures } from "../src/delivery-pictures";
 import { withDispatchFirst } from "../src/dispatch-first";
+import { sessionDispatchClient } from "../src/dispatch-session";
 import {
   type AcceptedUserTurn,
   HANDLED_ATTEMPT_ENTRY,
@@ -175,8 +176,13 @@ import { withSessionAnswers } from "../src/session-answers-context";
 import { sideTurn } from "../src/side-turn";
 import { TypedPictures } from "../src/typed-pictures";
 import { type CardDelivery, UnwrittenFrames, unwrittenCardKeys } from "../src/unwritten-frames";
-import { registerAskGate } from "./askgate/askgate";
-import { ADVISOR_GATE_ENTRY_TYPE, type GateEntry } from "./askgate/askgate-core";
+import { type AskGateRegistration, registerAskGate } from "./askgate/askgate";
+import {
+  ADVISOR_GATE_ENTRY_TYPE,
+  ADVISOR_GATE_RECORD_ENTRY_TYPE,
+  type GateEntry,
+  type GateRecordEntry,
+} from "./askgate/askgate-core";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
 
@@ -315,20 +321,6 @@ function serialQueue(deadlineMs: () => number) {
     },
     settled: (): Promise<unknown> => tail,
   };
-}
-
-/**
- * A Dispatch client on the configuration as it stands now in the session's envoy.json
- * (`CONFIG_FILE`), every request of it ending after `timeoutMs`, or undefined when Dispatch is not
- * configured. A configuration that cannot be read throws, as `activeDispatchSettings` does.
- */
-function timedDispatchClient(timeoutMs: number): DispatchClient | undefined {
-  const config = activeDispatchSettings(
-    sessionDispatchSettings(CONFIG_FILE, process.env, { cwd: process.cwd() }).dispatch
-  );
-  return config === null
-    ? undefined
-    : new DispatchClient(config.url, config.token, fetch, AbortSignal.timeout(timeoutMs));
 }
 
 /**
@@ -614,6 +606,13 @@ process.env.DISPATCH_HOST = "omp";
 // nothing on and turns both sections off.
 const CONFIG_FILE = sessionConfigFile("omp", process.env);
 if (CONFIG_FILE.path !== null) process.env.ENVOY_CONFIG_FILE = CONFIG_FILE.path;
+/**
+ * The session's Dispatch for one request of this extension's own, which has `ms` to answer: the
+ * one builder (`sessionDispatchClient`), resolved again per call, so a Dispatch that moved takes
+ * effect without a reload. Undefined when the session has no Dispatch configuration.
+ */
+const timedDispatchClient = (ms: number) =>
+  sessionDispatchClient(CONFIG_FILE, process.cwd(), AbortSignal.timeout(ms))?.client;
 
 export default function envoyExtension(pi: PiApi): void {
   logger.debug("extension instance loaded", { extension: import.meta.url });
@@ -658,17 +657,24 @@ export default function envoyExtension(pi: PiApi): void {
   // session start; a gate that did not load refuses each write it would review.
   const askgateNotices: string[] = [];
   let askgateLoad: Promise<void> = Promise.resolve();
-  let askgateFile: string | null = null;
-  const configPath = CONFIG_FILE.path;
+  // The gate's registration, while it is bound: the load, which the start notice reads, and what
+  // publishes the Dispatch record of a write that reached the CLI outside the form the gate reads
+  // (`recordUnmarked`). The records' shutdown is the recorder's own, registered where the gate
+  // binds (`askgate.ts`), so this entry holds no cut of its own.
+  let askgateRecorder: AskGateRegistration | undefined;
+  // The session's envoy.json as the gate's own reads go through it, set only where the switch is
+  // on: the file object the session resolved, not a path rebuilt from it.
+  let askgateFile: Extract<SessionConfigFile, { error: null }> | null = null;
+  const configFile = CONFIG_FILE.error === null ? CONFIG_FILE : null;
   const ownDispatch = (file: string): boolean => {
     const own = readEnvoyConfig(file, process.env, { cwd: process.cwd() });
     return dispatchSettings(process.env, own.kind === "read" ? { ...own, checkout: null } : own)
       .enabled;
   };
-  if (configPath !== null && (atStart.dispatch.enabled || ownDispatch(configPath))) {
-    const setting = askgateSetting(configPath);
+  if (configFile !== null && (atStart.dispatch.enabled || ownDispatch(configFile.path))) {
+    const setting = askgateSetting(configFile.path);
     if (setting.error !== null) askgateNotices.push(setting.error);
-    if (setting.enabled) askgateFile = configPath;
+    if (setting.enabled) askgateFile = configFile;
   }
   // The record that makes the `dispatch` CLI require AskGate's marker for a gated write
   // (`@legion/envoy-client/askgate-marker`): written, while the gate is bound, for each session id
@@ -3743,23 +3749,29 @@ export default function envoyExtension(pi: PiApi): void {
   // call; it waits for the modules the gate loads (`registerAskGate`). Only a session with
   // Dispatch and the switch on has one (`askgateFile`, above).
   if (askgateFile !== null) {
-    const configFile = askgateFile;
+    const gateFile = askgateFile;
     // What the gate logs at bind is also a notice at session start: the one it logs there says
     // the review deadline is under 30 s, which at the host's default handler limit is every
-    // profile that sets nothing, and a review that times out lets the write post.
+    // profile that sets nothing, and a review that times out lets the write post. A warning a
+    // gated call raises later goes to the plain log alone (`runtimeLogger`): it is about that
+    // session's calls, and a notice here would show again at every later session start.
     const gateLogger = {
       warn: (message: string) => {
         logger.warn(message);
         askgateNotices.push(message);
       },
     };
-    askgateLoad = registerAskGate(pi, { configFile, logger: gateLogger }).catch(
-      (error: unknown) => {
-        const notice = `AskGate did not load, so it refuses each Dispatch write it would review: ${messageFor(error)}. To turn AskGate off for this session, set askgate.enabled to false in ${configFile}.`;
-        logger.warn(notice);
-        askgateNotices.push(notice);
-      }
-    );
+    const registration = registerAskGate(pi, {
+      configFile: gateFile,
+      logger: gateLogger,
+      runtimeLogger: logger,
+    });
+    askgateRecorder = registration;
+    askgateLoad = registration.loaded.catch((error: unknown) => {
+      const notice = `AskGate did not load, so it refuses each Dispatch write it would review: ${messageFor(error)}. To turn AskGate off for this session, set askgate.enabled to false in ${gateFile.path}.`;
+      logger.warn(notice);
+      askgateNotices.push(notice);
+    });
   }
 
   pi.on("tool_result", async (event, context) => {
@@ -3775,9 +3787,9 @@ export default function envoyExtension(pi: PiApi): void {
       entries.some((entry) => entry.askgate !== undefined) &&
       !(await isSubagent(context))
     ) {
-      for (const { tool, askgate } of entries) {
+      for (const [line, { tool, askgate }] of entries.entries()) {
         if (askgate === undefined) continue;
-        pi.appendEntry(ADVISOR_GATE_ENTRY_TYPE, {
+        const entry: GateEntry = {
           advisor: "AskGate",
           tool,
           path: `dispatch ${commandName(tool)}`,
@@ -3789,7 +3801,58 @@ export default function envoyExtension(pi: PiApi): void {
           latencyMs: 0,
           revisesForKey: 0,
           argsDigest: "",
+        };
+        // The entry above reaches only this machine's disk. A write that would have opened an
+        // ask for a person also goes to Dispatch, where a session with no access to this machine
+        // counts the asks that went out, or were refused, unreviewed: the record carries the
+        // tool, the mode and how many asks the write carried, and no ask text. The entry is
+        // appended first and the record started behind it, awaited by nothing of this call: a
+        // session's records are written one at a time and each read and write has the client's
+        // own deadline, so awaiting one here held this tool result for as long as every record
+        // queued before it took, past the host's handler limit (#2161, reviewer round 17). A
+        // record that fails or that the shutdown cuts rides on an `advisor-gate-record` follow-up
+        // of its own, as a gated call's does (`askgate-core.ts`), appended while the session is
+        // still live; the recorder's cut at shutdown is what bounds it.
+        const asksCarried = askgate.asksCarried ?? 0;
+        // One tool call can log several gated writes, so the record's id names the ledger line's
+        // own place in it: what the reader de-duplicates a replayed write by, and what ties the
+        // follow-up of a record that failed to this entry alone — the gated calls of that same
+        // tool call carry its id too.
+        const recordId = `${event.toolCallId}#${line}`;
+        const recorder = asksCarried > 0 ? askgateRecorder : undefined;
+        pi.appendEntry(ADVISOR_GATE_ENTRY_TYPE, {
+          ...entry,
+          ...(recorder === undefined ? {} : { recordId }),
         } satisfies GateEntry);
+        if (recorder === undefined) continue;
+        void (async () => {
+          let recordError: string | undefined;
+          try {
+            recordError = await recorder.recordUnmarked({
+              entry: { ...entry, asksCarried },
+              sessionId: context.sessionManager.getSessionId(),
+              directory: context.cwd,
+              id: recordId,
+            });
+          } catch (error) {
+            recordError = messageFor(error);
+          }
+          if (recordError === undefined) return;
+          logger.warn(
+            `envoy: AskGate did not record the unmarked ${entry.path} on Dispatch: ${recordError}`
+          );
+          try {
+            pi.appendEntry(ADVISOR_GATE_RECORD_ENTRY_TYPE, {
+              toolCallId: entry.toolCallId,
+              tool: entry.tool,
+              recordId,
+              recordError,
+            } satisfies GateRecordEntry);
+          } catch {
+            // The session is sealed or its file is gone: there is nothing left to tell, and the
+            // tool result this record belongs to was answered long before it ran.
+          }
+        })();
       }
     }
     if (event.isError) return;

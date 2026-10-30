@@ -253,9 +253,11 @@ document, not for coordination between roles.
 
 ## AskGate
 
-AskGate reviews each Dispatch write of a session's main agent before the write posts. One model
-call judges the write against the rules in `extensions/askgate/rules.md` and answers `allow` or
-`revise`. A `revise` answer carries the reason and the fix. The gate reviews these calls:
+AskGate reviews each Dispatch write of a session's main agent before the write posts. The charter
+check, one model call, judges the write against the rules in `extensions/askgate/rules.md` and
+answers `allow` or `revise`. A `revise` answer carries the reason and the fix. A call that opens a
+new ask for a person also gets the rules check (below), a second model call beside it. The gate
+reviews these calls:
 
 - `dispatch ask`, `dispatch message`, `dispatch edit-ask`, `dispatch comment`, `dispatch doc-edit`
   and `dispatch request-approval`
@@ -299,7 +301,7 @@ in the next.
 **The form the gate reads.** One `dispatch` call, alone in the bash call:
 
 ```
-[cd <literal path> && ] dispatch <subcommand> <literal words…> [2>&1] [<<'DELIM' … DELIM] [| head|tail [-n N]]
+[cd <literal path> && ] dispatch <subcommand> <literal words…> [2>&1] [<<'DELIM' … DELIM] [| head|tail [-n N]] [# --advisor-rebuttal '<line>']
 ```
 
 - The program is `dispatch` by name, or a literal path that ends in it.
@@ -313,8 +315,13 @@ in the next.
   after the `2>&1`. Its body is on the lines after the line that opens it.
 - One trailing pipe stage may read its output: `head` or `tail`, alone or with `-n N`, `-nN` or
   `-N`. The dry run leaves it out.
+- One shell comment may stand where the command's line ends — after its last word and after every
+  `2>&1`, here-document opener and `head` or `tail` stage, which is where bash reads one — and
+  only when its words are override flags alone (`# --advisor-rebuttal '<line>'`, the form the gate
+  hands a rebutted command back in). It is read as those overrides, and no part of what runs:
+  `commandArgv` never holds it, so the marker binds the words bash hands the CLI.
 - Nothing else is in the call: no second command, no other pipe, no `;`, `&&`, `||` or `&`, no
-  assignment, no other redirect and no comment.
+  assignment, no other redirect and no other comment.
 
 **Everything else runs, and the `dispatch` command enforces the review.** The gate reads no other
 form and refuses none: a call outside the literal grammar runs as written. What holds it back is
@@ -360,8 +367,18 @@ gated write only when it consumes one, so a write sent any other way is refused 
   no marker, the gate appends an `AskGate note:` to that result. It names the first cause it found
   in the call, with the call's own text (an expansion in a value, a double-quoted value over lines
   with an expansion in it, a program that runs the write such as `xargs` or `timeout`, a pipe, a
-  second command, an assignment, a redirect), and the change that puts the write in the literal
-  form. The note is help only: the gate refuses nothing for it.
+  second command, an assignment, a redirect, a comment that is no override), and the change that
+  puts the write in the literal form. For a comment it says that AskGate reads a `#` only where
+  the command's line ends and only when its words are override flags alone. The note is
+  help only: the gate refuses nothing for it.
+- **The unmarked write that carries an ask.** The `unmarked` entry reaches only this machine's
+  disk. Where such a write carries at least one ask for a person, the CLI counts those asks from
+  the write's own text (`newAsks` in `@legion/envoy-client/askgate-new-asks`) and writes the count
+  into the session's ledger as `asksCarried`, and pi-envoy publishes one decision record for it on
+  Dispatch (below), with the tool, the mode and that count and no ask text. The count is of the
+  asks the write carries, so a re-upload of ask blocks the stored version already holds counts
+  them as carried: in `warn` mode the write has already posted when the ledger is read, so a read
+  of the stored version would see the new text and count nothing.
 
 The gated writes are the same list for the gate and the CLI (`gatedWrite` in
 `@legion/envoy-client/askgate-marker`): the six commands above, an `issue` with a spec and an
@@ -416,12 +433,75 @@ bind: only the loaded gate reads the arm, so a session that chose block through 
 no mode on disk until the gate's first main-agent `bash` or `eval` call, and none at all when the
 gate does not load — a write outside the literal form there posts with a warning. **An operator
 who selects block through the arm should also set `OMP_ASKGATE=block` for a hard guarantee**,
-which holds from the session's start and through a failed load. Two other refusals follow neither
-mode: no model role, and a gate that did not load, which refuses each literal call it would review
-in both modes, since neither can review anything.
+which holds from the session's start and through a failed load. Three refusals follow neither
+mode: a match of the rules check (below), which refuses the write in both modes; no model role;
+and a gate that did not load, the last two refusing each literal call they would review in both
+modes, since neither can review anything.
 
-**The model.** The gate asks the session's `askgate` model role (`modelRoles.askgate`). When that
-role is not set, it asks the `default` role. A model that answers with an error passes the request
+**The rules check.** A call that opens a new ask for the person gets a second model call, beside
+the charter call and on the same chain, deadline and transcript. That call knows two rules
+(`extensions/askgate/rule-check.md`) and judges only the new asks:
+
+- No change: the ask's own recommendation is to change nothing, such as to keep things as they
+  are, to take no action or to keep the current design.
+- Untried access: the ask asks the person to do a step with their own hands (run a command,
+  change a setting, grant access, sign in), or says that only the person can do the step. The
+  rule matches only when neither the ask nor the transcript shows that the agent tried the step
+  with the access it has or can request. A step that needs the person's security key, a sign-in
+  to their own account in a browser, a payment or their own decision does not match. An ask that
+  also asks the person to choose between options with different outcomes does not match.
+
+A new ask is a `dispatch ask`, an ask block that a `dispatch doc-edit` inserts, a block that it
+retypes into an ask, an ask block in a `dispatch issue` spec, or an ask block in a markdown
+upload whose `#id` the document does not already hold. When that document cannot be read, an
+upload's ask blocks that carry an `#id` are left out — a stored version may hold any of them —
+and only the blocks with no id are judged, so a re-upload of an unchanged document is never
+refused for an ask block it already held.
+
+The rules check runs only on a call the gate reads, which is the literal form above. A call in
+any other form reaches no gate at all: the CLI refuses it in `block` mode and posts it with a
+warning in `warn` mode, and the rules check never sees it. Where such a write carries an ask, the
+Dispatch record below counts it.
+
+A match refuses the call in `warn` mode and in `block` mode, so no part of the call posts and no
+marker is minted for it. The refusal names the matching asks, each with its rule and the words
+that match. It says what to do instead and how to send the call anyway. The agent sends the call
+anyway in one of three ways:
+
+- `--advisor-rebuttal '<line>'` on a `dispatch` command.
+- `"advisor_rebuttal": "<line>"` in a device's JSON.
+- The third attempt at the same thing on the same target: after the gate refuses one thing twice
+  on one target, it sends the third call that holds it without review. A thing is each new ask a
+  call opens, or the call as a whole when it opens none. A charter refusal counts on every thing
+  of the call, and a rules refusal counts on the asks it refused. Only a refusal counts: in `warn`
+  mode a charter `revise` sends the call, so it never moves the breaker, while a match of the
+  rules check refuses the call in either mode and always does. A call that opens an ask refused
+  once, or never, on that target is reviewed like any other, however often the gate refused other
+  asks there, and a call that opens no ask counts its own refusals, whatever asks were refused
+  there before it. An allow, a rebuttal or the third attempt starts every count on the target
+  again.
+
+A rebuttal sends the call with no review by either check, and the entry records the line. The
+CLI takes no such flag, so the gate moves it into a shell comment where the command's line ends,
+after everything that runs, where the agent's record of its call still shows it and dispatch never
+sees it; that command sent again is read as the same rebuttal and comes back unchanged. The
+comment stands at the end of the command's line because that is the one place bash reads it as a
+comment at all: every word of it is quoted, which keeps the comment's own quotes paired, but
+nowhere else would that quoting hold — written where a single-quoted value is still open, the
+quotes would pair around the agent's line and leave it outside them. The gate reads the commented
+command back as the same call before it hands it over: an override no
+word of the grammar can carry — a line holding both a `'` and a `$`, or a newline — is removed
+instead, and the acknowledgement says so. A device takes no such field, so the gate removes it
+before the call runs and says so. Either way the acknowledgement
+quotes the override exactly as the agent sent it. A rules call that ends in an error, a timeout or
+an answer that does not parse refuses nothing: the charter check decides. The third such rules
+call in a row writes one warning, saying that the new asks of those three calls went unchecked and
+that the check still runs on each new ask, to the host's plain log, shows it as a notice in a
+session with a UI, and adds it to that call's own result. It is not one of the notices a session
+shows at its start.
+
+**The model.** Both checks ask the session's `askgate` model role (`modelRoles.askgate`). When that
+role is not set, they ask the `default` role. A model that answers with an error passes the request
 to the next model of that role's `retry.fallbackChains` chain, on the same provider. When neither
 role resolves, the gate refuses the write in both modes and names the two roles. A session whose
 main model is on another provider than the gate's model is not reviewed: its transcript stays on
@@ -438,8 +518,8 @@ why. The note reaches a headless session too:
 | `no-verdict` | the model answered with no verdict the gate could read |
 | `halted` | three calls in a row reached no verdict, and the gate is paused for the session |
 | `skipped` | the session's main model is on another provider than the gate's |
-| `rebuttal` | the agent sent `--advisor-rebuttal <line>`, which is recorded and removed |
-| `breaker` | a third attempt on one target after two revise verdicts |
+| `rebuttal` | the agent sent `--advisor-rebuttal <line>`, which is recorded and kept only as a shell comment, or `"advisor_rebuttal"`, which is recorded and removed |
+| `breaker` | the third attempt at one thing on one target, after the gate refused it twice there |
 | `unreadable` (warn mode) | a file the literal call names was missing or not a regular file when the gate ran |
 | `abandoned` (warn mode) | the call or the run ended before the review answered |
 | `shutdown` (warn mode) | the session shut down before the review answered |
@@ -451,11 +531,14 @@ for `unreadable` and `unmarked`), those outcomes refuse the call instead. Only
 runs the agent's own command as written: a gate that fails breaks no valid write.
 
 **The time limit.** `OMP_ASKGATE_TIMEOUT_MS` sets the review's time limit. The default is 90 s. The
-gate holds the limit 5 s under `extensionHandlers.toolCallTimeoutMs`, the host's limit for one
-`tool_call` handler. That key is 30 s by default, so the limit is then 25 s. A review of a long
-session often takes longer than 25 s, and a review that times out lets the write post. Three
-timeouts in a row stop the gate for the rest of the session. Set the key to 120000 or more in the
-session's settings, for example in `~/.omp/agent/config.yml` or an overlay in `PI_CONFIG_FILES`:
+gate holds the limit 5,000 ms under `extensionHandlers.toolCallTimeoutMs`, the host's limit for
+one `tool_call` handler: the room its handler still needs once the limit passes, for the aborted
+call's usage report and for the entry. The Dispatch record below is no part of it, since it runs
+after the handler has returned. That key is 30 s by
+default, so the limit is then 25,000 ms. A review of a long session can take longer than 25 s,
+and a review that times out lets the write post. Three timeouts in a row stop the gate for the
+rest of the session. Set the key to 120000 or more in the session's settings, for example in
+`~/.omp/agent/config.yml` or an overlay in `PI_CONFIG_FILES`:
 
 ```yaml
 extensionHandlers:
@@ -463,20 +546,158 @@ extensionHandlers:
 ```
 
 When the limit is under 30 s, the gate logs one warning at start that names the key, the host's
-limit and the review's limit. It still reviews each write.
+limit and the review's limit. It still reviews each write. The key must be at least 15,000 ms,
+since the gate does not bind on a limit that leaves under 10 s for a verdict. A session set under
+15,000 ms gets a gate that does not load, and a gate that did not load refuses every Dispatch
+write it would have reviewed.
 
-`OMP_ASKGATE_DUMP` names a file that gets each review's two prompts. Every gated call writes one
-`advisor-gate` entry into the session's transcript, and `scripts/askgate-report.ts` reports over
-those entries: what the gate sent back and what the reviews cost, a count for each outcome, and
-every session that had a write the gate did not review, with its counts. The report counts a
-write as **sent back** when the gate did not pass it as sent: every entry whose decision is
-`revise` — a revise verdict, `no-model-role`, and in block mode `abandoned`, `shutdown` and
-`unmarked` — and every `unreadable`, `unmarked` or `load-failed` entry, whatever its mode, counted
-over every gated call, since some of them never reach a review; as a **refusal** when the write did
-not post (one sent back in block mode, and `no-model-role` and `load-failed`, which refuse in warn
+`OMP_ASKGATE_DUMP` names a file that gets the two prompts of each model call.
+
+**The record.** Every gated call writes one `advisor-gate` entry into the session's transcript.
+Every entry whose arguments the gate read carries `target`, the call's target in readable form:
+the tool name, then each of `issue`, `ask`, `artifact`, `project` and `in_reply_to` that the input
+carries, as `dispatch_ask issue=ACME-1`. An `unreadable` entry, and the `unmarked` entry pi-envoy
+writes from the CLI's own ledger line, carry none: neither has the arguments to name one. The
+third attempt (`outcome: "breaker"`) counts the refusals of
+one thing on one such target, and `revisesForKey` counts every `revise` on it, the `warn` ones
+included, since its counts last started again. A call that opens a new ask adds the fields of the
+rules check:
+
+- `rule`: `no_change` or `untried_access`, the rule that the first matching ask broke. The gate
+  sets it exactly when the rules check refused the call.
+- `ruleAsk`: the number of that ask in the rules request, from 1.
+- `ruleQuote`: the words of that ask that the rules call quoted.
+- `ruleOutcome`: how the rules check ended: `match`, `none`, `error`, `timeout`, `no-verdict`,
+  `abandoned`, `shutdown` or `unjudged`. The gate sets it on each gated call that opens a new ask
+  and reached the model call. `unjudged` is the one with no model call: an upload whose stored
+  version the gate could not read and whose every ask block carries an `#id`, so it judged none
+  of the call's asks. The call is not refused for it; the charter check decides alone.
+- `ruleModel`: the `provider/id` that answered the rules call.
+- `ruleLatencyMs`: the time of the rules check, its document read included. `charterLatencyMs` is
+  the charter check's own time on the same clock; the two calls run side by side, so each says
+  what it cost of the entry's whole `latencyMs`.
+- `ruleTextMissing`: `true` when the gate could not read the text of an ask and judged the ask
+  without it. A failed read of an upload's stored version never sets it: no ask of an upload
+  loses its own text.
+- `ruleError`: the error text for `error` (the provider's, or the check's own when it fails before
+  a model answers), `timeout` for a timeout, and `no-verdict` for an answer that does not parse.
+- `ruleAsksCut`: how many asks the request cut. The request lists every new ask, and aims to keep
+  the list within 32 KiB: each ask's text gets an equal share of it, at most 8 KiB, and an ask cut
+  to its share keeps its start and its end, where the rules read. The gate never leaves an ask out,
+  or cuts one below its start and its end, to stay within that bound: a write of very many ask
+  blocks, over a hundred, makes a longer request. An ask's `#id` is cut to 128 bytes.
+- `ruleAsksPartial`: `true` when the call was judged on part of its asks, or on none of them
+  (`ruleOutcome: "unjudged"`): the gate could not read the document an upload replaces, so the ask
+  blocks carrying an `#id` were left out of the check.
+- `mintSkipped`: `call-ended`, on a call whose decision let the write out and whose own tool ended
+  while the gate still held it. No marker was minted, since no command of that call can run.
+
+`decision` is `revise` on a rules refusal in `warn` mode too. The gate refused a call exactly when
+`decision` is `revise` and one of these is true: `verdictMode` is `block`, `outcome` is
+`no-model-role` or `load-failed`, or `rule` is set. An `unreadable` or `unmarked` entry is a
+refusal in `block` mode only, where its `decision` is `revise`; in `warn` mode its `decision` is
+`allow`, and the write went out with the note that it was unreviewed. To find the refusals that
+the agent overrode, join each rules refusal to the next entry with the same `target`. The agent
+overrode the refusal when that entry's `outcome` is `rebuttal` or `breaker`.
+
+`scripts/askgate-report.ts` reports over those entries: what the gate sent back and what the
+reviews cost, a count for each outcome, every session that had a write the gate did not review,
+with its counts, the markers it skipped, the outcomes and errors of the rules check, and the rules
+refusals that the agent overrode. The report counts a write as **sent back** when the gate did not
+pass it as sent: every entry whose decision is `revise` — a revise verdict, a rules refusal,
+`no-model-role`, and in block mode `abandoned`, `shutdown` and `unmarked` — and every
+`unreadable`, `unmarked` or `load-failed` entry, whatever its mode, counted over every gated call,
+since some of them never reach a review; as a **refusal** when the write did not post (one sent
+back in block mode, and `no-model-role`, `load-failed` and a rules refusal, which refuse in warn
 mode too); and as **unreviewed** when it posted with no review behind it, which is every `allow`
 whose outcome is no verdict (the table above, a rebuttal, a breaker trip and warn mode's
-`abandoned` and `shutdown` included).
+`unreadable`, `unmarked`, `abandoned` and `shutdown` included).
+
+**The Dispatch record.** The entry above reaches only the machine the session ran on. A session
+that counts the rule decisions over a fortnight — a standing session holding a Dispatch token and
+nothing else — reads them from Dispatch instead: every gated call whose rules check ran (every
+entry with a `ruleOutcome`), every call the agent sent anyway (a rebuttal or the breaker, whose
+record has `ruleOutcome: null` and the refusal's own `target`), and every write that reached the
+CLI outside the form the gate reads and carried an ask for a person (`outcome: "unmarked"`, with
+`asksCarried` above zero) are published to a Dispatch project document of the session's own,
+`askgate-decisions-<session id>.md`.
+
+- **What it carries.** The time, the session, `id` (the gated call's tool call id, and for an
+  unmarked write the CLI ledger line's place in its tool call, so a reader counts one decision
+  once), `source` (`pod` for a Legion role's session, which `LEGION_ISSUE` names, and `machine`
+  for every other), the project, `tool`, `target`, `rule`, `ruleOutcome`, `ruleError`,
+  `ruleTextMissing`, `ruleAsksCut`, `ruleAsksPartial`, `decision`, `outcome`, `verdictMode`,
+  `asksCarried`, `ruleLatencyMs`, `charterLatencyMs` and the plugin's version. **No ask text and
+  no quote leaves the session**, so nothing a person wrote travels with the counts.
+- **Which project.** `OMP_ASKGATE_RECORD_PROJECT`, else `LEGION_PROJECT` (a Legion pod has no
+  envoy.json, so its environment is the only setting it can carry), else no record at all and no
+  Dispatch call.
+- **When.** Once the call has been answered: the gate appends the call's `advisor-gate` entry,
+  returns, and then hands the record to the session's recorder, so no review is ever cut short to
+  pay for it. It never changes the decision. The write runs until Dispatch has answered it or the
+  session's shutdown cuts it — the client asks again under the call's own `Idempotency-Key`, and
+  nothing retries it from outside — so a Dispatch that is slow under load is waited
+  out rather than given up. A record that fails or that the shutdown cuts writes one line to the
+  host's log and appends one `advisor-gate-record` entry, carrying `toolCallId`, `tool`,
+  `recordError` and, for an unmarked write, the record's own `recordId`; the decision's own entry
+  stands as written. Once the session is shutting down, the one `session_shutdown` handler the
+  gate binds gives the records 1.25 s from that moment and then cuts them, whether or not the
+  gate loaded, and the gate's own handler waits for what is still pending inside the 1.5 s it
+  holds shutdown for, so a record still lands, and the entry of one that could not, before the
+  session is sealed; a record cut that way says the shutdown cut it. An unmarked write's record is
+  started from the `tool_result` the CLI's line reached, after that write's `advisor-gate` entry
+  is appended and awaited by nothing of the tool result, which returns while the record is still
+  in flight: the records of a session are written one at a time and each has the client's own
+  deadline, so a Dispatch that does not answer would otherwise stall every such write. It goes
+  through the one recorder the gate's own records use.
+- **One document per session, written once and appended to.** The document's create carries a
+  header paragraph and no record; every record, the session's first included, is a fenced JSON
+  line appended through `docEdit`. That rule is what keeps a record safe, because an upload of a
+  name Dispatch already holds stores a new version of that document and the reader reads the
+  latest version alone, so a second upload would erase every record appended since the first. A
+  process holding no id for the session — a fresh process serving it, or one whose create was cut
+  — reads the document by its name, one request of a few bytes, and appends to that; it creates
+  one only where that read answers 404. The create carries an `Idempotency-Key` of the document's
+  own, `askgate-doc.` and the sha256 of the project and the name, and a body fixed for the
+  session — the header alone, with no record, no time and no plugin version in it — so every
+  attempt of it, in this process or another, is one intent Dispatch runs once: it replays a key
+  that finished, answers `409 KEY_IN_FLIGHT` while the first run lives, `409 KEY_COMMITTED` where
+  that run landed and lost its answer, and `422 KEY_REUSED` for a different body, and the last two
+  send the recorder back to the read and then to the append. Each append carries a key of its own,
+  the sha256 of the session and the record's id, so an append Dispatch ran late is replayed to its
+  next attempt rather than written twice; the same record sent again with another time in its body
+  gets `422 KEY_REUSED`, is not written, and is counted as not confirmed. Keys
+  belong to the login that sent them, and every Legion pod writes under the shared agent token,
+  which is one login for all of them (`requestKeyLogin`,
+  `packages/envoy/internal/dispatch/api/request_keys.go`); Dispatch keeps a key 24 h
+  (`IdempotencyKeyTTL`), well past the 10 minutes a create's run can hold it
+  (`keyedHandlerLimit`). The records of one session are written one at a time, each sent once the
+  one before it has settled, and each carries the time the gate made it, which is what the reader
+  counts and sorts by: a write given up on this side may still be running on Dispatch's while the
+  next is sent, so the order they land in is not the order they were made.
+- **What is lost, and what is counted.** A session killed between a decision and its write loses
+  that one record, and a session that never reached a gated call writes no document. A record
+  that fails, or that the shutdown cuts, is unconfirmed too — and one given up that way may have
+  landed all the same, so a record the session could not confirm can still be in the document,
+  where the reader counts it once by its `id` and counts the second copy as a duplicate. What no
+  longer happens: a create given up here and committed on Dispatch after later records were
+  written cannot replace them, since every create of that document is the one keyed create, and
+  two processes writing one session's first record at the same moment make that same one create
+  between them. What the
+  machine could not get Dispatch to confirm is counted on the machine's own side: `--sessions`
+  counts the entries carrying a `recordError` as **decision records not confirmed**, an upper
+  bound on what the day's `--dispatch-project` counts cannot hold.
+
+`scripts/askgate-report.ts --dispatch-project <KEY> --since <RFC 3339> [--json]` reads those
+documents and prints the day's refusals by rule, the refusals the agent overrode, the calls
+judged on part of their asks and those that judged none, the unmarked writes by mode with the asks
+they carried, and the rules-call error rate, each split by `source`, with the documents and lines
+it could not read, and the records it read twice, counted beside them. An unmarked write is in no
+rules-call count and in no override count: no check judged it. Its `asksCarried` counts every ask
+and ask block the write carries, so a re-upload of blocks a stored version already holds counts
+them as carried. The same script's `--sessions <dir>` mode still reports the entries on disk, the
+decision records not confirmed among them. Each flag is given once: the
+script refuses a flag given twice by name, rather than reading only its last value.
 
 **What AskGate is not.** AskGate reviews the writes of a cooperating agent, so that a write that
 breaks its rules comes back with the reason before it posts. It is no sandbox. A process that
