@@ -2349,18 +2349,20 @@ path and leaves every child node, mark and inner block id exactly as it was; nam
 replaces the question's paragraphs with what the markdown pipeline parses, so they carry the
 attributes any other document write gives them, and anchors inside the text actually replaced are
 affected as they are by any document edit. Naming `options` writes only the lines it sends: each
-sent option is paired with the list item already holding it, by label and first unused match, so
-an option the edit does not change keeps its own node - its line as it stands, its block id, its
-marks and the sub-list, second paragraph or link a person wrote under it - and one whose
-description it changes keeps every block under its line, which is rewritten in place
-(`editedOptionList` in `docs/ask_block_text.go`). An item no sent option matches is dropped only
+sent option is paired with the list item already holding it, first the unused item that says
+exactly what the option says, label and description, then the first unused item holding its
+label, so an option the edit does not change keeps its own node - its line as it stands, its
+block id, its marks and the sub-list, second paragraph or link a person wrote under it - and
+one whose description it changes keeps every block under its line, which is rewritten in place
+(`editedOptionList` in `docs/ask_option_merge.go`). An item no sent option matches is dropped only
 where it holds nothing but its plain line, and a line is rewritten only where it writes nothing
 but its text; otherwise the whole edit is refused `400 ASK_BLOCK_TEXT` with field `options`,
-nothing written, quoting that item or that line whole and, for a drop, naming `dispatch doc-edit`,
-since the ask row shows an option's label and description alone and the sender cannot see what
-dropping it deletes - which is what a removal, a rename and an edit sending no option at all come
-to - or what rewriting a line holding a link's address, bold, code or an image deletes. What those
-refusals weigh is what the markdown writes, never what the nodes hold, so a mark no reader sees -
+nothing written, quoting that item or that line whole and naming the `dispatch doc-edit` that
+removes or rewrites it, since the ask row shows an option's label and description alone and the
+sender cannot see what dropping it deletes - which is what a removal, a rename and an edit
+sending no option at all come to - or what rewriting a line holding a link's address, bold,
+code or an image deletes. What those refusals weigh is what the markdown writes, never what the
+nodes hold, so a mark no reader sees -
 the editor's own on every character a person types - is nothing to lose. Settlement's restore of a
 decided ask's recorded wording goes through the same merge with no caller to answer a refusal
 (`writeDecidedWording`), so it drops an item no decided option is paired with, whatever that item
