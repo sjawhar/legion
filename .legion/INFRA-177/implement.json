@@ -2,55 +2,50 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-177",
-  "completed": "2026-10-30T12:24:39Z",
+  "completed": "2026-10-30T20:59:40Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2354",
   "proof": [
     {
-      "criterion": "Findings 5 and 7: one routeBody gives the handoff write its limit and its 413 CAP_EXCEEDED in the drain, the keyed layer and the handler; a spilled keyed write replays, a held-key repeat past 1 MiB gets KEY_IN_FLIGHT, a different body under the key gets KEY_REUSED with one version kept",
-      "surface": "Dispatch API handler on Postgres (the full package)",
-      "command": "cd packages/envoy && go test -count=1 -p 1 -timeout 50m ./internal/dispatch/api/",
-      "observed": "ok (1465 s); TestARetriedHandoffWriteReplaysItsAnswerAndRecordsOneVersion, TestAKeyedHandoffWritePastAMegabyteSpillsAndReplays and TestAnEarlyHandoffAnswerDrainsUpToTheHandoffWritesLimit pass",
-      "headSha": "4d3b83467cef",
-      "negativeControl": "with routeBody's handoff-write case removed, all three new tests fail with 413 REQUEST_TOO_LARGE at 1048576 bytes"
+      "criterion": "Finding 1: the Dispatch API package passes with the route-count pin at the true count (151: main's 147 plus this PR's 4)",
+      "surface": "Dispatch API handler on Postgres (the full package, not the required test job)",
+      "command": "cd packages/envoy && go test -count=1 -p 1 -timeout 55m ./internal/dispatch/api/",
+      "observed": "ok (1334 s) at 14f6fdc9; also ok (1243 s) at 588dad34 and (1432 s) at b036d227",
+      "headSha": "14f6fdc983e4",
+      "negativeControl": "at a1a6523d the pin said 150 while routes() held 151 rows, and the reviewer's run of the package failed on it"
     },
     {
-      "criterion": "Handoff records end to end after the merges with main a21100c5, 96a7e5ea (#2478) and 2d3a725f (Dispatch migration 0148_handoffs, daemon migration 0065_handoff_records, contract 44)",
+      "criterion": "Finding 7: the pass rebuilds a lost push above an approval from the branch's activity and applies it",
+      "surface": "daemon pass (readRequiredChecks) on Postgres against a GitHub stand-in serving the branch's activity",
+      "command": "cd packages/daemon && go test -count=1 -p 1 -timeout 30m ./internal/daemon/ (four environment-bound tests skipped: Docker, gVisor SigIgn, tmux credential helper)",
+      "observed": "ok (569 s) at 588dad34; TestThePassFollowsAPushAboveAnApprovalAsANewHead asserts one push-read fact and that the late webhook decides nothing",
+      "headSha": "588dad3401d3",
+      "negativeControl": "with the stand-in's activity read answering 404, the test fails: 'the pass applied 0 pushes it rebuilt from the branch's activity, want the one code..pushed'"
+    },
+    {
+      "criterion": "Handoff records end to end after the merges with main a4af0341, d126b19d and 2b891d47 (Dispatch migration 0150_handoffs, daemon migration 0065, contract 44)",
       "surface": "scripts/e2e/handoff-records.sh: the Go daemon and a real Dispatch server on Postgres and NATS",
-      "command": "LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/r_hr3 bash scripts/e2e/handoff-records.sh",
-      "observed": "handoff records e2e: PASS in 47s (also PASS in 62 s at a5f36189 and 64 s at 4d3b8346)",
-      "headSha": "a1a6523df1cb",
+      "command": "LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/t_hr bash scripts/e2e/handoff-records.sh",
+      "observed": "handoff records e2e: PASS in 39s",
+      "headSha": "14f6fdc983e4",
       "negativeControl": "the live test's own refusal: a record another session wrote is refused 403 HANDOFF_SESSION_MISMATCH and the phase does not move"
     },
     {
-      "criterion": "The Conversation shows handoff records, live, on the merged tree",
+      "criterion": "The Conversation shows handoff records, live, after main's #2392 event-lock change",
       "surface": "Dispatch browser suite: the real Go server on Postgres, Chromium through Playwright",
-      "command": "bash /legion/harness/dispatch-e2e.sh 'postgres://postgres@127.0.0.1:5433/r_e2e2?sslmode=disable' e2e/handoffs.e2e.ts",
-      "observed": "3 passed (14.3s) at a5f36189 (main's newer commits at 2d3a725f touch no handoff code); 3 passed at 4d3b8346",
-      "headSha": "a5f36189a6a0",
+      "command": "bash /legion/harness/dispatch-e2e.sh 'postgres://postgres@127.0.0.1:5433/t_e2e?sslmode=disable' e2e/handoffs.e2e.ts",
+      "observed": "3 passed (10.5s)",
+      "headSha": "14f6fdc983e4",
       "negativeControl": "at b7838708, with event-refresh.ts's [\"handoffs\", key] target removed, the live-update test failed (unexpected value \"2\")"
-    },
-    {
-      "criterion": "Finding 10: the cleaned-up push re-check test still pins every re-check clause",
-      "surface": "daemon workflow engine on Postgres",
-      "command": "cd packages/daemon && go test -count=1 -p 1 -timeout 30m ./internal/workflow/",
-      "observed": "ok (409 s) at 4d3b8346; ok (454 s) at a5f36189 after the #2478 merge, with #2478's own workflow tests naming a handoff record",
-      "headSha": "a5f36189a6a0",
-      "negativeControl": "TestAPushForAHeadTheBranchLeftDecidesTheChecks fails with each of the four re-check clauses in push() removed, one at a time"
     }
   ],
   "filesChanged": [
-    "200d0b98: merge with main a21100c5 (tool counts 27, registered routes 150; Dispatch migration 0145_handoffs renumbered to 0148 in both SQL files, handoffs.go, envoy AGENTS.md, cmd/dispatch/README.md and the envoy fragment)",
-    "96f3c40b: routeBody(method, pattern) (limit, tooLarge) in request_keys.go replaces routeBodyLimit and bodyTooLarge; decodeJSONWithin takes tooLarge and returns main's errJSONTooLarge shape; createHandoff's 413 remap deleted; README and comments name handoffRequestLimit and CAP_EXCEEDED; three new handoff limit tests; pressedAs replaces keyedHandoffPost",
-    "5335ecfe: claude-backend-sandbox.sh asserts handoff records and no committed .legion/ path, with its README section; githubrest.NotFound replaces ghbranch.NotFound; holdPortAgain retries only EADDRINUSE; checks_red_test and ghbranch_test cleanup; worker-image.yaml and lib/workflow.sh text",
-    "4d3b8346: pi-legion fragment uses the runbook's stop rule",
-    "a5f36189: merge with main 96a7e5ea (#2478: lost GitHub events heal): 24 files, both sides kept; #2478's push rebuild and CI settlement keep no handoff-only push class (handoffPush, knownPaths, readApprovalCarry, approval_reads.go gone; HeadPushKnown back for the rebuild); the implementer's completion passes both #2478's open-pull-request check and the record checks; contract 43 -> 44; daemon migration 0062_handoff_records -> 0065; #2478's api, workflow and daemon tests name a handoff record",
-    "a6de7711: merge with main 2d3a725f (pi-shared/AGENTS.md: both rows kept)",
-    "a1a6523d: ci.yaml's listener_server_change filter covers packages/envoy/internal/dispatch/api/testdata/*, which main's new decision-block-inserts.json fixture made check-ci-filters fail on main and on this PR"
+    "cae0d441: merge with main a4af0341: registeredRoutes 151; Dispatch migration 0148_handoffs -> 0149 (main took 0148), its README paragraph after main's 0148",
+    "b036d227: findings 3-7: record/store.go takes main's handoff_commit <> '' filter back; required_checks.go names the branch-activity read; running-legion.md in concepts.md's wording; packages/envoy/AGENTS.md names routeBody, handoffRequestLimit and CAP_EXCEEDED; TestThePassFollowsAPushAboveAnApprovalAsANewHead serves an activity entry and asserts the rebuilt push; the two ApprovalStands checks that could not fail are dropped",
+    "588dad34: merge with main d126b19d: AGENTS.md learnings line takes main's -pr<number> naming; main's #2552 carries the ci.yaml testdata filter line this PR added in a1a6523d, so that line is main's now",
+    "14f6fdc9: merge with main 2b891d47 (no conflict): Dispatch migration 0149_handoffs -> 0150 (main took 0149_event_horizon), README, AGENTS.md, handoffs.go, census and fragment"
   ],
   "deviations": [
-    "claude-envoy's tests fail 3 at this tree: #2550's answers-hook tests read dist/session-hook.js, which main has not rebuilt since #2550 (main's last rebuild 88818a3b is from b260b0c7); main fails them the same way until its rebuild lands. At a5f36189, with main's rebuilt dist/ then current, 268/268 passed.",
-    "internal/daemon's full package fails here only on tests that also fail at main@origin in this pod (rootless Docker, gVisor SigIgn, a tmux credential-helper test) and on TestTheKeeperRetriesAControllerWhoseLaunchesRanOut, a flake that failed 3 of 5 runs at main@origin and 2 of 5 here.",
-    "The ci.yaml filter line is outside round 11's list: without it the required lint job's ci-filters check is red on this PR's merge ref, as it is on main.",
-    "claude-backend-sandbox.sh needs the operator's cluster; here it was checked by bash -n and by reading each function it calls (assert_handoff_record, role_handoff, smoke_commit_files, legion_handoff_in)."
+    "Main moved to ab319326 (#2542, natsauth and envoy-client stall tests) after the checks; it conflicts with nothing and takes none of this PR's numbers, so no fourth merge was made.",
+    "claude-backend-sandbox.sh needs the operator's cluster and was not run here."
   ]
 }
