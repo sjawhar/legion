@@ -235,7 +235,7 @@ func TestDispatchSandboxRefusesWhatItDoesNotBuild(t *testing.T) {
 // the two images their pods run, each set to a value a consumer would plausibly send. The group is
 // written here and nowhere else, dispatchClusterOnlyRefusals taking these rows into its own table,
 // and the rows are in the order the resolver's own group names them in (dispatchTailnetInputs).
-var dispatchSandboxTailnetGroup = []dispatchClusterOnlyRefusal{
+var dispatchSandboxTailnetGroup = []dispatchInput{
 	{"tailnetDnsName", func(a *gcp.DispatchArgs) { a.TailnetDnsName = "example-tailnet.ts.net" }},
 	{"tags", func(a *gcp.DispatchArgs) { a.Tags = []string{"tag:example-dispatch"} }},
 	{"tailnetAuthKey", func(a *gcp.DispatchArgs) { a.TailnetAuthKey = pulumi.String("tskey-auth-example-0123456789") }},
@@ -246,7 +246,7 @@ var dispatchSandboxTailnetGroup = []dispatchClusterOnlyRefusal{
 
 // dispatchSandboxSignInGroup is the sign-in group: the Google client Dispatch hands a browser to,
 // and the domain whose accounts it admits. Written here alone, as the tailnet group is.
-var dispatchSandboxSignInGroup = []dispatchClusterOnlyRefusal{
+var dispatchSandboxSignInGroup = []dispatchInput{
 	{"signInClientId", func(a *gcp.DispatchArgs) { a.SignInClientId = "example-client-id" }},
 	{"signInClientSecret", func(a *gcp.DispatchArgs) { a.SignInClientSecret = pulumi.String("example-client-secret") }},
 	{"signInDomain", func(a *gcp.DispatchArgs) { a.SignInDomain = "example.com" }},
@@ -272,7 +272,7 @@ func TestDispatchPartialTailnetGroupNamesEveryMissingInput(t *testing.T) {
 	for _, group := range []struct {
 		name   string
 		rest   func(*gcp.DispatchArgs)
-		inputs []dispatchClusterOnlyRefusal
+		inputs []dispatchInput
 	}{
 		{"tailnet", nil, dispatchSandboxTailnetGroup},
 		{"sign-in", setDispatchTailnetGroup, dispatchSandboxSignInGroup},
@@ -294,45 +294,81 @@ func TestDispatchPartialTailnetGroupNamesEveryMissingInput(t *testing.T) {
 			})
 		}
 	}
-	// The same shortfall where the input the consumer did set is one the resolver refuses the
-	// value of. valid is how many of the group's inputs the resolver checks before the broken
-	// one, set here as the group's own table sets them, so the refusal under test is the one the
-	// bad value earns rather than a check before it.
+	// The same shortfall where the input the consumer did set is one whose value the resolver
+	// refuses. Each row sets exactly the inputs it needs, nothing standing in for them, so the
+	// refusal it reaches is the one that bad value earns rather than a check before it, and it
+	// names that refusal in the resolver's own words: the row fails if the check it targets stops
+	// firing, and fails too if that refusal is given without the clause, since nothing else in
+	// such a message names the inputs the group is still short.
 	for _, row := range []struct {
-		name   string
-		rest   func(*gcp.DispatchArgs)
-		group  []dispatchClusterOnlyRefusal
-		valid  int
-		broken string
-		set    func(*gcp.DispatchArgs)
+		name  string
+		group []dispatchInput
+		setup func(*gcp.DispatchArgs)
+		sets  []string
+		want  string
 	}{
-		{"tailnet tailnetDnsName", nil, dispatchSandboxTailnetGroup, 0, "tailnetDnsName", func(a *gcp.DispatchArgs) {
-			a.TailnetDnsName = "example-tailnet.example.com"
-		}},
-		{"tailnet tags", nil, dispatchSandboxTailnetGroup, 1, "tags", func(a *gcp.DispatchArgs) {
-			a.Tags = []string{"example-dispatch"}
-		}},
-		{"tailnet tailscaleImage", nil, dispatchSandboxTailnetGroup, 2, "tailscaleImage", func(a *gcp.DispatchArgs) {
-			a.TailscaleImage = "example.invalid/tailscale:latest"
-		}},
-		{"sign-in signInDomain", setDispatchTailnetGroup, dispatchSandboxSignInGroup, 0, "signInDomain", func(a *gcp.DispatchArgs) {
-			a.SignInDomain = "Example.com"
-		}},
+		{
+			name:  "tailnet tailnetDnsName malformed",
+			group: dispatchSandboxTailnetGroup,
+			setup: func(a *gcp.DispatchArgs) { a.TailnetDnsName = "example-tailnet.example.com" },
+			sets:  []string{"tailnetDnsName"},
+			want:  `tailnetDnsName "example-tailnet.example.com" must match`,
+		},
+		{
+			name:  "tailnet tags malformed",
+			group: dispatchSandboxTailnetGroup,
+			setup: func(a *gcp.DispatchArgs) {
+				a.TailnetDnsName = "example-tailnet.ts.net"
+				a.Tags = []string{"example-dispatch"}
+			},
+			sets: []string{"tailnetDnsName", "tags"},
+			want: `tags[0] "example-dispatch" must match`,
+		},
+		{
+			name:  "tailnet tailscaleImage malformed",
+			group: dispatchSandboxTailnetGroup,
+			setup: func(a *gcp.DispatchArgs) {
+				a.TailnetDnsName = "example-tailnet.ts.net"
+				a.Tags = []string{"tag:example-dispatch"}
+				a.TailscaleImage = "example.invalid/tailscale:latest"
+			},
+			sets: []string{"tailnetDnsName", "tags", "tailscaleImage"},
+			want: `tailscaleImage "example.invalid/tailscale:latest" must be pinned by digest`,
+		},
+		{
+			name:  "tailnet frontDoorToolsImage malformed",
+			group: dispatchSandboxTailnetGroup,
+			setup: func(a *gcp.DispatchArgs) {
+				a.TailnetDnsName = "example-tailnet.ts.net"
+				a.Tags = []string{"tag:example-dispatch"}
+				a.TailscaleImage = dispatchTailscaleImage
+				a.FrontDoorToolsImage = "example.invalid/envoy:latest"
+			},
+			sets: []string{"tailnetDnsName", "tags", "tailscaleImage", "frontDoorToolsImage"},
+			want: `frontDoorToolsImage "example.invalid/envoy:latest" must be pinned by digest`,
+		},
+		{
+			// The whole tailnet group, since a sign-in input with no tailnet is refused for being
+			// sent at all, and the one sign-in input the resolver reads before the domain.
+			name:  "sign-in signInDomain malformed",
+			group: dispatchSandboxSignInGroup,
+			setup: func(a *gcp.DispatchArgs) {
+				setDispatchTailnetGroup(a)
+				a.SignInClientId = "example-client-id"
+				a.SignInDomain = "Example.com"
+			},
+			sets: []string{"signInClientId", "signInDomain"},
+			want: `signInDomain "Example.com" must be a lowercase DNS name`,
+		},
 	} {
-		t.Run(row.name+" malformed", func(t *testing.T) {
+		t.Run(row.name, func(t *testing.T) {
 			args := dispatchSandboxArgs()
-			if row.rest != nil {
-				row.rest(args)
-			}
-			for _, in := range row.group[:row.valid] {
-				in.set(args)
-			}
-			row.set(args)
+			row.setup(args)
 			_, err := gcp.ResolveDispatch(args)
-			require.Error(t, err)
-			for _, other := range row.group[row.valid:] {
-				if other.input != row.broken {
-					require.ErrorContains(t, err, other.input, "the refusal names %s, which is unset too", other.input)
+			require.ErrorContains(t, err, row.want, "the refusal the value earns")
+			for _, in := range row.group {
+				if !slices.Contains(row.sets, in.input) {
+					require.ErrorContains(t, err, in.input, "the refusal names %s, which is unset too", in.input)
 				}
 			}
 		})

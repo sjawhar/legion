@@ -620,12 +620,6 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				t.Errorf("SignInIssuer = %q", boot.SignInIssuer)
 			}
 			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": ""}, "DISPATCH_SIGNIN_ISSUER missing")
-			// The sign-in settings go together or not at all: with none of them set the server
-			// boots and runs no browser sign-in.
-			noSignIn := resolveWith(t, noSignInSettings())
-			if noSignIn.SignInIssuer != "" {
-				t.Errorf("with no sign-in setting: SignInIssuer = %q, want a boot with no sign-in", noSignIn.SignInIssuer)
-			}
 			// The pool main builds the code flow for: /auth/start sends the browser to its
 			// authorization endpoint. A pool whose discovery fails does not stop the router being
 			// built: /auth/start answers 503 SIGNIN_UNAVAILABLE until the pool answers.

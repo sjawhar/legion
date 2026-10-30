@@ -101,9 +101,11 @@ func TestDispatchClusterOnlyPassesDeletionProtectionToTheCluster(t *testing.T) {
 	}
 }
 
-// dispatchClusterOnlyRefusal is one row of the refusal table: the input's schema name, and what
-// sets that input alone on a valid cluster-only DispatchArgs.
-type dispatchClusterOnlyRefusal struct {
+// dispatchInput is one row of an input table: the input's schema name, and what sets that input,
+// and nothing else, to a value a consumer would plausibly send. A row is applied to whatever
+// DispatchArgs a test hands it, alone on a cluster-only fixture here and on top of other inputs
+// in the sandbox's own tables, so it never assumes what the rest of the arguments hold.
+type dispatchInput struct {
 	input string
 	set   func(*gcp.DispatchArgs)
 }
@@ -115,8 +117,8 @@ type dispatchClusterOnlyRefusal struct {
 // refused here without that input being written down a second time.
 // TestDispatchEveryInputIsLiveOrRefusedUnderClusterOnly holds the table complete against
 // DispatchArgs itself.
-func dispatchClusterOnlyRefusals() []dispatchClusterOnlyRefusal {
-	return slices.Concat(dispatchSandboxTailnetGroup, dispatchSandboxSignInGroup, []dispatchClusterOnlyRefusal{
+func dispatchClusterOnlyRefusals() []dispatchInput {
+	return slices.Concat(dispatchSandboxTailnetGroup, dispatchSandboxSignInGroup, []dispatchInput{
 		{"envoyImage", func(a *gcp.DispatchArgs) { a.EnvoyImage = dispatchEnvoyImage }},
 		{"cloudSqlProxyImage", func(a *gcp.DispatchArgs) { a.CloudSqlProxyImage = dispatchProxyImage }},
 		{"natsUrl", func(a *gcp.DispatchArgs) { a.NatsUrl = pulumi.String("nats://example-hub.example-tailnet.ts.net:4222") }},

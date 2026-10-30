@@ -526,7 +526,7 @@ func TestConstructDispatchSandbox(t *testing.T) {
 	inputs := dispatchConstructInputs()
 	// The nine inputs of the two groups, from the groups' own lists, so a group that gains an
 	// input leaves it out of this call too.
-	for _, group := range [][]dispatchClusterOnlyRefusal{dispatchSandboxTailnetGroup, dispatchSandboxSignInGroup} {
+	for _, group := range [][]dispatchInput{dispatchSandboxTailnetGroup, dispatchSandboxSignInGroup} {
 		for _, in := range group {
 			delete(inputs, in.input)
 		}

@@ -136,8 +136,16 @@ type DispatchArgs struct {
 	// optional in the schema while the resolver is what requires it: a generated Go SDK emits a
 	// nil check in its constructor for every required input whose type can be nil, so a
 	// cluster-only consumer, which sets none of these, could not call the component at all while
-	// they stayed required. With clusterOnly off newDispatchSettings refuses each one missing, in
-	// the wording it always used; with clusterOnly on it refuses each one set.
+	// they stayed required. With clusterOnly off, four of the thirteen — the digest-pinned images
+	// envoyImage and cloudSqlProxyImage, natsUrl and natsSeedSecret — every deployment sets, and
+	// newDispatchSettings refuses each one missing by name, in the wording it always used. The
+	// other nine are two groups, each set whole or left wholly unset: the tailnet group
+	// (dispatchTailnetInputs), which builds the front door and serves Dispatch at its tailnet
+	// name, and the sign-in group (dispatchSignInInputs), which runs people's browser sign-in.
+	// Both unset is the sandbox, which the resolver accepts. A group set in part is refused by
+	// the per-input refusal it always gave, trailing one clause naming every input of that group
+	// still unset (dispatchGroupClause). With clusterOnly on the resolver refuses each of the
+	// thirteen that is set.
 	TailnetDnsName string             `pulumi:"tailnetDnsName,optional"`
 	Tags           []string           `pulumi:"tags,optional"`
 	TailnetAuthKey pulumi.StringInput `pulumi:"tailnetAuthKey,optional" provider:"secret"`
@@ -685,6 +693,90 @@ func dispatchGroupClause(feature string, group []dispatchInput) string {
 	return fmt.Sprintf(" (the %s inputs are set together or not at all; unset: %s)", feature, strings.Join(unset, ", "))
 }
 
+// refuseDispatchTailnetGroup judges the tailnet group alone: the tailnet name Dispatch is served
+// at, the tags its front-door nodes carry, the two images those pods run, held to the digest rule
+// the app's own images are held to, the key the nodes join the tailnet with and the Service they
+// host. It runs only while that group is set, so the sandbox, which sets none of it, reaches none
+// of these checks, and every refusal trails clause, which names every tailnet input still unset
+// (dispatchGroupClause): a group set in part is refused for the first input that is wrong and
+// told the whole shortfall at once.
+func refuseDispatchTailnetGroup(args *DispatchArgs, clause string) error {
+	if !tailnetDNSNameRule.MatchString(args.TailnetDnsName) {
+		return fmt.Errorf("tailnetDnsName %q must match %s%s", args.TailnetDnsName, tailnetDNSNameRule, clause)
+	}
+	if len(args.Tags) == 0 {
+		return fmt.Errorf("tags: at least one tag is required%s", clause)
+	}
+	for i, tag := range args.Tags {
+		if !tagRule.MatchString(tag) {
+			return fmt.Errorf("tags[%d] %q must match %s%s", i, tag, tagRule, clause)
+		}
+	}
+	for _, image := range []struct{ field, ref string }{
+		{"tailscaleImage", args.TailscaleImage},
+		{"frontDoorToolsImage", args.FrontDoorToolsImage},
+	} {
+		if !imageRule.MatchString(image.ref) {
+			return fmt.Errorf("%s %q must be pinned by digest, as <name>@sha256:<64 lowercase hex digits>%s", image.field, image.ref, clause)
+		}
+	}
+	if args.TailnetAuthKey == nil {
+		return fmt.Errorf("tailnetAuthKey is required%s", clause)
+	}
+	if args.TailnetService == nil {
+		return fmt.Errorf("tailnetService is required%s", clause)
+	}
+	return nil
+}
+
+// refuseDispatchSandbox judges what the sandbox cannot make good, and requires the two inputs the
+// mode needs. It runs only while the tailnet group is wholly unset, which is what asks for the
+// mode: no front door is built, so a sign-in input would ask an OAuth provider to redirect to an
+// in-cluster http:// address, frontDoorReplicas and frontDoorPdbMinAvailable size and protect a
+// Deployment that does not exist, the pods reach a NATS hub only inside their own cluster, and
+// the app's own policy is its only ingress. Each is refused by its own name rather than accepted
+// and quietly dropped. The sign-in inputs are refused here, before the sign-in group's own
+// checks, so one sent to a sandbox is refused for being sent at all and not for the rest of its
+// group being missing.
+func refuseDispatchSandbox(args *DispatchArgs, signInGroup []dispatchInput) error {
+	for _, in := range signInGroup {
+		if in.set {
+			return fmt.Errorf("%s configures browser sign-in, which needs the tailnet inputs: without them Dispatch is reached at an in-cluster http:// address, which no OAuth provider takes as a redirect origin, so no browser could sign in; unset the sign-in inputs, or set the tailnet inputs", in.input)
+		}
+	}
+	if args.NatsInCluster == nil || !*args.NatsInCluster {
+		return errors.New("natsInCluster is required without the tailnet inputs: the pods reach a tailnet NATS hub only through the front door's SOCKS5 proxy, and no front door is built, so the hub must run in the cluster")
+	}
+	if len(args.AllowedNamespaces) == 0 {
+		return errors.New("allowedNamespaces must name at least one namespace without the tailnet inputs: with no front door its rules are the app's only ingress, and a NetworkPolicy with no rule admits nobody, so nothing could reach Dispatch at all")
+	}
+	if args.FrontDoorReplicas != nil {
+		return errors.New("frontDoorReplicas sizes a front door, which is not built without the tailnet inputs: unset it, or set the tailnet inputs")
+	}
+	if args.FrontDoorPdbMinAvailable != nil {
+		return errors.New("frontDoorPdbMinAvailable covers a front door, which is not built without the tailnet inputs: unset it, or set the tailnet inputs")
+	}
+	return nil
+}
+
+// refuseDispatchSignInGroup judges the sign-in group alone: the Google client Dispatch hands a
+// browser to, the domain whose accounts it admits and that client's secret. It runs only while
+// that group is set, so a deployment that runs no browser sign-in reaches none of these checks,
+// and every refusal trails clause, which names every sign-in input still unset, as the tailnet
+// group's refusals do.
+func refuseDispatchSignInGroup(args *DispatchArgs, clause string) error {
+	if args.SignInClientId == "" {
+		return fmt.Errorf("signInClientId is required%s", clause)
+	}
+	if !signInDomainRule.MatchString(args.SignInDomain) {
+		return fmt.Errorf("signInDomain %q must be a lowercase DNS name%s", args.SignInDomain, clause)
+	}
+	if args.SignInClientSecret == nil {
+		return fmt.Errorf("signInClientSecret is required%s", clause)
+	}
+	return nil
+}
+
 // refuseDispatchHostname refuses a hostname that is not hostnameRule's shape. Both resolvers run
 // it, so a cluster-only component holds its hostname, which names every cloud resource, to the
 // rule the full resolver holds it to, with the same refusal.
@@ -746,99 +838,46 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 		return dispatchSettings{}, err
 	}
 	// The two groups the consumer sets together or not at all, and the modes they turn on. Each
-	// group's own checks run only when that group is set, so the sandbox, which sets neither,
-	// reaches none of them; a group set in part fails them, and every refusal of one of its inputs
-	// names the rest of the shortfall, whether the input it is about is missing or carries a value
-	// the resolver refuses (dispatchGroupClause). Each clause is what its group is short, read once
-	// here: no check below sets an input, so none of them can move either clause.
+	// group is judged by one function of its own, run only while that group is set, so the
+	// sandbox, which sets neither, reaches neither; what the sandbox cannot make good is judged
+	// by a third, run only while the tailnet group is unset. A group set in part is refused for
+	// the first of its inputs that is wrong, whether that input is missing or carries a value the
+	// resolver refuses, and the refusal trails the clause naming every input of the group still
+	// unset (dispatchGroupClause), so one run names the whole shortfall. Each clause is what its
+	// group is short as the consumer sent it: no check sets an input, so none can move it.
 	tailnetGroup, signInGroup := dispatchTailnetInputs(args), dispatchSignInInputs(args)
 	frontDoor, signInOn := dispatchGroupSet(tailnetGroup), dispatchGroupSet(signInGroup)
-	tailnetClause, signInClause := dispatchGroupClause("tailnet", tailnetGroup), dispatchGroupClause("sign-in", signInGroup)
 	if frontDoor {
-		if !tailnetDNSNameRule.MatchString(args.TailnetDnsName) {
-			return dispatchSettings{}, fmt.Errorf("tailnetDnsName %q must match %s%s", args.TailnetDnsName, tailnetDNSNameRule, tailnetClause)
+		if err := refuseDispatchTailnetGroup(args, dispatchGroupClause("tailnet", tailnetGroup)); err != nil {
+			return dispatchSettings{}, err
 		}
-		if len(args.Tags) == 0 {
-			return dispatchSettings{}, fmt.Errorf("tags: at least one tag is required%s", tailnetClause)
-		}
-		for i, tag := range args.Tags {
-			if !tagRule.MatchString(tag) {
-				return dispatchSettings{}, fmt.Errorf("tags[%d] %q must match %s%s", i, tag, tagRule, tailnetClause)
-			}
+	} else if err := refuseDispatchSandbox(args, signInGroup); err != nil {
+		return dispatchSettings{}, err
+	}
+	if signInOn {
+		if err := refuseDispatchSignInGroup(args, dispatchGroupClause("sign-in", signInGroup)); err != nil {
+			return dispatchSettings{}, err
 		}
 	}
-	// The app's two images are the sandbox's as much as the tailnet's, so they belong to no group
-	// and their refusals trail no clause; the front door's two are read only where one is built,
-	// so without the tailnet group they are refused as set rather than required as unset (the
-	// sandbox block below).
-	for _, image := range []struct {
-		field, ref, clause string
-		frontDoorOnly      bool
-	}{
-		{"envoyImage", args.EnvoyImage, "", false},
-		{"tailscaleImage", args.TailscaleImage, tailnetClause, true},
-		{"cloudSqlProxyImage", args.CloudSqlProxyImage, "", false},
-		{"frontDoorToolsImage", args.FrontDoorToolsImage, tailnetClause, true},
+	// The app's two images, which the app's pod runs in either mode: they belong to no group, so
+	// every consumer sets both and neither refusal trails a clause. The front door's two are the
+	// tailnet group's, held to this same digest rule by that group's own function.
+	for _, image := range []struct{ field, ref string }{
+		{"envoyImage", args.EnvoyImage},
+		{"cloudSqlProxyImage", args.CloudSqlProxyImage},
 	} {
-		if image.frontDoorOnly && !frontDoor {
-			continue
-		}
 		if !imageRule.MatchString(image.ref) {
-			return dispatchSettings{}, fmt.Errorf("%s %q must be pinned by digest, as <name>@sha256:<64 lowercase hex digits>%s", image.field, image.ref, image.clause)
+			return dispatchSettings{}, fmt.Errorf("%s %q must be pinned by digest, as <name>@sha256:<64 lowercase hex digits>", image.field, image.ref)
 		}
 	}
 	if err := refuseDispatchRegion(args.Region); err != nil {
 		return dispatchSettings{}, err
-	}
-	// The sandbox: with no tailnet input set the component builds no front door, so every input
-	// that only a front door makes good is refused here, by its own name, rather than accepted
-	// and quietly dropped, and the in-cluster NATS hub the pods then need is required. It runs
-	// before the sign-in group's own checks, so a sign-in input sent to a sandbox is refused for
-	// being sent at all and not for the rest of its group being missing. A tailnet group set in
-	// part never reaches this: its own checks above refused it first.
-	if !frontDoor {
-		for _, in := range signInGroup {
-			if in.set {
-				return dispatchSettings{}, fmt.Errorf("%s configures browser sign-in, which needs the tailnet inputs: without them Dispatch is reached at an in-cluster http:// address, which no OAuth provider takes as a redirect origin, so no browser could sign in; unset the sign-in inputs, or set the tailnet inputs", in.input)
-			}
-		}
-		if args.NatsInCluster == nil || !*args.NatsInCluster {
-			return dispatchSettings{}, errors.New("natsInCluster is required without the tailnet inputs: the pods reach a tailnet NATS hub only through the front door's SOCKS5 proxy, and no front door is built, so the hub must run in the cluster")
-		}
-		if len(args.AllowedNamespaces) == 0 {
-			return dispatchSettings{}, errors.New("allowedNamespaces must name at least one namespace without the tailnet inputs: with no front door its rules are the app's only ingress, and a NetworkPolicy with no rule admits nobody, so nothing could reach Dispatch at all")
-		}
-		if args.FrontDoorReplicas != nil {
-			return dispatchSettings{}, errors.New("frontDoorReplicas sizes a front door, which is not built without the tailnet inputs: unset it, or set the tailnet inputs")
-		}
-		if args.FrontDoorPdbMinAvailable != nil {
-			return dispatchSettings{}, errors.New("frontDoorPdbMinAvailable covers a front door, which is not built without the tailnet inputs: unset it, or set the tailnet inputs")
-		}
-	}
-	if signInOn {
-		if args.SignInClientId == "" {
-			return dispatchSettings{}, fmt.Errorf("signInClientId is required%s", signInClause)
-		}
-		if !signInDomainRule.MatchString(args.SignInDomain) {
-			return dispatchSettings{}, fmt.Errorf("signInDomain %q must be a lowercase DNS name%s", args.SignInDomain, signInClause)
-		}
-	}
-	if frontDoor {
-		if args.TailnetAuthKey == nil {
-			return dispatchSettings{}, fmt.Errorf("tailnetAuthKey is required%s", tailnetClause)
-		}
-		if args.TailnetService == nil {
-			return dispatchSettings{}, fmt.Errorf("tailnetService is required%s", tailnetClause)
-		}
 	}
 	if args.NatsUrl == nil {
 		return dispatchSettings{}, errors.New("natsUrl is required")
 	}
 	if args.NatsSeedSecret == nil {
 		return dispatchSettings{}, errors.New("natsSeedSecret is required")
-	}
-	if signInOn && args.SignInClientSecret == nil {
-		return dispatchSettings{}, fmt.Errorf("signInClientSecret is required%s", signInClause)
 	}
 	if args.AgentSecretsAudience != "" && args.AgentSecretsUrl == "" {
 		return dispatchSettings{}, errors.New("agentSecretsUrl is required when agentSecretsAudience is set")
