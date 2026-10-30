@@ -182,10 +182,7 @@ func retirePlainRefreshTokens(ctx context.Context, people *store.PgPeopleStore, 
 // would otherwise go on naming its person for its thirty days, signed by the deployment's own
 // DISPATCH_SIGNING_KEY and confirmed by nobody. Dev sign-in has no issuer either and keeps its
 // cookie: it mints that cookie itself. That case is read from boot, which says what the
-// deployment configured, and not from signIn: signInFlow builds a flow for exactly the boot whose
-// issuer is set, so the two agree in every process main starts, and a caller that passes no flow
-// for a boot that configured sign-in is saying something about itself rather than about the
-// deployment.
+// deployment configured, and not from signIn.
 func requestIdentityFor(boot bootConfig, signingKey auth.SigningKeys, people auth.PeopleStore, sessions auth.SessionStore, signIn *oidc.CodeFlow) identity.Identity {
 	if boot.IdentityHeader != "" {
 		return identity.HeaderIdentity{Header: boot.IdentityHeader, People: people}

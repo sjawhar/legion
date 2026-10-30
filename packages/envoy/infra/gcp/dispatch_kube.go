@@ -495,12 +495,13 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 
 	// The front door, one thing and registered as one: the Secret holding the key its pods join
 	// the tailnet with, the children newDispatchFrontDoor builds and renders its pod from (its TLS
-	// Secret, its Serve config and its account), frontDoorReplicas pods hosting the Tailscale
-	// Service svc:<hostname>, the name every reader reaches Dispatch at, the Service the app and
-	// the listener dial their SOCKS5 proxy at without natsInCluster, and the policy fencing that
-	// proxy. The Deployment is recreated at one pod and rolled above it, so by default a roll never
-	// leaves the name to a single pod, and only the auth key's checksum is on its template: a
-	// renewed certificate in its TLS Secret rolls no pod. Without the tailnet inputs none of this
+	// Secret, its Serve config, its account and that account's Role and RoleBinding),
+	// frontDoorReplicas pods hosting the Tailscale Service svc:<hostname>, the name every reader
+	// reaches Dispatch at, the Service the app and the listener dial their SOCKS5 proxy at without
+	// natsInCluster, and the policy fencing that proxy. The Deployment is recreated at one pod and
+	// rolled above it, so by default a roll never leaves the name to a single pod, and only the
+	// auth key's checksum is on its template: a renewed certificate in its TLS Secret rolls no
+	// pod. Without the tailnet inputs none of this
 	// is registered: nothing here has a value to render from, the auth key and tailnetService among
 	// them, and readers reach the app inside the cluster instead. The gate is also what keeps a nil
 	// tailnetAuthKey away from refuseDispatchSeedInSecret, which would dial ToStringOutput on it

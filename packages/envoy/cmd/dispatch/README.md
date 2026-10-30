@@ -225,7 +225,7 @@ lowercase email:
 
   With no `DISPATCH_SIGNIN_*` setting at all the server boots and runs no
   browser sign-in: it issues no `dsession` cookie, and it refuses every one
-  it has issued, answering each browser request `401 NO_IDENTITY`
+  it has issued, answering each request that needs a person `401 NO_IDENTITY`
   (`requestIdentityFor`). A cookie minted while sign-in was on still
   verifies for its thirty days, since the key signing it is the deployment's
   `DISPATCH_SIGNING_KEY` and outlives the configuration, and with no issuer

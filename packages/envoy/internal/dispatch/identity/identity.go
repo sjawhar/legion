@@ -84,8 +84,8 @@ func (i HeaderIdentity) Login(r *http.Request) (string, error) {
 
 // NoBrowserIdentity is the identity of a cookie server with no sign-in configured: nobody can sign
 // in there, and a cookie minted while sign-in was on must not outlive that configuration, since
-// the key signing it is the deployment's and lives on. Every browser request is then 401
-// NO_IDENTITY and the agent-token API is all the server serves.
+// the key signing it is the deployment's and lives on. Every request that needs a person is
+// then 401 NO_IDENTITY and the agent-token API is all the server serves.
 type NoBrowserIdentity struct{}
 
 // Login always returns ErrNoIdentity: no request names a person on a server nobody signs in to.
