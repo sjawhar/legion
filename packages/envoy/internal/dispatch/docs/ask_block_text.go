@@ -58,9 +58,9 @@ func (e *ErrAskBlockUnrepresentable) Error() string {
 }
 
 // SetAskBlockText applies edit to the ask block blockID of artifactID and returns what the block
-// then parses back to, which is what its ask row must hold, except where the return value says
-// the block does not read as a decision (AskBlockText.SeveralOptionLists): its options are then
-// a reading no row may take. The caller writes the row from the return value, never from its own
+// then parses back to, which is what its ask row must hold, except where the return value reports
+// that the block does not read as a decision (AskBlockText.SeveralOptionLists, which says what a
+// row may hold then). The caller writes the row from the return value, never from its own
 // request, so normalisation cannot leave the two disagreeing, and a field the edit did not name
 // comes back as the block's own.
 //
@@ -112,10 +112,9 @@ func (s *Service) SetAskBlockText(
 			Multiple: block.multiple,
 			Urgency:  block.urgency,
 			// The write leaves more than one bullet list only where it repairs an emptied
-			// question: the lists of such a block are kept as they are, and an options edit
-			// of it is refused (askBlockChildren). Every other edit reaching here passed the
-			// content rule, which leaves the block at most one list, and writes at most one
-			// itself.
+			// question (askBlockChildren); AskBlockText.SeveralOptionLists says what a row
+			// may hold then. Every other edit reaching here passed the content rule, which
+			// leaves the block at most one list, and writes at most one itself.
 			SeveralOptionLists: len(askBlockLists(block.node)) > 1,
 		}
 		attributes := pmdoc.Attrs{}
@@ -216,12 +215,12 @@ func withoutUnchanged(current askBlock, edit AskBlockEdit) AskBlockEdit {
 // what a person wrote under an option and rebuilding the list would delete it unseen. An item no
 // sent option is paired with is dropped here; the ask-edit route weighs what that deletes before
 // it builds these children (refuseLostOptionWords), which settlement's restore of a decided
-// wording cannot, since no caller there can answer a refusal (writeDecidedWording).
+// wording cannot (writeDecidedWording).
 //
-// A question's text is caller text, so it is weighed on budget, the write's, and parsed back on
-// it (parsedBlockBody); the merged option list carries what the document already holds under an
-// option, so the caller's labels and descriptions alone are weighed on that budget and the
-// merged rendering is parsed on one of its own (editedOptionList).
+// One budget pays for every part of the body this write sends: the question's text is weighed on
+// budget, the write's, and parsed back on it (parsedBlockBody), and so are the option items the
+// caller sent, where the merged list is parsed on a budget of its own for the reason
+// editedOptionList gives.
 //
 // Every bullet list the block holds is kept, in document order, each the node the document
 // already holds, with its block id, its items and their marks. A block holding more than one
@@ -325,11 +324,10 @@ func questionBlocks(question string, budget *pmdoc.WriteBudget) ([]*pmdoc.Node, 
 // a caller wrote it: rendering escapes the text so it reads back literally, and parsing supplies
 // the attributes and block ids a hand-built node has no business inventing. The rendering is parsed
 // on budget: the caller write's, which has weighed its text already (pmdoc.WriteBudget.
-// RefusePlainText), or, where the nodes carry content the document already holds and the caller
-// never wrote, one of its own (editedOptionList). refusal is why the text cannot be held, when
-// the renderer or the parser refuses it (ErrDocSchema, pmdoc.ErrSchema); any other error - a
-// refusal of its size, or a panic (pmdoc.ErrPanic), which is pmdoc's bug rather than a reason -
-// is err.
+// RefusePlainText), or one of its own, which editedOptionList says when and why. refusal is why
+// the text cannot be held, when the renderer or the parser refuses it (ErrDocSchema,
+// pmdoc.ErrSchema); any other error - a refusal of its size, or a panic (pmdoc.ErrPanic), which
+// is pmdoc's bug rather than a reason - is err.
 func parsedBlockBody(nodes []*pmdoc.Node, budget *pmdoc.WriteBudget) (parsed []*pmdoc.Node, refusal string, err error) {
 	markdown, err := renderTree(&pmdoc.Node{Type: "doc", Children: nodes})
 	if err != nil && !errors.Is(err, ErrDocSchema) {
@@ -614,8 +612,12 @@ func normalizeAskOptions(options []model.AskOption) []model.AskOption {
 // quotes it and names the two places the question can be written without losing it: an upload of
 // the document as a new version, which carries a block whose question it writes and is the path
 // an agent has, and the document editor, where a person writes the question beside the
-// paragraph. The block and the paragraph are quoted as data (quotedAskChild), never written into
-// the reason raw.
+// paragraph. The upload is named with the issue the document belongs to, since the command does
+// not address the document without it, and the refusal says this is the one case a document edit
+// cannot reach: an agent reading it has been told to change a document with a document edit
+// rather than to upload its name again (the dispatch_artifact tool's own description), and only
+// the reason above lets it do otherwise here. The block and the paragraph are quoted as data
+// (quotedAskChild), never written into the reason raw.
 func refuseEmptyQuestionEdit(block askBlock, edit AskBlockEdit) error {
 	for _, child := range block.node.Children {
 		if child.Type == "bullet_list" || writesNothingButItsText(child) {
@@ -627,9 +629,10 @@ func refuseEmptyQuestionEdit(block askBlock, edit AskBlockEdit) error {
 		}
 		return &ErrAskBlockUnrepresentable{Field: "block", Reason: fmt.Sprintf(
 			"ask block %q has an empty question, and writing a question into it would delete what one of its "+
-				"paragraphs holds, which is no text: %s; upload the document again as a new version with the "+
-				"question written beside that paragraph (dispatch artifact --name <the document> "+
-				"--content-file -), which is accepted for such a block, or write the question beside it in "+
+				"paragraphs holds, which is no text: %s; no document edit writes a paragraph into a "+
+				"decision, so this is the one case a document edit cannot reach - upload the document again "+
+				"as a new version with the question written beside that paragraph (dispatch artifact "+
+				"--issue <KEY> --name <the document> --content-file -), or write the question beside it in "+
 				"the document editor; either keeps what the paragraph holds",
 			block.id, quoted)}
 	}
@@ -646,7 +649,7 @@ func refuseEmptyQuestionEdit(block askBlock, edit AskBlockEdit) error {
 // deleting or replacing the block can restore every word of it and no block id is written into a
 // reason raw. A block the document has yet to stamp an id into is named by neither.
 func quotedAskChild(child *pmdoc.Node) (string, error) {
-	markdown, err := pmdoc.Render(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{child}})
+	markdown, err := renderBlock(child)
 	if err != nil {
 		return "", fmt.Errorf("render a block of a broken ask: %w", err)
 	}
@@ -655,6 +658,14 @@ func quotedAskChild(child *pmdoc.Node) (string, error) {
 		name = fmt.Sprintf("block %q", id)
 	}
 	return fmt.Sprintf("%s (%s) reads %q", name, child.Type, strings.TrimSpace(markdown)), nil
+}
+
+// renderBlock is the markdown of one block, rendered as the whole of a document holding it alone:
+// the renderer takes a document, and a caller quoting a block in a refusal or weighing two blocks
+// by what they write (rendersTheSame) has one block. A tree the renderer refuses is its caller's
+// to read, as pmdoc.Render leaves it.
+func renderBlock(block *pmdoc.Node) (string, error) {
+	return pmdoc.Render(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{block}})
 }
 
 // refuseAskContentEdit refuses every edit of block, an ask block breaking its content rule
@@ -667,17 +678,15 @@ func quotedAskChild(child *pmdoc.Node) (string, error) {
 // follows. A decision reaching here asks something: one whose question a person emptied is
 // weighed on that question first, and an edit carrying one writes it (refuseEmptyQuestionEdit).
 // Where a decision nested in this one holds no paragraph with text, no document edit repairs
-// that one: a delete writes no words, and an insert anchored on one of its blocks lands beside
-// the decision rather than in it (pmdoc.BlockBoundary reads the document-level block holding
-// the anchor), so the refusal says what it needs is words written, and names the editor. Until
-// the document settles its block ids (a child with no id, or an id repeated in the tree, which
-// ApplyOps would restamp first) the refusal names no delete and asks for a retry.
-// Where no one edit of deletes leaves every decision it changes readable, the refusal names no
-// delete and no decision to edit: it says the decision is repaired where a person writes it, in
-// the document editor. It sends no caller to an ask
-// edit of another decision, which is not the caller's to make: a decision that does not parse is
-// refused before its content rule is read (askBlockOf), and a decided one, or one another person
-// opened, is refused by the route above.
+// that one either, for the reason refuseEmptyQuestionEdit holds, so the refusal says what it
+// needs is words written, and names the editor. Until the document settles its block ids (a
+// child with no id, or an id repeated in the tree, which ApplyOps would restamp first) the
+// refusal names no delete and asks for a retry. Where no one edit of deletes leaves every
+// decision it changes readable, the refusal names no delete and no decision to edit: it says the
+// decision is repaired where a person writes it, in the document editor. It sends no caller to
+// an ask edit of another decision, which is not the caller's to make: a decision that does not
+// parse is refused before its content rule is read (askBlockOf), and a decided one, or one
+// another person opened, is refused by the route above.
 //
 // The refusal quotes every block of the decision in full, nested content and all, so a caller
 // deleting one can restore every word, and gives each block id as quoted data, never inside a

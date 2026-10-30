@@ -433,15 +433,14 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ask.Question = stored.Question
-		// A write that repairs a question a person emptied can leave a block holding more than
-		// one bullet list, which no parse reads as a decision: the options it reports are then
-		// every list's joined, the reading the row must not take, and settlement leaves such a
-		// row as it is, so the row would offer them until someone repairs the block. The row
-		// keeps the options it held, whichever fields the request named: a request that sends
-		// the question and options together sends those joined options, since a block holding
-		// two lists is refused any others (docs.SetAskBlockText), so taking the request's own
-		// would write that same reading into the row. The next edit of a block that reads as
-		// a decision writes the options it sends.
+		// The row keeps the options it held where the write left a block no parse reads as a
+		// decision, whose joined options a row must not take for the reason
+		// docs.AskBlockText.SeveralOptionLists holds. It keeps them whichever fields the
+		// request named: a request that sends the question and options together sends those
+		// joined options, since a block holding two lists is refused any others
+		// (docs.SetAskBlockText), so taking the request's own would write that same reading
+		// into the row. The next edit of a block that reads as a decision writes the options
+		// it sends.
 		if stored.SeveralOptionLists {
 			ask.Options = previous.Options
 		} else {

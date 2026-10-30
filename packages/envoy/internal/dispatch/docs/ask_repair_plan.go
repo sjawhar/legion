@@ -56,11 +56,10 @@ type askRepairPlan struct {
 // decision's block is deleted by its id like any other. A nested decision the rule leaves
 // nothing of is deleted whole (askRepairKeepsNothingOfItsOwn).
 //
-// No document edit writes a decision a question: a delete cannot, and an insert anchored on a
-// block of a decision lands beside that decision, not in it (pmdoc.BlockBoundary reads the
-// document-level block holding its anchor). So a decision holding no paragraph with text keeps
-// nothing its rule leaves room for, the re-read below finds what the deletes leave unreadable,
-// and the refusal says the decision is repaired where a person writes it.
+// No document edit writes a decision a question, for the reason refuseEmptyQuestionEdit holds. So
+// a decision holding no paragraph with text keeps nothing its rule leaves room for, the re-read
+// below finds what the deletes leave unreadable, and the refusal says the decision is repaired
+// where a person writes it.
 //
 // A document edit is refused where it leaves a decision it wrote or changed unreadable
 // (validateEditedAskBlocks), and a delete inside a decision changes every decision holding it, so

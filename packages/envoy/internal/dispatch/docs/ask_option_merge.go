@@ -16,6 +16,16 @@ import (
 // spread included, and the identity the markdown cannot carry is put back afterwards
 // (restoreOptionItems). list is the block's own list, nil where it holds none and every option
 // is new.
+//
+// The items the caller sent are charged to budget, the write's, and the merged list is parsed on
+// one of its own, so the list is parsed twice: a parse is the only way to count what an item
+// makes, and the two parses weigh different content. What the caller sends is their text - a new
+// item, and the line a rewrite replaces an item's own with (callerSentItems) - so one write may
+// make no more of it than any other write may (pmdoc.MaxDocumentElements), counting the question
+// it sends beside them (askBlockChildren). The merged list carries what the document already
+// holds under an option as well, which is not the caller's text: charging the write's budget for
+// it would refuse an edit of one option's line for the weight of another option's sub-list, which
+// the caller never sent and cannot make smaller.
 func editedOptionList(list *pmdoc.Node, options []model.AskOption, budget *pmdoc.WriteBudget) (*pmdoc.Node, error) {
 	merged := mergeAskOptions(list, options)
 	if len(merged) == 0 {
@@ -28,6 +38,13 @@ func editedOptionList(list *pmdoc.Node, options []model.AskOption, budget *pmdoc
 	if err := budget.RefusePlainText(texts...); err != nil {
 		return nil, err
 	}
+	if sent := callerSentItems(merged); len(sent.Children) > 0 {
+		if _, refusal, err := parsedBlockBody([]*pmdoc.Node{sent}, budget); err != nil {
+			return nil, err
+		} else if refusal != "" {
+			return nil, &ErrAskBlockUnrepresentable{Field: "options", Reason: refusal}
+		}
+	}
 	written := &pmdoc.Node{Type: "bullet_list", Children: make([]*pmdoc.Node, 0, len(merged))}
 	if list != nil {
 		written.Attrs = list.Attrs
@@ -35,12 +52,6 @@ func editedOptionList(list *pmdoc.Node, options []model.AskOption, budget *pmdoc
 	for _, option := range merged {
 		written.Children = append(written.Children, option.written)
 	}
-	// The merged list carries what the document already holds under an option as well as the
-	// lines the caller sent, and that content is not the caller's text: charging the write's
-	// budget for it would refuse an edit of one option's line for the weight of another option's
-	// sub-list, which the caller never sent and cannot make smaller. So the caller's label and
-	// description text is weighed on their budget above (RefusePlainText) and the merged
-	// rendering is parsed on a budget of its own.
 	rebuilt, refusal, err := parsedBlockBody([]*pmdoc.Node{written}, pmdoc.NewWriteBudget())
 	if err != nil {
 		return nil, err
@@ -55,6 +66,24 @@ func editedOptionList(list *pmdoc.Node, options []model.AskOption, budget *pmdoc
 		}
 	}
 	return restoreOptionItems(rebuilt[0], list, merged)
+}
+
+// callerSentItems is the list of what an options edit's caller sent of their own, out of the
+// merged items (mergeAskOptions): an item no option held, whole, and for a rewritten line that
+// line alone, without the nodes under it the document already held. Its parse is what charges the
+// write's budget for the caller's items (editedOptionList), so it carries no content the document
+// already holds; an item the merge keeps whole carries nothing the caller sent and is left out.
+func callerSentItems(merged []mergedOption) *pmdoc.Node {
+	sent := &pmdoc.Node{Type: "bullet_list", Children: make([]*pmdoc.Node, 0, len(merged))}
+	for _, option := range merged {
+		switch {
+		case option.held == nil:
+			sent.Children = append(sent.Children, option.written)
+		case !option.whole:
+			sent.Children = append(sent.Children, withChildren(option.written, option.written.Children[:1]))
+		}
+	}
+	return sent
 }
 
 // mergedOption is one item of the list an options edit writes: the node the merged markdown
@@ -75,7 +104,7 @@ type mergedOption struct {
 // option is paired with is dropped, which is what a removal, a rename and an edit sending no
 // option at all come to. What that drop and that rewrite would delete is refused before the
 // write (refuseLostOptionWords), except for settlement's restore of a decided ask's recorded
-// wording, the one caller no refusal can reach (writeDecidedWording).
+// wording, which writeDecidedWording says why no refusal reaches.
 func mergeAskOptions(list *pmdoc.Node, options []model.AskOption) []mergedOption {
 	var items []*pmdoc.Node
 	if list != nil {
@@ -159,7 +188,7 @@ func heldAskOptions(items []*pmdoc.Node) []model.AskOption {
 // entry holds is a drop, so what the refusal weighs and what the write does cannot drift. A
 // rewrite is weighed before a drop, and the whole edit is refused on the first of either. It is
 // weighed outside the merge because settlement's restore of a decided wording goes through the
-// merge with no caller to answer a refusal (writeDecidedWording).
+// merge, which writeDecidedWording says why no refusal reaches.
 func refuseLostOptionWords(current askBlock, edit AskBlockEdit) error {
 	edit = withoutUnchanged(current, edit)
 	if edit.Options == nil {
@@ -240,9 +269,7 @@ func restoreOptionItems(parsed, list *pmdoc.Node, merged []mergedOption) (*pmdoc
 // markdown of a document holding one bullet list holding it alone, so every word of it can be
 // restored, and the item is quoted as data (strconv.Quote), never written into the reason raw.
 func refuseDroppedOptionItem(list, item *pmdoc.Node, option model.AskOption) error {
-	markdown, err := pmdoc.Render(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{
-		{Type: "bullet_list", Attrs: list.Attrs, Children: []*pmdoc.Node{item}},
-	}})
+	markdown, err := renderBlock(&pmdoc.Node{Type: "bullet_list", Attrs: list.Attrs, Children: []*pmdoc.Node{item}})
 	if err != nil {
 		return fmt.Errorf("render the list item of a dropped option: %w", err)
 	}
@@ -297,11 +324,11 @@ func holdsOnlyItsOptionLine(item *pmdoc.Node) bool {
 // nothing, which no node it accepts renders to, so a caller weighing what a write would delete
 // keeps what it cannot read.
 func rendersTheSame(left, right *pmdoc.Node) bool {
-	leftMarkdown, err := pmdoc.Render(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{left}})
+	leftMarkdown, err := renderBlock(left)
 	if err != nil {
 		return false
 	}
-	rightMarkdown, err := pmdoc.Render(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{right}})
+	rightMarkdown, err := renderBlock(right)
 	if err != nil {
 		return false
 	}
@@ -315,7 +342,7 @@ func rendersTheSame(left, right *pmdoc.Node) bool {
 // deletion the drop refusal exists to prevent (refuseDroppedOptionItem). The line is quoted
 // whole, as data (strconv.Quote), never written into the reason raw.
 func refuseRewrittenOptionLine(line *pmdoc.Node, option model.AskOption) error {
-	markdown, err := pmdoc.Render(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{line}})
+	markdown, err := renderBlock(line)
 	if err != nil {
 		return fmt.Errorf("render the line of a rewritten option: %w", err)
 	}
