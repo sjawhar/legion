@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-556",
-  "completed": "2026-10-30T00:57:00Z",
-  "round": "review round 2 (changes requested at 7d15af8f), narrowed by the INFRA-63 architect to the reviewer's five items plus every former Fast-follow item (the 12 the reviewer listed at 17:03Z); one forward merge of main on the architect's word",
+  "completed": "2026-10-30T02:09:05Z",
+  "round": "tester round 4 failed on former Fast-follow item 12 (the awareness bound counted tombstones); narrowed by the INFRA-63 architect to that fix and two PR-body notes; no merge of main",
   "proof": [
+    {
+      "criterion": "Spec item 1 with the awareness bound: a reader joining after one tab's flood of invented awareness clients is seen on the other process within a second, and a flood still relays no more than the bound",
+      "surface": "two real envoy-dispatch binaries on one Postgres (the tester's red test), and the docs package's relay tests",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=2 -run TestAReaderJoiningAfterAnAwarenessFloodIsSeenOnTheOtherProcess -v ./cmd/dispatch && go test -count=1 -run Awareness ./internal/dispatch/docs/",
+      "observed": "the tester's test passes 2 of 2 unmodified (18.39 s, 14.41 s); TestAnAwarenessFrameOverTheClientBoundRelaysNoMoreThanTheBound (2,048-client frame relays 256, 1,792 refused) and the new TestAwarenessClientsThatLeaveFreeTheRelaysBoundAtOnce pass; the relay bounds live clients, ygo's tombstone-counting client bound is no longer set, MaxAwarenessBytesPerRoom (which releases bytes on tombstone) stays",
+      "headSha": "b0a2d131affb",
+      "negativeControl": "at d7ceabb4 the tester's test fails 2 of 2: 'alice ... was seen at once by carol on A but not by bob on B within 1s'"
+    },
     {
       "criterion": "Items 1-6 and D10 across two processes, at the merged head",
       "surface": "two real envoy-dispatch binaries on one Postgres 17 (go test -tags multiprocess ./cmd/dispatch)",
