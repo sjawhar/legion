@@ -11,7 +11,6 @@ date: 2026-10-30
 status: active
 module: packages/envoy/infra
 related_issues:
-  - "INFRA-550"
   - "sjawhar/legion#2529"
 ---
 
@@ -51,7 +50,7 @@ CLI, which is how a consuming program takes it. Two things to know before you pl
   `natsInCluster` and `nats://127.0.0.1:4222` fails with `needs a "gcp" provider in its providers
   option` and never reaches the URL refusal, which is proven by
   `TestDispatchRefusesABadNatsURLOnceItResolves/a loopback URL with natsInCluster` instead.
-- The plan of INFRA-550 named that second control for the plugin surface; the implementer
+- The plan of this change named that second control for the plugin surface; the implementer
   discovered it was unreachable there and moved it, and the tester re-ran both independently.
 - `pulumi package get-schema` of the built plugin listed `natsInCluster`, `natsReplicas` and
   `streamMaxBytes` with their types and `plain: true`, none in `requiredInputs`, and no
