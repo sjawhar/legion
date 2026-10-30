@@ -2,49 +2,50 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-177",
-  "completed": "2026-10-30T06:41:44Z",
+  "completed": "2026-10-30T09:32:05Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2354",
   "proof": [
     {
-      "criterion": "The Conversation shows a handoff written while it is open, without a reload (tester's T3), on main's one-socket live feed",
-      "surface": "Dispatch's browser suite: the real Go server on Postgres, Chromium through Playwright",
-      "command": "bash /legion/harness/dispatch-e2e.sh 'postgres://postgres@127.0.0.1:5433/d_e2e5?sslmode=disable' e2e/handoffs.e2e.ts",
-      "observed": "3 passed (14.0s): the Conversation lists each version and expands its fields and proof; a handoff written while the tab is open arrives with the document's own mark still on it; the Activity list has one line per version. Before the HandoffTurn fix the page failed with 'pins is not defined' (main removed TurnPin's disabled prop).",
-      "headSha": "b78387087c63",
-      "negativeControl": "with event-refresh.ts's [\"handoffs\", key] target commented out: the live-update test fails (toHaveCount: unexpected value \"2\"), the other two pass"
+      "criterion": "Findings 5 and 7: one routeBody gives the handoff write its limit and its 413 CAP_EXCEEDED in the drain, the keyed layer and the handler; a spilled keyed write replays, a held-key repeat past 1 MiB gets KEY_IN_FLIGHT, a different body under the key gets KEY_REUSED with one version kept",
+      "surface": "Dispatch API handler on Postgres (the full package)",
+      "command": "cd packages/envoy && go test -count=1 -p 1 -timeout 50m ./internal/dispatch/api/",
+      "observed": "ok (1465 s); TestARetriedHandoffWriteReplaysItsAnswerAndRecordsOneVersion, TestAKeyedHandoffWritePastAMegabyteSpillsAndReplays and TestAnEarlyHandoffAnswerDrainsUpToTheHandoffWritesLimit pass",
+      "headSha": "4d3b83467cef",
+      "negativeControl": "with routeBody's handoff-write case removed, all three new tests fail with 413 REQUEST_TOO_LARGE at 1048576 bytes"
     },
     {
-      "criterion": "A retried handoff write with the same Idempotency-Key returns the first answer and records one version (main's #2449 keyed writes)",
-      "surface": "Dispatch API handler on Postgres",
-      "command": "cd packages/envoy && go test -count=1 -p 1 -timeout 50m ./internal/dispatch/api/ (ICU en-US template for the rank collation test)",
-      "observed": "package ok; TestARetriedHandoffWriteReplaysItsAnswerAndRecordsOneVersion passes, and the client census test lists writeHandoff as a keyed write",
-      "headSha": "b78387087c63",
-      "negativeControl": "the envoy-client census failed to typecheck without the four handoff methods in its table (missing handoff, writeHandoff, listHandoffs, latestHandoff)"
+      "criterion": "Handoff records end to end after the merge with main a21100c5 (Dispatch migration 0148_handoffs, contract 43)",
+      "surface": "scripts/e2e/handoff-records.sh: the Go daemon and a real Dispatch server on Postgres and NATS",
+      "command": "LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/r_hr bash scripts/e2e/handoff-records.sh",
+      "observed": "ok proof (29s); handoff records e2e: PASS in 64s",
+      "headSha": "4d3b83467cef",
+      "negativeControl": "the live test's own refusal: a record another session wrote is refused 403 HANDOFF_SESSION_MISMATCH and the phase does not move"
     },
     {
-      "criterion": "Handoff records end to end: a worker writes its record, the daemon reads it back and refuses one another session wrote",
-      "surface": "scripts/e2e/handoff-records.sh: the Go daemon and Dispatch on Postgres and NATS",
-      "command": "LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/d_hr bash scripts/e2e/handoff-records.sh",
-      "observed": "--- PASS: TestHandoffRecordsLive (30.41s); handoff records e2e: PASS in 70s",
-      "headSha": "4302877cf7b9",
-      "negativeControl": "the live test's own refusal case: a record written by another session is refused by the daemon"
+      "criterion": "The Conversation shows handoff records, live, on the merged tree",
+      "surface": "Dispatch browser suite: the real Go server on Postgres, Chromium through Playwright",
+      "command": "bash /legion/harness/dispatch-e2e.sh 'postgres://postgres@127.0.0.1:5433/r_e2e?sslmode=disable' e2e/handoffs.e2e.ts",
+      "observed": "3 passed (14.8s)",
+      "headSha": "4d3b83467cef",
+      "negativeControl": "at b7838708, with event-refresh.ts's [\"handoffs\", key] target removed, the live-update test failed (unexpected value \"2\")"
     },
     {
-      "criterion": "A push for a head the branch left decides the checks again (review item 14)",
+      "criterion": "Finding 10: the cleaned-up push re-check test still pins every re-check clause",
       "surface": "daemon workflow engine on Postgres",
       "command": "cd packages/daemon && go test -count=1 -p 1 -timeout 30m ./internal/workflow/",
-      "observed": "ok (416.7s) at the merged tree",
-      "headSha": "4302877cf7b9",
-      "negativeControl": "at 0b0df428, removing each of the four re-check clauses in push() one at a time fails TestAPushForAHeadTheBranchLeftDecidesTheChecks"
+      "observed": "ok (409 s)",
+      "headSha": "4d3b83467cef",
+      "negativeControl": "TestAPushForAHeadTheBranchLeftDecidesTheChecks fails with each of the four re-check clauses in push() removed, one at a time"
     }
   ],
   "filesChanged": [
-    "0b0df428: the reviewer's 18 items and the tester's 3 (handoffimport, ghbranch, classify, api/ready.go, workflow test, runbook, rig, daemon-pane, e2e T3) and no Dispatch key in the change",
-    "3338c1a6 and 4302877c: forward merges with main cd5ca7c3 and 3c2691a7; contract 42 -> 43, Dispatch migration 0137 -> 0145; handoff.recorded moved to event-feed.ts; the handoff write is keyed (request_keys.go, body_drain.go)",
-    "b7838708: HandoffTurn without TurnPin's removed disabled prop; client census lists the handoff methods; scorer row carries main's flagged column; ci.yaml docs filter and docs-pages.yaml paths cover handoffimport"
+    "200d0b98: merge with main a21100c5 (tool counts 27, registered routes 150; Dispatch migration 0145_handoffs renumbered to 0148 in both SQL files, handoffs.go, envoy AGENTS.md, cmd/dispatch/README.md and the envoy fragment)",
+    "96f3c40b: routeBody(method, pattern) (limit, tooLarge) in request_keys.go replaces routeBodyLimit and bodyTooLarge; decodeJSONWithin takes tooLarge and returns main's errJSONTooLarge shape; createHandoff's 413 remap deleted; README and comments name handoffRequestLimit and CAP_EXCEEDED; three new handoff limit tests; pressedAs replaces keyedHandoffPost",
+    "5335ecfe: claude-backend-sandbox.sh asserts handoff records and no committed .legion/ path, with its README section; githubrest.NotFound replaces ghbranch.NotFound; holdPortAgain retries only EADDRINUSE; checks_red_test and ghbranch_test cleanup; worker-image.yaml and lib/workflow.sh text",
+    "4d3b8346: pi-legion fragment uses the runbook's stop rule"
   ],
   "deviations": [
-    "One INFRA key remains in added lines: a supersedes path in the pr2354 learning names a file main holds (…-INFRA-149.md); the path must stay exact.",
-    "claude-envoy check-dist reports dist/ and legion/ stale by design: they stay as main has them and the rebuild workflow regenerates them after the merge."
+    "claude-envoy's tests fail 17 at this tree only because its committed dist/ is a21100c5's, before main's rebuild dd552dfd; with main's rebuilt dist/ and legion/ in place they pass 268/268, and CI's merge ref carries main's rebuild.",
+    "claude-backend-sandbox.sh needs the operator's cluster; here it was checked by bash -n and by reading each function it calls (assert_handoff_record, role_handoff, smoke_commit_files, legion_handoff_in)."
   ]
 }
