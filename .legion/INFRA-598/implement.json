@@ -2,8 +2,32 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-598",
-  "completed": "2026-10-30T01:42:22Z",
+  "completed": "2026-10-30T10:39:25Z",
   "proof": [
+    {
+      "criterion": "Review round 1 findings 3-5: the sampler stops after an abandoned run; a kept run is held for a bound; a command from another PID namespace is refused",
+      "surface": "GKE namespace loadtest, from this Legion worker pod, Dispatch 9b92ac14",
+      "command": "run lt-20261030t090750-c99b at 0ad03b2b: up, seed, step 1x; `unshare -Urpf --mount-proc bash cluster.sh step ...` and `status`; `step killed` then kill -9 after 90 s; lock heartbeat read twice; `cluster.sh hold --for 30m`; log dispatch://INFRA-598/artifact/cluster-load-test-review1-round3-log-txt; comment https://github.com/sjawhar/legion/pull/2462#issuecomment-6520684501",
+      "observed": "foreign-namespace step exit 1 'only the role that ran up can drive run ...', status exit 0 naming pid:[17] vs pid:[38]; after the SIGKILL the heartbeat stayed at 09:22:53Z, heartbeat.log 'no command of run ... is alive and no hold holds it; stopping', sampler.log 'no heartbeat ... alive for 120 s; stopping every role loop'; hold renewed the lock (09:32:14Z) with no command alive and status showed 'hold: until 2026-10-30T09:59:13Z'",
+      "headSha": "3f904713b327438a91c5ade324ac76fbb4bdd730",
+      "negativeControl": "before 2f6dc193 the sampler ran for ever after a killed run (no stop rule; reviewer's finding), and cluster.test.sh cases (r), (s), (u) fail against 0fc92498's cluster.sh"
+    },
+    {
+      "criterion": "Architect's item: the Postgres volume is sized from measured need, a step fails early on low free space, and the peak is reported",
+      "surface": "GKE namespace loadtest, Dispatch 9b92ac14",
+      "command": "df of /var/lib/postgresql/copy every 30 s through run lt-20261030t090750-c99b (20Gi, seed plus a 20-minute r16-typing replay with eb0fe0be's -protect typing); then run at 3f904713: up --pg-volume 100Gi, seed, step 1x, LOADTEST_PG_DISK_MIN_FREE_PCT=99 step low, down; log dispatch://INFRA-598/artifact/cluster-load-test-review1-round3b-log-txt",
+      "observed": "on 20Gi: 6.2 GiB after seed and templates, peak 9.40 GiB at the end of the typed replay, growing about 0.15 GiB a minute while typing ran, Postgres restarts 0; at 3f904713 the claim reads 100Gi/100Gi, copy-meta postgres.volume '100Gi', step 1x pg-disk.json used_peak 1,375,461,376 of 105,089,261,568 with 8 samples",
+      "headSha": "3f904713b327438a91c5ade324ac76fbb4bdd730",
+      "negativeControl": "step low under a 99% threshold exits 1 before any load: 'step low failed: pg_disk of postgres: ... 96.6 GiB free (98% of it), under the 99% (96.9 GiB) a step needs; up --pg-volume SIZE gives a bigger volume'; INFRA-707's run on the 20Gi claim crashed Postgres with 'No space left on device'"
+    },
+    {
+      "criterion": "Review round 1 findings 1, 2, 7, 8, 9: knees past a failed step, copy-back failure marked, seed counts, kind from the run, random_hex shared",
+      "surface": "loadgen curves (Go tests on fixtures) and cluster.sh under cluster.test.sh's fakes",
+      "command": "cd packages/envoy && go test -p 2 -parallel 4 -count=1 ./loadtest/ && timeout 1500 bash loadtest/cluster/cluster.test.sh",
+      "observed": "go test ok; cluster.test.sh 46 PASS, 0 FAIL, including TestCurvesWalkTheKneesPastAFailedRow (knee at 7x, bracket (3, 7), 5x listed not judged), TestCurvesTakeAStepsKindFromTheRun, case (q) copy_back, and the seed counts assertion",
+      "headSha": "3f904713b327438a91c5ade324ac76fbb4bdd730",
+      "negativeControl": "each new test fails on the code before its fix: KNEES.md 'Knee at 5x (step 5x (failed: sampler_gap))'; '1x-other: kind grid, want db4'; 'holds no step-failed.json reason of kind copy_back'; \"seed's counts query does not count artifact_versions\""
+    },
     {
       "criterion": "Tester round 1 failure 2 (plan D5): an abandoned run's lock goes stale, so up names the down command",
       "surface": "GKE namespace loadtest, from this Legion worker pod",
@@ -66,7 +90,9 @@
     "packages/envoy/loadtest/: seedfinish.go, cgroup*.go, curves.go, codepaths.go, plandocs.go, pgclock.go, copymeta.go, live.go, sse.go, run.go, sample.go, tables.go and their tests, README.md, stack.sh, run-step.sh",
     ".github/workflows/ci.yaml (the cluster.test.sh step)",
     "packages/envoy/AGENTS.md, packages/envoy/go.mod, packages/envoy/go.sum",
-    "packages/envoy/.changes/unreleased/INFRA-598-*.yaml"
+    "packages/envoy/.changes/unreleased/INFRA-598-*.yaml",
+    "packages/envoy/loadtest/copymeta.go, curves.go, tables.go, cgrouptables.go (round: review 1)",
+    "packages/envoy/loadtest/cluster/manifests/postgres.yaml (the volume placeholder)"
   ],
   "trickyParts": [
     "#2449 removed Dispatch's SSE endpoint and loadgen's SSE client; the commit this issue measures serves only SSE, so loadgen probes /ws/live once per step and falls back to /api/v1/events on a 404 handshake.",
@@ -76,9 +102,9 @@
     "Main's reference seed (#2469) runs in both stack.sh and cluster.sh seed; its request_keys delete moved into loadgen seed-finish, which both share."
   ],
   "deviations": [
-    "The root's full curves and hour are rerun on the reference seed in a later round, after INFRA-707's two typed passes (architect's decision 01:42Z); results v5 will carry both seeds.",
-    "cluster.test.sh's cases (o) and (p), as the tester wrote them, add shellcheck notes (SC2030/SC2031, one SC1090); they are left unmodified, as red tests are. CI runs no shellcheck on these files; cluster.sh itself is clean.",
-    "Typing steps with -protect still wait for INFRA-707's branch image of eb0fe0be (release-envoy-listener run 40986096153)."
+    "The reference-seed rerun of the full curves and the hour (results v5) runs after INFRA-707's passes, as the architect decided; this round's 100Gi default rests on a 20-minute typed replay's 9.4 GiB peak, and each step of that rerun records its pg-disk.json peak.",
+    "A typed replay still loses edits where typing changed the logged text (68 named and 44 unnamed edits in the 20-minute r16-typing); the README says typed replays are not compared with the outage.",
+    "The tester's cases (o) and (p) keep their shellcheck notes; CI runs no shellcheck on cluster.test.sh."
   ],
   "openQuestions": []
 }
