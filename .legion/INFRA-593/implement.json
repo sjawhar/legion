@@ -2,34 +2,42 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-593",
-  "completed": "2026-10-30T04:40:00Z",
+  "completed": "2026-10-30T23:35:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2444",
-  "round": 9,
+  "round": 10,
   "answersReview": "Round 6 at 2dfde180 (REQUEST_CHANGES, review head 370bce4b): internal/dispatch/docs timed out under -race at 30 min with the branch merged into main. Per the architect: merge main forward (now carrying #2516's envoy-go-race-docs job), quote the package's -race time against main, and cut this PR's added test cost.",
   "proof": [
     {
-      "criterion": "The docs tests this PR adds no longer push internal/dispatch/docs past its race budget: the package under -race is no slower than main's",
-      "surface": "go test -race of internal/dispatch/docs on the worker pod, Postgres 16.2, at the merged head and on main",
-      "command": "GOMAXPROCS=4 CGO_ENABLED=1 go test -race -p 2 -parallel 4 -count=1 -timeout 80m -v ./internal/dispatch/docs/ (race-run.sh, memory.usage_in_bytes sampled every 2 s); main from git archive 8109a38d packages/envoy with GOWORK=off",
-      "observed": "merged head 0d9d9496: ok 3157.5 s, pod peak 15.7 GB; main 8109a38d: 3292.4 s, peak 15.9 GB (its only FAILs are 4 fixture reads of packages/contracts the export left out, 0.00 s each). The four shrunk tests: 88.48->24.80 s, 50.17->0.70 s, 27.85->0.41 s, 31.67->0.41 s (dispatch://INFRA-593/artifact/infra-593-docs-race-times-md).",
-      "headSha": "b24baf7d17a8e2eba7b6222d2671cd6d876187ca",
-      "negativeControl": "Before 85b8b216, the branch merged with main 1489a445 took 3361.2 s on the same pod, and CI timed out at 1801.0 s and 1800.9 s (run 40927706871, job 123716984268)."
+      "criterion": "The tester's red test passes unmodified on the new ygo pin",
+      "surface": "go test of internal/dispatch/docs on Postgres 16.2, at the head",
+      "command": "go test ./internal/dispatch/docs -run '^TestARefusedPeerUpdateLeavesTheRoomAsItsOtherPeersHoldIt$' -count=1; again with -race -count=10",
+      "observed": "PASS (0.89 s); -race -count=10 ok. a22f0f29's test file is unchanged on the branch.",
+      "headSha": "221f3ce3e2ec205fe6a777e2447d195e190a2488",
+      "negativeControl": "At b24baf7d (sami.7) the tester saw it fail: the room read 'after / hello' while the other peer read 'after / hello world'."
     },
     {
-      "criterion": "Acceptance 1, 2 and 5 at the merged head: a load reads the compacted row plus the rows after it, compaction survives a restart and runs without NATS, and young rows stay as written",
-      "surface": "real envoy-dispatch built from the head on Postgres 16.2, DISPATCH_NATS_DISABLED=1, driven through the HTTP API",
-      "command": "bash $TMPDIR/infra593/e2e.sh (dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt version 12)",
+      "criterion": "The stored rows ygo hands to persistence fold to the room's document when a peer update parks (the replay guarantee for this PR's folds)",
+      "surface": "real Service, ygo websocket room, two docstest peers, Postgres 16.2",
+      "command": "go test ./internal/dispatch/docs -run '^TestTheStoredRowsOfARoomFoldToItsDocumentWhenAPeerUpdateParks$' (and -race -count=10)",
+      "observed": "PASS: a second keystroke sent before the first parks in the room (PendingStats.Items > 0), and the cold-read fold of the stored rows renders and has the state vector of the room both while it waits and after the first keystroke lands. A scratch probe on the candidate showed the same for three orders of a parked same-client insert and a cross-client delete.",
+      "headSha": "221f3ce3e2ec205fe6a777e2447d195e190a2488",
+      "negativeControl": "While the second keystroke waits, the other peer reads only the seed, so the test sees a real parked struct rather than an applied one."
+    },
+    {
+      "criterion": "The forward merge of main 92619d8d and the pin keep the PR's change working",
+      "surface": "local build, vet and suites on Postgres 16.2",
+      "command": "go build ./... && go vet ./... (plain, -tags multiprocess, -tags memory); infra TestDispatchConnectionsPerPodIsTheServers; go test (GOMAXPROCS=4 -p 2 -parallel 4) ./internal/dispatch/store/... ./internal/pgmigrate/... ./internal/dispatch/outbox ./internal/dispatch/duty ./internal/dispatch/docs ./cmd/dispatch ./internal/dispatch/api",
+      "observed": "vet clean; connection test ok at 91; ok store 320 s, pgmigrate 4 s, outbox 191 s, duty 19 s, docs 1645 s, cmd/dispatch 403 s; api: one failure, TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, which refuses a byte-order (C) database and passes on an en_US cluster. Fingerprint comment: https://github.com/sjawhar/legion/pull/2444#issuecomment-6535642659.",
+      "headSha": "221f3ce3e2ec205fe6a777e2447d195e190a2488",
+      "negativeControl": "Before the merge GitHub reported 90da7682 CONFLICTING; at 221f3ce3 it reports MERGEABLE and started CI."
+    },
+    {
+      "criterion": "Acceptance 1, 2 and 5 at the head: a load reads the compacted row plus later rows, compaction survives a restart without NATS, young rows stay as written",
+      "surface": "real envoy-dispatch built from the head on Postgres 16.2, DISPATCH_NATS_DISABLED=1, through the HTTP API",
+      "command": "bash $TMPDIR/infra593/e2e.sh (dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt version 13)",
       "observed": "30 uploads made 41 rows; after the restart the sweep logged candidates=1 compacted=1 rows_deleted=37 leaving 4 rows; the 3 young rows unchanged in version, xmin and md5; text sha256 db68d573... identical; a 31st upload reads back.",
-      "headSha": "b24baf7d17a8e2eba7b6222d2671cd6d876187ca",
-      "negativeControl": "The restarted process's first sweep tick logs candidates=0 while the hour is recorded as served; only the next tick, after the record is cleared, folds the 37 rows."
-    },
-    {
-      "criterion": "The forward merge of main e4c9ab85 leaves the pull request's own change as reviewed, except the migration number",
-      "surface": "jj merge, local build, vet and the touched suites on Postgres 16.2",
-      "command": "jj new legion/INFRA-593 main@origin; go build ./... && go vet ./... (plain, -tags multiprocess, -tags memory); go test ./internal/dispatch/store/... ./internal/pgmigrate/... ./internal/dispatch/docs ./cmd/dispatch (GOMAXPROCS=4 -p 2 -parallel 4); infra TestDispatchConnectionsPerPodIsTheServers",
-      "observed": "One conflict, cmd/dispatch/README.md (main's 0142-0144 paragraphs, then this branch's, now 0145). Migration renumbered 0142 -> 0145_doc_compaction_owed with its test, AGENTS.md, changelog fragment. ok store 290.5 s, pgmigrate 4.1 s, docs 1432.8 s, cmd/dispatch 439.1 s; vet clean; infra/go.work.sum equals main's. Fingerprint comment: https://github.com/sjawhar/legion/pull/2444#issuecomment-6515062641.",
-      "headSha": "b24baf7d17a8e2eba7b6222d2671cd6d876187ca",
-      "negativeControl": "Before the merge GitHub reported 76227009 CONFLICTING against main and started 0 workflow runs; at b24baf7d it reports MERGEABLE and 2 runs started."
+      "headSha": "221f3ce3e2ec205fe6a777e2447d195e190a2488",
+      "negativeControl": "The restarted process's first sweep tick logs candidates=0 while the hour is recorded as served; only the next tick folds the 37 rows."
     }
   ],
   "filesChanged": [
@@ -38,10 +46,10 @@
     "migration renumbered 0141 -> 0142_doc_compaction_owed (up, census, its test, AGENTS.md, changelog fragment, cmd/dispatch/README.md)"
   ],
   "deviations": [
-    "The architect's 21:42Z brief named real 30-second waits in the queue and sweep tests; measured, those tests take under 3 s each. The cost was the million-item unfoldable fixtures, so 85b8b216 shrinks those.",
-    "ygo stays at v1.51.3-sami.7 in this round: sami.10, which the 02:08Z correction requires, was not tagged at 02:20Z (newest sami.9). The PR body says #2444 waits for it.",
-    "My drained pod's unpushed redo of this merge (left as legion/INFRA-593-rescue a9594294) is not taken: b24baf7d redoes it on current main, and every file a9594294 differs from it in is a file main changed after a2f72e8e.",
-    "ygo stays v1.51.3-sami.7: sami.10 is still not tagged (newest sami.9 at 04:40Z). The PR body says #2444 waits for it.",
-    "This handoff-only push carries no skip-checks line, so envoy-go-race and envoy-go-race-docs run at the pull request's head."
-  ]
+    "ygo is pinned to the release candidate 845ce79c, not a tag, on INFRA-514's architect's instruction; #2444 must not merge until it repins to v1.54.1-sami.1 (the architect holds acceptance).",
+    "The replica paths that read crdt.UpdateLog (docs/tree.go observe, consumed, recover, keepReplica) are #2485's per INFRA-514's architect; this PR does not change them. Its folds read the stored rows, which the new test covers.",
+    "The forward merge resolved runtime conflicts in store/pool.go, outbox/publisher.go and cmd/dispatch/main.go (main's horizon pool and PublishFailures kept beside this PR's compaction pool and the daily compaction's removal): a full round. The migration is now 0150_doc_compaction_owed and the connection ceiling 91.",
+    "This handoff-only push carries no skip-checks line, so CI runs at the pull request's head."
+  ],
+  "answersTest": "Tester round 9 at b24baf7d (fail): red test a22f0f29 TestARefusedPeerUpdateLeavesTheRoomAsItsOtherPeersHoldIt fails on ygo sami.7. Per INFRA-514's architect (21:47Z), the pin moves to the v1.54.1-sami.1 release candidate rc/v1.54.1-sami.1 at 845ce79c until the tag exists; the PR does not merge until it repins to the tag."
 }
