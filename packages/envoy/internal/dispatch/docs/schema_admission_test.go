@@ -1,8 +1,10 @@
 package docs
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -383,5 +385,152 @@ func requireServiceRestartClose(t *testing.T, connection *gws.Conn, what string)
 			t.Fatalf("%s ended with %v, want a close with %d", what, err, gws.CloseServiceRestart)
 		}
 		return
+	}
+}
+
+// A revoked socket's close frame is a message of its own, so it must never go out inside one of
+// ygo's. gorilla writes a frame larger than its write buffer as a header and the buffer's worth in
+// one write and the rest in another, and the close of a revoked connection - ygo's context
+// watcher, which the revoke wakes, and its ServeHTTP teardown, both of which call Close - can
+// arrive between the two. Here the writer puts the header and the first 4 KB of a 10 KB binary
+// message on the connection, both closers call Close while that message is part way out, and the
+// rest of the message follows: the page reads that message whole and then the close with 1012, and
+// nothing goes on the connection after the frame, the keep-alive's own write included.
+func TestARevokedSocketsCloseFrameWaitsForTheEndOfAMessage(t *testing.T) {
+	type socket struct {
+		admitted  *admittedConn
+		keepAlive *keepAliveWriter
+	}
+	served, done := make(chan socket, 1), make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The wrappers are the ones a document socket is served through (Service.ServeHTTP): the
+		// keep-alive's writer under the admitted one, so what ygo's upgrade hijacks is a
+		// keepAliveConn held by an admittedConn.
+		admitted := &admittedConn{}
+		keepAlive := newKeepAliveWriter(w, "room", time.Hour)
+		defer keepAlive.stop()
+		var upgrader gws.Upgrader
+		if _, err := upgrader.Upgrade(&admittedWriter{ResponseWriter: keepAlive, conn: admitted}, r, nil); err != nil {
+			t.Errorf("upgrade the document socket: %v", err)
+			return
+		}
+		served <- socket{admitted: admitted, keepAlive: keepAlive}
+		<-done
+	}))
+	defer server.Close()
+	defer close(done)
+
+	page, response, err := gws.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/ws/doc/room", nil)
+	if err != nil {
+		t.Fatalf("connect a page: response=%#v err=%v", response, err)
+	}
+	defer page.Close()
+	connection := <-served
+	connection.admitted.revoke()
+
+	// A binary message past gorilla's 4 KB write buffer, written as gorilla writes one.
+	message := bytes.Repeat([]byte("page"), 2_500)
+	frame := append([]byte{finalFrame | gws.BinaryMessage, 126, byte(len(message) >> 8), byte(len(message))}, message...)
+	const firstWrite = 4 + 4096
+	begun, release, rest := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		if _, err := connection.admitted.Write(frame[:firstWrite]); err != nil {
+			close(begun)
+			rest <- err
+			return
+		}
+		close(begun)
+		<-release
+		_, err := connection.admitted.Write(frame[firstWrite:])
+		rest <- err
+	}()
+	<-begun
+	closed := make(chan error, 2)
+	for range cap(closed) {
+		go func() { closed <- connection.admitted.Close() }()
+	}
+	// Both closers reach the connection while the message is part way out, as ygo's two do.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	if err := <-rest; err != nil {
+		t.Errorf("the rest of the message could not be written; the close cut it short: %v", err)
+	}
+	<-closed
+	<-closed
+
+	_ = page.SetReadDeadline(time.Now().Add(5 * time.Second))
+	kind, read, err := page.ReadMessage()
+	if err != nil || kind != gws.BinaryMessage || !bytes.Equal(read, message) {
+		t.Fatalf("the page read a message of type %d and %d bytes (%v), want the %d-byte message whole before the close",
+			kind, len(read), err, len(message))
+	}
+	requireServiceRestartClose(t, page, "the revoked page's socket")
+
+	if _, err := connection.admitted.Write(frame[:4]); !errors.Is(err, net.ErrClosed) {
+		t.Errorf("a write after the close frame = %v, want %v", err, net.ErrClosed)
+	}
+	watched, ok := connection.admitted.Conn.(*keepAliveConn)
+	if !ok {
+		t.Fatalf("ygo's upgrade hijacked a %T, want the keep-alive's connection", connection.admitted.Conn)
+	}
+	if err := watched.writeBetweenMessages(keepAliveFrame("room"), time.Second); err != nil {
+		t.Errorf("the keep-alive wrote on the connection after the close frame: %v", err)
+	}
+}
+
+// Two pages of one room presenting one schema_version share a token, and a re-check can revoke one
+// of them while its token is still on its way: after a rollback the page creating up to version 2
+// is no longer admitted, and the page creating up to 1 stays writable. The revoked socket keeps
+// its place in the key's waiting list, so the token that arrives first takes it and the page that
+// is still admitted is not left read-only. A read-only socket of that key is refused while the
+// revoked entry waits, since its own token could otherwise take the writable answer that entry
+// holds.
+func TestARevokedSocketKeepsItsPlaceUntilItsTokenIsAnswered(t *testing.T) {
+	var admissions schemaAdmissions
+	key := schemaAdmissionKey{room: "room", token: "2"}
+	older := &schemaAdmission{key: key, page: schemaPage{version: 2, creatable: 1, valid: true}, writable: true}
+	newer := &schemaAdmission{key: key, page: schemaPage{version: 2, creatable: 2, valid: true}, writable: true}
+	for _, admission := range []*schemaAdmission{older, newer} {
+		if !admissions.admit(admission) {
+			t.Fatalf("a page creating up to %d was refused beside the sockets of its key", admission.page.creatable)
+		}
+	}
+
+	revoked := admissions.revokeUnless(schemaFleet{minVersion: 2, maxCreatable: 1})
+	if len(revoked) != 1 || revoked[0] != newer {
+		t.Fatalf("the rollback revoked %d sockets, want the newer page's alone", len(revoked))
+	}
+	if admissions.admit(&schemaAdmission{key: key, page: schemaPage{version: 2, creatable: 2, valid: true}}) {
+		t.Error("the revoked page's reconnect was admitted read-only while the revoked socket waits for its token")
+	}
+	if !admissions.answer(key) {
+		t.Fatal("the first token of the key was answered read-only, want the writable admission both sockets hold")
+	}
+	if !admissions.answer(key) {
+		t.Error("the second token of the key was answered read-only; the socket that is still admitted holds a writable admission")
+	}
+}
+
+// A revoked socket whose token already had its answer is forgotten as it is revoked: nothing of
+// its key waits for a token any longer, so the next token of that key is answered read-only.
+func TestARevokedSocketWhoseTokenWasAnsweredIsForgotten(t *testing.T) {
+	var admissions schemaAdmissions
+	key := schemaAdmissionKey{room: "room", token: "3"}
+	socket := &schemaAdmission{key: key, page: schemaPage{version: 3, creatable: 2, valid: true}, writable: true}
+	if !admissions.admit(socket) {
+		t.Fatal("the newer page's socket was refused on a key of its own")
+	}
+	if !admissions.answer(key) {
+		t.Fatal("the socket's token was answered read-only, want its writable admission")
+	}
+
+	if revoked := admissions.revokeUnless(schemaFleet{minVersion: 2, maxCreatable: 1}); len(revoked) != 1 || revoked[0] != socket {
+		t.Fatalf("the rollback revoked %d sockets, want the newer page's", len(revoked))
+	}
+	if waiting := admissions.sockets[key]; len(waiting) != 0 {
+		t.Errorf("the key holds %d sockets after the revoke, want the answered one forgotten", len(waiting))
+	}
+	if admissions.answer(key) {
+		t.Error("a token of the revoked socket's key was answered read-write, want read-only")
 	}
 }
