@@ -138,14 +138,7 @@ func startDispatchNATS(t *testing.T, urls []string, overrides map[string]string)
 // the deployment's settings (ENVOY_NATS_REPLICAS=3 and the byte limit), and with both settings
 // unset, a replica count of 1 and no byte limit, which neither lowers the copies nor drops the limit.
 func TestADispatchStartKeepsAThreeCopyStreamsCopiesByteLimitAndIDAsItCorrectsTheStream(t *testing.T) {
-	for _, drift := range []struct {
-		name   string
-		change func(*natsgo.StreamConfig)
-	}{
-		{"a changed subject list", func(c *natsgo.StreamConfig) { c.Subjects = c.Subjects[:len(c.Subjects)-1] }},
-		{"a one-minute age", func(c *natsgo.StreamConfig) { c.MaxAge, c.Duplicates = time.Minute, time.Minute }},
-		{"no duplicate window", func(c *natsgo.StreamConfig) { c.Duplicates = 0 }},
-	} {
+	for _, drift := range bustest.StreamDrifts() {
 		for _, settings := range []struct {
 			name      string
 			overrides map[string]string
@@ -153,10 +146,10 @@ func TestADispatchStartKeepsAThreeCopyStreamsCopiesByteLimitAndIDAsItCorrectsThe
 			{"the deployment's settings", map[string]string{"ENVOY_NATS_REPLICAS": "3", "ENVOY_STREAM_MAX_BYTES": strconv.Itoa(bustest.StreamMaxBytes)}},
 			{"the settings unset", nil},
 		} {
-			t.Run(drift.name+"/"+settings.name, func(t *testing.T) {
+			t.Run(drift.Name+"/"+settings.name, func(t *testing.T) {
 				cluster := testnats.StartCluster(t, 3)
 				js := cluster.JetStream(t)
-				deployed := bustest.DeployedThreeCopyStream(drift.change)
+				deployed := bustest.DeployedThreeCopyStream(drift.Change)
 				if _, err := js.AddStream(&deployed); err != nil {
 					t.Fatalf("deploy the stream: %v", err)
 				}
@@ -208,41 +201,14 @@ func TestRedeliverWebhooksRaisesAnR1RedeliveryBucketToTheReplicaSetting(t *testi
 // the webhook redelivery bucket at one copy, and its next start creates and updates nothing.
 func TestADefaultDispatchStartOnASingleServerCreatesEverythingAtOneCopyAndTheNextWritesNothing(t *testing.T) {
 	_, url := testnats.Start(t)
-	writes := testnats.WatchStreamWrites(t, url)
-
-	if err := startDispatchNATS(t, []string{url}, nil); err != nil {
-		t.Fatalf("first start: %v", err)
-	}
 	streams := []string{bus.Stream, "KV_" + bus.WebhookRedeliveryBucket}
-	var created []string
-	for _, stream := range streams {
-		created = append(created, "$JS.API.STREAM.CREATE."+stream)
-	}
-	if got := writes.Take(t); !slices.Equal(slices.Sorted(slices.Values(got)), slices.Sorted(slices.Values(created))) {
-		t.Fatalf("the first start wrote %v, want a create of each of %v", got, streams)
-	}
-	conn := testnats.Connect(t, url)
-	t.Cleanup(conn.Close)
-	js, err := conn.JetStream()
-	if err != nil {
-		t.Fatalf("open JetStream: %v", err)
-	}
-	for _, stream := range streams {
-		info, err := js.StreamInfo(stream)
-		if err != nil {
-			t.Fatalf("read %s: %v", stream, err)
-		}
-		if info.Config.Replicas != 1 {
-			t.Errorf("%s replicas = %d, want 1", stream, info.Config.Replicas)
-		}
-	}
 
-	if err := startDispatchNATS(t, []string{url}, nil); err != nil {
-		t.Fatalf("second start: %v", err)
-	}
-	if got := writes.Take(t); len(got) != 0 {
-		t.Fatalf("the second start wrote %v, want nothing", got)
-	}
+	bustest.RequireFirstStartAtOneCopyAndNoSecondWrite(t, url, streams, func() {
+		t.Helper()
+		if err := startDispatchNATS(t, []string{url}, nil); err != nil {
+			t.Fatalf("start the Dispatch server's NATS work: %v", err)
+		}
+	})
 }
 
 // keeperWait bounds the wait for the Dispatch publisher's keeper to restore a lowered stream: its

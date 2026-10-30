@@ -2,10 +2,8 @@ package main
 
 import (
 	"os"
-	"slices"
 	"strconv"
 	"testing"
-	"time"
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
@@ -57,18 +55,11 @@ func startListenerStream(t *testing.T, cfg config.Service) *bus.Client {
 // in its subjects, its age or its duplicate window keeps the three copies, the byte limit and the
 // id, and corrects the subjects, the age, the window and discard, to DiscardNew.
 func TestAListenerStartKeepsAThreeCopyStreamsCopiesByteLimitAndIDAsItCorrectsTheStream(t *testing.T) {
-	for _, drift := range []struct {
-		name   string
-		change func(*natsgo.StreamConfig)
-	}{
-		{"a changed subject list", func(c *natsgo.StreamConfig) { c.Subjects = c.Subjects[:len(c.Subjects)-1] }},
-		{"a one-minute age", func(c *natsgo.StreamConfig) { c.MaxAge, c.Duplicates = time.Minute, time.Minute }},
-		{"no duplicate window", func(c *natsgo.StreamConfig) { c.Duplicates = 0 }},
-	} {
-		t.Run(drift.name, func(t *testing.T) {
+	for _, drift := range bustest.StreamDrifts() {
+		t.Run(drift.Name, func(t *testing.T) {
 			cluster := testnats.StartCluster(t, 3)
 			js := cluster.JetStream(t)
-			deployed := bustest.DeployedThreeCopyStream(drift.change)
+			deployed := bustest.DeployedThreeCopyStream(drift.Change)
 			if _, err := js.AddStream(&deployed); err != nil {
 				t.Fatalf("deploy the stream: %v", err)
 			}
@@ -114,44 +105,15 @@ func TestRaisingTheStreamMovesTheListenersDurableToThreeCopies(t *testing.T) {
 func TestADefaultListenerOnASingleServerCreatesEverythingAtOneCopyAndItsNextStartWritesNothing(t *testing.T) {
 	const machineID = "replicas-default"
 	uri := testnats.URL(t)
-	writes := testnats.WatchStreamWrites(t, uri)
 	binary := cmdtest.Build(t, "envoy-listener")
-	start := func() {
+	streams := []string{bus.Stream, "KV_" + bus.InterestBucket, "KV_" + bus.RoleClaimBucket, "KV_" + bus.SessionBucket, "KV_" + bus.CIStateBucket}
+
+	bustest.RequireFirstStartAtOneCopyAndNoSecondWrite(t, uri, streams, func() {
 		t.Helper()
 		listener := startListenerProcess(t, binary, uri, machineID,
 			"ENVOY_WEBHOOKS=github", "ENVOY_GITHUB_WEBHOOK_SECRET=replicas-secret", "ENVOY_REVIEWER_APP_ID=1")
 		listener.waitHealthy(t)
 		listener.Terminate(t)
 		listener.WaitExit(t, "SIGTERM")
-	}
-
-	start()
-	streams := []string{bus.Stream, "KV_" + bus.InterestBucket, "KV_" + bus.RoleClaimBucket, "KV_" + bus.SessionBucket, "KV_" + bus.CIStateBucket}
-	var created []string
-	for _, stream := range streams {
-		created = append(created, "$JS.API.STREAM.CREATE."+stream)
-	}
-	if got := writes.Take(t); !slices.Equal(slices.Sorted(slices.Values(got)), slices.Sorted(slices.Values(created))) {
-		t.Fatalf("the first start wrote %v, want a create of each of %v", got, streams)
-	}
-	conn := testnats.Connect(t, uri)
-	t.Cleanup(conn.Close)
-	js, err := conn.JetStream()
-	if err != nil {
-		t.Fatalf("open JetStream: %v", err)
-	}
-	for _, stream := range streams {
-		info, err := js.StreamInfo(stream)
-		if err != nil {
-			t.Fatalf("read %s: %v", stream, err)
-		}
-		if info.Config.Replicas != 1 {
-			t.Errorf("%s replicas = %d, want 1", stream, info.Config.Replicas)
-		}
-	}
-
-	start()
-	if got := writes.Take(t); len(got) != 0 {
-		t.Fatalf("the second start wrote %v, want nothing", got)
-	}
+	})
 }
