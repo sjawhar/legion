@@ -858,7 +858,7 @@ bind the one durable `listener-<machine id>`. The hosts are therefore safe only 
 build that has dispatch://INFRA-557's single-deliverer take-over: one pod delivers from the
 durable, every other pod waits as a standby and takes over within seconds when the active pod
 goes, and `/healthz` answers 200 only on a pod that can serve `/v1`, which is what the advertiser
-judges. No such build exists until INFRA-557 lands. With an earlier build, a second host's listener
+judges. This release is such a build. With an earlier build, a second host's listener
 waits 135 seconds to bind the durable the first one holds, then exits and is restarted, again and
 again (`cmd/listener/durable.go`, `durableBindDeadline`). Through each wait its `/healthz` answers
 200 (`"starting"`) and its `/v1` serves (`cmd/listener/main.go`, `healthzHandler`), so its

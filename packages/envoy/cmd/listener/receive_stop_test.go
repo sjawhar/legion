@@ -306,3 +306,20 @@ func TestAGracefulStopLingersToItsCapForATakerThatNeverReceives(t *testing.T) {
 		t.Fatal("pod-b does not hold the lease pod-a released")
 	}
 }
+
+// A linger whose cap has already run out when it starts - the deadline is set before the NAK
+// batch, and a flush and a release that both ran to their bounds leave it in the past - still
+// keeps the subscription for the window a take-over counts as this release's graceful hand-back
+// (leaseHandBackBridge): such a take-over settles for the hand-back delay alone, on the premise
+// that this subscription was still on the deliver subject when it wrote. At 57c6d1c5 (INFRA-557
+// review finding) the linger returned "timeout" at its first read, leaving the deliver subject to
+// a lost node's binding, or to no subscriber at all, while the next holder held for 3 s.
+func TestAStoppingPodsLingerOutlastsTheHandBackWindowThoughItsCapHasRun(t *testing.T) {
+	uri := testnats.URL(t)
+	handle, _ := recordingHandler()
+	active := newReceiverRig(t, uri, "box-linger-floor", "pod-a", handle, handBackTiming(), testLeaseTiming())
+	lingered, how := active.receiver.linger(time.Now())
+	if how != "timeout" || lingered < leaseHandBackBridge {
+		t.Fatalf("a linger past its cap ended %q after %s, want it held for the %s hand-back window first", how, lingered, leaseHandBackBridge)
+	}
+}

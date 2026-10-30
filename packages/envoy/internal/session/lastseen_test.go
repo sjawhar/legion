@@ -84,12 +84,12 @@ func TestEveryPodReportsALapsedSessionsLastSeenAlike(t *testing.T) {
 		t.Fatalf("pod a's cache still holds the expired %s: %v", sessionID, err)
 	}
 
-	onA := a.LastSeen(sessionID)
+	onA := a.LastSeen(context.Background(), sessionID)
 	if onA == 0 {
 		t.Fatalf("pod a reports no last-seen time for %s, which it registered %s ago", sessionID, time.Since(written.Created()))
 	}
 	b := lastSeenPod(t, "b", ttl)
-	if onB := b.LastSeen(sessionID); onB != onA {
+	if onB := b.LastSeen(context.Background(), sessionID); onB != onA {
 		t.Fatalf("pod b, started after %s lapsed, reports last seen %d; pod a reports %d", sessionID, onB, onA)
 	}
 	if want := written.Created().UnixMilli(); onA != want {
@@ -97,11 +97,15 @@ func TestEveryPodReportsALapsedSessionsLastSeenAlike(t *testing.T) {
 	}
 }
 
-// The state bucket drops a `seen.` record one MaxAge (10 minutes) after its last write, while the
-// listener keeps answering a lapsed session for the interest reaper's longer allowance. A pod that
-// watched the session still answers once the record is gone, from its own record of the
-// registration; only a pod that never saw the session depends on the bucket's record.
-func TestAPodThatSawTheSessionReportsItsLastSeenAfterTheBucketsRecordIsGone(t *testing.T) {
+// Every pod answers a lapsed session's last-seen time out of the bucket's `seen.` record alone,
+// so a pod that watched the session answers exactly what a pod that never saw it answers for as
+// long as the window lasts, and nothing once the record is gone. The bucket is sized to keep the
+// record past that window (listenerStateMaxAge), so a live deployment never reaches the second
+// case; this is what it would answer if it did. At 57c6d1c5 (INFRA-557 review finding) the pod
+// that had watched the session kept answering from a record of its own after the bucket's was
+// gone, so from about ten to twenty minutes after the last heartbeat two pods answered
+// GET /v1/interests/ differently for one session.
+func TestEveryPodAnswersAlikeOnceTheBucketsLastSeenRecordIsGone(t *testing.T) {
 	const (
 		sessionID = "ses_outlives_record"
 		ttl       = 2 * time.Second
@@ -111,18 +115,27 @@ func TestAPodThatSawTheSessionReportsItsLastSeenAfterTheBucketsRecordIsGone(t *t
 		t.Fatalf("register %s through pod a: %v", sessionID, err)
 	}
 	deadline := time.Now().Add(ttl + 10*time.Second)
-	for a.LastSeen(sessionID) == 0 || func() bool { _, err := a.Get(sessionID); return err == nil }() {
+	for a.LastSeen(context.Background(), sessionID) == 0 || func() bool { _, err := a.Get(sessionID); return err == nil }() {
 		if time.Now().After(deadline) {
 			t.Fatalf("%s did not lapse on pod a with a last-seen time within %s", sessionID, ttl+10*time.Second)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	// What the bucket's MaxAge does to the record ten minutes after its write.
+	b := lastSeenPod(t, "b", ttl, WithLastSeenRetention(time.Minute))
+	if onA, onB := a.LastSeen(context.Background(), sessionID), b.LastSeen(context.Background(), sessionID); onA != onB {
+		t.Fatalf("pod a reports %s last seen %d while the record stands; pod b, started after it lapsed, reports %d", sessionID, onA, onB)
+	}
+	// What the bucket's MaxAge would do to the record, were the window longer than the bucket
+	// keeps it.
 	if err := a.seen.Delete(lastSeenKey(sessionID)); err != nil {
 		t.Fatalf("remove %s's seen record: %v", sessionID, err)
 	}
-	if got := a.LastSeen(sessionID); got == 0 {
-		t.Fatalf("pod a, which saw %s's registration, reports no last-seen time once the bucket's record is gone", sessionID)
+	onA, onB := a.LastSeen(context.Background(), sessionID), b.LastSeen(context.Background(), sessionID)
+	if onA != onB {
+		t.Fatalf("pod a, which watched %s, reports last seen %d once the bucket's record is gone; pod b reports %d", sessionID, onA, onB)
+	}
+	if onA != 0 {
+		t.Fatalf("pods report %s last seen %d with no record in the bucket, want none", sessionID, onA)
 	}
 }
 

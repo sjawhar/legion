@@ -3,7 +3,7 @@ body: |-
     `envoy-listener` runs as an active pod and standbys for any machine id: any number of
     listeners may run with one `ENVOY_MACHINE_ID`, and only the holder of the machine's delivery
     lease, the key `lease.listener-<machine id>` in the new KV bucket `envoy_listener` (created at
-    `ENVOY_NATS_REPLICAS`, 10 minute `MaxAge`), receives its durable consumer. The holder renews the
+    `ENVOY_NATS_REPLICAS`, 20 minute `MaxAge`), receives its durable consumer. The holder renews the
     lease every second by compare-and-set and subscribes to the durable's deliver subject with a core
     subscription of its own, never `nats.Bind`, handling a message only while it holds the lease; a
     standby polls every 500 ms and takes an unreleased lease once it has not changed for 5 s, a
@@ -30,13 +30,14 @@ body: |-
     record carries
     `stale_binding` (its holder subscribed beside a lingering push binding), `unsettled` (its
     term's hold had not ended, kept by a release, or its holder handed messages back on a graceful
-    stop), `ack_wait_owed` (the ack wait the releasing term still owed: a term that must settle
-    owes one from its acquiring write until its hold ends, and a term taken from a hand-back until
-    it has subscribed, so a stop, a lapse, a give-up or a stop before the term ever subscribed
-    hands the debt on) and `receiving` (its holder's subscription is up), and a pod that takes a
+    stop, or its renewals had lapsed when it was stopped), `ack_wait_owed` (the ack wait the
+    releasing term still owed: a term that must settle owes one from its acquiring write until its
+    hold ends, and a term taken from a hand-back until it has subscribed, so a stop, a lapse, a
+    give-up or a stop before the term ever subscribed hands the debt on) and `receiving` (its
+    holder's subscription is up), and a pod that takes a
     released record carrying `stale_binding` or `unsettled` settles the same way, capped at 3 s
     when it carries `unsettled` without `ack_wait_owed` and the take-over's write is less than
-    1.5 s after the release, and at 7 s otherwise. A holder that
+    1 s after the release, no shorter than any linger lasts, and at 7 s otherwise. A holder that
     takes an absent record, or a released one with neither flag, and finds the durable push-bound
     by a listener build from before the lease waits for that binding to end and subscribes within
     a second of it; past 135 s it logs `lease holder cannot deliver from the durable` at ERROR,

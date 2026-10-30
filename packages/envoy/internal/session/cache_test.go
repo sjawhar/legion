@@ -65,7 +65,7 @@ func TestList_ExpiredEntryReadsAbsentAndLeavesAtItsDeadline(t *testing.T) {
 	if r.CacheSize() != 2 {
 		t.Fatalf("cache size after List = %d, want 2", r.CacheSize())
 	}
-	before := r.LastSeen("ses_expired")
+	before := r.LastSeen(context.Background(), "ses_expired")
 	if before != updated {
 		t.Fatalf("LastSeen before removal = %d, want the expired entry's UpdatedAt %d", before, updated)
 	}
@@ -76,7 +76,7 @@ func TestList_ExpiredEntryReadsAbsentAndLeavesAtItsDeadline(t *testing.T) {
 	r.scheduleLocked("ses_expired", expireLive, r.cache["ses_expired"].expiresAt)
 	r.mu.Unlock()
 	waitForCacheSize(t, r, 1)
-	if after := r.LastSeen("ses_expired"); after != before {
+	if after := r.LastSeen(context.Background(), "ses_expired"); after != before {
 		t.Fatalf("LastSeen after removal = %d, want %d as before it", after, before)
 	}
 	if _, err := r.Get("ses_live"); err != nil {
@@ -106,7 +106,7 @@ func TestGet_ExpiredEntryReadsAbsentAndLeavesAtItsDeadline(t *testing.T) {
 	if _, err := r.Get("ses_short"); !errors.Is(err, natsgo.ErrKeyNotFound) {
 		t.Fatalf("Get(ses_short) after its deadline = %v, want ErrKeyNotFound", err)
 	}
-	if got := r.LastSeen("ses_short"); got != created.UnixMilli() {
+	if got := r.LastSeen(context.Background(), "ses_short"); got != created.UnixMilli() {
 		t.Fatalf("LastSeen(ses_short) after removal = %d, want %d", got, created.UnixMilli())
 	}
 }
@@ -132,7 +132,7 @@ func TestExpiredLastSeenReadsZeroAndLeavesAtItsDeadline(t *testing.T) {
 	const ttl = 200 * time.Millisecond
 	r := newTestRegistry(ttl)
 	r.seenLocal["ses_lapsed"] = time.Now().Add(-2 * time.Minute).UnixMilli()
-	if got := r.LastSeen("ses_lapsed"); got != 0 {
+	if got := r.LastSeen(context.Background(), "ses_lapsed"); got != 0 {
 		t.Fatalf("LastSeen(ses_lapsed) = %d, want 0 for an expired record", got)
 	}
 	if !lastSeenHeld(r, "ses_lapsed") {
@@ -144,11 +144,11 @@ func TestExpiredLastSeenReadsZeroAndLeavesAtItsDeadline(t *testing.T) {
 	created := time.Now()
 	r.applyWatched(watchedPut(t, "ses_gone", 1, created, SessionEntry{Port: 1, UpdatedAt: created.UnixMilli()}))
 	r.applyWatched(watchedDelete("ses_gone", 2))
-	if got := r.LastSeen("ses_gone"); got != created.UnixMilli() {
+	if got := r.LastSeen(context.Background(), "ses_gone"); got != created.UnixMilli() {
 		t.Fatalf("LastSeen(ses_gone) = %d, want %d", got, created.UnixMilli())
 	}
 	waitUntil(t, func() bool { return !lastSeenHeld(r, "ses_gone") })
-	if got := r.LastSeen("ses_gone"); got != 0 {
+	if got := r.LastSeen(context.Background(), "ses_gone"); got != 0 {
 		t.Fatalf("LastSeen(ses_gone) after its deadline = %d, want 0", got)
 	}
 }
@@ -167,10 +167,10 @@ func TestPerProcessLastSeenEndsOneTTLAfterTheRegistrationsExpiry(t *testing.T) {
 			"ses_old":    now.Add(-2*time.Minute - time.Second).UnixMilli(),
 		},
 	}
-	if got, want := r.LastSeen("ses_recent"), now.Add(-90*time.Second).UnixMilli(); got != want {
+	if got, want := r.LastSeen(context.Background(), "ses_recent"), now.Add(-90*time.Second).UnixMilli(); got != want {
 		t.Fatalf("last seen of a session that lapsed 30 s ago = %d, want %d", got, want)
 	}
-	if got := r.LastSeen("ses_old"); got != 0 {
+	if got := r.LastSeen(context.Background(), "ses_old"); got != 0 {
 		t.Fatalf("last seen of a session whose registration expired over a TTL ago = %d, want none", got)
 	}
 	// The records went in directly, so nothing scheduled their deadlines; schedule them as a write
@@ -207,7 +207,7 @@ func TestLastSeenRetentionDoesNotRestoreLiveSession(t *testing.T) {
 	if len(entries) != 0 {
 		t.Fatalf("live sessions = %+v, want none", entries)
 	}
-	if got := r.LastSeen("ses_lapsed"); got == 0 {
+	if got := r.LastSeen(context.Background(), "ses_lapsed"); got == 0 {
 		t.Fatal("last seen timestamp was lost before its retention TTL")
 	}
 
@@ -217,7 +217,7 @@ func TestLastSeenRetentionDoesNotRestoreLiveSession(t *testing.T) {
 	if _, err := r.Get("ses_lapsed"); err != nil {
 		t.Fatalf("Get(reregistered): %v", err)
 	}
-	if got := r.LastSeen("ses_lapsed"); got != now.UnixMilli() {
+	if got := r.LastSeen(context.Background(), "ses_lapsed"); got != now.UnixMilli() {
 		t.Fatalf("last seen = %d after re-registration, want the live registration's %d", got, now.UnixMilli())
 	}
 }

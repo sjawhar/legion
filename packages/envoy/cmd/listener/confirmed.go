@@ -296,9 +296,12 @@ func (s *roleSend) timedOut(lastForward error) {
 // recorded capability_refused as sendHandler records it.
 //
 // The dedupe check reads the route's own record (listenerDeps.confirmed), not the delivery
-// handlers' cache: agentSubjectDelivery and fanoutDelivery record a key there for a self-subscribed
-// session whose push they skipped, having heard nothing from it, so a role send under a key one of
-// them saw would be answered 200 for a holder that never confirmed it.
+// ledger: the ledger records what this machine delivered - a prompt a session's server accepted,
+// a forward this pod published - which is not the recipient's own word that it has the message,
+// so a role send under a key the ledger holds would be answered 200 for a holder that never
+// confirmed it. The record is this pod's alone (README, "State the pods share"), so a send
+// retried against another pod of the machine forwards again, which is what the holder's receipt
+// answers.
 func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 	verdict := beforeForward(s.item, s.holder, entry, s.d.confirmed.Seen)
 	switch verdict.kind {
@@ -441,9 +444,8 @@ func topicRecipients(d *listenerDeps, item contracts.Envelope) []string {
 // publish, so the refusal is the recipient's subject or the grant's, not the sender's input.
 //
 // Only a receipt that arrived through the route counts, which is why it reads the route's own
-// record (listenerDeps.confirmed) and not the delivery handlers' cache: with the live topics lane
-// on, the lane receives this send's own publish on the topic, and its fanout records there every
-// self-subscribed session on this machine whose push it skipped, having heard nothing from it.
+// record (listenerDeps.confirmed) and not the delivery ledger: the ledger records what this
+// machine delivered, a push or a forward, and not the recipient's word that it has the message.
 func confirmTopicRecipient(ctx context.Context, d *listenerDeps, item contracts.Envelope, sessionID string) sendOutcome {
 	var lastForward error
 	for {

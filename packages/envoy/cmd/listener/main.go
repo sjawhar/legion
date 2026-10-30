@@ -59,11 +59,12 @@ type listenerDeps struct {
 	// session again, on this pod or any other of the machine), and writes each send's delivery line
 	// and delivery_status count through its logger and messagesDelivered, reading as the role lane's
 	// do, beside the route's own request record (request_record.go). The route never reads that
-	// ledger for its own dedupe answer, since the handlers also record a self-subscribed session
-	// whose push they skipped without hearing from it.
+	// ledger for its own dedupe answer: the ledger records what this machine delivered, a prompt
+	// or a forward, and not the recipient's word that it has the message.
 	delivery *listenerDeliveryHandlerConfig
 	// confirmed is the publish route's own record of each (dedupe key, session) whose receipt arrived
-	// through the route, which only the route writes. A send skips a holder or recipient recorded
+	// through the route, which only the route writes, and which this pod alone holds (README,
+	// "State the pods share"). A send skips a holder or recipient recorded
 	// there, so envoy-client's retry of a send does not forward again to one the first attempt
 	// confirmed, and no one is counted as confirming a message without having sent its receipt.
 	confirmed *dedupe.Cache
@@ -494,12 +495,11 @@ func listenerHealth(ctx context.Context, d *listenerDeps, verifier *apiVerifier)
 		if report.State != receiveStandby {
 			response["receive"] = report.State.String()
 		}
-		if report.NoLease || report.Lease.Holding || report.Lease.ActiveInstance == "" {
-			// This pod is the machine's deliverer and does not receive yet (it holds the lease,
-			// or runs without one), or no pod of the machine holds the lease as this one last
-			// read the record: nothing of the durable reaches a session until that changes, which
-			// no answer of this pod may call healthy. It stays 200, as a standby does, so a
-			// readiness probe keeps sending it /v1.
+		if report.Deliverer {
+			// This pod is the machine's deliverer and does not receive yet (receiveReport.Deliverer):
+			// nothing of the durable reaches a session until that changes, which no answer of this
+			// pod may call healthy. It stays 200, as a standby does, so a readiness probe keeps
+			// sending it /v1.
 			response["status"] = "degraded"
 		}
 		if report.Failing > 0 {
@@ -940,8 +940,10 @@ func newDeliveryLedger(deliveryLease *lease, machineID string, requestLimit time
 // buckets, session.OpenSessionRegistry's and cistore.Open's, the list its NATS grant is built
 // from), which the client's keeper raises back to it when a concurrent start or an operator
 // lowered one (bus.WithKeptBuckets). The CI bucket is named even on a listener with no GitHub
-// route, which opens none: the keeper skips a bucket that does not exist. main and the tests that
-// start the listener's stream both take them from here.
+// route, which opens none: the keeper skips a bucket that does not exist. The listener state
+// bucket is not named here but added once the lease has opened it (bus.Client.KeepBucket, main),
+// so a pod whose NATS user lacks the grant for it is not refused on it every period. main and the
+// tests that start the listener's stream both take them from here.
 func listenerStreamOptions(cfg config.Service) []bus.ConnectOption {
 	return []bus.ConnectOption{
 		bus.WithReplicas(cfg.NATSReplicas),
@@ -1094,8 +1096,14 @@ func main() {
 	}
 	// The delivery lease makes one pod of this machine id its deliverer and every other a standby
 	// (lease.go). It is created here, after the durable check so a refused start opens no bucket,
-	// and started once /v1 serves and the shutdown can release it.
+	// and started once /v1 serves and the shutdown can release it. A pod that opened the bucket
+	// has the grant for it, so its keeper raises that bucket to the deployment's copies every
+	// period too (bus.Client.KeepBucket): naming it at the connect would have a pod whose grant
+	// lacks it, which delivers without a lease, refused on it every period instead.
 	deliveryLease, leaseConn := openDeliveryLease(cfg.NATSURLs, cfg.NATSReplicas, cfg.MachineID, instance, logger)
+	if deliveryLease != nil {
+		client.KeepBucket(bus.ListenerStateBucket)
+	}
 	// CI-summary aggregation state. Its WatchAll cache warms asynchronously like the registries
 	// below; the summary loop tolerates an empty cache until it fills. It opens ahead of them, as the
 	// one store the webhooks need, and after the durable check, so a refused start opens no bucket.

@@ -302,3 +302,37 @@ func TestAListenerWithoutTheLeaseGrantDeliversWithoutALease(t *testing.T) {
 		t.Fatalf("the listener exited:\n%s", listener.Output.String())
 	}
 }
+
+// A holder whose renewals lapse stops receiving while its record still names it, so no other pod
+// has taken the lease and nothing of the durable reaches a session. Its /healthz must not call
+// that healthy: it answers 200 degraded, a standby naming itself, until it resumes or another pod
+// takes the record. At 57c6d1c5 (INFRA-557 review finding) the degraded branch asked only
+// whether the record named a holder, and the lapsed pod's own record answered that, so the pod
+// delivering nothing answered healthy.
+func TestALapsedHolderDoesNotAnswerHealthy(t *testing.T) {
+	uri := testnats.URL(t)
+	const machineID = "box-lapsed-health"
+	handle, _ := recordingHandler()
+	// The lease runs through a relay the test freezes; the bus connection answers throughout, so
+	// nothing but the lease ends the term.
+	leaseLink := startListenerRelay(t, uri)
+	active := newReceiverRigVia(t, uri, leaseLink.relayed, machineID, "pod-a", handle, testReceiveTiming(), testLeaseTiming())
+	active.lease.Start(context.Background())
+	active.receiver.Start()
+	active.awaitState(t, receiveActive, 10*time.Second)
+	get := healthzFor(t, active.client, active.receiver)
+	if code, body := get(); code != http.StatusOK || body["status"] != "healthy" || body["role"] != "active" {
+		t.Fatalf("the holder's /healthz = %d %v, want 200 healthy, role active", code, body)
+	}
+
+	thaw := leaseLink.freeze()
+	t.Cleanup(thaw)
+	waitFor(t, 30*time.Second, "pod-a's lease to lapse, ending its term", func() bool {
+		return strings.Contains(active.logs.String(), "listener lease lapsed")
+	})
+	active.awaitState(t, receiveStandby, 10*time.Second)
+	code, body := get()
+	if code != http.StatusOK || body["status"] != "degraded" || body["role"] != "standby" || body["active_instance"] != "pod-a" {
+		t.Fatalf("a lapsed holder's /healthz = %d %v, want 200 degraded, role standby, active_instance pod-a", code, body)
+	}
+}

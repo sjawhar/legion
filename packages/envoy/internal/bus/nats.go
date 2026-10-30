@@ -335,6 +335,10 @@ type Client struct {
 	// client that runs none, or none yet: one that connects in the background starts it on its first
 	// reconcile (ensureStreamOnce). It is written and read under mu (startKeeper, awaitKeeper).
 	keeperDone chan struct{}
+	// keptBuckets are the buckets the keeper raises every period: the ones the program named at
+	// its connect (WithKeptBuckets) and the ones it opened since (KeepBucket). They are read and
+	// written under mu, so a pass takes the list as it stands when it starts.
+	keptBuckets []string
 }
 
 // Dial opens a tuned core NATS connection using envoy's standard options (5s connect timeout,
@@ -433,6 +437,7 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 		reconnectErrClock:           opts.reconnectErrClock,
 		reconnectWaitTick:           opts.reconnectWaitTick,
 		stopCh:                      make(chan struct{}),
+		keptBuckets:                 opts.keptBuckets,
 	}
 	stream := opts.streamConfig()
 	dial := func(first nats.Option) (*nats.Conn, error) {
@@ -443,7 +448,7 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 		// The keeper starts once the first connection's reconcile has succeeded (ensureStreamOnce),
 		// not here: a pass before it could write back a subject the reconcile replaced.
 		if ownsStream {
-			c.AddReconnectHook(c.ensureStreamOnce(&stream, opts.keptBuckets, opts.keepInterval))
+			c.AddReconnectHook(c.ensureStreamOnce(&stream, opts.keepInterval))
 		}
 		// onConnect counts the first connection only once it is c.Conn, which install makes it. An
 		// install that fails returns no client, so it stops the client before
@@ -480,7 +485,7 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 		return nil, err
 	}
 	if ownsStream {
-		c.startKeeper(stream, opts.keptBuckets, opts.keepInterval)
+		c.startKeeper(stream, opts.keepInterval)
 	}
 	return c, nil
 }
@@ -508,12 +513,12 @@ func (c *Client) install(nc *nats.Conn, stream *nats.StreamConfig) error {
 // owning client's constructor does. It is the client's first hook, and the hooks run one at a time
 // (rewatch), so ensured needs no lock of its own. A run that fails leaves the hooks due, so a
 // recovery runs it again; once one has succeeded it does nothing, as no owning client reconciles
-// the stream again on a later connection. The run that succeeds starts the client's keeper with
-// buckets and interval (startKeeper), so no pass of it runs before the reconcile: a pass that read
-// the stream before the reconcile's write and wrote after it would put back a subject the
-// reconcile replaced, and no later reconcile would remove it. A client stopped before then never
-// starts one.
-func (c *Client) ensureStreamOnce(stream *nats.StreamConfig, buckets []string, interval time.Duration) func(*nats.Conn) error {
+// the stream again on a later connection. The run that succeeds starts the client's keeper at
+// interval (startKeeper), so no pass of it runs before the reconcile: a pass that read the stream
+// before the reconcile's write and wrote after it would put back a subject the reconcile
+// replaced, and no later reconcile would remove it. A client stopped before then never starts
+// one.
+func (c *Client) ensureStreamOnce(stream *nats.StreamConfig, interval time.Duration) func(*nats.Conn) error {
 	ensured := false
 	return func(*nats.Conn) error {
 		if ensured {
@@ -523,7 +528,7 @@ func (c *Client) ensureStreamOnce(stream *nats.StreamConfig, buckets []string, i
 			return fmt.Errorf("reconcile the %s stream: %w", Stream, err)
 		}
 		ensured = true
-		c.startKeeper(*stream, buckets, interval)
+		c.startKeeper(*stream, interval)
 		return nil
 	}
 }

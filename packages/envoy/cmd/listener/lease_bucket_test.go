@@ -10,10 +10,12 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/session"
+	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// The bucket is created with the configured replicas, file storage, a 10 minute MaxAge and one
+// The bucket is created with the configured replicas, file storage, listenerStateMaxAge and one
 // value per key.
 func TestListenerStateBucketIsCreatedAtTheConfiguredReplicas(t *testing.T) {
 	t.Run("one replica", func(t *testing.T) {
@@ -30,9 +32,9 @@ func TestListenerStateBucketIsCreatedAtTheConfiguredReplicas(t *testing.T) {
 		if bucket.Bucket() != "envoy_listener" || bus.ListenerStateBucket != "envoy_listener" {
 			t.Fatalf("bucket %q, constant %q, want envoy_listener", bucket.Bucket(), bus.ListenerStateBucket)
 		}
-		if config.Replicas != 1 || config.Storage != natsgo.FileStorage || config.MaxAge != 10*time.Minute || bucket.History() != 1 {
-			t.Fatalf("replicas %d, storage %v, max age %s, history %d; want 1, file, 10m, 1",
-				config.Replicas, config.Storage, config.MaxAge, bucket.History())
+		if config.Replicas != 1 || config.Storage != natsgo.FileStorage || config.MaxAge != listenerStateMaxAge || bucket.History() != 1 {
+			t.Fatalf("replicas %d, storage %v, max age %s, history %d; want 1, file, %s, 1",
+				config.Replicas, config.Storage, config.MaxAge, bucket.History(), listenerStateMaxAge)
 		}
 	})
 	// A single test server cannot hold three replicas, and refuses the create for exactly that,
@@ -48,6 +50,58 @@ func TestListenerStateBucketIsCreatedAtTheConfiguredReplicas(t *testing.T) {
 			t.Fatalf("a refused replica count reads as a missing grant: %v", err)
 		}
 	})
+}
+
+// The bucket keeps a session's `seen.` record for at least as long as every pod answers that
+// session's last_seen for, so the record every pod reads outlives the answer: the session
+// registry reports a lapsed session for the session TTL and the retention main gives it
+// (store.InterestReapAllowance of the reaper's grace) past the last registration write
+// (session.SessionRegistry.LastSeen). A shorter bucket age would leave a pod that never saw the
+// session with nothing to read while a pod that had watched it still answered.
+func TestTheListenerStateBucketOutlivesTheLastSeenWindow(t *testing.T) {
+	conn := testnats.Connect(t, testnats.URL(t))
+	t.Cleanup(conn.Close)
+	sessions, err := session.OpenSessionRegistry(conn, session.WithSessionReplicas(1))
+	if err != nil {
+		t.Fatalf("open the session registry: %v", err)
+	}
+	t.Cleanup(sessions.StopWatch)
+	window := sessions.TTL() + store.InterestReapAllowance(store.InterestReapGrace)
+	if listenerStateMaxAge < window {
+		t.Fatalf("the listener state bucket keeps a record for %s, want at least the %s a lapsed session's last_seen is answered for", listenerStateMaxAge, window)
+	}
+}
+
+// A bucket an earlier build created with a shorter MaxAge is raised to listenerStateMaxAge when
+// a listener opens it: a create that finds the bucket there changes nothing of it, so without the
+// raise a deployment that ran an earlier build would drop every `seen.` record inside the window
+// its pods answer last_seen for.
+func TestOpeningTheListenerStateBucketRaisesAnEarlierBuildsMaxAge(t *testing.T) {
+	conn := testnats.Connect(t, testnats.URL(t))
+	t.Cleanup(conn.Close)
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	if _, err := bus.EnsureKeyValue(js, &natsgo.KeyValueConfig{
+		Bucket:   bus.ListenerStateBucket,
+		History:  1,
+		TTL:      10 * time.Minute,
+		Storage:  natsgo.FileStorage,
+		Replicas: 1,
+	}); err != nil {
+		t.Fatalf("create the bucket as an earlier build did: %v", err)
+	}
+	if _, err := openListenerState(conn, 1, listenerStateRequestWait); err != nil {
+		t.Fatalf("open the bucket: %v", err)
+	}
+	info, err := js.StreamInfo("KV_" + bus.ListenerStateBucket)
+	if err != nil {
+		t.Fatalf("read the bucket's stream: %v", err)
+	}
+	if info.Config.MaxAge != listenerStateMaxAge {
+		t.Fatalf("the bucket keeps a record for %s after the open, want %s", info.Config.MaxAge, listenerStateMaxAge)
+	}
 }
 
 // A user whose grant lacks the bucket is refused with errListenerStateRefused, naming the bucket

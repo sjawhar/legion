@@ -50,10 +50,10 @@ type KVConfig struct {
 	// taken over at once, however young, since that process delivers nothing more. Nil treats
 	// every other boot as one that may still be prompting.
 	GoneBoot func(boot string) bool
-	// DeliveredAge and AttemptedAge are DeliveredAge and AttemptedAge when zero; a test shortens
-	// them.
+	// DeliveredAge is DeliveredAge when zero; a test shortens it. There is no field for the
+	// attempted age: both ledgers hold an attempt by the package's one rule (attemptHolds), and a
+	// field only one of them read would let a change to it move the sweep without moving the hold.
 	DeliveredAge time.Duration
-	AttemptedAge time.Duration
 	// Now is time.Now when nil: the clock each record's KV timestamp, and each attempt this
 	// process holds, is aged against.
 	Now func() time.Time
@@ -99,9 +99,6 @@ type heldAttempt struct {
 func NewKV(kv bus.KeyValue, cfg KVConfig) *KV {
 	if cfg.DeliveredAge == 0 {
 		cfg.DeliveredAge = DeliveredAge
-	}
-	if cfg.AttemptedAge == 0 {
-		cfg.AttemptedAge = AttemptedAge
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -204,7 +201,7 @@ func (l *KV) judge(pair Key, entry nats.KeyValueEntry) (verdict Verdict, retryIn
 	}
 	switch {
 	case record.State == stateDelivered:
-		return Delivered, 0, age < l.cfg.DeliveredAge
+		return Delivered, 0, deliveredStops(age, l.cfg.DeliveredAge)
 	case record.State == stateAttempted && record.Boot == l.cfg.Boot:
 		return InFlight, 0, l.holds(pair, entry.Revision())
 	case record.State == stateAttempted && record.Boot != "" && l.cfg.GoneBoot != nil && l.cfg.GoneBoot(record.Boot):
@@ -272,7 +269,7 @@ func (l *KV) sweepLocked(now time.Time) {
 		return
 	}
 	l.lastSweep = now
-	limit := max(l.cfg.AttemptedAge, l.cfg.TakeoverAfter)
+	limit := max(AttemptedAge, l.cfg.TakeoverAfter)
 	for pair, held := range l.held {
 		if _, writing := l.writing[pair]; !writing && now.Sub(held.at) >= limit {
 			delete(l.held, pair)

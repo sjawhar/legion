@@ -5,8 +5,9 @@ body: |-
     the receive loop started and, with an OIDC issuer configured, its discovery succeeded), where it
     answered 200 `starting` from the moment its port was bound; then `200` with `"role":"active"`
     (with the durable's lag) or `"role":"standby"` (with `active_instance`, the holder). A pod that
-    is the machine's deliverer and does not receive yet - it holds the lease, or runs without one,
-    or has read no holder at all - answers 200 `degraded` rather than `healthy`, since nothing of
+    is the machine's deliverer and does not receive yet - it holds the lease, runs without one,
+    has read no holder at all, or the record still names it while its renewals have lapsed -
+    answers 200 `degraded` rather than `healthy`, since nothing of
     the durable reaches a session until it receives, and stays ready as a standby does. Every answer
     comes within 5 s, past which it is `503`; the role lane's health is read from its core
     subscription. A health check that passed on a 200 before NATS answered now waits for the

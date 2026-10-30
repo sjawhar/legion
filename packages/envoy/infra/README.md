@@ -305,7 +305,7 @@ Every host runs the listener as the same machine id, so every one of them binds 
 `listener-<tailnet.listener.machineId>`. `tailnet.listener.image` must therefore be a build with
 dispatch://INFRA-557's single-deliverer take-over: one pod delivers from the durable, every other
 one waits as a standby and takes over within seconds when the active pod goes, and `/healthz`
-answers 200 only on a pod that can serve `/v1`. No such build exists until INFRA-557 lands. With an
+answers 200 only on a pod that can serve `/v1`. This release is such a build. With an
 earlier build, a second pod waits 135 seconds to bind the durable the first one holds, then exits
 and is restarted, over and over. Its listener answers `/healthz` with 200 (`"starting"`) and
 serves `/v1` through that wait, so its advertiser advertises it after two answers, its node joins

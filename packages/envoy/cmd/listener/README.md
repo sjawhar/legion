@@ -29,7 +29,12 @@ subscription, so a NATS restart leaves it nothing to re-subscribe.
 
 The lease is the key `lease.<durable>` (`lease.listener-<machine id>`) in the KV bucket
 `envoy_listener` (`bus.ListenerStateBucket`), which the listener creates at `ENVOY_NATS_REPLICAS`
-replicas, file storage, one value per key and a 10 minute `MaxAge`. Its value is JSON: `holder`
+replicas, file storage, one value per key and a 20 minute `MaxAge`
+(`listenerStateMaxAge`), raising a bucket an earlier build created with a shorter one on every
+open. The age is sized by the `seen.` records beside the lease, not by the lease: every pod
+answers a lapsed session's `last_seen` out of that record for the session TTL and the interest
+reaper's allowance (20 minutes with the default 5 minute TTL), so the record must outlive the
+answer. Its value is JSON: `holder`
 (the holding pod's instance), `boot` (random per process start), `deliver_subject`,
 `service_since`, `acquired_at`, `released`, and `stale_binding`, `unsettled`, `ack_wait_owed` and
 `receiving` ("Take-over" below); a field this build does not know is kept across every rewrite.
@@ -68,8 +73,11 @@ wait only once the pod holding it has died or lost the lease.
   NAKs of one message at most, `handBackNaksMax`, then it drops it), and reads the lease record
   every 250 ms (`lingerPoll`) until it names another holder with `receiving` true (which the holder
   writes once its subscription is up), or for 3 s (`lingerMax`) after the batch at most. When no
-  other pod has taken the record 1 s after the release (`lingerUntaken`, two standby polls), there
-  is no standby to wait for and it stops waiting. Then it drains the subscription. So everything it
+  other pod has taken the record, there is no standby to wait for and it stops waiting; no end but
+  a receiving holder comes before 1 s (`lingerUntaken`, two standby polls) and one poll have
+  passed since the release, however far its 3 s cap has run, since that second is the window a
+  take-over counts as this release's hand-back in (`leaseHandBackBridge`). Then it drains the
+  subscription. So everything it
   handed back is back within the standby's 3 s cap, as long as a standby took the record while
   that linger could still have bridged to it: a pod that takes the record later (none was running,
   so the linger ended "not taken") finds what the durable pushed meanwhile gone to no subscriber,
@@ -100,15 +108,19 @@ wait only once the pod holding it has died or lost the lease.
   renewal, release and take-over, and cleared by a holder that finds the durable not push-bound.
   `unsettled` is written from the acquiring write of a term that must settle until its hold ends,
   and a release keeps it, so a pod stopped mid-hold hands the hold on; a graceful stop that hands
-  messages back always releases it set. `ack_wait_owed` is the ack wait the releasing term still
+  messages back always releases it set, and so does a stop taken while the term's renewals have
+  lapsed, whatever its own flags stood at: the lapse dropped what it held without an ack.
+  `ack_wait_owed` is the ack wait the releasing term still
   owed its successor: a term that must settle owes one from its acquiring write until its own hold
   ends, and a term taken from a graceful hand-back until it has subscribed, so every release -
   a stop, a lapse, a give-up, a stop before the term ever subscribed - writes the debt as the term
-  stands, and every take-over writes it false. A pod that takes a released record carrying
+  stands, a release during a lapse writing it set, and every take-over writes it false. A pod that
+  takes a released record carrying
   `stale_binding` or `unsettled` settles too, subscribing at once beside any binding rather than
   waiting it out as a pre-lease build's. Its cap is the hand-back delay and a second when the
-  record carries `unsettled` without `ack_wait_owed` and the take-over's write is less than 1.5 s
-  after the release (`leaseHandBackBridge`, by the server's timestamps of the two writes), and one
+  record carries `unsettled` without `ack_wait_owed` and the take-over's write is less than 1 s
+  after the release (`leaseHandBackBridge`, `lingerUntaken`, by the server's timestamps of the two
+  writes: no linger lasts less than that, so one could still have bridged to the take-over), and one
   ack wait and a second otherwise: the messages the stopping pod handed back come back after the
   hand-back delay to the next pod and to a lingering binding alike, but one that went to such a
   binding alone, or to no subscriber at all once the linger ended, or that a dead pod before the
@@ -170,7 +182,7 @@ answered by then makes the answer `503 {"status":"unhealthy"}`.
 | `503 {"status":"starting"}` | Until the pod can serve: NATS connected, the webhook and `/v1` gates open over warm caches, the receive loop started and, with an OIDC issuer configured, its discovery succeeded. A NATS or issuer that does not answer keeps the pod here, up and retrying; it never exits for that. |
 | `200 {"status":"healthy","role":"active",…}` | The pod receives the durable. The body carries the durable's lag, `num_pending` and `num_ack_pending`. |
 | `200 {"status":"healthy","role":"standby",…}` | The pod is ready, does not deliver, and another pod of the machine holds the lease: `active_instance` names it. |
-| `200 {"status":"degraded",…}` | A transient KV failure the monitor and the NATS reconnect retry, or, on the active pod, a durable whose lag could not be read. Also a pod that is the machine's deliverer and does not receive yet - it holds the lease, or runs without one, or has read no holder at all: nothing of the durable reaches a session until it receives, so no such answer is healthy. `role` is `standby` and `receive` says what it waits for (`preparing the durable`, or `waiting for another subscriber's push binding to end`); when its reads, creations, corrections or subscribes of the durable fail, `error` is `durable consumer unavailable: <failure>` and `receive_failing_ms` how long it has failed. It stays `200`, as a standby does, so a readiness probe keeps it in service. |
+| `200 {"status":"degraded",…}` | A transient KV failure the monitor and the NATS reconnect retry, or, on the active pod, a durable whose lag could not be read. Also a pod that is the machine's deliverer and does not receive yet - it holds the lease, or runs without one, or has read no holder at all, or the record still names this pod while it no longer holds it (its renewals lapsed, and no other pod has taken the record yet): nothing of the durable reaches a session until it receives, so no such answer is healthy. `role` is `standby` and `receive` says what it waits for (`preparing the durable`, or `waiting for another subscriber's push binding to end`); when its reads, creations, corrections or subscribes of the durable fail, `error` is `durable consumer unavailable: <failure>` and `receive_failing_ms` how long it has failed. It stays `200`, as a standby does, so a readiness probe keeps it in service. |
 | `503 {"status":"unhealthy",…}` | A NATS flush failed (`nats unavailable`), the role lane's subscription is not valid (`role subscription inactive`), the live topics lane is disconnected or refused (`live subscription inactive`), a cache watcher stopped; on the active pod also its subscription is not valid, the durable is gone, or the durable delivers to another subject than its subscription's (`not bound to this listener's subscription`, which a durable deleted and created again under it leaves). Also the failing durable above once it has failed for 135 s: a lease holder gives the lease up then and answers as a standby, so only a listener without a lease, which keeps retrying, stays unready. |
 
 Every healthy answer also carries the body fields it always did (`live_topics`, `ci_cache`, the
@@ -209,8 +221,12 @@ standby answering `/v1`, answers as the active pod would:
   reason, so a redelivery that fails the same way publishes an exception with the same id and
   dedupe key, which the stream stores once.
 - **Last seen** (`seen.<session>` in `envoy_listener`): every session registration write records
-  when the session was last seen, so every pod answers a lapsed session's `last_seen` alike. It
-  lasts the bucket's 10 minute `MaxAge`.
+  when the session was last seen, and every pod answers a lapsed session's `last_seen` out of that
+  record alone, so two pods never answer one session differently - a pod that watched the session
+  keeps no answer of its own. The answer lasts the session TTL and the interest reaper's allowance
+  past the last write (20 minutes with the default 5 minute TTL), which the bucket's `MaxAge` is
+  sized to outlive; with no record in the bucket - it was never written, or it could not be read
+  within the request's budget - no pod answers one.
 - **Role-claim grace** counts from the machine's service start, `service_since` in the lease
   record: the server's time of the write that took the lease when no pod of the machine was
   serving (no record, or one last written more than two TTLs before). A claim stored before
@@ -220,6 +236,13 @@ standby answering `/v1`, answers as the active pod would:
   revision the pod read, merged again over the bucket's value on a conflict, at most 5 attempts,
   then `503` with `Retry-After: 1`. A pod whose cache has not seen a registration reads the bucket
   before `/v1/messages/send` or `/v1/roles/set` answers that the session is unknown.
+
+One record is each pod's own, deliberately: the **publish route's confirmation record**
+(`listenerDeps.confirmed`, `internal/dedupe`'s in-process cache), which holds each (dedupe key,
+session) whose receipt arrived through `/v1/messages/send` or `/v1/messages/publish` on this pod.
+Only a receipt the route itself took counts, and the delivery ledger above records what the
+machine delivered rather than what a recipient confirmed, so the two are not one record. A send
+retried against another pod of the machine forwards again, and the holder's receipt answers it.
 
 ## Two builds of the listener
 
@@ -245,6 +268,13 @@ the durable push-bound when it took an absent record or a released one carrying 
 subscriber's push binding to end`) and subscribes within a second of that binding's end. Past
 135 s it logs `lease holder cannot deliver from the durable` at ERROR, and again every 5 min, which
 the AWS `subscribe-exhausted` alarm matches; it never exits for it.
+
+An unreleased record stays in the bucket for the bucket's `MaxAge`, 20 minutes, where an earlier
+build of this release kept it 10: after every pod of this build died hard, a pod starting within
+20 minutes finds that record, takes it as an expired one and counts a push binding it finds as
+the dead holder's rather than a pre-lease build's - the window in which that reading holds is now
+twice as long. A pod starting later finds no record and waits such a binding out as a pre-lease
+build's, as it always has.
 
 Rolling back to a build before this release works: that build corrects the durable's filter to its
 own list and binds once this build's pods have stopped. But a hard stop of this build's lease

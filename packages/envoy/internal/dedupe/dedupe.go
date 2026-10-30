@@ -31,6 +31,16 @@ func attemptHolds(age time.Duration, kept bool, takeoverAfter time.Duration) boo
 	return age < limit
 }
 
+// deliveredStops is the rule both ledgers judge a delivered record by: it stops a further
+// delivery of its pair until it is deliveredAge old (DeliveredAge, which a test of the KV ledger
+// shortens through KVConfig). age is how long ago the delivery was recorded. The bound is
+// exclusive, as attemptHolds' is: a record exactly that old stops nothing, and the delivery that
+// finds it proceeds. Memory stopped one for one more instant (it compared age <= DeliveredAge);
+// it now answers as KV does.
+func deliveredStops(age, deliveredAge time.Duration) bool {
+	return age < deliveredAge
+}
+
 // Key identifies one delivery: an envelope's dedupe key to one session.
 type Key struct {
 	DedupeKey string

@@ -63,7 +63,11 @@ func ListenerBuckets() []string {
 }
 
 // LastSeenPrefix begins each session's last-seen record in ListenerStateBucket. The listener's
-// grant writes these keys for every session, whichever machine registered it.
+// grant writes these keys for every session, whichever machine registered it: a role claim
+// (RoleClaimBucket, one bucket for the whole fleet) names its holder session and no machine, so
+// GET /v1/roles/<role> on any listener answers a lapsed holder's last_seen out of that session's
+// record whichever machine the holder registered through. A key scoped to the writing machine
+// would leave every such read with no record to find.
 const LastSeenPrefix = "seen."
 
 // ListenerLeaseKey is the key of machine machineID's delivery lease in ListenerStateBucket. The

@@ -135,10 +135,10 @@ func WithSessionLogger(log *slog.Logger) SessionRegistryOption {
 
 // WithLastSeenBucket sets the listener state bucket (bus.ListenerStateBucket), where every
 // registration write also records the session's last-seen time under `seen.<session token>`
-// (lastSeenKey), so every listener pod answers LastSeen for a lapsed session alike, a pod that
-// started after the session lapsed included. Without it the registry keeps last-seen times in
-// process (SessionRegistry.seenLocal): a listener whose NATS user lacks the grant for that bucket
-// runs so, and a restart forgets them.
+// (lastSeenKey), the one record every listener pod answers LastSeen for a lapsed session from, a
+// pod that started after the session lapsed included. Without it the registry keeps last-seen
+// times in process (SessionRegistry.seenLocal): a listener whose NATS user lacks the grant for
+// that bucket runs so, and a restart forgets them.
 func WithLastSeenBucket(kv bus.KeyValue) SessionRegistryOption {
 	return func(o *sessionRegistryOpts) { o.seen = kv }
 }
@@ -149,9 +149,9 @@ func WithLastSeenBucket(kv bus.KeyValue) SessionRegistryOption {
 // for dropping it to stay safe (expireDue). The listener keeps it for as long as the interest
 // reaper can still hold a dead session's interest, so its interests API can report the session's
 // last heartbeat for every interest row it still lists. With the listener state bucket
-// (WithLastSeenBucket) a pod that never saw the session reads its `seen.` record instead, which
-// leaves that bucket one MaxAge after its last write; a pod that saw it answers for the whole
-// retention from its own record.
+// (WithLastSeenBucket) every pod answers out of the session's `seen.` record for this whole
+// window, and the bucket keeps a record longer than the listener ever sets this retention
+// (listenerStateMaxAge, cmd/listener/lease.go).
 func WithLastSeenRetention(d time.Duration) SessionRegistryOption {
 	return func(o *sessionRegistryOpts) { o.lastSeenRetention = d }
 }
@@ -185,13 +185,15 @@ type SessionRegistry struct {
 	mu             sync.RWMutex
 	cache          map[string]cachedSession
 	cacheRevisions map[string]uint64
-	// seenLocal is LastSeen's per-process fallback, used while seen has no handle: the UpdatedAt
-	// of each session's latest registration this registry wrote or its watcher delivered, until
-	// the retention past that registration's expiry. It is guarded by mu.
+	// seenLocal is what LastSeen answers a registry with no last-seen bucket from, and is written
+	// only by such a registry (cacheSessionLocked): the UpdatedAt of each session's latest
+	// registration this registry wrote or its watcher delivered, until the retention past that
+	// registration's expiry. It is guarded by mu.
 	seenLocal map[string]int64
 
-	// seen is the listener state bucket LastSeen reads a lapsed session's `seen.` record from
-	// (WithLastSeenBucket); its KeyValue is nil when the registry has none.
+	// seen is the listener state bucket LastSeen reads a lapsed session's `seen.` record from, the
+	// one answer every pod shares (WithLastSeenBucket); its KeyValue is nil when the registry has
+	// none.
 	seen bus.KeyValue
 
 	// expiries holds the deadline of each cached entry and of each last-seen record and revision
@@ -577,19 +579,28 @@ func (r *SessionRegistry) Refresh(ctx context.Context, sessionID string) (Sessio
 // (its registration expired or was deleted) it is the time its last registration write recorded
 // (recordSeen), for the registry's retention (one TTL unless WithLastSeenRetention set longer)
 // after that registration's expiry, so callers can report why an otherwise durable reference
-// stopped resolving. That time is the later of two records: this process's seenLocal, the
-// UpdatedAt of every registration this process wrote or its watcher saw, which a restart forgets;
-// and, with the listener state bucket (WithLastSeenBucket), the session's `seen.` record, the
-// server's timestamp of the write, which a pod started after the session lapsed reads too. The
-// bucket keeps that record for its MaxAge (10 minutes) after its last write, so a pod that never
-// saw the session reports it for that long, and a pod that saw it for the whole retention. The
-// window is measured on this process's clock against the server's timestamp; a skew of seconds
-// against a TTL of minutes moves its end by that skew.
+// stopped resolving.
+//
+// With the listener state bucket (WithLastSeenBucket) that time is the session's `seen.` record
+// alone, the server's timestamp of the write, which every pod reads alike, a pod started after the
+// session lapsed included: every pod of the fleet answers one time for one session through the
+// whole window, and a record the bucket has not got (it was never written, its MaxAge removed it,
+// or it could not be read) is no answer on any of them. The bucket keeps a record for
+// listenerStateMaxAge after its last write, which is sized past this window, so the record
+// outlives the answer rather than ending it. Without the bucket the time is this process's own
+// record (seenLocal), the UpdatedAt of every registration this process wrote or its watcher saw,
+// which a restart forgets. The window is measured on this process's clock against the server's
+// timestamp; a skew of seconds against a TTL of minutes moves its end by that skew.
+//
+// Its read of the bucket waits no longer than ctx (bus.Bounded), so a caller answering a request
+// keeps its own budget: a bucket that does not answer costs that budget once, and every further
+// row of the same request reads an ended ctx and answers at once. A read ctx ended is a WARN and
+// no time, as an unreadable record is.
 //
 // It takes only the shared lock and changes nothing: an expired entry the expiry timer has not
 // removed yet answers the lapsed session's record, which is what its removal leaves in place, so
 // the answer is the same before and after the removal.
-func (r *SessionRegistry) LastSeen(sessionID string) int64 {
+func (r *SessionRegistry) LastSeen(ctx context.Context, sessionID string) int64 {
 	now := time.Now()
 	r.mu.RLock()
 	cs, cached := r.cache[sessionID]
@@ -602,18 +613,12 @@ func (r *SessionRegistry) LastSeen(sessionID string) int64 {
 		return 0
 	}
 	if r.seen.KeyValue != nil {
-		// The bucket's record is the server's timestamp of the write, which every pod reads alike,
-		// a pod started after the session lapsed included; once the bucket's MaxAge has removed it
-		// (or it cannot be read), this process's own record serves the rest of the window, so a
-		// pod that watched the session reports it for the whole retention.
-		stored, err := r.readSeen(sessionID)
+		stored, err := r.readSeen(ctx, sessionID)
 		if err != nil {
 			r.logger().Warn("session last-seen unavailable: its record in the listener state bucket could not be read",
 				slog.String("session_id", sessionID), slog.String("key", lastSeenKey(sessionID)), slog.String("error", err.Error()))
 		}
-		if stored > 0 {
-			at = stored
-		}
+		at = stored
 	}
 	if at <= 0 || !now.Before(r.seenUntil(at)) {
 		return 0
@@ -673,9 +678,15 @@ func (r *SessionRegistry) recordSeen(ctx context.Context, kv bus.KeyValue, sessi
 }
 
 // readSeen reads sessionID's last-seen time, in Unix milliseconds, from its record in the listener
-// state bucket: 0 when there is none.
-func (r *SessionRegistry) readSeen(sessionID string) (int64, error) {
-	entry, err := r.seen.Get(lastSeenKey(sessionID))
+// state bucket: 0 when there is none. The read waits no longer than ctx (bus.Bounded), so a route
+// that answers a caller is held no longer than its own budget by a bucket that does not answer;
+// a read ctx ended is an error naming the key, which the caller reports as no time.
+func (r *SessionRegistry) readSeen(ctx context.Context, sessionID string) (int64, error) {
+	key := lastSeenKey(sessionID)
+	entry, answered, err := bus.Bounded(ctx, func() (nats.KeyValueEntry, error) { return r.seen.Get(key) })
+	if !answered {
+		return 0, fmt.Errorf("read %s from the listener state bucket: %w", key, err)
+	}
 	if errors.Is(err, nats.ErrKeyNotFound) {
 		return 0, nil
 	}
@@ -764,7 +775,9 @@ func (r *SessionRegistry) List() ([]ListEntry, error) {
 // cacheSessionLocked caches entry as sessionID's registration at revision unless the revision fence
 // holds a newer revision, and schedules the entry's removal at expiresAt. Without the listener
 // state bucket it is also where a registration's UpdatedAt becomes the session's per-process
-// last-seen time (seenLocal), whichever process wrote it. A put whose deadline has already passed
+// last-seen time (seenLocal), whichever process wrote it; with the bucket there is no such record,
+// since LastSeen answers a lapsed session from the bucket's shared one alone and a per-process
+// record would answer one pod differently from the next. A put whose deadline has already passed
 // for an id the cache does not hold is not inserted: it would read as absent anyway, and inserting
 // it would bring back a last-seen record for a session that left long ago. That is the late
 // delivery of a revision older than a fence expireDue already dropped. Callers must hold r.mu for
@@ -779,7 +792,7 @@ func (r *SessionRegistry) cacheSessionLocked(sessionID string, entry SessionEntr
 	}
 	r.cache[sessionID] = cs
 	r.cacheRevisions[sessionID] = revision
-	if r.ttl > 0 && entry.UpdatedAt > r.seenLocal[sessionID] {
+	if r.seen.KeyValue == nil && r.ttl > 0 && entry.UpdatedAt > r.seenLocal[sessionID] {
 		if r.seenLocal == nil {
 			r.seenLocal = map[string]int64{}
 		}

@@ -29,15 +29,13 @@ var ErrWrongMachine = errors.New("session belongs to a different machine")
 // OwnedBy reports whether the listener machineID is the one that delivers to the session entry
 // resolved through interest, the rule ErrWrongMachine states: the owner is the listener the
 // session's stored subscription names (interest.MachineID), else the one it registered through
-// (the entry's MachineID), and a session neither names is every listener's. A nil interest or
-// entry names no listener of its own. DeliverWithResultForEntry refuses a serve-port session this
-// answers false for, and the listener asks the same question before it writes the delivery ledger
-// for a pair (promptsHere, cmd/listener/delivery.go), so one rule answers both.
-func OwnedBy(machineID string, interest *store.Interest, entry *SessionEntry) bool {
-	owner := ""
-	if entry != nil {
-		owner = entry.MachineID
-	}
+// (entry.MachineID), and a session neither names is every listener's. A nil interest names no
+// listener of its own; the entry is taken by value, since both callers ask only of a session they
+// have resolved. DeliverWithResultForEntry refuses a serve-port session this answers false for,
+// and the listener asks the same question before it writes the delivery ledger for a pair
+// (promptsHere, cmd/listener/delivery.go), so one rule answers both.
+func OwnedBy(machineID string, interest *store.Interest, entry SessionEntry) bool {
+	owner := entry.MachineID
 	if interest != nil && interest.MachineID != "" {
 		owner = interest.MachineID
 	}
@@ -126,7 +124,7 @@ func (d Deliverer) DeliverWithResultForEntry(item contracts.Envelope, interest s
 		// of a serving-port session is the listener its stored subscription names. A re-registration
 		// does not move that subscription (store's mergeForUpsert); dispatch://INFRA-429 moves it.
 		// A non-owner acks silently: no delivery, no exception on any subject, no NAK.
-		if !OwnedBy(d.MachineID, &interest, entry) {
+		if !OwnedBy(d.MachineID, &interest, *entry) {
 			return DeliveryResult{}, ErrWrongMachine
 		}
 		host, podLocal := d.hostFor(*entry)

@@ -72,14 +72,8 @@ func ListenerPermissions(machineID string) Permissions {
 	publish = append(publish, bucketPermissions(bus.ListenerStateBucket,
 		bus.ListenerLeaseKey(machineID),
 		bus.ListenerLedgerPrefix(durable)+">",
-		// Every session's last-seen record, not only the ones this machine wrote: a session's
-		// record is read across machines. A role claim (bus.RoleClaimBucket, one bucket for the
-		// whole fleet) names its holder session and no machine, and GET /v1/roles/<role> on any
-		// listener answers a lapsed holder's last_seen out of that session's record
-		// (resolveLiveRoleHolder, cmd/listener/role_holder.go), whichever machine the holder
-		// registered through - Dispatch asks the listener beside it about roles the whole fleet
-		// holds. A key scoped to the writing machine would leave every such read with no record
-		// to find, so this one stays fleet-wide.
+		// Every session's last-seen record, not only the ones this machine wrote: the key is
+		// fleet-wide, for the reason bus.LastSeenPrefix's doc gives.
 		bus.LastSeenPrefix+">")...)
 	publish = append(publish, jsAPI+"STREAM.PURGE."+kvStream+bus.InterestBucket)
 	return Permissions{

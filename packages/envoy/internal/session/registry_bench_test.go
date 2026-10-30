@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -116,7 +117,7 @@ func BenchmarkRegistry(b *testing.B) {
 			r, _, _, gone := benchRegistry(n)
 			b.ReportAllocs()
 			for b.Loop() {
-				if r.LastSeen(gone) == 0 {
+				if r.LastSeen(context.Background(), gone) == 0 {
 					b.Fatalf("LastSeen(%s) = 0, want its last heartbeat", gone)
 				}
 			}

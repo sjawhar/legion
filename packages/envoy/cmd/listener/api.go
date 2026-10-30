@@ -986,23 +986,31 @@ type interestRow struct {
 }
 
 // interestRowFor answers item with its session's last heartbeat: the live entry's UpdatedAt while
-// the session is live, else the final heartbeat the cache still retains for it
+// the session is live, else the final heartbeat still reported for it
 // (session.SessionRegistry.LastSeen), else none. That heartbeat is the session's `seen.` record in
-// the listener state bucket, which a restarted pod reads as well; a listener without that bucket
-// keeps the records in process, so one that restarted since the session died reads it as unknown.
-func interestRowFor(sessions *session.SessionRegistry, item store.Interest) interestRow {
+// the listener state bucket, the one every pod of the fleet answers from, read within ctx: the
+// route passes its request's own budget, so a bucket that does not answer costs that budget once
+// for the whole answer and leaves the rows it could not read without a last heartbeat. A listener
+// without that bucket keeps the records in process, so one that restarted since the session died
+// reads it as unknown.
+func interestRowFor(ctx context.Context, sessions *session.SessionRegistry, item store.Interest) interestRow {
 	row := interestRow{Interest: item}
 	if entry, err := sessions.Get(item.SessionID); err == nil {
 		row.LastSeen = entry.UpdatedAt
 	} else {
-		row.LastSeen = sessions.LastSeen(item.SessionID)
+		row.LastSeen = sessions.LastSeen(ctx, item.SessionID)
 	}
 	return row
 }
 
 // adminInterestsHandler lists, reads and removes persisted interests. Each row a GET answers
-// carries its session's last heartbeat (interestRowFor). GET /v1/interests/<session_id>
-// reads within sendRequestBudget of the request's own context: a cache miss is read through to the
+// carries its session's last heartbeat (interestRowFor), read from the listener state bucket for
+// a session that has lapsed. GET /v1/interests/ answers from the interest cache and reads those
+// heartbeats within sendRequestBudget of the request's own context, the one budget for the whole
+// list: a bucket that stopped answering leaves the rows it could not read without a last
+// heartbeat rather than holding the answer open a read per row.
+// GET /v1/interests/<session_id> reads within sendRequestBudget of the request's own context: a
+// cache miss is read through to the
 // bucket, the bucket's word that the key is absent is a 404, a record this build cannot decode is
 // the 500 writeInterestRecordUnreadable writes, and a read that did not answer is the
 // bus-unavailable 503 with Retry-After: 1 (a key NATS refuses is still the 413 or 400
@@ -1017,10 +1025,12 @@ func adminInterestsHandler(registry *store.Registry, sessions *session.SessionRe
 				writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
 				return
 			}
+			ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
+			defer cancel()
 			items := registry.List()
 			rows := make([]interestRow, 0, len(items))
 			for _, item := range items {
-				rows = append(rows, interestRowFor(sessions, item))
+				rows = append(rows, interestRowFor(ctx, sessions, item))
 			}
 			writeJSON(w, http.StatusOK, rows)
 			return
@@ -1045,7 +1055,7 @@ func adminInterestsHandler(registry *store.Registry, sessions *session.SessionRe
 				writeBusUnavailable(w, err)
 				return
 			}
-			writeJSON(w, http.StatusOK, interestRowFor(sessions, item))
+			writeJSON(w, http.StatusOK, interestRowFor(ctx, sessions, item))
 		case http.MethodDelete:
 			ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 			defer cancel()

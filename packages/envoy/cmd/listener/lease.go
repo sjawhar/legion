@@ -37,12 +37,13 @@ const (
 
 // leaseHandBackBridge is how long after a release a take-over still counts as that release's
 // graceful hand-back (leaseStatus.HandedBack), by the server's timestamps of the two writes: a
-// stopping pod lingers on the deliver subject until the next holder receives, but lets go
-// lingerUntaken (two standby polls) after its release when no other pod has taken the record, and
-// a standby takes a released record at its first poll of it, within one standby poll of the
-// release. So a take-over later than that found no linger to bridge to it, whatever the record
+// stopping pod lingers on the deliver subject until the next holder receives, and ends a linger no
+// pod has taken the record in only once lingerUntaken (two standby polls) has passed since its
+// release, whatever its linger cap says (durableReceiver.linger, which reads the record one
+// lingerPoll past that, so a take written inside the window is read as taken and the linger waits
+// for it). So a take-over later than that found no linger to bridge to it, whatever the record
 // says, and must settle for an ack wait as after a hard take-over.
-const leaseHandBackBridge = lingerUntaken + leaseStandbyPoll
+const leaseHandBackBridge = lingerUntaken
 
 // leaseConfig carries the lease's timing, so a test of this package shortens it;
 // productionLeaseConfig is the only value the listener runs with.
@@ -59,12 +60,20 @@ func productionLeaseConfig() leaseConfig {
 
 // The listener state bucket (bus.ListenerStateBucket) keeps one value per key and drops a key
 // nobody has written for listenerStateMaxAge, so a lease record nobody renews leaves the bucket
-// after 10 minutes. listenerStateRequestWait is the JetStream wait of every request on the
-// bucket's handle: a renewal that hangs must give up well inside the holder's validity
-// (leaseTTL - leaseMargin) so its retry still lands in it. A bucket create the wait cuts short
-// is a connection error the caller retries, and the retry finds the bucket the server made.
+// after 20 minutes. That age is what every pod answers a lapsed session's last_seen for: the
+// session's `seen.` record is the one answer they share (session.SessionRegistry.LastSeen), and
+// the registry reports it for the session TTL and the interest reaper's allowance past its write
+// (store.InterestReapAllowance, the retention main sets), 20 minutes with the default 5-minute
+// TTL, so the record must outlive that window or a pod that never saw the session would answer
+// nothing while another still answered. A record nobody renews living twice as long changes
+// nothing else: a lease record is taken over once it has stood unchanged for the lease's ttl,
+// whatever its age, and the delivery ledger judges every record by its own ages (dedupe.KV).
+// listenerStateRequestWait is the JetStream wait of every request on the bucket's handle: a
+// renewal that hangs must give up well inside the holder's validity (leaseTTL - leaseMargin) so
+// its retry still lands in it. A bucket create the wait cuts short is a connection error the
+// caller retries, and the retry finds the bucket the server made.
 const (
-	listenerStateMaxAge      = 10 * time.Minute
+	listenerStateMaxAge      = 20 * time.Minute
 	listenerStateRequestWait = 2 * time.Second
 )
 
@@ -86,7 +95,11 @@ var errListenerStateRefused = errors.New("NATS refused KV bucket " + bus.Listene
 
 // openListenerState opens the listener state bucket, creating it at replicas with file storage,
 // listenerStateMaxAge and one value per key when it does not exist, with wait as the JetStream
-// wait of every request on the handle it returns (listenerStateRequestWait in production).
+// wait of every request on the handle it returns (listenerStateRequestWait in production). A
+// bucket an earlier build created keeps its keys for a shorter age, so the open raises it to
+// listenerStateMaxAge (bus.RaiseMaxAge): a `seen.` record must outlive the window every pod
+// answers a lapsed session's last_seen for, and a create that finds the bucket there changes
+// nothing of it.
 //
 // A refusal under the connection's grant is errListenerStateRefused, which errors.Is tells apart
 // from a connection error. nats-server drops a publish the grant refuses and answers it only with
@@ -110,6 +123,9 @@ func openListenerState(conn *nats.Conn, replicas int, wait time.Duration) (bus.K
 		Storage:  nats.FileStorage,
 		Replicas: replicas,
 	})
+	if err == nil {
+		_, err = bus.RaiseMaxAge(js, bus.ListenerStateBucket, listenerStateMaxAge)
+	}
 	if err == nil {
 		return kv, nil
 	}
@@ -167,7 +183,7 @@ func sameLastError(a, b error) (same bool) {
 // from the acquiring write of a term that must settle until that term's settle hold ends, and a
 // release keeps it as it stands, so a holder stopped mid-hold hands the duty on; a graceful stop
 // that hands messages back sets it before its release (Unsettle), so a release after one always
-// carries it.
+// carries it, and the release of a term whose validity had run out sets it too (Release).
 //
 // ack_wait_owed tells the next holder that its settle hold must wait as long as an ack wait: the
 // term that released the record still owed one, so a message it, a dead holder before it, or a
@@ -175,9 +191,11 @@ func sameLastError(a, b error) (same bool) {
 // (lease.ackWaitOwed), so every release writes it as the term stands and every acquiring write
 // writes it false: a term that must settle owes an ack wait from its acquisition until its settle
 // hold ends (Settled), and one taken from a graceful hand-back stops owing as soon as it has
-// subscribed (SetReceiving), the stopping holder's linger having bridged to it. A released record
-// carrying unsettled without it, taken while that linger could still have bridged to the
-// take-over (leaseHandBackBridge), is a graceful hand-back (leaseStatus.HandedBack).
+// subscribed (SetReceiving), the stopping holder's linger having bridged to it. The release of a
+// term whose validity had run out writes it whatever the term owed: what the lapse dropped
+// without an ack comes back only at its ack wait. A released record carrying unsettled without
+// it, taken while that linger could still have bridged to the take-over (leaseHandBackBridge), is
+// a graceful hand-back (leaseStatus.HandedBack).
 //
 // receiving says the holder's subscription to the durable's deliver subject is up: every
 // acquiring write and every release writes it false, the holder sets it once it has subscribed
@@ -572,13 +590,17 @@ func (l *lease) FormerHolder(boot string) bool {
 }
 
 // Release stops the lease and, when this process holds the record, marks it released at its
-// revision, no longer receiving, keeping service_since, stale_binding, unsettled and former_boots
-// as they stand and writing ack_wait_owed as the term stands (lease.ackWaitOwed), so a standby
-// takes it at its next poll with no TTL wait, and settles in its turn when this term had not
-// settled or handed messages back. A record another pod has already taken is left as it is, and
-// that is no error. It returns ctx.Err() when ctx ends before the loop has stopped, and the
-// write's error when the record could not be marked; either way this process no longer holds the
-// lease, and a record left unreleased is taken as an expired one.
+// revision, no longer receiving, keeping service_since, stale_binding and former_boots as they
+// stand and writing unsettled and ack_wait_owed as the term stands (lease.ackWaitOwed), so a
+// standby takes it at its next poll with no TTL wait, and settles in its turn when this term had
+// not settled or handed messages back. A term whose validity had run out when it was stopped - a
+// lapse the renewals never resumed - releases the record unsettled and owing an ack wait,
+// whatever its own flags say: the lapse dropped what the term had in hand and what the durable
+// pushed it without an ack, and those come back only at their ack wait, as they would have from
+// the expired record this release replaces. A record another pod has already taken is left as it
+// is, and that is no error. It returns ctx.Err() when ctx ends before the loop has stopped, and
+// the write's error when the record could not be marked; either way this process no longer holds
+// the lease, and a record left unreleased is taken as an expired one.
 func (l *lease) Release(ctx context.Context) error {
 	l.mu.Lock()
 	stop, done := l.stop, l.done
@@ -596,14 +618,15 @@ func (l *lease) Release(ctx context.Context) error {
 }
 
 // letGo ends this process's hold and, when it held the record, marks the record released at its
-// revision, no longer receiving, keeping service_since, stale_binding, unsettled and former_boots
-// as they stand and writing ack_wait_owed as the term stands. It returns the released record's
-// revision, or zero when it wrote none: it did not hold the record, another pod had already taken
-// it (no error), or the write failed (its error).
+// revision, no longer receiving, keeping service_since, stale_binding and former_boots as they
+// stand and writing unsettled and ack_wait_owed as the term stands, or both of them set when the
+// term had lapsed (Release). It returns the released record's revision, or zero when it wrote
+// none: it did not hold the record, another pod had already taken it (no error), or the write
+// failed (its error).
 func (l *lease) letGo() (uint64, error) {
 	l.mu.Lock()
-	held, rev, record := l.held, l.rev, l.record
-	record.StaleBinding, record.Unsettled, record.AckWaitOwed, record.Receiving = l.staleBinding, l.unsettled, l.ackWaitOwed, false
+	held, lapsed, rev, record := l.held, l.held && !l.holdingLocked(), l.rev, l.record
+	record.StaleBinding, record.Unsettled, record.AckWaitOwed, record.Receiving = l.staleBinding, l.unsettled || lapsed, l.ackWaitOwed || lapsed, false
 	l.held, l.validUntil = false, time.Time{}
 	l.mu.Unlock()
 	if !held {
@@ -729,10 +752,7 @@ func (l *lease) renew() time.Duration {
 	l.rev, l.record = next, record
 	l.validUntil = start.Add(l.cfg.ttl - l.cfg.margin)
 	if lapsed {
-		l.term++
-		l.how = leaseTakenExpired
-		l.settle, l.handedBack, l.resumed = true, false, true
-		l.unsettled, l.receiving, l.ackWaitOwed = true, false, true
+		l.startTermLocked(leaseTakenExpired, true, false, true)
 	}
 	term := l.term
 	l.mu.Unlock()
@@ -742,6 +762,21 @@ func (l *lease) renew() time.Duration {
 		l.signal()
 	}
 	return l.cfg.renewEvery
+}
+
+// startTermLocked begins a term of this process's hold and is where every term's state is set,
+// whichever way it was taken: the take of a record (acquire) and the resume of this process's own
+// after its renewals lapsed (renew). It counts the acquisition, records how it was taken, whether
+// it must settle, whether it was taken from a graceful hand-back and whether it is a resume
+// (leaseStatus), and sets the flags that follow from settle: a term that must settle is unsettled
+// and owes its successor an ack wait from here until its settle hold ends (Settled), and no term
+// has subscribed when it starts. acquire records stale_binding itself, which it carries over from
+// the record it took. Callers must hold l.mu.
+func (l *lease) startTermLocked(how leaseAcquisition, settle, handedBack, resumed bool) {
+	l.term++
+	l.how = how
+	l.settle, l.handedBack, l.resumed = settle, handedBack, resumed
+	l.unsettled, l.ackWaitOwed, l.receiving = settle, settle, false
 }
 
 // stepDown ends the holder's hold after a renewal found another pod's record.
@@ -896,10 +931,8 @@ func (l *lease) acquire(previous nats.KeyValueEntry, record leaseRecord, how lea
 	l.mu.Lock()
 	l.held, l.rev, l.record = true, rev, record
 	l.validUntil = start.Add(l.cfg.ttl - l.cfg.margin)
-	l.term++
-	l.how = how
-	l.settle, l.handedBack, l.resumed = settle, handedBack, false
-	l.staleBinding, l.unsettled, l.receiving, l.ackWaitOwed = record.StaleBinding, settle, false, settle
+	l.startTermLocked(how, settle, handedBack, false)
+	l.staleBinding = record.StaleBinding
 	term := l.term
 	l.mu.Unlock()
 	l.seenRev, l.lapseSignalled = 0, false

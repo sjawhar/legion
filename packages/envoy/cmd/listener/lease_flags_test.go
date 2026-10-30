@@ -218,21 +218,84 @@ func TestLeaseATermTakenFromAHandBackOwesTheAckWaitUntilItSubscribes(t *testing.
 	}
 }
 
-// A released record is a graceful hand-back only while the stopping pod's linger can still have
-// bridged to the take-over (leaseHandBackBridge): its linger ends lingerUntaken after the release
-// when no other pod has taken the record, and what the durable pushed after that went to a lost
-// node's binding alone, or to no subscriber at all, and comes back only at its ack wait. A pod
-// that takes such a record later settles as after a hard take-over, however the record reads.
-func TestLeaseTakesAReleasedRecordPastTheLingerAsNoHandBack(t *testing.T) {
+// A term stopped while its renewals have lapsed releases the record unsettled and owing an ack
+// wait, whatever its own flags stand at: the lapse dropped what it held and what the durable
+// pushed it without an ack, and those come back only at their ack wait, so the next holder must
+// settle for one as it would have over the expired record this release replaces. At 57c6d1c5
+// (INFRA-557 review finding) the release wrote the lapsed term's clean flags, and the standby
+// that took it delivered new messages at once, ahead of the dropped ones.
+func TestLeaseAStopDuringALapseReleasesTheRecordUnsettled(t *testing.T) {
 	kv := leaseBucket(t)
 	clock := newFakeLeaseClock()
-	putLease(t, kv, `{"holder":"pod-gone","boot":"0011223344556677","released":true,"unsettled":true,"stale_binding":true}`)
-	time.Sleep(leaseHandBackBridge + 100*time.Millisecond)
 	a := testLease(kv, "pod-a", productionLeaseConfig(), clock.now)
+	b := testLease(kv, "pod-b", productionLeaseConfig(), clock.now)
 	a.step()
 	status := a.Status()
-	if !status.Holding || status.How != leaseTakenReleased || !status.Settle || status.HandedBack {
-		t.Fatalf("pod-a status = %+v, want held from a released record past its linger, settling, no hand-back", status)
+	if !status.Holding {
+		t.Fatalf("pod-a status = %+v, want held from an absent record", status)
+	}
+	// Its settle hold ended and it subscribed: the term owes nothing and holds nothing back.
+	a.Settled(status.Term)
+	a.SetReceiving(status.Term)
+	clock.advance(leaseRenewEvery)
+	a.step()
+	if record, _ := readLease(t, kv); record.Unsettled || record.AckWaitOwed {
+		t.Fatalf("record of a settled term = %+v, want neither flag", record.leaseFields)
+	}
+
+	// The lease connection stalls past the term's validity: the renewals lapse, and SIGTERM
+	// arrives before one resumes.
+	clock.advance(leaseTTL)
+	if a.Holding() {
+		t.Fatal("pod-a still holds the lease past its validity")
+	}
+	if err := a.Release(context.Background()); err != nil {
+		t.Fatalf("release pod-a: %v", err)
+	}
+	if record, _ := readLease(t, kv); !record.Released || !record.Unsettled || !record.AckWaitOwed {
+		t.Fatalf("record released during a lapse = %+v, want released, unsettled, owing an ack wait", record.leaseFields)
+	}
+
+	b.step()
+	next := b.Status()
+	if !next.Holding || next.How != leaseTakenReleased || !next.Settle || next.HandedBack {
+		t.Fatalf("pod-b status = %+v, want held from a released record, settling for an ack wait, no hand-back", next)
+	}
+}
+
+// A released record is a graceful hand-back only while the stopping pod's linger can still have
+// bridged to the take-over (leaseHandBackBridge): a linger no pod has taken the record in ends
+// lingerUntaken after the release, and what the durable pushed after that went to a lost node's
+// binding alone, or to no subscriber at all, and comes back only at its ack wait. A pod that
+// takes such a record later settles as after a hard take-over, however the record reads. At
+// 57c6d1c5 (INFRA-557 review finding) the window was lingerUntaken and a standby poll, half a
+// second longer than any linger lasts, so a take-over at 1.2 s - a pod starting, or a standby
+// whose poll at 0.7 s failed - held for the hand-back's 3 s with nothing on the deliver subject
+// to have bridged to it, and delivered the messages it then held before the older ones still due
+// from the lost node's binding.
+func TestLeaseTakesAReleasedRecordPastTheLingerAsNoHandBack(t *testing.T) {
+	for _, row := range []struct {
+		name       string
+		record     string
+		after      time.Duration
+		handedBack bool
+	}{
+		{"taken while the linger holds", `{"holder":"pod-gone","boot":"0011223344556677","released":true,"unsettled":true}`, 0, true},
+		{"taken past the linger, no pod running to take it", `{"holder":"pod-gone","boot":"0011223344556677","released":true,"unsettled":true}`, lingerUntaken + 200*time.Millisecond, false},
+		{"taken past the linger beside a lost node's binding", `{"holder":"pod-gone","boot":"0011223344556677","released":true,"unsettled":true,"stale_binding":true}`, lingerUntaken + 200*time.Millisecond, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			kv := leaseBucket(t)
+			clock := newFakeLeaseClock()
+			putLease(t, kv, row.record)
+			time.Sleep(row.after)
+			a := testLease(kv, "pod-a", productionLeaseConfig(), clock.now)
+			a.step()
+			status := a.Status()
+			if !status.Holding || status.How != leaseTakenReleased || !status.Settle || status.HandedBack != row.handedBack {
+				t.Fatalf("pod-a status = %+v, want held from a released record, settling, handed back %v", status, row.handedBack)
+			}
+		})
 	}
 }
 

@@ -77,6 +77,36 @@ func raiseReplicas(js nats.JetStreamContext, bucket string, replicas int) (int, 
 	return info.Config.Replicas, nil
 }
 
+// RaiseMaxAge raises the stream of the existing bucket to keep a key's latest value for age when
+// it keeps it for less, and returns the age it kept it for, 0 when it left the bucket alone. A
+// bucket EnsureKeyValue creates is created with the age in its config; this is for one an earlier
+// build created with a shorter one, since a create that finds the bucket there changes nothing.
+// The update writes back the stream's deployed configuration with only its age changed, so the
+// bucket's copies, history, discard policy, direct get, rollup, delete settings, metadata and the
+// rest stay as they are. A bucket that keeps values as long or longer is left alone, so an
+// operator's longer age stands. As for the copies (raiseReplicas), a raise whose answer never
+// came succeeds when the stream, read again, holds the age (updateStream), and its error names
+// the bucket's stream: `raise KV_envoy_listener's max age: ...`.
+func RaiseMaxAge(js nats.JetStreamContext, bucket string, age time.Duration) (time.Duration, error) {
+	if age <= 0 {
+		return 0, nil
+	}
+	stream := "KV_" + bucket
+	info, err := js.StreamInfo(stream)
+	if err != nil {
+		return 0, fmt.Errorf("raise %s's max age: %w", stream, err)
+	}
+	if info.Config.MaxAge >= age {
+		return 0, nil
+	}
+	raised := info.Config
+	raised.MaxAge = age
+	if err := updateStream(js, &raised, func(again *nats.StreamInfo) bool { return again.Config.MaxAge >= age }); err != nil {
+		return 0, fmt.Errorf("raise %s's max age: %w", stream, err)
+	}
+	return info.Config.MaxAge, nil
+}
+
 // OpenKeyValue opens the existing KV bucket named bucket and creates nothing, as a rebuild does. It
 // raises nothing either: the start that opened the bucket with EnsureKeyValue did that.
 func OpenKeyValue(js nats.JetStreamContext, bucket string) (KeyValue, error) {

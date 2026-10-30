@@ -94,7 +94,9 @@ func TestMemory_ARecordedPairIsDeliveredUntilDeliveredAge(t *testing.T) {
 	mustAttempt(t, m, "key-1", "ses-B", Proceed)
 	mustAttempt(t, m, "key-2", "ses-A", Proceed)
 
-	clock.Advance(DeliveredAge)
+	// The bound is exclusive in both ledgers (deliveredStops): a record exactly DeliveredAge old
+	// stops nothing.
+	clock.Advance(DeliveredAge - 1)
 	mustAttempt(t, m, "key-1", "ses-A", Delivered)
 	clock.Advance(1)
 	mustAttempt(t, m, "key-1", "ses-A", Proceed)

@@ -152,7 +152,7 @@ while the old pod still delivers.
 | Starting | 503 | `{"status":"starting"}` | Up, init in progress: NATS connecting, caches warming or the OIDC issuer's discovery pending. Webhooks answer 503 until NATS and the CI store are open, `/v1/*` until the interest and session caches are warm too |
 | Active | 200 | `{"status":"healthy","role":"active",...}` | Serving, and this pod receives the durable; the body carries its lag |
 | Standby | 200 | `{"status":"healthy","role":"standby","active_instance":...}` | Serving; another pod of the machine id holds the lease |
-| Degraded | 200 | `{"status":"degraded","error":"..."}` | A KV dependency or the durable's lag read failed transiently; NATS reconnect and the monitor retry |
+| Degraded | 200 | `{"status":"degraded","error":"..."}` | A KV dependency or the durable's lag read failed transiently (NATS reconnect and the monitor retry), or this pod is the machine's deliverer and does not receive the durable yet: it holds the delivery lease, runs without one, has read no holder at all, or the lease record still names it while its renewals have lapsed. Nothing of the durable reaches a session until it receives, so no such answer is healthy; it stays 200, so a readiness probe keeps the pod in service |
 | Unhealthy | 503 | `{"status":"unhealthy","error":"..."}` | NATS, the role subscription, a KV watcher or, on the active pod, the subscription or the durable consumer is gone |
 
 Every answer comes within 5 s (`healthzDeadline`): a check still running then makes the answer

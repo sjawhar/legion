@@ -90,12 +90,12 @@ func (m *Memory) Keep(attempt Attempt) {
 	}
 }
 
-// live reports whether record still stops a delivery of its pair: a delivered record for
-// DeliveredAge, and an attempt by the ledgers' shared rule (attemptHolds).
+// live reports whether record still stops a delivery of its pair, by the ledgers' shared rules: a
+// delivered record by deliveredStops, an attempt by attemptHolds.
 func (m *Memory) live(record memoryRecord, now time.Time) bool {
 	age := now.Sub(record.at)
 	if record.delivered {
-		return age <= DeliveredAge
+		return deliveredStops(age, DeliveredAge)
 	}
 	return attemptHolds(age, record.kept, m.takeoverAfter)
 }

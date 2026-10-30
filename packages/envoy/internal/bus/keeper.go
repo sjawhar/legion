@@ -23,34 +23,57 @@ func withKeepInterval(interval time.Duration) ConnectOption {
 }
 
 // startKeeper starts the keeper of a client whose start reconciled the stream with cfg
-// (ensureStreamWithConfig), which keeps buckets (WithKeptBuckets) at cfg's copies too: the
-// constructor's start once install has returned, and the first connection's on a client that
-// connects in the background (ensureStreamOnce), which a Close or Drain can stop first. A client
-// already stopped starts none. The client's stop ends it (Close and Drain wait for it:
-// awaitKeeper). The check and keeperDone's write are one step under mu, and Close and Drain stop
-// the client before awaitKeeper reads keeperDone under mu, so a keeper either sees the stop or is
-// waited for.
-func (c *Client) startKeeper(cfg nats.StreamConfig, buckets []string, interval time.Duration) {
+// (ensureStreamWithConfig), which keeps the client's buckets (WithKeptBuckets, KeepBucket) at
+// cfg's copies too: the constructor's start once install has returned, and the first connection's
+// on a client that connects in the background (ensureStreamOnce), which a Close or Drain can stop
+// first. A client already stopped starts none. The client's stop ends it (Close and Drain wait for
+// it: awaitKeeper). The check and keeperDone's write are one step under mu, and Close and Drain
+// stop the client before awaitKeeper reads keeperDone under mu, so a keeper either sees the stop
+// or is waited for.
+func (c *Client) startKeeper(cfg nats.StreamConfig, interval time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.stopped() {
 		return
 	}
 	c.keeperDone = make(chan struct{})
-	go c.keep(c.keeperDone, cfg, buckets, interval)
+	go c.keep(c.keeperDone, cfg, interval)
+}
+
+// KeepBucket adds bucket to the ones this client's keeper raises back to the deployment's replica
+// count every period (WithKeptBuckets), from the next pass on: a program that opens a bucket only
+// once something else succeeded - the listener opens the listener state bucket only when its NATS
+// user may (openListenerState) - names it here rather than at its connect, where a pod without
+// the grant would have the keeper refused on it every period. A bucket the client already keeps
+// is not added twice. A client that runs no keeper (it does not own the stream) keeps the name
+// and raises nothing.
+func (c *Client) KeepBucket(bucket string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if slices.Contains(c.keptBuckets, bucket) {
+		return
+	}
+	c.keptBuckets = append(slices.Clone(c.keptBuckets), bucket)
+}
+
+// buckets is the list the keeper's next pass raises (KeepBucket).
+func (c *Client) buckets() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.keptBuckets
 }
 
 // keep is the keeper: every interval it puts back what the deployment's settings and this binary
-// ask of the stream (keepStream) and raises each of buckets, the program's own (WithKeptBuckets),
-// back to the deployment's copies (raiseReplicas), until the client stops. A start's reconcile can
-// lose to a concurrent start with other settings or subjects, since JetStream's stream update has
-// no compare-and-swap (ensureStreamWithConfig), and an operator can lower either by hand; the
-// keeper ends both within one period. A pass waits for a live connection: a pass while the client
-// is not connected is skipped, and none starts once the client has stopped, though a tick and the
-// stop came together. A pass that fails is logged and the next period tries again: the keeper never
-// stops the client or the process. A failure once the client has stopped is the stop's, and is not
-// logged.
-func (c *Client) keep(done chan struct{}, cfg nats.StreamConfig, buckets []string, interval time.Duration) {
+// ask of the stream (keepStream) and raises each of the client's buckets (WithKeptBuckets,
+// KeepBucket) back to the deployment's copies (raiseReplicas), until the client stops. A start's
+// reconcile can lose to a concurrent start with other settings or subjects, since JetStream's
+// stream update has no compare-and-swap (ensureStreamWithConfig), and an operator can lower
+// either by hand; the keeper ends both within one period. A pass waits for a live connection: a
+// pass while the client is not connected is skipped, and none starts once the client has stopped,
+// though a tick and the stop came together. A pass that fails is logged and the next period tries
+// again: the keeper never stops the client or the process. A failure once the client has stopped
+// is the stop's, and is not logged.
+func (c *Client) keep(done chan struct{}, cfg nats.StreamConfig, interval time.Duration) {
 	defer close(done)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -64,7 +87,7 @@ func (c *Client) keep(done chan struct{}, cfg nats.StreamConfig, buckets []strin
 			return
 		}
 		if c.Connected() {
-			c.keepPass(&cfg, buckets)
+			c.keepPass(&cfg, c.buckets())
 		}
 	}
 }
