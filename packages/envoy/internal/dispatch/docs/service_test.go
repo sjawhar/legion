@@ -723,7 +723,7 @@ func TestSetAskBlockTextRefusalOfATwoListAskQuotesEveryBlock(t *testing.T) {
 		ids = append(ids, strconv.Quote(id))
 	}
 	want := `block: ask block "ask-lists", asking "Should we ship?", holds a second bullet list where its content rule, paragraph+ bullet_list?, allows one or more paragraphs and then at most one bullet list, last; ` +
-		`the ask-edit route does not rebuild a decision that breaks its content rule, so delete the blocks to drop, all in one document edit (dispatch doc-edit, deleting a block by its id; one edit holding one delete per block), which keeps the question's paragraphs and the first list after them, here and in every decision nested in the blocks it keeps; ` +
+		`the ask-edit route does not rebuild a decision that breaks its content rule, so delete the blocks to drop, all in one document edit (dispatch doc-edit, deleting a block by its id; one edit holding one delete per block), which keeps the question's paragraphs and the first list after them, and keeps the same of every decision nested in the blocks it keeps, deleting whole a nested decision the rule leaves nothing of; ` +
 		`the blocks to delete are ` + ids[2] + `; then edit the ask; its blocks are: ` +
 		`block ` + ids[0] + ` (paragraph) reads "Should we ship?"; ` +
 		`block ` + ids[1] + ` (bullet_list) reads "- Ship: Release it\n- Hold: Wait for review"; ` +
@@ -944,8 +944,17 @@ func TestEditAskRepairsAnEmptyQuestion(t *testing.T) {
 		})
 		settleCurrentGeneration(t, service, artifactID)
 		options := firstAsk(liveTree(t, service, artifactID)).Children[1]
-		if err := sendAskOptions(service, artifactID, AskBlockEdit{Question: new("Should we ship it today?")}); err != nil {
+		var stored AskBlockText
+		if err := joinedWrite(service, func(ctx context.Context) (err error) {
+			stored, err = service.SetAskBlockText(ctx, artifactID, "ask-lists",
+				AskBlockEdit{Question: new("Should we ship it today?")}, model.Actor{Kind: "user", ID: "alice"})
+			return err
+		}); err != nil {
 			t.Fatalf("the ask edit sending a question to the emptied decision: %v", err)
+		}
+		if stored.SeveralOptionLists {
+			t.Fatalf("the repair of a decision holding one list reports it as holding several, "+
+				"so its row would keep options the block does not hold: %#v", stored)
 		}
 		ask := firstAsk(liveTree(t, service, artifactID))
 		block, err := parseAskBlock(ask)
@@ -1026,6 +1035,12 @@ func TestEditAskRepairsAnEmptyQuestion(t *testing.T) {
 			t.Fatalf("the ask row takes question %q with options %#v, want what the block holds",
 				stored.Question, stored.Options)
 		}
+		// The block holds both lists, so no parse reads it as a decision and the options above
+		// are the two lists joined. The write says so, and the ask-edit route keeps the row's
+		// own options rather than writing that reading into it.
+		if !stored.SeveralOptionLists {
+			t.Fatalf("the repair of a decision holding two lists does not report them: %#v", stored)
+		}
 	})
 }
 
@@ -1077,8 +1092,9 @@ func TestEditAskOfAnEmptyQuestionNamesTheStep(t *testing.T) {
 
 	// The paragraph a question would be written over holds no text, but it holds an image, which
 	// no question carries: writing the question would delete it unseen. The refusal quotes it and
-	// names the one place it is kept, the document editor, since a document edit cannot write a
-	// question beside it either.
+	// names the two places it is kept, since a document edit cannot write a question beside it:
+	// an upload of the document as a new version, which is the path an agent has, and the
+	// document editor, where a person writes it.
 	t.Run("a paragraph the question would replace holds an image", func(t *testing.T) {
 		service, artifactID := seedIndexedShipAsk(t, "ask-lists")
 		editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
@@ -1092,8 +1108,10 @@ func TestEditAskOfAnEmptyQuestionNamesTheStep(t *testing.T) {
 		err := sendAskOptions(service, artifactID, AskBlockEdit{Question: new("Should we ship?")})
 		want := `block: ask block "ask-lists" has an empty question, and writing a question into it would delete ` +
 			`what one of its paragraphs holds, which is no text: block ` + strconv.Quote(photo) +
-			` (paragraph) reads "![a photo](/photo.png)"; write the question beside it in the document editor, ` +
-			`which keeps it`
+			` (paragraph) reads "![a photo](/photo.png)"; upload the document again as a new version with ` +
+			`the question written beside that paragraph (dispatch artifact --name <the document> ` +
+			`--content-file -), which is accepted for such a block, or write the question beside it in the ` +
+			`document editor; either keeps what the paragraph holds`
 		if err == nil || err.Error() != want {
 			t.Fatalf("refusal =\n%v\nwant\n%s", err, want)
 		}

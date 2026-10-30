@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -996,5 +997,77 @@ func TestAskBlockOptionsEditKeepingContentSettlesUnchanged(t *testing.T) {
 	if len(ask.Options) != 2 || ask.Options[0] != (model.AskOption{Label: "REST", Description: "Ship now"}) ||
 		ask.Options[1] != (model.AskOption{Label: "gRPC", Description: "Adds streaming"}) {
 		t.Fatalf("the ask reads %#v after settling, want the options the edit sent", ask.Options)
+	}
+}
+
+// A browser can leave a decision whose question is empty and which holds a second bullet list.
+// An ask edit carrying a question repairs the question, and keeps both lists: the block it leaves
+// still reads as no decision, and what it parses back to joins the options of both lists. The row
+// keeps the options it was indexed with - settlement leaves the row of a block it cannot read as
+// it was, so a row given that reading would offer a person options read out of a stray list until
+// somebody repairs the block - while the question and the urgency the edit named are written.
+func TestEditOfAnAskWhoseBlockHoldsASecondListKeepsTheRowsOptions(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{
+			Store: database, Settle: 20 * time.Millisecond, Identity: headerIdentity(database),
+		})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue, askID := seedBlockAsk(t, handler, "Block ask second list", "decision", transportAsk, "Which transport?")
+	indexed := readBlockAsk(t, handler, askID).Options
+
+	// What no route writes: a browser empties the question and leaves a second list behind.
+	second, err := pmdoc.Parse("- Ship: Release it\n")
+	if err != nil {
+		t.Fatalf("parse the second list: %v", err)
+	}
+	peer := connectBrowserPeer(t, documentService, issue.PrimaryArtifactID)
+	t.Cleanup(peer.close)
+	peer.edit(t, func(tree *pmdoc.Node) error {
+		for _, child := range tree.Children {
+			if id, _ := child.Attrs[pmdoc.BlockIDAttr].(string); id != "decision" {
+				continue
+			}
+			child.Children[0].Children = nil
+			child.Children = append(child.Children, second.Children...)
+			return nil
+		}
+		return fmt.Errorf("the document holds no block under %q", "decision")
+	})
+	peer.barrier(t)
+
+	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"question": "Which transport ships this week?", "urgency": "low", "actor": sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("repair the emptied question: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	repaired := decodeBody[model.Ask](t, edited)
+	if repaired.Question != "Which transport ships this week?" || repaired.Urgency != "low" {
+		t.Fatalf("the repaired ask reads question=%q urgency=%q, want the edit's own",
+			repaired.Question, repaired.Urgency)
+	}
+	if !slices.Equal(repaired.Options, indexed) {
+		t.Fatalf("the repaired ask holds options %#v, want the %#v its row held: the block's two lists "+
+			"joined are no decision's options", repaired.Options, indexed)
+	}
+	// The document holds both lists - the second written with a bullet marker of its own, which
+	// is how the markdown keeps two lists apart - so the block is still no decision, and the row
+	// the next settlement leaves alone is the one the edit wrote.
+	written := documentMarkdown(t, handler, issue.PrimaryArtifactID)
+	for _, want := range []string{
+		"Which transport ships this week?", "- REST: Matches the platform", "- gRPC: Adds streaming", "Ship: Release it",
+	} {
+		if !strings.Contains(written, want) {
+			t.Fatalf("the document does not carry %q after the repair:\n%s", want, written)
+		}
+	}
+	settleDocument(t, handler, issue.PrimaryArtifactID, issue.Key, "after-repair")
+	if stored := readBlockAsk(t, handler, askID); !slices.Equal(stored.Options, indexed) ||
+		stored.Question != "Which transport ships this week?" {
+		t.Fatalf("the ask reads question=%q options=%#v after settling, want the repaired question and the "+
+			"options its row held", stored.Question, stored.Options)
 	}
 }
