@@ -29,8 +29,8 @@ skill before the tree's work starts: extend the issue's own primary document in 
 specification (never post a second "spec" artifact — that replaces the human's document), written
 as `skill://dispatch-writing-specs` says. Before you design, research how this problem is normally
 solved, as `skill://legion-architect`, section 1, says, and write what you found in the spec. Your
-decomposition, its waves, how each outcome is proven and the integration test go in the child
-issues and the planner's `.legion/<issue>/plan.json`, not the root spec. Once its ask blocks are
+decomposition, its waves and how each outcome is proven go in the child issues and the
+planner's `.legion/<issue>/plan.json`, not the root spec. Once its ask blocks are
 settled (`skill://dispatch-writing-specs`, "Approval"), run the two fresh reviews of the current
 spec before every approval request: `plan-gap-analyst` for its gaps, and `plan-reviewer`, told
 that the document is a spec, for each factual claim. Resolve every finding, and check with a

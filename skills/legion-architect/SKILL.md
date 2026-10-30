@@ -26,8 +26,9 @@ You own one issue tree from its first decision to the merge that closes it. The 
 - Read a child's handoff, create children, split across repositories or attach architecture components as `skill://legion-architect/references/decomposition.md` says.
 - Adopt children a human created and release them in the first wave. Never replace or re-decompose them.
 - Choose a single-issue tree only when one pull request in one repository can deliver every criterion.
-- Every child names the running system its criteria are proven on (the command, service or page the tester drives) and the repository skill that drives it. If the repository cannot exercise a criterion end to end, building that path is a child of this tree.
-- The issue's primary document is the root spec: extend it in place, because a second "spec" artifact replaces the human's document. The waves, the proof of each outcome and the integration test go in the children and `.legion/<issue>/plan.json`, not the root spec.
+- A child issue is a separately deliverable change: its own pull request in its own repository, or its own deploy. Never use a child to track a to-do, a fix found in review, a proof of the root's acceptance, or a part of your own work: do it in this tree. Each child costs a workspace, an admission wait and a review loop. Before any `dispatch issue` that creates a child, and before `release_children`, run the red-team check in `skill://legion-architect/references/decomposition.md`.
+- Every child names the running system its criteria are proven on (the command, service or page the tester drives) and the repository skill that drives it. If the repository cannot exercise a criterion end to end, building that path is work of this tree.
+- The issue's primary document is the root spec: extend it in place, because a second "spec" artifact replaces the human's document. The waves and the proof of each outcome go in the children and `.legion/<issue>/plan.json`, not the root spec.
 - Read `skill://legion-architect/references/design-gate.md` before you write the root spec and before any edit to it after approval, because any new version closes the gate. It also says which gate runs, and that a sub-architect runs none.
 - A root architect then ends its turn and releases no wave until a delivered wake shows `design-approved`: the daemon starts no phase in the tree before it. A root that waited on a person's answer gets no `design-approved` notice: a resume task saying "this resume is your design-approved wake" is that wake. A sub-architect waits for none and releases its children with `release_children`.
 
@@ -43,12 +44,12 @@ You own one issue tree from its first decision to the merge that closes it. The 
 
 ## 3. Children complete
 
-No notice marks the last child's close. The root can reach `accepting` before any child merges; accept its own pull request then (section 6), and its close waits for the rest of the tree.
+No notice marks the last child's close. The root can reach `accepting` before any child merges: sign it off only after its last round (section 4).
 
 ## 4. Integration verification
 
-- File a final integration child whose acceptance is every parent criterion proven on the default branch your addressing line names (never a hard-coded `main`), in each repository a criterion spans. Release it at once with `--blocked-by` naming every other child: Legion holds it until the last of them closes and starts it then, so it tests a branch that carries their merges. The root's close waits for it, so the root is done only once it closes. Each child you add later joins its `--blocked-by` list in the same turn it is filed (section 2).
-- Read its tester evidence, not a child pull request's check status. A failed check goes back to its implementer by the daemon's table; when the fix belongs in other work, create and release a corrective child wave. Never downgrade a parent criterion or carry the failure forward.
+- Prove every parent criterion in this tree, in the root's own pull request, never in a child: a child that proves the root defers the tree's own verification. How its last round carries the children's merges: `skill://legion-architect/references/acceptance.md`, "The root's last round".
+- Read its tester evidence, not a child pull request's check status. A failed check goes back to its implementer by the daemon's table; a fix that belongs in other work goes into an open pull request of this tree that touches that code. Never downgrade a parent criterion or carry the failure forward.
 
 ## 5. Retro
 
@@ -63,7 +64,7 @@ The reviewer's `phase-finished` with an `APPROVED` review puts the issue in `acc
 - the reviewer's approval of that head by SHA (`gh api --paginate repos/<o>/<r>/pulls/<n>/reviews`);
 - each claim the reviewer's prose commits to, checked against the code at that head and command output, never against the finding it ruled on or its own verdict: no other agent has read that prose.
 
-Accept only when each acceptance line of the issue's own pull request has passing evidence at the approved head and no criterion left the tree; a criterion only the tree as a whole meets is the integration child's (section 4), not a reason to hold the root's own pull request. A finding ask on the issue holds the acceptance until it is resolved or carries the controller's reply (`skill://legion-architect/references/acceptance.md`). Post that evidence as a `dispatch comment`, then `legion({ op: "sign_off", issue: "<KEY>" })`.
+Accept only when each acceptance line of the issue's own pull request has passing evidence at the approved head and no criterion left the tree; on a root, that head is section 4's last round. A finding ask on the issue holds the acceptance until it is resolved or carries the controller's reply (`skill://legion-architect/references/acceptance.md`). Post that evidence as a `dispatch comment`, then `legion({ op: "sign_off", issue: "<KEY>" })`.
 
 - `sign_off` works only in `accepting` (`SIGNOFF_OUTSIDE_ACCEPTING`). Children still in the workflow do not hold it: a root whose pull request merges waits at its close for the rest of its tree.
 - When an acceptance check fails: `request_backward_move` with `issue`, `to` (`implementing` or `testing`) and a `reason` naming the failure. It counts a review round.
@@ -81,5 +82,5 @@ Handle each delivered wake by its row in `skill://legion-architect/references/wa
 
 - `envoy_publish` to the controller (its topic is on your addressing line) a child that serves no criterion of the root, a need for admission slots, and two trees changing the same code, because only it sees other trees. Handle everything else.
 - A decision that needs the human, yours or a worker's, is a decision block you write, never the worker, because a new version of an approved root spec closes the gate.
-- A clear defect the controller hands you is in code your tree owns, so it is work inside the tree. Add it to an open child whose pull request touches that code. File a child (`dispatch issue --parent`) only when none does. Reply under its evidence comment with the issue that carries it. Change no root spec for it: a child's spec is never gated, and a new root-spec version closes the gate (`skill://legion-architect/references/design-gate.md`, "After approval"). Only a fix that would change the root's Summary, Acceptance or scope is a decision block instead.
+- A clear defect the controller hands you is in code your tree owns, so it is work inside the tree. Add it to an open pull request of this tree in that code's repository, the root's or a child's. File a child (`dispatch issue --parent`) only when none is open there, after the red-team check (section 1). Reply under its evidence comment with the issue that carries it. Change no root spec for it: a child's spec is never gated, and a new root-spec version closes the gate (`skill://legion-architect/references/design-gate.md`, "After approval"). Only a fix that would change the root's Summary, Acceptance or scope is a decision block instead.
 - A tool a worker cannot get is yours: a pull request changing `sjawhar/legion`'s worker image (`skill://legion-worker/references/tools.md`).

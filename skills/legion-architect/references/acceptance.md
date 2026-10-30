@@ -30,9 +30,9 @@ legion({ op: "sign_off", issue: "LEGION-40" })
   is in `accepting`, and the `phase-finished` notice that moved it there may never have reached you
   (the daemon drops a notice to a failed architect, so a retried one learns of the wait from its
   catch-up alone). Accept it as above.
-- Nothing beneath the issue holds the acceptance: accept a parent's own reviewed head while its
-  children still run. A root's close waits for them instead (*The close*, below); a parent that is
-  not the root closes at its own merge, and its children carry on under the root.
+- The daemon lets nothing beneath the issue hold `sign_off`. A parent that is not the root: accept
+  its own reviewed head while its children still run; it closes at its own merge, and its children
+  carry on under the root. A root: sign off only after its last round (below).
 - `request_backward_move` names the issue, because your grant serves the tree; the daemon starts
   that phase's role with your reason in its task.
 - `handoff_complete` from you in `accepting` is refused `ACCEPTANCE_IS_SIGN_OFF`. CI red at the head
@@ -45,6 +45,17 @@ legion({ op: "sign_off", issue: "LEGION-40" })
   to the controller topic. Accept only once each is resolved, or carries the controller's
   `Filed dispatch://`, `Handed dispatch://` or `Not filed:` reply, because a closed issue hides its
   asks from the controller.
+
+## The root's last round
+
+The root's own pull request proves every parent criterion, so a root is signed off only on an
+approved head that carries the merges of every child the criteria need, with tester evidence of
+each parent criterion on that head, in each repository a criterion spans. When the approved head
+does not carry them, leave the root in `accepting` until those children close (each
+`child-closed` is the wake), then `request_backward_move` it to `implementing` with a reason that
+names this round: its implementer brings the branch up to the default branch your addressing line
+names (never a hard-coded `main`), and its tester proves each criterion there. The move counts a
+review round.
 
 ## The order after your acceptance
 

@@ -31,6 +31,17 @@ dispatch issue --project <project> --parent <root issue> --title '<child outcome
 EOF
 ```
 
+- Before `dispatch issue` creates any child, dispatch a fresh red-team subagent (`task`) with the
+  root spec and the proposed child list, each child's title and whole spec. Its mandate: *"You did
+  not write this list. Argue that each child should not exist. Name every child that is a to-do, a
+  fix found in review, a proof of the root's acceptance, or a part of the architect's own work,
+  and say where it folds: the root's pull request or an open child's."* A child that is its own
+  pull request in its own repository, or its own deploy, survives. File only the survivors, and
+  post the verdict, with the folds you made, as one `dispatch comment` on the root: the architect
+  who wrote the list reads every child on it as needed, and the comment stops a later session
+  filing the same children again.
+- Before `release_children`, read that every child you filed has its verdict on the root. A child
+  a human created is adopted as it is and needs none.
 - Write each child's spec as `skill://dispatch-writing-specs` says, scaled to the child: its
   outline (`Summary` through `Acceptance`, a few sentences a part for a small child), a proposed
   answer to each point, each term a new reader may not know explained, no item number from another
