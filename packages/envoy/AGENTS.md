@@ -2350,16 +2350,24 @@ replaces the question's paragraphs with what the markdown pipeline parses, so th
 attributes any other document write gives them, and anchors inside the text actually replaced are
 affected as they are by any document edit. Naming `options` writes only the lines it sends: each
 sent option is paired with the list item already holding it, by label and first unused match, so
-an option the edit does not change keeps its own node - its block id, its marks and the sub-list,
-second paragraph or link a person wrote under it - and one whose description it changes keeps
-every block under its line, which is rewritten in place (`editedOptionList` in
-`docs/ask_block_text.go`). An item no sent option matches is dropped only where it holds nothing
-but its plain line; otherwise the whole edit is refused `400 ASK_BLOCK_TEXT` with field `options`,
-nothing written, quoting that item's markdown whole and naming `dispatch doc-edit`, since the ask
-row shows an option's label and description alone and the sender cannot see what dropping it
-deletes - which is what a removal, a rename and an edit sending no option at all come to. The
-merged list is rendered and parsed back as any other document write is, on a budget of its own,
-since what it carries under an option is the document's text and not the caller's, and the list's
+an option the edit does not change keeps its own node - its line as it stands, its block id, its
+marks and the sub-list, second paragraph or link a person wrote under it - and one whose
+description it changes keeps every block under its line, which is rewritten in place
+(`editedOptionList` in `docs/ask_block_text.go`). An item no sent option matches is dropped only
+where it holds nothing but its plain line, and a line is rewritten only where it writes nothing
+but its text; otherwise the whole edit is refused `400 ASK_BLOCK_TEXT` with field `options`,
+nothing written, quoting that item or that line whole and, for a drop, naming `dispatch doc-edit`,
+since the ask row shows an option's label and description alone and the sender cannot see what
+dropping it deletes - which is what a removal, a rename and an edit sending no option at all come
+to - or what rewriting a line holding a link's address, bold, code or an image deletes. What those
+refusals weigh is what the markdown writes, never what the nodes hold, so a mark no reader sees -
+the editor's own on every character a person types - is nothing to lose. Settlement's restore of a
+decided ask's recorded wording goes through the same merge with no caller to answer a refusal
+(`writeDecidedWording`), so it drops an item no decided option is paired with, whatever that item
+holds, and rewrites a line this route would refuse: a block left disagreeing with the row of the
+ask it was decided on would disagree for good. The merged list is rendered and parsed back as any
+other document write is, on a budget of its own, since what it carries under an option is the
+document's text and not the caller's, and the list's
 and the kept items' own block ids and nodes are put back afterwards. A field named but unchanged
 is not rewritten, so an idempotent retry of the whole ask writes nothing, versions nothing and
 keeps every anchor.
@@ -2402,10 +2410,16 @@ its blocks lands beside the decision rather than in it (`pmdoc.BlockBoundary` re
 document-level block holding the anchor) and a delete may not leave a decision asking nothing, so
 an ask edit carrying a question is what repairs it. Such an edit is written into the block
 whatever its content rule says, the question's paragraphs followed by every bullet list the block
-holds, each the node the document already holds (`repairedAskBlockChildren`); every paragraph it
+holds, each the node the document already holds (`askBlockChildren`); every paragraph it
 replaces holds no text, and one holding what is no text - an image, a link whose text is empty -
-is refused instead, quoted, with the document editor named. An edit of such a block carrying no
-question is refused `400 ASK_BLOCK_TEXT` with field `block`, naming that step, and one naming
+is refused instead, quoted, naming the two places the question is written without losing it: an
+upload of the document as a new version, which carries such a block and is the path an agent has,
+and the document editor, where a person writes it. A repair that leaves the block holding more
+than one list says so (`docs.AskBlockText.SeveralOptionLists`), since what that block parses back
+to joins the options of every one of its lists, the reading a row must not take: the route writes
+the question, `multiple` and `urgency` into the row and keeps the options the row holds, which
+settlement leaves alone while the block reads as no decision (`editAsk`). An edit of such a block
+carrying no question is refused `400 ASK_BLOCK_TEXT` with field `block`, naming that step, and one naming
 `options` on a block holding more than one list is refused with field `options`, since no sent
 option can say which list it is in. A decision that still breaks its content rule once it asks
 something is refused as above, and the document edit that refusal names then applies.
