@@ -283,7 +283,7 @@ export function isUnauthorized(error: unknown): boolean {
 /** Whether `error` is the sign-in check's `503 EVENT_HEAD_UNAVAILABLE`: Dispatch has no event id
  *  it can vouch for as final yet, which a process just restarted while an event write from before
  *  it is still open answers until that write ends. The page asks again until it answers
- *  (`whoAmIQuery`); nothing about the session is wrong. */
+ *  (`queryRetry`); nothing about the session is wrong. */
 export function isEventHeadUnavailable(error: unknown): boolean {
   return (
     error instanceof ApiError && error.status === 503 && error.code === "EVENT_HEAD_UNAVAILABLE"
