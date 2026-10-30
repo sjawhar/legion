@@ -1,5 +1,26 @@
 # Changelog
 
+## [main@49e23926228d] - 2026-10-30
+
+### Added
+
+- `dispatch comment --reply-to` and `dispatch message --in-reply-to` take a block reference to answer one block, `dispatch read` prints the block a reply answers (`Re: block b2: …`) and reads a block of a comment or message by its reference, and `commentBlocks` and `messageBlocks` read an item's blocks.
+
+### Changed
+
+- The `envoy_publish` description says when a publish errs: a role message errs when its holder
+  did not confirm it within the listener's window, and a team or other ad-hoc topic, which the
+  listener now confirms with each other session that holds its own NATS connection and registered
+  the topic, errs naming each session that did not confirm. A session that stopped without
+  unregistering stays registered for up to 5 minutes and is named in that time, and a named
+  session is not a failed delivery to the other sessions. A session on a serve port is not
+  confirmed.
+- `dispatch read` asks for each referenced document's latest version only (`GET /api/v1/issues/{key}/references?versions=latest`), so Dispatch builds a fraction of the answer; the printed `References:` section is unchanged, also against a Dispatch that does not know the parameter.
+- The related-item check's lines take which form an answer holds from `@legion/contracts`'
+  `relatedCheckFormOf` rather than judging it here, and word that form exactly as before. For
+  every answer a Dispatch server sends, no line a reader sees changes; an answer whose `related`
+  is not an array, which the contract does not allow, now prints the not-made line naming why.
+
 ## [main@1f5b08286a6d] - 2026-10-29
 
 ### Added

@@ -851,7 +851,7 @@ func TestRenderKeepsTextAroundFootnoteReferences(t *testing.T) {
 	}
 	undefined := &Node{Type: "doc", Children: []*Node{paragraph(text("[^2] stays"), reference("1")), definition("1")}}
 	if got := mustRender(t, undefined); !strings.HasPrefix(got, "[^2] stays") {
-		t.Fatalf("Render() = %q, want text naming an undefined label written as main writes it", got)
+		t.Fatalf("Render() = %q, want text naming an undefined label written as the writer before sjawhar/legion#1429 writes it", got)
 	}
 }
 
@@ -886,7 +886,7 @@ func TestRenderKeepsBlankCodeLinesInFootnoteDefinitions(t *testing.T) {
 	}
 	quoted := &Node{Type: "doc", Children: []*Node{{Type: "blockquote", Children: []*Node{code("a\n\nb")}}}}
 	if got, want := mustRender(t, quoted), "> ```\n> a\n> \n> b\n> ```\n"; got != want {
-		t.Fatalf("Render() = %q, want the bytes main writes, %q", got, want)
+		t.Fatalf("Render() = %q, want the bytes the writer before sjawhar/legion#1429 writes, %q", got, want)
 	}
 }
 

@@ -1,5 +1,36 @@
 # Changelog
 
+## [main@49e23926228d] - 2026-10-30
+
+### Added
+
+- The Dispatch tools take a block reference in `reply_to` and `in_reply_to` to answer one block of a comment or message, and read a block of a comment or message by its reference.
+
+### Changed
+
+- The bundled `envoy_publish` description says a role message errs when its
+  holder did not confirm it within the listener's window, and a team or other ad-hoc topic errs
+  naming each session holding its own NATS connection that registered the topic and did not
+  confirm it; a session that stopped without unregistering stays registered for up to 5 minutes
+  and is named in that time, and a named session is not a failed delivery to the others.
+- `dispatch read` asks for each referenced document's latest version only (`GET /api/v1/issues/{key}/references?versions=latest`), so Dispatch builds a fraction of the answer; the printed `References:` section is unchanged, also against a Dispatch that does not know the parameter.
+
+### Fixed
+
+- Main's rebuild of `dist/` and `legion/` lands even when main moved while its push job waited
+  for a runner: it commits the build onto main's tip whenever it is newer than the build main
+  holds, and starts one fresh run when a build input changed in between, so main's built plugin is
+  at most one run behind its inputs and never moves backward (#2493).
+  `scripts/build-inputs.txt` lists every path that can change the build; `tests/build-inputs.test.ts`
+  runs the build and fails when the bundles or the Legion plugin read a file the list does not
+  match (the files the build's scripts read by path are listed by hand).
+- A message the listener forwards to the session's agent subject is shown with the topic it was
+  published to: the channel notification's `topic` meta is the envelope's `topic`, falling back to
+  the NATS subject only when the envelope names none, where it was always the subject. A role
+  message's forward was shown under the session's own `notifications.agent.<id>`, and so was an
+  ad-hoc topic's copy the listener now confirms with the session, which can arrive before the copy
+  on the topic itself.
+
 ## [main@1f5b08286a6d] - 2026-10-29
 
 ### Added

@@ -980,8 +980,8 @@ __export(exports_coerce, {
 });
 
 // hooks/session-hook.ts
-import { appendFileSync, readFileSync as readFileSync5 } from "fs";
-import { join as join5 } from "path";
+import { appendFileSync, mkdirSync as mkdirSync2, readFileSync as readFileSync6, rmSync as rmSync3, statSync as statSync2, writeFileSync as writeFileSync2 } from "fs";
+import { join as join7 } from "path";
 
 // ../envoy-client/src/dispatch-execute.ts
 import { resolve as resolvePath2 } from "path";
@@ -13752,6 +13752,13 @@ var CommentDeliverySchema = object({
   reply_id: string2().nullable(),
   created_at: string2()
 });
+var ReplyBlockSchema = object({
+  node: string2(),
+  ref: string2().optional(),
+  block_id: string2(),
+  text: string2(),
+  removed: boolean2()
+});
 var CommentEventPayloadSchema = object({
   id: string2().optional(),
   artifact_name: string2().optional(),
@@ -13777,6 +13784,7 @@ var CommentEventPayloadSchema = object({
   created_at: string2().optional(),
   mentions: array(CommentMentionSchema).optional(),
   deliveries: array(CommentDeliverySchema).optional(),
+  reply_block: ReplyBlockSchema.nullish(),
   thread_logins: array(string2()).optional()
 }).passthrough();
 var MessageEventPayloadSchema = object({
@@ -13787,6 +13795,7 @@ var MessageEventPayloadSchema = object({
   reply_body: string2().optional(),
   thread_target: string2().optional(),
   author: object({ kind: string2(), id: string2() }).optional(),
+  reply_block: ReplyBlockSchema.nullish(),
   thread_logins: array(string2()).optional()
 });
 var DispatchTargetedResourceIDSchema = uuid2();
@@ -14341,7 +14350,7 @@ var dispatchToolSpecs = [
       quote: z.string().describe("Optional exact quoted document text.").optional(),
       occurrence: z.number({ int: true, min: 0 }).describe("Optional zero-based occurrence of quote.").optional(),
       body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Review comment, at most ${DISPATCH_BODY_MAX} characters.`),
-      reply_to: z.string().describe("A comment id (uuid); replying to any comment in a thread continues that thread (an " + "ask's clarification thread included). To reply to an ask, use reply_to_ask with the " + "ask id instead.").optional(),
+      reply_to: z.string().describe("A comment id (uuid); replying to any comment in a thread continues that thread (an " + "ask's clarification thread included). A block reference to one block of the comment " + "(dispatch://KEY/comment/<id>#b-<block id>) replies to that comment and names the " + "passage the reply answers. To reply to an ask, use reply_to_ask with the " + "ask id instead.").optional(),
       reply_to_ask: z.string().describe("Optional ask id to reply to, threading this comment under that question. Mutually " + "exclusive with reply_to.").optional(),
       turn: z.enum(["agent", "human"]).describe("Only with reply_to_ask: who holds the turn after this reply. agent: a progress note - " + "you keep the turn and the ask stays 'Waiting on agents' for the human; human (default): " + "you need the human to act - the ask returns to 'Waiting on you'.").optional(),
       images: imagesArgument(z, "the issue (or the project document's project)", `the ${DISPATCH_BODY_MAX}-character body limit`)
@@ -14376,7 +14385,7 @@ var dispatchToolSpecs = [
     arguments: (z) => ({
       issue: z.string().describe(`${ISSUE_REFERENCE} Omit it only when in_reply_to answers a human's direct message to this session.`).optional(),
       body: z.string({ max: DISPATCH_BODY_MAX }).describe(`Update text, at most ${DISPATCH_BODY_MAX} characters.`),
-      in_reply_to: z.string().describe("Optional message id or dispatch://KEY/message/<id> reference to reply to, threading " + "this message under it so the reply stays with the original in the Conversation. " + "A bare id with no issue answers a human's direct message to this session; a " + "dispatch://KEY/message/<id> names the issue its message lives on, so that form is a " + "reply on that issue.").optional(),
+      in_reply_to: z.string().describe("Optional message id or dispatch://KEY/message/<id> reference to reply to, threading " + "this message under it so the reply stays with the original in the Conversation. " + "A block reference to one block of the message (dispatch://KEY/message/<id>#b-<block id>) " + "replies to that message and names the passage the reply answers. " + "A bare id with no issue answers a human's direct message to this session; a " + "dispatch://KEY/message/<id> names the issue its message lives on, so that form is a " + "reply on that issue.").optional(),
       images: imagesArgument(z, "the issue (a reply to a direct message: your own conversation, dispatch://agent/<your session id>)", `the ${DISPATCH_BODY_MAX}-character body limit`)
     }),
     validation: messageValidation
@@ -14422,7 +14431,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_doc_read",
     example: { issue: "DSP-1" },
-    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " + "After the markdown it prints every open thread anchored on the document in full: an open ask with its id and question and each reply's author, time and text, and a comment thread with its root's id, author, quote and text and each reply's author, time and text, in order; a resolved thread, and an ask that is answered or resolved, is not printed. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
+    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " + "After the markdown it prints every open thread anchored on the document in full: an open ask with its id and question and each reply's author, time and text, and a comment thread with its root's id, author, time, quote and text and each reply's author, time and text, in order; a resolved thread, and an ask that is answered or resolved, is not printed. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
       project: z.string().describe("Project key owning the document.").optional(),
@@ -14583,6 +14592,13 @@ var dispatchToolSpecs = [
     strict: true
   },
   {
+    name: "dispatch_answers",
+    example: {},
+    description: "List every answer and comment a person wrote to this session in the last 72 hours, newest first, each in full: " + "answers to its asks, replies on its asks and in its comment threads, comments on its documents and on issues routed to it, " + "mentions of it, messages to it and replies to its messages. Each item names its time, its writer, what it is, its " + "dispatch:// reference and its issue or document, an answer's question and choices, and the words, never cut. " + "Run it when the list of people's answers on a model request says it left older items out. " + "It reads this session's id from CLAUDE_CODE_SESSION_ID under Claude Code and DISPATCH_SESSION_ID elsewhere, so a subagent reads its parent's.",
+    arguments: () => ({}),
+    strict: true
+  },
+  {
     name: "dispatch_whoami",
     example: {},
     description: "Who Dispatch takes this session for: {session, owner}. owner is the lowercase email of the person whose personal token you run under (the first choice of assignee for issues you create), or null under the shared token, in which case a create with no assignee falls back to the parent's assignee and then to the project's default assignee.",
@@ -14705,6 +14721,45 @@ function roleToken(project, issue, role) {
     throw new Error(`Invalid IssueKey: ${issue}`);
   const [, dispatchProject, number] = dispatchMatch;
   return `legion-${project}-${dispatchProject?.toLowerCase()}-${number}-${role}`;
+}
+// ../contracts/src/related-forms.ts
+function relatedCheckFormOf(suggestions) {
+  const { outcome, missing } = suggestions;
+  const searchQuery = suggestions.search_query;
+  if (outcome === "not_made" || outcome === undefined && missing !== undefined) {
+    return { form: "not_made", reason: missing ?? "the server gave no reason", searchQuery };
+  }
+  const mode = relatedCheckModeWords(suggestions);
+  if (suggestions.related.length > 0) {
+    return { form: "items", mode, related: suggestions.related };
+  }
+  if (outcome === undefined) {
+    return {
+      form: "not_made",
+      reason: "the server did not say whether it searched",
+      searchQuery
+    };
+  }
+  if (outcome === "found" || outcome === "none") {
+    return { form: "nothing", mode };
+  }
+  return {
+    form: "not_made",
+    reason: `the server answered an outcome this client does not know (${String(outcome)})`,
+    searchQuery
+  };
+}
+function relatedCheckModeWords(suggestions) {
+  const { search, search_note: note } = suggestions;
+  if (search === undefined)
+    return;
+  if (search === "meaning_and_keywords")
+    return "meaning and keywords";
+  const words = search === "keywords_only" ? "keywords only" : String(search);
+  return note === undefined || note === "" ? words : `${words}: ${note}`;
+}
+function relatedCheckSearchWords(text) {
+  return (text.match(/[\p{L}\p{N}_]+/gu) ?? []).filter((word) => (word.match(/\p{L}/gu) ?? []).length >= 4).slice(0, 3).join(" ");
 }
 // ../contracts/src/repo.ts
 function canonicalRepo(owner, repo) {
@@ -15731,6 +15786,12 @@ class DispatchClient {
   async openAsksForProject(project) {
     return this.#json("GET", ["api", "v1", "asks", "open"], undefined, { project });
   }
+  async sessionAnswers(sessionID, options = {}) {
+    return this.#json("GET", ["api", "v1", "agents", sessionID, "answers"], undefined, {
+      ...options.since === undefined ? {} : { since: options.since },
+      ...options.maxChars === undefined ? {} : { max_chars: options.maxChars }
+    }, options.signal);
+  }
   async listAgents() {
     return this.#json("GET", ["api", "v1", "agents"]);
   }
@@ -15896,6 +15957,12 @@ class DispatchClient {
   async artifactBlocks(id) {
     return this.#json("GET", ["api", "v1", "artifacts", id, "blocks"]);
   }
+  async commentBlocks(id) {
+    return this.#json("GET", ["api", "v1", "comments", id, "blocks"]);
+  }
+  async messageBlocks(id, session) {
+    return this.#json("GET", ["api", "v1", "messages", id, "blocks"], undefined, session === undefined ? undefined : { session });
+  }
   async docEdit(id, input) {
     return this.#json("POST", ["api", "v1", "artifacts", id, "edits"], input);
   }
@@ -15953,12 +16020,12 @@ class DispatchClient {
       throw error;
     }
   }
-  async#json(method, path, body, query) {
-    return (await this.#jsonAnswer(method, path, body, query)).payload;
+  async#json(method, path, body, query, signal) {
+    return (await this.#jsonAnswer(method, path, body, query, signal)).payload;
   }
-  async#jsonAnswer(method, path, body, query) {
+  async#jsonAnswer(method, path, body, query, signal) {
     const url = this.#url(path, query);
-    const response = await this.#send(method, url, body === undefined ? undefined : { content: JSON.stringify(body), type: "application/json" });
+    const response = await this.#send(method, url, body === undefined ? undefined : { content: JSON.stringify(body), type: "application/json" }, undefined, signal);
     return { status: response.status, payload: await this.#response(method, url, response) };
   }
   async#upload(path, input) {
@@ -15981,7 +16048,7 @@ class DispatchClient {
     const response = await this.#send(method, url, { content, type });
     return this.#response(method, url, response);
   }
-  async#send(method, url, body, accept = "application/json") {
+  async#send(method, url, body, accept = "application/json", signal) {
     const headers = {
       Accept: accept,
       Authorization: `Bearer ${this.token}`
@@ -15992,7 +16059,7 @@ class DispatchClient {
       return this.fetchImpl(url, {
         method,
         headers,
-        signal: this.#signal,
+        signal: signal === undefined ? this.#signal : AbortSignal.any([this.#signal, signal]),
         ...body === undefined ? {} : { body: body.content }
       });
     }
@@ -16178,6 +16245,9 @@ class DispatchClient {
 function documentLabel(project, slug) {
   return `${project}/${slug}`;
 }
+function ownerTitle(owner) {
+  return "issue" in owner ? `${owner.issue.key}: ${owner.issue.title}` : `${owner.document.project} / ${owner.document.name}`;
+}
 function issueTopic(key) {
   return { label: key, topic: dispatchIssueSubject(key, ">") };
 }
@@ -16196,10 +16266,26 @@ function dispatchDocumentRef(owner, slug) {
 function dispatchChildRef(ownerRef, kind, id) {
   return `${ownerRef}/${kind}/${id}`;
 }
-function parseBlockRef(document, fragment) {
-  const target = parseBlockFragment(fragment);
-  const parsed = parseDispatchRef(document);
-  if (target === undefined || parsed === null || parsed.version !== undefined || parsed.kind !== "spec" && parsed.kind !== "artifact") {
+function parseBlockRef(holder, fragment) {
+  const target = holder.includes("@") ? undefined : parseBlockFragment(fragment);
+  const parsed = parseDispatchRef(holder);
+  if (target === undefined || parsed === null) {
+    return null;
+  }
+  const pin = target.pin === undefined ? {} : { pin: target.pin };
+  const artifact = parsed.artifact === undefined ? {} : { artifact: parsed.artifact };
+  if (parsed.kind === "comment" || parsed.kind === "message" && target.pin === undefined) {
+    return {
+      owner: parsed.owner,
+      kind: "block",
+      id: parsed.id,
+      block: target.block,
+      item: { kind: parsed.kind, id: parsed.id },
+      ...artifact,
+      ...pin
+    };
+  }
+  if (parsed.kind !== "spec" && parsed.kind !== "artifact") {
     return null;
   }
   return {
@@ -16207,9 +16293,9 @@ function parseBlockRef(document, fragment) {
     kind: "block",
     id: parsed.id,
     block: target.block,
-    document,
+    document: holder,
     ...parsed.owner.kind === "project" ? { artifact: parsed.id } : {},
-    ...target.pin === undefined ? {} : { pin: target.pin }
+    ...pin
   };
 }
 function parseDispatchRef(ref) {
@@ -16982,38 +17068,17 @@ function decisionBlockLines(advice, context) {
   }
 }
 function relatedCheckForm(suggestions, context) {
-  const { outcome, missing } = suggestions;
-  if (outcome === "not_made" || outcome === undefined && missing !== undefined) {
-    return [notMadeLine(missing ?? "the server gave no reason", context, suggestions.search_query)];
+  const form = relatedCheckFormOf(suggestions);
+  if (form.form === "not_made") {
+    return [notMadeLine(form.reason, context, form.searchQuery)];
   }
-  const related = suggestions.related ?? [];
-  const mode = searchModeWords(suggestions);
-  if (related.length > 0) {
-    const header = mode === undefined ? "Related items:" : `Related items (searched by ${mode}):`;
-    return [header, ...related.flatMap((item) => relatedItemLines(item, context.configUrl))];
-  }
-  if (outcome === undefined) {
-    return [
-      notMadeLine("the server did not say whether it searched", context, suggestions.search_query)
-    ];
-  }
-  if (outcome === "found" || outcome === "none") {
-    return [
-      mode === undefined ? "Related-item check searched and found nothing." : `Related-item check searched (${mode}) and found nothing.`
-    ];
+  if (form.form === "items") {
+    const header = form.mode === undefined ? "Related items:" : `Related items (searched by ${form.mode}):`;
+    return [header, ...form.related.flatMap((item) => relatedItemLines(item, context.configUrl))];
   }
   return [
-    notMadeLine(`the server answered an outcome this client does not know (${String(outcome)})`, context, suggestions.search_query)
+    form.mode === undefined ? "Related-item check searched and found nothing." : `Related-item check searched (${form.mode}) and found nothing.`
   ];
-}
-function searchModeWords(suggestions) {
-  const { search, search_note: note } = suggestions;
-  if (search === undefined)
-    return;
-  if (search === "meaning_and_keywords")
-    return "meaning and keywords";
-  const words = search === "keywords_only" ? "keywords only" : String(search);
-  return note === undefined || note === "" ? words : `${words}: ${note}`;
 }
 function relatedItemLines(item, configUrl) {
   try {
@@ -17051,12 +17116,288 @@ function absoluteHref(href, configUrl) {
   }
 }
 function notMadeLine(reason, context, searchQuery) {
-  const words = searchQuery?.trim() || searchWords(context.text);
+  const words = searchQuery?.trim() || relatedCheckSearchWords(context.text);
   const query = words === "" ? " with two or three of its words as --query" : ` --query '${words.replaceAll("'", "'\\''")}'`;
   return `No related-item check was made: ${reason}. Search before you rely on this being new: dispatch search --project ${context.project}${query}`;
 }
-function searchWords(text) {
-  return (text.match(/[\p{L}\p{N}_]+/gu) ?? []).filter((word) => (word.match(/\p{L}/gu) ?? []).length >= 4).slice(0, 3).join(" ");
+
+// ../envoy-client/src/session-answers.ts
+import { mkdirSync, readFileSync } from "fs";
+import { join as join2 } from "path";
+
+// ../envoy-client/src/dispatch-session-directory.ts
+import { randomUUID } from "crypto";
+import { renameSync, rmSync, writeFileSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
+var SESSION_ID = /^[A-Za-z0-9._-]{1,128}$/;
+var PRIVATE_FILE = 384;
+function sessionStateRoot(env) {
+  const stateDir = env["DISPATCH_STATE_DIR"];
+  if (stateDir)
+    return stateDir;
+  return join(env["XDG_STATE_HOME"] || join(homedir(), ".local", "state"), "dispatch");
+}
+function sessionDirectory(env, sessionId) {
+  if (!SESSION_ID.test(sessionId) || sessionId === "." || sessionId === "..") {
+    throw new Error(`dispatch: the session id ${JSON.stringify(sessionId)} is not 1-128 letters, digits, ".", "_" or "-"`);
+  }
+  return join(sessionStateRoot(env), "sessions", sessionId);
+}
+function writeAtomically(path, text) {
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, text, { mode: PRIVATE_FILE });
+    renameSync(temporary, path);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
+}
+
+// ../envoy-client/src/session-answers.ts
+var SESSION_ANSWERS_WINDOW_MS = 72 * 3600000;
+var SESSION_ANSWERS_MAX_CHARS = 8000;
+var SESSION_ANSWERS_DEADLINE_MS = 800;
+var READ_TIMEOUT_MS = 1e4;
+var NO_ROUTE_BACKOFF_MS = 5 * 60000;
+var QUESTION_MAX = 200;
+var SESSION_ANSWERS_MARKER = "[Dispatch: what people wrote to this session in the last 72 hours, newest first, word for word. Reference, not a new request.]";
+var FAILURE_MARKER = "[Dispatch: people's answers from the last 72 hours could not be read (";
+var NO_ANSWERS_ROUTE_REASON = "this Dispatch build has no answers route";
+var RELATION_PHRASES = {
+  answered_your_ask: "answered your ask",
+  replied_on_your_ask: "replied on your ask",
+  replied_in_a_comment_thread: "replied in a comment thread",
+  commented_on_a_document: "commented on a document",
+  commented_on_an_issue: "commented on an issue",
+  mentioned_you: "mentioned you",
+  sent_you_a_message: "sent you a message",
+  replied_to_your_message: "replied to your message"
+};
+function isNoAnswersRoute(error) {
+  return error instanceof DispatchServiceError && error.status === 404;
+}
+function renderSessionAnswerItem(item) {
+  const relation = `${RELATION_PHRASES[item.relation]}${item.replaced === true ? " (replaces an earlier answer)" : ""}`;
+  const head = [item.at, `user ${item.author.id}`, relation];
+  if (item.edited_at !== undefined)
+    head.push(`edited ${item.edited_at}`);
+  const owner = item.owner === null ? undefined : ownerTitle(item.owner);
+  const where = item.ref === null ? `Direct message ${item.id}, on no issue` : owner === undefined ? item.ref : `${item.ref} \xB7 ${owner}`;
+  const lines = [head.join(" \xB7 "), where];
+  if (item.ask !== undefined) {
+    const question = item.ask.question.replace(/\s+/g, " ").trim();
+    lines.push(`Question: ${question.length > QUESTION_MAX ? `${question.slice(0, QUESTION_MAX)}\u2026` : question}`);
+  }
+  if (item.kind === "answer") {
+    const selected = item.selected ?? [];
+    lines.push(`Selected: ${selected.length === 0 ? "none" : selected.join(", ")}`);
+  }
+  if (item.text !== "")
+    lines.push(item.text);
+  return lines.join(`
+`);
+}
+function withinWindow(items, now) {
+  const start = now - SESSION_ANSWERS_WINDOW_MS;
+  return items.filter((item) => Date.parse(item.at) >= start);
+}
+var MAX_CHARS_TEXT = SESSION_ANSWERS_MAX_CHARS.toLocaleString("en-US");
+function leftOutLine(count) {
+  return `${count} older ${count === 1 ? "item" : "items"} left out to stay under ${MAX_CHARS_TEXT} characters: run \`dispatch answers\` to read every one in full.`;
+}
+function renderSessionAnswers(items, options) {
+  const shown = withinWindow(items, Number(options.now));
+  const unsent = shown.length === items.length ? Math.max(0, (options.total ?? items.length) - items.length) : 0;
+  const count = shown.length + unsent;
+  if (count === 0)
+    return;
+  const header = options.cached === undefined ? SESSION_ANSWERS_MARKER : `${SESSION_ANSWERS_MARKER}
+As read at ${options.cached.readAt}; this read failed: ${failureSentence(options.cached.reason)}`;
+  const blocks = [];
+  let length = header.length;
+  for (const item of shown) {
+    const block = renderSessionAnswerItem(item);
+    const after = count - blocks.length - 1;
+    const needed = length + 2 + block.length + (after === 0 ? 0 : 2 + leftOutLine(after).length);
+    if (needed >= SESSION_ANSWERS_MAX_CHARS)
+      break;
+    blocks.push(block);
+    length += 2 + block.length;
+  }
+  const leftOut = count - blocks.length;
+  return [header, ...blocks, ...leftOut === 0 ? [] : [leftOutLine(leftOut)]].join(`
+
+`);
+}
+function renderSessionAnswersList(items, options) {
+  const shown = withinWindow(items, Number(options.now));
+  if (shown.length === 0)
+    return "No person wrote to this session in the last 72 hours.";
+  return [
+    `${shown.length} ${shown.length === 1 ? "item" : "items"} people wrote to this session in the last 72 hours, newest first, word for word:`,
+    ...shown.map(renderSessionAnswerItem)
+  ].join(`
+
+`);
+}
+function failureSentence(reason) {
+  const text = reason.replace(/\s+/g, " ").trim();
+  return /[.?!]$/.test(text) ? text : `${text}.`;
+}
+function sessionAnswersFailureLine(reason) {
+  return `${FAILURE_MARKER}${reason.replace(/\s+/g, " ").trim()}); run \`dispatch answers\`.]`;
+}
+var STATE_KEY = Symbol.for("legion.pi-envoy.session-answers.v2");
+var processGlobal = globalThis;
+var state = processGlobal[STATE_KEY] ?? {
+  sessions: new Map,
+  noRouteUntil: new Map
+};
+processGlobal[STATE_KEY] = state;
+var CACHE_FILE = "answers.json";
+function readCacheFile(directory, url) {
+  try {
+    const value = JSON.parse(readFileSync(join2(directory, CACHE_FILE), "utf-8"));
+    if (typeof value === "object" && value !== null && "dispatch_url" in value && typeof value.dispatch_url === "string" && value.dispatch_url === url && "read_at" in value && typeof value.read_at === "string" && "total" in value && typeof value.total === "number" && "items" in value && Array.isArray(value.items)) {
+      return {
+        dispatch_url: value.dispatch_url,
+        read_at: value.read_at,
+        total: value.total,
+        items: value.items
+      };
+    }
+  } catch {}
+  return;
+}
+async function settleWithin(promise, ms, signal) {
+  if (signal?.aborted === true)
+    return "aborted";
+  let timer;
+  let onAbort;
+  const stop = new Promise((resolve) => {
+    timer = setTimeout(() => resolve("deadline"), ms);
+    onAbort = () => resolve("aborted");
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([promise, stop]);
+  } finally {
+    clearTimeout(timer);
+    if (onAbort !== undefined)
+      signal?.removeEventListener("abort", onAbort);
+  }
+}
+async function readSessionAnswers(options) {
+  const now = options.now ?? Date.now;
+  const { dispatch, session } = options;
+  if (!dispatch.enabled && dispatch.error === null) {
+    return { text: undefined, source: "off", reason: dispatch.notice };
+  }
+  let directory;
+  try {
+    directory = sessionDirectory(options.env, session);
+  } catch {}
+  const entries = state.sessions.get(session) ?? new Map;
+  state.sessions.set(session, entries);
+  const carry = (cache, reason) => {
+    const text = cache === undefined ? undefined : renderSessionAnswers(cache.items, {
+      now: now(),
+      total: cache.total,
+      cached: { readAt: cache.read_at, reason }
+    });
+    if (cache === undefined || text === undefined) {
+      return { text: sessionAnswersFailureLine(reason), source: "failure", reason };
+    }
+    return { text, source: "cache", readAt: cache.read_at, reason };
+  };
+  if (!dispatch.enabled) {
+    const url = options.dispatchUrl;
+    if (url === undefined)
+      return carry(undefined, dispatch.error);
+    const cache = entries.get(url)?.cache ?? (directory === undefined ? undefined : readCacheFile(directory, url));
+    return carry(cache, dispatch.error);
+  }
+  const { url } = dispatch;
+  const current = entries.get(url) ?? {
+    cache: undefined,
+    inFlight: undefined,
+    overdue: false
+  };
+  entries.set(url, current);
+  if (current.cache === undefined && directory !== undefined) {
+    current.cache = readCacheFile(directory, url);
+  }
+  if ((state.noRouteUntil.get(url) ?? 0) > now()) {
+    return carry(current.cache, NO_ANSWERS_ROUTE_REASON);
+  }
+  if (current.inFlight !== undefined && current.overdue) {
+    return carry(current.cache, "an earlier read is still waiting on Dispatch");
+  }
+  let read = current.inFlight;
+  if (read === undefined) {
+    const client = new DispatchClient(url, dispatch.token, options.fetchImpl ?? fetch);
+    const started = client.sessionAnswers(session, {
+      maxChars: SESSION_ANSWERS_MAX_CHARS,
+      signal: AbortSignal.timeout(READ_TIMEOUT_MS)
+    }).then((response) => {
+      if (!Array.isArray(response?.items) || typeof response.total !== "number") {
+        return { failure: "Dispatch answered with something that is not an answers list" };
+      }
+      const cache = {
+        dispatch_url: url,
+        read_at: new Date(now()).toISOString(),
+        total: response.total,
+        items: response.items
+      };
+      current.cache = cache;
+      if (directory !== undefined) {
+        try {
+          mkdirSync(directory, { recursive: true, mode: 448 });
+          writeAtomically(join2(directory, CACHE_FILE), JSON.stringify(cache));
+        } catch {}
+      }
+      return { cache };
+    }, (error) => {
+      if (isNoAnswersRoute(error)) {
+        state.noRouteUntil.set(url, now() + NO_ROUTE_BACKOFF_MS);
+        return { failure: NO_ANSWERS_ROUTE_REASON };
+      }
+      return { failure: messageFor(error) };
+    });
+    read = started.finally(() => {
+      if (current.inFlight === read) {
+        current.inFlight = undefined;
+        current.overdue = false;
+      }
+    });
+    current.inFlight = read;
+    current.overdue = false;
+  }
+  const deadlineMs = options.deadlineMs ?? SESSION_ANSWERS_DEADLINE_MS;
+  const outcome = await settleWithin(read, deadlineMs, options.signal);
+  if (outcome === "deadline") {
+    if (current.inFlight === read)
+      current.overdue = true;
+    return carry(current.cache, `Dispatch did not answer within ${deadlineMs} ms`);
+  }
+  if (outcome === "aborted") {
+    return carry(current.cache, "the request was cancelled before Dispatch answered");
+  }
+  if ("failure" in outcome)
+    return carry(current.cache, outcome.failure);
+  return {
+    text: renderSessionAnswers(outcome.cache.items, {
+      now: now(),
+      total: outcome.cache.total
+    }),
+    source: "fresh",
+    readAt: outcome.cache.read_at
+  };
+}
+async function sessionAnswersSettled(session) {
+  await Promise.all(Array.from(state.sessions.get(session)?.values() ?? [], (entry) => entry.inFlight));
 }
 
 // ../envoy-client/src/dispatch-execute.ts
@@ -17181,6 +17522,7 @@ var issueFreeTools = {
   dispatch_project: true,
   dispatch_projects: true,
   dispatch_open_asks: true,
+  dispatch_answers: true,
   dispatch_whoami: true,
   dispatch_architecture_sync: true
 };
@@ -17320,7 +17662,7 @@ function normalizeUUID(value) {
 }
 var askIdProblem = "ask must be a bare ask id or a dispatch://.../ask/<id> reference";
 var commentIdProblem = "comment must be a bare comment id or a dispatch://.../comment/<id> reference";
-var messageIdProblem = "in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference";
+var messageIdProblem = "in_reply_to must be a full message id (uuid), a dispatch://KEY/message/<id> reference, or a block of one (dispatch://KEY/message/<id>#b-<block id>)";
 function askId(args) {
   const ask = stringArg(args, "ask");
   return ask.startsWith("dispatch://") ? parseDispatchRef(ask)?.id ?? ask : ask;
@@ -17331,6 +17673,28 @@ function messageIdOf(value) {
     return reference?.kind === "message" ? reference.id : undefined;
   })() : value;
   return id === undefined ? undefined : normalizeUUID(id);
+}
+function itemBlockOf(value) {
+  const ref = parseDispatchRef(value);
+  return ref?.item === undefined || ref.block === undefined ? undefined : { ...ref, item: ref.item, block: ref.block };
+}
+function replyBlockProblem(field, kind, value) {
+  if (!/^dispatch:\/\/[^#]*#b-/.test(value))
+    return;
+  const form = `dispatch://KEY/${kind}/<id>#b-<block id>`;
+  const ref = parseDispatchRef(value);
+  if (ref?.kind !== "block") {
+    return `${field} ${value} names no block; a block of a ${kind} reads ${form}`;
+  }
+  const other = ref.item?.kind;
+  if (other !== kind) {
+    const answer = other === "comment" ? `; answer it with ${commandLine("dispatch_comment", { reply_to: value })}` : other === "message" ? `; answer it with ${commandLine("dispatch_message", { in_reply_to: value })}` : "";
+    return `${field} ${value} names a block of ${other === undefined ? "a document" : `a ${other}`}, but a ${kind} reply answers a block of a ${kind} (${form})${answer}`;
+  }
+  if (ref.pin !== undefined) {
+    return `${field} ${value} names revision ${ref.pin} of the block, but a reply answers the block whatever its text becomes: drop @v${ref.pin}`;
+  }
+  return;
 }
 var idPrefixPattern = /^[0-9a-f][0-9a-f-]{7,}$/i;
 function refOwnerName(ref) {
@@ -17441,7 +17805,20 @@ async function resolveAskArgument(tool, args, client, sessionId) {
 }
 function messageInReplyTo(args) {
   const inReplyTo = optionalString(args, "in_reply_to");
-  return inReplyTo === undefined ? undefined : messageIdOf(inReplyTo);
+  if (inReplyTo === undefined)
+    return;
+  const block = itemBlockOf(inReplyTo);
+  if (block !== undefined && block.item.kind !== "message")
+    return;
+  const id = messageIdOf(block?.item.id ?? inReplyTo);
+  return id === undefined ? undefined : { id, ...block === undefined ? {} : { block: block.block } };
+}
+function commentReplyTo(args) {
+  const replyTo = optionalString(args, "reply_to");
+  if (replyTo === undefined)
+    return;
+  const block = itemBlockOf(replyTo);
+  return block === undefined ? { id: replyTo } : { id: block.item.id, block: block.block };
 }
 function argumentProblems(tool, args) {
   const problems = [];
@@ -17476,15 +17853,21 @@ function argumentProblems(tool, args) {
       if (optionalString(args, "quote") !== undefined && optionalString(args, "artifact") === undefined) {
         problems.push("artifact is required when quote is supplied");
       }
-      if (optionalString(args, "reply_to") !== undefined && optionalString(args, "reply_to_ask") !== undefined) {
+      const replyTo = optionalString(args, "reply_to");
+      if (replyTo !== undefined && optionalString(args, "reply_to_ask") !== undefined) {
         problems.push("reply_to and reply_to_ask cannot both be set");
       }
+      const replyBlock = replyTo === undefined ? undefined : replyBlockProblem("reply_to", "comment", replyTo);
+      if (replyBlock !== undefined)
+        problems.push(replyBlock);
       break;
     }
     case "dispatch_message": {
       const inReplyTo = optionalString(args, "in_reply_to");
-      if (inReplyTo !== undefined && messageIdOf(inReplyTo) === undefined) {
-        problems.push(messageIdProblem);
+      if (inReplyTo !== undefined) {
+        const problem = replyBlockProblem("in_reply_to", "message", inReplyTo) ?? (messageInReplyTo(args) === undefined ? messageIdProblem : undefined);
+        if (problem !== undefined)
+          problems.push(problem);
       }
       break;
     }
@@ -17564,7 +17947,7 @@ function dispatchRefFromUrl(value, serverUrl) {
   };
   const blockOf = (versionName) => {
     const id = url.hash.startsWith("#b-") ? decodeBlockId(url.hash.slice(3)) : undefined;
-    return id === undefined || url.searchParams.get(versionName) ? "" : `#b-${encodeBlockId(id)}`;
+    return id === undefined || versionName !== undefined && url.searchParams.get(versionName) ? "" : `#b-${encodeBlockId(id)}`;
   };
   const issuePage = url.pathname.match(/^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/);
   if (issuePage) {
@@ -17590,9 +17973,9 @@ function dispatchRefFromUrl(value, serverUrl) {
     if (ask !== undefined)
       return `dispatch://${key}/ask/${ask}`;
     if (comment !== undefined)
-      return `dispatch://${key}/comment/${comment}`;
+      return `dispatch://${key}/comment/${comment}${blockOf()}`;
     if (message !== undefined)
-      return `dispatch://${key}/message/${message}`;
+      return `dispatch://${key}/message/${message}${blockOf()}`;
     return `dispatch://${key}`;
   }
   const agentArtifactPage = url.pathname.match(/^\/agents\/([^/]+)\/artifacts\/([^/]+)\/?$/);
@@ -17615,7 +17998,7 @@ function dispatchRefFromUrl(value, serverUrl) {
     return;
   return item === undefined ? `${document}${versionOf("version")}${blockOf("version")}` : `${document}/${item.kind}/${item.id}`;
 }
-var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), " + "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " + "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " + "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " + "dispatch read), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
+var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), " + "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " + "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " + "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " + "dispatch read), dispatch://KEY-1/comment/<uuid>#b-<block id>, " + "dispatch://PROJECT/artifact/<slug>/comment/<uuid>#b-<block id> or " + "dispatch://KEY-1/message/<uuid>#b-<block id> (one block of a comment or message, a " + "comment's optionally pinned to a revision of the comment with @v<N> after it; for dispatch " + "read), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
 var ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSUE";
 function innerRefProblem(tool, ref, refText) {
   if (ref.kind !== "ask" && ref.kind !== "comment" && ref.kind !== "message" && ref.kind !== "log" && ref.kind !== "children" && ref.kind !== "block") {
@@ -17624,10 +18007,11 @@ function innerRefProblem(tool, ref, refText) {
   if (tool === "dispatch_read" || tool === "dispatch_ask")
     return;
   const owner = refOwnerName(ref);
-  const documentArgument = ref.kind === "block" && tool !== "dispatch_comment" ? ` and artifact ${ref.id}` : tool === "dispatch_suggest" ? " and artifact <the document's slug>" : "";
+  const itemKind = ref.item?.kind ?? ref.kind;
+  const documentArgument = ref.kind === "block" && ref.item === undefined && tool !== "dispatch_comment" ? ` and artifact ${ref.id}` : tool === "dispatch_suggest" ? " and artifact <the document's slug>" : "";
   const ownerArguments = ref.owner.kind === "issue" ? `issue ${ref.owner.issue}${documentArgument}` : `project ${ref.owner.project} and artifact ${ref.artifact}`;
-  const fix = tool === "dispatch_comment" && ref.kind === "ask" ? `reply under it with reply_to_ask ${ref.id} and ${ownerArguments}` : tool === "dispatch_comment" && ref.kind === "comment" ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}` : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
-  const item = ref.kind === "ask" ? "an ask" : ref.kind === "log" ? "the event log" : ref.kind === "children" ? "the children" : ref.kind === "block" ? `block ${ref.block}` : `a ${ref.kind}`;
+  const fix = tool === "dispatch_comment" && itemKind === "ask" ? `reply under it with reply_to_ask ${ref.id} and ${ownerArguments}` : tool === "dispatch_comment" && itemKind === "comment" ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}` : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
+  const item = ref.kind === "ask" ? "an ask" : ref.kind === "log" ? "the event log" : ref.kind === "children" ? "the children" : ref.kind === "block" ? `block ${ref.block}${ref.item === undefined ? "" : ` of a ${ref.item.kind}`}` : `a ${ref.kind}`;
   return `ref ${refText} names ${item} on ${owner}; dispatch ${commandName(tool)} would act on ${owner} and drop the ${ref.kind}: ${fix}`;
 }
 var documentItemPattern = /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)\/artifact\/[^/@]+(?:@v\d+)?\/(ask|comment)\/([^/]+)$/;
@@ -17654,7 +18038,7 @@ function ownerConflictProblems(tool, args, parsedRef, refText) {
   const artifact = optionalString(args, "artifact");
   const version = optionalNumber(args, "version");
   const ref = tool === "dispatch_ask" && (issue !== undefined || project !== undefined) ? null : parsedRef;
-  const refDocument = ref === null ? undefined : ref.owner.kind === "project" ? ref.artifact ?? ref.id : ref.kind === "spec" || ref.kind === "artifact" || ref.kind === "block" ? ref.id : undefined;
+  const refDocument = ref === null ? undefined : ref.owner.kind === "project" ? ref.artifact ?? ref.id : ref.kind === "spec" || ref.kind === "artifact" || ref.kind === "block" && ref.item === undefined ? ref.id : undefined;
   if (ref !== null && refText !== undefined) {
     const refOwner = refOwnerName(ref);
     if (issue !== undefined && (ref.owner.kind !== "issue" || nativeIssueKeyPattern.test(issue) && issue !== ref.owner.issue)) {
@@ -18061,9 +18445,12 @@ function referenceLines(read) {
   if (read.edges.length === 0)
     return ["- none"];
   return read.edges.map((edge) => {
+    const { node } = edge;
     const excerpt = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} \xB7 `;
     const block = edge.block === undefined ? "" : ` (block ${edge.block.ref ?? edge.block.id})`;
-    return `- ${edge.kind} ${edge.node.kind} ${edge.node.ref ?? edge.node.id} (${excerpt}${edge.created_at})${block}`;
+    const item = node.kind === "block" && node.document === undefined && (node.parent?.kind === "comment" || node.parent?.kind === "message") ? node.parent : undefined;
+    const source = item === undefined ? `${node.kind} ${node.ref ?? node.id}` : `${item.kind} ${item.ref ?? item.id} block ${node.block_id ?? node.id}`;
+    return `- ${edge.kind} ${source} (${excerpt}${edge.created_at})${block}`;
   });
 }
 function unavailableReason(error) {
@@ -18106,27 +18493,32 @@ function nodeLine(node) {
   const made = fact(node.made_by, node.made_at);
   const changed = fact(node.changed_by, node.changed_at);
   const { parent } = node;
-  const partOf = parent == null ? "" : ` \xB7 part of ${parent.ref ?? `${parent.kind} ${parent.id}`}${node.parent_version == null ? "" : ` (version ${node.parent_version})`}`;
+  const partOf = parent == null ? "" : ` \xB7 part of ${parent.ref ?? `${parent.kind} ${parent.id}`}${node.parent_version == null ? "" : ` (${parent.kind === "comment" ? "revision" : "version"} ${node.parent_version})`}`;
   return [
     `Node: ${node.kind} ${node.ref ?? node.id} \xB7 made by ${made} \xB7 changed by ${changed}${partOf}`
   ];
 }
 function blockLines(node, ref) {
-  const head = [
-    `Block: ${node.block_id ?? ref.block}`,
+  const unit = ref.item === undefined ? "version" : "revision";
+  const blockID = node.block_id ?? ref.block;
+  const head = ref.item === undefined ? [
+    `Block: ${blockID}`,
     `Document: ${node.document ?? ref.document}`,
     ...node.changed_version === undefined ? [] : [`Changed in version: ${node.changed_version}`],
     ...node.text === undefined ? [] : ["Text:", node.text]
+  ] : [
+    `Block ${blockID} of ${ref.item.kind} ${ref.item.id}${node.changed_version === undefined ? "" : ` (changed in revision ${node.changed_version})`}:`,
+    ...node.text === undefined ? [] : [node.text]
   ];
   const { pin } = node;
   if (pin === undefined)
     return head;
-  const state = pin.state === "unchanged" ? `Unchanged since version ${pin.version}.` : pin.state === "changed" ? `Changed since version ${pin.version}; last changed in version ${node.changed_version}.` : `Removed in version ${pin.removed_version}.`;
+  const state = pin.state === "unchanged" ? `Unchanged since ${unit} ${pin.version}.` : pin.state === "changed" ? `Changed since ${unit} ${pin.version}; last changed in ${unit} ${node.changed_version}.` : `Removed in ${unit} ${pin.removed_version}.`;
   return [
     ...head,
-    `Pinned to version: ${pin.version}`,
+    `Pinned to ${unit}: ${pin.version}`,
     state,
-    `Text at version ${pin.version}:`,
+    `Text at ${unit} ${pin.version}:`,
     pin.text
   ];
 }
@@ -18243,12 +18635,9 @@ function openAskAge(ageSeconds) {
   const days = Math.floor(hours / 24);
   return `${days}d${hours % 24 === 0 ? "" : ` ${hours % 24}h`}`;
 }
-function openAskOwner(ask) {
-  return "issue" in ask.owner ? `${ask.owner.issue.key}: ${ask.owner.issue.title}` : `${ask.owner.document.project} / ${ask.owner.document.name}`;
-}
 function openAskLine(ask, baseUrl) {
   const priority = ask.priority === null ? "" : `P${ask.priority} \xB7 `;
-  return `- ${openAskAge(ask.age_seconds)} \xB7 ${priority}${openAskOwner(ask)} \xB7 ${ask.question} \xB7 ${new URL(ask.ref, baseUrl).toString()}`;
+  return `- ${openAskAge(ask.age_seconds)} \xB7 ${priority}${ownerTitle(ask.owner)} \xB7 ${ask.question} \xB7 ${new URL(ask.ref, baseUrl).toString()}`;
 }
 function formatOpenAsksSummary(response, baseUrl) {
   const scope = "active open asks you authored on open issues and project documents";
@@ -18273,11 +18662,13 @@ function commentSummary({ comment, replies }, graph) {
   const root = [
     `${comment.id} \xB7 ${actorText(comment.author)}`,
     ...anchorLines(comment),
+    ...replyBlockLines(comment),
     `Body: ${comment.body}`
   ];
   const chain = replies.flatMap((reply) => [
     `${reply.id} \xB7 ${actorText(reply.author)}`,
     ...anchorLines(reply),
+    ...replyBlockLines(reply),
     `Body: ${reply.body}`
   ]);
   return [
@@ -18288,6 +18679,14 @@ function commentSummary({ comment, replies }, graph) {
     ...graph
   ].join(`
 `);
+}
+function replyBlockLines(record) {
+  const block = record.reply_block;
+  if (block === undefined || block === null)
+    return [];
+  return [
+    block.removed ? `Re: block ${block.block_id} (removed)` : `Re: block ${block.block_id}: ${textHead(block.text)}`
+  ];
 }
 function anchorLines(record) {
   return [
@@ -18312,9 +18711,14 @@ function positionText(block) {
   ].join(" \u203A ");
 }
 function messageSummary({ message, replies }, graph) {
-  const root = [`${message.id} \xB7 ${actorText(message.author)}`, `Body: ${message.body}`];
+  const root = [
+    `${message.id} \xB7 ${actorText(message.author)}`,
+    ...replyBlockLines(message),
+    `Body: ${message.body}`
+  ];
   const chain = replies.flatMap((reply) => [
     `${reply.id} \xB7 ${actorText(reply.author)}`,
+    ...replyBlockLines(reply),
     `Body: ${reply.body}`
   ]);
   return [
@@ -18648,6 +19052,24 @@ async function executeDispatchTool(input) {
       throw new Error("host session id is required for dispatch open-asks");
     const response = await client.openAsks(sessionId);
     return { text: formatOpenAsksSummary(response, linkBase), details: { ...response } };
+  }
+  if (input.tool === "dispatch_answers") {
+    const sessionId = input.sessionId?.trim();
+    if (!sessionId)
+      throw new Error("host session id is required for dispatch answers");
+    let response;
+    try {
+      response = await dispatchClient().sessionAnswers(sessionId);
+    } catch (error) {
+      if (isNoAnswersRoute(error)) {
+        throw new Error(`This Dispatch (${configUrl}) has no answers route yet: its build is older than the answers route.`);
+      }
+      throw error;
+    }
+    return {
+      text: renderSessionAnswersList(response.items, { now: Date.now() }),
+      details: { session: sessionId, since: response.since, total: response.total }
+    };
   }
   if (input.tool === "dispatch_whoami") {
     const sessionId = input.sessionId?.trim();
@@ -19172,7 +19594,7 @@ async function executeDispatchTool(input) {
       const owner = documentOwner();
       const resolved = owner.kind === "project" || artifactReference === undefined ? owner.kind === "project" ? await resolveDocument(owner, artifactReference) : undefined : await resolveDocument(owner, artifactReference);
       const anchored = resolved ? anchor(resolved.artifact, args) : undefined;
-      const replyTo = optionalString(args, "reply_to");
+      const replyTo = commentReplyTo(args);
       const replyToAskReference = optionalString(args, "reply_to_ask");
       const replyToAsk = replyToAskReference === undefined ? undefined : normalizeUUID(replyToAskReference);
       if (replyToAskReference !== undefined && replyToAsk === undefined) {
@@ -19189,7 +19611,8 @@ async function executeDispatchTool(input) {
       const commentInput = {
         body,
         ...anchored === undefined ? {} : { anchor: anchored },
-        ...replyTo === undefined ? {} : { reply_to: replyTo },
+        ...replyTo === undefined ? {} : { reply_to: replyTo.id },
+        ...replyTo?.block === undefined ? {} : { reply_to_block: replyTo.block },
         ...replyToAsk === undefined ? {} : { ask_id: replyToAsk },
         ...requestedTurn === undefined ? {} : { turn: requestedTurn },
         actor
@@ -19249,7 +19672,8 @@ async function executeDispatchTool(input) {
       };
     }
     case "dispatch_message": {
-      const inReplyTo = messageInReplyTo(args);
+      const target = messageInReplyTo(args);
+      const inReplyTo = target?.id;
       const written = stringArg(args, "body");
       const bodyLimit = {
         cap: DISPATCH_BODY_MAX,
@@ -19296,6 +19720,7 @@ async function executeDispatchTool(input) {
       const message = await client.message(issueKey, {
         body,
         ...inReplyTo === undefined ? {} : { in_reply_to: inReplyTo },
+        ...target?.block === undefined ? {} : { in_reply_to_block: target.block },
         actor
       });
       const messageRef = dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id);
@@ -19590,10 +20015,11 @@ Document token: ${listed.token}`,
       if (ownerArguments.ref?.kind === "block") {
         const ref = ownerArguments.ref;
         const blockRef = stringArg(args, "ref");
+        const holder = blockRef.slice(0, blockRef.indexOf("#"));
         const [incoming, outgoing] = await Promise.all([
           client.getReferences({ to: blockRef }).catch((error) => {
             if (ref.pin === undefined && dispatchAnswered(error, 404)) {
-              throw new Error(`No block ${ref.block} in ${ref.document}.`);
+              throw new Error(`No block ${ref.block} in ${holder}.`);
             }
             throw error;
           }),
@@ -19692,16 +20118,16 @@ function asObject(value) {
 }
 
 // ../envoy-client/src/dispatch-first.ts
-import { readFileSync } from "fs";
-import { join } from "path";
+import { readFileSync as readFileSync2 } from "fs";
+import { join as join3 } from "path";
 var DISPATCH_FIRST_MARKER = "<dispatch-first-skill>";
 function dispatchFirstSkillFile(skillsDirectory) {
-  return join(skillsDirectory, "dispatch-first", "SKILL.md");
+  return join3(skillsDirectory, "dispatch-first", "SKILL.md");
 }
 function readDispatchFirstContext(skillFile) {
   let skill;
   try {
-    skill = readFileSync(skillFile, "utf8");
+    skill = readFileSync2(skillFile, "utf8");
   } catch (error) {
     throw new Error(`the dispatch-first skill ${skillFile} could not be read: ${messageFor(error)}`);
   }
@@ -19724,12 +20150,12 @@ import {
   lstatSync,
   mkdtempSync,
   openSync,
-  readFileSync as readFileSync3,
+  readFileSync as readFileSync4,
   readlinkSync,
-  rmSync,
+  rmSync as rmSync2,
   statSync
 } from "fs";
-import { homedir, tmpdir } from "os";
+import { homedir as homedir2, tmpdir } from "os";
 import * as path from "path";
 
 // ../envoy-client/src/json-position.ts
@@ -19819,14 +20245,14 @@ function jsonErrorPosition(text) {
 }
 
 // ../envoy-client/src/secret-file.ts
-import { readFileSync as readFileSync2 } from "fs";
+import { readFileSync as readFileSync3 } from "fs";
 function sendable(value) {
   return !/[\s\p{Cc}]/u.test(value);
 }
 function readSecretFile(variable, filePath) {
   let contents;
   try {
-    contents = readFileSync2(filePath, "utf8");
+    contents = readFileSync3(filePath, "utf8");
   } catch (error) {
     throw new Error(`${variable} names ${filePath}, which could not be read: ${messageFor(error)}`);
   }
@@ -19855,7 +20281,7 @@ function neutralConfig(env) {
   if (xdgConfigHome !== undefined && !path.isAbsolute(xdgConfigHome)) {
     return { error: `XDG_CONFIG_HOME is ${xdgConfigHome}, which is not an absolute path` };
   }
-  const configHome = xdgConfigHome ?? path.join(nonEmpty(env.HOME) ?? homedir(), ".config");
+  const configHome = xdgConfigHome ?? path.join(nonEmpty(env.HOME) ?? homedir2(), ".config");
   return { path: path.resolve(configHome, "legion", "envoy.json") };
 }
 var HARNESS_DIRECTORY_VARIABLE = {
@@ -19961,7 +20387,7 @@ function danglingLink(filePath) {
 function parseFile(filePath, schema, checkout) {
   let raw;
   try {
-    raw = readFileSync3(filePath, "utf-8");
+    raw = readFileSync4(filePath, "utf-8");
   } catch (error) {
     if (hasErrnoCode(error, "ENOENT") || hasErrnoCode(error, "ENOTDIR")) {
       return { kind: "absent", link: danglingLink(filePath) };
@@ -19992,9 +20418,9 @@ function parseFile(filePath, schema, checkout) {
 }
 var FAILURE_KEPT_MS = 60000;
 var COMMAND_OUTCOMES = Symbol.for("legion.envoy-config.commands.v1");
-var processGlobal = globalThis;
-var commandOutcomes = processGlobal[COMMAND_OUTCOMES] ?? new Map;
-processGlobal[COMMAND_OUTCOMES] = commandOutcomes;
+var processGlobal2 = globalThis;
+var commandOutcomes = processGlobal2[COMMAND_OUTCOMES] ?? new Map;
+processGlobal2[COMMAND_OUTCOMES] = commandOutcomes;
 function runCommand(command, env, cwd) {
   const childEnv = {};
   for (const [name, variable] of Object.entries(env)) {
@@ -20037,7 +20463,7 @@ function runCommand(command, env, cwd) {
         timedOut: false
       };
     }
-    const value = readFileSync3(output, "utf-8").trim();
+    const value = readFileSync4(output, "utf-8").trim();
     if (value.length === 0)
       return { failure: "printed nothing", timedOut: false };
     if (!sendable(value)) {
@@ -20048,10 +20474,10 @@ function runCommand(command, env, cwd) {
     }
     return { value };
   } finally {
-    rmSync(directory, { recursive: true, force: true });
+    rmSync2(directory, { recursive: true, force: true });
   }
 }
-function fileValue(value, field, filePath, env) {
+function fileValue(value, field, filePath, env, commands = "run") {
   if (!value.startsWith("!")) {
     if (!sendable(value)) {
       throw new Error(`${filePath}: ${field} holds whitespace or a control character`);
@@ -20062,7 +20488,11 @@ function fileValue(value, field, filePath, env) {
   const cwd = path.dirname(path.resolve(filePath));
   const key = JSON.stringify([command, filePath, cwd]);
   let outcome = commandOutcomes.get(key);
-  if (outcome === undefined || "failure" in outcome && !outcome.timedOut && Date.now() - outcome.at >= FAILURE_KEPT_MS) {
+  if (commands === "kept") {
+    if (outcome === undefined) {
+      throw new Error(`${filePath}: ${field}'s command has not run in this process yet, and this read does not run it`);
+    }
+  } else if (outcome === undefined || "failure" in outcome && !outcome.timedOut && Date.now() - outcome.at >= FAILURE_KEPT_MS) {
     outcome = { ...runCommand(command, env, cwd), at: Date.now() };
     commandOutcomes.set(key, outcome);
   }
@@ -20091,7 +20521,7 @@ function moveNotice(oldFile, newFile, move, deviceOf) {
   return `${oldFile} is not read: ${move}`;
 }
 function oldUserFileNotice(filePath, env, deviceOf) {
-  const home = nonEmpty(env.HOME) ?? homedir();
+  const home = nonEmpty(env.HOME) ?? homedir2();
   const old = path.join(home, ".config", "opencode", "envoy.json");
   if (!existsSync(old))
     return;
@@ -20172,7 +20602,7 @@ function bearerSource(env, section, written) {
   const bearer = written();
   return bearer === undefined ? { kind: "none" } : { kind: "file", ...bearer };
 }
-function fileBearer(bearer, url, section, env) {
+function fileBearer(bearer, url, section, env, commands = "run") {
   const named = httpUrl2(url)?.origin;
   const paired = httpUrl2(bearer.server)?.origin;
   if (named !== paired) {
@@ -20184,7 +20614,7 @@ function fileBearer(bearer, url, section, env) {
   if (bearer.token === "") {
     throw new Error(`${bearer.field} in ${bearer.path} must be a non-empty bearer token`);
   }
-  return fileValue(bearer.token, bearer.field, bearer.path, env);
+  return fileValue(bearer.token, bearer.field, bearer.path, env, commands);
 }
 
 // ../envoy-client/src/dispatch-config.ts
@@ -20219,7 +20649,34 @@ function writtenToken(config, checkout) {
     checkout: false
   };
 }
-function dispatchSettings(env, config) {
+function dispatchSettings(env, config, options = {}) {
+  const target = dispatchTarget(env, config);
+  if (!target.enabled)
+    return target;
+  const { url, source } = target;
+  let token;
+  try {
+    token = source.kind === "variable" ? source.token : fileBearer(source, url, "DISPATCH", env, options.commands);
+  } catch (error) {
+    return offWithError(messageFor(error));
+  }
+  const publicUrl = nonEmpty(env.DISPATCH_PUBLIC_URL);
+  const publicParsed = publicUrl === undefined ? undefined : httpUrl2(publicUrl);
+  if (publicUrl !== undefined && (publicParsed === undefined || publicParsed.port === "0")) {
+    return offWithError("DISPATCH_PUBLIC_URL must be an http or https URL");
+  }
+  return {
+    enabled: true,
+    url,
+    token,
+    ...publicUrl === undefined ? {} : { publicUrl: publicUrl.replace(/\/+$/, "") }
+  };
+}
+function dispatchUrl(env, config) {
+  const target = dispatchTarget(env, config);
+  return target.enabled ? target.url : undefined;
+}
+function dispatchTarget(env, config) {
   if (config.kind === "failed")
     return offWithError(config.error);
   const explicitUrl = nonEmpty(env.DISPATCH_URL);
@@ -20242,27 +20699,17 @@ function dispatchSettings(env, config) {
   if (explicitUrl !== undefined && httpUrl2(explicitUrl) === undefined) {
     return offWithError("DISPATCH_URL must be an http or https URL");
   }
+  let source;
   try {
-    const source = checkout !== null && checkoutServer !== undefined ? checkoutPair(checkout, checkoutServer) : bearerSource(env, "DISPATCH", () => writtenToken(config, checkout));
-    if (source.kind === "none") {
-      return offWithError(explicitUrl === undefined ? `${config.path}: dispatch is enabled and no token is: set dispatch.token, or DISPATCH_TOKEN or DISPATCH_TOKEN_FILE` : `DISPATCH_URL is set and no token is: set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or dispatch.token in ${config.path}`);
-    }
-    const url = (explicitUrl ?? (source.kind === "file" ? source.server : own.serverUrl ?? DEFAULT_SERVER_URL)).replace(/\/+$/, "");
-    const token = source.kind === "variable" ? source.token : fileBearer(source, url, "DISPATCH", env);
-    const publicUrl = nonEmpty(env.DISPATCH_PUBLIC_URL);
-    const publicParsed = publicUrl === undefined ? undefined : httpUrl2(publicUrl);
-    if (publicUrl !== undefined && (publicParsed === undefined || publicParsed.port === "0")) {
-      return offWithError("DISPATCH_PUBLIC_URL must be an http or https URL");
-    }
-    return {
-      enabled: true,
-      url,
-      token,
-      ...publicUrl === undefined ? {} : { publicUrl: publicUrl.replace(/\/+$/, "") }
-    };
+    source = checkout !== null && checkoutServer !== undefined ? checkoutPair(checkout, checkoutServer) : bearerSource(env, "DISPATCH", () => writtenToken(config, checkout));
   } catch (error) {
     return offWithError(messageFor(error));
   }
+  if (source.kind === "none") {
+    return offWithError(explicitUrl === undefined ? `${config.path}: dispatch is enabled and no token is: set dispatch.token, or DISPATCH_TOKEN or DISPATCH_TOKEN_FILE` : `DISPATCH_URL is set and no token is: set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or dispatch.token in ${config.path}`);
+  }
+  const url = (explicitUrl ?? (source.kind === "file" ? source.server : own.serverUrl ?? DEFAULT_SERVER_URL)).replace(/\/+$/, "");
+  return { enabled: true, url, source };
 }
 
 // ../envoy-client/src/envoy-settings.ts
@@ -20451,10 +20898,15 @@ function sessionDispatchSettings(file, env, options) {
     return { dispatch: offWithError(file.error), warnings: [], missing: null };
   const config = readEnvoyConfig(file.path, env, options);
   return {
-    dispatch: dispatchSettings(env, config),
+    dispatch: dispatchSettings(env, config, { commands: options.commands }),
     warnings: config.kind === "read" ? config.warnings : [],
     missing: config.kind === "read" ? config.missing : null
   };
+}
+function sessionDispatchUrl(file, env, options) {
+  if (file.path === null)
+    return;
+  return dispatchUrl(env, readEnvoyConfig(file.path, env, options));
 }
 function sessionEnvoySettings(file, env, options) {
   if (file.path === null)
@@ -20478,12 +20930,12 @@ function claudeProjectDirectory(environment, fallback) {
 
 // src/session-identity.ts
 import { readFile } from "fs/promises";
-import { basename as basename2, join as join4 } from "path";
+import { basename as basename2, join as join6 } from "path";
 
 // src/session-state.ts
-import { readFileSync as readFileSync4 } from "fs";
+import { readFileSync as readFileSync5 } from "fs";
 import { mkdir, readdir, rename, rm, stat, utimes, writeFile } from "fs/promises";
-import { dirname as dirname2, join as join3 } from "path";
+import { dirname as dirname2, join as join5 } from "path";
 async function writeAtomicStateFile(file, contents) {
   await mkdir(dirname2(file), { recursive: true, mode: 448 });
   const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
@@ -20501,7 +20953,7 @@ async function pruneStateDirectory(directory, isStale) {
     throw error;
   });
   for (const entry of entries) {
-    const file = join3(directory, entry);
+    const file = join5(directory, entry);
     if (!await isStale(file))
       continue;
     await rm(file, { recursive: true, force: true });
@@ -20516,7 +20968,7 @@ async function writtenLongAgo(file) {
 }
 var TITLES_DIRECTORY = "titles";
 function sessionTitleFile(stateDirectory, sessionId) {
-  return join3(stateDirectory, TITLES_DIRECTORY, `${encodeURIComponent(sessionId)}.txt`);
+  return join5(stateDirectory, TITLES_DIRECTORY, `${encodeURIComponent(sessionId)}.txt`);
 }
 async function writeChosenTitle(file, title) {
   await writeAtomicStateFile(file, `${title}
@@ -20527,7 +20979,7 @@ async function removeChosenTitle(file) {
 }
 function readChosenTitleSync(file) {
   try {
-    return readFileSync4(file, "utf8");
+    return readFileSync5(file, "utf8");
   } catch {
     return;
   }
@@ -20544,7 +20996,7 @@ async function recordChosenTitle(sessionId, title) {
     await writeChosenTitle(file, chosen);
 }
 async function pruneStaleSessionTitles(stateDirectory) {
-  await pruneStateDirectory(join3(stateDirectory, TITLES_DIRECTORY), writtenLongAgo);
+  await pruneStateDirectory(join5(stateDirectory, TITLES_DIRECTORY), writtenLongAgo);
 }
 
 // src/session-identity.ts
@@ -20565,14 +21017,14 @@ class SessionIdentity {
   }
 }
 function sessionHandoffDirectory(stateDirectory, claudePid) {
-  return join4(stateDirectory, "sessions", String(claudePid));
+  return join6(stateDirectory, "sessions", String(claudePid));
 }
 function sessionHandoffFile(stateDirectory, claudePid) {
-  return join4(sessionHandoffDirectory(stateDirectory, claudePid), "session-id");
+  return join6(sessionHandoffDirectory(stateDirectory, claudePid), "session-id");
 }
 var ROLES_DIRECTORY = "roles";
 function roleStateFile(stateDirectory, sessionId) {
-  return join4(stateDirectory, ROLES_DIRECTORY, `${encodeURIComponent(sessionId)}.json`);
+  return join6(stateDirectory, ROLES_DIRECTORY, `${encodeURIComponent(sessionId)}.json`);
 }
 
 class UnparseableRoleRecordError extends Error {
@@ -20623,14 +21075,14 @@ function processExists(pid) {
   }
 }
 async function pruneStaleSessionHandoffs(stateDirectory) {
-  await pruneStateDirectory(join4(stateDirectory, "sessions"), (file) => {
+  await pruneStateDirectory(join6(stateDirectory, "sessions"), (file) => {
     const pid = basename2(file);
     return /^\d+$/.test(pid) && !processExists(Number(pid));
   });
 }
 async function pruneStaleSessionRoles(stateDirectory, currentSessionId) {
   const own = roleStateFile(stateDirectory, currentSessionId);
-  await pruneStateDirectory(join4(stateDirectory, ROLES_DIRECTORY), async (file) => file !== own && await writtenLongAgo(file));
+  await pruneStateDirectory(join6(stateDirectory, ROLES_DIRECTORY), async (file) => file !== own && await writtenLongAgo(file));
 }
 
 // hooks/session-hook.ts
@@ -20644,11 +21096,26 @@ var DispatchFirstInput = object({
   hook_event_name: _enum2(["SessionStart", "SubagentStart"]),
   cwd: string2().optional()
 });
+var AnswersInput = object({ session_id: string2().min(1), ...DispatchFirstInput.shape });
+var ANSWERS_BY_MS = SESSION_ANSWERS_DEADLINE_MS;
+var ANSWERS_LEAST_WAIT_MS = 150;
+var ANSWERS_SETTLE_MS = 50;
+var REFRESH_LOCK = "answers-refresh.lock";
+var REFRESH_OUTCOME = "answers-refresh.json";
+var REFRESH_POLL_MS = 20;
+var REFRESH_READ_MS = 12000;
+var REFRESH_LOCK_STALE_MS = 30000;
+var RefreshOutcome = object({
+  finished_at: number2(),
+  dispatch_url: string2().nullable(),
+  text: string2().nullable()
+});
+var ANSWERS_TIMING_FILE = "ENVOY_ANSWERS_TIMING_FILE";
 var DISPATCH_HOST_LINE = "export DISPATCH_HOST=claude";
 function appendOnce(envFile, line) {
   let written = "";
   try {
-    written = readFileSync5(envFile, "utf8");
+    written = readFileSync6(envFile, "utf8");
   } catch (error) {
     if (!hasErrnoCode(error, "ENOENT"))
       throw error;
@@ -20725,15 +21192,194 @@ function dispatchFirst(raw) {
   process.stdout.write(JSON.stringify({
     hookSpecificOutput: {
       hookEventName: input.hook_event_name,
-      additionalContext: readDispatchFirstContext(dispatchFirstSkillFile(join5(pluginRoot, "skills")))
+      additionalContext: readDispatchFirstContext(dispatchFirstSkillFile(join7(pluginRoot, "skills")))
     }
   }));
 }
-var mode = process.argv[2];
-if (mode !== "open-asks" && mode !== "dispatch-first") {
-  throw new Error(`session-hook: unknown mode ${JSON.stringify(mode)}; hooks.json names open-asks or dispatch-first`);
+function remainingUntil(at) {
+  return Math.max(0, Math.round(at - performance.now()));
 }
-var input = JSON.parse(await Bun.stdin.text());
+function refreshLockHeld(lock) {
+  let age;
+  let text;
+  try {
+    age = Date.now() - statSync2(lock).mtimeMs;
+    text = readFileSync6(lock, "utf8");
+  } catch (error) {
+    if (hasErrnoCode(error, "ENOENT"))
+      return false;
+    throw error;
+  }
+  if (age > REFRESH_LOCK_STALE_MS)
+    return false;
+  const pid = Number(text);
+  if (!Number.isSafeInteger(pid) || pid <= 0)
+    return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !hasErrnoCode(error, "ESRCH");
+  }
+}
+function takeRefreshLock(lock) {
+  for (let attempt = 0;attempt < 2; attempt++) {
+    try {
+      writeFileSync2(lock, String(process.pid), { flag: "wx", mode: 384 });
+      return true;
+    } catch (error) {
+      if (!hasErrnoCode(error, "EEXIST"))
+        throw error;
+    }
+    if (refreshLockHeld(lock))
+      return false;
+    rmSync3(lock, { force: true });
+  }
+  return false;
+}
+function refreshOutcome(file, since) {
+  let value;
+  try {
+    value = JSON.parse(readFileSync6(file, "utf8"));
+  } catch {
+    return;
+  }
+  const outcome = RefreshOutcome.safeParse(value);
+  return outcome.success && outcome.data.finished_at >= since ? outcome.data : undefined;
+}
+async function refreshedAnswers(session, cwd, dispatchUrl, startedAt, by) {
+  let directory;
+  try {
+    directory = sessionDirectory(process.env, session);
+  } catch (error) {
+    return { reason: messageFor(error) };
+  }
+  const lock = join7(directory, REFRESH_LOCK);
+  if (!refreshLockHeld(lock)) {
+    Bun.spawn([process.execPath, Bun.main, "answers-refresh", session, cwd], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+      detached: true
+    }).unref();
+  }
+  const file = join7(directory, REFRESH_OUTCOME);
+  for (;; ) {
+    const outcome = refreshOutcome(file, startedAt);
+    if (outcome !== undefined) {
+      if (outcome.dispatch_url === dispatchUrl)
+        return { text: outcome.text ?? undefined };
+      return {
+        reason: `the refresher read ${outcome.dispatch_url ?? "no Dispatch"}, not the Dispatch envoy.json names now`
+      };
+    }
+    const left = remainingUntil(by);
+    if (left === 0) {
+      return {
+        reason: `a "!" command in envoy.json had not finished ${Math.round(by)} ms after the hook started`
+      };
+    }
+    await Bun.sleep(Math.min(REFRESH_POLL_MS, left));
+  }
+}
+async function answersMessage(session, cwd, startedAt, by) {
+  const file = sessionConfigFile("claude", process.env);
+  let { dispatch } = sessionDispatchSettings(file, process.env, { cwd, commands: "kept" });
+  let dispatchUrl;
+  if (!dispatch.enabled && dispatch.error !== null) {
+    dispatchUrl = sessionDispatchUrl(file, process.env, { cwd });
+    if (dispatchUrl !== undefined) {
+      const refreshed = await refreshedAnswers(session, cwd, dispatchUrl, startedAt, by);
+      if ("text" in refreshed)
+        return refreshed.text;
+      dispatch = offWithError(refreshed.reason);
+    }
+  }
+  const read = await readSessionAnswers({
+    session,
+    dispatch,
+    dispatchUrl,
+    env: process.env,
+    deadlineMs: Math.max(ANSWERS_LEAST_WAIT_MS, remainingUntil(by))
+  });
+  return read.text;
+}
+async function answers(text) {
+  const began = performance.now();
+  const by = Math.max(ANSWERS_BY_MS, began + ANSWERS_LEAST_WAIT_MS);
+  const startedAt = Date.now() - performance.now();
+  let printed = null;
+  try {
+    const input = AnswersInput.parse(JSON.parse(text));
+    const directory = claudeProjectDirectory({ CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] }, input.cwd ?? process.cwd());
+    const message = await answersMessage(input.session_id, directory, startedAt, by);
+    if (message !== undefined) {
+      await Bun.write(Bun.stdout, JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: input.hook_event_name,
+          additionalContext: message
+        }
+      }));
+    }
+    printed = performance.now();
+    await Promise.race([
+      sessionAnswersSettled(input.session_id),
+      Bun.sleep(remainingUntil(by + ANSWERS_SETTLE_MS))
+    ]);
+  } catch (error) {
+    process.stderr.write(`envoy: people's answers were not added \u2014 ${messageFor(error)}
+`);
+  }
+  const timingFile = process.env[ANSWERS_TIMING_FILE];
+  if (timingFile !== undefined) {
+    try {
+      writeFileSync2(timingFile, JSON.stringify({ began, printed, ended: performance.now() }));
+    } catch {}
+  }
+  process.exit(0);
+}
+async function answersRefresh(session, cwd) {
+  const directory = sessionDirectory(process.env, session);
+  mkdirSync2(directory, { recursive: true, mode: 448 });
+  const lock = join7(directory, REFRESH_LOCK);
+  if (takeRefreshLock(lock)) {
+    try {
+      const file = sessionConfigFile("claude", process.env);
+      const dispatchUrl = sessionDispatchUrl(file, process.env, { cwd }) ?? null;
+      const { dispatch } = sessionDispatchSettings(file, process.env, { cwd });
+      const read = await readSessionAnswers({
+        session,
+        dispatch,
+        env: process.env,
+        deadlineMs: REFRESH_READ_MS
+      });
+      const outcome = {
+        finished_at: Date.now(),
+        dispatch_url: dispatchUrl,
+        text: read.text ?? null
+      };
+      writeAtomically(join7(directory, REFRESH_OUTCOME), JSON.stringify(outcome));
+    } finally {
+      rmSync3(lock, { force: true });
+    }
+  }
+  process.exit(0);
+}
+var [mode, ...modeArguments] = process.argv.slice(2);
+if (mode === "answers-refresh") {
+  const [session, cwd] = modeArguments;
+  if (session === undefined || cwd === undefined) {
+    throw new Error("session-hook: answers-refresh takes a session id and a directory");
+  }
+  await answersRefresh(session, cwd);
+}
+if (mode !== "open-asks" && mode !== "dispatch-first" && mode !== "answers") {
+  throw new Error(`session-hook: unknown mode ${JSON.stringify(mode)}; hooks.json names open-asks, dispatch-first or answers`);
+}
+var text = await Bun.stdin.text();
+if (mode === "answers")
+  await answers(text);
+var input = JSON.parse(text);
 if (mode === "open-asks")
   await openAsks(input);
 else

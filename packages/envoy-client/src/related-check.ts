@@ -1,4 +1,11 @@
-import type { SearchAsk, Suggestions, WriteAdvice, WriteSuggestion } from "@legion/contracts";
+import {
+  relatedCheckFormOf,
+  relatedCheckSearchWords,
+  type SearchAsk,
+  type Suggestions,
+  type WriteAdvice,
+  type WriteSuggestion,
+} from "@legion/contracts";
 import { messageFor } from "./errors";
 import { askStateLines } from "./search-answer";
 
@@ -100,46 +107,26 @@ export function decisionBlockLines(
   }
 }
 
+/**
+ * One of the three forms as the CLI words it. Which form the result holds is the contract's
+ * judgement (`relatedCheckFormOf`), never this module's: the dashboard reads the same answer.
+ */
 function relatedCheckForm(suggestions: Suggestions, context: RelatedCheckContext): string[] {
-  const { outcome, missing } = suggestions;
-  if (outcome === "not_made" || (outcome === undefined && missing !== undefined)) {
-    return [notMadeLine(missing ?? "the server gave no reason", context, suggestions.search_query)];
+  const form = relatedCheckFormOf(suggestions);
+  if (form.form === "not_made") {
+    return [notMadeLine(form.reason, context, form.searchQuery)];
   }
-  const related = suggestions.related ?? [];
-  const mode = searchModeWords(suggestions);
-  if (related.length > 0) {
+  if (form.form === "items") {
     // A server predating the forms names no search mode, so its header names none either.
-    const header = mode === undefined ? "Related items:" : `Related items (searched by ${mode}):`;
-    return [header, ...related.flatMap((item) => relatedItemLines(item, context.configUrl))];
-  }
-  if (outcome === undefined) {
-    return [
-      notMadeLine("the server did not say whether it searched", context, suggestions.search_query),
-    ];
-  }
-  if (outcome === "found" || outcome === "none") {
-    return [
-      mode === undefined
-        ? "Related-item check searched and found nothing."
-        : `Related-item check searched (${mode}) and found nothing.`,
-    ];
+    const header =
+      form.mode === undefined ? "Related items:" : `Related items (searched by ${form.mode}):`;
+    return [header, ...form.related.flatMap((item) => relatedItemLines(item, context.configUrl))];
   }
   return [
-    notMadeLine(
-      `the server answered an outcome this client does not know (${String(outcome)})`,
-      context,
-      suggestions.search_query
-    ),
+    form.mode === undefined
+      ? "Related-item check searched and found nothing."
+      : `Related-item check searched (${form.mode}) and found nothing.`,
   ];
-}
-
-/** How the check searched, as the forms word it after "searched" or "searched by". */
-function searchModeWords(suggestions: Suggestions): string | undefined {
-  const { search, search_note: note } = suggestions;
-  if (search === undefined) return undefined;
-  if (search === "meaning_and_keywords") return "meaning and keywords";
-  const words = search === "keywords_only" ? "keywords only" : String(search);
-  return note === undefined || note === "" ? words : `${words}: ${note}`;
 }
 
 function relatedItemLines(item: WriteSuggestion, configUrl: string): string[] {
@@ -193,18 +180,10 @@ function absoluteHref(href: string, configUrl: string): string {
  * check read. With no such word the command names what to put in `--query` instead of guessing.
  */
 function notMadeLine(reason: string, context: RelatedCheckContext, searchQuery?: string): string {
-  const words = searchQuery?.trim() || searchWords(context.text);
+  const words = searchQuery?.trim() || relatedCheckSearchWords(context.text);
   const query =
     words === ""
       ? " with two or three of its words as --query"
       : ` --query '${words.replaceAll("'", "'\\''")}'`;
   return `No related-item check was made: ${reason}. Search before you rely on this being new: dispatch search --project ${context.project}${query}`;
-}
-
-/** The first three words of four or more letters: short words are mostly ones every item holds. */
-function searchWords(text: string): string {
-  return (text.match(/[\p{L}\p{N}_]+/gu) ?? [])
-    .filter((word) => (word.match(/\p{L}/gu) ?? []).length >= 4)
-    .slice(0, 3)
-    .join(" ");
 }

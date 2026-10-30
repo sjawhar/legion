@@ -81,7 +81,7 @@ var _ intake.Handler = (*Admission)(nil)
 
 // New creates an admission handler for one Dispatch project. engine is the workflow's own, shared
 // with intake's other handler: reenterStrandedChildren calls its exported ReenterChild rather than
-// keeping a second copy of the suspend-and-gate-open re-entry.
+// keeping a second copy of re-entry and gate-open behavior.
 func New(store record.Store, engine *workflow.Engine, cap int, project string, log *slog.Logger) *Admission {
 	if log == nil {
 		log = slog.Default()
@@ -948,8 +948,8 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	return a.store.ClearTreeGeneration(ctx, tx, stored.Tree)
 }
 
-// releaseReturnedSlots gives back the slots of roots that no longer run workers: a completed root,
-// or one in awaiting_person, whose architect is suspended until the person answers.
+// releaseReturnedSlots gives back the slots of roots that no longer need one: a completed root or
+// one in awaiting_person, whose architect stays live while the root waits for a person.
 func (a *Admission) releaseReturnedSlots(ctx context.Context, tx pgx.Tx) ([]string, error) {
 	return a.releaseSlots(ctx, tx, "returned", releasesSlot)
 }
