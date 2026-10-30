@@ -28,12 +28,14 @@
 //     `[...](u)` is a different shape, so the link context is written only for the image control,
 //     which is no link.
 //   - An image-label form is an image whose label holds raw HTML: a tag, a lowercase declaration,
-//     an uppercase one, a comment, a processing instruction and CDATA, each with text around it
-//     and each alone in the label, with and without a title. The engine's alt text is
-//     mdast-util-to-string of the label, which writes a literal node's own value and so keeps the
-//     raw HTML, where Go built the alt from the label's text and nested images alone and dropped
-//     it. Only the label decides the alt, which no mark around the image reaches, so these take
-//     the bare context alone, in every container.
+//     an uppercase one, a comment, a processing instruction, CDATA and an anchor span with its
+//     `</span>`, each with text around it and each alone in the label, with and without a title.
+//     The engine's alt text is mdast-util-to-string of the label, which writes a literal node's
+//     own value and so keeps the raw HTML; the anchor span is in the alt too, since the engine
+//     builds the alt as the label closes and turns spans into marks only afterwards, and Go reads
+//     a span in a label as the raw HTML it is for that reason. Only the label decides the alt,
+//     which no mark around the image reaches, so these take the bare context alone, in every
+//     container.
 //
 // The containers are a paragraph, a heading, a quote, a bullet item, an ordered item, a table
 // cell, a callout, a footnote definition and a quoted bullet item. A form holding a line ending -
@@ -96,7 +98,15 @@ const labelForms = [
   "![<https://u.test>](u)",
 ] as const;
 // Raw HTML in an image's label, one form for each kind a label can hold.
-const imageLabelHTML = ["<b>", "<!a>", "<!A>", "<!-- c -->", "<?x?>", "<![CDATA[x]]>"] as const;
+const imageLabelHTML = [
+  "<b>",
+  "<!a>",
+  "<!A>",
+  "<!-- c -->",
+  "<?x?>",
+  "<![CDATA[x]]>",
+  '<span data-proof="comment" data-id="c1" data-by="user:x">b</span>',
+] as const;
 const imageLabelForms = imageLabelHTML.flatMap((html) =>
   ["i.png", 'i.png "t"'].flatMap((destination) => [
     `![r ${html} s](${destination})`,

@@ -840,9 +840,11 @@ func parseTableRow(row ast.Node, header bool, source []byte, footnotes map[int]s
 // HTML is such a literal node: mdast reads `<b>`, `</b>`, a comment, a declaration, a processing
 // instruction and CDATA each into one `html` node, and mdast's `html` is a literal, so the one
 // `html` arm here covers every kind of raw HTML a label can hold, writing its characters as
-// written from the node's `value` attribute. A `<span data-proof=…>` and its `</span>` are no
-// `html` node at all: parseInlineMarks reads them as the anchor mark on the text between them, in
-// an image's label as anywhere else, so an anchored label holds its text alone in the alt.
+// written from the node's `value` attribute. A `<span data-proof=…>` and its `</span>` are that
+// arm's too: parseInlineMarks reads them as the anchor mark on the text between them everywhere
+// but in an image's label, where they are the raw HTML they are (insideImage), since a label is
+// alt text and holds no mark, so an anchored label's characters reach this builder as the
+// browser editor's reader holds them in its alt.
 // inlineNesting holds images within maxInlineNesting of one another, so each alt text is copied
 // into at most that many others.
 func parseImage(image *ast.Image, source []byte, footnotes map[int]string) (*Node, error) {
@@ -1025,17 +1027,26 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 			children = append(children, &Node{Type: "footnote_reference", Attrs: Attrs{"label": decoded}})
 		case *ast.RawHTML:
 			value := segmentsText(current.Segments, source)
-			if strings.EqualFold(strings.TrimSpace(value), "</span>") {
-				var removed bool
-				active, removed = closeAnchorMark(active)
-				if removed {
+			// An anchor mark reaches nothing inside an image's label: the label is the alt text,
+			// an attribute, which carries no mark, so reading a `<span data-proof=…>` as a mark
+			// there would leave the document without the mark and the alt without the span's
+			// characters. The browser editor's reader keeps them, since
+			// mdast-util-from-markdown builds the alt with resume() as the label closes, before
+			// remarkProofMarks turns such a span into a mark, so the alt it writes holds the
+			// span's bytes. Here the span is the raw HTML it is, which parseImage writes into the
+			// alt; everywhere else it is the anchor mark on the text up to its `</span>`.
+			if !insideImage(current) {
+				if strings.EqualFold(strings.TrimSpace(value), "</span>") {
+					var removed bool
+					active, removed = closeAnchorMark(active)
+					if removed {
+						continue
+					}
+				}
+				if anchor, ok := parseAnchorMark(value); ok {
+					active = append(active, anchor)
 					continue
 				}
-			}
-			anchor, ok := parseAnchorMark(value)
-			if ok {
-				active = append(active, anchor)
-				continue
 			}
 			children = append(children, &Node{Type: "html", Attrs: Attrs{"value": value}})
 		default:

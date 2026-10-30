@@ -79,3 +79,5 @@ a ![r <![CDATA[x]]> s](i.png) b
 a ![<![CDATA[x]]>](i.png) b
 
 a ![r <![CDATA[x]]> s](i.png "t") b
+
+a ![r <span data-proof="comment" data-id="c1" data-by="user:x">b</span> s](i.png) b
