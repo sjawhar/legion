@@ -14,10 +14,11 @@ body: |-
     mention names hears the comment once, from the mention; when that mention's send fails, the
     route or author copy skipped for it is published to it then. The comment's own event waits on a
     mention for at most a minute after the comment committed, however long the recipient's lane is
-    held: past that the outbox records the copy it skipped (migration `0145`,
+    held and whether or not a Retry overtook the attempt: past that the outbox records the copy it
+    skipped (migration `0145`,
     `comment_fallback_copies`), publishes the event to every other destination, and publishes that
-    copy to its one destination only if the send - the sweep's resend, or the queued send the lane
-    comes to - then fails; a copy whose publish fails is
+    copy to its one destination only if the send - the sweep's resend, the queued send the lane
+    comes to, or the settle of an attempt a Retry overtook - then fails; a copy whose publish fails is
     retried on the outbox's event backoff, never given up, and logged at Error when it reaches the
     ten attempts at which the outbox reports an event dead-lettered. A Retry of a mention from its
     card while its first attempt is still waiting on a lane opens the attempt that is sent: the

@@ -131,7 +131,8 @@ const (
 	// mentionSent: an attempt reached the session, so the mention delivered the comment.
 	mentionSent mentionState = iota
 	// mentionResending: an attempt past the lease the outbox waits a send out for
-	// (model.MentionResumedSQL): the delivery sweep's to resend, or a queued send's to make.
+	// (model.MentionResumedSQL): the delivery sweep's to resend, or a queued send's to make, or
+	// one a later attempt overtook, which its sender settles superseded.
 	mentionResending
 	// mentionSending: an attempt whose send is live (model.MentionLiveSQL).
 	mentionSending
@@ -193,8 +194,9 @@ func (a *attempt) leftToMention(sessionID string) bool {
 // skipped. A mention that reached the session delivered the comment, so the copy is skipped. A
 // mention still being sent may yet, so the copy is held back and the attempt marked deferred, to
 // be decided again on the next scan. A mention past the lease that wait is bounded by
-// (model.MentionResumedSQL: the delivery sweep resends it, or a sender holds it queued still) is
-// that send's: the copy is skipped and held as a fallback row (mentionComment.holdFallbackCopy),
+// (model.MentionResumedSQL: the delivery sweep resends it, a sender holds it queued still, or a
+// later attempt overtook it) is that send's: the copy is skipped and held as a fallback row
+// (mentionComment.holdFallbackCopy),
 // which the fallback pass publishes should the send fail (publishFallbackCopies); an insert that
 // fails holds the copy back and fails the attempt, so the event is retried. A destination this
 // event already reached gave the session a copy, so it needs no row. A mention whose send was
@@ -593,11 +595,13 @@ func failedFallbackCopy(held fallbackCopy) fallbackRecord {
 // longer on: the delivery sweep resends it (resumeOwedDeliveries in internal/dispatch/api) under
 // the attempt's own idempotency key once no sender holds it - the process that queued it died
 // with the send in flight, or never started it, perhaps after the listener took it, and the
-// listener drops the resend as a repeat when it did - or a live sender holds it queued behind a
-// lane its recipient has held longer than a lease, and sends it when that lane reaches it. The
-// outbox cannot tell which, and holding the comment's event for a lane's minutes would be no
-// bound at all, so it neither publishes that copy nor waits on the send. It records the copy it
-// held back as a comment_fallback_copies row instead, keyed by the comment and the exact
+// listener drops the resend as a repeat when it did - or a live sender holds it, queued behind a
+// lane its recipient has held longer than a lease, and sends it when that lane reaches it, or
+// settles it superseded without sending when a Retry from the card overtook it meanwhile
+// (supersedeCommentDelivery). The outbox cannot tell which, and holding the comment's event for a
+// lane's minutes would be no bound at all, so it neither publishes that copy nor waits on the
+// send. It records the copy it held back as a comment_fallback_copies row instead, keyed by the
+// comment and the exact
 // destination topic the copy would have gone to and naming the key whose attempts decide it (the
 // session, or the target of a route suppressed by that string alone), inserted idempotently
 // before the event can be marked published; an insert that fails fails the attempt, so the event
@@ -798,8 +802,15 @@ func decideFallbackCopy(
 // next_attempt_at pushed out by claimWindow in the same breath, which each row returns as its
 // claim. It reads the partial index of unsettled rows, so a pass with nothing to decide reads no
 // row.
+//
+// The statement runs outside the pass's context, under claimTimeout of its own, as the record
+// step does: a context that ends once it has committed would answer context canceled and lose the
+// rows it claimed, which would then sit claimed for claimWindow with no pass deciding them. The
+// pass reads its own ctx instead and releases every row it claimed at once (publishFallbackCopies).
 func claimFallbackCopies(ctx context.Context, deps Deps) ([]fallbackCopy, error) {
-	rows, err := deps.Store.Pool.Query(ctx, `
+	claim, cancel := context.WithTimeout(context.WithoutCancel(ctx), claimTimeout)
+	defer cancel()
+	rows, err := deps.Store.Pool.Query(claim, `
 		update comment_fallback_copies set next_attempt_at = now() + $2
 		where (comment_id, destination) in (
 			select comment_id, destination from comment_fallback_copies

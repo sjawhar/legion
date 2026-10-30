@@ -66,10 +66,15 @@ const (
 	// loadCommentRecipients) so a malformed cycle (comments.reply_to has no acyclicity
 	// constraint) cannot spin the recursive query and stall the outbox scan.
 	maxCommentThreadDepth = 32
-	// recordTimeout bounds the write of a batch's outcome (recordBatch), which a stopping process
-	// still makes after its context has ended: one statement, which a healthy database answers in
-	// milliseconds, so a write that takes longer is a database the batch's claim is left to.
+	// recordTimeout bounds the write of a batch's or a fallback pass's outcome (recordBatch,
+	// recordFallbackCopies), which a stopping process still makes after its context has ended: one
+	// statement, which a healthy database answers in milliseconds, so a write that takes longer is
+	// a database the batch's claim is left to.
 	recordTimeout = 5 * time.Second
+	// claimTimeout bounds the fallback pass's claim (claimFallbackCopies), which runs outside the
+	// pass's own context so that one ending mid-statement cannot leave its rows claimed for
+	// claimWindow. It is one statement too, so it is given the bound its pass's write is given.
+	claimTimeout = recordTimeout
 )
 
 // Publisher is the NATS publication boundary used by the Dispatch outbox.

@@ -105,8 +105,9 @@ func (m mentionSend) lane() string {
 // send them past it (resumeOwedDeliveries). The outbox counts each of them live for the first
 // model.DeliveryClaimLapse of its attempt's life, holding the mentioned session's copy back; past
 // that lease it counts the attempt resumed (model.MentionResumedSQL) and keeps that copy as a
-// comment_fallback_copies row, which the lane's own send settles with nothing published when it
-// lands.
+// comment_fallback_copies row, which the outbox's fallback pass settles with nothing published
+// once the lane's send lands, and publishes should that send fail (publishFallbackCopies in
+// internal/dispatch/outbox).
 //
 // The statements the sender makes go through its three functions, which register binds to the
 // server: send (sendCommentMention), refresh (refreshMentionClaims) and release

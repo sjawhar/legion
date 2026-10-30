@@ -79,9 +79,10 @@ var (
 		where m.id = d.message_id and i.closed_at is not null
 	)`
 	// owedCommentAttempt is model.OwedMentionAttemptSQL, built from the same lease the outbox's
-	// split of a pending attempt reads (model.MentionResumedSQL, which counts beside it an attempt
-	// a sender holds past that lease), so the outbox holds a session's copy back for exactly the
-	// attempts this sweep will send and for no attempt it waits longer on than this sweep does.
+	// split of a pending attempt reads (model.MentionResumedSQL, which counts beside it every
+	// attempt past that lease a sender holds, overtaken ones included), so the outbox holds a
+	// session's copy back for exactly the attempts this sweep will send and for no attempt it
+	// waits longer on than this sweep does.
 	owedCommentAttempt = `d.state = 'pending' and ` + model.OwedMentionAttemptSQL("d")
 	// commentAttemptMentionGone holds for an attempt whose comment no longer holds its mention.
 	commentAttemptMentionGone = `not exists (

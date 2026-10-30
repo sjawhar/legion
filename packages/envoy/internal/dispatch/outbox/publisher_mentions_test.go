@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -619,10 +620,12 @@ func TestARetryReachesTheClaimantTheScanReads(t *testing.T) {
 // sender acts on its row first. When the outbox does, the attempt reads failed with its
 // comment.delivery receipt and the route copy it held back is published; a sender that claims it
 // afterwards finds it settled. When a sender's claim commits while the outbox waits to settle it,
-// the attempt is that sender's: it stays pending under the fresh claim, no receipt is written, and
-// the event defers on the send. An attempt a sender claimed whose claim lapsed (its sender died
+// the attempt is that sender's: it stays pending under the fresh claim and no receipt is written,
+// and the outbox, which waits on no attempt past the lease whoever holds it
+// (model.MentionResumedSQL), publishes the event and keeps the route copy as a fallback row for
+// that sender's send to decide. An attempt a sender claimed whose claim lapsed (its sender died
 // with the send in flight) is the delivery sweep's to resend: the outbox leaves it pending, writes
-// no receipt and publishes no copy, without waiting on it.
+// no receipt and holds its copy the same way, without waiting on it.
 func TestAnAbandonedMentionIsSettledByTheOutboxOrLeftToTheClaimThatTookItFirst(t *testing.T) {
 	const (
 		issueTopic = "notifications.dispatch.issue.T-1.comment.created"
@@ -636,15 +639,20 @@ func TestAnAbandonedMentionIsSettledByTheOutboxOrLeftToTheClaimThatTookItFirst(t
 		// commits it only once the outbox waits on the comment's owner lock to settle it.
 		claimFirst bool
 		wantTopics []string
-		wantErr    error
-		wantState  string
+		// wantHeld is the destination of each fallback row the publish leaves behind.
+		wantHeld  []string
+		wantErr   error
+		wantState string
 	}{
 		{name: "the outbox acts first", seeded: "abandoned", wantTopics: []string{issueTopic, routeTopic}, wantState: "failed"},
 		{
 			name: "a claim commits first", seeded: "abandoned", claimFirst: true,
-			wantTopics: []string{issueTopic}, wantErr: errMentionPending, wantState: "pending",
+			wantTopics: []string{issueTopic}, wantHeld: []string{routeTopic}, wantState: "pending",
 		},
-		{name: "a claim lapsed with its sender", seeded: "resumed", wantTopics: []string{issueTopic}, wantState: "pending"},
+		{
+			name: "a claim lapsed with its sender", seeded: "resumed",
+			wantTopics: []string{issueTopic}, wantHeld: []string{routeTopic}, wantState: "pending",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := store.WithTransactionTracking(context.Background())
@@ -708,6 +716,19 @@ func TestAnAbandonedMentionIsSettledByTheOutboxOrLeftToTheClaimThatTookItFirst(t
 			}
 			if got := topicsOf(publisher.all()); !reflect.DeepEqual(got, tc.wantTopics) {
 				t.Fatalf("published topics = %#v, want %#v", got, tc.wantTopics)
+			}
+			heldRows, err := database.Pool.Query(ctx, `
+				select destination from comment_fallback_copies where comment_id = $1 order by destination
+			`, commentID)
+			if err != nil {
+				t.Fatalf("read the fallback copies: %v", err)
+			}
+			held, err := pgx.CollectRows(heldRows, pgx.RowTo[string])
+			if err != nil {
+				t.Fatalf("decode the fallback copies: %v", err)
+			}
+			if !slices.Equal(held, tc.wantHeld) {
+				t.Fatalf("the fallback copies hold %#v, want %#v", held, tc.wantHeld)
 			}
 
 			var state string
@@ -980,8 +1001,9 @@ func TestAFallbackCopyWhoseMentionIsStillBeingSentIsClaimedAgainOnlyOnceItsWaitH
 	publisher := &recordingPublisher{}
 	deps := Deps{Store: database, Publisher: publisher, Broker: events.NewBroker()}
 	commentID := seedHeldFallbackCopy(ctx, t, deps)
-	// The mention is being sent again: a sender claimed its attempt just now, so the attempt is
-	// live (model.MentionLiveSQL) and the pass reads it as still being sent.
+	// The mention is being sent again: a sender claimed its attempt just now, and that attempt was
+	// created a lease ago, so the pass reads it as a send it waits no longer on
+	// (model.MentionResumedSQL) and leaves the row to a later pass.
 	if _, err := database.Pool.Exec(ctx, `
 		update comment_deliveries set state = 'pending', claimed_at = now() where comment_id = $1
 	`, commentID); err != nil {
@@ -1262,6 +1284,45 @@ func TestAFallbackPassWritesNothingToARowClaimedSinceItsClaim(t *testing.T) {
 					row.attempts, row.settled, row.published, row.due, secondClaim)
 			}
 		})
+	}
+}
+
+// TestAFallbackPassThatIsStoppingReleasesEveryRowItClaimed: a pass whose context has ended claims
+// its rows all the same - the claim runs outside that context (claimFallbackCopies) - and hands
+// every one of them straight back: the row is unsettled, counts no attempt and is due at once,
+// for whatever process runs next, rather than sitting claimed for claimWindow. That is what a
+// context ending while the claim runs comes to as well: the statement commits, and the pass
+// releases what it took. A claim made on the pass's own context would answer context canceled
+// with its rows claimed in the database, and the pass would return having left them so. The row
+// starts due on a wait that has passed, the shape a pass before this one released it in, so the
+// claim this pass takes and gives back is told apart from no claim at all.
+func TestAFallbackPassThatIsStoppingReleasesEveryRowItClaimed(t *testing.T) {
+	const sessionTopic = "notifications.agent.s1"
+	ctx := store.WithTransactionTracking(context.Background())
+	database := storetest.Open(t)
+	publisher := &recordingPublisher{}
+	deps := Deps{Store: database, Publisher: publisher, Broker: events.NewBroker()}
+	commentID := seedHeldFallbackCopy(ctx, t, deps)
+	if _, err := database.Pool.Exec(ctx, `
+		update comment_fallback_copies set next_attempt_at = now() - interval '1 second'
+		where comment_id = $1 and destination = $2
+	`, commentID, sessionTopic); err != nil {
+		t.Fatalf("let the held copy's wait pass: %v", err)
+	}
+	published := len(publisher.all())
+
+	stopping, stop := context.WithCancel(ctx)
+	stop()
+	publishFallbackCopies(stopping, deps)
+
+	row := readHeldCopy(t, database, commentID, sessionTopic)
+	if row.attempts != 0 || row.settled || row.published || row.due != nil {
+		t.Fatalf("the held copy has attempts=%d settled=%v published=%v next_attempt_at=%v, want it released "+
+			"by the pass that claimed it: no attempt counted, unsettled, unpublished and due at once",
+			row.attempts, row.settled, row.published, row.due)
+	}
+	if now := len(publisher.all()); now != published {
+		t.Fatalf("the stopping pass published %d envelopes, want none: it decided no row", now-published)
 	}
 }
 

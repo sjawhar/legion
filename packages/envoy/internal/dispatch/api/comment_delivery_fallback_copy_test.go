@@ -422,13 +422,28 @@ type heldLaneComment struct {
 	listener  *mentionListener
 }
 
-// aMentionQueuedPastALease posts two comments mentioning s1 on an issue routed to s1, the first
-// send stalled at the listener so the second waits on s1's lane, moves both attempts a claim
-// lease into the past - the lane held that long - and runs the outbox over them. The route is the
+// queuedMention is a mention of s1 waiting on a lane a stalled first send holds: the server the
+// comments were posted to, the issue they are on, the comment whose send is stalled at the
+// listener, the comment queued behind it, the listener and the release that lets the queued send
+// run. Its attempts are as young as the comments; a caller that wants the lane held past a claim
+// lease ages them (ageAttempts).
+type queuedMention struct {
+	handler  http.Handler
+	database *store.Store
+	deps     Deps
+	issue    string
+	sending  string
+	queued   string
+	release  func()
+	listener *mentionListener
+}
+
+// aMentionQueuedBehindAStalledSend posts two comments mentioning s1 on an issue routed to s1, the
+// first send stalled at the listener so the second waits on s1's lane. The route is the
 // destination that would reach s1, so it is the copy the outbox decides. The sender holds the
-// queued attempt's claim throughout: it is the live claim past a lease the outbox bounds its wait
-// by.
-func aMentionQueuedPastALease(t *testing.T) heldLaneComment {
+// queued attempt's claim throughout, writing it again every mentionClaimRefresh: it is the live
+// claim the outbox bounds its wait by however long the lane is held.
+func aMentionQueuedBehindAStalledSend(t *testing.T) queuedMention {
 	t.Helper()
 	listener, state := newMentionListener(t)
 	handler, database, deps, _ := newRegisteredTestServer(t, testServerOptions{
@@ -448,12 +463,24 @@ func aMentionQueuedPastALease(t *testing.T) heldLaneComment {
 	if !claimedPending(t, database, queued, "session:s1") {
 		t.Fatal("the attempt waiting on the held lane is not held by the sender")
 	}
-	ageAttempts(t, database, sending, queued)
+	return queuedMention{
+		handler: handler, database: database, deps: deps, issue: issue.Key,
+		sending: sending, queued: queued, release: release, listener: state,
+	}
+}
+
+// aMentionQueuedPastALease is a mention queued behind a stalled send
+// (aMentionQueuedBehindAStalledSend) with both attempts moved a claim lease into the past - the
+// lane held that long - and the outbox run over them.
+func aMentionQueuedPastALease(t *testing.T) heldLaneComment {
+	t.Helper()
+	lane := aMentionQueuedBehindAStalledSend(t)
+	ageAttempts(t, lane.database, lane.sending, lane.queued)
 	published := &recordingOutboxPublisher{}
-	runOutboxBeside(t, deps, published)
+	runOutboxBeside(t, lane.deps, published)
 	return heldLaneComment{
-		database: database, issue: issue.Key, published: published, comment: queued,
-		release: release, listener: state,
+		database: lane.database, issue: lane.issue, published: published, comment: lane.queued,
+		release: lane.release, listener: lane.listener,
 	}
 }
 
@@ -515,5 +542,74 @@ func TestAMentionQueuedPastALeasePublishesItsCopyWhenTheSendFails(t *testing.T) 
 	}
 	if copiesToS1 != 1 {
 		t.Fatalf("the outbox published %d copies to s1's own topic (%v), want the held copy alone", copiesToS1, topics)
+	}
+}
+
+// A Retry of a mention that is waiting on a held lane opens an attempt of its own, which
+// overtakes the queued one (claimCommentDeliveryAttempt); when that Retry fails, the comment's
+// event is not held with the attempt it overtook. Once the overtaken attempt is past a claim
+// lease the outbox counts it resumed whoever holds it (model.MentionResumedSQL), so it publishes
+// the comment to every other destination at once and keeps s1's copy as a fallback row, which
+// waits while that attempt is pending. The lane then settles the attempt superseded without
+// sending it, and the pass publishes the copy: s1 hears the comment exactly once, from the
+// outbox.
+func TestARetryThatFailsDoesNotHoldTheCommentOfTheAttemptItOvertook(t *testing.T) {
+	lane := aMentionQueuedBehindAStalledSend(t)
+	lane.listener.refuseSends("s1")
+	retry := dispatchRequest(t, lane.handler, http.MethodPost, "/api/v1/comments/"+lane.queued+"/deliveries",
+		map[string]any{"delivery": "steer"}, "alice")
+	if retry.Code != http.StatusCreated {
+		t.Fatalf("retry the queued mention: status=%d body=%s", retry.Code, retry.Body.String())
+	}
+	if attempt := decodeBody[commentDeliveryRead](t, retry); attempt.Attempt != 2 || attempt.State != "failed" {
+		t.Fatalf("the Retry = %#v, want an attempt 2 of its own, failed: attempt 1 waits on the held lane "+
+			"and s1's host refused this send", attempt)
+	}
+	ageAttempts(t, lane.database, lane.sending, lane.queued)
+	published := &recordingOutboxPublisher{}
+	runOutboxBeside(t, lane.deps, published)
+
+	destinations := awaitPublishedCommentCreated(t, lane.database, lane.queued)
+	if slices.Contains(destinations, contracts.AgentSubject("s1")) {
+		t.Fatalf("comment.created reached %v, want s1's own topic held as a fallback row", destinations)
+	}
+	if !slices.Contains(destinations, "notifications.dispatch.issue."+lane.issue+".comment.created") {
+		t.Fatalf("comment.created reached %v, want the issue's own topic among them: the overtaken attempt "+
+			"holds the event no longer", destinations)
+	}
+	awaitFallbackCopies(t, lane.database, lane.queued, []string{contracts.AgentSubject("s1")}, false)
+
+	// The lane reaches the attempt the Retry overtook and settles it superseded, sending nothing.
+	lane.release()
+	settled := waitForCommentDeliveries(t, lane.database, lane.queued, "both attempts settled",
+		func(attempts []model.CommentDelivery) bool {
+			return len(attempts) == 2 && attempts[0].State != "pending" && attempts[1].State != "pending"
+		})
+	if settled[0].State != "failed" || settled[0].Error == nil || *settled[0].Error != mentionSupersededError {
+		t.Fatalf("the overtaken attempt = %#v, want it settled superseded once its lane reached it", settled[0])
+	}
+	copies := awaitFallbackCopies(t, lane.database, lane.queued, []string{contracts.AgentSubject("s1")}, true)
+	if !copies[0].published {
+		t.Fatalf("the fallback copy = %#v, want it published: no attempt of the mention was sent", copies[0])
+	}
+	topics := published.topicsAbout(t, lane.queued)
+	var copiesToS1 int
+	for _, topic := range topics {
+		if topic == contracts.AgentSubject("s1") {
+			copiesToS1++
+		}
+	}
+	if copiesToS1 != 1 {
+		t.Fatalf("the outbox published %d copies to s1's own topic (%v), want the held copy alone", copiesToS1, topics)
+	}
+	var sendsOfTheComment int
+	for _, send := range lane.listener.sent() {
+		if send.body == "second" {
+			sendsOfTheComment++
+		}
+	}
+	if sendsOfTheComment != 1 {
+		t.Fatalf("the listener took %d sends of the queued comment, want the refused Retry alone: the "+
+			"overtaken attempt sends nothing", sendsOfTheComment)
 	}
 }

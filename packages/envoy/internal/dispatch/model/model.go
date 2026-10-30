@@ -1202,7 +1202,8 @@ var DeliveryClaimLapseInterval = fmt.Sprintf("interval '%d seconds'", int64(Deli
 // (OwedMentionAttemptSQL): the window in which a repeat of a send is still recognised as a
 // duplicate (contracts.DeliveryDuplicateWindow), so a resend of one that did land is dropped
 // rather than delivered twice. Past it the sweep sends nothing, and the outbox counts the attempt
-// abandoned whoever claimed it (MentionAbandonedSQL).
+// abandoned as soon as no sender holds it (MentionAbandonedSQL) and resumed while one does
+// (MentionResumedSQL): either way it waits on it no longer.
 const MentionSweepWindow = contracts.DeliveryDuplicateWindow
 
 // MentionSweepWindowInterval is MentionSweepWindow as a Postgres interval literal in whole
@@ -1219,12 +1220,14 @@ var MentionSweepWindowInterval = fmt.Sprintf("interval '%d seconds'", int64(Ment
 //
 // MentionLiveSQL, MentionResumedSQL and MentionAbandonedSQL split the pending attempts of
 // comment_deliveries three ways, each attempt into exactly one; a caller pairs each with
-// state = 'pending'. All three are built from the lease the delivery sweep waits an attempt out
-// for before it sends it (OwedMentionAttemptSQL, through mentionAttemptPastClaimLapseSQL), so the
-// outbox cannot come to a different answer from the sweep about who owes an attempt, and holds a
-// session's copy back for no longer than that lease. Which process acts on an attempt in each
-// state, and what becomes of the mentioned session's copy of the comment meanwhile, is described
-// once, on publishFallbackCopies in internal/dispatch/outbox.
+// state = 'pending'. All three turn on DeliveryClaimLapse, the lease the delivery sweep waits an
+// attempt out for before it sends it (OwedMentionAttemptSQL, through
+// mentionAttemptPastClaimLapseSQL), so the outbox cannot come to a different answer from the
+// sweep about who owes an attempt, and holds a session's copy back for no longer than that lease:
+// every pending attempt past it is resumed or abandoned, and none of them live, whoever holds it
+// and whether or not a later attempt overtook it. Which process acts on an attempt in each state,
+// and what becomes of the mentioned session's copy of the comment meanwhile, is described once, on
+// publishFallbackCopies in internal/dispatch/outbox.
 
 // DeliveryClaimFreeSQL is true of a delivery attempt no sender holds: never claimed, or claimed
 // more than DeliveryClaimLapse ago. The API's claim transactions take a pending attempt that reads
@@ -1268,8 +1271,7 @@ func deliveryClaimFreeSQL(row string) string {
 // mentionAttemptPastClaimLapseSQL is true of a pending attempt that is the mention's
 // (MentionAttemptIsTheMentionsSQL) and was created more than DeliveryClaimLapse ago: the lease an
 // attempt is left to the process that opened it for. Past it the attempt is the delivery sweep's
-// as soon as no sender holds it, and the outbox waits for it no longer (MentionResumedSQL),
-// whoever holds it.
+// as soon as no sender holds it (OwedMentionAttemptSQL).
 func mentionAttemptPastClaimLapseSQL(row string) string {
 	return `(` + MentionAttemptIsTheMentionsSQL(row) +
 		` and ` + row + `.created_at < now() - ` + DeliveryClaimLapseInterval + `)`
@@ -1278,21 +1280,28 @@ func mentionAttemptPastClaimLapseSQL(row string) string {
 // OwedMentionAttemptSQL is true of a pending attempt the delivery sweep sends now: the mention's,
 // created at least DeliveryClaimLapse ago (mentionAttemptPastClaimLapseSQL), and held by no
 // sender, so an attempt its own process opened is left to that process for its first minute. The
-// sweep reads it, and the outbox's MentionResumedSQL is this attempt and the one a sender holds
-// past the same lease, which it cannot tell from it.
+// sweep reads it, and the outbox counts it resumed beside every other pending attempt past that
+// same lease that is not abandoned, which it cannot tell from it (MentionResumedSQL).
 func OwedMentionAttemptSQL(row string) string {
 	return `(` + mentionAttemptPastClaimLapseSQL(row) + ` and ` + deliveryClaimFreeSQL(row) + `)`
 }
 
 // MentionResumedSQL is true of a pending mention attempt the outbox waits for no longer: it was
-// created more than DeliveryClaimLapse ago (mentionAttemptPastClaimLapseSQL), so either no sender
-// holds it and the delivery sweep sends it next pass (OwedMentionAttemptSQL) under its own
-// idempotency key, which the listener drops as a repeat when the first send landed, or a sender
-// holds it still - a send queued behind a lane held longer than a lease, whose claim its process
-// writes again every mentionClaimRefresh. The outbox cannot tell the two apart, and waits for
-// neither: it holds that session's copy as a comment_fallback_copies row, which the fallback pass
-// publishes should the send fail and settles with nothing sent once it lands.
-func MentionResumedSQL(row string) string { return mentionAttemptPastClaimLapseSQL(row) }
+// created more than DeliveryClaimLapse ago - the lease an attempt is left to the process that
+// opened it for - and is not abandoned (MentionAbandonedSQL). That is one of three sends the
+// outbox cannot tell apart: the mention's own, held by no sender, which the delivery sweep sends
+// next pass (OwedMentionAttemptSQL) under the attempt's own idempotency key, which the listener
+// drops as a repeat when the first send landed; one a sender holds still, a send queued behind a
+// lane held longer than a lease, whose claim its process writes again every mentionClaimRefresh;
+// and one a later attempt overtook while its sender held it, which that sender settles superseded
+// when its lane reaches it. The outbox waits for none of them, whoever holds the attempt and
+// whether or not a retry overtook it: it holds that session's copy as a comment_fallback_copies
+// row, which the fallback pass publishes should the send fail and settles with nothing sent once
+// it lands.
+func MentionResumedSQL(row string) string {
+	return `(` + row + `.created_at < now() - ` + DeliveryClaimLapseInterval +
+		` and not ` + MentionAbandonedSQL(row) + `)`
+}
 
 // MentionAbandonedSQL is true of a pending mention attempt the delivery sweep will never send and
 // no sender holds: created more than MentionSweepWindow ago, or overtaken by a later attempt of
@@ -1305,13 +1314,14 @@ func MentionAbandonedSQL(row string) string {
 }
 
 // MentionLiveSQL is true of a pending mention attempt whose send is live and the outbox still
-// waits on: neither past the lease the sweep waits out (MentionResumedSQL) nor abandoned
-// (MentionAbandonedSQL). That is the mention's own attempt in the DeliveryClaimLapse after its
-// comment committed - claimed, which the mention sender does when the attempt is committed and
-// keeps doing while the send waits on its recipient's lane, or unclaimed, the shape of an attempt
-// whose send the sender refused - and one past the sweep's reach that a sender holds all the
-// same. The outbox holds a mentioned session's copy back while its attempt is live, so that wait
-// is bounded by the lease.
+// waits on: neither past the lease a send is waited out for (MentionResumedSQL) nor abandoned
+// (MentionAbandonedSQL), which is to say created within DeliveryClaimLapse and claimed, or
+// unclaimed and the mention's still. That is the mention's own attempt in the DeliveryClaimLapse
+// after its comment committed - claimed, which the mention sender does when the attempt is
+// committed and keeps doing while the send waits on its recipient's lane, or unclaimed, the shape
+// of an attempt whose send the sender refused - and, within that same lease, an attempt a later
+// one overtook while a sender holds it. The outbox holds a mentioned session's copy back while
+// its attempt is live, so that wait is bounded by the lease, whoever holds the attempt.
 func MentionLiveSQL(row string) string {
 	return `(not ` + MentionResumedSQL(row) + ` and not ` + MentionAbandonedSQL(row) + `)`
 }

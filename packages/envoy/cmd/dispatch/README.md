@@ -1309,8 +1309,10 @@ reading `messages` once. Its trigger takes `SHARE ROW EXCLUSIVE` on `messages` a
 write waits behind it while a read does not. Its census answers `0` for the same reasons.
 
 Migration `0145_comment_fallback_copies` creates `comment_fallback_copies`, the copies of a new
-comment the outbox held back for a mention the delivery sweep resends, one row per comment and
-destination topic, which the outbox's fallback pass publishes once that resend fails
+comment the outbox held back for a mention it waits on no longer - one the delivery sweep resends,
+one a sender still holds queued behind a lane held past a claim lease, and one a Retry overtook
+while its sender holds it - one row per comment and destination topic, which the outbox's fallback
+pass publishes once that send fails and settles with nothing published once it lands
 (`publishFallbackCopies` in `internal/dispatch/outbox/mentions.go`), and its partial index of the
 unsettled rows. It names no other table, so a plain `create table` and `create index` in the
 runner's transaction lock only the new table, and the release before it neither reads nor writes
