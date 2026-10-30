@@ -65,7 +65,10 @@ const (
 )
 
 // submitted is the enable or merge the fake records for #42 at head, with the squash commit message
-// Submit asked for: the pull request's title and its number, and an empty body.
+// Submit asked for: the pull request's title and its number, and an empty body. The message matters:
+// GitHub's own COMMIT_MESSAGES default joins every commit message of the branch into the squash
+// body, which is how a branch commit's Omp-Session: line, its skip-checks: true line and its
+// Dispatch key would reach the base branch's public history.
 func submitted(verb, pullTitle string) string {
 	return fmt.Sprintf("%s PR_42 head SQUASH headline=%q body=%q", verb, pullTitle+" (#42)", "")
 }
@@ -311,6 +314,7 @@ func TestSubmitUsesGitHubsAnswerForTheREADYHead(t *testing.T) {
 	for _, tc := range []struct {
 		name                          string
 		state, head, mergeState, keep string
+		title                         string
 		queueRequired, autoMergeOK    bool
 		armed, queued                 bool
 		want                          []string
@@ -340,9 +344,11 @@ func TestSubmitUsesGitHubsAnswerForTheREADYHead(t *testing.T) {
 		{name: "moved past READY once the record left it", head: "moved", keep: "", mergeState: "CLEAN", outcome: Stale},
 		{name: "armed once the record left READY", head: "head", keep: "", mergeState: "BLOCKED", autoMergeOK: true, armed: true, outcome: Stale},
 		{name: "the record no longer covers READY", head: "head", keep: "", mergeState: "CLEAN", outcome: Stale},
+		{name: "the headline is the pull request's own title, read from GitHub", head: "head", keep: "head", mergeState: "CLEAN", title: "feat(cli): read the queue's own answer",
+			want: []string{submitted("merge", "feat(cli): read the queue's own answer")}, outcome: Merged},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			g := &github{state: tc.state, head: tc.head, mergeState: tc.mergeState, queueRequired: tc.queueRequired,
+			g := &github{state: tc.state, head: tc.head, title: tc.title, mergeState: tc.mergeState, queueRequired: tc.queueRequired,
 				autoMergeOK: tc.autoMergeOK, armed: tc.armed, queued: tc.queued}
 			client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
 			got, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", false, keeping(tc.keep))
@@ -370,44 +376,6 @@ func TestSubmitUsesGitHubsAnswerForTheREADYHead(t *testing.T) {
 			}
 			if g.timelineReads != 0 {
 				t.Fatalf("timeline reads %d by a row that never saw READY's head armed, want none", g.timelineReads)
-			}
-		})
-	}
-}
-
-// Every mutation Submit sends writes the squash commit's message itself: the headline is the pull
-// request's own title with its number, read from GitHub rather than composed from anything else,
-// and the body is empty, so GitHub's COMMIT_MESSAGES default never joins the branch's commit
-// messages - with their Omp-Session: lines, skip-checks: true lines and Dispatch keys - onto the
-// base branch. The enqueue carries them too, where GitHub ignores them.
-func TestSubmitWritesTheSquashCommitMessage(t *testing.T) {
-	for _, tc := range []struct {
-		name                       string
-		mergeState                 string
-		queueRequired, autoMergeOK bool
-		title                      string
-		verb                       string
-	}{
-		{name: "the enqueue of a merge-queue base", mergeState: "CLEAN", queueRequired: true, verb: "enable"},
-		{name: "the merge of a pull request mergeable now", mergeState: "CLEAN", verb: "merge"},
-		{name: "the arm of a pull request not mergeable yet", mergeState: "BLOCKED", autoMergeOK: true, verb: "enable"},
-		{name: "a pull request whose own title is the headline", mergeState: "CLEAN", title: "feat(cli): read the queue's own answer", verb: "merge"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			g := &github{head: "head", title: tc.title, mergeState: tc.mergeState, queueRequired: tc.queueRequired, autoMergeOK: tc.autoMergeOK}
-			client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
-			_, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", false, keeping("head"))
-			if err != nil && !errors.Is(err, wait.ErrWaiting) {
-				t.Fatalf("Submit = %v, want a merge or a wait on one", err)
-			}
-			wanted := tc.title
-			if wanted == "" {
-				wanted = title
-			}
-			g.mu.Lock()
-			defer g.mu.Unlock()
-			if want := []string{submitted(tc.verb, wanted)}; !slices.Equal(g.mutations, want) {
-				t.Fatalf("mutations %v, want %v: the headline is the pull request's title with its number, and the body is empty", g.mutations, want)
 			}
 		})
 	}

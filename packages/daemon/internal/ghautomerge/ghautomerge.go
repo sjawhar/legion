@@ -38,20 +38,20 @@ const read = `query PullRequestAutoMerge($owner: String!, $name: String!, $numbe
   }
 }`
 
-// The enable and the merge carry the squash commit's message themselves because GitHub's own
-// default for it, COMMIT_MESSAGES, joins every commit message of the branch into the body: that is
-// how a branch commit's Omp-Session: line, its skip-checks: true line and its Dispatch key reach
-// the base branch's public history. An empty body is the whole of the fix; GitHub reads it as a
-// value, not as an omission, and appends no second (#n) to a headline it was given.
-//
-// The enable carries the same two variables, and GitHub ignores them: EnablePullRequestAutoMergeInput
-// says any commit headline or body input is ignored when the pull request merges through a merge
-// queue, and EnqueuePullRequestInput has no message field at all. A merge-queue base therefore keeps
-// GitHub's default message, which only a repository setting can change.
 const (
 	disable = `mutation DisableAutoMerge($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id}) { clientMutationId } }`
 	dequeue = `mutation DequeuePullRequest($id: ID!) { dequeuePullRequest(input: {id: $id}) { clientMutationId } }`
-	enable  = `mutation EnableAutoMerge($id: ID!, $head: GitObjectID!, $method: PullRequestMergeMethod!, $headline: String!, $body: String!) {
+	// The enable and the merge carry the squash commit's message themselves because GitHub's own
+	// default for it, COMMIT_MESSAGES, joins every commit message of the branch into the body: that is
+	// how a branch commit's Omp-Session: line, its skip-checks: true line and its Dispatch key reach
+	// the base branch's public history. An empty body is the whole of the fix; GitHub reads it as a
+	// value, not as an omission, and appends no second (#n) to a headline it was given.
+	//
+	// The enable carries the same two variables, and GitHub ignores them: EnablePullRequestAutoMergeInput
+	// says any commit headline or body input is ignored when the pull request merges through a merge
+	// queue, and EnqueuePullRequestInput has no message field at all. A merge-queue base therefore keeps
+	// GitHub's default message, which only a repository setting can change.
+	enable = `mutation EnableAutoMerge($id: ID!, $head: GitObjectID!, $method: PullRequestMergeMethod!, $headline: String!, $body: String!) {
   enablePullRequestAutoMerge(input: {pullRequestId: $id, expectedHeadOid: $head, mergeMethod: $method, commitHeadline: $headline, commitBody: $body}) { clientMutationId }
 }`
 	merge = `mutation MergeREADYHead($id: ID!, $head: GitObjectID!, $method: PullRequestMergeMethod!, $headline: String!, $body: String!) {
