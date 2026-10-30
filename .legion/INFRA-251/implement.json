@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-251",
-  "completed": "2026-10-30T01:31:20Z",
+  "completed": "2026-10-30T02:14:38Z",
   "stateTable": [
     "Kept-decision hand-over: one rule",
     "",
@@ -53,6 +53,14 @@
       "observed": "vet ok, gofmt empty. Every package ok (admit 312.9s, api 160.6s, workflow 472.1s, store 64.8s, record 43.8s, supervise 18.7s, sandbox 178.2s, workspace 247.9s, cmd/legion 106.8s, launcher 49.3s, ...) except: Docker-only tests (rootless Docker not found), tmux's TestNewRefusesLaunchersItCannotRun (tmux not on PATH in this pod), and daemon's TestTheKeeperRetriesAControllerWhoseLaunchesRanOut.",
       "headSha": "f3ed0a138f3c25555c1f0b93dfdf60718864a271",
       "negativeControl": "TestTheKeeperRetriesAControllerWhoseLaunchesRanOut passes alone (0.68s) and fails at the pushed head 9b011313 too with -run Controller -count=2 (controller_launch_test.go:182), so it is an existing timing flake of the controller keeper test, not this change; the launcher failures seen with the pod's environment pass once LEGION_WORKSPACE and OMP_SESSION_SQL_DSN_FILE are unset."
+    },
+    {
+      "criterion": "The forward merge of main (GitHub reported #2163 CONFLICTING after the round's push) keeps the change and breaks nothing",
+      "surface": "jj forward merge (jj new legion/INFRA-251 main@origin) and the whole daemon module at the merge head",
+      "command": "fingerprint: jj diff --from 'fork_point(main@origin | <head>)' --to <head> --git '~(.legion | docs/solutions)' | sha256sum, at 015a11b8 and at 7a0834ddd6b3ae3064ba00e74cc06dedcf39a888; then cd packages/daemon && go build ./... && go vet ./internal/... && gofmt -l internal cmd && go test -count=1 -p 1 ./internal/... ./cmd/... (pod LEGION_*/OMP_SESSION_* unset, Docker-only tests skipped)",
+      "observed": "One conflict, a comment above releaseReturnedSlots in admit.go: main's wording kept (an awaiting_person root's architect stays live, #2521), keepStaleApproval kept. Fingerprint before 51055a187fc7f041351fcb1a4be06e4270ad328761d9a33bc37e40543b6c06ec, after f66578ab592ae1188268ce6b3cb1e475f8761d91bb8445e1c76ec4687cc75c70 (the diff against the new fork point now carries main's comment, 53 files). Every package ok, daemon 555.1s, admit 318.2s, workflow and store included, except Docker-only natsauth tests and ompsessions' TestImportRefusesContentNoTextValueHolds, a package this branch does not touch (0 files changed against main) whose Import of invalid bytes the pod's scratch Postgres accepted.",
+      "headSha": "7a0834ddd6b3ae3064ba00e74cc06dedcf39a888",
+      "negativeControl": "Before the merge, GitHub reported mergeable=CONFLICTING mergeStateStatus=DIRTY at 015a11b8; the build of the merge head with the conflict markers left in admit.go would not compile."
     }
   ],
   "filesChanged": [
