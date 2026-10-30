@@ -2752,7 +2752,7 @@ test("a tester passes when its completion names the test record its own session 
   expect(out).toMatch(
     /tester-proof-rec-1\tpass=true\tref=false\tran=true record=v1 proof=true pushes=0 complete=true refusedCompletions=1 ordered=true testerLine=true ownHead=true editBeforeRecord=false /
   );
-  expect(out).toContain("tester-proof\trec\t1/4\t0/4\t0\n");
+  expect(out).toContain("tester-proof\trec\t1/4\t0/4\t0\t0\n");
 });
 
 test("a record another session wrote fails the proof, even when the stand-in accepted it", () => {

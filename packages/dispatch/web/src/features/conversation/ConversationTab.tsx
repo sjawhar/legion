@@ -432,14 +432,12 @@ function HandoffFields({ handoffId, id }: { handoffId: string; id: string }): Re
  *  that reads its body. */
 function HandoffTurn({
   current,
-  disabled,
   item,
   onPin,
   pinned,
   register,
 }: {
   current: boolean;
-  disabled: boolean;
   item: Extract<Conversation, { kind: "handoff" }>;
   onPin: () => void;
   pinned: boolean;
@@ -478,7 +476,7 @@ function HandoffTurn({
           {expanded ? <HandoffFields handoffId={item.handoff.id} id={fieldsId} /> : null}
         </div>
         <TurnActions>
-          <TurnPin disabled={disabled} onPin={onPin} pinned={pinned} />
+          <TurnPin onPin={onPin} pinned={pinned} />
         </TurnActions>
       </div>
     </li>
@@ -1282,7 +1280,6 @@ export function ConversationTab({
             return (
               <HandoffTurn
                 current={current}
-                disabled={pins.blocked}
                 item={item}
                 key={item.id}
                 onPin={() => pinConversation(item.id)}
