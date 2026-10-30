@@ -10,7 +10,6 @@ date: 2026-10-30
 status: active
 module: .github/scripts
 related_issues:
-  - "INFRA-567"
   - "sjawhar/legion#2512"
 ---
 

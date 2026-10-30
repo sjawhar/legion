@@ -11,9 +11,8 @@ date: 2026-10-29
 status: active
 module: .github/workflows
 related_issues:
-  - "INFRA-567"
-  - "INFRA-303"
-  - "LEGION-632"
+  - "sjawhar/legion#1842"
+  - "sjawhar/legion#2221"
   - "sjawhar/legion#2512"
 ---
 
@@ -21,10 +20,11 @@ related_issues:
 
 Replaces two pages this change retired. Both told a reader to re-run the failed jobs after an
 image pull failed: "A CI red in Initialize containers with toomanyrequests is the runners' Docker
-Hub window, not the branch" (LEGION-632) and "An unknown blob from mirror.gcr.io in an image-pull
-step is the mirror, not the branch" (INFRA-303). Their measurements are the evidence for this
-change and are kept under Evidence below. Their advice is wrong now. No CI job of this repository
-reads a third-party registry any more, so a failed pull is this repository's own fault.
+Hub window, not the branch" (sjawhar/legion#1842) and "An unknown blob from mirror.gcr.io in an
+image-pull step is the mirror, not the branch" (sjawhar/legion#2221). Their measurements are the
+evidence for this change and are kept under Evidence below. Their advice is wrong now. No CI job
+of this repository reads a third-party registry any more, so a failed pull is this repository's
+own fault.
 
 ## What was measured
 
@@ -99,7 +99,7 @@ reads a third-party registry any more, so a failed pull is this repository's own
 
 ## Evidence
 
-- **LEGION-632, sjawhar/legion#1842, 2026-10-09 21:01–21:33Z.** The retro's docs commit cd8f3d20,
+- **sjawhar/legion#1842, 2026-10-09 21:01–21:33Z.** The retro's docs commit cd8f3d20,
   the `.legion/` removal 6cc0c109 and the harness fix bb12c138 each turned `Tests` (pgvector's
   pull in `Initialize containers`), `Worker Image` (`debian:bookworm-slim` in buildx, then
   `moby/buildkit` in `setup-buildx-action`), `Docs` and seven container jobs of `Legion Envoy and
@@ -107,13 +107,13 @@ reads a third-party registry any more, so a failed pull is this repository's own
   passed each time, since they pull nothing. Attempt 2 of `Tests` at 21:07Z failed the same way.
   Main's #1871 landed at 22:48Z, and the forward merge 3366e977 brought it. `Tests` 38008011356
   and `Docs` 38008011222 at the next head were green on the first run.
-- **INFRA-303, sjawhar/legion#2221, 2026-10-26 05:12–05:18Z.** At code head 26bb37f6, a change
+- **sjawhar/legion#2221, 2026-10-26 05:12–05:18Z.** At code head 26bb37f6, a change
   confined to `packages/dispatch`, three jobs failed pulling
   `mirror.gcr.io/library/nats@sha256:2ae57dfba306…`, with layer `d4854e17c8c8` answering
   `unknown blob` three times each: `test` (Tests run 40270870455), `dispatch` and `envoy-smoke`
   (Legion Envoy and Contracts run 40270870435). Main's last six Tests runs, through 04:25Z, were
   green. One `gh run rerun --failed` of each run passed on attempt 2, with no code change.
-- **INFRA-567, sjawhar/legion#2512, 2026-10-29.** The first copy run of this change failed part
+- **sjawhar/legion#2512, 2026-10-29.** The first copy run of this change failed part
   way with `BLOB_UNKNOWN` from `mirror.gcr.io`, so each row's `upstream` is now the
   image's own Docker Hub reference. The 12 digests are the same at both hosts, read at both. At
   17:1xZ, from a pod holding no credential, an anonymous token request

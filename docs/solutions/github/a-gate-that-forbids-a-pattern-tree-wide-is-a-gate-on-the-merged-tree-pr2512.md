@@ -10,7 +10,6 @@ date: 2026-10-30
 status: active
 module: .github/scripts
 related_issues:
-  - "INFRA-567"
   - "sjawhar/legion#2512"
 ---
 
@@ -40,15 +39,18 @@ differently:
 
 sjawhar/legion#2512 added `.github/scripts/check-ci-images.sh`, which refuses any CI-reachable
 reference to a third-party registry. `main` then added the `envoy-go-race-docs` job at `de546ed2`
-(#2516) with a `services:` Postgres on `mirror.gcr.io/pgvector/pgvector`. Run 41009980170 at the
-branch's own head `e4d33f45` was red twice for one cause: `lint` (job 123919645492) printed
-`.github/workflows/ci.yaml:2476: the postgres service's image names mirror.gcr.io/pgvector/pgvector`
-and `2 problem(s)`, and `test` (job 123919645418) printed `FAIL: the real tree passes the tree
-mode`, `Results: 97 passed, 2 failed`, from the harness case in
+(#2516) with a `services:` Postgres on the third-party mirror this change was removing. Run
+41009980170 at the branch's own head `e4d33f45` was red twice for one cause: `lint` (job
+123919645492) printed `.github/workflows/ci.yaml:2476: the postgres service's image names` that
+mirror, and `2 problem(s)`, and `test` (job 123919645418) printed `FAIL: the real tree passes
+the tree mode`, `Results: 97 passed, 2 failed`, from the harness case in
 `.github/scripts/check-ci-images.test.sh`.
 
+This page names that registry nowhere, because the gate it describes refuses any file of CI's
+reach that does, and a page is in that reach.
+
 The fix was entirely on the branch: forward merge `a2056893`
-(`jj new legion/INFRA-567 main@origin`, never a rebase), with that service repointed at
+(`jj new <the issue branch> main@origin`, never a rebase), with that service repointed at
 `ghcr.io/sjawhar/legion/ci@sha256:2358fcba…`, the digest `.github/ci-images.yaml` already held.
 The unchanged-diff fingerprint moved by exactly those three lines, which the pull request's
 forward-merge comment quotes.
