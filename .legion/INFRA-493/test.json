@@ -2,37 +2,34 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-493",
-  "completed": "2026-10-30T00:55:00Z",
-  "round": 8,
-  "headTested": "4b82bb04c445af98b04619e193d5b6b17c241b0d",
-  "codeHead": "53bf175c1aa36044042a0fc96eadef3c7b5b8538",
-  "forwardMerge": "Fingerprint 4a0517ec 417950e3… vs 53bf175c 67574c6d…: changed. The only lines of the pull request's own diff that differ are the doc comment above record.TreeLive (packages/daemon/internal/record/project.go), reworded where the merge met main's #2521; TreeLive's code lines in the diff are identical, and the merged function runs #2521's AwaitingPerson early return before this branch's slots-only read. So I drove TreeLive's live paths rather than every surface again.",
-  "earlierRounds": "Rounds 1-7 stand for every other line: the pull request's own diff is otherwise identical to 4a0517ec's (round 7), 72675d21's (round 6) and 6e7e399a's but for the route pin (round 5); rounds 1-4 are in git at 00b7e93c.",
+  "completed": "2026-10-30T04:25:00Z",
+  "round": 9,
+  "headTested": "7471da7817d4a47777ceaddab31de597c24eaa92",
+  "codeHead": "a2388fe2a281098f8fc2503d91cc0525d93d3e79",
+  "forwardMerge": "Fingerprint 53bf175c 67574c6d… vs a2388fe2 ed8373c6…: changed. The only lines of the pull request's own diff that differ are packages/envoy/internal/dispatch/api/routes_table_test.go `registeredRoutes` (144 over main's 143 → 146 over main's 145, main having added Dispatch routes); no product file changed. So I drove the route that pin guards, as in round 5.",
+  "earlierRounds": "Round 8 (53bf175c, the merged TreeLive through child-adoption.sh), rounds 5-7 and rounds 1-4 (in git at 00b7e93c) stand: every other line of the pull request's diff is identical.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Its round-9 proof is the daemon's suites after resolving the record/project.go conflict. I drove the merged TreeLive through the whole daemon with the repository's child-adoption live proof at the merge head, and re-ran the end-to-end redelivery smoke."
+    "how": "Its round-10 proof is the dispatch/api suite with the pin at 146. I drove the route the pin guards on the real Dispatch server built at a2388fe2, on Postgres 16.4 with pgvector 0.8.7."
   },
   "failures": [],
   "failed": 0,
-  "ciAtHead": "Read on GitHub at 00:46Z: at 53bf175c the CI and PR Title runs are queued (changes, pr-title); the run at 51ba749d was cancelled when superseded. Read as running, not waited on. GitHub reports #2478 MERGEABLE.",
-  "notes": [
-    "The awaiting_person branch of the merged TreeLive is main's #2521 and is not this pull request's line; I did not drive a root waiting on a person live, and CI's suites at the head cover #2521's own tests."
-  ],
+  "ciAtHead": "Read on GitHub at 04:24Z: at a2388fe2 `changes` and `pr-title` queued, nothing else started; 7471da78 is the handoff-only head. Read as running, not waited on. GitHub reports #2478 MERGEABLE. The reviewer approved with no findings.",
   "proof": [
     {
-      "criterion": "The merged record.TreeLive (this branch's slots-only read beside #2521's early return): a todo child under a live tree joins it, a root that ran keeps queueing, an ancestry-held root queues once its ancestor leaves, a release of another tree's child is refused",
-      "surface": "the whole daemon (run, as `legion start` calls it) on Postgres 16.4 and a nats-server 2.10.22 the script starts, Dispatch events published on ENVOY_NOTIFICATIONS, POST /legion/v1/waves/release, GET /legion/v1/state",
-      "command": "LEGION_TEST_PG_DSN=<embedded Postgres> LEGION_E2E_NATS_BIN=<nats-server 2.10.22> bash scripts/e2e/child-adoption.sh",
-      "observed": "child adoption e2e: PASS in 50s; every step ok, among them a-root-that-ran-keeps-queueing (TESTDCE998DAB561-17 slotted in its own tree) and ancestry-held-root-queues-once-a-recorded-ancestor-leaves (TESTDCE998DAB561-20 held with no slot, then slotted once TESTDCE998DAB561-18 left its chain)",
-      "headSha": "53bf175c1aa36044042a0fc96eadef3c7b5b8538",
-      "negativeControl": "release-refuses: POST /legion/v1/waves/release of TESTDCE998DAB561-12 by another tree's architect → 409 CHILD_IN_OTHER_TREE, record unchanged, no Dispatch status write"
+      "criterion": "1.3 Dispatch's GET /api/v1/github/app-installation/{owner}/{repo} serves beside main's new routes after the merge (the route-count pin the merge changed)",
+      "surface": "the real Dispatch server binary built from packages/envoy at a2388fe2, Postgres 16.4 with pgvector, a throwaway GitHub App key and a loopback GitHub fake",
+      "command": "dispatch with DISPATCH_APP_CLIENT_ID, DISPATCH_APP_PEM_B64, DISPATCH_GITHUB_API_BASE=http://127.0.0.1:15751; curl -H 'Authorization: Bearer <agent token>' …/app-installation/acme/widgets, acme/other, acme/broken; the same with no bearer and a wrong one",
+      "observed": "the server migrated and listened; acme/widgets 200 {\"installed\":true}; acme/other (GitHub 404) 200 {\"installed\":false}; acme/broken (GitHub 500) 502 GITHUB_UNREADABLE naming the read",
+      "headSha": "a2388fe2a281098f8fc2503d91cc0525d93d3e79",
+      "negativeControl": "no bearer: 401 NO_IDENTITY; a wrong bearer: 401 UNAUTHORIZED `invalid bearer token`"
     },
     {
       "criterion": "Smoke at the merge head: a delivery NATS refused is redelivered by the real sweep and applied once; a delivery published twice is applied once by its dedupe_key",
-      "surface": "the real listener and `dispatch redeliver-webhooks` binaries built at 53bf175c, a fake GitHub, the daemon's consumer on Postgres 16.4 and nats-server 2.10.22",
+      "surface": "the real listener and `dispatch redeliver-webhooks` binaries built at a2388fe2, a fake GitHub, the daemon's consumer on Postgres 16.4 and nats-server 2.10.22",
       "command": "cd packages/daemon && go test -count=1 ./internal/intake/ -run Redelivered -v",
-      "observed": "both PASS: the listener answered 503, the sweep's one redelivery was answered 200, the daemon applied it once",
-      "headSha": "53bf175c1aa36044042a0fc96eadef3c7b5b8538",
+      "observed": "both PASS: listener 503, the sweep's one redelivery answered 200, github.8a4f2c10-… applied once and acme/widgets#7 recorded open on ACME-7",
+      "headSha": "a2388fe2a281098f8fc2503d91cc0525d93d3e79",
       "negativeControl": "the stream without notifications.github.> stores nothing on the pull request's subject until the sweep's redelivery"
     }
   ]
