@@ -1,5 +1,6 @@
 import { MAX_BLOCK_ID_BYTES, referenceTargetFits, utf8Bytes } from "@legion/contracts";
 
+import { itemOfBlock } from "./block-reference";
 import type { DispatchReferenceRoute } from "./routes";
 
 /**
@@ -13,7 +14,7 @@ import type { DispatchReferenceRoute } from "./routes";
 /** What a reference resolves to for display: the record whose title, excerpt, or author the
  * reader is shown. An issue's spec/log/activity/children/artifacts tabs all resolve to the issue
  * itself; an ask or comment nested under a project document resolves to that item, not the
- * document; a block of a document (`#b-`) resolves to that block. */
+ * document; a block of a document, a comment or a message (`#b-`) resolves to that block. */
 export type ReferenceTargetKind = "issue" | "document" | "block" | "ask" | "comment" | "message";
 
 export function referenceTargetKind(route: DispatchReferenceRoute): ReferenceTargetKind {
@@ -38,11 +39,15 @@ export function referenceTargetKind(route: DispatchReferenceRoute): ReferenceTar
 
 /** The target id the server's graph stores a reference to `route` under, as Go's `text.TargetID`
  *  writes it: an ask's, a comment's or a message's id, a document's `<key or project>/<slug>`
- *  (`spec` for an issue's spec) or `agent/<session id>/<slug>`, a block's `#<block id>` after its
- *  document's, and an issue's key for the issue and each of its tabs. A version or a pin is no
- *  part of it. */
+ *  (`spec` for an issue's spec) or `agent/<session id>/<slug>`, a document block's `#<block id>`
+ *  after its document's, a comment's or message's block's `<item kind>/<item id>#<block id>`, and
+ *  an issue's key for the issue and each of its tabs. A version or a pin is no part of it. */
 function routeTarget(route: DispatchReferenceRoute): string {
   const block = "block" in route && route.block !== undefined ? `#${route.block.id}` : "";
+  const item = itemOfBlock(route);
+  if (item !== undefined) {
+    return `${item.kind}/${item.id}${block}`;
+  }
   switch (route.kind) {
     case "agent-artifact":
       return `agent/${route.session}/${route.slug}`;
