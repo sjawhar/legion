@@ -105,10 +105,9 @@ func line(issues []Issue, slots []Slot) []Issue {
 }
 
 // TreeLive says whether root's tree is live: the root holds a slot, waits for one (held under an
-// unreleased child or not), or waits on a person with its session suspended, and does not linger
-// after its close. A todo child under a live tree runs in it, or waits with its root held under an
-// unreleased child and moves with it into the tree that adopts it; under any other it is an
-// orphan.
+// unreleased child or not), or waits on a person with its architect live, and does not linger after
+// its close. A todo child under a live tree runs in it, or waits with its root held under an
+// unreleased child and moves with it into the tree that adopts it; under any other it is an orphan.
 func TreeLive(ctx context.Context, store Store, tx pgx.Tx, root Issue) (bool, error) {
 	if root.Lingers() {
 		return false, nil

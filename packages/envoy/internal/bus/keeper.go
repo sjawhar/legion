@@ -129,7 +129,9 @@ func (c *Client) awaitKeeper() {
 // it leaves to a start, sending nothing and returning an error when it needs anything: only a start
 // moves the role lanes off the stream, their consumers' filters first (migrateRoleLanesOffStream),
 // and a write of the list the keeper read could put them back after a start removed them. An update
-// whose answer never came succeeds when the stream, read again, needs nothing more (updateStream).
+// whose answer never came succeeds when the stream, read again, needs nothing more, and one the
+// server refused as overlapping the stream itself is sent again until the stream needs nothing
+// more or its sends run out (updateStream).
 func keepStream(js nats.JetStreamContext, cfg *nats.StreamConfig) ([]string, error) {
 	info, err := js.StreamInfo(Stream)
 	if err != nil {

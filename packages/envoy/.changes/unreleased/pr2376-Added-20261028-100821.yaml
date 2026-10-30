@@ -1,0 +1,23 @@
+kind: Added
+body: |-
+    Dispatch serves `GET /api/v1/agents/{session_id}/answers` (any caller): what people wrote that
+    Dispatch delivered to one session since `since` (default 72 hours ago, at most 7 days), newest
+    first, which every agent host will carry on each model request. It lists a person's
+    `ask.answered`, `comment.created`, `message.created` and `message.answered` events whose
+    `published_destinations` hold the session's own topic, its sent message deliveries (targeted and
+    broadcast messages) and its sent comment deliveries (mentions), each item once at its current
+    words: an ask's current answer (`replaced` when it changed an earlier one), a comment's current
+    body (`edited_at` when edited), a message's body. Each carries its relation to the session, the
+    ask and its question where it is in one, its owner, `dispatch://` ref and deep link. `max_chars`
+    stops the list after the item that takes the running sum of text lengths past it, while `total`
+    counts the whole window. The read is `sessionanswers.List`, which the outbox's tests read back
+    through after publishing. Migrations `0145` (`events_person_words`, a partial index on a person's
+    events of those four types by time), `0146` (`comment_deliveries_session`) and `0147`
+    (`message_deliveries_session_created`, a partial covering index on a session's sent message
+    deliveries by time) serve it; on 1,000,000 events `0145` built in about a second and the route's
+    query ran in 6-8 ms. Through `0147` the read of a session's message deliveries, in a cached
+    generic plan as well, is an index-only scan of only those since an hour before the window: on a
+    session holding 60,003 deliveries, 1,019 of them in range, it took 0.3-0.4 ms and 11 buffers.
+time: 2026-10-28T10:08:21.714939694Z
+custom:
+    Issue: pr2376

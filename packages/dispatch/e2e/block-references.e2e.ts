@@ -6,6 +6,7 @@ import {
   createIssueArtifact,
   createProject,
   editArtifact,
+  editComment,
   getArtifact,
   getIssue,
 } from "./api";
@@ -204,4 +205,122 @@ test("a pinned link keeps the text of the version it pins, says how the block st
   const removedCard = await openCard(page, removed);
   await expect(removedCard).toContainText(`Removed in version ${pinned + 2}`);
   await expect(removedCard).toContainText("P ships on Friday.");
+});
+
+// A link to a block of a comment reads the block's graph read, which is fetched again only by an
+// event that can change it (`blockQuery`, staleTime Infinity). The comment's own edit is one: the
+// open card, and the link's own title, show the reworded paragraph with no reload.
+test("a link to a block of a comment shows the block's new text once its author edits it, with no reload", async ({
+  page,
+}) => {
+  const issue = await createIssue({ project: "CORE", title: "Comment block text" });
+  const cited = await createComment(issue.key, { body: "Alpha first.\n\nBeta as first written." });
+  await createComment(issue.key, {
+    body: `The detail is in dispatch://${issue.key}/comment/${cited.id}#b-b2 today.`,
+  });
+
+  // The first events subscription resumes from the sign-in check's head, so once the live socket
+  // opens, every write after this reaches the page.
+  const stream = page.waitForEvent(
+    "websocket",
+    (socket) => new URL(socket.url()).pathname === "/ws/live"
+  );
+  await page.goto(`/issues/${issue.key}/conversation`);
+  await stream;
+  const turns = page.getByRole("list", { name: "Conversation turns" });
+  const link = turns.getByRole("link", { name: "Beta as first written." });
+  await expect(link).toHaveAttribute("href", `/issues/${issue.key}/comments/${cited.id}#b-b2`);
+  const card = await openCard(page, link);
+  await expect(card).toContainText("Comment · alice");
+  await expect(card).toContainText("Beta as first written.");
+
+  // The author rewords the cited paragraph; b1 stays, so the reworded paragraph keeps b2.
+  await editComment(cited.id, { body: "Alpha first.\n\nBeta as reworded." });
+  await expect(card).toContainText("Beta as reworded.", { timeout: 5_000 });
+  await expect(card).not.toContainText("as first written");
+  await expect(turns.getByRole("link", { name: "Beta as reworded." })).toHaveAttribute(
+    "href",
+    `/issues/${issue.key}/comments/${cited.id}#b-b2`
+  );
+});
+
+// The author's edit that deletes the cited paragraph is an edit too: the open card and the link
+// stop showing the paragraph's text without a reload, and read as a freshly loaded page reads the
+// same link (no text of a paragraph the comment no longer holds).
+test("a link to a block of a comment stops showing the block's text once its author deletes it, with no reload", async ({
+  page,
+}) => {
+  const issue = await createIssue({ project: "CORE", title: "Deleted comment block" });
+  const cited = await createComment(issue.key, { body: "Alpha first.\n\nBeta soon deleted." });
+  await createComment(issue.key, {
+    body: `The detail was in dispatch://${issue.key}/comment/${cited.id}#b-b2 today.`,
+  });
+
+  const stream = page.waitForEvent(
+    "websocket",
+    (socket) => new URL(socket.url()).pathname === "/ws/live"
+  );
+  await page.goto(`/issues/${issue.key}/conversation`);
+  await stream;
+  const turns = page.getByRole("list", { name: "Conversation turns" });
+  const link = turns.getByRole("link", { name: "Beta soon deleted." });
+  const card = await openCard(page, link);
+  await expect(card).toContainText("Beta soon deleted.");
+
+  await editComment(cited.id, { body: "Alpha first." });
+  await expect(card).not.toContainText("Beta soon deleted.", { timeout: 5_000 });
+  await expect(turns.getByRole("link", { name: "Beta soon deleted." })).toHaveCount(0);
+});
+
+// A link to a block of a document reads the same block read, which a version of the document
+// fetches again: a document edit that deletes the cited block makes it answer 404, and the open
+// card and the link stop showing the block's text without a reload, reading as a freshly loaded
+// page reads the same link (no text of a block the document no longer holds).
+test("a link to a block of a spec stops showing the block's text once a document edit deletes it, with no reload", async ({
+  page,
+}) => {
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "Intro paragraph.\n\nGamma soon deleted.\n",
+    title: "Deleted spec block",
+  });
+  const specId = issue.primary_artifact_id;
+  const paragraph = await blockId(specId, "Gamma soon deleted.");
+  const before = await latestVersion(specId);
+  await createComment(issue.key, {
+    body: `The detail was in dispatch://${issue.key}/spec#b-${paragraph} today.`,
+  });
+
+  const stream = page.waitForEvent(
+    "websocket",
+    (socket) => new URL(socket.url()).pathname === "/ws/live"
+  );
+  await page.goto(`/issues/${issue.key}/conversation`);
+  await stream;
+  const turns = page.getByRole("list", { name: "Conversation turns" });
+  const link = turns.getByRole("link", { name: "Gamma soon deleted." });
+  await expect(link).toHaveAttribute("href", `/issues/${issue.key}/spec#b-${paragraph}`);
+  const card = await openCard(page, link);
+  await expect(card).toContainText("Gamma soon deleted.");
+
+  await editArtifact(specId, {
+    ops: [{ block: paragraph, op: "delete" }],
+    summary: "Drop the paragraph",
+  });
+  await expect.poll(() => latestVersion(specId)).toBe(before + 1);
+  await expect(card).not.toContainText("Gamma soon deleted.", { timeout: 5_000 });
+  await expect(card).toHaveText(`${issue.key} spec block`);
+  await expect(turns.getByRole("link", { name: "Gamma soon deleted." })).toHaveCount(0);
+  await expect(turns.getByRole("link", { name: `${issue.key} spec block` })).toHaveAttribute(
+    "href",
+    `/issues/${issue.key}/spec#b-${paragraph}`
+  );
+
+  // A freshly loaded page reads the same link the same way.
+  await page.reload();
+  const fresh = page
+    .getByRole("list", { name: "Conversation turns" })
+    .getByRole("link", { name: `${issue.key} spec block` });
+  await expect(fresh).toHaveAttribute("href", `/issues/${issue.key}/spec#b-${paragraph}`);
+  await expect(await openCard(page, fresh)).toHaveText(`${issue.key} spec block`);
 });

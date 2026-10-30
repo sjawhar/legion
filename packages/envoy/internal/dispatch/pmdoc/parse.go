@@ -99,6 +99,22 @@ func ParseRendering(markdown string) (*Node, error) {
 	return parseStamped(markdown, readBackBudget())
 }
 
+// ParseWithSourceStarts parses markdown as Parse does and also answers, for each of the tree's
+// top-level children, the byte offset in markdown where the goldmark block it was converted from
+// starts (startOf): a paragraph's first line, and every other block's recorded position, so a
+// fenced code block starts at its opening fence. Front matter starts at 0. A child converted from
+// no goldmark block (the empty paragraph of a document with no blocks), or from one that records
+// no position, answers -1.
+func ParseWithSourceStarts(markdown string) (*Node, []int, error) {
+	var starts []int
+	doc, err := parseMarkdown(markdown, fromStart, true, NewWriteBudget(), &starts)
+	if err != nil {
+		return nil, nil, err
+	}
+	EnsureBlockIDs(doc)
+	return doc, starts, nil
+}
+
 func parseStamped(markdown string, budget *WriteBudget) (*Node, error) {
 	return parseStampedAt(markdown, fromStart, budget)
 }
@@ -205,6 +221,12 @@ func LineFeedAttrs(attrs map[string]any) map[string]any {
 // block that names none has none yet. Without readFrontmatter a closed front-matter block is read
 // as the blocks its lines make. at is where markdown stands in what the caller wrote, which a
 // refusal's line number counts from.
+func parseUnstamped(markdown string, at origin, readFrontmatter bool, budget *WriteBudget) (*Node, error) {
+	return parseMarkdown(markdown, at, readFrontmatter, budget, nil)
+}
+
+// parseMarkdown is parseUnstamped that, given starts, also sets it to where each of the tree's
+// top-level children starts in markdown (sourceStarts).
 //
 // Every U+0000 in markdown is read as U+FFFD (nulAsReplacement) before any parser sees a byte of
 // it, as CommonMark requires of a reader (§2.3 Insecure characters) and the browser editor's parser
@@ -213,16 +235,16 @@ func LineFeedAttrs(attrs map[string]any) map[string]any {
 // the markdown it is stored as does not: the tree a read serves and the bytes a version carries
 // then disagreed. The replacement is three bytes where the character was one, so every offset taken
 // after it is an offset into source and never into markdown: a refusal's line number counts
-// source's line feeds, which the replacement neither adds nor removes, and at.server measures a
+// source's line feeds, which the replacement neither adds nor removes, at.server measures a
 // prefix the server itself wrote ahead of the caller's text (parseTableRows), which holds no
-// U+0000 and so keeps its length.
-func parseUnstamped(markdown string, at origin, readFrontmatter bool, budget *WriteBudget) (doc *Node, err error) {
+// U+0000 and so keeps its length, and starts are offsets into source as well.
+func parseMarkdown(markdown string, at origin, readFrontmatter bool, budget *WriteBudget, starts *[]int) (doc *Node, err error) {
 	defer recoverPanic(&doc, &err, "reading markdown")
 	source := []byte(nulAsReplacement(markdown))
 	var front *Node
 	unclosedFrontmatter := false
+	rest := 0
 	if readFrontmatter {
-		var rest int
 		front, rest, unclosedFrontmatter = parseFrontmatterBlock(source)
 		at.line += bytes.Count(source[:rest], []byte("\n"))
 		at.server = max(0, at.server-rest)
@@ -253,7 +275,43 @@ func parseUnstamped(markdown string, at origin, readFrontmatter bool, budget *Wr
 	if err := doc.Validate(); err != nil {
 		return nil, err
 	}
+	if starts != nil {
+		*starts = sourceStarts(doc, root, front != nil, rest)
+	}
 	return doc, nil
+}
+
+// sourceStarts is where each of doc's top-level children starts in the markdown parsed: front
+// matter at 0, and every other child where the block of root it was converted from starts
+// (sourceStart), past the front matter's offset bytes. Each of root's blocks converts to one child
+// (parseBlocks); a child past root's last block, the empty paragraph of a document with no blocks,
+// answers -1.
+func sourceStarts(doc *Node, root ast.Node, front bool, offset int) []int {
+	starts := make([]int, len(doc.Children))
+	index := 0
+	if front {
+		index = 1
+	}
+	for block := root.FirstChild(); index < len(starts); index++ {
+		starts[index] = -1
+		if block == nil {
+			continue
+		}
+		if start := sourceStart(block); start >= 0 {
+			starts[index] = offset + start
+		}
+		block = block.NextSibling()
+	}
+	return starts
+}
+
+// sourceStart is startOf, or -1 for a block that records neither the position nor the line startOf
+// reads.
+func sourceStart(block ast.Node) int {
+	if (isParagraph(block) || block.Pos() < 0) && block.Lines().Len() == 0 {
+		return -1
+	}
+	return startOf(block)
 }
 
 // inlineParserOptions is how inline markdown is read: a paragraph is the only block, so a leading
@@ -355,7 +413,10 @@ func ParseInline(markdown string, budget *WriteBudget) (nodes []*Node, err error
 // elements it makes on budget, a caller write's, or none when budget is nil (a read-back). Its
 // source is the caller's markdown with its line endings and its U+0000 characters read as the
 // parser of a document's markdown reads them (LineFeeds, nulAsReplacement, parseUnstamped); a
-// read-back's markdown, which the renderer wrote, holds neither, so both leave it as it is.
+// read-back's markdown, which the renderer wrote, holds neither, so both leave it as it is. The
+// lines the parse recorded as opening a block of HTML for the browser editor's parser are dropped
+// before the tree is converted (dropHTMLFlowLines), since this markdown opens no block where it
+// lands.
 func readInline(markdown string, inline parser.Parser, context parser.Context, budget *WriteBudget) (nodes []*Node, err error) {
 	defer recoverPanic(&nodes, &err, "reading inline markdown")
 	source := []byte(nulAsReplacement(LineFeeds(markdown)))
@@ -368,6 +429,7 @@ func readInline(markdown string, inline parser.Parser, context parser.Context, b
 	if err != nil {
 		return nil, err
 	}
+	dropHTMLFlowLines(root)
 	count.weigh(root, source)
 	if refusal := count.refusal(source, 1); refusal != nil {
 		return nil, refusal

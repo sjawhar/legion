@@ -615,11 +615,10 @@ type HandoffComplete struct {
 	Claim claim.Token
 	// Generation is the run whose task the worker took, which the daemon reads from the claim —
 	// the delivery whose turn is running, or the run the claim is left serving once that turn
-	// ends. A run that was interrupted — a child taken back to todo, its stop refused by the
-	// runtime — keeps working and reports a completion of the run that is over; nothing on the
-	// worker's own request tells the two apart, since the claim token is stable across runs and
-	// the session is kept across a suspend. The route refuses a claim that has taken no task, so
-	// a fact reaching the workflow always names a run.
+	// ends. A child taken back to todo can leave the prior run's worker live: its completion names
+	// that prior generation and is refused. Nothing on the worker's own request tells the two apart,
+	// since the claim token is stable across runs and the session is kept live. The route refuses a
+	// claim that has taken no task, so a fact reaching the workflow always names a run.
 	Generation uint64
 	Summary    string
 	Verdict    string
