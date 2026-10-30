@@ -2,17 +2,15 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-715",
-  "completed": "2026-10-30T04:00:00Z",
-  "round": 8,
-  "decision": "changes_requested",
-  "reviewedCodeHead": "b0a59b0b5c6a",
+  "completed": "2026-10-30T06:25:00Z",
+  "round": 9,
+  "decision": "approved",
+  "reviewedCodeHead": "2670904e2fc3",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "keyFindings": [
-    {"severity": "important", "file": "packages/dispatch/e2e/block-references.e2e.ts", "description": "#2480 is CONFLICTING (mergeStateStatus DIRTY) at 045d6850 against main e4c9ab85: main's #2463 (10fc3b77a1) changed packages/dispatch/e2e/block-references.e2e.ts, and git merge-tree reports a content conflict there alone. #2463 also changed pmdoc/parse.go (ParseWithSourceStarts, parseUnstamped split into parseMarkdown), which this PR changes too; it auto-merges, but by the architect's rule a merge that brings in a change to a file of the PR's own diff is a full round. Forward-merge main (never rebase), resolve the e2e file, and push without a skip-checks trailer so CI runs at the merged head."}
-  ],
-  "accepted": "Round-7 findings fixed: 92abb6c4 re-imports getArtifactText beside #2502's blockId; 61efae41 skips the three room-memory tests under -race through a build-tagged raceEnabled constant. Threads PRRT_kwDORFy7ds6xwou5 and PRRT_kwDORFy7ds6xwovG answered and accepted; the implementer has not resolved them yet. The PR's runtime diff (packages, excluding tests and e2e) is byte-identical between 37f334f0 and b0a59b0b against their merge bases (hunk headers and index lines stripped), so the thermonuclear pair's run at 4be0d238 still covers all runtime code; not re-run.",
-  "ci": "Run 40976299539 at code head b0a59b0b (compare to 045d6850 handoffsOnly true): every lane green - lint, test, envoy-go, envoy-go-race, envoy-go-race-docs, dispatch, dispatch-memory, dispatch-multiprocess, dispatch-browser-multiprocess, docs, envoy-infra-go, envoy-smoke, envoy-session-stall, listener-server-change, worker-image; typecheck skipped; pr-title success; ci-ok cancelled at 03:17Z (not required). No head of this PR is mergeable now, so approval waits for the merged head.",
-  "nextRound": "Full round at the merged head: read the required checks and dispatch, envoy-go, envoy-go-race, envoy-go-race-docs, dispatch-memory, dispatch-multiprocess green there; check the e2e resolution and the parse.go auto-merge (carryBlockIDs still called in parseForWrite after #2463's parseMarkdown split)."
+  "keyFindings": [],
+  "accepted": "Forward merge 2670904e of main 49e23926 is sound: block-references.e2e.ts against main's version adds only this PR's test and the getArtifactText import, keeping #2463's tests; parseForWrite still calls carryBlockIDs (parse.go:174) after #2463's parseMarkdown split; the PR's runtime diff (packages, excluding tests and e2e, hunk headers and index lines stripped) is byte-identical at b0a59b0b and 2670904e against their merge bases, so the thermonuclear pair's run at 4be0d238 covers every runtime line. All 19 review threads resolved. git merge-tree with main 147ff0dd is clean; GitHub reports MERGEABLE.",
+  "ci": "Run 41001861096 at code head 2670904e (compare to f2b5e0f4 handoffsOnly true): lint, test, envoy-go, envoy-go-race, envoy-go-race-docs, dispatch, dispatch-memory, dispatch-multiprocess, dispatch-browser-multiprocess, docs, envoy-infra-go, envoy-smoke, envoy-session-stall, listener-server-change, worker-image all success; typecheck skipped (passing for a required check); pr-title success; ci-ok (not required) still queued at 06:20Z.",
+  "e2e": "E2E (implementer) and E2E (tester) both present; the tester's round 10 is a full round at 2670904e."
 }
