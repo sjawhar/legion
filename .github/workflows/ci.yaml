@@ -1308,11 +1308,12 @@ jobs:
   # package to check that it holds every row. The order is the point: the read fails a row the
   # package does not hold, so the copy for this change runs first. The ci_images filter selects
   # this job, and names the files that decide what its two steps do: the rows, the two scripts,
-  # the crane action and this file. The gate's other half reads the whole tree, and is a step of
-  # lint, which runs on every change: a file that names a third-party registry again can be any
-  # file, and this filter names few of them. This job is the one copy path: it runs on a pull
-  # request, on a merge group and on a push to main, which is every event that can bring a new
-  # row, and a failed copy is re-run with `gh run rerun`.
+  # the module both scripts read a reference with, the crane action and this file. The gate's
+  # other half reads the whole tree, and is a step of lint, which runs on every change: a file
+  # that names a third-party registry again can be any file, and this filter names few of them.
+  # This job is the one copy path: it runs on a pull request, on a merge group and on a push to
+  # main, which is every event that can bring a new row, and a failed copy is re-run with
+  # `gh run rerun`.
   ci-images:
     needs: changes
     if: needs.changes.outputs.ci_images == 'true'
@@ -1707,7 +1708,7 @@ jobs:
         # ghcr.io/sjawhar/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml). This job
         # pulls the image here, and does not call .github/actions/pull-test-images: that action
         # reads a Go `const` line, and this image is a TypeScript constant
-        # (packages/envoy-client/src/__tests__/nats-server.ts:9). The registry is this
+        # (packages/envoy-client/src/__tests__/nats-server.ts:9-10). The registry is this
         # repository's own, so a failed pull is a fault of this repository. Show it, do not retry
         # it.
         run: docker pull ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f
@@ -2599,9 +2600,10 @@ jobs:
           go-version-file: packages/envoy/go.mod
           cache: false
       # Every image the build or the test starts (testnats.Image and the smoke image's base
-      # images) is pulled first, for the reason .github/actions/pull-test-images gives. The SPA
-      # stage's base carries an ARG (the Bun pin), so each ARG default is expanded into the FROM
-      # that uses it.
+      # images) is pulled first, for the reason .github/actions/pull-test-images gives. Every
+      # FROM of docker/Dockerfile names a digest and no ARG, so the substitution below expands
+      # nothing today; it stays because a FROM written as an ARG would otherwise be pulled as
+      # the literal `${NAME}`.
       - name: Read the smoke image's base images
         id: base-images
         run: |

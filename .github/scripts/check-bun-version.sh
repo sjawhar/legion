@@ -43,8 +43,10 @@
 #  10. a tool-manager manifest (any mise file, `.tool-versions`) naming bun.
 #
 # Files are discovered by walking the tree, not by asking git, so an unsnapshotted change cannot
-# read green locally. Workflows and actions are parsed as YAML, never grepped. Every problem is
-# printed with its file and line; the only non-zero exit is a named problem.
+# read green locally. Workflows and actions are parsed as YAML, never grepped, and an image
+# reference is read with the grammar of .github/scripts/ci_images.py, which is the grammar
+# .github/scripts/check-ci-images.sh reads a row of .github/ci-images.yaml with. Every problem
+# is printed with its file and line; the only non-zero exit is a named problem.
 #
 # Run from anywhere: .github/scripts/check-bun-version.sh
 # CI runs it in ci.yaml's lint job, and its tests in ci.yaml's test job.
@@ -52,12 +54,18 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-python3 <<'PY'
+# The reference grammar is .github/scripts/ci_images.py's, beside this script in the repository
+# it checks, which PYTHONPATH names: a reference this gate reads is the reference the image gate
+# reads, so a row one of them counts as an oven/bun row is a row the other counts as one too.
+# PYTHONDONTWRITEBYTECODE keeps the import from leaving a __pycache__ in the tree.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.github/scripts python3 <<'PY'
 import re
 import sys
 from pathlib import Path
 
 import yaml
+
+from ci_images import split_reference
 
 
 class LineLoader(yaml.SafeLoader):
@@ -128,6 +136,12 @@ DOCKER_RUN_BUN = re.compile(r"\bdocker\s[^\n|&;]*\brun\b[^\n|&;]*\b(oven/bun(?::
 INPUT_ASSIGNMENT = re.compile(r"INPUT_[A-Za-z0-9_-]+(?:=|<<)")
 MISE_ENTRY = re.compile(r'^"?(?:tools\.)?bun"?\s*[=:]|^bun\s|^\[tools\.bun\]')
 VERSION = re.compile(r"\d+\.\d+\.\d+")
+# The build variable this repository's Dockerfiles write a Bun tag as, and a stand-in the tag
+# grammar accepts. `oven/bun:${BUN_VERSION}` is no reference ci_images.py can read, and with the
+# variable stood in for, the rest of a reference — a host carrying a port, a tag written beside
+# a digest — is read by the one reader this repository has.
+BUN_ARG = "${BUN_VERSION}"
+BUN_ARG_STANDIN = "0bun-version-arg0"
 
 problems = []
 wrapper_setup_steps: list[tuple[int, dict]] = []
@@ -140,10 +154,22 @@ def one_line(value: object) -> str:
     return " ".join(str(value).split())
 
 
+def reference_parts(image: str) -> tuple[str, str, str, str]:
+    """(host, path, tag, digest) of an image reference, read with ci_images.py's grammar, and
+    every field "" where that grammar refuses the string. Each rule below reads the empty answer
+    as naming no Bun release and no row's digest, so a string that is not a reference fails the
+    rule it reaches instead of passing it."""
+    parts = split_reference(image.replace(BUN_ARG, BUN_ARG_STANDIN))
+    if parts is None:
+        return "", "", "", ""
+    host, path, tag, digest = parts
+    return host, path, tag.replace(BUN_ARG_STANDIN, BUN_ARG), digest
+
+
 def bun_tag_is_pinned(image: str, expected: str) -> bool:
     """An `oven/bun` reference is pinned when its tag is the pinned release, suffix and all;
-    an untagged reference is `latest`."""
-    return image.partition(":")[2].split("-")[0] == expected
+    an untagged reference is `latest`, and a string the grammar refuses carries no tag at all."""
+    return reference_parts(image)[2].split("-")[0] == expected
 
 
 def installs_bun(script: str, pinned: str = "") -> bool:
@@ -470,14 +496,15 @@ for dockerfile in dockerfiles:
                 )
         elif upper.startswith("FROM ") and "oven/bun" in stripped.lower():
             image = stripped.split()[1]
-            if "${BUN_VERSION}" not in image.partition(":")[2]:
+            if BUN_ARG not in reference_parts(image)[2]:
                 problems.append(
                     f"{dockerfile}:{number}: {one_line(image)} hardcodes its Bun tag — use "
                     f"oven/bun:${{BUN_VERSION}} and ARG BUN_VERSION={pinned}"
                 )
         elif upper.startswith("FROM ") and MIRROR_REGISTRY in stripped.lower():
             image = stripped.split()[1]
-            upstream = mirror_rows().get(image.partition("@")[2])
+            digest = reference_parts(image)[3]
+            upstream = mirror_rows().get(digest) if digest else None
             if upstream is None:
                 problems.append(
                     f"{dockerfile}:{number}: {one_line(image)} names a digest no row of "

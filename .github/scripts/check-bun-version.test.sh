@@ -4,9 +4,10 @@
 # rounds — twice because a rule was missing rather than wrong — so the probes live here now.
 #
 # Each case builds a miniature repository under a temporary directory and symlinks the real
-# script into it, so the script under test is the file CI runs, not a copy that can drift: it
-# resolves its root from its own path (`cd "$(dirname "$0")/../.."`), which the symlink puts at
-# the fixture root.
+# script, and the reference grammar it reads an image reference with (ci_images.py), into it, so
+# the code under test is the code CI runs, not a copy that can drift: the script resolves its
+# root from its own path (`cd "$(dirname "$0")/../.."`), which the symlink puts at the fixture
+# root, and imports the module from the .github/scripts under it.
 #
 # Run from anywhere: .github/scripts/check-bun-version.test.sh
 # CI runs it in ci.yaml's test job.
@@ -36,6 +37,7 @@ fixture() {
   fi
   mkdir -p "$root/.github/scripts" "$root/.github/workflows" "$root/.github/actions/setup-bun"
   ln -s "$check_script" "$root/.github/scripts/check-bun-version.sh"
+  ln -s "$script_dir/ci_images.py" "$root/.github/scripts/ci_images.py"
   echo "1.3.14" > "$root/.bun-version"
   cat > "$root/.github/actions/setup-bun/action.yml" <<'YAML'
 name: Setup Bun
@@ -305,6 +307,23 @@ run_check "$root"
 check "a digest no row holds fails" "$(is "$status" 1)"
 check "names the file it must come from" "$(contains "$out" 'names a digest no row of .github/ci-images.yaml holds')"
 check "and the line to edit" "$(contains "$out" 'worker.Dockerfile:1:')"
+
+# Two shapes the gate's own reader refused while it split a reference by hand, both of which
+# .github/scripts/ci_images.py reads: a row that names a tag beside a digest, which
+# .github/ci-images.yaml's nats hub row is written as, and a host carrying a port.
+root=$(fixture mirror-bun-tag-and-digest)
+mirror_row "$root" docker.io/oven/bun:1.3.14@sha256:0a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f6071
+printf 'FROM ghcr.io/sjawhar/legion/ci@sha256:0a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f6071 AS plugin\n' \
+  > "$root/worker.Dockerfile"
+run_check "$root"
+check "a row whose upstream names the pinned tag beside a digest passes" "$(is "$status" 0)"
+
+root=$(fixture mirror-bun-host-port)
+mirror_row "$root" registry.example.com:5000/oven/bun:1.3.14
+printf 'FROM ghcr.io/sjawhar/legion/ci@sha256:0a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f60710a1b2c3d4e5f6071 AS plugin\n' \
+  > "$root/worker.Dockerfile"
+run_check "$root"
+check "a row whose upstream host carries a port passes" "$(is "$status" 0)"
 
 echo "case: the repository's own tree"
 set +e

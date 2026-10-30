@@ -193,8 +193,8 @@ def key_line(mapping: object, name: str) -> int:
 
 
 # ---------------------------------------------------------------- data
-# The half this run checks. The wrapper above admits these two words alone.
-TREE = "tree"
+# The half this run checks. The wrapper above admits `tree` and `package` alone, and the rules
+# below ask for the package half by name.
 PACKAGE = "package"
 MODE = os.environ["CI_IMAGES_MODE"]
 

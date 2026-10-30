@@ -25,9 +25,7 @@
     {
       "script": "dispatch-claimant-delivery.sh",
       "go_version_file": "packages/envoy/go.mod",
-      "apt": [
-        "postgresql-client"
-      ],
+      "apt": ["postgresql-client"],
       "bun": true,
       "evidence_variable": "",
       "timeout_minutes": 25,
@@ -57,9 +55,7 @@
     {
       "script": "stage1-skeleton.sh",
       "go_version_file": "packages/daemon/go.mod",
-      "apt": [
-        "tmux"
-      ],
+      "apt": ["tmux"],
       "bun": false,
       "evidence_variable": "",
       "timeout_minutes": 20,
