@@ -2,64 +2,57 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-177",
-  "completed": "2026-10-30T06:59:00Z",
-  "round": 14,
-  "headTested": "5024f6c649e930b205a64ad6f7a7cdb223615cef (code head b78387087c63)",
-  "workspace": "Recreated before this round; it holds legion/INFRA-177 as pushed. The implementer's unpushed work I flagged before the 02:10Z drain (0b0df428 and a merge) is on the branch now, as 0b0df428, 3338c1a6, 4302877c and b7838708.",
-  "fingerprint": "changed (implementer, PR comment 6516723276: approved head 85e78bb5 ae8fccd6… -> code head b7838708 566f48ab…): the reviewer's 18 items, my 3, the key removal, two merges with main (contract 43, Dispatch migration 0145, the keyed handoff write) and four post-merge fixes. A full round.",
-  "mergeability": "gh pr view 2354 -> MERGEABLE (BLOCKED: required checks not reported); git merge-tree of main 147ff0dd with 5024f6c6 -> no conflict; contract 43, daemon 0062_handoff_records and Dispatch 0145_handoffs free on main (42, 0061, 0144).",
-  "ci": "Read 06:58Z: the CI workflow run 41015682111 is at the pushed head 5024f6c6, which carries code head b7838708's tree plus .legion/; it and its changes job are queued, and b7838708 itself has no check run (it was pushed beneath 5024f6c6 in one push). Read as running, not waited for.",
-  "myThreeItems": {
-    "staleComments": "handoffimport.go:1-10 and cmd/legion/handoffs.go:26-33 now say the removal is deferred while the issue is in a phase handoffimport.deferredUnderRecords names (testing, reviewing, held, merging, awaiting_merge), not 'testing or reviewing'.",
-    "leftTheWorkflowLine": "An issue gone from the daemon's state by the re-read prints 'left the workflow; nothing removed' and counts under 'left the workflow' (observed below); docs/kubernetes.md's line list carries it.",
-    "liveRefreshBrowserTest": "handoffs.e2e.ts:140 'a handoff written while the Conversation is open arrives without a reload' passes at the head and fails with event-refresh.ts's [\"handoffs\", key] target removed (observed below)."
+  "completed": "2026-10-30T13:08:00Z",
+  "round": 15,
+  "headTested": "ec393773d37555d4084557447714d6e370b16598 (code head a1a6523df1cb)",
+  "scope": "Per the architect: review round 11's eleven findings and three merges with main (a21100c5; 96a7e5ea carrying #2478; 2d3a725f). Tested what moved: the #2478 merge resolution in full, the ported claude-backend-sandbox.sh, handoff-records.sh and handoffs.e2e.ts at the merged head, the renumbered migrations, the new limit and key-reuse tests, and CI.",
+  "mergeability": "gh pr view 2354 -> MERGEABLE (BLOCKED: required checks not reported); git merge-tree of main 2d3a725f with ec393773 -> no conflict; contract 44, daemon 0065_handoff_records, Dispatch 0148_handoffs free on main (43, 0064, 0147); recordsSchema 65.",
+  "ci": "Read 13:07Z: CI run 41055339339 at ec393773 (the pushed head, code head a1a6523d's tree plus .legion/): changes success, every other job queued (test, typecheck, lint, ci-filters, the Go, Bun, browser and worker-image lanes). Read as running, not waited for.",
+  "pr2478": {
+    "tests": "676 of #2478's tests (its 68 test files) exist at the head by name; run by name per package: cmd/legion, admit, api, classify, dispatch, githubrest, projection, prompts, record, workflow, envoy infra aws/core, cistore, contracts, dispatch/api, integration, webhook ok; redeliver ok on a fresh database (the shared harness database still held an earlier head's handoffs table: 'relation \"handoffs\" already exists'). Two fail here and need Docker, which this pod has not: TestDaemonPermissionsOnRealServers/2.10 and TestConsumerLagCountsEveryConsumerWhileNATSRefusesTheOldestMessageRead (testcontainers docker_host.go); CI's.",
+    "dropped": "15 names. Each covered a handoff-only push, its approval carry, the forced marker, the committed handoff on READY's head, or the commit-keyed completion: TestALatePushWithItsPathsCutShortKeepsTheHandoffPushThePassRebuilt, TestHandoffPushTakesOnlyAComparisonThatProvesTheCodeUnchanged, TestThePassFollowsAHandoffPushSoAnApprovalBeneathItStands, TestAFailedComparisonStillReadsThePullRequest, TestAPushReplacesAnApprovalCarrierOfItsTwoHeads, TestDecodingCarriesThePushForcedMarkerAndTheReviewOrder (review half kept as TestDecodingCarriesTheReviewOrder), TestNoComposedPromptKeepsTheIssuesHandoffsOnTheMergedHead, TestHandoffCompleteReadyRefusesAHeadThatStillCarriesTheIssuesHandoffs, TestHandoffCompleteEnforcesRoleSpecificFieldsAndDeduplicatesTheCommit (…TheRecord), the four classify ones judged in rounds 6-8. Two carried non-handoff protections and have head equivalents: TestThePassRebuildsAForcePushLost -> TestThePassRebuildsAPushLostWhateverTheActivityCallsIt (push and force_push both counted, the approval of the replaced head not standing; passes), and TestHandoffCompleteRecordsTheCommitTheWorkerReportsAndTheOpenPullRequestGitHubShows -> HANDOFF_NO_PULL_REQUEST kept in api/handoff.go:390 with its tests in handoff_test.go (api package ok).",
+    "mechanics": "The pass's activity-rebuilt pushes judge by pusher, not paths: TestThePassRebuildsTheReviewAppsRedTestPushesLost, TestThePassRebuildsTheImplementersFixPushLost, TestThePassRebuildsAPushLostWhateverTheActivityCallsIt, TestThePassAppliesNoPushWhenTheActivityCannotBeFollowed, TestThePassFollowsAPushAboveAnApprovalAsANewHead pass.",
+    "noHandoffOnlyPath": "git grep -nE 'skip-checks|READY_HEAD_CARRIES_HANDOFFS|HandoffOnly|handoffOnly|ClassifyPush|classifyPush|HandoffPath|carriesApproval|carriedBack|readApprovalCarry|handoffPush' ec393773 (A4's scope and exclusions, plus claude-envoy's generated dist/ and legion/): two hits, docs/kubernetes.md:5453 and handoffimport.go:59, both describing the release before's HandoffPath for the cutover. No ChangedPaths, changed_paths or .legion/ read in pull_request_reads.go, classify settlement/decisions, workflow/pullrequest.go or review.go."
   },
+  "claudeBackendSandbox": "Not runnable from this pod: it needs the restricted cluster context (LEGION_E2E_RUNTIME_CONTEXT unset here), docker (absent) and the operator's own account (require_proof_human). Ran here: `bash -n scripts/e2e/claude-backend-sandbox.sh` ok; its handoff check assert_handoff_record (lib/workflow.sh, shared with claude-backend-tmux.sh and stage4b) applied to a real record on a scratch Dispatch from the head: the right issue, word, version and session pass, another session, another phase and another version fail. Its 'no .legion/ path in the implementer's commit' check is a grep on the commit's file list. The full proof is the operator's to run.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran handoff-records.sh on a fresh database (9 checks ok, PASS in 48s) and the browser suite e2e/handoffs.e2e.ts (3 passed, T3 included); the keyed-write claim held on a scratch Dispatch (a replay carries Idempotency-Replayed: ?1 and records one version). Item 14's workflow test was not re-run by me (CI's)."
+    "how": "handoff-records.sh on a fresh database at the merged head (9 checks ok, PASS in 47s); e2e/handoffs.e2e.ts 3 passed; handoffs_test.go's 11 tests (TestARetriedHandoffWriteReplaysItsAnswerAndRecordsOneVersion, TestAKeyedHandoffWritePastAMegabyteSpillsAndReplays, TestAnEarlyHandoffAnswerDrainsUpToTheHandoffWritesLimit and the cap/refusal tests) ok; the limit and key claims hold on a scratch Dispatch. Finding 10's workflow test not re-run by me (CI's)."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "A handoff written while the Conversation is open shows without a reload; the Conversation lists and expands each version (the HandoffTurn page fix)",
-      "surface": "the Dispatch dashboard in Chromium against the real Go server, SPA rebuilt from the head",
-      "command": "bash /legion/harness/dispatch-e2e.sh 'postgres://postgres@127.0.0.1:5433/dispatch_e2e_t14?sslmode=disable' e2e/handoffs.e2e.ts",
-      "observed": "3 passed: the list-and-expand test, 'a handoff written while the Conversation is open arrives without a reload' (version 3 appears, the document's own mark still on it), and the Activity test",
-      "headSha": "5024f6c649e930b205a64ad6f7a7cdb223615cef",
-      "negativeControl": "with event-refresh.ts:842 (targets.push({ queryKey: [\"handoffs\", key] })) removed, restored after: the live test fails 'Expected: 3, Received: 2' and the other two pass"
-    },
-    {
-      "criterion": "The import after the rollout: deferred phases leave the branch, an issue that left the workflow says so, other phases get the removal",
-      "surface": "handoffimport.Run against a real Dispatch built from the head, the daemon's schema at recordsSchema 62; GitHub and the daemon's state stood in by the package's world; a throwaway driver, deleted afterwards",
-      "command": "TESTER_DISPATCH_URL=http://127.0.0.1:18931 go test ./internal/handoffimport/ -run TestZZTesterR14 -v (LEG-8 held, LEG-9 merging, LEG-10 awaiting_merge, each with another issue's .legion/OTHER-3/; LEG-5 retro at the first read, done from the second)",
-      "observed": "exit 0; 'LEG-5: left the workflow; nothing removed'; held/testing/reviewing say 'run the import again once the phase ends', merging/awaiting_merge say 'its merge carries .legion/ to the default branch, which the cleanup after the cutover removes'; LEG-5, LEG-8, LEG-9, LEG-10 unmoved; count line 'imported 17 … removed .legion/ 2, deferred 5, left the workflow 1, no branch 1, failed 0'; the package's tests ok",
-      "headSha": "5024f6c649e930b205a64ad6f7a7cdb223615cef",
-      "negativeControl": "LEG-1 (planning) and LEG-4 (accepting) were moved by their removal commits in the same run"
-    },
-    {
-      "criterion": "Contract 43: the head's daemon registers a contract-43 plugin and refuses a contract-42 one; a claude-envoy built from this source speaks 43",
-      "surface": "the whole daemon in scripts/e2e/handoff-records.sh; claude-envoy's scripts/build.ts --out on Bun 1.4.4",
-      "command": "bash scripts/e2e/handoff-records.sh at 43; the same with the driver registering at api.DaemonAPIVersion - 1 (restored after); bun scripts/build.ts --out $TMPDIR/ce-build14",
-      "observed": "at 43: all 9 checks ok (A3, A6, A7 with the task naming '--version 2', A10, HANDOFF_NOT_NEW); built claude-envoy: daemonApiVersion 43, handoffId present, legion/ skills teach handoff-write, no skip-checks",
-      "headSha": "5024f6c649e930b205a64ad6f7a7cdb223615cef",
-      "negativeControl": "at 42: 'register … = 409 {\"error\":\"pi-legion speaks daemon API contract 42; this daemon requires 43: …\"}'; main's tracked claude-envoy bundle compiles in 42"
-    },
-    {
-      "criterion": "The keyed handoff write (main's #2449): a retry with the same Idempotency-Key replays its answer and records one version",
+      "criterion": "Findings 5 and 7: one route body limit gives the handoff write its limit and its 413 CAP_EXCEEDED in the drain, the keyed layer and the handler; a keyed write past 1 MiB spills and replays; a held key answers KEY_IN_FLIGHT; another body under the key is KEY_REUSED",
       "surface": "POST /api/v1/issues/{key}/handoffs/{phase} on a scratch Dispatch built from the head",
-      "command": "two POSTs to TST-1/handoffs/implement with one Idempotency-Key and one body; then the same key with another body; then two POSTs with no key",
-      "observed": "both 201 with the same id and version 1, the second carrying 'Idempotency-Replayed: ?1'; one implement record stored; the CLI's two handoff-write calls make versions 1 and 2",
-      "headSha": "5024f6c649e930b205a64ad6f7a7cdb223615cef",
-      "negativeControl": "the same key with another body -> 422 KEY_REUSED, nothing run; no key -> versions 1 and 2"
+      "command": "keys.sh: a 262,144-byte body sent \\u003c-escaped (1,572,881-byte request) twice with one Idempotency-Key; six concurrent POSTs under another key; the same key with another session's body; a 262,145-byte body keyed; a 2,625,583-byte request (past 6 x cap + 4 KiB + 1 MiB) keyed and unkeyed",
+      "observed": "both keyed writes 201 with one id and version 1, the second 'Idempotency-Replayed: ?1'; six concurrent: one 201 v1 and five 409 KEY_IN_FLIGHT; one record per issue stored",
+      "headSha": "ec393773d37555d4084557447714d6e370b16598",
+      "negativeControl": "same key, other body -> 422 KEY_REUSED; 262,145 bytes keyed -> 413 CAP_EXCEEDED; past the request limit -> 413 CAP_EXCEEDED keyed and unkeyed"
     },
     {
-      "criterion": "Dispatch migration 0145 applies on main's 0144, and the release before runs over it; the routes hold their limits",
-      "surface": "Dispatch built from main 147ff0dd and from the head on one database; raw HTTP; the real dispatch CLI; pi-shared paneHandoffReport",
-      "command": "upg.sh; probe.sh; dispatch handoff-write/handoff-read; bun pane-drive.ts",
-      "observed": "main at 144 (handoff route 404); head at 145, UPG-1 kept, plan v1 recorded, census 0; main serves the 145 database (200). 30 concurrent writes -> versions 1..30; a 262,144-byte body \\u003c-escaped to 1,572,881 bytes -> 201; read-back byte-identical (\\u0000, surrogates, duplicate keys). The pane reports the newest record (and the implementer's pushed tip)",
-      "headSha": "5024f6c649e930b205a64ad6f7a7cdb223615cef",
-      "negativeControl": "262,145 bytes -> 413; phase PLAN or 'plan/../' -> 400; a human caller -> 403; no bearer -> 401; an array body refused by the CLI before sending; --version 9 -> HANDOFF_NOT_FOUND naming version 2; DISPATCH_HOST=claude with no session -> refused; an unpushed implementer @- -> refused naming the push"
+      "criterion": "Handoff records end to end at the merged head (contract 44): a worker's record is read back, another session's refused, Dispatch outages handled, the import's record re-written; a contract-43 plugin is refused",
+      "surface": "the whole daemon in scripts/e2e/handoff-records.sh",
+      "command": "LEGION_TEST_PG_DSN=…/legion_t15 … bash scripts/e2e/handoff-records.sh; then with the driver registering at api.DaemonAPIVersion - 1 (restored after)",
+      "observed": "9 checks ok, PASS in 47s",
+      "headSha": "ec393773d37555d4084557447714d6e370b16598",
+      "negativeControl": "at 43: 'register … = 409 {\"error\":\"pi-legion speaks daemon API contract 43; this daemon requires 44: …\"}'"
+    },
+    {
+      "criterion": "The Conversation shows handoff records, live, at the merged head",
+      "surface": "the Dispatch dashboard in Chromium against the real Go server, SPA rebuilt from the head",
+      "command": "bash /legion/harness/dispatch-e2e.sh 'postgres://postgres@127.0.0.1:5433/dispatch_e2e_t15?sslmode=disable' e2e/handoffs.e2e.ts",
+      "observed": "3 passed, the live test among them",
+      "headSha": "ec393773d37555d4084557447714d6e370b16598",
+      "negativeControl": "round 14 at 5024f6c6: with event-refresh.ts's [\"handoffs\", key] target removed the live test fails 'Expected: 3, Received: 2'; this round touched neither the test nor the rule"
+    },
+    {
+      "criterion": "The renumbered migrations: Dispatch 0148 on main's 0147, daemon 0065 on main's 0064 with docs/kubernetes.md's rollback",
+      "surface": "Dispatch built from main 2d3a725f and from the head on one database; psql on main's daemon migrations",
+      "command": "upg.sh (main's Dispatch, then the head's, then main's); main's 0001-0064 each in a transaction, then 0065, then the rollback SQL twice, then 0065 again",
+      "observed": "Dispatch: main at 147, head at 148 with UPG-1 kept and plan v1 recorded, census 0, main serves the 148 database (200). Daemon: 0065 adds handoff_record '' and handoff_version 0; rollback 'ALTER TABLE', 'DELETE 1', then the two NOTICEs and 'DELETE 0', store at 64; 0065 applies again",
+      "headSha": "ec393773d37555d4084557447714d6e370b16598",
+      "negativeControl": "main's Dispatch answers the handoff route 404"
     }
   ]
 }
