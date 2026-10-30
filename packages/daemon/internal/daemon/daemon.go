@@ -1682,6 +1682,17 @@ func (s projectRecords) Enqueue(ctx context.Context, tx pgx.Tx, row record.Outbo
 	return nil
 }
 
+// EnqueueID wakes the row's lane as Enqueue does: a start or catch-up naming kept decisions is
+// written with its id (workflow.EnqueueNaming), so the row it claims them for waits for no sweep.
+func (s projectRecords) EnqueueID(ctx context.Context, tx pgx.Tx, row record.OutboxRow) (int64, error) {
+	id, err := s.Store.EnqueueID(ctx, tx, row)
+	if err != nil {
+		return 0, err
+	}
+	s.wakeOnCommit(ctx, row)
+	return id, nil
+}
+
 func (s projectRecords) ExpediteOutbox(ctx context.Context, tx pgx.Tx, row record.OutboxRow, now time.Time) error {
 	if err := s.Store.ExpediteOutbox(ctx, tx, row, now); err != nil {
 		return err

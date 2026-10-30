@@ -174,7 +174,7 @@ func HandOverKept(ctx context.Context, tx pgx.Tx, store record.Store, gate confi
 	if err != nil || !hears {
 		return err
 	}
-	return QueueCatchUp(ctx, tx, store, gate, *root, launch, now)
+	return QueueCatchUp(ctx, tx, store, gate.OrDefault(), *root, launch, now)
 }
 
 // ArchitectHears says whether root has an architect to hear a person's decision now: it is its
