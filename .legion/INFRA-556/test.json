@@ -2,49 +2,61 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-556",
-  "completed": "2026-10-30T12:30:00Z",
-  "round": 9,
-  "testedCodeHead": "09e42b205f18",
-  "scope": "INFRA-63 architect, 2026-10-30T11:54Z, in workspace mode and with GOWORK=off: the many-sockets file unchanged and passing; it and the short-message test pass; the five earlier red tests still pass; the room bound 4,000 and memory flat under the 400k flood and 200 full sockets; a nameless first message of any length closes while the web client's first message is admitted",
+  "completed": "2026-10-30T22:40:00Z",
+  "round": 10,
+  "testedCodeHead": "bf6318c01ed9",
+  "scope": "INFRA-63 architect, 2026-10-30T20:38Z and 21:57Z: a full round covering review round 3's items and the merge with main's #2392 (per-issue event writes, no database-wide event lock); read ci-ok and the four required checks at the code head",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the seven awareness red tests it names at 09e42b20 on real binaries, 2 of 2 each in workspace mode (gorilla v1.5.4-pre) and with GOWORK=off (v1.5.3). The red-test files are byte-identical to what I wrote."
+    "how": "Re-ran the implementer's multiprocess command at bf6318c0: ok 1148.109s, 133 PASS, 0 FAIL. Re-ran its browser coedit spec on main's two-process harness: 2 of 2 passed."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Every awareness red test passes in both build modes: a reader joining after, or during, a flood (one socket or 200 full sockets) is seen on the other process within a second; five readers placing cursors at once are all seen; repeated floods keep a room's awareness bounded; one socket is held to four clients through a real upgrade; a short nameless first message closes its socket",
-      "surface": "two real envoy-dispatch binaries on one Postgres 17 (go test -tags multiprocess ./cmd/dispatch) and the docs package's two Services on real websocket upgrades",
-      "command": "cd packages/envoy && for mode in workspace GOWORK=off: go test -count=2 -run 'TestRepeatedAwarenessFloodsDoNotGrowARoomsAwarenessWithoutLimit|TestADocumentSocketHoldsItsAwarenessBoundThroughARealUpgrade|TestADocumentSocketWhoseShortFirstMessageNamesNoDocumentIsClosed' ./internal/dispatch/docs && go test -tags multiprocess -count=2 -run 'TestAReaderJoining(After|During)A.*AwarenessFlood|TestFiveReadersPlacingCursorsAtOnceAreAllSeenOnTheOtherProcess|TestAReaderJoiningWhileManySocketsFillTheirBoundsIsSeenOnTheOtherProcess' ./cmd/dispatch",
-      "observed": "All seven pass 2 of 2 in each mode. The repeated-flood test reports 'task A's room tracks 1024 client entries, task B's 0 (bound 8000)'; maxAwarenessClientsPerRoom = 1,000 x 4 = 4,000. One socket's 2,048-client frame reaches carol on A and bob on B as 4 clients each, in both modes. Evidence: https://github.com/sjawhar/legion/pull/2414#issuecomment-6522689220",
-      "headSha": "09e42b205f18",
-      "negativeControl": "At c83f0a4e: the many-sockets test fails 2 of 2 (bob on B holds 256 clients and never alice), and the short-message test fails 2 of 2 in each mode (socket open 5 s later). At 3b94b7c2 the five-reader test fails 4 of 4, and in workspace mode the real-upgrade test fails (carol holds 10 of one socket's clients)."
+      "criterion": "The merge with main keeps both sides: items 1-6 and D10 across two processes, main's close-time ask withdrawal, and every awareness red test",
+      "surface": "two real envoy-dispatch binaries on one Postgres 17 (go test -tags multiprocess ./cmd/dispatch)",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_test?sslmode=disable go test -tags multiprocess -count=1 -timeout 60m -v ./cmd/dispatch",
+      "observed": "ok github.com/sjawhar/envoy/cmd/dispatch 1148.109s, 133 PASS, 0 FAIL: the seven spec tests, TestClosingAnIssueOnOneProcessWithdrawsItsAskAndFreezesTheOtherProcessesRoomUntilItsReopen, and all seven awareness red tests. After 200 alternating keystrokes every counter is 0 on A and B. In docs/copied_asks.go and duty/exclusive.go the conflict resolution touches only the lock-enumeration comments. Evidence: https://github.com/sjawhar/legion/pull/2414#issuecomment-6534858795",
+      "headSha": "bf6318c01ed9",
+      "negativeControl": "The seven spec tests fail at aa50b68c (round 1)"
     },
     {
-      "criterion": "Census entry 4: a document socket whose first message names no document and type within 512 bytes is closed, whatever its length, and the real web client's first message is admitted",
-      "surface": "two real envoy-dispatch binaries driven by raw gorilla websockets; Chromium on main's two-process harness for the web client",
-      "command": "go test -tags multiprocess -run TestProbeR7FirstMessage ./cmd/dispatch (throwaway, both modes); bun run e2e:multiprocess -- zz-firstframe.multiprocess (throwaway spec, workspace build)",
-      "observed": "Closed on A and B in both modes: 1 byte (80), 3 bytes (ff ff ff), 100, 511 and 513 bytes of ff, a 600-byte name, a name with no type, and an empty message. A well-formed awareness or sync first message is kept. The web client's first message on each document socket is Auth (type 2), naming the document in a 38-byte header (41 bytes), and its socket stays connected on A and B.",
-      "headSha": "09e42b205f18",
-      "negativeControl": "At c83f0a4e the 3-byte nameless first message left the socket open in both modes (round 8)."
+      "criterion": "The merge under load: concurrent closes and reopens with ask withdrawal across both processes, alongside agent writes, under per-issue event writes",
+      "surface": "two real envoy-dispatch binaries; throwaway test TestProbeR10ConcurrentClosesWithAsks",
+      "command": "go test -tags multiprocess -run TestProbeR10ConcurrentClosesWithAsks ./cmd/dispatch",
+      "observed": "Twelve issues, each with an open decision block and an editor on the other process, closed at once, six through A and six through B, while agents wrote to two other issues through both. Every close answered 200 within 1.13 s and every agent write succeeded. Every block reads state=\"resolved\", and every editor was closed and reconnected readonly. A concurrent reopen answered within 0.45 s, and every editor reconnected read-write. Each issue's events are contiguous in seq.",
+      "headSha": "bf6318c01ed9",
+      "negativeControl": "Before this change (aa50b68c), a close through B left the room on A open (round 1)"
     },
     {
-      "criterion": "Memory stays flat under the 400k flood and under 200 full sockets",
-      "surface": "two real envoy-dispatch binaries; VmRSS from /proc",
-      "command": "go test -tags multiprocess -run 'TestProbeR7Memory400k|TestProbeR7LiveFloodHeldOpen' ./cmd/dispatch (throwaway, both modes)",
-      "observed": "400,000 invented ids: A 56 to 60 MB in workspace mode and 59 to 66 MB with GOWORK=off; B unchanged. One live flooding socket re-announced for 41 s: A and B unchanged, B holds 4 clients. 200 full sockets (800 clients) re-announced for 45 s: B holds 800 and moves 57 to 59 MB; A 56 to 123 MB, level from 12 s to 45 s (the 200 open websockets). A reader joining during the 200-socket flood is seen by carol on A and bob on B within 1 s in both modes. My probe's reader sends no heartbeat, so it expired at 30 s (awarenessExpiry), as designed.",
-      "headSha": "09e42b205f18",
-      "negativeControl": "At b0a2d131 the 400,000-id flood grew A to 404 MB and B to 108 MB (round 5)."
+      "criterion": "Review round 3: a departing reader's removal carries its client's clock",
+      "surface": "two real envoy-dispatch binaries: twenty readers on A leave at once while others join and leave (tombstones purging), five rounds; plus the implementer's docs test",
+      "command": "go test -tags multiprocess -run TestProbeR10ManyReadersLeaveAtOnce ./cmd/dispatch (throwaway); go test -count=5 -run TestAReaderLeavingIsRelayedAtItsClientsClockThoughAPurgeRacesTheEncode ./internal/dispatch/docs",
+      "observed": "At head, bob on B holds none of the twenty 2 s later in every round: 4 runs in workspace mode, 1 with GOWORK=off. The implementer's test passes 5 of 5.",
+      "headSha": "bf6318c01ed9",
+      "negativeControl": "At 09e42b20, before the fix, the throwaway test fails 2 of 2: 'two seconds after twenty readers left A at once, bob on B still holds 1 of them'"
     },
     {
-      "criterion": "Real readers are never dropped: several tabs, a reconnecting tab, the editor's own awareness",
-      "surface": "Chromium on main's two-process harness, harness binary built in workspace mode (go version -m: gorilla v1.5.4-pre, filter active)",
-      "command": "cd packages/dispatch && DATABASE_URL=… bun run e2e:multiprocess -- zz-firstframe.multiprocess zz-tabs.multiprocess zz-reconnect.multiprocess coedit.multiprocess --repeat-each=2",
-      "observed": "8 passed. Six tabs, three per process, place carets at once and every page shows the other five within 1 s, over 8 rounds. A tab on B whose socket is cut is shown on A again within 148-260 ms, over 6 reconnects. coedit.multiprocess passes 2 of 2.",
-      "headSha": "09e42b205f18",
-      "negativeControl": "coedit.multiprocess fails on a0f877c5, the harness without this change (round 1)."
+      "criterion": "Review round 3 (4f15d975): a read of a room that has taken no edit copies it once, the copy becomes the room's rendered copy, and every read stays correct",
+      "surface": "two real envoy-dispatch binaries; throwaway test TestProbeR10ReadsOfAnUnwrittenRoomStayCorrect",
+      "command": "go test -tags multiprocess -run TestProbeR10ReadsOfAnUnwrittenRoomStayCorrect ./cmd/dispatch",
+      "observed": "A cold agent write loads the room. Six readers (3 on A, 3 on B) loop GET /text while alice on A and bob on B open it and type 40 keystrokes. Of 948 concurrent reads, none was wrong. Afterwards A's API, B's API and both editors hold beta plus 20 a and 20 b.",
+      "headSha": "bf6318c01ed9",
+      "negativeControl": "Every one of the 948 reads would have failed on text without the agent's edit, or on a 'beta' prefix missing; none did"
+    },
+    {
+      "criterion": "Browser: readers on two processes see each other's edits, cursors and presence within one second, through a reconnect, and every document socket's first message names the document",
+      "surface": "Chromium on main's two-process harness",
+      "command": "cd packages/dispatch && DATABASE_URL=… bun run e2e:multiprocess -- zz-tabs.multiprocess coedit.multiprocess --repeat-each=2",
+      "observed": "4 passed. Six tabs (three per process) see the other five carets within 1 s over 4 rounds, including after one tab's socket is cut and reconnects. Each of the 7 document sockets' first byte is 36, the length of the document's id. coedit.multiprocess passes 2 of 2.",
+      "headSha": "bf6318c01ed9",
+      "negativeControl": "coedit.multiprocess fails on a0f877c5, the harness without this change (round 1)"
     }
   ],
-  "ci": "GitHub reads PR #2414 MERGEABLE (mergeStateStatus BLOCKED). At 09e42b20 only changes and pr-title are queued and no other lane has run; the PR waits for the merge queue (architect)."
+  "notes": [
+    "Census entry 4: my round-8 short-message test is now a row ('three bytes of an integer that never ends') of the table test TestADocumentSocketWhoseFirstMessageNamesNoDocumentIsClosedThroughARealUpgrade, which passes in both build modes.",
+    "Migrations 0150-0152 will overlap INFRA-562's #2387; whichever lands later renumbers. The architect said not to fail the round for it."
+  ],
+  "ci": "At bf6318c0, read 2026-10-30T22:33Z: lint success; pr-title success (one earlier run cancelled); typecheck skipped (no TypeScript it reads changed); test in progress; ci-ok not posted yet; broker-multiprocess and changes success; the other lanes queued. GitHub was recomputing the merge state."
 }
