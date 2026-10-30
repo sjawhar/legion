@@ -360,7 +360,7 @@ describe("Dispatch write advice", () => {
     );
 
     expect(result.text).toEndWith(
-      'Posted. You\'ve sent 6 messages on DSP-42 with no human response. Stop posting here until a human replies. Their reply ends this: post then what you held back. A reply in an ask thread a human answered is never counted here anyway. See the `dispatch` skill, "Structure over stream".'
+      'Posted. You\'ve sent 6 messages on DSP-42 with no human response. Stop posting here until a human replies. Their reply ends this: post then what you held back. See the `dispatch` skill, "Structure over stream".'
     );
     expect(result.details.advice).toEqual(rawAdvice);
   });

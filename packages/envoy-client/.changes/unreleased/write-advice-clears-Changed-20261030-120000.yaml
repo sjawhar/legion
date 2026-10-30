@@ -1,5 +1,5 @@
 kind: Changed
-body: 'The write advice at six session writes with no human response names what ends it: a person''s reply clears the count and is the cue to post what was held back, and a reply in an ask thread a person answered is never counted. The old text, "Stop posting here until a human replies", read as a standing instruction, so a session that had its answers suppressed the one reply that closed the loop.'
+body: 'The write advice at six session writes with no human response states the duty at the end it already named: "Stop posting here until a human replies. Their reply ends this: post then what you held back." The old text named the end and no duty there, so a session whose questions were answered acted on the answers and wrote none of it back into the threads.'
 time: 2026-10-30T12:00:00.000000000Z
 custom:
     Issue: write-advice-clears
