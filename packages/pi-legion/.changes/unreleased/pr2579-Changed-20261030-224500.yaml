@@ -1,11 +1,12 @@
 kind: Changed
 body: |-
-    `legion-worker`'s tools reference opens with the database a role's tests use: never the one
-    `OMP_SESSION_SQL_DSN_FILE` names, whose login drops databases on the instance every pod's
-    sessions live in, but `LEGION_TEST_PG_DSN`, the pod's own PostgreSQL, which the worker image
-    now carries and the pod's setup step starts before the agent. A role on a digest that predates
-    the variable is told how to start one for itself, and the Dispatch browser suite's entry names
-    the pod's server instead of a Debian unpack.
+    `legion-worker`'s tools reference opens with the database a role's tests use: never the URL in
+    the file `OMP_SESSION_SQL_DSN_FILE`, the live sessions database every pod shares, whose login
+    can create and drop databases there, but `$LEGION_TEST_PG_DSN`, the pod's own PostgreSQL, which
+    the worker image now carries and the roles container's launcher starts at container start. The
+    rule names every Postgres variable a test reads, how a suite that resets the database it is
+    given makes one of its own with `createdb`, and what a role on a digest that predates the
+    server does instead.
 time: 2026-10-30T22:45:00.000000000Z
 custom:
     Issue: pr2579
