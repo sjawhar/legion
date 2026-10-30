@@ -1035,6 +1035,11 @@ type Store interface {
 	// (supervise.Delivery.Kept). Nothing is kept for a confirmed task, a claim with no task, or a
 	// task naming nothing of those issues.
 	ReKeepDeliveredDecisions(ctx context.Context, tx pgx.Tx, token claim.Token, root string, issues []string) error
+	// HeldKeptDecisions is what the unconfirmed task pending on claim token names of what its
+	// root keeps (pending_task_deliveries.kept_decisions, supervise.Delivery.Kept): rows the
+	// claim's queueing of the task forgot, which the task alone carries from then on. Nothing for
+	// a confirmed task, a claim with no task, or a task that names no decision.
+	HeldKeptDecisions(ctx context.Context, tx pgx.Tx, token claim.Token) ([]DecisionMark, error)
 	// ParkedDecisions is every decision root keeps, claimed or not, newest first, ties by ref.
 	ParkedDecisions(ctx context.Context, tx pgx.Tx, root string) ([]ParkedDecision, error)
 	// UnclaimedKept is what root keeps that no delivery claims: its decisions, newest first, ties by

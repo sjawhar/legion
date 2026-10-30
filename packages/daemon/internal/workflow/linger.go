@@ -346,8 +346,54 @@ func (e *Engine) lingerExpired(ctx context.Context, tx pgx.Tx, fact intake.Linge
 		}
 	}
 	e.logOnCommit(ctx, "workflow: linger closed the tree", "tree", issue.Key, "generation", issue.Generation, "issues", len(members))
+	if err := e.warnKeptDecisionsOfAClosedTree(ctx, tx, *issue); err != nil {
+		return intake.Result{}, err
+	}
 	if issue.Status == "done" {
 		return intake.Result{}, e.settleUnfinished(ctx, tx, *issue, members)
 	}
 	return intake.Result{}, nil
+}
+
+// warnKeptDecisionsOfAClosedTree names every decision a person made while nobody in this tree
+// could hear it that the tree's close leaves behind: one the root still keeps, claimed by a start
+// or a catch-up or not (Store.ParkedDecisions), and one the unconfirmed task held on the root
+// architect's claim is the only carrier of (Store.HeldKeptDecisions, the rows a claim's queueing
+// of the task forgot). The tree closes for good here, so no start task and no catch-up of it names
+// them to an architect again: a decision of a child the close hands over reaches that child's own
+// architect once the child is re-admitted (admit.Admission.readmit), and every other one stands
+// where it is until a person acts. Each is one Warn line of its own, written once the close has
+// committed (warnOnCommit), so a row run again after a failed commit writes nothing twice. The
+// controller was told each when it was kept — that is what a person's decision on a tree nobody in
+// it hears reaches (record.RelayParkedDecision's notice) — so the line says where the decision
+// stands rather than that it is lost.
+func (e *Engine) warnKeptDecisionsOfAClosedTree(ctx context.Context, tx pgx.Tx, root record.Issue) error {
+	kept, err := e.store.ParkedDecisions(ctx, tx, root.Key)
+	if err != nil {
+		return err
+	}
+	for _, decision := range kept {
+		e.warnKeptDecisionOfAClosedTree(ctx, root.Key, decision.Ref, decision.Issue, "kept for its root")
+	}
+	project, err := claim.ProjectToken(root.Project)
+	if err != nil {
+		return err
+	}
+	architect, err := claim.NewToken(project, root.Key, claim.RoleArchitect)
+	if err != nil {
+		return err
+	}
+	held, err := e.store.HeldKeptDecisions(ctx, tx, architect)
+	if err != nil {
+		return err
+	}
+	for _, named := range held {
+		e.warnKeptDecisionOfAClosedTree(ctx, root.Key, named.Ref, named.Issue, "held by its architect's unconfirmed task")
+	}
+	return nil
+}
+
+func (e *Engine) warnKeptDecisionOfAClosedTree(ctx context.Context, root, ref, issue, where string) {
+	e.warnOnCommit(ctx, "workflow: the tree closed while it still owed a person's decision to an architect; the controller already has its parked-decision notice",
+		"ref", ref, "root", root, "issue", issue, "where", where)
 }

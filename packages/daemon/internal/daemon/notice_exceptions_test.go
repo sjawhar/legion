@@ -1099,7 +1099,7 @@ func TestAReheldCatchUpNeverFollowsANewerOne(t *testing.T) {
 				t.Fatalf("rehold: %v", err)
 			}
 			queued := queuedNotices(t, pool)
-			superseded := strings.Contains(logged.String(), `msg="outbox catch-up not re-held: a newer catch-up supersedes it"`)
+			superseded := strings.Contains(logged.String(), `msg="outbox catch-up not re-held: a newer catch-up supersedes it; what it named is handed over"`)
 			if tc.reheld && (len(queued) != 1 || superseded) || !tc.reheld && (len(queued) != 0 || !superseded) {
 				t.Fatalf("queued %v, logged:\n%s\nwant re-held %t", queued, logged.String(), tc.reheld)
 			}

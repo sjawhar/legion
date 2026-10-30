@@ -680,23 +680,11 @@ func (s *Postgres) ReKeepDeliveredDecisions(ctx context.Context, tx pgx.Tx, toke
 	if len(issues) == 0 {
 		return nil
 	}
-	var encoded []byte
-	err := tx.QueryRow(ctx, `select kept_decisions from pending_task_deliveries
-		where claim_token = $1 and confirmed_at is null`, string(token)).Scan(&encoded)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil
-	}
+	held, err := s.HeldKeptDecisions(ctx, tx, token)
 	if err != nil {
-		return fmt.Errorf("read the decisions the task pending on %s names: %w", token, err)
+		return err
 	}
-	var kept KeptDecisions
-	if len(encoded) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(encoded, &kept); err != nil {
-		return fmt.Errorf("decode the decisions the task pending on %s names: %w", token, err)
-	}
-	for _, named := range kept.Decisions {
+	for _, named := range held {
 		if !slices.Contains(issues, named.Issue) {
 			continue
 		}
@@ -706,6 +694,30 @@ func (s *Postgres) ReKeepDeliveredDecisions(ctx context.Context, tx pgx.Tx, toke
 		}
 	}
 	return nil
+}
+
+// HeldKeptDecisions reads what the unconfirmed task pending on token names: the decisions its root
+// kept, which went from parked_decisions the moment the claim queued the task, so this is the only
+// place they stand. A confirmed task has been taken by its agent and is told, and a claim with no
+// task holds nothing.
+func (s *Postgres) HeldKeptDecisions(ctx context.Context, tx pgx.Tx, token claim.Token) ([]DecisionMark, error) {
+	var encoded []byte
+	err := tx.QueryRow(ctx, `select kept_decisions from pending_task_deliveries
+		where claim_token = $1 and confirmed_at is null`, string(token)).Scan(&encoded)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read the decisions the task pending on %s names: %w", token, err)
+	}
+	if len(encoded) == 0 {
+		return nil, nil
+	}
+	var kept KeptDecisions
+	if err := json.Unmarshal(encoded, &kept); err != nil {
+		return nil, fmt.Errorf("decode the decisions the task pending on %s names: %w", token, err)
+	}
+	return kept.Decisions, nil
 }
 
 func (s *Postgres) ParkedDecisions(ctx context.Context, tx pgx.Tx, root string) ([]ParkedDecision, error) {

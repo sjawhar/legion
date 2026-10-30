@@ -3,7 +3,9 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"reflect"
 	"strings"
@@ -722,4 +724,151 @@ func keptDecisions(t *testing.T, pool *pgxpool.Pool, records record.Store, root 
 		t.Fatalf("read the kept decisions of %s: %v", root, err)
 	}
 	return kept
+}
+
+// A tree closes for good when its linger expires, and a person's decision kept while nobody in it
+// could hear it can still be standing then: kept for the root and unclaimed, kept and claimed by a
+// start or catch-up row that will never reach an architect, or held by the unconfirmed task of the
+// root architect's claim, which the claim's queueing of that task left as the only record of it.
+// Nothing of a closed tree names any of them to an architect again, so the close says each one:
+// one Warn line, with the decision's reference, its root and the issue a person decided on. The
+// controller has each as a parked-decision notice, written when the decision was kept
+// (record.RelayParkedDecision), which is where a person's decision on a tree nobody in it hears
+// goes. The lines are written once the close has committed, so the linger row run again — a lost
+// finish, a daemon that died before it — writes none of them twice.
+func TestAClosingTreeNamesEveryDecisionStillOwedToItsArchitect(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	until := time.Now().Add(-time.Minute)
+	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+		Project: "LEGION", Tree: "LEGION-208", Title: "Root", Phase: phase.Done, Generation: 3, Status: "done",
+		Rank: "U", LastDispatchSeq: 5, LingerUntil: &until}
+	parent := root.Key
+	child := record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+		Project: "LEGION", Tree: root.Tree, Parent: &parent, Title: "Child", Phase: phase.Done, Generation: 1,
+		Status: "done", Rank: "B", LastDispatchSeq: 2}
+	putOutboxIssue(t, pool, records, root)
+	putOutboxIssue(t, pool, records, child)
+
+	at := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	unclaimed, claimed, held := "dispatch://LEGION-208/ask/ask-1", "dispatch://LEGION-209/ask/ask-2", "dispatch://LEGION-208/ask/ask-3"
+	for _, kept := range []record.ParkedDecision{
+		{Root: root.Key, Ref: unclaimed, Issue: root.Key, Decision: record.DecisionAskAnswered, Actor: "user:alice", At: at},
+		{Root: root.Key, Ref: claimed, Issue: child.Key, Decision: record.DecisionAskResolved, Actor: "user:bob", At: at},
+	} {
+		if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error { return records.AddParkedDecision(ctx, tx, kept) }); err != nil {
+			t.Fatalf("keep the decision %s: %v", kept.Ref, err)
+		}
+	}
+	// The start that claimed the decision on the child is still queued: its claim is released by
+	// nothing here, and the close leaves it where it stands.
+	naming := record.KeptDecisions{Decisions: []record.DecisionMark{{Ref: claimed, At: at, Issue: child.Key,
+		Decision: record.DecisionAskResolved, Actor: "user:bob"}}}
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		row := mustOutboxRow(t, root.Key, record.SuperviseRequest{Op: "start", Tree: root.Tree, Role: claim.RoleArchitect,
+			Generation: root.Generation, Phase: phase.Admitted, Task: "a person decided on the tree", Kept: &naming}, time.Now())
+		if err := records.Enqueue(ctx, tx, row); err != nil {
+			return err
+		}
+		var id int64
+		if err := tx.QueryRow(ctx, "select max(id) from outbox").Scan(&id); err != nil {
+			return err
+		}
+		return records.ClaimKeptDecisions(ctx, tx, root.Key, naming, id)
+	}); err != nil {
+		t.Fatalf("claim the decision on the child for a queued start: %v", err)
+	}
+	// The root architect's claim holds a start task nobody sent and nobody confirmed; the decision
+	// it names went from parked_decisions when the claim took the task.
+	seedHeldArchitectTask(t, pool, root.Key, record.KeptDecisions{Decisions: []record.DecisionMark{
+		{Ref: held, At: at, Issue: root.Key, Decision: record.DecisionAskAnswered, Actor: "user:alice"}}})
+
+	var logged bytes.Buffer
+	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories},
+		slog.New(slog.NewJSONHandler(&logged, nil)))
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records,
+		handlers: []intake.Handler{engine}, now: time.Now}
+	row := mustOutboxRow(t, root.Key, record.LingerClose{Generation: root.Generation}, time.Now())
+	if err := runner.execute(ctx, row); err != nil {
+		t.Fatalf("close the tree at its linger's end: %v", err)
+	}
+
+	want := []string{
+		"WARN " + unclaimed + " root=LEGION-208 issue=LEGION-208 where=kept for its root",
+		"WARN " + claimed + " root=LEGION-208 issue=LEGION-209 where=kept for its root",
+		"WARN " + held + " root=LEGION-208 issue=LEGION-208 where=held by its architect's unconfirmed task",
+	}
+	if got := owedDecisionsLogged(t, logged.Bytes()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the close logged %q, want one line per decision the tree still owes: %q", got, want)
+	}
+	// The row runs again, as a lost finish leaves it: the close is already applied, so it says
+	// nothing a second time.
+	logged.Reset()
+	if err := runner.execute(ctx, row); err != nil {
+		t.Fatalf("run the linger close again: %v", err)
+	}
+	if got := owedDecisionsLogged(t, logged.Bytes()); len(got) != 0 {
+		t.Fatalf("the linger row run again logged %q, want nothing: the close committed once", got)
+	}
+}
+
+// seedHeldArchitectTask records root's architect ready with a start task it has been given and
+// nobody has sent: unconfirmed, naming kept, as a task held while its root has no architect to
+// hear it stands (supervise's sendPending).
+func seedHeldArchitectTask(t *testing.T, pool *pgxpool.Pool, root string, kept record.KeptDecisions) {
+	t.Helper()
+	ctx := context.Background()
+	token, err := claim.NewToken("legion", root, claim.RoleArchitect)
+	if err != nil {
+		t.Fatalf("the architect token of %s: %v", root, err)
+	}
+	if _, err := pool.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation, session, session_file,
+		state, launch_failures, prompt_failures, prompt_retires, uncertain_streak, delivered_rows)
+		values ($1, 'legion', $2, $2, 'architect', 1, 'ses-architect', '', 'ready', 0, 0, 0, 0, '{}')`,
+		string(token), root); err != nil {
+		t.Fatalf("record the architect claim of %s: %v", root, err)
+	}
+	encoded, err := json.Marshal(kept)
+	if err != nil {
+		t.Fatalf("encode the decisions the held task names: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `insert into pending_task_deliveries (claim_token, delivery_id, task,
+		queued_at, generation, phase, kept_decisions)
+		values ($1, 'outbox:7', 'While nobody in the tree could hear it, a person decided on the tree.', now(), 1, '', $2::jsonb)`,
+		string(token), encoded); err != nil {
+		t.Fatalf("record the architect's held task of %s: %v", root, err)
+	}
+}
+
+// owedDecisionsLogged is every line the close wrote for a decision it still owed an architect, in
+// the order it wrote them: the level, the decision's reference, its root, the issue a person
+// decided on, and where the decision stood.
+func owedDecisionsLogged(t *testing.T, logged []byte) []string {
+	t.Helper()
+	var lines []string
+	for _, line := range bytes.Split(bytes.TrimSpace(logged), []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var entry struct {
+			Level string `json:"level"`
+			Msg   string `json:"msg"`
+			Ref   string `json:"ref"`
+			Root  string `json:"root"`
+			Issue string `json:"issue"`
+			Where string `json:"where"`
+		}
+		if err := json.Unmarshal(line, &entry); err != nil {
+			t.Fatalf("decode the log line %q: %v", line, err)
+		}
+		if !strings.Contains(entry.Msg, "still owed a person's decision to an architect") {
+			continue
+		}
+		if !strings.Contains(entry.Msg, "the controller already has its parked-decision notice") {
+			t.Fatalf("the line %q does not say the controller already has the decision's notice", line)
+		}
+		lines = append(lines, fmt.Sprintf("%s %s root=%s issue=%s where=%s", entry.Level, entry.Ref, entry.Root, entry.Issue, entry.Where))
+	}
+	return lines
 }
