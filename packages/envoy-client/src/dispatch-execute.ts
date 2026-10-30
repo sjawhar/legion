@@ -39,6 +39,7 @@ import type {
   OpenAsk,
   OpenAsksResponse,
   Project,
+  SessionAnswersResponse,
   WriteAdvice,
 } from "@legion/contracts";
 import {
@@ -91,6 +92,7 @@ import {
   issueTopic,
   type Owner,
   type OwnerTopic,
+  ownerTitle,
   type ParsedDispatchRef,
   parseDispatchRef,
 } from "./dispatch-owner";
@@ -123,6 +125,7 @@ import { messageFor } from "./errors";
 import { humanEditHead } from "./human-edit";
 import { decisionBlockLines, relatedCheckLines } from "./related-check";
 import { pageSummaryText, searchAnswer } from "./search-answer";
+import { isNoAnswersRoute, renderSessionAnswersList } from "./session-answers";
 import { formatZodIssues, ToolInputError } from "./tool-input-errors";
 
 /**
@@ -434,6 +437,7 @@ const issueFreeTools: Readonly<Record<string, true>> = {
   dispatch_project: true,
   dispatch_projects: true,
   dispatch_open_asks: true,
+  dispatch_answers: true,
   dispatch_whoami: true,
   dispatch_architecture_sync: true,
 };
@@ -2386,15 +2390,9 @@ function openAskAge(ageSeconds: number): string {
   return `${days}d${hours % 24 === 0 ? "" : ` ${hours % 24}h`}`;
 }
 
-function openAskOwner(ask: OpenAsk): string {
-  return "issue" in ask.owner
-    ? `${ask.owner.issue.key}: ${ask.owner.issue.title}`
-    : `${ask.owner.document.project} / ${ask.owner.document.name}`;
-}
-
 function openAskLine(ask: OpenAsk, baseUrl: string): string {
   const priority = ask.priority === null ? "" : `P${ask.priority} · `;
-  return `- ${openAskAge(ask.age_seconds)} · ${priority}${openAskOwner(ask)} · ${ask.question} · ${new URL(ask.ref, baseUrl).toString()}`;
+  return `- ${openAskAge(ask.age_seconds)} · ${priority}${ownerTitle(ask.owner)} · ${ask.question} · ${new URL(ask.ref, baseUrl).toString()}`;
 }
 
 export function formatOpenAsksSummary(response: OpenAsksResponse, baseUrl: string): string {
@@ -3129,6 +3127,25 @@ export async function executeDispatchTool(
     if (!sessionId) throw new Error("host session id is required for dispatch open-asks");
     const response = await client.openAsks(sessionId);
     return { text: formatOpenAsksSummary(response, linkBase), details: { ...response } };
+  }
+  if (input.tool === "dispatch_answers") {
+    const sessionId = input.sessionId?.trim();
+    if (!sessionId) throw new Error("host session id is required for dispatch answers");
+    let response: SessionAnswersResponse;
+    try {
+      response = await dispatchClient().sessionAnswers(sessionId);
+    } catch (error) {
+      if (isNoAnswersRoute(error)) {
+        throw new Error(
+          `This Dispatch (${configUrl}) has no answers route yet: its build is older than the answers route.`
+        );
+      }
+      throw error;
+    }
+    return {
+      text: renderSessionAnswersList(response.items, { now: Date.now() }),
+      details: { session: sessionId, since: response.since, total: response.total },
+    };
   }
   if (input.tool === "dispatch_whoami") {
     const sessionId = input.sessionId?.trim();

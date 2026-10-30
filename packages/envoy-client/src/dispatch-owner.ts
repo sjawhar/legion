@@ -1,6 +1,7 @@
 import {
   dispatchDocumentSubject,
   dispatchIssueSubject,
+  type OpenAskOwner,
   parseBlockFragment,
 } from "@legion/contracts";
 
@@ -18,6 +19,14 @@ export interface OwnerTopic {
 /** How tool results name a project document: `<project>/<slug>`. */
 export function documentLabel(project: string, slug: string): string {
   return `${project}/${slug}`;
+}
+
+/** How the open-asks summary and the per-request answers list name an item's issue or document:
+ *  `<KEY>: <title>` or `<project> / <name>`. */
+export function ownerTitle(owner: OpenAskOwner): string {
+  return "issue" in owner
+    ? `${owner.issue.key}: ${owner.issue.title}`
+    : `${owner.document.project} / ${owner.document.name}`;
 }
 
 export function issueTopic(key: string): OwnerTopic {
