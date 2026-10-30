@@ -10,7 +10,6 @@ date: 2026-10-30
 status: active
 module: packages/envoy/internal/bus
 related_issues:
-  - "INFRA-750"
   - "sjawhar/legion#2506"
 ---
 
@@ -37,7 +36,7 @@ fail here"; this is the other, and it is the one to take when widening has alrea
 
 ## Evidence
 
-- INFRA-750's spec named a create race (`AddStream` after a clustered `StreamInfo` answered
+- The spec behind sjawhar/legion#2506 named a create race (`AddStream` after a clustered `StreamInfo` answered
   `stream not found`). Temporary instrumentation at all four refusal sites — `AddStream`,
   `UpdateStream`, `CreateKeyValue` and the bucket raise — in a scratch copy of `packages/envoy`
   showed no create-branch entry at all in 240 starts, including the tolerated

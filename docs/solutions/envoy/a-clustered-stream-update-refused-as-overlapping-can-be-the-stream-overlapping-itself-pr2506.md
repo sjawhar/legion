@@ -11,7 +11,6 @@ date: 2026-10-30
 status: active
 module: packages/envoy/internal/bus
 related_issues:
-  - "INFRA-750"
   - "sjawhar/legion#2506"
 ---
 
@@ -59,7 +58,7 @@ Extends docs/solutions/envoy/a-jetstream-answer-is-not-the-outcome-a-sequence-ze
 - `updateStream` (`packages/envoy/internal/bus/stream.go:505-563`) carries the rule for the stream
   and, through `raiseReplicas` (`kv.go:81`), for every bucket with no code change of its own.
   `overlapSends = 5` and `jsStreamSubjectOverlap = 10065`, which nats.go names no constant for.
-- Measured on a real three-server v2.10.29 cluster, INFRA-750: three clients sending one stream
+- Measured on a real three-server v2.10.29 cluster (sjawhar/legion#2506): three clients sending one stream
   update at once refused 1 of 900 requests in 6.6 s. The acceptance test that failed in CI
   (`TestTwoStartsRaisingOneStreamAtOnceBothSucceed`) reproduced in 0 of 200 iterations in the same
   pod, so the direct probe is what named the cause.

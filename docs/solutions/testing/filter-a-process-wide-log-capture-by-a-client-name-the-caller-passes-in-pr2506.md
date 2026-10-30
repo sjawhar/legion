@@ -10,7 +10,6 @@ date: 2026-10-30
 status: active
 module: packages/envoy/internal/bus
 related_issues:
-  - "INFRA-750"
   - "sjawhar/legion#2506"
 ---
 
@@ -42,7 +41,7 @@ is how to hold that filter to the client under test without writing a second rac
   filter) with the call sites at `:40-41`, `drain_hook_edges_test.go:88-89` and `:215-216`. The
   default client name is `"envoy"` (`internal/bus/nats.go:64`), which is why an unnamed client is
   indistinguishable from any other test's.
-- INFRA-750 round 2 shipped the record-presence guard and round 3 took it out. The tester measured
+- The round that shipped the record-presence guard was followed by the round that took it out. The tester measured
   20 drains of `TestAStuckDeliveryStillEndsTheKVWatchers`' shape under `-race`: 4 had no record
   naming the client when `Drain` returned, the first landing 1.629 to 2.254 ms later, and that
   test reads the capture with one `ConsumerNames` round trip as its whole margin.

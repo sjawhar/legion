@@ -11,7 +11,6 @@ date: 2026-10-30
 status: active
 module: packages/envoy/internal/bus
 related_issues:
-  - "INFRA-750"
   - "sjawhar/legion#2506"
 ---
 
