@@ -323,7 +323,9 @@ func TestStreamConfigExcludesRoleLanes(t *testing.T) {
 		"notifications.legion.>",
 		"notifications.ghostwispr.>",
 		"notifications.whatsapp.>",
+		"notifications.team.>",
 		"notifications.envoy.exceptions.notifications.agent.>",
+		"notifications.envoy.exceptions.notifications.team.>",
 	}
 	if !reflect.DeepEqual(streamCfg.Subjects, wantSubjects) {
 		t.Fatalf("stream subjects = %v, want %v", streamCfg.Subjects, wantSubjects)
@@ -357,9 +359,9 @@ func TestEveryStreamSubjectIsClassifiedForReplay(t *testing.T) {
 }
 
 // A topic is shared only under one shared stream subject: an issue, document, GitHub, Slack, Ghost
-// Wispr or WhatsApp topic, a wildcard inside one of them included, and nothing under an agent
-// subject, an exception lane or the Legion controller's notices, nor a wildcard wider than one
-// shared subject.
+// Wispr, WhatsApp or team topic, a wildcard inside one of them included, and nothing under an
+// agent subject, an exception lane (a team topic's included) or the Legion controller's notices,
+// nor a wildcard wider than one shared subject.
 func TestSharedStreamTopicHoldsOnlyTopicsUnderASharedStreamSubject(t *testing.T) {
 	for topic, want := range map[string]bool{
 		"notifications.dispatch.issue.KEY-1.>":                        true,
@@ -378,7 +380,9 @@ func TestSharedStreamTopicHoldsOnlyTopicsUnderASharedStreamSubject(t *testing.T)
 		"notifications.envoy.exceptions.notifications.dispatch.issue": false,
 		"notifications.legion.ACME.controller":                        false,
 		"notifications.role.reviewer":                                 false,
-		"notifications.team.x.y":                                      false,
+		"notifications.team.x.y":                                      true,
+		"notifications.team.x.>":                                      true,
+		"notifications.envoy.exceptions.notifications.team.x":         false,
 		"notifications.dispatch":                                      false,
 		"notifications.*.acme.widgets.pr.7":                           false,
 		"notifications.*":                                             false,

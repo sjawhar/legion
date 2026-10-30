@@ -177,9 +177,9 @@ func TestSessionConsumerRegistrationAnswersConsumerModeAndFiltersOnStoredFollowe
 	if answer.Delivery.Gap == nil || *answer.Delivery.Gap {
 		t.Fatalf("answer %s, want gap false", answer.raw)
 	}
-	want := []string{"notifications.agent." + sessionID, "notifications.dispatch.issue.A.>"}
+	want := []string{"notifications.agent." + sessionID, "notifications.dispatch.issue.A.>", "notifications.team.deploy"}
 	if got := rig.filters(t, sessionID); !slices.Equal(got, want) {
-		t.Fatalf("consumer filters %v, want %v (the team topic is not stored)", got, want)
+		t.Fatalf("consumer filters %v, want %v (the stream stores a team topic, so the session's consumer carries it)", got, want)
 	}
 	if entry := rig.entry(t, sessionID); entry.Delivery != session.DeliveryConsumer || entry.Epoch != "epoch-1" {
 		t.Fatalf("session entry %+v, want consumer delivery at epoch-1", entry)

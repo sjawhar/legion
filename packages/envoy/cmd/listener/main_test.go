@@ -370,67 +370,57 @@ func (clock *listenerAcknowledgementClock) CancelAll() {
 	}
 }
 
-// A publish through the listener's API to an ad-hoc topic, one no stream subject captures, answers
-// 200 at once with its envelope and reaches a session subscribed to the topic on NATS, as
-// envoy_publish does: the listener sends it over core NATS. Before, it went to JetStream, which never
-// answered while that subscriber held the subject, and the API answered 500 after five seconds.
-func TestPublishHandlerDeliversAnAdHocTopicToItsSubscriber(t *testing.T) {
+// A publish through the listener's API to a team topic, with no session connected to receive it,
+// answers 200 with its envelope and leaves the message on the stream under notifications.team.>,
+// where the consumer of every session that follows the topic reads it whenever it comes back.
+// Before team topics were stored the route published them over core NATS, which hands a message
+// only to whoever holds the subject at that moment, so this message would have reached nobody.
+func TestPublishHandlerStoresATeamTopicNoSessionIsConnectedFor(t *testing.T) {
 	const topic = "notifications.team.deploy-squad"
 	harness := newListenerDeliveryHarness(t, nil)
 	client := harness.client
-	received, err := client.Conn.SubscribeSync("notifications.team.>")
-	if err != nil {
-		t.Fatalf("subscribe: %v", err)
-	}
-	t.Cleanup(func() { _ = received.Unsubscribe() })
-	if err := client.Conn.Flush(); err != nil {
-		t.Fatalf("flush the subscription: %v", err)
-	}
 
 	state := harness.publishDeps(t)
 	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"deploy complete","source_session":"ses_publisher","idempotency_key":"adhoc-1"}`))
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"deploy complete","source_session":"ses_publisher","idempotency_key":"team-1"}`))
 	request.Header.Set("Content-Type", "application/json")
 	started := time.Now()
 	publishHandler(state, logging.New("test")).ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
-		t.Fatalf("publish to an ad-hoc topic: status %d, body %s", recorder.Code, recorder.Body.String())
+		t.Fatalf("publish to a team topic: status %d, body %s", recorder.Code, recorder.Body.String())
 	}
 	if elapsed := time.Since(started); elapsed >= time.Second {
-		t.Fatalf("publish to an ad-hoc topic took %s", elapsed)
+		t.Fatalf("publish to a team topic took %s", elapsed)
 	}
 	var answered contracts.Envelope
 	if err := json.Unmarshal(recorder.Body.Bytes(), &answered); err != nil {
 		t.Fatalf("decode the answer %s: %v", recorder.Body.String(), err)
 	}
 
-	msg, err := received.NextMsg(5 * time.Second)
+	stored, err := client.JS().GetLastMsg(bus.Stream, topic)
 	if err != nil {
-		t.Fatalf("the subscriber received nothing: %v", err)
+		t.Fatalf("the stream holds nothing on %s: %v", topic, err)
 	}
-	var delivered contracts.Envelope
-	if err := json.Unmarshal(msg.Data, &delivered); err != nil {
-		t.Fatalf("decode the delivered envelope: %v", err)
+	var retained contracts.Envelope
+	if err := json.Unmarshal(stored.Data, &retained); err != nil {
+		t.Fatalf("decode the stored envelope: %v", err)
 	}
-	if delivered.Topic != topic || delivered.EventID != answered.EventID || delivered.PayloadSummary != "deploy complete" ||
-		delivered.SourceSession != "ses_publisher" || delivered.DedupeKey != "publish.adhoc-1" {
-		t.Fatalf("delivered %+v, want the answered envelope %+v", delivered, answered)
-	}
-	if _, err := received.NextMsg(500 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {
-		t.Fatalf("a second copy reached the subscriber (err %v): the publish went out twice", err)
+	if retained.Topic != topic || retained.EventID != answered.EventID || retained.PayloadSummary != "deploy complete" ||
+		retained.SourceSession != "ses_publisher" || retained.DedupeKey != "publish.team-1" {
+		t.Fatalf("stored %+v, want the answered envelope %+v", retained, answered)
 	}
 }
 
 // The publish API takes only notification topics: a subject outside notifications., such as a KV
-// key's or a JetStream API request's, is a 400 naming the prefix and reaches nothing, while an ad-hoc
-// notification topic beside it is still published.
+// key's or a JetStream API request's, is a 400 naming the prefix and reaches nothing, while a team
+// topic beside it is still published.
 func TestPublishHandlerRefusesATopicOutsideNotifications(t *testing.T) {
-	const adhoc = "notifications.lxspec.probe.all"
+	const accepted = "notifications.team.probe.all"
 	refused := []string{"$KV.envoy_roles.x", "$JS.API.STREAM.INFO.x", "team.deploy-squad.all"}
 	harness := newListenerDeliveryHarness(t, nil)
 	client := harness.client
 	received := make(chan *natsgo.Msg, 16)
-	for _, subject := range append(slices.Clone(refused), adhoc) {
+	for _, subject := range append(slices.Clone(refused), accepted) {
 		subscription, err := client.Conn.ChanSubscribe(subject, received)
 		if err != nil {
 			t.Fatalf("subscribe %s: %v", subject, err)
@@ -471,16 +461,16 @@ func TestPublishHandlerRefusesATopicOutsideNotifications(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 	}
 
-	if recorder := publish(adhoc); recorder.Code != http.StatusOK {
-		t.Fatalf("publish to %q: status %d, want 200; body %s", adhoc, recorder.Code, recorder.Body.String())
+	if recorder := publish(accepted); recorder.Code != http.StatusOK {
+		t.Fatalf("publish to %q: status %d, want 200; body %s", accepted, recorder.Code, recorder.Body.String())
 	}
 	select {
 	case msg := <-received:
-		if msg.Subject != adhoc {
-			t.Fatalf("received subject %q, want %q", msg.Subject, adhoc)
+		if msg.Subject != accepted {
+			t.Fatalf("received subject %q, want %q", msg.Subject, accepted)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("the ad-hoc publish reached nobody")
+		t.Fatal("the team publish reached nobody")
 	}
 }
 
@@ -3298,6 +3288,53 @@ func TestListenerDeliveryHandler_FanoutRefusesUnadvertisedDeliveryMode(t *testin
 	}
 	if logs := harness.logs.String(); strings.Contains(logs, exceptionPublishFailedLine) {
 		t.Fatalf("capability refusal must publish its exception successfully:\n%s", logs)
+	}
+}
+
+// A fanout refusal of a team message is reported on the stream, where a reader of the team's
+// exception lane finds it: that lane is a stream subject (bus.StreamSubjects), so the report
+// survives the moment it was made and the consumer of a session following the lane carries it
+// when that session returns. Every fanout refusal took core NATS before team topics were stored,
+// which keeps nothing: the report of a team message nobody could take would reach nobody either.
+func TestListenerDeliveryHandler_FanoutRefusalOfATeamTopicIsStoredOnItsExceptionLane(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("an incapable subscriber must not receive prompt_async")
+	}))
+	const (
+		topic     = "notifications.team.refusal-stored"
+		incapable = "ses_team_incapable"
+	)
+	harness.registerFanoutTarget(t, incapable, topic, nil)
+	item := listenerTestEnvelope(topic, "fanout-refusal-team-stored")
+	item.Payload = `{"event":{"id":0,"issue_key":"CORE-1"},"delivery":{"attempt":1,"mode":"btw"}}`
+
+	harness.handler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+
+	lane := bus.ExceptionTopicPrefix + topic
+	stored, err := harness.client.JS().GetLastMsg(bus.Stream, lane)
+	if err != nil {
+		t.Fatalf("the stream holds no report on %s: %v; a core publish of it would reach no session", lane, err)
+	}
+	var exception contracts.Envelope
+	if err := json.Unmarshal(stored.Data, &exception); err != nil {
+		t.Fatalf("decode the stored report: %v", err)
+	}
+	if exception.Topic != lane || exception.SourceEventID != item.EventID {
+		t.Fatalf("stored report %+v, want the lane %s and the refused event %s", exception, lane, item.EventID)
+	}
+	var payload struct {
+		OriginalTopic    string `json:"original_topic"`
+		Reason           string `json:"reason"`
+		RecipientSession string `json:"recipient_session"`
+	}
+	if err := json.Unmarshal([]byte(exception.Payload), &payload); err != nil {
+		t.Fatalf("decode the stored report's payload: %v", err)
+	}
+	if payload.OriginalTopic != topic || payload.Reason != "delivery_failed" || payload.RecipientSession != incapable {
+		t.Fatalf("stored report payload = %+v, want delivery_failed for %s on %s", payload, incapable, topic)
+	}
+	if logs := harness.logs.String(); strings.Contains(logs, exceptionPublishFailedLine) {
+		t.Fatalf("the refusal's report must publish successfully:\n%s", logs)
 	}
 }
 

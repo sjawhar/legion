@@ -637,7 +637,7 @@ describe("the move from the core path to consumer delivery", () => {
     const { delivery } = setup({
       state: {
         stream_id: STREAM,
-        subjects: { [AGENT]: { after: 12 }, "notifications.team.alpha": { after: 1 } },
+        subjects: { [AGENT]: { after: 12 }, "notifications.lxspec.alpha": { after: 1 } },
       },
     });
 
@@ -683,11 +683,17 @@ describe("the move from the core path to consumer delivery", () => {
   test("a consumer answer relays the stored topics it carried, and a core one none", () => {
     const { delivery, consumerMode } = setup();
 
-    delivery.answered(CONSUMER, [AGENT, ISSUE_TOPIC, "notifications.team.alpha"]);
+    delivery.answered(CONSUMER, [
+      AGENT,
+      ISSUE_TOPIC,
+      "notifications.team.alpha",
+      "notifications.lxspec.alpha",
+    ]);
     expect(delivery.relaying()).toBe(true);
     expect(delivery.relays(AGENT)).toBe(true);
     expect(delivery.relays(ISSUE_TOPIC)).toBe(true);
-    expect(delivery.relays("notifications.team.alpha")).toBe(false);
+    expect(delivery.relays("notifications.team.alpha")).toBe(true);
+    expect(delivery.relays("notifications.lxspec.alpha")).toBe(false);
 
     delivery.answered({ mode: "core", reason: "not_answered" }, [AGENT, ISSUE_TOPIC]);
     expect(delivery.relaying()).toBe(false);

@@ -1146,19 +1146,6 @@ func (r *Registry) Match(machineID string, topic string) []Interest {
 	return r.matchLocked(func(visit func(string)) { r.index.match(machineID, topic, visit) })
 }
 
-// MatchAll returns every cached interest whose topics match topic, on any machine, sorted by
-// SessionID for deterministic output: a sender that must confirm delivery to each subscribed
-// session needs them all, wherever each session registered.
-func (r *Registry) MatchAll(topic string) []Interest {
-	r.mu.RLock()
-	out := r.matchLocked(func(visit func(string)) { r.index.matchAll(topic, visit) })
-	r.mu.RUnlock()
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].SessionID < out[j].SessionID
-	})
-	return out
-}
-
 // matchLocked returns, once each, the cached interests of the keys walk visits over the subject
 // index; the index visits a key once per matching pattern. The caller holds r.mu.
 func (r *Registry) matchLocked(walk func(visit func(key string))) []Interest {

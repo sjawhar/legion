@@ -35,8 +35,8 @@ const inboxes = nats.InboxPrefix + ">"
 // entries. Publish, in this order:
 //   - every notification topic (bus.NotificationTopicPrefix): the stream's subjects, the role
 //     lanes, every exception lane, the session relay subjects (bus.DeliverSubjectPrefix), and any
-//     other topic a caller of /v1/messages/publish names, which the listener publishes over core
-//     NATS (an ad-hoc topic such as notifications.team.deploy-squad);
+//     other topic the listener publishes over core NATS, a role lane's forward among them
+//     (/v1/messages/publish refuses by name a notifications. topic no stream subject captures);
 //   - the stream's info, create and update, its stored-message get, its durable's
 //     (bus.ListenerDurable) info and create, the durable's acknowledgements, and JetStream's
 //     account info. The stored-message get is the read /v1/replay makes to return the retained

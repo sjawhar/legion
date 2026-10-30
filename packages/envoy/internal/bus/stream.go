@@ -142,7 +142,13 @@ var streamSubjects = []string{
 	"notifications.legion.>",
 	"notifications.ghostwispr.>",
 	"notifications.whatsapp.>",
+	// A team's own topic, the one namespace an agent names itself
+	// (notifications.team.deploy-squad): the listener's publish route stores it so a session
+	// that was not connected reads it from its consumer later, and refuses by name every other
+	// notifications. topic no subject here captures (cmd/listener/api.go).
+	"notifications.team.>",
 	ExceptionTopicPrefix + contracts.AgentTopicPrefix + ">",
+	ExceptionTopicPrefix + "notifications.team.>",
 }
 
 // Every subject of streamSubjects is classified for POST /v1/replay (cmd/listener/replay.go) by
@@ -169,6 +175,10 @@ var (
 		"notifications.ghostwispr.>",
 		// A WhatsApp chat's messages the MCP bridge relays (internal/mcpbridge BuildEnvelope).
 		"notifications.whatsapp.>",
+		// A team's own topic, published by the listener's route for whoever registered it
+		// (cmd/listener publishHandler): a group's lane carries no one session's private
+		// payload, as its sender names the team and not a session.
+		"notifications.team.>",
 	}
 	privateStreamSubjects = []string{
 		// Each session's own inbox: Dispatch's routes, follower and author copies, and every
@@ -180,6 +190,9 @@ var (
 		// A failed delivery's report, carrying the undelivered message's payload and the session it
 		// was for (cmd/listener publishDeliveryException); a session's own lane included.
 		ExceptionTopicPrefix + contracts.AgentTopicPrefix + ">",
+		// A failed delivery on a team topic, carrying that message's payload and the session it
+		// was for, as the agent lane above does; only the exception's own reader may have it.
+		ExceptionTopicPrefix + "notifications.team.>",
 	}
 )
 

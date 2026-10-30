@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
+	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -108,6 +110,45 @@ func registerServingSession(t *testing.T, listener *listenerProcess, serving *se
 	postListener(t, listener.port, "/v1/interests/subscribe", string(body))
 }
 
+// seedUncapturedTopics writes sessionID's interest row with topics straight into the registry, as
+// a build before team topics were stored wrote one through /v1/interests/subscribe: that route
+// now refuses by name a notifications. topic no stream subject captures (api.go), and a row left
+// by such a build is all the live topics lane has left to fan out. It replaces the row the
+// registration wrote, so it names every topic the session is to follow, and returns once the
+// listener reads each of them back.
+func seedUncapturedTopics(t *testing.T, listener *listenerProcess, uri, machineID, sessionID string, topics ...string) {
+	t.Helper()
+	conn := testnats.Connect(t, uri)
+	t.Cleanup(conn.Close)
+	registry, err := store.Open(conn, store.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("open the interest registry: %v", err)
+	}
+	if _, err := registry.Upsert(store.Interest{SessionID: sessionID, MachineID: machineID}, topics); err != nil {
+		t.Fatalf("seed %s's interest row: %v", sessionID, err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		status, body := callListener(t, listener.port, http.MethodGet, "/v1/interests/"+sessionID, "")
+		var row struct {
+			Topics []string `json:"topics"`
+		}
+		if status == http.StatusOK && json.Unmarshal([]byte(body), &row) == nil {
+			seen := true
+			for _, topic := range topics {
+				seen = seen && slices.Contains(row.Topics, topic)
+			}
+			if seen {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the listener on port %d does not read back %v for %s within 10s: %d %s", listener.port, topics, sessionID, status, body)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // connectPublisher opens a bus client of the test's own, apart from the listener's: a publish
 // through it reaches NATS as one from any session holding its own connection does, core NATS for a
 // topic the stream does not store and JetStream for one it does (bus.Client.Publish).
@@ -160,25 +201,29 @@ func requirePromptCarries(t *testing.T, text string, item contracts.Envelope) {
 	}
 }
 
-// A session on a serving port subscribed to a topic the stream does not store, such as a team
-// topic, receives it when a listener on its machine is told its grant lets it subscribe to every
-// notification topic (ENVOY_SUBSCRIBE_ALL_TOPICS=1). Before INFRA-122 the listener took only the
-// stream's durable and the role lanes off the bus, so such a publish went out over core NATS to
-// no one and the session was never told: this test fails there with no prompt in 2 s. The topic is
-// published from a bus client of the test's own, as a session holding its own NATS connection
-// publishes, so nothing in the listener's /v1 path can hand it to the session. A second prompt
-// within a second would be the same publish delivered twice.
+// A session on a serving port that follows a topic the stream does not store receives it when a
+// listener on its machine is told its grant lets it subscribe to every notification topic
+// (ENVOY_SUBSCRIBE_ALL_TOPICS=1). Before INFRA-122 the listener took only the stream's durable and
+// the role lanes off the bus, so such a publish went out over core NATS to no one and the session
+// was never told: this test fails there with no prompt in 2 s. The row that follows the topic is
+// seeded as a build before team topics were stored left one (seedUncapturedTopics), since
+// /v1/interests/subscribe refuses such a topic by name now. The topic is published from a bus
+// client of the test's own, as a session holding its own NATS connection publishes, so nothing in
+// the listener's /v1 path can hand it to the session. A second prompt within a second would be
+// the same publish delivered twice.
 func TestAServingPortReceivesATopicTheStreamDoesNotStore(t *testing.T) {
+	const machineID = "live-topics"
 	uri := testnats.URL(t)
-	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "live-topics",
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, machineID,
 		"ENVOY_SUBSCRIBE_ALL_TOPICS=1", "ENVOY_HOST_BRIDGE=127.0.0.1")
 	listener.waitHealthy(t)
 
-	topic := "notifications.team." + id.New()
+	topic := "notifications.lxspec." + id.New()
 	serving := startServingPort(t, "ses_live_"+id.New(), http.StatusNoContent)
-	registerServingSession(t, listener, serving, "127.0.0.1", topic)
+	registerServingSession(t, listener, serving, "127.0.0.1")
+	seedUncapturedTopics(t, listener, uri, machineID, serving.sessionID, topic)
 
-	item := newEnvelope("agent", topic, "deploy finished on the team topic")
+	item := newEnvelope("agent", topic, "deploy finished on the live lane")
 	item.SourceSession = "ses_publisher_" + id.New()
 	publish(t, connectPublisher(t, uri), item)
 
@@ -337,17 +382,19 @@ func TestAStoredTopicStillReachesAServingPortOnce(t *testing.T) {
 // second listener waits on the durable the first holds and never turns healthy, so its live lane
 // is open once it logs so.
 func TestTwoListenersOnOneMachineDeliverALiveTopicOnce(t *testing.T) {
+	const machineID = "two-listeners"
 	uri := testnats.URL(t)
 	binary := cmdtest.Build(t, "envoy-listener")
-	first := startListenerProcess(t, binary, uri, "two-listeners", liveLaneEnv...)
+	first := startListenerProcess(t, binary, uri, machineID, liveLaneEnv...)
 	first.waitHealthy(t)
-	second := startListenerProcess(t, binary, uri, "two-listeners", liveLaneEnv...)
+	second := startListenerProcess(t, binary, uri, machineID, liveLaneEnv...)
 	second.WaitForOutput(t, liveLaneLine, "subscribe failed, retrying")
 	first.WaitForOutput(t, liveLaneLine)
 
-	topic := "notifications.team." + id.New()
+	topic := "notifications.lxspec." + id.New()
 	serving := startServingPort(t, "ses_two_"+id.New(), http.StatusNoContent)
-	registerServingSession(t, first, serving, "127.0.0.1", topic)
+	registerServingSession(t, first, serving, "127.0.0.1")
+	seedUncapturedTopics(t, first, uri, machineID, serving.sessionID, topic)
 	role := "two-listeners-" + id.New()
 	holder, received := holdRole(t, first, uri, role)
 	second.awaitSessionsListed(t, serving.sessionID, holder)
@@ -385,19 +432,24 @@ func TestTwoListenersOnOneMachineDeliverALiveTopicOnce(t *testing.T) {
 // session subscribed to that topic's exceptions lane is prompted with it. A report is never itself
 // reported, so the failed delivery of that prompt (the watcher's port answers 500) publishes no
 // second one. The refusal is a btw-mode message (frameDeliveryMode) to a subscriber that
-// advertises no capability. The watcher registers the live topic's own lane: the wildcard over
-// every lane also reaches the agent subjects' lanes, a private stream subject the listener does
-// not store (bus.ReachesPrivateStreamSubject).
+// advertises no capability. Both rows are seeded as a build before team topics were stored left
+// them (seedUncapturedTopics): /v1/interests/subscribe refuses a topic the stream does not
+// capture by name now. The watcher follows the live topic's own lane: the wildcard over every
+// lane also reaches the agent subjects' lanes, a private stream subject the listener does not
+// store (bus.ReachesPrivateStreamSubject).
 func TestALiveTopicExceptionIsReadBackOnce(t *testing.T) {
+	const machineID = "exception-read-back"
 	uri := testnats.URL(t)
-	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "exception-read-back", liveLaneEnv...)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, machineID, liveLaneEnv...)
 	listener.waitHealthy(t)
 
-	topic := "notifications.team." + id.New()
+	topic := "notifications.lxspec." + id.New()
 	refusing := startServingPort(t, "ses_refusing_"+id.New(), http.StatusNoContent)
-	registerServingSession(t, listener, refusing, "127.0.0.1", topic)
+	registerServingSession(t, listener, refusing, "127.0.0.1")
+	seedUncapturedTopics(t, listener, uri, machineID, refusing.sessionID, topic)
 	watcher := startServingPort(t, "ses_watcher_"+id.New(), http.StatusInternalServerError)
-	registerServingSession(t, listener, watcher, "127.0.0.1", bus.ExceptionTopicPrefix+topic)
+	registerServingSession(t, listener, watcher, "127.0.0.1")
+	seedUncapturedTopics(t, listener, uri, machineID, watcher.sessionID, bus.ExceptionTopicPrefix+topic)
 	conn := testnats.Connect(t, uri)
 	t.Cleanup(conn.Close)
 	exceptions, err := conn.SubscribeSync(bus.ExceptionTopicPrefix + ">")
@@ -431,17 +483,21 @@ func TestALiveTopicExceptionIsReadBackOnce(t *testing.T) {
 
 // The live lane delivers only an envelope that is valid and names as its topic the subject it
 // arrived on: bytes that are no envelope, an envelope the wire rules refuse (an empty urgency) and
-// an envelope naming a topic other than its subject, which its session also subscribes to, reach
-// no port. Core NATS keeps one publisher's order, so a valid envelope published after them being
-// the first prompt shows they were dropped, not late.
+// an envelope naming a topic other than its subject, which its session also follows, reach no
+// port. Core NATS keeps one publisher's order, so a valid envelope published after them being
+// the first prompt shows they were dropped, not late. Both topics are ones the stream does not
+// capture, seeded as an earlier build's row (seedUncapturedTopics): a stored subject is the
+// durable's, which reads the envelope's own topic and never the subject it arrived on.
 func TestALiveLaneDropsAnInvalidEnvelope(t *testing.T) {
+	const machineID = "invalid-envelope"
 	uri := testnats.URL(t)
-	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "invalid-envelope", liveLaneEnv...)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, machineID, liveLaneEnv...)
 	listener.waitHealthy(t)
 
-	topic, other := "notifications.team."+id.New(), "notifications.team."+id.New()
+	topic, other := "notifications.lxspec."+id.New(), "notifications.lxspec."+id.New()
 	serving := startServingPort(t, "ses_invalid_"+id.New(), http.StatusNoContent)
-	registerServingSession(t, listener, serving, "127.0.0.1", topic, other)
+	registerServingSession(t, listener, serving, "127.0.0.1")
+	seedUncapturedTopics(t, listener, uri, machineID, serving.sessionID, topic, other)
 	publisher := connectPublisher(t, uri)
 
 	if err := publisher.Conn.Publish(topic, []byte("not an envelope")); err != nil {
@@ -474,23 +530,26 @@ func TestALiveLaneDropsAnInvalidEnvelope(t *testing.T) {
 
 // The live lane leaves a session's relay subject (notifications.envoy.deliver.<id>) alone: a frame
 // there is a stored message the listener owning the session relays to it from its consumer, never
-// one to fan out, even to a session that names the subject as a topic. Core NATS keeps one
-// publisher's order, so a team topic's envelope published after the frame being the first prompt
-// shows the frame was dropped, not late.
+// one to fan out, even to a session whose row names the subject as a topic - one an earlier build
+// stored, since /v1/interests/subscribe refuses the subject by name now (seedUncapturedTopics).
+// Core NATS keeps one publisher's order, so a live topic's envelope published after the frame
+// being the first prompt shows the frame was dropped, not late.
 func TestSessionConsumerRelaySubjectIsNotFannedOutByTheLiveLane(t *testing.T) {
+	const machineID = "relay-subject"
 	uri := testnats.URL(t)
-	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "relay-subject", liveLaneEnv...)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, machineID, liveLaneEnv...)
 	listener.waitHealthy(t)
 
-	relayed, team := bus.DeliverSubject("ses_relayed_"+id.New()), "notifications.team."+id.New()
+	relayed, live := bus.DeliverSubject("ses_relayed_"+id.New()), "notifications.lxspec."+id.New()
 	serving := startServingPort(t, "ses_relay_watcher_"+id.New(), http.StatusNoContent)
-	registerServingSession(t, listener, serving, "127.0.0.1", relayed, team)
+	registerServingSession(t, listener, serving, "127.0.0.1")
+	seedUncapturedTopics(t, listener, uri, machineID, serving.sessionID, relayed, live)
 	publisher := connectPublisher(t, uri)
 
 	if err := publisher.PublishCoreTo(relayed, newEnvelope("agent", relayed, "a relay frame")); err != nil {
 		t.Fatalf("publish a frame on the relay subject: %v", err)
 	}
-	valid := newEnvelope("agent", team, "a team envelope after it")
+	valid := newEnvelope("agent", live, "a live envelope after it")
 	publish(t, publisher, valid)
 
 	requirePromptCarries(t, serving.awaitPrompt(t, 2*time.Second), valid)

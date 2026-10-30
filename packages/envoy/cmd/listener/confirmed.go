@@ -7,8 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strings"
-	"sync"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/bus"
@@ -52,37 +50,7 @@ type capabilityRefusal struct {
 	Holder string      `json:"holder"`
 }
 
-// undeliveredRecipient names one session of an ad-hoc topic send that did not confirm the message,
-// with the reason a role send would give.
-type undeliveredRecipient struct {
-	SessionID string      `json:"session_id"`
-	Reason    sendOutcome `json:"reason"`
-}
-
-// topicSendFailure is the 504 of an ad-hoc topic send that published the message and that some
-// recipient did not confirm inside the window. Delivered names every recipient that did; an empty
-// list is [] rather than null.
-type topicSendFailure struct {
-	Error       string                 `json:"error"`
-	Reason      sendOutcome            `json:"reason"`
-	EventID     string                 `json:"event_id"`
-	DedupeKey   string                 `json:"dedupe_key"`
-	Delivered   []string               `json:"delivered"`
-	Undelivered []undeliveredRecipient `json:"undelivered"`
-}
-
-// topicPublishFailure is the 504 of an ad-hoc topic send whose own publish on the topic did not
-// reach NATS, reason publish_failed: no recipient was forwarded the message, so the answer lists
-// none, and its error says the topic was not published, which is all a client that shows only the
-// error (envoy-client's EnvoyApiError) tells its agent.
-type topicPublishFailure struct {
-	Error     string      `json:"error"`
-	Reason    sendOutcome `json:"reason"`
-	EventID   string      `json:"event_id"`
-	DedupeKey string      `json:"dedupe_key"`
-}
-
-// sendOutcome is how a confirmed send ended, or how one recipient of an ad-hoc topic send did. An
+// sendOutcome is how a confirmed send ended, or how its recipient did. An
 // answer that carries a reason carries the outcome itself, which marshals as its string. A send's
 // log line names the outcome as its reason attribute and deliveryStatus's label for it as its
 // delivery_status attribute, so the reason reads as the answer does and delivery_status reads as
@@ -111,11 +79,6 @@ const (
 	// publish NATS refuses or the grant denies), or a role send whose first resolution of the
 	// holder failed, answered as GET /v1/roles/<role> answers it.
 	sendFailed sendOutcome = "failed"
-	// sendNotConfirmed is an ad-hoc topic send that published and that some recipient did not
-	// confirm.
-	sendNotConfirmed sendOutcome = "not_confirmed"
-	// sendPublishFailed is an ad-hoc topic send whose own publish did not reach NATS.
-	sendPublishFailed sendOutcome = "publish_failed"
 )
 
 // deliveryStatus is the label the role lane gives the same outcome, which the route counts under
@@ -163,8 +126,7 @@ func (d *listenerDeps) forwardAndWait(subject string, item contracts.Envelope, w
 // forwardRefused reports whether a forward failed in a way another attempt repeats: NATS refuses
 // the envelope or subject however often it is sent (bus.ErrRefused), or the listener's grant does
 // not allow the subject (bus.ErrPublishDenied). A role send answers it at once, as
-// requestRecord.refuseBusUnavailable maps it (413 or 400 for a refusal, 403 for a denial); an
-// ad-hoc topic send stops sending to that recipient (confirmTopicRecipient).
+// requestRecord.refuseBusUnavailable maps it (413 or 400 for a refusal, 403 for a denial).
 func forwardRefused(err error) bool {
 	return errors.Is(err, bus.ErrRefused) || errors.Is(err, bus.ErrPublishDenied)
 }
@@ -413,167 +375,4 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecor
 		}
 	}
 	send.timedOut(lastForward)
-}
-
-// topicRecipients lists the sessions an ad-hoc topic send confirms the message with: every session
-// whose registered interests match the topic on any machine (store.Registry.MatchAll), whose
-// session entry is live and self-subscribed, other than the sender. A self-subscribed session holds
-// its own NATS connection and answers a receipt on its agent subject; a session served on a port
-// does not, and keeps the live lane's delivery.
-func topicRecipients(d *listenerDeps, item contracts.Envelope) []string {
-	var recipients []string
-	for _, interest := range d.registry.MatchAll(item.Topic) {
-		if interest.SessionID == item.SourceSession {
-			continue
-		}
-		if entry, err := d.sessions.Get(interest.SessionID); err == nil && entry.SelfSubscribed {
-			recipients = append(recipients, interest.SessionID)
-		}
-	}
-	return recipients
-}
-
-// confirmTopicRecipient forwards item, unchanged, to sessionID's agent subject until its receipt
-// arrives or ctx ends, by a role send's retry rule, and reports how the recipient ended: delivered,
-// dedupe (it had confirmed this key through the route already), receipt_timeout or delivery_failed.
-// The recipient is checked live and self-subscribed before each attempt, and one that confirmed the
-// key already is not sent it again. A forward refused however often it is sent (forwardRefused)
-// ends this recipient alone as delivery_failed: the envelope itself already passed the topic's
-// publish, so the refusal is the recipient's subject or the grant's, not the sender's input.
-//
-// Only a receipt that arrived through the route counts, which is why it reads the route's own
-// record (listenerDeps.confirmed) and not the delivery handlers' cache: with the live topics lane
-// on, the lane receives this send's own publish on the topic, and its fanout records there every
-// self-subscribed session on this machine whose push it skipped, having heard nothing from it.
-func confirmTopicRecipient(ctx context.Context, d *listenerDeps, item contracts.Envelope, sessionID string) sendOutcome {
-	var lastForward error
-	for {
-		if d.confirmed.Seen(item.DedupeKey, sessionID) {
-			return sendDedupe
-		}
-		if entry, err := d.sessions.Get(sessionID); err == nil && entry.SelfSubscribed {
-			window := receiptWindow(ctx)
-			if window <= 0 {
-				break
-			}
-			err := d.forwardAndWait(contracts.AgentSubject(sessionID), item, window, false)
-			if err == nil {
-				d.confirm(item.DedupeKey, sessionID)
-				return sendDelivered
-			}
-			if forwardRefused(err) {
-				outcome := sendDeliveryFailed
-				d.delivery.logger.DeliveryLog(slog.LevelWarn, "listener publish topic forward refused", sessionID, item.Topic, item.EventID, outcome.deliveryStatus(),
-					slog.String("reason", string(outcome)), slog.String("error", err.Error()))
-				return outcome
-			}
-			lastForward = err
-		}
-		if !pauseBeforeRetry(ctx) {
-			break
-		}
-	}
-	return unconfirmedReason(lastForward)
-}
-
-// sendToTopic delivers an ad-hoc topic message through the publish route: a topic no stream subject
-// captures (bus.UsesCoreTransport), which core NATS hands once to whoever is subscribed at that
-// moment. It still publishes the envelope on the topic, for the serve-port sessions the live lane
-// delivers to and any subscriber the registry does not know; then it forwards the same envelope,
-// topic, event_id and dedupe_key unchanged, to the agent subject of every recipient
-// (topicRecipients) in parallel and answers once each confirmed, or 504 not_confirmed naming each
-// that did not once publishDeliveryWindow from arrived has passed. A recipient that took both
-// copies drops the second by its event_id.
-//
-// A send whose own publish on the topic did not reach NATS answers 504 publish_failed, whether the
-// window ended first (the publish's reconnect wait used it up) or the publish failed at once on a
-// connection that is down, so its status does not depend on how soon the failure came; nothing was
-// forwarded, and with no recipient the send is answered 200 only once the topic was published. A
-// publish NATS refuses however often it is sent (forwardRefused) is the sender's input or the
-// grant's, answered as requestRecord.refuseBusUnavailable maps it. Every answer goes through
-// record, the route's one line per request, under the outcome it answers.
-func sendToTopic(ctx context.Context, w http.ResponseWriter, record *requestRecord, d *listenerDeps, item contracts.Envelope, arrived time.Time) {
-	recipients := topicRecipients(d, item)
-	settle := func(outcome sendOutcome, delivered []string, undelivered []undeliveredRecipient, attrs ...slog.Attr) {
-		switch outcome {
-		case sendPublishFailed, sendFailed:
-			// The send forwarded nothing, so each recipient it did not reach counts failed, as
-			// not_confirmed counts each recipient that did not confirm; a send with no recipient
-			// counts nothing. Every other outcome's recipients are counted as each one ended.
-			for range recipients {
-				d.delivery.messagesDelivered.Inc([2]string{"delivery_status", outcome.deliveryStatus()})
-			}
-		}
-		level := slog.LevelInfo
-		if outcome != sendDelivered {
-			level = slog.LevelWarn
-		}
-		attrs = append([]slog.Attr{
-			slog.String("reason", string(outcome)),
-			slog.String("dedupe_key", item.DedupeKey),
-			slog.Any("delivered", delivered),
-			slog.Any("undelivered", undelivered),
-			slog.String("elapsed", time.Since(arrived).String()),
-		}, attrs...)
-		d.delivery.logger.DeliveryLog(level, "listener publish topic send", "", item.Topic, item.EventID, outcome.deliveryStatus(), attrs...)
-	}
-	// The sender stamp's read takes no more of the window than senderStampReadTimeout, and a read
-	// that does not answer only leaves the stamp short: the publish below meets the same bus.
-	item.Sender = senderStamp(ctx, d.registry, d.sessions, item.SourceSession)
-	// The topic's own core publish waits for a reconnecting connection as long as the send's window
-	// lasts and no longer, so a hub that is down is answered inside the window, never after the
-	// bus's own reconnect wait, which outlasts envoy-client's 5 s attempt.
-	if err := d.client.PublishCoreContext(ctx, item.Topic, item); err != nil {
-		if forwardRefused(err) {
-			record.refuseBusUnavailable(w, err)
-			settle(sendFailed, nil, nil, slog.String("error", err.Error()))
-			return
-		}
-		record.refuseWith(w, http.StatusGatewayTimeout, outcomePublishFailed, topicPublishFailure{
-			Error:     fmt.Sprintf("%s was not published within %s: %v; no session was sent it", item.Topic, publishDeliveryWindow, err),
-			Reason:    sendPublishFailed,
-			EventID:   item.EventID,
-			DedupeKey: item.DedupeKey,
-		})
-		settle(sendPublishFailed, nil, nil, slog.String("error", err.Error()))
-		return
-	}
-	outcomes := make([]sendOutcome, len(recipients))
-	var wg sync.WaitGroup
-	for i, sessionID := range recipients {
-		wg.Go(func() { outcomes[i] = confirmTopicRecipient(ctx, d, item, sessionID) })
-	}
-	wg.Wait()
-	delivered := []string{}
-	undelivered := []undeliveredRecipient{}
-	for i, outcome := range outcomes {
-		d.delivery.messagesDelivered.Inc([2]string{"delivery_status", outcome.deliveryStatus()})
-		switch outcome {
-		case sendDelivered, sendDedupe:
-			delivered = append(delivered, recipients[i])
-		default:
-			undelivered = append(undelivered, undeliveredRecipient{SessionID: recipients[i], Reason: outcome})
-		}
-	}
-	if len(undelivered) > 0 {
-		// The error names each session, since a client that shows only the error (envoy-client's
-		// EnvoyApiError) must still tell its agent which sessions did not take the message.
-		named := make([]string, len(undelivered))
-		for i, recipient := range undelivered {
-			named[i] = fmt.Sprintf("%s (%s)", recipient.SessionID, recipient.Reason)
-		}
-		record.refuseWith(w, http.StatusGatewayTimeout, outcomeNotConfirmed, topicSendFailure{
-			Error: fmt.Sprintf("%d of %d sessions subscribed to %s did not confirm event %s within %s: %s",
-				len(undelivered), len(recipients), item.Topic, item.EventID, publishDeliveryWindow, strings.Join(named, ", ")),
-			Reason:      sendNotConfirmed,
-			EventID:     item.EventID,
-			DedupeKey:   item.DedupeKey,
-			Delivered:   delivered,
-			Undelivered: undelivered,
-		})
-		settle(sendNotConfirmed, delivered, undelivered)
-		return
-	}
-	record.accept(w, publishResponse{Envelope: item})
-	settle(sendDelivered, delivered, undelivered)
 }

@@ -634,12 +634,12 @@ func TestReplayRefusesASubjectTheSessionDoesNotFollow(t *testing.T) {
 
 // A registered topic is answered only under a shared stream subject: a wildcard over every
 // notification, a wildcard over every exception lane, the session's own exception lane, the Legion
-// controller's notices, a wildcard wider than one shared subject and an ad-hoc team topic are
-// refused not_followed with no messages and next_after their own cursor, even when the stream
-// holds messages on them, while a registered issue topic and a GitHub pull request topic are
-// still answered.
+// controller's notices and a wildcard wider than one shared subject are refused not_followed with
+// no messages and next_after their own cursor, even when the stream holds messages on them, while
+// a registered issue topic, a GitHub pull request topic and a team topic, the group's own lane
+// that carries no session's private payload, are still answered.
 func TestReplayAnswersARegisteredTopicOnlyUnderASharedStreamSubject(t *testing.T) {
-	const pullRequest = "notifications.github.acme.widgets.pr.7.>"
+	const pullRequest, team = "notifications.github.acme.widgets.pr.7.>", "notifications.team.x.>"
 	ownLane := bus.ExceptionTopicPrefix + contracts.AgentSubject(replaySession)
 	controller := "notifications.legion.ACME.controller"
 	refused := []string{
@@ -648,17 +648,18 @@ func TestReplayAnswersARegisteredTopicOnlyUnderASharedStreamSubject(t *testing.T
 		ownLane,
 		controller,
 		"notifications.*",
-		"notifications.team.x.y",
 	}
-	rig := newReplayRig(t, append([]string{replayIssueTopic, pullRequest}, refused...)...)
+	rig := newReplayRig(t, append([]string{replayIssueTopic, pullRequest, team}, refused...)...)
 	rig.store(t, ownLane)
 	rig.store(t, controller)
 	issueBody, issueSeq := rig.store(t, "notifications.dispatch.issue.KEY-1.ask.opened")
 	prBody, prSeq := rig.store(t, "notifications.github.acme.widgets.pr.7.checks")
+	teamBody, teamSeq := rig.store(t, "notifications.team.x.deploy")
 
 	subjects := []replaySubjectRequest{
 		{Subject: replayIssueTopic, After: new(uint64(0))},
 		{Subject: pullRequest, After: new(uint64(0))},
+		{Subject: team, After: new(uint64(0))},
 	}
 	for _, topic := range refused {
 		subjects = append(subjects, replaySubjectRequest{Subject: topic, After: new(uint64(0))})
@@ -668,12 +669,12 @@ func TestReplayAnswersARegisteredTopicOnlyUnderASharedStreamSubject(t *testing.T
 	for index, want := range []struct {
 		seq  uint64
 		data string
-	}{{issueSeq, issueBody}, {prSeq, prBody}} {
+	}{{issueSeq, issueBody}, {prSeq, prBody}, {teamSeq, teamBody}} {
 		if got := response.Subjects[index]; got.Refused != "" || !equalSeqs(got.Messages, want.seq) || got.Messages[0].Data != want.data {
 			t.Fatalf("%s = %+v, want seq %d answered", got.Subject, got, want.seq)
 		}
 	}
-	for _, result := range response.Subjects[2:] {
+	for _, result := range response.Subjects[3:] {
 		if result.Refused != "not_followed" || len(result.Messages) != 0 || result.More || result.NextAfter != 0 {
 			t.Fatalf("%s = %+v, want refused not_followed with no messages and next_after 0", result.Subject, result)
 		}

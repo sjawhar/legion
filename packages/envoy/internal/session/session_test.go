@@ -218,7 +218,7 @@ func TestDeliver_SkipsStoredTopics_whenSessionIsOnConsumerDelivery(t *testing.T)
 		resolved,
 	)
 	liveErr := deliverThroughEntry(t, deliverer, sessions,
-		newTestEnvelope("agent", "notifications.team.deploy", "live message"),
+		newTestEnvelope("agent", "notifications.lxspec.deploy", "live message"),
 		store.Interest{SessionID: "ses_consumer"},
 	)
 

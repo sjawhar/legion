@@ -72,7 +72,7 @@ func TestTheInterestWriteRoutesAnswerOverAnUnreadableInterestRecord(t *testing.T
 	t.Run("POST /v1/interests/subscribe", func(t *testing.T) {
 		const (
 			sessionID = "ses_unreadable_subscribe"
-			topic     = "notifications.example.subscribed"
+			topic     = "notifications.team.subscribed"
 		)
 		storeUnreadable(t, sessionID)
 		before := len(logs.String())

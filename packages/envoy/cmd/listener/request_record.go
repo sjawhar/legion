@@ -47,15 +47,11 @@ const (
 	// REPLAY_UNAVAILABLE and records nothing. It is not outcomeBusUnavailable: the bus answered,
 	// with a denial no retry can get past.
 	outcomePublishDenied requestOutcome = "publish_denied"
-	// outcomeReceiptTimeout, outcomeDeliveryFailed, outcomeNotConfirmed and outcomePublishFailed
-	// are the publish route's confirmed sends answered 504 (confirmed.go), each under the reason
-	// its body names: a role send whose holder's receipt did not arrive after a forward reached
-	// the server, or that no forward was shown to reach; an ad-hoc topic send some recipient did
-	// not confirm, or whose own publish on the topic did not reach NATS.
+	// outcomeReceiptTimeout and outcomeDeliveryFailed are the publish route's role send answered
+	// 504 (confirmed.go), each under the reason its body names: a holder's receipt that did not
+	// arrive after a forward reached the server, or a send no forward was shown to reach.
 	outcomeReceiptTimeout requestOutcome = "receipt_timeout"
 	outcomeDeliveryFailed requestOutcome = "delivery_failed"
-	outcomeNotConfirmed   requestOutcome = "not_confirmed"
-	outcomePublishFailed  requestOutcome = "publish_failed"
 	// outcomeStreamFull is a send or publish the stream refused because it holds its byte limit
 	// (bus.ErrStreamFull). It is not outcomeBusUnavailable: the bus answered, that the stream is
 	// full, so an operator reading the record looks at the stream's size, not for an outage.

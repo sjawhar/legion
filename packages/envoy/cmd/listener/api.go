@@ -517,7 +517,7 @@ func deliveryModeVerdict(sessionID string, entry session.SessionEntry, payload s
 // its publish share it, and GET /v1/roles/<role> resolves its holder within it too. The publish
 // route spends it on the publish of a topic the stream captures, and a role send's first
 // resolution of the role's holder (sendToRole, every attempt of that resolution) is answered within
-// it too; a role or ad-hoc topic send then runs on within publishDeliveryWindow (confirmed.go). GET
+// it too; a role send then runs on within publishDeliveryWindow (confirmed.go). GET
 // /v1/sessions, GET /v1/registry/<session_id> and GET /v1/interests/<session_id> read within it as
 // well, and every route that writes does its store work within it: subscribe, unsubscribe, POST
 // /v1/roles/set, and DELETE of /v1/interests/<session_id> and /v1/sessions/<session_id>. The HTTP
@@ -648,15 +648,15 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 }
 
 // publishHandler rejects agent-targeted topics (must use /v1/messages/send
-// instead) and sends the envelope. A role topic is forwarded to its holder and
-// an ad-hoc topic confirmed with each self-subscribed recipient, both answered
-// once confirmed or when publishDeliveryWindow from the request's arrival has
-// passed (sendToRole, sendToTopic in confirmed.go); a topic the stream captures
-// is answered once the stream stored it. An explicit dedupe_key is used
-// verbatim (a re-send a receiver's own dedupe recognises); it is mutually
-// exclusive with idempotency_key, may not begin with roleForwardDedupePrefix,
-// the mark the role arbiter drops on sight, and may not ride a dispatch
-// envelope. Every host drops a repeat of any dispatch key
+// instead) and sends the envelope. A role topic is forwarded to its holder,
+// answered once confirmed or when publishDeliveryWindow from the request's
+// arrival has passed (sendToRole in confirmed.go); a topic the stream captures
+// is answered once the stream stored it, and any other notifications. topic is
+// refused by name, since nothing would store it for a session to read. An
+// explicit dedupe_key is used verbatim (a re-send a receiver's own dedupe
+// recognises); it is mutually exclusive with idempotency_key, may not begin
+// with roleForwardDedupePrefix, the mark the role arbiter drops on sight, and
+// may not ride a dispatch envelope. Every host drops a repeat of any dispatch key
 // (contracts.DedupeKeyNamesTheUpstreamEvent), and Dispatch's outbox keys are
 // sequential (dispatch-<event id>), so a caller that chose one could make a
 // host drop the real event it names. Dispatch itself never needs this route's
@@ -734,10 +734,14 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			sendToRole(ctx, w, record, d, item, role, arrived)
 			return
 		}
+		// Every other topic the stream does not capture is refused by name. A session reads only
+		// what its own consumer holds, so such a publish would reach nobody, now or later;
+		// nothing retries into success, so it is the 400 the refusals above answer rather than a
+		// 504. Team topics are the namespace an agent names itself and the stream stores them
+		// (bus.StreamSubjects).
 		if bus.UsesCoreTransport(request.Topic) {
-			ctx, cancel := context.WithDeadline(r.Context(), arrived.Add(publishDeliveryWindow))
-			defer cancel()
-			sendToTopic(ctx, w, record, d, item, arrived)
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest,
+				"no stream subject captures "+request.Topic+", so no session would receive it; publish to a notifications.team.<name> topic instead", "topic")
 			return
 		}
 		// The sender stamp's read and the publish take this one deadline, derived from the
@@ -1402,6 +1406,20 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 				warnings = append(warnings, fmt.Sprintf("%s was not registered: it reaches a private stream subject (another session's inbox, a failed-delivery lane, or the Legion controller lane), and of those a session registers only its own agent subject, %s",
 					topic, contracts.AgentSubject(body.SessionID)))
 				continue
+			}
+			// A notifications. topic no stream subject captures, and that is no role lane, is
+			// refused by name with the whole registration: a session receives only what its own
+			// consumer holds, which is what the stream stored, so such an interest would be
+			// stored and deliver nothing, and the plugin that asked for it would never learn
+			// why. It is the registration and not the topic alone, unlike a private-subject
+			// topic above, because no live caller names one: a census of production on
+			// 2026-10-30 read all 596 interest rows and found every uncaptured non-role topic
+			// in use to be a notifications.team.* topic, which this build stores. A role lane is
+			// registered by its holder (POST /v1/roles/set) and still travels over core NATS.
+			if bus.UsesCoreTransport(topic) && !strings.HasPrefix(topic, contracts.RoleTopicPrefix) {
+				writeJSONError(w, http.StatusBadRequest, fmt.Sprintf("no stream subject captures %s, so nothing would be delivered to %s on it; follow a notifications.team.<name> topic instead",
+					topic, body.SessionID), "topics")
+				return
 			}
 			topics = append(topics, topic)
 		}

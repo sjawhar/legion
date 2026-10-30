@@ -924,7 +924,7 @@ func (m *sessionRelays) refuseFollowedTopic(sessionID string, item contracts.Env
 		return true
 	}
 	m.logger.DeliveryLog(slog.LevelWarn, "session relay refused a message the session cannot take", sessionID, item.Topic, item.EventID, "failed", slog.String("error", err.Error()))
-	if publishErr := publishDeliveryException(m.client, item, "delivery_failed", sessionID, true, ""); publishErr != nil {
+	if publishErr := publishDeliveryException(m.client, item, "delivery_failed", sessionID, ""); publishErr != nil {
 		m.logger.Warn("session relay could not publish a delivery exception", slog.String("session_id", sessionID), slog.String("event_id", item.EventID), slog.String("error", publishErr.Error()))
 	}
 	return true

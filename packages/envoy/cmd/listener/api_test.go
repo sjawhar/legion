@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -2277,6 +2278,51 @@ func TestPublishHandler_RejectsReservedDedupeKeyPrefix(t *testing.T) {
 	}
 }
 
+// A publish to a notifications. topic no stream subject captures is refused by name, and nothing
+// is published: a session reads only what its own consumer holds, so the message would reach
+// nobody, now or later, and no retry of the same topic could change that. A team topic, which
+// the stream stores, is accepted on the same route.
+func TestPublishHandlerRefusesAnUncapturedNotificationTopicByName(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
+	publish := func(topic string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		publishHandler(state, logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"hello"}`)))
+		return recorder
+	}
+	for _, topic := range []string{"notifications.lxspec.probe.all", "notifications.teamx.deploy", bus.ExceptionTopicPrefix + "notifications.github.acme.widgets.pr.1"} {
+		t.Run(topic, func(t *testing.T) {
+			probe, err := client.Conn.SubscribeSync(topic)
+			if err != nil {
+				t.Fatalf("subscribe topic probe: %v", err)
+			}
+			t.Cleanup(func() { _ = probe.Unsubscribe() })
+			if err := client.Conn.Flush(); err != nil {
+				t.Fatalf("flush: %v", err)
+			}
+			recorder := publish(topic)
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body = %s", recorder.Code, recorder.Body.String())
+			}
+			var response apiError
+			if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+				t.Fatalf("decode 400 body: %v", err)
+			}
+			if !strings.Contains(response.Error, topic) || !strings.Contains(response.Error, "no stream subject captures") ||
+				!reflect.DeepEqual(response.Expected, []string{"topic"}) {
+				t.Fatalf("400 body = %+v, want it to name %s and the topic field", response, topic)
+			}
+			if _, err := probe.NextMsg(250 * time.Millisecond); !errors.Is(err, nats.ErrTimeout) {
+				t.Fatalf("a refused publish must publish nothing: %v", err)
+			}
+		})
+	}
+	if recorder := publish("notifications.team.captured"); recorder.Code != http.StatusOK {
+		t.Fatalf("a team topic: status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 // A dispatch envelope's dedupe key is recognised by every host as the Dispatch event it names, and
 // Dispatch's outbox numbers its keys in sequence, so a key a caller chose there would make a host
 // drop the real event when it arrives. The key is still the caller's on any other source.
@@ -2690,6 +2736,62 @@ func TestAServingPortRegistrationWithAMalformedHostIsRefused(t *testing.T) {
 	}
 	if entry, err := sessions.Get("ses_no_port"); err != nil || entry.Host != "example-host:80" {
 		t.Fatalf("the registration with no port stored %+v, %v; want its host as it came", entry, err)
+	}
+}
+
+// A registration naming a notifications. topic no stream subject captures is refused whole, by
+// that topic's name, and nothing is written: the session would otherwise hold an interest that
+// delivers nothing, since its consumer carries only what the stream stored, and never learn why.
+// A role lane is no such topic: its holder registers it and the listener forwards it over core
+// NATS. A team topic and a topic outside notifications. are stored as they always were.
+func TestSubscribeHandlerRefusesAnUncapturedNotificationTopicByName(t *testing.T) {
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	handler := subscribeHandler(&listenerDeps{registry: registry, sessions: sessions}, "test-machine", logging.New("test"))
+	subscribe := func(t *testing.T, sessionID string, topics ...string) *httptest.ResponseRecorder {
+		t.Helper()
+		encoded, err := json.Marshal(map[string]any{"session_id": sessionID, "topics": topics, "self_subscribed": true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/interests/subscribe", strings.NewReader(string(encoded))))
+		return recorder
+	}
+	for index, topic := range []string{"notifications.lxspec.probe.all", "notifications.teamx.deploy", bus.DeliverSubject("ses_other")} {
+		t.Run(topic, func(t *testing.T) {
+			sessionID := fmt.Sprintf("ses_uncaptured_%d", index)
+			recorder := subscribe(t, sessionID, "notifications.team.kept", topic)
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body = %s", recorder.Code, recorder.Body.String())
+			}
+			var answer apiError
+			if err := json.NewDecoder(recorder.Body).Decode(&answer); err != nil {
+				t.Fatalf("decode the refusal: %v", err)
+			}
+			if !strings.Contains(answer.Error, topic) || !strings.Contains(answer.Error, "no stream subject captures") ||
+				!reflect.DeepEqual(answer.Expected, []string{"topics"}) {
+				t.Fatalf("refusal = %+v, want it to name %s and the topics field", answer, topic)
+			}
+			if interest, err := registry.Get(context.Background(), sessionID); err == nil {
+				t.Fatalf("a refused registration wrote interests %+v", interest)
+			}
+			if entry, err := sessions.Get(sessionID); err == nil {
+				t.Fatalf("a refused registration wrote the session entry %+v", entry)
+			}
+		})
+	}
+
+	recorder := subscribe(t, "ses_captured", "notifications.team.kept", contracts.RoleTopicPrefix+"reviewer", "team.bridge.>")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+	}
+	stored, err := registry.Get(context.Background(), "ses_captured")
+	if err != nil {
+		t.Fatalf("read the stored interest: %v", err)
+	}
+	want := []string{contracts.AgentSubject("ses_captured"), contracts.RoleTopicPrefix + "reviewer", "notifications.team.kept", "team.bridge.>"}
+	if !slices.Equal(stored.Topics, want) {
+		t.Fatalf("stored topics = %v, want %v", stored.Topics, want)
 	}
 }
 

@@ -361,8 +361,9 @@ func (l *sessionLocks) lock(sessionID string) (unlock func()) {
 }
 
 // sessionConsumerFilter is the subjects sessionID's consumer filters on: its agent subject and
-// every one of topics the stream stores (bus.StreamCaptures). A topic the stream does not store (a
-// team or other ad-hoc topic, a role lane) reaches the session over its core subscription only.
+// every one of topics the stream stores (bus.StreamCaptures), a team topic among them. A topic
+// the stream does not store (a role lane, or a topic an earlier build's row still names, which
+// /v1/interests/subscribe refuses now) reaches the session over its core subscription only.
 // SessionConsumers reduces the list to filters that do not overlap.
 func sessionConsumerFilter(sessionID string, topics []string) []string {
 	filter := make([]string, 0, len(topics)+1)

@@ -1202,17 +1202,18 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 // UsesCoreTransport reports whether topic travels over core NATS rather than JetStream: any
 // notification topic none of the stream's subjects captures. That holds the role lanes and their
 // exception lanes, which the stream must never retain and no stream subject captures
-// (TestStreamConfigExcludesRoleLanes), and every ad-hoc topic such as
-// notifications.team.deploy-squad, or the exception lane of one. JetStream answers a publish to a
-// subject no stream captures only with "no responders", and not at all while a core subscriber
+// (TestStreamConfigExcludesRoleLanes), and any other uncaptured topic a raw publish names, such
+// as notifications.lxspec.probe.all, or the exception lane of one. JetStream answers a publish to
+// a subject no stream captures only with "no responders", and not at all while a core subscriber
 // holds the subject, since that subscriber is handed the acknowledgement request: the publish
 // would wait out its whole deadline for an acknowledgement that never comes, after the subscribers
 // had already received the message. A subject outside NotificationTopicPrefix keeps JetStream, as
 // before. The capture is judged on the subjects this binary compiles in, not the deployed stream's:
 // a topic under a subject only a newer build adds (which reconciliation keeps) goes over core NATS
 // from an older one, so the stream still stores it but without a MsgId, and the older listener's
-// durable never fans it out. The listener's publish route reads it too: such a topic is not
-// stored, so the route confirms it with each self-subscribed recipient itself.
+// durable never fans it out. The listener's publish route reads it too, to refuse such a topic by
+// name: nothing would store it, and a session reads only what its own consumer holds
+// (cmd/listener/api.go).
 func UsesCoreTransport(topic string) bool {
 	return strings.HasPrefix(topic, NotificationTopicPrefix) && !StreamCaptures(topic)
 }
