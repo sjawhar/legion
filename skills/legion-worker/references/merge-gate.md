@@ -21,17 +21,18 @@ it, and any other change to the head voids it.
 - The reviewer reads CI on GitHub and verifies the `Threads` and `E2E` facts there directly —
   never from a handoff — then runs `task(agent="thermonuclear-deep-review")` and
   `task(agent="thermonuclear-code-quality")` once at that head — the head the round reviews —
-  and records the verdict. The CI it reads is the checks that stand for the code under review:
-  those GitHub ran for the newest push of the branch that started `pull_request` workflows, when
-  every commit above that push's head changes only `.legion/<issue>/` (GitHub starts no workflow
-  run for a head whose commit message carries `skip-checks: true`, which every handoff-only push
-  before retro does; retro's push carries no such line, so its head does get GitHub's workflow runs
-  of its own). With `<o>/<r>`, `<n>`, `<base>`, `<headRefName>` and `<headRefOid>` from
-  `gh pr view <n> --json baseRefName,headRefOid,headRefName`, four reads. The required set is the
-  base branch's rulesets' required checks and its branch protection's, when it has any. Both
-  branch endpoints take the base as a URL path, each segment escaped and each `/` kept (a raw `#`
-  or `%` reads another branch), built in the same command from the name GitHub returns, never
-  pasted or carried over from an earlier command:
+  waits for each one's result with `wait`, since each runs as a job of its own, and records the
+  verdict from what those results say. The CI it reads is the checks that stand for the code
+  under review: those GitHub ran for the newest push of the branch that started `pull_request`
+  workflows, when every commit above that push's head changes only `.legion/<issue>/` (GitHub
+  starts no workflow run for a head whose commit message carries `skip-checks: true`, which every
+  handoff-only push before retro does; retro's push carries no such line, so its head does get
+  GitHub's workflow runs of its own). With `<o>/<r>`, `<n>`, `<base>`, `<headRefName>` and
+  `<headRefOid>` from `gh pr view <n> --json baseRefName,headRefOid,headRefName`, four reads. The
+  required set is the base branch's rulesets' required checks and its branch protection's, when it
+  has any. Both branch endpoints take the base as a URL path, each segment escaped and each `/`
+  kept (a raw `#` or `%` reads another branch), built in the same command from the name GitHub
+  returns, never pasted or carried over from an earlier command:
 
   ```bash
   base=$(gh pr view <n> -R <o>/<r> --json baseRefName -q .baseRefName) && \

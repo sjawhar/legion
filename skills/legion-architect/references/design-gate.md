@@ -50,8 +50,9 @@ When the gate is armed, run this exact sequence before the tree's work starts:
 3. Before every approval request, give two fresh reviewers the current root spec, the code and
    command output it relies on, and the human's words: `task(agent="plan-gap-analyst")` finds its
    gaps, and `task(agent="plan-reviewer")`, told the document is a spec, checks each factual claim
-   against the code, the docs or a read-only command it runs. Resolve every finding in the root
-   spec. Check with a command each claim either reviewer marks unverified: fix it when it is
+   against the code, the docs or a read-only command it runs. Each runs as a job of its own, so
+   `wait` for its result and read what it found before you act on it. Resolve every finding in the
+   root spec. Check with a command each claim either reviewer marks unverified: fix it when it is
    false, or take it out.
 4. Request approval only once the human has agreed to every point in the spec, because the human
    approves what they already agreed to and a point new in the request has no decision block for

@@ -1,0 +1,15 @@
+kind: Changed
+body: |-
+    Every Legion skill that dispatches a task subagent now says to read its result with Oh My Pi's
+    `wait` tool, since a subagent runs as a background job under the pinned binary's own defaults:
+    the worker's merge gate, the architect's design gate and decomposition, the oracle's research
+    steps, retro's second reading and the simplify pass. The worker skill's stop rules say that the
+    phase reminder keeps still while a role waits on background work of its own, and that the
+    workspace is read-only from the moment the phase ends — a CI red that takes it back stops no
+    turn, so the role stops writing itself and leaves what it has uncommitted. `skills/AGENTS.md`
+    states the pairing as a rule. A new case in this package's skills guard holds the repository's
+    skills, this package's agents and a fresh build of the Claude Code plugin to naming none of the
+    retired sentences and to pairing every dispatch with `wait`.
+time: 2026-10-30T18:00:00Z
+custom:
+    Issue: INFRA-338
