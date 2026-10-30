@@ -142,10 +142,13 @@ type DispatchArgs struct {
 	// other nine are two groups, each set whole or left wholly unset: the tailnet group
 	// (dispatchTailnetInputs), which builds the front door and serves Dispatch at its tailnet
 	// name, and the sign-in group (dispatchSignInInputs), which runs people's browser sign-in.
-	// Both unset is the sandbox, which the resolver accepts. A group set in part is refused by
-	// the per-input refusal it always gave, trailing one clause naming every input of that group
-	// still unset (dispatchGroupClause). With clusterOnly on the resolver refuses each of the
-	// thirteen that is set.
+	// Both unset is the sandbox, which the resolver accepts; the tailnet group set with the
+	// sign-in group unset is a tailnet Dispatch that runs no browser sign-in, which it accepts
+	// too. A sign-in input sent with the tailnet group unset is refused for being sent at all
+	// (refuseDispatchSandbox). Otherwise a group set in part is refused by the per-input refusal
+	// it always gave, trailing one clause naming every input of that group still unset
+	// (dispatchGroupClause). With clusterOnly on the resolver refuses each of the thirteen that
+	// is set.
 	TailnetDnsName string             `pulumi:"tailnetDnsName,optional"`
 	Tags           []string           `pulumi:"tags,optional"`
 	TailnetAuthKey pulumi.StringInput `pulumi:"tailnetAuthKey,optional" provider:"secret"`
@@ -837,14 +840,8 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	if err := refuseDispatchHostname(args.Hostname); err != nil {
 		return dispatchSettings{}, err
 	}
-	// The two groups the consumer sets together or not at all, and the modes they turn on. Each
-	// group is judged by one function of its own, run only while that group is set, so the
-	// sandbox, which sets neither, reaches neither; what the sandbox cannot make good is judged
-	// by a third, run only while the tailnet group is unset. A group set in part is refused for
-	// the first of its inputs that is wrong, whether that input is missing or carries a value the
-	// resolver refuses, and the refusal trails the clause naming every input of the group still
-	// unset (dispatchGroupClause), so one run names the whole shortfall. Each clause is what its
-	// group is short as the consumer sent it: no check sets an input, so none can move it.
+	// Each group is judged by its own function while it is set, and what the sandbox cannot make
+	// good by a third while the tailnet group is unset.
 	tailnetGroup, signInGroup := dispatchTailnetInputs(args), dispatchSignInInputs(args)
 	frontDoor, signInOn := dispatchGroupSet(tailnetGroup), dispatchGroupSet(signInGroup)
 	if frontDoor {
