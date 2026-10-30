@@ -33,9 +33,9 @@ export interface DocumentBridge {
   /** Writes the provisional mark `markId` again, as one of `kind` under a fresh id, over `quote` -
    *  the words the refused send is anchored to - wherever they read now, so a send the server
    *  refused for a mark it cannot see has something to anchor to. The words travel with the
-   *  request, and `placement` - which reading of them in which block the editor wrote the mark
-   *  over - with them, because the editor may have kept nothing: another writer's change reaches
-   *  it as a rebuilt document, and a reconnect rebuilds the editor. */
+   *  request, and `placement` - the block the editor wrote the mark in and the text it read on
+   *  each side of those words - with them, because the editor may have kept nothing: another
+   *  writer's change reaches it as a rebuilt document, and a reconnect rebuilds the editor. */
   remarkMark(
     markId: string,
     kind: ComposerKind,
@@ -269,8 +269,8 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
         setAnchorRefusal({ markId: anchor.mark_id, text: REANCHOR_REFUSALS.gone(kind) });
         return;
       }
-      // What the refused send itself carries: the words the composer was opened over, and which
-      // reading of them in which block the editor wrote its mark over. Both outlive the mark and
+      // What the refused send itself carries: the words the composer was opened over, and the
+      // block and surrounding text the editor wrote its mark among. Both outlive the mark and
       // the editor state that wrote it, which is why the composer is the one that keeps them.
       const outcome = bridge.remarkMark(
         anchor.mark_id,

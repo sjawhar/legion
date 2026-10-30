@@ -187,8 +187,8 @@ export interface ProofEditorHandle extends TypedBlockCommands {
   /** Writes a fresh mark of `kind` over `quote` - the words the composer that owns the provisional
    *  record mark `markId` is anchored to - wherever they are now: under the mark while the
    *  document still holds it, else where those words read, which `placement` - the one the
-   *  `MarkAction` for that mark carried - narrows to the reading the reader selected. Answers it
-   *  under a new id, as the margin needs when the server refuses a send whose mark the document
+   *  `MarkAction` for that mark carried - narrows by the text the reader had around them. Answers
+   *  it under a new id, as the margin needs when the server refuses a send whose mark the document
    *  has lost; a refusal names why nothing changed. */
   remarkMark(
     markId: string,

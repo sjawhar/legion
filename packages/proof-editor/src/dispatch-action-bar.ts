@@ -311,8 +311,9 @@ class ActionBarController {
     const onMarkAction = this.options.onMarkAction;
     if (!onMarkAction) return;
 
-    // Which reading of the quote this is, for the host to keep: the mark it names can be swept
-    // away or lost with the editor, and only the host's copy outlives that (`remarkRecordMark`).
+    // The words around the quote as the editor reads them here, for the host to keep: the mark it
+    // names can be swept away or lost with the editor, and only the host's copy outlives that,
+    // which is what says later which reading of those words was this one (`remarkRecordMark`).
     const action: MarkAction = {
       kind,
       markId,

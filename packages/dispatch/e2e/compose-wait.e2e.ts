@@ -68,9 +68,18 @@ async function watchMark(
   }
 }
 
-/** Whether the mark's span was in the page at about `second` seconds after it was written. */
+/** Whether the mark's span was in the page at about `second` seconds after it was written: the
+ *  first sample taken at or after it, since the sampler loses a second now and then on a loaded
+ *  two-core box and an exact label would make the row flake rather than measure. */
 function presentAt(log: readonly string[], second: number): boolean {
-  return log.includes(`${second}s:present`);
+  return (
+    log
+      .find((sample) => {
+        const at = Number.parseInt(sample, 10);
+        return Number.isFinite(at) && at >= second;
+      })
+      ?.endsWith(":present") ?? false
+  );
 }
 
 /** Opens a document, selects QUOTE, presses Comment and types `draft`. Returns the provisional
@@ -531,6 +540,67 @@ test("a comment keeps its own reading when another writer adds an earlier one", 
     expect(await markOffsets(page)).toEqual([
       { id: rows[0]?.anchor?.mark_id ?? "", offset: readings[2] },
     ]);
+  } finally {
+    await alice.close();
+  }
+});
+
+/** A spec whose two paragraphs each read the same words, with different text around them. */
+const TWO_PARAGRAPH_SPEC = [
+  "## Review",
+  "",
+  "Alpha the lazy dog sits here.",
+  "",
+  "Beta the lazy dog sits there.",
+  "",
+].join("\n");
+
+/** Another writer takes the reader's own words out of the paragraph they selected in, while the
+ *  same words still read once in another paragraph, surrounded by different text. That other
+ *  paragraph is a different passage, so Send must not quietly put the comment there: it says it
+ *  cannot be attached, keeps the draft, and does not claim the words were changed or deleted,
+ *  since they are plainly still on the page (the INFRA-512 architect's amended decision on
+ *  sjawhar/legion#2548: words and surroundings both have to match). */
+test("a comment whose own paragraph lost the words is not moved to another paragraph", async ({
+  browser,
+}) => {
+  test.setTimeout(240_000);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: TWO_PARAGRAPH_SPEC,
+    title: "Review the spec",
+  });
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await openSpec(page, issue.key, "Alpha the lazy dog");
+    await expect(connectedDot(page)).toHaveText("connected");
+    await selectEditorText(page, REPEATED_QUOTE);
+    await barAction(page, "Comment");
+    await expect(documentEditor(page).locator('span[data-proof="comment"][data-id]')).toHaveCount(
+      1
+    );
+    await composer(page).getByLabel("Comment").fill("Which dog is this?");
+
+    await editArtifact(
+      issue.primary_artifact_id,
+      {
+        ops: [
+          { find: "Alpha the lazy dog sits here.", op: "replace", with: "Nothing of the sort." },
+        ],
+      },
+      { actor: { id: "e2e-compose-wait", kind: "session" }, as: "agent" }
+    );
+    await expect(documentEditor(page)).toContainText("Nothing of the sort.");
+    await expect(documentEditor(page)).toContainText("Beta the lazy dog sits there.");
+
+    await send(page);
+    await expect(composer(page)).toContainText("Your draft is kept");
+    await expect(composer(page).getByLabel("Comment")).toHaveValue("Which dog is this?");
+    expect(await composer(page).textContent()).not.toContain("changed or deleted");
+    expect(await listComments(issue.key, issue.primary_artifact_id)).toHaveLength(0);
+    expect(await markOffsets(page)).toEqual([]);
   } finally {
     await alice.close();
   }

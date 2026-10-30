@@ -198,9 +198,16 @@ const keptComposerSend = shape.record({
       shape.record({
         artifact: shape.string,
         mark_id: shape.string,
-        // The reading the reader selected, which the recovery from `ANCHOR_MISSING` needs after
-        // a reload as much as the quote beside it (`ComposerAnchor.placement`).
-        placement: shape.optional(shape.record({ blockId: shape.string, reading: shape.number })),
+        // The words the reader had around their selection, which the recovery from
+        // `ANCHOR_MISSING` needs after a reload as much as the quote beside it
+        // (`ComposerAnchor.placement`).
+        placement: shape.optional(
+          shape.record({
+            blockId: shape.nullable(shape.string),
+            prefix: shape.string,
+            suffix: shape.string,
+          })
+        ),
         quote: shape.string,
       })
     ),

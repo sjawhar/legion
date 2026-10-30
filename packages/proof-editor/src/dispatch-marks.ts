@@ -33,15 +33,22 @@ import type { MarkRange } from 'proof-sdk-upstream/src/editor/plugins/marks';
 export type SelectionBarActionKind = 'comment' | 'ask' | 'suggest';
 export type PopoverActionKind = 'reply' | 'resolve' | 'unresolve' | 'accept' | 'reject' | 'delete';
 
-/** Which reading of a quote a record mark was written over, in a form that outlives this editor:
- *  the id of the textblock that held the mark, and the index of that reading of the quote inside
- *  that block's text, counted as the editor reads the block. A remote change arrives as a rebuilt
- *  document and a reconnect rebuilds the editor, so nothing the editor keeps survives either; a
- *  host that keeps this beside the quote can have the mark written again over the reading its
- *  reader selected rather than the first one those words read in (`remarkRecordMark`). */
+/** Where a record mark was written, in a form that outlives this editor: the id of the textblock
+ *  that held it, and the text the editor read on each side of the selected words at the moment
+ *  they were selected. With the quote the composer carries beside it, that is the ordinary
+ *  three-part text-quote selector, and a reading of those words is the reader's own only where
+ *  the words and their surroundings both match. A remote change arrives as a rebuilt document
+ *  and a reconnect rebuilds the editor, so nothing the editor keeps survives either; a host that
+ *  keeps this beside the quote can have the mark written again over the passage its reader
+ *  selected rather than another reading of the same words (`remarkRecordMark`). */
 export interface RecordMarkPlacement {
-  readonly blockId: string;
-  readonly reading: number;
+  /** Null for a textblock that carries no id, which leaves a re-anchor the whole document. */
+  readonly blockId: string | null;
+  /** The text immediately before the selected words, as the editor read it: at most
+   *  `QUOTE_CONTEXT_CHARS` of it, and shorter where the block begins nearer than that. */
+  readonly prefix: string;
+  /** The text immediately after them, capped and cut short at the block's end the same way. */
+  readonly suffix: string;
 }
 
 export type MarkAction =
@@ -51,8 +58,8 @@ export type MarkAction =
       quote: string;
       from: number;
       to: number;
-      /** Null where there is none to keep: a textblock with no id, or a quote whose reading in
-       *  that block cannot be counted. */
+      /** Null where there is none to keep: a selection no one textblock's text reads as the
+       *  quote, which leaves a later re-mark the quote alone to go by. */
       placement: RecordMarkPlacement | null;
     }
   | { kind: 'reply'; markId: string; text: string }

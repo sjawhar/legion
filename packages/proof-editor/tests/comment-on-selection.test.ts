@@ -3,6 +3,7 @@ import { TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import type { MarkAction } from "../src/lib";
 import { blockIdOf } from "../src/lib";
+import { QUOTE_CONTEXT_CHARS } from "../src/record-mark-retype";
 import { withMarksEditor } from "./marks-editor";
 
 const SENTENCE = "The quick brown fox";
@@ -38,7 +39,7 @@ test("commentOnSelection marks the selection as a comment and hands it to onMark
           from: 5,
           kind: "comment",
           markId: expect.any(String),
-          placement: { blockId: expect.any(String), reading: 0 },
+          placement: { blockId: expect.any(String), prefix: "The ", suffix: " fox" },
           quote: "quick brown",
           to: 16,
         },
@@ -98,7 +99,7 @@ test("the selection bar's Comment button takes the same path: a mark, then onMar
           from: 5,
           kind: "comment",
           markId: expect.any(String),
-          placement: { blockId: expect.any(String), reading: 0 },
+          placement: { blockId: expect.any(String), prefix: "The ", suffix: " fox" },
           quote: "quick brown",
           to: 16,
         },
@@ -115,33 +116,73 @@ test("the selection bar's Comment button takes the same path: a mark, then onMar
   );
 });
 
-test("the mark the bar writes carries which reading of the quote it covers", async () => {
+test("the selection bar records the words' surroundings, capped, and shorter at a block's edge", async () => {
   const actions: MarkAction[] = [];
-  const repeated = "The vet sees the lazy dog, then the lazy dog again";
   const quote = "the lazy dog";
-  // Where the second reading of those words starts: the paragraph opens at 0 and its text at 1,
-  // so a text offset is one less than the position.
-  const second = repeated.indexOf(quote, repeated.indexOf(quote) + 1) + 1;
+  // More text than the cap on each side of the selected words, so both sides are cut down to it.
+  const before = "A sentence written out at length, so the words before run past the cap. ";
+  const after = " And a sentence after them, also written out well past the cap it keeps.";
+  // The paragraph opens at 0 and its text at 1, so a text offset is one less than the position.
+  const at = before.length + 1;
   await withMarksEditor(
-    repeated,
+    `${before}${quote}${after}`,
     ({ handle, view }) => {
       const blockId = blockIdOf(view.state.doc.child(0));
       if (blockId === null) throw new Error("the paragraph has no block id");
-      select(view, second, second + quote.length);
+      select(view, at, at + quote.length);
       expect(handle.commentOnSelection()).toBe(true);
-      // The quote alone cannot say which reading the reader selected, and the host keeps this
-      // for the day the mark is gone and the editor remembers nothing (`remarkRecordMark`).
+      // The quote alone cannot say which reading of those words the reader selected, and the host
+      // keeps this for the day the mark is gone and the editor remembers nothing
+      // (`remarkRecordMark`): the text around them, as the editor read it, capped on each side.
       expect(actions).toEqual([
         {
-          from: second,
+          from: at,
           kind: "comment",
           markId: expect.any(String),
-          placement: { blockId, reading: 1 },
+          placement: {
+            blockId,
+            prefix: before.slice(-QUOTE_CONTEXT_CHARS),
+            suffix: after.slice(0, QUOTE_CONTEXT_CHARS),
+          },
           quote,
-          to: second + quote.length,
+          to: at + quote.length,
+        },
+      ]);
+      const written = actions[0];
+      if (written === undefined || written.kind !== "comment") {
+        throw new Error("the bar reported no comment action");
+      }
+      expect(written.placement?.prefix).toHaveLength(QUOTE_CONTEXT_CHARS);
+      expect(written.placement?.suffix).toHaveLength(QUOTE_CONTEXT_CHARS);
+    },
+    { onMarkAction: (action) => void actions.push(action) }
+  );
+
+  // A selection against an edge of its block keeps what text there is beside it, which at the
+  // edge itself is none at all.
+  const edges: MarkAction[] = [];
+  const edged = `${quote} sits at the start, and at the end sits ${quote}`;
+  await withMarksEditor(
+    edged,
+    ({ handle, view }) => {
+      select(view, 1, 1 + quote.length);
+      expect(handle.commentOnSelection()).toBe(true);
+      const end = edged.length + 1;
+      select(view, end - quote.length, end);
+      expect(handle.commentOnSelection()).toBe(true);
+      expect(edges.map((action) => (action.kind === "comment" ? action.placement : null))).toEqual([
+        {
+          blockId: expect.any(String),
+          prefix: "",
+          suffix: edged.slice(quote.length, quote.length + QUOTE_CONTEXT_CHARS),
+        },
+        {
+          blockId: expect.any(String),
+          prefix: edged.slice(0, edged.length - quote.length).slice(-QUOTE_CONTEXT_CHARS),
+          suffix: "",
         },
       ]);
     },
-    { onMarkAction: (action) => void actions.push(action) }
+    { onMarkAction: (action) => void edges.push(action) }
   );
 });
