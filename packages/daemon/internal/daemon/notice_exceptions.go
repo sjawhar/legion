@@ -153,7 +153,9 @@ func (r *outbox) rehold(ctx context.Context, data []byte) error {
 // forward only after its receipt window (two seconds, longer while forwards queue behind others on
 // its role lane). A notice to the same architect written before the copy is queued is not held
 // behind the failed one, so it can arrive before the copy. A catch-up a newer one superseded
-// (catchUpSuperseded) is not queued again: its copy would arrive after the fresh catch-up. Nor is
+// (catchUpSuperseded) is not queued again: its copy would arrive after the fresh catch-up, so what
+// it named is handed over to that fresh catch-up instead (workflow.HandOverKept, through
+// supersededKept), the copy that would have carried its claims on never being written. Nor is
 // a notice whose architect stopped with its finished tree (stoppedWithTree): nothing of the close
 // is sent to it, and a person's spec decision such a notice reports goes to the controller instead
 // (parkDecision). Those checks read the claim from memory, outside ApplyFact's lock, which the
@@ -229,8 +231,21 @@ func (r *outbox) reholdNotice(ctx context.Context, reported reportedNotice, reas
 	}
 	committed()
 	if superseded {
-		r.log.Info("outbox catch-up not re-held: a newer catch-up supersedes it", "issue", issue, "key", key,
-			"generation", notice.CatchUp.Generation, "launch", notice.CatchUp.Launch, "reason", reason)
+		// The copy this re-hold would have queued is the only thing that would have taken the row's
+		// claims on (MoveKeptClaims), so what the row named is handed over here exactly as a
+		// superseded catch-up's own ending hands it over (supersededKept): unclaimed, and named at
+		// once by a fresh catch-up while the root has an architect to tell. A catch-up is enqueued
+		// for the root whose tree it states (workflow.QueueCatchUp), so the row's issue is that
+		// root. The hand-over is its own transaction, after this one: a receipt timeout marks no
+		// telling, so the told check supersededKept makes answers no here unless an earlier run of
+		// this row published.
+		if notice.CatchUp.Kept != nil && reported.claims != 0 {
+			if err := r.supersededKept(ctx, issue, reported.claims, key, held.Claim.Generation); err != nil {
+				return err
+			}
+		}
+		r.log.Info("outbox catch-up not re-held: a newer catch-up supersedes it; what it named is handed over",
+			"issue", issue, "key", key, "generation", notice.CatchUp.Generation, "launch", notice.CatchUp.Launch, "reason", reason)
 	}
 	if queued {
 		r.log.Info("outbox notice re-held: the listener could not forward it to its architect's session",

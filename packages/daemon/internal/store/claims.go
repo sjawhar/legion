@@ -30,7 +30,8 @@ const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.gener
 	c.boot_token_hash, c.capability_hash, c.uncertain_streak, c.last_start_row, c.serving_generation,
 	c.agent_secrets_enrollment, c.agent_secrets_enrollment_incarnation, c.suspended_by,
 	c.plugin_contract, c.plugin_relaunch_for, c.delivered_rows,
-	d.delivery_id, d.task, d.phase, d.generation, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted
+	d.delivery_id, d.task, d.phase, d.generation, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted,
+	d.kept_decisions
 	from claims c left join pending_task_deliveries d on d.claim_token = c.token`
 
 // PutClaim persists an admitted claim's state: every write a claim's machine makes. A claim enters
@@ -267,15 +268,15 @@ func putDelivery(ctx context.Context, db execer, token claim.Token, d supervise.
 		return fmt.Errorf("put delivery %s on %s: generation %d does not fit a bigint", d.ID, token, d.Generation)
 	}
 	_, err := db.Exec(ctx, `insert into pending_task_deliveries (claim_token, delivery_id, task,
-		phase, generation, queued_at, delivered_at, marked_by, confirmed_at, interrupted)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		phase, generation, queued_at, delivered_at, marked_by, confirmed_at, interrupted, kept_decisions)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, coalesce($11::jsonb, '{}'::jsonb))
 		on conflict (claim_token) do update set delivery_id = excluded.delivery_id,
 		task = excluded.task, phase = excluded.phase, generation = excluded.generation,
 		queued_at = excluded.queued_at,
 		delivered_at = excluded.delivered_at, marked_by = excluded.marked_by, confirmed_at = excluded.confirmed_at,
-		interrupted = excluded.interrupted`,
+		interrupted = excluded.interrupted, kept_decisions = excluded.kept_decisions`,
 		string(token), d.ID, d.Task, string(d.Phase), int64(d.Generation), d.QueuedAt, instant(d.DeliveredAt), d.MarkedBy,
-		instant(d.ConfirmedAt), d.Interrupted,
+		instant(d.ConfirmedAt), d.Interrupted, keptDecisions(d.Kept),
 	)
 	if err != nil {
 		return fmt.Errorf("put delivery %s on %s: %w", d.ID, token, err)
@@ -335,13 +336,14 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		queuedAt, delivered        *time.Time
 		confirmed                  *time.Time
 		interrupted                *bool
+		kept                       []byte
 	)
 	err := row.Scan(&token, &c.Project, &c.Tree, &c.Issue, &role, &generation, &treeEpoch, &c.Session,
 		&c.SessionFile, &locator, &state, &c.Failure, &c.Budgets.LaunchFailures, &c.Budgets.Deaths, &c.Budgets.PromptFailures,
 		&c.Budgets.PromptRetires, &c.BootTokenHash, &c.CapabilityHash, &c.UncertainStreak,
 		&c.LastStartRow, &servingGeneration, &enrollmentID, &enrollmentIC, &by,
 		&c.PluginContract, &c.PluginRelaunchFor, &c.DeliveredRows,
-		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted)
+		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted, &kept)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return supervise.Claim{}, err
 	}
@@ -379,6 +381,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 			MarkedBy:    *markedBy,
 			ConfirmedAt: orZero(confirmed),
 			Interrupted: orFalse(interrupted),
+			Kept:        keptDecisions(kept),
 		}
 	}
 	return c, nil
@@ -390,6 +393,17 @@ func instant(t time.Time) *time.Time {
 		return nil
 	}
 	return &t
+}
+
+// keptDecisions is a delivery's kept-decision record as the column holds it and as the delivery
+// carries it: an empty record ("{}", or nothing at all for a claim with no delivery) is a task that
+// names no decision, which the delivery holds as no bytes at all, so a restored delivery equals the
+// one that was written.
+func keptDecisions(kept []byte) []byte {
+	if len(kept) == 0 || string(kept) == "{}" {
+		return nil
+	}
+	return kept
 }
 
 // orFalse is a nullable boolean column read as false when null: the left join's delivery columns

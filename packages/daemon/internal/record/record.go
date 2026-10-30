@@ -239,8 +239,15 @@ const (
 // back to unclaimed, and a fresh catch-up names it at once while the root has an architect to
 // tell, so a release never leaves it kept with nobody to name it again.
 type ParkedDecision struct {
-	Root     string
-	Ref      string
+	Root string
+	Ref  string
+	// Issue is where in Dispatch the decision was made: the issue of the ask, comment or spec it
+	// was made on, which is the root itself or one of its tree's members. It is what says whose
+	// debt the row is once the tree breaks up — a child handed over into a tree of its own takes
+	// what was decided on itself and its descendants with it (admit.Admission.readmit) — and it is
+	// empty for no row the daemon writes, since every path that keeps one knows where it was made
+	// (RelayParkedDecision).
+	Issue    string
 	Decision DecisionKind
 	Actor    string
 	At       time.Time
@@ -1011,10 +1018,23 @@ type Store interface {
 	OpenProductionChecksOfTree(ctx context.Context, tx pgx.Tx, tree string) ([]ProductionCheck, error)
 	// SessionClaimsTree says whether the agent session holds a claim in the tree.
 	SessionClaimsTree(ctx context.Context, tx pgx.Tx, tree, session string) (bool, error)
-	// AddParkedDecision keeps a relayed decision for its root's next admission. A ref the root
-	// already keeps keeps its newest decision: a later one, by At, replaces it, so a changes request
-	// the person has since followed with an approval of the same spec is not what the start names.
+	// AddParkedDecision keeps a relayed decision for its root's next admission, with the issue it
+	// was decided on. A ref the root already keeps keeps its newest decision: a later one, by At,
+	// replaces it, so a changes request the person has since followed with an approval of the same
+	// spec is not what the start names.
 	AddParkedDecision(ctx context.Context, tx pgx.Tx, decision ParkedDecision) error
+	// MoveKeptDecisions moves to root every decision from keeps that was made on one of issues —
+	// a child handed over into a tree of its own and its descendants (admit.Admission.readmit) —
+	// leaving each unclaimed under its new root, so the next start or catch-up of that root names
+	// it and nothing of the tree it left does. A reference root already keeps keeps the newer
+	// decision, by At, as AddParkedDecision does; the older row goes with the rest.
+	MoveKeptDecisions(ctx context.Context, tx pgx.Tx, from, root string, issues []string) error
+	// ReKeepDeliveredDecisions keeps for root, unclaimed, every decision on one of issues that the
+	// unconfirmed task pending on claim token names: the hand-over of a child whose decisions a
+	// start already forgot into a held task of the old root's architect
+	// (supervise.Delivery.Kept). Nothing is kept for a confirmed task, a claim with no task, or a
+	// task naming nothing of those issues.
+	ReKeepDeliveredDecisions(ctx context.Context, tx pgx.Tx, token claim.Token, root string, issues []string) error
 	// ParkedDecisions is every decision root keeps, claimed or not, newest first, ties by ref.
 	ParkedDecisions(ctx context.Context, tx pgx.Tx, root string) ([]ParkedDecision, error)
 	// UnclaimedKept is what root keeps that no delivery claims: its decisions, newest first, ties by
@@ -1187,16 +1207,25 @@ type Store interface {
 	// caller that then wakes the row's lane has its issue and kind.
 	ExpediteOutbox(ctx context.Context, tx pgx.Tx, row OutboxRow, now time.Time) error
 	// DropCatchUps deletes every catch-up notice row of issue the outbox still holds, a re-held copy
-	// and a row the runner has leased included, but for one whose publish told the decisions it
-	// named (KeptToldSource) and whose forget has not committed yet: that row still owes them that
-	// forget, which its next run makes, and dropping it would release them for the fresh catch-up
-	// to tell a second time. A leased row may be mid-publish: the runner executes it from memory,
-	// and the notice executor publishes it only while OutboxLeased still finds it, so a dropped row
-	// is delivered only when the drop lands during its publish, a duplicate the fresh catch-up
-	// follows. A dropped catch-up's decisions are released with its row and named again by the
-	// fresh catch-up, written in the same transaction as the drop: only a published catch-up
-	// forgets them (ForgetKeptDecisions).
-	DropCatchUps(ctx context.Context, tx pgx.Tx, issue string) error
+	// and a row the runner has leased included, but for two a drop would lose a person's decision
+	// from. The first is a row whose publish told the decisions it named (KeptToldSource) and whose
+	// forget has not committed yet: that row still owes them that forget, which its next run makes,
+	// and dropping it would release them for the fresh catch-up to tell a second time. The second is
+	// a row that carries kept decisions under a live lease (lease_until after now, which is the
+	// caller's clock, the one a claim's lease is written from: ClaimRow): its lane may be publishing
+	// it this moment, outside every transaction, and the drop would release what it named for the
+	// fresh catch-up, written in the same transaction, to name again — telling the architect that
+	// already has the publish in its hands a person's decision twice. Such a row is left for its own
+	// ending to settle what it claims: its publish forgets exactly what it named
+	// (ForgetKeptDecisions), a newer catch-up that supersedes it hands those rows over
+	// (workflow.HandOverKept), and every other ending leaves them to the row's deletion, for the
+	// architect's next ready to name. A leased row with no decisions is dropped as before: the
+	// runner executes it from memory, and the notice executor publishes it only while OutboxLeased
+	// still finds it, so a dropped row is delivered only when the drop lands during its publish, a
+	// duplicate the fresh catch-up follows. A dropped catch-up's decisions are released with its row
+	// and named again by the fresh catch-up, written in the same transaction as the drop: only a
+	// published catch-up forgets them.
+	DropCatchUps(ctx context.Context, tx pgx.Tx, issue string, now time.Time) error
 	// DropStatusWrites deletes every Dispatch status write of issue the outbox still holds, a row
 	// the runner has leased included; one mid-attempt can still reach Dispatch, and its finish then
 	// finds nothing to delete.

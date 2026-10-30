@@ -50,17 +50,20 @@ func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimRea
 // (treeCatchUp) for launch, the launch it was written for, so a failed forward of an older one is
 // not queued again behind it (the outbox's rehold).
 //
-// A catch-up an earlier launch never had delivered is dropped first (DropCatchUps), so the agent is
-// given one catch-up, computed now, which names again the decisions the dropped one named — the
-// drop releases them in this transaction — with any kept since. The notice goes through the outbox
-// like any other, so it is routed, held and re-held as they are.
+// A catch-up an earlier launch never had delivered is dropped first (DropCatchUps, at the caller's
+// now, which is the clock a lane's lease is written from), so the agent is given one catch-up,
+// computed now, which names again the decisions the dropped one named — the drop releases them in
+// this transaction — with any kept since. A catch-up that carries kept decisions and is being
+// published under a live lease is not dropped: it settles what it named itself, and this one names
+// only what nobody claims. The notice goes through the outbox like any other, so it is routed, held
+// and re-held as they are.
 func QueueCatchUp(ctx context.Context, tx pgx.Tx, store record.Store, gate config.DesignGate, root record.Issue, launch uint64, now time.Time) error {
 	catchUp, awaiting, err := treeCatchUp(ctx, tx, store, gate, root)
 	if err != nil {
 		return err
 	}
 	catchUp.Launch = launch
-	if err := store.DropCatchUps(ctx, tx, root.Key); err != nil {
+	if err := store.DropCatchUps(ctx, tx, root.Key, now); err != nil {
 		return err
 	}
 	// A decision kept since the start's task was written (one a person made while the tree's

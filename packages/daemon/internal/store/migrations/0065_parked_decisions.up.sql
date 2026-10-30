@@ -9,9 +9,16 @@
 -- and a catch-up a newer one supersedes, hand their rows over — unclaimed again, and named at once
 -- by a fresh catch-up while the root has an architect to tell. A row's deletion releases what it
 -- still claims (on delete set null), for the next start or the next ready's catch-up to name.
+--
+-- issue is where in Dispatch the decision was made — the ask's issue, which is the root itself or
+-- one of its tree's members. It is what says whose debt the row is when the tree breaks up: a child
+-- a finished tree hands over into a tree of its own takes with it, unclaimed, every row decided on
+-- itself or on one of its descendants (admit.Admission.readmit), so its new architect's start task
+-- names them and the old root keeps only what was decided on the rest of its tree.
 create table parked_decisions (
   root text not null references issues (key) on delete cascade,
   ref text not null,
+  issue text not null,
   decision text not null,
   actor text not null,
   at timestamptz not null,

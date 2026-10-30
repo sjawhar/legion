@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"slices"
 
@@ -22,6 +23,20 @@ import (
 // (dedupeKeyNamesItsEvent, packages/contracts/src/envelope.ts) can tell that two rows relay one
 // decision.
 const parkedDecisionSource = "parked-decision"
+
+// keptJSON encodes what a start row's task names of what its root keeps, for the delivery to carry
+// and the claim store to persist (supervise.Delivery.Kept). A task that names nothing carries
+// nothing.
+func keptJSON(kept *record.KeptDecisions) ([]byte, error) {
+	if kept == nil {
+		return nil, nil
+	}
+	encoded, err := json.Marshal(kept)
+	if err != nil {
+		return nil, fmt.Errorf("encode the decisions a start's task names: %w", err)
+	}
+	return encoded, nil
+}
 
 // parkDecision hands the person's spec decision a notice reports to the one rule for a decision
 // nobody in its tree hears (record.RelayParkedDecision): the project's controller is told, in a

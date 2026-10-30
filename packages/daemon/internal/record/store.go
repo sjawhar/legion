@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -634,10 +635,75 @@ func (s *Postgres) SessionClaimsTree(ctx context.Context, tx pgx.Tx, tree, sessi
 }
 
 func (s *Postgres) AddParkedDecision(ctx context.Context, tx pgx.Tx, decision ParkedDecision) error {
-	if _, err := tx.Exec(ctx, `insert into parked_decisions (root, ref, decision, actor, at) values ($1, $2, $3, $4, $5)
-		on conflict (root, ref) do update set decision = excluded.decision, actor = excluded.actor, at = excluded.at, claimed_by = null
-		where parked_decisions.at <= excluded.at`, decision.Root, decision.Ref, string(decision.Decision), decision.Actor, decision.At); err != nil {
+	if _, err := tx.Exec(ctx, `insert into parked_decisions (root, ref, issue, decision, actor, at) values ($1, $2, $3, $4, $5, $6)
+		on conflict (root, ref) do update set issue = excluded.issue, decision = excluded.decision, actor = excluded.actor,
+		at = excluded.at, claimed_by = null
+		where parked_decisions.at <= excluded.at`,
+		decision.Root, decision.Ref, decision.Issue, string(decision.Decision), decision.Actor, decision.At); err != nil {
 		return fmt.Errorf("keep the decision %s on %s: %w", decision.Ref, decision.Root, err)
+	}
+	return nil
+}
+
+// MoveKeptDecisions moves the rows of issues from one root to another in one statement pair: the
+// insert writes each under its new root, unclaimed — a row the new root already keeps keeping
+// whichever decision is newer, as AddParkedDecision does — and the delete takes every moved row
+// off the old root, the one an older decision lost the conflict to included.
+func (s *Postgres) MoveKeptDecisions(ctx context.Context, tx pgx.Tx, from, root string, issues []string) error {
+	if len(issues) == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(ctx, `insert into parked_decisions (root, ref, issue, decision, actor, at)
+		select $2, ref, issue, decision, actor, at from parked_decisions where root = $1 and issue = any($3::text[])
+		on conflict (root, ref) do update set issue = excluded.issue, decision = excluded.decision, actor = excluded.actor,
+		at = excluded.at, claimed_by = null
+		where parked_decisions.at <= excluded.at`, from, root, issues); err != nil {
+		return fmt.Errorf("move the decisions kept for %s on %v to %s: %w", from, issues, root, err)
+	}
+	if _, err := tx.Exec(ctx, "delete from parked_decisions where root = $1 and issue = any($2::text[])", from, issues); err != nil {
+		return fmt.Errorf("take the decisions moved to %s off %s: %w", root, from, err)
+	}
+	return nil
+}
+
+// ReKeepDeliveredDecisions keeps for root, unclaimed, every decision on one of issues that the
+// unconfirmed task pending on claim token names (pending_task_deliveries.kept_decisions, written
+// with the delivery by the claim store): those rows were deleted when the claim took the task, so
+// the task is the only thing that carries them, and a task held while its own root has no architect
+// to hear it would take them out of the tree the issues have moved to. A confirmed task has been
+// taken by its agent and is told; a claim with no task, or one naming no decision on those issues,
+// keeps nothing here. The rows are written as AddParkedDecision writes them, so a reference root
+// already keeps keeps whichever decision is newer, and the task is left as it is: if it is later
+// sent to its own architect, that architect is told a decision of a tree it no longer holds, which
+// is the lesser fault of the two (telling twice rather than never).
+func (s *Postgres) ReKeepDeliveredDecisions(ctx context.Context, tx pgx.Tx, token claim.Token, root string, issues []string) error {
+	if len(issues) == 0 {
+		return nil
+	}
+	var encoded []byte
+	err := tx.QueryRow(ctx, `select kept_decisions from pending_task_deliveries
+		where claim_token = $1 and confirmed_at is null`, string(token)).Scan(&encoded)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read the decisions the task pending on %s names: %w", token, err)
+	}
+	var kept KeptDecisions
+	if len(encoded) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(encoded, &kept); err != nil {
+		return fmt.Errorf("decode the decisions the task pending on %s names: %w", token, err)
+	}
+	for _, named := range kept.Decisions {
+		if !slices.Contains(issues, named.Issue) {
+			continue
+		}
+		if err := s.AddParkedDecision(ctx, tx, ParkedDecision{Root: root, Ref: named.Ref, Issue: named.Issue,
+			Decision: named.Decision, Actor: named.Actor, At: named.At}); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -662,7 +728,7 @@ func (s *Postgres) UnclaimedKept(ctx context.Context, tx pgx.Tx, root string) ([
 // parkedDecisions is every decision root keeps, or only those no delivery claims, newest first,
 // ties by ref.
 func parkedDecisions(ctx context.Context, tx pgx.Tx, root string, unclaimed bool) ([]ParkedDecision, error) {
-	rows, err := tx.Query(ctx, `select ref, decision, actor, at, coalesce(claimed_by, 0) from parked_decisions
+	rows, err := tx.Query(ctx, `select ref, issue, decision, actor, at, coalesce(claimed_by, 0) from parked_decisions
 		where root = $1 and (not $2 or claimed_by is null) order by at desc, ref`, root, unclaimed)
 	if err != nil {
 		return nil, fmt.Errorf("read the decisions kept for %s: %w", root, err)
@@ -671,7 +737,7 @@ func parkedDecisions(ctx context.Context, tx pgx.Tx, root string, unclaimed bool
 	var decisions []ParkedDecision
 	for rows.Next() {
 		decision := ParkedDecision{Root: root}
-		if err := rows.Scan(&decision.Ref, &decision.Decision, &decision.Actor, &decision.At, &decision.ClaimedBy); err != nil {
+		if err := rows.Scan(&decision.Ref, &decision.Issue, &decision.Decision, &decision.Actor, &decision.At, &decision.ClaimedBy); err != nil {
 			return nil, fmt.Errorf("scan a decision kept for %s: %w", root, err)
 		}
 		decisions = append(decisions, decision)
@@ -1590,11 +1656,12 @@ func (s *Postgres) DropStatusWrites(ctx context.Context, tx pgx.Tx, issue string
 	return nil
 }
 
-func (s *Postgres) DropCatchUps(ctx context.Context, tx pgx.Tx, issue string) error {
+func (s *Postgres) DropCatchUps(ctx context.Context, tx pgx.Tx, issue string, now time.Time) error {
 	if _, err := tx.Exec(ctx, `delete from outbox where kind = $1 and issue = $2 and payload->>'kind' = 'catch-up'
 		and not exists (select 1 from processed_events where source = $3
-			and event_id = $4 || coalesce((outbox.payload->>'resend_of')::bigint, outbox.id))`,
-		string(OutboxKindNotice), issue, KeptToldSource, outboxKeyPrefix); err != nil {
+			and event_id = $4 || coalesce((outbox.payload->>'resend_of')::bigint, outbox.id))
+		and not (payload->'catch_up'->'kept' is not null and lease_token <> '' and lease_until > $5)`,
+		string(OutboxKindNotice), issue, KeptToldSource, outboxKeyPrefix, now); err != nil {
 		return fmt.Errorf("drop the queued catch-ups of %s: %w", issue, err)
 	}
 	return nil

@@ -62,8 +62,15 @@ type keptTelling struct {
 	// to is that the root has an architect to hear it (hears) rather than the generation named.
 	prompt bool
 	hears  bool
-	named  uint64
-	root   uint64
+	// named is the generation the telling itself names, and root the generation its root stood at
+	// when the daemon decided to send it — read where the catch-up's publish began, not once it
+	// returned (observe).
+	named uint64
+	root  uint64
+	// row is the outbox row that carried the telling: the start row a prompt's delivery id names,
+	// or the row a published notice's dedupe key names (its original, for a copy). It is what says
+	// whether the row was composed before a hand-over (held).
+	row int64
 	// tree is the root whose architect heard it, and issueTree the tree the decision's issue stood
 	// in then. A decision is owed to the architect of the tree its issue is in, so a telling whose
 	// two differ went to an architect that is not the one it was owed to (held).
@@ -148,7 +155,8 @@ type keptRace struct {
 
 // keptPublisher is the listener as a role publish meets it, under one mode the run switches. It
 // counts the answer each catch-up drew, so a run reports which modes its catch-ups actually met,
-// and holds one publish open for the interleaving a step armed (keptRace).
+// holds one publish open for the interleaving a step armed (keptRace), and records, for each
+// catch-up it takes, the generation that catch-up's root stood at then (atPublish).
 type keptPublisher struct {
 	mu        sync.Mutex
 	mode      keptPublishMode
@@ -157,6 +165,14 @@ type keptPublisher struct {
 
 	raceMu sync.Mutex
 	race   *keptRace
+
+	// atPublish is the generation the root whose architect holds a topic stands at, false for a
+	// topic no driven tree's architect holds. genMu guards what it answered: genAt, by the
+	// notice's dedupe key, and genErr, the read that failed, which ends the run.
+	atPublish func(topic string) (uint64, bool, error)
+	genMu     sync.Mutex
+	genAt     map[string]uint64
+	genErr    error
 }
 
 func (p *keptPublisher) Publish(_ context.Context, topic, message string, payload any, key string) error {
@@ -164,6 +180,11 @@ func (p *keptPublisher) Publish(_ context.Context, topic, message string, payloa
 	catchUp := isNotice && notice.CatchUp != nil
 	var raced *keptRace
 	if catchUp {
+		// The generation is read before anything else of this publish: it is the one the daemon
+		// decided to send this catch-up at, where its lease-time check read the root, and a
+		// re-admission landing inside the publish is followed by its own catch-up rather than
+		// making this telling wrong.
+		p.noteGeneration(topic, key)
 		raced = p.disarm()
 	}
 	if raced != nil {
@@ -188,6 +209,34 @@ func (p *keptPublisher) Publish(_ context.Context, topic, message string, payloa
 	}
 	p.delivered = append(p.delivered, outboxPublish{topic: topic, message: message, key: key, payload: payload})
 	return nil
+}
+
+// noteGeneration records the generation the publish's root stands at now, under the notice's
+// dedupe key, keeping the first reading of a key: one key is one telling, and that telling is the
+// first delivery under it.
+func (p *keptPublisher) noteGeneration(topic, key string) {
+	if p.atPublish == nil {
+		return
+	}
+	generation, known, err := p.atPublish(topic)
+	p.genMu.Lock()
+	defer p.genMu.Unlock()
+	if err != nil {
+		p.genErr = errors.Join(p.genErr, err)
+		return
+	}
+	if _, seen := p.genAt[key]; known && !seen {
+		p.genAt[key] = generation
+	}
+}
+
+// generationAtPublish is the generation the root stood at when the listener took the catch-up
+// published under key, and whatever read of one failed, which ends the run.
+func (p *keptPublisher) generationAtPublish(key string) (uint64, bool, error) {
+	p.genMu.Lock()
+	defer p.genMu.Unlock()
+	generation, known := p.genAt[key]
+	return generation, known, p.genErr
 }
 
 // answer is what this run's mode makes of one publish, and the mode that answer is of: a copy the
@@ -447,11 +496,18 @@ type keptRun struct {
 	// was delivered under — a repeat of either is the same telling, not a second one — and applied
 	// every terminal fact key the run has applied, which is what says a launch's ready has been
 	// told to the workflow already.
-	sent     map[string]bool
-	keys     map[string]bool
-	applied  map[string]bool
-	publishd int
-	counts   keptCounts
+	sent    map[string]bool
+	keys    map[string]bool
+	applied map[string]bool
+	// refused is every driven tree whose catch-up a holder's refusal or the listener's grant
+	// finished undelivered while its root heard, which quiesce ends with that architect's relaunch
+	// (relaunchAfterRefusal).
+	refused map[string]bool
+	// handedRow is the newest outbox row at the moment the root handed its child over, 0 before
+	// that: every row at or below it was composed while the child was still in the root's tree.
+	handedRow int64
+	publishd  int
+	counts    keptCounts
 }
 
 // A person's decision on a tree nobody in it can hear reaches an architect of that tree exactly
@@ -463,12 +519,17 @@ type keptRun struct {
 // PostgreSQL, and holds each run to the invariant after every step:
 //
 //   - no decision is told twice (a start task prompt or a published catch-up naming it again);
-//   - every catch-up telling names the generation its root stands at when the architect receives
-//     it, and every start-task telling reaches a root that has an architect to hear it: a start
-//     task names no generation, and it is held on its claim, unsent, while its root is parked,
-//     lingering or waiting for its slot (supervise's Deps.RootHears);
+//   - every catch-up telling names the generation its root stood at when the daemon decided to
+//     send it — read where its publish began, not once the publish returned, since the publish is
+//     network I/O outside every transaction and a re-admission landing inside it is followed by
+//     that generation's own catch-up (observe) — and every start-task telling reaches a root that
+//     has an architect to hear it: a start task names no generation, and it is held on its claim,
+//     unsent, while its root is parked, lingering or waiting for its slot (supervise's
+//     Deps.RootHears);
 //   - once the run quiesces — every injected failure off, every row drained, each architect ready
-//     and its turns ended — every decision kept has been told once, to an architect of the tree
+//     and its turns ended, and each architect whose catch-up a refusal or a denial finished
+//     undelivered while its root heard relaunched once, which is what ends such a refusal in life
+//     (relaunchAfterRefusal) — every decision kept has been told once, to an architect of the tree
 //     its own issue stood in when it was told, and nothing is left kept under any root.
 //
 // The last is per root, not per run: the root hands its child into a tree of its own (handOver,
@@ -605,7 +666,7 @@ func newKeptRun(t *testing.T, seed int64, steps int) *keptRun {
 		trees:     outboxTreeStore(t, pool, keptRoot),
 		claims:    &outboxClaimStore{},
 		rt:        &keptRuntime{Runtime: fake.NewRuntime()},
-		publisher: &keptPublisher{},
+		publisher: &keptPublisher{genAt: map[string]uint64{}},
 		stateDir:  t.TempDir(),
 		at:        time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC),
 		told:      map[string][]keptTelling{},
@@ -615,6 +676,7 @@ func newKeptRun(t *testing.T, seed int64, steps int) *keptRun {
 		keys:      map[string]bool{},
 		applied:   map[string]bool{},
 	}
+	run.publisher.atPublish = run.rootGeneration
 	parent := keptRoot
 	run.root = &keptTree{key: keptRoot, token: mustClaimToken(t, keptRoot, claim.RoleArchitect), conn: fake.NewConn(),
 		topic: architectTopic(t, keptRoot),
@@ -925,6 +987,10 @@ func (r *keptRun) handOverEnabled() bool {
 // it would make is applied here, which is the path a person's label takes.
 func (r *keptRun) handOver() {
 	now := time.Now()
+	// Every row the outbox holds now was composed while the child was still in the root's tree: a
+	// task or catch-up of one of them may name a decision on the child, and telling the old
+	// architect it is the one extra telling the invariant accepts (held).
+	r.handedRow = r.lastRow()
 	if err := pgx.BeginFunc(r.ctx, r.pool, func(tx pgx.Tx) error {
 		if err := r.records.PutHandover(r.ctx, tx, record.Handover{Issue: keptChild, Tree: r.root.issue.Tree,
 			Generation: r.root.issue.Generation}); err != nil {
@@ -1194,7 +1260,8 @@ func (r *keptRun) finishRow(row record.OutboxRow) error {
 // noteRun records what one row's run did, read against the claim and the listener as they stood
 // before it: a start that relaunched a failed claim (the outbox's start, case StateFailed), a
 // catch-up the executor finished because nobody will hold the architect's role again — the only
-// ending a no-holder answer has besides the wait — and the claim's own fall to failed, which the
+// ending a no-holder answer has besides the wait — a catch-up a refusal or a denial finished
+// undelivered while its root heard (noteRefusal), and the claim's own fall to failed, which the
 // daemon tells the workflow (claimFailed).
 func (r *keptRun) noteRun(tree *keptTree, before supervise.ClaimState, answered [keptModes]int, payload record.OutboxPayload, runErr error) {
 	switch value := payload.(type) {
@@ -1203,12 +1270,18 @@ func (r *keptRun) noteRun(tree *keptTree, before supervise.ClaimState, answered 
 			r.counts.retriedFailed++
 		}
 	case record.Notice:
-		if value.CatchUp != nil && runErr == nil && r.publisher.answers()[keptNoHolder] > answered[keptNoHolder] {
+		if value.CatchUp == nil {
+			break
+		}
+		if runErr == nil && r.publisher.answers()[keptNoHolder] > answered[keptNoHolder] {
 			r.counts.endedCatchUps++
 			if claimEnded(before) {
 				r.counts.endedByFailure++
 			}
 			r.tracef("catch-up finished undelivered: nobody will hold the architect's role again (claim=%s)", keptClaimState(before))
+		}
+		if tree != nil && refusedOrDenied(r.publisher.answers(), answered) {
+			r.noteRefusal(tree)
 		}
 	}
 	if tree == nil {
@@ -1221,19 +1294,47 @@ func (r *keptRun) noteRun(tree *keptTree, before supervise.ClaimState, answered 
 }
 
 // noteTogether reads what a step that ran several rows at once did: which architect claims fell to
-// failed while they ran, which the daemon's terminal hook tells the workflow, and how many
-// catch-ups ended for an architect that will not hold its role again. Which row did which is not
-// read: the rows ran beside each other, and only what they left behind is a fact of the step.
+// failed while they ran, which the daemon's terminal hook tells the workflow, how many catch-ups
+// ended for an architect that will not hold its role again, and whether a refusal or a denial
+// finished one undelivered. Which row did which is not read: the rows ran beside each other, and
+// only what they left behind is a fact of the step, so a refusal is noted for every driven tree
+// whose root heard then.
 func (r *keptRun) noteTogether(before map[string]supervise.ClaimState, answered [keptModes]int) {
 	if ended := r.publisher.answers()[keptNoHolder] - answered[keptNoHolder]; ended > 0 {
 		r.counts.endedCatchUps += ended
 	}
+	refused := refusedOrDenied(r.publisher.answers(), answered)
 	for _, tree := range r.roots {
+		if refused {
+			r.noteRefusal(tree)
+		}
 		if after := r.claimState(tree); before[tree.key] != supervise.StateFailed && after == supervise.StateFailed {
 			r.counts.failedClaim++
 			r.claimFailed(tree)
 		}
 	}
+}
+
+// refusedOrDenied says whether a catch-up publish was refused by its architect's holder or denied
+// by the listener's own NATS grant between the two readings of the publisher's answers: the two
+// endings that finish a catch-up undelivered with its decisions left to the row's deletion, which
+// no retry of that row and no fresh catch-up can change while the refusal stands.
+func refusedOrDenied(after, before [keptModes]int) bool {
+	return after[keptRefuses] > before[keptRefuses] || after[keptDenied] > before[keptDenied]
+}
+
+// noteRefusal records that a catch-up of tree was refused or denied while tree's root had an
+// architect to hear it, so what that catch-up named was released by the row's deletion with
+// nothing to name it again. What ends a refusal in real life is the architect's next launch, whose
+// ready names every unclaimed decision, and quiesce drives one (relaunchAfterRefusal).
+func (r *keptRun) noteRefusal(tree *keptTree) {
+	if !r.architectToHear(tree.key) {
+		return
+	}
+	if r.refused == nil {
+		r.refused = map[string]bool{}
+	}
+	r.refused[tree.key] = true
 }
 
 // claimStates is the state of every driven tree's architect claim now, by root key.
@@ -1501,6 +1602,14 @@ func (r *keptRun) restartDaemon() {
 // waiting — never when it runs, which would hand a lost decision a fresh namer and hide it — and
 // then the rows of every driven tree, its architects' launches and their turns driven, in random
 // order, until no row is left and no delivery is pending.
+//
+// One thing more is driven, and only where the run met it: a catch-up a holder's refusal or the
+// listener's own grant finished undelivered while its root heard (noteRefusal) leaves what it
+// named to the row's deletion, and nothing names it again while that refusal stands — a fresh
+// catch-up would be refused too. What ends a refusal in real life is the architect's next launch,
+// so once nothing else is left to drive, each such architect is relaunched once
+// (relaunchAfterRefusal) and that launch's ready names every unclaimed decision. Nothing else is
+// relaxed: the relaunch is an operation of the machinery, driven as every other step's is.
 func (r *keptRun) quiesce() {
 	r.records.fails.Store(false)
 	r.rt.setRefuses(false)
@@ -1528,6 +1637,9 @@ func (r *keptRun) quiesce() {
 			}
 		}
 		if len(actions) == 0 {
+			if r.relaunchAfterRefusal() {
+				continue
+			}
 			r.tracef("quiesced")
 			return
 		}
@@ -1536,6 +1648,45 @@ func (r *keptRun) quiesce() {
 		r.deliverRowsTheRunDoesNotDrive()
 	}
 	r.fatalf("the rows and deliveries of %s did not drain in %d quiescence steps", strings.Join(r.rootKeys(), ", "), keptQuiesceBound)
+}
+
+// relaunchAfterRefusal ends one refusal the run met: the architect whose catch-up a holder's
+// refusal or the listener's grant finished undelivered while its root heard is relaunched, which
+// is what ends such a refusal in life — the session that would not take the delivery is gone, and
+// the launch that replaces it is told everything unclaimed in its ready's catch-up. Its process is
+// ended through the fake runtime as a death, which the supervisor answers with the relaunch; the
+// agent is then brought up (ready) and the workflow told that ready (readyFact), as every launch
+// of the run is. False is no refusal left to end.
+func (r *keptRun) relaunchAfterRefusal() bool {
+	for _, tree := range r.roots {
+		if !r.refused[tree.key] {
+			continue
+		}
+		delete(r.refused, tree.key)
+		machine, found := r.sup.Machine(tree.token)
+		if !found || machine.Claim().Locator == nil {
+			r.tracef("the refusal of %s's catch-up ends with no relaunch: its architect has no process", tree.key)
+			continue
+		}
+		r.step++
+		if err := machine.Handle(r.ctx, supervise.RuntimeObservation{Observation: runtime.Observation{
+			Locator: *machine.Claim().Locator, Kind: runtime.Gone, At: time.Now()}}); err != nil {
+			r.fatalf("end the process of %s's architect after its catch-up was refused: %v", tree.key, err)
+		}
+		r.waitMachines()
+		r.tracef("relaunch tree=%s architect=%s: the session that refused its catch-up is gone", tree.key,
+			keptClaimState(r.claimState(tree)))
+		if r.readyEnabled(tree) {
+			r.ready(tree)
+		}
+		if _, _, told := r.readyFactEnabled(tree); told {
+			r.readyFact(tree)
+		}
+		r.observe()
+		r.deliverRowsTheRunDoesNotDrive()
+		return true
+	}
+	return false
 }
 
 // runLeftoverRow runs one of the remaining rows whatever its backoff says: a quiesced daemon has
@@ -1565,28 +1716,43 @@ func (r *keptRun) report() {
 	r.t.Logf("seed %d: %s", r.seed, r.counts)
 }
 
-// held is the run's verdict once it has quiesced: every decision kept was told once, to an
-// architect of the tree its own issue stood in when it was told, and no root keeps anything. A
-// telling that reached another tree's architect pays no debt: the decision's issue had left that
-// architect's tree, so what it was owed is still owed.
+// held is the run's verdict once it has quiesced: every decision kept was told exactly once to an
+// architect of the tree its issue stands in now, and no root keeps anything.
+//
+// One telling more is accepted, and only one: a decision on an issue the root handed over, carried
+// to the old tree's architect by a row composed before that hand-over. Such a row's task or
+// catch-up names the reference in text written while the issue was still in that tree, and the row
+// can be prompted or published long after — a start whose launch kept failing, a task held on the
+// claim until its root heard again. Telling the old architect pays nothing of what the child's
+// architect is owed (the issue has left its tree), and the decision is kept for the child all the
+// same (record.Store.MoveKeptDecisions, ReKeepDeliveredDecisions), so the child's architect is told
+// it too: a person's decision is never lost, and told twice is the lesser fault. Any other telling
+// to another tree's architect, and any second telling to one architect, is a fault.
 func (r *keptRun) held() {
 	for _, tracked := range r.tracked {
+		tree := r.treeOf(tracked.issue)
 		var owed int
-		var elsewhere []string
+		var elsewhere, overheard []string
 		for _, telling := range r.told[tracked.ref] {
-			if telling.tree == telling.issueTree {
+			if telling.tree == tree {
 				owed++
 				continue
 			}
-			elsewhere = append(elsewhere, fmt.Sprintf("at step %d by %s, the architect of %s, while %s stood in the tree of %s",
-				telling.step, telling.how, telling.tree, tracked.issue, telling.issueTree))
+			line := fmt.Sprintf("at step %d by %s, the architect of %s, while %s stood in the tree of %s",
+				telling.step, telling.how, telling.tree, tracked.issue, telling.issueTree)
+			if r.beforeTheHandOver(telling, tree) {
+				overheard = append(overheard, line)
+				continue
+			}
+			elsewhere = append(elsewhere, line)
 		}
-		if owed == 1 && len(elsewhere) == 0 {
+		if owed == 1 && len(elsewhere) == 0 && len(overheard) <= 1 {
 			continue
 		}
-		r.fatalf("%s, an ask of %s now in the tree of %s, was told %d times to an architect of its own tree and %d times to another tree's architect (%s), want once and never: "+
+		r.fatalf("%s, an ask of %s now in the tree of %s, was told %d times to an architect of its own tree, %d times to another tree's architect (%s) "+
+			"and %d times to the architect of the tree it left by a row composed before the hand-over (%s), want once, never, and at most once: "+
 			"a person's decision kept while nobody in its tree could hear it must reach an architect of the tree its issue is in exactly once",
-			tracked.ref, tracked.issue, r.treeOf(tracked.issue), owed, len(elsewhere), keptElsewhere(elsewhere))
+			tracked.ref, tracked.issue, tree, owed, len(elsewhere), keptElsewhere(elsewhere), len(overheard), keptElsewhere(overheard))
 	}
 	for _, root := range r.rootKeys() {
 		if left := keptDecisions(r.t, r.pool, r.base, root); len(left) != 0 {
@@ -1594,6 +1760,15 @@ func (r *keptRun) held() {
 				root, len(left), keptRefs(left))
 		}
 	}
+}
+
+// beforeTheHandOver says whether a telling that reached another tree's architect than the one the
+// decision's issue stands in now is the one such telling the invariant accepts: it went to the tree
+// the issue left — the root the run opens with, the only tree a hand-over here takes an issue out
+// of — and the row that carried it was composed before that hand-over (handedRow, the newest row
+// when it ran), so its text named the reference while the issue was still in that tree.
+func (r *keptRun) beforeTheHandOver(telling keptTelling, tree string) bool {
+	return r.handedRow != 0 && tree != keptRoot && telling.tree == keptRoot && telling.row != 0 && telling.row <= r.handedRow
 }
 
 func keptElsewhere(elsewhere []string) string {
@@ -1613,8 +1788,15 @@ func keptRefs(decisions []record.ParkedDecision) string {
 
 // observe reads what each architect was told since the last step — the prompts its connection
 // received and the catch-ups the publisher delivered to its role topic — and holds each telling to
-// the invariant: no reference twice, a catch-up naming the generation its root stands at now, and
-// a start task reaching a root that has an architect to hear it.
+// the invariant: no reference twice, a catch-up naming the generation its root stood at when the
+// daemon decided to send it, and a start task reaching a root that has an architect to hear it.
+//
+// The generation a catch-up is held to is the one the publisher read as the listener took it
+// (generationAtPublish), not the one the root stands at once the publish has returned: the daemon
+// decides to send a catch-up at its lease-time check, before the publish, and the publish is
+// network I/O outside every transaction. A re-admission that lands inside it leaves this telling
+// the generation it was decided at, and is followed by that generation's own catch-up, queued
+// behind this one.
 //
 // One telling is one delivery, not one frame: a prompt frame carries the daemon's delivery id, and
 // a shim that sees the same id twice answers it without a second turn (supervise.Delivery), so the
@@ -1637,7 +1819,7 @@ func (r *keptRun) observe() {
 				r.fatalf("the architect of %s was prompted by delivery %q, whose outbox row %d the run never saw", tree.key, prompt.DeliveryID, row)
 			}
 			for _, ref := range r.refsIn(prompt.Message) {
-				r.tell(keptTelling{ref: ref, prompt: true, hears: r.architectToHear(tree.key), named: named, root: generation,
+				r.tell(keptTelling{ref: ref, prompt: true, hears: r.architectToHear(tree.key), named: named, root: generation, row: row,
 					tree: tree.key, issueTree: r.treeOf(r.refIssue[ref]), step: r.step,
 					how: fmt.Sprintf("the start task of row %d, prompt %s", row, prompt.DeliveryID)})
 			}
@@ -1655,9 +1837,16 @@ func (r *keptRun) observe() {
 			continue
 		}
 		r.keys[delivered.key] = true
-		generation := r.storedGeneration(tree.key)
+		generation, known, err := r.publisher.generationAtPublish(delivered.key)
+		if err != nil {
+			r.fatalf("the generation a catch-up published at could not be read: %v", err)
+		}
+		if !known {
+			r.fatalf("the catch-up published under %s to the architect of %s was taken by the listener without its root's generation read",
+				delivered.key, tree.key)
+		}
 		for _, ref := range r.refsIn(notice.CatchUp.Decided) {
-			r.tell(keptTelling{ref: ref, named: notice.CatchUp.Generation, root: generation, tree: tree.key,
+			r.tell(keptTelling{ref: ref, named: notice.CatchUp.Generation, root: generation, row: keptRowOfKey(delivered.key), tree: tree.key,
 				issueTree: r.treeOf(r.refIssue[ref]), step: r.step,
 				how: fmt.Sprintf("the catch-up published under %s", delivered.key)})
 		}
@@ -1684,21 +1873,26 @@ func (r *keptRun) architectToHear(key string) bool {
 	return hears
 }
 
-// tell records one telling and holds it to the two invariants a telling can break on its own.
+// tell records one telling and holds it to the invariants a telling can break on its own: no
+// architect is told one decision twice, a start task reaches a root that has an architect to hear
+// it, and a catch-up names the generation its root was at when the daemon decided to send it.
 // Which architect heard it is not one of them: a decision's issue can leave for a tree of its own
-// between the keeping and the telling, so where the debt stands is read once the run has quiesced
-// (held).
+// between the keeping and the telling, and a row composed before that can still tell the tree it
+// left, so where the debt stands is read once the run has quiesced (held).
 func (r *keptRun) tell(telling keptTelling) {
-	if before := r.told[telling.ref]; len(before) > 0 {
-		r.fatalf("%s was told twice: first at step %d by %s, now by %s; a person's decision reaches its architect once",
-			telling.ref, before[0].step, before[0].how, telling.how)
+	for _, before := range r.told[telling.ref] {
+		if before.tree == telling.tree {
+			r.fatalf("%s was told twice to the architect of %s: first at step %d by %s, now by %s; a person's decision reaches its architect once",
+				telling.ref, telling.tree, before.step, before.how, telling.how)
+		}
 	}
 	switch {
 	case telling.prompt && !telling.hears:
 		r.fatalf("%s was told by %s while %s has no architect to hear it (parked, lingering, or waiting for its slot): a start task reaches an architect of the root's current run",
 			telling.ref, telling.how, telling.tree)
 	case !telling.prompt && telling.named != telling.root:
-		r.fatalf("%s was told by %s, which names generation %d, while %s stands at generation %d: every catch-up names the generation the root is at when its architect receives it",
+		r.fatalf("%s was told by %s, which names generation %d, while %s stood at generation %d when the daemon decided to send it: "+
+			"every catch-up names the generation its root is at when it is sent",
 			telling.ref, telling.how, telling.named, telling.tree, telling.root)
 	}
 	r.told[telling.ref] = append(r.told[telling.ref], telling)
@@ -1722,6 +1916,21 @@ func (r *keptRun) refsIn(text string) []string {
 // for an id no row minted.
 func keptRowOfDelivery(id string) int64 {
 	rest, found := strings.CutPrefix(id, outboxDeliveryPrefix)
+	if !found {
+		return 0
+	}
+	row, err := strconv.ParseInt(rest, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return row
+}
+
+// keptRowOfKey is the outbox row a published notice's dedupe key names (record.OutboxKey), and 0
+// for a key no row minted. A re-held copy goes out under the key of the row it copies, which is the
+// row whose text it carries.
+func keptRowOfKey(key string) int64 {
+	_, rest, found := strings.Cut(key, ":")
 	if !found {
 		return 0
 	}
@@ -1904,6 +2113,22 @@ func (r *keptRun) storedGeneration(key string) uint64 {
 		r.fatalf("read the generation of %s: %v", key, err)
 	}
 	return generation
+}
+
+// rootGeneration is the generation the root whose architect holds topic stands at, false for a
+// topic no driven tree's architect holds. The publisher reads it as it takes a catch-up, on
+// whichever lane is publishing, so it answers the error rather than ending the run from a
+// goroutine of its own.
+func (r *keptRun) rootGeneration(topic string) (uint64, bool, error) {
+	tree := r.treeTopic(topic)
+	if tree == nil {
+		return 0, false, nil
+	}
+	var generation uint64
+	if err := r.pool.QueryRow(r.ctx, "select generation from issues where key = $1", tree.key).Scan(&generation); err != nil {
+		return 0, false, fmt.Errorf("read the generation of %s while its catch-up published: %w", tree.key, err)
+	}
+	return generation, true, nil
 }
 
 func (r *keptRun) waitsForSlot() bool {

@@ -7,7 +7,8 @@ import (
 )
 
 // 0065 adds parked_decisions and readmitted_approvals: a root keeps one decision row per Dispatch
-// reference and one approval below its spec's latest version, and both go with the issue they name.
+// reference, with the issue it was decided on, and one approval below its spec's latest version,
+// and both go with the issue they name.
 func TestParkedDecisionsArriveWith0065AndGoWithTheirRoot(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
@@ -39,17 +40,22 @@ func TestParkedDecisionsArriveWith0065AndGoWithTheirRoot(t *testing.T) {
 		values ('LEGION-210', 'LEGION-210', 'LEGION', 'parked root', 'done', 1, 'backlog', 'A', 1)`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Pool().Exec(ctx, `insert into parked_decisions (root, ref, decision, actor, at)
-		values ('LEGION-210', 'dispatch://LEGION-210/spec', 'design-approved', 'user:alice', now())`); err != nil {
+	if _, err := store.Pool().Exec(ctx, `insert into parked_decisions (root, ref, issue, decision, actor, at)
+		values ('LEGION-210', 'dispatch://LEGION-210/spec', 'LEGION-210', 'design-approved', 'user:alice', now())`); err != nil {
 		t.Fatalf("keep a decision: %v", err)
 	}
-	if _, err := store.Pool().Exec(ctx, `insert into parked_decisions (root, ref, decision, actor, at)
-		values ('LEGION-210', 'dispatch://LEGION-210/spec', 'design-changes-requested', 'user:bob', now())`); err == nil ||
+	if _, err := store.Pool().Exec(ctx, `insert into parked_decisions (root, ref, issue, decision, actor, at)
+		values ('LEGION-210', 'dispatch://LEGION-210/spec', 'LEGION-210', 'design-changes-requested', 'user:bob', now())`); err == nil ||
 		!strings.Contains(err.Error(), "duplicate key") {
 		t.Fatalf("a second row for one ref = %v, want the primary key to refuse it", err)
 	}
 	if _, err := store.Pool().Exec(ctx, `insert into parked_decisions (root, ref, decision, actor, at)
-		values ('LEGION-404', 'dispatch://LEGION-404/spec', 'design-approved', 'user:alice', now())`); err == nil ||
+		values ('LEGION-210', 'dispatch://LEGION-210/ask/ask-1', 'ask-answered', 'user:alice', now())`); err == nil ||
+		!strings.Contains(err.Error(), "not-null") {
+		t.Fatalf("a decision naming no issue = %v, want the not-null constraint to refuse it: a kept row records where it was decided", err)
+	}
+	if _, err := store.Pool().Exec(ctx, `insert into parked_decisions (root, ref, issue, decision, actor, at)
+		values ('LEGION-404', 'dispatch://LEGION-404/spec', 'LEGION-404', 'design-approved', 'user:alice', now())`); err == nil ||
 		!strings.Contains(err.Error(), "foreign key") {
 		t.Fatalf("a decision on an unrecorded root = %v, want the foreign key to refuse it", err)
 	}

@@ -64,10 +64,12 @@ func WaitsForSlot(ctx context.Context, tx pgx.Tx, store Store, root Issue) (bool
 //     moved back into the workflow is nobody's parked tree (RelayNotParked): either keeps nothing.
 //   - Only a person decides (PersonActor): a session's write, the daemon's own included, is no
 //     decision to relay (RelayNoPerson).
-//   - What is kept is kept until the start or catch-up that named it reached an architect
-//     (Store.ForgetKeptDecisions); one that reached none hands it over to a fresh catch-up
-//     (workflow.HandOverKept), so it is never left unclaimed while its root has an architect to
-//     tell. What is relayed is one parked-decision controller notice of
+//   - What is kept is kept under root, with issue, the issue it was decided on, so that a child
+//     handed over into a tree of its own takes what was decided on it and its descendants with it
+//     (admit.Admission.readmit). It is kept until the start or catch-up that named it reached an
+//     architect (Store.ForgetKeptDecisions); one that reached none hands it over to a fresh
+//     catch-up (workflow.HandOverKept), so it is never left unclaimed while its root has an
+//     architect to tell. What is relayed is one parked-decision controller notice of
 //     issue, naming root, the decision, where in Dispatch, who made it, and a spec decision's
 //     version and a changes request's reason.
 //
@@ -93,7 +95,7 @@ func RelayParkedDecision(ctx context.Context, tx pgx.Tx, store Store, issue stri
 		}
 		return RelayNoPerson, nil
 	}
-	decision.Root = root.Key
+	decision.Root, decision.Issue = root.Key, issue
 	if err := store.AddParkedDecision(ctx, tx, decision); err != nil {
 		return RelayNone, err
 	}
@@ -111,13 +113,21 @@ func RelayParkedDecision(ctx context.Context, tx pgx.Tx, store Store, issue stri
 	return RelaySent, nil
 }
 
-// DecisionMark identifies one kept decision an architect's start task or catch-up named: its
-// Dispatch reference and the time of the decision the root kept then (ParkedDecision.At). A newer
-// decision a person made on the same reference since replaces that row with a later time, so the
-// forget leaves it for the next start or catch-up to name.
+// DecisionMark identifies one kept decision an architect's start task or catch-up named, and holds
+// what re-keeping it needs: its Dispatch reference and the time of the decision the root kept then
+// (ParkedDecision.At) identify the row — a newer decision a person made on the same reference since
+// replaces that row with a later time, so the forget leaves it for the next start or catch-up to
+// name — and the issue it was decided on, its kind and its author are the rest of that row, carried
+// so that a task still holding it can be written back as a kept decision of another root: the
+// hand-over of a child re-keeps for the child what a held task of the old root's architect names of
+// its subtree (Store.ReKeepDeliveredDecisions), those rows having been deleted when the claim took
+// the task.
 type DecisionMark struct {
-	Ref string    `json:"ref"`
-	At  time.Time `json:"at"`
+	Ref      string       `json:"ref"`
+	At       time.Time    `json:"at"`
+	Issue    string       `json:"issue,omitempty"`
+	Decision DecisionKind `json:"decision,omitempty"`
+	Actor    string       `json:"actor,omitempty"`
 }
 
 // KeptDecisions is what one architect start task or catch-up named of what its root keeps
@@ -133,13 +143,15 @@ type KeptDecisions struct {
 	Latest    int            `json:"latest,omitempty"`
 }
 
-// KeptToldSource is the processed-event source a catch-up marks, under the key of its own outbox
-// row (OutboxKey), once its publish has told the architect what it named — before it forgets those
-// rows, in a transaction of its own. Only that mark says the architect was told when the forget
-// fails or the daemon dies before its commit: the row's next run then forgets what it named rather
-// than hand it over, and no drop of the root's queued catch-ups takes the row away before it does
-// (Store.DropCatchUps). A start needs none: its claim records the row with the delivery
-// (supervise.Claim.DeliveredRows).
+// KeptToldSource is the processed-event source a catch-up marks, under the dedupe key its publish
+// went out on (Notice.Published, which a re-held copy shares with the row it copies, since one key
+// is one telling however many rows publish it), once that publish has told the architect what it
+// named — before it forgets those rows, in a transaction of its own. Only that mark says the
+// architect was told when the forget fails or the daemon dies before its commit: the row's next run
+// then forgets what it named rather than hand it over, and no drop of the root's queued catch-ups
+// takes the row away before it does (Store.DropCatchUps, whose SQL computes that same key from the
+// row it names, its original for a copy). A start needs none: its claim records the row with the
+// delivery (supervise.Claim.DeliveredRows).
 const KeptToldSource = "kept-told"
 
 func (k KeptDecisions) validate() error {

@@ -66,6 +66,14 @@ type Delivery struct {
 	// task is sent behind interruptedTask from then on (message). The task text stays as the
 	// workflow wrote it.
 	Interrupted bool
+	// Kept is what the task names of the decisions a person made while nobody in the root's tree
+	// could hear them, as the row that queued the task recorded them (record.KeptDecisions, encoded
+	// JSON). It is opaque here — this package knows nothing of the record — and is carried and
+	// persisted with the delivery for one reader: the hand-over of a child into a tree of its own,
+	// which re-keeps for the child what a held, unconfirmed task of the old root's architect names
+	// of its subtree, those rows having been forgotten when the claim queued the task
+	// (record.Store.ReKeepDeliveredDecisions). Empty for a task that names none.
+	Kept []byte
 }
 
 // StillWorked says whether a claim in state will still work this task as the task of generation's
@@ -135,7 +143,8 @@ func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 	if id == "" {
 		id = rand.Text()
 	}
-	d := Delivery{ID: id, Task: task, Phase: request.Phase, Generation: request.Generation, QueuedAt: m.deps.Clock.Now()}
+	d := Delivery{ID: id, Task: task, Phase: request.Phase, Generation: request.Generation, Kept: request.Kept,
+		QueuedAt: m.deps.Clock.Now()}
 	if request.Row > 0 {
 		// The claim records the row only once the store has it with the delivery: a write that
 		// failed leaves the row undelivered, so its retry queues the task.
@@ -158,7 +167,8 @@ func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 // to hear it, and the claim's connection is registered. A missing connection is not a
 // failure — the shim's next hello sends it. A delivery an earlier daemon may have sent is sent
 // again only after the agent says it is not already in a turn; if it is, that turn is taken as the
-// delivery's.
+// delivery's — except for a root architect's task of a run, which no turn of the agent's own is
+// ever taken for, since it may be a task nobody has sent at all (asksRoot).
 func (m *Machine) sendPending(ctx context.Context) error {
 	// A claim holding a suspension is handed nothing (holdSuspension).
 	if state := m.claim.State; (state != StateReady && state != StateIdle) || m.held != nil {
@@ -187,6 +197,31 @@ func (m *Machine) sendPending(ctx context.Context) error {
 			return err
 		}
 	}
+	// A root architect's task of a run (asksRoot) is the one delivery the question a restart left
+	// never answers: such a task may be one nobody has ever sent — it is held on the claim while
+	// its root has no architect to hear it, across restarts — and the decisions it names were
+	// forgotten when the claim queued it, so a turn of the agent's own taken for this task's would
+	// retire it unsent at that turn's end and lose a person's decision. The question is resolved
+	// here rather than asked: while the root does not hear, the task stays pending and unconfirmed
+	// and nothing is sent; once the root hears, it is sent. A send can meet an agent still in a
+	// turn of its own, which answers it busy and leaves the task waiting, charged nothing (refused,
+	// table.go), and the turn's end sends it again: sending again is the lesser fault of the two.
+	// Its phase check always holds — such a task names no phase — so a dropped task is never this
+	// one.
+	if m.asksRoot(*p) {
+		m.askFirst = false
+		hears, err := m.rootHears(ctx, *p)
+		if err != nil {
+			return err
+		}
+		if !hears {
+			m.log.Info("supervise: the root of this task's tree has no architect to hear it; the task stays pending",
+				"delivery", p.ID, "issue", m.claim.Issue, "run", p.Generation)
+			return nil
+		}
+		m.startSend(conn, *p)
+		return nil
+	}
 	// The question a restart left — whether the turn the agent may be in is the pending
 	// delivery's — is asked once, here, whether or not that delivery survived the phase check.
 	// Left armed with nothing pending, it would make the next task the running turn's: confirmed,
@@ -211,28 +246,28 @@ func (m *Machine) sendPending(ctx context.Context) error {
 	if !holds {
 		return nil
 	}
-	hears, err := m.rootHears(ctx, *p)
-	if err != nil {
-		return err
-	}
-	if !hears {
-		m.log.Info("supervise: the root of this task's tree has no architect to hear it; the task stays pending",
-			"delivery", p.ID, "issue", m.claim.Issue, "run", p.Generation)
-		return nil
-	}
 	m.startSend(conn, *p)
 	return nil
 }
 
+// asksRoot says whether a delivery's send waits on whether the root of this claim's tree has an
+// architect to hear it (rootHears): a root architect's task of a run — it names no phase and a
+// run, and the claim is its tree's root — on a daemon with a workflow to answer for it. It is also
+// what says the question a restart left cannot confirm that task by itself (table.go's
+// turnStarted): a task nobody has sent is no task in flight.
+func (m *Machine) asksRoot(d Delivery) bool {
+	return m.deps.RootHears != nil && d.Phase == "" && d.Generation != 0 && m.claim.treeRoot()
+}
+
 // rootHears asks whether the root of this claim's tree has an architect to hear the task now
-// (Deps.RootHears). Only a root architect's task of a run is put to the answer: it names no phase,
-// so the phase check never drops it, and its decisions were forgotten when the claim queued it, so
-// a prompt while the tree is parked, lingering or waiting for its slot would tell them to an
-// architect no run of the root owns. Every other delivery — a phase worker's, an operator's, a
-// production check's look, the controller's start message — is sent as it always was, and a daemon
-// with no workflow configured supplies no answer, where every delivery is sent.
+// (Deps.RootHears). Only a root architect's task of a run is put to the answer (asksRoot): it names
+// no phase, so the phase check never drops it, and its decisions were forgotten when the claim
+// queued it, so a prompt while the tree is parked, lingering or waiting for its slot would tell
+// them to an architect no run of the root owns. Every other delivery — a phase worker's, an
+// operator's, a production check's look, the controller's start message — is sent as it always was,
+// and a daemon with no workflow configured supplies no answer, where every delivery is sent.
 func (m *Machine) rootHears(ctx context.Context, d Delivery) (bool, error) {
-	if m.deps.RootHears == nil || d.Phase != "" || d.Generation == 0 || !m.claim.treeRoot() {
+	if !m.asksRoot(d) {
 		return true, nil
 	}
 	hears, err := m.deps.RootHears(ctx, m.claim, d)

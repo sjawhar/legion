@@ -14,3 +14,15 @@
 -- forgets what it named, and one it did not hands those claims over to a fresh catch-up, so a
 -- release never leaves a kept decision unclaimed while its root has an architect to tell.
 alter table claims add column delivered_rows bigint[] not null default '{}';
+
+-- pending_task_deliveries.kept_decisions is what that task names of the decisions a person made
+-- while nobody in the root's tree could hear them (supervise.Delivery.Kept, record.KeptDecisions as
+-- JSON), kept with the delivery because the rows themselves are forgotten the moment the claim
+-- queues the task: from then on the task is the only thing that carries them, and it can wait on a
+-- ready or idle claim for generations while its root is parked, lingering or waiting for its slot
+-- (supervise's Deps.RootHears). One reader: the hand-over of a child into a tree of its own, which
+-- re-keeps for the child, unclaimed under the child's key, every decision on the child's subtree
+-- that such a held, unconfirmed task names, so the child's own architect is told it
+-- (record.Store.ReKeepDeliveredDecisions, admit.Admission.readmit). An empty object is a task that
+-- names none.
+alter table pending_task_deliveries add column kept_decisions jsonb not null default '{}'::jsonb;

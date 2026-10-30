@@ -1009,9 +1009,17 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			// settle or a ClaimReady below that failed, a crash before the row finished) queues the
 			// task again neither while it is pending nor once the claim has retired it
 			// (supervise.Claim.DeliveredRows), and that same record is what says, when the row
-			// settles what its task named, that the architect has it (settleKept).
+			// settles what its task named, that the architect has it (settleKept). What the task
+			// names of what its root keeps travels with it as well (supervise.Delivery.Kept): those
+			// rows are forgotten the moment the claim takes the task, so a held task is the only
+			// thing that carries them, and a hand-over of a child reads them there to re-keep what
+			// was decided on the child's subtree (record.Store.ReKeepDeliveredDecisions).
+			kept, err := keptJSON(payload.Kept)
+			if err != nil {
+				return err
+			}
 			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: payload.Task, Phase: payload.Phase, Generation: payload.Generation,
-				ID: fmt.Sprintf("%s%d", outboxDeliveryPrefix, row.ID), Row: row.ID}); err != nil {
+				ID: fmt.Sprintf("%s%d", outboxDeliveryPrefix, row.ID), Row: row.ID, Kept: kept}); err != nil {
 				return fmt.Errorf("deliver to claim %s: %w", token, err)
 			}
 			gave = true

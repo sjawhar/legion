@@ -91,7 +91,8 @@ func ParkedDecisionTask(ctx context.Context, tx pgx.Tx, store record.Store, gate
 		named := make([]string, 0, len(decisions))
 		for _, d := range decisions {
 			named = append(named, fmt.Sprintf("%s (%s by %s)", d.Ref, d.Decision, d.Actor))
-			kept.Decisions = append(kept.Decisions, record.DecisionMark{Ref: d.Ref, At: d.At})
+			kept.Decisions = append(kept.Decisions, record.DecisionMark{Ref: d.Ref, At: d.At, Issue: d.Issue,
+				Decision: d.Decision, Actor: d.Actor})
 		}
 		parts = append(parts, fmt.Sprintf("While nobody in %s's tree could hear it, a person decided on the tree: %s. Read each before you continue.",
 			root.Key, strings.Join(named, "; ")))
@@ -150,15 +151,17 @@ func (e *Engine) EnqueueNaming(ctx context.Context, tx pgx.Tx, issue, root strin
 // so a row whose settle committed and whose finish did not writes no second catch-up when it runs
 // again.
 //
-// Two finishes hand over, and only two: an architect start whose task reached no claim (the
-// outbox's settleKept), and a catch-up a newer one supersedes (catchUpSuperseded, the outbox's
-// notice). Every other undelivered finish keeps the older rule — the row's deletion releases what
-// it claimed, and the architect's next ready names every unclaimed decision in its catch-up. Each
-// of those endings is one where the architect can take no notice at all now — its row was deleted
-// under its lease, it is unroutable, its architect stopped with its finished tree or will not hold
-// its role again, its holder refused the delivery or the listener's grant denied it — so a fresh
-// catch-up would reach nobody either, and what the ending releases waits for that architect's next
-// launch, whose ready names every unclaimed decision. A receipt timeout neither forgets nor hands
+// Three finishes hand over, and only three: an architect start whose task reached no claim (the
+// outbox's settleKept), a catch-up a newer one supersedes (catchUpSuperseded, the outbox's
+// notice), and a receipt timeout on a catch-up the re-hold finds superseded, which queues no copy
+// to carry its claims on (the daemon's reholdNotice, through the same supersededKept). Every other
+// undelivered finish keeps the older rule — the row's deletion releases what it claimed, and the
+// architect's next ready names every unclaimed decision in its catch-up. Each of those endings is
+// one where the architect can take no notice at all now — its row was deleted under its lease, it
+// is unroutable, its architect stopped with its finished tree or will not hold its role again, its
+// holder refused the delivery or the listener's grant denied it — so a fresh catch-up would reach
+// nobody either, and what the ending releases waits for that architect's next launch, whose ready
+// names every unclaimed decision. A receipt timeout that draws a copy neither forgets nor hands
 // over: the re-held copy carries the claims on (Store.MoveKeptClaims).
 func HandOverKept(ctx context.Context, tx pgx.Tx, store record.Store, gate config.DesignGate, rootKey string,
 	from int64, launch uint64, now time.Time) error {
