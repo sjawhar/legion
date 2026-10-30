@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-592",
-  "completed": "2026-10-30T10:19:15Z",
+  "completed": "2026-10-30T11:24:56Z",
   "proof": [
+    {
+      "criterion": "Which Go wait held a write transaction idle in the 1x burst (architect, round 7): no write waits on admission, a writer gate or a pool while it holds its transaction; the idle time is document work inside the transaction (INFRA-636's #2468)",
+      "surface": "The real envoy-dispatch binary of the tester's local merge of #2392 7d09eefb into b18e2678 (32ea5013, build-info clean) on INFRA-589's 2-core stack (lt3), under the 1x load",
+      "command": "LOADTEST_SRC=/legion/scratch/tmp/infra-592-tester/m2392 run-step.sh r9-1x-{a,b,c,d} and r10-1x-{e,f,g} --events 4 --sessions 400 --requests 60, each beside stall-sampler.sh (every 0.25 s: pg_stat_activity for a dispatch-requests backend idle in transaction over 1 s, then 0.5 s; on each find, GET /debug/pprof/goroutine?debug=2)",
+      "observed": "7 waits caught, 0.50-1.41 s idle in transaction (transactions 0.58-3.86 s old), after issueOpen (a live fork's injection check) or a doc_updates fold. In every dump the write goroutines are runnable or in IO wait on Postgres, in MarkQuote -> applyLive -> forkLive/warmFork/coldFork, refreshAnchors, IndexDocumentReferences, writeAdvice; 117 goroutines waited in admission.(*gate).acquire, every one in the middleware before its handler (admitted <- trackTransactions <- accesslog), 0 in a writer gate, 0 in a pool acquire. The 1x runs refused 0 reads and 5, 5, 0, 1, 0, 0, 0 writes (at most 0.7%); the g6-1x-b burst (214 reads) did not recur in 7 runs. Evidence: dispatch://INFRA-592/artifact/infra-592-implementer-round7-tar-gz",
+      "headSha": "b18e2678e2b6e6691e3d7e3743a61bc25266aaa6",
+      "negativeControl": "The sampler is not blind to the case it rules out: the same dumps show 117 request goroutines blocked in admission.(*gate).acquire (outside any transaction) and the r9-1x-b samples show the rooms pool with 5 waiters, so a write waiting on admission or a pool would have appeared in its stack"
+    },
     {
       "criterion": "Every request-only refusal of the gated write routes answers before the writer gate, TURN_REQUIRES_ASK for a comment with a turn and no ask_id or reply_to included (tester round 5)",
       "surface": "Real envoy-dispatch binary on INFRA-589's local stack (lt3: Postgres via 1 ms proxy, NATS, listener), built from the head (build-info b18e2678, dirty false)",
@@ -29,24 +37,13 @@
       "negativeControl": "Before (merge-base 2df3353c, PR body tables): 2x-10x 0.0-55 successful reads/s and 3,485-20,174 goroutines waiting for a connection"
     }
   ],
-  "filesChanged": [
-    "packages/envoy/internal/dispatch/api/comment_create.go",
-    "packages/envoy-client/src/dispatch-http.ts (merge: #2376's signal through #send)",
-    "packages/envoy/internal/dispatch/api/session_answers.go (merge)",
-    ".dispatch/architecture/dispatch-api.md (merge)",
-    ".dispatch/architecture/dispatch-outbox.md (merge)",
-    "packages/envoy/AGENTS.md (merge)",
-    "packages/envoy/internal/dispatch/docs/upload_memory_test.go (merge)",
-    "packages/envoy/cmd/dispatch/main.go (merge: #2508's metrics registry beside this PR's pools)",
-    "packages/envoy/internal/dispatch/api/github_app_installation.go (merge)"
-  ],
+  "filesChanged": [],
   "trickyParts": [
-    "#2376's per-call signal now also ends the Retry-After wait in #send (AbortSignal.any with the client's signal)",
-    "A root comment with turn 'nobody' answers TURN_REQUIRES_ASK again, before the turn value check, as before this PR's previous round"
+    "No code change this round: the burst's idle-in-transaction time is document work done in Go between a write's statements, the case INFRA-636's #2468 ('a write holds its transaction id only for its database statements, not while it does document work') removes",
+    "A local three-way merge of #2468 (8b265c32) onto the #2392 merge conflicts in 37 files, so the 1x gate with #2468 merged is measured once #2468 or this PR is on main"
   ],
   "deviations": [
-    "dispatch-api.md's api package file count was 87 on main and 82 on this branch; the resolution writes the counted 99",
-    "One of two 1x runs at b18e2678 refused 150 reads and 11 writes in 1 s wait bursts (the 2-core harness's saturation band without #2392); the repeat refused none"
+    "The g6-1x-b burst itself (5.4 s idle) was not reproduced; the classification rests on 7 shorter waits of the same shape"
   ],
   "openQuestions": []
 }
