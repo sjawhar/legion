@@ -70,8 +70,8 @@ func (e *ErrAskBlockUnrepresentable) Error() string {
 // A block whose question a person's edit emptied is read leniently (askBlockToEdit), so that an
 // edit carrying a question repairs it: a block holding no question is one no ask edit could
 // reach, and the refusal of every other edit of it names the step that does
-// (refuseEmptyQuestionEdit). Such a block is weighed on its question before its content rule,
-// and an edit carrying a question is written into it whatever that rule says.
+// (refuseEmptyQuestionEdit). Such a block is weighed on that question rather than on its content
+// rule, and an edit carrying a question is written into it whatever that rule says.
 func (s *Service) SetAskBlockText(
 	ctx context.Context,
 	artifactID, blockID string,
@@ -88,29 +88,23 @@ func (s *Service) SetAskBlockText(
 		if err != nil {
 			return err
 		}
-		// A block read leniently is weighed on its empty question first. No document edit
+		// A block read leniently is weighed on its empty question alone. No document edit
 		// repairs it: a delete may not leave a decision it changes unreadable
 		// (validateEditedAskBlocks), and one asking nothing is unreadable, so the deletes the
 		// content rule's refusal names are a step no caller can take yet, and a refusal must
 		// name only the step that applies now. That step is the question, which this route
 		// writes into the block whatever the content rule says, since no document edit writes
-		// a paragraph inside a decision (refuseEmptyQuestionEdit holds that reason).
-		writesTheQuestion := emptyQuestion && edit.Question != nil && normalizeAskQuestion(*edit.Question) != ""
+		// a paragraph inside a decision (refuseEmptyQuestionEdit holds that reason). Every
+		// other block is weighed on its content rule instead: for one that reads as a decision
+		// the rule is decided once, before the edit is built, and askBlockChildren then yields
+		// the question's paragraphs and at most one list, which keeps it. A block that breaks
+		// it is refused, and repaired where a person writes it (refuseAskContentEdit).
 		if emptyQuestion {
-			if err := refuseEmptyQuestionEdit(block, writesTheQuestion); err != nil {
+			if err := refuseEmptyQuestionEdit(block, edit); err != nil {
 				return err
 			}
-		}
-		// For a block that reads as a decision the content rule is decided once, before the
-		// edit is built: askBlockChildren then yields the question's paragraphs and at most one
-		// list, which keeps the rule. It is weighed before the question, since a question
-		// written into a block that breaks the rule is a rebuild of that block, which this
-		// route makes for no edit of a decision: such a block is refused with its rule, and
-		// repaired where a person writes it (refuseAskContentEdit).
-		if !writesTheQuestion {
-			if err := refuseAskContentEdit(tree, block); err != nil {
-				return err
-			}
+		} else if err := refuseAskContentEdit(tree, block); err != nil {
+			return err
 		}
 		want := AskBlockText{
 			Question: block.question,
@@ -119,10 +113,10 @@ func (s *Service) SetAskBlockText(
 			Urgency:  block.urgency,
 			// The write leaves more than one bullet list only where it repairs an emptied
 			// question: the lists of such a block are kept as they are, and an options edit
-			// of it is refused (askBlockChildren). Every other edit reaching here is of a
-			// block that keeps its content rule, which leaves it at most one list, and
-			// writes at most one itself.
-			SeveralOptionLists: writesTheQuestion && len(askBlockLists(block.node)) > 1,
+			// of it is refused (askBlockChildren). Every other edit reaching here passed the
+			// content rule, which leaves the block at most one list, and writes at most one
+			// itself.
+			SeveralOptionLists: len(askBlockLists(block.node)) > 1,
 		}
 		attributes := pmdoc.Attrs{}
 		if edit.Multiple != nil {
@@ -601,9 +595,9 @@ func normalizeAskOptions(options []model.AskOption) []model.AskOption {
 
 // refuseEmptyQuestionEdit refuses edit, an ask edit of block, an ask block whose question a
 // person's edit emptied (parseAskBlockLeniently), where no question of the edit's can be written
-// into it; it returns nil where one can. It is weighed before the block's content rule, which an
-// edit carrying a question is written whatever it says (askBlockChildren), because the one thing
-// that repairs such a block is a question: an edit carrying one has it written where the block's
+// into it; it returns nil where one can, which is the one edit of such a block that applies and
+// is written whatever the block's content rule says (askBlockChildren). The one thing that
+// repairs such a block is a question: an edit carrying one has it written where the block's
 // paragraphs are, and an edit carrying none is refused with that step, since the block's own
 // sentence names none and an agent reading it has nowhere to go.
 //
@@ -622,7 +616,7 @@ func normalizeAskOptions(options []model.AskOption) []model.AskOption {
 // an agent has, and the document editor, where a person writes the question beside the
 // paragraph. The block and the paragraph are quoted as data (quotedAskChild), never written into
 // the reason raw.
-func refuseEmptyQuestionEdit(block askBlock, writesTheQuestion bool) error {
+func refuseEmptyQuestionEdit(block askBlock, edit AskBlockEdit) error {
 	for _, child := range block.node.Children {
 		if child.Type == "bullet_list" || writesNothingButItsText(child) {
 			continue
@@ -639,7 +633,7 @@ func refuseEmptyQuestionEdit(block askBlock, writesTheQuestion bool) error {
 				"the document editor; either keeps what the paragraph holds",
 			block.id, quoted)}
 	}
-	if writesTheQuestion {
+	if edit.Question != nil && normalizeAskQuestion(*edit.Question) != "" {
 		return nil
 	}
 	return &ErrAskBlockUnrepresentable{Field: "block", Reason: fmt.Sprintf(

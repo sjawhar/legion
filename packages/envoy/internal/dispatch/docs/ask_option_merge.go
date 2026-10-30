@@ -111,9 +111,9 @@ func mergeAskOptions(list *pmdoc.Node, options []model.AskOption) []mergedOption
 // changing the other's description would move a person's sub-list under the line it rewrote and
 // drop the item that says what it left alone.
 //
-// held is what each item of the list says, read as parseAskBlock reads it (heldAskOptions). The
-// ask-edit route's refusals and the merge pair here, over this one list, so the words the route
-// weighs are the words the merge writes over (refuseLostOptionWords, mergeAskOptions).
+// held is what each item of the list says, read as parseAskBlock reads it (heldAskOptions). It
+// is read once, by the merge, and the ask-edit route's refusals weigh the merge's result
+// (refuseLostOptionWords), so the words the route weighs are the words the merge writes over.
 func pairedAskOptions(held, options []model.AskOption) []int {
 	pairs := make([]int, len(options))
 	for index := range pairs {
@@ -154,10 +154,12 @@ func heldAskOptions(items []*pmdoc.Node) []model.AskOption {
 // dropped by the merge, and a pair whose description changed has its line replaced by the plain
 // line the edit sends (mergeAskOptions).
 //
-// It is weighed before the block's children are built, over the pairing the merge writes over
-// (pairedAskOptions), so the two can never disagree, and outside the merge because settlement's
-// restore of a decided wording goes through the merge with no caller to answer a refusal
-// (writeDecidedWording).
+// It weighs the merge's own result rather than pairing a second time (mergeAskOptions): an entry
+// holding an item the merge does not keep whole is a rewrite of that item's line, and an item no
+// entry holds is a drop, so what the refusal weighs and what the write does cannot drift. A
+// rewrite is weighed before a drop, and the whole edit is refused on the first of either. It is
+// weighed outside the merge because settlement's restore of a decided wording goes through the
+// merge with no caller to answer a refusal (writeDecidedWording).
 func refuseLostOptionWords(current askBlock, edit AskBlockEdit) error {
 	edit = withoutUnchanged(current, edit)
 	if edit.Options == nil {
@@ -169,34 +171,27 @@ func refuseLostOptionWords(current askBlock, edit AskBlockEdit) error {
 	if list == nil {
 		return nil
 	}
-	options := normalizeAskOptions(*edit.Options)
-	items := list.Children
-	held := heldAskOptions(items)
-	taken := make([]bool, len(items))
-	for sent, match := range pairedAskOptions(held, options) {
-		if match < 0 {
+	merged := mergeAskOptions(list, normalizeAskOptions(*edit.Options))
+	paired := make(map[*pmdoc.Node]struct{}, len(merged))
+	for _, option := range merged {
+		if option.held == nil {
 			continue
 		}
-		taken[match] = true
-		if held[match].Description == options[sent].Description {
+		paired[option.held] = struct{}{}
+		// An item the merge keeps whole is written back as it is, and one holding nothing has
+		// no line to lose: the rewrite writes one and deletes nothing.
+		if option.whole || len(option.held.Children) == 0 {
 			continue
 		}
-		// An item holding nothing has no line to lose: the rewrite writes one and deletes
-		// nothing.
-		if len(items[match].Children) == 0 {
-			continue
+		if line := option.held.Children[0]; !writesNothingButItsText(line) {
+			return refuseRewrittenOptionLine(line, optionOfItem(option.held))
 		}
-		line := items[match].Children[0]
-		if rendersTheSame(line, optionParagraph(held[match])) {
-			continue
-		}
-		return refuseRewrittenOptionLine(line, held[match])
 	}
-	for index, item := range items {
-		if taken[index] || holdsOnlyItsOptionLine(item, held[index]) {
+	for _, item := range list.Children {
+		if _, held := paired[item]; held || holdsOnlyItsOptionLine(item) {
 			continue
 		}
-		return refuseDroppedOptionItem(list, item, held[index])
+		return refuseDroppedOptionItem(list, item, optionOfItem(item))
 	}
 	return nil
 }
@@ -238,7 +233,8 @@ func restoreOptionItems(parsed, list *pmdoc.Node, merged []mergedOption) (*pmdoc
 }
 
 // refuseDroppedOptionItem refuses the whole options edit, writing nothing, because it drops item,
-// the list item of option, which holds more than the line the option writes. An ask row shows
+// which holds more than its own plain line (holdsOnlyItsOptionLine); option is what the item
+// says, read as parseAskBlock reads it, and names it in the refusal. An ask row shows
 // nothing of what a person wrote under an option, so the caller sending the edit cannot see what
 // dropping it deletes: the refusal quotes the item whole, its nested content and all, as the
 // markdown of a document holding one bullet list holding it alone, so every word of it can be
@@ -284,21 +280,14 @@ func itemContent(item *pmdoc.Node) []*pmdoc.Node {
 }
 
 // holdsOnlyItsOptionLine reports whether item holds nothing a rebuilt list would not write
-// again: it renders to exactly what a fresh item for option renders to (optionItem). An item
-// holding a sub-list, a second paragraph, a link's address, bold, code or an image renders to
-// more than that, and dropping it would delete what a person wrote; a mark the markdown never
-// writes, the editor's own on every character a person types among them, renders to nothing and
-// is nothing to lose (rendersTheSame).
-func holdsOnlyItsOptionLine(item *pmdoc.Node, option model.AskOption) bool {
-	return rendersTheSame(listOfOneItem(item), listOfOneItem(optionItem(option)))
-}
-
-// listOfOneItem is a list item in the shape a document holds it, which is the shape a refusal
-// quotes it in and the shape one item is compared with another in (refuseDroppedOptionItem): a
-// bullet list holding it alone. The list carries no attributes of its own, so what two of these
-// render differently is the items.
-func listOfOneItem(item *pmdoc.Node) *pmdoc.Node {
-	return &pmdoc.Node{Type: "bullet_list", Children: []*pmdoc.Node{item}}
+// again: one line, written as a paragraph, that writes no more than the text in it
+// (writesNothingButItsText). An item holding a sub-list, a second paragraph, a link's address,
+// bold, code or an image writes more than that, and dropping it would delete what a person
+// wrote; the whitespace a person typed in its line is text, and is written again, so an item
+// whose line reads "Hold: Wait " is the edit's to drop as one reading "Hold: Wait" is.
+func holdsOnlyItsOptionLine(item *pmdoc.Node) bool {
+	return len(item.Children) == 1 && item.Children[0].Type == "paragraph" &&
+		writesNothingButItsText(item.Children[0])
 }
 
 // rendersTheSame reports whether two nodes write the same markdown, which is all a document
