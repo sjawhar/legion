@@ -12,13 +12,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// The two kinds of round supervise.Claim.UpdateRound spells: a pod's, which every role claim of
-// one issue shares, and one claim's own plugin round (supervise's refreshPlugin).
-const (
-	podRoundPrefix    = "pod:"
-	pluginRoundPrefix = "plugin:"
-)
-
 // reconcilePodUpdates carries every update round of this project one step, over the claims the
 // orphan sweep already read this tick. A running issue pod whose configuration has drifted is
 // never replaced where it is found: that ends every role process in it mid-turn and deletes the
@@ -47,7 +40,7 @@ func (s *supervision) reconcilePodUpdates(ctx context.Context, claims []supervis
 		if c.Issue == "" {
 			// The project controller's claim: no pod round, but a plugin round of its own runs
 			// here as any other claim's does.
-			if strings.HasPrefix(c.UpdateRound, pluginRoundPrefix) {
+			if strings.HasPrefix(c.UpdateRound, supervise.PluginRoundPrefix) {
 				s.reconcilePluginUpdate(ctx, c, now)
 			}
 			continue
@@ -87,7 +80,7 @@ func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string,
 	// terminal pod, a failed init container, a superseded disk, a lost launcher binding — and its
 	// disk went with it while a worker still had work to push. A round every blocking claim
 	// answered lost nothing, and ends below with the drift or the replacement.
-	if open != "" && open != podRoundPrefix+pod && len(waitingClaims(group, open)) > 0 {
+	if open != "" && open != supervise.PodRoundPrefix+pod && len(waitingClaims(group, open)) > 0 {
 		s.podWentWithoutItsRound(ctx, issue, group, open, pod)
 		return
 	}
@@ -112,7 +105,7 @@ func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string,
 			"issue", issue, "reasons", reasons)
 		return
 	}
-	s.openPodUpdate(ctx, issue, group, podRoundPrefix+pod, pod, reasons, now)
+	s.openPodUpdate(ctx, issue, group, pod, reasons, now)
 }
 
 // completePodUpdate replaces the pod and ends the round when the round is over: every claim that
@@ -123,6 +116,14 @@ func (s *supervision) reconcileIssuePodUpdate(ctx context.Context, issue string,
 // ReplacePod is called once, with the process of the first claim that records one; a round whose
 // pod is already gone replaces nothing and only ends. A failed ReplacePod is logged and retried at
 // the next tick: nothing is ended, so the round still holds every worker's next task.
+//
+// The call is bounded to one sweep interval, because it is the only thing in this loop that waits
+// on a pod: it takes that pod's launch turn and then waits the pod out, up to
+// worker_boot_timeout_seconds, while every other issue's round, this tick's stale-plugin re-posts
+// and the orphan reaping behind it wait. The bound costs the round nothing. The suspension that
+// displaces the pod has already landed when it hits, so the next tick finds the Sandbox
+// suspended, ReplacePod answers nil and the round ends there; nothing is deleted earlier than it
+// would have been, and the round stays open until the call succeeds.
 func (s *supervision) completePodUpdate(ctx context.Context, issue string, group []supervise.Claim, round, pod string) bool {
 	waiting := waitingClaims(group, round)
 	if len(waiting) > 0 {
@@ -134,7 +135,9 @@ func (s *supervision) completePodUpdate(ctx context.Context, issue string, group
 		return true
 	}
 	if k, running := podProcess(group); running {
-		if err := s.runtime.ReplacePod(ctx, k); err != nil {
+		bounded, done := context.WithTimeout(ctx, s.plan.orphanSweep)
+		defer done()
+		if err := s.runtime.ReplacePod(bounded, k); err != nil {
 			if ctx.Err() == nil {
 				s.log.Error("supervise: replace the pod of a finished update round; retrying at the next sweep",
 					"issue", issue, "round", round, "pod", pod, "error", err)
@@ -173,7 +176,8 @@ func (s *supervision) podWentWithoutItsRound(ctx context.Context, issue string, 
 // work — and is not retired. A claim with no session has never had a worker and blocks nothing. A
 // failed or operator-suspended claim blocks until the operator acts, which is this issue's own
 // rule, and the notice below is what tells the operator.
-func (s *supervision) openPodUpdate(ctx context.Context, issue string, group []supervise.Claim, round, pod string, reasons []string, now time.Time) {
+func (s *supervision) openPodUpdate(ctx context.Context, issue string, group []supervise.Claim, pod string, reasons []string, now time.Time) {
+	round := supervise.PodRoundPrefix + pod
 	blocking := blockingClaims(group)
 	joined := strings.Join(reasons, ", ")
 	task := supervise.PodUpdateTask(joined)
@@ -195,7 +199,7 @@ func (s *supervision) openPodUpdate(ctx context.Context, issue string, group []s
 		// installed. Nothing is replaced, and the operator drains the pod by hand.
 		s.tellUpdateStalled(ctx, updateStall{
 			issue: issue, round: round, pod: pod, reasons: reasons, group: group,
-			waiting: waitingOf(deaf, true),
+			waiting: waitingOf(deaf),
 			reason: fmt.Sprintf("a worker's plugin predates daemon contract %d, so it can never answer the update task",
 				supervise.PodUpdateContract),
 			message: cannotAnswerMessage(reasons, deaf),
@@ -205,7 +209,7 @@ func (s *supervision) openPodUpdate(ctx context.Context, issue string, group []s
 	if now.Sub(*opened) >= s.cfg.PodUpdateNotice {
 		s.tellUpdateStalled(ctx, updateStall{
 			issue: issue, round: round, pod: pod, reasons: reasons, group: group,
-			waiting: waitingOf(waitingClaims(group, round), false),
+			waiting: waitingOf(waitingClaims(group, round)),
 			reason: fmt.Sprintf("the update round has waited %s for its workers to answer",
 				now.Sub(*opened).Round(time.Minute)),
 		})
@@ -218,7 +222,7 @@ func (s *supervision) openPodUpdate(ctx context.Context, issue string, group []s
 // anyway.
 func (s *supervision) reconcilePluginUpdates(ctx context.Context, group []supervise.Claim, now time.Time) {
 	for _, c := range group {
-		if strings.HasPrefix(c.UpdateRound, pluginRoundPrefix) {
+		if strings.HasPrefix(c.UpdateRound, supervise.PluginRoundPrefix) {
 			s.reconcilePluginUpdate(ctx, c, now)
 		}
 	}
@@ -246,7 +250,7 @@ func (s *supervision) reconcilePluginUpdate(ctx context.Context, c supervise.Cla
 	s.supervisor.post(c.Token, supervise.PodUpdateOpen{
 		Claim: c.Token, Round: round, Reasons: c.UpdateReasons, Task: supervise.PodUpdateTask(c.UpdateReasons),
 	})
-	deaf := c.PluginContract < supervise.PodUpdateContract
+	deaf := !supervise.CanAnswerUpdate(c)
 	late := c.UpdateOpenedAt != nil && now.Sub(*c.UpdateOpenedAt) >= s.cfg.PodUpdateNotice
 	if c.UpdateToldAt != nil || !(deaf || late) {
 		return
@@ -261,7 +265,7 @@ func (s *supervision) reconcilePluginUpdate(ctx context.Context, c supervise.Cla
 	reasons := splitReasons(c.UpdateReasons)
 	stall := updateStall{
 		issue: c.Issue, round: round, reasons: reasons, group: []supervise.Claim{c},
-		waiting: waitingOf([]supervise.Claim{c}, deaf),
+		waiting: waitingOf([]supervise.Claim{c}),
 	}
 	switch {
 	case deaf:
@@ -419,7 +423,7 @@ func podOf(locator *runtime.Locator) string {
 // openPodRound is the pod round open over the group, and "" when none is.
 func openPodRound(group []supervise.Claim) string {
 	for _, c := range group {
-		if strings.HasPrefix(c.UpdateRound, podRoundPrefix) {
+		if strings.HasPrefix(c.UpdateRound, supervise.PodRoundPrefix) {
 			return c.UpdateRound
 		}
 	}
@@ -505,11 +509,11 @@ func workingClaims(group []supervise.Claim) []string {
 }
 
 // cannotAnswer is every claim that can never answer an update task: its registration declared a
-// plugin contract below the one that introduced the op (supervise.PodUpdateContract).
+// plugin contract below the one that introduced the op (supervise.CanAnswerUpdate).
 func cannotAnswer(claims []supervise.Claim) []supervise.Claim {
 	var deaf []supervise.Claim
 	for _, c := range claims {
-		if c.PluginContract < supervise.PodUpdateContract {
+		if !supervise.CanAnswerUpdate(c) {
 			deaf = append(deaf, c)
 		}
 	}
@@ -528,13 +532,14 @@ func podProcess(group []supervise.Claim) (runtime.Known, bool) {
 }
 
 // waitingOf is the claims as the controller's notice lists them, so it can retry one claim or ask
-// the operator. deaf marks claims whose plugin can never answer.
-func waitingOf(claims []supervise.Claim, deaf bool) []record.UpdateWaiting {
+// the operator; each is marked with whether its plugin can answer at all
+// (supervise.CanAnswerUpdate).
+func waitingOf(claims []supervise.Claim) []record.UpdateWaiting {
 	waiting := make([]record.UpdateWaiting, len(claims))
 	for i, c := range claims {
 		waiting[i] = record.UpdateWaiting{
 			Claim: string(c.Token), Role: c.Role, State: string(c.State),
-			CannotAnswer: deaf || c.PluginContract < supervise.PodUpdateContract,
+			CannotAnswer: !supervise.CanAnswerUpdate(c),
 		}
 	}
 	return waiting

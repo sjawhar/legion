@@ -6,22 +6,17 @@ package sandbox
 import (
 	"encoding/json"
 	"fmt"
-	"hash/fnv"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-// podUpdateRunIssue is pod-update's issue key in the run whose project is project: S4A- and the
-// FNV-1a hash of that project and this check's own name, so it is neither cache-b's key
+// podUpdateRunIssue is pod-update's issue key in the run whose project is project, seeded by that
+// project and this check's own name (runIssue), so it is neither cache-b's key
 // (cacheRunIssue) nor another run's. Both workers of the issue push its branch, legion/<issue>,
 // onto the run's repository, which every Stage 4a run shares, so each run only ever creates and
 // deletes its own; the key keeps cache-b's `legion/S4A-<digits>` shape, so a branch a killed run
 // left is swept by cache-lost-volume's own sweep (staleRunBranches).
-func podUpdateRunIssue(project string) string {
-	sum := fnv.New32a()
-	_, _ = sum.Write([]byte(project + " pod-update"))
-	return fmt.Sprintf("S4A-%d", sum.Sum32())
-}
+func podUpdateRunIssue(project string) string { return runIssue(project + " pod-update") }
 
 // movedPodShape is the recorded shape with its disk moved one gibibyte up, and the one reason the
 // runtime then names for the pod (podShapeDrift). The disk is what the harness moves because it is

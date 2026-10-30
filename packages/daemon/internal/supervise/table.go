@@ -1438,21 +1438,32 @@ func exit(m *Machine, ctx context.Context, ev Event) error {
 // than a fault: the update task must never displace the work in flight. The refusal is swallowed,
 // UpdateTaskedAt is left as it was, and the next tick asks again — which lands as soon as that
 // turn is over.
+//
+// The claim is written only where this post changed it: a round the claim was not in, reasons
+// that have grown, or a task this post actually sent. The sweep posts to every claim of every
+// open round at every tick, for the hours a round can run, and a post that decided nothing has
+// nothing to write — as refreshPlugin's own re-post returns before any write.
 func openPodUpdate(m *Machine, ctx context.Context, ev Event) error {
 	open := ev.(PodUpdateOpen)
 	now := m.deps.Clock.Now()
+	changed := false
 	if m.claim.UpdateRound != open.Round {
 		m.log.Info("supervise: an update round is open on this claim; its worker is asked to push its work and answer",
 			"round", open.Round, "reasons", open.Reasons)
 		opened := now
+		m.clearUpdate()
 		m.claim.UpdateRound, m.claim.UpdateReasons, m.claim.UpdateOpenedAt = open.Round, open.Reasons, &opened
-		m.claim.UpdateTaskedAt, m.claim.UpdateSignalledAt, m.claim.UpdateToldAt = nil, nil, nil
-		m.claim.UpdateHead = ""
-	} else {
+		changed = true
+	} else if m.claim.UpdateReasons != open.Reasons {
 		m.claim.UpdateReasons = open.Reasons
+		changed = true
 	}
+	tasked := m.claim.UpdateTaskedAt
 	if err := m.askForUpdate(ctx, open, now); err != nil {
 		return err
+	}
+	if !changed && m.claim.UpdateTaskedAt == tasked {
+		return nil
 	}
 	return m.persist(ctx)
 }
@@ -1463,7 +1474,7 @@ func (m *Machine) askForUpdate(ctx context.Context, open PodUpdateOpen, now time
 	if m.claim.UpdateSignalledAt != nil {
 		return nil
 	}
-	if m.claim.PluginContract < PodUpdateContract {
+	if !CanAnswerUpdate(m.claim) {
 		m.log.Info("supervise: the claim's plugin predates ready_for_update, so it is not asked to answer the update round",
 			"round", open.Round, "pluginContract", m.claim.PluginContract, "podUpdateContract", PodUpdateContract)
 		return nil
@@ -1511,9 +1522,7 @@ func (m *Machine) askForUpdate(ctx context.Context, open PodUpdateOpen, now time
 func endPodUpdate(m *Machine, ctx context.Context, ev Event) error {
 	ended := ev.(PodUpdateEnded)
 	m.log.Info("supervise: the update round is over for this claim", "round", m.claim.UpdateRound, "relaunch", ended.Relaunch)
-	m.claim.UpdateRound, m.claim.UpdateReasons, m.claim.UpdateHead = "", "", ""
-	m.claim.UpdateOpenedAt, m.claim.UpdateTaskedAt = nil, nil
-	m.claim.UpdateSignalledAt, m.claim.UpdateToldAt = nil, nil
+	m.clearUpdate()
 	if ended.Relaunch {
 		m.claim.PluginRelaunchFor = m.deps.PluginContract
 		return m.replaceProcess(ctx, "the process on another plugin contract is replaced now that its worker has pushed its work")
@@ -1522,6 +1531,15 @@ func endPodUpdate(m *Machine, ctx context.Context, ev Event) error {
 		return err
 	}
 	return m.sendPending(ctx)
+}
+
+// clearUpdate drops every field an update round writes, which is what a round leaving this claim
+// means: the round the sweep ends (endPodUpdate), and the round a new one replaces, whose fields
+// are each the earlier round's (openPodUpdate).
+func (m *Machine) clearUpdate() {
+	m.claim.UpdateRound, m.claim.UpdateReasons, m.claim.UpdateHead = "", "", ""
+	m.claim.UpdateOpenedAt, m.claim.UpdateTaskedAt = nil, nil
+	m.claim.UpdateSignalledAt, m.claim.UpdateToldAt = nil, nil
 }
 
 // podUpdateSignalled records the worker's answer to the update task — its work is pushed, and the

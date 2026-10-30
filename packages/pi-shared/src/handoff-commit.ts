@@ -87,6 +87,26 @@ function requiredVariable(env: NodeJS.ProcessEnv, name: string, purpose: string)
   return value;
 }
 
+/** The issue the pane works and the branch it names, `legion/<issue>`: the key is the worker's own
+ * environment, so a value that is no Dispatch key would otherwise name a path outside the tree's
+ * own (`.legion/<issue>/…`) and a branch that is nobody's. `purpose` is what the caller cannot do
+ * without the key. */
+function issueBranch(env: NodeJS.ProcessEnv, purpose: string): { issue: string; bookmark: string } {
+  const issue = requiredVariable(env, "LEGION_ISSUE", purpose);
+  if (!DISPATCH_KEY_PATTERN.test(issue)) {
+    throw new Error(
+      `LEGION_ISSUE ${JSON.stringify(issue)} is not a Dispatch issue key like LEGION-1`
+    );
+  }
+  return { issue, bookmark: `legion/${issue}` };
+}
+
+/** The revset of `<bookmark>@origin`: the branch head as the remote has it, which is what the push
+ * check reads and what `ready_for_update` reports. */
+function pushedBranch(bookmark: string): string {
+  return `remote_bookmarks(exact:${JSON.stringify(bookmark)}, exact:"origin")`;
+}
+
 const FOR_HANDOFF = "handoff_complete cannot find the commit to report";
 
 /** The head of `legion/<issue>@origin`, as `ready_for_update` reports it: the commit the pane's
@@ -100,25 +120,8 @@ export async function findPushedBranchHead(input: {
   const jj = input.jj ?? pathJj;
   const purpose = "ready_for_update cannot find the branch head to report";
   const workspace = requiredVariable(env, "LEGION_WORKSPACE", purpose);
-  // The issue key names the branch, and a worker sets its own environment.
-  const issue = requiredVariable(env, "LEGION_ISSUE", purpose);
-  if (!DISPATCH_KEY_PATTERN.test(issue)) {
-    throw new Error(
-      `LEGION_ISSUE ${JSON.stringify(issue)} is not a Dispatch issue key like LEGION-1`
-    );
-  }
-  const bookmark = `legion/${issue}`;
-  return jj(
-    [
-      "log",
-      "-r",
-      `remote_bookmarks(exact:${JSON.stringify(bookmark)}, exact:"origin")`,
-      "--no-graph",
-      "-T",
-      "commit_id",
-    ],
-    workspace
-  );
+  const { bookmark } = issueBranch(env, purpose);
+  return jj(["log", "-r", pushedBranch(bookmark), "--no-graph", "-T", "commit_id"], workspace);
 }
 
 /** The commit a completion of `phase` by `role` reports. */
@@ -130,14 +133,8 @@ export async function findHandoffCommit(input: HandoffCommitInput): Promise<stri
   if (handoff === undefined || handoff.role !== role) {
     return jj(["log", "-r", "@-", "--no-graph", "-T", "commit_id"], workspace);
   }
-  // The issue key names the handoff's directory and the branch, and a worker sets its own
-  // environment: a value such as ../x would otherwise name a path outside the tree's own.
-  const issue = requiredVariable(env, "LEGION_ISSUE", FOR_HANDOFF);
-  if (!DISPATCH_KEY_PATTERN.test(issue)) {
-    throw new Error(
-      `LEGION_ISSUE ${JSON.stringify(issue)} is not a Dispatch issue key like LEGION-1`
-    );
-  }
+  // The issue key names the handoff's directory and the branch (issueBranch).
+  const { issue, bookmark } = issueBranch(env, FOR_HANDOFF);
   const file = `.legion/${issue}/${handoff.word}.json`;
   const fileset = `root:${JSON.stringify(file)}`;
   if ((await jj(["diff", "-r", "@", "--name-only", fileset], workspace)) !== "") {
@@ -179,16 +176,8 @@ export async function findHandoffCommit(input: HandoffCommitInput): Promise<stri
       );
     }
   }
-  const bookmark = `legion/${issue}`;
   const pushed = await jj(
-    [
-      "log",
-      "-r",
-      `${carrying} & ::remote_bookmarks(exact:${JSON.stringify(bookmark)}, exact:"origin")`,
-      "--no-graph",
-      "-T",
-      "commit_id",
-    ],
+    ["log", "-r", `${carrying} & ::${pushedBranch(bookmark)}`, "--no-graph", "-T", "commit_id"],
     workspace
   );
   if (pushed === "") {

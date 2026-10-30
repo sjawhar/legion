@@ -10,15 +10,19 @@ import (
 	"time"
 )
 
-// cacheRunIssue is cache-b's issue key in the run whose project is project: S4A- and the FNV-1a
-// hash of the project. cache-lost-volume pushes the issue's branch, legion/<issue>, onto the run's
-// repository, which every Stage 4a run shares, so each run's key is its own, and a run only ever
-// creates and deletes its own branch.
-func cacheRunIssue(project string) string {
+// runIssue is a Stage 4a check's issue key in the run its seed names: S4A- and the FNV-1a hash of
+// that seed. Each check of a run pushes its issue's branch, legion/<issue>, onto the run's
+// repository, which every Stage 4a run shares, so one seed per check per run gives each its own
+// branch to create and delete (cacheRunIssue, podUpdateRunIssue).
+func runIssue(seed string) string {
 	sum := fnv.New32a()
-	_, _ = sum.Write([]byte(project))
+	_, _ = sum.Write([]byte(seed))
 	return fmt.Sprintf("S4A-%d", sum.Sum32())
 }
+
+// cacheRunIssue is cache-b's issue key in the run whose project is project, seeded by the project
+// itself. cache-lost-volume pushes the issue's branch onto the run's repository.
+func cacheRunIssue(project string) string { return runIssue(project) }
 
 // staleRunBranchAge is longer than any Stage 4a run lives: the script stops its harness at
 // `-test.timeout 150m`, and a run that long skips its teardown, so its cache-b branch stays.

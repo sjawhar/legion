@@ -21,6 +21,14 @@ import (
 // constant above the daemon's own.
 const PodUpdateContract = 43
 
+// CanAnswerUpdate says whether c's worker can answer an update task at all: its registration
+// declared PodUpdateContract or above, so its plugin has the ready_for_update op. It is the one
+// statement of that rule, read by the round itself (askForUpdate), by the stale-plugin lane that
+// decides between a round and an immediate relaunch (refreshPlugin), and by the daemon's sweep,
+// which names the claims a round can never finish on (internal/daemon's cannotAnswer, waitingOf,
+// reconcilePluginUpdate).
+func CanAnswerUpdate(c Claim) bool { return c.PluginContract >= PodUpdateContract }
+
 // registrationTrigger is refreshPlugin's trigger for a stale registration (staleRegistration), as
 // against the boot's and the orphan sweep's posts of StalePlugin.
 const registrationTrigger = "registration"
@@ -70,7 +78,7 @@ func (m *Machine) refreshPlugin(ctx context.Context, trigger string) error {
 	if m.claim.PluginContract == m.deps.PluginContract {
 		return nil
 	}
-	if trigger != registrationTrigger && m.claim.PluginContract >= PodUpdateContract {
+	if trigger != registrationTrigger && CanAnswerUpdate(m.claim) {
 		return m.openPluginUpdate(ctx)
 	}
 	if m.held == nil {
@@ -106,7 +114,7 @@ func (m *Machine) openPluginUpdate(ctx context.Context) error {
 		"daemonApiVersion", m.deps.PluginContract)
 	return openPodUpdate(m, ctx, PodUpdateOpen{
 		Claim:   m.claim.Token,
-		Round:   fmt.Sprintf("plugin:%d", m.deps.PluginContract),
+		Round:   fmt.Sprintf("%s%d", PluginRoundPrefix, m.deps.PluginContract),
 		Reasons: reasons,
 		Task:    PodUpdateTask(reasons),
 	})

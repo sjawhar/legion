@@ -14,9 +14,13 @@ package supervise
 // called directly.
 
 import (
+	"errors"
 	"strconv"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
 const (
@@ -292,7 +296,7 @@ func TestPodUpdateHoldsTheNextTaskUntilTheRoundEnds(t *testing.T) {
 func TestPodUpdateEndedWithRelaunchReplacesTheProcess(t *testing.T) {
 	h := updateHarness(t, PodUpdateContract)
 	h.reach(StateIdle)
-	h.openUpdate("plugin:"+itoa(PodUpdateContract+1), testReasons)
+	h.openUpdate("plugin:"+strconv.Itoa(PodUpdateContract+1), testReasons)
 	h.signalUpdate("c0ffee")
 	stale := h.locator()
 
@@ -325,12 +329,12 @@ func TestPodUpdateOpensARoundForAStalePluginThatCanAnswer(t *testing.T) {
 
 	h.wantState(StateReady)
 	h.wantCalls("Resume", 0)
-	c := h.wantRound("plugin:" + itoa(PodUpdateContract+1))
+	c := h.wantRound("plugin:" + strconv.Itoa(PodUpdateContract+1))
 	if c.PluginRelaunchFor != 0 {
 		t.Errorf("PluginRelaunchFor = %d, want 0: nothing was relaunched yet", c.PluginRelaunchFor)
 	}
-	wantReasons := "the process speaks plugin contract " + itoa(PodUpdateContract) +
-		", and this daemon speaks " + itoa(PodUpdateContract+1)
+	wantReasons := "the process speaks plugin contract " + strconv.Itoa(PodUpdateContract) +
+		", and this daemon speaks " + strconv.Itoa(PodUpdateContract+1)
 	if c.UpdateReasons != wantReasons {
 		t.Errorf("UpdateReasons = %q, want %q", c.UpdateReasons, wantReasons)
 	}
@@ -416,6 +420,67 @@ func TestPodUpdateRecordsTheRoundOnAClaimWithNoAgent(t *testing.T) {
 	}
 }
 
-// itoa is strconv.Itoa under a short name, so the round and reason strings these tests build read
-// as the code under test writes them.
-func itoa(n int) string { return strconv.Itoa(n) }
+// The worker's answer is fenced as every other request an agent makes is: it ends a round, and a
+// round ending deletes the pod's disk, so a process of a superseded generation or of another
+// session must never be what says the work is pushed.
+func TestPodUpdateSignalIsFenced(t *testing.T) {
+	h := updateHarness(t, PodUpdateContract)
+	h.reach(StateReady)
+	h.openUpdate(testRound, testReasons)
+
+	err := h.handle(PodUpdateSignalled{Claim: h.token, Generation: h.generation(), Session: "ses_intruder", Head: "c0ffee"})
+
+	if !errors.Is(err, claim.SameAgentRefusal) {
+		t.Errorf("ready_for_update as another session returned %v, want the same-agent refusal", err)
+	}
+	if c := h.claim(); c.UpdateSignalledAt != nil || c.UpdateHead != "" {
+		t.Errorf("claim after the refused signal = %+v, want the round still waiting for its answer", c)
+	}
+
+	// The relaunch moves the claim to the next generation; the process of the one before it is the
+	// stale one.
+	h.observe(runtime.Gone)
+	h.wantState(StateLaunching)
+
+	err = h.handle(PodUpdateSignalled{Claim: h.token, Generation: h.generation() - 1, Session: session, Head: "c0ffee"})
+
+	if !errors.Is(err, claim.StaleGeneration) {
+		t.Errorf("ready_for_update at the superseded generation returned %v, want the stale-generation refusal", err)
+	}
+	if c := h.claim(); c.UpdateSignalledAt != nil || c.UpdateHead != "" {
+		t.Errorf("claim after the stale signal = %+v, want the round still waiting for its answer", c)
+	}
+}
+
+// The sweep posts an open round over every claim of it at every tick, for as long as the round
+// runs. A post that decides nothing — the same round, the same reasons, and the next ask hours
+// away — writes the claim no more times.
+func TestPodUpdateASettledRoundIsNotWrittenAgain(t *testing.T) {
+	h := updateHarness(t, PodUpdateContract)
+	h.reach(StateReady)
+	h.openUpdate(testRound, testReasons)
+	h.advance(time.Minute)
+	settled := len(h.store.history())
+
+	h.openUpdate(testRound, testReasons)
+	h.openUpdate(testRound, testReasons)
+
+	if got := len(h.store.history()); got != settled {
+		t.Errorf("two further posts of the settled round wrote the claim %d times, want none", got-settled)
+	}
+	h.wantPrompts(1)
+	c := h.wantRound(testRound)
+	if c.UpdateOpenedAt == nil || !c.UpdateOpenedAt.Equal(epoch) {
+		t.Errorf("UpdateOpenedAt = %v, want the first post's %v", c.UpdateOpenedAt, epoch)
+	}
+
+	// Reasons that have grown are a decision, and are written.
+	h.openUpdate(testRound, testReasons+", disk")
+
+	if got := len(h.store.history()); got != settled+1 {
+		t.Errorf("the post carrying new reasons wrote the claim %d times, want once", got-settled)
+	}
+	if stored := h.store.load(h.token); stored.UpdateReasons != testReasons+", disk" {
+		t.Errorf("stored reasons = %q, want the grown %q", stored.UpdateReasons, testReasons+", disk")
+	}
+}

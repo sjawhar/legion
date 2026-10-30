@@ -154,11 +154,12 @@ type Claim struct {
 	// daemon's contract is the one that is charged rather than relaunched again uncharged.
 	PluginRelaunchFor int
 	// UpdateRound is the update round this claim is in, and "" when none is open: the round's
-	// identity and its kind in one string. "pod:<pod uid>" is the drift round of the pod the claim
-	// runs on, which every claim of that pod shares, and "plugin:<daemon contract>" the per-claim
-	// round of a claim whose plugin is behind this daemon. A round ends when the process it waits
-	// for is replaced, and the daemon replaces nothing until every claim of the round has
-	// signalled, so no unpushed work dies with the disk the replacement deletes.
+	// identity and its kind in one string. PodRoundPrefix and the pod's uid is the drift round of
+	// the pod the claim runs on, which every claim of that pod shares, and PluginRoundPrefix and
+	// the daemon's contract the per-claim round of a claim whose plugin is behind this daemon. A
+	// round ends when the process it waits for is replaced, and the daemon replaces nothing until
+	// every claim of the round has signalled, so no unpushed work dies with the disk the
+	// replacement deletes.
 	UpdateRound string
 	// UpdateReasons is what the round was opened for, as the daemon found the drift: the task's
 	// text and the operator's reading of why this pod is being replaced.
@@ -178,6 +179,16 @@ type Claim struct {
 	// not reported again at every sweep that finds it open.
 	UpdateToldAt *time.Time
 }
+
+// The two kinds of round Claim.UpdateRound spells, each with what identifies it: a pod's, which
+// every role claim of one issue shares, and one claim's own plugin round. They are here, beside
+// the field, because a round is written in this package (openPluginUpdate, the daemon's
+// openPodUpdate) and matched in internal/daemon's sweep, which recognises the rounds it must
+// carry by them.
+const (
+	PodRoundPrefix    = "pod:"
+	PluginRoundPrefix = "plugin:"
+)
 
 // RuleMayResume says whether the rule may resume this suspended claim: every suspension but the
 // operator's, which holds until an operator resumes the claim.
@@ -881,6 +892,11 @@ func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 		return m.fenceRequest("ready", ev.Generation, ev.Session)
 	case RequestExit:
 		return m.fenceRequest("exit", ev.Generation, ev.Session)
+	case PodUpdateSignalled:
+		// The worker's answer ends a round, and a round ending deletes a disk: a process of a
+		// superseded generation, or of another session, must never be what says the work is
+		// pushed.
+		return m.fenceRequest("ready_for_update", ev.Generation, ev.Session)
 	}
 	return true, nil
 }

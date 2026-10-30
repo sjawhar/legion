@@ -518,7 +518,7 @@ func (r *Runtime) podTemplate(l launch) podTemplate {
 			Labels: r.labels(l),
 			Annotations: map[string]string{
 				doNotDisruptAnnotation: "true", safeToEvictAnnotation: "false",
-				podShapeAnnotation: podShape(r, l.kind),
+				podShapeAnnotation: r.podShapes[l.kind],
 			},
 		},
 		Spec: spec,

@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -58,6 +59,10 @@ type podShapeRecord struct {
 // unreachable — every field is an API object the API server itself round-trips as JSON — and is
 // logged and recorded as no shape at all, which reads as a pod built before this release: compared
 // by image alone, never replaced for a reservation, a volume, a mount or a disk.
+//
+// Every field is settled when the runtime is built and never written again, so the runtime calls
+// this once per kind, as it is built, and keeps what it answers (r.podShapes): the pod template
+// that records a shape and the sweep that compares one read that string.
 func podShape(r *Runtime, kind podKind) string {
 	encoded, err := json.Marshal(podShapeRecord{
 		Image:     r.image,
@@ -153,13 +158,8 @@ func sameQuantity(held, want string) bool {
 // one this runtime launches every container with, as one reason. A pod is built whole from one
 // image, so one container's drift is the pod's.
 func templateImageDrift(s *sandbox, image string) []string {
-	spec := s.Spec.PodTemplate.Spec
-	for _, containers := range [][]corev1.Container{spec.InitContainers, spec.Containers} {
-		for _, container := range containers {
-			if container.Image != image {
-				return []string{"image " + container.Image + ", now " + image}
-			}
-		}
+	if other, drifted := imageOtherThan(&s.Spec.PodTemplate.Spec, image); drifted {
+		return []string{"image " + other + ", now " + image}
 	}
 	return nil
 }
@@ -179,6 +179,12 @@ func templateImageDrift(s *sandbox, image string) []string {
 // the controller has no issue workspace and nothing to push, so its pod is replaced by its next
 // launch as it always was. It answers nothing when the Sandbox or the pod is absent, or when the
 // pod is not the one the locator records: a pod that is not there needs no round.
+//
+// The sweep asks this of every claim of the deployment at every tick, so the steady state — a pod
+// built from the configuration the runtime still has — costs one read of the annotation the
+// stored template records against the shape the runtime holds for that kind (r.podShapes), both
+// strings. The Sandbox itself is decoded only where those two differ, which is the pod a round is
+// about to be opened over.
 func (r *Runtime) PodDrift(_ context.Context, k runtime.Known) ([]string, error) {
 	if err := k.Validate(); err != nil {
 		return nil, fmt.Errorf("sandbox runtime: pod drift: %w", err)
@@ -195,18 +201,26 @@ func (r *Runtime) PodDrift(_ context.Context, k runtime.Known) ([]string, error)
 		return nil, nil
 	}
 	name := k.Locator.Sandbox.Name
-	s, err := r.storedSandbox(name)
+	u, err := r.storedObject(name)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox runtime: pod drift %s: %w", k.Claim, err)
 	}
-	if s == nil {
+	if u == nil {
 		return nil, nil
 	}
 	pod := r.storedPod(name)
-	if !ownedBy(pod, s.UID) || string(pod.UID) != k.Locator.Sandbox.PodUID {
+	if !ownedBy(pod, u.GetUID()) || string(pod.UID) != k.Locator.Sandbox.PodUID {
 		return nil, nil
 	}
-	drifted := podShapeDrift(s, podShape(r, kind))
+	var drifted []string
+	want := r.podShapes[kind]
+	if held, _, _ := unstructured.NestedString(u.Object, "spec", "podTemplate", "metadata", "annotations", podShapeAnnotation); held != want {
+		s, err := decodeSandbox(u)
+		if err != nil {
+			return nil, fmt.Errorf("sandbox runtime: pod drift %s: %w", k.Claim, err)
+		}
+		drifted = podShapeDrift(s, want)
+	}
 	for _, moved := range r.driftedInPod(pod, role) {
 		drifted = append(drifted, moved.String())
 	}
@@ -247,17 +261,19 @@ func (r *Runtime) ReplacePod(ctx context.Context, k runtime.Known) error {
 	if s == nil || s.mode() == modeSuspended {
 		return nil
 	}
-	pod := r.storedPod(name)
-	if !ownedBy(pod, s.UID) || string(pod.UID) != k.Locator.Sandbox.PodUID {
+	// The pod the Sandbox owns, as every other reader of the two together takes it (viewOf): a
+	// same-named pod it does not own is some earlier Sandbox's, and no pod of this round.
+	v := r.viewOf(name, s)
+	if v.pod == nil || string(v.pod.UID) != k.Locator.Sandbox.PodUID {
 		return nil
 	}
-	if _, err := r.suspendDisplacing(ctx, s, pod.UID); err != nil {
+	if _, err := r.suspendDisplacing(ctx, s, v.pod.UID); err != nil {
 		return fmt.Errorf("replace %s's pod: suspend its sandbox: %w", k.Claim, err)
 	}
 	if _, err := r.awaitPodGone(ctx, s); err != nil {
 		return fmt.Errorf("replace %s's pod: wait out its pod: %w", k.Claim, err)
 	}
-	r.log.Info("sandbox runtime: the pod of a finished update round is replaced", "sandbox", name, "pod", pod.UID, "claim", k.Claim)
+	r.log.Info("sandbox runtime: the pod of a finished update round is replaced", "sandbox", name, "pod", v.pod.UID, "claim", k.Claim)
 	return nil
 }
 

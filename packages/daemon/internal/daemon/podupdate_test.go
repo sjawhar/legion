@@ -14,8 +14,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -48,29 +48,6 @@ const (
 	podUpdateDrift = "image"
 )
 
-// movingClock is time a test moves by hand: the machines and the sweep read the same one, so a
-// bound is reached because the test said so and never because a test ran slowly.
-type movingClock struct {
-	mu  sync.Mutex
-	now time.Time
-}
-
-func (c *movingClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now
-}
-
-func (c *movingClock) advance(d time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.now = c.now.Add(d)
-}
-
-func (c *movingClock) AfterFunc(time.Duration, func()) supervise.Cancel { return stopped{} }
-
-func (c *movingClock) Sleep(ctx context.Context, _ time.Duration) error { return ctx.Err() }
-
 // podUpdateRole is one role claim a test seeds: the state the store holds it in, whether an agent
 // has run for it (a session), whether it records a process in the issue's pod, and the plugin
 // contract its registration declared.
@@ -96,7 +73,7 @@ type podUpdateRig struct {
 	rt      *fake.Runtime
 	pool    *pgxpool.Pool
 	records record.Store
-	clock   *movingClock
+	clock   *heldClock
 	conns   *fake.Conns
 	workers map[claim.Role]*fake.Conn
 	tokens  map[claim.Role]claim.Token
@@ -136,7 +113,7 @@ func newPodUpdateRig(t *testing.T, roles ...podUpdateRole) *podUpdateRig {
 		t.Fatalf("open the store: %v", err)
 	}
 	t.Cleanup(st.Close)
-	clock := &movingClock{now: time.Date(2026, 10, 29, 9, 0, 0, 0, time.UTC)}
+	clock := &heldClock{at: time.Date(2026, 10, 29, 9, 0, 0, 0, time.UTC)}
 	rt := fake.NewRuntime()
 	rt.Now = clock.Now
 	conns := fake.NewConns()
@@ -169,7 +146,7 @@ func newPodUpdateRig(t *testing.T, roles ...podUpdateRole) *podUpdateRig {
 	}
 	rig.s = &supervision{
 		cfg: config.Config{Project: "LEGION", PodUpdateRetask: podUpdateRetask, PodUpdateNotice: podUpdateNotice},
-		log: quietLogger(), plan: plan{clock: clock, project: podUpdateProject, pluginRelaunchable: true},
+		log: quietLogger(), plan: plan{clock: clock, project: podUpdateProject, pluginRelaunchable: true, orphanSweep: orphanSweepInterval},
 		runtime: rt, supervisor: sup,
 		enqueue: (&workflowRuntime{pool: pool, records: records, log: quietLogger()}).enqueueOutbox,
 	}
@@ -435,7 +412,7 @@ func TestPodUpdateTellsTheControllerOnceAfterTheNoticeBound(t *testing.T) {
 	if notice.Update.Round != podUpdateRound || notice.Update.Pod != podUpdatePod {
 		t.Errorf("the notice names round %q of pod %q, want %q of %q", notice.Update.Round, notice.Update.Pod, podUpdateRound, podUpdatePod)
 	}
-	if want := []string{podUpdateDrift, "disk"}; !equalStrings(notice.Update.Reasons, want) {
+	if want := []string{podUpdateDrift, "disk"}; !slices.Equal(notice.Update.Reasons, want) {
 		t.Errorf("the notice names reasons %q, want %q", notice.Update.Reasons, want)
 	}
 	if len(notice.Update.Waiting) != 1 || notice.Update.Waiting[0].Role != claim.RoleImplementer ||
@@ -696,16 +673,4 @@ func promptsOf(conn *fake.Conn, deliveryID string) []fake.Prompt {
 		}
 	}
 	return of
-}
-
-func equalStrings(got, want []string) bool {
-	if len(got) != len(want) {
-		return false
-	}
-	for i := range got {
-		if got[i] != want[i] {
-			return false
-		}
-	}
-	return true
 }
