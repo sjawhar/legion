@@ -1335,25 +1335,8 @@ func TestSetAskBlockTextRefusalOfEveryBrokenBodyLeadsToAValidDecision(t *testing
 			unrepresentable := askEditRefusal(t, before, "ask-lists", err)
 			breaksTheRule := true
 			if unrepresentable.Reason == emptyQuestionStep("ask-lists") {
-				// A body no paragraph of which holds text asks nothing, and its refusal names the
-				// one step that repairs it: this same ask edit again, carrying a question, which
-				// the route writes into the block whatever its content rule says.
-				edit.Question = new(askRepairQuestion)
-				if editErr := sendAskOptions(service, artifactID, edit); editErr != nil {
-					t.Fatalf("the ask edit sent again with a question, as the refusal names: %v\nrefusal: %v", editErr, err)
-				}
-				settleCurrentGeneration(t, service, artifactID)
-				before = liveTree(t, service, artifactID)
-				ask = firstAsk(before)
-				// The decision may break its content rule still, and the refusal after the
-				// question names the blocks to delete, as it does for one that always asked
-				// something.
-				next := sendAskOptions(service, artifactID, edit)
-				breaksTheRule = next != nil
-				if breaksTheRule {
-					err = next
-					unrepresentable = askEditRefusal(t, before, "ask-lists", err)
-				}
+				before, ask, err, unrepresentable, breaksTheRule = followEmptyQuestionStep(
+					t, service, artifactID, "ask-lists", &edit, err, unrepresentable)
 			}
 			kept := textWords(before)
 			if breaksTheRule {
@@ -2175,23 +2158,8 @@ func followAskRefusal(t *testing.T, service *Service, artifactID, blockID string
 	}
 	breaksTheRule := true
 	if unrepresentable.Reason == emptyQuestionStep(blockID) {
-		// The decision asks nothing, and its refusal names the one step that repairs it: this
-		// same ask edit again, carrying a question, which no delete could write into it.
-		edit.Question = new(askRepairQuestion)
-		if editErr := sendAskBlockEdit(service, artifactID, blockID, edit); editErr != nil {
-			t.Fatalf("the ask edit of %q sent again with a question, as the refusal names: %v\nrefusal: %v", blockID, editErr, err)
-		}
-		settleCurrentGeneration(t, service, artifactID)
-		before = liveTree(t, service, artifactID)
-		ask = blockByID(before, blockID)
-		// The decision may break its content rule still, and the refusal after the question
-		// names the blocks to delete, as it does for one that always asked something.
-		next := sendAskBlockEdit(service, artifactID, blockID, edit)
-		breaksTheRule = next != nil
-		if breaksTheRule {
-			err = next
-			unrepresentable = askEditRefusal(t, before, blockID, err)
-		}
+		before, ask, err, unrepresentable, breaksTheRule = followEmptyQuestionStep(
+			t, service, artifactID, blockID, &edit, err, unrepresentable)
 	}
 	kept := textWords(before)
 	if breaksTheRule {
@@ -2268,6 +2236,45 @@ func followAskRefusal(t *testing.T, service *Service, artifactID, blockID string
 		}
 	}
 	return ""
+}
+
+// followEmptyQuestionStep follows the one step the refusal of a decision asking nothing names
+// (emptyQuestionStep): this same ask edit again, carrying a question, which the route writes into
+// the block whatever its content rule says and which no delete could write into it. It writes
+// that question into edit, which its caller reads afterwards for the question the follow wrote,
+// and sends the same edit once more: the decision may break its content rule still, and the
+// refusal of that second edit names the blocks to delete, as it does for one that always asked
+// something.
+//
+// It returns the tree and the decision read again after the question was written, the refusal
+// the caller carries on with - the second edit's where that edit was refused, and otherwise the
+// one this step answered, which the caller reports beside a later failure - and whether the
+// decision breaks its content rule still, which is what the deletes repair. Both corpora of
+// broken bodies follow this step, the bodies enumerated over one decision
+// (TestSetAskBlockTextRefusalOfEveryBrokenBodyLeadsToAValidDecision) and the decisions nested in
+// another (followAskRefusal), so neither can drift from the step the refusal names.
+func followEmptyQuestionStep(
+	t *testing.T,
+	service *Service,
+	artifactID, blockID string,
+	edit *AskBlockEdit,
+	refused error,
+	given *ErrAskBlockUnrepresentable,
+) (before, ask *pmdoc.Node, err error, refusal *ErrAskBlockUnrepresentable, breaksTheRule bool) {
+	t.Helper()
+	edit.Question = new(askRepairQuestion)
+	if editErr := sendAskBlockEdit(service, artifactID, blockID, *edit); editErr != nil {
+		t.Fatalf("the ask edit of %q sent again with a question, as the refusal names: %v\nrefusal: %v",
+			blockID, editErr, refused)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	before = liveTree(t, service, artifactID)
+	ask = blockByID(before, blockID)
+	next := sendAskBlockEdit(service, artifactID, blockID, *edit)
+	if next == nil {
+		return before, ask, refused, given, false
+	}
+	return before, ask, next, askEditRefusal(t, before, blockID, next), true
 }
 
 // askRepairQuestion is the question a follow writes into a decision asking nothing, the one step
@@ -3005,12 +3012,9 @@ func TestRestoringADecidedWordingDropsAnOptionTheDecisionNeverHeld(t *testing.T)
 	}
 }
 
-// sendAskOptions sends edit to the ask-lists block as alice.
+// sendAskOptions sends edit to the ask-lists block as alice (sendAskBlockEdit).
 func sendAskOptions(service *Service, artifactID string, edit AskBlockEdit) error {
-	return joinedWrite(service, func(ctx context.Context) error {
-		_, err := service.SetAskBlockText(ctx, artifactID, "ask-lists", edit, model.Actor{Kind: "user", ID: "alice"})
-		return err
-	})
+	return sendAskBlockEdit(service, artifactID, "ask-lists", edit)
 }
 
 // assertBrokenAskEditRefused checks err refuses an edit of the document's first ask, which breaks
