@@ -10,6 +10,7 @@ import (
 	"runtime/debug"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -613,6 +614,72 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 				reanchors = append(reanchors, reanchor{mark: mark, range_: found.Range, attrs: found.Attrs})
 			}
 		}
+		// An upload over open anchors writes the room the target with its anchors already on it,
+		// built first in a scratch document no one else sees: the target written there, each open
+		// anchor marked again where its quote now stands, and the tree read back. Writing the
+		// target to the room without its anchors and marking them again re-formats every anchored
+		// run twice, stripping each anchor and adding it back: a tombstone per anchor per upload
+		// that the room keeps for the document's life, even where the upload left the anchored text
+		// unchanged. pmdoc.Update leaves the text it finds unchanged as it is, so writing the tree
+		// with its anchors leaves the anchored text the upload did not touch alone.
+		write := target
+		if len(reanchors) > 0 {
+			scratch := newDocumentCopy()
+			scratchFragment := scratch.GetXmlFragment(fragmentName)
+			if err := scratch.TransactE(func(txn *crdt.Transaction) error {
+				if err := pmdoc.Update(txn, scratchFragment, target); err != nil {
+					return err
+				}
+				// One finder over target and one writer over the scratch fragment serve every row, so
+				// the upload flattens target and reads the fragment's text ranges once, not once a row.
+				// Both read nothing until the first row needs them. A row whose quote no longer
+				// resolves keeps no mark, so its miss is never described. Each row is marked at the
+				// occurrence of its quote nearest where it stood, and where that occurrence stands
+				// somewhere the schema allows no mark of its type (pmdoc.ErrMarkNotAllowed: an ask's
+				// quote in a code block, any anchor's in the front matter), at the next nearest that
+				// allows it: an upload that copies anchored text into a code block or the front matter
+				// and keeps the original leaves the anchor on the original. Only when no occurrence
+				// allows the mark is the upload refused, as its markdown's to fix (reanchorError).
+				finder := pmdoc.NewQuoteFinder(target)
+				writer := pmdoc.NewMarkWriter(scratchFragment)
+			reanchors:
+				for _, reanchor := range reanchors {
+					occurrences, err := finder.NearestFirst(reanchor.mark.anchor.Quote, reanchor.range_.From)
+					if errors.Is(err, pmdoc.ErrTargetNotFound) {
+						continue
+					}
+					if err != nil {
+						return reanchorError(reanchor.mark, err)
+					}
+					mark := MarkSpec{
+						Kind:  MarkKind(reanchor.mark.markType),
+						ID:    reanchor.mark.anchor.MarkID,
+						Attrs: reanchor.attrs,
+					}.pmMark()
+					// Every occurrence the schema refuses the mark on is kept, so a quote with
+					// nowhere left to stand names each place it stands, and how many places of each
+					// kind, rather than the last place tried, and one fix of the markdown resolves
+					// the upload.
+					var notAllowed []error
+					for _, occurrence := range occurrences {
+						refused := writer.Mark(txn, occurrence, mark)
+						if refused == nil || errors.Is(refused, pmdoc.ErrTargetNotFound) {
+							continue reanchors
+						}
+						if !errors.Is(refused, pmdoc.ErrMarkNotAllowed) {
+							return reanchorError(reanchor.mark, refused)
+						}
+						notAllowed = append(notAllowed, refused)
+					}
+					return reanchorError(reanchor.mark, notAllowed...)
+				}
+				var err error
+				write, err = pmdoc.ReadInTransaction(txn, scratchFragment)
+				return err
+			}); err != nil {
+				return err
+			}
+		}
 		var updateErr error
 		transact(func(transaction *crdt.Transaction) {
 			// A repair keeps nothing of the unreadable tree, which pmdoc.Update would otherwise
@@ -621,39 +688,9 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 			if length := fragment.Len(); repairing && length > 0 {
 				fragment.Delete(transaction, 0, length)
 			}
-			if updateErr = pmdoc.Update(transaction, fragment, target); updateErr != nil {
-				return
-			}
-			// One finder over target and one writer over the updated fragment serve every row, so
-			// the upload flattens target and reads the fragment's text ranges once, not once a row.
-			// Both read nothing until the first row needs them. A row whose quote no longer
-			// resolves keeps no mark, so its miss is never described.
-			finder := pmdoc.NewQuoteFinder(target)
-			writer := pmdoc.NewMarkWriter(fragment)
-			for _, reanchor := range reanchors {
-				range_, err := finder.FindDiscardingMiss(reanchor.mark.anchor.Quote, nil, &reanchor.range_.From)
-				if err == nil {
-					// A refusal to read the fragment's text is the stored document's: a peer can
-					// have left it outside the schema after the write read its tree.
-					err = documentSchemaError(writer.Mark(transaction, range_, MarkSpec{
-						Kind:  MarkKind(reanchor.mark.markType),
-						ID:    reanchor.mark.anchor.MarkID,
-						Attrs: reanchor.attrs,
-					}.pmMark()))
-				}
-				if errors.Is(err, pmdoc.ErrTargetNotFound) {
-					continue
-				}
-				if err != nil {
-					updateErr = err
-					return
-				}
-			}
+			updateErr = pmdoc.Update(transaction, fragment, write)
 		})
-		if updateErr != nil {
-			return updateErr
-		}
-		return nil
+		return updateErr
 	})
 	if unchanged && errors.Is(err, websocket.ErrNoChanges) {
 		return canonical, nil
@@ -662,6 +699,97 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		return "", wrapUnlessTooLarge(err, "replace live document")
 	}
 	return canonical, nil
+}
+
+// anchorKinds names, for a person, each mark type an open anchor carries (openAnchoredMarks).
+var anchorKinds = map[string]string{
+	string(MarkAsk):        "ask",
+	string(MarkComment):    "comment",
+	string(MarkSuggestion): "suggestion",
+}
+
+// reanchorError is an upload's refusal to put an open anchor back, causes being the finder's or the
+// mark writer's refusal, and, where every occurrence of the quote refuses the mark, one refusal an
+// occurrence, nearest first. A mark the schema allows nowhere the anchor's quote now stands
+// (pmdoc.MarkNotAllowedError) is the caller's markdown to fix: ErrInvalidMarkdown, naming the
+// anchor's kind and quote, each kind of place its text landed and how many such places, the kinds
+// in the order of their first occurrence, so the nearest comes first, and the two ways
+// out, holding no cause it wraps, so no route reads it as a document outside its schema. The count
+// is what keeps one pass over the markdown enough: a quote left in two code blocks says so, rather
+// than reading as one code block and refusing the upload again once its author has moved the first.
+// Any other cause, or a mark type no open anchor carries, is a fault of the stored anchor or of
+// the server: a plain ErrDocSchema, which the routes answer 500 and log, and never a stored
+// document to repair, since the scratch document no peer can reach holds nothing but the caller's
+// target.
+func reanchorError(mark anchoredMark, causes ...error) error {
+	kind, named := anchorKinds[mark.markType]
+	places := make([]refusedPlace, 0, len(causes))
+	for _, cause := range causes {
+		var notAllowed *pmdoc.MarkNotAllowedError
+		if !named || !errors.As(cause, &notAllowed) {
+			return fmt.Errorf("%w: re-anchor %s %s: %v", ErrDocSchema, mark.markType, mark.anchor.MarkID, errors.Join(causes...))
+		}
+		place := notAllowed.Place()
+		if index := slices.IndexFunc(places, func(seen refusedPlace) bool { return seen.singular == place }); index >= 0 {
+			if !slices.Contains(places[index].at, notAllowed.At) {
+				places[index].at = append(places[index].at, notAllowed.At)
+			}
+			continue
+		}
+		places = append(places, refusedPlace{singular: place, plural: notAllowed.PlacePlural(), at: []int{notAllowed.At}})
+	}
+	them, distinct := "it", 0
+	for _, place := range places {
+		distinct += len(place.at)
+	}
+	if distinct > 1 {
+		them = "them"
+	}
+	counted := make([]string, len(places))
+	for index, place := range places {
+		counted[index] = place.String()
+	}
+	return fmt.Errorf("%w: the open %s anchored on %q would land in %s, where its mark is not allowed, and the upload leaves its quote nowhere it may stand; move that text out of %s, or resolve the %s first",
+		ErrInvalidMarkdown, kind, mark.anchor.Quote, placeList(counted), them, kind)
+}
+
+// refusedPlace is one kind of place an upload left an anchor's quote where its mark is not allowed,
+// with where each such place begins (pmdoc.MarkNotAllowedError.At): a quote left in two code blocks
+// is one refusedPlace holding two, so the refusal says "two code blocks" and its author moves both
+// out in one pass over the markdown, while two occurrences in one code block are one place. singular
+// and plural are pmdoc.MarkNotAllowedError's words for the place, the plural empty where the schema
+// holds one place of the kind at most.
+type refusedPlace struct {
+	singular string
+	plural   string
+	at       []int
+}
+
+// String names the place as a person counts it: "a code block" for one, "two code blocks" for two,
+// and "the front matter" always, since a document inside the schema holds one.
+func (p refusedPlace) String() string {
+	count := len(p.at)
+	if count < 2 || p.plural == "" {
+		return p.singular
+	}
+	if count < len(spelledCounts) {
+		return spelledCounts[count] + " " + p.plural
+	}
+	return strconv.Itoa(count) + " " + p.plural
+}
+
+// spelledCounts are the counts a person reads as a word before a place ("two code blocks"); past
+// them the digits read better, and a quote standing in that many places is past counting at a
+// glance anyway.
+var spelledCounts = [...]string{2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten"}
+
+// placeList reads the places a refused anchor's quote stands as a person says them: "a code
+// block", "the front matter and two code blocks".
+func placeList(places []string) string {
+	if len(places) < 2 {
+		return strings.Join(places, "")
+	}
+	return strings.Join(places[:len(places)-1], ", ") + " and " + places[len(places)-1]
 }
 
 func (s *Service) refuseDroppedAskBlocks(ctx context.Context, artifactID string, target *pmdoc.Node) error {
