@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-715",
-  "completed": "2026-10-29T19:50:00Z",
+  "completed": "2026-10-30T02:07:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2480",
-  "codeHead": "37f334f05032fbc6110476de4d30bea4f1e6b6fe",
+  "codeHead": "b0a59b0b5c6a808af33504d9dabfaf39e7299e56",
   "proof": [
     {
       "criterion": "A2: on the cluster copy, an hour at ten times grows Dispatch's memory by no more than the documents' stored growth plus a stated constant (1 GiB); the curve is quoted against the 2026-10-28 baseline",
@@ -85,6 +85,14 @@
       "observed": "PASS, all six rows. The new row is an upload of \"Intro.\\n\\n```\\nrun the tests\\nand run the tests\\n```\\n\" over an open ask on \"run the tests\". It is refused: would land in a code block, where its mark is not allowed, and the upload leaves its quote nowhere it may stand; move that text out of it, or resolve the ask first. The upload, anchor and ReplaceText tests pass.",
       "headSha": "37f334f05032fbc6110476de4d30bea4f1e6b6fe",
       "negativeControl": "With MarkNotAllowedError.At set to the refused range's start (max(r.From, spans[last].From)), the new row fails: it reads would land in two code blocks."
+    },
+    {
+      "criterion": "Review round 7: the dispatch typecheck is clean after a forward merge of main, and the docs package under -race is back near main's time, the room-memory tests skipping under -race",
+      "surface": "packages/dispatch typecheck and its Chromium browser suite, and go test -race of internal/dispatch/docs on Postgres 16, at forward merges of main 1489a445 and de546ed2",
+      "command": "cd packages/dispatch && bunx tsc --noEmit; bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts --project=chromium e2e/block-references.e2e.ts; cd packages/envoy && CGO_ENABLED=1 go test -race -timeout 120m ./internal/dispatch/docs/ -count=1 (head and main 1489a445); go build ./... && go vet -p 2 ./...",
+      "observed": "Locally: tsc is clean and the block-references file passes 5 of 5. Under -race the three room-memory tests SKIP, and docs takes 2,255 s at the head against 2,186 s at main 1489a445 on this pod. Without -race they pass (200 uploads retained 135,432 B against a bound of 2,273,178 B). go build and go vet are clean. CI at b0a59b0b: envoy-go-race, envoy-go-race-docs, envoy-go, lint, test, pr-title, dispatch-memory, dispatch-multiprocess, dispatch-browser-multiprocess and the other lanes are green; dispatch was still running at 02:06Z.",
+      "headSha": "b0a59b0b5c6a808af33504d9dabfaf39e7299e56",
+      "negativeControl": "Before the import was restored, CI run 40942207302 at 37f334f0 failed dispatch typecheck with TS2552 Cannot find name getArtifactText. Before the skip, envoy-go-race timed out the docs package at 30m."
     }
   ],
   "filesChanged": [
@@ -122,10 +130,11 @@
     "Round 5 answers review round 3: a forward merge of main 30ecdcd4 at 84001a00, the only conflict being the README row (fingerprint comment 6502316391), and threads PRRT_kwDORFy7ds6xofnK, PRRT_kwDORFy7ds6xofnP and PRRT_kwDORFy7ds6xofnW, each replied to and resolved at 090ae14d.",
     "Round 6 answers review round 4: threads PRRT_kwDORFy7ds6xqDFj, PRRT_kwDORFy7ds6xqDFu and PRRT_kwDORFy7ds6xqDF1, each replied to and resolved at e0629eed. The reviewer's prose commit 4cd42dff stays.",
     "Round 7 answers review round 5: threads PRRT_kwDORFy7ds6xsYkA, PRRT_kwDORFy7ds6xsYkH, PRRT_kwDORFy7ds6xsYkM, PRRT_kwDORFy7ds6xsYkV and PRRT_kwDORFy7ds6xsYkY, each replied to and resolved at 4be0d238. The census row now matches the 400 text, multi-place form included. The reviewer's prose commit 63abb711 stays.",
-    "Round 8 answers review round 6: thread PRRT_kwDORFy7ds6xuR36, replied to and resolved at 37f334f0. The change is a test only. The reviewer's comment commit 8ca80716 stays."
+    "Round 8 answers review round 6: thread PRRT_kwDORFy7ds6xuR36, replied to and resolved at 37f334f0. The change is a test only. The reviewer's comment commit 8ca80716 stays.",
+    "Round 9 answers review round 7 with no new threads: 92abb6c4 is a forward merge of main 1489a445 that restores the getArtifactText import; 61efae41 adds the race skip; b0a59b0b is a forward merge of main de546ed2 for the envoy-go-race-docs job, with the fingerprint unchanged. Completed before the 02:10Z worker-image drain, while CI dispatch was still running at b0a59b0b; its typecheck is clean locally."
   ],
   "openQuestions": [
     "The literal bound holds for an hour because the 1 GiB constant absorbs comment growth; the measured proportional factor is k ~ 19 (working-set growth per stored byte). INFRA-179's room byte budget caps the unbounded case."
   ],
-  "round": 8
+  "round": 9
 }
