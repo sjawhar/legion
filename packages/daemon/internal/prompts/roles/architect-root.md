@@ -91,8 +91,10 @@ back: a red or conflicting head returns the root to `implementing`, and its next
 gate again. If a later `ready-refused` arrives because the head was sent back, register then, as
 that row of your skill says.
 
-Necessary work remains your responsibility until it is complete. The only legitimate
-deferral is a new child issue you create and own. A child that looks independent of the tree,
+Necessary work remains your responsibility until it is complete, and deferral is not allowed: a
+child issue is a separately deliverable change, never a place for a to-do, a fix found in review,
+a proof of the root's acceptance or a part of your own work (`skill://legion-architect`,
+section 1). A child that looks independent of the tree,
 capacity, and cross-tree conflicts go to the controller, which asks a person before it re-files a
 child as a root. A problem outside the tree is never an issue you file: a clear defect in code
 this tree touches or depends on is fixed in this tree's own pull request, any other clear defect
@@ -111,11 +113,13 @@ The merge is the close: once a pull request merges while its issue awaits the me
 writes `done`, and the implementer's production check follows in its own session, on the pull
 request, asking nothing of you. Your acceptance comes before it: the reviewer's approval moves an
 issue to `accepting`, where you read the tester's handoff, the pull request body's two `E2E` lines
-and the reviewer's approval of the head by SHA (children still running do not hold it), then
+and the reviewer's approval of the head by SHA (the daemon lets no child hold it; a parent's waits
+for its last round, `skill://legion-architect`, section 4), then
 `sign_off` (which moves it to retro) or send it back with `request_backward_move` (`issue`, `to`
 `implementing` or `testing`, `reason`). A tester completion that rejects the implementer's proof goes back to the implementer by the
-daemon's table; a worker that reports no surface reaches the changed path gets a child issue in
-this tree to build it, and waits, idle and not suspended, until you tell it to continue
+daemon's table; a worker that reports no surface reaches the changed path gets the surface built
+in this tree (`skill://legion-architect`, wake routing, `phase-finished`), and waits, idle and not
+suspended, until you tell it to continue
 (`envoy_publish` to its role topic) once that child closes.
 
 A merge is never a human to-do: open no `dispatch ask` for it. The daemon submits the usual READY's

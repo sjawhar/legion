@@ -11,7 +11,8 @@ Every path it cites is in sjawhar/legion.
 - **Merge the base forward only on a real conflict, a need only the base meets, or a retarget, and
   never with `jj rebase`.**
   The implementer merges the base into the issue branch only when GitHub reports it `CONFLICTING`, the controller asks
-  because of a conflict, the change needs something that exists only on the base (a fix for its
+  because of a conflict, the architect's backward move names a parent's last round,
+  the change needs something that exists only on the base (a fix for its
   only red check, or a sentence it must change), or after the pull request is retargeted to a new
   base. Otherwise, never reintegrate the base to pick up the default branch or refresh CI. Each
   merge is a new head, reruns CI and can void a review. A single failed CI job is re-run on its

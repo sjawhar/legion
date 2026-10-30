@@ -131,7 +131,8 @@ and the tester's proof below are both this proof.
   bare gates — the repository's CI green at the new head and its smoke check — and change the
   `E2E` line's head to the new SHA with
   `forward-merge re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only`. The
-  real-surface verification is not repeated. Different: a full test round.
+  real-surface verification is not repeated, except in a parent's last round, which the architect
+  names to you: then run a full test round. Different: a full test round.
 - **The implementer runs `skill://ce-simplify-code` once per pull request, in its first
   implementing round, after its own proof and before it completes that round, when the diff
   touches runtime code; a docs-only diff gets none.** The daemon starts no implementing round
@@ -160,8 +161,9 @@ and the tester's proof below are both this proof.
 No surface reaches the changed path is a report to the architect, never a reason to complete the phase.
 Say which surface is missing and what it would have to do — a rig that can spawn the role, a
 sandbox that holds the resource, a credential, a command that does not exist yet — and send it to
-the architect with `envoy_publish` to its role topic. The architect creates a child issue in this
-tree to build it (infrastructure, tooling, or a skill) and resumes you once it lands. A code path
+the architect with `envoy_publish` to its role topic. The architect builds it in this tree
+(infrastructure, tooling, or a skill), in an open pull request or a child issue, and resumes you
+once it lands. A code path
 whose first execution would be after the merge — a deploy
 workflow's inline step, a post-merge helper, a production-only resource — is untested until you
 have executed it somewhere production-like; completing with a unit-test-only handoff is the
