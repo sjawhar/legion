@@ -2,54 +2,47 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-606",
-  "completed": "2026-10-30T06:00:00Z",
-  "round": 13,
-  "headTested": "5a26d3ab1b6f",
-  "handoffHead": "18c05c997146cc3d4e94354e4f36ccd365b5f21c",
-  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round13-tar-gz (RESULTS.md); scripts: dispatch://INFRA-606/artifact/infra606-tester-scripts-tar-gz version 3",
+  "completed": "2026-10-30T09:40:00Z",
+  "round": 14,
+  "headTested": "e4846fb7e96a",
+  "handoffHead": "12bdd8f7e3d2c1dd7cabee880926bbfa4e4e2677",
+  "evidence": "dispatch://INFRA-606/artifact/infra606-tester-round14-tar-gz (RESULTS.md); scripts: dispatch://INFRA-606/artifact/infra606-tester-scripts-tar-gz version 4",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-drove the round-13 proof on the real surface, against a freshly seeded load-test stack (seed at migration 145, Dispatch built from 5a26d3ab). The implementer's claims held: a send queued past a lease publishes comment.created with the session's copy held as a fallback row, which is settled unpublished when the send lands; order holds through a sweep with real claim ageing; a Retry while attempt 1 is queued leaves one send."
+    "how": "Re-ran the implementer's three commands at head: TestARetryThatFailsDoesNotHoldTheCommentOfTheAttemptItOvertook passes twice, TestAFallbackPassThatIsStoppingReleasesEveryRowItClaimed passes 5 of 5, and TestAClaimantWhoseResentMentionFailsStillHearsTheComment passes 30 of 30. With the two new tests copied onto round 13's code, both fail: the held row stays claimed, and comment.created is left unpublished. Then drove the failed-Retry case on the real API against a stack freshly seeded at migration 148."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Review round 5 finding 1: a queued mention's claim does not keep comment.created deferred past about a minute.",
-      "surface": "POST /api/v1/issues/LGA-6/comments as a person on the local stack (listener at a 30 s round trip, so every send fails after its window); LGA-6 routed to the mentioned session:ses-x",
-      "command": "defer.sh head 40 (40 comments back to back on one lane; samples unpublished comment.created rows; counts ses-x's NATS copies)",
-      "observed": "Every comment.created was published within 63 s (p50 61 s) while its mention was still queued. All 40 attempts failed; 27 fallback rows were published and the rest got the route copy, so ses-x stores each comment exactly once. The same run on the pod before it was recreated gave the same numbers.",
-      "headSha": "5a26d3ab1b6f",
-      "negativeControl": "defer.sh r12 40 with round 12's build 74779bec on the same database: publish delay max 188 s, p50 97 s, because each comment.created waited for its send to fail."
+      "criterion": "Review round 6 finding 1: an attempt that a failed Retry overtook while its lane holds it does not keep comment.created deferred past about a lease, and the mentioned session still gets one copy.",
+      "surface": "POST /api/v1/issues/LGA-7/comments and POST /api/v1/comments/{id}/deliveries as a person on the local stack (listener at a 4 s round trip; ses-y advertises steer only; LGA-7 routed to session:ses-y)",
+      "command": "retryfailr.sh head 30 (30 comments mention ses-y on one lane, a backlog of about 4 minutes; the last is retried in aside, which ses-y does not advertise)",
+      "observed": "The Retry answers 201 with attempt 2 failed ('does not advertise aside'). The last comment's comment.created is published 61 s after creation, while the lane sends until 4 min 35 s later. Attempt 1 is settled 'superseded', and its fallback row is published, so ses-y stores every comment once and in order.",
+      "headSha": "e4846fb7e96a",
+      "negativeControl": "retryfailr.sh r13 30 on round 13's build 5a26d3ab: the last comment.created is published 228 s after creation, deferred until the lane superseded attempt 1."
     },
     {
-      "criterion": "Review round 5 finding 5: an API Retry while attempt 1 is queued leaves the recipient one copy, in either mode.",
-      "surface": "POST /api/v1/comments/{id}/deliveries as a person on the local stack (listener at 2 s; ses-y offers steer and aside)",
-      "command": "retry.sh head-aside aside; retry.sh head-steer steer (6 comments queue one lane; c6 is retried while its attempt 1 is pending and claimed)",
-      "observed": "Retry answers 201 with attempt 2 sent; attempt 1 is settled failed, 'not sent: a later attempt of this mention superseded it'; ses-y stores c6 once, in either mode, and c1-c5 once each.",
-      "headSha": "5a26d3ab1b6f",
-      "negativeControl": "retry.sh r12-aside aside on round 12's build: attempt 1 (steer) and attempt 2 (aside) are both sent, and ses-y stores c6 twice."
+      "criterion": "Review round 6 finding 2: a fallback pass stopped during its claim leaves no row claimed, and the claimant test is no longer flaky.",
+      "surface": "The outbox's fallback pass under Go tests against Postgres 16 (no runtime surface reaches a stop at that statement)",
+      "command": "go test ./internal/dispatch/outbox/ -run TestAFallbackPassThatIsStoppingReleasesEveryRowItClaimed -count=5; go test -p 2 -parallel 4 ./internal/dispatch/api/ -run TestAClaimantWhoseResentMentionFailsStillHearsTheComment -count=30",
+      "observed": "5 of 5 and 30 of 30 pass.",
+      "headSha": "e4846fb7e96a",
+      "negativeControl": "The same outbox test on round 13's code fails 3 of 3: the held copy stays claimed (next_attempt_at a minute out) rather than being released."
     },
     {
-      "criterion": "Review round 5 findings 3 and 4, and round 4's order rule: a recipient behind a lane backlog longer than a lease, with two live processes and the delivery sweep running, receives every comment once and in order.",
-      "surface": "Two envoy-dispatch processes on one database (38777 and 38778), listener at 2 s, 45 comments to ses-a",
-      "command": "steal.sh 45 (no route, session author); stealr.sh 45 (LGA-11 routed to ses-a); stealp.sh 45 (routed, person author)",
-      "observed": "The backlog settles about 187-190 s after the first post. In all three runs ses-a stores c1-c45 once each, in order, and process B sends nothing. In the person-authored routed run, 29 queued-past-a-lease attempts wrote fallback rows, all settled unpublished; comment.created was published within 65 s.",
-      "headSha": "5a26d3ab1b6f",
-      "negativeControl": "Round 12 recorded the same steal.sh run on round 11's build delivering c33 before c30-c32."
-    },
-    {
-      "criterion": "Review round 5 finding 2, and delivery through a kill and a rolling update: a stopping process hands its queued claims over at once, and every attempt is sent once.",
-      "surface": "The local stack: SIGKILL during shutdown (crash.sh), and SIGTERM with a successor process (rolling.sh)",
-      "command": "crash.sh r13person 1 150 (listener up); STOP_LISTENER=1 crash.sh r13down 1 170 (listener down after the restart); rolling.sh",
-      "observed": "Kill with the listener up: ses-a, ses-b and ses-c each get c1-c8 once; 8 fallback rows settled unpublished. Kill with the listener down: ses-a gets each comment once, from 8 published fallback rows. Rolling update: the old process releases its 27 queued claims at SIGTERM (27 pending and unclaimed at t+2 s; round 12 kept them claimed until they lapsed). The successor sends all 30 attempts once each to each session, in comment-creation order, including 4 comments committed during the drain; the last went out about 2 minutes after the SIGTERM.",
-      "headSha": "5a26d3ab1b6f",
-      "negativeControl": "Round 12's rolling run on 74779bec showed the queued attempts still claimed (pending/unclaimed=false) until the lease lapsed."
+      "criterion": "No regression in the earlier rounds' delivery guarantees after the round-14 change and the forward merge of main a21100c5.",
+      "surface": "The local stack: silent listener, two live processes, SIGKILL during shutdown, and SIGTERM with a successor",
+      "command": "defer.sh head14 40; stealp.sh 45; crash.sh r14person 1 150; STOP_LISTENER=1 crash.sh r14down 1 170; rolling.sh",
+      "observed": "Silent listener: comment.created is published within 65 s (p50 61 s), with one copy each. Two processes with a 190 s backlog: 45 comments once each, in order, and 29 fallback rows settled unpublished. Kill with the listener up: one copy per session, and 8 rows settled unpublished. Kill with the listener down: one copy, from 8 published rows. Rolling update: the old process releases its 27 claims at SIGTERM, and the successor sends all 30 once, in creation order.",
+      "headSha": "e4846fb7e96a",
+      "negativeControl": "Round 13's controls on round 12's build stand for the deferral (188 s) and the Retry (two copies); this round's code did not change those paths except as finding 1 above."
     }
   ],
   "notes": [
-    "Every red test passes at head (5 tests x 2 runs, go test -p 2 -parallel 4); none was modified this round.",
-    "CI: on 5a26d3ab every job but changes and pr-title was cancelled when I read it; the handoff head 18c05c99 reported no runs.",
-    "The pod was recreated during the round (02:10Z drain); the stack was rebuilt from the attached scripts and reseeded, and every check above ran after the rebuild."
+    "Every red test (5) passes twice at head; none was modified this round. The renamed outbox test TestAnAbandonedMentionIsSettledByTheOutboxOrLeftToTheClaimThatTookItFirst is the implementer's own, and it passes 5 of 5.",
+    "Observation, not counted as a failure: with no route, a Retry that fails (a mode the session does not advertise) while attempt 1 is queued leaves the session with no copy of that comment. Attempt 1 is superseded ('not sent: a later attempt of this mention superseded it'), attempt 2 failed, and both receipts show as failed. The supersede rule is the round-13 behaviour the reviewer asked for; only an API caller can retry a pending attempt.",
+    "CI: e4846fb7 was queued (pr-title and changes green) when I read it; af24e6bb and the handoff head 12bdd8f7 reported no runs.",
+    "The forward merge renumbered the fallback table to 0148, so the stack was reseeded at migration 148 before any surface run."
   ]
 }
