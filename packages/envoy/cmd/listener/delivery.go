@@ -345,7 +345,7 @@ func laneHolderFresh(entry session.SessionEntry) bool {
 // under context.Background(): the holder's session read keeps roleHolderReadTimeout
 // (roleHolderSession's bound) as its own cap.
 func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Envelope, role string) (string, session.SessionEntry, bool) {
-	resolved, err := resolveRoleHolder(context.Background(), cfg.registry, cfg.sessions, role, laneHolderFresh)
+	resolved, err := resolveRoleHolder(context.Background(), cfg.registry, cfg.sessions, role, laneHolderFresh, releaseExpiredRoleClaim)
 	sessionID := resolved.holder
 	// Every error resolveRoleHolder returns is a *roleHolderFailure naming the read that failed.
 	// One that is not would still be a read that failed, so it is logged as the claim read with

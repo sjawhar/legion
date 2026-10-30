@@ -34,6 +34,15 @@ bucket, misses the holder in its session cache, and releases the claim as lapsed
 claims again. During a rolling deploy, A is the old task and B the replacement, and both serve the
 machine's role lane.
 
+Since the lookup stopped releasing anything (`keepLapsedRoleClaim`, `cmd/listener/role_holder.go`,
+2026-10-29), `GET /v1/roles/<role>` is no longer one of the decisions that can destroy a claim on a
+cache miss, so the second symptom above, and the first-answer-then-`unclaimed` sequence below, are
+what the race looked like through the lookup up to that change. Role delivery and the publish
+route's role send still release a lapsed claim, under the same rule; the mechanism and every rule
+below are unchanged for them. The role bucket is no longer uncached either: a watcher feeds a view
+of the claims (`store.Registry.RolesHeldBy`, and `RoleHolders`, which `GET /v1/roles` lists from),
+while every resolution still reads the claim it acts on from the bucket itself.
+
 ## Rules
 
 - **A cache miss may refuse or retry. It may not destroy state another listener wrote.** Before

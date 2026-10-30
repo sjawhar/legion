@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/store"
 )
 
 // supersedingRoleDeleteKV answers every conditional Delete of a role claim with nats.ErrKeyExists,
@@ -30,6 +32,54 @@ type supersedingRoleDeleteKV struct {
 func (kv supersedingRoleDeleteKV) Delete(key string, opts ...nats.DeleteOpt) error {
 	return nats.ErrKeyExists
 }
+
+// supersededRoleClaimKV answers every read of a role claim with a claim naming another session
+// than the read before it, and one nobody registered, standing in for a writer that replaces the
+// claim between one read and the next. A lookup keeps the claim it finds lapsed and reads the
+// claim once more instead of deleting it (keepLapsedRoleClaim), so under this KV every attempt
+// resolveRoleHolder makes is superseded while every bus read it makes answers -- the lookup's
+// counterpart of supersedingRoleDeleteKV's lost compare-and-swap. It writes nothing: the stored
+// claim stays as the test seeded it, so what the lookup itself did to the claim is still visible
+// afterwards. It counts a delete rather than passing it on, since a lookup that released a claim
+// would read the same answers from this KV and leave the same stored claim behind: the deletes
+// are what tell the two apart.
+type supersededRoleClaimKV struct {
+	nats.KeyValue
+	reads   *int
+	deletes *atomic.Int64
+}
+
+func (kv supersededRoleClaimKV) Delete(key string, opts ...nats.DeleteOpt) error {
+	kv.deletes.Add(1)
+	return nil
+}
+
+func (kv supersededRoleClaimKV) Get(key string) (nats.KeyValueEntry, error) {
+	*kv.reads++
+	claim, err := json.Marshal(store.RoleClaim{
+		HolderSessionID: fmt.Sprintf("ses_moved_%d", *kv.reads),
+		ClaimedAt:       time.Now().UnixMilli(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return movedRoleClaimEntry{key: key, value: claim, revision: uint64(*kv.reads)}, nil
+}
+
+// movedRoleClaimEntry is one claim supersededRoleClaimKV answers a read with.
+type movedRoleClaimEntry struct {
+	key      string
+	value    []byte
+	revision uint64
+}
+
+func (e movedRoleClaimEntry) Bucket() string             { return bus.RoleClaimBucket }
+func (e movedRoleClaimEntry) Key() string                { return e.key }
+func (e movedRoleClaimEntry) Value() []byte              { return e.value }
+func (e movedRoleClaimEntry) Revision() uint64           { return e.revision }
+func (e movedRoleClaimEntry) Created() time.Time         { return time.Now() }
+func (e movedRoleClaimEntry) Delta() uint64              { return 0 }
+func (e movedRoleClaimEntry) Operation() nats.KeyValueOp { return nats.KeyValuePut }
 
 // A publish whose role claim is superseded on every resolution attempt is a lost race against a
 // live replacement holder, not a bus that went quiet: each attempt's reads were answered, and only
@@ -57,7 +107,7 @@ func TestAPublishThatLosesTheRoleClaimRaceSaysSoRatherThanBlamingTheBus(t *testi
 	// gone and tries to release it -- and loses that release to the KV above, every time.
 	setRegistryRoleKV(t, registry, supersedingRoleDeleteKV{KeyValue: registryRoleKV(t, registry)})
 
-	if _, err := resolveRoleHolder(context.Background(), registry, sessions, role, registered); !errors.Is(err, errRoleHolderChanged) {
+	if _, err := resolveRoleHolder(context.Background(), registry, sessions, role, registered, releaseExpiredRoleClaim); !errors.Is(err, errRoleHolderChanged) {
 		t.Fatalf("resolving a claim superseded on every attempt = %v, want errRoleHolderChanged", err)
 	}
 
@@ -97,11 +147,15 @@ func TestAPublishThatLosesTheRoleClaimRaceSaysSoRatherThanBlamingTheBus(t *testi
 	t.Logf("lost claim race: %s", refusal.Error)
 }
 
-// GET /v1/roles/<role> resolves its holder exactly as a role send through the publish route does, so it can lose the
+// GET /v1/roles/<role> resolves its holder as a role send through the publish route does, so it
+// can lose the
 // same race, and it answers it as the publish route does: the 503 and the Retry-After that ask for
 // the retry a fresh lookup wins, and a body that names the race in a lookup's words. Every bus read
 // answered and the claim decoded, so neither the bus-unavailable 503 this route gives a read that
-// did not answer nor the 500 it gives an undecodable claim would be true of it.
+// did not answer nor the 500 it gives an undecodable claim would be true of it. A lookup loses
+// that race by reading rather than by writing: it keeps the claim and reads it again
+// (keepLapsedRoleClaim), so a claim that names another session by then was superseded while the
+// lookup ran, exactly as a lost conditional delete says it was for a resolution that releases.
 func TestARoleLookupThatLosesTheRoleClaimRaceSaysSoRatherThanFailing(t *testing.T) {
 	const (
 		role   = "reviewer"
@@ -112,9 +166,13 @@ func TestARoleLookupThatLosesTheRoleClaimRaceSaysSoRatherThanFailing(t *testing.
 	if _, err := registry.SetRole(holder, "test-machine", role, false); err != nil {
 		t.Fatalf("seed the role claim: %v", err)
 	}
-	// As in the publish test above: the holder is never registered, so every attempt finds it gone
-	// and loses its conditional release.
-	setRegistryRoleKV(t, registry, supersedingRoleDeleteKV{KeyValue: registryRoleKV(t, registry)})
+	// As in the publish test above the holder is never registered, so every attempt finds it gone;
+	// here every claim read then names a session the one before it did not, so every attempt is
+	// superseded. The real bucket goes back before the claim is read at the end.
+	roleKV := registryRoleKV(t, registry)
+	reads := 0
+	deletes := &atomic.Int64{}
+	setRegistryRoleKV(t, registry, supersededRoleClaimKV{KeyValue: roleKV, reads: &reads, deletes: deletes})
 
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 	recorder := httptest.NewRecorder()
@@ -133,21 +191,30 @@ func TestARoleLookupThatLosesTheRoleClaimRaceSaysSoRatherThanFailing(t *testing.
 	if refusal.Error != want {
 		t.Fatalf("the refusal reads %q, want %q", refusal.Error, want)
 	}
+	setRegistryRoleKV(t, registry, roleKV)
+	if got := deletes.Load(); got != 0 {
+		t.Fatalf("the lookup sent %d deletes of the claim; want none, whatever the race", got)
+	}
 	if got, err := registry.RoleHolder(role); err != nil || got != holder {
 		t.Fatalf("the claim after the lookup = %q, %v; want %s's, untouched", got, err, holder)
 	}
 }
 
-// stalledRoleKV is a role bucket one of whose calls does not answer: a claim read (stallGet) or a
-// conditional delete (stallDelete) waits stall, or until the test ends, and then fails, the way a
+// stalledRoleKV is a role bucket one of whose calls does not answer: a claim read (stallGetFrom,
+// the first read it stalls, counting from 1, so 2 stalls a resolution's second read of the claim
+// and leaves its first answered) or a conditional delete (stallDelete) waits stall, or until the
+// test ends, and then fails, the way a
 // legacy nats.go KV call waits out the JetStream MaxWait on a bus that has stopped answering. Every
 // other call goes to the real bucket. stall is longer than sendRequestBudget, so a route that waits
-// the call out answers after its budget, and one bounded by its budget answers at it.
+// the call out answers after its budget, and one bounded by its budget answers at it. A value of it
+// is copied into the registry, so gets is a pointer: the copies share one count.
 type stalledRoleKV struct {
 	nats.KeyValue
-	stallGet, stallDelete bool
-	stall                 time.Duration
-	released              <-chan struct{}
+	stallGetFrom int
+	stallDelete  bool
+	gets         *atomic.Int64
+	stall        time.Duration
+	released     <-chan struct{}
 }
 
 func (kv stalledRoleKV) wait() {
@@ -158,7 +225,7 @@ func (kv stalledRoleKV) wait() {
 }
 
 func (kv stalledRoleKV) Get(key string) (nats.KeyValueEntry, error) {
-	if kv.stallGet {
+	if kv.stallGetFrom > 0 && kv.gets.Add(1) >= int64(kv.stallGetFrom) {
 		kv.wait()
 		return nil, errors.New("the role bucket's read never answered")
 	}
@@ -192,11 +259,12 @@ func TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget(t *tes
 	)
 	topic := contracts.RoleTopicPrefix + role
 	for _, tc := range []struct {
-		name                  string
-		stallGet, stallDelete bool
-		unanswered            string
+		name         string
+		stallGetFrom int
+		stallDelete  bool
+		unanswered   string
 	}{
-		{name: "the claim read", stallGet: true, unanswered: "read role reviewer's claim: context deadline exceeded"},
+		{name: "the claim read", stallGetFrom: 1, unanswered: "read role reviewer's claim: context deadline exceeded"},
 		{name: "the conditional release", stallDelete: true, unanswered: "release role reviewer's expired claim held by ses_unanswered_holder: context deadline exceeded"},
 	} {
 		// open seeds a claim whose holder never registered, so a resolution that reads it goes on
@@ -211,11 +279,12 @@ func TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget(t *tes
 			released := make(chan struct{})
 			t.Cleanup(func() { close(released) })
 			setRegistryRoleKV(t, registry, stalledRoleKV{
-				KeyValue:    registryRoleKV(t, registry),
-				stallGet:    tc.stallGet,
-				stallDelete: tc.stallDelete,
-				stall:       6 * time.Second,
-				released:    released,
+				KeyValue:     registryRoleKV(t, registry),
+				stallGetFrom: tc.stallGetFrom,
+				stallDelete:  tc.stallDelete,
+				gets:         &atomic.Int64{},
+				stall:        6 * time.Second,
+				released:     released,
 			})
 			return withPublishRoute(t, &listenerDeps{client: client, registry: registry, sessions: sessions})
 		}
@@ -268,7 +337,10 @@ func TestARoleResolutionWhoseStoreCallDoesNotAnswerAnswersInsideTheBudget(t *tes
 // reads as a broken listener rather than an unreachable bus, the distinction the spec gives
 // bus-down its 503 for, so an operator's filter on that prefix finds this outage too; and the
 // publish route already answers the same stalled store this way, in the test above. The bus is
-// connected throughout, so nothing but the stalled role-bucket call can end the lookup.
+// connected throughout, so nothing but the stalled role-bucket call can end the lookup. Both of
+// the lookup's role-bucket calls are reads, since it releases no claim (keepLapsedRoleClaim): the
+// claim read of each attempt, and the second read it makes of a lapsed holder's claim in place of
+// the conditional delete the publish route makes there.
 func TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering(t *testing.T) {
 	const (
 		role   = "reviewer"
@@ -276,12 +348,12 @@ func TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering(t *test
 		within = 4 * time.Second
 	)
 	for _, tc := range []struct {
-		name                  string
-		stallGet, stallDelete bool
-		unanswered            string
+		name         string
+		stallGetFrom int
+		unanswered   string
 	}{
-		{name: "the claim read", stallGet: true, unanswered: "read role reviewer's claim: context deadline exceeded"},
-		{name: "the conditional release", stallDelete: true, unanswered: "release role reviewer's expired claim held by " + holder + ": context deadline exceeded"},
+		{name: "the claim read", stallGetFrom: 1, unanswered: "read role reviewer's claim: context deadline exceeded"},
+		{name: "the lapsed claim's second read", stallGetFrom: 2, unanswered: "read role reviewer's claim: context deadline exceeded"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client := setupPublishTestClient(t)
@@ -292,11 +364,11 @@ func TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering(t *test
 			released := make(chan struct{})
 			t.Cleanup(func() { close(released) })
 			setRegistryRoleKV(t, registry, stalledRoleKV{
-				KeyValue:    registryRoleKV(t, registry),
-				stallGet:    tc.stallGet,
-				stallDelete: tc.stallDelete,
-				stall:       6 * time.Second,
-				released:    released,
+				KeyValue:     registryRoleKV(t, registry),
+				stallGetFrom: tc.stallGetFrom,
+				gets:         &atomic.Int64{},
+				stall:        6 * time.Second,
+				released:     released,
 			})
 			state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 
@@ -319,6 +391,12 @@ func TestARoleLookupWhoseStoreDoesNotAnswerIsRefusedAsTheBusNotAnswering(t *test
 			}
 			if !strings.HasPrefix(refusal.Error, busUnansweredPrefix) || !strings.Contains(refusal.Error, tc.unanswered) {
 				t.Fatalf("the refusal reads %q, want it to begin %q and name %q", refusal.Error, busUnansweredPrefix, tc.unanswered)
+			}
+			// Both of a lookup's role-bucket calls are reads, so neither case may name a release:
+			// the releasing resolution's own failure here reads "drop expired role claim: release
+			// role <role>'s expired claim held by …", which holds the read's words too.
+			if strings.Contains(refusal.Error, "release role") {
+				t.Fatalf("the refusal reads %q: a lookup releases no claim, so it names no release", refusal.Error)
 			}
 		})
 	}

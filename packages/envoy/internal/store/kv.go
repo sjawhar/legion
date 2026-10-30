@@ -473,21 +473,21 @@ func (r *Registry) setRoleHolderLocked(role, holder string, revision uint64) {
 	r.holderRevisions[role] = revision
 }
 
-// ErrRoleViewNotReady is RolesHeldBy's answer when its view of the role claims is not complete, so
-// it cannot say which roles a session holds: its watcher's first scan has not delivered every claim
+// ErrRoleViewNotReady is the answer of a read of the role claim view (readRoleHolders, so
+// RolesHeldBy and RoleHolders) while that view is not complete, so it can say neither which roles
+// a session holds nor who holds the roles: its watcher's first scan has not delivered every claim
 // (the scan is still running, nats.go's idle timer ended it, or a recreated bucket's reset emptied
 // the view and the refill is still running), the watcher has ended and not been replaced, or no
 // watcher follows the claims. It is a read that did not answer, never the answer that a session
-// holds no roles.
+// holds no roles or that a role has no claim.
 var ErrRoleViewNotReady = errors.New("the role claim view is not complete")
 
-// RolesHeldBy returns the roles whose claims name sessionID, sorted, from the role claim
-// watcher's view of the bucket, so it makes no bucket call. A session holds a role exactly when
-// the role's claim names it; its interest record's topics say nothing about that. It answers only
-// while the view is complete (kvwatch.Watcher.Complete): the current watcher's first scan
-// delivered every claim, after any reset, and the watcher still runs. Otherwise it returns
-// ErrRoleViewNotReady, wrapped. A first scan the idle timer ended is scanned again
-// (newRoleWatcher), so the view becomes complete without a Rewatch.
+// readRoleHolders runs read over the role claim watcher's view of the bucket, under the one rule
+// RolesHeldBy and RoleHolders both answer by. It answers only while the view is complete
+// (kvwatch.Watcher.Complete): the current watcher's first scan delivered every claim, after any
+// reset, and the watcher still runs. Otherwise it returns ErrRoleViewNotReady, wrapped. A first
+// scan the idle timer ended is scanned again (newRoleWatcher), so the view becomes complete
+// without a Rewatch.
 //
 // The view is read between two readings of the watcher's generation, and answers only when the
 // first said complete and both name the same generation: a reset empties the view only under a new
@@ -495,30 +495,63 @@ var ErrRoleViewNotReady = errors.New("the role claim view is not complete")
 // generation the view changes only by revision-fenced updates (setRoleHolder), each of which keeps
 // every claim present at a revision no older than the scan's, so the answer is no older than
 // that complete scan.
-func (r *Registry) RolesHeldBy(sessionID string) ([]string, error) {
+//
+// read runs under the view's read lock and must not keep the map it is handed, which the watcher
+// goes on writing once it returns.
+func (r *Registry) readRoleHolders(read func(holders map[string]string)) error {
 	if r.roleWatcher == nil {
-		return nil, fmt.Errorf("%w: no watcher follows the role claims", ErrRoleViewNotReady)
+		return fmt.Errorf("%w: no watcher follows the role claims", ErrRoleViewNotReady)
 	}
 	if err := r.roleWatcher.Err(); err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrRoleViewNotReady, err)
+		return fmt.Errorf("%w: %w", ErrRoleViewNotReady, err)
 	}
 	generation, complete := r.roleWatcher.Complete()
 	if !complete {
-		return nil, fmt.Errorf("%w: its watcher has not delivered every claim", ErrRoleViewNotReady)
+		return fmt.Errorf("%w: its watcher has not delivered every claim", ErrRoleViewNotReady)
 	}
-	roles := []string{}
 	r.holdersMu.RLock()
-	for role, holder := range r.holders {
-		if holder == sessionID {
-			roles = append(roles, role)
-		}
-	}
+	read(r.holders)
 	r.holdersMu.RUnlock()
 	if again, _ := r.roleWatcher.Complete(); again != generation {
-		return nil, fmt.Errorf("%w: its watcher was replaced while it was read", ErrRoleViewNotReady)
+		return fmt.Errorf("%w: its watcher was replaced while it was read", ErrRoleViewNotReady)
+	}
+	return nil
+}
+
+// RolesHeldBy returns the roles whose claims name sessionID, sorted, from the role claim
+// watcher's view of the bucket (readRoleHolders), so it makes no bucket call and changes nothing.
+// A session holds a role exactly when the role's claim names it; its interest record's topics say
+// nothing about that.
+func (r *Registry) RolesHeldBy(sessionID string) ([]string, error) {
+	roles := []string{}
+	if err := r.readRoleHolders(func(holders map[string]string) {
+		for role, holder := range holders {
+			if holder == sessionID {
+				roles = append(roles, role)
+			}
+		}
+	}); err != nil {
+		return nil, err
 	}
 	sort.Strings(roles)
 	return roles, nil
+}
+
+// RoleHolders returns the session each role's claim names, by role, from the same view
+// (readRoleHolders): one answer for "who holds the roles?", with no bucket call and no claim
+// touched, so a caller that lists holders changes none of them. A role whose claim names no
+// holder is in no entry: one deleted, and one this build cannot read, which gives its role to
+// nobody (applyRoleClaim). The map is the caller's own.
+func (r *Registry) RoleHolders() (map[string]string, error) {
+	claims := map[string]string{}
+	if err := r.readRoleHolders(func(holders map[string]string) {
+		for role, holder := range holders {
+			claims[role] = holder
+		}
+	}); err != nil {
+		return nil, err
+	}
+	return claims, nil
 }
 
 // WaitForCacheReady blocks until both watchers are ready (kvwatch.Watcher.Ready), each having ended

@@ -1156,16 +1156,21 @@ func roleSetHandler(d *listenerDeps, machineID string) http.HandlerFunc {
 	}
 }
 
-// roleGetHandler answers GET /v1/roles/<role> with the role's live holder. It resolves the holder
-// (resolveRoleHolder, with registered: any entry) within sendRequestBudget of the request's own
-// context, as a role send's first resolution through the publish route does, so a bus that
-// does not answer is reported inside the caller's attempt. A resolution that lost the race for the
+// roleGetHandler answers GET /v1/roles/<role> with the role's live holder, and changes nothing:
+// it resolves the holder (resolveRoleHolder, with registered: any entry, and keepLapsedRoleClaim)
+// within sendRequestBudget of the request's own context, as a role send's first resolution
+// through the publish route does, so a bus that
+// does not answer is reported inside the caller's attempt. A lapsed holder's claim is left as it
+// stands: the 404 reports it `claim_released: false`, and a monitor that watches a role never
+// takes the claim it is reading (keepLapsedRoleClaim says who ends a lapsed claim instead).
+// A resolution that lost the race for the
 // role's claim (errRoleHolderChanged) is the publish route's 503 with Retry-After: 1, worded for a
 // lookup, since every read answered and a fresh lookup wins the race once the replacement claim
 // settles. A claim record that cannot be decoded (store.ErrMalformedRoleClaim) is the publish
 // route's 500 with no Retry-After (writeRoleClaimUnreadable): the bus answered it. Any other
 // failure is a role store call that did not answer within its cap or that budget - the claim read,
-// the holder's session read or the conditional release - and is answered as the publish route
+// the holder's session read or the second claim read keepLapsedRoleClaim makes - and is answered
+// as the publish route
 // answers it (writeBusUnavailable): the 503 with Retry-After: 1 whose body begins
 // busUnansweredPrefix and names the call, or the 413 and 400 a refused key gets.
 func roleGetHandler(d *listenerDeps) http.HandlerFunc {
@@ -1181,7 +1186,7 @@ func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
-		result, err := resolveRoleHolder(ctx, d.registry, d.sessions, role, registered)
+		result, err := resolveRoleHolder(ctx, d.registry, d.sessions, role, registered, keepLapsedRoleClaim)
 		if errors.Is(err, errRoleHolderChanged) {
 			writeRoleHolderChanged(w, role, "lookup")
 			return
@@ -1208,6 +1213,98 @@ func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 			"capabilities": append([]string{}, result.entry.Capabilities...),
 			"last_seen":    result.entry.UpdatedAt,
 		})
+	}
+}
+
+// roleHolderInfo is one row of GET /v1/roles: a role claim and what the listener knows of its
+// holder. State is roleHolderLive or roleHolderLapsed, the two a claim can be in - a role with no
+// claim is in no row at all, so roleHolderUnclaimed never appears. A lapsed row carries the
+// holder and whatever final heartbeat the listener still keeps (LastSeen, omitted when it keeps
+// none), and none of the session fields, which name a session that is gone.
+type roleHolderInfo struct {
+	Role         string          `json:"role"`
+	State        roleHolderState `json:"state"`
+	Holder       string          `json:"holder"`
+	Title        string          `json:"title,omitempty"`
+	Dir          string          `json:"dir,omitempty"`
+	MachineID    string          `json:"machine_id,omitempty"`
+	Host         string          `json:"host,omitempty"`
+	Capabilities []string        `json:"capabilities,omitempty"`
+	LastSeen     int64           `json:"last_seen,omitempty"`
+}
+
+// roleListHandler answers GET /v1/roles with every role claim and its holder, sorted by role, and
+// changes nothing: it is the read a monitor of the roles makes, where one GET of each role would
+// cost one request per role and GET /v1/sessions answers the question the other way round, by
+// session, and so cannot show a claim whose holder is gone - which is the claim worth watching.
+//
+// The claims come from the registry's watched view of the role bucket
+// (store.Registry.RoleHolders), so the list makes no bucket call for them and releases none of
+// them; a view that is not complete (store.ErrRoleViewNotReady: still scanning, refilling a
+// recreated bucket, or its watcher ended) is a read that did not answer and ends the list with the
+// bus-unavailable 503, never a role reported unclaimed. Each holder's session is read as the
+// lookup reads it (liveSessionEntry with registered), from the session cache and through to the
+// session bucket on a miss, so a holder another listener registered a moment ago is live here too;
+// every such read shares one sendRequestBudget deadline, as the interest reads of GET /v1/sessions
+// do, and keeps roleHolderReadTimeout as its own cap; a session that holds several roles is read
+// once for all of its rows. The bucket's word that the holder is gone
+// (nats.ErrKeyNotFound) is the lapsed row; any other error is a read that did not answer and ends
+// the list with that same 503, never a row that calls a live holder lapsed.
+func roleListHandler(d *listenerDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		claims, err := d.registry.RoleHolders()
+		if err != nil {
+			writeBusUnavailable(w, err)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
+		defer cancel()
+		roles := make([]string, 0, len(claims))
+		for role := range claims {
+			roles = append(roles, role)
+		}
+		slices.Sort(roles)
+		result := make([]roleHolderInfo, 0, len(roles))
+		// A session can hold several roles, and every row of it reports the same session: each
+		// holder is read once, so a listener holding five of one session's roles costs one read of
+		// it rather than five.
+		read := map[string]session.SessionEntry{}
+		gone := map[string]bool{}
+		for _, role := range roles {
+			holder := claims[role]
+			row := roleHolderInfo{Role: role, State: roleHolderLive, Holder: holder}
+			entry, seen := read[holder]
+			if !seen && !gone[holder] {
+				var err error
+				entry, err = liveSessionEntry(ctx, d.sessions, holder, roleHolderReadTimeout, registered)
+				switch {
+				case err == nil:
+					read[holder] = entry
+				case errors.Is(err, nats.ErrKeyNotFound):
+					gone[holder] = true
+				default:
+					writeBusUnavailable(w, err)
+					return
+				}
+			}
+			if gone[holder] {
+				row.State = roleHolderLapsed
+				row.LastSeen = d.sessions.LastSeen(holder)
+			} else {
+				row.Title = entry.Title
+				row.Dir = entry.Dir
+				row.MachineID = entry.MachineID
+				row.Host = entry.HostOrMachine()
+				row.Capabilities = append([]string{}, entry.Capabilities...)
+				row.LastSeen = entry.UpdatedAt
+			}
+			result = append(result, row)
+		}
+		writeJSON(w, http.StatusOK, result)
 	}
 }
 
@@ -1469,6 +1566,9 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 		writeJSON(w, http.StatusOK, map[string][]string{"removed": removed})
 	})
 	v1.HandleFunc("/v1/roles/set", roleSetHandler(d, machineID))
+	// Exact before subtree: http.ServeMux prefers "/v1/roles" to "/v1/roles/" for that one path,
+	// so the list route answers it rather than the subtree's redirect to the trailing slash.
+	v1.HandleFunc("/v1/roles", roleListHandler(d))
 	v1.HandleFunc("/v1/roles/", roleGetHandler(d))
 	v1.HandleFunc("/v1/registry/", sessionEntryHandler(d))
 

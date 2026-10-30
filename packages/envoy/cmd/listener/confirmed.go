@@ -310,7 +310,10 @@ func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 // first resolution reads the holder as an HTTP lookup does (resolveRoleHolder with registered),
 // within sendRequestBudget of arrived as GET /v1/roles/<role> reads it, and gives its answers: 404
 // unclaimed or holder_lapsed, and for a resolution that failed the lookup's 503 or 500 (unresolved),
-// so a holder that exists but has not heartbeated lately gets attempts rather than a 404. The first
+// so a holder that exists but has not heartbeated lately gets attempts rather than a 404. It parts
+// from the lookup in one thing: a send is deciding where this message goes, so it releases a
+// lapsed holder's claim (releaseExpiredRoleClaim) where the lookup, which acts on nothing, keeps
+// it. The first
 // attempt forwards to that holder when its session entry passes role delivery's freshness test
 // (laneHolderFresh), without reading the claim again; every other attempt resolves the holder
 // again by role delivery's rule (resolveRoleHolder with laneHolderFresh), so a holder that
@@ -325,7 +328,7 @@ func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecord, d *listenerDeps, item contracts.Envelope, role string, arrived time.Time) {
 	send := &roleSend{w: w, record: record, d: d, item: item, role: role, arrived: arrived}
 	firstCtx, cancelFirst := context.WithDeadline(ctx, arrived.Add(sendRequestBudget))
-	first, err := resolveRoleHolder(firstCtx, d.registry, d.sessions, role, registered)
+	first, err := resolveRoleHolder(firstCtx, d.registry, d.sessions, role, registered, releaseExpiredRoleClaim)
 	cancelFirst()
 	if err != nil {
 		send.unresolved(err)
@@ -347,7 +350,7 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecor
 	resolved := first
 	for pass := 0; ; pass++ {
 		if pass > 0 || !laneHolderFresh(first.entry) {
-			resolved, err = resolveRoleHolder(ctx, d.registry, d.sessions, role, laneHolderFresh)
+			resolved, err = resolveRoleHolder(ctx, d.registry, d.sessions, role, laneHolderFresh, releaseExpiredRoleClaim)
 			if err != nil && ctx.Err() != nil {
 				// The window ended under the resolution: what it read says nothing more.
 				break

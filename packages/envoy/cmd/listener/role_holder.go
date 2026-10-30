@@ -53,7 +53,7 @@ const (
 	roleHolderSessionRead
 	// roleHolderRelease: the lapsed holder's claim could not be released.
 	roleHolderRelease
-	// roleHolderChurn: every release found the claim superseded by a fresher one, past
+	// roleHolderChurn: every attempt found the claim superseded by a fresher one, past
 	// roleHolderResolutionAttempts.
 	roleHolderChurn
 )
@@ -159,9 +159,19 @@ func writeRoleClaimUnreadable(w http.ResponseWriter, role string, err error) int
 	return http.StatusInternalServerError
 }
 
+// lapsedRoleClaim is what a resolution does about the claim of a holder whose session is gone
+// (resolveRoleHolder). It answers the release outcome the 404 reports, whether the claim was
+// superseded by a fresh one while the resolution ran, which makes the resolution read the role
+// again, and the failure of its own bus call.
+//
+// There are two, and which one a caller passes is what makes a read a read: releaseExpiredRoleClaim
+// for a decision that takes the role from its holder (role delivery, and the publish route's role
+// send), keepLapsedRoleClaim for one that only reports it (GET /v1/roles/<role>).
+type lapsedRoleClaim func(ctx context.Context, registry roleClaimResolver, role, sessionID string, sessionTTL time.Duration) (store.ExpiredRoleClaimRelease, bool, *roleHolderFailure)
+
 // releaseExpiredRoleClaim is the single point in the listener that interprets
 // store.ExpiredRoleClaimRelease's ExpiredRoleClaimSuperseded outcome. resolveRoleHolder, the one
-// resolution behind HTTP role lookups, the publish route's role sends and role delivery, calls it
+// resolution behind the publish route's role sends and role delivery, calls it
 // instead of registry.ReleaseExpiredRoleClaim directly, so a claim that raced a fresh SetRole
 // before the conditional delete landed is reported as "must re-resolve" in exactly one place. A
 // second, drifted branch on ExpiredRoleClaimSuperseded is exactly how a live replacement holder
@@ -171,16 +181,41 @@ func writeRoleClaimUnreadable(w http.ResponseWriter, role string, err error) int
 // The release waits no longer than ctx: a route passes its request's own context, role delivery
 // context.Background(). store.Registry.ReleaseExpiredRoleClaim says why a delete it abandons is safe
 // to leave running.
-func releaseExpiredRoleClaim(ctx context.Context, registry roleClaimResolver, role, sessionID string, sessionTTL time.Duration) (release store.ExpiredRoleClaimRelease, superseded bool, err error) {
-	release, err = registry.ReleaseExpiredRoleClaim(ctx, role, sessionID, sessionTTL)
+func releaseExpiredRoleClaim(ctx context.Context, registry roleClaimResolver, role, sessionID string, sessionTTL time.Duration) (store.ExpiredRoleClaimRelease, bool, *roleHolderFailure) {
+	release, err := registry.ReleaseExpiredRoleClaim(ctx, role, sessionID, sessionTTL)
 	if err != nil {
-		return store.ExpiredRoleClaimRetained, false, err
+		return store.ExpiredRoleClaimRetained, false, &roleHolderFailure{step: roleHolderRelease, cause: err}
 	}
 	return release, release == store.ExpiredRoleClaimSuperseded, nil
 }
 
+// keepLapsedRoleClaim is releaseExpiredRoleClaim's other half: the lapsed-claim policy of a read,
+// which writes nothing at all. It deletes no claim, so a lookup of a role whose holder has gone
+// leaves that claim exactly as it found it, and the role reaper (store.Registry.ReapRoleClaims,
+// every five minutes) and the next claim of the role (POST /v1/roles/set, whose soft claim
+// supersedes a holder that is gone) are what end it. Reaping is theirs because a read that
+// released the claim it was asked about could not be used to watch a role: the answer and the
+// act would be one call, so a monitor would take the claim it was checking from a holder that had
+// gone quiet, and nobody could ask "who holds this?" without risking the answer.
+//
+// It reads the claim once more in place of the conditional delete, which costs the same one bus
+// call, so the resolution's supersession branch still holds for a read: a claim that names another
+// session now was superseded while this resolution ran, which the release path learns from its
+// lost compare-and-swap and a read learns by reading again, and either way the role is resolved
+// again rather than answered with a holder a fresh claim has already replaced. A claim that is
+// gone by then names no holder either, so the second attempt answers the role unclaimed, which is
+// what the bucket now holds. Its own read failing is a claim read, and is reported as one.
+func keepLapsedRoleClaim(ctx context.Context, registry roleClaimResolver, role, sessionID string, _ time.Duration) (store.ExpiredRoleClaimRelease, bool, *roleHolderFailure) {
+	claim, err := registry.RoleClaim(ctx, role)
+	if err != nil {
+		return store.ExpiredRoleClaimRetained, false, &roleHolderFailure{step: roleHolderClaimRead, cause: err}
+	}
+	return store.ExpiredRoleClaimRetained, claim.HolderSessionID != sessionID, nil
+}
+
 // liveSessionEntry is sessionID's session entry for a decision that acts on its absence: a role
-// lookup or role delivery that releases a lapsed claim, a soft claim that supersedes a gone holder,
+// lookup, which reports a lapsed holder, role delivery, which releases its claim, a soft claim
+// that supersedes a gone holder,
 // the role reaper, and a session-addressed send, which tells its sender the destination is gone.
 // live is the caller's test of an entry. The cache answers when it holds an entry live accepts;
 // otherwise the session is read from the session bucket itself (session.SessionRegistry.Refresh),
@@ -237,26 +272,30 @@ const roleHolderReadTimeout = 2 * time.Second
 
 // errRoleHolderChanged is the cause of resolveRoleHolder's roleHolderChurn failure, when every one
 // of roleHolderResolutionAttempts was spent on a supersession: each attempt found the claim's
-// holder session gone and lost its conditional release to a fresh claim another writer had already
-// installed. Every bus read answered, so this is a lost compare-and-swap against a live
-// replacement holder and not a bus failure, and a caller recognises it rather than sweeping it in
+// holder session gone and another writer's fresh claim already in its place — a lost conditional
+// release for a resolution that releases, a second read naming another holder for one that keeps
+// the claim (lapsedRoleClaim). Every bus read answered, so this is a live replacement holder and
+// not a bus failure, and a caller recognises it rather than sweeping it in
 // with the reads that did not answer (publishHandler's role send, roleGetHandler).
 var errRoleHolderChanged = errors.New("role holder changed while resolving")
 
 // resolveRoleHolder resolves role's current holder inside ctx: the claim's holder, live when live
 // accepts its session entry (liveSessionEntry). A holder whose entry is gone or that live refuses
-// has lapsed: its claim is released through releaseExpiredRoleClaim, and when the release finds the
-// claim already superseded by a fresh one the role is resolved again, bounded to
+// has lapsed, and what becomes of its claim is onLapsed's (lapsedRoleClaim): released, or kept by
+// a resolution that only reports it. When onLapsed finds the claim already superseded by a fresh
+// one the role is resolved again, bounded to
 // roleHolderResolutionAttempts, so a claim raced by a live replacement resolves to that
 // replacement instead of reporting a session the fresh claim has already superseded.
 //
-// live is the one rule its callers differ on. An HTTP lookup (GET /v1/roles/<role>) and the
-// publish route's first resolution pass registered, any entry. Role delivery — the role lane
-// (resolveCoreRoleHolder) and the publish route's attempts — passes laneHolderFresh, which
+// live and onLapsed are the two rules its callers differ on. An HTTP lookup (GET /v1/roles/<role>)
+// and the publish route's first resolution pass registered, any entry. Role delivery — the role
+// lane (resolveCoreRoleHolder) and the publish route's attempts — passes laneHolderFresh, which
 // distrusts a holder that has not heartbeated within session.ClaimStaleAfter even while its
 // registry cache entry has not expired, since a dropped delivery is costlier than an HTTP 404.
+// Those delivery paths and the publish route pass releaseExpiredRoleClaim; the lookup, which
+// answers a question and acts on nothing, passes keepLapsedRoleClaim.
 //
-// Every bus call it makes waits no longer than ctx: the claim read and the conditional release,
+// Every bus call it makes waits no longer than ctx: the claim read and onLapsed's own call,
 // which store.Registry bounds by ctx, and the holder's session read through liveSessionEntry, which
 // also keeps roleHolderReadTimeout as its own cap; a second attempt is not started once ctx has
 // ended. A route passes its request's own context, bounded by its budget, so a bus that does not
@@ -268,7 +307,7 @@ var errRoleHolderChanged = errors.New("role holder changed while resolving")
 // can name it. It unwraps to the read's own error: an ended ctx, wrapped naming the call that did
 // not answer, which a route answers as a bus that did not answer; store.ErrMalformedRoleClaim, a
 // claim record that cannot be read (writeRoleClaimUnreadable); or errRoleHolderChanged.
-func resolveRoleHolder(ctx context.Context, registry roleClaimResolver, sessions *session.SessionRegistry, role string, live func(session.SessionEntry) bool) (roleHolderResult, error) {
+func resolveRoleHolder(ctx context.Context, registry roleClaimResolver, sessions *session.SessionRegistry, role string, live func(session.SessionEntry) bool, onLapsed lapsedRoleClaim) (roleHolderResult, error) {
 	for range roleHolderResolutionAttempts {
 		if err := ctx.Err(); err != nil {
 			return roleHolderResult{}, &roleHolderFailure{step: roleHolderClaimRead, cause: fmt.Errorf("resolve role %s's holder: %w", role, err)}
@@ -289,9 +328,9 @@ func resolveRoleHolder(ctx context.Context, registry roleClaimResolver, sessions
 			return roleHolderResult{holder: holder}, &roleHolderFailure{step: roleHolderSessionRead, cause: err}
 		}
 		lastSeen := sessions.LastSeen(holder)
-		release, superseded, err := releaseExpiredRoleClaim(ctx, registry, role, holder, sessions.TTL())
-		if err != nil {
-			return roleHolderResult{holder: holder}, &roleHolderFailure{step: roleHolderRelease, cause: err}
+		release, superseded, failure := onLapsed(ctx, registry, role, holder, sessions.TTL())
+		if failure != nil {
+			return roleHolderResult{holder: holder}, failure
 		}
 		if superseded {
 			continue
