@@ -843,6 +843,7 @@ func TestAReconnectCatchesUpWhatTheListenerMissed(t *testing.T) {
 	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
 	snapshot := conn.snapshot(t, 5*time.Second, "t")
 	rig.waitFor(t, 0, 5*time.Second, "the listener's first connection", func(note deliveryHubNote) bool { return note.what == "connected" })
+	rig.settle(t)
 	start := rig.mark()
 
 	// The listener loses its connection and cannot dial again; a merge commits while it is blind.
@@ -1045,7 +1046,7 @@ func TestASessionWriteDuringAViewsReadThatItsAnswerDoesNotShowRecomputesNothing(
 		observe := hub.observe
 		hub.observe = func(note deliveryHubNote) {
 			observe(note)
-			if note.what == "recompute read" && held.CompareAndSwap(false, true) {
+			if note.what == "recompute read" && strings.HasPrefix(note.view, deliveryLiveTimeline) && held.CompareAndSwap(false, true) {
 				close(reading)
 				<-release
 			}
@@ -1056,6 +1057,15 @@ func TestASessionWriteDuringAViewsReadThatItsAnswerDoesNotShowRecomputesNothing(
 	seedHubSettings(t, rig.database)
 	key := createHubIssue(t, rig.handler, map[string]any{"title": "Ship widgets"})
 	upsertPR(t, rig.database, prNaming(1, rig.clock.Now().Add(-3*time.Hour), key))
+	// A measures view starts the generation and holds it open while the timeline view, the one
+	// measured here, subscribes after it: the relay's feed, taken on a goroutine of the
+	// generation's own, marks every view it finds dirty when it arrives (applyFeed), and that
+	// recompute belongs to none of what this measures.
+	warm := newFakeLiveConn()
+	rig.hub.Subscribe(warm, subscribeFrame("m", presetView(deliveryLiveMeasures, 28, "")))
+	warm.snapshot(t, 5*time.Second, "m")
+	rig.settle(t)
+
 	conn := newFakeLiveConn()
 	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
 	select {
@@ -1082,6 +1092,9 @@ func TestASessionWriteDuringAViewsReadThatItsAnswerDoesNotShowRecomputesNothing(
 	if _, shown := read.SessionTitles["session-not-shown"]; shown {
 		t.Fatalf("the snapshot's session_titles = %v, want the writing session not shown", read.SessionTitles)
 	}
+	// The hub tells a sub the verdict it knows right after its first answer (Subscribe), which
+	// the measures view's read set before this view subscribed.
+	conn.freshness(t, time.Second, "the verdict after the timeline's first snapshot")
 	conn.none(t, time.Second, "a session write the view's answer does not show")
 	if n := rig.count(start, recomputeBegin("")); n != 0 {
 		t.Fatalf("the session write during the read recomputed the view %d times more, want none", n)
@@ -1258,6 +1271,7 @@ func TestEventsNoViewReadsRecomputeNothing(t *testing.T) {
 	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
 	conn.snapshot(t, 5*time.Second, "t")
 
+	rig.settle(t)
 	start := rig.mark()
 	if _, err := rig.database.Pool.Exec(t.Context(), `
 		insert into events (project_key, seq, type, actor, payload, notify)
@@ -1327,7 +1341,7 @@ func TestAClosedFeedReloadsTheOpenP0sAndRecomputesEveryView(t *testing.T) {
 			// the feed; the deltas are what this test reads.
 			var delta DeliveryLiveDelta
 			for ok := false; !ok; {
-				frame := conn.next(t, 3*time.Second, "each view's delta after "+after)
+				frame := conn.next(t, eventFeedWait, "each view's delta after "+after)
 				if _, fresh := frame.(DeliveryLiveFreshness); fresh {
 					continue
 				}
@@ -1345,6 +1359,9 @@ func TestAClosedFeedReloadsTheOpenP0sAndRecomputesEveryView(t *testing.T) {
 		}
 	}
 
+	// The hub takes its feed on a goroutine of its own, so a generation that has not taken one
+	// yet would lose nothing when the relay's generation ends below.
+	rig.settle(t)
 	start := rig.mark()
 	endRelayGeneration(rig.relay)
 	rig.waitFor(t, start, 3*time.Second, "the hub losing its feed", func(note deliveryHubNote) bool { return note.what == "feed closed" })
