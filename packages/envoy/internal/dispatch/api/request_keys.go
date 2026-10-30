@@ -87,8 +87,8 @@ const (
 	// spill does, so a keyed 25 MiB upload costs no more memory than an unkeyed one.
 	keyedBodyInMemory = 1 << 20
 	// keyedBodyMax is the largest body an upload route reads: an upload's file and a megabyte of
-	// fields (uploadArtifactFor). Every other route reads a JSON body of at most
-	// maxJSONRequestBytes (routeBodyLimit).
+	// fields (uploadArtifactFor). The handoff write reads handoffRequestLimit, and every other
+	// route a JSON body of at most maxJSONRequestBytes (routeBody).
 	keyedBodyMax = maxArtifactBlobSize + 1<<20
 	// keyedBookkeeping bounds the layer's work around the handler - the claim before it, and each
 	// statement recording its answer after it - which runs on past a client that went away, since
@@ -227,7 +227,7 @@ type resolvedCaller struct {
 func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, replay keyedReplay) http.HandlerFunc {
 	wildcards := patternWildcards(pattern)
 	keepsAnswer := !answerHoldsSecret[method+" "+pattern]
-	bodyLimit := routeBodyLimit(method, pattern)
+	bodyLimit, _ := routeBody(method, pattern)
 	run := handler
 	if s.deps.TestHooksEnabled {
 		run = s.slowedByTestHook(handler)
@@ -343,21 +343,22 @@ func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, r
 	}
 }
 
-// routeBodyLimit is the largest body a route reads: an upload's file and a megabyte of fields
-// (uploadArtifactFor) for an upload route, a handoff write's own limit (handoffRequestLimit) for
-// that one, and a JSON body (decodeJSON) for every other. It is the most the keyed layer spools
-// before its handler runs - a body past it is refused by the route's handler whatever its key, so
-// it runs unkeyed rather than spooled - and the most an early answer discards before it is written
-// (drainBeforeAnswer).
-func routeBodyLimit(method, pattern string) int64 {
-	route := method + " " + pattern
-	if keyedUploads[route] {
-		return keyedBodyMax
+// routeBody is the largest body a route reads and the 413 it answers one past that with: an
+// upload's file and a megabyte of fields (uploadArtifactFor) for an upload route, a handoff
+// write's own limit (handoffRequestLimit) for that one, and a JSON body (decodeJSON) for every
+// other. The limit is the most the keyed layer spools before its handler runs - a body past it is
+// refused by the route's handler whatever its key, so it runs unkeyed rather than spooled - and
+// the most an early answer discards before it is written (drainBeforeAnswer). One answer serves
+// all three layers and the handler, so none of them can disagree with another.
+func routeBody(method, pattern string) (limit int64, tooLarge *apiError) {
+	switch route := method + " " + pattern; {
+	case keyedUploads[route]:
+		return keyedBodyMax, errUploadTooLarge
+	case route == handoffWriteRoute:
+		return handoffRequestLimit, errHandoffTooLarge
+	default:
+		return maxJSONRequestBytes, errJSONTooLarge
 	}
-	if route == handoffWriteRoute {
-		return handoffRequestLimit
-	}
-	return maxJSONRequestBytes
 }
 
 // keyedUploads is every keyed route whose body may hold a file (uploadArtifactFor).
@@ -550,7 +551,7 @@ func (w spillWriter) Write(p []byte) (int, error) {
 }
 
 // readKeyedBody reads body into a keyedBody, at most one byte past limit, the route's own
-// (routeBodyLimit), writing it to digest as it goes (bodyDigest). A body that fits in
+// (routeBody), writing it to digest as it goes (bodyDigest). A body that fits in
 // keyedBodyInMemory never touches the disk: a route whose limit is no more than that holds even its
 // one byte past the limit in memory.
 func readKeyedBody(body io.Reader, digest io.Writer, contentType string, limit int64) (*keyedBody, error) {
@@ -912,7 +913,7 @@ func answerHeldKey(w http.ResponseWriter, r *http.Request, key string, held held
 //
 // The body is read for at most drainTime (readFor): one that stops arriving is answered 409
 // KEY_IN_FLIGHT, which is what the key said, and the connection closes after it. A body past the
-// route's limit is answered as its route answers one (bodyTooLarge), unkeyed, as a request whose
+// route's limit is answered as its route answers one (routeBody), unkeyed, as a request whose
 // body is past the limit runs unkeyed. Either keeps the read's deadline for net/http's own reads
 // after the answer; only a body read to its end lifts it.
 func (s *server) answerDrainedRepeat(
@@ -923,7 +924,7 @@ func (s *server) answerDrainedRepeat(
 		writeKeyInFlight(w, key)
 		return
 	}
-	limit := routeBodyLimit(method, pattern)
+	limit, tooLarge := routeBody(method, pattern)
 	digest := sha256.New()
 	writeRequestFields(digest, r, method, pattern, wildcards)
 	lift := s.readFor(w)
@@ -935,7 +936,6 @@ func (s *server) answerDrainedRepeat(
 		writeKeyInFlight(w, key)
 		return
 	case size > limit:
-		tooLarge := bodyTooLarge(method, pattern)
 		writeError(w, tooLarge.code, tooLarge.status, tooLarge.message)
 		return
 	}

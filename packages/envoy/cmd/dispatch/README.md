@@ -1904,11 +1904,13 @@ and its answer recorded, on a context the client's leaving does not end, bounded
 Every other answer Dispatch gives before it has read a request's body - `KEY_INVALID`, the
 closed-issue upload refusal, `LOGIN_CHANGED`, a refused path parameter, a refusal before
 decoding - is written only once the rest of the body has been read and discarded, never spooled,
-up to the route's limit (26 MiB on the upload routes, 1 MiB on every other). A browser that sends
+up to the route's limit (26 MiB on the upload routes, 1,576,960 bytes - six times the 256 KiB
+handoff body cap, plus 4 KiB - on the handoff write, 1 MiB on every other). A browser that sends
 a whole upload before it reads the answer (WebKit, Firefox) otherwise met the connection's close
-as a reset and never saw the answer. A body past the limit is answered `413 CAP_EXCEEDED` (uploads)
-or `413 REQUEST_TOO_LARGE` in that answer's place, and the connection closes; a `401` is the one
-early answer that stands, since a caller nobody resolves is refused before any limit is judged.
+as a reset and never saw the answer. A body past the limit is answered `413 CAP_EXCEEDED` (the
+upload routes and the handoff write) or `413 REQUEST_TOO_LARGE` in that answer's place, and the
+connection closes; a `401` is the one early answer that stands, since a caller nobody resolves is
+refused before any limit is judged.
 Both reads wait at most a minute for a body: one that stops arriving is given its answer with
 `Connection: close`. An `Expect: 100-continue` request answered early is never asked for its
 body: Dispatch sends no `100 Continue`, sends the answer and closes the connection.
@@ -1956,7 +1958,8 @@ deliveries behind the answer.
 
 The layer reads a keyed body before its handler runs, spooling at most the route's own limit: 26
 MiB for the three upload routes (`POST /api/v1/issues/{key}/artifacts`,
-`/projects/{key}/artifacts`, `/agents/{session_id}/artifacts`), 1 MiB for every other. A body past
+`/projects/{key}/artifacts`, `/agents/{session_id}/artifacts`), 1,576,960 bytes for the handoff
+write (`POST /api/v1/issues/{key}/handoffs/{phase}`), 1 MiB for every other. A body past
 it runs unkeyed and its route refuses it. A body the client did not finish sending is
 `400 REQUEST_BODY_UNREADABLE`; one Dispatch cannot spool to its temporary directory is Dispatch's
 own failure, a 5xx with the key echoed, which the client asks again.

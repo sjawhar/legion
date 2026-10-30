@@ -846,8 +846,9 @@ func TestAnAnswerPastTheKeptSizeReplaysItsStatusAlone(t *testing.T) {
 
 // A client mints a multipart body's boundary afresh for every attempt, so a retry of one upload
 // under its key is a repeat whatever its boundary; a different file is another request. A body past
-// what the layer holds in memory reaches the handler whole. It runs on an upload route, the only
-// kind whose body the layer reads past a JSON body's megabyte (routeBodyLimit).
+// what the layer holds in memory reaches the handler whole. It runs on an upload route, whose body
+// is the largest the layer reads past a JSON body's megabyte (routeBody; a handoff write reads
+// handoffRequestLimit).
 func TestAMultipartRetryUnderANewBoundaryIsARepeat(t *testing.T) {
 	rig := newKeyedRigAt(t, "/api/v1/issues/{key}/artifacts", func(run int32, w http.ResponseWriter, r *http.Request) {
 		data, err := io.ReadAll(r.Body)
@@ -978,8 +979,9 @@ func TestACommentPostedAgainUnderItsKeyLandsOnce(t *testing.T) {
 func requestDigestOf(t *testing.T, request *http.Request, pattern string) string {
 	t.Helper()
 	digest := sha256.New()
+	limit, _ := routeBody(request.Method, pattern)
 	writeRequestFields(digest, request, request.Method, pattern, patternWildcards(pattern))
-	body, err := readKeyedBody(request.Body, digest, request.Header.Get("Content-Type"), routeBodyLimit(request.Method, pattern))
+	body, err := readKeyedBody(request.Body, digest, request.Header.Get("Content-Type"), limit)
 	defer body.close()
 	if err != nil {
 		t.Fatalf("read the request's body: %v", err)

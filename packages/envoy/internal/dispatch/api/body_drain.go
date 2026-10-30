@@ -15,13 +15,13 @@ import (
 // it, and the client drops the answer with it. So every layer's early answer - the keyed layer's
 // KEY_INVALID, the closed-issue refusal of an upload, LOGIN_CHANGED, a refused path parameter, a
 // handler's refusal made before it decodes - waits until the body is off the connection, read and
-// discarded, never spooled, up to the route's own limit (routeBodyLimit) and for at most
+// discarded, never spooled, up to the route's own limit (routeBody) and for at most
 // bodyDrainLimit. The keyed layer reads a repeat's body itself when it finds the key held by a
 // first request still running, and judges the repeat once that body has arrived
 // (answerDrainedRepeat).
 
 // bodyDrainLimit is the longest a drain waits for the rest of a request's body, counted from when
-// the drain begins: a minute carries a whole upload (routeBodyLimit) over a link of 450 KB/s or
+// the drain begins: a minute carries a whole upload (routeBody) over a link of 450 KB/s or
 // more. A body still arriving then is not waited for: its answer goes out as it stood, and the
 // connection closes after it, so a client that stopped sending does not hold its request open - nor
 // whatever the layer that answered it holds - for as long as it cares to.
@@ -64,25 +64,12 @@ func expectsContinue(r *http.Request) bool {
 	return strings.EqualFold(strings.TrimSpace(r.Header.Get("Expect")), "100-continue")
 }
 
-// errUploadTooLarge is an upload route's answer to a body past its limit (routeBodyLimit), and
-// errJSONTooLarge every other route's (decodeJSON).
+// errUploadTooLarge is an upload route's answer to a body past its limit, errHandoffTooLarge the
+// handoff write's, and errJSONTooLarge every other route's (routeBody, decodeJSON).
 var (
 	errUploadTooLarge = errorf(http.StatusRequestEntityTooLarge, "CAP_EXCEEDED", "artifact blob exceeds 25 MB")
 	errJSONTooLarge   = errorf(http.StatusRequestEntityTooLarge, "REQUEST_TOO_LARGE", "request body exceeds %d bytes", maxJSONRequestBytes)
 )
-
-// bodyTooLarge is the route's answer to a body past its limit: the one its handler gives on
-// reading past it.
-func bodyTooLarge(method, pattern string) *apiError {
-	route := method + " " + pattern
-	if keyedUploads[route] {
-		return errUploadTooLarge
-	}
-	if route == handoffWriteRoute {
-		return errHandoffTooLarge
-	}
-	return errJSONTooLarge
-}
 
 // drainBeforeAnswer serves a route whose requests carry a body - every route but a GET - so that
 // whatever layer answers a request, and however little of its body that layer read, the answer
@@ -100,8 +87,7 @@ func bodyTooLarge(method, pattern string) *apiError {
 // sending it (Expect: 100-continue) and was never told: it sends nothing, and the first read would
 // tell it to send all of it.
 func (s *server) drainBeforeAnswer(method, pattern string, handler http.HandlerFunc) http.HandlerFunc {
-	limit := routeBodyLimit(method, pattern)
-	tooLarge := bodyTooLarge(method, pattern)
+	limit, tooLarge := routeBody(method, pattern)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Body == nil || r.Body == http.NoBody {
 			handler(w, r)

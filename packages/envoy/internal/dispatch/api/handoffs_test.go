@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -22,23 +21,6 @@ func postHandoff(t *testing.T, handler http.Handler, issueKey, phase, body strin
 	return sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issueKey+"/handoffs/"+phase, map[string]any{
 		"actor": sessionActor(), "body": body,
 	})
-}
-
-// keyedHandoffPost posts one handoff write under key, the Idempotency-Key a client sends with
-// every attempt of that one write.
-func keyedHandoffPost(t *testing.T, handler http.Handler, issueKey, phase, body, key string) *httptest.ResponseRecorder {
-	t.Helper()
-	data, err := json.Marshal(map[string]any{"actor": sessionActor(), "body": body})
-	if err != nil {
-		t.Fatalf("encode handoff write: %v", err)
-	}
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/issues/"+issueKey+"/handoffs/"+phase, bytes.NewReader(data))
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Authorization", "Bearer agent-token")
-	request.Header.Set(contracts.IdempotencyKeyHeader, key)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	return response
 }
 
 func recordedHandoff(t *testing.T, handler http.Handler, issueKey, phase, body string) model.HandoffSummary {
@@ -360,30 +342,144 @@ func TestHandoffWriteAppendsHandoffRecordedWithoutTheBody(t *testing.T) {
 	}
 }
 
+// spilledHandoff is a handoff body of about 200 KB, well inside the 256 KiB cap, that note names,
+// whose request is about 1.2 MB: a < travels as \u003c, six bytes of a JSON string, which is why
+// the handoff write reads handoffRequestLimit rather than a JSON body's megabyte. A request that
+// size is past what the keyed layer holds in memory (keyedBodyInMemory), so its body spills to a
+// temporary file and is read back for the handler.
+func spilledHandoff(note string) string {
+	return `{"note":"` + note + `","proof":"` + strings.Repeat("<", 200_000) + `"}`
+}
+
 // A handoff write is a keyed write: a retry under the same Idempotency-Key, which the `dispatch`
 // command and the dashboard send with every attempt of one intent, is answered the first call's
-// 201 as it stands, marked replayed, and records one version rather than a second.
+// 201 as it stands, marked replayed, and records one version rather than a second. A changed
+// handoff under that key is another request, 422 KEY_REUSED, read under the handoff write's own
+// limit however large it is, and it records nothing.
 func TestARetriedHandoffWriteReplaysItsAnswerAndRecordsOneVersion(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Keyed handoff write", "spec")
 	const key = "11111111-2222-3333-4444-555555555555"
 	const body = `{"schemaVersion":1,"phase":"implement"}`
+	write := func(body string) *httptest.ResponseRecorder {
+		t.Helper()
+		return pressedAs(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/handoffs/implement",
+			map[string]any{"actor": sessionActor(), "body": body}, "agent-token", nil, key)
+	}
 
-	first := keyedHandoffPost(t, handler, issue.Key, "implement", body, key)
+	first := write(body)
 	if first.Code != http.StatusCreated {
 		t.Fatalf("first write: status=%d body=%s", first.Code, first.Body.String())
 	}
-	repeat := keyedHandoffPost(t, handler, issue.Key, "implement", body, key)
+	repeat := write(body)
 	if repeat.Code != first.Code || repeat.Body.String() != first.Body.String() {
 		t.Fatalf("repeat = %d %s, want the first answer %d %s", repeat.Code, repeat.Body.String(), first.Code, first.Body.String())
 	}
 	if replayed := repeat.Header().Get(contracts.IdempotencyReplayedHeader); replayed != "?1" {
 		t.Fatalf("repeat's %s = %q, want ?1: the key answered it, the handler did not run again", contracts.IdempotencyReplayedHeader, replayed)
 	}
+	reused := write(spilledHandoff("rewritten"))
+	if reused.Code != http.StatusUnprocessableEntity || responseCode(t, reused) != contracts.IdempotencyKeyReused {
+		t.Fatalf("a changed handoff under the key: status=%d body=%.300s, want 422 %s",
+			reused.Code, reused.Body.String(), contracts.IdempotencyKeyReused)
+	}
 
 	listed := decodeBody[[]model.HandoffSummary](t, sessionRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/handoffs", nil))
 	written := decodeBody[model.HandoffSummary](t, first)
 	if len(listed) != 1 || !sameHandoff(listed[0], written) {
 		t.Fatalf("the issue holds %#v, want exactly the one record %#v the first write made", listed, written)
+	}
+}
+
+// A keyed handoff write past the megabyte the keyed layer holds in memory is spooled to a
+// temporary file and read back whole for its handler, and its retry replays the first answer: the
+// layer reads the handoff write's own limit (routeBody), not the megabyte every other JSON route
+// reads.
+func TestAKeyedHandoffWritePastAMegabyteSpillsAndReplays(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Spilled handoff write", "spec")
+	const key = "22222222-3333-4444-5555-666666666666"
+	body := spilledHandoff("spilled")
+	wire, err := json.Marshal(map[string]any{"actor": sessionActor(), "body": body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(wire)) <= keyedBodyInMemory || int64(len(wire)) > handoffRequestLimit {
+		t.Fatalf("the write is %d bytes on the wire, want one past the %d the keyed layer holds in memory and inside the handoff write's %d",
+			len(wire), keyedBodyInMemory, handoffRequestLimit)
+	}
+	write := func() *httptest.ResponseRecorder {
+		t.Helper()
+		return pressedAs(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/handoffs/implement",
+			map[string]any{"actor": sessionActor(), "body": body}, "agent-token", nil, key)
+	}
+
+	first := write()
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first write: status=%d body=%.300s", first.Code, first.Body.String())
+	}
+	repeat := write()
+	if repeat.Code != first.Code || repeat.Body.String() != first.Body.String() ||
+		repeat.Header().Get(contracts.IdempotencyReplayedHeader) != "?1" {
+		t.Fatalf("repeat = %d %s replayed=%q, want the first answer %d %s replayed",
+			repeat.Code, repeat.Body.String(), repeat.Header().Get(contracts.IdempotencyReplayedHeader), first.Code, first.Body.String())
+	}
+	latest := decodeBody[model.Handoff](t, sessionRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/handoffs/implement/latest", nil))
+	if latest.Version != 1 || latest.Body != body {
+		t.Fatalf("the record is version %d of %d bytes, want version 1 of the %d written whole", latest.Version, len(latest.Body), len(body))
+	}
+}
+
+// An answer a handoff write gets before its body is read waits for that body, read and
+// discarded up to the write's own limit (routeBody): a body past handoffRequestLimit is answered
+// 413 CAP_EXCEEDED in the early answer's place, one byte past the limit read, and a repeat whose
+// key a first write still holds is answered 409 KEY_IN_FLIGHT once a body past a JSON body's
+// megabyte has arrived whole.
+func TestAnEarlyHandoffAnswerDrainsUpToTheHandoffWritesLimit(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Drained handoff write", "spec")
+	target := "/api/v1/issues/" + issue.Key + "/handoffs/implement"
+	// A first handoff write under the key that is still running: a row in flight, inside its
+	// lease, held for the request the repeat inside the limit sends again.
+	repeated := httptest.NewRequest(http.MethodPost, target, endlessBody(handoffRequestLimit-1))
+	repeated.Header.Set("Content-Type", "application/json")
+	repeated.SetPathValue("key", issue.Key)
+	repeated.SetPathValue("phase", "implement")
+	holdKeyInFlight(t, database, requestKeyAgentToken, "held", target, requestDigestOf(t, repeated, handoffWritePattern))
+
+	for _, early := range []struct {
+		name     string
+		key      string
+		size     int64
+		status   int
+		code     string
+		wantRead int64
+	}{
+		{
+			name: "a write refused for its key, past the handoff write's limit", key: "not a key",
+			size: handoffRequestLimit + 1<<20, status: http.StatusRequestEntityTooLarge, code: "CAP_EXCEEDED",
+			wantRead: handoffRequestLimit + 1,
+		},
+		{
+			name: "a repeat while its first write runs, past a megabyte and inside the limit", key: "held",
+			size: handoffRequestLimit - 1, status: http.StatusConflict, code: contracts.IdempotencyKeyInFlight,
+			wantRead: handoffRequestLimit - 1,
+		},
+	} {
+		t.Run(early.name, func(t *testing.T) {
+			sent := endlessBody(early.size)
+			request := httptest.NewRequest(http.MethodPost, target, sent)
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer agent-token")
+			request.Header.Set(contracts.IdempotencyKeyHeader, early.key)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if code, _ := refusalOf(t, response); response.Code != early.status || code != early.code {
+				t.Fatalf("status=%d body=%.300s, want %d %s", response.Code, response.Body.String(), early.status, early.code)
+			}
+			if read := sent.read.Load(); read != early.wantRead {
+				t.Fatalf("read %d bytes of the %d-byte body, want %d", read, early.size, early.wantRead)
+			}
+		})
 	}
 }
