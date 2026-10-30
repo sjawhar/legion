@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-484",
+  "completed": "2026-10-30T08:20:00Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "a62d9ba7be6ba257c3063d00909f8efb003e0686",
+  "critical": 2,
+  "important": 9,
+  "minor": 6,
+  "keyFindings": [
+    {"severity": "critical", "file": "packages/daemon/internal/supervise/table.go:621", "description": "A retired or failed claim keeps UpdateRound (retire does not clearUpdate; PodUpdateEnded is ignored in failed/retired; openPodRound/roundOpenedAt/roundTold read retired claims). After the replacement the sweep reads the old round against the new pod and posts the 'pod is gone, work lost' MessagePost every minute, and any later round on that issue is ended every tick. Reproduced by DeepReview with a throwaway test on real Postgres: 3 sweeps -> 3 messages."},
+    {"severity": "critical", "file": "packages/daemon/internal/supervise/table.go:1488", "description": "The re-task reuses delivery id 'update:'+round. shimwire/dedupe.go:63-97 answers a repeat of the last delivery id locally (ack, AgentStart, AgentEnd) and never prompts the agent, so spec R4's re-task never reaches an idle worker. supervise/podupdate_test.go:212-238 pins the same-id behaviour against a fake with no dedupe."},
+    {"severity": "important", "file": "packages/daemon/internal/daemon/podupdate.go:83", "description": "pod == '' (every claim's Locator nil: all suspended, or the only live claim mid-relaunch) is read as 'the pod went': false data-loss message on the issue, the round ends and an operator-held claim stops blocking. Reproduced by DeepReview (operator suspend of a lone worker -> one message)."},
+    {"severity": "important", "file": "packages/daemon/internal/supervise/plugin.go:81", "description": "The controller claim is put in plugin rounds (CanAnswerUpdate checks only the contract) but its tool has no ready_for_update (pi-legion tools.ts:59); staleClaim then serves it on the old contract for ever. Plan D10 says the controller keeps today's behaviour."},
+    {"severity": "important", "file": "packages/daemon/internal/daemon/podupdate.go:247", "description": "PodUpdateEnded{Relaunch:true} is posted for any non-working state; table.go:619 accepts it in suspended, so an operator-suspended claim is relaunched. Reproduced by DeepReview in the supervise harness (suspended by=operator -> launching)."},
+    {"severity": "important", "file": "packages/daemon/internal/daemon/podupdate.go:196", "description": "cannotAnswer is judged from the recorded contract of claims with no running process (launching after the boot relaunch, suspended), so the first roll writes a false drain message and a suspended pre-43 claim is never revived; refreshStalePlugins skips a claim in any round, so a round recorded on a pre-43 claim blocks the relaunch that would let it answer."},
+    {"severity": "important", "file": "packages/daemon/internal/supervise/table.go:1550", "description": "A signal stays valid through later turns (an Envoy-injected turn), and completePodUpdate decides from the tick-start snapshot, which can be minutes old after earlier issues' ReplacePod calls; a turn started after the signal can be cut and its unpushed work deleted."},
+    {"severity": "important", "file": "packages/daemon/internal/daemon/podupdate.go:132", "description": "A round every worker answered but whose turn never ends or whose ReplacePod keeps failing returns before openPodUpdate, so no update-stalled notice is ever sent while every signalled worker's tasks are held."},
+    {"severity": "important", "file": "packages/daemon/internal/daemon/podupdate.go:570", "description": "cannotAnswerMessage's drain steps (suspend, start again) do not replace the pod: Suspend never changes the Sandbox mode and a resume into a live issue pod keeps it. Same text at docs/kubernetes.md 'The disk dies with its pod'."},
+    {"severity": "important", "file": "packages/daemon/internal/daemon/podupdate.go:444", "description": "Reasons are joined with ', ' and split back on ', ', which every reason contains; the update-stalled notice's reasons list is wrong."},
+    {"severity": "important", "file": "PR body", "description": "The spec's acceptance needs a test in each touched package that fails on main and passes at the change, with both runs quoted on the pull request; the body quotes no failing run on main (e9398987)."},
+    {"severity": "minor", "file": "packages/daemon/internal/supervise/table.go:1522", "description": "endPodUpdate leaves a pending, unconfirmed update:<round> delivery queued; it is delivered after the round ended and blocks phase tasks until then."},
+    {"severity": "minor", "file": "packages/daemon/internal/supervise/table.go:149", "description": "PodUpdateTask tells a plugin-round worker its pod and disk are deleted; the plugin relaunch keeps both."},
+    {"severity": "minor", "file": "packages/daemon/internal/supervise/table.go:169", "description": "PodUpdateEnded.Relaunch duplicates the round-kind prefix; round kind decided by string prefix at many sites; refreshPlugin branches on its log trigger string (plugin.go:34)."},
+    {"severity": "minor", "file": "packages/daemon/internal/daemon/podupdate.go:316", "description": "The notice and the issue message are separate transactions; a failed message re-enqueues the notice next tick."},
+    {"severity": "minor", "file": "packages/daemon/internal/prompts/prompts_test.go:246", "description": "TestEveryComposedPromptCarriesTheUpdateTask and roles_test.go TestNoSharedPartStatesTheUpdateRoundsSteps pin prompt wording only, against the repository's test rules."},
+    {"severity": "minor", "file": "packages/daemon/internal/supervise/table.go:1550", "description": "The head a signal records is cleared with the round and never logged, so the acceptance's git ls-remote of each recorded head has nothing to read after the replacement."}
+  ],
+  "proseFixedByReviewer": [
+    "skills/legion-controller/SKILL.md, references/wakes.md: route the update-stalled wake (it was reachable only through 'An architect's escalation').",
+    "skills/legion-controller/references/escalation.md: name the update task's three steps instead of 'the three steps'.",
+    "docs/site/src/content/docs/legion/running-legion.md: list pod_update_retask_hours and pod_update_notice_hours with the other workflow limits.",
+    "docs/kubernetes.md (two places) and sandbox.go's imageDrift comment: a launch replaces the controller's pod for any drift (roundCovers), not only when it is not live."
+  ],
+  "thermonuclear": "deep-review CHANGES, code-quality CHANGES, both at code head a62d9ba7be6b",
+  "ci": "CI run 41019320047 at code head a62d9ba7be6b was still queued (lint, typecheck, test, pr-title queued) when read at 07:51Z; the request for changes does not wait on it."
+}
