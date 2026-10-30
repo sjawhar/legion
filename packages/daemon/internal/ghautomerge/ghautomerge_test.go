@@ -39,6 +39,7 @@ type github struct {
 	mu                             sync.Mutex
 	notFound                       string
 	state                          string
+	title                          string
 	head                           string
 	mergeState                     string
 	updated                        string
@@ -57,8 +58,17 @@ type github struct {
 	mutations                      []string
 }
 
-// updatedAt is the fake pull request's default last change on GitHub.
-const updatedAt = "2026-10-16T05:00:00Z"
+// updatedAt is the fake pull request's default last change on GitHub, and title its default title.
+const (
+	updatedAt = "2026-10-16T05:00:00Z"
+	title     = "fix(daemon): merge an accepted READY head"
+)
+
+// submitted is the enable or merge the fake records for #42 at head, with the squash commit message
+// Submit asked for: the pull request's title and its number, and an empty body.
+func submitted(verb, pullTitle string) string {
+	return fmt.Sprintf("%s PR_42 head SQUASH headline=%q body=%q", verb, pullTitle+" (#42)", "")
+}
 
 func (g *github) serve(t *testing.T) string {
 	t.Helper()
@@ -93,7 +103,16 @@ func (g *github) serve(t *testing.T) string {
 			if strings.Contains(request.Query, "enablePullRequestAutoMerge") {
 				verb = "enable"
 			}
-			g.mutations = append(g.mutations, fmt.Sprintf("%s %v %v %v", verb, request.Variables["id"], request.Variables["head"], request.Variables["method"]))
+			// GitHub reads only what the mutation's input passes, so a field the mutation leaves out
+			// is recorded as absent rather than as the value of the variable it never reads.
+			passed := func(field, variable string) any {
+				if !strings.Contains(request.Query, field+": $"+variable) {
+					return "<absent>"
+				}
+				return request.Variables[variable]
+			}
+			g.mutations = append(g.mutations, fmt.Sprintf("%s %v %v %v headline=%q body=%q", verb, request.Variables["id"], request.Variables["head"], request.Variables["method"],
+				passed("commitHeadline", "headline"), passed("commitBody", "body")))
 			if g.submitStatus != 0 {
 				http.Error(w, `{"message":"Server Error"}`, g.submitStatus)
 				return
@@ -157,7 +176,7 @@ func (g *github) serve(t *testing.T) string {
 			if g.queued {
 				entry = `{"enqueuedAt":"2026-10-11T12:05:00Z"}`
 			}
-			state, mergeState, updated := g.state, g.mergeState, g.updated
+			state, mergeState, updated, pullTitle := g.state, g.mergeState, g.updated, g.title
 			if state == "" {
 				state = "OPEN"
 			}
@@ -167,8 +186,11 @@ func (g *github) serve(t *testing.T) string {
 			if updated == "" {
 				updated = strconv.Quote(updatedAt)
 			}
-			_, _ = fmt.Fprintf(w, `{"data":{"repository":{"autoMergeAllowed":%t,"pullRequest":{"id":"PR_42","state":%q,"headRefOid":%q,"mergeStateStatus":%q,"updatedAt":%s,"isMergeQueueEnabled":%t,"autoMergeRequest":%s,"mergeQueueEntry":%s}}}}`,
-				g.autoMergeOK, state, g.head, mergeState, updated, g.queueRequired, autoMerge, entry)
+			if pullTitle == "" {
+				pullTitle = title
+			}
+			_, _ = fmt.Fprintf(w, `{"data":{"repository":{"autoMergeAllowed":%t,"pullRequest":{"id":"PR_42","state":%q,"title":%q,"headRefOid":%q,"mergeStateStatus":%q,"updatedAt":%s,"isMergeQueueEnabled":%t,"autoMergeRequest":%s,"mergeQueueEntry":%s}}}}`,
+				g.autoMergeOK, state, pullTitle, g.head, mergeState, updated, g.queueRequired, autoMerge, entry)
 		}
 	}))
 	t.Cleanup(server.Close)
@@ -296,15 +318,15 @@ func TestSubmitUsesGitHubsAnswerForTheREADYHead(t *testing.T) {
 		wait                          string
 	}{
 		{name: "a merge queue enqueues a pull request GitHub reports mergeable and waits for the merge", head: "head", keep: "head", mergeState: "CLEAN", queueRequired: true,
-			want: []string{"enable PR_42 head SQUASH"}, wait: "armed"},
+			want: []string{submitted("enable", title)}, wait: "armed"},
 		{name: "a merge queue waits while a required check runs", head: "head", keep: "head", mergeState: "BLOCKED", queueRequired: true, autoMergeOK: true, wait: "unmergeable"},
 		{name: "a merge queue waits while GitHub computes", head: "head", keep: "head", mergeState: "UNKNOWN", queueRequired: true, autoMergeOK: true, wait: "unmergeable"},
 		{name: "auto-merge allowed arms it and waits for the merge", head: "head", keep: "head", mergeState: "BLOCKED", autoMergeOK: true,
-			want: []string{"enable PR_42 head SQUASH"}, wait: "armed"},
+			want: []string{submitted("enable", title)}, wait: "armed"},
 		{name: "a clean pull request merges at once", head: "head", keep: "head", mergeState: "CLEAN",
-			want: []string{"merge PR_42 head SQUASH"}, outcome: Merged},
+			want: []string{submitted("merge", title)}, outcome: Merged},
 		{name: "an unstable pull request merges at once", head: "head", keep: "head", mergeState: "UNSTABLE",
-			want: []string{"merge PR_42 head SQUASH"}, outcome: Merged},
+			want: []string{submitted("merge", title)}, outcome: Merged},
 		{name: "auto-merge disallowed waits while blocked", head: "head", keep: "head", mergeState: "BLOCKED", wait: "unmergeable"},
 		{name: "auto-merge disallowed waits while GitHub computes", head: "head", keep: "head", mergeState: "UNKNOWN", wait: "unmergeable"},
 		{name: "auto-merge disallowed waits while behind", head: "head", keep: "head", mergeState: "BEHIND", wait: "unmergeable"},
@@ -348,6 +370,44 @@ func TestSubmitUsesGitHubsAnswerForTheREADYHead(t *testing.T) {
 			}
 			if g.timelineReads != 0 {
 				t.Fatalf("timeline reads %d by a row that never saw READY's head armed, want none", g.timelineReads)
+			}
+		})
+	}
+}
+
+// Every mutation Submit sends writes the squash commit's message itself: the headline is the pull
+// request's own title with its number, read from GitHub rather than composed from anything else,
+// and the body is empty, so GitHub's COMMIT_MESSAGES default never joins the branch's commit
+// messages - with their Omp-Session: lines, skip-checks: true lines and Dispatch keys - onto the
+// base branch. The enqueue carries them too, where GitHub ignores them.
+func TestSubmitWritesTheSquashCommitMessage(t *testing.T) {
+	for _, tc := range []struct {
+		name                       string
+		mergeState                 string
+		queueRequired, autoMergeOK bool
+		title                      string
+		verb                       string
+	}{
+		{name: "the enqueue of a merge-queue base", mergeState: "CLEAN", queueRequired: true, verb: "enable"},
+		{name: "the merge of a pull request mergeable now", mergeState: "CLEAN", verb: "merge"},
+		{name: "the arm of a pull request not mergeable yet", mergeState: "BLOCKED", autoMergeOK: true, verb: "enable"},
+		{name: "a pull request whose own title is the headline", mergeState: "CLEAN", title: "feat(cli): read the queue's own answer", verb: "merge"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := &github{head: "head", title: tc.title, mergeState: tc.mergeState, queueRequired: tc.queueRequired, autoMergeOK: tc.autoMergeOK}
+			client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
+			_, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", false, keeping("head"))
+			if err != nil && !errors.Is(err, wait.ErrWaiting) {
+				t.Fatalf("Submit = %v, want a merge or a wait on one", err)
+			}
+			wanted := tc.title
+			if wanted == "" {
+				wanted = title
+			}
+			g.mu.Lock()
+			defer g.mu.Unlock()
+			if want := []string{submitted(tc.verb, wanted)}; !slices.Equal(g.mutations, want) {
+				t.Fatalf("mutations %v, want %v: the headline is the pull request's title with its number, and the body is empty", g.mutations, want)
 			}
 		})
 	}
@@ -563,7 +623,7 @@ func TestSubmitReadsARemovalItDidNotMakeInsteadOfSubmittingAgain(t *testing.T) {
 			defer g.mu.Unlock()
 			var want []string
 			if tc.resubmit {
-				want = []string{"enable PR_42 head SQUASH"}
+				want = []string{submitted("enable", title)}
 			}
 			if !slices.Equal(g.mutations, want) {
 				t.Fatalf("mutations %v, want %v", g.mutations, want)
