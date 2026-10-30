@@ -2,26 +2,25 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-562",
-  "completed": "2026-10-30T08:18:32Z",
-  "round": 8,
-  "scope": "Narrowed by the INFRA-63 architect: the forward merge by fingerprint (the accepted diff plus only the conflict resolution and the renumbering), the six text fixes from round 7, and the required checks at the code head; approve if they hold.",
-  "reviewedHead": "79a62abe8f13b5b6f451465d12b72f2f808766d4",
-  "codeHead": "79a62abe8f13b5b6f451465d12b72f2f808766d4",
+  "completed": "2026-10-30T09:15:36Z",
+  "round": 9,
+  "scope": "Narrowed by the INFRA-63 architect: the renumbering merge by fingerprint, that main@origin holds no migration sharing a version with this PR's (git ls-tree), and the required checks at the code head; approve if they hold, and do not hold for a migration that lands after the read.",
+  "reviewedHead": "080dcd011d364e2ee2963c265d511f39161d3e94",
+  "codeHead": "05185b3369a9282872ee34baa4f17836db16eab1",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
   "minor": 0,
   "scopeResults": {
-    "forwardMerge": "Faithful. I compared the PR's patch before the merge (de546ed2 -> c2378eb6) with its patch after (3c2691a7 -> 6256e014), file by file. The only differences are: the renumbering 0142-0145 -> 0145-0148, with file headers and references in delivery.go, issue_route_status.go, ratelimit.go, delivery_bound_send_test.go, README.md, AGENTS.md and the fragments; and the six text fixes. No other code line differs. go vet (with and without -tags multiprocess) and gofmt are clean.",
-    "textFixes": "All six done in 6256e014. (2) Fragment 103003 names /api/v1/live/_test/disconnect and /rotate. (3) Fragment 103010 says 'a nullable column with a check added not valid, and three new tables' and that either release's sweep resumes. (4) main.go's leased-loop list drops the delivery resume and adds the term-statistics refresh. (5) messages.go, message_delivery.go and fragment 103005 say the no-attempt recovery serves only messages an earlier release stored. (6) AGENTS.md's stranded-attempt paragraph points to 'The delivery sweep' and keeps only requested_by, urgency and ACCEPT_STALE. (7) delivery_sweep.go states the worst-case pass of about 21 minutes under a take-over.",
-    "proseFixOfMine": "79a62abe corrects packages/envoy/AGENTS.md:2745, which still named route_roster's migration 0143 after the renumbering; it is 0146. Docs only; it is the head reviewed here."
+    "renumberingMerge": "Holds. I compared the PR's patch over 3c2691a7 -> 79a62abe with its patch over 71e31498 -> 05185b33. With migration numbers masked, the only remaining difference is README's 'It follows `0144_messages_item_blocks_trigger`' becoming 'It follows `0147_message_deliveries_session_created`', which is the correct new predecessor. The migrations are 0148_message_delivery_urgency, 0149_route_roster, 0150_github_rate_limits and 0151_delivery_run_warnings. AGENTS.md's route_roster reference reads 0149. go vet is clean; TestMigrationSetIsNumberedOneToN passes at 05185b33.",
+    "noSharedVersion": "Holds at main@origin 202d0168 (fetched 09:10Z): git ls-tree lists main's highest migration as 0147, and none of 0148-0151 is on main. The branch holds no duplicate version."
   },
-  "ci": "At 79a62abe: lint, test and pr-title success, typecheck skipped (counts as passing); envoy-go success (job 123939641979, internal/dispatch/api ok 538.598 s); envoy-infra-go success; dispatch-multiprocess in progress at 08:18Z. My push cancelled 6256e014's runs, so 79a62abe, which has the same code plus one AGENTS.md line, is the code head CI ran.",
+  "ci": "Does not hold. No workflow ran at the code head 05185b33 (GET actions/runs?head_sha=05185b33 returns none): the push's head was the implementer's handoff commit carrying skip-checks: true. The newest pull_request CI head is still my 79a62abe, all green there, but the compare from it to this head is 159 files including main's merge, so it does not stand for this code. GitHub also reports the PR CONFLICTING again: main moved to 202d0168 (#2508 at 08:36Z, #2478 at 08:59Z). Both touch files this PR changes: packages/envoy/AGENTS.md, cmd/dispatch/{AGENTS.md,README.md,main.go}, api/routes_table.go, githubapp/{client.go,deliveries.go}, redeliver/{sweep.go,sweep_test.go} and docs/site/.../dispatch/envoy.md. Without a merge ref no pull_request CI can run.",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/store/migrations/0145_message_delivery_urgency.up.sql",
-      "description": "After the implementer's merge (base 3c2691a7), main added 0145_events_person_words, 0146_comment_deliveries_session and 0147_message_deliveries_session_created (#2376 at 06:48Z and the commits after it). This PR's 0145, 0146 and 0147 now share versions with them, and pgmigrate refuses that (internal/pgmigrate/set.go:138). GitHub reports MERGEABLE because the file names differ. Merge main forward again, keep both sides, renumber this PR's four migrations above main's highest (0148-0151 today) with every reference, and push without the skip-checks trailer. main's 0146 and 0147 add indexes on comment_deliveries and message_deliveries, the tables this PR writes; check that nothing conflicts with them."
+      "file": "PR #2387 (CI and merge state)",
+      "description": "The required checks have not run on this code, and they cannot run while the PR conflicts with main. Merge main forward once more (keep both sides; #2508 and #2478 touch githubapp, redeliver and the dispatch docs this PR changes), renumber again only if main has passed 0147 by then, and push with no skip-checks trailer on the pushed head, so the code head gets its own lint, typecheck, test, pr-title and envoy-go runs. The next round reads that by fingerprint."
     }
   ]
 }
