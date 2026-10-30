@@ -324,7 +324,7 @@ func TestAStopWhoseHandlerIgnoresItsCancelMarksNoHandBack(t *testing.T) {
 	active.logRecord(t, "the message in hand was still being handled after its cancel", 5*time.Second)
 	end := handBackEnd(t, active)
 	if end["linger_end"] != string(lingerEndReceiving) || end["hand_back_marked"] != false ||
-		end["no_mark"] != "the message in hand was still being handled after its cancel" {
+		end["no_mark"] != noMarkHandlerRunning {
 		t.Fatalf("pod-a's hand-back ended %v, want its linger ended by the standby receiving, no mark written, and the handler still running as the reason", end)
 	}
 	released := active.lease.released
@@ -351,6 +351,8 @@ func TestAStopMarksNoHandBackWhenItsLingerOrItsTermFellShort(t *testing.T) {
 	for _, row := range []struct {
 		name, machineID string
 		lingerEnd       lingerEnd
+		// noMark is the gate that must stop the mark, as the hand-back line names it.
+		noMark string
 		// taker runs a lease without a receive loop, so the record is taken and never received
 		// on, and successor a whole pod, which takes the record and receives on it; binding
 		// leaves a lost node's push binding open beside the stopping pod's own; swallowDrain
@@ -361,10 +363,10 @@ func TestAStopMarksNoHandBackWhenItsLingerOrItsTermFellShort(t *testing.T) {
 		binding      bool
 		swallowDrain bool
 	}{
-		{"the linger ended with no pod having taken the record", "box-unmarked-untaken", "not taken", false, false, false, false},
-		{"the linger ran to its cap with a taker that never received", "box-unmarked-mute", "timeout", true, false, false, false},
-		{"the term had a lost node's binding open", "box-unmarked-stale", lingerEndReceiving, false, true, true, false},
-		{"the drain's wait ran out", "box-unmarked-drain", lingerEndReceiving, false, true, false, true},
+		{"the linger ended with no pod having taken the record", "box-unmarked-untaken", lingerEndUntaken, noMarkNoSuccessor, false, false, false, false},
+		{"the linger ran to its cap with a taker that never received", "box-unmarked-mute", lingerEndTimeout, noMarkNoSuccessor, true, false, false, false},
+		{"the term had a lost node's binding open", "box-unmarked-stale", lingerEndReceiving, noMarkRelease, false, true, true, false},
+		{"the drain's wait ran out", "box-unmarked-drain", lingerEndReceiving, noMarkUndrained, false, true, false, true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			uri := testnats.URL(t)
@@ -410,8 +412,8 @@ func TestAStopMarksNoHandBackWhenItsLingerOrItsTermFellShort(t *testing.T) {
 			defer cancel()
 			active.receiver.Stop(ctx)
 			end := handBackEnd(t, active)
-			if end["linger_end"] != string(row.lingerEnd) || end["hand_back_marked"] != false {
-				t.Fatalf("pod-a's hand-back ended %v, want its linger ended %q and no mark written", end, row.lingerEnd)
+			if end["linger_end"] != string(row.lingerEnd) || end["hand_back_marked"] != false || end["no_mark"] != row.noMark {
+				t.Fatalf("pod-a's hand-back ended %v, want its linger ended %q and no mark written, stopped by %q", end, row.lingerEnd, row.noMark)
 			}
 			released := active.lease.released
 			if _, err := active.lease.kv.Get(active.lease.handBackKey(released)); !errors.Is(err, natsgo.ErrKeyNotFound) {

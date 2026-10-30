@@ -1452,11 +1452,12 @@ func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.C
 	// clean-hand-back mark, one bucket call of 2 s at most, which ends the standby's settle hold
 	// at 3 s (durableReceiver.handBack): 11 s at most, and 12.25 s when the flush (1 s) and the
 	// release (2 s) both run to their bounds and leave that floor past the cap. This budget bounds
-	// none of those waits: it is how long this shutdown waits for the stop before it goes on,
-	// leaving the HTTP stop below none of it, while the hand-back runs to its own bounds. All a
-	// stop past the budget can lose is its mark, if the runtime kills the process before that
-	// write lands, and the next holder then settles at its 7 s cap as it does after any stop that
-	// wrote none.
+	// none of those waits: it is how long this shutdown waits for the receive stop. Past it the
+	// shutdown goes on to the HTTP stop with no time left, then to the NATS drains below and
+	// os.Exit(1), while the hand-back may still be draining or writing its mark. That exit, not the
+	// runtime's kill, cuts the hand-back off, so a longer grace period in the runtime keeps no
+	// mark. A stop cut off this way writes no mark, and the next holder then settles at its 7 s
+	// cap, as it does after any stop that wrote none.
 	// HTTP keeps serving meanwhile.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

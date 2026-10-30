@@ -157,15 +157,16 @@ func (r *durableReceiver) handBack(t *receiveTerm) {
 // ended. The lease adds what it knows: its own release wrote the record, and that record carried
 // no stale binding (lease.MarkHandBack). A write that fails leaves the next holder the settle
 // hold of a hard take-over and nothing worse, so it is a warning and no more;
-// listenerStateRequestWait bounds it, inside the stop's own budget.
+// listenerStateRequestWait bounds it, and a stop past the shutdown's budget can be cut off
+// before it by the listener's own exit (shutdownListener).
 func (r *durableReceiver) markHandBack(end lingerEnd, drained, handled bool) (bool, string) {
 	switch {
 	case end != lingerEndReceiving:
-		return false, "no successor was receiving when the linger ended"
+		return false, noMarkNoSuccessor
 	case !drained:
-		return false, "the server did not confirm the drain"
+		return false, noMarkUndrained
 	case !handled:
-		return false, "the message in hand was still being handled after its cancel"
+		return false, noMarkHandlerRunning
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), listenerStateRequestWait)
 	defer cancel()
@@ -174,12 +175,22 @@ func (r *durableReceiver) markHandBack(end lingerEnd, drained, handled bool) (bo
 	case err != nil:
 		r.logger.Warn("clean hand-back not marked; the next holder settles for an ack wait",
 			slog.String("consumer", r.consumer), slog.String("error", err.Error()))
-		return false, "the mark's write failed"
+		return false, noMarkWriteFailed
 	case !marked:
-		return false, "this stop's own release wrote no record, or one beside a lost node's binding"
+		return false, noMarkRelease
 	}
 	return true, ""
 }
+
+// The reasons markHandBack gives for writing no mark, the no_mark of the hand-back log line, one
+// for each gate in the order it checks them.
+const (
+	noMarkNoSuccessor    = "no successor was receiving when the linger ended"
+	noMarkUndrained      = "the server did not confirm the drain"
+	noMarkHandlerRunning = "the message in hand was still being handled after its cancel"
+	noMarkWriteFailed    = "the mark's write failed"
+	noMarkRelease        = "this stop's own release wrote no record, or one beside a lost node's binding"
+)
 
 // lingerEnd is how a stopping pod's linger ended, the linger_end of its hand-back log line.
 type lingerEnd string
