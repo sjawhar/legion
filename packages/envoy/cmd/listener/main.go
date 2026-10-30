@@ -401,14 +401,17 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 // (store.Registry.RoleViewErr): until its watcher's first scan has delivered every claim the view
 // answers no read, so GET /v1/sessions and GET /v1/registry/<session_id> answer 503 while every
 // other check here passes, and the report reads the very state those routes read. It is last so
-// that it hides nothing: every check above answers 503 for a fault that is not self-repairing,
-// and a degraded view must not take the place of one of those. For the same reason the degraded
-// answer carries the healthy body's own fields, so a reader loses no counter while the view
-// fills. Degraded and not unhealthy, because that view fills itself through its watcher's own
-// rescan and a 503 would take a serving listener out of a load balancer for a state that repairs
-// itself: a readiness check runs curl -f or -sf against /healthz, which a 200 passes. For the
-// same reason the view is no part of Ping or WatchErr, whose terminal failures the self-health
-// monitor self-terminates the listener over: a restart completes no scan that keeps timing out.
+// that it hides nothing: it comes after every check that can answer 503, so a degraded view never
+// takes the place of a fault that does not repair itself. A KV ping or durable info read that
+// answered with a transient failure is reported before it, as its own 200 "degraded" carrying
+// only status and error, and returns before the checks after it. The role claim view's degraded
+// answer instead carries the healthy body's own fields, so a reader loses no counter while the
+// view fills. Degraded and not unhealthy, because that view fills itself through its watcher's
+// own rescan and a 503 would take a serving listener out of a load balancer for a state that
+// repairs itself: a readiness check runs curl -f or -sf against /healthz, which a 200 passes.
+// For the same reason the view is no part of Ping or WatchErr, whose terminal failures the
+// self-health monitor self-terminates the listener over: a restart completes no scan that keeps
+// timing out.
 func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -473,9 +476,9 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 		}
 		response["num_pending"] = consumerInfo.NumPending
 		response["num_ack_pending"] = consumerInfo.NumAckPending
-		// Last, so that no fault above is reported as this one: every check before it answers 503
-		// for something that does not repair itself, and the view does. The answer keeps the
-		// fields above it, so a reader of the counters loses none while the view fills.
+		// Last, so that no fault above is reported as this one: every check before it that can
+		// answer 503 has passed. The answer keeps the fields above it, so a reader of the counters
+		// loses none while the view fills.
 		if err := d.registry.RoleViewErr(); err != nil {
 			response["status"] = "degraded"
 			response["error"] = dependencyUnavailable("role claim view", err)
