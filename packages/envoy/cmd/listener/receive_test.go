@@ -73,25 +73,26 @@ type receiverRig struct {
 }
 
 // newReceiverRig builds a pod named instance of machineID's listener on the NATS at uri, whose
-// receive loop hands each message to handle, without starting its lease or its receive loop.
-func newReceiverRig(t *testing.T, uri, machineID, instance string, handle durableHandler, timing receiveConfig, leaseTiming leaseConfig) *receiverRig {
+// receive loop hands each message to handle, without starting its lease or its receive loop. Any
+// options go to the pod's bus client, beside the ones every rig connects with.
+func newReceiverRig(t *testing.T, uri, machineID, instance string, handle durableHandler, timing receiveConfig, leaseTiming leaseConfig, options ...bus.ConnectOption) *receiverRig {
 	t.Helper()
-	return newReceiverRigVia(t, uri, uri, machineID, instance, handle, timing, leaseTiming)
+	return newReceiverRigVia(t, uri, uri, machineID, instance, handle, timing, leaseTiming, options...)
 }
 
 // newReceiverRigVia is newReceiverRig with the bus client connected at busURI (a relay, say) and
 // the listener state bucket's connection at stateURI.
-func newReceiverRigVia(t *testing.T, busURI, stateURI, machineID, instance string, handle durableHandler, timing receiveConfig, leaseTiming leaseConfig) *receiverRig {
+func newReceiverRigVia(t *testing.T, busURI, stateURI, machineID, instance string, handle durableHandler, timing receiveConfig, leaseTiming leaseConfig, options ...bus.ConnectOption) *receiverRig {
 	t.Helper()
-	return newReceiverRigAs(t, busURI, stateURI, "", machineID, instance, handle, timing, leaseTiming)
+	return newReceiverRigAs(t, busURI, stateURI, "", machineID, instance, handle, timing, leaseTiming, options...)
 }
 
 // newReceiverRigAs is newReceiverRigVia with both connections made as the nkey user whose seed is
 // seed, as main makes them from NATS_NKEY_SEED (the state bucket's on a connection bus.Dial makes),
 // or with the URLs' own credentials when seed is "".
-func newReceiverRigAs(t *testing.T, busURI, stateURI, seed, machineID, instance string, handle durableHandler, timing receiveConfig, leaseTiming leaseConfig) *receiverRig {
+func newReceiverRigAs(t *testing.T, busURI, stateURI, seed, machineID, instance string, handle durableHandler, timing receiveConfig, leaseTiming leaseConfig, extra ...bus.ConnectOption) *receiverRig {
 	t.Helper()
-	options := []bus.ConnectOption{bus.WithReplicas(1), bus.WithName("receive-test " + instance)}
+	options := append([]bus.ConnectOption{bus.WithReplicas(1), bus.WithName("receive-test " + instance)}, extra...)
 	var stateConn *natsgo.Conn
 	if seed == "" {
 		stateConn = testnats.Connect(t, stateURI)
@@ -150,9 +151,9 @@ func newReceiverRigAs(t *testing.T, busURI, stateURI, seed, machineID, instance 
 }
 
 // startReceiverRig is newReceiverRig with the lease and the receive loop started.
-func startReceiverRig(t *testing.T, uri, machineID, instance string, handle durableHandler, timing receiveConfig, leaseTiming leaseConfig) *receiverRig {
+func startReceiverRig(t *testing.T, uri, machineID, instance string, handle durableHandler, timing receiveConfig, leaseTiming leaseConfig, options ...bus.ConnectOption) *receiverRig {
 	t.Helper()
-	rig := newReceiverRig(t, uri, machineID, instance, handle, timing, leaseTiming)
+	rig := newReceiverRig(t, uri, machineID, instance, handle, timing, leaseTiming, options...)
 	rig.lease.Start(context.Background())
 	rig.receiver.Start()
 	return rig

@@ -1719,8 +1719,8 @@ A listener named `<N>` registers these resources, each a child of the component:
 | `<N>-execution-nats-nkey-seed-read` | `aws:iam/rolePolicy:RolePolicy` | The same on `seedSecretArn`, only when it is given. |
 | `<N>-task` | `aws:ecs/taskDefinition:TaskDefinition` | `family`, `cpu` and `memory` on Fargate (`awsvpc`), with the one container below, created after both policies and after `apiTokenSecretVersionId`'s resource. |
 | `<N>-service` | `aws:ecs/service:Service` | One task in `subnetIds` with `securityGroupId` and no public address, its port 9020 in `targetGroupArn`, registered in Cloud Map, with ECS Exec on, created after `natsServiceArn`'s resource. It deploys at 100% minimum and 200% maximum, so a healthy target stays in the target group; the circuit breaker rolls back a replacement that keeps failing to start, the service waits for steady state, ECS ignores load-balancer health for 120 s while a task starts, and create and update time out after 15 minutes. |
-| `<N>-<filter>` | `aws:cloudwatch/logMetricFilter:LogMetricFilter` | Eight, on the log group; `envoy-infra render metric-filters` prints them. |
-| `<N>-<alarm>` | `aws:cloudwatch/metricAlarm:MetricAlarm` | Five, below. |
+| `<N>-<filter>` | `aws:cloudwatch/logMetricFilter:LogMetricFilter` | Nine, on the log group; `envoy-infra render metric-filters` prints them. |
+| `<N>-<alarm>` | `aws:cloudwatch/metricAlarm:MetricAlarm` | Six, below. |
 
 The log group, the Cloud Map service, the task definition, the service and the alarms carry
 `baseTags` and `service: <N>`; the policies and the filters carry none.
@@ -1752,11 +1752,13 @@ ECS injects its secrets from their ARNs: `ENVOY_GITHUB_WEBHOOK_SECRET` with `git
 Each alarm pages `alarmTopicArn` on one matching line in five minutes (`Sum` over 300 s at least 1,
 missing data not breaching) and sends the OK transition there too, so the channel sees the signal
 stop: `<N>-publish-failure` (a JetStream publish that did not complete), `<N>-webhook-refused` (a
-delivery NATS can never take, answered 422), `<N>-stream-subject-dropped` (a start that dropped
-another deployment's overlapping stream subject), `<N>-durable-refused` (a start that refused its
-durable consumer) and `<N>-subscribe-exhausted` (a listener holding its machine's delivery lease
-that has gone 135 s or more without receiving from its durable: another subscriber holds it
-push-bound, usually a build from before the lease still running, or its reads, writes or
+delivery NATS can never take, answered 422), `<N>-reconnect-hooks-stalled` (a KV watch rebuild
+that has not succeeded for a minute after a NATS reconnect, so the pod's caches serve what they
+last held and `/healthz` answers 200 `degraded`), `<N>-stream-subject-dropped` (a start that
+dropped another deployment's overlapping stream subject), `<N>-durable-refused` (a start that
+refused its durable consumer) and `<N>-subscribe-exhausted` (a listener holding its machine's
+delivery lease that has gone 135 s or more without receiving from its durable: another subscriber
+holds it push-bound, usually a build from before the lease still running, or its reads, writes or
 subscribes of the durable fail, and it gives the lease up). `<N>-publish-failure` and
 `<N>-webhook-refused` count a GitHub delivery's first failure or refusal in each listener task: a
 later one of the same delivery, such as each of the redeliveries Dispatch's sweep asks for over 72

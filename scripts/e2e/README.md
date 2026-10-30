@@ -46,6 +46,45 @@ the kernel kill pod processes below their own limits, and the kubelet does not s
 | `TestRealGitHubCredentialSurface` | the real `api.NewServer`'s App leases, rendered as the gh files a pane's `GH_CONFIG_DIR` holds, make the real `gh` identify as the implementer and reviewer bots, an empty `GH_CONFIG_DIR` authenticates nobody, and `git` clones the smoke repository through `gh auth git-credential` from the implement App's files alone. Devbox only |
 | `TestRealGitHubReadyHoldsTheHeadToRetrosCommits` | the daemon's `POST /legion/v1/handoff/complete` with `ready: true`, over a real Postgres and as the real implement App, holds a pull request's head to its review round's approved head plus retro's commits: GitHub's compare of the two must show nothing outside `docs/solutions/` and `.legion/<issue>/`, or READY is refused `READY_UNREVIEWED_CHANGE` naming the paths. Devbox only |
 
+## On a GitHub-hosted runner
+
+[`.github/workflows/e2e.yaml`](../../.github/workflows/e2e.yaml) runs one proof per job on
+`ubuntu-24.04`, against a Postgres service. Five scripts run there: `child-adoption.sh`,
+`dispatch-claimant-delivery.sh`, `merged-root-waits.sh`, `no-required-checks.sh` and
+`stage1-skeleton.sh`, which the `test` job of `ci.yaml` also runs. None of them needs a secret,
+and none there may: Sami answered that no API key goes into this repository, and that a smoke
+test which calls a model runs in the deployment repository on workload identity federation
+(sjawhar/legion#2512). Every other script needs a devbox, a throwaway kind cluster, a real
+cluster or a model key, and the workflow refuses it by name with what its own header says it
+needs. `.github/e2e-scripts.json` holds both lists, and a script in neither fails the run.
+
+A person or a role starts a proof two ways, and takes no devbox for either:
+
+```sh
+gh workflow run e2e.yaml -f script=merged-root-waits   # one proof, with or without the .sh
+gh pr edit <number> --add-label e2e                    # every hosted proof, on that pull request
+```
+
+A nightly run makes the whole hosted set on `main`: GitHub starts a scheduled run from the default
+branch alone, so it proves main's scripts, never a pull request's.
+
+Read the result, and take the evidence:
+
+```sh
+gh run list --workflow e2e.yaml --limit 5
+gh run view <run id>        # one job per proof, each named for its script, and which one failed
+gh run view --log --job <job id>
+gh run download <run id>    # every evidence directory the run uploaded
+```
+
+Each job writes its evidence to one directory and uploads it as
+`e2e-<script>-<run id>-<run attempt>`, on a pass and on a failure. The job sets the evidence
+variable of the script it runs (`CHILD_ADOPTION_EVIDENCE_DIR`, `MERGED_ROOT_WAITS_EVIDENCE_DIR`,
+`NO_REQUIRED_CHECKS_EVIDENCE_DIR`), so that script writes its transcript and its logs there. It
+also keeps the run's own output as `output.log` in the same directory, which is what
+`stage1-skeleton.sh` and `dispatch-claimant-delivery.sh` leave a reader: they take no evidence
+variable and keep a work directory of their own, whose path that output names.
+
 ## TestRealGitHubCredentialSurface
 
 ```sh

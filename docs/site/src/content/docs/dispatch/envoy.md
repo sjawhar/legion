@@ -412,14 +412,24 @@ so run one listener per machine id until the grant is in place.
 | `503` `starting` | The listener cannot serve yet: it is connecting to NATS, loading its caches, or waiting for its OIDC issuer. It stays up and keeps trying, however long that takes. |
 | `200` `healthy`, `role` `active` | Everything answers, and this listener delivers. The body includes the consumer's lag, and `live_topics`: `subscribed` when the listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`), `not_applicable` when it does not. |
 | `200` `healthy`, `role` `standby` | Everything answers, and another listener of the machine delivers; `active_instance` names it. A standby is ready: send it traffic. |
-| `200` `degraded` | A passing key-value failure the listener is retrying, or a pod that is its machine's deliverer and does not receive the durable yet: it holds the delivery lease, runs without one, has read no holder at all, or the lease record still names it while its renewals have lapsed. Nothing of the durable reaches a session until it receives, so no such answer is healthy; it stays `200`, so a readiness probe keeps the pod in service. |
-| `503` `unhealthy` | NATS is unreachable, the role subscription or a cache watcher stopped, or, on the active listener, its subscription stopped, the durable consumer is gone, or the durable consumer is `not bound to this listener's subscription`, which a durable deleted and created again under the listener leaves. With `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, also `live subscription inactive` when the subscription to every topic is gone or the server refuses it, as one restarted without that grant does. |
+| `200` `degraded` | A passing key-value failure the listener is retrying, or a pod that is its machine's deliverer and does not receive the durable yet: it holds the delivery lease, runs without one, has read no holder at all, or the lease record still names it while its renewals have lapsed. Nothing of the durable reaches a session until it receives, so no such answer is healthy; it stays `200`, so a readiness probe keeps the pod in service. Also `KV watch rebuild unavailable` when the pod has not rebuilt its key-value watches for a minute after a NATS reconnect, active or standby: its caches serve what they last held, and the answer stays a `200` because the container health check and the readiness probe both read `/healthz`, so refusing would take out a pod still serving those caches and replace it with one that rebuilds into the same failure with empty caches. A pod that carries a failure of its own and a stalled rebuild names both in `error`, its own first. |
+| `503` `unhealthy` | NATS is unreachable, the role subscription or a cache watcher stopped, or, on the active listener, its subscription stopped, the durable consumer is gone, or the durable consumer is `not bound to this listener's subscription`, which a durable deleted and created again under the listener leaves. With `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, also `live subscription inactive` when the subscription to every topic is gone or the server refuses it, as one restarted without that grant does. A pod this answers for is refused however long its KV watch rebuild has stalled: the rebuild is the last thing `/healthz` reads. |
 
 The webhooks open once NATS is connected, and `/v1` once the session and subscription caches are
 loaded too; until then each answers `503` `service starting`, and `/healthz` answers `503`
 `starting` until both are open. So a readiness check on `/healthz` sends a listener no traffic
 before it can serve, and sends traffic to the active listener and the standbys alike. A liveness
 check should restart only a listener that does not answer at all, not one that answers `503`.
+
+After a NATS reconnect the listener rebuilds the key-value watches its caches read through. A
+rebuild that fails is tried again within seconds, so one that fails and then succeeds inside that
+minute leaves the pod `healthy` and logs a warning rather than an error; only a rebuild that has
+not succeeded for a minute is logged as an error and makes `/healthz` answer `200` `degraded`,
+naming the rebuild and how long it has gone without succeeding, whichever role the pod holds.
+Page on that error line, not on the health check: the health check and the readiness probe act on
+`/healthz` themselves, so a pod taken out for a stalled rebuild is replaced by one that rebuilds
+into the same failure with caches that warm up empty and drop the messages the running one still
+delivers, and a standby taken out is one pod less to take the delivery lease over.
 
 Give the listener about 30 seconds to stop after `SIGTERM`. It hands its deliveries to a standby,
 stops taking requests, lets deliveries in progress finish, then exits with a non-zero code so a

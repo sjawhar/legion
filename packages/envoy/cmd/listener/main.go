@@ -400,19 +400,44 @@ type healthAnswer struct {
 // answer within healthzBudget, or on the active pod when its subscription is inactive, the
 // durable consumer is gone, or the durable consumer is "not bound to this listener's
 // subscription" because it was recreated server-side and now delivers elsewhere; and 200
-// "degraded" for a transient KV failure the self-health monitor and the NATS reconnect retry, or
-// an active pod's durable lag that could not be read. A pod that holds the lease, or runs
-// without one, and fails to read, create, correct or subscribe to the durable answers 200
-// "degraded" with the failure in "error" and how long it has failed in
-// "receive_failing_ms", and 503 "unhealthy" once that has lasted the alarm bound
-// (durableTakeoverAlarmAfter): a holder gives the lease up then and is a standby again, so only a
-// listener without a lease, which keeps retrying, stays there. A listener that mounts no GitHub
-// webhook route keeps no CI cache, and its answer carries "ci_cache": "not_applicable".
-// "live_topics" says whether the live topics lane is "subscribed" or, with
+// "degraded" for a transient KV failure the self-health monitor and the NATS reconnect retry, an
+// active pod's durable lag that could not be read, or a KV watch rebuild stalled past
+// bus.RepairGrace (below). A pod that holds the lease, or runs without one, and fails to read,
+// create, correct or subscribe to the durable answers 200 "degraded" with the failure in "error"
+// and how long it has failed in "receive_failing_ms", and 503 "unhealthy" once that has lasted
+// the alarm bound (durableTakeoverAlarmAfter): a holder gives the lease up then and is a standby
+// again, so only a listener without a lease, which keeps retrying, stays there. A listener that
+// mounts no GitHub webhook route keeps no CI cache, and its answer carries "ci_cache":
+// "not_applicable". "live_topics" says whether the live topics lane is "subscribed" or, with
 // ENVOY_SUBSCRIBE_ALL_TOPICS off, "not_applicable"; with it on, a live client that is not
 // connected or holds no valid subscription is 503 "live subscription inactive", since every topic
 // the stream does not store then reaches no session. The checks run under one healthzDeadline, and
 // an answer they have not reached by then is 503 "unhealthy".
+//
+// A rewatch of the KV caches that keeps failing after a reconnect ends no watcher and clears no
+// cache, so every other check still passes while the caches follow buckets they no longer watch
+// (INFRA-743). The handler therefore reads the client's HookStall, how long the bus's reconnect
+// hooks have been due without a run that succeeded, and reports the dependency "KV watch rebuild"
+// once it reaches bus.RepairGrace. It reads it last, below every 503 check and immediately before
+// either 200 answer, an active pod's and a standby's alike (okAnswer), so a stall never stands in
+// for a worse fault: a durable consumer that is gone, unbound, or whose info read did not answer,
+// a subscription that is not valid and a takeover that has failed past durableTakeoverAlarmAfter
+// are each still 503, since a listener that receives nothing is not the case the 200 is for. That
+// answer is 200 "degraded" and not 503, because the probes act on /healthz: the ECS container
+// health check is curl -sf /healthz, every 30 s with 3 retries
+// (infra/aws/rendering/listener.go:202-203), and GKE's readiness probe reads it too
+// (infra/gcp/dispatch_kube.go, readyProbe). A 503 would unroute, or replace, a pod whose caches
+// still hold what they warmed up with, and its replacement rebuilds into the same failing rewatch
+// with cold caches that warm up empty, whose fanout then acknowledges general-topic messages as
+// unmatched and loses them (delivery.go, fanoutDelivery); a standby taken out of service this way
+// is also one pod less to take the lease over. The paging signal for this state is the bus's ERROR
+// "envoy nats reconnect hooks have not succeeded" (internal/bus/recovery.go, reportHookFailure),
+// which the AWS rendering counts as a log metric filter (infra/aws/rendering/metricfilters.go). A
+// shorter stall is reported nowhere here: the bus runs the hooks again within seconds of a failure
+// (internal/bus/recovery.go, recoverUntilHealthy), so a rebuild under the bound is being repaired,
+// and a listener would otherwise read as degraded over every reconnect. The stall is one
+// bus.Client's, naming no cache, so a listener that keeps no CI cache needs no branch of its own,
+// and the live topics lane's client, which carries no reconnect hook, has no stall to report.
 //
 // The checks that go to the bus share one healthzBudget taken from that deadline: the flush, each
 // cache's KV ping and the active pod's durable consumer info read. A ping or that read that has not
@@ -510,7 +535,7 @@ func listenerHealth(ctx context.Context, d *listenerDeps, verifier *apiVerifier)
 			}
 			response["status"] = "degraded"
 		}
-		return healthAnswer{http.StatusOK, response}
+		return okAnswer(response, d.client)
 	}
 	response["role"] = "active"
 	if !report.SubscriptionValid {
@@ -535,7 +560,7 @@ func listenerHealth(ctx context.Context, d *listenerDeps, verifier *apiVerifier)
 		response["num_pending"] = consumerInfo.NumPending
 		response["num_ack_pending"] = consumerInfo.NumAckPending
 	}
-	return healthAnswer{http.StatusOK, response}
+	return okAnswer(response, d.client)
 }
 
 // healthzBudget bounds the bus checks of one /healthz answer.
@@ -565,6 +590,40 @@ func dependencyHealth(dependency string, err error, terminal bool) healthAnswer 
 		"status": status,
 		"error":  dependency + " unavailable: " + err.Error(),
 	}}
+}
+
+// okAnswer is /healthz's 200 answer over response, and the last thing the endpoint decides. A
+// rewatch of the KV caches that keeps failing after a reconnect ends no watcher and clears no
+// cache, so every other check answers while the caches follow buckets they no longer watch
+// (INFRA-743); this reads the client's HookStall for exactly that. A stall that has reached
+// bus.RepairGrace makes the answer "degraded" and names the "KV watch rebuild" in "error", and a
+// shorter one is reported nowhere: the bus runs the hooks again within seconds of a failure
+// (internal/bus/recovery.go, recoverUntilHealthy), so a rebuild under the bound is being repaired
+// and a listener would otherwise read as degraded over every reconnect. Only the 200 answers come
+// through here, below every 503 check, so a stall never stands in for a worse fault. A report the
+// pod already carries - a standby's failing takeover, an active pod's durable lag that could not
+// be read - keeps its place and the stall is named after it: both faults are this same 200
+// "degraded", and an operator reading the answer wants the whole of what is wrong, not whichever
+// half the endpoint found last.
+func okAnswer(response map[string]interface{}, client *bus.Client) healthAnswer {
+	stall, hookErr := client.HookStall()
+	if stall < bus.RepairGrace {
+		return healthAnswer{http.StatusOK, response}
+	}
+	rebuild := fmt.Errorf("no rebuild has succeeded for %s", stall.Round(time.Second))
+	if hookErr != nil {
+		// The last failure says what is broken; the stall, for how long. A run still in flight past
+		// the grace has no error of its own, and a dependency report needs one, so then the stall
+		// is the whole of it.
+		rebuild = fmt.Errorf("%w (%w)", hookErr, rebuild)
+	}
+	reported := "KV watch rebuild unavailable: " + rebuild.Error()
+	if carried, ok := response["error"].(string); ok {
+		reported = carried + "; " + reported
+	}
+	response["status"] = "degraded"
+	response["error"] = reported
+	return healthAnswer{http.StatusOK, response}
 }
 
 // webhookRoute is one configured webhook path and the handler it serves over the only

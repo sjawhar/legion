@@ -37,12 +37,14 @@ func TestHealthzReportsARecreatedDurableUnhealthy(t *testing.T) {
 	}
 }
 
-// setupUnboundDurableFixture is the pod a recreated durable is tested against: machineID's lease
-// holder receiving the durable into handle, and a get() that serves one /healthz request over it
-// (healthzFor), which is every piece the tests in this file share.
-func setupUnboundDurableFixture(t *testing.T, machineID string, handle durableHandler) (*receiverRig, func() (int, map[string]any)) {
+// setupUnboundDurableFixture is the pod a recreated durable or a stalled rewatch is tested
+// against: machineID's lease holder receiving the durable into handle, and a get() that serves
+// one /healthz request over it (healthzFor), which is every piece the tests in this file share.
+// The options are the pod's bus client's, so a test that needs a clock for the bus's reconnect
+// reporting (bus.WithReconnectErrClock) hands it in here.
+func setupUnboundDurableFixture(t *testing.T, machineID string, handle durableHandler, options ...bus.ConnectOption) (*receiverRig, func() (int, map[string]any)) {
 	t.Helper()
-	rig := startReceiverRig(t, testnats.URL(t), machineID, "pod-a", handle, testReceiveTiming(), testLeaseTiming())
+	rig := startReceiverRig(t, testnats.URL(t), machineID, "pod-a", handle, testReceiveTiming(), testLeaseTiming(), options...)
 	rig.awaitState(t, receiveActive, 10*time.Second)
 	return rig, healthzFor(t, rig.client, rig.receiver)
 }
@@ -57,7 +59,7 @@ func healthzFor(t *testing.T, client *bus.Client, receiver *durableReceiver) fun
 		t.Fatalf("open interest registry: %v", err)
 	}
 	t.Cleanup(registry.StopWatch)
-	readyCtx, readyCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	readyCtx, readyCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer readyCancel()
 	if err := registry.WaitForCacheReady(readyCtx); err != nil {
 		t.Fatalf("wait for interest cache: %v", err)
@@ -72,7 +74,7 @@ func healthzFor(t *testing.T, client *bus.Client, receiver *durableReceiver) fun
 	}
 	subscribeRoleLane(t, client)
 	state := &atomic.Pointer[listenerDeps]{}
-	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions, caches: []listenerCache{{name: "interest", cache: registry}, {name: "session", cache: sessions}}, receiver: receiver})
+	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions, caches: listenerCaches(registry, sessions, nil), receiver: receiver})
 	return func() (int, map[string]any) { return serveHealthz(state) }
 }
 
