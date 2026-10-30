@@ -94,11 +94,11 @@ import { configureDispatchLinks } from './dispatch-links';
 import { trailingNewlineInputPlugin } from './trailing-newline-input';
 import { recordMarkHistoryPlugin } from './record-mark-history';
 import { editorHighlightsPlugin, pulseHighlight, setActiveHighlights } from './editor-highlights';
-import { removeRecordMark, retypeMark as retypeRecordMark } from './record-mark-retype';
-import type { RetypeOutcome } from './record-mark-retype';
+import { removeRecordMark, recordMarkTrackingPlugin, remarkRecordMark, retypeMark as retypeRecordMark } from './record-mark-retype';
+import type { RemarkOutcome, RetypeOutcome } from './record-mark-retype';
 
 export type { MarkAction, SelectionBarActionKind, PopoverActionKind } from './dispatch-marks';
-export type { RetypedMark, RetypeRefusal, RetypeOutcome } from './record-mark-retype';
+export type { RemarkOutcome, RemarkRefusal, RetypedMark, RetypeRefusal, RetypeOutcome } from './record-mark-retype';
 export type {
   BlockAttributeKind,
   BlockAttributeSchema,
@@ -180,6 +180,12 @@ export interface ProofEditorHandle extends TypedBlockCommands {
   /** Replaces a provisional record mark with a fresh one of `kind` over the same text, as the
    *  margin composer's kind switch needs; a refusal names why nothing changed. */
   retypeMark(markId: string, kind: SelectionBarActionKind): RetypeOutcome;
+  /** Writes a fresh mark of `kind` over `quote` - the words the composer that owns the provisional
+   *  record mark `markId` is anchored to - wherever they are now: under the mark while the
+   *  document still holds it, else where those words read. Answers it under a new id, as the
+   *  margin needs when the server refuses a send whose mark the document has lost; a refusal names
+   *  why nothing changed. */
+  remarkMark(markId: string, kind: SelectionBarActionKind, quote: string): RemarkOutcome;
   /** Starts a comment on the current selection exactly as the selection bar's Comment button
    *  does, `onMarkAction` included, and answers whether it did: false for an empty selection and
    *  while the document is read-only, where the bar offers no Comment. */
@@ -354,8 +360,10 @@ export async function createProofEditor(
     .use(tableKeyboardPlugin)
     // Firefox puts text typed over a code block's last line before its newline
     .use(trailingNewlineInputPlugin)
-    // The composer's own record-mark writes are never undo steps
+    // The composer's own record-mark writes are never undo steps, and where each one sits and
+    // what it was written over outlives the mark itself, for `remarkMark`
     .use(recordMarkHistoryPlugin)
+    .use(recordMarkTrackingPlugin)
     .use(editorHighlightsPlugin)
     .use(placeholderPlugin)
     .config((ctx) => {
@@ -459,6 +467,9 @@ export async function createProofEditor(
     },
     retypeMark(markId: string, kind: SelectionBarActionKind): RetypeOutcome {
       return retypeRecordMark(view, markId, kind, opts.user.name);
+    },
+    remarkMark(markId: string, kind: SelectionBarActionKind, quote: string): RemarkOutcome {
+      return remarkRecordMark(view, markId, kind, opts.user.name, quote);
     },
     commentOnSelection(): boolean {
       return commentOnSelection(view);

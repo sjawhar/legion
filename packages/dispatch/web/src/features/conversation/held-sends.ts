@@ -24,7 +24,7 @@ import {
   writesOf,
 } from "../writes/write-store";
 import type { ReplyTarget } from "./composer-model";
-import { type SentDraft, type SentRequest, sendAttempt } from "./send-request";
+import { requestFor, type SentDraft, type SentRequest, sendAttempt } from "./send-request";
 
 /** A held send's draft as its composer restores it: the text, its accepted mentions and a
  *  suggestion's replacement, and an ask's fields. */
@@ -421,6 +421,27 @@ export class HeldSends {
     if (held?.status === "refused") {
       this.#writes.amend(held.id, composerSend, (detail) => ({ ...detail, request }));
     }
+  }
+
+  /** Sends the refused send under `mutationKey` again as a press of its own - the margin's, once
+   *  it has written a refused compose's mark again and re-addressed the send to it - and says
+   *  whether there was one to send. It carries the request the store holds now, so the retry names
+   *  the mark the margin wrote, and the draft the reader last wrote over the refusal. A refusal
+   *  Dispatch gave is its verdict on that send's key, so the attempt goes out under a key of its
+   *  own (`requestFor`): a second body under the answered key would be replayed that verdict or
+   *  refused outright. */
+  retry(mutationKey: MutationKey): boolean {
+    const held = this.get(mutationKey);
+    if (held?.status !== "refused") return false;
+    const { sendKey: _refused, ...addressed } = held.request;
+    return this.send(
+      mutationKey,
+      requestFor(held.request, held.refusal, {
+        ...addressed,
+        ask: held.draft.ask,
+        draft: held.draft.draft,
+      })
+    );
   }
 }
 

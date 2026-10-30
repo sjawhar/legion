@@ -395,9 +395,34 @@ function draftRefusal(
   return undefined;
 }
 
+/** What the composer shows for `refusal`: the host's own words, where it has some about the mark
+ *  this send names - the margin's, when the server refused the send for a mark it cannot see and
+ *  the margin could not write that mark again - else the words of a refusal written for the
+ *  reader (the server's missing anchor, a send they stopped), else the page's wording around what
+ *  went wrong. */
+function refusalMessage(
+  refusal: Error,
+  anchor: ComposerAnchor | undefined,
+  anchorRefusal: { readonly markId: string; readonly text: string } | undefined
+): string {
+  const anchorMissing =
+    refusal instanceof ApiError && refusal.status === 409 && refusal.code === "ANCHOR_MISSING";
+  if (anchorMissing && anchorRefusal !== undefined && anchorRefusal.markId === anchor?.mark_id) {
+    return anchorRefusal.text;
+  }
+  return anchorMissing || refusal instanceof SendStoppedError
+    ? refusal.message
+    : `Couldn't send — ${apiErrorMessage(refusal, "network error")}`;
+}
+
 interface MentionComposerProps {
   readonly agents?: readonly Agent[];
   readonly anchor?: ComposerAnchor;
+  /** What the host says in place of the server's words when it refused this send for a mark the
+   *  document no longer holds (`ANCHOR_MISSING`) and could not write that mark again: the margin's
+   *  message, kept with the mark it answers, since the composer stays mounted when a newer compose
+   *  replaces the anchor. */
+  readonly anchorRefusal?: { readonly markId: string; readonly text: string };
   /** Focuses the field once, on the first render this is true. A host that keeps the composer
    *  mounted out of sight - the margin's, under its collapsed sheet, its rail or the Pinned tab -
    *  passes it once the composer is on screen, since a field out of sight takes no focus. */
@@ -448,6 +473,7 @@ interface MentionComposerProps {
 export function MentionComposer({
   agents: suppliedAgents,
   anchor,
+  anchorRefusal,
   autoFocus = false,
   closed = false,
   docked = false,
@@ -1370,14 +1396,7 @@ export function MentionComposer({
       {refusal === undefined ? null : (
         <div className="flex flex-wrap items-center gap-3">
           <QueryError
-            message={
-              (refusal instanceof ApiError &&
-                refusal.status === 409 &&
-                refusal.code === "ANCHOR_MISSING") ||
-              refusal instanceof SendStoppedError
-                ? refusal.message
-                : `Couldn't send — ${apiErrorMessage(refusal, "network error")}`
-            }
+            message={refusalMessage(refusal, anchor, anchorRefusal)}
             // Retry sends the draft as it stands, so it asks what Send asks of it.
             onRetry={canSubmit ? send : undefined}
             retrying={sending}

@@ -311,6 +311,31 @@ test("ProofDocument reports connection status and pending edits through the tool
   }
 });
 
+test("the margin's wait for this browser's edits ends when the document holds none, and at its bound", async () => {
+  const { margin, pending, sync, view } = renderProofDocument();
+
+  try {
+    await sync();
+    await waitFor(() => expect(margin.current?.documentBridge).toBeDefined());
+    const bridge = margin.current?.documentBridge;
+    if (bridge === undefined) throw new Error("expected a registered document");
+
+    act(() => pending({ count: 1, readOnly: false, rebuiltAt: undefined, stored: true }));
+    const waiting = bridge.whenSent(5000);
+    act(() => pending({ count: 0, readOnly: false, rebuiltAt: undefined, stored: true }));
+    await expect(waiting).resolves.toBe(true);
+    await expect(bridge.whenSent(5000)).resolves.toBe(true);
+
+    // A read-only admission cannot send the row it holds, and a row another tab holds is not
+    // this page's to send either: the bound is what ends the wait, and the margin sends again
+    // whatever it answers.
+    act(() => pending({ count: 1, readOnly: true, rebuiltAt: undefined, stored: true }));
+    await expect(bridge.whenSent(0)).resolves.toBe(false);
+  } finally {
+    view.unmount();
+  }
+});
+
 test("ProofDocument keeps the live editor mounted while a version is shown and destroys it once", async () => {
   const versionedArtifact = {
     ...artifact,

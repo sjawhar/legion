@@ -197,6 +197,10 @@ export function ProofDocument({
   const highlightTermRef = useRef(highlightTerm);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [pending, setPending] = useState<PendingState | undefined>(undefined);
+  // The latest pending report and whoever waits on it (`whenSent`), beside the state the toolbar
+  // renders: the margin asks from a callback the editor holds for the document's lifetime.
+  const pendingRef = useRef<PendingState | undefined>(undefined);
+  const pendingWaiters = useRef(new Set<() => void>());
   const [loadError, setLoadError] = useState<string | undefined>(undefined);
   const [schemaReadOnly, setSchemaReadOnly] = useState(false);
   // Whether the issue was closed when the current admission came. The server admits a socket
@@ -342,6 +346,37 @@ export function ProofDocument({
       `${window.location.origin}${window.location.pathname}${blockFragment(blockId)}`
     );
   }, []);
+  // Whether this browser holds no edit of this document the server has still to take: the margin
+  // waits on it after it has marked the words a comment is to anchor to again, so the mark it
+  // sends is one the server can already see. The count is every tab's, so a row another tab
+  // cannot send keeps it waiting: the bound is what ends the wait there, and the margin retries
+  // whatever it answers.
+  const whenSent = useCallback(
+    (timeoutMs: number): Promise<boolean> =>
+      new Promise<boolean>((resolve) => {
+        const sent = () => {
+          const state = pendingRef.current;
+          return state !== undefined && state.count === 0 && !state.readOnly;
+        };
+        if (sent()) {
+          resolve(true);
+          return;
+        }
+        const waiters = pendingWaiters.current;
+        const check = () => {
+          if (!sent()) return;
+          waiters.delete(check);
+          clearTimeout(bound);
+          resolve(true);
+        };
+        const bound = setTimeout(() => {
+          waiters.delete(check);
+          resolve(false);
+        }, timeoutMs);
+        waiters.add(check);
+      }),
+    []
+  );
   // Every focus in the live editor - a block link, the margin's mark and block focus, a reader's
   // click to a block - runs `focus` now and `refocus` once more after the page's mermaid diagrams
   // have drawn (`refocusAfterDiagrams`), since a diagram that draws above the target pushes it
@@ -480,9 +515,12 @@ export function ProofDocument({
         },
         focusMark: (markId) => focusInEditor(() => handle.focusMark(markId)),
         removeMark: (markId) => handle.removeMark(markId),
+        remarkMark: (markId, kind, quote) =>
+          handle.remarkMark(markId, selectionBarKindFor(kind), quote),
         retypeMark: (markId, kind) => handle.retypeMark(markId, selectionBarKindFor(kind)),
         setActiveBlocks: (blockIds) => handle.setActiveBlocks(blockIds),
         setActiveMarks: (markIds) => handle.setActiveMarks(markIds),
+        whenSent,
       });
       const unbindRemoteMarks = bindRemoteMarks(connection.doc, handle);
       const fragment = connection.doc.getXmlFragment(FRAGMENT_NAME);
@@ -610,7 +648,9 @@ export function ProofDocument({
             },
             onPending: (state) => {
               if (mounted) {
+                pendingRef.current = state;
                 setPending(state);
+                for (const waiter of [...pendingWaiters.current]) waiter();
               }
             },
             onSynced: () => {
@@ -681,7 +721,7 @@ export function ProofDocument({
       readmitRef.current = undefined;
       teardown();
     };
-  }, [artifact.id, blockSchema, createEditor, focusInEditor, loadTransport, queryClient]);
+  }, [artifact.id, blockSchema, createEditor, focusInEditor, loadTransport, queryClient, whenSent]);
 
   // A blocked admission is admitted again by the next successful read of the document's text: the
   // refetch a repair upload's or a rebuild's invalidation makes, or any other. Each successful read

@@ -1,5 +1,6 @@
 /**
- * Retyping a provisional record mark: the margin composer's Comment / Suggest / Ask switch.
+ * The margin composer's provisional record mark: retyping it with the Comment / Suggest / Ask
+ * switch, and putting it back over its words once the document has lost it.
  *
  * The selection bar (./dispatch-action-bar.ts `runAction`) writes a mark of the pressed kind and
  * the server verifies that a record's `mark_id` names a mark of the record's own kind
@@ -15,17 +16,34 @@
  * another record's mark of that kind covers sits beside that mark rather than cutting it
  * (LEGION-458).
  *
+ * A mark the document has lost is `remarkRecordMark`'s case: the reader held the composer open
+ * while another writer rewrote the sentence, or their tab was away past the provisional mark's
+ * time, so the mark is gone and the send the server refuses (`409 ANCHOR_MISSING`) has nothing to
+ * anchor to. The margin hands back the words the composer is anchored to - the quote its own
+ * request carries - and the fresh mark goes over the first of these that holds: the mark's own
+ * range, while the document still has it; the tracked range the plugin below keeps, when its text
+ * reads as that quote; the one place the quote reads in the textblock that range starts in; the
+ * one place the quote reads in the whole document. That last one needs no tracking at all, which
+ * is what carries the recovery through a change another writer made: y-prosemirror applies a
+ * remote update by rebuilding the document rather than through a mapping a local step would give,
+ * and a reconnect can rebuild the editor, taking every plugin's state with it. One place, one
+ * meaning: a second reading of those words would anchor the record to a passage the reader never
+ * selected, which no refusal would ever tell them about, so two readings and no usable tracked
+ * range is a refusal.
+ *
  * `removeRecordMark` is the precise removal both this module and the handle's `removeMark` use:
  * span by span, by id, whatever the mark's type. Upstream's `deleteMark` is not it - it cannot
  * see a provisional comment (`buildAnchorMarks` drops a comment anchor whose body is empty, and
  * the bar creates comments with an empty body) - and nothing else is needed: once the spans are
  * gone, the marks plugin's own `normalizeMetadata` drops the metadata of every id no longer
- * anchored.
+ * anchored. It is also where a tracked entry ends: the composer that owned the mark is over.
  */
 
 import type { Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
-import { PluginKey, type Transaction } from "@milkdown/kit/prose/state";
+import { type EditorState, Plugin, PluginKey, type Transaction } from "@milkdown/kit/prose/state";
+import { AddMarkStep } from "@milkdown/kit/prose/transform";
 import type { EditorView } from "@milkdown/kit/prose/view";
+import { $prose } from "@milkdown/kit/utils";
 import type { MarkRange } from "proof-sdk-upstream/src/editor/plugins/marks";
 import { comment, suggestReplace } from "proof-sdk-upstream/src/editor/plugins/marks";
 import type { SelectionBarActionKind } from "./dispatch-marks";
@@ -51,6 +69,16 @@ export interface RetypeRefusal {
 }
 
 export type RetypeOutcome = RetypedMark | RetypeRefusal;
+
+/** Why a re-mark changed nothing: the new kind cannot be written over the text, as a retype's
+ *  `"unmarkable"` says, or the words the mark was written over are no longer there to mark
+ *  (`"gone"`). A re-mark never answers `"missing"`: a mark the document has lost is the case it
+ *  is for. */
+export interface RemarkRefusal {
+  readonly refused: RetypeRefusal["refused"] | "gone";
+}
+
+export type RemarkOutcome = RetypedMark | RemarkRefusal;
 
 /** The record mark `markId` as the document holds it: its type, and the range from the start of
  *  its first inline run to the end of its last. Inline atoms such as an image count toward the
@@ -82,6 +110,91 @@ export function findRecordMark(
   return from === -1 || !sawText ? null : { range: { from, to }, type };
 }
 
+/** Every record mark this editor wrote that no `removeRecordMark` has ended, by its id: where
+ *  this editor wrote it, mapped through every transaction since. The words it was written over
+ *  are not kept here - `remarkRecordMark` is given the composer's own quote, the one copy of
+ *  those words that outlives this editor's state. */
+type TrackedMarks = ReadonlyMap<string, MarkRange>;
+
+/** The tracking plugin's key, which also names the meta `removeRecordMark` sets to end an entry:
+ *  the id it removes. */
+const recordMarkTracking = new PluginKey<TrackedMarks>("recordMarkTracking");
+
+/** The record marks `transaction` writes, each id's spans as one range in the document the
+ *  transaction leaves: a creator marks text node by text node, and the whole run is the entry.
+ *  `undefined` when it writes none, which is nearly every transaction. */
+function recordMarksWrittenBy(transaction: Transaction): Map<string, MarkRange> | undefined {
+  let written: Map<string, MarkRange> | undefined;
+  transaction.steps.forEach((step, index) => {
+    if (!(step instanceof AddMarkStep) || !RECORD_MARK_TYPES.has(step.mark.type.name)) return;
+    const id: unknown = step.mark.attrs.id;
+    if (typeof id !== "string") return;
+    // A mark step maps no position, but a later step of the same transaction can, so each span is
+    // read in the coordinates the whole transaction leaves.
+    const after = transaction.mapping.slice(index + 1);
+    const from = after.map(step.from, 1);
+    const to = after.map(step.to, -1);
+    written ??= new Map<string, MarkRange>();
+    const span = written.get(id);
+    written.set(
+      id,
+      span === undefined
+        ? { from, to }
+        : { from: Math.min(span.from, from), to: Math.max(span.to, to) }
+    );
+  });
+  return written;
+}
+
+/** `tracked` after `transaction`: every entry mapped to the document it leaves - kept whether or
+ *  not the mark is still on that text - with the marks it writes added and the entry a
+ *  `removeRecordMark` ends dropped. */
+function trackedAfter(tracked: TrackedMarks, transaction: Transaction): TrackedMarks {
+  const written = recordMarksWrittenBy(transaction);
+  const ended: unknown = transaction.getMeta(recordMarkTracking);
+  if (written === undefined && ended === undefined) {
+    if (tracked.size === 0 || !transaction.docChanged) return tracked;
+  }
+  const next = new Map<string, MarkRange>();
+  for (const [id, range] of tracked) {
+    next.set(
+      id,
+      transaction.docChanged
+        ? {
+            // The range keeps to what it covered: text written at either edge is the reader's
+            // prose, not the words the record was written over.
+            from: transaction.mapping.map(range.from, 1),
+            to: transaction.mapping.map(range.to, -1),
+          }
+        : range
+    );
+  }
+  if (written !== undefined) {
+    for (const [id, range] of written) next.set(id, range);
+  }
+  if (typeof ended === "string") next.delete(ended);
+  return next;
+}
+
+/**
+ * Remembers where every record mark this editor writes - the selection bar's, a retype's, a
+ * re-mark's - sits, through every transaction, and goes on remembering it after a transaction
+ * takes the mark out of the document: a tracked range is the precise answer for `remarkRecordMark`
+ * while this editor's own state stands, and the only one that tells two readings of the same words
+ * apart. An entry ends with `removeRecordMark`, where the composer that owned the mark is over,
+ * and every other entry with the editor state itself.
+ */
+export const recordMarkTrackingPlugin = $prose(
+  () =>
+    new Plugin<TrackedMarks>({
+      key: recordMarkTracking,
+      state: {
+        init: () => new Map<string, MarkRange>(),
+        apply: (transaction, tracked) => trackedAfter(tracked, transaction),
+      },
+    })
+);
+
 /** The meta key `removeRecordMark` sets on its transaction, and the value it sets there. Both are
  *  this module's own, so no other writer's meta can be read as this label by accident: ProseMirror
  *  files a meta under the key's derived string (`"recordMarkRemoval$"`), which another meta could
@@ -101,7 +214,9 @@ export function isRecordMarkRemoval(transaction: Transaction): boolean {
  *  atoms such as an image alike. Answers whether a span was removed. The transaction is labelled
  *  as the composer's own removal, so it is not an undo step (./record-mark-history.ts). */
 export function removeRecordMark(view: EditorView, markId: string): boolean {
-  let transaction = view.state.tr.setMeta(recordMarkRemoval, composerRemoval);
+  let transaction = view.state.tr
+    .setMeta(recordMarkRemoval, composerRemoval)
+    .setMeta(recordMarkTracking, markId);
   view.state.doc.descendants((node, pos) => {
     if (!node.isInline) return true;
     for (const mark of node.marks) {
@@ -111,9 +226,28 @@ export function removeRecordMark(view: EditorView, markId: string): boolean {
     }
     return true;
   });
-  if (!transaction.docChanged) return false;
+  const removed = transaction.docChanged;
+  // A mark another writer's edit already dropped has an entry and no span, and the composer's end
+  // has to reach the tracking all the same.
+  if (!removed && recordMarkTracking.getState(view.state)?.has(markId) !== true) return false;
   view.dispatch(transaction);
-  return true;
+  return removed;
+}
+
+/** The mark of `kind` the selection bar's creators write over `range`, by `by`, over the text
+ *  `quote`, and the id they mint for it; null when upstream will not write that kind there - a
+ *  suggestion across table cells, or one that starts or ends mid-word. The same creators, with
+ *  the same arguments, as the bar's `runAction`: every record mark is written one way. */
+function createRecordMark(
+  view: EditorView,
+  kind: SelectionBarActionKind,
+  range: MarkRange,
+  quote: string,
+  by: string
+): string | null {
+  if (kind === "comment") return comment(view, quote, by, "", range).id;
+  if (kind === "suggest") return suggestReplace(view, quote, by, "", range)?.id ?? null;
+  return createAskMark(view, range, by)?.id ?? null;
 }
 
 /** Replaces the record mark `markId` with a fresh mark of `kind` over the same text, written by
@@ -129,21 +263,101 @@ export function retypeMark(
   const held = findRecordMark(view.state.doc, markId);
   if (held === null) return { refused: "missing" };
   const quote = view.state.doc.textBetween(held.range.from, held.range.to, "\n", "\n");
-  const type = MARK_TYPE_FOR_KIND[kind];
-  if (held.type === type) return { markId, quote };
-  // The same creators, with the same arguments, as the selection bar's `runAction`.
-  let created: string;
-  if (kind === "comment") {
-    created = comment(view, quote, by, "", held.range).id;
-  } else if (kind === "suggest") {
-    const suggestion = suggestReplace(view, quote, by, "", held.range);
-    if (suggestion === null) return { refused: "unmarkable" };
-    created = suggestion.id;
-  } else {
-    const ask = createAskMark(view, held.range, by);
-    if (ask === null) return { refused: "unmarkable" };
-    created = ask.id;
-  }
+  if (held.type === MARK_TYPE_FOR_KIND[kind]) return { markId, quote };
+  const created = createRecordMark(view, kind, held.range, quote, by);
+  if (created === null) return { refused: "unmarkable" };
   removeRecordMark(view, markId);
   return { markId: created, quote };
+}
+
+/** The one place `quote` reads inside `scope`, as a range in the document, where `scope`'s own
+ *  content starts at position `base`: a textblock scope is read on its own, any other node
+ *  textblock by textblock. The text is read as the selection bar reads a quote out of the
+ *  document - `textBetween` with a newline for each break - so a quote that runs across two
+ *  blocks is never found here. Null when the quote reads nowhere, and null when it reads twice:
+ *  the second reading could be the passage the reader selected just as well as the first, and a
+ *  record on the wrong passage is worse than a refusal the reader can act on. */
+function soleOccurrence(scope: ProseMirrorNode, base: number, quote: string): MarkRange | null {
+  if (quote === "") return null;
+  const found: MarkRange[] = [];
+  const readBlock = (block: ProseMirrorNode, start: number): void => {
+    // An inline atom stands for one character here, as it does in the block's positions, so a
+    // text offset is a position offset.
+    const text = block.textBetween(0, block.content.size, "\n", "\n");
+    for (let at = text.indexOf(quote); at !== -1; at = text.indexOf(quote, at + 1)) {
+      found.push({ from: start + at, to: start + at + quote.length });
+      if (found.length > 1) return;
+    }
+  };
+  if (scope.isTextblock) {
+    readBlock(scope, base);
+  } else {
+    scope.descendants((node, pos) => {
+      if (found.length > 1) return false;
+      if (!node.isTextblock) return true;
+      // `descendants` counts from the start of `scope`'s content, and a block's own content opens
+      // one position inside it.
+      readBlock(node, base + pos + 1);
+      return false;
+    });
+  }
+  return found.length === 1 ? found[0] : null;
+}
+
+/** Where the record mark `markId` was written, as the document reads now, for a composer anchored
+ *  to `quote`: the tracked range, when its text still reads as that quote, else the one place the
+ *  quote reads in the textblock that range starts in. Null when nothing tracks the mark - the
+ *  state the mark was written in is gone - and null when neither reading is the one place those
+ *  words are, which leaves the whole document to `remarkRecordMark`'s last step. */
+function trackedRange(state: EditorState, markId: string, quote: string): MarkRange | null {
+  const tracked = recordMarkTracking.getState(state)?.get(markId);
+  if (tracked === undefined || quote === "") return null;
+  const size = state.doc.content.size;
+  const from = Math.min(tracked.from, size);
+  const to = Math.min(tracked.to, size);
+  if (to > from && state.doc.textBetween(from, to, "\n", "\n") === quote) {
+    return { from, to };
+  }
+  const $start = state.doc.resolve(from);
+  for (let depth = $start.depth; depth > 0; depth -= 1) {
+    const block = $start.node(depth);
+    if (!block.isTextblock) continue;
+    return soleOccurrence(block, $start.start(depth), quote);
+  }
+  return null;
+}
+
+/**
+ * Writes a fresh mark of `kind`, by `by`, over `quote` - the words the composer that owns the
+ * record mark `markId` is anchored to - wherever they are now, takes the old mark out, and answers
+ * the mark it wrote. The first of these that holds: the mark's own range, while the document still
+ * holds it; the tracked range, when its text reads as `quote`; the one place `quote` reads in the
+ * textblock that range starts in; the one place `quote` reads in the whole document. The last step
+ * asks the tracking for nothing, so it still answers after a remote update rebuilt the document or
+ * a reconnect rebuilt the editor; the two before it are the precise answers while this editor's
+ * own state stands, and the only ones that tell two readings of the same words apart.
+ *
+ * The id is always a fresh one. The server refuses a send because it cannot see the mark, and a
+ * mark it has dropped whose local copy has not caught up would be refused again under that id, so
+ * the retry carries a mark the server has never judged, whether or not the kind changed.
+ */
+export function remarkRecordMark(
+  view: EditorView,
+  markId: string,
+  kind: SelectionBarActionKind,
+  by: string,
+  quote: string
+): RemarkOutcome {
+  const range =
+    findRecordMark(view.state.doc, markId)?.range ??
+    trackedRange(view.state, markId, quote) ??
+    soleOccurrence(view.state.doc, 0, quote);
+  if (range === null) return { refused: "gone" };
+  // What the mark ends up over, which is the quote itself except under a mark the document still
+  // holds over text that has changed since: the record is re-addressed to the words it marks.
+  const marked = view.state.doc.textBetween(range.from, range.to, "\n", "\n");
+  const created = createRecordMark(view, kind, range, marked, by);
+  if (created === null) return { refused: "unmarkable" };
+  removeRecordMark(view, markId);
+  return { markId: created, quote: marked };
 }
