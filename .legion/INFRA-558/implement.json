@@ -2,50 +2,51 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-558",
-  "completed": "2026-10-28T23:30:00Z",
+  "completed": "2026-10-30T10:06:00Z",
   "proof": [
     {
       "criterion": "Item 6 / acceptance 1: the two-build test exists and passes for the current build against the previous release (CLI, documents, messages both ways).",
-      "surface": "Two real envoy-dispatch processes (legion-envoy-v19.0.0, the release --previous-release and CI resolve, built from git archive, and this head) on one Postgres 17 + pgvector and one nats-server, each build's dispatch CLI against the other build's server",
-      "command": "bash packages/envoy/scripts/build-dispatch-build.sh --previous-release --out $TMPDIR/dispatch-previous && cd packages/envoy && DISPATCH_PREVIOUS_BUILD=$TMPDIR/dispatch-previous DISPATCH_TEST_DATABASE_URL=<local postgres> go test -tags twobuild -count=1 -timeout 30m -v -run TestTwoBuilds ./cmd/dispatch",
-      "observed": "TestTwoBuildsAnswerEachOthersCLI PASS (15.1s), TestTwoBuildsReadAndEditEachOthersDocuments PASS (45.9s: corpus documents each way read, edited and opened writable on the other build's socket, approval carried, refs rows survive each way), TestTwoBuildsPassMessagesBothWays PASS (116.1s)",
-      "headSha": "07b79a109da3",
-      "negativeControl": "This tree's intake stop made to skip its ack: TestTwoBuildsPassMessagesBothWays FAIL '#1011 2 times [current build ... current build ...]'. Before cc73bbec (pool closed before the intake holds were released): FAIL 'the restarted current build took delivery-events from the previous build, which delivers from it under no hold'."
+      "surface": "Two real envoy-dispatch processes (legion-envoy-v24.0.0, the release --previous-release and CI now resolve, built from git archive, and this head) on one Postgres 17 + pgvector and one nats-server, each build's dispatch CLI against the other build's server",
+      "command": "bash packages/envoy/scripts/build-dispatch-build.sh --previous-release --out $TMPDIR/dispatch-previous-24 && cd packages/envoy && DISPATCH_PREVIOUS_BUILD=$TMPDIR/dispatch-previous-24 DISPATCH_TEST_DATABASE_URL=<local postgres> go test -tags twobuild -count=1 -timeout 30m -v -run TestTwoBuilds ./cmd/dispatch",
+      "observed": "TestTwoBuildsAnswerEachOthersCLI PASS (18.7s), TestTwoBuildsReadAndEditEachOthersDocuments PASS (63.1s: 130 corpus documents each way read, edited and opened writable on the other build's socket, approval carried, 57 of 57 refs rows survive each way), TestTwoBuildsPassMessagesBothWays PASS (118.2s: 11 and 10 of 25 pull requests handled at each stop, 50 handled as 50)",
+      "headSha": "377d5a496a48",
+      "negativeControl": "This tree's intake stop made to skip its ack: TestTwoBuildsPassMessagesBothWays FAIL '#1011 2 times [current build ... current build ...]'. Against v23.0.0 the documents row's references check, before 4ca0e707, failed: the previous build dropped 3 of 57 edges (comment_block, message_block)."
     },
     {
-      "criterion": "Item 6 browser half: each build's page works against the other build's server (sign in, issue list, comment, document edit seen by the other build, ask answer, Delivery socket).",
-      "surface": "Dispatch web app in real Chromium (Playwright) through the two-process proxy, page requests pinned to one process and API, websocket, SSE and /auth to the other; process B is legion-envoy-v19.0.0",
-      "command": "cd packages/dispatch && DATABASE_URL=<fresh db> DISPATCH_E2E_PORT_B=<free port> DISPATCH_E2E_BINARY_B=$TMPDIR/dispatch-previous/envoy-dispatch DISPATCH_E2E_WEB_DIST_B=$TMPDIR/dispatch-previous/web bun run e2e:multiprocess -- cross-build.multiprocess; then bun run e2e:multiprocess",
-      "observed": "2 passed (this tree's page against v19's server 10.6s, v19's page against this tree's server 10.0s), the newer-content row skipped by design with B on v19; full bun run e2e:multiprocess with both processes on this tree: 8 passed",
-      "headSha": "07b79a109da3",
-      "negativeControl": "Proxy made to ignore the page/API pin cookies and the newer-content hook route removed: all 3 rows FAIL (assets served by the wrong process; hook 404)."
+      "criterion": "Item 6 browser half: each build's page works against the other build's server (sign in, issue list, comment, document edit seen by the other build, ask answer, the live socket's timeline subscription).",
+      "surface": "Dispatch web app in real Chromium (Playwright) through the two-process proxy, page requests pinned to one process and API, websocket, SSE and /auth to the other; process B is legion-envoy-v24.0.0",
+      "command": "cd packages/dispatch && DATABASE_URL=<fresh db> DISPATCH_E2E_PORT_B=<free port> DISPATCH_E2E_BINARY_B=$TMPDIR/dispatch-previous-24/envoy-dispatch DISPATCH_E2E_WEB_DIST_B=$TMPDIR/dispatch-previous-24/web bun run e2e:multiprocess -- cross-build.multiprocess; then DATABASE_URL=<fresh db> bun run e2e:multiprocess",
+      "observed": "2 passed (this tree's page against v24's server 11.3s, v24's page against this tree's server 10.7s), the newer-content row skipped by design with B on v24; full bun run e2e:multiprocess with both processes on this tree: 8 passed (1.7m)",
+      "headSha": "377d5a496a48",
+      "negativeControl": "Before 15c5f814 the spec watched /ws/delivery, which neither build opens: CI run 41000521744 failed both rows ('Expected value: subscribe, Received array: []'). Proxy made to ignore the page/API pin cookies: all 3 rows FAIL."
     },
     {
-      "criterion": "Review round 1: the ten findings fixed, each with a test that fails before and passes after; items 1-4 keep their failing-before tests.",
-      "surface": "Go packages against real Postgres and in-process nats-server; cmd/dispatch real processes (multiprocess tag); proof-editor, web and CLI under bun",
-      "command": "cd packages/envoy && CGO_ENABLED=1 go test -race ./internal/dispatch/delivery/ ./internal/dispatch/duty/ ./internal/bus/ && go test ./internal/dispatch/docs/ ./internal/dispatch/pmdoc/... ./internal/dispatch/processes/ ./cmd/dispatch/ && go test -run 'Rebuild|NewerContent|Schema|Socket|Admission|Document' ./internal/dispatch/api/ && go test -tags multiprocess ./cmd/dispatch; cd packages/proof-editor && bun test; cd packages/dispatch && bun test web/src; cd packages/envoy-client && bun test; cd packages/contracts && bun test",
-      "observed": "All ok at 07b79a10 (pmdoc Linear timing tests excepted, environment); multiprocess ok (610s) incl. TestAProcessStoppedWhileWaitingForAdmissionReleasesItsDurables; proof-editor 161 pass, web 2629 pass, envoy-client 1029 pass, contracts 304 pass. Before each fix: the admission-wait stop left the hold row with the stopped process's subject; a failed create made the next take-over replay from the stream start; a (3,2) page was writable after a rollback; a markdown paste created a not-yet-creatable block; a rebuild answered 400 INVALID_MARKDOWN / 500; an aborted request waited out the retry; a PR envelope with a non-string member was dropped with an ERROR.",
-      "headSha": "07b79a109da3",
-      "negativeControl": "TestIntakeHandlesAMergedPullRequestEnvelopeWithAMemberItDoesNotRead against the old flatPayload: FAIL 'intake logged an ERROR for a pull request with a member it does not read: ... cannot unmarshal array into Go value of type string' and 'no rows in result set'."
+      "criterion": "Forward merges of main (e4c9ab85, 71e31498, 96a7e5ea): every CI failure the first merge surfaced is fixed, and the change's suites pass at the merged head.",
+      "surface": "Go packages against real Postgres (ICU collation) and in-process nats-server, under -race where CI runs them; cmd/dispatch real processes (multiprocess tag); envoy-client, pi-envoy, contracts and web under bun",
+      "command": "cd packages/envoy && go test ./internal/dispatch/api/ ./internal/dispatch/docs/ ./internal/dispatch/store/... ./internal/dispatch/pmdoc/ ./internal/dispatch/embedqueue/ ./internal/dispatch/processes/ ./cmd/dispatch/ && go test -tags multiprocess ./cmd/dispatch && CGO_ENABLED=1 go test -race ./internal/bus/ ./internal/dispatch/delivery/ ./cmd/listener/ && CGO_ENABLED=1 go test -race -count=30 -run Admission ./internal/dispatch/docs/; cd packages/envoy-client && bun test; cd packages/pi-envoy && bun test",
+      "observed": "All ok (pmdoc Linear timing tests skipped, environment): api 1761s, docs 1876s, store, pmdoc, embedqueue, processes, cmd/dispatch, multiprocess 859s; race bus 362s, delivery 207s, listener 562s; Admission x30 under -race ok; envoy-client 1161 pass 0 fail; pi-envoy 1491 pass 0 fail; tsc and biome clean.",
+      "headSha": "377d5a496a48",
+      "negativeControl": "CI run 41000521744 at 78e951ea (before 4ca0e707 and 15c5f814): TestBroadcastRejectsMalformedInput/a_body_key, TestCopyLockComesBeforeEveryPendingRowAndEvent (nil dereference), TestAMarginWriteMatchesTheWholeDocumentWrite, TestAResumeOfTheWrongShapeIsAnInvalidFrame, TestTheSlowWriteHookDelaysEveryKeyedRunOfItsPath, TestRoutesTablePinsEveryRegisteredRoute and the admission recheck's 1012 close (1006 in 3 of 150 local runs) all FAIL."
     }
   ],
   "filesChanged": [
-    "Round 1: packages/envoy/cmd/dispatch/main.go (stopIntakes on every exit), delivery/intake.go (ack floor kept in the hold token, lenient payload members), duty/hold.go (Lapse), docs/websocket.go (admits caps page R), docs/rebuild.go + tree.go + pmdoc/update.go (rebuild classification and re-seed), agent texts, bus/confirm.go + nats.go (publishDenied), pmdoc manifest globals removed",
-    "Round 1: packages/proof-editor/src/block-schema.ts + lib.ts (creation gate on paste and import), packages/contracts/src/dispatch-api.ts (abortable sleep), web client.ts and envoy-client dispatch-http.ts",
-    "Round 1: packages/envoy/cmd/dispatch/README.md and store/README.md (Messages rule, registry-less builds), .github/workflows/envoy-and-contracts.yaml (held-port.py, internal/redact filters)",
+    "4ca0e707: api/broadcasts.go (idempotency_key in the body refused by name), api/json_members.go + server.go + slow_write_hook.go (decodeJSONTestHook), api/delivery_live_socket.go (a live resume refuses an undeclared member), copy_lock_order_test.go (package-level func literals registered), docs/mutation.go (applyMargin refuses newer content before it changes the fork), docs/testhooks.go and margin-equivalence fixtures, routes_table_test.go, cmd/dispatch/twobuild_documents_test.go (refs check by the reader's guard), README and changelog fragment",
+    "15c5f814: docs/schema_admission.go (admittedConn.Close holds its lock across the 1012 frame), packages/dispatch/e2e/cross-build.multiprocess.e2e.ts (watches /ws/live)",
+    "a2e014fc: migrations renumbered 0148-0150 with every reference; pmdoc/parse.go and envoy-client dispatch-http.ts conflicts; session-answers.ts takes the no-route wait; three answers-route tests expect the retried requests",
+    "377d5a49: internal/bus/confirm.go + nats.go use main's publishDenial",
     "Earlier: the whole change, see the PR body"
   ],
   "trickyParts": [
-    "ygo's OnTokenAuth gets only (room, token), so the HTTP-time admission is recorded per (room, schema_version) and answered to the token; the 15 s re-check closes a revoked socket with 1012 through a wrapped hijacked conn.",
-    "A take-over writes its computed start into the hold token before deleting the durable; a graceful stop with that start pending lapses the hold rather than deleting its row, so the next holder finds the start.",
-    "The editor gate runs only on editable parses: the collab sync, read-only setMarkdown and the version view read every element.",
-    "The previous release exits without acking the message in its handler; the harness tolerates exactly that one redelivery."
+    "ygo closes a revoked document socket from two goroutines (its teardown and its context watcher, which the revoke's own read error wakes through net/http's connReader); Close must hold its lock across the 1012 frame or the second closer cuts the frame.",
+    "A margin write and a whole-document write must refuse newer content at the same point, before the write changes the fork, or the fork's coldness differs.",
+    "The answers read's 10 s background timeout outlasts the no-route retry's at most 8.75 s of waits, so an older Dispatch is still recorded as having no answers route.",
+    "Earlier rounds: the HTTP-time schema admission keyed per (room, schema_version); the take-over start kept in the hold token; the editor gate only on editable parses; the previous release's one unacknowledged last message."
   ],
   "deviations": [
     "Plan departures 1-3 as approved.",
-    "A page that sends no schema_creatable counts R = 1 (review round 1), so a newer page after a rollback is read-only while older pages stay writable.",
+    "Three request members stay refused by name, where the README rule otherwise ignores an undeclared member: the broadcast's body idempotency_key (a dropped key means a second send), a live socket's resume (a dropped member means rows never seen or seen twice), and the /_test/ hooks (no client outside this tree).",
     "packages/claude-envoy/dist is main's: since main's claude-envoy AGENTS.md a pull request never commits dist.",
-    "Fast-follow (behaviour-free file moves) waits for INFRA-607's #2391, which rewrites the same intake; StopDelivering and subscribeDurable's lookup branch stay as agreed with it."
+    "The answers route's own message still says the build is older than the route; it is now said after the no-route retry, and its text is main's (pr2376 fragment)."
   ],
   "openQuestions": []
 }
