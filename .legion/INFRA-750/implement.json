@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-750",
-  "completed": "2026-10-30T07:55:00Z",
+  "completed": "2026-10-30T08:35:00Z",
   "generation": 2,
-  "round": 2,
+  "round": 3,
   "pullRequest": "sjawhar/legion#2542",
-  "head": "d5dbcf927aa7",
+  "head": "73196dfca8cd",
   "plan": "dispatch://INFRA-750/artifact/plan-md@v4, with the architect's decision of 2026-10-30 that put the daemon in scope (roll-call line 4)",
   "proof": [
     {
@@ -48,6 +48,14 @@
       "observed": "Both rows of the unit test pass twice under -race: a first watch that fails with no replacement current logs the one ERROR; one that fails after a Rewatch armed a replacement logs no ERROR of any message, one INFO end line, and its replacement still delivers a later put. The listener guard is green: both clients' cut lines, a warm-up line from each of the three caches after the thaw, an interest from another listener reaching this one's cache, and no ERROR line from the freeze on. kvwatch and its three dependants are green under -race (65.021s, 22.111s, 11.620s, 32.918s).",
       "headSha": "d5dbcf927aa7",
       "negativeControl": "With Start's old body restored and the test files untouched, the unit test's `a rewatch replaced it` row fails: `a first watch a rewatch replaced logged [test cache watch failed: nats: connection closed], want no ERROR`. The listener guard does not go red there, and no listener-process test can: main.go opens all three caches and waits out their warm-up gates before it adds the reconnect hook, so no first watch is in flight when a Rewatch can exist (a probe froze the hub for 4.8 s and for 40 s and reached that branch neither time). The unit test is the red-at-base proof; the listener test is the end-to-end guard, and its doc comment says so."
+    },
+    {
+      "criterion": "The review's two findings, both in files this pull request adds or changes: the replaced watch's line names the right cause, and the freeze-and-wait sequence lives in one place.",
+      "surface": "The kvwatch watcher against a real in-process NATS server, and the real envoy-listener binary against a hub whose relay freezes and thaws, through the shared helper both listener tests now call.",
+      "command": "From packages/envoy: `CGO_ENABLED=1 go test -race -count=2 -timeout 15m -run 'TestAFailedFirstStartLogsItsErrorOnlyWhileItIsTheLiveWatch$' ./internal/kvwatch/`; `go test -count=2 -timeout 20m -run 'TestBothOfTheListenersNATSClientsReportASilentCutWithinSeconds$|TestASilentCutRewatchesTheCachesWithNoErrorLine$' ./cmd/listener/`; `gofmt -l cmd internal`; `go vet ./cmd/listener/ ./internal/kvwatch/`.",
+      "observed": "The unit test passes both rows twice under -race (ok 1.601s). Both listener tests pass twice through the shared helper with the timings unchanged by the fold: envoy 2.784 s to 2.837 s and envoy-live-topics 2.835 s to 2.839 s after the freeze. gofmt and vet print nothing.",
+      "headSha": "73196dfca8cd",
+      "negativeControl": "With the old wording back in kvwatch.go and the test untouched, the `a rewatch replaced it` row fails: `kvwatch_test.go:223: timed out waiting for the replaced first watch's end`. The helper fold is behaviour-identical rather than new behaviour, and its control is that both tests keep passing with the same per-client timings and the same per-client failure diagnostic."
     }
   ],
   "filesChanged": [
@@ -84,5 +92,12 @@
     "failure": "The head carried no CI at all: round 1's push ended on the implement handoff commit, which carried `skip-checks: true`, so GitHub started no run for a push that also carried seven code commits. The reviewer reads the head's checks and a base that requires a check will not merge a head whose checks never ran.",
     "fix": "This round's push ends on a commit with no such line, so GitHub runs the base's required checks over every code commit of this branch. The rule the round broke is that a round whose code and handoff go in one push is a code push; this round's handoff commit carries no trailer.",
     "notRewritten": "The two trailered commits already on the branch are left as they are. Rewriting mine alone would leave the tester's own handoff commit as the tip, which carries the line correctly (its push was handoff-only) and would still start no run; rewriting both would rewrite the commit the daemon recorded as the tester's handoff. What starts CI is the push, not the history. Reported to the architect, whose instruction named the rewrite."
+  },
+  "reviewRound": {
+    "threads": [
+      "PRRT_kwDORFy7ds6x5O3- (internal/kvwatch/kvwatch.go): fixed in 73196dfc \u2014 the replaced watch's INFO line reads `<cache> first watch failed after a rewatch replaced it; the replacement feeds the cache`, so it names the failure and leaves the cause with the error attribute; the test's expected message follows, and Start's doc says the watch fails only before it installs a watcher and that the branch is while no watcher is current.",
+      "PRRT_kwDORFy7ds6x5O4E (cmd/listener/cut_rewatch_test.go): fixed in 73196dfc \u2014 freezeUntilBothClientsReportTheCut in silent_cut_test.go holds the freeze, the log offset and the wait for both clients' lines, with the per-client missing diagnostic and the timing log, and both listener tests call it."
+    ],
+    "allAnsweredAndResolved": true
   }
 }
