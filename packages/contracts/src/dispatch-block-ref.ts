@@ -136,12 +136,16 @@ const ITEM_BLOCK_REFERENCE = new RegExp(
 );
 
 /**
- * The kind of item (`comment` or `message`) whose block `value` names, as Go's `text.Ref.Item`
- * reads it, or undefined when it names no block of a comment or message. The item id is read as
- * Go's `itemSegment` reads it: written with no whitespace (JavaScript's `\s`), then decoded as
- * `decodeBlockId` decodes a block id, which refuses a `%` two hex digits do not follow, a
- * decoding that is not UTF-8 or holds a control character, and an `@`, which Go refuses anywhere
- * before a block's fragment. A message never changes, so a pinned message block is no reference.
+ * The kind of item (`comment` or `message`) whose block `value` names, or undefined when it names
+ * no block of a comment or message. It applies the rules of Go's `text.parseDispatch` to the whole
+ * value: the item id is written with no whitespace (JavaScript's `\s`, as Go's `itemSegment`), then
+ * decoded as `decodeBlockId` decodes a block id, which refuses a `%` two hex digits do not follow,
+ * a decoding that is not UTF-8 or holds a control character, and an `@`, which Go refuses anywhere
+ * before a block's fragment. Go's validator reads the value through `text.ParseRef`, which first
+ * ends it at a character no reference holds (`referenceEnd`: `'`, `"`, `<`, `>`, a backtick, `[`,
+ * `]`, `|` or whitespace) and trims trailing punctuation, so such a value may be refused here with
+ * a different reason than Go gives; both refuse it. A message never changes, so a pinned message
+ * block is no reference.
  */
 function itemBlockKind(value: string): "comment" | "message" | undefined {
   const match = ITEM_BLOCK_REFERENCE.exec(value);
