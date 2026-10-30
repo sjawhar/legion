@@ -2,45 +2,46 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-590",
-  "completed": "2026-10-30T05:20:00Z",
-  "round": 15,
-  "testedHead": "74bcfc093f230af602bf983b3a57774cf1b46e1b",
-  "fingerprint": "The implementer's comment 6512805615 gives bd52726b… -> be743def… for the merge of main 10fc3b77a (#2463, #2371). Main changed files this PR also changes (cmd/dispatch/main_test.go, infra/gcp/dispatch.go, store/store_test.go), so this is a full round under the architect's rule.",
+  "completed": "2026-10-30T08:50:00Z",
+  "round": 16,
+  "testedHead": "bcf50ed5282d0655405e648be162f1df774ab173",
+  "fingerprint": "The implementer's comment 6517975067: merge of main a21100c5bc (#2376). Main changed cmd/dispatch/README.md, store/store_test.go and infra/gcp/dispatch.go, which the PR also changes, so this is a full round.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Ran the suites at 74bcfc09 with -p 2 -parallel 4, one group at a time (peak pod memory 3.72 GB). Before the 02:10Z drain: bus, roles and duty ok, and every multiprocess row passed but the frozen-publisher row. After the drain, on a fresh pod and a fresh UTF8 Postgres 17 with nothing else running, I re-ran each item that had failed: all pass (proof below). Interim evidence: PR comment 6513388277."
+    "how": "Ran the suites at bcf50ed5 in the foreground, -p 2 -parallel 4, one group at a time (peak pod memory 2.83 GB): multiprocess ok (1011.7 s); outbox and duty ok; store ok on a fresh database; -run TestSessionAnswers ./internal/dispatch/api/ ok; build, vet and multiprocess vet clean; infra vets clean. Checked each of the architect's five points (proof and observations)."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "After the merge: 0145_duty_holds and 0146_outbox_claim apply above main's 0142-0144 (#2463); main's build runs on schema 146; the count stays 89; the infra module vets clean",
-      "surface": "envoy-dispatch built at head and main's envoy-dispatch (merge base 10fc3b77a) on one database and a real NATS; packages/envoy/infra in a scratch copy",
-      "command": "head build migrates a fresh database (/healthz), publishes a comment, stops with SIGTERM; main's build posts 3 comments. In packages/envoy/infra: go vet ./..., go vet -tags natslive ./core/, go test -run TestDispatchConnectionsPerPodIsTheServers ./gcp/",
-      "observed": "Head /healthz: schema_version 146, outbox_publisher true; duty_holds empty after SIGTERM. Main's build booted on schema_version 146 and published 4 of 4 comment events. Both vets clean; the count test passes at 89",
-      "headSha": "74bcfc093f230af602bf983b3a57774cf1b46e1b",
-      "negativeControl": "Round 11 showed the count test failing at 88 (expected 89); main changed no pool"
+      "criterion": "Main's build and the head share the schema both ways: the head migrates main's 147 forward to 149 (0148_duty_holds, 0149_outbox_claim), and main's build runs on 149",
+      "surface": "main's envoy-dispatch (merge base a21100c5bc) and the head's on one fresh database and a real NATS",
+      "command": "main's build creates the database and publishes 3 events; the head's build starts on it (/healthz), publishes a comment, stops with SIGTERM; main's build starts again and posts 2 comments",
+      "observed": "Main alone: schema 147, 3 of 3 events published. Head on it: schema_version 149, outbox_publisher true, 4 of 4 published, duty_holds empty after SIGTERM. Main again: schema_version 149, 6 of 6 published",
+      "headSha": "bcf50ed5282d0655405e648be162f1df774ab173",
+      "negativeControl": "Main's tree has no 0148/0149, so the second start of main's build is the one that proves it tolerates the head's tables; it published both its comments"
     },
     {
-      "criterion": "One publisher; take-over within 10 s, a frozen publisher sends nothing when it resumes; each session takes each event once and in order",
-      "surface": "the repository's multiprocess harness: two real envoy-dispatch processes",
-      "command": "go test -p 2 -parallel 4 -tags multiprocess -count=1 -timeout 40m -v ./cmd/dispatch (before the drain); then -count=3 -run 'TestAFrozenPublisherSendsNothingWhenItResumes$' alone, after it",
-      "observed": "Full suite: every row passed but the frozen-publisher row; kill 5.0 s, NATS cut 3.0 s, silent cut 2.2 s, 200 comments each once and in order, the moving role holder each once and in order. The frozen-publisher row alone: 3 of 3 pass, standby took the hold in 5.2-5.5 s, and the resumed process logged the hold lost 19-81 ms after resume",
-      "headSha": "74bcfc093f230af602bf983b3a57774cf1b46e1b",
-      "negativeControl": "In the failed full-suite run, the 'stopped' publisher's own log shows batches sent after the SIGSTOP and both supervised runs died of SIGHUP in that row: the pod continued the stopped process group, so the test's freeze did not hold. Run alone in the foreground, the freeze holds and the row passes"
+      "criterion": "Main's two new session-answers tests were adapted in setup only",
+      "surface": "the two test files at the head against main a21100c5bc",
+      "command": "diff of packages/envoy/internal/dispatch/outbox/session_answers_test.go and packages/envoy/internal/dispatch/api/session_answers_test.go against main's copies; go test -run TestSessionAnswers ./internal/dispatch/api/",
+      "observed": "The outbox test's one call to scan becomes withHeldRoles + scanBatch(ctx, deps, unfenced{}, holding(t, deps).instance); the api test starts the outbox with outbox.New(...).Run(ctx), Listen, and an unclaimedRoles role reader. No assertion line differs. The api session-answers tests pass",
+      "headSha": "bcf50ed5282d0655405e648be162f1df774ab173",
+      "negativeControl": "n/a: a text diff; every changed line is setup"
     },
     {
-      "criterion": "The packages pass on a quiet pod",
-      "surface": "store, outbox and cmd/listener packages on a fresh UTF8 Postgres 17, nothing else running",
-      "command": "go test -p 2 -parallel 4 -count=1 ./internal/dispatch/store/ ./internal/dispatch/outbox/; -count=5 of TestTheClaimSkipsPendingCommandsAndBackedOffRows and TestScannedTimestampsCarryUTCWhateverTheHostZone; go test -p 2 -parallel 4 -count=1 ./cmd/listener/",
-      "observed": "store ok (321.7 s), outbox ok (295.3 s), cmd/listener ok (497.5 s). The claim bound: fastest of 20 at 0.408-0.463 ms in 5 runs (bound 0.5 ms). The UTC timestamps test: 5 of 5 pass",
-      "headSha": "74bcfc093f230af602bf983b3a57774cf1b46e1b",
-      "negativeControl": "Before the drain, with other roles' runs on the pod, the claim measured 0.514 ms and failed; the UTC test failed on the client encoding, and four listener rows got 'connection refused' after another role stopped the shared Postgres at 02:10:49. None repeats alone"
+      "criterion": "One publisher; take-over within 10 s; a frozen publisher sends nothing when it resumes; each session takes each event once and in order; count 89",
+      "surface": "the repository's multiprocess harness (foreground) and infra/gcp's count test",
+      "command": "go test -p 2 -parallel 4 -tags multiprocess -count=1 -timeout 40m -v ./cmd/dispatch; go test -run TestDispatchConnectionsPerPodIsTheServers ./gcp/ in a scratch copy",
+      "observed": "ok, 1011.7 s: kill 4.554 s, NATS cut 3.005 s, silent cut 2.178 s, SIGSTOP 4.17 s with the resumed process logging the hold lost after 46 ms; 200 comments each once and in order; the moving role holder each once and in order. Count test passes at 89",
+      "headSha": "bcf50ed5282d0655405e648be162f1df774ab173",
+      "negativeControl": "Round 11 showed the count test failing at 88"
     }
   ],
   "observations": [
-    "CI at 74bcfc09: every check was cancelled (29 cancelled, 2 success, pr-title among the successes), presumably by the 02:10Z drain, so no required check has a result at the code head. I did not re-run CI; a re-run of the cancelled workflow on 74bcfc09 is needed before review can read the head's checks. Sent to the architect.",
-    "PR is MERGEABLE.",
-    "Contract-42 pods: a process group the test stops with SIGSTOP can be continued by the pod when the supervising shell's session ends (exit 129, SIGHUP), so run the multiprocess suite in the foreground."
+    "Main's sessionanswers.TestTheReadOfASessionsMessageDeliveriesReadsItsWindowsRange fails on this pod on main's own tree (a21100c5bc, 3 of 3) exactly as at the head ('the custom plan reads message deliveries other than by an index-only scan of message_deliveries_session_created'): main's, not this PR's.",
+    "internal/dispatch/store failed once on the shared 'postgres' database: 'apply migration 148: … relation \"duty_holds\" already exists'. That database was left at version 147 holding duty_holds by an earlier run under the previous numbering; on a fresh database the package passes (288.2 s). Environment, but it is what a deployed database migrated by a build at an earlier numbering of this branch would do; no deployment ran this branch.",
+    "CI at bcf50ed5: the CI workflow run created 08:02:29Z is still pending (queued) and pr-title is queued, so lint, typecheck, test, envoy-go, envoy-go-race, envoy-go-race-docs, dispatch and dispatch-multiprocess have no result yet when read at about 08:48Z.",
+    "INFRA-607's #2391 also uses 0148+; whichever merges later renumbers (architect)."
   ]
 }
