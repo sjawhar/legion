@@ -1925,9 +1925,11 @@ pinned-image change is a round.
 
 The daemon-launched controller's pod is in scope for the warning and in no round: it has no issue
 workspace and nothing to push, so `PodDrift` answers nothing for it
-(`internal/runtime/sandbox/drift.go`). Its pod is replaced when a launch finds it not live — its
-Sandbox suspended, its pod ended, its init container failed, or its launcher binding lost — so an
-operator moving the controller onto a new image suspends its claim and resumes it
+(`internal/runtime/sandbox/drift.go`). Its pod is replaced by a launch: one that finds it not
+live — its Sandbox suspended, its pod ended, its init container failed, or its launcher binding
+lost — and, since no round covers it, one that finds it drifted in any way, its image and pod
+shape included, unless that launch installs a stale-plugin pair (`roundCovers`, `shapeDrift`). So
+an operator moving the controller onto a new image suspends its claim and resumes it
 (`legion claims suspend`, then `legion claims resume`).
 
 A launch replaces a pod other roles of its issue still run in only when the pod cannot run the
@@ -2217,9 +2219,10 @@ when it does not), and then `exec "$@"`s into Oh My Pi, which starts with
 in place of `/opt/legion/pi-envoy` and `/opt/legion/pi-legion`. A pod replaced for any other reason
 in the same relaunch — a suspended Sandbox, a lost launcher binding, a failed init container, a
 moved address — installs nothing: it comes up on the configured image, whose copies the boot gate
-already holds to the daemon's contract. A pod merely running another image is replaced by no
-relaunch at all, stale-plugin or not: it is drift, and the update round replaces it once every
-worker in it has pushed ("Pinning a release that drops what a running pod still uses" above). An
+already holds to the daemon's contract. An issue pod merely running another image is replaced by
+no relaunch at all, stale-plugin or not: it is drift, and the update round replaces it once every
+worker in it has pushed ("Pinning a release that drops what a running pod still uses" above). The
+controller's pod, which no round covers, is replaced by any relaunch that installs nothing. An
 install failure ends the child before Oh My Pi starts; the launcher reports it gone, the daemon
 charges it as a launch failure, and the claim is retried until the budget ends it in a
 `worker-died`.
