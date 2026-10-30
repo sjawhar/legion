@@ -2,43 +2,35 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-177",
-  "completed": "2026-10-30T23:09:00Z",
-  "round": 18,
-  "headTested": "1064e2183d3d098d8d980b711875c1f153da84bc (286a15f5's learnings census, ae40b8e1's handoff, and the forward merge 1064e218 with main e018f1d3)",
-  "scope": "Per the architect: 36 learnings corrected in place and 4 superseded (286a15f5), the census in the PR body, and one merge with main (fingerprint unchanged). Checked: no active docs/solutions note still teaches handoff-only heads, the trailer on a handoff push or the verdict carry; corrected notes keep their other rules; no rename; superseded notes name their successor; the required test job.",
-  "fingerprint": "unchanged across the merge: ae40b8e1 and 1064e218 both a9d4f392304a5d1b25f78868efea6361c0bd070b1f4bcc7952518315ff9e7fec (conflicts-and-rewrites.md's command).",
-  "mergeability": "gh pr view 2354 -> MERGEABLE at 1064e218.",
-  "ci": "Read 23:08Z at 1064e218: changes queued; the required test job has not run, so it has not settled green. Read as running, not waited for.",
+  "completed": "2026-10-30T23:16:00Z",
+  "round": 19,
+  "headTested": "ca79b1c53d8a67aeca45eaaa251ed060288fb63c (code head ca1e146a51c4, docs/solutions only since round 18's 1064e218)",
+  "scope": "Per the architect: the pr2542 note corrected in place, pr2512 moved to the corrected list, and the required test job. A note main adds after the round's head is recorded for retro, not failed on.",
+  "mergeability": "gh pr view 2354 -> MERGEABLE.",
+  "ci": "Read 23:15Z at ca79b1c5: changes queued; the required test job has not run, so it has not settled green. Read as running, not waited for.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Read 286a15f5's diff over docs/solutions: each corrected note puts its handoff clause in the past tense beside what holds now and keeps its other rules (sampled: webhook-rule-across-listener-and-daemon, conflicting-pr-gets-no-pull-request-ci, gh-run-list-commit-…-INFRA-92, a-decision-that-binds-a-later-phase-…, the-private-names-check-…-LEGION-781, the-record-is-not-the-reader-…, proving-a-refusals-absence-…). No file renamed: git diff --name-status -M f4023bcb..1064e218 -- docs/solutions shows only added files, all main's. Every note marked 'status: superseded by sjawhar/legion#2354' names the successor note (10 of 10)."
+    "how": "Read ca1e146a's diff and the two notes at the head."
   },
-  "failures": [
-    {
-      "criterion": "No active docs/solutions note still teaches handoff-only heads, the trailer on a handoff push, or the verdict carry as today's rule",
-      "evidence": "docs/solutions/legion/the-trailer-on-a-pushs-tip-suppresses-the-runs-of-every-code-commit-beneath-it-pr2542.md (status: active, date 2026-10-30) arrived with the forward merge 1064e218 from main (it is on main, added by #2542 after this round's census) and teaches the removed mechanism in the present tense: line 18-19 'a push whose tip is another role's handoff commit starts no run at all'; line 25-26 'A role resuming a round inherits the previous role's trailered handoff commit as `@-`, so the trailer arrives without anybody writing one'; lines 27-30, the cure, 'rewriting only your own commits leaves the other role's trailered handoff as the tip … rewriting that commit rewrites the one the daemon recorded as that role's handoff'; lines 31-33 'A handoff-only head with a trailer, where the code beneath it was checked at its own commit (the designed shape, …INFRA-117.md)'. After this PR no role pushes a handoff commit and nothing carries the trailer, so with this PR merged main holds an active note that tells a resuming role to expect a trailered handoff at @-. It is neither corrected nor listed in docs/solutions/legion/handoffs-are-dispatch-records-and-the-notes-that-teach-handoff-commits-are-superseded-pr2354.md (grep -c 'the-trailer-on-a-pushs-tip' -> 0). Its general rule (GitHub reads the tip's message; read the tip before a code push) stands, so a correction in place fits. Found by: grep -rlE 'skip-checks|\\.legion/[^ ]*-only|handoff-only|handoff commit|push the handoff|handoff push|verdict to the handoff' docs/solutions, dropping notes whose status is superseded, then reading each remaining hit; every other active hit uses the mechanism as dated history or evidence, or (INFRA-825) a skip-checks trailer on scratch-repository heads, which is not a handoff. No red test: a test of a learning's wording would be a source-text test."
-    }
-  ],
-  "failed": 1,
-  "notes": [
-    "docs/solutions/legion/a-branch-whose-every-round-pushes-never-settles-a-required-check-pr2512.md is listed under the superseding note's `supersedes:` (line 20) yet is status: active and corrected in place; the other ten listed notes are superseded. Either move it to the corrected-in-place list or mark it superseded."
-  ],
+  "failures": [],
+  "failed": 0,
+  "notesForRetro": "None: main added no docs/solutions note since this branch's merge base that mentions a handoff commit, a handoff-only push, a skip-checks trailer on a handoff, or a .legion/-only commit.",
   "proof": [
     {
-      "criterion": "The merge with main changed none of this PR's own lines outside docs/solutions",
-      "surface": "the PR's own diff against its fork point at ae40b8e1 and 1064e218",
-      "command": "the fingerprint command of skill://legion-worker/references/conflicts-and-rewrites.md",
-      "observed": "a9d4f392… at both heads",
-      "headSha": "1064e2183d3d098d8d980b711875c1f153da84bc",
-      "negativeControl": "the same comparison saw the 0136 -> 0137 renumber in round 12"
+      "criterion": "The pr2542 trailer note is corrected in place: its rule stands, its handoff clauses are history",
+      "surface": "docs/solutions/legion/the-trailer-on-a-pushs-tip-suppresses-the-runs-of-every-code-commit-beneath-it-pr2542.md at the head",
+      "command": "git diff e41ccf1b ca79b1c5 -- docs/solutions; every path the note cites checked to exist",
+      "observed": "status: active; the rule (GitHub reads the tip's message, so a trailered tip starts no run; read the tip before a code push; cure with a further push) stands in the present tense; the inherited handoff trailer, the rewrite it guarded and the handoff-only cause of no runs are each 'before sjawhar/legion#2354' beside what holds now (a trailer at @- is a mistake; a head with no check runs is this case or a conflicting head, with the pr2504 note cited); its four cited notes exist (two paths it named wrongly before are corrected)",
+      "headSha": "ca79b1c53d8a67aeca45eaaa251ed060288fb63c",
+      "negativeControl": "at 1064e218 the same note said 'A role resuming a round inherits the previous role's trailered handoff commit as @-' and called the trailered handoff-only head 'the designed shape' (round 18's failure)"
     },
     {
-      "criterion": "Superseded notes name their successor, and no note was renamed",
-      "surface": "docs/solutions at the head",
-      "command": "for each note with 'status: superseded by sjawhar/legion#2354', grep for the successor's path; git diff --name-status -M f4023bcb 1064e218 -- docs/solutions",
-      "observed": "10 of 10 name handoffs-are-dispatch-records-…-pr2354.md; the name-status list holds only A lines (24 notes main added), no R or D",
-      "headSha": "1064e2183d3d098d8d980b711875c1f153da84bc",
-      "negativeControl": "the pr2542 trailer note above, which the same search finds active and uncorrected"
+      "criterion": "pr2512 is listed as corrected, not superseded, and pr2542 is listed as corrected",
+      "surface": "docs/solutions/legion/handoffs-are-dispatch-records-and-the-notes-that-teach-handoff-commits-are-superseded-pr2354.md",
+      "command": "grep the note's supersedes: front matter and its corrected-in-place list",
+      "observed": "pr2512 appears 0 times under supersedes: and once in the corrected list ('the .legion/-only handoff commit that followed the code'), matching its status: active; pr2542 is in the corrected list",
+      "headSha": "ca79b1c53d8a67aeca45eaaa251ed060288fb63c",
+      "negativeControl": "at 1064e218 pr2512 was line 20 of supersedes: while status: active"
     }
   ]
 }
