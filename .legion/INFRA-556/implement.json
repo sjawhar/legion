@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-556",
-  "completed": "2026-10-30T09:50:06Z",
-  "round": "tester round 7 failed: the per-socket awareness filter never ran under the workspace's gorilla v1.5.4-pre; the architect added the room bound back at 256, census entry 4's close, and the relay's loss of concurrent cursors; no merge of main",
+  "completed": "2026-10-30T11:53:46Z",
+  "round": "tester round 8 failed: a short nameless first message passed the filter; the architect added deriving the room bound so it never shuts out a real reader; no merge of main",
   "proof": [
+    {
+      "criterion": "Census entry 4: any complete document message that names no document closes the socket; the room's awareness bound never shuts out a real reader",
+      "surface": "docs package real-upgrade tests (workspace mode and GOWORK=off) and two real envoy-dispatch binaries with 200 sockets of one user each holding its four allowed clients",
+      "command": "cd packages/envoy && go test -count=2 -run 'Awareness|TestADocumentSocket' ./internal/dispatch/docs/ (and GOWORK=off); go test -tags multiprocess -run 'TestAReaderJoiningWhileManySocketsFillTheirBoundsIsSeenOnTheOtherProcess|TestTwoHundredSocketsOfOneUserDoNotFillARoomAgainstANewReader' ./cmd/dispatch; whole multiprocess file; whole docs package",
+      "observed": "the tester's TestADocumentSocketWhoseShortFirstMessageNamesNoDocumentIsClosed and TestAReaderJoiningWhileManySocketsFillTheirBoundsIsSeenOnTheOtherProcess pass unmodified, with every earlier red test; maxAwarenessClientsPerRoom = maxRoomConnections x maxAwarenessClientsPerSocket (4,000); the new row also checks the room's tracked entries stay within the bound (room-counters hook's awareness_clients); multiprocess file ok 1204.627s; docs package ok 1688.011s",
+      "headSha": "09e42b205f18",
+      "negativeControl": "the many-sockets test at fa3212f1 (committed alone, before the fix) fails: 'alice ... was seen at once by carol on A but not by bob on B within 1s'; the short-message test at c83f0a4e fails: 'the socket is still open 5s after a three-byte first message'"
+    },
     {
       "criterion": "Every document socket holds at most four awareness clients in every build; a nameless first message closes the socket; every reader's cursor on one process reaches the other within a second",
       "surface": "docs package real-upgrade tests in workspace mode (gorilla v1.5.4-pre, confirmed with go version -m) and GOWORK=off (v1.5.3); two real envoy-dispatch binaries for the five-reader test",
