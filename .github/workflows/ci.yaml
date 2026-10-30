@@ -2418,11 +2418,11 @@ jobs:
   # the test process (internal/testnats), so no job here needs a container runtime of its own.
   #
   # Delivery, the Dispatch store, the bus, the listener, the registry store, the session cache and
-  # kvwatch share this runner. The Dispatch store's tests, delivery's
-  # (internal/dispatch/delivery/intake_test.go:39-41, which skips without the database) and
-  # cmd/listener/dispatch_resolution_test.go open the Dispatch database through internal/testpg,
-  # so the job carries the lane's Postgres service; the registry store itself is the NATS KV view
-  # and needs none.
+  # kvwatch share this runner. The Dispatch store's tests (store_test.go:27, storetest.go:34) and
+  # delivery's (internal/dispatch/delivery/intake_test.go:39-41) read DISPATCH_TEST_DATABASE_URL
+  # and skip without it, and cmd/listener/dispatch_resolution_test.go:158 gets its database
+  # through internal/testpg, so the job carries the lane's Postgres service; the registry store
+  # itself is the NATS KV view and needs none.
   envoy-go-race:
     needs: changes
     if: needs.changes.outputs.envoy_go_race == 'true'
