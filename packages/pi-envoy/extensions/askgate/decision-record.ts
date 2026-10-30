@@ -26,29 +26,41 @@
 // `packages/envoy/internal/dispatch/api/artifacts.go`), which the reader reads in place of
 // everything the first upload held. The document's id is held in memory for the session; holding
 // none — a process that never uploaded this session's document, or one whose upload was cut —
-// the recorder finds the document among the project's by its name and appends to it, and uploads
-// only when the project holds none. One session's records are written one at a time, each after
-// the one before it has settled, so they land in the order the gate made them.
+// the recorder reads the document by its name (`getProjectArtifact`, which Dispatch resolves by
+// filename, one request of a few bytes) and appends to it, and uploads only where that read
+// answers 404. One session's records are written one at a time, each started once the one before
+// it has settled; each carries the `time` the gate made it, which is what the reader counts and
+// sorts by, since a write given up on this side may still be running on Dispatch's while the next
+// one is sent.
 //
-// What is lost, and is left visible in the reader's output rather than hidden: a session killed
-// between a decision and its write loses that one record; a session that never reached a gated
-// call writes no document at all; a write that fails, that outlives its stop or that the
-// session's shutdown cuts loses its record, and one given up that way may have landed all the
-// same, so a record its caller calls lost can still be in the document; and two processes that
-// write one session's first record at the same moment each find no document and upload one,
-// where the later upload's version replaces the record the earlier one carried. The caller says
-// where a loss goes: the core appends an `advisor-gate-record` entry for the gated call it
-// belongs to, and the host leaves `recordError` on the `unmarked` entry it writes.
+// How long a write runs: until Dispatch has answered it or the session's shutdown cuts it. The
+// client asks again under one `Idempotency-Key` for the whole call (`DISPATCH_WRITE_RETRY`, 30 s,
+// `packages/envoy-client/src/dispatch-http.ts`), so a slow Dispatch is waited out rather than given
+// up at a stop of the recorder's own, and nothing here starts a second attempt, which is what would
+// need a key of the first to be safe.
+//
+// What is lost, and is left visible in a count rather than hidden: a session killed between a
+// decision and its write loses that one record; a session that never reached a gated call writes
+// no document at all; a write that fails or that the session's shutdown cuts loses its record,
+// and one given up that way may have landed all the same, so a record its caller calls lost can
+// still be in the document; and two processes that write one session's first record at the same
+// moment each find no document and upload one, where the later upload's version replaces the
+// record the earlier one carried. The caller says where a loss goes: the core appends an
+// `advisor-gate-record` entry for the gated call it belongs to, and the host leaves `recordError`
+// on the `unmarked` entry it writes; `scripts/askgate-report.ts` counts both as records lost.
 import type { CreateArtifactInput, EditArtifactInput } from "@legion/contracts";
+import { DispatchServiceError } from "@legion/envoy-client/dispatch-http";
 import pkg from "../../package.json";
 
 /**
- * The record's own stop, armed when the recorder takes a decision it records: a write that has not
- * answered by then is given up, and never retried.
+ * How long the records in flight have from the start of the session's shutdown before the cut
+ * gives them up. It falls a margin before the core's own wait for the session's handlers and their
+ * records (`SHUTDOWN_WAIT_MS`, 1.5 s, askgate-core.ts), so the `advisor-gate-record` entry of a
+ * record that could not land is appended while the handler still holds the session open.
  */
-export const RECORD_TIMEOUT_MS = 5_000;
+export const RECORD_CUT_DELAY_MS = 1_250;
 
-/** The `recordError` of a record the session's shutdown cut short, before its own stop fell. */
+/** The `recordError` of a record the session's shutdown cut. */
 export const RECORD_SHUT_DOWN = "the session shut down before Dispatch answered the record";
 
 /**
@@ -70,12 +82,12 @@ export type RecordSource = "pod" | "machine";
  */
 export interface RecordClient {
   /**
-   * The project's documents, which the recorder reads to find the session's own by name: the one
-   * read that tells it whether an upload would make the document or replace it.
+   * The project's document of that name, which the recorder reads to find the session's own: one
+   * request of a few bytes, where reading every document of the project took seconds and
+   * megabytes under load (#2161, reviewer round 16). Dispatch resolves the reference by slug and
+   * then by filename, and answers 404 where the project holds neither.
    */
-  listProjectArtifacts(
-    project: string
-  ): Promise<readonly { readonly id: string; readonly name: string }[]>;
+  getProjectArtifact(project: string, name: string): Promise<{ readonly id: string }>;
   projectArtifact(
     project: string,
     input: CreateArtifactInput
@@ -127,6 +139,12 @@ export interface DecisionRecord {
   /** RFC 3339, UTC. */
   time: string;
   session: string;
+  /**
+   * What tells this record from every other of the session, so a reader counts a record Dispatch
+   * stored twice once: the gated call's own tool call id, and for an unmarked write the id of the
+   * CLI ledger line's place in its tool call, since one call can log several.
+   */
+  id: string;
   source: RecordSource;
   project: string;
   tool: string;
@@ -161,24 +179,33 @@ export interface RecordRequest {
   sessionId: string;
   /** The directory whose Dispatch configuration the write uses: the session's own. */
   directory: string;
+  /** The record's `id`: what tells it from the session's others. */
+  id: string;
 }
 
 /**
- * Writes a session's decisions to its Dispatch document, one write of a session at a time, each
- * under a stop of its own. The gate's own records and the host's records of unmarked writes go
- * through one of these, so a session's decisions reach one document.
+ * Writes a session's decisions to its Dispatch document, one write of a session at a time. The
+ * gate's own records and the host's records of unmarked writes go through one of these, so a
+ * session's decisions reach one document.
  */
 export interface DecisionRecorder {
   /**
-   * Records one decision, under a stop of its own at `RECORD_TIMEOUT_MS`, armed only for a
-   * decision there is something to record of. Answers the text for the entry's `recordError` when
-   * the write failed, outlived its stop or was cut, and undefined when it recorded or when there
-   * was nothing to record.
+   * Records one decision. The write runs until Dispatch has answered it or the cut ends it.
+   * Answers the text for the entry's `recordError` when the write failed or was cut, and
+   * undefined when it recorded or when there was nothing to record.
    */
   record(request: RecordRequest): Promise<string | undefined>;
   /**
+   * The session is shutting down: gives the records in flight `RECORD_CUT_DELAY_MS` to land, then
+   * gives up those still running with `RECORD_SHUT_DOWN`, as it gives up every record started
+   * after that as it starts, and answers once the records it waited for have answered their
+   * callers. The one owner of the cut, whether or not the gate loaded: `settled` is all the core
+   * waits on.
+   */
+  shutdown(): Promise<void>;
+  /**
    * Gives up every record in flight with `RECORD_SHUT_DOWN`, and gives up every later one as it
-   * starts: the session is shutting down, and no record may hold it open past that.
+   * starts: what `shutdown` does once its delay has run out.
    */
   cut(): void;
   /** Settles once every record in flight has answered its caller: what a shutdown waits for. */
@@ -199,8 +226,10 @@ export function createDecisionRecorder(deps: RecordDeps): DecisionRecorder {
   const documents = new Map<string, string>();
   /**
    * The write each session's next record waits for: one write of a session at a time, so the
-   * document's upload has answered before anything appends to it and the appends reach Dispatch
-   * in the order the gate made them. This promise never rejects.
+   * document's upload has answered before anything appends to it, and each append is sent in the
+   * order the gate made it. What a record given up on this side is doing on Dispatch's is not
+   * this side's to know, so the order records land in is not claimed; each carries its own `time`.
+   * This promise never rejects.
    */
   const writing = new Map<string, Promise<void>>();
   /** Every record whose caller is still waiting: what `settled` waits for. */
@@ -214,6 +243,7 @@ export function createDecisionRecorder(deps: RecordDeps): DecisionRecorder {
     entry,
     sessionId,
     directory,
+    id,
   }: RecordRequest): Promise<string | undefined> => {
     // The calls whose rules check ran, the calls the agent sent anyway — a rebuttal or the
     // breaker, which the gate answers with no check of its own — and the writes that reached the
@@ -239,6 +269,7 @@ export function createDecisionRecorder(deps: RecordDeps): DecisionRecorder {
     const record: DecisionRecord = {
       time: new Date(deps.now()).toISOString(),
       session: sessionId,
+      id,
       source,
       project,
       tool: entry.tool,
@@ -260,12 +291,11 @@ export function createDecisionRecorder(deps: RecordDeps): DecisionRecorder {
     const block = `\`\`\`json\n${JSON.stringify(record)}\n\`\`\``;
     const name = `${DECISION_DOCUMENT_PREFIX}${sessionId}.md`;
     // Past the cut the session is sealing: this record is given up before it asks Dispatch for
-    // anything, and arms no stop of its own, since what it would hold the session open for is
-    // already past.
+    // anything, since what it would hold the session open for is already past.
     if (cutShort) return RECORD_SHUT_DOWN;
-    // The record's own stop, armed here and nowhere earlier: an entry the lines above record
-    // nothing of leaves no timer behind. The abort ends the request behind it, and the first
-    // reason given — this stop, or the session's shutdown — is the one the caller is told.
+    // What ends this record before Dispatch has answered it, and the only thing that does: the
+    // session's shutdown, through `cut`. The abort ends the request behind it, and the caller is
+    // told the reason given here rather than whatever the aborted request rejects with.
     const stop = new AbortController();
     const { promise: stopped, resolve: giveUp } = Promise.withResolvers<string>();
     const end = (why: string) => {
@@ -276,10 +306,6 @@ export function createDecisionRecorder(deps: RecordDeps): DecisionRecorder {
       stop.abort(why);
     };
     stops.add(end);
-    const timer = setTimeout(
-      () => end(`Dispatch did not answer the record within ${RECORD_TIMEOUT_MS} ms`),
-      RECORD_TIMEOUT_MS
-    );
     // Inside the write, so a Dispatch configuration that refuses to resolve fails as any other
     // write does: the record is lost and the entry says why.
     const write = async (): Promise<string | undefined> => {
@@ -292,12 +318,11 @@ export function createDecisionRecorder(deps: RecordDeps): DecisionRecorder {
       // The id this process holds for the session, else the document the project already holds
       // under that name. An upload of a name Dispatch knows stores a new version of that same
       // document, and the reader reads the latest version alone, so a process holding no id reads
-      // the project's documents before it writes: a document a cut upload left behind, or one the
+      // that one document before it writes: a document a cut upload left behind, or one the
       // process that served this session before wrote, takes this record rather than losing its
-      // own. A read that fails is this record's failure, as a failed write is.
-      const held =
-        documents.get(sessionId) ??
-        (await client.listProjectArtifacts(project)).find((artifact) => artifact.name === name)?.id;
+      // own. A read that fails for any other reason than a 404 is this record's failure, as a
+      // failed write is.
+      const held = documents.get(sessionId) ?? (await byName(client, project, name));
       if (held !== undefined) {
         documents.set(sessionId, held);
         await client.docEdit(held, {
@@ -322,9 +347,12 @@ export function createDecisionRecorder(deps: RecordDeps): DecisionRecorder {
       return undefined;
     };
     // This session's records, one at a time: the next starts once this write has settled, however
-    // it settled, so neither a failure nor a stop leaves the session's later records unwritten.
+    // it settled.
     const queued = writing.get(sessionId);
-    const mine = queued === undefined ? write() : queued.then(write, write);
+    const mine = queued === undefined ? write() : queued.then(write);
+    // What the next record of this session waits for: this write however it settled, so neither a
+    // failure nor a cut leaves the session's later records unwritten. It never rejects, which is
+    // why the wait above needs no rejection arm of its own.
     writing.set(
       sessionId,
       mine.then(
@@ -332,35 +360,68 @@ export function createDecisionRecorder(deps: RecordDeps): DecisionRecorder {
         () => undefined
       )
     );
-    // The caller's own wait, which `settled` holds the shutdown for: it ends at the write, at this
-    // record's stop or at the cut, whichever comes first, and never after.
+    // The caller's own wait, which `settled` holds the shutdown for: it ends at the write or at
+    // the cut, whichever comes first, and never after.
     const { promise: answered, resolve: answer } = Promise.withResolvers<void>();
     pending.add(answered);
     try {
-      // The write is never waited on past the stop, and never retried.
+      // The write is never waited on past the cut, and nothing here attempts it a second time:
+      // the client's own attempts share one Idempotency-Key, and another from here would not.
       return await Promise.race([mine, stopped]);
     } catch (error) {
       // A write that fails costs the gated call nothing: the entry carries why, and that is all.
       const message = error instanceof Error ? error.message : String(error);
       return message === "" ? "the Dispatch write failed without a message" : message;
     } finally {
-      clearTimeout(timer);
       stops.delete(end);
       pending.delete(answered);
       answer();
     }
   };
 
+  const cut = (): void => {
+    cutShort = true;
+    for (const end of [...stops]) end(RECORD_SHUT_DOWN);
+  };
+
+  const settled = async (): Promise<void> => {
+    // A record that starts while this waits is waited for as well; past the cut each of those is
+    // given up as it starts, so the wait ends with the records the session had.
+    while (pending.size > 0) await Promise.allSettled([...pending]);
+  };
+
   return {
     record,
-    cut: () => {
-      cutShort = true;
-      for (const end of [...stops]) end(RECORD_SHUT_DOWN);
-    },
-    settled: async () => {
-      // A record that starts while this waits is waited for as well; past the cut each of those is
-      // given up as it starts, so the wait ends with the records the session had.
-      while (pending.size > 0) await Promise.allSettled([...pending]);
+    cut,
+    settled,
+    shutdown: async () => {
+      // The delay runs from here, the start of the session's shutdown, and the timer is left
+      // armed when this answers early: a record the core starts while the session seals — the
+      // gate it abandoned writes one as its handler returns — is cut by this same timer, which is
+      // unreferenced so it holds no event loop open.
+      const timer = setTimeout(cut, RECORD_CUT_DELAY_MS);
+      timer.unref?.();
+      await settled();
     },
   };
+}
+
+/**
+ * The id of the project's document of that name, or undefined where it holds none. Dispatch's 404
+ * is that answer; every other failure is the caller's to report, since a record written over a
+ * document the read could not see would replace what that document holds.
+ */
+async function byName(
+  client: RecordClient,
+  project: string,
+  name: string
+): Promise<string | undefined> {
+  try {
+    return (await client.getProjectArtifact(project, name)).id;
+  } catch (error) {
+    if (error instanceof DispatchServiceError && error.fromDispatch && error.status === 404) {
+      return undefined;
+    }
+    throw error;
+  }
 }

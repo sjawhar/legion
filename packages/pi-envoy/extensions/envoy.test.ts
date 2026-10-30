@@ -4452,10 +4452,10 @@ console.log(JSON.stringify(args));
     /** The documents this Dispatch holds, which its list of the project's answers. */
     const recordDocuments: Array<{ id: string; name: string; slug: string }> = [];
     /**
-     * Answers the three Dispatch calls a decision record makes — the read of the project's
-     * documents, the document's upload, then an append to it — and keeps each JSON record the
-     * writes carried, so a test reads what reached Dispatch and nothing else. Every other request
-     * goes on to the suite's own stand-in.
+     * Answers the three Dispatch calls a decision record makes — the read of the session's own
+     * document by name, the document's upload, then an append to it — and keeps each JSON record
+     * the writes carried, so a test reads what reached Dispatch and nothing else. Every other
+     * request goes on to the suite's own stand-in.
      */
     const standInRecordProject = () => {
       published.length = 0;
@@ -4470,11 +4470,17 @@ console.log(JSON.stringify(args));
       };
       globalThis.fetch = async (input, init) => {
         const url = String(input instanceof Request ? input.url : input);
+        const byName = /\/api\/v1\/projects\/INFRA\/artifacts\/(.+)$/.exec(url);
+        if (byName !== null && (init?.method ?? "GET").toUpperCase() === "GET") {
+          // The read the recorder makes before it uploads: the one document of that name, as
+          // Dispatch resolves a document reference, and its 404 where the project holds none.
+          const name = decodeURIComponent(byName[1] ?? "");
+          const held = recordDocuments.find((document) => document.name === name);
+          return held === undefined
+            ? Response.json({ code: "ARTIFACT_NOT_FOUND", error: "not found" }, { status: 404 })
+            : Response.json(held);
+        }
         if (url.endsWith("/api/v1/projects/INFRA/artifacts")) {
-          // The read the recorder makes before it uploads: one document per name, as Dispatch
-          // holds them, so a second upload of a name would store a new version of that document.
-          if ((init?.method ?? "GET").toUpperCase() === "GET")
-            return Response.json(recordDocuments);
           const body = JSON.parse(String(init?.body ?? "{}")) as {
             content?: string;
             name?: string;
@@ -4573,6 +4579,9 @@ console.log(JSON.stringify(args));
       expect(run.records).toMatchObject([
         {
           session: "ses_askgate",
+          // The tool call the CLI's line was read from, and the line's own place in it: what
+          // tells this record from another write of the same call (#2161).
+          id: "call-py#0",
           project: "INFRA",
           tool: "dispatch_ask",
           outcome: "unmarked",

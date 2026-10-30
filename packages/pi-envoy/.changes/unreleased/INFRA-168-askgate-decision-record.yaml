@@ -7,29 +7,37 @@ body: |-
   session's own, `askgate-decisions-<session id>.md`, so a session holding a Dispatch token and
   nothing else can count the refusals, the overrides, the unreviewed writes that carried an ask and
   the rules-call errors a fortnight of sessions made. The record carries the time, the session,
-  `source` (`pod` or `machine`), the project, the call's tool and target, the rule fields, the
-  decision, the mode, `asksCarried` and the two latencies, and **no ask text and no quote**. The
+  an `id` of its own (the gated call's tool call id, and for an unmarked write the CLI ledger
+  line's place in its tool call), `source` (`pod` or `machine`), the project, the call's tool and
+  target, the rule fields, the decision, the mode, `asksCarried` and the two latencies, and **no
+  ask text and no quote**. The
   CLI counts an unmarked write's asks from the write's own text, so a re-upload of ask blocks the
   stored version already holds counts them as carried. `OMP_ASKGATE_RECORD_PROJECT` names the
   project, else `LEGION_PROJECT` does, and with neither set nothing is written. The record runs
-  once the gate has answered the call, never inside its `tool_call` handler, under a 5 second stop
-  the recorder arms, and never changes the decision. A record that fails, that hits that stop or
-  that the session's shutdown cuts writes one line to the host's log and appends one
+  once the gate has answered the call, never inside its `tool_call` handler, and never changes
+  the decision. Its write runs until Dispatch has answered it or the session's shutdown cuts it,
+  under the one `Idempotency-Key` the client gives the call, so a Dispatch slow under load is
+  waited out rather than given up. A record that fails or that the session's shutdown cuts writes
+  one line to the host's log and appends one
   `advisor-gate-record` entry carrying `toolCallId`, `tool` and `recordError`; the call's own
-  `advisor-gate` entry stands as written, and the report reads `advisor-gate` entries alone. At
-  shutdown the gate cuts the recorder 1.25 s after shutdown began and waits for what is still
-  pending, so a record still lands, and the entry of one that could not, before the session is
-  sealed; a record cut there says the shutdown cut it. The session's first decision uploads the
-  document and every later one appends to it, and a process holding no id for the session finds
-  the document by name among the project's rather than uploading that name again, which Dispatch
-  stores as a new version of the document and the reader reads in place of everything it held.
-  The records of one session are written one at a time, so they land in the order the gate made
-  them.
+  `advisor-gate` entry stands as written, and `--sessions` counts both as decision records lost.
+  At shutdown the one `session_shutdown` handler the gate binds gives the records 1.25 s from
+  that moment and then cuts them, whether or not the gate loaded, and the gate waits for what is
+  still pending, so a record still lands, and the entry of one that could not, before the session
+  is sealed; a record cut there says the shutdown cut it. The session's first decision uploads the
+  document and every later one appends to it, and a process holding no id for the session reads
+  the document by name — one request of a few bytes, rather than every document of the project —
+  and uploads only where that read answers 404, since a second upload of the name would store a
+  new version of the document and the reader reads that in place of everything it held.
+  The records of one session are written one at a time, each carrying the time the gate made it,
+  which is what the reader counts and sorts by.
   `scripts/askgate-report.ts
   --dispatch-project <KEY> --since <RFC 3339> [--json]` reads those documents back and counts
   them, split by `source`, with the unmarked writes on a line of their own, by mode and with the
-  asks they carried, counted as neither a rules call nor an override. Because no call waits for
-  the record, the review's deadline keeps its 5,000 ms margin under
+  asks they carried, counted as neither a rules call nor an override; one `(session, id)` is one
+  decision, and a second copy of it — a write given up here that Dispatch ran all the same — is
+  counted as a duplicate and in nothing else.
+  Because no call waits for the record, the review's deadline keeps its 5,000 ms margin under
   `extensionHandlers.toolCallTimeoutMs` — the room the handler needs for the aborted call's usage
   report and the entry — so Oh My Pi's 30 s default still gives a 25,000 ms deadline, and the key
   must be at least 15,000 ms: set below that, the gate does not load, and so refuses every

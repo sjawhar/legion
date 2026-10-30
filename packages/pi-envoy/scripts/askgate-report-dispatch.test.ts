@@ -25,6 +25,8 @@ const MACHINE_SESSION = "ses-machine";
 function decision(e: {
   time: string;
   session: string;
+  /** What tells the record from the session's others; its own time unless a test repeats one. */
+  id?: string;
   source: "pod" | "machine";
   target?: string;
   rule?: string;
@@ -44,6 +46,7 @@ function decision(e: {
   return JSON.stringify({
     time: e.time,
     session: e.session,
+    id: e.id ?? `call-${e.time}`,
     source: e.source,
     project: PROJECT,
     tool: "bash",
@@ -183,6 +186,7 @@ const DAY_REPORT: DispatchReport = {
   unreadableDocuments: 0,
   sessions: 2,
   unparsedLines: 0,
+  duplicateRecords: 0,
   total: {
     ...NO_DECISIONS,
     calls: 6,
@@ -321,6 +325,86 @@ describe("the Dispatch reader", () => {
     });
   });
 
+  // #2161, reviewer round 16: a record write given up on the session's side can have landed on
+  // Dispatch's all the same, so one decision can be in the document twice. Each decision carries
+  // an id of its own, and one (session, id) is one decision.
+  test("one decision stored twice is counted once, and the second copy is counted as a duplicate", async () => {
+    const twice = decision({
+      time: at(1),
+      session: POD_SESSION,
+      id: "tool-call-1",
+      source: "pod",
+      rule: "no_change",
+      target: ASK_1,
+    });
+    const documents: ProjectDocument[] = [
+      {
+        name: `askgate-decisions-${POD_SESSION}.md`,
+        markdown: decisionDocument(POD_SESSION, [
+          twice,
+          twice,
+          // Another call of the same session: its own id, so it is a decision of its own.
+          decision({
+            time: at(2),
+            session: POD_SESSION,
+            id: "tool-call-2",
+            source: "pod",
+            rule: "untried_access",
+            target: EDIT_2,
+          }),
+        ]),
+      },
+      {
+        // Another session's record of the same id: a tool call id is one session's own.
+        name: `askgate-decisions-${MACHINE_SESSION}.md`,
+        markdown: decisionDocument(MACHINE_SESSION, [
+          decision({
+            time: at(1),
+            session: MACHINE_SESSION,
+            id: "tool-call-1",
+            source: "machine",
+            rule: "no_change",
+            target: COMMENT_7,
+          }),
+        ]),
+      },
+    ];
+    const { read, report } = await reportOf(documents, SINCE);
+    expect(read.duplicates).toBe(1);
+    expect(read.records.map((record) => [record.session, record.id])).toEqual([
+      [POD_SESSION, "tool-call-1"],
+      [POD_SESSION, "tool-call-2"],
+      [MACHINE_SESSION, "tool-call-1"],
+    ]);
+    expect(report.duplicateRecords).toBe(1);
+    expect(report.total.refusals).toBe(3);
+    expect(report.pod.refusals).toBe(2);
+    expect(dispatchReportLines(report, false)).toContain("duplicate records: 1");
+  });
+
+  test("records written before the gate gave each an id are each counted, duplicates and all", async () => {
+    // A document a released gate wrote before this change holds no id: two of its records are two
+    // decisions, since nothing in them says otherwise.
+    const old = JSON.stringify({
+      ...JSON.parse(
+        decision({ time: at(1), session: POD_SESSION, source: "pod", rule: "no_change" })
+      ),
+      id: undefined,
+    });
+    const { read, report } = await reportOf(
+      [
+        {
+          name: `askgate-decisions-${POD_SESSION}.md`,
+          markdown: decisionDocument(POD_SESSION, [old, old]),
+        },
+      ],
+      SINCE
+    );
+    expect(read.records.map((record) => record.id)).toEqual(["", ""]);
+    expect(read.duplicates).toBe(0);
+    expect(report.total.refusals).toBe(2);
+  });
+
   test("--json prints one object carrying the numbers the plain text prints", async () => {
     const { report } = await reportOf(DAY, SINCE);
     const json = dispatchReportLines(report, true);
@@ -333,6 +417,7 @@ describe("the Dispatch reader", () => {
     expect(text).toContain("unreadable documents: 0");
     expect(text).toContain("sessions: 2");
     expect(text).toContain("unparsed lines: 0");
+    expect(text).toContain("duplicate records: 0");
     expect(text).toContain("rules calls: 6 (pod 3, machine 3)");
     expect(text).toContain("refusals: 3 (pod 2, machine 1)");
     expect(text).toContain("rule no_change: 2 (pod 1, machine 1)");

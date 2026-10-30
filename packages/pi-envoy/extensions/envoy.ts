@@ -3726,7 +3726,7 @@ export default function envoyExtension(pi: PiApi): void {
       entries.some((entry) => entry.askgate !== undefined) &&
       !(await isSubagent(context))
     ) {
-      for (const { tool, askgate } of entries) {
+      for (const [line, { tool, askgate }] of entries.entries()) {
         if (askgate === undefined) continue;
         const entry: GateEntry = {
           advisor: "AskGate",
@@ -3744,10 +3744,10 @@ export default function envoyExtension(pi: PiApi): void {
         // The entry above reaches only this machine's disk. A write that would have opened an
         // ask for a person also goes to Dispatch, where a session with no access to this machine
         // counts the asks that went out, or were refused, unreviewed: the record carries the
-        // tool, the mode and how many asks the write carried, and no ask text. It is published
-        // under a stop of its own, so an unreachable Dispatch delays this one tool result by at
-        // most that stop, and a failure costs the result nothing: the log says why, and so does
-        // the entry.
+        // tool, the mode and how many asks the write carried, and no ask text. Its write runs
+        // until Dispatch has answered it or the session's shutdown cuts it, so an unreachable
+        // Dispatch delays this one tool result by what the client's own attempts cost, and a
+        // failure costs the result nothing: the log says why, and so does the entry.
         const asksCarried = askgate.asksCarried ?? 0;
         let recordError: string | undefined;
         if (askgateRecorder !== undefined && asksCarried > 0) {
@@ -3755,6 +3755,9 @@ export default function envoyExtension(pi: PiApi): void {
             entry: { ...entry, asksCarried },
             sessionId: context.sessionManager.getSessionId(),
             directory: context.cwd,
+            // One tool call can log several gated writes, so the record's id names the ledger
+            // line's own place in it: what the reader de-duplicates a replayed write by.
+            id: `${event.toolCallId}#${line}`,
           });
           if (recordError !== undefined) {
             logger.warn(

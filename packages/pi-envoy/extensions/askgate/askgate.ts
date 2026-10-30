@@ -101,9 +101,9 @@ export interface AskGateRegistration {
   readonly loaded: Promise<void>;
   /**
    * Publishes one Dispatch decision record for a write that reached the CLI outside the form the
-   * gate reads (`decision-record.ts`), under the recorder's own stop at `RECORD_TIMEOUT_MS`.
-   * Answers the text for the entry's `recordError` when the write failed or was given up, and
-   * undefined when it recorded or when the entry is nothing to record.
+   * gate reads (`decision-record.ts`). The write runs until Dispatch has answered it or the
+   * session's shutdown cuts it. Answers the text for the entry's `recordError` when the write
+   * failed or was given up, and undefined when it recorded or when the entry is nothing to record.
    */
   readonly recordUnmarked: (request: RecordRequest) => Promise<string | undefined>;
 }
@@ -141,12 +141,12 @@ export function registerAskGate(pi: PiApi, host: AskGateHost): AskGateRegistrati
   // The host's context carries every member GateCtx reads; PiApi types only those the Envoy entry
   // reads, so the handler takes it as the core's type.
   pi.on("tool_call", async (event, ctx) => (await gate)(event, ctx as unknown as GateCtx));
-  // The recorder is cut at `session_shutdown`, so no record holds a sealing session open: the
-  // core does that at its own record deadline, inside the wait it holds the shutdown for. A load
-  // that failed leaves no core to do it, while the unmarked writes' records are written all the
-  // same, so the cut is registered here, and only then.
-  void loading.catch(() => {
-    pi.on("session_shutdown", async () => record.cut());
+  // The one owner of the records' shutdown, registered here at bind time and never anywhere else:
+  // the recorder holds the cut and its delay (`shutdown`), so the records of a gate that never
+  // loaded — the unmarked writes', which need none of Oh My Pi's modules — are given the same
+  // window as the core's own, and the core only waits on what is still pending.
+  pi.on("session_shutdown", async () => {
+    await record.shutdown();
   });
   return {
     loaded: loading.then(() => undefined),

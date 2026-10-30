@@ -23,6 +23,10 @@
 //     not `verdict`: timeout, error, no-verdict, halted, skipped, rebuttal, breaker, and in
 //     warn mode `unreadable`, `unmarked`, `abandoned` and `shutdown`. A warn-mode `abandoned` or
 //     `shutdown` is that alone: its decision is `allow`, so it is not sent back.
+//   - records lost: the gated call's decision never reached Dispatch. Every entry carrying a
+//     `recordError` — an unmarked write's own, written with the entry, and the one the gate
+//     appends as an `advisor-gate-record` entry for every other call — so the day's `--sessions`
+//     count names what the `--dispatch-project` count over the same day cannot hold.
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { parseArgs as parseArgv } from "node:util";
@@ -77,6 +81,12 @@ export interface GateRecord {
   target: string | null;
   /** Why no marker was minted though the decision let the write out: `call-ended`, or null. */
   mintSkipped: string | null;
+  /**
+   * Why this call's decision never reached Dispatch: the `recordError` of the `advisor-gate-record`
+   * entry the gate appended after it, or, for an unmarked write, the one on the entry itself.
+   * Null where the record landed, or where the call had none to write.
+   */
+  recordError: string | null;
   /** `reviewed`: the text the model judged. `command`: the tool call's own text, which for a
    *  file-backed write names the file and not its content. */
   textSource: "reviewed" | "command";
@@ -136,6 +146,11 @@ export interface Stats {
    * ended while the gate still held it, so no marker was minted and no command of it can post.
    */
   mintsSkipped: number;
+  /**
+   * Gated calls carrying a `recordError`: the decision never reached Dispatch, so the Dispatch
+   * report over the same day counts one decision fewer than the machine made.
+   */
+  recordsLost: number;
   perTool: ToolShare[];
   rules: RuleStats;
   /** Every outcome seen and how many entries carried it, most first. */
@@ -177,9 +192,16 @@ function callText(call: Json): string {
   return JSON.stringify(args ?? null);
 }
 
-/** Reads every advisor-gate entry of one session file's text. Lines that do not parse are skipped. */
+/**
+ * Reads every advisor-gate entry of one session file's text, each carrying what the gate could
+ * not record of it on Dispatch: the `recordError` of its own entry (an unmarked write's, written
+ * with the entry) or of the `advisor-gate-record` entry the gate appended after it. Lines that do
+ * not parse are skipped.
+ */
 export function parseSessionText(text: string, session: string): GateRecord[] {
   const calls = new Map<string, string>();
+  /** Each call whose decision record was lost, by tool call id, and what stopped it. */
+  const recordsLost = new Map<string, string>();
   const records: GateRecord[] = [];
   for (const line of text.split("\n")) {
     if (line.trim() === "") continue;
@@ -198,6 +220,12 @@ export function parseSessionText(text: string, session: string): GateRecord[] {
           calls.set(part.id, callText(part));
         }
       }
+      continue;
+    }
+    if (entry.type === "custom" && entry.customType === "advisor-gate-record") {
+      const lost = isObject(entry.data) ? entry.data : {};
+      const why = strOrNull(lost.recordError);
+      if (why !== null) recordsLost.set(str(lost.toolCallId), why);
       continue;
     }
     if (entry.type !== "custom" || entry.customType !== "advisor-gate") continue;
@@ -227,11 +255,17 @@ export function parseSessionText(text: string, session: string): GateRecord[] {
       ruleModel: strOrNull(data.ruleModel),
       target: strOrNull(data.target),
       mintSkipped: strOrNull(data.mintSkipped),
+      // The unmarked write's own entry carries it; the gate's own calls carry it on the
+      // follow-up entry joined below.
+      recordError: strOrNull(data.recordError),
     });
   }
-  // The call comes before its entry, but the join waits for the whole file.
-  for (const record of records)
+  // The call comes before its entry, and the record's follow-up entry after it, but both joins
+  // wait for the whole file.
+  for (const record of records) {
     if (record.textSource === "command") record.text = calls.get(record.toolCallId) ?? null;
+    record.recordError ??= recordsLost.get(record.toolCallId) ?? null;
+  }
   return records;
 }
 
@@ -381,6 +415,7 @@ export function computeStats(records: GateRecord[]): Stats {
     costCount: costs.length,
     refusals: records.filter(isRefusal).length,
     mintsSkipped: records.filter((r) => r.mintSkipped !== null).length,
+    recordsLost: records.filter((r) => r.recordError !== null).length,
     perTool: [...byTool.values()].sort((a, b) => (a.tool < b.tool ? -1 : a.tool > b.tool ? 1 : 0)),
     rules: computeRuleStats(records),
     byOutcome: [...byOutcome.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)),
@@ -432,6 +467,7 @@ export function formatReport(stats: Stats, seed: number): string[] {
     `refusals: ${stats.refusals}`,
     `unreviewed sends: ${stats.unreviewed}`,
     `mints skipped: ${stats.mintsSkipped}`,
+    `decision records lost: ${stats.recordsLost}`,
     ...stats.byOutcome.map(([outcome, count]) => `outcome ${outcome}: ${count}`),
     ...stats.perTool.map(
       (t) =>

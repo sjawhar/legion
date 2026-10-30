@@ -215,14 +215,16 @@
 // counts the rule decisions over a fortnight holds a Dispatch token and nothing else. That write
 // carries no ask text and no quote, and never changes the decision. It runs after the handler has
 // returned, so no review is ever cut short to pay for it: the handler hands it to the session's
-// recorder, which arms the 5 s stop of its own (RECORD_TIMEOUT_MS), and keeps the wait for it in a
-// pending set. A record that cannot be written — an error, its own stop, or the shutdown's cut —
-// writes one line to the host's plain log (`runtimeLogger`) and appends one `advisor-gate-record`
-// entry carrying `toolCallId`, `tool` and `recordError`; the `advisor-gate` entry it belongs to is
-// written already, and `askgate-report.ts` reads `advisor-gate` entries alone, so it passes over
-// these. At shutdown the handler cuts the recorder at the record deadline and waits for what is
-// still pending, before the markers are released, so a record still lands before the session is
-// sealed. The records of one session keep their order: the recorder writes them one at a time.
+// recorder, whose write runs until Dispatch has answered it or the session's shutdown cuts it,
+// and keeps the wait for it in a pending set. A record that cannot be written — an error, or the
+// shutdown's cut — writes one line to the host's plain log (`runtimeLogger`) and appends one
+// `advisor-gate-record` entry carrying `toolCallId`, `tool` and `recordError`; the `advisor-gate`
+// entry it belongs to is written already, so `askgate-report.ts` counts the gated call from that
+// one and the follow-up as a record lost. At shutdown the handler waits for what is still
+// pending, before the markers are released, so a record still lands before the session is sealed;
+// what ends that wait is the cut the entry owns (`askgate.ts`, `RECORD_CUT_DELAY_MS`). The records
+// of one session are written one at a time, and each carries the time the gate made it, which is
+// what the reader counts by.
 // The order after the decision settles, per call: the halt count, the rules count, the block reset,
 // the entry, that record started, the override put back as a comment, the marker, the notes. The
 // mint comes last and only where the decision does not block, so no refused call ever leaves a
@@ -326,13 +328,12 @@ const WARN_DEADLINE_MS = 30_000;
 const RECOMMENDED_CEILING_MS = 120_000;
 // The runner gives a session_shutdown handler 2 s (SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS) and then seals
 // the session, dropping any later entry: gates abandoned there get a shorter grace, and the handler
-// waits at most SHUTDOWN_WAIT_MS for their entries and for the decision records they start. A
-// record still pending then, or started after, is cut SHUTDOWN_RECORD_MARGIN_MS before that wait
-// runs out, so the `advisor-gate-record` entry of a record that fails is appended while the
-// handler still holds the session.
+// waits at most SHUTDOWN_WAIT_MS for their entries and for the decision records they start. The
+// entry's own handler cuts a record still pending RECORD_CUT_DELAY_MS after the shutdown began,
+// which falls inside that wait, so the `advisor-gate-record` entry of a record that could not land
+// is appended while the handler still holds the session.
 const SHUTDOWN_GRACE_MS = 1_000;
 const SHUTDOWN_WAIT_MS = 1_500;
-const SHUTDOWN_RECORD_MARGIN_MS = 250;
 /**
  * The outcomes of a call the gate let through without a verdict, the gate's own failure or a stop
  * it took: no review stands behind the bytes, so the command the agent wrote runs as written.
@@ -2498,9 +2499,9 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     };
     /**
      * Publishes one decision to Dispatch, started as the handler returns and awaited by nothing of
-     * the call: the review's deadline pays none of it. The recorder arms the write's own stop at
-     * RECORD_TIMEOUT_MS and gives it up at the shutdown's cut, and writes a session's records one
-     * at a time, so they land in the order they were started.
+     * the call: the review's deadline pays none of it. The recorder's write runs until Dispatch
+     * has answered it or the session's shutdown cuts it, and a session's records are written one
+     * at a time, each carrying the time the gate made it.
      */
     const startRecord = (entry: GateEntry, ctx: GateCtx) => {
       const done = (async () => {
@@ -2510,6 +2511,9 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
             entry,
             sessionId: ctx.sessionManager.getSessionId(),
             directory: ctx.cwd,
+            // One record per gated call, so the call's own id tells this record from the
+            // session's others: what the reader de-duplicates a replayed write by.
+            id: entry.toolCallId,
           });
         } catch (error) {
           recordError = messageOf(error);
@@ -2526,12 +2530,11 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     // `shutdown`, and block mode refuses the call as it refuses any call given up without a verdict.
     // The handlers are waited for first, since each starts its decision record as it returns, then
     // the records themselves — this session's and the host's of the writes the gate never saw,
-    // which share the one recorder — which the cut ends SHUTDOWN_RECORD_MARGIN_MS before the wait
-    // runs out: a record that fails appends its own entry while the handler still holds the session.
+    // which share the one recorder. Nothing here cuts those records: the entry's own handler owns
+    // the cut and its delay (`askgate.ts`), which falls inside this wait, so a record that could
+    // not land appends its entry while this handler still holds the session.
     pi.on("session_shutdown", async () => {
       closing = true;
-      const recordMs = SHUTDOWN_WAIT_MS - SHUTDOWN_RECORD_MARGIN_MS;
-      const cut = setTimeout(() => recordDecision.cut(), recordMs);
       for (const abandon of inflight.values()) abandon("shutdown", SHUTDOWN_GRACE_MS);
       const { promise: waited, resolve: stopWaiting } = Promise.withResolvers<void>();
       const timer = setTimeout(stopWaiting, SHUTDOWN_WAIT_MS);
@@ -2542,7 +2545,6 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       })();
       await Promise.race([settled, waited]);
       clearTimeout(timer);
-      clearTimeout(cut);
       // After the wait, so a call that settled during it leaves no marker behind.
       for (const toolCallId of markers.keys()) releaseMarker(toolCallId);
     });
@@ -3555,9 +3557,11 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       // whatever that write costs or loses, the decision above and the call's result stand. It is
       // started for a call this entry failed too, as it is for one whose own refusal stands: what
       // the write did is the record's own account, which the session's disk no longer holds. It
-      // starts after the mint, since a mint that refuses is the decision the call finally got: the
-      // write never posted, and the record says the call was sent back, not that it went out.
-      startRecord(minted?.block === true ? { ...entry, decision: "revise" } : entry, ctx);
+      // starts after the mint, since the record carries the decision the call finally got: a call
+      // a failed entry or a refusing mint sent back never posted, so the record says `revise`,
+      // whatever the verdict above was.
+      const sentBack = refusal !== undefined || minted?.block === true;
+      startRecord(sentBack ? { ...entry, decision: "revise" } : entry, ctx);
       if (refusal !== undefined) return refusal;
       if (minted?.block) {
         notices.delete(event.toolCallId);

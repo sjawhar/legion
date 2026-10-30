@@ -576,7 +576,7 @@ apart from the verdict's mode (`sessionMode`, block by default); `envoy.ts` turn
 CLI logged as unmarked into an `unmarked` entry, and, where the CLI's own line says the write
 carried asks for a person (`asksCarried`, counted with `newAsks` in
 `@legion/envoy-client/askgate-new-asks`), publishes one decision record for it through the
-recorder `registerAskGate` returns, under its own `RECORD_TIMEOUT_MS` stop and the shutdown cut,
+recorder `registerAskGate` returns, which runs until Dispatch answers it or the shutdown cut ends it,
 with `recordError` on the entry when that fails. The gate appends a cause note
 (`nonLiteralCause`, `causeNote`) to the result of a call outside the literal form that the CLI
 refused. A gate that did not load refuses each literal call at the hook (`loadFailureGate`) and
@@ -591,17 +591,20 @@ reads markdown as the Dispatch server does; the CLI reads it too. `rules-check.t
 check through the model walk and the Dispatch client that the core passes in, so it never imports
 `askgate-core.ts`. `breaker.ts` holds the breaker and its keys. `decision-record.ts` publishes
 each rule decision, each override and each unmarked write that carries an ask to a Dispatch
-project document of the session's own, through the same Dispatch client, under a 5 s stop of its
-own and with no ask text in it; it too is free of the core, reading the entry's fields
-structurally, and a write that fails changes no decision. The core starts a gated call's record as
-its handler returns, never inside it, and holds it in a pending set: a record that fails, hits its
-own stop or is cut at shutdown writes one line to `runtimeLogger` and appends one
-`advisor-gate-record` entry (`ADVISOR_GATE_RECORD_ENTRY_TYPE`, carrying `toolCallId`, `tool` and
-`recordError`), since the call's `advisor-gate` entry was written before the record began;
-`askgate-report.ts` reads `advisor-gate` entries alone and passes over these. Once the session is
-shutting down, the shutdown handler waits for the handlers and then for those records, cutting each
-`SHUTDOWN_RECORD_MARGIN_MS` before its wait runs out, so a record still lands, and the entry of one
-that could not, before the session is sealed. `text.ts` is the leaf that holds the text helpers
+project document of the session's own, through the same Dispatch client, reading that document
+by name (`getProjectArtifact`) and uploading only on a 404, and with no ask text in it; it too is
+free of the core, reading the entry's fields structurally, and a write that fails changes no
+decision. Each record carries an `id` — the gated call's tool call id, and for an unmarked write
+the CLI ledger line's place in its tool call — so the reader counts one (session, id) once. The
+core starts a gated call's record as its handler returns, never inside it, and holds it in a
+pending set: a record that fails or is cut at shutdown writes one line to `runtimeLogger` and
+appends one `advisor-gate-record` entry (`ADVISOR_GATE_RECORD_ENTRY_TYPE`, carrying `toolCallId`,
+`tool` and `recordError`), since the call's `advisor-gate` entry was written before the record
+began; `askgate-report.ts` counts both of those as records lost. Once the session is shutting
+down, the one `session_shutdown` handler `registerAskGate` binds owns the cut and its delay
+(`RECORD_CUT_DELAY_MS`, whether or not the gate loaded), and the core's handler waits for its own
+handlers and then for those records, so a record still lands, and the entry of one that could
+not, before the session is sealed. `text.ts` is the leaf that holds the text helpers
 both checks share. The model
 walk (`walk` in `createAskGate`) is the one path either check takes to the model. The review's
 deadline is held 5,000 ms under `extensionHandlers.toolCallTimeoutMs` (`CEILING_MARGIN_MS`, the

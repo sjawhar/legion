@@ -308,6 +308,46 @@ describe("parseSessionText", () => {
     expect(JSON.parse(sampleLine(r1 as GateRecord)).textSource).toBe("reviewed");
     expect(JSON.parse(sampleLine(r2 as GateRecord)).textSource).toBe("command");
   });
+
+  // #2161, reviewer round 16: a decision the gate could not record on Dispatch is in no count of
+  // the Dispatch report, so the session files are where it is counted. The gate's own calls carry
+  // the loss on an `advisor-gate-record` entry written after the call's own; an unmarked write's
+  // entry carries it itself.
+  test("a record the gate could not write is read onto its call, from either entry", () => {
+    const lost = (toolCallId: string, recordError: string) =>
+      JSON.stringify({
+        type: "custom",
+        customType: "advisor-gate-record",
+        id: `r-${toolCallId}`,
+        parentId: "p",
+        timestamp: "2026-10-21T12:00:01.000Z",
+        data: { toolCallId, tool: "dispatch_ask", recordError },
+      });
+    const text = [
+      gate({ id: "k1", fields: { ruleOutcome: "none" } }),
+      lost("k1", "the session shut down before Dispatch answered the record"),
+      gate({ id: "k2", fields: { ruleOutcome: "none" } }),
+      // An unmarked write: the host writes the entry once its own record has answered, so the
+      // reason rides on the entry itself.
+      gate({
+        id: "k3",
+        outcome: "unmarked",
+        fields: { asksCarried: 1, recordError: "dispatch: 503 Service Unavailable" },
+      }),
+    ].join("\n");
+    const parsed = parseSessionText(text, "s");
+    expect(parsed.map((record) => [record.toolCallId, record.recordError])).toEqual([
+      ["k1", "the session shut down before Dispatch answered the record"],
+      ["k2", null],
+      ["k3", "dispatch: 503 Service Unavailable"],
+    ]);
+    // The follow-up entry is no gated call of its own: it is counted as a record lost, and in
+    // nothing else.
+    const stats = computeStats(parsed);
+    expect(stats.gatedCalls).toBe(3);
+    expect(stats.recordsLost).toBe(2);
+    expect(formatReport(stats, 1)).toContain("decision records lost: 2");
+  });
 });
 
 describe("readSessions and computeStats", () => {

@@ -26,6 +26,7 @@ export type ReportRecord = Pick<
   DecisionRecord,
   | "time"
   | "session"
+  | "id"
   | "source"
   | "target"
   | "rule"
@@ -79,6 +80,9 @@ export function parseRecordLine(line: string): ReportRecord | null {
   return {
     time,
     session,
+    // A record written before the gate gave each one an id holds none, and an empty id names
+    // nothing, so two of those are never taken for one write stored twice.
+    id: str(value.id),
     source,
     target: strOrNull(value.target),
     rule: strOrNull(value.rule),
@@ -128,6 +132,11 @@ export interface DocumentRead {
   unreadable: number;
   /** Fenced lines that were not records: a decision half-written, or something else entirely. */
   unparsedLines: number;
+  /**
+   * Records dropped as a second copy of one already kept: the same session and the same `id`. A
+   * write the gate gave up on and Dispatch ran all the same, then wrote again, is one decision.
+   */
+  duplicates: number;
 }
 
 /** How many decision documents are read at once, as `scripts/dispatch/ask-census.ts` reads issues. */
@@ -145,7 +154,13 @@ export async function readDecisionDocuments(
   project: string,
   since: number
 ): Promise<DocumentRead> {
-  const read: DocumentRead = { records: [], documents: 0, unreadable: 0, unparsedLines: 0 };
+  const read: DocumentRead = {
+    records: [],
+    documents: 0,
+    unreadable: 0,
+    unparsedLines: 0,
+    duplicates: 0,
+  };
   const artifacts = (await client.listProjectArtifacts(project)).filter(
     (artifact) =>
       artifact.name.startsWith(DECISION_DOCUMENT_PREFIX) ||
@@ -168,6 +183,11 @@ export async function readDecisionDocuments(
   await Promise.all(
     Array.from({ length: Math.min(DOCUMENT_CONCURRENCY, artifacts.length) }, reader)
   );
+  // One decision per (session, id): a record Dispatch stored twice — a write given up here that
+  // landed there all the same, and a later one under a key of its own — would otherwise count
+  // twice. A record carrying no id is from before the gate wrote one and names no write, so each
+  // of those is kept.
+  const seen = new Set<string>();
   for (const markdown of markdowns) {
     if (markdown === undefined) {
       read.unreadable += 1;
@@ -176,7 +196,16 @@ export async function readDecisionDocuments(
     read.documents += 1;
     const { records, unparsed } = parseDecisionDocument(markdown);
     read.unparsedLines += unparsed;
-    for (const record of records) if (Date.parse(record.time) >= since) read.records.push(record);
+    for (const record of records) {
+      if (Date.parse(record.time) < since) continue;
+      const key = `${record.session}\n${record.id}`;
+      if (record.id !== "" && seen.has(key)) {
+        read.duplicates += 1;
+        continue;
+      }
+      seen.add(key);
+      read.records.push(record);
+    }
   }
   return read;
 }
@@ -236,6 +265,8 @@ export interface DispatchReport {
   /** Sessions the kept records name: the sessions that made a decision in the day. */
   sessions: number;
   unparsedLines: number;
+  /** Records dropped as a second copy of one already counted: the same session and the same id. */
+  duplicateRecords: number;
   total: DecisionCounts;
   pod: DecisionCounts;
   machine: DecisionCounts;
@@ -294,6 +325,7 @@ export function computeDispatchReport(
     unreadableDocuments: read.unreadable,
     sessions: new Set(read.records.map((record) => record.session)).size,
     unparsedLines: read.unparsedLines,
+    duplicateRecords: read.duplicates,
     total: countDecisions(read.records, overridden),
     pod: countDecisions(of("pod"), overridden),
     machine: countDecisions(of("machine"), overridden),
@@ -311,6 +343,7 @@ export function formatDispatchReport(report: DispatchReport): string[] {
     "An unmarked write is the third: a write that reached the dispatch CLI outside the form the gate reads, carrying at least one ask for a person. No check judged it, so it is in no rules call count and in no override count.",
     "A rules refusal is a rules call with a rule. It was overridden when the next record on its target, in its session, is a rebuttal or a breaker.",
     "A document that could not be read, and a line that is not a record, are counted below: the decisions they held are missing from every other count.",
+    "A duplicate record is a second copy of one decision, which Dispatch stored where a write given up here landed there all the same: it is counted below and in nothing else.",
     "A rules call with asks cut is one whose request did not carry every new ask of the call whole: the check judged clipped text.",
     "A rules call judged on part of its asks is an upload whose stored version the gate could not read: it judged the asks no stored version can hold and left the rest alone.",
     "A rules call that judged none of its asks is one of those whose every ask carries an id the stored version may hold: no model was asked, and the upload went out unjudged.",
@@ -321,6 +354,7 @@ export function formatDispatchReport(report: DispatchReport): string[] {
     `unreadable documents: ${report.unreadableDocuments}`,
     `sessions: ${report.sessions}`,
     `unparsed lines: ${report.unparsedLines}`,
+    `duplicate records: ${report.duplicateRecords}`,
     `rules calls: ${bySource(report, (c) => c.calls)}`,
     `refusals: ${bySource(report, (c) => c.refusals)}`,
     ...Object.keys(report.total.byRule).map(

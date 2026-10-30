@@ -1,10 +1,11 @@
 import { describe, expect, jest, test } from "bun:test";
+import { DispatchServiceError } from "@legion/envoy-client/dispatch-http";
 import pkg from "../../package.json";
 import type { GateEntry } from "./askgate-core";
 import {
   createDecisionRecorder,
+  RECORD_CUT_DELAY_MS,
   RECORD_SHUT_DOWN,
-  RECORD_TIMEOUT_MS,
   type RecordClient,
   type RecordDeps,
   type RecordedDecision,
@@ -77,6 +78,15 @@ const UNMARKED: RecordedDecision = {
   asksCarried: 1,
 };
 
+/** Dispatch's answer that the project holds no document of that name, as the client throws it. */
+function notFound(name: string): DispatchServiceError {
+  return new DispatchServiceError(
+    "ARTIFACT_NOT_FOUND",
+    404,
+    `document "${name}" not found by slug; project documents: none`
+  );
+}
+
 /**
  * The Dispatch a record is written to: what each call was given, and what it answers. The
  * documents it holds are the uploads it answered, by name, since an upload of a name it already
@@ -91,14 +101,16 @@ function fakeDispatch(answers: Partial<RecordClient> = {}, id = "doc-1") {
     after?: string;
     actor?: unknown;
   }> = [];
-  /** Every read of the project's documents: the project it asked for. */
-  const lists: string[] = [];
+  /** Every read of a document by name: the name it asked for. */
+  const reads: string[] = [];
   const stored = new Map<string, string>();
   const client: RecordClient = {
-    listProjectArtifacts: async (project) => {
-      lists.push(project);
-      if (answers.listProjectArtifacts) return await answers.listProjectArtifacts(project);
-      return [...stored].map(([name, document]) => ({ id: document, name }));
+    getProjectArtifact: async (project, name) => {
+      reads.push(name);
+      if (answers.getProjectArtifact) return await answers.getProjectArtifact(project, name);
+      const held = stored.get(name);
+      if (held === undefined) throw notFound(name);
+      return { id: held };
     },
     projectArtifact: async (project, input) => {
       uploads.push({
@@ -128,7 +140,7 @@ function fakeDispatch(answers: Partial<RecordClient> = {}, id = "doc-1") {
         : { applied: input.ops.length };
     },
   };
-  return { uploads, edits, lists, stored, client };
+  return { uploads, edits, reads, stored, client };
 }
 
 /** One recorder, over one fake Dispatch, with the directory and signal of every client it asked for. */
@@ -154,8 +166,9 @@ function harness(
   return {
     asked,
     recorder,
-    write: (entry: GateEntry | RecordedDecision, sessionId = SESSION) =>
-      recorder.record({ entry, sessionId, directory: "/work" }),
+    /** One record; `id` tells it from the session's others, as the gated call's own id does. */
+    write: (entry: GateEntry | RecordedDecision, sessionId = SESSION, id = "t1") =>
+      recorder.record({ entry, sessionId, directory: "/work", id }),
   };
 }
 
@@ -169,6 +182,7 @@ const recordsIn = (markdown: string) =>
 const RECORD_KEYS = [
   "time",
   "session",
+  "id",
   "source",
   "project",
   "tool",
@@ -233,13 +247,14 @@ describe("the AskGate decision record", () => {
 
   test("the record holds exactly the contract's keys, and no ask text, quote or reason", async () => {
     const dispatch = fakeDispatch();
-    await harness({ client: dispatch.client }).write(REFUSAL);
+    await harness({ client: dispatch.client }).write(REFUSAL, SESSION, "t1");
     const record = recordsIn(dispatch.uploads[0]?.content ?? "")[0] as Record<string, unknown>;
 
     expect(Object.keys(record)).toEqual(RECORD_KEYS);
     expect(record).toEqual({
       time: "2026-10-25T09:15:30.250Z",
       session: SESSION,
+      id: "t1",
       source: "machine",
       project: "INFRA",
       tool: "dispatch_ask",
@@ -495,20 +510,65 @@ describe("the AskGate decision record", () => {
     expect(dispatch.edits).toHaveLength(2);
   });
 
-  test("a write that never answers is given up at the record's own stop", async () => {
-    // The recorder arms that stop itself, so the test runs the clock to it rather than waiting.
+  // #2161, reviewer round 16: under load Dispatch answered 13 of 31 records after the recorder's
+  // 5 s stop, and those decisions were in no count. A record now runs until Dispatch answers it
+  // or the shutdown cuts it, and the client's own attempts share one Idempotency-Key, so nothing
+  // here writes it twice.
+  test("a record Dispatch answers long after the old 5 s stop still lands, exactly once", async () => {
     jest.useFakeTimers();
     try {
-      const hangs = Promise.withResolvers<{ artifact: { id: string } }>();
-      const dispatch = fakeDispatch({ projectArtifact: () => hangs.promise });
-      const answered = harness({ client: dispatch.client }).write(REFUSAL);
+      const answers = Promise.withResolvers<{ artifact: { id: string } }>();
+      const dispatch = fakeDispatch({ projectArtifact: () => answers.promise });
+      const g = harness({ client: dispatch.client });
+      const answered = g.write(REFUSAL);
       for (let i = 0; i < 20; i++) await Promise.resolve();
-      jest.advanceTimersByTime(RECORD_TIMEOUT_MS);
-      expect(await answered).toBe(
-        `Dispatch did not answer the record within ${RECORD_TIMEOUT_MS} ms`
-      );
+      // Long past the stop the recorder used to arm, and past the longest pause the client's own
+      // keyed retries take: nothing here gives the write up.
+      jest.advanceTimersByTime(20_000);
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+      expect(g.asked[0]?.signal.aborted).toBe(false);
+      answers.resolve({ artifact: { id: "doc-late" } });
+      expect(await answered).toBeUndefined();
       expect(dispatch.uploads).toHaveLength(1);
-      hangs.resolve({ artifact: { id: "doc-1" } });
+      // The session's next record appends to the document that upload made, rather than making
+      // a second one that would replace it.
+      expect(await g.write({ ...REFUSAL, toolCallId: "t2" }, SESSION, "t2")).toBeUndefined();
+      expect(dispatch.uploads).toHaveLength(1);
+      expect(dispatch.edits).toMatchObject([{ id: "doc-late" }]);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  // #2161, reviewer round 16: the stop was armed when a record was queued, not when its write
+  // began, so three records behind a 3 s append shared one 5 s budget and the last two were given
+  // up having never been sent. No record is on a budget of its own any more.
+  test("records queued behind a slow write all land, however long the one before them took", async () => {
+    jest.useFakeTimers();
+    try {
+      /** Each append's answer, given 3 s after the write started, as a slow Dispatch answers. */
+      const slow = async (): Promise<{ applied: number }> => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 3_000));
+        return { applied: 1 };
+      };
+      const dispatch = fakeDispatch({ docEdit: slow });
+      const g = harness({ client: dispatch.client });
+      expect(await g.write(REFUSAL, SESSION, "t0")).toBeUndefined();
+      const answers = Promise.all([
+        g.write({ ...REFUSAL, target: "first" }, SESSION, "t1"),
+        g.write({ ...REFUSAL, target: "second" }, SESSION, "t2"),
+        g.write({ ...REFUSAL, target: "third" }, SESSION, "t3"),
+      ]);
+      for (let elapsed = 0; elapsed < 12_000; elapsed += 500) {
+        for (let i = 0; i < 20; i++) await Promise.resolve();
+        jest.advanceTimersByTime(500);
+      }
+      expect(await answers).toEqual([undefined, undefined, undefined]);
+      expect(dispatch.edits.map(({ markdown }) => recordsIn(markdown)[0]?.target)).toEqual([
+        "first",
+        "second",
+        "third",
+      ]);
     } finally {
       jest.useRealTimers();
     }
@@ -563,31 +623,38 @@ describe("the AskGate decision record", () => {
 
   // #2161, reviewer round 15: a second upload of a session's document replaces the records the
   // first one holds (Dispatch versions a project artifact by name), and a fresh process serving
-  // the session held no id for it, so it uploaded again.
-  test("a recorder holding no id for the session appends to the document the project already holds", async () => {
+  // the session held no id for it, so it uploaded again. Round 16: that lookup read every
+  // document of the project — 4.5 MB and 2.1 s under load — and it reads this session's own by
+  // name instead.
+  test("a recorder holding no id for the session reads its document by name and appends to it", async () => {
     const dispatch = fakeDispatch({}, "doc-held");
     expect(await harness({ client: dispatch.client }).write(REFUSAL)).toBeUndefined();
     expect(dispatch.uploads).toHaveLength(1);
+    // The upload follows the read that found no document of that name, and nothing else is read.
+    expect(dispatch.reads).toEqual([DOCUMENT]);
 
     // A second process serving the same session: it holds no document id of its own.
     const next = harness({ client: dispatch.client });
-    expect(await next.write({ ...REFUSAL, toolCallId: "t2" })).toBeUndefined();
+    expect(await next.write({ ...REFUSAL, toolCallId: "t2" }, SESSION, "t2")).toBeUndefined();
     expect(dispatch.uploads).toHaveLength(1);
     expect(dispatch.edits).toMatchObject([{ id: "doc-held", op: "insert", after: "end" }]);
-    // The document it found, held from here on: its next record reads the project no second time.
-    expect(await next.write({ ...REFUSAL, toolCallId: "t3" })).toBeUndefined();
-    expect(dispatch.lists).toEqual(["INFRA", "INFRA"]);
+    // The document it found, held from here on: its next record reads nothing to find it.
+    expect(await next.write({ ...REFUSAL, toolCallId: "t3" }, SESSION, "t3")).toBeUndefined();
+    expect(dispatch.reads).toEqual([DOCUMENT, DOCUMENT]);
     expect(dispatch.edits).toHaveLength(2);
   });
 
-  test("a document of another session's own is no match: the name is the session's", async () => {
+  test("a read that fails for anything but a 404 is the record's failure, and uploads nothing", async () => {
     const dispatch = fakeDispatch({
-      listProjectArtifacts: async () => [
-        { id: "doc-other", name: "askgate-decisions-sess-other.md" },
-      ],
+      getProjectArtifact: () =>
+        Promise.reject(new DispatchServiceError("INTERNAL", 500, "dispatch: 500 Internal Error")),
     });
-    expect(await harness({ client: dispatch.client }).write(REFUSAL)).toBeUndefined();
-    expect(dispatch.uploads).toMatchObject([{ name: DOCUMENT }]);
+    // An upload here would store a new version of a document that exists, replacing every record
+    // it holds, so a read that says nothing about the document is a loss of this one record alone.
+    expect(await harness({ client: dispatch.client }).write(REFUSAL)).toBe(
+      "dispatch: 500 Internal Error"
+    );
+    expect(dispatch.uploads).toEqual([]);
     expect(dispatch.edits).toEqual([]);
   });
 
@@ -629,5 +696,59 @@ describe("the AskGate decision record", () => {
       "second",
       "third",
     ]);
+  });
+
+  // #2161, reviewer round 16: the cut had two owners, the core's handler and the host's, chosen
+  // by whether the gate loaded. The recorder owns the delay and the cut, and `shutdown` is the
+  // whole of what a session_shutdown handler does with the records.
+  test("shutdown gives a record in flight the cut delay, then cuts it and answers", async () => {
+    jest.useFakeTimers();
+    try {
+      const hangs = Promise.withResolvers<{ artifact: { id: string } }>();
+      const dispatch = fakeDispatch({ projectArtifact: () => hangs.promise });
+      const g = harness({ client: dispatch.client });
+      const answered = g.write(REFUSAL);
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+      let shutdown = false;
+      const sealing = g.recorder.shutdown().then(() => {
+        shutdown = true;
+      });
+      // Up to the delay the record is still running: nothing has given it up.
+      jest.advanceTimersByTime(RECORD_CUT_DELAY_MS - 1);
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+      expect(shutdown).toBe(false);
+      expect(g.asked[0]?.signal.aborted).toBe(false);
+      jest.advanceTimersByTime(1);
+      await sealing;
+      expect(shutdown).toBe(true);
+      expect(await answered).toBe(RECORD_SHUT_DOWN);
+      expect(g.asked[0]?.signal.aborted).toBe(true);
+      hangs.resolve({ artifact: { id: "doc-1" } });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test("shutdown answers at once with no record pending, and still cuts one started while the session seals", async () => {
+    jest.useFakeTimers();
+    try {
+      const hangs = Promise.withResolvers<{ artifact: { id: string } }>();
+      const dispatch = fakeDispatch({ projectArtifact: () => hangs.promise });
+      const g = harness({ client: dispatch.client });
+      await g.recorder.shutdown();
+      // The gate the core abandons writes its record as its own handler returns, after this
+      // handler has answered: the delay runs from the shutdown all the same.
+      const answered = g.write(REFUSAL);
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+      expect(dispatch.uploads).toHaveLength(1);
+      jest.advanceTimersByTime(RECORD_CUT_DELAY_MS);
+      expect(await answered).toBe(RECORD_SHUT_DOWN);
+      // Past the cut, a record is given up before it asks Dispatch for anything.
+      expect(await g.write(REFUSAL, SESSION, "t2")).toBe(RECORD_SHUT_DOWN);
+      expect(dispatch.uploads).toHaveLength(1);
+      hangs.resolve({ artifact: { id: "doc-1" } });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
