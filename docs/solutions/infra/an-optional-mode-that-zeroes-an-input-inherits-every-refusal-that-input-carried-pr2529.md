@@ -36,20 +36,20 @@ Two rules for adding an optional mode to a component that hands a config to a sh
 
 - `packages/envoy/infra/core/listener_env.go:236-240`: `Env` refuses a local NATS URL only in the
   `else if c.SOCKS5Proxy != ""` branch. `natsInCluster` resolves `SOCKS5Proxy` to `""`
-  (`gcp/dispatch.go:415-420`), so in the new mode a loopback `natsUrl` rendered cleanly and would
+  (`gcp/dispatch.go:435-440`), so in the new mode a loopback `natsUrl` rendered cleanly and would
   have deployed an app and a listener dialling themselves. The component now refuses it itself:
-  `if s.natsInCluster && bus.LocalNATSURL(url)` at `gcp/dispatch_kube.go:268-270`, written against
+  `if s.natsInCluster && bus.LocalNATSURL(url)` at `gcp/dispatch_kube.go:280-282`, written against
   `bus.LocalNATSURL` as a function so that a change to which spellings it vouches for needs no
   edit here. Pinned by `TestDispatchRefusesABadNatsURLOnceItResolves/a loopback URL with
-  natsInCluster` (`gcp/dispatch_test.go:700`).
+  natsInCluster` (`gcp/dispatch_test.go:723`).
 - The same enumeration cleared the sibling case: `ENVOY_ALLOW_REMOTE_NATS=1` is decided by the
   URL's own locality (`core/listener_env.go:221,236`), not by the proxy, so it keeps rendering in
   the in-cluster mode — which the pods need, since `bus.refuseRemoteNATS` would otherwise refuse
   every connect to a Service name.
-- `gcp/dispatch_kube.go:284` returns every non-`socks5Proxy` refusal of `core.ListenerConfig.Env`
+- `gcp/dispatch_kube.go:296` returns every non-`socks5Proxy` refusal of `core.ListenerConfig.Env`
   as a `core.InputError` named `natsUrl`. This change put `NATSReplicas` and `StreamMaxBytes` into
   that config, and core refuses both on its own terms (`core/listener_env.go:172-177`,
   `natsReplicas %d is outside 0-5`), so a `natsReplicas: 6` would have reached the consumer as an
-  error naming `natsUrl`. It is discharged in the resolver instead (`gcp/dispatch.go:690-702`,
+  error naming `natsUrl`. It is discharged in the resolver instead (`gcp/dispatch.go:826-841`,
   which refuses `natsReplicas` outside 1 to `bus.MaxReplicas` and `streamMaxBytes` below 1 before
-  anything registers), and the reason is written at `gcp/dispatch_kube.go:259-263`.
+  anything registers), and the reason is written at `gcp/dispatch_kube.go:271-275`.

@@ -42,9 +42,9 @@ CLI, which is how a consuming program takes it. Two things to know before you pl
 
 ## Evidence
 
-- `packages/envoy/infra/gcp/dispatch.go:1041` resolves the settings and `:1045` calls
+- `packages/envoy/infra/gcp/dispatch.go:1176` resolves the settings and `:1180` calls
   `providers.Require(… "gcp" …)`, while the `natsUrl` check runs in the `ApplyT` at
-  `gcp/dispatch_kube.go:400-412`. Measured on the built plugin with the pinned CLI v3.268.0: a
+  `gcp/dispatch_kube.go:401-413`. Measured on the built plugin with the pinned CLI v3.268.0: a
   program setting `natsReplicas: 6` fails with `envoy-infra:gcp:Dispatch example-dispatch:
   natsReplicas 6 is above 5, the most copies NATS keeps`, while the same program with
   `natsInCluster` and `nats://127.0.0.1:4222` fails with `needs a "gcp" provider in its providers
@@ -54,4 +54,5 @@ CLI, which is how a consuming program takes it. Two things to know before you pl
   discovered it was unreachable there and moved it, and the tester re-ran both independently.
 - `pulumi package get-schema` of the built plugin listed `natsInCluster`, `natsReplicas` and
   `streamMaxBytes` with their types and `plain: true`, none in `requiredInputs`, and no
-  `description` on any of the resource's 52 input properties.
+  `description` on any of the resource's 52 input properties (53 since sjawhar/legion#2528 added
+  `clusterOnly`).

@@ -30,7 +30,7 @@ continued existence with zero rules rather than asserting the absence of a rule.
   Port 1055 — the SOCKS5 proxy the app and the listener dialled the NATS hub through — was that
   policy's only rule, so the obvious edit (drop the rule, drop the policy) would have opened the
   front door's pods, which hold the deployment's tailnet egress, to every pod in the cluster.
-- Pinned by `TestDispatchInClusterNatsLeavesNoSocks5Path` (`gcp/dispatch_test.go:1585`), whose
+- Pinned by `TestDispatchInClusterNatsLeavesNoSocks5Path` (`gcp/dispatch_test.go:1608`), whose
   `policyIngressRules(t, m, "example-dispatch-tailnet", 0)` asserts the policy is registered, its
   `podSelector` unchanged, and its rule list empty — an assertion that fails both ways round: if
   the policy disappears, the lookup fails; if a rule survives, the count fails.

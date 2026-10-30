@@ -36,7 +36,7 @@ making an entry of such a list conditional in the first place.
 
 ## Evidence
 
-- `packages/envoy/infra/gcp/dispatch_kube.go:574-589`: the app's unconditional environment literal
+- `packages/envoy/infra/gcp/dispatch_kube.go:575-590`: the app's unconditional environment literal
   now ends at `NATS_NKEY_SEED_FILE`; `ENVOY_NATS_SOCKS5_PROXY` is appended first, keeping the slot
   it always held, then `ENVOY_NATS_REPLICAS` and `ENVOY_STREAM_MAX_BYTES` when set, then
   `ENVOY_URL` and `ENVOY_TOKEN` as before. With the three new inputs unset the rendering is
@@ -46,8 +46,8 @@ making an entry of such a list conditional in the first place.
   `gcp/tailnet_service.go:169-171` renders `TS_SOCKS5_SERVER` only for a non-empty `socks5Server`,
   so `gcp/dispatch_frontdoor.go:526-534` turns the proxy off by leaving that string empty;
   `core/listener_env.go:250-255` does the same for the two numbers.
-- `dispatchNatsSettings` (`gcp/dispatch_test.go:1342`) collects only the keys that are present,
-  and `TestDispatchAppAndListenerAgreeOnNats` (`:1405`) asserts `require.Len` on that projection
+- `dispatchNatsSettings` (`gcp/dispatch_test.go:1365`) collects only the keys that are present,
+  and `TestDispatchAppAndListenerAgreeOnNats` (`:1428`) asserts `require.Len` on that projection
   (5 keys through the proxy, 4 in the in-cluster mode) before `require.Equal` compares the app's
   with the listener's. The agreement test is what holds the two renderings together — the app's
   list is hand-written while the listener's comes from `core.ListenerConfig.Env`, and the simplify
