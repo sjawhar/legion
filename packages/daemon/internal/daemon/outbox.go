@@ -492,6 +492,8 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		return r.checkLook(ctx, row, value)
 	case record.CheckBound:
 		return r.checkBound(ctx, row)
+	case record.PhaseEnded:
+		return r.phaseEnded(ctx, row, value)
 	default:
 		return fmt.Errorf("outbox row %d: no executor for %T", row.ID, payload)
 	}
@@ -759,6 +761,45 @@ func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload r
 	}
 	if err != nil {
 		return fmt.Errorf("publish %s's READY packet or its withdrawal to merge queue role %s: %w", row.Issue, payload.Role, err)
+	}
+	return nil
+}
+
+// phaseEnded publishes the message of a phase-ended row (record.PhaseEnded) to the Envoy topic of
+// the role whose phase a CI-red transition ended, the claim of that role on the row's issue, and to
+// nothing else. It is no architect notice: it carries one sentence of the daemon's own rather than
+// a Notice, waits behind no other row of its issue (its own lane, record.LaneRoleMessage), and its
+// recipient is the role the workflow named rather than whichever architect owns the issue. The
+// message stops nothing it reaches: pi-envoy hands it to an Oh My Pi session at its next model turn
+// and ends a running wait, the Claude Code bridge puts it in that session's inbox, and the role's
+// turn, jobs and process run on.
+//
+// A topic with no live holder (notify.ErrNoHolder) ends the row with one log line rather than
+// holding it as an architect's notice is held: the role's next task from the daemon names its phase
+// anyway, so a message nobody is there to read is worth nothing later, and a role that never claims
+// its topic — a session that has not registered, or one that failed — would hold the row for ever.
+// The three answers of the confirmed publish route are different failures and keep the ordinary
+// retry: a holder that did not confirm in time (notify.ErrNotDelivered) can take it on the next
+// attempt, a holder that does not advertise the delivery mode (notify.ErrRefusedByHolder) can be
+// replaced by another session on the role, and a forward the listener's own NATS grant denies
+// (notify.ErrPublishDenied) goes through once an operator changes that grant.
+func (r *outbox) phaseEnded(ctx context.Context, row record.OutboxRow, payload record.PhaseEnded) error {
+	if r.notices == nil {
+		return errors.New("phase-ended executor has no Envoy publisher")
+	}
+	token, err := claim.NewToken(r.project, row.Issue, payload.Role)
+	if err != nil {
+		return fmt.Errorf("the %s of %s: %w", payload.Role, row.Issue, err)
+	}
+	message := payload.Message(row.Issue)
+	published := r.notices.Publish(ctx, notify.RoleTopicPrefix+string(token), message, message, record.OutboxKey(row.ID))
+	if errors.Is(published, notify.ErrNoHolder) {
+		r.log.Info("outbox phase-ended message finished undelivered: no live session holds the role",
+			"row", row.ID, "issue", row.Issue, "role", payload.Role, "from", payload.From, "to", payload.To)
+		return nil
+	}
+	if published != nil {
+		return fmt.Errorf("publish the end of %s's %s phase to its %s: %w", row.Issue, payload.From, payload.Role, published)
 	}
 	return nil
 }

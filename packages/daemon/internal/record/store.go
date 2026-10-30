@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -1126,7 +1127,7 @@ const outboxLaneFree = `not (outbox.kind = any($5::text[]) and exists (select 1 
 const outboxClaimable = outboxUnleasedDue + ` and ` + outboxInOrder + ` and ` + outboxLaneFree
 
 // lifecycleKindNames is the lifecycle lane's kinds as the outbox stores them, the $5 every
-// statement embedding the predicates takes and the lane UnfinishedLanes sorts rows into.
+// statement embedding the predicates takes: the lane rule is the lifecycle lane's alone.
 var lifecycleKindNames = kindNames(laneKinds[LaneLifecycle])
 
 // outboxDueArgs is the parameters of a statement that embeds the predicates: now, the ordering
@@ -1250,28 +1251,38 @@ func (s *Postgres) NextDue(ctx context.Context, tx pgx.Tx, issue string, kinds [
 }
 
 // UnfinishedLanes is every lane of project's issues with a row still in the outbox — due, running,
-// backing off or held — by issue then lane: the lanes the runner needs an executor for.
+// backing off or held — by issue then lane: the lanes the runner needs an executor for. The kinds
+// left are read and sorted into lanes here (LaneOf), rather than mapped in SQL, so laneKinds stays
+// the one place a kind's lane is written down however many lanes there are. A kind this binary has
+// no lane for — a row a newer daemon of a rolling restart queued — is left out: this daemon has no
+// executor for it either, and the daemon that wrote it runs it.
 func (s *Postgres) UnfinishedLanes(ctx context.Context, tx pgx.Tx, project string) ([]LaneKey, error) {
-	rows, err := tx.Query(ctx, `select distinct issue, case when kind = any($2::text[]) then $3::text else $4::text end as lane
-		from outbox where split_part(issue, '-', 1) = $1 order by issue, lane`,
-		project, lifecycleKindNames, string(LaneLifecycle), string(LaneBoard))
+	rows, err := tx.Query(ctx, `select distinct issue, kind from outbox where split_part(issue, '-', 1) = $1`, project)
 	if err != nil {
 		return nil, fmt.Errorf("list the unfinished outbox lanes of %s: %w", project, err)
 	}
 	defer rows.Close()
 	lanes := []LaneKey{}
 	for rows.Next() {
-		var key LaneKey
-		var lane string
-		if err := rows.Scan(&key.Issue, &lane); err != nil {
+		var issue, kind string
+		if err := rows.Scan(&issue, &kind); err != nil {
 			return nil, fmt.Errorf("list the unfinished outbox lanes of %s: %w", project, err)
 		}
-		key.Lane = OutboxLane(lane)
+		key := LaneKey{Issue: issue, Lane: LaneOf(OutboxKind(kind))}
+		if key.Lane == "" || slices.Contains(lanes, key) {
+			continue
+		}
 		lanes = append(lanes, key)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("list the unfinished outbox lanes of %s: %w", project, err)
 	}
+	slices.SortFunc(lanes, func(a, b LaneKey) int {
+		if a.Issue != b.Issue {
+			return strings.Compare(a.Issue, b.Issue)
+		}
+		return strings.Compare(string(a.Lane), string(b.Lane))
+	})
 	return lanes, nil
 }
 

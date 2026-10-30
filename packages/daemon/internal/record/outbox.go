@@ -35,9 +35,10 @@ const (
 	OutboxKindCheckCompare      OutboxKind = "check_compare"
 	OutboxKindCheckLook         OutboxKind = "check_look"
 	OutboxKindCheckBound        OutboxKind = "check_bound"
+	OutboxKindPhaseEnded        OutboxKind = "phase_ended"
 )
 
-// OutboxLane is which executor of an issue runs a kind. An issue's rows run on two lanes side by
+// OutboxLane is which executor of an issue runs a kind. An issue's rows run on three lanes side by
 // side. The lifecycle lane runs the rows that start, stop and tidy the issue's roles and their
 // resources, one at a time in the order they were queued: each assumes the state its predecessor
 // leaves (a start after the branch it waits for, a workspace removal after the suspend that
@@ -48,19 +49,25 @@ const (
 // (check_compare, check_look, check_bound), which start and end the implementer's looks in order
 // with the starts and suspends they queue. The board lane runs the issue's Dispatch writes and
 // notice publishes beside them, so a status write or a notice never waits behind a start pulling
-// an image, and a slow publish never holds a stop back.
+// an image, and a slow publish never holds a stop back. The role-message lane runs the one kind the
+// daemon addresses to a role of the issue that is not its architect (phase_ended), on a lane of its
+// own because the board lane's architect notices are ordered among themselves and one of them waits
+// for as long as its architect holds no role (the daemon's errNoticeWaits): a role told that its
+// phase ended must hear it while that is news, not after whatever its tree's architect is owed.
 type OutboxLane string
 
 const (
-	LaneLifecycle OutboxLane = "lifecycle"
-	LaneBoard     OutboxLane = "board"
+	LaneLifecycle   OutboxLane = "lifecycle"
+	LaneBoard       OutboxLane = "board"
+	LaneRoleMessage OutboxLane = "role_message"
 )
 
 // laneKinds is each lane's kinds in the order LaneKinds lists them. Every OutboxKind is in exactly
 // one lane (TestEveryOutboxKindIsInExactlyOneLane).
 var laneKinds = map[OutboxLane][]OutboxKind{
-	LaneLifecycle: {OutboxKindSupervise, OutboxKindIssueSuspend, OutboxKindLingerClose, OutboxKindWorkspaceRemove, OutboxKindGateSeed, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge, OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound},
-	LaneBoard:     {OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindMergeQueuePublish},
+	LaneLifecycle:   {OutboxKindSupervise, OutboxKindIssueSuspend, OutboxKindLingerClose, OutboxKindWorkspaceRemove, OutboxKindGateSeed, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge, OutboxKindCheckCompare, OutboxKindCheckLook, OutboxKindCheckBound},
+	LaneBoard:       {OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindMergeQueuePublish},
+	LaneRoleMessage: {OutboxKindPhaseEnded},
 }
 
 // LaneOf is the lane that runs kind.
@@ -510,6 +517,41 @@ type CheckBound struct{}
 
 func (CheckBound) OutboxKind() OutboxKind { return OutboxKindCheckBound }
 
+// PhaseEnded tells the role whose phase a CI-red transition ended that its phase is over, on that
+// role's own Envoy topic. It is the one message the daemon addresses to a role that is not an
+// architect of its own accord: when CI goes red the implementer starts at once, and without that
+// message nothing tells the tester, the reviewer, the merger or the implementer in retro that the
+// phase it was working is no longer its own, since the daemon's next task for a role waits for that
+// role's turn to end. Role is the recipient, From the phase that ended, To the phase the issue is
+// in now, Reason what the architect's checks-red notice carries, and TaskFollows that the recipient
+// is also the role the new phase starts — the implementer sent back from retro — whose task for
+// that phase follows this message. It stops nothing: the recipient keeps its turn, its jobs, its
+// process and its session.
+type PhaseEnded struct {
+	Role        claim.Role  `json:"role"`
+	From        phase.Phase `json:"from"`
+	To          phase.Phase `json:"to"`
+	Reason      string      `json:"reason"`
+	TaskFollows bool        `json:"taskFollows,omitempty"`
+}
+
+func (PhaseEnded) OutboxKind() OutboxKind { return OutboxKindPhaseEnded }
+
+// Message is what the runner publishes for issue: one sentence that the recipient's phase ended,
+// which phase the issue is in now and why, the implementer's own sentence where its task follows,
+// and the two that keep the role off the working copy the new phase owns without stopping it (the
+// worker prompt says the same, internal/prompts/go/worker-common.md).
+func (p PhaseEnded) Message(issue string) string {
+	follows := ""
+	if p.TaskFollows {
+		follows = fmt.Sprintf(" Your %s task follows.", p.To)
+	}
+	return fmt.Sprintf("%s: CI went red, so your %s phase has ended and the issue is in %s now: %s.%s"+
+		" Nothing of yours is stopped: your turn, your jobs, your process and your session run on."+
+		" The workspace is the %s phase's now, so stop writing it at once and leave whatever you have uncommitted.",
+		issue, p.From, p.To, p.Reason, follows, p.To)
+}
+
 // NewOutboxRow encodes one validated payload for durable delivery at nextAt.
 func NewOutboxRow(issue string, payload OutboxPayload, nextAt time.Time) (OutboxRow, error) {
 	if err := validateOutboxPayload(payload); err != nil {
@@ -638,6 +680,12 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
 		payload = value
+	case OutboxKindPhaseEnded:
+		value := PhaseEnded{}
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
+		}
+		payload = value
 	default:
 		return nil, fmt.Errorf("decode outbox row %d: unknown kind %q", row.ID, row.Kind)
 	}
@@ -741,6 +789,19 @@ func validateOutboxPayload(payload OutboxPayload) error {
 	case CheckLook:
 		if value.Look <= 0 {
 			return fmt.Errorf("check look bound requires the look it bounds")
+		}
+	case PhaseEnded:
+		if !claim.IsRole(value.Role) || value.Role == claim.RoleArchitect {
+			return fmt.Errorf("a phase-ended message goes to the role whose phase ended, never to an architect, which its checks-red notice tells; %q is neither", value.Role)
+		}
+		if value.From == "" || value.To == "" || value.From == value.To {
+			return fmt.Errorf("a phase-ended message names the phase that ended and the different phase the issue is in now; it names %q and %q", value.From, value.To)
+		}
+		if value.Reason == "" {
+			return fmt.Errorf("a phase-ended message carries the reason the architect's notice carries")
+		}
+		if value.TaskFollows && value.Role != claim.RoleImplementer {
+			return fmt.Errorf("only the implementer is told its task follows, since the phase the red opens is its own; the %s is not", value.Role)
 		}
 	default:
 		return fmt.Errorf("unknown outbox payload %T", payload)

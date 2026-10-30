@@ -870,6 +870,9 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	if err := e.notice(ctx, tx, issue.Key, noticeFor(trigger, from, handoff, reason)); err != nil {
 		return err
 	}
+	if err := e.phaseEnded(ctx, tx, issue, trigger, from, row.To, starting, reason); err != nil {
+		return err
+	}
 	if from == phase.AwaitingMerge && trigger == TriggerChecksRed {
 		return e.withdrawReady(ctx, tx, issue, pr, reason)
 	}
@@ -906,6 +909,26 @@ func noticeFor(trigger TriggerKind, from phase.Phase, handoff record.PhaseRow, r
 		return record.Notice{}
 	}
 	return record.Notice{Kind: "phase-finished", Role: RoleFor(from), Phase: from, Summary: handoff.Summary, Verdict: handoff.Verdict}
+}
+
+// phaseEnded tells the role a CI-red transition out of from leaves with no phase that its phase
+// ended, which phase the issue is in now and why (record.PhaseEnded), on that role's own Envoy
+// topic. Only a red sends such a message: every other move out of a phase is the working role's own
+// completion or backward move, which that role made and so already knows of. The recipient is
+// RoleFor(from) whenever that is a role other than the architect, read from the transition alone
+// rather than from what the role had done: the tester in testing, the reviewer in reviewing whether
+// or not it completed its round, the merger in merging, and the implementer in retro, which is also
+// the role starting, told that its task for the new phase follows. Accepting sends none — its role
+// is the architect, which the checks-red notice tells (noticeFor) — and neither does awaiting_merge,
+// a phase no role works. Without the message nothing tells that role: no transition stops a worker,
+// and the daemon's next task for a role is delivered only once that role's turn ends, while this
+// message reaches its session at its next model turn and ends a wait.
+func (e *Engine) phaseEnded(ctx context.Context, tx pgx.Tx, issue record.Issue, trigger TriggerKind, from, to phase.Phase, starting claim.Role, reason string) error {
+	ended := RoleFor(from)
+	if trigger != TriggerChecksRed || ended == "" || ended == claim.RoleArchitect {
+		return nil
+	}
+	return e.enqueue(ctx, tx, issue.Key, record.PhaseEnded{Role: ended, From: from, To: to, Reason: reason, TaskFollows: ended == starting})
 }
 
 func (e *Engine) row(from phase.Phase, trigger TriggerKind, target phase.Phase, snapshot Snapshot) (Row, bool) {

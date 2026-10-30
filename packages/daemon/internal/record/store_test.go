@@ -1233,8 +1233,8 @@ func TestHeldRowsListsLifecycleRowsBehindTheirIssuesRunningOne(t *testing.T) {
 }
 
 // UnfinishedLanes names each lane with a row left, once, by issue then lane, for the project alone:
-// an issue with a status write and a start has both lanes, one with two board rows has the board
-// lane once, and a project with no rows has none.
+// an issue with a status write, a start and a phase-ended message has all three lanes, one with two
+// board rows has the board lane once, and a project with no rows has none.
 func TestUnfinishedLanesNamesEachLaneWithARowLeft(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
@@ -1245,6 +1245,7 @@ func TestUnfinishedLanesNamesEachLaneWithARowLeft(t *testing.T) {
 			{Kind: OutboxKindDispatchStatus, Issue: "LEGION-208", Payload: json.RawMessage(`{"status":"testing"}`)},
 			{Kind: OutboxKindSupervise, Issue: "LEGION-208", Payload: json.RawMessage(`{"op":"start"}`)},
 			{Kind: OutboxKindNotice, Issue: "LEGION-209", Payload: json.RawMessage(`{"kind":"phase-finished"}`)},
+			{Kind: OutboxKindPhaseEnded, Issue: "LEGION-208", Payload: json.RawMessage(`{"role":"tester","from":"testing","to":"implementing","reason":"CI is red"}`)},
 			{Kind: OutboxKindDispatchMessage, Issue: "LEGION-209", Payload: json.RawMessage(`{"body":"Done."}`)},
 			{Kind: OutboxKindSupervise, Issue: "OTHER-7", Payload: json.RawMessage(`{"op":"start"}`)},
 		} {
@@ -1255,7 +1256,8 @@ func TestUnfinishedLanesNamesEachLaneWithARowLeft(t *testing.T) {
 	inTx(t, st, func(tx pgx.Tx) {
 		lanes, err := records.UnfinishedLanes(ctx, tx, "LEGION")
 		must(t, err)
-		want := []LaneKey{{Issue: "LEGION-208", Lane: LaneBoard}, {Issue: "LEGION-208", Lane: LaneLifecycle}, {Issue: "LEGION-209", Lane: LaneBoard}}
+		want := []LaneKey{{Issue: "LEGION-208", Lane: LaneBoard}, {Issue: "LEGION-208", Lane: LaneLifecycle}, {Issue: "LEGION-208", Lane: LaneRoleMessage},
+			{Issue: "LEGION-209", Lane: LaneBoard}}
 		if !reflect.DeepEqual(lanes, want) {
 			t.Errorf("LEGION's unfinished lanes = %v, want %v", lanes, want)
 		}

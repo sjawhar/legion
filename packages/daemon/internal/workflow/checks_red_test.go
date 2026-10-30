@@ -28,10 +28,10 @@ import (
 // told with the same checks in a checks-red notice naming the phase the red stopped, and the round
 // is counted, as every return to implementing counts one: the implementer's completion of this pass
 // is told from its last by it. Its next push is then a counted fix attempt, as a red verdict makes
-// any new head. The implementer's start waits for the role CI took the phase from while it was
-// still at work - the tester, a reviewer whose round is not completed, the merger - and for nobody
-// once that role had completed, or when the phase was the implementer's own (retro), where it keeps
-// its turn and is handed the new task once it ends. Leaving merging also voids a READY the design
+// any new head. The implementer's start waits for nobody: the role CI leaves with no phase - the
+// tester, the reviewer whether or not its round is completed, the merger, and the implementer
+// itself in retro - keeps its turn, its jobs, its process and its session, and is told its phase
+// ended by a message on its own topic. Leaving merging also voids a READY the design
 // gate refused there (ReadyPendingVersion).
 //
 // The CI rule reads nothing of the review round: a round whose request for changes is already in
@@ -162,6 +162,110 @@ func TestARedVerdictSendsTheTreeBackToImplementing(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A red that sends the work back tells the role whose phase it ended, on that role's own Envoy
+// topic, that the phase is over and which phase the issue is in now (record.PhaseEnded): the tester
+// in testing, the reviewer in reviewing whether or not it completed its round, the merger in
+// merging, and the implementer in retro, which is told besides that its implementing task follows,
+// since the phase the red opens is its own. Nothing else tells any of them: no transition stops a
+// worker, and a task the daemon has for a role is delivered only once that role's turn ends. Two
+// phases tell nobody: accepting, whose role is the tree's architect, which hears the red in its
+// checks-red notice instead, and awaiting_merge, which no role works. The row is the transition's,
+// written beside the architect's notice and the implementer's start, and carries the reason that
+// notice carries.
+func TestARedTellsTheRoleWhosePhaseItEnded(t *testing.T) {
+	const reason = "CI is red at head: python-cli-tests / test (pytest)"
+	for _, tc := range []struct {
+		name   string
+		from   phase.Phase
+		status string
+		// uncompleted seeds the reviewer's row without its completion: its round still at work.
+		uncompleted bool
+		// want is the message queued for the role whose phase ended; the zero value is none.
+		want record.PhaseEnded
+	}{
+		{name: "the tester in testing", from: phase.Testing, status: "testing",
+			want: record.PhaseEnded{Role: claim.RoleTester, From: phase.Testing, To: phase.Implementing, Reason: reason}},
+		{name: "the reviewer in a round it completed", from: phase.Reviewing, status: "needs_review",
+			want: record.PhaseEnded{Role: claim.RoleReviewer, From: phase.Reviewing, To: phase.Implementing, Reason: reason}},
+		{name: "the reviewer in a round it did not complete", from: phase.Reviewing, status: "needs_review", uncompleted: true,
+			want: record.PhaseEnded{Role: claim.RoleReviewer, From: phase.Reviewing, To: phase.Implementing, Reason: reason}},
+		{name: "the merger in merging", from: phase.Merging, status: "retro",
+			want: record.PhaseEnded{Role: claim.RoleMerger, From: phase.Merging, To: phase.Implementing, Reason: reason}},
+		{name: "the implementer in retro", from: phase.Retro, status: "retro",
+			want: record.PhaseEnded{Role: claim.RoleImplementer, From: phase.Retro, To: phase.Implementing, Reason: reason, TaskFollows: true}},
+		{name: "the architect in accepting, which its notice tells", from: phase.Accepting, status: "needs_review"},
+		{name: "nobody in awaiting_merge, a phase no role works", from: phase.AwaitingMerge, status: "retro"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"})
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Required: []string{"python-cli-tests / test (pytest)"}})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			if tc.from == phase.Reviewing {
+				reviewer := record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "head", Summary: "reviewed"}
+				if tc.uncompleted {
+					reviewer.HandoffCommit, reviewer.Summary = "", ""
+				}
+				seedPhase(t, pool, reviewer)
+			}
+			if tc.from == phase.Merging || tc.from == phase.AwaitingMerge {
+				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", HandoffCommit: "head"})
+			}
+			if result, err := intake.ApplyFact(context.Background(), pool, "github", "red", intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42,
+				HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "pytest", ID: 7}}, Generation: 1, Snapshot: "red-head",
+				Failing: []string{"python-cli-tests / test (pytest)"}}, testEngine(config.DesignGateRootIssues, nil)); err != nil || result.Refusal != nil {
+				t.Fatalf("apply the red verdict = %+v, %v", result.Refusal, err)
+			}
+			if got := issuePhase(t, pool); got != phase.Implementing {
+				t.Fatalf("after the red verdict the issue is in %s, want implementing", got)
+			}
+			// The implementer's start is written whatever the red ended, and waits for nothing.
+			if task := implementerStart(t, pool); !strings.Contains(task, reason) {
+				t.Fatalf("the implementer's task is %q, want the red named in it", task)
+			}
+			got := phaseEndedMessages(t, pool, "LEGION-208")
+			if tc.want == (record.PhaseEnded{}) {
+				if len(got) != 0 {
+					t.Fatalf("the red out of %s told %+v, want nobody: its role is %q", tc.from, got, RoleFor(tc.from))
+				}
+				return
+			}
+			if len(got) != 1 || got[0] != tc.want {
+				t.Fatalf("the red out of %s told %+v, want the one message %+v", tc.from, got, tc.want)
+			}
+		})
+	}
+}
+
+// phaseEndedMessages is every phase-ended message the outbox holds for issue, oldest first, decoded
+// as the runner decodes it.
+func phaseEndedMessages(t *testing.T, pool *pgxpool.Pool, issue string) []record.PhaseEnded {
+	t.Helper()
+	rows, err := pool.Query(context.Background(), "select id, payload from outbox where kind = 'phase_ended' and issue = $1 order by id", issue)
+	if err != nil {
+		t.Fatalf("read the phase-ended messages of %s: %v", issue, err)
+	}
+	defer rows.Close()
+	var messages []record.PhaseEnded
+	for rows.Next() {
+		row := record.OutboxRow{Kind: record.OutboxKindPhaseEnded}
+		if err := rows.Scan(&row.ID, &row.Payload); err != nil {
+			t.Fatalf("read the phase-ended messages of %s: %v", issue, err)
+		}
+		payload, err := record.DecodeOutboxPayload(row)
+		if err != nil {
+			t.Fatalf("decode phase-ended row %d: %v", row.ID, err)
+		}
+		messages = append(messages, payload.(record.PhaseEnded))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the phase-ended messages of %s: %v", issue, err)
+	}
+	return messages
 }
 
 // The CI rule acts on whichever fact makes a red stand for the head (standingRed): a settlement, a
