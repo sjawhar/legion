@@ -99,6 +99,12 @@ func RewriteApprovalAsk(
 	if err != nil {
 		return model.Event{}, fmt.Errorf("index approval ask: %w", err)
 	}
+	// The rewording is a revision of the request's question part, which its ask.edited names
+	// beside the request's own references.
+	changes, err = refs.IndexAskPartsCounted(ctx, tx, *ask, serverURL, editedAt, changes)
+	if err != nil {
+		return model.Event{}, fmt.Errorf("index the parts of approval ask %s: %w", ask.ID, err)
+	}
 	payload := model.NewAskEditEventPayload(*ask, previous, actor, changes)
 	payload.Quiet = quiet
 	event, err := broker.Append(ctx, tx, model.Event{

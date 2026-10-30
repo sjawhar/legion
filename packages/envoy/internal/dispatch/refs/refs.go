@@ -211,9 +211,9 @@ func refTargets(found []text.Ref) ([]string, []string) {
 }
 
 // Stamp records eventID as the write that introduced every edge of one source that has no
-// provenance yet: the source's own refs and, for a document, a comment or a message, the mentions
-// its blocks hold. It runs after the source's event is appended, in the same transaction, and
-// leaves edges that survived a reconcile untouched.
+// provenance yet: the source's own refs and, for a document, a comment, a message or an ask, the
+// mentions its blocks hold, an ask's parts included. It runs after the source's event is
+// appended, in the same transaction, and leaves edges that survived a reconcile untouched.
 func Stamp(ctx context.Context, tx pgx.Tx, fromKind, fromID string, eventID int64) error {
 	if _, err := tx.Exec(ctx, `
 		update refs set source_seq = $3
@@ -225,7 +225,7 @@ func Stamp(ctx context.Context, tx pgx.Tx, fromKind, fromID string, eventID int6
 	switch fromKind {
 	case "artifact":
 		blockRefs = `update block_refs set source_seq = $2 where artifact_id = $1 and source_seq is null`
-	case string(ItemComment), string(ItemMessage):
+	case string(ItemComment), string(ItemMessage), string(ItemAsk):
 		// An item's blocks are keyed by its uuid; an id that is none names no item and holds no
 		// block mention.
 		if uuid.Validate(fromID) != nil {

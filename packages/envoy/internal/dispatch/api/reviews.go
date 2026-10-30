@@ -493,6 +493,12 @@ func (s *server) openApprovalAsk(
 	if err != nil {
 		return nil, model.Event{}, err
 	}
+	// The request's parts - its question and its two review options - beside its own
+	// references, both named by the ask.opened below.
+	askChanges, err = s.indexAskParts(ctx, tx, ask, ask.CreatedAt, askChanges)
+	if err != nil {
+		return nil, model.Event{}, err
+	}
 	payload, err := events.AskEventPayload(ctx, tx, ask, askChanges)
 	if err != nil {
 		return nil, model.Event{}, err

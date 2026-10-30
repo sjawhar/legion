@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -40,6 +41,20 @@ func (s *server) replaceEditedReferences(
 	fromKind, fromID, previous, body string,
 ) (model.ReferenceChanges, error) {
 	return refs.ReplaceCountedEdit(ctx, tx, fromKind, fromID, previous, body, s.deps.ServerURL)
+}
+
+// indexAskParts is refs.IndexAskPartsCounted bound to this server's URL: the parts of the ask
+// this write just wrote - its question, its options and its answer - indexed in the same
+// transaction, written at `at`, with what they moved merged into beside, the counted changes the
+// same write already holds, so the event it appends names them all.
+func (s *server) indexAskParts(
+	ctx context.Context,
+	tx pgx.Tx,
+	ask model.Ask,
+	at time.Time,
+	beside model.ReferenceChanges,
+) (model.ReferenceChanges, error) {
+	return refs.IndexAskPartsCounted(ctx, tx, ask, s.deps.ServerURL, at, beside)
 }
 
 // getReferences reads one node's edges in the reference graph: ?to= lists every edge pointing

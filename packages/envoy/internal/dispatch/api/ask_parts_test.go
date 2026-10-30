@@ -1,0 +1,405 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
+)
+
+// askPartLayout reads an ask's parts as one line: its current parts in order, each as
+// <id>@<changed_revision>, then each removed part as -<id>@<changed_revision>, by id. It returns
+// the ask's revision too, and fails the test while the ask is still owed an index: migration
+// 0146's trigger owes one on every write of an ask, and every writer of this build clears it in
+// the transaction that wrote the ask.
+func askPartLayout(t *testing.T, database *store.Store, askID string) (string, int) {
+	t.Helper()
+	rows, err := database.Pool.Query(context.Background(), `
+		select block_id, position is not null, changed_revision from ask_blocks
+		where ask_id = $1::uuid order by position nulls last, length(block_id), block_id
+	`, askID)
+	if err != nil {
+		t.Fatalf("read the parts of ask %s: %v", askID, err)
+	}
+	defer rows.Close()
+	parts := []string{}
+	for rows.Next() {
+		var id string
+		var live bool
+		var changed int
+		if err := rows.Scan(&id, &live, &changed); err != nil {
+			t.Fatalf("scan a part of ask %s: %v", askID, err)
+		}
+		if !live {
+			id = "-" + id
+		}
+		parts = append(parts, fmt.Sprintf("%s@%d", id, changed))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the parts of ask %s: %v", askID, err)
+	}
+	var revision int
+	var owed bool
+	var sum *string
+	if err := database.Pool.QueryRow(context.Background(), `
+		select revision, owed_at is not null, body_sha256 from ask_block_state where ask_id = $1::uuid
+	`, askID).Scan(&revision, &owed, &sum); err != nil {
+		t.Fatalf("read the block state of ask %s: %v", askID, err)
+	}
+	if owed || sum == nil {
+		t.Fatalf("ask %s is owed a part index after its write (owed=%v, body_sha256=%v)", askID, owed, sum)
+	}
+	return strings.Join(parts, " "), revision
+}
+
+// requireAskParts fails unless the ask's parts read as layout at revision.
+func requireAskParts(t *testing.T, database *store.Store, askID, step, layout string, revision int) {
+	t.Helper()
+	gotLayout, gotRevision := askPartLayout(t, database, askID)
+	if gotLayout != layout || gotRevision != revision {
+		t.Fatalf("%s: parts = %q at revision %d, want %q at revision %d", step, gotLayout, gotRevision, layout, revision)
+	}
+}
+
+// askPartRow is one part row as the assertions read it: its id, its node id, its type, the login
+// of its maker ("" for a part the ask's author made) and its excerpt.
+type askPartRow struct {
+	id, node, kind, madeBy, excerpt string
+}
+
+// askPartRows is every part row of the ask, current ones in position order, then removed ones.
+func askPartRows(t *testing.T, database *store.Store, askID string) []askPartRow {
+	t.Helper()
+	rows, err := database.Pool.Query(context.Background(), `
+		select block_id, node_id, type, coalesce(made_by->>'id', ''), excerpt from ask_blocks
+		where ask_id = $1::uuid order by position nulls last, length(block_id), block_id
+	`, askID)
+	if err != nil {
+		t.Fatalf("read the part rows of ask %s: %v", askID, err)
+	}
+	defer rows.Close()
+	var parts []askPartRow
+	for rows.Next() {
+		var part askPartRow
+		if err := rows.Scan(&part.id, &part.node, &part.kind, &part.madeBy, &part.excerpt); err != nil {
+			t.Fatalf("scan a part row of ask %s: %v", askID, err)
+		}
+		parts = append(parts, part)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the part rows of ask %s: %v", askID, err)
+	}
+	return parts
+}
+
+// askPartText is the text ask_block_texts holds for a part at revision: the latest row at or
+// below it, which is null for a part a revision removed.
+func askPartText(t *testing.T, database *store.Store, askID, blockID string, revision int) *string {
+	t.Helper()
+	var text *string
+	if err := database.Pool.QueryRow(context.Background(), `
+		select text from ask_block_texts where ask_id = $1::uuid and block_id = $2 and revision <= $3
+		order by revision desc limit 1
+	`, askID, blockID, revision).Scan(&text); err != nil {
+		t.Fatalf("read the text of %s of ask %s at revision %d: %v", blockID, askID, revision, err)
+	}
+	return text
+}
+
+// askPartRefs is every link the ask's parts hold, each as "<part id> <to kind> <to id>".
+func askPartRefs(t *testing.T, database *store.Store, askID string) []string {
+	t.Helper()
+	rows, err := database.Pool.Query(context.Background(), `
+		select block_id, to_kind, to_id from ask_block_refs where ask_id = $1::uuid
+		order by block_id, to_kind, to_id
+	`, askID)
+	if err != nil {
+		t.Fatalf("read the part links of ask %s: %v", askID, err)
+	}
+	defer rows.Close()
+	links := []string{}
+	for rows.Next() {
+		var block, kind, id string
+		if err := rows.Scan(&block, &kind, &id); err != nil {
+			t.Fatalf("scan a part link of ask %s: %v", askID, err)
+		}
+		links = append(links, block+" "+kind+" "+id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the part links of ask %s: %v", askID, err)
+	}
+	return links
+}
+
+// askRefs is every link the ask's own row holds, each as "<to kind> <to id>".
+func askRefs(t *testing.T, database *store.Store, askID string) []string {
+	t.Helper()
+	rows, err := database.Pool.Query(context.Background(), `
+		select to_kind, to_id from refs where from_kind = 'ask' and from_id = $1 order by to_kind, to_id
+	`, askID)
+	if err != nil {
+		t.Fatalf("read the links of ask %s: %v", askID, err)
+	}
+	defer rows.Close()
+	links := []string{}
+	for rows.Next() {
+		var kind, id string
+		if err := rows.Scan(&kind, &id); err != nil {
+			t.Fatalf("scan a link of ask %s: %v", askID, err)
+		}
+		links = append(links, kind+" "+id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the links of ask %s: %v", askID, err)
+	}
+	return links
+}
+
+// createPartAsk opens an ask on the issue as the test session, with the options it is given.
+func createPartAsk(t *testing.T, handler http.Handler, issueKey, question string, options ...map[string]string) model.Ask {
+	t.Helper()
+	body := map[string]any{"actor": sessionActor(), "question": question}
+	if len(options) > 0 {
+		body["options"] = options
+	}
+	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issueKey+"/asks", body)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create the ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+	return decodeBody[model.Ask](t, response)
+}
+
+// editPartAskOptions rewrites the ask's options as its asking session does.
+func editPartAskOptions(t *testing.T, handler http.Handler, askID, step string, options ...map[string]string) model.Ask {
+	t.Helper()
+	response := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+askID, map[string]any{
+		"actor": sessionActor(), "options": options,
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("%s: status=%d body=%s", step, response.Code, response.Body.String())
+	}
+	return decodeBody[model.Ask](t, response)
+}
+
+// answerPartAsk answers the ask as login, with the question revision that login read.
+func answerPartAsk(t *testing.T, handler http.Handler, ask model.Ask, login string, selected []string, text string) model.Ask {
+	t.Helper()
+	body := map[string]any{"selected": selected, "expected_edited_at": ask.EditedAt}
+	if text != "" {
+		body["text"] = text
+	}
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer", body, login)
+	if response.Code != http.StatusOK {
+		t.Fatalf("answer the ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+	return decodeBody[model.Ask](t, response)
+}
+
+// Every write of an ask's question, options or answer indexes its parts in its own transaction:
+// each write is a revision of the ask's blocks, and nothing is left for the reconciliation to
+// drain. The order here is the order the routes allow: an answered ask is closed to edits
+// (ASK_NOT_OPEN), so the rewording and the dropped option come before the answer.
+func TestAnAsksPartsAreIndexedOnEveryWrite(t *testing.T) {
+	const (
+		monday      = "Monday — Ship at the start of the week."
+		tuesday     = "Tuesday — Ship once the review lands."
+		reworded    = "Tuesday — Ship once the review lands and the queue is green."
+		answerText  = "Monday - Ship it then."
+		theQuestion = "Which day do we ship?"
+	)
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Ask parts", "A spec")
+	ask := createPartAsk(t, handler, issue.Key, theQuestion,
+		map[string]string{"label": "Monday", "description": "Ship at the start of the week."},
+		map[string]string{"label": "Tuesday", "description": "Ship once the review lands."})
+
+	requireAskParts(t, database, ask.ID, "create", "b1@1 b2@1 b3@1", 1)
+	want := []askPartRow{
+		{id: "b1", node: "ask/" + ask.ID + "#b1", kind: "question", excerpt: theQuestion},
+		{id: "b2", node: "ask/" + ask.ID + "#b2", kind: "option", excerpt: monday},
+		{id: "b3", node: "ask/" + ask.ID + "#b3", kind: "option", excerpt: tuesday},
+	}
+	if got := askPartRows(t, database, ask.ID); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the created ask's parts = %#v, want %#v", got, want)
+	}
+
+	// A reworded option keeps its part id at the new revision, and no other part moves.
+	edited := editPartAskOptions(t, handler, ask.ID, "reword an option",
+		map[string]string{"label": "Monday", "description": "Ship at the start of the week."},
+		map[string]string{"label": "Tuesday", "description": "Ship once the review lands and the queue is green."})
+	requireAskParts(t, database, ask.ID, "reword an option", "b1@1 b2@1 b3@2", 2)
+	if text := askPartText(t, database, ask.ID, "b3", 2); text == nil || *text != reworded {
+		t.Fatalf("the reworded option's text at revision 2 = %v, want %q", text, reworded)
+	}
+
+	// The option the ask no longer holds keeps its row, with no position and the last excerpt it
+	// held, so a reference made while it was live still resolves and reads removed. Its changed
+	// revision stays the one its text last changed in; the revision that dropped it records that
+	// it holds no text.
+	edited = editPartAskOptions(t, handler, ask.ID, "drop an option",
+		map[string]string{"label": "Monday", "description": "Ship at the start of the week."})
+	requireAskParts(t, database, ask.ID, "drop an option", "b1@1 b2@1 -b3@2", 3)
+	dropped := askPartRows(t, database, ask.ID)[2]
+	if dropped.id != "b3" || dropped.excerpt != reworded {
+		t.Fatalf("the dropped option = %#v, want b3 with the excerpt %q it last held", dropped, reworded)
+	}
+	if text := askPartText(t, database, ask.ID, "b3", 3); text != nil {
+		t.Fatalf("the dropped option's text at revision 3 = %q, want none", *text)
+	}
+
+	// The answer is a part of its own, made by the answerer, who is not the ask's author.
+	answered := answerPartAsk(t, handler, edited, "alice", []string{"Monday"}, "Ship it then.")
+	if answered.Answer == nil {
+		t.Fatal("the answered ask carries no answer")
+	}
+	requireAskParts(t, database, ask.ID, "answer", "b1@1 b2@1 b4@4 -b3@2", 4)
+	answer := askPartRows(t, database, ask.ID)[2]
+	if answer.id != "b4" || answer.kind != "answer" || answer.madeBy != "alice" || answer.excerpt != answerText {
+		t.Fatalf("the answer part = %#v, want b4 made by alice reading %q", answer, answerText)
+	}
+}
+
+// A decided ask an earlier release reworded gets its decided wording back with no event of any
+// kind (restoreWordings), and its parts move with its row: the restoration is a write of the
+// ask's question and options, so it indexes them, and leaves nothing owed.
+func TestARestoredDecidedWordingMovesTheAsksPartRevision(t *testing.T) {
+	var documentService *docs.Service
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, ServerURL: "https://dispatch.example", Settle: time.Hour})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Restored wording", "A spec")
+	ask := createPartAsk(t, handler, issue.Key, "Ship on Monday?",
+		map[string]string{"label": "Yes", "description": "Monday."},
+		map[string]string{"label": "No", "description": "Later."})
+	answerPartAsk(t, handler, ask, "alice", []string{"Yes"}, "")
+	requireAskParts(t, database, ask.ID, "answer", "b1@1 b2@1 b3@1 b4@2", 2)
+
+	// What a task of the release before LEGION-651 leaves: the document's rewording in the
+	// decided row, with an ask.edited recording the wording the decision was given on. Its
+	// release had no part index, so the parts are owed and the reconciliation indexes them.
+	rewordAsAnEarlierRelease(t, database, issue.Key, ask, "Ship on Tuesday?",
+		[]model.AskOption{{Label: "Tuesday", Description: "Ship it."}, {Label: "No", Description: "Later."}})
+	if indexed, err := refs.IndexOwedItemBlocks(context.Background(), database.Pool,
+		refs.OwedItemBlock{Kind: refs.ItemAsk, ID: ask.ID}, "https://dispatch.example"); err != nil || !indexed {
+		t.Fatalf("the reconciliation indexed the reworded ask = %v (%v), want it indexed", indexed, err)
+	}
+	requireAskParts(t, database, ask.ID, "the earlier release's rewording", "b1@3 b2@3 b3@1 b4@2", 3)
+
+	restored, copies, err := documentService.RestoreDecidedWordings(context.Background())
+	if err != nil || restored != 1 || copies != 0 {
+		t.Fatalf("the boot's restoration restored %d asks and marked %d copies owed (%v), want the one ask", restored, copies, err)
+	}
+	requireAskParts(t, database, ask.ID, "the restoration", "b1@4 b2@4 b3@1 b4@2", 4)
+	if text := askPartText(t, database, ask.ID, "b1", 4); text == nil || *text != "Ship on Monday?" {
+		t.Fatalf("the restored question part = %v, want the wording the answer was given on", text)
+	}
+	if edits := askEditedEvents(t, database, ask.ID); edits != 1 {
+		t.Fatalf("the ask has %d ask.edited events after the restoration, want only the earlier release's", edits)
+	}
+}
+
+// rewordAsAnEarlierRelease writes wording into the decided ask's row, as a task of the release
+// before LEGION-651 did when its settlement found the block reworded: the row takes the question
+// and the options with edited_at, and an ask.edited records the wording it replaced. That release
+// indexed no parts, so none are written here either.
+func rewordAsAnEarlierRelease(t *testing.T, database *store.Store, issueKey string, ask model.Ask, question string, options []model.AskOption) {
+	t.Helper()
+	ctx := context.Background()
+	encoded, err := json.Marshal(options)
+	if err != nil {
+		t.Fatalf("encode the rewording's options: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		update asks set question = $2, options = $3, edited_at = now() where id = $1::uuid
+	`, ask.ID, question, encoded); err != nil {
+		t.Fatalf("reword the decided ask's row: %v", err)
+	}
+	payload, err := json.Marshal(map[string]any{"id": ask.ID, "previous": model.NewAskEditPrevious(ask)})
+	if err != nil {
+		t.Fatalf("encode the rewording's payload: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		insert into events (issue_key, seq, type, actor, payload, notify)
+		select $1, coalesce(max(seq), 0) + 1, 'ask.edited', '{"kind":"session","id":"session-0123456789abcdef"}', $2::jsonb, false
+		from events where issue_key = $1
+	`, issueKey, payload); err != nil {
+		t.Fatalf("append the rewording's ask.edited: %v", err)
+	}
+}
+
+// askEditedEvents is how many ask.edited events the ask has.
+func askEditedEvents(t *testing.T, database *store.Store, askID string) int {
+	t.Helper()
+	var count int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*)::int from events where type = 'ask.edited' and payload->>'id' = $1
+	`, askID).Scan(&count); err != nil {
+		t.Fatalf("count the ask.edited events of ask %s: %v", askID, err)
+	}
+	return count
+}
+
+// A part is a text of its own, so a link written in an option is an edge out of that option and
+// out of nothing else. A link the question alone holds is written by the ask's row and by its
+// question part, and the target counts it once either way.
+func TestALinkInAnOptionStartsAtThatOption(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	createReferenceAPIProject(t, handler, "OPS")
+	source := createReferenceAPIIssue(t, handler, "OPS")
+	target := createReferenceAPIIssue(t, handler, "CORE")
+	spec := "dispatch://" + target.Key + "/spec"
+
+	option := createPartAsk(t, handler, source.Key, "Which transport?",
+		map[string]string{"label": "REST", "description": "as " + spec + " reads it"},
+		map[string]string{"label": "gRPC"})
+	if links := askPartRefs(t, database, option.ID); len(links) != 1 || links[0] != "b2 artifact "+target.Key+"/spec" {
+		t.Fatalf("the links of the option ask's parts = %#v, want one from its REST option", links)
+	}
+	if links := askRefs(t, database, option.ID); len(links) != 0 {
+		t.Fatalf("the links of the option ask's own row = %#v, want none: its question holds no link", links)
+	}
+
+	// The question's own link: the ask's row holds it, as it always has, and so does the
+	// question part. The target counts it once.
+	question := createPartAsk(t, handler, source.Key, "Does dispatch://"+target.Key+" ship first?")
+	if links := askPartRefs(t, database, question.ID); len(links) != 1 || links[0] != "b1 issue "+target.Key {
+		t.Fatalf("the links of the question ask's parts = %#v, want one from its question", links)
+	}
+	if links := askRefs(t, database, question.ID); len(links) != 1 || links[0] != "issue "+target.Key {
+		t.Fatalf("the links of the question ask's own row = %#v, want its question's", links)
+	}
+	// One beside the structural edge of the issue's own spec document.
+	requireIssueBacklinkCount(t, handler, target.Key, 2)
+}
+
+// An answer is a part, so its text reaches the graph, and the ask.answered event the answer
+// appends names what the answer moved: the targets its own text mentions.
+func TestAnAnsweredAsksEventNamesWhatItsAnswerMentions(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	createReferenceAPIProject(t, handler, "OPS")
+	source := createReferenceAPIIssue(t, handler, "OPS")
+	target := createReferenceAPIIssue(t, handler, "CORE")
+	ask := createPartAsk(t, handler, source.Key, "Which day do we ship?",
+		map[string]string{"label": "Monday"})
+	answerPartAsk(t, handler, ask, "alice", []string{"Monday"}, "Monday, once dispatch://"+target.Key+" lands.")
+
+	requireReferencesChanged(t, handler, source.Key, "ask.answered", ask.ID, []model.ChangedReference{
+		{Kind: "issue", ID: target.Key},
+	})
+	if links := askPartRefs(t, database, ask.ID); len(links) != 1 || links[0] != "b3 issue "+target.Key {
+		t.Fatalf("the links of the answered ask's parts = %#v, want one from its answer", links)
+	}
+}

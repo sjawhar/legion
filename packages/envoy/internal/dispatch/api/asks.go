@@ -242,6 +242,13 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.writeHandlerError(w, err)
 		return
 	}
+	// The ask's parts, beside the ask's own references: the row is in, so its state row comes
+	// after it, and the event below names what both moved.
+	askChanges, err = s.indexAskParts(r.Context(), tx, ask, ask.CreatedAt, askChanges)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	appended := []model.Event{}
 	if snapshot != nil {
 		snapshotEvent, err := s.commitArtifactVersionEvent(r.Context(), tx, owner, actor, anchor.ArtifactID, artifactName, *snapshot, nil)
@@ -454,6 +461,13 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	ask.EditedAt = timestampPtr(&editedAt)
 	askChanges, err := s.replaceEditedReferences(documentCtx, tx, "ask", ask.ID, previous.Question, ask.Question)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	// The edit writes the question and the options, so it is a revision of the ask's parts:
+	// index them at the edited_at the row took, and name what they moved beside the rest.
+	askChanges, err = s.indexAskParts(documentCtx, tx, ask, editedAt, askChanges)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

@@ -1,5 +1,5 @@
-// Package itemblocks holds the blocks of comments and messages: how a body splits into blocks, and
-// how an edit keeps their ids.
+// Package itemblocks holds the blocks of comments, messages and asks: how a body splits into
+// blocks, and how an edit keeps their ids, which an ask's parts take through Align too.
 package itemblocks
 
 import (

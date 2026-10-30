@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 // A human's answer to a decision block carries his approval forward. He approved the document at
@@ -119,7 +120,7 @@ func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID strin
 		return nil, err
 	}
 	if open != nil {
-		answered, err := answerApprovalAsk(ctx, tx, s.events, open, review.Actor, reason)
+		answered, err := answerApprovalAsk(ctx, tx, s.events, open, review.Actor, reason, s.serverURL)
 		if err != nil {
 			return nil, err
 		}
@@ -414,7 +415,7 @@ func (s *Service) storedVersionTree(ctx context.Context, tx pgx.Tx, artifactID s
 // reason as the answer's text, as a human's answer through the answer route is written, and
 // appends its ask.answered event on the ask's owner. The write names the open state it answers
 // from: a request that is no longer open is an error, not a second answer.
-func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, ask *model.Ask, actor model.Actor, reason string) (model.Event, error) {
+func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, ask *model.Ask, actor model.Actor, reason, serverURL string) (model.Event, error) {
 	answer := model.AskAnswer{User: actor.ID, Selected: []string{ApprovalOptionApprove}, Text: &reason, At: time.Now().UTC()}
 	encoded, err := json.Marshal(answer)
 	if err != nil {
@@ -429,7 +430,13 @@ func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, as
 	}
 	ask.State = "answered"
 	ask.Answer = &answer
-	payload, err := events.AskEventPayload(ctx, tx, *ask, model.ReferenceChanges{})
+	// The answer is a part of the request, so its text reaches the graph with it, and the
+	// ask.answered below names what it moved.
+	changes, err := refs.IndexAskPartsCounted(ctx, tx, *ask, serverURL, answer.At, model.ReferenceChanges{})
+	if err != nil {
+		return model.Event{}, fmt.Errorf("index the parts of approval ask %s: %w", ask.ID, err)
+	}
+	payload, err := events.AskEventPayload(ctx, tx, *ask, changes)
 	if err != nil {
 		return model.Event{}, err
 	}
@@ -440,6 +447,11 @@ func answerApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, as
 	})
 	if err != nil {
 		return model.Event{}, fmt.Errorf("append approval ask answer: %w", err)
+	}
+	// The answer's part edges are new rows of this transaction, so they take the event's id and
+	// a ?since= read lists them.
+	if err := refs.Stamp(ctx, tx, "ask", ask.ID, event.ID); err != nil {
+		return model.Event{}, fmt.Errorf("stamp approval ask answer references: %w", err)
 	}
 	return event, nil
 }
