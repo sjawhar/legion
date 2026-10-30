@@ -83,16 +83,26 @@ const (
 	// enforces on every room's awareness (Server.MaxAwarenessClientsPerRoom in docs/service.go,
 	// which it forwards to awareness.Awareness.SetMaxClients): past it a client id the room has
 	// not seen before is refused, whether it arrives in a browser's frame or in another
-	// process's notification (awareness/awareness.go:608-623). A document's readers are a
-	// handful of browser tabs, each announcing one client, on every process together, so 256 is
-	// far past what any real room holds. It is what bounds a room's memory, which the byte bound
-	// alone does not - a client id costs an entry whether its state is cursor-sized or null -
-	// and a client that leaves gives its entry back at once rather than two expiries later
-	// (reclaimAwarenessSlots), so it counts the clients a room holds now. What holds a room to
-	// its readers' own clients, well under this, is the bound each socket is held to before ygo
-	// reads its frame (awareness_limit.go), and the same bound on the sender's side of every
-	// relayed state; this one is what is left if any other path ever reaches a room's awareness.
-	maxAwarenessClientsPerRoom = 256
+	// process's notification (awareness/awareness.go:608-623). A refused client is a reader
+	// nobody sees - neither the room's own readers nor, since the relay sends what the room
+	// took, the readers of any other process - so the bound has to stand above every client
+	// real readers can put in a room, and it is derived from the two caps that bound them:
+	// this process's sockets, every one it admits (maxRoomConnections) holding the clients a
+	// socket may hold (maxAwarenessClientsPerSocket, awareness_limit.go), and the clients
+	// another process relays, which that process's own sockets are held to in the same way
+	// before they cross (received). They share this bound: four thousand entries is every
+	// connection this process admits, all of them on one document, each announcing four
+	// clients where a browser tab announces one, and a process refuses the socket after that
+	// whatever its rooms hold (Service.canAddConnection). Relayed clients reach it no sooner:
+	// a document would have to hold four thousand tabs at once - every socket of four
+	// processes at their connection caps - against the handful any document of this service
+	// has. What stops one tab from spending the room's bound on invented ids is the socket's
+	// own bound, applied before ygo reads its frame; this one is what is left if any other
+	// path ever reaches a room's awareness. A client that leaves gives its entry back at once
+	// rather than two expiries later (reclaimAwarenessSlots), so it counts the clients a room
+	// holds now, and it is what bounds a room's entries where the byte bound does not - a
+	// client id costs an entry whether its state is cursor-sized or null.
+	maxAwarenessClientsPerRoom = maxRoomConnections * maxAwarenessClientsPerSocket
 	// awarenessTombstoneAge is the age reclaimAwarenessSlots frees a room's tombstones from. ygo
 	// takes an age and refuses a non-positive one (awareness/awareness.go:883-886), so the
 	// shortest positive one stands for "every tombstone the room holds now".
@@ -103,10 +113,13 @@ const (
 	// client's bytes are released as it leaves or expires, so the entry it leaves behind costs
 	// nothing against this bound, which is why the room's client bound is the one that holds a
 	// frame of invented ids. It is the room's bound of clients each holding a state as large as
-	// one notification carries (roomSyncPayloadLimit), so no state small enough for the relay to
-	// send is refused for the room's total, and presence costs a room no more than this. Past it
-	// ygo takes the state as null, which removes that client's presence; the client's next
-	// announcement, under a room back below the bound, brings it back.
+	// one notification carries (roomSyncPayloadLimit) - about 31 MB - so no state small enough
+	// for the relay to send is refused for the room's total, and presence costs a room no more
+	// than this. Reaching it takes every socket this process admits, in one document, each
+	// holding four states the size of a whole notification where a reader's cursor is a few
+	// hundred bytes; those sockets cost more than their states do. Past it ygo takes the state
+	// as null, which removes that client's presence; the client's next announcement, under a
+	// room back below the bound, brings it back.
 	maxAwarenessBytesPerRoom = maxAwarenessClientsPerRoom * roomSyncPayloadLimit
 )
 

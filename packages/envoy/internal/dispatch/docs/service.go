@@ -730,9 +730,10 @@ func New(deps Deps) *Service {
 	// all - grows the room's map by every id it names, which the byte bound does not stop. What
 	// keeps a room to its readers is the bound each socket is held to before ygo reads its
 	// frames (maxAwarenessClientsPerSocket, awareness_limit.go) and the entry a client gives
-	// back as it leaves (reclaimAwarenessSlots); the client bound is far past the handful of
-	// tabs any document has, so it refuses no reader of a room, only a path that reaches a
-	// room's awareness without passing either.
+	// back as it leaves (reclaimAwarenessSlots); the client bound stands above every client
+	// those sockets can hold - maxRoomConnections of them, each holding
+	// maxAwarenessClientsPerSocket - so it refuses no reader of a room, here or on another
+	// process, only a path that reaches a room's awareness without passing either.
 	srv.MaxAwarenessClientsPerRoom = maxAwarenessClientsPerRoom
 	srv.MaxAwarenessBytesPerRoom = maxAwarenessBytesPerRoom
 

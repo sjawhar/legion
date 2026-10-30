@@ -3,6 +3,7 @@ package docs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"sync"
@@ -39,8 +40,18 @@ const (
 	PauseAfterCommit LiveWritePausePoint = "after-commit"
 )
 
+const (
+	// MaxAwarenessClientsPerSocketForTest and MaxAwarenessClientsPerRoomForTest are the awareness
+	// client bounds of a document socket (maxAwarenessClientsPerSocket, awareness_limit.go) and
+	// of a room (maxAwarenessClientsPerRoom, awareness_relay.go), for the multiprocess suite: it
+	// runs the built binaries, so it reads neither constant, and it reads what a room holds
+	// through RoomCounters.AwarenessClients.
+	MaxAwarenessClientsPerSocketForTest = maxAwarenessClientsPerSocket
+	MaxAwarenessClientsPerRoomForTest   = maxAwarenessClientsPerRoom
+)
+
 // RoomCounters is what one process did with one document's rooms and owed settlement since the
-// process started.
+// process started, and what its room of the document holds now (AwarenessClients).
 type RoomCounters struct {
 	// RoomFailures counts the times a room of the document failed (failRoomLocked).
 	RoomFailures int64 `json:"room_failures"`
@@ -56,6 +67,11 @@ type RoomCounters struct {
 	// SettlementResumptions holds the time of each settlement-resumption pass of this process that
 	// armed the document's owed settlement (resumeOwedSettlements), oldest first.
 	SettlementResumptions []time.Time `json:"settlement_resumptions"`
+	// AwarenessClients is how many client entries this process's room of the document holds now
+	// - the clients present and the tombstones of the ones that left, whoever sent them - which
+	// is what maxAwarenessClientsPerRoom bounds. It is 0 when no room of the document is
+	// resident here. Unlike the counters above it is a gauge, read as the hook answers.
+	AwarenessClients int `json:"awareness_clients"`
 }
 
 // testHooks is the test hooks' state, on a service built with Deps.TestHooks.
@@ -96,20 +112,41 @@ func (s *Service) ResidentRooms() []string {
 }
 
 // RoomCounters reads what this process did with artifactID's rooms and owed settlement since it
-// started. Its SettlementResumptions is a copy, empty rather than nil when none was armed.
+// started, and how many awareness client entries its room of the document holds now. Its
+// SettlementResumptions is a copy, empty rather than nil when none was armed.
 func (s *Service) RoomCounters(artifactID string) (RoomCounters, error) {
 	h := s.hooks
 	if h == nil {
 		return RoomCounters{}, ErrTestHooksOff
 	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	var counted RoomCounters
 	if counters := h.counters[artifactID]; counters != nil {
 		counted = *counters
 	}
+	h.mu.Unlock()
 	counted.SettlementResumptions = append([]time.Time{}, counted.SettlementResumptions...)
+	clients, err := s.heldAwarenessClients(artifactID)
+	if err != nil {
+		return RoomCounters{}, err
+	}
+	counted.AwarenessClients = clients
 	return counted, nil
+}
+
+// heldAwarenessClients is how many client entries this process's room of artifactID holds now,
+// the tombstones of the clients that left included: the clients a full awareness update of the
+// room encodes. A document with no room here holds none.
+func (s *Service) heldAwarenessClients(artifactID string) (int, error) {
+	aw, resident := s.srv.GetAwareness(artifactID)
+	if !resident {
+		return 0, nil
+	}
+	entries, err := decodeAwarenessEntries(aw.EncodeUpdate(nil))
+	if err != nil {
+		return 0, fmt.Errorf("read the awareness of the room of %s: %w", artifactID, err)
+	}
+	return len(entries), nil
 }
 
 // HoldRoomPersistence makes every append of a browser update from this process's rooms of

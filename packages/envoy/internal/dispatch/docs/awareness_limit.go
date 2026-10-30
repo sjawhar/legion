@@ -56,8 +56,9 @@ const (
 	// maxDocumentMessageHeader is how many bytes of a message the filter reads to learn what the
 	// message is: Hocuspocus frames each one with the document's name and the message's type
 	// (docs/service.go sets HocuspocusFraming), which is 38 bytes for a document of this service.
-	// A socket whose message does not name both within this many bytes is sending nothing this
-	// service can read, and its connection ends rather than carry a frame past the filter.
+	// A socket whose message does not name both within this many bytes, and one whose message
+	// ends without naming both however short it is, is sending nothing this service can read,
+	// and its connection ends rather than carry a frame past the filter.
 	maxDocumentMessageHeader = 512
 	// continuationFrame is the opcode of a websocket frame continuing the message before it
 	// (RFC 6455 section 5.4); gorilla names every other opcode this package uses.
@@ -223,7 +224,10 @@ func (c *awarenessLimitConn) readFrame() error {
 // decide reads as much of the frame as it takes to learn what the message is - the document it
 // names and its type - and sets the mode the rest of the message is read in. A message that is
 // not awareness is handed to ygo as it stands: the bytes already read go out as one frame and the
-// rest of the frame is copied through unread.
+// rest of the frame is copied through unread. A message that ends without naming both, or that
+// has not named them within maxDocumentMessageHeader bytes, ends the connection: whatever its
+// length, it is not a message this service reads, and ygo, which reads the same header, would
+// make nothing of it either.
 func (c *awarenessLimitConn) decide(payload int64, final bool) error {
 	want := payload
 	if room := int64(maxDocumentMessageHeader - len(c.message)); want > room {
@@ -245,18 +249,21 @@ func (c *awarenessLimitConn) decide(payload int64, final bool) error {
 	switch {
 	case !named && rest > 0:
 		return fmt.Errorf("dispatch: a document socket's message does not name its document and type within %d bytes", maxDocumentMessageHeader)
-	case !named && !final:
+	case !named && final:
+		// The whole message is in hand - a message of three bytes as much as one of six hundred -
+		// and names neither a document nor a type.
+		return fmt.Errorf("dispatch: a document socket's %d-byte message names neither a document nor a type", len(c.message))
+	case !named:
 		// The header runs into the next frame of the message.
 		c.mode = limitDeciding
 		return nil
-	case named && kind == hocuspocusAwareness:
+	case kind == hocuspocusAwareness:
 		c.name = name
 		c.message = append(c.message[:0], c.message[read:]...)
 		c.mode = limitAwareness
 		return c.collect(rest, final)
 	default:
-		// Not an awareness message, or one too short to name itself at all: ygo reads it as it
-		// arrived.
+		// Not an awareness message: ygo reads it as it arrived.
 		c.pass(rest, final)
 		return nil
 	}

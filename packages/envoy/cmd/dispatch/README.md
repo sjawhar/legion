@@ -684,9 +684,15 @@ process holds its own room for a document. Postgres is the only channel between 
   readers thousands of cursors, nor becomes thousands of notifications. A socket's clients go
   when it does, and a client that leaves gives its entry back at once rather than two expiries
   later (`reclaimAwarenessSlots`), so a reader who joins after such a frame is taken in and
-  relayed at once. A room also holds about 2 MB of its clients' states
-  (`MaxAwarenessBytesPerRoom`) and, as a last resort, 256 client entries
-  (`maxAwarenessClientsPerRoom`), far past the handful of tabs any document has.
+  relayed at once. A socket whose message names neither a document nor a message type - a
+  three-byte message as much as one that has said nothing by 512 bytes
+  (`maxDocumentMessageHeader`) - is closed rather than read on: nothing this service reads looks
+  like that. A room also holds about 31 MB of its clients' states (`MaxAwarenessBytesPerRoom`)
+  and, as a last resort, `maxAwarenessClientsPerRoom` client entries - the connections one
+  process admits (`maxRoomConnections`, 1,000) each holding the four clients a socket may, which
+  is the same bound another process's relayed clients passed before they crossed - so it stands
+  above every client real readers can put in a room and refuses none of them, here or on another
+  process.
 - **Issue close and reopen.** Migration `0142`'s trigger notifies `dispatch_issue_open_changed`
   when an issue's `closed_at` changes, whichever process or build wrote it. Every process of this
   build then closes its rooms of the issue's documents, and their browsers reconnect read-only or
@@ -2082,7 +2088,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/artifacts/_test/quiesce` | POST | cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1` | Close every live document and wait for the settlements in flight; not mounted otherwise. |
 | `/api/v1/artifacts/_test/rooms` | GET | cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1` | List the documents this process holds a room of now: `{"rooms": [artifact id, ...]}`. Not mounted otherwise. |
 | `/api/v1/artifacts/{id}/_test/outside-schema` | POST | cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1` | Write the crafted malformed tree e2e uses; not mounted otherwise. |
-| `/api/v1/artifacts/{id}/_test/room-counters` | GET | cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1` | What this process did with the document since the process started: `{"room_failures": n, "lock_waiting_compactions": n, "room_closes": n, "settlement_resumptions": [RFC 3339 time, ...]}` - its room failures, lock-waiting compactions, closes of a room of the document by the service (a replaced history, an issue's close or reopen, a failed room's eviction, shutdown; not ygo's idle retirement), and the time of each settlement-resumption pass that armed the document's owed settlement. Not mounted otherwise. |
+| `/api/v1/artifacts/{id}/_test/room-counters` | GET | cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1` | What this process did with the document since the process started, and what its room holds now: `{"room_failures": n, "lock_waiting_compactions": n, "room_closes": n, "settlement_resumptions": [RFC 3339 time, ...], "awareness_clients": n}` - its room failures, lock-waiting compactions, closes of a room of the document by the service (a replaced history, an issue's close or reopen, a failed room's eviction, shutdown; not ygo's idle retirement), the time of each settlement-resumption pass that armed the document's owed settlement, and the awareness client entries its room of the document holds now (0 with no room here), which `maxAwarenessClientsPerRoom` bounds. Not mounted otherwise. |
 | `/api/v1/artifacts/{id}/_test/hold-persistence` | POST | cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1` | Take `{"duration": "<Go duration>"}` and hold every append of a browser update that this process's rooms of the document make, for that long from now; `204` once the hold is set, `400 DURATION_INPUT` for a duration that is not positive. Not mounted otherwise. |
 | `/api/v1/artifacts/{id}/_test/live-write-pauses/{point}` | PUT | cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1` | Park the document's next live write on this process at `{point}`: `after-first-append` (it holds the document's lock) or `after-commit` (before its publish). `204` once armed, `409 PAUSE_ARMED` when a pause is armed already, `400 PAUSE_POINT_INPUT` for another point. Not mounted otherwise. |
 | `/api/v1/artifacts/{id}/_test/live-write-pauses/{point}` | GET | cookie, trusted header, or bearer; `DISPATCH_TEST_HOOKS=1` | Wait up to `?wait` (a Go duration, 10 s when absent) for a write to park at the armed pause: `{"parked": true}`, or `{"parked": false}` when none did. `404 PAUSE_NOT_ARMED` when no pause is armed. Not mounted otherwise. |

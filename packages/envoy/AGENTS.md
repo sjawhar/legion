@@ -895,11 +895,17 @@ every other process see the same clients, and it is what keeps a peer's frame of
 from growing a room's awareness map and the relay's fan-out. ygo removes the clients a peer owned
 as it disconnects, and a client that leaves gives its entry back as it goes rather than two
 expiries later - the room's own observer frees it (`watchRoomAwareness`,
-`reclaimAwarenessSlots`), as does the arrival of another process's awareness. A room also holds
-at most `maxAwarenessBytesPerRoom` (about 2 MB) of its clients' states and, as a last resort,
-`maxAwarenessClientsPerRoom` (256) client entries (ygo's `MaxAwarenessClientsPerRoom`,
-`docs/service.go`), far past the handful of tabs any document has: it is what bounds a room's
-memory if any path other than a socket ever reaches its awareness.
+`reclaimAwarenessSlots`), as does the arrival of another process's awareness. A socket whose
+message names neither a document nor a message type - a three-byte message as much as one that
+has said nothing by `maxDocumentMessageHeader` (512) bytes - is closed rather than read on, since
+nothing this service reads looks like that. A room also holds at most `maxAwarenessBytesPerRoom`
+(about 31 MB) of its clients' states and, as a last resort, `maxAwarenessClientsPerRoom` client
+entries (ygo's `MaxAwarenessClientsPerRoom`, `docs/service.go`). That bound is derived from the
+two caps that bound real readers - `maxRoomConnections` (1,000) sockets per process, each holding
+`maxAwarenessClientsPerSocket` (4) clients, which is also what another process's relayed clients
+passed before they crossed - so it stands above every client the sockets of a process can put in
+a room and refuses no reader, here or on another process; it is what bounds a room's memory if
+any path other than a socket ever reaches its awareness.
 
 An issue's close and reopen reach every process through migration 0142's trigger, which notifies
 `dispatch_issue_open_changed` with the issue's key when `closed_at` changes, whoever wrote it. Each
