@@ -2781,10 +2781,13 @@ listener's NATS user manages the consumer: it creates, reads, pulls, acknowledge
   agent-subject subscription, which the plugin answers in both modes (the role-lane bullet under
   "Critical conventions").
 - **Trust:** a client that may subscribe to `notifications.>`, as every session user may, can read
-  another session's relay frames and publish `done` to a frame's reply subject, which acknowledges
-  that session's message away. Such a client already reads every session's traffic, so the threat
-  model does not change. dispatch://INFRA-771 narrows that grant to a session's own delivery
-  subjects.
+  another session's relay frames and publish `done` to a frame's reply subject (an `_INBOX.`
+  subject, which every session user may publish to), which acknowledges that session's message
+  away. Such a client already reads every session's traffic and can already answer a role
+  forward's receipt for its holder, whose reply inbox the forward on `notifications.agent.<id>`
+  carries; what this adds is that it can remove a stored message from the consumer of a session
+  that is away, so that session never sees it. dispatch://INFRA-771 narrows that grant to a
+  session's own delivery subjects.
 
 ## Keyed Dispatch writes
 
