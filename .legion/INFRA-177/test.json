@@ -2,51 +2,39 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-177",
-  "completed": "2026-10-30T21:29:30Z",
-  "round": 16,
-  "headTested": "c024f2572e667dae5bee6da7a5c326fa5952f6ca (code head 14f6fdc983e4)",
-  "workspace": "Recreated before this round; it holds legion/INFRA-177 as pushed, my round-15 handoff (33db91e8) beneath the implementer's commits. Nothing of mine was unpushed.",
-  "scope": "Per the architect: review round 12's seven findings and the merges with main a4af0341, d126b19d and 2b891d47. Tested what moved: the Dispatch API package (route pin), the pass test's rebuilt push, the HandedOffWithoutOpenOrMergedPullRequest filter, handoff-records.sh and handoffs.e2e.ts at the merged head, and CI. No rerun of untouched paths.",
-  "mergeability": "gh pr view 2354 -> MERGEABLE (BLOCKED: required checks not reported); git merge-tree of main e4dc7c4f with c024f257 -> no conflict; contract 44, daemon 0065_handoff_records, Dispatch 0150_handoffs free on main (43, 0064, 0149_event_horizon); registeredRoutes 151.",
-  "ci": "Read 21:29Z: CI run 41127718749 at c024f257 (code head 14f6fdc9's tree plus .legion/): changes success, every other job queued (test, typecheck, lint, ci-filters, ci-images, the Go, Bun, browser and docs lanes, the envoy Dispatch API lane 'dispatch' among them). 14f6fdc9 itself has no check run. Read as running, not waited for; the Dispatch API package passed here (below).",
+  "completed": "2026-10-30T22:13:00Z",
+  "round": 17,
+  "headTested": "4e5e6c5037b6df0f21a2a0337b6b0ec08ff1e57e (code head 20bd9186cb49)",
+  "scope": "Per the architect: review round 13's findings (20bd9186: two e2e-scripts.json rows, two corrected learnings, the superseding note, a reflow of packages/envoy/AGENTS.md). No merge with main. Tested what moved, and the required test job.",
+  "mergeability": "gh pr view 2354 -> MERGEABLE.",
+  "ci": "Read 22:12Z: CI run 41135952773 at 4e5e6c50 (code head 20bd9186's tree plus .legion/) is queued, its changes job queued; 20bd9186 itself has no check run. The required test job has not run, so it has not settled green: read as running, not waited for.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's finding-1 command `go test -count=1 -p 1 ./internal/dispatch/api/` on a fresh database (ok, 1492.6 s, route pin 151); TestThePassFollowsAPushAboveAnApprovalAsANewHead passes; handoff-records.sh 9 checks ok; handoffs.e2e.ts 3 passed."
+    "how": "`bash .github/scripts/select-e2e-proofs.test.sh` -> 97 passed, 0 failed; handoff-records.sh runs as the new row runs it (HANDOFF_RECORDS_EVIDENCE_DIR set) and passes."
   },
-  "failures": [],
-  "failed": 0,
+  "failures": [
+    {
+      "criterion": "Review round 13: every docs/solutions learning that teaches the handoff push as today's rule is corrected or superseded (the reviewer's pr2512 and pr2504 findings, and this PR's superseding note, which lists the notes it supersedes or corrects)",
+      "evidence": "docs/solutions/legion/gh-run-list-commit-takes-the-full-sha-and-an-empty-answer-is-not-a-measurement-INFRA-92.md (status: active) still teaches the removed mechanism in the present tense, at lines 26-32: 'A branch whose head is a handoff-only commit — which carries `skip-checks: true` by design and starts no workflow — shows only the checks the pull-request event itself produced, while the code beneath it is being checked at its own commit. … That shape is the designed one: the daemon carries the code head's verdict to the handoff head.' After this PR no phase pushes a handoff commit, no push carries the trailer, and the daemon carries no verdict to any head. The note is neither under the superseding note's `supersedes:` (docs/solutions/legion/handoffs-are-dispatch-records-and-the-notes-that-teach-handoff-commits-are-superseded-pr2354.md) nor among its corrected-in-place notes, and it was not changed in 20bd9186. Found with: grep -rlE 'skip-checks: true|\\.legion/[^ ]*-only commit|push the handoff' docs/solutions, minus the notes the superseding note lists, minus notes already marked superseded; of the five left, three are status: superseded by other changes and one (…-INFRA-149.md, 'the pull-request body is shared state') states the trailer only as past evidence. The INFRA-92 note's other two rules (gh run list --commit takes the full sha; an empty answer is not a measurement) stand, so a correction in place, as for pr2504, fits. No red test: a test of a learning's wording would be a source-text test, which the testing rules forbid."
+    }
+  ],
+  "failed": 1,
   "proof": [
     {
-      "criterion": "Finding 1: the Dispatch API package passes at the merged head with the route pin at the true count",
-      "surface": "packages/envoy/internal/dispatch/api against a fresh Postgres",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=…/dispatch_t16 go test -count=1 -p 1 -timeout 60m ./internal/dispatch/api/",
-      "observed": "ok github.com/sjawhar/envoy/internal/dispatch/api 1492.648s; routes_table_test.go pins registeredRoutes = 151 (main's 147 plus this PR's 4)",
-      "headSha": "c024f2572e667dae5bee6da7a5c326fa5952f6ca",
-      "negativeControl": "the shared harness database an earlier head migrated refuses Dispatch's migrations ('relation \"handoffs\" already exists', round 15), so a fresh database is the surface"
+      "criterion": "select-e2e-proofs.test.sh passes with the two new e2e-scripts.json rows, and each row selects as its kind says",
+      "surface": ".github/scripts/select-e2e-proofs.sh, as e2e.yaml's select job runs it (EVENT, REQUESTED, GITHUB_OUTPUT), and its test",
+      "command": "bash .github/scripts/select-e2e-proofs.test.sh; EVENT=workflow_dispatch REQUESTED=handoff-records.sh …; EVENT=workflow_dispatch REQUESTED=handoff-cutover-github.sh …; EVENT=schedule REQUESTED= …",
+      "observed": "97 passed, 0 failed. handoff-records.sh is emitted as one proof with go_version_file packages/daemon/go.mod, bun true, jj true, evidence_variable HANDOFF_RECORDS_EVIDENCE_DIR, timeout 25; the schedule run includes it and not handoff-cutover-github.sh; handoff-records.sh run with HANDOFF_RECORDS_EVIDENCE_DIR=$TMPDIR/hr-evidence passes (9 checks, 41 s) and writes daemon.log, dispatch.log, nats.log, proof.log and transcript.log there",
+      "headSha": "4e5e6c5037b6df0f21a2a0337b6b0ec08ff1e57e",
+      "negativeControl": "with the handoff-records.sh row removed (file restored after): 77 passed, 17 failed; REQUESTED=handoff-cutover-github.sh exits 1 with '::error::scripts/e2e/handoff-cutover-github.sh needs gh acting as an App installed on sjawhar/legion-smoke … so this workflow runs it nowhere.'"
     },
     {
-      "criterion": "Finding 7: the pass test asserts the push it rebuilt from the branch's activity above an approval",
-      "surface": "the required-checks pass (readRequiredChecks) against a GitHub stand-in serving the branch's activity, on a real Postgres",
-      "command": "go test ./internal/daemon/ -run '^TestThePassFollowsAPushAboveAnApprovalAsANewHead$' -v, with the #2478 pass tests beside it",
-      "observed": "PASS; with TestThePassRebuildsAPushLostWhateverTheActivityCallsIt, TestThePassTellsTheArchitectOfAPullRequestMissingOncePerHandoff, TestThePassRecordsAnOpenedLostInAnyPhase, TestThePassRecordsAnOpenPullRequestWhoseOpenedHasNotArrived and the two declined-opened tests, ok",
-      "headSha": "c024f2572e667dae5bee6da7a5c326fa5952f6ca",
-      "negativeControl": "with lostPushes returning no push (pull_request_reads.go:189, restored after) the test fails: 'the pass applied 0 pushes it rebuilt from the branch's activity, want the one code..pushed'"
-    },
-    {
-      "criterion": "Finding 3: HandedOffWithoutOpenOrMergedPullRequest keeps main's handoff_commit <> '' filter",
-      "surface": "record/store.go and the pass that reads it (pull_request_reads.go:252)",
-      "command": "diff of the function at main e4dc7c4f and at the head; TestThePassTellsTheArchitectOfAPullRequestMissingOncePerHandoff",
-      "observed": "the function is identical to main's; the test passes. The implementer still reports a commit (its pushed tip) at every completion, so every completed implementer row carries handoff_commit",
-      "headSha": "c024f2572e667dae5bee6da7a5c326fa5952f6ca",
-      "negativeControl": "an implementer row with no completion (handoff_commit '') is not listed, as on main"
-    },
-    {
-      "criterion": "Handoff records end to end and the live Conversation at the merged head (main's #2392 event-lock change)",
-      "surface": "scripts/e2e/handoff-records.sh; the Dispatch dashboard in Chromium with the SPA rebuilt from the head",
-      "command": "LEGION_TEST_PG_DSN=…/legion_t16 … bash scripts/e2e/handoff-records.sh; bash /legion/harness/dispatch-e2e.sh …/dispatch_e2e_t16 e2e/handoffs.e2e.ts",
-      "observed": "9 checks ok, PASS in 53s; 3 passed",
-      "headSha": "c024f2572e667dae5bee6da7a5c326fa5952f6ca",
-      "negativeControl": "with event-refresh.ts's [\"handoffs\", key] target removed (restored after) the live test fails 'Expected: 3, Received: 2'"
+      "criterion": "The two corrected learnings, the superseding note and the envoy guide reflow",
+      "surface": "the files at the head",
+      "command": "git diff 75919928 4e5e6c50 -- docs/solutions packages/envoy/AGENTS.md; every path the superseding note names checked to exist; the envoy guide compared with whitespace collapsed",
+      "observed": "pr2504 and pr2512 put their handoff-push clauses in the past tense beside the present rule; the superseding note lists pr2512 under supersedes and pr2504 among the corrected notes, every listed path exists (the three … paths resolve by prefix); packages/envoy/AGENTS.md's words are unchanged, only reflowed",
+      "headSha": "4e5e6c5037b6df0f21a2a0337b6b0ec08ff1e57e",
+      "negativeControl": "the INFRA-92 note above, which the same search finds, is neither corrected nor listed"
     }
   ]
 }
