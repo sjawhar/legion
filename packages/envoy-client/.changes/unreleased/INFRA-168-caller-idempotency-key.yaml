@@ -1,0 +1,10 @@
+kind: Added
+body: |-
+  `DispatchClient.projectArtifact(project, input, key?)` and `docEdit(id, input, key?)` take the
+  caller's own `Idempotency-Key` for that write, used in place of the one the client mints per
+  call and sent on every attempt of it, so a caller whose intent outlives one call — AskGate's
+  decision document, created once per session whatever process reaches for it, and each of its
+  records appended once (dispatch://INFRA-168) — has Dispatch run that intent once and replay it
+  rather than write a second time. The key must match `IDEMPOTENCY_KEY_PATTERN`; every other
+  write still mints its own, and a call that passes none is unchanged.
+time: 2026-10-30T00:00:00Z

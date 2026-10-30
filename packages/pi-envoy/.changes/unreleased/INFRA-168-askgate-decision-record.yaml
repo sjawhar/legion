@@ -17,7 +17,7 @@ body: |-
   once the gate has answered the call, never inside its `tool_call` handler, and never changes
   the decision; an unmarked write's runs behind that write's own entry, and the tool result waits
   on none of it. Its write runs until Dispatch has answered it or the session's shutdown cuts it,
-  under the one `Idempotency-Key` the client gives the call, so a Dispatch slow under load is
+  under the `Idempotency-Key` the write carries, so a Dispatch slow under load is
   waited out rather than given up. A record that fails or that the session's shutdown cuts writes
   one line to the host's log and appends one
   `advisor-gate-record` entry carrying `toolCallId`, `tool`, `recordError` and, for an unmarked
@@ -27,11 +27,22 @@ body: |-
   At shutdown the one `session_shutdown` handler the gate binds gives the records 1.25 s from
   that moment and then cuts them, whether or not the gate loaded, and the gate waits for what is
   still pending, so a record still lands, and the entry of one that could not, before the session
-  is sealed; a record cut there says the shutdown cut it. The session's first decision uploads the
-  document and every later one appends to it, and a process holding no id for the session reads
-  the document by name — one request of a few bytes, rather than every document of the project —
-  and uploads only where that read answers 404, since a second upload of the name would store a
-  new version of the document and the reader reads that in place of everything it held.
+  is sealed; a record cut there says the shutdown cut it. The document is created once and
+  appended to ever after: the create carries a header paragraph and no record, and every record,
+  the session's first included, is appended through `docEdit`, since an upload of a name Dispatch
+  already holds stores a new version of that document and the reader reads that in place of
+  everything the versions before it held. A process holding no id for the session reads the
+  document by name — one request of a few bytes, rather than every document of the project — and
+  creates one only where that read answers 404. The create carries an `Idempotency-Key` of the
+  document's own (`askgate-doc.` and the sha256 of the project and the name) and a body fixed for
+  the session, the header alone, so every attempt of it, in this process or another, is one
+  intent Dispatch runs once: a key that finished is replayed, `409 KEY_COMMITTED` and
+  `422 KEY_REUSED` send the recorder to the read and then the append, and no create of a session's
+  document given up here can replace the records written since by committing late. Each append
+  carries a key of its own, the sha256 of the session and the record's id, so a record written
+  again is replayed rather than appended twice. Keys belong to the login that sent them — every
+  Legion pod writes under the shared agent token, which is one login — and Dispatch keeps one
+  24 h, well past the 10 minutes a create's run can hold it.
   The records of one session are written one at a time, each carrying the time the gate made it,
   which is what the reader counts and sorts by.
   `scripts/askgate-report.ts

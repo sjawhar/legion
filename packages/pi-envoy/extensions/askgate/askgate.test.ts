@@ -3445,14 +3445,14 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
     test("a mint that refuses makes the record say the call was sent back", async () => {
       const store = path.join(SUITE_TMP, `unmintable-${Date.now()}`);
       fs.writeFileSync(store, "a file where the store goes");
-      const uploads: string[] = [];
+      const appended: string[] = [];
       const client = {
         getProjectArtifact: () => Promise.reject(NO_DOCUMENT),
-        projectArtifact: async (_project, input) => {
-          uploads.push("content" in input ? input.content : "");
-          return { artifact: { id: "doc-1" } };
+        projectArtifact: async () => ({ artifact: { id: "doc-1" } }),
+        docEdit: async (_id, input) => {
+          for (const op of input.ops) appended.push(op.markdown ?? "");
+          return { applied: input.ops.length };
         },
-        docEdit: async (_id, input) => ({ applied: input.ops.length }),
       } satisfies RecordClient;
       const g = bind({
         env: { ...STUB, OMP_ASKGATE: "block", OMP_ASKGATE_RECORD_PROJECT: "INFRA" },
@@ -3473,7 +3473,7 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
       // The entry of the call the gate answered says the rebuttal went out, as it did decide.
       expect(g.entries).toMatchObject([{ decision: "allow", outcome: "rebuttal" }]);
       await recorded();
-      const records = [...(uploads[0] ?? "").matchAll(/```json\n(.*)\n```/g)].map(
+      const records = [...(appended[0] ?? "").matchAll(/```json\n(.*)\n```/g)].map(
         ([, line]) => JSON.parse(line as string) as Record<string, unknown>
       );
       expect(records).toMatchObject([
@@ -3485,14 +3485,14 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
     // was still recorded `decision: "allow"`. Both refusals send the call back, so both record
     // the decision the call finally got.
     test("an entry that cannot be written makes the record say the call was sent back", async () => {
-      const uploads: string[] = [];
+      const appended: string[] = [];
       const client = {
         getProjectArtifact: () => Promise.reject(NO_DOCUMENT),
-        projectArtifact: async (_project, input) => {
-          uploads.push("content" in input ? input.content : "");
-          return { artifact: { id: "doc-1" } };
+        projectArtifact: async () => ({ artifact: { id: "doc-1" } }),
+        docEdit: async (_id, input) => {
+          for (const op of input.ops) appended.push(op.markdown ?? "");
+          return { applied: input.ops.length };
         },
-        docEdit: async (_id, input) => ({ applied: input.ops.length }),
       } satisfies RecordClient;
       const g = bind({
         env: { ...STUB, OMP_ASKGATE: "warn", OMP_ASKGATE_RECORD_PROJECT: "INFRA" },
@@ -3514,7 +3514,7 @@ console.log(JSON.stringify({ argv: process.argv.slice(2), stdin }));
       expect(result?.reason).toContain("could not record that in the session");
       expect(g.entries).toEqual([]);
       await recorded();
-      const records = [...(uploads[0] ?? "").matchAll(/```json\n(.*)\n```/g)].map(
+      const records = [...(appended[0] ?? "").matchAll(/```json\n(.*)\n```/g)].map(
         ([, line]) => JSON.parse(line as string) as Record<string, unknown>
       );
       expect(records).toMatchObject([
@@ -7171,11 +7171,11 @@ describe("the Dispatch decision record (A5)", () => {
   const MATCHED = rulesAnswer([{ ask: 1, rule: "no_change" as const, quote: "keep it as it is" }]);
   /**
    * A Dispatch that answers the record's three calls; the gate reads no document in these tests.
-   * The documents it holds are the uploads it answered, by name, as Dispatch holds one artifact
-   * per name and stores a second upload of that name as a new version of it.
+   * The documents it holds are the creates it answered, by name, as Dispatch holds one artifact
+   * per name; each create carries the key its caller chose, and every record is appended.
    */
   function recordingDispatch(answers: Partial<RecordClient> = {}) {
-    const uploads: Array<{ project: string; name: string; content: string }> = [];
+    const uploads: Array<{ project: string; name: string; content: string; key?: string }> = [];
     const edits: Array<{ id: string; markdown: string }> = [];
     const stored = new Map<string, string>();
     const client = {
@@ -7187,14 +7187,15 @@ describe("the Dispatch decision record (A5)", () => {
         }
         return { id: held };
       },
-      projectArtifact: async (project, input) => {
+      projectArtifact: async (project, input, key) => {
         uploads.push({
           project,
           name: input.name,
           content: "content" in input ? input.content : "",
+          key,
         });
         const answer = answers.projectArtifact
-          ? await answers.projectArtifact(project, input)
+          ? await answers.projectArtifact(project, input, key)
           : { artifact: { id: "doc-1" } };
         stored.set(input.name, answer.artifact.id);
         return answer;
@@ -7230,7 +7231,9 @@ describe("the Dispatch decision record (A5)", () => {
     expect(dispatch.uploads).toMatchObject([
       { project: "INFRA", name: "askgate-decisions-sess-1.md" },
     ]);
-    expect(recordsIn(dispatch.uploads[0]?.content ?? "")).toMatchObject([
+    // The create carries the header alone; the record is the append that follows it.
+    expect(recordsIn(dispatch.uploads[0]?.content ?? "")).toEqual([]);
+    expect(recordsIn(dispatch.edits[0]?.markdown ?? "")).toMatchObject([
       {
         session: "sess-1",
         source: "machine",
@@ -7245,13 +7248,14 @@ describe("the Dispatch decision record (A5)", () => {
       },
     ]);
     expect(dispatch.uploads[0]?.content).not.toContain("cache path");
+    expect(dispatch.edits[0]?.markdown).not.toContain("cache path");
     expect(g.recordEntries).toEqual([]);
 
     expect((await g.device("t2", "dispatch_ask", KEEP))?.block).toBe(true);
     await recorded();
     expect(dispatch.uploads).toHaveLength(1);
-    expect(dispatch.edits).toMatchObject([{ id: "doc-1" }]);
-    expect(recordsIn(dispatch.edits[0]?.markdown ?? "")).toMatchObject([{ rule: "no_change" }]);
+    expect(dispatch.edits).toMatchObject([{ id: "doc-1" }, { id: "doc-1" }]);
+    expect(recordsIn(dispatch.edits[1]?.markdown ?? "")).toMatchObject([{ rule: "no_change" }]);
     expect(g.recordEntries).toEqual([]);
   });
 
@@ -7287,17 +7291,17 @@ describe("the Dispatch decision record (A5)", () => {
     released.resolve();
     await recorded();
     expect(answered).toBe(true);
-    expect(recordsIn(dispatch.uploads[0]?.content ?? "")).toMatchObject([
+    expect(recordsIn(dispatch.edits[0]?.markdown ?? "")).toMatchObject([
       { tool: "dispatch_ask", ruleOutcome: "match" },
     ]);
     expect(g.recordEntries).toEqual([]);
   });
 
-  test("two decisions of one session started back to back give one upload and one append", async () => {
-    // The second record starts while the first upload is still unanswered — which only a record
+  test("two decisions of one session started back to back give one create and two appends", async () => {
+    // The second record starts while the first create is still unanswered — which only a record
     // the handler does not wait for can do. The recorder holds the document's promise, so the
-    // second appends to that document rather than posting its name again, which Dispatch would
-    // answer with a second document.
+    // second appends to that document rather than creating its name again, which Dispatch would
+    // answer with a new version of that same document.
     const released = Promise.withResolvers<void>();
     const dispatch = recordingDispatch({
       projectArtifact: async () => {
@@ -7317,8 +7321,9 @@ describe("the Dispatch decision record (A5)", () => {
     released.resolve();
     await recorded();
     expect(dispatch.uploads).toHaveLength(1);
-    expect(dispatch.edits).toMatchObject([{ id: "doc-1" }]);
+    expect(dispatch.edits).toMatchObject([{ id: "doc-1" }, { id: "doc-1" }]);
     expect(recordsIn(dispatch.edits[0]?.markdown ?? "")).toMatchObject([{ rule: "no_change" }]);
+    expect(recordsIn(dispatch.edits[1]?.markdown ?? "")).toMatchObject([{ rule: "no_change" }]);
     expect(g.recordEntries).toEqual([]);
   });
 
@@ -7457,7 +7462,7 @@ describe("the Dispatch decision record (A5)", () => {
     ]);
     expect(g.entries[0]?.ruleTextMissing).toBeUndefined();
     await recorded();
-    expect(recordsIn(dispatch.uploads[0]?.content ?? "")).toMatchObject([
+    expect(recordsIn(dispatch.edits[0]?.markdown ?? "")).toMatchObject([
       { tool: "dispatch_artifact", ruleAsksPartial: true, ruleTextMissing: false },
     ]);
   });
@@ -7495,7 +7500,7 @@ describe("the Dispatch decision record (A5)", () => {
     ]);
     await recorded();
     expect(g.recordEntries).toEqual([]);
-    expect(recordsIn(dispatch.uploads[0]?.content ?? "")).toMatchObject([
+    expect(recordsIn(dispatch.edits[0]?.markdown ?? "")).toMatchObject([
       {
         tool: "dispatch_artifact",
         rule: null,

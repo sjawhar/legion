@@ -607,8 +607,8 @@ CLI outside the form the gate reads and carried an ask for a person (`outcome: "
 - **When.** Once the call has been answered: the gate appends the call's `advisor-gate` entry,
   returns, and then hands the record to the session's recorder, so no review is ever cut short to
   pay for it. It never changes the decision. The write runs until Dispatch has answered it or the
-  session's shutdown cuts it — the client asks again under one `Idempotency-Key` for the whole
-  call, and nothing retries it from outside — so a Dispatch that is slow under load is waited
+  session's shutdown cuts it — the client asks again under the call's own `Idempotency-Key`, and
+  nothing retries it from outside — so a Dispatch that is slow under load is waited
   out rather than given up. A record that fails or that the shutdown cuts writes one line to the
   host's log and appends one `advisor-gate-record` entry, carrying `toolCallId`, `tool`,
   `recordError` and, for an unmarked write, the record's own `recordId`; the decision's own entry
@@ -622,12 +622,27 @@ CLI outside the form the gate reads and carried an ask for a person (`outcome: "
   in flight: the records of a session are written one at a time and each has the client's own
   deadline, so a Dispatch that does not answer would otherwise stall every such write. It goes
   through the one recorder the gate's own records use.
-- **One document per session.** The session's first decision uploads it; every later one appends a
-  fenced JSON line through `docEdit`, because an upload of a name Dispatch already holds stores a
-  new version of that document, and the reader reads the latest version alone. A process holding
-  no id for the session — a fresh process serving it, or one whose upload was cut — reads the
-  document by its name, one request of a few bytes, and appends to that; it uploads only where
-  that read answers 404. The records of one session are written one at a time, each sent once the
+- **One document per session, written once and appended to.** The document's create carries a
+  header paragraph and no record; every record, the session's first included, is a fenced JSON
+  line appended through `docEdit`. That rule is what keeps a record safe, because an upload of a
+  name Dispatch already holds stores a new version of that document and the reader reads the
+  latest version alone, so a second upload would erase every record appended since the first. A
+  process holding no id for the session — a fresh process serving it, or one whose create was cut
+  — reads the document by its name, one request of a few bytes, and appends to that; it creates
+  one only where that read answers 404. The create carries an `Idempotency-Key` of the document's
+  own, `askgate-doc.` and the sha256 of the project and the name, and a body fixed for the
+  session — the header alone, with no record, no time and no plugin version in it — so every
+  attempt of it, in this process or another, is one intent Dispatch runs once: it replays a key
+  that finished, answers `409 KEY_IN_FLIGHT` while the first run lives, `409 KEY_COMMITTED` where
+  that run landed and lost its answer, and `422 KEY_REUSED` for a different body, and the last two
+  send the recorder back to the read and then to the append. Each append carries a key of its own,
+  the sha256 of the session and the record's id, so a record written again — a resumed session
+  repeating one its first process could not confirm — is replayed rather than appended twice. Keys
+  belong to the login that sent them, and every Legion pod writes under the shared agent token,
+  which is one login for all of them (`requestKeyLogin`,
+  `packages/envoy/internal/dispatch/api/request_keys.go`); Dispatch keeps a key 24 h
+  (`IdempotencyKeyTTL`), well past the 10 minutes a create's run can hold it
+  (`keyedHandlerLimit`). The records of one session are written one at a time, each sent once the
   one before it has settled, and each carries the time the gate made it, which is what the reader
   counts and sorts by: a write given up on this side may still be running on Dispatch's while the
   next is sent, so the order they land in is not the order they were made.
@@ -635,9 +650,11 @@ CLI outside the form the gate reads and carried an ask for a person (`outcome: "
   that one record, and a session that never reached a gated call writes no document. A record
   that fails, or that the shutdown cuts, is unconfirmed too — and one given up that way may have
   landed all the same, so a record the session could not confirm can still be in the document,
-  where the reader counts it once by its `id` and counts the second copy as a duplicate. Two
-  processes writing one session's first record at the same moment each find no document and upload
-  one, and the later upload's version replaces the record the earlier one carried. What the
+  where the reader counts it once by its `id` and counts the second copy as a duplicate. What no
+  longer happens: a create given up here and committed on Dispatch after later records were
+  written cannot replace them, since every create of that document is the one keyed create, and
+  two processes writing one session's first record at the same moment make that same one create
+  between them. What the
   machine could not get Dispatch to confirm is counted on the machine's own side: `--sessions`
   counts the entries carrying a `recordError` as **decision records not confirmed**, an upper
   bound on what the day's `--dispatch-project` counts cannot hold.

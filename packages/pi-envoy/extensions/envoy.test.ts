@@ -4444,9 +4444,10 @@ console.log(JSON.stringify(args));
     /** Every AskGate decision record the session published, read off the Dispatch write itself. */
     const published: Array<Record<string, unknown>> = [];
     /**
-     * The Dispatch writes those records made: the session's one document, uploaded under its name,
-     * and each append to it. A session's records belong in one document, so a second upload is a
-     * second recorder's, and Dispatch answers it by replacing what the first one wrote.
+     * The Dispatch writes those records made: the session's one document, created under its name
+     * with its header, and each record appended to it. A session's records belong in one
+     * document, so a second create is a second recorder's, which Dispatch would answer by
+     * replacing what the first one wrote.
      */
     const recordWrites = { uploads: 0, appends: 0 };
     /** The documents this Dispatch holds, which its list of the project's answers. */
@@ -4455,7 +4456,7 @@ console.log(JSON.stringify(args));
     const recordWaiters: Array<() => void> = [];
     /**
      * Answers the three Dispatch calls a decision record makes — the read of the session's own
-     * document by name, the document's upload, then an append to it — and keeps each JSON record
+     * document by name, the document's create, then an append to it — and keeps each JSON record
      * the writes carried, so a test reads what reached Dispatch and nothing else. Every other
      * request goes on to the suite's own stand-in.
      */
@@ -4783,16 +4784,16 @@ console.log(JSON.stringify(args));
     }, 30_000);
 
     // #2161: the record of an unmarked write is the host's, the record of a gated call the core's,
-    // and a session makes both. Each recorder holds its own map of the documents it uploaded, so
-    // two of them upload the session's document twice under its one name, which Dispatch answers
+    // and a session makes both. Each recorder holds its own map of the documents it created, so
+    // two of them create the session's document twice under its one name, which Dispatch answers
     // by replacing it: the first recorder's records are dropped. One recorder serves both.
-    test("an unmarked ask and a gated call in one session share the decision document: it is uploaded once and the second record appends", async () => {
+    test("an unmarked ask and a gated call in one session share the decision document: it is created once and both records append", async () => {
       gateOn();
       const { default: envoyExtension } = await import("./envoy.ts?record-one-document");
       standInDispatch();
       const run = await unmarkedRun(envoyExtension, UNMARKED_ASK);
       expect(run.records).toMatchObject([{ outcome: "unmarked", asksCarried: 1 }]);
-      expect(recordWrites).toEqual({ uploads: 1, appends: 0 });
+      expect(recordWrites).toEqual({ uploads: 1, appends: 1 });
 
       const gated = await run.gatedAsk("call-ask");
 
@@ -4810,9 +4811,9 @@ console.log(JSON.stringify(args));
           target: "dispatch_ask issue=DSP-1",
         },
       ]);
-      // One document holds both: the gated call's record appended to the upload the unmarked
-      // write made, rather than uploading that name again.
-      expect(recordWrites).toEqual({ uploads: 1, appends: 1 });
+      // One document holds both: the gated call's record appended to the document the unmarked
+      // write's create made, rather than creating that name again.
+      expect(recordWrites).toEqual({ uploads: 1, appends: 2 });
       await run.shutdown();
     }, 30_000);
 

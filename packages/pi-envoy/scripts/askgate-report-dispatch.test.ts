@@ -68,10 +68,16 @@ function decision(e: {
   });
 }
 
-/** A decision document as the gate uploads one: its header paragraph, then one block per record. */
+/**
+ * A decision document as the recorder writes one (`extensions/askgate/decision-record.ts`): the
+ * header its create carries, which holds no record of its own, and then one block appended per
+ * record, the session's first included.
+ */
 function decisionDocument(session: string, lines: readonly string[]): string {
-  const blocks = lines.map((line) => `\`\`\`json\n${line}\n\`\`\``).join("\n\n");
-  return `AskGate rule decisions of session ${session}. One block per decision.\n\n${blocks}\n`;
+  const header =
+    `AskGate rule decisions of session ${session}. One fenced block per decision follows, ` +
+    "each holding one JSON record.\n";
+  return lines.reduce((text, line) => `${text}\n\`\`\`json\n${line}\n\`\`\`\n`, header);
 }
 
 /** A document of the project: its markdown, or null for one whose read Dispatch refuses. */
@@ -224,6 +230,29 @@ describe("the Dispatch reader", () => {
   test("two sessions' documents, one pod and one machine, are read into one report", async () => {
     const { report } = await reportOf(DAY, SINCE);
     expect(report).toEqual(DAY_REPORT);
+  });
+
+  // #2161, reviewer round 17: the document's create carries its header and no record, and every
+  // record is appended after it, the session's first included. A session whose records were all
+  // lost leaves that header alone, which is no record and no unparsed line either.
+  test("a document whose header holds no record is read, with the records appended after it", async () => {
+    const session = "ses-appended";
+    const records = [
+      decision({ time: at(1), session, source: "pod", rule: "no_change", target: ASK_1 }),
+      decision({ time: at(2), session, source: "pod", target: SPEC }),
+    ];
+    const { read } = await reportOf(
+      [
+        { name: `askgate-decisions-${session}.md`, markdown: decisionDocument(session, records) },
+        { name: "askgate-decisions-ses-empty.md", markdown: decisionDocument("ses-empty", []) },
+      ],
+      SINCE
+    );
+    expect({
+      records: read.records.map((record) => record.target),
+      documents: read.documents,
+      unparsedLines: read.unparsedLines,
+    }).toEqual({ records: [ASK_1, SPEC], documents: 2, unparsedLines: 0 });
   });
 
   test("a record before --since is left out, and one at --since is counted", async () => {

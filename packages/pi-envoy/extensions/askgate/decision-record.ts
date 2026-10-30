@@ -19,38 +19,59 @@
 //
 // Where: one document per session, `askgate-decisions-<session id>.md`, in the project
 // OMP_ASKGATE_RECORD_PROJECT names, else the one LEGION_PROJECT names, else nowhere — with
-// neither set the gate makes no Dispatch call at all and the call costs nothing. The session's
-// first decision uploads the document with its header paragraph and that first record; every
-// later one appends a fenced block through `docEdit`, because Dispatch stores a second upload of
-// one name as a new version of that same document (`findArtifactByName`,
+// neither set the gate makes no Dispatch call at all and the call costs nothing. The document is
+// written once and appended to ever after: the create carries a header paragraph and no record,
+// and every record, the session's first included, is a fenced block appended through `docEdit`.
+// That is the one rule that keeps a record safe, because Dispatch stores an upload of a name it
+// already holds as a new version of that same document (`findArtifactByName`,
 // `packages/envoy/internal/dispatch/api/artifacts.go`), which the reader reads in place of
-// everything the first upload held. The document's id is held in memory for the session; holding
-// none — a process that never uploaded this session's document, or one whose upload was cut —
-// the recorder reads the document by its name (`getProjectArtifact`, which Dispatch resolves by
-// filename, one request of a few bytes) and appends to it, and uploads only where that read
-// answers 404. One session's records are written one at a time, each started once the one before
-// it has settled; each carries the `time` the gate made it, which is what the reader counts and
-// sorts by, since a write given up on this side may still be running on Dispatch's while the next
-// one is sent.
+// everything the versions before it held: a second create would erase every record appended since
+// the first. The document's id is held in memory for the session; holding none — a process that
+// never created this session's document, or one whose create was cut — the recorder reads the
+// document by its name (`getProjectArtifact`, which Dispatch resolves by filename, one request of
+// a few bytes) and creates one only where that read answers 404. One session's records are
+// written one at a time, each started once the one before it has settled; each carries the `time`
+// the gate made it, which is what the reader counts and sorts by, since a write given up on this
+// side may still be running on Dispatch's while the next one is sent.
+//
+// Why one create is one create, however many attempts and processes make it: the create is sent
+// under an `Idempotency-Key` of the document's own — `askgate-doc.` and the sha256 of the project
+// and the name — and its body is fixed for the session, the header alone, with no time, no plugin
+// version and no record in it, so every attempt of it is the same request to Dispatch. Dispatch
+// replays a key that finished, answers `409 KEY_IN_FLIGHT` while its first run lives (the client
+// asks again under the key), `409 KEY_COMMITTED` where it landed and lost its answer, and
+// `422 KEY_REUSED` for a different body (`keyedWrites`,
+// `packages/envoy/internal/dispatch/api/request_keys.go`); the last two send this side back to the
+// read by name and then to the append, and nothing creates a second time. A key belongs to the
+// login that sent it (`requestKeyLogin`), and every Legion pod writes under the shared agent
+// token, which is one login for all of them, so two pods serving one session share these keys;
+// Dispatch keeps a key 24 h (`IdempotencyKeyTTL`), which outlives the 10 minutes a create's run
+// can hold it (`keyedHandlerLimit`). Each append carries a key of its own, the sha256 of the
+// session and the record's id, so a late or repeated append is replayed rather than written twice.
 //
 // How long a write runs: until Dispatch has answered it or the session's shutdown cuts it. The
-// client asks again under one `Idempotency-Key` for the whole call (`DISPATCH_WRITE_RETRY`, 30 s,
+// client asks again under the call's key (`DISPATCH_WRITE_RETRY`, 30 s,
 // `packages/envoy-client/src/dispatch-http.ts`), so a slow Dispatch is waited out rather than given
-// up at a stop of the recorder's own, and nothing here starts a second attempt, which is what would
-// need a key of the first to be safe.
+// up at a stop of the recorder's own.
 //
 // What is lost, and is left visible in a count rather than hidden: a session killed between a
 // decision and its write loses that one record; a session that never reached a gated call writes
 // no document at all; a write that fails or that the session's shutdown cuts is unconfirmed, and
 // one given up that way may have landed all the same, so a record its caller could not confirm
-// can still be in the document; and two processes that write one session's first record at the
-// same moment each find no document and upload one, where the later upload's version replaces
-// the record the earlier one carried. The caller says where a loss goes: both the core, for a
-// gated call, and the host, for an unmarked write, append an `advisor-gate-record` entry — the
-// host's named by the record's own id, since one tool call can log several unmarked writes — and
-// `scripts/askgate-report.ts` counts each as a decision record the session could not confirm.
-import type { CreateArtifactInput, EditArtifactInput } from "@legion/contracts";
-import { DispatchServiceError } from "@legion/envoy-client/dispatch-http";
+// can still be in the document, where the reader counts it once by its `id`. What no longer
+// happens: a create given up here and committed on Dispatch after a later record wrote cannot
+// erase that record, since every create of this document is the one keyed create. The caller says
+// where a loss goes: both the core, for a gated call, and the host, for an unmarked write, append
+// an `advisor-gate-record` entry — the host's named by the record's own id, since one tool call
+// can log several unmarked writes — and `scripts/askgate-report.ts` counts each as a decision
+// record the session could not confirm.
+import { createHash } from "node:crypto";
+import {
+  type CreateArtifactInput,
+  type EditArtifactInput,
+  IDEMPOTENCY_KEY_REUSED,
+} from "@legion/contracts";
+import { DispatchServiceError, DispatchWriteLandedError } from "@legion/envoy-client/dispatch-http";
 import pkg from "../../package.json";
 
 /**
@@ -69,6 +90,15 @@ export const RECORD_SHUT_DOWN = "the session shut down before Dispatch answered 
  * upload writes and a reader of a project's documents finds them by.
  */
 export const DECISION_DOCUMENT_PREFIX = "askgate-decisions-";
+
+/**
+ * What the `Idempotency-Key` of a session document's create starts with, and what one record's
+ * append starts with: the sha256 of what each is of follows (`intentKey`). Both fit
+ * `IDEMPOTENCY_KEY_PATTERN` — letters, digits, `.`, `_`, `:` and `-`, 128 at most — at 76
+ * characters.
+ */
+const DOCUMENT_KEY_PREFIX = "askgate-doc";
+const RECORD_KEY_PREFIX = "askgate-rec";
 
 /** The plugin that wrote the record, as the record names it: the manifest's own name and version. */
 const PLUGIN = `${pkg.name}@${pkg.version}`;
@@ -89,11 +119,17 @@ export interface RecordClient {
    * then by filename, and answers 404 where the project holds neither.
    */
   getProjectArtifact(project: string, name: string): Promise<{ readonly id: string }>;
+  /**
+   * The create of the session's document, under the key given: the caller's own, so every attempt
+   * and every process creating this document is one intent to Dispatch.
+   */
   projectArtifact(
     project: string,
-    input: CreateArtifactInput
+    input: CreateArtifactInput,
+    key: string
   ): Promise<{ artifact: { id: string } }>;
-  docEdit(id: string, input: EditArtifactInput): Promise<unknown>;
+  /** One record appended, under the key given: that record's own, so a repeat is replayed. */
+  docEdit(id: string, input: EditArtifactInput, key: string): Promise<unknown>;
 }
 
 export interface RecordDeps {
@@ -316,35 +352,25 @@ export function createDecisionRecorder(deps: RecordDeps): DecisionRecorder {
       // A bearer caller names its own session or Dispatch refuses the write (ACTOR_KIND, "bearer
       // callers require actor.kind session"); the `dispatch` command names it the same way.
       const actor = { kind: "session", id: sessionId } as const;
-      // The id this process holds for the session, else the document the project already holds
-      // under that name. An upload of a name Dispatch knows stores a new version of that same
-      // document, and the reader reads the latest version alone, so a process holding no id reads
-      // that one document before it writes: a document a cut upload left behind, or one the
+      // The id this process holds for the session, else the document the project holds under that
+      // name, else the one the create below makes: a document a cut create left behind, or one the
       // process that served this session before wrote, takes this record rather than losing its
       // own. A read that fails for any other reason than a 404 is this record's failure, as a
       // failed write is.
-      const held = documents.get(sessionId) ?? (await byName(client, project, name));
-      if (held !== undefined) {
-        documents.set(sessionId, held);
-        await client.docEdit(held, {
-          ops: [{ op: "insert", markdown: block, after: "end" }],
-          actor,
-        });
-        return undefined;
-      }
-      const where = source === "pod" ? "a Legion role's pod" : "a person's machine";
-      const created = await client.projectArtifact(project, {
-        name,
-        content:
-          `AskGate rule decisions of session ${sessionId}, made on ${where} (source ` +
-          `\`${source}\`). One fenced block per decision follows, each holding one JSON ` +
-          `record.\n\n${block}\n`,
-        actor,
-      });
-      // Held once Dispatch has answered it, so the session's next record appends to this document
-      // and reads nothing to find it. An upload that fails or is given up holds nothing: the next
-      // record looks the document up by name, and uploads again only where none landed.
-      documents.set(sessionId, created.artifact.id);
+      const held =
+        documents.get(sessionId) ?? (await document(client, project, name, sessionId, actor));
+      // Held once Dispatch has answered for it, so the session's next record reads nothing to find
+      // it. A create that fails or is given up holds nothing: the next record reads the document
+      // by name, and creates again under the same key, which Dispatch replays rather than runs.
+      documents.set(sessionId, held);
+      // Every record, this session's first included, is appended: the document's text is written
+      // once, by the create, so no write of this session can replace what another wrote. The key
+      // is this record's own, so a late or repeated append is replayed rather than written twice.
+      await client.docEdit(
+        held,
+        { ops: [{ op: "insert", markdown: block, after: "end" }], actor },
+        intentKey(RECORD_KEY_PREFIX, sessionId, id)
+      );
       return undefined;
     };
     // This session's records, one at a time: the next starts once this write has settled, however
@@ -425,4 +451,76 @@ async function byName(
     }
     throw error;
   }
+}
+
+/**
+ * The id of the session's document: the one the project holds under that name, else the one this
+ * create makes. The create is sent under a key of the document's own, so the session's document is
+ * created once however many attempts, records and processes reach for it. An answer that says the
+ * create already landed — a replay Dispatch kept no answer for, `409 KEY_COMMITTED`, or
+ * `422 KEY_REUSED` for a create another version of this plugin wrote under the same key — sends
+ * this back to the read: the document is there to be appended to, and nothing uploads a second
+ * time. A create Dispatch never answered is this record's failure, and the next record asks again
+ * under the same key, which Dispatch replays, holds or refuses rather than running twice.
+ */
+async function document(
+  client: RecordClient,
+  project: string,
+  name: string,
+  sessionId: string,
+  actor: { readonly kind: "session"; readonly id: string }
+): Promise<string> {
+  const held = await byName(client, project, name);
+  if (held !== undefined) return held;
+  // The create's body, fixed for the session: the header alone, with no record, no time and no
+  // plugin version in it, so two attempts of it — two processes', or one process's own, a day
+  // apart — are the same request under the same key, which Dispatch replays rather than refusing
+  // as a key reused (`422 KEY_REUSED`).
+  const content =
+    `AskGate rule decisions of session ${sessionId}. One fenced block per decision follows, ` +
+    "each holding one JSON record.\n";
+  try {
+    const created = await client.projectArtifact(
+      project,
+      { name, content, actor },
+      intentKey(DOCUMENT_KEY_PREFIX, project, name)
+    );
+    return created.artifact.id;
+  } catch (error) {
+    if (!mayHaveCreated(error)) throw error;
+  }
+  const after = await byName(client, project, name);
+  if (after !== undefined) return after;
+  // Dispatch says this key's create landed, and the project holds no document of that name: it was
+  // deleted, or renamed. Uploading again would need a key of its own, and a key of its own is what
+  // replaces one document's records with another's, so this record is lost instead.
+  throw new Error(
+    `Dispatch holds the create of "${name}" under its key, and the project holds no document of ` +
+      "that name"
+  );
+}
+
+/**
+ * Whether this failure says Dispatch may have made the write already, so the caller reads what it
+ * wrote rather than sending it again: the write landed and its answer is gone
+ * (`409 KEY_COMMITTED`, or a replay of an answer Dispatch kept none of), or the key was used for
+ * a different request (`422 KEY_REUSED`), which only another writer under this same intent can be.
+ */
+function mayHaveCreated(error: unknown): boolean {
+  if (error instanceof DispatchWriteLandedError) return true;
+  return (
+    error instanceof DispatchServiceError &&
+    error.fromDispatch &&
+    error.status === 422 &&
+    error.code === IDEMPOTENCY_KEY_REUSED
+  );
+}
+
+/**
+ * One caller's `Idempotency-Key` for one intent: the prefix, and the sha256 of what the intent is
+ * of, which is what keeps the key inside `IDEMPOTENCY_KEY_PATTERN` whatever a session id or a
+ * document name holds.
+ */
+function intentKey(prefix: string, ...of: readonly string[]): string {
+  return `${prefix}.${createHash("sha256").update(of.join("\n")).digest("hex")}`;
 }
