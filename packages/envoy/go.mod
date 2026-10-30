@@ -133,27 +133,24 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800 // indirect
 )
 
-// The sjawhar/ygo fork is upstream ygo v1.51.2 plus fixes Dispatch depends on while each waits in
-// an upstream pull request (reearth/ygo #258, #260, #263, #266, #268, #269, #291, #304, #331, #332,
-// #333, #334; the fork carries #258's fix as its own closed duplicate, #262): an iterative delete
-// cascade and nested reads, so the stack a delete or read needs does not grow with a tree a peer
-// nested; the transactional GC range search; a whole document state resolves its own dependencies
-// before the pending cap, through a dependency worklist rather than a re-scan per step; items merge
-// only when their right origins match, so a re-encoded document keeps its text order; the bundled
-// stores keep a large incremental update, and BroadcastUpdate and the cluster relay check one with
-// the stores' check rather than refusing it past a pending cap; Apply stamps a room with no peer
-// idle when it returns, so the idle sweep evicts a room only the API touched; a Hocuspocus-framed
-// connection is answered one SyncStatus for each SyncStep2 or Update it sends, so the browser's
-// provider learns which of its edits the room took; CloseRoom closes a browser that connects while
-// it runs, which it used to leave on the room it removed, where no later edit reached it; a
-// document logs each committed transaction's update in commit order under its own lock
-// (UpdateLog), so the room's update observer measures each update against the room the commit
-// before it left; parked delete ranges are capped as parked items are and retried only once they
-// can apply; and a remote update's deferred items integrate in dependency order, so a document many
-// writers forked from decodes in time linear in its items rather than one pass over every deferred
-// item per dependency (INFRA-593; upstream fixed the same since v1.51.12, reearth/ygo #296 and
-// #312, which the fork's base predates). The fork's opt-in hooks and bounds
-// (Server.OnPeerUpdate, WithMaxIntegrateScan, WithIntegrateScanBudget) are off unless set, and
-// Dispatch sets none. A merged update's skip parking the items after it (reearth/ygo#257) is
-// upstream since v1.51.0.
-replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.51.3-sami.7
+// The sjawhar/ygo fork is upstream ygo v1.54.0 plus fixes Dispatch depends on while each waits in
+// an upstream pull request (its RELEASE_NOTES.md lists each): CloseRoom closes a browser that
+// connects while it runs (reearth/ygo#331); a document logs each committed transaction's update,
+// and what that transaction parked, in commit order under its own lock (UpdateLog,
+// LoggedUpdate.Parked, #332), so the room's update observer measures each update against the room
+// the commit before it left; a remote update's conflict scans can be bounded and split runs merge
+// back in linear time (#333, with a per-apply scan budget stacked on it); parked delete ranges are
+// capped as parked items are, retried only once they can apply, and an update past that cap is
+// refused before it changes the document (#334), as is an update past the pending cap (#340); an
+// observed text with a map-valued format no longer panics (#335); ChangedTypes and Parent on every
+// shared type (#336); awareness reaches its sender (#338); a failed write closes the peer (#339);
+// a relay-injected update that fails partway reaches the node's peers with what the room kept
+// (#341); and a struct sent again while it waits in the pending queue parks once (#344). The
+// v1.51.3-sami.N line's other fixes are upstream in v1.54.0, among them the dependency-ordered
+// integration of a remote update's deferred items that makes a document many writers forked
+// decode in time linear in its items (reearth/ygo #296, #312; INFRA-593). The fork's opt-in hooks
+// and bounds (Server.OnPeerUpdate, WithMaxIntegrateScan, WithIntegrateScanBudget) are off unless
+// set, and Dispatch sets none. This pins the release candidate rc/v1.54.1-sami.1 at 845ce79c until
+// its tag, v1.54.1-sami.1, exists; v1.51.3-sami.6 through sami.9 apply an update before their
+// parked-delete cap refuses it (reearth/ygo#334).
+replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.50.1-0.20261030152837-845ce79c04ec
