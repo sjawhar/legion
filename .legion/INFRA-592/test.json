@@ -2,40 +2,56 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-592",
-  "completed": "2026-10-30T07:11:30Z",
-  "round": 5,
-  "headSha": "0dcb0f223d889ad3871e3f3532d764156df06113",
-  "codeHeadSha": "bb5628b39c67defb89d9fb58709031bda891401c",
-  "scope": "Short round, as the architect set it (Envoy 07:05Z): the round's fix on the real binary, the round-4 red test, the five changed routes' tests; no load runs; the 1x gate and CI lanes are read at the merged head next round.",
+  "completed": "2026-10-30T10:52:00Z",
+  "round": 6,
+  "headSha": "5847ab111ac59fceaf231cdef031c27ef55ee698",
+  "codeHeadSha": "b18e2678e2b6e6691e3d7e3743a61bc25266aaa6",
+  "roundShape": "Full round, as the architect set it (10:19Z): the range carries db9743e8, a runtime fix to api/comment_create.go, so no file-list classification is needed.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran their real-binary proof at the head build (lt3, r5-demo.sh): the invalid comment edit while an edit holds the gate answered 400 INVALID_COMMENT in 0.006 s (theirs 0.004 s); the held edit 200 in 11.2 s; reads during the hold 200 in 0.03-0.10 s; the block-index waiter is dispatch-background; 0 ERROR lines in Dispatch's log."
+    "how": "Re-ran their real-binary refusal script at the head build (lt3, r6-refusals.sh): all eight refusals 400 in 0.005-0.020 s with the gate held (theirs 0.005-0.023 s), the held edit 200 in 14.4 s (theirs 14.2 s), 0 ERROR lines. Their 10x (t6-head-10x): 89,903 reads and 6,860 writes refused 429 OVERLOADED (theirs 88,980 / 6,843), 97 reads/s served, 1.69 events/s committed (theirs 1.79), 0 connection failures. Their 1x pair (one run 150 reads and 11 writes refused, one 0) is the same pattern my gate runs show; see the failure."
   },
-  "failed": 2,
+  "failed": 1,
   "failures": [
     {
-      "criterion": "Every database-free refusal of the changed routes answers before the writer gate (the architect's round-5 check; the class of round 4's finding)",
-      "evidence": "api/comment_create.go createCommentFor answers TURN_REQUIRES_ASK at line 571, after resolveThenLock/gatedCommentWrite has taken the documents' writer gates and opened the transaction. For a comment that carries an anchor and a turn but no ask_id and no reply_to, no row can make the thread an ask's (an anchor with reply_to or ask_id is refused before the gate), so the refusal is the request's own. Real binary (lt3 stack, head build, r6-refusals.sh in dispatch://INFRA-592/artifact/infra-592-tester-round5-tar-gz): with an edit holding the spec's writer gate, 'comment create: turn without ask_id' answered 400 TURN_REQUIRES_ASK after 12.05 s; with no gate held, 0.024 s. Red test: packages/envoy/internal/dispatch/api/document_writer_gate_test.go TestAnAnchoredCommentWithATurnIsRefusedBeforeTheWriterGate (commit a9f861bf 'test(dispatch): red test: an anchored comment with a turn is refused before the writer gate'), which holds the gate with service.AcquireDocumentWriter and requires the 400 TURN_REQUIRES_ASK within 2 s. `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://... go test ./internal/dispatch/api/ -run TestAnAnchoredCommentWithATurnIsRefusedBeforeTheWriterGate -count=3` fails 3 of 3: 'an anchored comment with a turn is still unanswered 2 s into another writer's hold of the document's gate (1 writers queued), want its 400 at once'."
-    },
-    {
-      "criterion": "CI read at the tested head",
-      "evidence": "gh pr view 2402 --json mergeable,mergeStateStatus -> CONFLICTING / DIRTY. git merge-tree main@origin (a21100c5, #2376 'people's answers on every model request', merged 06:48:17Z) 0dcb0f22 -> CONFLICT (content) in .dispatch/architecture/dispatch-api.md, .dispatch/architecture/dispatch-outbox.md and packages/envoy-client/src/dispatch-http.ts. check-runs total_count 0 at 0dcb0f22 and bb5628b3. The architect set this round to fail on the conflict so the implementer merges now (Envoy 07:05Z). dispatch-http.ts is a file of this PR's own diff, so the forward merge is a full round (architect's 00:58Z rule)."
+      "criterion": "The architect's 1x gate: refusals within 0-0.1% of reads and 0.7-1.5% of writes on #2402 merged after #2392, three runs; a burst that is admission's, not a box-wide stall, is a failure (architect, 10:19Z)",
+      "evidence": "Local merge of #2392 7d09eefb into b18e2678 (32ea5013 in /legion/scratch/tmp/infra-592-tester/m2392: built on round 4's aaece0e0; one text conflict in store/pool.go comments; budget 89; build and vet clean, TestDispatchConnectionsPerPodIsTheServers passes), three 1x runs with a 1 s box-CPU sampler (/proc/stat, a shell loop independent of loadgen) beside each: g6-1x-c 0/0; g6-1x-a 0 reads and 4 writes (0.56%, inside the band), the burst at 10:25:09-15 straddling the window start, box sampler 60-82% busy with ticks 1.04-1.21 s; g6-1x-b 214 reads (1.99%) and 19 writes (2.64%), outside the band. The g6-1x-b burst is admission's: from 10:29:20 to 10:29:55 the box sampler ticked every 1.02-1.33 s at 53-89% CPU (no stall; round 4's burst had a 12 s sampler gap). Dispatch's /metrics at 10:29:36 shows read admission full, 28 in flight and 20 queued, requests pool 35 in use, 0 pool waiters, GC pause total +59 ms over 10 s; the refused reads fall between the 10:29:36 and 10:29:41 samples (cumulative read refusals 45 -> 263) and the refused writes are logged at 10:29:43-50. In the same window Dispatch's access log shows comment and edit writes taking 3.0-8.0 s and issue reads 3.1-3.3 s, and Dispatch logged at 10:29:48 'event horizon held back by an open transaction; live event readers wait for it' pending_for=5.38 s, holder a dispatch-requests backend 'idle in transaction' since 10:29:42.216 after 'select last_seq, project_key, pg_current_xact_id() from issues where key = $1 for no key update' (the event append's issue lock). The Postgres log shows no checkpoint and no statement over 50 ms between 10:29:28 and 10:29:50. So for about 15 s writes held their transactions for seconds with Postgres idle-ish, reads that wait on the event horizon or on those rows piled into the 28 read slots, and the 1 s admission wait refused the excess. Which wait held the write transaction idle is not established [INFERENCE: the 5.4 s idle-in-transaction after the issue lock points at work done in Go while the transaction is open, such as the document or ledger work of a write, or a wait on another pool]. No red test: the burst appears in one of three 180 s 1x load runs on the 2-core harness and has no deterministic unit reproduction; the evidence is the run directory g6-1x-b (dispatch.log, samples.json, TABLES.md) and boxcpu-g6-1x-b.txt in dispatch://INFRA-592/artifact/infra-592-tester-round6-tar-gz."
     }
   ],
   "architectChecks": {
-    "fixOnRealBinary": "Seven of the eight database-free refusals answer before the gate. With an edit holding the spec's writer gate (comment row held in psql 15 s) / with no gate held: comment edit blocks without base_revision 400 INVALID_COMMENT 0.020 / 0.005 s; comment create anchor and reply_to 400 INVALID_COMMENT 0.006 / 0.006 s; reply_to_block without reply_to 400 INVALID_COMMENT 0.006 / 0.006 s; anchor with empty quote 400 INVALID_ANCHOR 0.005 / 0.015 s; anchor with quote and mark_id 400 INVALID_ANCHOR 0.006 / 0.006 s; ask create anchor with no artifact 400 INVALID_ANCHOR 0.011 / 0.008 s; issue patch closing with a bad external link URL 400 INVALID_URL 0.006 / 0.006 s. The eighth, an anchored comment with a turn and no ask, is the failure above. Codes match the no-gate answers in every case. The held edit landed 200 in 14.2 s. Comment actions (resolve/reopen/accept/reject) carry no request-only refusal behind their gate: their refusals all read the comment row.",
-    "redTestRound4": "TestACommentEditRefusedForItsInputWaitsOnNoWriterGate is unmodified (document_writer_gate_test.go unchanged from 804035ec to 0dcb0f22) and passes 3 of 3.",
-    "changedRoutesTests": "go test -p 2 -parallel 4 ./internal/dispatch/api/ -run 'Anchor|Turn|ExternalLink|CommentEdit|EditComment|Thread|Reply|WriterGate|Gated|Comment.*Block|IssuePatch|PatchIssue|CreateAsk|AskCreate|Ask.*Anchor' (132 tests, my new red test skipped): ok in 97.3 s against the lt3 stack's Postgres 16.2.",
-    "loadAndGate": "Not run this round, by the architect's scope; the round-4 1x gate (5 of 6 runs 0 refusals, the sixth a box-wide stall) stands until the merged head."
+    "refusalsBeforeGate": "PASS. Real binary, an edit holding the spec's writer gate 14.4 s / no gate held: comment edit blocks without base_revision 400 INVALID_COMMENT 0.020 / 0.006 s; comment create anchor and reply_to 400 INVALID_COMMENT 0.007 / 0.010 s; reply_to_block without reply_to 400 INVALID_COMMENT 0.006 / 0.007 s; turn without ask_id 400 TURN_REQUIRES_ASK 0.0055 / 0.0052 s; empty quote 400 INVALID_ANCHOR 0.005 / 0.005 s; quote and mark_id 400 INVALID_ANCHOR 0.006 / 0.005 s; ask create anchor with no artifact 400 INVALID_ANCHOR 0.010 / 0.010 s; issue patch closing with a bad URL 400 INVALID_URL 0.006 / 0.007 s. Red tests TestAnAnchoredCommentWithATurnIsRefusedBeforeTheWriterGate and TestACommentEditRefusedForItsInputWaitsOnNoWriterGate unmodified (git diff 9aa25ee4..5847ab11 of document_writer_gate_test.go is empty), pass 3 of 3 with the refresh and writer-gate pinned-read tests.",
+    "runtimeJoins": "PASS. (a) #2376's per-call signal ends #2402's Retry-After wait: signal-wait.ts against a local server answering 429 OVERLOADED with Retry-After 5: DispatchClient.sessionAnswers with a signal aborted at 300 ms rejected at 301 ms after 1 request ('caller's deadline'); with no signal it made 3 requests and gave up at 10,486 ms naming the Retry-After. envoy-client dispatch-http.test.ts 52 pass 0 fail. (b) #2480's upload tests take the writer gate: across the merge 93436e52 every #2480 test that joins a write (docs upload_anchors_test.go, upload_memory_test.go, marks_test.go, api anchors_test.go) takes documentService.AcquireDocumentWriter and joins under that context before beginning its transaction; go test ./internal/dispatch/docs/ -run 'Upload|Anchor|Mark' (92 tests) ok 147 s, ./internal/dispatch/api/ -run Anchor ok.",
+    "connections87": "PASS. ConnectionsPerProcess = 48+6+4+4+4+1+15(13 lease names+2)+1+1+3 = 87 = infra/gcp dispatchConnectionsPerPod; README, AGENTS.md, store/pool.go, running-dispatch.md, dispatch-store.md and the changelog fragment say 87.",
+    "ci": "Not readable: at 10:50Z every lane at b18e2678 (envoy-go, envoy-go-race, envoy-go-race-docs, ci-filters, dispatch, pi-envoy and the rest) was queued; read as running, not waited for. The PR is not reported CONFLICTING."
   },
+  "observations": [
+    "#2392 at 7d09eefb runs GET /auth/whoami's reads and the relay's first start through its 2-connection horizon pool (store/pool.go comment on horizonPoolSize in the merge); a request path on a 2-connection pool is #2392's design, noted for that tree.",
+    "The 10x head run's read refusal p99 was 164 ms and writes waited the 1 s bound, as in every earlier round."
+  ],
   "proof": [
     {
-      "criterion": "A write refused for its own input is answered before it takes a document's writer gate",
-      "surface": "the real envoy-dispatch on the load stack (head build 0dcb0f22), a person's HTTP writes while another edit holds the spec's writer gate",
-      "command": "LOADTEST_ROOT=lt3 stack.sh reset; r6-refusals.sh (psql holds the anchored comment's row 15 s; PATCH the comment to hold the gate; send eight invalid requests on the five changed routes; the same eight with no gate held)",
-      "observed": "seven of eight answered 400 with their codes in 0.005-0.020 s while the gate was held, the same as with none; 'turn without ask_id' on an anchored comment answered 400 TURN_REQUIRES_ASK after 12.05 s",
-      "headSha": "0dcb0f223d889ad3871e3f3532d764156df06113",
-      "negativeControl": "round 4 at b7892ad2: the invalid comment edit answered 400 after 8.93 s behind a held gate"
+      "criterion": "Every request-only refusal of the gated write routes answers before the writer gate",
+      "surface": "the real envoy-dispatch on the load stack (head build 5847ab11), a person's HTTP writes while another edit holds the spec's writer gate",
+      "command": "LOADTEST_ROOT=lt3 stack.sh reset; r6-refusals.sh",
+      "observed": "all eight answered 400 with their codes in 0.005-0.020 s with the gate held, the same as with none; held edit 200 in 14.4 s; 0 ERROR lines",
+      "headSha": "5847ab111ac59fceaf231cdef031c27ef55ee698",
+      "negativeControl": "round 5 at bb5628b3: TURN_REQUIRES_ASK answered after 12.05 s behind the held gate"
+    },
+    {
+      "criterion": "A caller's own signal ends the client's Retry-After wait",
+      "surface": "the dispatch command's DispatchClient (envoy-client source at the head) against a local HTTP server",
+      "command": "bun signal-wait.ts (server: every request 429 OVERLOADED, Retry-After: 5)",
+      "observed": "with a signal aborted at 300 ms: rejected at 301 ms after 1 request",
+      "headSha": "5847ab111ac59fceaf231cdef031c27ef55ee698",
+      "negativeControl": "no signal: 3 requests, rejected at 10,486 ms after waiting out Retry-After twice"
+    },
+    {
+      "criterion": "Excess load refused early with a retryable status at 10x",
+      "surface": "INFRA-589's 2-core load reproduction, Dispatch built from the head",
+      "command": "LOADTEST_ROOT=lt3 run-step.sh t6-head-10x --events 40 --sessions 1000 --requests 600",
+      "observed": "every refusal 429 OVERLOADED (89,903 reads, 6,860 writes; read refusal p99 164 ms), 0 connection failures, 0 other non-2xx, 97 reads/s served, 1.69 events/s committed, at most 13 goroutines waiting",
+      "headSha": "5847ab111ac59fceaf231cdef031c27ef55ee698",
+      "negativeControl": "main e9398987 at 10x on the same harness (round 2): 5 of 107,355 reads 2xx, 19,713 goroutines waiting"
     }
   ]
 }
