@@ -1023,6 +1023,7 @@ jobs:
               - 'packages/envoy/internal/**'
               - 'packages/envoy/listenfd/**'
               - 'packages/envoy/loadtest/**'
+              - 'packages/envoy/migrationid/**'
               - 'packages/envoy/scripts/**'
               - 'packages/envoy/testnatsimages/**'
               - '.omp-pin'

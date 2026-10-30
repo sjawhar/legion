@@ -5,11 +5,20 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"github.com/sjawhar/envoy/migrationid"
 )
 
-// craftedNumbered is how many numbered migrations a crafted set holds: enough for a gap to show,
-// and nothing about the set the daemon ships, whose numbers Load reads for itself.
+// craftedNumbered is how many numbered migrations a crafted set holds, and the number such a set's
+// series closed at: enough for a gap to show, and nothing about the set the daemon ships, whose
+// own closing file migrationid records. A crafted set is read by load with that number
+// (crafted), rather than by Load, which finds the daemon's series by its closing file.
 const craftedNumbered = 3
+
+// crafted checks a crafted set against its own closing number.
+func crafted(versions map[int]string) error {
+	return migrationid.CheckClosedAt(versions, craftedNumbered)
+}
 
 // craftedSet is a set shaped like the embedded one — versions 1 through
 // craftedNumbered, one file each — with the named extra files added. A test
@@ -43,7 +52,7 @@ func TestTheEmbeddedMigrationsKeepTheIdentifierRule(t *testing.T) {
 // the loader refuses the pair by name rather than applying one and dropping the
 // other.
 func TestLoadRefusesTwoMigrationsSharingATimestamp(t *testing.T) {
-	_, err := Load(craftedSet("20261030120000_a.up.sql", "20261030120000_b.up.sql"))
+	_, err := load(craftedSet("20261030120000_a.up.sql", "20261030120000_b.up.sql"), crafted)
 	if err == nil {
 		t.Fatal("two migrations sharing a timestamp were loaded, want a refusal")
 	}
@@ -86,7 +95,7 @@ func TestLoadRefusesASetThatBreaksTheIdentifierRule(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := Load(tc.fsys)
+			_, err := load(tc.fsys, crafted)
 			if err == nil {
 				t.Fatal("Load took a set that breaks the identifier rule, want a refusal")
 			}
@@ -100,7 +109,7 @@ func TestLoadRefusesASetThatBreaksTheIdentifierRule(t *testing.T) {
 }
 
 func TestLoadTakesANumberedSetWithATimestampedMigration(t *testing.T) {
-	all, err := Load(craftedSet("20261030120000_x.up.sql"))
+	all, err := load(craftedSet("20261030120000_x.up.sql"), crafted)
 	if err != nil {
 		t.Fatalf("load a set that keeps the rule: %v", err)
 	}

@@ -59,10 +59,10 @@ type Migration struct {
 // calls it before opening a transaction applies nothing from a set it refuses. The order is the
 // versions', never the file names': 9_a.up.sql runs before 0010_b.up.sql, and every timestamp
 // after every number. Load judges no version past its digits; that a set's numbered versions run
-// 1 to the file its series closed at (migrationid.Closed), each taken once, and that every version
-// above them is a real UTC instant is the repository's rule about handing identifiers out, which migrationid.Check holds
-// Dispatch's set to and pgmigratetest.CheckNumberedOneToN the broker's, which is numbered
-// throughout.
+// 1 to the file its series closed at (recorded once in migrationid), each taken once,
+// and that every version above them is a real UTC instant is the repository's rule about handing
+// identifiers out, which migrationid.Check holds Dispatch's set to and
+// pgmigratetest.CheckNumberedOneToN the broker's, which is numbered throughout.
 func Load(fsys fs.FS, dir string) ([]Migration, error) {
 	entries, err := fs.ReadDir(fsys, dir)
 	if err != nil {

@@ -163,10 +163,18 @@ schema_applied() {
   printf '%s-%s-%s\n' "$max" "$count" "${digest%% *}"
 }
 
-# schema_max prints the highest version a recorded value holds, in either form: the value above,
-# or the bare max(version) the deployer before this one recorded.
-schema_max() {
-  printf '%s\n' "${1%%-*}"
+# schema_changed answers whether the applied set moved from a recorded baseline to the set the
+# database holds now: 0 when it moved, 1 when it did not. A baseline in the form above holds the
+# whole set, so any difference is a move; a bare max(version), which the deployer before this one
+# recorded, holds only the highest version, so all it can show is a version applied above it.
+schema_changed() {
+  local baseline="$1"
+  local now="$2"
+  if [[ "$baseline" == *-* ]]; then
+    [[ "$now" != "$baseline" ]]
+    return
+  fi
+  ((${now%%-*} > baseline))
 }
 
 # schema_label describes a value for a log line: the highest version applied, and, for a value
@@ -266,7 +274,6 @@ roll_back_or_stop() {
   local running
   local now
   local status
-  local moved
   local refusing
   refusing="so refusing to roll back to $previous, which runs against schema $(schema_label "$baseline"), and forward recovery is required"
   if ! compose 120 stop dispatch; then
@@ -282,15 +289,7 @@ roll_back_or_stop() {
     log "could not read the schema version after stopping $sha (status $status), $refusing"
     return 1
   }
-  moved=false
-  if [[ "$baseline" == *-* ]]; then
-    if [[ "$now" != "$baseline" ]]; then
-      moved=true
-    fi
-  elif (($(schema_max "$now") > baseline)); then
-    moved=true
-  fi
-  if [[ "$moved" == true ]]; then
+  if schema_changed "$baseline" "$now"; then
     log "refusing to roll back to $previous: it runs against schema $(schema_label "$baseline"), and $sha changed the applied migrations to $(schema_label "$now") before it failed. $sha is stopped, and forward recovery is required: deploy an image that fixes it, or start $sha by hand once its failure is understood. Never start $previous against schema $(schema_label "$now")"
     return 1
   fi

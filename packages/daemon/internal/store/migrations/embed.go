@@ -10,8 +10,9 @@
 // the same time cannot both claim one version the way two branches each taking
 // the next number did. A timestamp sorts after every numbered migration and
 // timestamps sort among themselves by time, and migrationid.Check holds a set
-// to that rule: the numbered series closed at 0061_pull_request_head_run.up.sql
-// (migrationid.Closed), so a set holding a number above it is refused.
+// to that rule: the daemon's numbered series closed at
+// 0061_pull_request_head_run.up.sql (migrationid's closings), so a set holding a
+// number above it is refused.
 package migrations
 
 import (
@@ -48,6 +49,13 @@ func All() ([]Migration, error) {
 // silence. So is a set migrationid.Check refuses, which is what keeps a daemon
 // carrying a version two branches could collide on from booting at all.
 func Load(fsys fs.FS) ([]Migration, error) {
+	return load(fsys, migrationid.Check)
+}
+
+// load is Load with the identifier check given, so a test can read a crafted set
+// of its own few numbered migrations against its own closing number
+// (migrationid.CheckClosedAt) rather than one shaped like the embedded set.
+func load(fsys fs.FS, check func(map[int]string) error) ([]Migration, error) {
 	names, err := fs.Glob(fsys, "*.up.sql")
 	if err != nil {
 		return nil, fmt.Errorf("list migrations: %w", err)
@@ -72,7 +80,7 @@ func Load(fsys fs.FS) ([]Migration, error) {
 		}
 		versions[migration.Version] = migration.Name
 	}
-	if err := migrationid.Check(versions); err != nil {
+	if err := check(versions); err != nil {
 		return nil, err
 	}
 	return all, nil

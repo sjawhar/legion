@@ -350,9 +350,10 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 }
 
 // Dispatch's set hands its identifiers out the way the repository requires: its numbered
-// migrations are 1 to however many of them there are, each taken once, and every migration added
-// since is named for the UTC moment its author created it, so two pull requests open at once
-// cannot both claim one version; migrationid.Check says why.
+// migrations are 1 to the file its series closed at (migrationid's closings), each
+// taken once and none above it, and every migration added since is named for the UTC moment its
+// author created it, so two pull requests open at once cannot both claim one version;
+// migrationid.Check says why.
 func TestMigrationSetTakesNumbersThenTimestamps(t *testing.T) {
 	migrations, err := pgmigrate.Load(migrationFiles, "migrations")
 	if err != nil {

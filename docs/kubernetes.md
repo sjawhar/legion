@@ -1448,6 +1448,28 @@ The daemon runs on a host its pods can reach and serves the worker stream they d
 is `legion controller start` on the operator's machine, or, under `controller: daemon`, a pod of its
 own with one launcher that the daemon launches ([The controller](#the-controller)).
 
+### Daemon migration identifiers and release order
+
+A migration's version is the leading digits of its file name (`internal/store/migrations`). The
+numbered migrations are the sequence the daemon grew up with, 1 to the number its series closed at
+(`0061_pull_request_head_run.up.sql`, recorded once in `migrationid`), each taken once; every
+migration added since takes the UTC moment its author created it, 14 digits `YYYYMMDDHHMMSS`, so two
+branches open at the same time cannot both claim one version. A timestamp sorts after every number,
+so a fresh database applies the numbered migrations in their old order and the timestamped ones in
+the order they were written.
+
+`schemaVersion` is the highest version applied, not proof that every version below it is applied:
+`Migrate` applies every version `schema_version` lacks, in version order, so a migration that
+merges below one a database already has still runs there, once. A deployed database applies each
+migration as the release carrying it deploys, so it can apply two migrations written on branches
+open at the same time in the other order than a fresh database does; a migration must not depend
+on that order, and one that needs another's effect is written after that one has merged.
+
+The release that reads the version cast to `bigint` goes out before any release that carries a
+timestamped migration: the release before it reads `max(version)` uncast, so a deployment that
+skips it costs the daemon it replaces one failed state read on each connection that prepared the
+uncast read, which pgx then drops.
+
 ### Upgrading a deployment with running trees
 
 This section is for a deployment that runs the release before issue pods (`legion-v10.0.0`), whose
@@ -2070,16 +2092,9 @@ record, every Sandbox, its uid, its annotations and its tree label. In this orde
    written after the numbered series takes the UTC moment it was created as its version, the
    14 digits its file name begins with (`20261030120000_<slug>.up.sql` records
    `version = 20261030120000`), so reversing one deletes that 14-digit value and not a small
-   number. `schemaVersion` is the highest version applied, not proof that every version below it
-   is applied: `Migrate` applies every version `schema_version` lacks, in version order, so a
-   migration that merges below one a database already has still runs there, once. A deployed
-   database applies each migration as the release carrying it deploys, so it can apply two
-   migrations written on branches open at the same time in the other order than a fresh database
-   does; a migration must not depend on that order, and one that needs another's effect is written
-   after that one has merged. Roll this release out before any release that carries a timestamped
-   migration: this one reads the version cast to `bigint` and the release before it does not, so a
-   deployment that skips it costs the daemon it replaces one failed state read on each connection
-   that prepared the uncast read, which pgx then drops.
+   number. What the recorded versions do and do not prove, and which release goes out first, are
+   [Daemon migration identifiers and release
+   order](#daemon-migration-identifiers-and-release-order).
 4. **Return every one-container issue Sandbox to the earlier layout's template.** With
    `<namespace>` and `<project>` as in [Upgrading a deployment with running
    trees](#upgrading-a-deployment-with-running-trees) step 4, each patch suspends the Sandbox, which
