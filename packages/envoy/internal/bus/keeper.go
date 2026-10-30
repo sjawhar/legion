@@ -132,7 +132,9 @@ func (c *Client) awaitKeeper() {
 // stamped with a generation higher than streamConfigGeneration belongs to a newer build and is
 // left exactly as it is, as a start leaves it (ensureStreamWithConfig), so the two builds a
 // release runs at once never put their own settings back in turn. An update whose answer never
-// came succeeds when the stream, read again, needs nothing more (updateStream).
+// came succeeds when the stream, read again, needs nothing more, and one the server refused as
+// overlapping the stream itself is sent again until the stream needs nothing more or its sends
+// run out (updateStream).
 func keepStream(js nats.JetStreamContext, cfg *nats.StreamConfig) ([]string, error) {
 	info, err := js.StreamInfo(Stream)
 	if err != nil {

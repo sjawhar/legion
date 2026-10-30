@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   type ArchitectureSource,
   type IssueSummary,
+  type ItemBlocks,
   NO_ROUTE_ROLLING_RELEASE_MESSAGE,
   type Sleep,
   sleep,
@@ -1000,6 +1001,32 @@ describe("DispatchClient", () => {
     expect(
       requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
     ).toEqual(["/api/v1/comments/comment-1"]);
+  });
+
+  test("maps a comment's and a message's blocks reads to the API", async () => {
+    const blocks: ItemBlocks = {
+      item: { kind: "comment", id: "comment-1" },
+      revision: 1,
+      indexed: true,
+      blocks: [{ id: "b1", type: "paragraph", text: "Alpha.", from: 0, to: 6 }],
+    };
+    const { fetchImpl, requests } = fakeFetch([
+      jsonResponse(blocks),
+      jsonResponse({ ...blocks, item: { kind: "message", id: "message-1" } }),
+      jsonResponse({ ...blocks, item: { kind: "message", id: "message-2" } }),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    expect(await client.commentBlocks("comment-1")).toEqual(blocks);
+    await client.messageBlocks("message-1");
+    await client.messageBlocks("message-2", "s1");
+    expect(
+      requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
+    ).toEqual([
+      "/api/v1/comments/comment-1/blocks",
+      "/api/v1/messages/message-1/blocks",
+      "/api/v1/messages/message-2/blocks?session=s1",
+    ]);
   });
 });
 

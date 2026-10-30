@@ -158,6 +158,8 @@ export type {
   IssueReferences,
   IssueRouteReach,
   IssueSummary,
+  ItemBlock,
+  ItemBlocks,
   ListUsersResponse,
   LiveAgentFrame,
   LiveClientFrame,
