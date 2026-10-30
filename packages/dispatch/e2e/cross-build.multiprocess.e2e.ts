@@ -7,6 +7,7 @@ import {
   type WebSocket,
 } from "@playwright/test";
 
+import type { LiveClientFrame, LiveServerFrame } from "../web/src/api/types";
 import {
   baseUrl,
   createAsk,
@@ -41,8 +42,9 @@ import { signIn } from "./users";
  * direction runs one build's page against the other build's server; without it both processes run
  * this tree. In each direction the page signs in, opens a project's issue list and an issue, posts
  * a comment, answers an ask, types into the issue's document and sees the edit saved and shown in
- * a context of the other build's page, and opens the Delivery page, whose socket subscribes. Every
- * selector is one both builds' own browser suites use.
+ * a context of the other build's page, and opens the Delivery page, whose live socket subscribes
+ * to the timeline and is answered a snapshot. Every selector is one both builds' own browser
+ * suites use.
  *
  * A previous release knows no shared cookie key (e2e/run-server.sh), so a context signs in on the
  * process its API requests go to and sends them nowhere else, and every seed call is pinned to the
@@ -80,13 +82,19 @@ async function splitContext(
   return context;
 }
 
-/** The frames the page's Delivery socket sends and receives, as text, from the moment it opens. */
-function watchDeliverySocket(page: Page): { sent: string[]; received: string[] } {
-  const frames = { received: [] as string[], sent: [] as string[] };
+/** The frames the page's live socket sends and receives, from the moment it opens. Both builds
+ *  run every live subscription of a page over one `/ws/live` socket, with the same frames
+ *  (web/src/api/live-socket.ts). */
+function watchLiveSocket(page: Page): { sent: LiveClientFrame[]; received: LiveServerFrame[] } {
+  const frames = { received: [] as LiveServerFrame[], sent: [] as LiveClientFrame[] };
   page.on("websocket", (socket: WebSocket) => {
-    if (new URL(socket.url()).pathname !== "/ws/delivery") return;
-    socket.on("framesent", (frame) => frames.sent.push(String(frame.payload)));
-    socket.on("framereceived", (frame) => frames.received.push(String(frame.payload)));
+    if (new URL(socket.url()).pathname !== "/ws/live") return;
+    socket.on("framesent", ({ payload }) => {
+      frames.sent.push(JSON.parse(String(payload)) as LiveClientFrame);
+    });
+    socket.on("framereceived", ({ payload }) => {
+      frames.received.push(JSON.parse(String(payload)) as LiveServerFrame);
+    });
   });
   return frames;
 }
@@ -108,14 +116,14 @@ for (const pageProcess of dispatchProcesses) {
       { options: [{ label: "Ship" }, { label: "Hold" }], question: "Ship it?" },
       { ...on, actor: seedAgent, as: "agent" }
     );
-    // The Delivery page's timeline, written in Postgres: its socket answers a snapshot only once
-    // delivery is configured.
+    // The Delivery page's timeline, written in Postgres: the live socket answers its timeline
+    // subscription with a snapshot only once delivery is configured.
     await seedDeliveryFixture();
 
     const context = await splitContext(browser, pageProcess, server);
     try {
       const page = await context.newPage();
-      const delivery = watchDeliverySocket(page);
+      const live = watchLiveSocket(page);
 
       // The project's issue list, and the issue from it.
       await page.goto("/projects/XB/issues");
@@ -170,18 +178,27 @@ for (const pageProcess of dispatchProcesses) {
           .toContain(edit);
       }
 
-      // The Delivery page on the fixture's day, whose socket subscribes and is answered with a
-      // snapshot.
+      // The Delivery page on the fixture's day: the page's live socket subscribes to the timeline
+      // view, and the other build's server answers that subscription with a snapshot.
       await page.goto(`/delivery?${deliveryWindow}`);
       await expect(page.getByRole("heading", { name: "Delivery timeline" })).toBeVisible();
       await expect
-        .poll(() => delivery.sent.map((frame) => JSON.parse(frame).type))
-        .toContain("subscribe");
+        .poll(() =>
+          live.sent.flatMap((frame) => (frame.type === "subscribe" ? [frame.view.kind] : []))
+        )
+        .toContain("timeline");
       await expect
-        .poll(() => delivery.received.map((frame) => JSON.parse(frame)))
-        .toContainEqual(expect.objectContaining({ type: "snapshot" }));
+        .poll(() => {
+          const timeline = live.sent.flatMap((frame) =>
+            frame.type === "subscribe" && frame.view.kind === "timeline" ? [frame.sub] : []
+          );
+          return live.received.some(
+            (frame) => frame.type === "snapshot" && timeline.includes(frame.sub)
+          );
+        })
+        .toBe(true);
 
-      // The split held: every asset came from the page's process, and the document and Delivery
+      // The split held: every asset came from the page's process, and the document and live
       // sockets went to the other. Read before the other build's context opens a page of its own.
       const assets = (
         (await (await fetch(new URL("/_proxy/requests", baseUrl))).json()) as ProxiedRequest[]
@@ -191,7 +208,7 @@ for (const pageProcess of dispatchProcesses) {
       const sockets = (await (
         await fetch(new URL("/_proxy/sockets", baseUrl))
       ).json()) as ProxiedSocket[];
-      for (const path of ["/ws/doc/", "/ws/delivery"]) {
+      for (const path of ["/ws/doc/", "/ws/live"]) {
         const opened = sockets.filter((socket) => socket.path.startsWith(path));
         expect(opened.length, `a ${path} socket opened`).toBeGreaterThan(0);
         expect(opened.filter((socket) => socket.upstream !== server)).toEqual([]);

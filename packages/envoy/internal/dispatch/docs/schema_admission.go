@@ -275,7 +275,8 @@ func (w *admittedWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter 
 // without a change to ygo (revoke). ygo writes on a socket from its writer goroutine alone, and
 // only reading ends its read loop, so revoke sets a read deadline already past, which ends that
 // loop; ygo then stops its writer and closes the connection, and that Close writes the close frame
-// first: nothing else writes by then. Until revoke, every call passes through.
+// first. Two of ygo's goroutines close one connection, and Close serializes them. Until revoke,
+// every call passes through.
 type admittedConn struct {
 	net.Conn
 	mu      sync.Mutex
@@ -327,16 +328,21 @@ func (c *admittedConn) SetDeadline(t time.Time) error {
 }
 
 // Close writes, on a revoked connection, the close frame with schemaRevokedCloseCode before it
-// closes. ygo closes the connection once its writer has stopped (provider/websocket/server.go,
-// ServeHTTP's teardown after handleDisconnect), so the frame follows the last message ygo wrote.
+// closes. Two of ygo's goroutines close one connection (provider/websocket/server.go): its
+// ServeHTTP teardown, once its writer has stopped (after handleDisconnect), and its context
+// watcher, which the revoke itself wakes - gorilla reads through the buffered reader net/http
+// hijacked with the connection, whose connReader reads the connection directly and cancels the
+// request's context on the read error the past deadline gives it (net/http's server.go,
+// connReader.Read calling handleReadError). So whichever call arrives first writes the frame while
+// it holds the lock, and the other waits there rather than closing the connection from under that
+// write: a close that beats the frame reaches the page as an abnormal closure, not as 1012.
 func (c *admittedConn) Close() error {
 	c.mu.Lock()
-	frame := c.revoked && !c.closed
-	c.closed = true
-	c.mu.Unlock()
-	if frame {
+	defer c.mu.Unlock()
+	if c.revoked && !c.closed {
 		_ = c.Conn.SetWriteDeadline(time.Now().Add(time.Second))
 		_, _ = c.Conn.Write(schemaRevokedCloseFrame)
 	}
+	c.closed = true
 	return c.Conn.Close()
 }
