@@ -184,7 +184,7 @@ func TestBootReconcileHoldsATodoUnderAnUnreleasedChildOfALiveTree(t *testing.T) 
 		t.Fatalf("open JetStream: %v", err)
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	consumers, err := intake.OpenConsumers(ctx, js, intake.ConsumerSpec{
+	consumers, err := intake.OpenConsumers(ctx, js, pool, intake.ConsumerSpec{
 		Project: "CAPTURE", Repositories: []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion")}, AckWait: time.Second, NakDelay: time.Millisecond, Logger: log,
 	})
 	if err != nil {

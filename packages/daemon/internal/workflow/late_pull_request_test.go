@@ -117,6 +117,10 @@ func TestALatePullRequestEventChangesNothing(t *testing.T) {
 		{"an opened newer than the head", record.PullRequestOpen, lateOpened("head-a", later), kept},
 		{"a close older than the reopen", record.PullRequestOpen, lateClosed("head-c", earlier), kept},
 		{"a reopen older than the close", record.PullRequestClosed, lateReopened("head-c", earlier), closed},
+		// A reopen of the pull request the record holds open, at its clock, is the reopen that
+		// opened it delivered again: the CI settlement is kept.
+		{"a reopen at the same clock as the open pull request", record.PullRequestOpen, lateReopened("head-c", lateApplied), kept},
+		{"a reopen older than the open pull request", record.PullRequestOpen, lateReopened("head-c", earlier), kept},
 
 		{"a newer synchronize", record.PullRequestOpen, lateSync("head-d", later), pullRequestView{head: "head-d", decision: "approved", state: record.PullRequestOpen}},
 		{"a synchronize at the same clock", record.PullRequestOpen, lateSync("head-d", lateApplied), pullRequestView{head: "head-d", decision: "approved", state: record.PullRequestOpen}},
