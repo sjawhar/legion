@@ -1474,3 +1474,29 @@ func (s *server) useUpArtifactScanTotal(w http.ResponseWriter, r *http.Request) 
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// tangleArtifactBeyondOneApply gives the document a stored history ending in a tangle no one apply
+// of a browser's may scan through, closing its room first
+// (docs.Service.TangleBeyondOneApplyForTest). Test-only: mounted by routes() only when
+// Deps.TestHooksEnabled is set, so a browser test can drive the editor's handling of
+// 4413 DOC_TOO_TANGLED without making the tens of thousands of items at one place a browser would
+// have to meet for an honest apply to pass the scans one apply is allowed.
+func (s *server) tangleArtifactBeyondOneApply(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	artifact, err := s.loadArtifactForRequest(r.Context(), s.deps.Store.Pool, r)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if artifact.Kind != "doc" {
+		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
+		return
+	}
+	if err := s.deps.Docs.TangleBeyondOneApplyForTest(r.Context(), artifact.ID); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}

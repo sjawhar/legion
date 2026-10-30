@@ -138,6 +138,115 @@ func (s *Service) UseUpScanTotalForTest(ctx context.Context, artifactID string) 
 	return nil
 }
 
+// The tangle TangleBeyondOneApplyForTest appends: a chain of tangledChain one-character items,
+// each of a client of its own from tangledChainClient on, and the client of the probe item the
+// hook measures the chain with, which stands for the browser whose insert meets it. A browser's
+// client ID is a random 32-bit number, so these collide with one no more often than any two
+// browsers' do, and all but about one in 30,000 of them are past the chain's, which is what makes
+// a browser's insert scan the chain rather than stop at its first item (Item.integrate, case 1,
+// crdt/item.go:155-168).
+const (
+	tangledChain       = 40_000
+	tangledChainClient = 100_000
+	tangledProbeClient = 4_000_000_000
+)
+
+// TangleBeyondOneApplyForTest closes artifactID's room if this server holds it and appends to its
+// stored history one update whose structs no later apply of a browser's can merge: after the last
+// character of the document's last text, a chain of tangledChain one-character items, each of a
+// client of its own so none merges with its neighbour. An insert a browser made at that place
+// before the chain arrived - a paste at the end of that text, offline - names the same left origin
+// and no right origin, so its apply scans the chain to its end (Item.integrate, sjawhar/ygo
+// v1.51.3-sami.7, crdt/item.go:117-192): 40,000 items, past the 27,594 an update no rule weighs is
+// allowed (scanCeiling(0)), so the room refuses it whole and the browser is closed 4413
+// DOC_TOO_TANGLED (documentTooTangled). Decoding the chain costs the room about one scan an item,
+// 40,006 of its 1,000,000-item scan total measured on this pod (the browser row of
+// packages/dispatch/e2e/document-refusals.e2e.ts, whose server logged a refusal at an allowance of
+// 27,528 leaving 932,466 of the total), so the room the next load makes has far more left than one
+// apply may scan and refuses that apply as too tangled rather than as needing a rebuild
+// (roomScans.reserve). A document tangles that far only where tens of thousands of items have been
+// made at one place since a browser's edit, which no browser test can type. The document reads the
+// chain's "a"s at the end of its last text, and no stored rendering until the next room settles.
+// It refuses to return without error unless the stored history leaves more of the room's scan
+// total than one apply may scan, so that the ceiling is what refuses the apply, and unless an
+// insert at the chain's head scans past that ceiling. It is mounted only through Dispatch's
+// test-hook route.
+func (s *Service) TangleBeyondOneApplyForTest(ctx context.Context, artifactID string) error {
+	if err := s.Evict(ctx, artifactID); err != nil {
+		return err
+	}
+	loaded, err := s.persistence.Load(ctx, artifactID)
+	if err != nil {
+		return err
+	}
+	doc := newDocumentCopy()
+	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
+		return err
+	}
+	text := lastWrittenText(doc.GetXmlFragment(fragmentName))
+	if text == nil {
+		return fmt.Errorf("document %s holds no text to chain onto", artifactID)
+	}
+	last := crdt.CreateRelativePositionFromIndex(text, text.Len()-1, 0).Item
+	if last == nil {
+		return fmt.Errorf("document %s's last text has no item for its last character", artifactID)
+	}
+	frame := encoding.NewEncoder()
+	frame.WriteVarUint(tangledChain) // client groups: one for each item of the chain
+	origin := *last
+	for i := range tangledChain {
+		client := uint64(tangledChainClient + i)
+		frame.WriteVarUint(1) // structs in the group
+		frame.WriteVarUint(client)
+		frame.WriteVarUint(0) // first clock
+		writeOriginString(frame, origin, "a")
+		origin = crdt.ID{Client: crdt.ClientID(client), Clock: 0}
+	}
+	frame.WriteVarUint(0) // no delete set
+	if _, err := NewPgVersioned(s.store).AppendUpdate(ctx, artifactID, frame.Bytes()); err != nil {
+		return fmt.Errorf("persist the tangle: %w", err)
+	}
+	stored, err := s.persistence.Load(ctx, artifactID)
+	if err != nil {
+		return err
+	}
+	state, err := decodeStoredState(stored.Update)
+	if err != nil {
+		return err
+	}
+	ceiling := uint64(scanCeiling(0))
+	if left := roomScanTotal - int64(state.scans); left <= int64(ceiling) {
+		return fmt.Errorf("document %s's history re-scans %d items with the tangle, leaving %d of the %d scan total, within the %d items one apply may scan",
+			artifactID, state.scans, left, roomScanTotal, ceiling)
+	}
+	// What a browser's insert at the chain's head scans, measured as the room's apply measures it
+	// (decodeCountingScans): the probe is that insert's shape, of a client past the chain's.
+	scans, err := decodeCountingScans(state.doc, tangleProbe(*last))
+	if err != nil {
+		return err
+	}
+	if scans <= ceiling {
+		return fmt.Errorf("document %s's tangle makes an insert at its head scan %d items, within the %d one unweighed apply may",
+			artifactID, scans, ceiling)
+	}
+	return nil
+}
+
+// tangleProbe is the update one insert a browser made at origin before the tangle arrived looks
+// like on the wire: a string item of a client past the chain's naming origin as its left origin
+// and no right origin (writeOriginString), the shape of a paste at the end of a text that has been
+// chained onto since.
+func tangleProbe(origin crdt.ID) []byte {
+	frame := encoding.NewEncoder()
+	frame.WriteVarUint(1) // one client group
+	frame.WriteVarUint(1) // structs in the group
+	frame.WriteVarUint(tangledProbeClient)
+	frame.WriteVarUint(0) // first clock
+	writeOriginString(frame, origin, "z")
+	frame.WriteVarUint(0) // no delete set
+	return frame.Bytes()
+}
+
 // writeOriginString writes one string item of content naming origin as its left origin and no
 // right origin, so its parent is its origin's and the wire does not name it (crdt/update.go:942-965).
 func writeOriginString(frame *encoding.Encoder, origin crdt.ID, content string) {

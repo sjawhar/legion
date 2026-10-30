@@ -2215,6 +2215,52 @@ func TestUsedUpHookIsGatedByTestHooksEnabled(t *testing.T) {
 	}
 }
 
+// The tangled hook is a browser test's alone: unmounted without DISPATCH_TEST_HOOKS, and with them
+// it appends to the document's stored history the tens of thousands of items it measured - it
+// answers an error rather than leave a tangle an insert at its head scans within the items one
+// unweighed apply may (docs.Service.TangleBeyondOneApplyForTest), or one that leaves the room near
+// its scan total. Far more of that total is left than one apply may scan: a rebuild is still
+// refused, as it is for any document far from a cap, so what refuses a browser's apply on the
+// tangle is the per-apply scan ceiling and not a used-up room. The hook writes no rendering, as
+// the used-up hook writes none: the markdown a reader sees changes when the room the next browser
+// loads settles.
+func TestTangledHookIsGatedByTestHooksEnabled(t *testing.T) {
+	handler := newTestHandler(t)
+	unhooked := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/00000000-0000-0000-0000-000000000001/_test/tangled", nil, "alice")
+	if unhooked.Code != http.StatusNotFound {
+		t.Fatalf("tangled hook without TestHooksEnabled: status=%d, want %d", unhooked.Code, http.StatusNotFound)
+	}
+	hooked, database, _ := newTestServer(t, testServerOptions{testHooks: true})
+	issue := createInteractionIssue(t, hooked, "TEST", "Tangled", "A spec.")
+	storedStructs := func(what string) int64 {
+		t.Helper()
+		loaded, err := docs.NewPgVersioned(database).Load(context.Background(), issue.PrimaryArtifactID)
+		if err != nil {
+			t.Fatalf("load the stored history %s the hook: %v", what, err)
+		}
+		structs, err := docs.StateStructsForTest(loaded.Update)
+		if err != nil {
+			t.Fatalf("walk the stored history %s the hook: %v", what, err)
+		}
+		return structs
+	}
+	before := storedStructs("before")
+	tangled := dispatchRequest(t, hooked, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/_test/tangled", nil, "alice")
+	if tangled.Code != http.StatusNoContent {
+		t.Fatalf("tangled hook: status=%d body=%.300s, want %d", tangled.Code, tangled.Body.String(), http.StatusNoContent)
+	}
+	// Tens of thousands, the tangle's own count, without pinning the test to the length it is
+	// given: one apply of a browser's may scan 27,594 items (scanCeiling(0)), and the tangle is
+	// past that.
+	if added := storedStructs("after") - before; added < 30_000 {
+		t.Fatalf("the hook added %d structs to the stored history, want the tens of thousands of the tangle", added)
+	}
+	rebuildPath := "/api/v1/artifacts/" + issue.PrimaryArtifactID + "/rebuild"
+	if refused := dispatchRequest(t, hooked, http.MethodPost, rebuildPath, map[string]any{}, "alice"); refused.Code != http.StatusConflict {
+		t.Fatalf("rebuild after the tangled hook: status=%d body=%.300s, want %d", refused.Code, refused.Body.String(), http.StatusConflict)
+	}
+}
+
 // TestDisconnectAllStreamsClosesOpenConnections proves the test-only hook drives a
 // client through its reconnect-from-lastId path without seeding thousands of events
 // to trip the replay cap: the same recovery path useEventStream exercises after any

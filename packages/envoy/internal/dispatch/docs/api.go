@@ -26,6 +26,7 @@ type API interface {
 	RoomLiveForTest(artifactID string) bool
 	HoldNextAdmissionForTest(artifactID string, wait time.Duration)
 	UseUpScanTotalForTest(ctx context.Context, artifactID string) error
+	TangleBeyondOneApplyForTest(ctx context.Context, artifactID string) error
 	Text(ctx context.Context, artifactID string) (string, error)
 	TextWithToken(ctx context.Context, artifactID string) (string, string, error)
 	Blocks(ctx context.Context, artifactID string) ([]model.ArtifactBlock, error)

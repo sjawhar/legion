@@ -23,14 +23,17 @@ import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
 // What a person sees when the document server refuses an edit: as too large for the document
-// (DOCUMENT_TOO_LARGE_CLOSE_CODE, permanent: the edit is dropped), as one the document cannot take
-// until it is rebuilt (the same code with DOC_NEEDS_REBUILD: the edit is dropped and the rebuild is
-// offered), or for want of room for open documents (DOCUMENT_BUSY_CLOSE_CODE, transient: the edit
-// waits and saves once room frees).
+// (DOCUMENT_TOO_LARGE_CLOSE_CODE, permanent: the edit is dropped), as one it could not merge into
+// the document quickly enough (the same code with DOC_TOO_TANGLED, permanent too: the edit is
+// dropped), as one the document cannot take until it is rebuilt (the same code with
+// DOC_NEEDS_REBUILD: the edit is dropped and the rebuild is offered), or for want of room for open
+// documents (DOCUMENT_BUSY_CLOSE_CODE, transient: the edit waits and saves once room frees).
 
 const TOO_LARGE = "Your last edit was not saved: it would make this document larger";
 const NEEDS_REBUILD =
   "This document has been edited so much that it must be rebuilt before it can take this edit. Your other edits are kept.";
+const TOO_TANGLED =
+  "Your last edit was not saved: Dispatch could not merge it into this document quickly enough. Your other edits are kept.";
 const OUT_OF_ROOM = "Dispatch is out of room for open documents right now.";
 const ROOM_BUDGET = "/api/v1/artifacts/_test/room-budget";
 /** The sentence both browsers of the used-up row write after, the end of its paragraph's text. */
@@ -40,6 +43,10 @@ const MEETING_POINT = "Both browsers write after this sentence.";
  * them are a hundred items between the place and the end of its text, more than the 64 a used-up
  * room lets one browser's apply scan (usedUpScanBudget). */
 const TYPED_IN_PLACE = Array.from({ length: 100 }, (_, index) => String(index % 10)).join("");
+/** The paragraph the tangle row types, the end of the document's last text: its last character is
+ * the left origin of both the paste that browser makes offline and the tangle chained on after
+ * it, which is what makes merging the paste scan the whole tangle. */
+const TANGLE_POINT = "This paragraph is where the tangle starts.";
 
 /** The most markdown one document may hold (pmdoc.MaxDocumentBytes). */
 const MAX_DOCUMENT_BYTES = 1 << 20;
@@ -415,5 +422,75 @@ test("a used-up document refuses a larger merge as needing a rebuild, and saves 
   } finally {
     await alice.close();
     await bob.close();
+  }
+});
+
+test("a merge the server cannot scan through is dropped with its reason, and the next edit saves", async ({
+  browser,
+}) => {
+  test.setTimeout(120_000);
+  await createProject({ key: "TANGLE", name: "Tangled documents" });
+  const issue = await createIssue({
+    project: "TANGLE",
+    spec: "# Tangled\n\nThe tangle follows the next paragraph.\n",
+    title: "Refuse a merge that scans too far",
+  });
+  const artifactId = issue.primary_artifact_id;
+  const alice = await asUser(browser, "alice");
+  try {
+    const offline = await alice.newPage();
+    const transport = await documentTransport(offline);
+    await openSpec(offline, issue.key, "The tangle follows the next paragraph.");
+    await typeAtEnd(offline, TANGLE_POINT);
+    await expect
+      .poll(async () => (await getArtifactText(artifactId)).markdown)
+      .toContain(TANGLE_POINT);
+    await expect.poll(() => pendingEditCount(offline, artifactId)).toBe(0);
+
+    // Alice goes offline and pastes at the end of what she typed: one edit, one saved row, made
+    // while the server holds nothing after that place, so it names that place's last character as
+    // its left origin and nothing as its right.
+    transport.hold();
+    await transport.sever();
+    await placeCaret(offline, "after", TANGLE_POINT);
+    await paste(offline, { html: "", text: "tangled paste" });
+    await expect.poll(() => pendingEditCount(offline, artifactId)).toBe(1);
+
+    // The hook chains tens of thousands of items onto the end of that text
+    // (docs.Service.TangleBeyondOneApplyForTest), each naming the place Alice's paste names: a
+    // real document is tangled that far only where as many items were made at one place while a
+    // browser was away, which no browser test can type. Merging her paste scans the chain to its
+    // end, past the items one apply of hers is allowed (27,528 of them for her 36-byte frame,
+    // scanCeiling), while the room keeps 932,466 of its 1,000,000-item scan total, which is what
+    // makes this refusal the too-tangled one and not a rebuild's.
+    const tangled = await postAsPage(offline, `/api/v1/artifacts/${artifactId}/_test/tangled`);
+    expect(tangled.status(), await tangled.text()).toBe(204);
+    await offline.close();
+
+    // Alice comes back: her saved paste is sent, refused whole, and dropped with its reason.
+    const page = await alice.newPage();
+    const sockets = await recordDocumentSockets(page);
+    await page.goto(`/issues/${issue.key}/spec`);
+    await expect(page.getByText(TOO_TANGLED)).toBeVisible();
+    // Nothing to rebuild: the document is nowhere near a cap, only this one merge was too far.
+    await expect(page.getByRole("button", { name: "Rebuild this document" })).toHaveCount(0);
+    await expect(connectedDot(page)).toHaveText("connected");
+    await expect(documentEditor(page)).toContainText(TANGLE_POINT);
+    await expect(documentEditor(page)).not.toContainText("tangled paste");
+    await expect.poll(() => pendingEditCount(page, artifactId)).toBe(0);
+    const refused = (await getArtifactText(artifactId)).markdown;
+    expect(refused).not.toContain("tangled paste");
+    expect(refused).toContain(TANGLE_POINT);
+
+    await typeAtEnd(page, "saved after the refusal");
+    await expect
+      .poll(async () => (await getArtifactText(artifactId)).markdown)
+      .toContain("saved after the refusal");
+    await expect.poll(() => pendingEditCount(page, artifactId)).toBe(0);
+    // One refusal, and no reconnect that met it again.
+    expect((await sockets()).closes.filter((code) => code === 4413)).toHaveLength(1);
+    expect((await getArtifactText(artifactId)).markdown).not.toContain("tangled paste");
+  } finally {
+    await alice.close();
   }
 });
