@@ -1023,11 +1023,19 @@ What to compare, from each step's `summary.json` and `samples.json`:
 | --- | --- | --- |
 | The CPU | `summary.json` `replay.dispatch_cpu_s` | Dispatch's CPU-seconds over the window: the figure the three base runs and the three head runs are compared on. The spread is the highest base run's value less the lowest. |
 | The same work | `summary.json` `replay.end_state.sha256` | Equal hashes show the runs did the same work. Within one build they are always equal; across the two builds they are equal when neither replanned (`base_docs.replanned` false on both) and the builds' answers are the same, and can differ when the builds' renderings differ (The client's text is the build's, above). |
-| Not saturated | `summary.json` `replay.saturated` | False in every one of the six runs. A saturated run measures the box's limit, not the change. |
+| Not saturated | `summary.json` `replay.saturated` | False in every one of the six runs that are compared. A saturated run measures the box's limit, not the change (A saturated run, below). |
 | Memory | `samples.json` `heap_inuse` and `rss_kib` key `dispatch`, over the samples with `in_window` true | Dispatch's heap in use and its resident size during the window. |
 
+**A saturated run.** A run with `replay.saturated` true is discarded: it is not compared. Run it
+again in the same place of the interleave, under a new name and with the same flags: a saturated
+`base-2` is run again as `base-2b` before `head-2` starts (`run-step.sh` refuses a step name that
+already holds a step). One upload past its 60 s deadline is enough to saturate a run, and at the
+default F on a 2-core pod this happens in some full-window runs. If more than one run of one
+comparison saturates, the reruns included, run the whole comparison again at a lower F, and name
+that F.
+
 The pull request quotes the six runs in their order, their `replay.dispatch_cpu_s`, the spread, the
-command and the inputs (`replay.inputs`).
+command and the inputs (`replay.inputs`), and how many runs were saturated and run again.
 
 **What the replay does not reproduce:**
 
