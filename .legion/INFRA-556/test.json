@@ -2,33 +2,46 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-556",
-  "completed": "2026-10-30T02:55:00Z",
-  "round": 5,
-  "testedCodeHead": "b0a2d131affb",
-  "scope": "INFRA-63 architect, 2026-10-30T02:09Z: the awareness fix only: (1) the round-4 red test passes; (2) repeated floods must not grow a room's awareness memory past a bound on either process; (3) the two PR-body lines",
+  "completed": "2026-10-30T05:05:00Z",
+  "round": 6,
+  "testedCodeHead": "65dccc7c0612",
+  "scope": "INFRA-63 architect, 2026-10-30T04:16Z: the awareness fix only. Both red tests, unmodified, on real binaries; memory stays flat under repeated floods; a reader joining after a flood is seen on the other process within a second; freeing a departed client's entry does not drop a live client's presence (reconnect, delayed update)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran TestAReaderJoiningAfterAnAwarenessFloodIsSeenOnTheOtherProcess on two real binaries at b0a2d131: it passes."
+    "how": "Re-ran both red tests unmodified at 65dccc7c, 3 of 3 each: TestAReaderJoiningAfterAnAwarenessFloodIsSeenOnTheOtherProcess on real binaries, and TestRepeatedAwarenessFloodsDoNotGrowARoomsAwarenessWithoutLimit with 256 entries per room. The docs package's awareness tests and TestTwoEditorsOnTwoProcessesSeeEachOthersEditsAndCursorsLive also passed 3 of 3."
   },
   "failures": [
     {
-      "criterion": "Architect's scope item 2: repeated frames of thousands of invented awareness clients must not grow a room's memory past a bound, on either process",
-      "evidence": "Red test TestRepeatedAwarenessFloodsDoNotGrowARoomsAwarenessWithoutLimit in packages/envoy/internal/dispatch/docs/awareness_flood_bound_test.go (commit 0cc7fe8a). Command: cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<url> go test -run TestRepeatedAwarenessFloodsDoNotGrowARoomsAwarenessWithoutLimit ./internal/dispatch/docs. At b0a2d131 it fails 2 of 2: 'task A's room tracks 16384 client entries, want at most 512' and 'task B's room tracks 5120 client entries'. At d7ceabb4, where ygo's MaxAwarenessClientsPerRoom is set, it passes 2 of 2 with 256 on each room. On two real binaries, one tab on A sent 40 frames of 10,000 new client ids each in about 6 s. VmRSS on A went from 54 to 312 MB, and to 404 MB 50 s after the flood began. On B it went from 56 to 108 MB once the expiries were relayed as removals. Null-state frames took A from 56 to 112 MB. At d7ceabb4 the same flood left A at 66 MB and B at 58 MB. Cause: b0a2d131 leaves ygo's client bound unset. The byte bound counts live states only, so every invented id stays in the room's map, live or as a tombstone, until it is purged 60 s after removal. On B, every relayed removal of a client B never held is stored as a tombstone. The fix must pass this test and TestAReaderJoiningAfterAnAwarenessFloodIsSeenOnTheOtherProcess together."
+      "criterion": "A reader joining after (here: during) an awareness flood is seen on the other process within a second, as on one pod (architect's scope; spec item 1)",
+      "evidence": "Red test TestAReaderJoiningDuringALiveAwarenessFloodIsSeenOnTheOtherProcess in packages/envoy/cmd/dispatch/awareness_flood_multiprocess_test.go (commit 57348fc7). Command: cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<url> go test -tags multiprocess -run TestAReaderJoiningDuringALiveAwarenessFloodIsSeenOnTheOtherProcess ./cmd/dispatch. Setup: one tab on A keeps 2,048 invented awareness clients alive by re-announcing them every 10 s. At 65dccc7c it fails 2 of 2: alice, joining A, 'was seen at once by carol on A but not by bob on B within 1s'. A probe found bob still had not seen her 76 s later while the tab kept re-announcing. At 1d55e48f, before the room bound, it passes 2 of 2. d7ceabb4 also fails this case (alice seen after 1 min 44 s, once a non-heartbeating flood expired). Cause: maxAwarenessClientsPerRoom (256) counts every client the room holds. A's room is full of the tab's clients, so it refuses alice's client id and never relays it, while A still sends her frame to its own peers. The next fix must pass all three red tests. One way: bound the client ids one socket may hold, rather than the room as a whole."
     }
   ],
   "failed": 1,
   "proof": [
     {
-      "criterion": "The round-4 red test passes: a reader who joins after one tab's 2,048-client frame is seen on the other process within a second",
-      "surface": "two real envoy-dispatch binaries on one Postgres 17 (go test -tags multiprocess ./cmd/dispatch)",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_test?sslmode=disable go test -tags multiprocess -run TestAReaderJoiningAfterAnAwarenessFloodIsSeenOnTheOtherProcess -v ./cmd/dispatch",
-      "observed": "PASS (16.18 s). Evidence: https://github.com/sjawhar/legion/pull/2414#issuecomment-6513369818",
-      "headSha": "b0a2d131affb",
-      "negativeControl": "At d7ceabb4 it fails 3 of 3: 'seen at once by carol on A but not by bob on B within 1s' (round 4)"
+      "criterion": "Memory stays flat under repeated awareness floods on both processes",
+      "surface": "two real envoy-dispatch binaries on one Postgres 17. One tab on A sends 40 frames of 10,000 new client ids; VmRSS read from /proc",
+      "command": "go test -tags multiprocess -run 'TestProbeR6Memory(Live|Null)' -v ./cmd/dispatch (throwaway)",
+      "observed": "Live states: A 59 to 67 MB, B 59 to 59 MB, still the same 50 s after the flood began. Null states: A 58 to 66 MB, B 58 MB. Evidence: https://github.com/sjawhar/legion/pull/2414#issuecomment-6515227723",
+      "headSha": "65dccc7c0612",
+      "negativeControl": "At b0a2d131 the same live-state flood grew A to 404 MB and B to 108 MB (round 5)"
+    },
+    {
+      "criterion": "A reader joining after a flood that ended is seen on the other process within a second",
+      "surface": "two real envoy-dispatch binaries",
+      "command": "go test -tags multiprocess -run 'TestProbeR6ReaderAfterFlood|TestAReaderJoiningAfterAnAwarenessFloodIsSeenOnTheOtherProcess' -v ./cmd/dispatch",
+      "observed": "Seen within 1 s on both processes for each of: live states then a null-state removal frame; null states only on A; null states only on B; live states with the flooding tab closed.",
+      "headSha": "65dccc7c0612",
+      "negativeControl": "The round-4 red test fails at d7ceabb4 (3 of 3)"
+    },
+    {
+      "criterion": "Freeing a departed client's entry at once does not drop a live client's presence (reconnect, delayed update)",
+      "surface": "Chromium on main's two-process harness (bob pinned to B, alice to A, bob's socket cut with the e2e transport's sever), and two real binaries driven by Go peers",
+      "command": "cd packages/dispatch && DATABASE_URL=… bun run e2e:multiprocess -- zz-reconnect.multiprocess --repeat-each=4 (throwaway spec); go test -tags multiprocess -run TestProbeR6LiveStaysWhileOthersLeave -count=2 ./cmd/dispatch (throwaway)",
+      "observed": "Browser: bob, reconnected on B, was shown again on alice's page within 146-276 ms every time over 15 reconnects (5 runs of 3). Go: bob stayed shown on A through ten other readers leaving, five on each process, each departure freeing every tombstone. His cursor move 2 s later reached A within 1 s, and no departed reader was left shown. A late stale state of a departed client did not bring it back. coedit.multiprocess passed 2 of 2.",
+      "headSha": "65dccc7c0612",
+      "negativeControl": "The drop-and-reconnect really happened: the page reconnected each time (its connection dot read 'connected' again after the sever) before the 1 s check started."
     }
   ],
-  "notes": [
-    "PR body: census entry 1 now names docs/append_gate.go, and the slow-close line is gone from 'Not proven / risk', so both lines are fixed. Still stale, both written by the reviewer: 'Not proven / risk' lists the storedHistoryHolds per-keystroke decode, which fc2de439 fixed, and 'Look at first' points at pending_authors.go:562 and closed_at = now()."
-  ],
-  "ci": "No CI at b0a2d131: PR #2414 conflicts with main and waits for the merge queue (architect, 2026-10-30T00:58Z)."
+  "ci": "No CI at 65dccc7c: PR #2414 conflicts with main and waits for the merge queue (architect, 2026-10-30T00:58Z and 04:16Z)."
 }
