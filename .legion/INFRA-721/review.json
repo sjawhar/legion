@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-721",
+  "completed": "2026-10-30T01:14:30Z",
+  "decision": "changes_requested",
+  "reviewedHead": "2d2de934498ac87347b5f300510f09b3cd61f359",
+  "ci": "Required checks lint, typecheck, test, pr-title (main's ruleset). CI run 40982770096 at 2d2de934 was still queued at review time; no completed CI exists for the code. A request for changes does not wait on CI.",
+  "thermonuclear": "deep-review: CHANGES at 2d2de934 (1 High, 2 Medium, 3 Minor); code-quality: CHANGES at 2d2de934 (7 findings). Both verified against the code by the reviewer before being carried into the review.",
+  "critical": 1,
+  "important": 3,
+  "minor": 8,
+  "keyFindings": [
+    {
+      "severity": "critical",
+      "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go:742",
+      "description": "plainInline counts every mark as content, including proofAuthored, which the Dispatch editor (authoredTrackerPlugin, packages/proof-editor/src/lib.ts:330) puts on every character a person types and pmdoc keeps (pmdoc/node.go:45) but Render never writes. So an options edit that drops, renames or clears an option a person typed in the browser is refused, quoting a line that looks plain, and an emptied question that keeps any typed whitespace is refused the repair (refuseEmptyQuestionEdit). No test builds a marked item."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go:289",
+      "description": "Repairing an emptied decision that holds two bullet lists returns the joined options of every list (parseAskBlock), and editAsk writes them to the ask row (api/asks.go:435-451): the reading readAskBlockStrictly says the row must not take. The row then offers options from a stray list until a person repairs the block."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go:634",
+      "description": "Rewriting a changed option's description replaces its line with plain text, so a link address, bold, code or image in that line is deleted unseen: the same harm the drop refusal exists to prevent, and the PR body's Outcome claims the link and bold are kept. Tester and architect raised it too."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go:618",
+      "description": "With two items of one label, first-unused label matching pairs a sent option with the wrong item: a person's sub-list under 'A: x' moves under the rewritten 'A: y' and the plain 'A: y' item is dropped. Match label and description first, then label alone."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go:951",
+      "description": "The repair step says it keeps the question and first list 'in every decision nested in the blocks it keeps', but askRepairKeepsNothingOfItsOwn deletes some nested decisions whole."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go:839",
+      "description": "The image-only question refusal names only the document editor, a person's surface; an agent's own path is a new document version (dispatch artifact)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go:604",
+      "description": "dropUnmatched threads settlement's policy through three signatures; make the merge always drop and refuse the drop as a route-side pre-check."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go:134",
+      "description": "The writesTheQuestion builder branch is redundant: repairedAskBlockChildren already delegates for under two lists, and a block with two lists never reaches the else arm."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go:565",
+      "description": "The merged list is parsed on a fresh budget with the caller's text charged to it; charge the caller's new items to the write budget. The comment also carries a test measurement and the BlockBoundary rationale is repeated in six comments."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/docs/ask_block_text.go",
+      "description": "The file grows from 797 to 1248 lines across four concerns; move the option merge and the repair planner to files of their own."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/docs/service_test.go:2159",
+      "description": "The empty-question follow is copied between the corpus test and followAskRefusal (1318-1341), with a breaksTheRule flag nesting both delete bodies; sendAskBlockEdit (2351) duplicates sendAskOptions (2806)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/AGENTS.md:2430",
+      "description": "The docs and the changelog fragment do not say that settlement's restore drops an unmatched option item whatever it holds, where the route refuses."
+    }
+  ],
+  "proseFixed": [
+    "PR body Thermo line: named 8924f9d1 as both the head the simplify pass ran at and the head it made; the pass ran at its parent 266c1a5c (body edit, no commit)."
+  ]
+}
