@@ -197,12 +197,20 @@ App JWT, which is why Dispatch runs this. The webhook the App delivers to is the
 publishes GitHub envelopes under a JetStream MsgId of it. So redelivering a delivery that did
 reach the stream adds nothing to the stream.
 
-- A delivery the listener answered with 5xx, or that GitHub could not complete, is redelivered
-  on the next sweep. If that redelivery fails too, it is retried after 2, 4, 8 and 16 minutes, at most
-  five times.
-- A redelivery request GitHub refuses (for example 422) delivers nothing. It is asked again on
-  the same backoff, at most five times, even after its failed attempt is older than the sweep's
-  hour: a refused request adds no attempt to GitHub's log, so the sweep's record brings it back.
+- Every failed delivery is asked for again, whatever status code its failed attempts carry: a
+  5xx, an attempt GitHub could not complete, and a 4xx alike (the listener's 401 for a signature
+  it cannot check, 400 for a body it cannot use, 422 for a publish NATS refused), since what the
+  listener cannot take now it may take later. The first request goes on the next sweep. While no
+  attempt is `OK`, the next request is due 2, 4, 8, 16 and 32 minutes after the one before, then
+  every 60 minutes. A redelivery request GitHub refuses (for example 422) delivers nothing and is
+  asked again on the same schedule, as is an accepted request whose redelivery never appears in
+  GitHub's log.
+- The sweep stops asking 72 hours after the first failed attempt it saw for the delivery, since
+  GitHub keeps a delivery 72 hours, or when GitHub answers the redelivery request 404 (it no
+  longer has the delivery). It logs
+  `level=ERROR msg="webhook delivery expired undelivered"` once per delivery, with `requests`,
+  `first_delivered_at` and `reason` (`GitHub keeps a delivery 72 hours` or
+  `GitHub no longer has the delivery`).
 - A rate-limited answer (403 or 429, as GitHub's REST rate-limit documentation describes one)
   stops the sweep and counts nothing against the delivery. No sweep sends GitHub anything until
   the time GitHub gave (`Retry-After`, or `x-ratelimit-reset` when no requests remain), and at
@@ -211,22 +219,22 @@ reach the stream adds nothing to the stream.
   a request already sent when another sweeper records a limit is not recalled. It logs
   `level=WARN msg="webhook redelivery rate-limited by GitHub"`. Redelivery requests go a second
   apart, as GitHub asks of a large number of POSTs.
-- A delivery the listener answered with 4xx is never redelivered: the listener refused the
-  request itself, and the same bytes would fail the same way.
 - A delivery GitHub has recorded an `OK` attempt for is never asked for again, even when a request
-  for it was recorded as refused (an accepted request whose answer was lost).
-- Giving up logs `level=ERROR msg="webhook redelivery exhausted"`. A 4xx logs
-  `level=ERROR msg="webhook delivery refused terminally"`. Each is logged once per delivery.
-  Every sweep logs an INFO `msg="webhook redelivery sweep"` line: `failed_attempts` (the failed
+  for it was recorded as refused (an accepted request whose answer was lost). When the sweep had
+  made at least one request for it, it logs `level=INFO msg="webhook delivery recovered"` once,
+  with `requests`, the number of requests the delivery took.
+- Every sweep logs an INFO `msg="webhook redelivery sweep"` line: `failed_attempts` (the failed
   attempts listed), `deliveries` (the deliveries the sweep decided: the GUIDs of the listed failed
-  attempts, plus refused deliveries the listing no longer returns), and one count per outcome,
+  attempts, plus the open deliveries the listing no longer returns), and one count per outcome,
   which add up to `deliveries`. `closed` is a delivery an earlier sweep settled (GitHub recorded it
-  `OK`, it was refused terminally, or it was given up on): its failed attempt stays listed until it
-  is older than the sweep's hour, so after a burst of failures is redelivered, the next hour's
-  sweeps count the burst as `closed`.
-  `pending` is a redelivery GitHub accepted and has not made yet.
-- A sweep looks back one hour. After a gap in sweeping (Dispatch down), it resumes from its
-  cursor, back to GitHub's three days. The first sweep ever made looks back one hour only.
+  `OK`, or it expired): its failed attempt stays listed until it is older than the sweep's hour, so
+  after a burst of failures is redelivered, the next hour's sweeps count the burst as `closed`.
+  `waiting` is a delivery whose next request is not due yet. A delivery the sweep's cap of 300
+  requests left over is not counted; the next sweep takes it.
+- A sweep looks back one hour, and decides every delivery whose record is still open, neither
+  delivered nor expired, even when its attempts are older than that. After a gap in sweeping
+  (Dispatch down), it resumes from its cursor, back to GitHub's three days. The first sweep ever
+  made, with no cursor, looks back 72 hours.
 
 The cursor, the last rate limit, and one record per delivery acted on live in the JetStream KV
 bucket `envoy_webhook_redelivery`. Its 72-hour TTL matches GitHub's horizon. The server opens the
@@ -1448,8 +1456,22 @@ message included (a message is never edited), and owes an index to every message
 reading `messages` once. Its trigger takes `SHARE ROW EXCLUSIVE` on `messages` alone, so a message
 write waits behind it while a read does not. Its census answers `0` for the same reasons.
 
+Migration `0148_asks_anchor_artifact_id` creates `asks_anchor_artifact_id`, an index over the asks
+whose `anchor` is set of `case when anchor->>'artifact_id' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then (anchor->>'artifact_id')::uuid end`:
+the uuid cast `comments_anchor_artifact` (`0032`) indexes, guarded by the form every
+server-written anchor carries, since an unguarded cast would fail the boot over an anchor an
+earlier release could store. Settlement's sweep reads through it the marks a document's asks
+record, by the anchor's document alone, so an ask that also names an ask block on another document
+(`block_artifact_id`) keeps its mark on the document its anchor names. Building it takes `SHARE`
+on `asks`, so ask writes wait for the build; it rewrites no row and refuses none, so its census
+answers `0`. An anchor whose artifact id is not a lower-case document id is left out of the index,
+which costs the read nothing — its text comparison never matched such a spelling either — and
+each boot logs the count of those asks with a warning when there are any. The release before it
+never reads the index and serves beside it unchanged, except that its sweep still drops the mark
+of an ask holding both columns (no such row is written today), and rolling Dispatch back past
+`0148` is an image rollback alone: the index is left for the next release that reads it.
 
-Migration `0148_dpop_proofs` creates `dpop_proofs`, the record of every RFC 9449 DPoP proof
+Migration `0149_dpop_proofs` creates `dpop_proofs`, the record of every RFC 9449 DPoP proof
 Dispatch has accepted, and its expiry index. A caller presenting an access token the secrets
 broker issued signs a fresh proof of that token's key for each request
 (`internal/brokertoken`), and the row keyed on the proof's `jti` and normalized `htu` is what
@@ -2171,6 +2193,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/projects` | POST | cookie, trusted header, or bearer | Create a project from `key` and `name`, for a person or an agent session alike; rejects a key that is not a project key, an empty name, a name holding a control character or a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069), and a name with no visible character (a letter, number, punctuation or symbol other than the blank fillers U+115F, U+1160, U+3164, U+FFA0 and U+2800, or a code point Go's Unicode tables leave unassigned, such as an emoji newer than them, other than a noncharacter (U+FDD0-U+FDEF and each code point ending in FFFE or FFFF) or a reserved default-ignorable (U+2065, U+FFF0-U+FFF8, U+E0000-U+E0FFF); combining marks, format characters, private-use characters and whitespace don't count) with `400 INVALID_PROJECT`, a name over 80 characters (`contracts.ProjectNameMax`, UTF-16 units after the trim) with `400 CAP_EXCEEDED`, and a duplicate key with `409 PROJECT_EXISTS`. |
 | `/api/v1/settings/repo-projects` | GET | cookie, trusted header, or bearer | List repository-to-project mappings, each with `default`, whether it is its project's default repository. |
 | `/api/v1/settings/repo-projects/{owner}/{repo}` | PUT, DELETE | cookie, trusted header, or bearer | Create or replace, or remove, a repository mapping; PUT takes `{project, default?}`, and `default: true` moves the project's one default to it. A mapping an issue names as its `repo` is neither deleted nor moved: `409 REPO_PROJECT_IN_USE`. `AGENTS.md` gives the rules and the `settings.repo_project.updated` events. |
+| `/api/v1/github/app-installation/{owner}/{repo}` | GET | cookie, trusted header, or bearer | Whether Dispatch's GitHub App, which GitHub sends the repository's webhook events through, is installed on the repository: `200 {installed}`, `false` when GitHub answers 404. `503 GITHUB_APP_UNCONFIGURED` when Dispatch holds no App key, `502 GITHUB_UNREADABLE` naming the repository and GitHub's error on any other failure. The Legion daemon asks it for every repository it serves, for `legion state`. |
 | `/api/v1/settings/project-default-assignees` | GET | cookie or trusted header (human only) | List every project that names a default assignee, by project key, as `[{project, assignee}]`; a project with no default is left out. Human-only, since the default names a person. |
 | `/api/v1/projects/{key}/default-assignee` | PUT | cookie or trusted header (human only) | Set a project's default assignee `{assignee}` (the email of a person who has signed in, or `null` to clear it): who an issue created with no assignee, by nobody, under no parent or under a parent with nobody on it, goes to — the last step of the create chain. `400 ASSIGNEE_NOT_ALLOWED` for an email nobody has signed in with, `400 INVALID_PROJECT` for a body without `assignee` or one whose `assignee` is neither a string nor null, `404 NOT_FOUND` for an unknown project. Human-only: no agent surface sets it. |
 | `/api/v1/delivery/session-groups` | POST | cookie, trusted header, or bearer | Create a Delivery session group `{name, sessions}`: its sessions' pull requests take it as their Parent agent, `group:<id>`. `409 SESSION_IN_GROUP` for a session another group holds, `409 SESSION_GROUP_NAME_TAKEN` for a name another group has (ignoring case), `409 SESSION_GROUP_NAME_IS_SESSION_TITLE` for a name that is the latest title of a session outside the group, `400 SESSION_GROUP_INPUT` for a blank name or no sessions. The timeline lists every group (`session_groups`). |

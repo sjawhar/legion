@@ -4,6 +4,7 @@ package config
 import (
 	"maps"
 	"os"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -330,6 +331,310 @@ func TestLoadReadsTheRegisteredServices(t *testing.T) {
 	e["BROKER_SERVICES"] = "legion-daemon=system:serviceaccount:legion:default-worker other=system:serviceaccount:default:other-sa"
 	if _, err := Load(env(e)); err != nil {
 		t.Errorf("BROKER_SERVICES naming dedicated accounts whose name or namespace contains default: %v", err)
+	}
+}
+
+// exampleVMServiceAccount is a placeholder Google service account; this repository is public, so
+// no real account, project or instance name appears in a test.
+const exampleVMServiceAccount = "example-fleet@example-project.iam.gserviceaccount.com"
+
+// validVMEnv is validEnv with one VM service fully configured: the Google audience, the service's
+// account, its project and its instance-name pattern.
+func validVMEnv() map[string]string {
+	e := validEnv()
+	e["BROKER_GOOGLE_OIDC_AUDIENCE"] = "example-broker"
+	e["BROKER_VM_SERVICES"] = "example-service=" + exampleVMServiceAccount
+	e["BROKER_VM_PROJECTS"] = exampleVMServiceAccount + "=example-project"
+	e["BROKER_VM_INSTANCES"] = exampleVMServiceAccount + "=example-vm-*"
+	return e
+}
+
+// TestLoadReadsTheVMServices pins the four VM settings: one entry gives the service, the project
+// and the instance pattern, each keyed by the account's email.
+func TestLoadReadsTheVMServices(t *testing.T) {
+	cfg, err := Load(env(validVMEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GoogleOIDCAudience != "example-broker" {
+		t.Fatalf("GoogleOIDCAudience = %q, want example-broker", cfg.GoogleOIDCAudience)
+	}
+	if want := map[string]string{exampleVMServiceAccount: "example-service"}; !maps.Equal(cfg.VMServicesByAccount, want) {
+		t.Fatalf("VMServicesByAccount = %v, want %v", cfg.VMServicesByAccount, want)
+	}
+	if want := map[string]string{exampleVMServiceAccount: "example-project"}; !maps.Equal(cfg.VMProjects, want) {
+		t.Fatalf("VMProjects = %v, want %v", cfg.VMProjects, want)
+	}
+	if want := map[string]string{exampleVMServiceAccount: "example-vm-*"}; !maps.Equal(cfg.VMInstancePatterns, want) {
+		t.Fatalf("VMInstancePatterns = %v, want %v", cfg.VMInstancePatterns, want)
+	}
+
+	// Two accounts for one service, entries separated by any white space, and an audience with
+	// white space around it, which is trimmed, as a token's audience never carries it.
+	const second = "second-fleet@example-project.iam.gserviceaccount.com"
+	two := validVMEnv()
+	two["BROKER_GOOGLE_OIDC_AUDIENCE"] = " \texample-broker\n"
+	two["BROKER_VM_SERVICES"] += "\texample-service=" + second
+	two["BROKER_VM_PROJECTS"] += "\n" + second + "=example-other"
+	two["BROKER_VM_INSTANCES"] += "\t" + second + "=example-vm-[0-9]*"
+	cfg, err = Load(env(two))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GoogleOIDCAudience != "example-broker" {
+		t.Fatalf("GoogleOIDCAudience = %q, want example-broker with its white space trimmed", cfg.GoogleOIDCAudience)
+	}
+	if want := map[string]string{exampleVMServiceAccount: "example-service", second: "example-service"}; !maps.Equal(cfg.VMServicesByAccount, want) {
+		t.Fatalf("VMServicesByAccount with two accounts = %v, want %v", cfg.VMServicesByAccount, want)
+	}
+	if want := map[string]string{exampleVMServiceAccount: "example-project", second: "example-other"}; !maps.Equal(cfg.VMProjects, want) {
+		t.Fatalf("VMProjects with two accounts = %v, want %v", cfg.VMProjects, want)
+	}
+	if want := map[string]string{exampleVMServiceAccount: "example-vm-*", second: "example-vm-[0-9]*"}; !maps.Equal(cfg.VMInstancePatterns, want) {
+		t.Fatalf("VMInstancePatterns with two accounts = %v, want %v", cfg.VMInstancePatterns, want)
+	}
+	// The second account's missing project or glob is refused naming it, not only the first's.
+	for _, missing := range []string{"BROKER_VM_PROJECTS", "BROKER_VM_INSTANCES"} {
+		e := maps.Clone(two)
+		e[missing] = validVMEnv()[missing]
+		_, err := Load(env(e))
+		want := "BROKER_VM_SERVICES names " + second + `, got "example-service=` + second + `", but ` + missing + " does not"
+		if err == nil || !strings.HasPrefix(err.Error(), want) {
+			t.Errorf("Load with the second account missing from %s = %v, want a refusal starting %q", missing, err, want)
+		}
+	}
+}
+
+// TestTheVMSettingsLeaveEveryOtherFieldAlone pins requirement R4: a Kubernetes configuration loads
+// to the same Config with or without the four VM settings beside it, apart from the VM fields.
+func TestTheVMSettingsLeaveEveryOtherFieldAlone(t *testing.T) {
+	base := validEnv()
+	base["BROKER_K8S_OIDC_ISSUER"] = "https://oidc.eks.example.invalid/id/EXAMPLE"
+	base["BROKER_K8S_OIDC_AUDIENCE"] = "agent-secrets"
+	base["BROKER_SERVICES"] = "example-service=system:serviceaccount:example:example-sa"
+	base["BROKER_SERVICE_LOGINS"] = "example-service=system:serviceaccount:example:example-login"
+	base["BROKER_API_ACCOUNTS"] = "dispatch=system:serviceaccount:example-ns:example-dispatch"
+	want, err := Load(env(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	withVM := maps.Clone(base)
+	for _, name := range []string{"BROKER_GOOGLE_OIDC_AUDIENCE", "BROKER_VM_SERVICES", "BROKER_VM_PROJECTS", "BROKER_VM_INSTANCES"} {
+		withVM[name] = validVMEnv()[name]
+	}
+	got, err := Load(env(withVM))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.VMServicesByAccount == nil {
+		t.Fatal("the VM settings were not read")
+	}
+	got.GoogleOIDCAudience, got.VMServicesByAccount, got.VMProjects, got.VMInstancePatterns = "", nil, nil, nil
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Config with the VM settings, VM fields cleared = %+v, want it equal to the Config without them, %+v", got, want)
+	}
+}
+
+// TestVMServicesRefuseInvalidDefaultOrDuplicateAccounts pins BROKER_VM_SERVICES' own refusals,
+// each by its own message: an entry that is not a user-managed service account (a Kubernetes
+// subject, an account ID too short or ending in a hyphen), the service name shared, an address
+// with capital letters, a project's default service accounts, a Google-managed service agent, one
+// account bound to two services, and one account given twice for one service.
+func TestVMServicesRefuseInvalidDefaultOrDuplicateAccounts(t *testing.T) {
+	const userManaged = "must name user-managed service accounts, <account id>@<project id>.iam.gserviceaccount.com, got "
+	for _, row := range []struct{ services, want string }{
+		{"example-service=not-an-email", userManaged + `"example-service=not-an-email"`},
+		{"example-service=system:serviceaccount:example:example-sa", userManaged + `"example-service=system:serviceaccount:example:example-sa"`},
+		{"example-service=abcde@example-project.iam.gserviceaccount.com", userManaged + `"example-service=abcde@example-project.iam.gserviceaccount.com"`},
+		{"example-service=example-fleet-@example-project.iam.gserviceaccount.com", userManaged + `"example-service=example-fleet-@example-project.iam.gserviceaccount.com"`},
+		{"shared=" + exampleVMServiceAccount, `not shared, got "shared=` + exampleVMServiceAccount + `"`},
+		{"example-service=Example-Fleet@example-project.iam.gserviceaccount.com", "names a service account with capital letters"},
+		{"example-service=system:serviceaccount:Other:x", userManaged + `"example-service=system:serviceaccount:Other:x"`},
+		{"example-service=123456789-compute@developer.gserviceaccount.com", "names a project's default service account"},
+		{"example-service=example-project@appspot.gserviceaccount.com", "names a project's default service account"},
+		{"example-service=service-123456789012@compute-system.iam.gserviceaccount.com", "names a Google-managed service agent"},
+		{"example-service=service-123456789012@gcp-sa-example.iam.gserviceaccount.com", "names a Google-managed service agent"},
+		{"example-service=example-agent@gcp-sa-example.iam.gserviceaccount.com", "names a Google-managed service agent"},
+		{"example-service=service-org-123456789012@gcp-sa-example.iam.gserviceaccount.com", "names a Google-managed service agent"},
+		{"example-service=" + exampleVMServiceAccount + " another-service=" + exampleVMServiceAccount, `for both "example-service" and "another-service"`},
+		{"example-service=" + exampleVMServiceAccount + " example-service=" + exampleVMServiceAccount, `twice for "example-service"`},
+		{"example-service=" + exampleVMServiceAccount + ".attacker.example", userManaged + `"example-service=` + exampleVMServiceAccount + `.attacker.example"`},
+		{"example-service=person@example.com", userManaged + `"example-service=person@example.com"`},
+		{"example-service=example-fleet@" + strings.Repeat("a", 31) + ".iam.gserviceaccount.com", userManaged + `"example-service=example-fleet@` + strings.Repeat("a", 31) + `.iam.gserviceaccount.com"`},
+		{"Example_Service=" + exampleVMServiceAccount, `at most 64, not shared, got "Example_Service=` + exampleVMServiceAccount + `"`},
+		{"=" + exampleVMServiceAccount, `at most 64, not shared, got "=` + exampleVMServiceAccount + `"`},
+		{strings.Repeat("a", 65) + "=" + exampleVMServiceAccount, `at most 64, not shared, got "` + strings.Repeat("a", 65) + "=" + exampleVMServiceAccount + `"`},
+	} {
+		e := validVMEnv()
+		e["BROKER_VM_SERVICES"] = row.services
+		_, err := Load(env(e))
+		if err == nil || !strings.HasPrefix(err.Error(), "BROKER_VM_SERVICES ") || !strings.Contains(err.Error(), row.want) {
+			t.Errorf("Load(BROKER_VM_SERVICES=%q) = %v, want a refusal naming the setting and %q", row.services, err, row.want)
+		}
+	}
+}
+
+// TestVMServicesNeedTheGoogleAudience pins that each VM setting with no Google audience is refused,
+// naming itself and the audience, rather than configured and never reachable; an audience of only
+// whitespace counts as none.
+func TestVMServicesNeedTheGoogleAudience(t *testing.T) {
+	for _, audience := range []string{"", " \t"} {
+		for _, setting := range []string{"BROKER_VM_SERVICES", "BROKER_VM_PROJECTS", "BROKER_VM_INSTANCES"} {
+			e := validEnv()
+			e["BROKER_GOOGLE_OIDC_AUDIENCE"] = audience
+			e[setting] = validVMEnv()[setting]
+			_, err := Load(env(e))
+			if want := setting + " needs BROKER_GOOGLE_OIDC_AUDIENCE"; err == nil || !strings.HasPrefix(err.Error(), want) {
+				t.Errorf("Load with only %s and audience %q = %v, want a refusal starting %q", setting, audience, err, want)
+			}
+		}
+	}
+}
+
+// TestAGoogleAudienceWithNoVMServicesIsRefused pins the other direction: an audience with no VM
+// service listed could accept no token, so it is refused naming both settings.
+func TestAGoogleAudienceWithNoVMServicesIsRefused(t *testing.T) {
+	e := validEnv()
+	e["BROKER_GOOGLE_OIDC_AUDIENCE"] = "example-broker"
+	_, err := Load(env(e))
+	if want := "BROKER_GOOGLE_OIDC_AUDIENCE needs BROKER_VM_SERVICES"; err == nil || !strings.HasPrefix(err.Error(), want) {
+		t.Fatalf("Load with a Google audience and no VM service = %v, want a refusal starting %q", err, want)
+	}
+}
+
+// TestVMServicesNeedAProjectAndAnInstancePattern pins that every VM account needs both its
+// project and its instance pattern, refused naming the account and its entry; that neither setting
+// may name an account no VM service lists (the first such entry as written is the one named), an
+// account twice, or a malformed value; and that an instance glob holds only an instance name's
+// characters and path.Match's.
+func TestVMServicesNeedAProjectAndAnInstancePattern(t *testing.T) {
+	for _, missing := range []string{"BROKER_VM_PROJECTS", "BROKER_VM_INSTANCES"} {
+		e := validVMEnv()
+		delete(e, missing)
+		_, err := Load(env(e))
+		want := "BROKER_VM_SERVICES names " + exampleVMServiceAccount + `, got "example-service=` + exampleVMServiceAccount + `", but ` + missing + " does not"
+		if err == nil || !strings.HasPrefix(err.Error(), want) {
+			t.Errorf("Load with %s unset = %v, want a refusal starting %q", missing, err, want)
+		}
+	}
+	const other, third = "other-fleet@example-project.iam.gserviceaccount.com", "third-fleet@example-project.iam.gserviceaccount.com"
+	for name, values := range map[string][2]string{
+		"BROKER_VM_PROJECTS":  {"example-project", "example-project"},
+		"BROKER_VM_INSTANCES": {"example-vm-*", "example-vm-*"},
+	} {
+		// Twenty loads, since a refusal that ranged over a map would name either account.
+		for range 20 {
+			e := validVMEnv()
+			e[name] += " " + other + "=" + values[0] + " " + third + "=" + values[1]
+			_, err := Load(env(e))
+			want := name + " names " + other + `, got "` + other + "=" + values[0] + `", but BROKER_VM_SERVICES does not list it`
+			if err == nil || !strings.HasPrefix(err.Error(), want) {
+				t.Fatalf("Load with %s naming two unlisted accounts = %v, want a refusal starting %q", name, err, want)
+			}
+		}
+	}
+	for _, row := range []struct{ name, value string }{
+		{"BROKER_VM_PROJECTS", "Example_Project"},
+		{"BROKER_VM_PROJECTS", "123456789012"},
+		{"BROKER_VM_PROJECTS", "example-project=x"},
+		{"BROKER_VM_INSTANCES", "example-vm-["},
+		{"BROKER_VM_INSTANCES", "[!t]*"},
+		{"BROKER_VM_INSTANCES", "example-vm-*/"},
+		{"BROKER_VM_INSTANCES", "Example-VM-*"},
+		{"BROKER_VM_INSTANCES", "example-vm-*=x"},
+		{"BROKER_VM_INSTANCES", "example.vm.*"},
+		{"BROKER_VM_INSTANCES", "example_vm_*"},
+		{"BROKER_VM_INSTANCES", "a{b,c}"},
+		{"BROKER_VM_INSTANCES", `example-vm-\*`},
+		{"BROKER_VM_INSTANCES", "example-vm^x"},
+		{"BROKER_VM_INSTANCES", "^example-vm-*"},
+		{"BROKER_VM_INSTANCES", ""},
+		{"BROKER_VM_PROJECTS", ""},
+		{"BROKER_VM_PROJECTS", "short"},
+		{"BROKER_VM_PROJECTS", strings.Repeat("a", 31)},
+		{"BROKER_VM_PROJECTS", "example-project-"},
+	} {
+		e := validVMEnv()
+		bad := exampleVMServiceAccount + "=" + row.value
+		e[row.name] = bad
+		_, err := Load(env(e))
+		if err == nil || !strings.HasPrefix(err.Error(), row.name+" must be <service account email>=<") || !strings.Contains(err.Error(), strconv.Quote(bad)) {
+			t.Errorf("Load(%s=%q) = %v, want a refusal naming it and the entry", row.name, bad, err)
+		}
+	}
+	for _, glob := range []string{"example-vm-[0-9]*", "example-vm-[^x]?", "*"} {
+		e := validVMEnv()
+		e["BROKER_VM_INSTANCES"] = exampleVMServiceAccount + "=" + glob
+		if cfg, err := Load(env(e)); err != nil || cfg.VMInstancePatterns[exampleVMServiceAccount] != glob {
+			t.Errorf("Load(BROKER_VM_INSTANCES glob %q) = %v, %v; want it accepted", glob, cfg.VMInstancePatterns, err)
+		}
+	}
+	for _, setting := range []string{"BROKER_VM_PROJECTS", "BROKER_VM_INSTANCES"} {
+		e := validVMEnv()
+		bad := "not-an-email=" + strings.SplitN(validVMEnv()[setting], "=", 2)[1]
+		e[setting] = bad
+		_, err := Load(env(e))
+		if want := setting + " must name user-managed service accounts"; err == nil || !strings.HasPrefix(err.Error(), want) || !strings.Contains(err.Error(), strconv.Quote(bad)) {
+			t.Errorf("Load(%s=%q) = %v, want a refusal starting %q and naming the entry", setting, bad, err, want)
+		}
+	}
+	for setting, row := range map[string]struct {
+		kind   string
+		values []string
+	}{
+		"BROKER_VM_PROJECTS":  {"project id", []string{"example-other", "example-project"}},
+		"BROKER_VM_INSTANCES": {"instance-name glob", []string{"example-other", "example-vm-*"}},
+	} {
+		kind := row.kind
+		for _, other := range row.values {
+			e := validVMEnv()
+			e[setting] += " " + exampleVMServiceAccount + "=" + other
+			_, err := Load(env(e))
+			want := setting + " names the service account " + exampleVMServiceAccount + " twice; each account has one " + kind + ", so name it once"
+			if err == nil || err.Error() != want {
+				t.Errorf("Load with an account given twice in %s = %v, want %q", setting, err, want)
+			}
+		}
+	}
+}
+
+// TestAnAccountBoundByTheKubernetesServicesIsRefusedAsAVMAccount pins that the two account kinds
+// never overlap: BROKER_SERVICE_LOGINS refuses a Google email, so a VM's account cannot log in as a
+// Kubernetes service, and BROKER_VM_SERVICES refuses a Kubernetes subject, so a pod's account cannot
+// be bound as a VM service.
+func TestAnAccountBoundByTheKubernetesServicesIsRefusedAsAVMAccount(t *testing.T) {
+	// The setting's own parser refuses, by its own message, with the Kubernetes issuer set, so no
+	// other refusal can stand in for it.
+	e := validVMEnv()
+	e["BROKER_K8S_OIDC_ISSUER"] = "https://oidc.eks.example.invalid/id/EXAMPLE"
+	e["BROKER_K8S_OIDC_AUDIENCE"] = "agent-secrets"
+	e["BROKER_SERVICE_LOGINS"] = "example-service=" + exampleVMServiceAccount
+	_, err := Load(env(e))
+	if want := "BROKER_SERVICE_LOGINS must be <service>=system:serviceaccount:<namespace>:<name> entries"; err == nil || !strings.HasPrefix(err.Error(), want) || !strings.Contains(err.Error(), exampleVMServiceAccount) {
+		t.Fatalf("Load with a Google account in BROKER_SERVICE_LOGINS = %v, want a refusal starting %q and naming the account", err, want)
+	}
+
+	const subject = "system:serviceaccount:example:example-sa"
+	e = validVMEnv()
+	e["BROKER_SERVICES"] = "example-service=" + subject
+	e["BROKER_VM_SERVICES"] = "example-service=" + subject
+	e["BROKER_VM_PROJECTS"] = subject + "=example-project"
+	e["BROKER_VM_INSTANCES"] = subject + "=example-vm-*"
+	_, err = Load(env(e))
+	if want := `BROKER_VM_SERVICES must name user-managed service accounts, <account id>@<project id>.iam.gserviceaccount.com, got "example-service=` + subject + `"`; err == nil || err.Error() != want {
+		t.Fatalf("Load with a Kubernetes subject in BROKER_VM_SERVICES = %v, want %q", err, want)
+	}
+}
+
+// TestWithNoGoogleAudienceEveryVMFieldIsEmpty pins requirement R4's configuration half: with no
+// Google audience and no VM setting, every VM field is empty, so nothing downstream can act on one.
+func TestWithNoGoogleAudienceEveryVMFieldIsEmpty(t *testing.T) {
+	cfg, err := Load(env(validEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.GoogleOIDCAudience != "" || cfg.VMServicesByAccount != nil || cfg.VMProjects != nil || cfg.VMInstancePatterns != nil {
+		t.Fatalf("VM configuration = audience %q, services %v, projects %v, instances %v; want empty with no Google audience", cfg.GoogleOIDCAudience, cfg.VMServicesByAccount, cfg.VMProjects, cfg.VMInstancePatterns)
 	}
 }
 

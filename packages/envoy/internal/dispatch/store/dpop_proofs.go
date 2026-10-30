@@ -17,7 +17,7 @@ const jtiRetentionMargin = time.Minute
 
 // DPoPProofs is Dispatch's rfc9449.DPoPReplayStorage: the record of every RFC 9449 proof a
 // request has already spent, so a captured proof replayed inside its acceptance window is refused
-// (migration 0148). internal/brokertoken hands it to the library's resource check, and nothing
+// (migration 0149). internal/brokertoken hands it to the library's resource check, and nothing
 // else writes the table.
 type DPoPProofs struct {
 	pool *Pool
