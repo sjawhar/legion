@@ -2,68 +2,56 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-591",
-  "completed": "2026-10-30T07:20:11Z",
-  "headTested": "fd71eb019ec345811ee5bfb929417a106582f691 (code 629fe0eec6ec: 005075ed, 229b8995 persisted horizon with migration 0145, 629fe0ee retry in the default query retry; fd71eb01 adds only .legion/)",
-  "rebaseCheck": "No merge since round 13 (fork point cd5ca7c3). Full round of the changed paths: the persisted horizon, whoami and the web app's query retry.",
+  "completed": "2026-10-30T09:41:43Z",
+  "headTested": "5be7f32d89b5bc0db9433c055032545d373cc34e",
+  "codeHead": "7d09eefb1310",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I drove the same surface independently: envoy-dispatch built at 629fe0ee on a Postgres 16.2 and a NATS of my own, subscribing on /ws/live, with 5,000,122 ids for the cost cases, and Dispatch's own browser harness for the web app, with contracts and the web app built at the head. The persisted-horizon tests, the whoami tests and my earlier red tests all pass at the head (go test -p 2 -parallel 4). The hover-preview failure the implementer names fails 8 of 8 on main cd5ca7c3 on this pod and 7 of 8 at the head, so it is not this change's."
+    "how": "Built envoy-dispatch from 7d09eefb (head) and from main's fork point a21100c5 on a Postgres 16.2 and a NATS of my own. The base built the schema to 147 and the head migrated it to 148 with event_horizon (id, safe, safe_at, updated_at); a 5,000,122-event database migrated too. I re-ran the implementer's tests on that Postgres: go test ./internal/dispatch/events/ (all, including the persist backoff and reset tests), ./internal/dispatch/routes/ -run Whoami, the horizon socket tests in ./internal/dispatch/api/ and ./internal/dispatch/store/ -run Migrat. All pass. Its browser test shell.e2e.ts 'a page stops on Couldn't reach Dispatch. while whoami answers EVENT_HEAD_READ_FAILED' passes with the shell and live suites."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Architect item 1a: with four overlapping pre-boot inserts on 5M ids, the first start reads a bounded number of rows and every event arrives once, in order.",
-      "surface": "/ws/live cold subscription on a newly started head process that a head process before it had served, 5,000,122 ids",
-      "command": "adv.py persisted head 3.0 0.5, twice (rows of events read = pg_stat seq_tup_read + events_pkey idx_tup_read around the start, other backends ended so their counts flush)",
-      "observed": "Stored horizon before the restart: 5000122, then 5000147. events_start came 3.13 s and 2.36 s after subscribe (round 13 read the whole log, 6.0 to 6.2 s). 177 and 156 rows of events read around the start; no whole-log warning. 19 frames each time, equal to the database's ids after since, with no duplicate.",
-      "headSha": "629fe0eec6ec31ae4a10cc47310e797d3869e914",
-      "negativeControl": "Round 13's head dc1fe429, the same writers: full read with a warning, 6.03 and 6.20 s."
+      "criterion": "Review round 9 item 1: whoami answers EVENT_HEAD_UNAVAILABLE only while no head is proven, and the page stops on Couldn't reach Dispatch. with Retry when the head cannot be read",
+      "surface": "GET /auth/whoami on the head server; Dispatch's browser harness in Chromium (bun run e2e, shell.e2e.ts and live.e2e.ts)",
+      "command": "go test ./internal/dispatch/routes/ -run Whoami -v; bun run e2e -- bunx playwright test e2e/shell.e2e.ts e2e/live.e2e.ts --project=chromium --workers=1; adv.py reset_persisted head",
+      "observed": "The routes tests pass. While an insert from before boot was still open after a log reset, whoami answered 503 EVENT_HEAD_UNAVAILABLE ('no event id is proven final yet; ask again'). The browser suites: 33 passed and 1 skipped, including round 13's EVENT_HEAD_UNAVAILABLE test (it keeps asking and opens once whoami answers) and the new EVENT_HEAD_READ_FAILED test (it stops on 'Couldn't reach Dispatch.' with Retry and asks no more). On a live server I could not produce EVENT_HEAD_READ_FAILED. With Postgres stopped, identity fails first (500 IDENTITY_ERROR). With an ACCESS EXCLUSIVE lock on events, before and after a new comment, whoami answered 200 from the head it had proven, in 3-4 ms. So the server half of the split is proven by the routes test and its negative control, and the page half by the browser test.",
+      "headSha": "7d09eefb1310",
+      "negativeControl": "With router.go changed to answer EVENT_HEAD_UNAVAILABLE for every head error (round 14's behaviour), TestWhoamiRefusesWhenItCannotReadTheEventHead fails ('503 EVENT_HEAD_UNAVAILABLE, want 503 EVENT_HEAD_READ_FAILED'), and so does TestAnAnonymousWhoamiIsUnauthorizedWhileTheEventHeadCannotBeRead. The file was restored, and jj status shows no change."
     },
     {
-      "criterion": "Architect item 1b: a reset log (created_at mismatch) ignores the stored value; two processes writing it never move it backwards; a horizon persisted by a process that then died is still sound for the next one.",
-      "surface": "event_horizon, /auth/whoami and /ws/live across a truncate, two processes and a kill -9",
-      "command": "adv.py reset_persisted head; adv.py twoproc_persist 20; adv.py dead head; adv.py late_insert head",
-      "observed": "Reset: stored 122 from the old log; after `truncate events restart identity` and a 300-row refill, the new log's row 122 had another created_at. With an insert from before boot open, whoami answered 503 EVENT_HEAD_UNAVAILABLE after 2.1 s rather than the stale 122; the first start read the whole new log (warning logged); the insert g=301 and a comment h=302 committed after the start both arrived. Two processes under 20 s of load: 39 samples of event_horizon.safe, 22 distinct, from 122 to 1701, with no backward step; a write of id 50 through the persist statement left it at 1701. Dead process: one persisted 5000122 and was killed -9; the next, with an insert open since before boot, answered whoami 5000122 in 12 ms and read no whole log; the insert g=5000124 and a comment h=5000125 committed after the start each arrived once, in order. A write that took its xid before boot and inserted after the start: delivered once, in order.",
-      "headSha": "629fe0eec6ec31ae4a10cc47310e797d3869e914",
-      "negativeControl": "Round 13 (no persisted horizon): an insert from before boot made whoami answer 503 for as long as the insert stayed open."
+      "criterion": "Review round 9 item 2: event_horizon is migration 0148, above main's 0145-0147, so the merged tree migrates",
+      "surface": "envoy-dispatch boot on a Postgres database",
+      "command": "start.sh base, then start.sh head, on a fresh dispatch database from the seed template; the same with the head on the 5,000,122-event database",
+      "observed": "The base boots with migrations ending 145,146,147. The head then boots and migrates to 148. \\d event_horizon shows id smallint, safe bigint, safe_at timestamptz, updated_at timestamptz default now(). The 5M database migrated to 148 at boot. go test ./internal/dispatch/store/ -run Migrat passes.",
+      "headSha": "7d09eefb1310",
+      "negativeControl": "The base binary (main a21100c5) leaves version 147 the highest, and it has no event_horizon table."
     },
     {
-      "criterion": "Architect item 2: my red browser test e0b2e7f4 passes unmodified; the EVENT_HEAD_UNAVAILABLE retry sits in the default query retry, and no other query retries that code wrongly.",
-      "surface": "Dispatch's browser harness (packages/dispatch e2e/run.ts, server built from this tree, chromium)",
-      "command": "jj diff --from e0b2e7f4 --to fd71eb01 packages/dispatch/e2e/shell.e2e.ts (empty); bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/shell.e2e.ts e2e/live.e2e.ts --project=chromium; grep EVENT_HEAD_UNAVAILABLE across packages/envoy/internal/dispatch",
-      "observed": "shell.e2e.ts is byte-identical to e0b2e7f4. The shell and live suites: 32 passed, 1 skipped, the red test among them. A run I started with --workers=2 against the config's workers: 1 failed 3 tests on a shared database (PROJECT_EXISTS); that is my command, not the change. queryRetry retries only an ApiError of status 503 with code EVENT_HEAD_UNAVAILABLE, and only routes/router.go:476 (whoami) answers that code, so no other read retries it.",
-      "headSha": "629fe0eec6ec31ae4a10cc47310e797d3869e914",
-      "negativeControl": "Round 13's head dc1fe429: the red test failed at shell.e2e.ts:83, and in real Chromium the page stopped on 'Couldn't reach Dispatch.' until a click."
+      "criterion": "Review round 9 items 3 and 4: a failed persist backs off, and a reset log never gets the old log's horizon",
+      "surface": "the head server on the seed log after truncate events restart identity; two head processes on one database",
+      "command": "adv.py reset_persisted head; adv.py twoproc_persist 20; go test ./internal/dispatch/events/ -run Persist -v",
+      "observed": "After the reset, the stored row named id 122 with the old log's created_at, but the new row 122 had another created_at. whoami answered 503 EVENT_HEAD_UNAVAILABLE rather than 122. The first start read the new log and sent the insert from before boot (301) and a later comment (302) once each. Afterwards event_horizon held safe 302 with safe_at equal to row 302's created_at. Two processes under load for 20 s: 24 samples, no backward step; a lower write (id 50) through the persist statement left safe at 784. TestAFailedPersistIsTriedAgainOnlyOnceEveryPersistInterval, TestAPersistDecidedBeforeAResetWritesNothing and TestAPersistOfAnOldLogsHorizonWritesNothingAfterTheLogIsReset pass.",
+      "headSha": "7d09eefb1310",
+      "negativeControl": "A stored horizon whose safe_at does not match the row's created_at is not trusted: whoami answered 503 rather than the stale id."
     },
     {
-      "criterion": "Architect item 3: whoami answers at once with a pre-boot insert open.",
-      "surface": "GET /auth/whoami on a newly started process",
-      "command": "adv.py dead head; adv.py whoami head",
-      "observed": "With an insert open since before boot and a horizon persisted by the process before: 5000122 in 12 ms. With a write open (id 123) on a running process: 122 in 4 ms, and a page resumed from it got 123, then 124.",
-      "headSha": "629fe0eec6ec31ae4a10cc47310e797d3869e914",
-      "negativeControl": "Round 13 (dc1fe429): with an insert from before boot open, whoami answered 503 after 2.1 s, three times in a row."
+      "criterion": "The first start after a restart reads only around its floor and loses nothing, with writers that hold their ids across the restart",
+      "surface": "the head server on a 5,000,122-event database, subscribed through /ws/live (wsfeed)",
+      "command": "adv.py persisted head 3.0 0.5 (twice); adv.py dead head; adv.py late_insert head",
+      "observed": "With four overlapping 3 s inserts from before the restart, events_start came 2.92 s and 3.17 s after subscribing. 199 and 208 rows of events were read around the start, with no whole-log warning, and 19 of 19 frames matched the database ids after since, with no duplicates. A horizon stored by a process killed with kill -9 (5000172): the next process answered whoami 5000172 in 10 ms, then sent the insert open from before boot (5000174) and a later comment (5000175) once each, in order. A write that took its id before the first subscription and inserted after it: both events came once each, in order, with no full read.",
+      "headSha": "7d09eefb1310",
+      "negativeControl": "Round 13's head dc1fe429 read the whole log on the same shape (events_start 6.0-6.2 s)."
     },
     {
-      "criterion": "Architect item 4: the chromium failure named as main's hover-preview flake fails on main too.",
-      "surface": "Dispatch's browser harness on this pod, at the head and at main cd5ca7c3 (a tree of main with this workspace's node_modules linked, contracts and web app built)",
-      "command": "bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/hover-preview.e2e.ts:87 --repeat-each=8 --project=chromium, in each tree",
-      "observed": "Main: 8 of 8 failed, each 'Test timeout of 30000ms exceeded'. Head: 7 of 8 failed the same way. In main's CI dispatch job of run 40996989713 the test passed, so this pod times it out more than CI does. It is not this change's.",
-      "headSha": "629fe0eec6ec31ae4a10cc47310e797d3869e914",
-      "negativeControl": "Main cd5ca7c3: 8 of 8 failed."
-    },
-    {
-      "criterion": "Order, replay_complete and the old lock are unchanged.",
-      "surface": "/ws/live and the REST API",
-      "command": "adv.py ooo commit; concurrent; lock; replay",
-      "observed": "An open 123 with 124 committed: nothing, then 123 and 124. 92 ids in order on 3 subscriptions and a resume. Old lock held: POST 201 in 17 ms. replay_complete only on a resume at or below the head.",
-      "headSha": "629fe0eec6ec31ae4a10cc47310e797d3869e914",
-      "negativeControl": "Main (round 11, same driver): 124 at once and never 123."
+      "criterion": "The global lock is gone, and out-of-order commits, rollbacks, resumes and whoami still hold",
+      "surface": "the head server on the seed log: SSE /api/v1/events and /ws/live",
+      "command": "adv.py 'ooo commit'; 'ooo rollback'; concurrent; lastid; lock; replay; whoami head",
+      "observed": "A comment POST answered 201 in 17 ms while the old advisory lock and an open write on another issue were held. A lower id open held back the committed higher one; after the commit both came in id order, and after a rollback only the higher one came. Three concurrent subscriptions and a resume each got every id once, increasing, equal to the database. Bad Last-Event-ID values were refused, and ' 7 ' replayed 210 events. Replay headers: 'complete' at or below the head, none above it. whoami stays below an open write (122 while 123 was open and 124 committed) and answers in 2-16 ms.",
+      "headSha": "7d09eefb1310",
+      "negativeControl": "Last-Event-ID 'abc', '-5', '1e3' and a 20-digit value: refused (status -1, no frames)."
     }
   ],
-  "ci": "Read at about 07:25Z, recorded here only. At 629fe0ee the CI run was still queued ('changes' queued), so envoy-go, envoy-go-race, envoy-go-race-docs and dispatch (architect item 5) are unread. At 229b8995, the previous code head, envoy-go failed only TestAnAskBlockWhoseIDIsPastTheBoundSettles (internal/dispatch/docs, block_id_bound_test.go:201). It passed 5 of 5 here at the head and 5 of 5 at main, and 629fe0ee changes only web files since; dispatch failed on 'a failed identity refetch keeps the cached user's sidebar preference', which the implementer's move of the retry fixes (bun run test 2955 pass in its proof).",
-  "notes": [
-    "For the architect: any failure of whoami's eventHead read, not only an insert from before boot, answers EVENT_HEAD_UNAVAILABLE (routes/router.go:470-476): for example the database or the horizon's two-connection pool unable to connect while the sign-in check succeeds. The page now retries that without limit, every 5 s at most, and shows its skeleton instead of 'Couldn't reach Dispatch.' with Retry. It opens on its own once the read succeeds. This is inferred from the code; I did not drive that outage in a browser this round.",
-    "Migration 0145 collides with #2391, #2395, #2406 and #2444 (architect's note); whichever merges later renumbers."
-  ]
+  "ci": "CI read on GitHub at 7d09eefb at 09:35Z. Most lanes were queued (envoy-go, envoy-go-race, dispatch, dispatch-multiprocess, typecheck and others). pi-envoy failed its real-Oh-My-Pi card tests. Main fails the same tests at a21100c5 (run 41016236644), and this PR does not touch packages/pi-envoy. The controller says dispatch://INFRA-826 tracks it and sjawhar/legion #2550 fixes it; once that merges, main comes into #2392."
 }
