@@ -914,13 +914,13 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			// Its three readers, on a single server, which refuses a create at more than one copy
 			// and names the setting: the stream main's publisher reconciles
 			// (dispatchStreamOptions) on its first connection, in the background, so the refusal
-			// reaches the reconnect hook's logged error (startDispatchStream), the webhook
+			// reaches the reconnect hook's logged error (refusedDispatchStream), the webhook
 			// sweeper's bucket (webhookSweeper's Open) and the bucket redeliver-webhooks opens.
 			// stream_replicas_test.go raises the same on a cluster.
 			_, url := testnats.Start(t)
 			three := map[string]string{"ENVOY_NATS_REPLICAS": "3"}
-			if _, err := startDispatchStream(t, []string{url}, three); err == nil || !strings.Contains(err.Error(), "ENVOY_NATS_REPLICAS=3: ") {
-				t.Errorf("the stream at ENVOY_NATS_REPLICAS=3 on one server: logged %v, want the server's refusal naming the setting", err)
+			if refusal := refusedDispatchStream(t, []string{url}, three); !strings.Contains(refusal, "ENVOY_NATS_REPLICAS=3: ") {
+				t.Errorf("the stream at ENVOY_NATS_REPLICAS=3 on one server: logged %q, want the server's refusal naming the setting", refusal)
 			}
 			conn := testnats.Connect(t, url)
 			t.Cleanup(conn.Close)
@@ -931,10 +931,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			if info, err := js.StreamInfo(bus.Stream); !errors.Is(err, natsgo.ErrStreamNotFound) {
 				t.Errorf("after the refused start at ENVOY_NATS_REPLICAS=3 the stream is %+v (%v), want none created", info, err)
 			}
-			client, err := startDispatchStream(t, []string{url}, nil)
-			if err != nil {
-				t.Fatalf("connect the publisher at the default: %v", err)
-			}
+			client := startDispatchStream(t, []string{url}, nil)
 			key, pemText := githubapptest.Key(t)
 			app := &auth.AppConfig{ClientID: replicasTestClientID, PEM: pemText}
 			sweeper, err := webhookSweeper(client, app, "", resolveWith(t, three).NATSReplicas)
@@ -973,10 +970,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			// Its reader: the stream main's publisher creates (dispatchStreamOptions) holds the
 			// limit and refuses new messages once full.
 			_, url := testnats.Start(t)
-			client, err := startDispatchStream(t, []string{url}, map[string]string{"ENVOY_STREAM_MAX_BYTES": "1048576"})
-			if err != nil {
-				t.Fatalf("start the stream with ENVOY_STREAM_MAX_BYTES=1048576: %v", err)
-			}
+			client := startDispatchStream(t, []string{url}, map[string]string{"ENVOY_STREAM_MAX_BYTES": "1048576"})
 			info, err := client.JS().StreamInfo(bus.Stream)
 			if err != nil || info.Config.MaxBytes != 1<<20 || info.Config.Discard != natsgo.DiscardNew {
 				t.Errorf("stream = %+v, %v; want a byte limit of %d discarding new", info, err, 1<<20)
