@@ -11,6 +11,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/property"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sjawhar/envoy/infra/gcp"
 	"github.com/sjawhar/envoy/infra/internal/pulumitest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -41,13 +42,26 @@ func setConstructApp(inputs map[string]property.Value) {
 	inputs["appPrivateKeySecretKey"] = property.New("private-key.b64")
 }
 
+// dispatchConstructGCP and dispatchConstructRandom are the references a consumer's program gives
+// Construct, one per provider package it declares.
+var (
+	dispatchConstructGCP    = p.ProviderReference{Urn: resource.URN("urn:pulumi:s::p::" + gcpProviderType + "::gcp-example"), ID: "gcp-example-id"}
+	dispatchConstructRandom = p.ProviderReference{Urn: resource.URN("urn:pulumi:s::p::" + randomProviderType + "::random-example"), ID: "random-example-id"}
+)
+
 func constructDispatch(t *testing.T, inputs map[string]property.Value, dryRun bool) (*pulumitest.Mocks, p.ConstructResponse, error) {
 	t.Helper()
-	m := newMocks()
-	response, err := pulumitest.Construct(t, m, dispatchType, "example-dispatch", inputs, dryRun, map[tokens.Package]p.ProviderReference{
-		"gcp":    {Urn: resource.URN("urn:pulumi:s::p::" + gcpProviderType + "::gcp-example"), ID: "gcp-example-id"},
-		"random": {Urn: resource.URN("urn:pulumi:s::p::" + randomProviderType + "::random-example"), ID: "random-example-id"},
+	return constructDispatchWithProviders(t, inputs, dryRun, map[tokens.Package]p.ProviderReference{
+		"gcp": dispatchConstructGCP, "random": dispatchConstructRandom,
 	})
+}
+
+// constructDispatchWithProviders constructs the component through the plugin's own Construct, the
+// path a consumer's pulumi up takes, with the provider references the consumer's program declares.
+func constructDispatchWithProviders(t *testing.T, inputs map[string]property.Value, dryRun bool, providers map[tokens.Package]p.ProviderReference) (*pulumitest.Mocks, p.ConstructResponse, error) {
+	t.Helper()
+	m := newMocks()
+	response, err := pulumitest.Construct(t, m, dispatchType, "example-dispatch", inputs, dryRun, providers)
 	return m, response, err
 }
 
@@ -422,4 +436,68 @@ func TestConstructTakesAWholeDispatchIntegerSentAsAFloat(t *testing.T) {
 	require.NoError(t, err)
 	spec := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").Inputs.Mappable()["spec"].(map[string]any)
 	require.EqualValues(t, 3, spec["replicas"])
+}
+
+// constructDispatchClusterOnly constructs a cluster-only component through the plugin's own
+// Construct, the path a consumer's pulumi up takes, from the three inputs the mode takes and a
+// gcp provider reference alone: the mode registers no RandomPassword, so a cluster-only program
+// declares no random provider.
+func constructDispatchClusterOnly(t *testing.T, dryRun bool) (*pulumitest.Mocks, p.ConstructResponse, error) {
+	t.Helper()
+	return constructDispatchWithProviders(t, map[string]property.Value{
+		"clusterOnly": property.New(true),
+		"region":      property.New("us-central1"),
+		"hostname":    property.New("example-dispatch"),
+	}, dryRun, map[tokens.Package]p.ProviderReference{"gcp": dispatchConstructGCP})
+}
+
+// A cluster-only component answers with all eight outputs. Three carry the cluster's own values,
+// which a consumer reads to reach it: the cluster's name, the service-account token issuer built
+// from the project, the location and the name, and the exec-plugin kubeconfig rendered from the
+// cluster the mocks compute. The five Dispatch would decide are an explicit empty string, present
+// and known: a field left unset would await as unknown, one value in preview and another in
+// update, while "" is the same in both and is what a consumer already reads as "not applied".
+// Hence the preview row: an empty string must be the same value there as in an update.
+func TestConstructOutputsTheClusterOnlyState(t *testing.T) {
+	for _, row := range []struct {
+		name   string
+		dryRun bool
+	}{{"an update", false}, {"a preview", true}} {
+		t.Run(row.name, func(t *testing.T) {
+			_, response, err := constructDispatchClusterOnly(t, row.dryRun)
+			require.NoError(t, err)
+			for output, want := range map[string]string{
+				"clusterName":           "example-dispatch",
+				"serviceAccountIssuer":  azureIssuer,
+				"kubeconfig":            gcp.DispatchKubeconfig("example-endpoint", "ZXhhbXBsZS1jYQ==", "example-dispatch"),
+				"url":                   "",
+				"databaseInstance":      "",
+				"principal":             "",
+				"agentToken":            "",
+				"serviceAccountSubject": "",
+			} {
+				value, ok := response.State.GetOk(output)
+				require.True(t, ok, "%s is in the state", output)
+				require.True(t, value.IsString(), "%s is a known string, not %s", output, value)
+				require.Equal(t, want, value.AsString(), output)
+			}
+		})
+	}
+}
+
+// An input that configures Dispatch, sent with clusterOnly over the wire a consumer's SDK uses,
+// is refused by name before anything registers: a stack already running Dispatch sets these, so
+// turning the mode on is refused rather than deleting what it would no longer build.
+// TestDispatchClusterOnlyRefusesEveryDispatchInput holds the refusal for every such input.
+func TestConstructRefusesADispatchInputWithClusterOnly(t *testing.T) {
+	m, _, err := constructDispatch(t, map[string]property.Value{
+		"clusterOnly": property.New(true),
+		"region":      property.New("us-central1"),
+		"hostname":    property.New("example-dispatch"),
+		"natsUrl":     property.New("nats://example-hub.example-tailnet.ts.net:4222"),
+	}, false)
+	// The component's refusal reaches the consumer through the RPC, which wraps it.
+	require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: natsUrl configures Dispatch, "+
+		"which clusterOnly does not build: unset it, or unset clusterOnly")
+	require.Empty(t, m.Types())
 }

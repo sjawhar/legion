@@ -1489,7 +1489,7 @@ relation: `mentions`, `child_of` (`issues.parent_key`), `blocked_by` (`issue_lin
 `part_of` edge to its document (`document_blocks`), since migration 0142 the same two for a
 block of a comment or message (`comment_block_refs` and `message_block_refs`, `comment_blocks` and
 `message_blocks`) and a reply's `replies_to` edge to the block it names (`replies_to_block`), and
-since migration 0145 a typed block's `block[]` attribute makes `block_refs` edges of a kind named
+since migration 0148 a typed block's `block[]` attribute makes `block_refs` edges of a kind named
 by the attribute (below the typed block rules). An issue may wait only on issues in its own
 project through `blocked_by`.
 For cycle checks an issue has two halves: it starts after its `blocked_by` targets are done and
@@ -2492,7 +2492,7 @@ while its target has an allowed type: each `block_refs` row a pointer writes car
 attribute's targets as `to_types` (null: no limit), and the `graph_edges` block arm,
 `readEdgeRows`' document `?from=` arm and `refs.BlockLinks` list a row only while
 `block_ref_listed(to_types, to_id)` holds, true when no current `document_blocks` row of the target
-has a type outside `to_types` (migration 0145). Retyping a target hides or shows the edge with no
+has a type outside `to_types` (migration 0148). Retyping a target hides or shows the edge with no
 rewrite of the citing document, a pinned pointer is limited by its target's current type, and the
 index refreshes `to_types` on every row it keeps, so a change of an attribute's targets reaches a
 document's rows at its next index (a version write, or `rebuild-refs`). The editor's typed-block

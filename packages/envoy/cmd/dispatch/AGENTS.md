@@ -300,7 +300,7 @@ mentions, and a reply's `replies_to` edge to the block it names); `0143` and `01
 `item_blocks_owe` to `comments` and `messages`, so every comment and message any build writes is
 owed its blocks (`owed_at`) until a block-aware write or the block-index reconciliation indexes
 it, and owe every item already stored.
-`0145_block_pointer_links` gives `block_refs` a nullable `to_types`, the types a typed block's
+`0148_block_pointer_links` gives `block_refs` a nullable `to_types`, the types a typed block's
 `block[]` pointer may point at, creates `block_ref_listed(to_types, to_id)`, and re-states
 `graph_edges` with its `block_refs` arm listing a row only while that function holds, so a
 pointer's edge, whose kind is the attribute's name, is listed only while its target has an
