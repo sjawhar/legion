@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -64,7 +65,9 @@ type keptPublishMode int
 const (
 	// keptDelivers: every publish reaches its topic's holder.
 	keptDelivers keptPublishMode = iota
-	// keptNoHolder: no live session holds the role, so the row waits (notify.ErrNoHolder).
+	// keptNoHolder: no live session holds the role (notify.ErrNoHolder), so the row waits while
+	// the architect's claim can hold its role again, and finishes undelivered once nobody will
+	// hold it (architectEnded).
 	keptNoHolder
 	// keptRefuses: the holder does not advertise the delivery mode, so the row finishes
 	// undelivered (notify.ErrRefusedByHolder) and releases what it claimed.
@@ -74,6 +77,16 @@ const (
 	// Only a notice nobody has re-held yet is answered this way, so the re-hold budget
 	// (noticeReholdDelays) is never spent and the copy is never dropped for exhausting it.
 	keptReceiptTimeout
+	// keptDenied: the listener's own NATS grant refuses the forward (notify.ErrPublishDenied),
+	// which no retry can change until an operator changes the grant, so the row finishes
+	// undelivered as a refused one does.
+	keptDenied
+	// keptDeliveryFailed: the listener could not forward the notice at all — the hub down, the
+	// role or session unreadable (notify.ReasonDeliveryFailed) — which is none of the answers the
+	// executor classifies, so the row fails and retries on its backoff without finishing.
+	keptDeliveryFailed
+	// keptModes is how many modes the generator chooses among.
+	keptModes
 )
 
 func (m keptPublishMode) String() string {
@@ -84,41 +97,76 @@ func (m keptPublishMode) String() string {
 		return "refused"
 	case keptReceiptTimeout:
 		return "receipt-timeout"
+	case keptDenied:
+		return "denied"
+	case keptDeliveryFailed:
+		return "delivery-failed"
 	default:
 		return "delivers"
 	}
 }
 
-// keptPublisher is the listener as a role publish meets it, under one mode the run switches.
+// keptPublisher is the listener as a role publish meets it, under one mode the run switches. It
+// counts the answer each catch-up drew, so a run reports which modes its catch-ups actually met.
 type keptPublisher struct {
 	mu        sync.Mutex
 	mode      keptPublishMode
 	delivered []outboxPublish
+	answered  [keptModes]int
 }
 
 func (p *keptPublisher) Publish(_ context.Context, topic, message string, payload any, key string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	switch p.mode {
-	case keptNoHolder:
-		return fmt.Errorf("publish notice to %s: listener returned 404 Not Found: %w", topic, notify.ErrNoHolder)
-	case keptRefuses:
-		return fmt.Errorf("publish notice to %s: listener returned 403 Forbidden: %w", topic,
-			notify.ErrRefusedByHolder{Holder: "ses-other"})
-	case keptReceiptTimeout:
-		if notice, ok := payload.(record.Notice); ok && notice.Resends == 0 {
-			return fmt.Errorf("publish notice to %s: listener returned 504 Gateway Timeout: %w", topic,
-				notify.ErrNotDelivered{Reason: notify.ReasonReceiptTimeout, Holder: "ses-other"})
-		}
+	mode, err := p.answer(topic, payload, key)
+	if notice, ok := payload.(record.Notice); ok && notice.CatchUp != nil {
+		p.answered[mode]++
+	}
+	if err != nil {
+		return err
 	}
 	p.delivered = append(p.delivered, outboxPublish{topic: topic, message: message, key: key, payload: payload})
 	return nil
+}
+
+// answer is what this run's mode makes of one publish, and the mode that answer is of: a copy the
+// re-hold already queued is delivered rather than timed out again, so the re-hold budget is never
+// spent.
+func (p *keptPublisher) answer(topic string, payload any, key string) (keptPublishMode, error) {
+	switch p.mode {
+	case keptNoHolder:
+		return p.mode, fmt.Errorf("publish notice to %s: listener returned 404 Not Found: %w", topic, notify.ErrNoHolder)
+	case keptRefuses:
+		return p.mode, fmt.Errorf("publish notice to %s: listener returned 403 Forbidden: %w", topic,
+			notify.ErrRefusedByHolder{Holder: "ses-other"})
+	case keptDenied:
+		return p.mode, fmt.Errorf("publish notice to %s: listener returned 403 Forbidden: %w", topic,
+			notify.ErrPublishDenied{Message: fmt.Sprintf(
+				"envoy: the message bus denied the publish under this listener's own permissions: bus: NATS denied the publish to %q", topic)})
+	case keptDeliveryFailed:
+		return p.mode, fmt.Errorf("publish notice to %s: listener returned 504 Gateway Timeout: %w", topic,
+			notify.ErrNotDelivered{Reason: notify.ReasonDeliveryFailed, EventID: key})
+	case keptReceiptTimeout:
+		if notice, ok := payload.(record.Notice); ok && notice.Resends == 0 {
+			return p.mode, fmt.Errorf("publish notice to %s: listener returned 504 Gateway Timeout: %w", topic,
+				notify.ErrNotDelivered{Reason: notify.ReasonReceiptTimeout, Holder: "ses-other"})
+		}
+	}
+	return keptDelivers, nil
 }
 
 func (p *keptPublisher) setMode(mode keptPublishMode) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.mode = mode
+}
+
+// answers is how many catch-up publishes each mode has answered, which a step reads before and
+// after a row's run to see what that run's publish met.
+func (p *keptPublisher) answers() [keptModes]int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.answered
 }
 
 func (p *keptPublisher) published() []outboxPublish {
@@ -142,6 +190,101 @@ func (s *keptForgetStore) ForgetKeptDecisions(ctx context.Context, tx pgx.Tx, ro
 	return s.Store.ForgetKeptDecisions(ctx, tx, root, kept, row)
 }
 
+// keptRuntime is the fake runtime with every launch of the architect refused while the run's
+// toggle is on — the pod the cluster would not open, the session it could not resume — so a start
+// spends the claim's launch budget (supervise.Limits.LaunchFailures) and leaves the claim failed.
+type keptRuntime struct {
+	*fake.Runtime
+	mu       sync.Mutex
+	refuses  bool
+	refusals int
+}
+
+var _ runtime.Runtime = (*keptRuntime)(nil)
+
+func (r *keptRuntime) Spawn(ctx context.Context, spec runtime.SpawnSpec) (runtime.Locator, error) {
+	if err := r.refusal(); err != nil {
+		return runtime.Locator{}, err
+	}
+	return r.Runtime.Spawn(ctx, spec)
+}
+
+func (r *keptRuntime) Resume(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
+	if err := r.refusal(); err != nil {
+		return runtime.Locator{}, err
+	}
+	return r.Runtime.Resume(ctx, prev, spec)
+}
+
+// refusal is the answer a launch draws while the toggle is on, which supervise charges to the
+// claim's launch budget.
+func (r *keptRuntime) refusal() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.refuses {
+		return nil
+	}
+	r.refusals++
+	return errors.New("tester: no process could be opened for the claim")
+}
+
+func (r *keptRuntime) setRefuses(refuses bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.refuses = refuses
+}
+
+func (r *keptRuntime) refusing() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.refuses
+}
+
+func (r *keptRuntime) refused() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.refusals
+}
+
+// keptCounts is what a run's injected failures drove, reported at the run's end so the operations
+// the generator chose are shown to have fired rather than assumed.
+type keptCounts struct {
+	// refusedLaunches is every Spawn or Resume the runtime refused.
+	refusedLaunches int
+	// failedClaim is every time the architect's claim spent its launch budget and failed.
+	failedClaim int
+	// retriedFailed is every start row that found the claim failed and relaunched it (the
+	// outbox's start, case StateFailed).
+	retriedFailed int
+	// endedCatchUps is every catch-up the executor finished undelivered because nobody will hold
+	// the architect's role again (architectEnded), and endedByFailure those of them whose reason
+	// was the claim itself — failed, retired or unsupervised — rather than the lingering tree.
+	endedCatchUps  int
+	endedByFailure int
+	// publishes is how many catch-up publishes each listener mode answered.
+	publishes [keptModes]int
+}
+
+func (c *keptCounts) add(other keptCounts) {
+	c.refusedLaunches += other.refusedLaunches
+	c.failedClaim += other.failedClaim
+	c.retriedFailed += other.retriedFailed
+	c.endedCatchUps += other.endedCatchUps
+	c.endedByFailure += other.endedByFailure
+	for mode := range c.publishes {
+		c.publishes[mode] += other.publishes[mode]
+	}
+}
+
+func (c keptCounts) String() string {
+	return fmt.Sprintf("%d launches refused, %d claim failures, %d starts relaunched a failed claim, "+
+		"%d catch-ups finished for an architect that will not hold its role again (%d of them a failed claim); "+
+		"catch-up publishes answered: %d delivered, %d no-holder, %d refused, %d receipt-timeout, %d denied, %d delivery-failed",
+		c.refusedLaunches, c.failedClaim, c.retriedFailed, c.endedCatchUps, c.endedByFailure,
+		c.publishes[keptDelivers], c.publishes[keptNoHolder], c.publishes[keptRefuses],
+		c.publishes[keptReceiptTimeout], c.publishes[keptDenied], c.publishes[keptDeliveryFailed])
+}
+
 // keptRun is one seeded life of one root: the real record store, workflow engine, outbox runner
 // and claim supervisor over a database of its own, the model the generator drives them from, and
 // what the architect was told.
@@ -160,7 +303,7 @@ type keptRun struct {
 	engine    *workflow.Engine
 	trees     *store.Store
 	claims    *outboxClaimStore
-	rt        *fake.Runtime
+	rt        *keptRuntime
 	conn      *fake.Conn
 	publisher *keptPublisher
 	sup       *supervisor
@@ -181,6 +324,7 @@ type keptRun struct {
 	keys     map[string]bool
 	prompts  int
 	publishd int
+	counts   keptCounts
 }
 
 // A person's decision on a root nobody in its tree can hear reaches an architect of the root's
@@ -207,11 +351,20 @@ type keptRun struct {
 // lingering after its close) with the architect's suspend, its hand back to todo with no slot, its
 // re-admission with the start admission writes, one due supervise or notice row of the root run in
 // no particular order (finished, or its finish lost to a crash), the architect's launch coming
-// ready, its turn on the task it holds, the forget's failure switched on and off, the listener
-// switched between delivering, holding no session, refusing the delivery mode and not confirming
-// in time (the re-hold), and the daemon's restart.
+// ready, its turn on the task it holds, the forget's failure switched on and off, the runtime's
+// refusal of every launch switched on and off, the listener switched between delivering, holding
+// no session, refusing the delivery mode, not confirming in time (the re-hold), denying the
+// forward under its own NATS grant and failing to forward at all, and the daemon's restart.
 //
-// Three the machinery has are left out. The architect's process dying takes its task back and the
+// The refused launch is what drives the claim through its launch budget
+// (supervise.Limits.LaunchFailures) into failed, which the run tells the workflow as the daemon's
+// terminal hook does (claimFailed), and from there through the start row's relaunch of a failed
+// claim and the catch-up the executor finishes because nobody will hold the architect's role again
+// (architectEnded). The denied forward finishes a catch-up undelivered as a refusal does; the
+// failed forward is none of the answers the executor classifies, so its row retries on its backoff
+// without finishing. Each run reports how often each of these fired (keptCounts).
+//
+// Five the machinery has are left out. The architect's process dying takes its task back and the
 // relaunch sends the same delivery to a fresh agent, which no observation here can tell from a
 // second telling, and whether that is one is a question for the specification rather than for this
 // test. A newer decision on a reference already kept replaces its row (Store.AddParkedDecision),
@@ -219,17 +372,41 @@ type keptRun struct {
 // every decision here is made on a reference of its own. The outbox's own parkDecision, which
 // keeps the decision a spec-decision notice could not deliver, reaches the same
 // record.RelayParkedDecision this test calls directly, and adds only the notice routing its own
-// tests cover.
+// tests cover. The start's relaunch of a retired claim (the outbox's start, case StateRetired) is
+// unreachable here: a claim retires at an operator's stop, at its tree's close or when its linger
+// expires, and this life has none of the three — its park leaves the architect suspended, which is
+// what the workflow's own suspend writes. The notice the executor cannot route
+// (errNoticeUnroutable) needs a record with no such issue, no tree or no recorded root, which the
+// rest of the run reads as a broken record rather than as a state the root can be in.
 func TestKeptDecisionsReachTheCurrentArchitectOnce(t *testing.T) {
 	steps := keptPropertyEnv(t, "LEGION_KEPT_PROPERTY_STEPS", keptPropertySteps)
+	var all keptCounts
+	var seeds, failedSeeds int
+	var modeSeeds [keptModes]int
 	for _, seed := range keptPropertySeeds(t) {
 		t.Run(fmt.Sprintf("seed-%d", seed), func(t *testing.T) {
 			run := newKeptRun(t, seed, steps)
 			run.drive()
 			run.quiesce()
 			run.held()
+			run.report()
+			all.add(run.counts)
+			seeds++
+			if run.counts.failedClaim > 0 {
+				failedSeeds++
+			}
+			for mode, count := range run.counts.publishes {
+				if count > 0 {
+					modeSeeds[mode]++
+				}
+			}
 		})
 	}
+	t.Logf("%d seeds: %s", seeds, all)
+	t.Logf("%d of %d seeds reached a failed architect claim; seeds whose catch-ups met each listener mode: "+
+		"%d delivered, %d no-holder, %d refused, %d receipt-timeout, %d denied, %d delivery-failed",
+		failedSeeds, seeds, modeSeeds[keptDelivers], modeSeeds[keptNoHolder], modeSeeds[keptRefuses],
+		modeSeeds[keptReceiptTimeout], modeSeeds[keptDenied], modeSeeds[keptDeliveryFailed])
 }
 
 // keptPropertySeeds is the seeds this invocation runs: the one LEGION_KEPT_PROPERTY_SEED names, or
@@ -277,7 +454,7 @@ func newKeptRun(t *testing.T, seed int64, steps int) *keptRun {
 		engine:    workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger()),
 		trees:     outboxTreeStore(t, pool, keptRoot),
 		claims:    &outboxClaimStore{},
-		rt:        fake.NewRuntime(),
+		rt:        &keptRuntime{Runtime: fake.NewRuntime()},
 		conn:      fake.NewConn(),
 		publisher: &keptPublisher{},
 		token:     mustClaimToken(t, keptRoot, claim.RoleArchitect),
@@ -365,7 +542,7 @@ func (r *keptRun) drive() {
 // enabled is every operation the model state allows now, in a fixed order so one seed always picks
 // the same one.
 func (r *keptRun) enabled() []func() {
-	ops := []func(){r.toggleForget, r.togglePublisher, r.restartDaemon}
+	ops := []func(){r.toggleForget, r.togglePublisher, r.toggleLaunch, r.restartDaemon}
 	if !r.architectHears() {
 		ops = append(ops, r.decide)
 	}
@@ -519,9 +696,7 @@ func (r *keptRun) runRow() {
 	if err != nil {
 		r.fatalf("decode outbox row %d: %v", row.ID, err)
 	}
-	row.LeaseToken = leaseOutboxRow(r.t, r.pool, row.ID)
-	runErr := r.runner.execute(r.ctx, row)
-	r.waitMachine()
+	runErr := r.runOne(&row, payload)
 	crashed := runErr == nil && r.rng.IntN(6) == 0
 	if runErr == nil && !crashed {
 		if err := pgx.BeginFunc(r.ctx, r.pool, func(tx pgx.Tx) error {
@@ -531,6 +706,77 @@ func (r *keptRun) runRow() {
 		}
 	}
 	r.tracef("run-row id=%d kind=%s what=%s outcome=%s", row.ID, row.Kind, keptRowWhat(payload), keptRunOutcome(runErr, crashed))
+}
+
+// runOne leases the row and runs it as its lane would, and records what the run did to the
+// architect's claim and to what the row named (noteRun).
+func (r *keptRun) runOne(row *record.OutboxRow, payload record.OutboxPayload) error {
+	state, answered := r.claimState(), r.publisher.answers()
+	row.LeaseToken = leaseOutboxRow(r.t, r.pool, row.ID)
+	runErr := r.runner.execute(r.ctx, *row)
+	r.waitMachine()
+	r.noteRun(state, answered, payload, runErr)
+	return runErr
+}
+
+// noteRun records what one row's run did, read against the claim and the listener as they stood
+// before it: a start that relaunched a failed claim (the outbox's start, case StateFailed), a
+// catch-up the executor finished because nobody will hold the architect's role again — the only
+// ending a no-holder answer has besides the wait — and the claim's own fall to failed, which the
+// daemon tells the workflow (claimFailed).
+func (r *keptRun) noteRun(before supervise.ClaimState, answered [keptModes]int, payload record.OutboxPayload, runErr error) {
+	switch value := payload.(type) {
+	case record.SuperviseRequest:
+		if value.Op == "start" && before == supervise.StateFailed {
+			r.counts.retriedFailed++
+		}
+	case record.Notice:
+		if value.CatchUp != nil && runErr == nil && r.publisher.answers()[keptNoHolder] > answered[keptNoHolder] {
+			r.counts.endedCatchUps++
+			if claimEnded(before) {
+				r.counts.endedByFailure++
+			}
+			r.tracef("catch-up finished undelivered: nobody will hold the architect's role again (claim=%s)", keptClaimState(before))
+		}
+	}
+	if after := r.claimState(); before != supervise.StateFailed && after == supervise.StateFailed {
+		r.counts.failedClaim++
+		r.claimFailed()
+	}
+}
+
+// claimState is the architect's claim as the supervisor holds it now, and "" when this daemon
+// supervises none, which is what the notice executor reads for a claim it does not supervise
+// (claimEnded).
+func (r *keptRun) claimState() supervise.ClaimState {
+	machine, found := r.sup.Machine(r.token)
+	if !found {
+		return ""
+	}
+	return machine.Claim().State
+}
+
+func keptClaimState(state supervise.ClaimState) supervise.ClaimState {
+	if state == "" {
+		return "none"
+	}
+	return state
+}
+
+// claimFailed tells the workflow that the architect's claim spent its launch budget, as the
+// daemon's terminal hook does (workflowRuntime.applyTerminal): the engine writes the tree's
+// worker-died notice, which goes to that same architect and waits ahead of its catch-ups.
+func (r *keptRun) claimFailed() {
+	machine, found := r.sup.Machine(r.token)
+	if !found {
+		r.fatalf("the architect claim is gone")
+	}
+	held := machine.Claim()
+	if _, err := intake.ApplyFact(r.ctx, r.pool, terminalSource, terminalEventID(held, supervise.StateFailed),
+		intake.ClaimFailed{Issue: keptRoot, Role: claim.RoleArchitect, Reason: held.Failure}, r.engine); err != nil {
+		r.fatalf("apply the architect's failure at launch %d: %v", held.Generation, err)
+	}
+	r.tracef("claim-failed launch=%d refusals=%d notice-row=%d", held.Generation, r.rt.refused(), r.lastRow())
 }
 
 func keptRunOutcome(err error, crashed bool) string {
@@ -635,19 +881,23 @@ func (r *keptRun) toggleForget() {
 }
 
 func (r *keptRun) togglePublisher() {
-	mode := keptPublishMode(r.rng.IntN(4))
+	mode := keptPublishMode(r.rng.IntN(int(keptModes)))
 	r.publisher.setMode(mode)
 	r.tracef("publisher=%s", mode)
 }
 
+// toggleLaunch switches the runtime's refusal of the architect's launches on and off: while it is
+// on, every Spawn and Resume is refused, so the next start of the claim spends its launch budget
+// (supervise.Limits.LaunchFailures) and leaves it failed, where its start rows relaunch it and its
+// catch-ups find nobody to hold its role.
+func (r *keptRun) toggleLaunch() {
+	r.rt.setRefuses(!r.rt.refusing())
+	r.tracef("launch-refusal=%t claim=%s", r.rt.refusing(), keptClaimState(r.claimState()))
+}
+
 func (r *keptRun) restartDaemon() {
 	r.restart()
-	machine, found := r.sup.Machine(r.token)
-	state := supervise.ClaimState("none")
-	if found {
-		state = machine.Claim().State
-	}
-	r.tracef("restart claims=%d architect=%s", r.sup.count(), state)
+	r.tracef("restart claims=%d architect=%s", r.sup.count(), keptClaimState(r.claimState()))
 }
 
 // quiesce ends the run: every injected failure off, the root re-admitted when it is parked or
@@ -656,8 +906,9 @@ func (r *keptRun) restartDaemon() {
 // the root is left and no delivery is pending.
 func (r *keptRun) quiesce() {
 	r.records.fails = false
+	r.rt.setRefuses(false)
 	r.publisher.setMode(keptDelivers)
-	r.tracef("quiesce: every failure off, publisher delivers")
+	r.tracef("quiesce: every failure off, launches open, publisher delivers")
 	if r.parkedOrWaiting() {
 		r.readmit()
 	}
@@ -694,9 +945,7 @@ func (r *keptRun) runLeftoverRow() {
 	if err != nil {
 		r.fatalf("decode outbox row %d: %v", row.ID, err)
 	}
-	row.LeaseToken = leaseOutboxRow(r.t, r.pool, row.ID)
-	runErr := r.runner.execute(r.ctx, row)
-	r.waitMachine()
+	runErr := r.runOne(&row, payload)
 	if runErr == nil {
 		if err := pgx.BeginFunc(r.ctx, r.pool, func(tx pgx.Tx) error {
 			return r.records.FinishOutbox(r.ctx, tx, row.ID, row.LeaseToken)
@@ -705,6 +954,14 @@ func (r *keptRun) runLeftoverRow() {
 		}
 	}
 	r.tracef("run-row id=%d kind=%s what=%s outcome=%s", row.ID, row.Kind, keptRowWhat(payload), keptRunOutcome(runErr, false))
+}
+
+// report says what the run's injected failures drove, so a reader of the test's output sees the
+// operations the generator chose actually fire.
+func (r *keptRun) report() {
+	r.counts.refusedLaunches = r.rt.refused()
+	r.counts.publishes = r.publisher.answers()
+	r.t.Logf("seed %d: %s", r.seed, r.counts)
 }
 
 // held is the run's verdict once it has quiesced: every decision kept was told once, and the root
