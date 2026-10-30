@@ -36,8 +36,9 @@ import (
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
-// Image is the NATS server image the daemon's existing NATS tests use.
-const Image = "mirror.gcr.io/library/nats:2.10"
+// Image is the NATS server image the daemon's existing NATS tests use:
+// ghcr.io/sjawhar/legion/ci, the copy of nats:2.10 (.github/ci-images.yaml).
+const Image = "ghcr.io/sjawhar/legion/ci@sha256:5498ba57b9471840be3d15b033a4eec554d1c02fa6c2cc0ca2d888637f6c6e2f"
 
 // readinessTimeout bounds the wait for the JetStream API once the container runs. The container
 // start is not bounded by it: how long Docker takes to create a container is the daemon's load.

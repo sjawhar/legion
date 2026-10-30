@@ -153,6 +153,13 @@ var listenerSignals = []struct {
 		description: "Envoy listener refused a webhook delivery (`<source> publish refused`, `github ci record refused` or `github ci suite record refused`, answered 422): the envelope is past what NATS takes or the commit's CI record is past its bound, and the same input is refused on every attempt. A GitHub delivery is counted at its first refusal in each listener task: Dispatch's redelivery sweep asks for a failed delivery again for 72 hours, and each later refusal of it is logged `redelivery <delivery>: <action> refused` and not counted. A delivery refused before a fix deploys is recovered once the fix lands within those 72 hours; past them it is lost. A refused CI record leaves its commit overflowed, never settling, whatever is redelivered. Read /ecs/envoy-listener for the refusal's reason; the fix is a cap in legion's normalizer or a CI bound, not the NATS server's limits.",
 	},
 	{
+		alarm: "reconnect-hooks-stalled", metric: "ReconnectHooksStalled",
+		filters: [][2]string{
+			{"reconnect-hooks-stalled-filter", `[date=%^\d{4}/\d{2}/\d{2}$%, time=%^\d{2}:\d{2}:\d{2}$%, level=ERROR, w1=envoy, w2=nats, w3=reconnect, w4=hooks, w5=have, w6=not, w7=succeeded, ...]`},
+		},
+		description: "An Envoy listener's KV watch rebuild has not succeeded for a minute after a NATS reconnect (`envoy nats reconnect hooks have not succeeded`): its interest, role-claim, session and CI caches no longer follow their buckets and serve what they last held, and `/healthz` reports this as 200 `degraded` naming `KV watch rebuild` — deliberately not a 503, which would replace the only task into the same failing rebuild with empty caches. The bus keeps retrying the rebuild with backoff. Read the line's `error` in /ecs/envoy-listener for the failing bucket read: typically a JetStream that refuses or does not answer consumer creation for the KV streams.",
+	},
+	{
 		alarm: "stream-subject-dropped", metric: "StreamSubjectsDropped",
 		filters: [][2]string{
 			{"stream-subject-dropped-filter", `[date=%^\d{4}/\d{2}/\d{2}$%, time=%^\d{2}:\d{2}:\d{2}$%, level=WARN, w1=envoy, w2=nats, w3=stream, w4=subject, w5=replaced, w6=by, w7=an, w8=overlapping, w9=one, ...]`},
@@ -324,7 +331,7 @@ func TestWebhookListenerTagsEachChildWithItsService(t *testing.T) {
 			tagged++
 		}
 	}
-	require.Equal(t, 9, tagged, "the log group, Cloud Map service, task definition, service and five alarms")
+	require.Equal(t, 10, tagged, "the log group, Cloud Map service, task definition, service and six alarms")
 }
 
 // The task definition comes after the policies its execution role reads the secrets with, and the
@@ -435,7 +442,7 @@ func TestWebhookListenerAlarmsNameItsLogGroup(t *testing.T) {
 			require.Equal(t, "/ecs/example-hooks", c.Inputs["logGroupName"].StringValue(), "%s's log group", name)
 		}
 	}
-	require.Equal(t, 5, alarms)
+	require.Equal(t, 6, alarms)
 }
 
 // natsUrls may be known only in the apply, so core.ListenerConfig.Env refuses a bad one there and
