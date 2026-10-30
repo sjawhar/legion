@@ -2,47 +2,17 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-743",
-  "completed": "2026-10-30T04:39:00Z",
-  "round": 3,
-  "decision": "changes_requested",
-  "reviewedCodeHead": "0ae1b454076b",
-  "ci": "Code head 0ae1b454 (only .legion/INFRA-743/ changed up to 79d741f4): lint, typecheck, test, pr-title, envoy-go-race and listener-server-change are success. envoy-go failed (job 123822045224, run 40979135125) on TestAnAskBlockWhoseIDIsPastTheBoundSettles in internal/dispatch/docs (block_id_bound_test.go:201), so ci-ok is cancelled. This PR changes no file of that package, and `go list -deps ./internal/dispatch/docs` names neither internal/bus nor internal/kvwatch. Main's envoy-go passed at edc99283 (run 40976699333), the base of this head's merge, with the same code in that package. Main's newer runs were queued, in progress or cancelled at 04:37Z.",
-  "mergeability": "GitHub reports the pull request CONFLICTING/DIRTY at 79d741f4: main moved after the 0ae1b454 merge.",
-  "thermonuclear": "deep-review: Verdict APPROVE at 0ae1b454. It moved the stall branch back above the durable checks in a scratch copy, and the new test failed. internal/bus, internal/kvwatch and cmd/listener passed under the memory rule. code-quality: Verdict CHANGES at 0ae1b454 (1 Medium, 5 Low, no behaviour change). I checked each finding I carry below in the code.",
-  "roundTwoItems": "The Medium is fixed in a7e0ec2a: the stall check is last, after every 503 check (main.go:486-497), and TestHealthzReportsARecreatedDurableThroughAHookStall locks it. The code minors are fixed: function names in place of line numbers in kvwatch.go and AGENTS.md, 200 degraded in hook_stall_test.go, the HookStall doc, the recovery.go filter comment, and the changelog fragment. I wrote the census rows and the reviewer lines into the PR body myself, which needs no commit.",
+  "completed": "2026-10-30T07:31:00Z",
+  "round": 4,
+  "decision": "approved",
+  "reviewedCodeHead": "999ce53ff029",
+  "proseFix": "One reviewer commit above 999ce53f changes only Go comments, with no code line changed. It corrects HookStall's doc: the rule alone, without a partial list of cases. It removes the claim that every other /healthz test uses setupUnboundDurableFixture, which is false (healthz_hook_stall_test.go:106-107). It cuts 'a server it keeps' from durable_unbound_test.go:46. It rewraps main.go:402-416, where one line ran to 105 columns. gofmt is clean, and go vet ./internal/bus/ ./cmd/listener/ passes. The approval names that commit's head, once its checks are green.",
+  "ci": "At 999ce53f: lint, typecheck, test, pr-title, envoy-go-race, listener-server-change and dispatch are green. envoy-go failed (job 123914502561) on TestTwoAnnouncersAtOnceAnnounceAndPublishOnce in internal/dispatch/startup (started_test.go:271). This PR changes no file of that package, and that package does not depend on internal/bus or internal/kvwatch (go list -deps). Main's envoy-go passed at 5dc21cb9 (run 41007768416), and 5dc21cb9 differs from this merge's base 3c2691a7 in no envoy Go file. Round 3's envoy-go red was another test in another package (TestAnAskBlockWhoseIDIsPastTheBoundSettles, internal/dispatch/docs). The prose push starts a new run, and envoy-go is read again at that head.",
+  "mergeability": "MERGEABLE at 86af5b38. The merge 999ce53f kept main's side of every file this PR changes. The one conflict was in packages/envoy/AGENTS.md: it keeps this PR's bullet and main's new bullet after it, which the deep review checked line by line.",
+  "thermonuclear": "deep-review: Verdict APPROVE at 999ce53f. Its run of `go test -run 'Healthz|Unbound|BoundDurable|HookStall' ./cmd/listener/` passed. code-quality: Verdict CHANGES at 999ce53f, for two comment findings only, which the prose commit fixes.",
+  "roundThreeItems": "All fixed in 999ce53f. hookStallFixture is now the clocked client plus setupUnboundDurableFixture, which takes a *bus.Client. failReconnectHooks replaces the pasted block. The expected text is built from errDurableUnbound.Error(). main.go cites readyProbe by name. The healthy response map is built after every check. HookStall's doc names reportHookFailure as a reader; its list of cases is corrected in the prose commit.",
   "critical": 0,
-  "important": 2,
-  "minor": 5,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "PR #2504",
-      "description": "The pull request is CONFLICTING with main at 79d741f4, so it cannot merge and it gets no CI. Bring main in. Since edc99283, main changed one file of this PR's diff, packages/envoy/AGENTS.md, so by the forward-merge rule the next round is a full round. Read envoy-go green at the merged head, or show TestAnAskBlockWhoseIDIsPastTheBoundSettles failing on main's own envoy-go run, with the run named."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/cmd/listener/healthz_hook_stall_test.go",
-      "description": "hookStallFixture (:104-152) copies setupUnboundDurableFixture (durable_unbound_test.go:42-82) almost line for line, its doc comment included. Only the client differs. Give the existing fixture a *bus.Client parameter (its callers pass setupTestNATS(t)), and build hookStallFixture as the clocked client plus that fixture."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/cmd/listener/healthz_hook_stall_test.go",
-      "description": "The AddReconnectHook + ForceReconnect + waitFor block is pasted at :80-87 and :165-172; one helper beside errHookStallRewatch, carrying the comment. :181 repeats errDurableUnbound's exact text; build it from errDurableUnbound.Error()."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/bus/nats.go",
-      "description": "HookStall's doc (:569-575) lists when the error is nil, and misses the case of a run still in flight. The rule is simpler: the error is nil when no run has failed since the last run that succeeded. 'That handler is the reader' is also wrong: reportHookFailure reads HookStall too."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/cmd/listener/main.go",
-      "description": "The doc cites infra/gcp/dispatch_kube.go:516, which is a pre-stop comment. The readiness probe is at :523. Cite readyProbe by name. The healthy response map is built at :462-472, before the durable checks and the stall check that can discard it. Build it just before :498, so the code reads as the doc says: every check, then the healthy answer."
-    },
-    {
-      "severity": "minor",
-      "file": "a7e0ec2a",
-      "description": "The fix commit's author is legion-reviewer[bot] and its committer is legion-implementer[bot]. It was written on a working copy that the review App's handoff left. The merge 0ae1b454 above it is the implementer's own, so it is the last code push and nothing is wrong at this head. Start each round's commits with `jj new` on your own commit, so the author is yours."
-    }
-  ]
+  "important": 0,
+  "minor": 0,
+  "keyFindings": []
 }
