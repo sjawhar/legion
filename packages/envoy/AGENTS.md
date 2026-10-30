@@ -4406,6 +4406,31 @@ once and named exactly, keyed by account in `Config.ServiceLogins`; read by the 
 is an account `BROKER_SERVICES` binds for a service's pods, since every such pod holds a token for
 it; needs `BROKER_K8S_OIDC_ISSUER`; unset, no service logs in with a token),
 `BROKER_K8S_OIDC_ISSUER` / `BROKER_K8S_OIDC_AUDIENCE` (set together or not at all),
+`BROKER_GOOGLE_OIDC_AUDIENCE` (optional; the audience a Google VM identity token must carry,
+`Config.GoogleOIDCAudience`; its issuer is always `https://accounts.google.com`, the constant
+`config.GoogleOIDCIssuer`, so there is no issuer variable; it needs `BROKER_VM_SERVICES`, since an
+audience no VM service is listed for could accept no token; unset, `BROKER_VM_SERVICES`,
+`BROKER_VM_PROJECTS` and `BROKER_VM_INSTANCES` are each refused, naming the variable and this one),
+`BROKER_VM_SERVICES` (optional; whitespace-separated `name=<service account email>` entries, such
+as `example-service=example-fleet@example-project.iam.gserviceaccount.com`, keyed by account in
+`Config.VMServicesByAccount`; read by its own parser (`parseVMServiceAccounts`), since
+`parseServiceAccounts` takes only Kubernetes subjects. After the same service-name form and refusal
+of `shared`, `vmAccountRefusal` takes only a user-managed account,
+`<account id>@<project id>.iam.gserviceaccount.com` in lowercase as a token carries it, and refuses
+with a message of its own such an address written with capital letters, a project's default
+account (Compute Engine's `<number>-compute@developer.gserviceaccount.com` or App Engine's
+`<project id>@appspot.gserviceaccount.com`, which the project's workloads run as by default), and a
+Google-managed service agent (`service-<number>@…`, or any `gcp-sa-` domain); then the refusal of
+an account given twice, naming both services when they differ, through the helper both parsers
+share (`bindOnce`); every account needs an entry in both settings below),
+`BROKER_VM_PROJECTS` / `BROKER_VM_INSTANCES` (optional; whitespace-separated
+`<service account email>=<project id>` and `<service account email>=<instance-name glob>` entries,
+keyed by account in `Config.VMProjects` and `Config.VMInstancePatterns`, each account read by
+`vmAccountRefusal` as above; the glob is `path.Match`'s syntax over an instance name's characters
+(lowercase letters, digits, `-`, and `*`, `?`, `[`, `]`, `^`), so a `/`, a capital, a `.`, a `\` or
+a `!` is refused; an account given twice is refused, and so is an entry naming an account
+`BROKER_VM_SERVICES` does not list, the first such entry as written; an account that setting lists
+with no project or no glob is refused, naming that account, its entry and the missing setting),
 `BROKER_EXCHANGE_K8S_AUDIENCE` (optional; the audience a pod's projected token must carry to be
 exchanged for a Dispatch access token — its own, beside `BROKER_K8S_OIDC_AUDIENCE`, so neither
 token is spendable where the other is; its issuer is the one cluster the broker is told about,
@@ -4483,7 +4508,9 @@ of the number among them) and a key name outside `global`; the other store's key
 `BROKER_SERVICE_LOGINS` or `BROKER_EXCHANGE_K8S_AUDIENCE` set with no cluster issuer, a
 `BROKER_EXCHANGE_ACCOUNTS` with no `BROKER_EXCHANGE_K8S_AUDIENCE` and a
 `BROKER_EXCHANGE_WORKFLOWS` with no `BROKER_EXCHANGE_GITHUB_ISSUER`, each naming the pair whose
-tokens its callers present; and a `_SECONDS` variable that isn't a
+tokens its callers present; any of `BROKER_VM_SERVICES`, `BROKER_VM_PROJECTS` and
+`BROKER_VM_INSTANCES` set with no `BROKER_GOOGLE_OIDC_AUDIENCE`, and that audience set with no
+`BROKER_VM_SERVICES`; each VM refusal of the paragraph above; and a `_SECONDS` variable that isn't a
 whole number between the min and max its row of Load's `ints` table gives (non-numeric fails the
 same check as out of range). `cmd/broker/main.go` logs at boot, before it loads the AWS config or
 opens the database, how it signs in (`database sign-in method=rds-iam` when `Config.DatabaseIAM`,
