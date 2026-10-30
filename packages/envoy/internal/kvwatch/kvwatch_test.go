@@ -178,6 +178,84 @@ func TestAFirstStartFailingAfterARewatchLeavesTheLiveWatcherHealthy(t *testing.T
 	eventually(t, "the live watcher's delivery", func() bool { return into.has("after-start") })
 }
 
+// The ERROR a failed first start logs is the live cache's alone. A first start that fails while
+// no watcher is current leaves the cache empty and nothing feeding it, so it logs the ERROR an
+// operator reads. A first start that fails after a reconnect hook's Rewatch armed a replacement
+// ends a watch nothing reads: the replacement feeds the cache, so the end is logged at INFO and no
+// ERROR is written. The listener declares a hub that stopped answering lost within seconds, so
+// every such cut runs its caches through that replacement path.
+func TestAFailedFirstStartLogsItsErrorOnlyWhileItIsTheLiveWatch(t *testing.T) {
+	const failed = "test cache watch failed"
+	const replaced = "test cache first watch ended because a rewatch replaced it"
+
+	t.Run("no replacement", func(t *testing.T) {
+		uri := testnats.URL(t)
+		conn, kv := bucket(t, uri)
+		conn.Close()
+		logger, records := jsonLogger(t)
+		w := kvwatch.New("test cache", kv, newSeen().apply, func() {}, kvwatch.WithLogger(logger))
+
+		w.Start()
+		eventually(t, "the failed first start's ERROR", func() bool {
+			return len(matching(records(), "ERROR", failed)) == 1
+		})
+		if ended := matching(records(), "INFO", replaced); len(ended) != 0 {
+			t.Fatalf("a first start no rewatch replaced logged %v, want the ERROR alone", ended)
+		}
+	})
+
+	t.Run("a rewatch replaced it", func(t *testing.T) {
+		uri := testnats.URL(t)
+		firstConn, first := bucket(t, uri)
+		liveConn, _ := bucket(t, uri)
+		firstConn.Close()
+		logger, records := jsonLogger(t)
+		into := newSeen()
+		w := kvwatch.New("test cache", first, into.apply, into.reset, kvwatch.WithLogger(logger))
+		t.Cleanup(w.Stop)
+		if err := w.Rewatch(liveConn); err != nil {
+			t.Fatalf("rewatch: %v", err)
+		}
+
+		w.Start()
+		// The watch ends in one of two ways, and the wait takes whichever comes: the INFO line
+		// this watch writes, or an ERROR, which is the case this test refuses.
+		eventually(t, "the replaced first watch's end", func() bool {
+			return len(matching(records(), "INFO", replaced))+len(atError(records())) > 0
+		})
+		if logged := atError(records()); len(logged) != 0 {
+			t.Fatalf("a first watch a rewatch replaced logged %v, want no ERROR", logged)
+		}
+		if ended := matching(records(), "INFO", replaced); len(ended) != 1 {
+			t.Fatalf("the replaced first watch logged %d INFO %q lines, want one", len(ended), replaced)
+		}
+		// The replacement is the cache's watcher still, and it delivers what the bucket takes.
+		live := w.KV()
+		if _, err := live.Put("after-start", []byte("1")); err != nil {
+			t.Fatalf("put: %v", err)
+		}
+		eventually(t, "the live watcher's delivery", func() bool { return into.has("after-start") })
+		if logged := atError(records()); len(logged) != 0 {
+			t.Fatalf("the live watcher logged %v, want no ERROR", logged)
+		}
+	})
+}
+
+// atError is every ERROR record, each as its message and error, whatever the watcher wrote it
+// about: a case that wants none names no message of its own and so cannot miss one.
+func atError(records []map[string]any) []string {
+	var found []string
+	for _, record := range records {
+		if level, _ := record["level"].(string); level != "ERROR" {
+			continue
+		}
+		message, _ := record["msg"].(string)
+		failure, _ := record["error"].(string)
+		found = append(found, message+": "+failure)
+	}
+	return found
+}
+
 // A first start that fails while a Rewatch's watcher is still scanning leaves readiness to that
 // watcher: the cache is ready only once the current watcher has delivered every existing key, so a
 // caller waiting for it never reads a partial cache as complete.
