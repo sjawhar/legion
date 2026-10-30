@@ -3,7 +3,6 @@ package brokertoken_test
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,13 +13,11 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/sjawhar/envoy/internal/broker/helper"
-	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/brokertoken"
+	"github.com/sjawhar/envoy/internal/brokertoken/brokertokentest"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/ratelimit"
@@ -40,54 +37,6 @@ const (
 	// callerAddress is the source address the rate-limiter buckets are keyed on.
 	callerAddress = "203.0.113.7:51789"
 )
-
-// stubBroker is the secrets broker's introspection route: it answers what the test has said each
-// token is, and counts the introspections so a test can prove how many reached it.
-type stubBroker struct {
-	server *httptest.Server
-
-	mu      sync.Mutex
-	answers map[string]brokertoken.Introspection
-	// bearers is every Authorization the broker was presented, so a test can prove Dispatch
-	// authenticated as itself.
-	bearers []string
-
-	introspections atomic.Int64
-}
-
-func newStubBroker(t *testing.T) *stubBroker {
-	t.Helper()
-	broker := &stubBroker{answers: map[string]brokertoken.Introspection{}}
-	broker.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != brokertoken.IntrospectPath {
-			http.Error(w, "not the introspection route", http.StatusNotFound)
-			return
-		}
-		if err := r.ParseForm(); err != nil {
-			http.Error(w, "unreadable form", http.StatusBadRequest)
-			return
-		}
-		broker.introspections.Add(1)
-		broker.mu.Lock()
-		broker.bearers = append(broker.bearers, r.Header.Get("Authorization"))
-		answer := broker.answers[r.PostForm.Get("token")]
-		broker.mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(answer)
-	}))
-	t.Cleanup(broker.server.Close)
-	return broker
-}
-
-// says makes the broker answer answer for token. A token nothing says anything about is answered
-// not live, as a token the broker never issued is.
-func (b *stubBroker) says(token string, answer brokertoken.Introspection) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.answers[token] = answer
-}
-
-func (b *stubBroker) count() int64 { return b.introspections.Load() }
 
 // clock is a test's own reading of now for the cache and the address buckets, so a test proves
 // what happens after the cache lapses without sleeping through it. A proof's own acceptance
@@ -111,64 +60,26 @@ func (c *clock) advance(d time.Duration) {
 	c.at = c.at.Add(d)
 }
 
-// capturedRequests keeps the request helper's DPoP transport signed, so every proof in this
-// suite is the one the real producer makes rather than a second signer written here.
-type capturedRequests struct {
-	mu   sync.Mutex
-	last *http.Request
-}
-
-func (c *capturedRequests) RoundTrip(r *http.Request) (*http.Response, error) {
-	c.mu.Lock()
-	c.last = r
-	c.mu.Unlock()
-	return &http.Response{
-		StatusCode: http.StatusOK,
-		Header:     http.Header{},
-		Body:       io.NopCloser(strings.NewReader("")),
-		Request:    r,
-	}, nil
-}
-
-// signer produces the requests a caller holding one key sends.
+// signer produces the requests a caller holding one key sends, through the shared stub caller so
+// that every proof in this suite is the one the real producer makes rather than a second signer
+// written here.
 type signer struct {
-	t        *testing.T
-	client   *http.Client
-	captured *capturedRequests
-	jkt      string
+	t      *testing.T
+	caller *brokertokentest.Caller
+	jkt    string
 }
 
-// newSigner is a caller with a key of its own, using the broker helper's DPoP transport.
+// newSigner is a caller with a key of its own.
 func newSigner(t *testing.T) *signer {
 	t.Helper()
-	key, err := proof.NewKey()
-	if err != nil {
-		t.Fatalf("mint the caller's key: %v", err)
-	}
-	jkt, err := proof.Thumbprint(&key.PublicKey)
-	if err != nil {
-		t.Fatalf("thumbprint the caller's key: %v", err)
-	}
-	captured := &capturedRequests{}
-	return &signer{t: t, client: &http.Client{Transport: helper.NewDPoPTransport(key, captured)}, captured: captured, jkt: jkt}
+	caller := brokertokentest.NewCaller(t)
+	return &signer{t: t, caller: caller, jkt: caller.JKT()}
 }
 
 // request is one signed request presenting token at url, as Dispatch's handler would see it.
 func (s *signer) request(url, token string) *http.Request {
 	s.t.Helper()
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		s.t.Fatalf("build the request: %v", err)
-	}
-	req.Header.Set("Authorization", "DPoP "+token)
-	response, err := s.client.Do(req)
-	if err != nil {
-		s.t.Fatalf("sign the request: %v", err)
-	}
-	response.Body.Close()
-	s.captured.mu.Lock()
-	signed := s.captured.last
-	s.captured.mu.Unlock()
+	signed := s.caller.Signed(s.t, http.MethodGet, url, token)
 	signed.RemoteAddr = callerAddress
 	return signed
 }
@@ -180,7 +91,7 @@ func (s *signer) at(path, token string) *http.Request {
 
 // rig is one verifier, the broker it asks and the clock it reads.
 type rig struct {
-	broker   *stubBroker
+	broker   *brokertokentest.StubBroker
 	clock    *clock
 	verifier *brokertoken.Verifier
 }
@@ -189,10 +100,10 @@ type rig struct {
 func newRig(t *testing.T, options ...func(*brokertoken.Options)) *rig {
 	t.Helper()
 	database := storetest.Open(t)
-	broker := newStubBroker(t)
+	broker := brokertokentest.NewStubBroker(t)
 	tick := newClock()
 	opts := brokertoken.Options{
-		BrokerURL: broker.server.URL,
+		BrokerURL: broker.Server.URL,
 		Account:   brokertoken.NewAccountToken(accountTokenFile(t, accountToken)),
 		Origin:    dispatchOrigin,
 		Replay:    store.NewDPoPProofs(database.Pool),
@@ -240,7 +151,7 @@ func TestALiveTokenWithASoundProofIsAccepted(t *testing.T) {
 	rig := newRig(t)
 	caller := newSigner(t)
 	const token = "a-token-the-broker-issued"
-	rig.broker.says(token, liveToken(caller.jkt, time.Hour))
+	rig.broker.Says(token, liveToken(caller.jkt, time.Hour))
 
 	decided, err := rig.verifier.Verify(t.Context(), caller.at(resourcePath, token))
 	if err != nil {
@@ -252,11 +163,11 @@ func TestALiveTokenWithASoundProofIsAccepted(t *testing.T) {
 	if decided.ProjectScope != brokertoken.ProjectScopeNamed || decided.Scope != "dispatch.write" || decided.Thumbprint != caller.jkt {
 		t.Fatalf("Verify = %+v, want the broker's scope and the caller's key", decided)
 	}
-	if rig.broker.count() != 1 {
-		t.Fatalf("the broker was asked %d times, want once", rig.broker.count())
+	if rig.broker.Count() != 1 {
+		t.Fatalf("the broker was asked %d times, want once", rig.broker.Count())
 	}
-	if want := "Bearer " + accountToken; rig.broker.bearers[0] != want {
-		t.Fatalf("the broker was presented %q, want Dispatch's own %q", rig.broker.bearers[0], want)
+	if want := "Bearer " + accountToken; rig.broker.Bearers()[0] != want {
+		t.Fatalf("the broker was presented %q, want Dispatch's own %q", rig.broker.Bearers()[0], want)
 	}
 }
 
@@ -269,23 +180,23 @@ func TestOneTokenCostsOneIntrospectionInsideTheCachesLife(t *testing.T) {
 	caller := newSigner(t)
 	const token = "a-token-presented-again-and-again"
 	// Two seconds, inside AffirmativeCacheTTL, so the answer's own expiry is what ends it.
-	rig.broker.says(token, liveToken(caller.jkt, 2*time.Second))
+	rig.broker.Says(token, liveToken(caller.jkt, 2*time.Second))
 
 	for request := range 8 {
 		if _, err := rig.verifier.Verify(t.Context(), caller.at(resourcePath, token)); err != nil {
 			t.Fatalf("request %d: %v", request, err)
 		}
 	}
-	if rig.broker.count() != 1 {
-		t.Fatalf("8 requests cost %d introspections, want 1", rig.broker.count())
+	if rig.broker.Count() != 1 {
+		t.Fatalf("8 requests cost %d introspections, want 1", rig.broker.Count())
 	}
 
 	rig.clock.advance(3 * time.Second)
 	if _, err := rig.verifier.Verify(t.Context(), caller.at(resourcePath, token)); err != nil {
 		t.Fatalf("the request past the answer's expiry: %v", err)
 	}
-	if rig.broker.count() != 2 {
-		t.Fatalf("the request past the answer's expiry cost %d introspections in all, want 2", rig.broker.count())
+	if rig.broker.Count() != 2 {
+		t.Fatalf("the request past the answer's expiry cost %d introspections in all, want 2", rig.broker.Count())
 	}
 }
 
@@ -301,7 +212,7 @@ func TestRequestsArrivingAtOnceWithOneTokenCostOneIntrospection(t *testing.T) {
 	})
 	caller := newSigner(t)
 	const token = "a-token-many-requests-arrive-with-at-once"
-	rig.broker.says(token, liveToken(caller.jkt, time.Hour))
+	rig.broker.Says(token, liveToken(caller.jkt, time.Hour))
 
 	// Each request needs its own proof: a replayed one is refused, which is a different check.
 	const requests = 8
@@ -324,8 +235,8 @@ func TestRequestsArrivingAtOnceWithOneTokenCostOneIntrospection(t *testing.T) {
 			t.Fatalf("request %d: %v", i, err)
 		}
 	}
-	if rig.broker.count() != 1 {
-		t.Fatalf("%d requests arriving at once cost %d introspections, want 1", requests, rig.broker.count())
+	if rig.broker.Count() != 1 {
+		t.Fatalf("%d requests arriving at once cost %d introspections, want 1", requests, rig.broker.Count())
 	}
 }
 
@@ -343,11 +254,11 @@ func TestATokenTheBrokerCallsNotLiveIsRefusedAndNeverRemembered(t *testing.T) {
 			t.Fatalf("request %d answered %v, want ErrNotActive", request, err)
 		}
 	}
-	if rig.broker.count() != 2 {
-		t.Fatalf("two presentations of a refused token cost %d introspections, want 2", rig.broker.count())
+	if rig.broker.Count() != 2 {
+		t.Fatalf("two presentations of a refused token cost %d introspections, want 2", rig.broker.Count())
 	}
 
-	rig.broker.says(token, liveToken(caller.jkt, time.Hour))
+	rig.broker.Says(token, liveToken(caller.jkt, time.Hour))
 	if _, err := rig.verifier.Verify(t.Context(), caller.at(resourcePath, token)); err != nil {
 		t.Fatalf("the token the broker now calls live: %v", err)
 	}
@@ -359,7 +270,7 @@ func TestAProofSignedByAnotherKeyIsRefused(t *testing.T) {
 	rig := newRig(t)
 	owner, thief := newSigner(t), newSigner(t)
 	const token = "a-token-bound-to-the-owners-key"
-	rig.broker.says(token, liveToken(owner.jkt, time.Hour))
+	rig.broker.Says(token, liveToken(owner.jkt, time.Hour))
 
 	_, err := rig.verifier.Verify(t.Context(), thief.at(resourcePath, token))
 	if !errors.Is(err, brokertoken.ErrKeyMismatch) {
@@ -374,7 +285,7 @@ func TestAReplayedProofIsRefused(t *testing.T) {
 	rig := newRig(t)
 	caller := newSigner(t)
 	const token = "a-token-whose-proof-is-captured"
-	rig.broker.says(token, liveToken(caller.jkt, time.Hour))
+	rig.broker.Says(token, liveToken(caller.jkt, time.Hour))
 	signed := caller.at(resourcePath, token)
 
 	if _, err := rig.verifier.Verify(t.Context(), signed); err != nil {
@@ -384,8 +295,8 @@ func TestAReplayedProofIsRefused(t *testing.T) {
 	if !errors.Is(err, brokertoken.ErrProofInvalid) {
 		t.Fatalf("the replayed proof answered %v, want ErrProofInvalid", err)
 	}
-	if rig.broker.count() != 1 {
-		t.Fatalf("the replay cost %d introspections in all, want 1: it was refused by the store", rig.broker.count())
+	if rig.broker.Count() != 1 {
+		t.Fatalf("the replay cost %d introspections in all, want 1: it was refused by the store", rig.broker.Count())
 	}
 }
 
@@ -398,7 +309,7 @@ func TestTheProofIsCheckedAgainstDispatchsOwnOriginNotAForwardedHeader(t *testin
 	rig := newRig(t)
 	caller := newSigner(t)
 	const token = "a-token-presented-through-a-proxy"
-	rig.broker.says(token, liveToken(caller.jkt, time.Hour))
+	rig.broker.Says(token, liveToken(caller.jkt, time.Hour))
 
 	sound := caller.at(resourcePath, token)
 	sound.Host = "dispatch.internal:8080"
@@ -431,7 +342,7 @@ func TestAFloodOfDistinctUnknownTokensFromOneAddressIsBoundedBeforeTheBroker(t *
 				t.Fatalf("request %d was accepted; want a refusal", request)
 			}
 		}
-		return rig.broker.count()
+		return rig.broker.Count()
 	}
 
 	bounded := spend(t, newRig(t))
@@ -455,7 +366,7 @@ func TestARefusedAddressIsNeverTheBrokersVerdict(t *testing.T) {
 		o.AddressLimit = ratelimit.Limit{Every: time.Minute, Burst: 1}
 	})
 	caller := newSigner(t)
-	rig.broker.says("the-first-token", liveToken(caller.jkt, time.Hour))
+	rig.broker.Says("the-first-token", liveToken(caller.jkt, time.Hour))
 	if _, err := rig.verifier.Verify(t.Context(), caller.at(resourcePath, "the-first-token")); err != nil {
 		t.Fatalf("the request that spends the bucket: %v", err)
 	}
@@ -464,8 +375,8 @@ func TestARefusedAddressIsNeverTheBrokersVerdict(t *testing.T) {
 	if !errors.Is(err, brokertoken.ErrRateLimited) {
 		t.Fatalf("the request with no token left in the bucket answered %v, want ErrRateLimited", err)
 	}
-	if rig.broker.count() != 1 {
-		t.Fatalf("the refused request reached the broker: %d introspections, want 1", rig.broker.count())
+	if rig.broker.Count() != 1 {
+		t.Fatalf("the refused request reached the broker: %d introspections, want 1", rig.broker.Count())
 	}
 	if rig.verifier.RetryAfter() != time.Minute {
 		t.Fatalf("RetryAfter = %v, want the bucket's minute", rig.verifier.RetryAfter())
@@ -505,8 +416,8 @@ func TestAnAccountTokenDispatchCannotReadAsksTheBrokerNothing(t *testing.T) {
 	if !errors.As(err, &unreadable) {
 		t.Fatalf("err = %v, want an *AccountTokenError in the chain", err)
 	}
-	if rig.broker.count() != 0 {
-		t.Fatalf("the broker was asked %d times, want not at all", rig.broker.count())
+	if rig.broker.Count() != 0 {
+		t.Fatalf("the broker was asked %d times, want not at all", rig.broker.Count())
 	}
 }
 

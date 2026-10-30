@@ -46,24 +46,13 @@ const (
 	ClaimSession = "session"
 	// ClaimPerson is the person the session acts for.
 	ClaimPerson = "person"
-	// ClaimProjectScope is what ClaimProject means, one of ProjectScopeNamed or
-	// ProjectScopePerson. It is written always, so a reader never has to take an absent project
-	// as either "every project" or "none".
+	// ClaimProjectScope is what ClaimProject means, one of oauthwire.ProjectScopeNamed or
+	// oauthwire.ProjectScopePerson. It is written always, so a reader never has to take an
+	// absent project as either "every project" or "none".
 	ClaimProjectScope = "project_scope"
-	// ClaimProject is the one project key a ProjectScopeNamed token may write, and is absent
-	// from a ProjectScopePerson token, which names none.
+	// ClaimProject is the one project key a token of the named scope may write, and is absent
+	// from one of the person scope, which names none.
 	ClaimProject = "project"
-)
-
-// The wire names of exchange.ProjectScope, which ClaimProjectScope carries and an introspection
-// answer repeats. They are short and fixed so a reader of either reads one word rather than the
-// prose exchange.ProjectScope.String prints for an operator.
-const (
-	// ProjectScopeNamed is a token that may write the one project it names.
-	ProjectScopeNamed = "named"
-	// ProjectScopePerson is a token that may write every project its person may write, and names
-	// no project.
-	ProjectScopePerson = "person"
 )
 
 // subjectTokenAlgorithms are the signature algorithms a JWT subject token may be signed with: the
@@ -398,10 +387,10 @@ func (p *Provider) decide(_ context.Context, request oauth2.Requester, subjectTo
 	session.Extra[ClaimPerson] = claims.Person
 	switch claims.Scope {
 	case exchange.ProjectScopeNamed:
-		session.Extra[ClaimProjectScope] = ProjectScopeNamed
+		session.Extra[ClaimProjectScope] = oauthwire.ProjectScopeNamed
 		session.Extra[ClaimProject] = claims.Project
 	default:
-		session.Extra[ClaimProjectScope] = ProjectScopePerson
+		session.Extra[ClaimProjectScope] = oauthwire.ProjectScopePerson
 		delete(session.Extra, ClaimProject)
 	}
 	return claims.Person, nil

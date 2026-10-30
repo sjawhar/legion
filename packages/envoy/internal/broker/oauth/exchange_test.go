@@ -232,8 +232,8 @@ func TestAPodExchangesItsTokenForOneThatIntrospects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Introspect: %v", err)
 	}
-	want := oauth.Introspection{
-		Active: true, Session: "implementer-g1", Person: person, ProjectScope: oauth.ProjectScopeNamed,
+	want := oauthwire.Introspection{
+		Active: true, Session: "implementer-g1", Person: person, ProjectScope: oauthwire.ProjectScopeNamed,
 		Project: project, ClientID: oauthwire.ExchangeClientID, Thumbprint: thumbprint(t, key),
 		ExpiresAt: answer.ExpiresAt,
 	}
@@ -441,7 +441,7 @@ func TestADevBoxSessionExchangesItsMachineToken(t *testing.T) {
 	if !answer.Active || answer.Session != "ada-devbox" || answer.Person != person {
 		t.Fatalf("Introspect = %+v, want a live token of ada-devbox acting for %s", answer, person)
 	}
-	if answer.ProjectScope != oauth.ProjectScopePerson || answer.Project != "" {
+	if answer.ProjectScope != oauthwire.ProjectScopePerson || answer.Project != "" {
 		t.Errorf("Introspect = %+v, want every project the person may write and no project named", answer)
 	}
 	if answer.Thumbprint != thumbprint(t, key) {
@@ -877,7 +877,7 @@ func TestIntrospectingATokenTheBrokerCannotStandBehind(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Introspect = %v, want no error", err)
 			}
-			if answer != (oauth.Introspection{}) {
+			if answer != (oauthwire.Introspection{}) {
 				t.Fatalf("Introspect = %+v, want not live and nothing else", answer)
 			}
 		})
@@ -911,7 +911,7 @@ func TestIntrospectionAnswersOnlyAnAccessToken(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Introspect = %v, want no error", err)
 		}
-		if answer != (oauth.Introspection{}) {
+		if answer != (oauthwire.Introspection{}) {
 			t.Fatalf("Introspect of a refresh token = %+v, want not live and nothing else", answer)
 		}
 	}

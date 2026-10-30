@@ -54,7 +54,7 @@ func (c *answerCache) lookup(key [sha256.Size]byte, now time.Time) (Introspectio
 // actually being served.
 func (c *answerCache) remember(key [sha256.Size]byte, answer Introspection, now time.Time) {
 	until := now.Add(AffirmativeCacheTTL)
-	if expiry := answer.expiry(); !expiry.IsZero() && expiry.Before(until) {
+	if expiry := expiryOf(answer); !expiry.IsZero() && expiry.Before(until) {
 		until = expiry
 	}
 	if !until.After(now) {

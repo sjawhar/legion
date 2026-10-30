@@ -11,6 +11,7 @@ package main
 import (
 	"crypto/ecdsa"
 	"encoding/json"
+	"fmt"
 	"io"
 	"maps"
 	"net/http"
@@ -23,7 +24,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
-	"github.com/sjawhar/envoy/internal/broker/oauth"
 	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
@@ -152,7 +152,7 @@ func TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt(t *testing.T) {
 			{"session", body["session"], heldSession, "the session the token's writes are recorded as"},
 			{"person", body["person"], person, "the person the entry gives that account"},
 			{"project", body["project"], project, "the project the entry gives that account"},
-			{"project_scope", body["project_scope"], oauth.ProjectScopeNamed, "that the project is the one named project it may write"},
+			{"project_scope", body["project_scope"], oauthwire.ProjectScopeNamed, "that the project is the one named project it may write"},
 			{"client_id", body["client_id"], oauthwire.ExchangeClientID, "the client the exchange issued it to"},
 			{"jkt", body["jkt"], jkt, "the thumbprint of this test's own key, which is what makes a stolen token useless"},
 		} {
@@ -458,14 +458,18 @@ type liveBroker struct {
 	plain *http.Client
 }
 
+// newPlainBroker drives the broker listening at addr with no key: the routes a listed caller
+// reaches present that caller's ServiceAccount token and sign no proof.
+func newPlainBroker(addr string) *liveBroker {
+	return &liveBroker{base: "http://" + addr, plain: &http.Client{}}
+}
+
 // newLiveBroker drives the broker listening at addr, signing a proof of key for every request the
 // exchange judges a credential-less caller on.
 func newLiveBroker(addr string, key *ecdsa.PrivateKey) *liveBroker {
-	return &liveBroker{
-		base:  "http://" + addr,
-		dpop:  &http.Client{Transport: helper.NewDPoPTransport(key, http.DefaultTransport)},
-		plain: &http.Client{},
-	}
+	live := newPlainBroker(addr)
+	live.dpop = &http.Client{Transport: helper.NewDPoPTransport(key, http.DefaultTransport)}
+	return live
 }
 
 // exchange posts an RFC 8693 token exchange, with a DPoP proof of the caller's key, and answers
@@ -499,63 +503,69 @@ func (l *liveBroker) registered(t *testing.T, podToken, session, bearer string) 
 	}
 }
 
-// post sends one form to the broker and logs both halves as the live run's transcript, with every
-// credential named rather than repeated.
-func (l *liveBroker) post(t *testing.T, client *http.Client, path string, form url.Values, bearer string) (int, map[string]any) {
+// brokerCall is one request to the live broker as send makes it: the method and path, the body
+// and the content type it is sent under (empty for a request that carries neither), the bearer
+// whose Authorization header goes on when it is not empty, and the request half as the transcript
+// shows it, with every credential named rather than repeated.
+type brokerCall struct {
+	method      string
+	path        string
+	contentType string
+	body        string
+	bearer      string
+	shown       string
+}
+
+// send sends one request to the broker, reads its answer and logs both halves as the live run's
+// transcript. The answer is handed back as the bytes the broker sent, because what a route's
+// answer has to be is its caller's to hold it to: JSON for most of them, and RFC 7009's empty
+// body for a revocation that worked.
+func (l *liveBroker) send(t *testing.T, client *http.Client, call brokerCall) (int, []byte) {
 	t.Helper()
-	request, err := http.NewRequest(http.MethodPost, l.base+path, strings.NewReader(form.Encode()))
+	request, err := http.NewRequest(call.method, l.base+call.path, strings.NewReader(call.body))
 	if err != nil {
 		t.Fatal(err)
 	}
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	if bearer != "" {
-		request.Header.Set("Authorization", "Bearer "+bearer)
+	if call.contentType != "" {
+		request.Header.Set("Content-Type", call.contentType)
+	}
+	if call.bearer != "" {
+		request.Header.Set("Authorization", "Bearer "+call.bearer)
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		t.Fatalf("POST %s: %v", path, err)
+		t.Fatalf("%s %s: %v", call.method, call.path, err)
 	}
 	defer response.Body.Close()
 	answer, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var body map[string]any
-	if err := json.Unmarshal(answer, &body); err != nil {
-		t.Fatalf("POST %s answered %d %s, which is not JSON: %v", path, response.StatusCode, answer, err)
-	}
-	t.Logf("> POST %s %s\n< %d %s", path, shownForm(form), response.StatusCode, shownAnswer(answer, body))
-	return response.StatusCode, body
+	t.Logf("> %s %s %s\n< %d %s", call.method, call.path, call.shown, response.StatusCode, shownAnswer(answer))
+	return response.StatusCode, answer
 }
 
-// postJSON sends one JSON body to the broker, with no DPoP proof, and logs both halves of the
-// exchange as post does, every credential in the body named rather than repeated.
+// post sends one form to the broker and answers the status and the JSON body it gave.
+func (l *liveBroker) post(t *testing.T, client *http.Client, path string, form url.Values, bearer string) (int, map[string]any) {
+	t.Helper()
+	status, answer := l.send(t, client, brokerCall{
+		method: http.MethodPost, path: path, contentType: formContentType,
+		body: form.Encode(), bearer: bearer, shown: shownForm(form),
+	})
+	var body map[string]any
+	if err := json.Unmarshal(answer, &body); err != nil {
+		t.Fatalf("POST %s answered %d %s, which is not JSON: %v", path, status, answer, err)
+	}
+	return status, body
+}
+
+// postJSON sends one JSON body to the broker, with no DPoP proof, every credential in the body
+// named in the transcript rather than repeated.
 func (l *liveBroker) postJSON(t *testing.T, path string, fields map[string]any, bearer string) (int, map[string]any) {
 	t.Helper()
 	encoded, err := json.Marshal(fields)
 	if err != nil {
 		t.Fatal(err)
-	}
-	request, err := http.NewRequest(http.MethodPost, l.base+path, strings.NewReader(string(encoded)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set("Content-Type", "application/json")
-	if bearer != "" {
-		request.Header.Set("Authorization", "Bearer "+bearer)
-	}
-	response, err := l.plain.Do(request)
-	if err != nil {
-		t.Fatalf("POST %s: %v", path, err)
-	}
-	defer response.Body.Close()
-	answer, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var body map[string]any
-	if err := json.Unmarshal(answer, &body); err != nil {
-		t.Fatalf("POST %s answered %d %s, which is not JSON: %v", path, response.StatusCode, answer, err)
 	}
 	shown := map[string]any{}
 	for name, value := range fields {
@@ -565,9 +575,19 @@ func (l *liveBroker) postJSON(t *testing.T, path string, fields map[string]any, 
 		}
 		shown[name] = value
 	}
-	t.Logf("> POST %s %v\n< %d %s", path, shown, response.StatusCode, strings.TrimSpace(string(answer)))
-	return response.StatusCode, body
+	status, answer := l.send(t, l.plain, brokerCall{
+		method: http.MethodPost, path: path, contentType: "application/json",
+		body: string(encoded), bearer: bearer, shown: fmt.Sprint(shown),
+	})
+	var body map[string]any
+	if err := json.Unmarshal(answer, &body); err != nil {
+		t.Fatalf("POST %s answered %d %s, which is not JSON: %v", path, status, answer, err)
+	}
+	return status, body
 }
+
+// formContentType is what an OAuth request's form body is sent as (RFC 6749 Section 3.2).
+const formContentType = "application/x-www-form-urlencoded"
 
 // credentialFields are the request fields whose value is a credential; the transcript names those
 // and shows every other field in full, since a refusal's own sentence is the evidence.
@@ -586,10 +606,16 @@ func shownForm(form url.Values) string {
 	return shown.Encode()
 }
 
-// shownAnswer is the broker's answer as the transcript shows it: the JSON it sent, with the access
-// token it carries named rather than repeated.
-func shownAnswer(answer []byte, body map[string]any) string {
+// shownAnswer is the broker's answer as the transcript shows it: what it sent, with the access
+// token a token answer carries named rather than repeated. An answer that is not a JSON object —
+// a revocation's empty body, or a refusal in some other form — is shown as it came, since it
+// carries no token to name.
+func shownAnswer(answer []byte) string {
 	shown := strings.TrimSpace(string(answer))
+	var body map[string]any
+	if err := json.Unmarshal(answer, &body); err != nil {
+		return shown
+	}
 	if token, _ := body["access_token"].(string); token != "" {
 		shown = strings.ReplaceAll(shown, token, "<access_token>")
 	}

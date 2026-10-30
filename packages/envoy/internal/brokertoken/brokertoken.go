@@ -117,6 +117,18 @@ const (
 // can make Dispatch verify.
 var proofAlgorithms = []jose.SignatureAlgorithm{jose.ES256}
 
+// proofAlgorithmNames is proofAlgorithms as the library's StrategyConfig spells them. It is built
+// once here rather than in the method below because the resource check asks for it on every proof
+// it reads — once per DPoP-authenticated request — and the answer never differs: the set is a
+// package-level constant in all but name, and the library only reads the names it is given.
+var proofAlgorithmNames = func() []string {
+	names := make([]string, 0, len(proofAlgorithms))
+	for _, algorithm := range proofAlgorithms {
+		names = append(names, string(algorithm))
+	}
+	return names
+}()
+
 // Caller is who a verified token names: everything the broker's answer carries that a request's
 // writes are recorded under. It never carries the token.
 type Caller struct {
@@ -172,6 +184,10 @@ type Verifier struct {
 	brokerURL string
 	account   *AccountToken
 	origin    *url.URL
+	// originTLS is the TLS state atOrigin puts on the request it rewrites: one empty state for
+	// the whole process when the origin is https, nil when it is not. Nothing reads more of it
+	// than whether it is there, and nothing writes to it, so every request shares this one.
+	originTLS *tls.ConnectionState
 	http      *http.Client
 	strategy  *rfc9449.DefaultStrategy
 	addresses *ratelimit.Keyed
@@ -212,12 +228,19 @@ func New(options Options) (*Verifier, error) {
 	if now == nil {
 		now = time.Now
 	}
+	// One empty state serves every request atOrigin rewrites, built here rather than per
+	// request: what reads it asks only whether the request carried TLS.
+	var originTLS *tls.ConnectionState
+	if origin.Scheme == "https" {
+		originTLS = &tls.ConnectionState{}
+	}
 	return &Verifier{
 		// The trailing slash goes so BrokerURL + IntrospectPath is one path, as agentsecrets.New
 		// trims it for the same reason.
 		brokerURL: strings.TrimRight(options.BrokerURL, "/"),
 		account:   options.Account,
 		origin:    origin,
+		originTLS: originTLS,
 		http:      client,
 		strategy:  rfc9449.NewDefaultStrategy(proofConfig{}, withoutNonces{options.Replay}),
 		addresses: ratelimit.NewKeyed(limit),
@@ -265,7 +288,7 @@ func (v *Verifier) Verify(ctx context.Context, r *http.Request) (Caller, error) 
 	if _, err := v.strategy.ValidateResourceAccess(ctx, signed, token, answer.Thumbprint, false); err != nil {
 		return Caller{}, v.refused(err, signed, answer.Thumbprint)
 	}
-	return answer.caller(), nil
+	return callerOf(answer), nil
 }
 
 // Live is Verify without the proof check: the broker's answer alone, cached or fresh.
@@ -281,7 +304,7 @@ func (v *Verifier) Live(ctx context.Context, r *http.Request) (Caller, error) {
 	if err != nil {
 		return Caller{}, err
 	}
-	return answer.caller(), nil
+	return callerOf(answer), nil
 }
 
 // live is the broker's half of both checks: the token r presents and an answer saying it is live
@@ -363,10 +386,7 @@ func (v *Verifier) known(ctx context.Context, r *http.Request, token string) (In
 func (v *Verifier) atOrigin(r *http.Request) *http.Request {
 	out := r.Clone(r.Context())
 	out.URL.Scheme, out.URL.Host, out.Host = v.origin.Scheme, v.origin.Host, v.origin.Host
-	out.TLS = nil
-	if v.origin.Scheme == "https" {
-		out.TLS = &tls.ConnectionState{}
-	}
+	out.TLS = v.originTLS
 	out.Header.Del("X-Forwarded-Proto")
 	out.Header.Del("X-Forwarded-Host")
 	return out
@@ -398,11 +418,7 @@ func (v *Verifier) refused(err error, signed *http.Request, boundJKT string) err
 type proofConfig struct{}
 
 func (proofConfig) GetDPoPAllowedJWSAlgorithms(context.Context) []string {
-	names := make([]string, 0, len(proofAlgorithms))
-	for _, algorithm := range proofAlgorithms {
-		names = append(names, string(algorithm))
-	}
-	return names
+	return proofAlgorithmNames
 }
 
 func (proofConfig) GetDPoPClockSkew(context.Context) time.Duration     { return ProofClockSkew }

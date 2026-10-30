@@ -65,9 +65,11 @@ type testServerOptions struct {
 	// deployment, whose bearer handling is untouched by that feature.
 	oidc ServiceTokenVerifier
 	// brokerTokens decides a caller presenting an access token the secrets broker issued, under
-	// the DPoP scheme; nil is the deployment with no broker, which is every test but
-	// broker_token_test.go's and answers such a presentation 401 UNAUTHORIZED.
-	brokerTokens *brokertoken.Verifier
+	// the DPoP scheme. It is built from the test's own database, as the persistence seam below
+	// is, because the verifier's DPoP replay store is a table of it (store.NewDPoPProofs); nil
+	// is the deployment with no broker, which is every test but broker_token_test.go's and
+	// project_scope_test.go's, and answers such a presentation 401 UNAUTHORIZED.
+	brokerTokens func(*store.Store) *brokertoken.Verifier
 	// identity resolves a cookie caller; nil is headerIdentity, which names the person the
 	// X-Dispatch-User header names.
 	identity identity.Identity
@@ -110,6 +112,10 @@ type testServerOptions struct {
 	// server with no dashboard, as the Go test rigs are.
 	dashboardEntry string
 }
+
+// testServerURL is the public origin every test server serves under: what a link a handler
+// writes names, and what a DPoP proof's 'htu' is checked against (broker_token_test.go).
+const testServerURL = "https://dispatch.example"
 
 // testSigningKey is the one-key set the package's session cookies are signed with.
 var testSigningKey = auth.SingleSigningKey("signing-key")
@@ -175,7 +181,11 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 	if options.persistence != nil {
 		documentPersistence = options.persistence(database)
 	}
-	documentService := docs.New(docs.Deps{Store: database, Persistence: documentPersistence, Events: broker, ServerURL: "https://dispatch.example", Settle: settle})
+	var brokerTokens *brokertoken.Verifier
+	if options.brokerTokens != nil {
+		brokerTokens = options.brokerTokens(database)
+	}
+	documentService := docs.New(docs.Deps{Store: database, Persistence: documentPersistence, Events: broker, ServerURL: testServerURL, Settle: settle})
 	t.Cleanup(func() {
 		if err := documentService.Shutdown(context.Background()); err != nil {
 			t.Errorf("shutdown document service: %v", err)
@@ -191,7 +201,7 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		Identity:         people,
 		AgentTokens:      sharedAgentTokens(t, "agent-token"),
 		DefaultProject:   options.defaultProject,
-		ServerURL:        "https://dispatch.example",
+		ServerURL:        testServerURL,
 		Docs:             documentService,
 		Events:           broker,
 		App:              options.app,
@@ -201,7 +211,7 @@ func newRegisteredTestServer(t testing.TB, options testServerOptions) (http.Hand
 		EnvoyURL:         options.envoyURL,
 		EnvoyTimeout:     options.envoyTimeout,
 		OIDC:             options.oidc,
-		BrokerTokens:     options.brokerTokens,
+		BrokerTokens:     brokerTokens,
 		AgentStream:      options.agentStream,
 		Embedder:         options.embedder,
 		Files:            options.files,

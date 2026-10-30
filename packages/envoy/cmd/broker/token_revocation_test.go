@@ -14,7 +14,6 @@ import (
 	"bytes"
 	"crypto/ecdsa"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -29,6 +28,8 @@ import (
 )
 
 const (
+	// revokePath is the RFC 7009 revocation route this test drives.
+	revokePath = "/v1/oauth/revoke"
 	// deviceCodeGrantType and refreshGrantType are the two grants a machine login polls and then
 	// renews with, which the library spells in a package its users cannot import.
 	deviceCodeGrantType = "urn:ietf:params:oauth:grant-type:device_code"
@@ -237,31 +238,17 @@ func (l *liveBroker) revoke(t *testing.T, token, clientID, hint, bearer string) 
 	if hint != "" {
 		form.Set("token_type_hint", hint)
 	}
-	request, err := http.NewRequest(http.MethodPost, l.base+"/v1/oauth/revoke", strings.NewReader(form.Encode()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	if bearer != "" {
-		request.Header.Set("Authorization", "Bearer "+bearer)
-	}
-	response, err := l.plain.Do(request)
-	if err != nil {
-		t.Fatalf("POST /v1/oauth/revoke: %v", err)
-	}
-	defer response.Body.Close()
-	answer, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("> POST /v1/oauth/revoke %s\n< %d %s", shownForm(form), response.StatusCode, bytes.TrimSpace(answer))
+	status, answer := l.send(t, l.plain, brokerCall{
+		method: http.MethodPost, path: revokePath, contentType: formContentType,
+		body: form.Encode(), bearer: bearer, shown: shownForm(form),
+	})
 	var body map[string]any
 	if len(bytes.TrimSpace(answer)) > 0 {
 		if err := json.Unmarshal(answer, &body); err != nil {
-			t.Fatalf("POST /v1/oauth/revoke answered %d %s, which is neither empty nor JSON: %v", response.StatusCode, answer, err)
+			t.Fatalf("POST %s answered %d %s, which is neither empty nor JSON: %v", revokePath, status, answer, err)
 		}
 	}
-	return response.StatusCode, body, answer
+	return status, body, answer
 }
 
 // revoked ends token as the caller whose ServiceAccount token is bearer and fails the test unless

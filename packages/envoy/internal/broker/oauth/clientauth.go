@@ -67,7 +67,7 @@ func (s *exchangeClientAuth) AuthenticateClient(ctx context.Context, r *http.Req
 // credentialLessExchange reports whether this is the one token request the broker authenticates
 // itself: the exchange client, exactly the token-exchange grant, and no credential of any kind.
 func credentialLessExchange(r *http.Request, form url.Values) bool {
-	return form.Get("grant_type") == string(oauth2.GrantTypeTokenExchange) && presentsNothing(r, form)
+	return form.Get("grant_type") == string(oauth2.GrantTypeTokenExchange) && namesTheExchangeClientWithoutCredential(r, form)
 }
 
 // credentialLessRevocation reports whether this is a revocation request naming the exchange
@@ -94,14 +94,15 @@ func credentialLessRevocation(r *http.Request, form url.Values, strategy oauth2.
 	if _, ok := strategy.(*oauth2.RevocationEndpointClientAuthStrategy); !ok {
 		return false
 	}
-	return presentsNothing(r, form)
+	return namesTheExchangeClientWithoutCredential(r, form)
 }
 
-// presentsNothing reports whether the request names the exchange client and carries no credential
-// of any kind — no Authorization header, no client secret in the form, and no client assertion.
-// Any Authorization header at all disqualifies it, rather than only a Basic one: a request that
-// tried to authenticate and got it wrong must be refused by the library, not waved through here.
-func presentsNothing(r *http.Request, form url.Values) bool {
+// namesTheExchangeClientWithoutCredential reports whether the request names the exchange client
+// in its form and carries no credential of any kind — no Authorization header, no client secret
+// in the form, and no client assertion. Any Authorization header at all disqualifies it, rather
+// than only a Basic one: a request that tried to authenticate and got it wrong must be refused by
+// the library, not waved through here.
+func namesTheExchangeClientWithoutCredential(r *http.Request, form url.Values) bool {
 	if r == nil || r.Header.Get("Authorization") != "" {
 		return false
 	}

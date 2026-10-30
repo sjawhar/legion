@@ -52,7 +52,7 @@ const (
 // the table rather than in each row because Go leaves no field out of a positional composite
 // literal: a sixth value on the row would have to be written on all 146 rows, every GET row
 // included, and a GET row needs no class. routes() stamps it onto the row, so apiRoute.Scope is
-// what every reader of a route sees, and unclassedWrites holds the two in exact correspondence
+// what every reader of a route sees, and undecidableWrites holds the two in exact correspondence
 // — a mutating row this table does not name, and a name that is no mutating row, each fail
 // TestEveryMutatingRouteIsClassed and refuse to mount (register).
 var writeClasses = map[string]writeScope{
@@ -182,7 +182,7 @@ const routeIndexDocs = "skills/dispatch/SKILL.md"
 // routes lists every native-workspace route. Add a row here, never a mux.HandleFunc line. A
 // mutating row's write class comes from writeClasses, which Register's project-scope check
 // reads; a row that names no class there is one that check cannot decide, and Register refuses
-// to mount it (unclassedWrites).
+// to mount it (undecidableWrites).
 func (s *server) routes() []apiRoute {
 	rows := []routeRow{
 		{http.MethodGet, "/api/v1", authPublic, "This index: every route with its method, auth, and purpose.", s.getRouteIndex},

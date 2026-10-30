@@ -81,7 +81,7 @@ type projectResolver func(ctx context.Context, q queryer, r *http.Request) (stri
 
 // projectResolverFor is the resolver a route's address calls for, read from the shape of its
 // pattern, and whether the pattern names an object at all. Every row the table classes
-// scopeProject has one, except issueCreateRoute; unclassedWrites holds the table to that and
+// scopeProject has one, except issueCreateRoute; undecidableWrites holds the table to that and
 // register refuses to mount a table that breaks it.
 func (s *server) projectResolverFor(pattern string) (projectResolver, bool) {
 	switch {
@@ -261,14 +261,14 @@ func refuseWriteOutsideProjectScope(w http.ResponseWriter, covers, belongsTo str
 		"this request's credential may write project %s; this write belongs to project %s", covers, belongsTo))
 }
 
-// unclassedWrites names every mutating row the project check cannot decide: one writeClasses
+// undecidableWrites names every mutating row the project check cannot decide: one writeClasses
 // gives no class, and one classed scopeProject whose address names no object to resolve.
 // TestEveryMutatingRouteIsClassed walks the table through it, and register refuses to mount a
-// table it names anything in, so a row added later cannot be unclassed. The other direction, a
-// writeClasses name that is no row of the table, is the same test's (nothing is served by it,
+// table it names anything in, so a row added later cannot be left undecided. The other direction,
+// a writeClasses name that is no row of the table, is the same test's (nothing is served by it,
 // so it cannot admit a write).
-func (s *server) unclassedWrites(routes []apiRoute) []string {
-	var unclassed []string
+func (s *server) undecidableWrites(routes []apiRoute) []string {
+	var undecidable []string
 	for _, route := range routes {
 		if route.Method == http.MethodGet {
 			continue
@@ -278,11 +278,11 @@ func (s *server) unclassedWrites(routes []apiRoute) []string {
 		case scopeSession, scopeDeployment:
 		case scopeProject:
 			if _, addressed := s.projectResolverFor(route.Pattern); !addressed && name != issueCreateRoute {
-				unclassed = append(unclassed, name+": classed as a project's write, but its address names no object whose project can be resolved")
+				undecidable = append(undecidable, name+": classed as a project's write, but its address names no object whose project can be resolved")
 			}
 		default:
-			unclassed = append(unclassed, name+": no write class (writeClasses)")
+			undecidable = append(undecidable, name+": no write class (writeClasses)")
 		}
 	}
-	return unclassed
+	return undecidable
 }

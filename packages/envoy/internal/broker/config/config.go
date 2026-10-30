@@ -70,7 +70,7 @@ type Config struct {
 	// BROKER_K8S_OIDC_ISSUER as every other ServiceAccount token the broker takes is, so this
 	// needs that pair. A token that lives longer than an hour from its issue is refused, as a
 	// service's login token is. The caller's name decides what the account may do, and the broker
-	// knows two: dispatch reaches every one of those routes, the nine Dispatch's server relays a
+	// knows two: dispatch reaches every one of those routes, the ten Dispatch's server relays a
 	// person's decisions and reads through as well as introspection, and listener reaches
 	// introspection alone, since the Envoy listener reads a token back and relays no decision. A
 	// name the broker does not know refuses the boot naming it and the names it knows, so a typo

@@ -18,8 +18,8 @@ import (
 func TestEveryMutatingRouteIsClassed(t *testing.T) {
 	served := &server{deps: Deps{TestHooksEnabled: true}}
 	routes := served.routes()
-	if unclassed := served.unclassedWrites(routes); len(unclassed) > 0 {
-		t.Fatalf("%d mutating row(s) the project check cannot decide:\n%s", len(unclassed), strings.Join(unclassed, "\n"))
+	if undecidable := served.undecidableWrites(routes); len(undecidable) > 0 {
+		t.Fatalf("%d mutating row(s) the project check cannot decide:\n%s", len(undecidable), strings.Join(undecidable, "\n"))
 	}
 	mounted := make(map[string]bool, len(routes))
 	for _, route := range routes {
@@ -32,21 +32,21 @@ func TestEveryMutatingRouteIsClassed(t *testing.T) {
 	}
 
 	t.Run("a mutating row with no class fails this walk", func(t *testing.T) {
-		unclassed := served.unclassedWrites([]apiRoute{
+		undecidable := served.undecidableWrites([]apiRoute{
 			{Method: http.MethodGet, Pattern: "/api/v1/widgets", Auth: authAny},
 			{Method: http.MethodPost, Pattern: "/api/v1/widgets", Auth: authAny},
 		})
-		if len(unclassed) != 1 || !strings.HasPrefix(unclassed[0], "POST /api/v1/widgets:") {
-			t.Fatalf("the walk answered %q, want the unclassed POST named and the GET left alone", unclassed)
+		if len(undecidable) != 1 || !strings.HasPrefix(undecidable[0], "POST /api/v1/widgets:") {
+			t.Fatalf("the walk answered %q, want the unclassed POST named and the GET left alone", undecidable)
 		}
 	})
 
 	t.Run("a project row whose address names no object fails it too", func(t *testing.T) {
-		unclassed := served.unclassedWrites([]apiRoute{
+		undecidable := served.undecidableWrites([]apiRoute{
 			{Method: http.MethodPost, Pattern: "/api/v1/widgets/{id}/paint", Auth: authAny, Scope: scopeProject},
 		})
-		if len(unclassed) != 1 || !strings.Contains(unclassed[0], "names no object") {
-			t.Fatalf("the walk answered %q, want the unresolvable project row named", unclassed)
+		if len(undecidable) != 1 || !strings.Contains(undecidable[0], "names no object") {
+			t.Fatalf("the walk answered %q, want the unresolvable project row named", undecidable)
 		}
 	})
 }
@@ -190,7 +190,7 @@ func TestAProjectScopedTokenWritesOnlyItsOwnProject(t *testing.T) {
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
 	const token = "a-token-scoped-to-one-project"
-	rig.broker.says(token, liveNamedToken(caller.jkt))
+	rig.broker.Says(token, liveNamedToken(caller.jkt))
 	own := seedProject(t, rig, brokerTestProject, "Broker")
 	other := seedProject(t, rig, "OTH", "Other")
 
@@ -233,7 +233,7 @@ func TestAnUnknownTargetKeepsTheHandlersAnswer(t *testing.T) {
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
 	const token = "a-token-addressing-nothing"
-	rig.broker.says(token, liveNamedToken(caller.jkt))
+	rig.broker.Says(token, liveNamedToken(caller.jkt))
 	seedProject(t, rig, brokerTestProject, "Broker")
 
 	for name, request := range map[string]struct {
@@ -270,7 +270,7 @@ func TestADeploymentWriteIsRefusedToAProjectScopedToken(t *testing.T) {
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
 	const token = "a-token-that-may-not-create-a-project"
-	rig.broker.says(token, liveNamedToken(caller.jkt))
+	rig.broker.Says(token, liveNamedToken(caller.jkt))
 
 	refused := rig.serve(caller.presenting(t, http.MethodPost, "/api/v1/projects", token, map[string]any{
 		"key": "NEW", "name": "New",
@@ -343,7 +343,7 @@ func TestAProjectScopedTokenCreatesIssuesOnlyInItsOwnProject(t *testing.T) {
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
 	const token = "a-token-creating-issues"
-	rig.broker.says(token, liveNamedToken(caller.jkt))
+	rig.broker.Says(token, liveNamedToken(caller.jkt))
 	seedProject(t, rig, brokerTestProject, "Broker")
 	seedProject(t, rig, "OTH", "Other")
 

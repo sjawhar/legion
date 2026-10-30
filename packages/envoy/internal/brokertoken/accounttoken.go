@@ -37,7 +37,8 @@ type AccountToken struct {
 	readAt time.Time
 }
 
-// NewAccountToken reads the projected ServiceAccount token at path.
+// NewAccountToken is a reader of the projected ServiceAccount token at path, which Read opens at
+// call time, caching what it reads for AccountTokenCacheTTL.
 func NewAccountToken(path string) *AccountToken {
 	return &AccountToken{Path: path, TTL: AccountTokenCacheTTL}
 }

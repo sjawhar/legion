@@ -9,7 +9,6 @@ package main
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -57,7 +56,7 @@ func TestAListedAccountReachesOnlyItsOwnRoutes(t *testing.T) {
 		"BROKER_K8S_OIDC_AUDIENCE=" + enrolmentAudience,
 		"BROKER_API_ACCOUNTS=dispatch=" + apiAccount + " listener=" + listenerAccount,
 	}})
-	base := "http://" + broker.Addr
+	live := newPlainBroker(broker.Addr)
 	dispatchToken := accountToken(t, cluster, clusterKey, apiAccount)
 	listenerToken := accountToken(t, cluster, clusterKey, listenerAccount)
 
@@ -65,7 +64,7 @@ func TestAListedAccountReachesOnlyItsOwnRoutes(t *testing.T) {
 	// pattern is what the broker names in a refusal, path what this test calls.
 	for _, route := range []struct {
 		method, pattern, path, contentType, body string
-		// relays is true for the nine routes Dispatch's server relays a person's decisions and
+		// relays is true for the ten routes Dispatch's server relays a person's decisions and
 		// reads through, false for introspection, the one route the listener caller may call.
 		relays bool
 	}{
@@ -92,7 +91,7 @@ func TestAListedAccountReachesOnlyItsOwnRoutes(t *testing.T) {
 			contentType: "application/json", body: `{"approver":"` + powersApprover + `"}`, relays: true},
 	} {
 		t.Run("as listener: "+route.method+" "+route.pattern, func(t *testing.T) {
-			status, body := callBroker(t, base, route.method, route.path, listenerToken, route.contentType, route.body)
+			status, body := live.callAs(t, route.method, route.path, listenerToken, route.contentType, route.body)
 			if !route.relays {
 				// Introspection is the listener's own route: it answers about the token, and the
 				// token nobody issued is simply not live.
@@ -120,40 +119,26 @@ func TestAListedAccountReachesOnlyItsOwnRoutes(t *testing.T) {
 			// grant for the ids and bodies it sends — so what is asserted is that the answer is
 			// not the authority's refusal: neither "this caller may not call that route" nor
 			// "this account is not listed".
-			status, body := callBroker(t, base, route.method, route.path, dispatchToken, route.contentType, route.body)
+			status, body := live.callAs(t, route.method, route.path, dispatchToken, route.contentType, route.body)
 			if code, _ := body["code"].(string); status == http.StatusForbidden && (code == lacksPower || code == "ACCOUNT_NOT_LISTED") {
-				t.Fatalf("%s %s as dispatch = %d %v, want anything but the authority's refusal: the dispatch caller reaches all ten routes as it did before", route.method, route.pattern, status, body)
+				t.Fatalf("%s %s as dispatch = %d %v, want anything but the authority's refusal: the dispatch caller reaches all eleven routes as it did before", route.method, route.pattern, status, body)
 			}
 		})
 	}
 }
 
-// callBroker sends one request to the broker as the caller whose ServiceAccount token is bearer,
-// and answers the status and the decoded body, logging both halves as the live run's transcript
-// with the caller's token named rather than repeated.
-func callBroker(t *testing.T, base, method, path, bearer, contentType, body string) (int, map[string]any) {
+// callAs sends one request to the broker as the caller whose ServiceAccount token is bearer, and
+// answers the status and the decoded body, the caller's token named in the transcript rather than
+// repeated.
+func (l *liveBroker) callAs(t *testing.T, method, path, bearer, contentType, body string) (int, map[string]any) {
 	t.Helper()
-	request, err := http.NewRequest(method, base+path, strings.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if contentType != "" {
-		request.Header.Set("Content-Type", contentType)
-	}
-	request.Header.Set("Authorization", "Bearer "+bearer)
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatalf("%s %s: %v", method, path, err)
-	}
-	defer response.Body.Close()
-	answer, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("> %s %s %s (as <account-token>)\n< %d %s", method, path, body, response.StatusCode, strings.TrimSpace(string(answer)))
+	status, answer := l.send(t, l.plain, brokerCall{
+		method: method, path: path, contentType: contentType,
+		body: body, bearer: bearer, shown: body + " (as <account-token>)",
+	})
 	var decoded map[string]any
 	if err := json.Unmarshal(answer, &decoded); err != nil {
-		t.Fatalf("%s %s answered %d %s, which is not JSON: %v", method, path, response.StatusCode, answer, err)
+		t.Fatalf("%s %s answered %d %s, which is not JSON: %v", method, path, status, answer, err)
 	}
-	return response.StatusCode, decoded
+	return status, decoded
 }

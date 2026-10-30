@@ -4476,7 +4476,8 @@ so what a token says lives on its stored session and this route is the only way 
 is an `accountAuth` route — the caller's own ServiceAccount token, which RFC 7662 Section 2.1
 allows in place of OAuth client authentication, so the provider's `Introspect` answers it
 directly rather than authenticating an OAuth client. The form's `token` parameter names the
-token (missing, `400 TOKEN_REQUIRED`), and the answer is `oauth.Introspection`: `active`, and
+token (missing, `400 TOKEN_REQUIRED`), and the answer is `oauthwire.Introspection`, the one
+declaration the broker serialises and a resource server decodes: `active`, and
 when it is live the `session` the token's writes are recorded as, the `person` it acts for, the
 `project_scope` (`named` or `person`) and the `project` a named one may write, the `scope`, `exp`
 and `client_id`, and `jkt`, the thumbprint of the key the token is DPoP-bound to — which is what
