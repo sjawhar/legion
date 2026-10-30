@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-556",
-  "completed": "2026-10-30T04:15:31Z",
-  "round": "tester round 5 failed: without ygo's client cap, repeated awareness floods grew a room without limit; narrowed by the INFRA-63 architect to that fix; no merge of main",
+  "completed": "2026-10-30T06:37:59Z",
+  "round": "tester round 6 failed: one tab keeping 2,048 invented awareness clients alive filled the room so a joining reader was never relayed; narrowed by the INFRA-63 architect to a per-socket bound; no merge of main",
   "proof": [
+    {
+      "criterion": "All three awareness flood tests: a reader joining during or after a flood is seen on both processes within a second, and repeated floods keep each room's awareness bounded",
+      "surface": "two real envoy-dispatch binaries (the two multiprocess flood tests), the docs package's repeated-flood test, and Chromium on main's two-process harness",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=2 -run 'TestAReaderJoining|TwoEditors' ./cmd/dispatch && go test -count=2 -run Awareness ./internal/dispatch/docs/; whole multiprocess file, whole docs package, api socket tests; cd packages/dispatch && bun run e2e:multiprocess -- coedit.multiprocess --repeat-each=2",
+      "observed": "all three tests pass unmodified, 2 of 2; multiprocess file ok 1266.409s; docs package ok 1701.414s; api (-run 'Live|Peer|Socket|Websocket|WebSocket|Room|Issue|Clos|Approval|Storable|Access|Identity|Doc') ok 641.855s; browser spec 2 passed (21.9s). Mechanism: a reader wrapped around the hijacked document socket rewrites each awareness message to at most four clients per socket before ygo applies or broadcasts it, so local and relayed readers see the same set; the room-wide cap is re-derived as maxRoomConnections x 4 so it shuts out no reader",
+      "headSha": "3b94b7c21d06",
+      "negativeControl": "at 65dccc7c TestAReaderJoiningDuringALiveAwarenessFloodIsSeenOnTheOtherProcess fails: 'alice ... was seen at once by carol on A but not by bob on B within 1s: A's room is full of that tab's clients and never relays hers'"
+    },
     {
       "criterion": "A room's stored awareness stays bounded on both processes under repeated floods, and a reader joining after a flood is still seen on the other process within a second",
       "surface": "docs package two-Service test of repeated floods (the tester's red test), and two real envoy-dispatch binaries (the tester's round-4 red test)",
@@ -73,7 +81,9 @@
   "deviations": [
     "The gate's batch wrapper (queueAppendGate) is gone on the reviewer's request; #2445's implementer agreed to call decideAppend from its batch path (Envoy, 2026-10-29T17:05Z).",
     "The issue.closed event keeps the closing transaction's start time; the stored row and the PATCH response carry the re-stamped commit-time closed_at (README says so).",
-    "main moved again after the merge (GitHub reads CONFLICTING); per the architect's word, the branch does not chase it."
+    "main moved again after the merge (GitHub reads CONFLICTING); per the architect's word, the branch does not chase it.",
+    "The repeated-flood test's bound is 2 x maxAwarenessClientsPerRoom; re-deriving that constant as maxRoomConnections x maxAwarenessClientsPerSocket (4000) raised the test's bound from 512 to 8000. A room cap of 256 would shut out real readers past 64 sockets; with the per-socket bound one tab can no longer fill a room. The test still fails without any bound (16,384 entries).",
+    "New refusal (census entry 4): a document socket whose first message names no document and type within 512 bytes is closed."
   ],
   "openQuestions": []
 }
