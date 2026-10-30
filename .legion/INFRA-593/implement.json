@@ -2,37 +2,36 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-593",
-  "completed": "2026-10-29T18:08:00Z",
+  "completed": "2026-10-30T02:30:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2444",
-  "round": 8,
-  "answersMove": "READY's head moved from 11581bf6 to fd69c20e: retro's rename of its six docs/solutions/ lessons to ...-pr2444.md with the issue key removed, on the architect's instruction. No runtime code changed; this round re-proves the change at fd69c20e so the tester and reviewer can run that head.",
+  "round": 9,
+  "answersReview": "Round 6 at 2dfde180 (REQUEST_CHANGES, review head 370bce4b): internal/dispatch/docs timed out under -race at 30 min with the branch merged into main. Per the architect: merge main forward (now carrying #2516's envoy-go-race-docs job), quote the package's -race time against main, and cut this PR's added test cost.",
   "proof": [
     {
-      "criterion": "Acceptance 1, 2 and 5: a load reads the compacted row plus the rows after it, compaction survives a restart and runs without NATS, and young rows stay as written, at the head that will merge",
-      "surface": "real envoy-dispatch built from the head on Postgres 16.2, DISPATCH_NATS_DISABLED=1, driven through the HTTP API",
-      "command": "bash $TMPDIR/infra593/e2e.sh (script and output: dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt version 10)",
-      "observed": "30 uploads made 41 rows; after a stop every row but the newest 3 was backdated and the hour's document-compaction record cleared; after the restart the sweep logged candidates=1 compacted=1 rows_deleted=37, leaving 4 rows; the 3 young rows unchanged in version, xmin and md5; text sha256 db68d573... identical before and after; a 31st upload reads back.",
-      "headSha": "fd69c20e4e6a0d5090424bd49381c5bd62969ae4",
-      "negativeControl": "The restarted process's first sweep tick logs candidates=0 compacted=0 while the hour is recorded as served; only after the record is cleared does the next tick fold the 37 rows, so the fold is the sweep's and not the restart's."
+      "criterion": "The docs tests this PR adds no longer push internal/dispatch/docs past its race budget: the package under -race is no slower than main's",
+      "surface": "go test -race of internal/dispatch/docs on the worker pod, Postgres 16.2, at the merged head and on main",
+      "command": "GOMAXPROCS=4 CGO_ENABLED=1 go test -race -p 2 -parallel 4 -count=1 -timeout 80m -v ./internal/dispatch/docs/ (race-run.sh, memory.usage_in_bytes sampled every 2 s); main from git archive 8109a38d packages/envoy with GOWORK=off",
+      "observed": "merged head 0d9d9496: ok 3157.5 s, pod peak 15.7 GB; main 8109a38d: 3292.4 s, peak 15.9 GB (its only FAILs are 4 fixture reads of packages/contracts the export left out, 0.00 s each). The four shrunk tests: 88.48->24.80 s, 50.17->0.70 s, 27.85->0.41 s, 31.67->0.41 s (dispatch://INFRA-593/artifact/infra-593-docs-race-times-md).",
+      "headSha": "0d9d949698ae0f1113fcc7fe415bf4f7d6da324c",
+      "negativeControl": "Before 85b8b216, the branch merged with main 1489a445 took 3361.2 s on the same pod, and CI timed out at 1801.0 s and 1800.9 s (run 40927706871, job 123716984268)."
     },
     {
-      "criterion": "The head moved only in files no runtime reads",
-      "surface": "jj diff of the branch",
-      "command": "jj diff --name-only --from 11581bf624d1 --to fd69c20e4e6a",
-      "observed": "Six renames under docs/solutions/ (each -INFRA-593.md -> -pr2444.md), with one front-matter line and one dispatch:// link removed; no file outside docs/solutions/.",
-      "headSha": "fd69c20e4e6a0d5090424bd49381c5bd62969ae4",
-      "negativeControl": "From 9ed33934 (the last code round) to fd69c20e the only packages/ paths are the reviewer's test-only commit 26953da8, which the approved head 11581bf6 already carried."
+      "criterion": "Acceptance 1, 2 and 5 at the merged head: a load reads the compacted row plus the rows after it, compaction survives a restart and runs without NATS, and young rows stay as written",
+      "surface": "real envoy-dispatch built from the head on Postgres 16.2, DISPATCH_NATS_DISABLED=1, driven through the HTTP API",
+      "command": "bash $TMPDIR/infra593/e2e.sh (dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt version 11)",
+      "observed": "30 uploads made 41 rows; after the restart the sweep logged candidates=1 compacted=1 rows_deleted=37 leaving 4 rows; the 3 young rows unchanged in version, xmin and md5; text sha256 db68d573... identical; a 31st upload reads back.",
+      "headSha": "0d9d949698ae0f1113fcc7fe415bf4f7d6da324c",
+      "negativeControl": "The restarted process's first sweep tick logs candidates=0 while the hour is recorded as served; only the next tick, after the record is cleared, folds the 37 rows."
     }
   ],
   "filesChanged": [
-    "docs/solutions/architecture-patterns/a-periodic-pass-starts-from-main-under-runleased-with-a-tick-at-start-pr2444.md",
-    "docs/solutions/database-issues/a-pool-whose-work-moves-out-of-its-transactions-was-also-a-semaphore-pr2444.md",
-    "docs/solutions/database-issues/a-sweep-over-a-table-too-large-to-migrate-reads-a-worklist-the-hot-write-fills-in-its-own-statement-pr2444.md",
-    "docs/solutions/database-issues/fold-off-the-lock-and-write-only-when-every-folded-rows-version-and-xmin-still-stand-pr2444.md",
-    "docs/solutions/envoy/let-the-consumers-own-decode-be-the-validation-instead-of-decoding-the-bytes-twice-pr2444.md",
-    "docs/solutions/testing/a-test-of-a-background-queue-pauses-it-through-its-production-pause-while-it-reads-the-state-it-compares-pr2444.md"
+    "packages/envoy/internal/dispatch/docs/{fold,persistence,service,tree,websocket,rebuild,compaction}.go: per-instance pending queue (PgVersioned.maxPendingItems, Service.maxPendingItems -> Server.MaxPendingItems and validateUpdate), maxUpdateItems in production",
+    "packages/envoy/internal/dispatch/docs/{history_fold,load_fold,compaction}_test.go: unfoldableHistory(maxPending), shrinkPendingItems, testPendingItems = 64",
+    "migration renumbered 0141 -> 0142_doc_compaction_owed (up, census, its test, AGENTS.md, changelog fragment, cmd/dispatch/README.md)"
   ],
   "deviations": [
-    "This handoff-only push carries no skip-checks line, so the required checks run at the pull request's head that READY will name."
+    "The architect's 21:42Z brief named real 30-second waits in the queue and sweep tests; measured, those tests take under 3 s each. The cost was the million-item unfoldable fixtures, so 85b8b216 shrinks those.",
+    "ygo stays at v1.51.3-sami.7 in this round: sami.10, which the 02:08Z correction requires, was not tagged at 02:20Z (newest sami.9). The PR body says #2444 waits for it.",
+    "This handoff-only push carries no skip-checks line, so envoy-go-race and envoy-go-race-docs run at the pull request's head."
   ]
 }
