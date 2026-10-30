@@ -20,12 +20,13 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
 	"github.com/sjawhar/envoy/internal/dispatch/redeliver"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 // The Dispatch server's starts of the stream here go through dispatchStreamOptions over what
 // resolveBootConfig read from the settings table, connecting in the background as main's do
-// (serverClient, dispatchStreamStart), on an in-process three-server cluster
+// (serverClient, connectDispatchStream), on an in-process three-server cluster
 // (testnats.StartCluster), one per test or subtest, unless a test says single server.
 
 // replicasTestClientID is the GitHub App the tests' webhook sweeper signs as.
@@ -34,7 +35,7 @@ const replicasTestClientID = "Iv1.replicas"
 // reconcileWait bounds the wait of the start helpers for the background reconcile of the stream.
 const reconcileWait = 30 * time.Second
 
-// dispatchStreamStart is the Dispatch server's publisher connect for the settings overrides
+// connectDispatchStream is the Dispatch server's publisher connect for the settings overrides
 // names, exactly as main makes it on the servers at urls: ConnectOwningStream with serverClient
 // over dispatchStreamOptions, with no option and no clock of the test's own. It returns the
 // settings it resolved, the client, and the buffer that holds the client's log lines. The client
@@ -42,7 +43,7 @@ const reconcileWait = 30 * time.Second
 // starts its keeper (bus.WithConnectInBackground), so a caller waits for that reconcile itself.
 // The helper sets the default logger to record the client's lines until the test ends: a test
 // that calls it must not run in parallel.
-func dispatchStreamStart(t *testing.T, urls []string, overrides map[string]string) (bootConfig, *bus.Client, *cmdtest.LockedBuffer) {
+func connectDispatchStream(t *testing.T, urls []string, overrides map[string]string) (bootConfig, *bus.Client, *cmdtest.LockedBuffer) {
 	t.Helper()
 	env := bootEnvironment(overrides)
 	boot, err := resolveBootConfig(env)
@@ -50,9 +51,7 @@ func dispatchStreamStart(t *testing.T, urls []string, overrides map[string]strin
 		t.Fatalf("resolveBootConfig(%v): %v", overrides, err)
 	}
 	logged := &cmdtest.LockedBuffer{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(logged, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewJSONHandler(logged, nil))
 	client, err := bus.ConnectOwningStream(urls, serverClient(dispatchStreamOptions(boot, env)...)...)
 	if err != nil {
 		t.Fatalf("connect Dispatch's publisher for %v: %v", overrides, err)
@@ -63,8 +62,8 @@ func dispatchStreamStart(t *testing.T, urls []string, overrides map[string]strin
 
 // startDispatchStream is startDispatchStreamRepairing with no repair: the Dispatch server's
 // publisher connect for the settings overrides names, built exactly as main builds it
-// (dispatchStreamStart), waited out until this client's own first connection has reconciled the
-// stream to what the settings ask of it. It sets the default logger (dispatchStreamStart), so a
+// (connectDispatchStream), waited out until this client's own first connection has reconciled the
+// stream to what the settings ask of it. It sets the default logger (connectDispatchStream), so a
 // test that calls it must not run in parallel.
 func startDispatchStream(t *testing.T, urls []string, overrides map[string]string) *bus.Client {
 	t.Helper()
@@ -72,7 +71,7 @@ func startDispatchStream(t *testing.T, urls []string, overrides map[string]strin
 }
 
 // startDispatchStreamRepairing is the Dispatch server's publisher connect for the settings
-// overrides names on the servers at urls (dispatchStreamStart), waited out, at the latest for
+// overrides names on the servers at urls (connectDispatchStream), waited out, at the latest for
 // reconcileWait, until the stream holds what the settings ask of it (reconciledFor). The helper
 // waits for this client's own reconcile, not for a stream that already looks reconciled: it
 // returns only once the client's hooks have covered a connection event
@@ -85,16 +84,16 @@ func startDispatchStream(t *testing.T, urls []string, overrides map[string]strin
 // repair once with that failure, and then starts the wait over, so that reconcileWait bounds the
 // reconcile the repair makes possible rather than the repair itself: a repair that restarts a
 // cluster member waits for the member, and testnats.Cluster.AwaitReady spends 15 seconds on a
-// member no peer hears from before it restarts that member (measured here: one run in three).
+// member no peer hears from before it restarts that member.
 // A nil repair is no repair. repair runs on the helper's own goroutine, which is the test's
 // goroutine, because testnats.Server.Start, testnats.Server.Stop and testnats.Cluster.AwaitReady
 // call t.Fatal, which Go forbids off the test goroutine.
 //
-// The helper sets the default logger (dispatchStreamStart), so a test that calls it must not run
+// The helper sets the default logger (connectDispatchStream), so a test that calls it must not run
 // in parallel.
 func startDispatchStreamRepairing(t *testing.T, urls []string, overrides map[string]string, repair func(hookFailure)) *bus.Client {
 	t.Helper()
-	boot, client, logged := dispatchStreamStart(t, urls, overrides)
+	boot, client, logged := connectDispatchStream(t, urls, overrides)
 	reconciled := reconciledFor(boot)
 	var info *natsgo.StreamInfo
 	var err error
@@ -106,7 +105,8 @@ func startDispatchStreamRepairing(t *testing.T, urls []string, overrides map[str
 			}
 		}
 		if failure.Message == "" {
-			if failure = reconcileFailure(logged.String()); failure.Message != "" && repair != nil {
+			failure = reconcileFailure(logged.String())
+			if failure.Message != "" && repair != nil {
 				repair(failure)
 				deadline = time.Now().Add(reconcileWait)
 			}
@@ -120,14 +120,14 @@ func startDispatchStreamRepairing(t *testing.T, urls []string, overrides map[str
 
 // refusedDispatchStream is the error of the first failed run of the reconnect hooks that the
 // Dispatch server's publisher logs for the settings overrides names on the servers at urls
-// (dispatchStreamStart, reconcileFailure), for a start whose settings the servers can never
+// (connectDispatchStream, reconcileFailure), for a start whose settings the servers can never
 // satisfy. It closes the client as soon as that failure reaches the log, so the client retries the
 // reconcile no more. It fails the test when the stream reconciles instead, and when the publisher
-// logs no such failure within reconcileWait. It sets the default logger (dispatchStreamStart), so
-// a test that calls it must not run in parallel.
+// logs no such failure within reconcileWait. It sets the default logger (connectDispatchStream),
+// so a test that calls it must not run in parallel.
 func refusedDispatchStream(t *testing.T, urls []string, overrides map[string]string) string {
 	t.Helper()
-	boot, client, logged := dispatchStreamStart(t, urls, overrides)
+	boot, client, logged := connectDispatchStream(t, urls, overrides)
 	reconciled := reconciledFor(boot)
 	for deadline := time.Now().Add(reconcileWait); ; {
 		if failure := reconcileFailure(logged.String()); failure.Message != "" {
@@ -162,6 +162,14 @@ func reconciledFor(boot bootConfig) func(natsgo.StreamConfig) bool {
 	}
 }
 
+// retriedHookFailure and uncoveredHookFailure are the two messages the bus logs a failed run of
+// the reconnect hooks under, by how long the hooks have been uncovered (internal/bus,
+// bus.RepairGrace): the WARN under that grace, the ERROR at or past it.
+const (
+	retriedHookFailure   = "envoy nats reconnect hook failed; it is retried"
+	uncoveredHookFailure = "envoy nats reconnect hooks have not succeeded"
+)
+
 // hookFailure is one failed run of the Dispatch publisher's reconnect hooks, as the bus logged it:
 // the message the bus chose for it, and the error of the run. The zero value says that the
 // publisher logged no such run (Message == "").
@@ -171,12 +179,9 @@ type hookFailure struct {
 }
 
 // reconcileFailure is the first failed run of the reconnect hooks that the Dispatch publisher
-// logged in logs, JSON lines, and the zero hookFailure when it logged none. The bus reports such a
-// run by how long its hooks have been uncovered (internal/bus, bus.RepairGrace): under that grace
-// the WARN `envoy nats reconnect hook failed; it is retried`, at or past it the ERROR `envoy nats
-// reconnect hooks have not succeeded`. Both messages are read, so that a failure a slow start logs
-// past the grace is read as well, and the Message a caller gets back names which of the two the
-// bus chose.
+// logged in logs, JSON lines, and the zero hookFailure when it logged none. Both messages are
+// read, so that a failure a slow start logs past the grace is read as well, and the Message a
+// caller gets back names which of the two the bus chose.
 func reconcileFailure(logs string) hookFailure {
 	for line := range strings.Lines(logs) {
 		var record map[string]any
@@ -184,7 +189,7 @@ func reconcileFailure(logs string) hookFailure {
 			continue
 		}
 		switch message := record["msg"]; message {
-		case "envoy nats reconnect hook failed; it is retried", "envoy nats reconnect hooks have not succeeded":
+		case retriedHookFailure, uncoveredHookFailure:
 			return hookFailure{Message: fmt.Sprint(message), Error: fmt.Sprint(record["error"])}
 		}
 	}
@@ -225,8 +230,8 @@ func TestADispatchStartWaitsOutAReconcileFailureTheBusRetries(t *testing.T) {
 		cluster.AwaitReady(t)
 	})
 
-	if want := "envoy nats reconnect hook failed; it is retried"; repaired.Message != want {
-		t.Errorf("the start's first logged failure of the reconnect hooks is %q (%s), want the retried %q", repaired.Message, repaired.Error, want)
+	if repaired.Message != retriedHookFailure {
+		t.Errorf("the start's first logged failure of the reconnect hooks is %q (%s), want the retried %q", repaired.Message, repaired.Error, retriedHookFailure)
 	}
 	if events := client.HookedConnectionEvents(); events < 1 {
 		t.Errorf("the client's hooks covered %d connection events, want at least 1", events)
