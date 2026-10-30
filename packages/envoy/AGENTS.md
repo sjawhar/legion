@@ -1508,7 +1508,7 @@ relation: `mentions`, `child_of` (`issues.parent_key`), `blocked_by` (`issue_lin
 `part_of` edge to its document (`document_blocks`), and since migration 0142 the same two for a
 block of a comment or message (`comment_block_refs` and `message_block_refs`, `comment_blocks` and
 `message_blocks`) and a reply's `replies_to` edge to the block it names (`replies_to_block`), and
-since migration 0148 the same two for a part of an ask (`ask_block_refs` and `ask_blocks`), which
+since migration 0149 the same two for a part of an ask (`ask_block_refs` and `ask_blocks`), which
 a reply in its thread answers the same way. An
 issue may wait only on issues in its own
 project through `blocked_by`.
@@ -2092,10 +2092,17 @@ its parser unquotes back. Marks are read as that parser reads them, as a set, wh
 them: a mark opened where the same mark is already open adds nothing, and its close ends the mark
 for the rest of the text around it, up to the node that opened it (`parseInlineMarks`), so
 `*x *y* z*` is
-`x y` in emphasis and ` z` without, and `****a****` is strong once. An image is read without the
-marks around it, a link among them, as the browser editor's store (y-prosemirror, which keeps a
-mark on text alone) holds it, so a linked image is stored without its link (LEGION-365) rather than
-refused. Delimiter runs pair as that parser pairs them: CommonMark's rule of three is judged on the
+`x y` in emphasis and ` z` without, and `****a****` is strong once. An inline leaf - a node that is
+inline, holds no content of its own and is not text: raw HTML, an image, a hard break, a footnote
+reference - is read without the marks around it, a link among them, by both readers, since a mark
+lives on text alone, as the browser editor's store (y-prosemirror) holds it and as the engine
+itself reads it; so a linked image is stored without its link (LEGION-365) rather than refused,
+and a comment and a past version draw what the document stores. An autolink inside a link label
+carries its own link, in place of the label's, on its own text (the autolink arm of
+`parseInlineMarks`, where a mark excludes another of its own type), and the label's link covers the
+runs around it: stacking the two would put a text under two links, a tree ProseMirror cannot hold,
+and the write would be refused. Delimiter runs
+pair as that parser pairs them: CommonMark's rule of three is judged on the
 lengths two runs have left after the pairs already made from them (`emphasisDelimiters`), where
 goldmark judged the lengths they were written with, so in `***a.****&#32;b*` the closer's last `**`
 is text. A run of `*` or `_` can also open where another `*` or `_` follows it and close where one
@@ -2291,7 +2298,16 @@ grammar decides, since an escaped `<` reads as text in both: goldmark reads a de
 `<!` and an uppercase letter, and an unquoted attribute value holding no control character, where
 CommonMark 0.31 and the engine also read a lowercase one (`<!doctype x;[a@b.cc](mailto:a@b.cc)>`)
 and a U+0001 in an unquoted value as raw HTML. Only a `<` the run's first writing reads so is
-escaped, so a run that reads back keeps its bytes. A text `<` first after its line's container
+escaped, so a run that reads back keeps its bytes. The reader opens a declaration by the rule the
+scan already judged it by (`opensDeclaration`, which `rawHTMLCloser` asks for the reader and for the
+scan alike): `<!` and any ASCII letter, as CommonMark 0.31 and the engine open one, where goldmark's
+raw HTML parser opens one only after an uppercase letter, so `p <!a> q` is read as inline raw HTML
+and stored unescaped. Every kind of inline raw HTML that ends at a closer of its own is read by the
+one parser (`inlineRawHTMLParser`), which walks a block to its end at most once per kind: the first
+opener of a kind whose walk finds no closer is recorded (`unclosedRawHTML` for a parse,
+`rawHTMLScan.ends` for a write) and every later opener of it in that block is refused without a
+walk, so a kind added to `rawHTMLCloser` keeps that guarantee only by recording what its own walk
+answered. A text `<` first after its line's container
 prefix is also escaped where micromark's html-flow start conditions open an HTML block there, judged
 in `endLine` on the line as written across nodes (`htmlBlockStart`), since goldmark can read a
 paragraph there: `<span title=a=b;[a@b.cc](mailto:a@b.cc)>` alone on a paragraph's first line is a
@@ -2646,8 +2662,8 @@ An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and
 canonical markdown, and a copy also `copied_from` and `copied_from_document`, the ask it was copied
 from and that ask's document.
 
-An ask's parts are blocks of the graph (migrations `0148_ask_blocks` and
-`0149_asks_block_parts_trigger`): its question, each of its options in the row's order and its
+An ask's parts are blocks of the graph (migrations `0149_ask_blocks` and
+`0150_asks_block_parts_trigger`): its question, each of its options in the row's order and its
 current answer (`refs.AskParts`, written by `refs.IndexAskParts` in the transaction of every
 write of an ask: the ask routes' insert, edit, answer and resolve, an issue's reopen,
 settlement's own open, edit and restore of a block ask, the approval routes and a decided
@@ -2688,7 +2704,7 @@ its card's count reads too, and an ask's own read lists the edges at its parts, 
 part as `block`, each counted as the ask's (`refs.BacklinkCounts`). An ask's `refs` rows hold its
 question's mentions alone, so an issue's closure reads the links its options and answer hold from
 `ask_block_refs`, the member's `via` the ask at the depth the ask's own link has
-(`refs.Closure`). An ask any build writes is owed a part index (`0149`'s `asks_item_blocks_owed`
+(`refs.Closure`). An ask any build writes is owed a part index (`0150`'s `asks_item_blocks_owed`
 trigger on its question, options and answer, which a part-aware writer's own index clears in the
 same transaction), which the block-index reconciliation drains and `rebuild-refs` marks for every
 ask.

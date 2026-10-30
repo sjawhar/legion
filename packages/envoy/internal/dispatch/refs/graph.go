@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -626,20 +627,27 @@ func anchorVersion(alias string) string {
 // loadAskNodes resolves ask nodes. An ask is made by its author. Its last change is its own edit
 // (edited_at: its wording, a block ask's settlement, an approval request's version move), by the
 // editor the latest ask.edited event names; an answer or a resolution is no change of it. It
-// belongs to the document it is written on: the one its anchor names, at the anchored version; a
-// block ask's document, at the version that first held its block when Dispatch knows it
-// (blockFirstVersion); an approval request's document, at the version it named when it opened
-// (written_version); the document that owns it, at the version current when it was written
-// (written_version). An ask written on no document belongs to its issue.
+// belongs to the document it is written on: the one its anchor names, when the anchor's
+// artifact_id casts to a uuid, at the anchored version; a block ask's document, at the version
+// that first held its block when Dispatch knows it (blockFirstVersion); an approval request's
+// document, at the version it named when it opened (written_version); the document that owns it,
+// at the version current when it was written (written_version). An ask written on no document
+// belongs to its issue.
+//
+// An artifact_id that casts to no uuid names no document, so such an anchor falls through to the
+// branch below - the ask's block document, at that branch's version - exactly as an anchor
+// carrying no artifact_id at all does, and as both search arms link the same ask. The version and
+// the document therefore always come from one branch.
 //
 // The edit lookup repeats events_ask_payload_id's type list (migration 0030), so the planner can
 // prove the partial index serves it.
 func loadAskNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []string, nodes map[[2]string]resolvedNode) error {
+	anchorArtifact := store.CastableUUID(`k.anchor->>'artifact_id'`)
 	rows, err := q.Query(ctx, `
 		select k.id::text, k.issue_key, coalesce(i.project_key, a.project_key, ''), coalesce(a.slug, ''), k.question,
 		       k.author, k.created_at, k.edited_at, edit.edited_by, `+documentColumns("doc")+`,
 		       case
-		         when k.anchor->>'artifact_id' is not null then `+anchorVersion("k")+`
+		         when `+anchorArtifact+` is not null then `+anchorVersion("k")+`
 		         when k.block_artifact_id is not null then case when first.known then first.version end
 		         else k.written_version
 		       end
@@ -647,7 +655,7 @@ func loadAskNodes(ctx context.Context, q Queryer, _ string, _ bool, ids []string
 		left join issues i on i.key = k.issue_key
 		left join artifacts a on a.id = k.artifact_id
 		left join artifacts doc on doc.id = case
-		  when k.anchor->>'artifact_id' is not null then (k.anchor->>'artifact_id')::uuid
+		  when `+anchorArtifact+` is not null then `+anchorArtifact+`
 		  when k.block_artifact_id is not null then k.block_artifact_id
 		  when k.kind = 'approval' then (k.approval->>'artifact_id')::uuid
 		  else k.artifact_id

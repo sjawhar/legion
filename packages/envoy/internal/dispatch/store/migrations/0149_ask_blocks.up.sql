@@ -1,4 +1,4 @@
--- 0148_ask_blocks.up.sql
+-- 0149_ask_blocks.up.sql
 --
 -- An ask is a collection of blocks too, as 0142's comments and messages are: its question, each
 -- of its options and its answer are parts, split as the document parser reads them
@@ -56,7 +56,7 @@ create table ask_block_texts (
 
 -- An ask's indexing state. revision counts its indexed revisions (1 is the first indexing, 0
 -- none yet) and next_block is the number of the next block id it mints, so no id is reused.
--- body_sha256 is the question, options and answer last indexed. owed_at is set by 0149's trigger
+-- body_sha256 is the question, options and answer last indexed. owed_at is set by 0150's trigger
 -- on every write of any build and cleared by the index a block-aware build runs in the same
 -- transaction, so a row still owed was written by a build without this index; the partial index
 -- serves the reconciliation's read of the oldest owed.

@@ -11,6 +11,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // askRowColumns are docs.AskColumns plus the documents a block ask, a quoted anchor or an
@@ -20,9 +21,13 @@ const askRowColumns = docs.AskColumns + `, ba.id::text, ba.slug, ba.is_primary,
 	aa.project_key, aa.slug, aa.name, aa.is_primary,
 	pa.project_key, pa.slug, pa.name, pa.is_primary`
 
-const askRowFrom = `from asks a
+// askRowFrom is a var, not a const, because its anchor join is built from store.CastableUUID: a
+// stored anchor resolves to the document its artifact_id casts to, whatever the spelling, and one
+// whose artifact_id casts to no uuid resolves to no document instead of failing the read with
+// SQLSTATE 22P02.
+var askRowFrom = `from asks a
 	left join artifacts ba on ba.id = a.block_artifact_id
-	left join artifacts aa on aa.id = (a.anchor->>'artifact_id')::uuid
+	left join artifacts aa on aa.id = ` + store.CastableUUID(`a.anchor->>'artifact_id'`) + `
 	left join artifacts pa on pa.id = (a.approval->>'artifact_id')::uuid`
 
 // newestReply selects the newest comment in the thread of the ask aliased a: the one that
@@ -87,7 +92,7 @@ func askWaitingOn(ctx context.Context, q queryer, askID string) (string, error) 
 // never carry WaitingOn.
 const askReadColumns = askRowColumns + `, lr.author, lr.created_at, ` + waitingOnExpression + ` as waiting_on`
 
-const askReadFrom = askRowFrom + lastReplyJoin
+var askReadFrom = askRowFrom + lastReplyJoin
 
 // nullableAskArtifactRef holds the nullable columns of one optional document an ask names - a
 // quoted anchor's or an approval request's artifact_id, both resolved through a left join that
@@ -176,7 +181,7 @@ func attachAskBacklinkCounts(ctx context.Context, q queryer, asks []*model.Ask) 
 // A part is matched to the option it stands for by its stored position and type, never by
 // hashing the option's label a second time: the index owns the identity of a part, and a reader
 // of this id must get back exactly the part the index wrote. An ask whose parts are not indexed
-// yet - owed by migration 0149's trigger and never drained, so no build with the index has
+// yet - owed by migration 0150's trigger and never drained, so no build with the index has
 // written them - has no state row or no parts, and carries no id and revision 0: a read of an ask
 // never depends on the index being current. So does an ask whose stored parts stand for other
 // options than the row now holds, where the index is behind the row and positions no longer line

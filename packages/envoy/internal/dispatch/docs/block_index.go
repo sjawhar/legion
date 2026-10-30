@@ -64,7 +64,7 @@ type BlockIndexTick struct {
 // index with the block grammar (block_grammar_owed, migrations 0123-0126), which a build older
 // than the block grammar indexes without, and every comment, message and ask owed a block index
 // of its own blocks (comment_block_state, message_block_state and ask_block_state owed_at, set by
-// migrations 0143-0144's and 0149's triggers on every write and by rebuild-refs), which a build
+// migrations 0143-0144's and 0150's triggers on every write and by rebuild-refs), which a build
 // older than item blocks leaves owed.
 // One tick per lease, at start, then every blockIndexStep while a batch is full and every
 // BlockIndexReconcileInterval once none is, until ctx ends.
