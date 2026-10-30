@@ -1,0 +1,5 @@
+kind: Added
+body: |-
+  Each claim records when it last started and ended a turn, and the pull request records GitHub's
+  own merge state and the base it sits on. `legion state` and `legion claims list --json` show them,
+  so a reader can tell a worker that is working from one that has stopped.

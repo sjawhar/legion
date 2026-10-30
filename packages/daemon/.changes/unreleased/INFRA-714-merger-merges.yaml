@@ -1,0 +1,7 @@
+kind: Removed
+body: |-
+  The daemon submits no merge and changes no merge setting. The READY route and its packet, the
+  auto-merge arming and disarming, the merge outbox rows and the four merge notices are gone, and
+  the merger merges the pull request itself with the implementer App at the head it read. The
+  `awaiting_merge` phase goes with them: an issue stands in `merging` until GitHub reports its pull
+  request merged.
