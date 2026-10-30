@@ -2,35 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-720",
-  "completed": "2026-10-30T00:07:00Z",
-  "round": 2,
-  "codeHeadReviewed": "d5e71a0a5ce1935912e8be86c1101c87f10e2bf4",
+  "completed": "2026-10-30T05:53:00Z",
+  "round": 3,
+  "codeHeadReviewed": "a46b10cb20fe9a93b917d8cae3397ac20b3872f3",
+  "previousApproval": "ee124abfc331dab55dd484dfd2e97a4c8ae148dd",
   "decision": "approved",
   "critical": 0,
   "important": 0,
-  "minor": 2,
-  "rulesApplied": "Spec v25 (the INFRA-512 architect, 2026-10-29 17:52Z) and the architect's round cap (17:11Z: the reviewer checks only round 1's five items). Not slower: alternating 3+3 replay runs with start times, median head 305.3 <= max base 317.0 CPU-s at c9c5430b, carried across the renumber-only merge by the architect's ruling; the plan's old A3 rule (sweep share) passes too. Correct: 270 byte-identical responses over INFRA-639's LINUX seed except took_ms; the one changed answer (a non-castable anchor: 500 -> 200, no document, block-document parent) is the architect's decision quoted in the PR body.",
-  "roundOneItems": {
-    "1": "done: refs/graph.go:524 builds CastableUUID once; version CASE :529 and document CASE :537 both test it; TestRefsAndSearchPutAnAskWhoseAnchorDoesNotCastOnItsBlockDocument pins refs and search to the block document; reverting the version CASE fails TestAskNodeAnswersOverAnAnchorArtifactIDThatDoesNotCast (deep review)",
-    "2": "done: model.DecodeAnchor (model.go:83) at all six stored-anchor decode sites (comment_queries.go:219, ask_row.go:39, anchor_blocks.go:66, marks.go:473/:657/:801); no other json decode of a stored anchor; decode ~ (p=0.105) and 5(a) ~ (p=0.796) against main; the implementer's measurement that a method costs +51% justifies a function over the fast-path method round 1 named",
-    "3": "done: recordedMarkTargets (marks.go:763-779)",
-    "4": "done: api/ask_anchor_fixtures_test.go",
-    "5": "done: canonical_uuid.go comments state each contract"
+  "minor": 0,
+  "fingerprint": {
+    "before": {"head": "ee124abfc331dab55dd484dfd2e97a4c8ae148dd", "sha256": "18a1db0209c2c80485cc05cc18598bb6a24c9d9d4606b740e2026de304cc7d35"},
+    "after": {"head": "a46b10cb20fe9a93b917d8cae3397ac20b3872f3", "sha256": "5d2b1d894ab140799ed15afb5849431d4c60c943dff465d70d2f8945fd2a3961"},
+    "verdict": "different, so a new round with the thermonuclear pair; after s/0145/0142/ the fingerprinted diffs differ in one line, asksAnchorArtifactIDVersion 145 vs 142, so the PR's own lines changed only by the migration renumber"
   },
-  "keyFindings": [
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/refs/ask_anchor_spelling_test.go",
-      "description": "Comment said a non-castable anchor's ask belongs to its issue, and api/ask_anchor_artifact_test.go:16 named model.Anchor's removed method; fixed by the reviewer in a prose commit."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/model/model.go",
-      "description": "DecodeAnchor's success branch after the RawMessage decode (:102-107) is reachable only with duplicate keys, which jsonb never stores. Behaviour is correct and harmless; not adopted under the architect's round cap."
-    }
-  ],
-  "notAdopted": [
-    "Code quality: revert search.go's CastableUUID and delete the two search tests (guard unreachable). The architect's decisions (a) 08:05Z and the 17:11Z round cap keep every ask reader on CastableUUID and a test pinning refs and search to the same document; declined as in round 1."
-  ],
-  "thermonuclear": "At 3da58601: deep review APPROVE (one Minor, stale PR body bullets, fixed in the body by the reviewer); code quality CHANGES (three items: search guard, dead DecodeAnchor branch, two stale test comments), adjudicated above."
+  "rulesApplied": "Spec v25. Not slower carries from round 7 at c9c5430b by the architect's ruling (alternating 3+3, median head 305.3 <= max base 317.0 CPU-s); correct: the tester's 270 byte-identical responses against main 49e23926 at a46b10cb, except took_ms.",
+  "keyFindings": [],
+  "semanticMerge": "main 08c2e8ad -> 49e23926 adds one ask-anchor cast, the graph_edges view in 0142_item_blocks.up.sql:165, coalesce(block_artifact_id, cast), which casts only rows 0032's index already casts; main's new comment reads still decode through scanComment's model.DecodeAnchor; 0145 runs after 0144; README, changelog fragment and docs/solutions name 0145.",
+  "ci": "CI head a46b10cb (compare to f2e9d2ac: handoffsOnly true): lint success, test success, typecheck skipped, pr-title success.",
+  "thermonuclear": "At f2e9d2ac (code a46b10cb): deep review APPROVE, no findings, full store/refs/docs/model/cmd suites and the targeted api tests ok on a fresh database; code quality APPROVE, no findings."
 }
