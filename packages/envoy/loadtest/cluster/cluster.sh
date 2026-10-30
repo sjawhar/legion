@@ -47,7 +47,9 @@
 #       INFRA-639's LINUX replay inputs (default manifest ../replay-2026-10-26.json) into the
 #       template database dispatch_replay. Refuses, before it touches the copy, a manifest whose
 #       seed is null (INFRA-639's seed is not uploaded yet) or whose seed check failed (check.passed
-#       not true, version_size_mismatches or anchors_outside_logged_block not 0). Then downloads
+#       not true, version_size_mismatches or anchors_outside_logged_block not 0), and an unset
+#       LOADTEST_REPLAY_ISSUE, which names the issue the parts are file artifacts of (the manifest
+#       names none), even with --from-dir. Then downloads
 #       (or copies from --from-dir) and verifies the parts with stack.sh replay-get's code
 #       (common.sh replay_get_bundle, replay_fetch_parts) under <run>/replay/; streams the dump into
 #       the Postgres pod and restores it (pg_restore --no-owner --no-privileges) into a fresh
@@ -200,8 +202,9 @@
 # directory ${LOADTEST_CLUSTER_ROOT:-$TMPDIR/dispatch-loadtest-cluster}/<run id>/ (state.json, mode
 # 600, holds the digests and the run's random credentials; cgroup.jsonl; steps/; logs/); --run ID
 # names the run instead. Needs kubectl, jq, curl, gh, go, setsid, timeout, tar, gzip, base64,
-# sha256sum, uv (collect), git (up), dispatch (collect --upload-issue), and DISPATCH_URL and
-# DISPATCH_TOKEN_FILE (replay-prepare's downloads, without --from-dir).
+# sha256sum, uv (collect), git (up), dispatch (collect --upload-issue), and LOADTEST_REPLAY_ISSUE
+# with DISPATCH_URL and DISPATCH_TOKEN_FILE (replay-prepare's downloads; the issue even with
+# --from-dir, since the manifest names none).
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -3369,6 +3372,9 @@ cmd_replay_prepare() {
   replay_manifest_valid "$manifest"
   why=$(replay_seed_refusal "$manifest")
   [ -z "$why" ] || die "replay-prepare: $why; refusing before it touches the copy"
+  # The manifest names no issue; the operator does, and the parts are read from it.
+  [ -n "${LOADTEST_REPLAY_ISSUE:-}" ] ||
+    die "replay-prepare: LOADTEST_REPLAY_ISSUE is not set: set it to the issue the replay's parts are file artifacts of (the manifest names none); refusing before it touches the copy"
   [ -z "$from_dir" ] || [ -d "$from_dir" ] || die "replay-prepare: --from-dir $from_dir is not a directory"
   use_run
   replay_prepare_run "$manifest" "$from_dir"
@@ -3475,6 +3481,10 @@ cmd_all() {
   valid duration "$ALL_KEEP_FOR" || die "all: --keep-for '$ALL_KEEP_FOR' is not a whole number of s, m or h (for example 2h)"
   [ -z "$issue" ] || valid issue "$issue" || die "--upload-issue '$issue' is not an issue key"
   replay_manifest_valid "$manifest"
+  # A seeded manifest runs the replay phases, whose parts are file artifacts of the operator's
+  # issue; a null-seed manifest skips them and needs none.
+  [ "$(jq '.seed == null' "$manifest")" = true ] || [ -n "${LOADTEST_REPLAY_ISSUE:-}" ] ||
+    die "all: LOADTEST_REPLAY_ISSUE is not set: set it to the issue the replay's parts are file artifacts of (the manifest names none)"
   RUN_TAKEN=""
   trap all_exit EXIT
   up_run

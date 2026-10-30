@@ -476,14 +476,14 @@ func commitOrderLockTable(md *markdown, steps []stepData) {
 	failedReadsNote(md, marked, "the probe's connect or read of pg_locks", "`commit_order_lock.errors`")
 }
 
-// liveTransport is the step's dashboard transport, ws for a step of a run from before the SSE
-// transport, whose summary.json has no live.transport: every one of those followed the live
-// socket.
+// liveTransport is the dashboard stream the step's streams ran on, from summary.json's
+// config.dashboard (probeDashboard). A step of a run from before that probe has no such field:
+// every one of those followed the live socket.
 func (s stepData) liveTransport() string {
-	if s.sum.Live.Transport == "" {
-		return liveTransportWS
+	if s.sum.Config.Dashboard == "" {
+		return dashboardLive
 	}
-	return s.sum.Live.Transport
+	return s.sum.Config.Dashboard
 }
 
 func liveTable(md *markdown, steps []stepData) {
@@ -493,7 +493,7 @@ func liveTable(md *markdown, steps []stepData) {
 		"live frame ms from write response p50 / p99", "live frames", "live order violations"}
 	// The transport is a column only where it is worth one: every step on the dashboard live
 	// socket is the table as it was.
-	named := slices.ContainsFunc(steps, func(s stepData) bool { return s.liveTransport() != liveTransportWS })
+	named := slices.ContainsFunc(steps, func(s stepData) bool { return s.liveTransport() != dashboardLive })
 	if named {
 		columns = append(columns, "transport")
 	}
@@ -510,8 +510,8 @@ func liveTable(md *markdown, steps []stepData) {
 		md.row(cells...)
 	}
 	if named {
-		md.line("\ntransport: how the step's dashboard streams followed the event feed. `%s`: the dashboard live socket, `GET /ws/live`. `%s`: the SSE endpoint `GET /api/v1/events`, which a Dispatch that serves no such socket is followed on instead. `%s`: the step opened no stream (`-live 0`). A step of a run from before the SSE transport, whose summary.json has no `live.transport`, reads `%s`.",
-			liveTransportWS, liveTransportSSE, liveTransportNone, liveTransportWS)
+		md.line("\ntransport: how the step's dashboard streams followed the event feed. `%s`: the dashboard live socket, `GET /ws/live`. `%s`: the SSE endpoint `GET /api/v1/events`, which a Dispatch that serves no such socket is followed on instead. A step of a run from before that probe, whose summary.json has no `config.dashboard`, reads `%s`.",
+			dashboardLive, dashboardSSE, dashboardLive)
 	}
 	commitsUnreadNote(md, unread, "the NATS delivery latencies from sent and the live frame latencies from write response (both take only committed writes' primary events)", "show")
 }

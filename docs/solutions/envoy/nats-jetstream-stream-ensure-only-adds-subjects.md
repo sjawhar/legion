@@ -100,7 +100,10 @@ undone 30 seconds later. The keeper only adds subjects: it removes and replaces 
 keeper that reconciled subjects as a start does would have two releases with different subject
 lists switch the stream back and forth every period. Its write still carries the rest of the list
 as it read it, so a start's write that lands between the keeper's read and its write loses its new
-subject again, and that release's own keeper adds it back a period later. A stream that still
+subject again, and that release's own keeper adds it back a period later. One case does not
+recover that way: when the write that lands puts back an overlapping subject the start had
+replaced, that release's keeper skips its own subject while the overlapping one is there
+(`keptSubjects`), so only that release's next start replaces it again. A stream that still
 carries a role-lane subject the keeper leaves to a start, which moves the role lanes off before it
 removes them: while such a stream needs anything, the keeper sends nothing and logs
 `envoy nats keeper could not restore the stream`, so a stale read never puts a role lane back.
@@ -137,13 +140,16 @@ listener then answered `500 {"error":"nats: no response from stream"}`.
   Start-up never does it for you. A writer built after the removal names the subject in its
   `keeps subjects this binary does not compile` line on every start until the edit, so that line
   is where to find what is left to retire.
-- **Two starts in the same instant can still drop a subject, for up to one keeper period.**
+- **Two starts in the same instant can still drop a subject, for up to one keeper period, or
+  until the next start when the dropped subject had replaced an overlapping one.**
   JetStream's stream update has no compare-and-swap: if two writers with different lists both read
   the stream before either writes, the second write omits the first writer's addition. It takes
   two process starts within one read-update round trip, and a keeper write that lands after a
   start's can do the same; the keeper of the writer that lost its subject adds it back within 30
   seconds (`TestEachReleasesKeeperAddsBackItsOwnSubjectAConcurrentWriteTookAway`), as does that
-  writer's next start.
+  writer's next start. A subject that start had put in place of an overlapping one is the
+  exception: the keeper skips it while the subject it replaced is back (`keptSubjects`), so only
+  that writer's next start puts it back.
 - The outbox's `published_at` gate is why a missing subject stalls Dispatch events rather than
   losing them: `scanBatch` sets `published_at` only after a successful publish to the issue-topic
   subject (`packages/envoy/internal/dispatch/outbox/publisher.go`), and a failed publish schedules

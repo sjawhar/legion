@@ -5,11 +5,22 @@
 # die MESSAGE prints MESSAGE, prefixed with the script's name, and exits 1. note MESSAGE prints
 # MESSAGE with the same prefix and goes on. usage prints the script's header comment, from its
 # second line to its `set -euo` line, and exits 2. abs_file FLAG FILE prints FILE's absolute path
-# and dies, naming FLAG, when FILE is not a file.
+# and dies, naming FLAG, when FILE is not a file. sha256_of FILE prints FILE's sha256, and
+# joined_sha256 FILE... the sha256 of the files' concatenation (stack.sh's builds, replay.sh's
+# parts).
 #
 # resolve_paths sets SRC to LOADTEST_SRC (default: the checkout holding this file) and ROOT to
 # LOADTEST_ROOT (default ${TMPDIR:-/tmp}/dispatch-loadtest, created), both as physical paths, and
 # exports them as LOADTEST_SRC and LOADTEST_ROOT.
+#
+# stack_ports ROOT: the stack's ports for ROOT, "KEY PORT" a line. The defaults follow the root's
+# physical path (port_block, default_port): a root always gets the same block of 7 ports, and two
+# roots get two blocks out of 200, so they share every port about 1 pair of roots in 200 (the block
+# is a hash modulo 200, not a per-root reservation). Each LOADTEST_*_PORT (PORT_VAR) overrides its
+# own port. So two Legion roles of one pod, each with its own LOADTEST_ROOT, almost always run a
+# stack each with no port variable set; when their blocks do collide, check_port refuses the second
+# stack and the roles set the LOADTEST_*_PORT variables (or pick another root). stack.sh setup
+# records the ports in ROOT/stack.json, and `stack.sh status` prints them.
 #
 # lock_root ROOT: one run at a time per root (README.md, "One run at a time"). It takes an
 # exclusive, non-blocking flock on ROOT/.run.lock and keeps it on file descriptor 9. The lock lasts
@@ -41,7 +52,9 @@
 # a series; run-series.sh calls it once, before its first step.
 #
 # The replay's inputs (README.md, The replay): stack.sh replay-get and cluster.sh replay-prepare
-# both download and verify INFRA-639's parts with replay_fetch_parts and replay_get_bundle below.
+# both download and verify the manifest's parts with replay_fetch_parts and replay_get_bundle
+# below. The manifest names no issue; LOADTEST_REPLAY_ISSUE names the one the parts are file
+# artifacts of, and nothing is read or downloaded without it.
 
 die() {
   printf '%s: %s\n' "${0##*/}" "$*" >&2
@@ -56,6 +69,12 @@ abs_file() {
   printf '%s/%s\n' "$(cd -- "$(dirname -- "$2")" && pwd -P)" "$(basename -- "$2")"
 }
 
+# sha256_of FILE: FILE's sha256, the hex alone.
+sha256_of() { sha256sum -- "$1" | cut -d' ' -f1; }
+
+# joined_sha256 FILE...: the sha256 of the files' concatenation.
+joined_sha256() { cat -- "$@" | sha256sum | cut -d' ' -f1; }
+
 usage() {
   sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//' >&2
   exit 2
@@ -67,6 +86,57 @@ resolve_paths() {
   mkdir -p -- "$ROOT"
   ROOT=$(cd -- "$ROOT" && pwd -P)
   export LOADTEST_SRC=$SRC LOADTEST_ROOT=$ROOT
+}
+
+# ---- the stack's ports ---------------------------------------------------------------------------
+
+# The stack's default ports follow LOADTEST_ROOT, so two roots on one machine (two Legion roles of
+# one pod, each with its own root and its own PID namespace) almost always run side by side with no
+# port variable set: each root hashes to one of PORT_BLOCKS blocks, so two roots land in one block
+# about 1 pair in 200, and then every port of the two stacks is the same one (check_port refuses
+# the second stack; the remedy is the LOADTEST_*_PORT variables). PORT_KEYS names stack.json's
+# ports, PORT_VAR each one's environment variable and PORT_OFFSET its place in a root's block of
+# ports.
+PORT_KEYS=(postgres proxy nats nats_monitor listener dispatch pprof)
+declare -A PORT_VAR=(
+  [postgres]=LOADTEST_PG_PORT [proxy]=LOADTEST_PROXY_PORT [nats]=LOADTEST_NATS_PORT
+  [nats_monitor]=LOADTEST_NATS_MONITOR_PORT [listener]=LOADTEST_LISTENER_PORT
+  [dispatch]=LOADTEST_DISPATCH_PORT [pprof]=LOADTEST_PPROF_PORT
+)
+declare -A PORT_OFFSET=(
+  [postgres]=0 [proxy]=1 [nats]=2 [nats_monitor]=3 [listener]=4 [dispatch]=5 [pprof]=6
+)
+PORT_BASE=15000
+PORT_STRIDE=10
+PORT_BLOCKS=200
+
+# port_block ROOT: ROOT's block of ports, an index k in [0, PORT_BLOCKS): the first 8 hex digits of
+# the sha256 of ROOT's physical path, modulo PORT_BLOCKS. The same root always gets the same block.
+port_block() {
+  local hex
+  hex=$(printf '%s' "$1" | sha256sum | cut -c1-8)
+  printf '%s\n' "$((16#$hex % PORT_BLOCKS))"
+}
+
+# default_port KEY BLOCK: the default port of KEY in block BLOCK:
+#
+#   PORT_BASE + BLOCK * PORT_STRIDE + PORT_OFFSET[KEY] = 15000 + 10k + 0..6
+#
+# The 7 offsets differ and all are below the stride, so no two ports of a block and no two ports of
+# two different blocks ever meet (two roots in one block hold the same 7 ports);
+# every port is between 15000 and 16996, inside 1024-65535 and below the ephemeral range.
+default_port() { printf '%s\n' "$((PORT_BASE + $2 * PORT_STRIDE + PORT_OFFSET[$1]))"; }
+
+# stack_ports ROOT: ROOT's ports, "KEY PORT" a line in PORT_KEYS' order: the block's default port,
+# or the value of the key's PORT_VAR when this environment sets it. stack.sh setup records them in
+# ROOT/stack.json, which `stack.sh status` prints.
+stack_ports() {
+  local block key var
+  block=$(port_block "$1")
+  for key in "${PORT_KEYS[@]}"; do
+    var=${PORT_VAR[$key]}
+    printf '%s %s\n' "$key" "${!var:-$(default_port "$key" "$block")}"
+  done
 }
 
 # lock_field NAME RECORD: the value of NAME= in a lock record.
@@ -321,6 +391,7 @@ replay_fetch_part() {
 # replay_fetch_parts MANIFEST WHICH PARTS_DIR FROM_DIR: every part of the manifest's WHICH (bundle
 # or seed) at PARTS_DIR/<file> (replay_fetch_part), then the joined parts' sha256 against WHICH's
 # tar_zst_sha256 (bundle) or dump_sha256 (seed). The parts' paths, in order, go into REPLAY_PARTS.
+# The parts are file artifacts of the issue LOADTEST_REPLAY_ISSUE names, which is required.
 replay_fetch_parts() {
   local manifest=$1 which=$2 parts_dir=$3 from_dir=$4 key issue entry want got
   case $which in
@@ -328,7 +399,11 @@ replay_fetch_parts() {
     seed) key=dump_sha256 ;;
     *) die "replay_fetch_parts: no part list $which" ;;
   esac
-  issue=$(jq -er .issue "$manifest")
+  # The manifest names no issue: the operator names it, and nothing is read or downloaded without
+  # it (stack.sh replay-get, cluster.sh replay-prepare).
+  [ -n "${LOADTEST_REPLAY_ISSUE:-}" ] ||
+    die "LOADTEST_REPLAY_ISSUE is not set: set it to the issue the replay's parts are file artifacts of (the manifest names none)"
+  issue=$LOADTEST_REPLAY_ISSUE
   mkdir -p -- "$parts_dir"
   REPLAY_PARTS=()
   while IFS= read -r entry; do

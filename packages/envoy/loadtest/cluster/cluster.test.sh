@@ -716,6 +716,8 @@ unset FAKE_EXEC_FAIL FAKE_SAMPLE FAKE_PROD_MAJOR FAKE_LOADGEN_FAIL FAKE_APPLY_FA
   FAKE_EXEC_ERRORS FAKE_FAST_SLEEP FAKE_TYPING_RC FAKE_DISPATCH_BUILD_ERROR FAKE_COPY_BACK_FAIL \
   FAKE_PG_DF_SEQ FAKE_RC_UNTIL_STOP FAKE_HEAP_COPY_FAIL FAKE_HEAP_EXISTS_FAIL FAKE_HEAP_KEEP_REMOVE_FAIL
 export DISPATCH_URL=http://dispatch.invalid DISPATCH_TOKEN_FILE=$fake/token
+# The manifest names no issue: the operator does, and replay-prepare refuses without it.
+export LOADTEST_REPLAY_ISSUE=INFRA-639
 echo fake-token >"$fake/token"
 # The seed's counts query, as common.sh holds it: the fake kubectl answers every count only for
 # exactly this query, so a cluster.sh seed that asks for less is seen.
@@ -780,7 +782,7 @@ done
 # part_entry FILE SLUG: a manifest part entry for FAKE_DIR/parts/SLUG.
 part_entry() {
   jq -n --arg f "$1" --arg s "$2" --arg sha "$(sha256sum <"$fake/parts/$2" | cut -d' ' -f1)" --argjson b "$(stat -c %s "$fake/parts/$2")" \
-    '{file: $f, slug: $s, ref: "dispatch://INFRA-639/artifact/\($s)", version: 1, bytes: $b, sha256: $sha}'
+    '{file: $f, slug: $s, version: 1, bytes: $b, sha256: $sha}'
 }
 
 # write_manifest OUT [CHECK]: a schema 1 replay manifest of the fixture's parts whose seed (at
@@ -792,7 +794,7 @@ write_manifest() {
     --argjson s0 "$(part_entry fake-seed.dump.part00 fake-seed-dump-part00)" \
     --arg tar "$(cat "$fake/parts/fake-replay-tar-zst-part00" "$fake/parts/fake-replay-tar-zst-part01" | sha256sum | cut -d' ' -f1)" \
     --arg dump "$(sha256sum <"$fake/parts/fake-seed-dump-part00" | cut -d' ' -f1)" --argjson check "$check" \
-    '{schema: 1, project: "FAKE", window: {from: "2026-10-26T22:55:00Z", to: "2026-10-26T23:34:00Z"}, issue: "INFRA-639",
+    '{schema: 1, project: "FAKE", window: {from: "2026-10-26T22:55:00Z", to: "2026-10-26T23:34:00Z"},
       bundle: {tar_zst_sha256: $tar, parts: [$b0, $b1]},
       seed: {dump_sha256: $dump, migration: 121, check: $check, parts: [$s0]}}' >"$1"
 }
@@ -985,6 +987,19 @@ for c in "null|seed is null): INFRA-639's seed is not uploaded yet" "unpassed|th
   [ ! -s "$fake/curl.log" ] || ! grep -q /api/v1/ "$fake/curl.log" || fail "replay-prepare downloaded a part before refusing replay-${c%%|*}.json"
 done
 pass "replay-prepare refuses a null seed and a seed check that failed any of its three conditions, before any kubectl call"
+
+# The manifest names no issue, so the operator's LOADTEST_REPLAY_ISSUE must: without it
+# replay-prepare refuses before any kubectl call, as stack.sh replay-get does.
+reset_fake
+(
+  unset LOADTEST_REPLAY_ISSUE
+  run_cluster replay-prepare --namespace "$ns" --manifest "$seeded"
+  ((RC != 0)) || fail "replay-prepare accepted an unset LOADTEST_REPLAY_ISSUE"
+  grep -qF 'LOADTEST_REPLAY_ISSUE is not set' "$tmp/out" ||
+    fail "replay-prepare's refusal does not name LOADTEST_REPLAY_ISSUE: $(cat "$tmp/out")"
+  [ ! -s "$fake/kubectl.log" ] || fail "replay-prepare called kubectl before refusing an unset LOADTEST_REPLAY_ISSUE: $(cat "$fake/kubectl.log")"
+) || exit 1
+pass "replay-prepare refuses an unset LOADTEST_REPLAY_ISSUE, which the manifest does not name, before any kubectl call"
 
 # write_lock RUN HEARTBEAT [UID]: another run's lock ConfigMap.
 write_lock() {

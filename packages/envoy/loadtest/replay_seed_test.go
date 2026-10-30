@@ -31,7 +31,8 @@ func TestWriteCanceledByAnotherWrite(t *testing.T) {
 		return &seedError{step: "history-edit", logged: "d1@7", status: http.StatusRequestEntityTooLarge, code: "REQUEST_TOO_LARGE"}
 	})
 	_ = g.Wait()
-	_, err := s.write(gctx, "comment-anchored", "PRJ-1", 0, "", "comment-anchored", "c1", "POST", "/api/v1/issues/PRJ-1/comments", who{}, jsonBody(map[string]any{"body": "x"}))
+	_, err := s.write(gctx, seedWrite{kind: "comment-anchored", issue: "PRJ-1", step: "comment-anchored", logged: "c1",
+		method: "POST", path: "/api/v1/issues/PRJ-1/comments", body: jsonBody(map[string]any{"body": "x"})})
 	var se *seedError
 	if err == nil || errors.As(err, &se) || !errors.Is(err, context.Canceled) {
 		t.Fatalf("a write the group canceled returns %v, want context.Canceled and no refusal", err)
@@ -86,7 +87,7 @@ func TestFileBytesDeterministic(t *testing.T) {
 	}
 }
 
-func TestIDOfAndDispatchCode(t *testing.T) {
+func TestIDOfAndErrorCode(t *testing.T) {
 	for body, want := range map[string]string{
 		`{"id":"c1","body":"x"}`:                 "c1",
 		`{"artifact":{"id":"d1"},"version":1}`:   "d1",
@@ -97,8 +98,8 @@ func TestIDOfAndDispatchCode(t *testing.T) {
 			t.Errorf("idOf(%s) = %q, want %q", body, got, want)
 		}
 	}
-	if dispatchCode([]byte(`{"code":"ANCHOR_MISSING","error":"synthetic"}`)) != "ANCHOR_MISSING" || dispatchCode([]byte("not json")) != "" {
-		t.Fatal("dispatchCode")
+	if errorCode([]byte(`{"code":"ANCHOR_MISSING","error":"synthetic"}`)) != "ANCHOR_MISSING" || errorCode([]byte("not json")) != "" {
+		t.Fatal("errorCode")
 	}
 }
 

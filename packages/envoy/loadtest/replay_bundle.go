@@ -321,6 +321,50 @@ type replayCounts struct {
 	AnchorRules map[string]int `json:"anchor_rules"`
 }
 
+// The event types this package compares, as Dispatch's event log names them (replayEvent.Type).
+// A literal spelt wrong here fails quietly: the planner falls to unhandled: and the fetch code
+// skips the event, so every comparison in the package names one of these.
+const (
+	evIssueCreated  = "issue.created"
+	evIssueUpdated  = "issue.updated"
+	evIssueClosed   = "issue.closed"
+	evIssueClaimed  = "issue.claimed"
+	evIssueReleased = "issue.released"
+
+	evCommentCreated         = "comment.created"
+	evCommentEdited          = "comment.edited"
+	evCommentResolved        = "comment.resolved"
+	evCommentReopened        = "comment.reopened"
+	evCommentAnchorRefreshed = "comment.anchor_refreshed"
+
+	evArtifactCreated = "artifact.created"
+	evArtifactVersion = "artifact.version"
+
+	evAskOpened   = "ask.opened"
+	evAskAnswered = "ask.answered"
+	evAskResolved = "ask.resolved"
+
+	evMessageCreated  = "message.created"
+	evMessageDelivery = "message.delivery"
+	evMessageAccepted = "message.accepted"
+
+	evChildStatus = "child.status"
+
+	// The prefixes a few sites take a whole family by.
+	evPrefixIssue     = "issue."
+	evPrefixAsk       = "ask."
+	evPrefixUserState = "user_state."
+)
+
+// decodePayload decodes one event's payload, naming the event and its type in the error.
+func decodePayload[T any](ev replayEvent) (T, error) {
+	var v T
+	if err := json.Unmarshal(ev.Payload, &v); err != nil {
+		return v, fmt.Errorf("event %d (%s): %w", ev.ID, ev.Type, err)
+	}
+	return v, nil
+}
+
 // replayEvent is one window.jsonl line. Payload is left raw for the consumer to decode per Type;
 // Raw is the whole line as served.
 type replayEvent struct {

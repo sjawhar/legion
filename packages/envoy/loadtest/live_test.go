@@ -3,13 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -196,90 +194,6 @@ func TestLiveSocketURL(t *testing.T) {
 	}
 	if _, err := liveSocketURL("ftp://x"); err == nil || !strings.Contains(err.Error(), "neither") {
 		t.Errorf("ftp:// gave %v, want a refusal", err)
-	}
-}
-
-// TestDecideLiveTransport probes the three Dispatch commits a step can meet: one that serves the
-// dashboard live socket, one from before it that serves the SSE endpoint in its place, and one
-// that serves neither, which refuses the step naming both endpoints. A step with -live 0 opens no
-// stream, so it probes neither.
-func TestDecideLiveTransport(t *testing.T) {
-	var asked atomic.Int64
-	sse := func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", sseMediaType+"; charset=utf-8")
-		if _, err := io.WriteString(w, ": open\n\n"); err != nil {
-			return
-		}
-		_ = http.NewResponseController(w).Flush()
-		<-r.Context().Done()
-	}
-	server := func(live bool) *httptest.Server {
-		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			asked.Add(1)
-			switch {
-			case live && r.URL.Path == "/ws/live":
-				conn, err := (&websocket.Upgrader{EnableCompression: true}).Upgrade(w, r, nil)
-				if err != nil {
-					return
-				}
-				defer conn.Close()
-				for {
-					if _, _, err := conn.ReadMessage(); err != nil {
-						return
-					}
-				}
-			case !live && r.URL.Path == sseEventsPath:
-				sse(w, r)
-			default:
-				http.NotFound(w, r)
-			}
-		}))
-	}
-	decide := func(t *testing.T, srv *httptest.Server, live int) (string, error) {
-		t.Helper()
-		url, err := liveSocketURL(srv.URL)
-		if err != nil {
-			t.Fatal(err)
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return decideLiveTransport(ctx, live, srv.URL, url)
-	}
-
-	withSocket := server(true)
-	defer withSocket.Close()
-	if got, err := decide(t, withSocket, 2); got != liveTransportWS || err != nil {
-		t.Errorf("a Dispatch with the live socket gave %q, %v; want %q", got, err, liveTransportWS)
-	}
-
-	withSSE := server(false)
-	defer withSSE.Close()
-	if got, err := decide(t, withSSE, 2); got != liveTransportSSE || err != nil {
-		t.Errorf("a Dispatch with the SSE endpoint alone gave %q, %v; want %q", got, err, liveTransportSSE)
-	}
-
-	withNeither := httptest.NewServer(http.NotFoundHandler())
-	defer withNeither.Close()
-	got, err := decide(t, withNeither, 2)
-	if got != "" || err == nil {
-		t.Fatalf("a Dispatch with neither endpoint gave %q, %v; want a refusal", got, err)
-	}
-	liveURL, _ := liveSocketURL(withNeither.URL)
-	for _, want := range []string{liveURL, sseEventsURL(withNeither.URL), "404 Not Found"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("the refusal %q does not name %q", err, want)
-		}
-	}
-	if strings.Count(err.Error(), "404 Not Found") != 2 {
-		t.Errorf("the refusal %q does not give what both endpoints answered", err)
-	}
-
-	asked.Store(0)
-	if got, err := decide(t, withNeither, 0); got != liveTransportNone || err != nil {
-		t.Errorf("-live 0 gave %q, %v; want %q", got, err, liveTransportNone)
-	}
-	if n := asked.Load(); n != 0 {
-		t.Errorf("-live 0 asked Dispatch %d times, want none: it opens no dashboard stream", n)
 	}
 }
 

@@ -6,20 +6,15 @@ package main
 // stopped. It logs keys, ids, statuses, Dispatch's error codes, sizes and counts, never a text.
 
 import (
-	"bytes"
 	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"hash/fnv"
 	"log"
 	"maps"
-	"math/rand/v2"
-	"mime/multipart"
 	"net/http"
-	"net/textproto"
 	"net/url"
 	"os"
 	"slices"
@@ -200,8 +195,10 @@ func (s *replaySeeder) run(ctx context.Context, plans []seedIssuePlan) error {
 	defer close(stop)
 
 	// Step 0: the project.
-	if _, err := s.write(ctx, "project-create", "", 0, "", "project", s.b.State.Project, "POST", "/api/v1/projects", who{},
-		jsonBody(map[string]any{"key": s.b.State.Project, "name": s.b.State.Project, "actor": sessionActor(replaySeedActorID)}), http.StatusConflict); err != nil {
+	if _, err := s.write(ctx, seedWrite{kind: "project-create", step: "project", logged: s.b.State.Project,
+		method: "POST", path: "/api/v1/projects",
+		body: jsonBody(map[string]any{"key": s.b.State.Project, "name": s.b.State.Project, "actor": sessionActor(replaySeedActorID)}),
+		ok:   []int{http.StatusConflict}}); err != nil {
 		return err
 	}
 	// Step 1: every issue number in order, one at a time.
@@ -291,7 +288,7 @@ func jsonBody(v any) rawBody {
 // session named in the body, a user through the identity header.
 func actorOf(a *replayActor) (who, map[string]any, error) {
 	if a == nil {
-		return who{}, map[string]any{"kind": "session", "id": replaySeedActorID}, nil
+		return who{}, sessionActor(replaySeedActorID), nil
 	}
 	switch a.Kind {
 	case "session":
@@ -311,38 +308,55 @@ func withActor(body map[string]any, actor map[string]any) map[string]any {
 	return body
 }
 
+// seedWrite is one write the seed sends: kind names it in the counts and the ops log, step and
+// logged name it in a log line or a refusal (a kind may cover several steps), and ok lists the
+// statuses other than 2xx the caller accepts.
+type seedWrite struct {
+	kind     string
+	issue    string
+	docBytes int
+	docID    string
+	step     string
+	logged   string
+	method   string
+	path     string
+	w        who
+	body     rawBody
+	ok       []int
+}
+
 // write sends one write, retrying a transport error, 429 or 5xx with backoff, and records it in the
 // counts and the ops log. A 2xx or a status in ok returns the body; any other status is a
 // *seedError. A write the seed's context ended returns that context's error alone: its cause is
 // the error another issue's write failed with (errgroup), and wrapped here it would read as this
 // write's own refusal (anchored would take another write's 413 for its quote's).
-func (s *replaySeeder) write(ctx context.Context, kind, issue string, docBytes int, docID, step, logged, method, path string, w who, body rawBody, ok ...int) ([]byte, error) {
+func (s *replaySeeder) write(ctx context.Context, sw seedWrite) ([]byte, error) {
 	backoff := 250 * time.Millisecond
 	for attempt := 0; ; attempt++ {
 		before := s.ticks()
-		res := s.api.callRaw(ctx, method, path, w, body.contentType, body.payload)
+		res := s.api.callRaw(ctx, sw.method, sw.path, sw.w, sw.body.contentType, sw.body.payload)
 		after := s.ticks()
 		if res.transient() && attempt < 10 && ctx.Err() == nil {
-			s.lg.Printf("%s %s: transient status %d (%v); retrying in %s", step, logged, res.status, errClass(res.err), backoff)
+			s.lg.Printf("%s %s: transient status %d (%v); retrying in %s", sw.step, sw.logged, res.status, errClass(res.err), backoff)
 			time.Sleep(backoff)
 			backoff = min(2*backoff, 8*time.Second)
 			continue
 		}
 		if res.err != nil {
 			if ctx.Err() != nil {
-				return nil, fmt.Errorf("%s %s: %w", step, logged, ctx.Err())
+				return nil, fmt.Errorf("%s %s: %w", sw.step, sw.logged, ctx.Err())
 			}
-			return nil, fmt.Errorf("%s %s: %w", step, logged, res.err)
+			return nil, fmt.Errorf("%s %s: %w", sw.step, sw.logged, res.err)
 		}
 		accepted := res.ok()
-		for _, st := range ok {
+		for _, st := range sw.ok {
 			accepted = accepted || res.status == st
 		}
 		if !accepted {
-			return nil, &seedError{step: step, logged: logged, status: res.status, code: dispatchCode(res.body)}
+			return nil, &seedError{step: sw.step, logged: sw.logged, status: res.status, code: errorCode(res.body)}
 		}
 		if res.ok() {
-			s.record(kind, issue, docBytes, docID, time.Duration(res.end-res.start), before, after)
+			s.record(sw.kind, sw.issue, sw.docBytes, sw.docID, time.Duration(res.end-res.start), before, after)
 		}
 		return res.body, nil
 	}
@@ -357,15 +371,6 @@ func errClass(err error) string {
 		return "timeout"
 	}
 	return fmt.Sprintf("%T", errors.Unwrap(err))
-}
-
-// dispatchCode is the `code` of a Dispatch error body.
-func dispatchCode(body []byte) string {
-	var e struct {
-		Code string `json:"code"`
-	}
-	_ = json.Unmarshal(body, &e)
-	return e.Code
 }
 
 func (s *replaySeeder) record(kind, issue string, docBytes int, docID string, latency time.Duration, before, after int64) {
@@ -442,7 +447,8 @@ func (s *replaySeeder) createIssue(ctx context.Context, p seedIssuePlan) error {
 	if err != nil {
 		return err
 	}
-	res, err := s.write(ctx, "issue-create", p.Key, docBytes, "", "issue-create", p.Key, "POST", "/api/v1/issues", w, jsonBody(body))
+	res, err := s.write(ctx, seedWrite{kind: "issue-create", issue: p.Key, docBytes: docBytes, step: "issue-create", logged: p.Key,
+		method: "POST", path: "/api/v1/issues", w: w, body: jsonBody(body)})
 	if err != nil {
 		return err
 	}
@@ -695,8 +701,8 @@ func (s *replaySeeder) ensureDoc(ctx context.Context, key string, d *issueDoc) e
 	}
 	if local == "" {
 		text := firstVersionText(d.is, d.a, d.text, d.plan)
-		res, err := s.write(ctx, "doc-create", key, len(text), "", "doc-create", d.a.ID, "POST", "/api/v1/issues/"+key+"/artifacts", who{},
-			jsonBody(docCreateBody(d.a.Name, text)))
+		res, err := s.write(ctx, seedWrite{kind: "doc-create", issue: key, docBytes: len(text), step: "doc-create", logged: d.a.ID,
+			method: "POST", path: "/api/v1/issues/" + key + "/artifacts", body: jsonBody(docCreateBody(d.a.Name, text))})
 		if err != nil {
 			return err
 		}
@@ -737,22 +743,6 @@ func (s *replaySeeder) adoptUnmapped(ctx context.Context, kind, query string, ar
 	return "", nil
 }
 
-// fileBytes are a file's stand-in bytes: size bytes from a PCG keyed by the rng seed and the
-// file's logged id.
-func fileBytes(rngSeed uint64, id string, size int) []byte {
-	h := fnv.New64a()
-	h.Write([]byte(id))
-	r := rand.New(rand.NewPCG(rngSeed, h.Sum64()))
-	out := make([]byte, size)
-	for i := 0; i < size; i += 8 {
-		v := r.Uint64()
-		for j := 0; j < 8 && i+j < size; j++ {
-			out[i+j] = byte(v >> (8 * j))
-		}
-	}
-	return out
-}
-
 func (s *replaySeeder) ensureFile(ctx context.Context, key string, a *replayArtifact) error {
 	if _, ok := s.ids.get(idArtifact, a.ID); ok {
 		return nil
@@ -769,26 +759,15 @@ func (s *replaySeeder) ensureFile(ctx context.Context, key string, a *replayArti
 		if a.MIME != nil && *a.MIME != "" {
 			mimeType = *a.MIME
 		}
-		var buf bytes.Buffer
-		mw := multipart.NewWriter(&buf)
-		_ = mw.WriteField("name", a.Name)
-		actor, _ := json.Marshal(sessionActor(replaySeedActorID))
-		_ = mw.WriteField("actor", string(actor))
-		h := textproto.MIMEHeader{}
-		h.Set("Content-Disposition", multipart.FileContentDisposition("file", a.Name))
-		h.Set("Content-Type", mimeType)
-		part, err := mw.CreatePart(h)
+		// The upload form is built in one place (multipartFile): the boundary is the replay's,
+		// derived from the rng seed and the logged id, and the parts are the same bytes.
+		ct, body, err := multipartFile(s.rngSeed, &replayFile{Name: a.Name, MIME: mimeType, Seed: a.ID, Size: *a.Size,
+			Actor: sessionActor(replaySeedActorID)})
 		if err != nil {
 			return err
 		}
-		if _, err := part.Write(fileBytes(s.rngSeed, a.ID, *a.Size)); err != nil {
-			return err
-		}
-		if err := mw.Close(); err != nil {
-			return err
-		}
-		res, err := s.write(ctx, "file-create", key, 0, "", "file-create", a.ID, "POST", "/api/v1/issues/"+key+"/artifacts", who{},
-			rawBody{mw.FormDataContentType(), buf.Bytes()})
+		res, err := s.write(ctx, seedWrite{kind: "file-create", issue: key, step: "file-create", logged: a.ID,
+			method: "POST", path: "/api/v1/issues/" + key + "/artifacts", body: rawBody{ct, body}})
 		if err != nil {
 			return err
 		}
@@ -818,8 +797,8 @@ func (s *replaySeeder) history(ctx context.Context, key string, docs map[string]
 	}
 	// edit writes version n over version n-1, which is size bytes.
 	edit := func(n, size int, ops []any) error {
-		if _, err := s.write(ctx, "history-edit", key, size, d.local, "history-edit", fmt.Sprintf("%s@%d", d.a.ID, n), "POST", "/api/v1/artifacts/"+d.local+"/edits", who{},
-			jsonBody(historyEditBody(ops))); err != nil {
+		if _, err := s.write(ctx, seedWrite{kind: "history-edit", issue: key, docBytes: size, docID: d.local, step: "history-edit", logged: fmt.Sprintf("%s@%d", d.a.ID, n),
+			method: "POST", path: "/api/v1/artifacts/" + d.local + "/edits", body: jsonBody(historyEditBody(ops))}); err != nil {
 			return err
 		}
 		if got, err := s.maxVersion(ctx, d.local); err != nil {
@@ -964,7 +943,7 @@ func (s *replaySeeder) restoreOps(ctx context.Context, d *issueDoc, markdown, pa
 	p := d.plan
 	res := s.api.call(ctx, "GET", "/api/v1/artifacts/"+d.local+"/blocks", who{}, nil)
 	if !res.ok() {
-		return nil, &seedError{step: "blocks-read", logged: d.a.ID, status: res.status, code: dispatchCode(res.body)}
+		return nil, &seedError{step: "blocks-read", logged: d.a.ID, status: res.status, code: errorCode(res.body)}
 	}
 	var blocks []struct {
 		ID   string `json:"id"`
@@ -1185,7 +1164,8 @@ func (s *replaySeeder) comment(ctx context.Context, key string, docs map[string]
 		docBytes, docID = len(d.text), d.local
 	}
 	if st.Kind != commentAnchored {
-		res, err := s.write(ctx, string(st.Kind), key, docBytes, docID, string(st.Kind), c.ID, "POST", "/api/v1/issues/"+key+"/comments", w, jsonBody(body))
+		res, err := s.write(ctx, seedWrite{kind: string(st.Kind), issue: key, docBytes: docBytes, docID: docID, step: string(st.Kind), logged: c.ID,
+			method: "POST", path: "/api/v1/issues/" + key + "/comments", w: w, body: jsonBody(body)})
 		if err != nil {
 			return err
 		}
@@ -1278,7 +1258,8 @@ func (s *replaySeeder) anchored(ctx context.Context, kind, key string, d *issueD
 		}
 		for _, quote := range choice.Candidates {
 			body["anchor"] = anchorField(d.local, quote, choice)
-			res, err := s.write(ctx, kind, key, len(d.text), d.local, kind, logged, "POST", path, w, jsonBody(body))
+			res, err := s.write(ctx, seedWrite{kind: kind, issue: key, docBytes: len(d.text), docID: d.local, step: kind, logged: logged,
+				method: "POST", path: path, w: w, body: jsonBody(body)})
 			if err == nil {
 				local := idOf(res)
 				if local == "" {
@@ -1338,7 +1319,8 @@ func (s *replaySeeder) resolve(ctx context.Context, key string, docs map[string]
 		if c.Anchor != nil && docs[c.Anchor.ArtifactID] != nil {
 			docID = docs[c.Anchor.ArtifactID].local
 		}
-		if _, err := s.write(ctx, "resolve", key, 0, docID, "resolve", c.ID, "POST", "/api/v1/comments/"+local+"/resolve", w, body); err != nil {
+		if _, err := s.write(ctx, seedWrite{kind: "resolve", issue: key, docID: docID, step: "resolve", logged: c.ID,
+			method: "POST", path: "/api/v1/comments/" + local + "/resolve", w: w, body: body}); err != nil {
 			return err
 		}
 		if c.Anchor != nil && docID != "" {
@@ -1346,399 +1328,4 @@ func (s *replaySeeder) resolve(ctx context.Context, key string, docs map[string]
 		}
 	}
 	return s.ids.put(ctx, idResolve, c.ID, local)
-}
-
-// --- step 4: asks --------------------------------------------------------------------------------
-
-func (s *replaySeeder) ask(ctx context.Context, key string, docs map[string]*issueDoc, a *replayAsk, thread []commentStep, orphans *[]localComment) error {
-	local, err := s.ensureAsk(ctx, key, docs, a)
-	if err != nil {
-		return err
-	}
-	before, after := splitAtAnswer(thread, a.Answer)
-	for _, st := range before {
-		if err := s.comment(ctx, key, docs, st, orphans); err != nil {
-			return err
-		}
-	}
-	if a.State == "answered" {
-		if err := s.answer(ctx, key, docs, a, local); err != nil {
-			return err
-		}
-	}
-	for _, st := range after {
-		if err := s.comment(ctx, key, docs, st, orphans); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *replaySeeder) ensureAsk(ctx context.Context, key string, docs map[string]*issueDoc, a *replayAsk) (string, error) {
-	if local, ok := s.ids.get(idAsk, a.ID); ok {
-		return local, nil
-	}
-	adopt := func(query string, args ...any) (string, error) { return s.adoptUnmapped(ctx, idAsk, query, args...) }
-	switch {
-	case a.BlockID != nil:
-		// A typed ask block lives in its document's text, which the history wrote; settlement
-		// indexed it.
-		local, err := adopt(`select id::text from asks where issue_key = $1 and block_id = $2 order by created_at, id`, key, *a.BlockID)
-		if err != nil {
-			return "", err
-		}
-		if local == "" {
-			return "", fmt.Errorf("ask %s: no ask was indexed from its typed block %s", a.ID, *a.BlockID)
-		}
-		return local, s.ids.put(ctx, idAsk, a.ID, local)
-	case a.Approval != nil:
-		d := docs[a.Approval.ArtifactID]
-		if d == nil {
-			return "", fmt.Errorf("ask %s asks to approve %s, which is not one of the issue's seeded documents", a.ID, a.Approval.ArtifactID)
-		}
-		local, err := adopt(`select id::text from asks where issue_key = $1 and kind = 'approval' and approval->>'artifact_id' = $2 order by created_at, id`, key, d.local)
-		if err != nil {
-			return "", err
-		}
-		if local == "" {
-			w, body, err := approvalBody(a)
-			if err != nil {
-				return "", err
-			}
-			res, err := s.write(ctx, "ask", key, len(d.text), d.local, "approval-request", a.ID, "POST", "/api/v1/artifacts/"+d.local+"/approval-requests", w, jsonBody(body))
-			if err != nil {
-				return "", err
-			}
-			if local = idOf(res); local == "" {
-				return "", fmt.Errorf("approval-request %s: no ask in the response", a.ID)
-			}
-		}
-		return local, s.ids.put(ctx, idAsk, a.ID, local)
-	}
-	local, err := adopt(`select id::text from asks where issue_key = $1 and kind = 'question' and block_id is null and question = $2 order by created_at, id`, key, a.Question)
-	if err != nil {
-		return "", err
-	}
-	if local != "" {
-		return local, s.ids.put(ctx, idAsk, a.ID, local)
-	}
-	w, body, err := questionBody(a)
-	if err != nil {
-		return "", err
-	}
-	path := "/api/v1/issues/" + key + "/asks"
-	if a.Anchor == nil {
-		res, err := s.write(ctx, "ask", key, 0, "", "ask-create", a.ID, "POST", path, w, jsonBody(body))
-		if err != nil {
-			return "", err
-		}
-		return idOf(res), s.mapCreated(ctx, idAsk, a.ID, res)
-	}
-	d := docs[a.Anchor.ArtifactID]
-	if d == nil {
-		return "", fmt.Errorf("ask %s is anchored on %s, which is not one of the issue's seeded documents", a.ID, a.Anchor.ArtifactID)
-	}
-	return s.anchored(ctx, "ask", key, d, a.ID, a.Anchor, w, path, body)
-}
-
-// approvalBody is the approval request body of approval ask a, as whom.
-func approvalBody(a *replayAsk) (who, map[string]any, error) {
-	w, actor, err := actorOf(&a.Author)
-	if err != nil {
-		return w, nil, fmt.Errorf("ask %s: %w", a.ID, err)
-	}
-	body := map[string]any{}
-	if summary := approvalSummary(a.Question); summary != "" {
-		body["summary"] = summary
-	}
-	return w, withActor(body, actor), nil
-}
-
-// questionBody is the body that opens question ask a, as whom (anchored adds an anchor).
-func questionBody(a *replayAsk) (who, map[string]any, error) {
-	w, actor, err := actorOf(&a.Author)
-	if err != nil {
-		return w, nil, fmt.Errorf("ask %s: %w", a.ID, err)
-	}
-	options := a.Options
-	if options == nil {
-		options = []replayAskOption{}
-	}
-	body := withActor(map[string]any{"question": a.Question, "kind": "question", "options": options, "multiple": a.Multiple}, actor)
-	if a.Urgency != "" {
-		body["urgency"] = a.Urgency
-	}
-	return w, body, nil
-}
-
-// answerBody is the body that answers question ask a, whose edited_at is editedAt.
-func answerBody(a *replayAsk, editedAt json.RawMessage) map[string]any {
-	body := map[string]any{"selected": nonNil(a.Answer.Selected), "expected_edited_at": editedAt}
-	if a.Answer.Text != nil {
-		body["text"] = *a.Answer.Text
-	}
-	return body
-}
-
-// askResolveBody is the body that resolves ask a as its logged resolution says, as whom.
-func askResolveBody(a *replayAsk) (who, map[string]any, error) {
-	w, actor, err := actorOf(&a.Resolution.By)
-	if err != nil {
-		return w, nil, fmt.Errorf("ask-resolve %s: %w", a.ID, err)
-	}
-	return w, withActor(map[string]any{"kind": a.Resolution.Kind, "reason": a.Resolution.Reason}, actor), nil
-}
-
-// answer re-sends an answered ask's answer as the answering user: an approval through a review, a
-// question (a typed ask block's too) through POST /asks/{id}/answer. A typed ask block's answer
-// rewrites its block, which Dispatch versions once settled; history waits for that version.
-func (s *replaySeeder) answer(ctx context.Context, key string, docs map[string]*issueDoc, a *replayAsk, local string) error {
-	if _, ok := s.ids.get(idAnswer, a.ID); ok {
-		return nil
-	}
-	if a.Answer == nil {
-		return fmt.Errorf("ask %s is answered with no answer in the bundle", a.ID)
-	}
-	var state string
-	if err := s.pool.QueryRow(ctx, `select state from asks where id = $1`, local).Scan(&state); err != nil {
-		return err
-	}
-	if state == "open" {
-		w := who{person: a.Answer.User}
-		if a.Approval != nil {
-			body, err := reviewFor(a.Answer)
-			if err != nil {
-				return fmt.Errorf("ask %s: %w", a.ID, err)
-			}
-			d := docs[a.Approval.ArtifactID]
-			if _, err := s.write(ctx, "answer", key, len(d.text), d.local, "review", a.ID, "POST", "/api/v1/artifacts/"+d.local+"/reviews", w, jsonBody(body)); err != nil {
-				return err
-			}
-			return s.ids.put(ctx, idAnswer, a.ID, local)
-		}
-		var block *issueDoc
-		if a.BlockID != nil {
-			if a.BlockArtifactID == nil || docs[*a.BlockArtifactID] == nil {
-				return fmt.Errorf("ask %s: an answered typed ask block names no seeded document", a.ID)
-			}
-			block = docs[*a.BlockArtifactID]
-		}
-		editedAt, err := s.askEditedAt(ctx, a.ID, local)
-		if err != nil {
-			return err
-		}
-		body := answerBody(a, editedAt)
-		docBytes, docID := 0, ""
-		if block != nil {
-			docBytes, docID = len(block.text), block.local
-		}
-		if _, err := s.write(ctx, "answer", key, docBytes, docID, "answer", a.ID, "POST", "/api/v1/asks/"+local+"/answer", w, jsonBody(body)); err != nil {
-			return err
-		}
-	}
-	return s.ids.put(ctx, idAnswer, a.ID, local)
-}
-
-// resolveAsk resolves a resolved typed ask block as its resolving actor through POST
-// /asks/{id}/resolve with the logged resolution's kind and reason. Dispatch writes state="resolved"
-// into the block, which it versions once settled; history waits for that version.
-func (s *replaySeeder) resolveAsk(ctx context.Context, key string, docs map[string]*issueDoc, a *replayAsk, local string) error {
-	if _, ok := s.ids.get(idAskResolve, a.ID); ok {
-		return nil
-	}
-	if a.Resolution == nil {
-		return fmt.Errorf("ask %s is resolved with no resolution in the bundle", a.ID)
-	}
-	if a.BlockArtifactID == nil || docs[*a.BlockArtifactID] == nil {
-		return fmt.Errorf("ask %s: a resolved typed ask block names no seeded document", a.ID)
-	}
-	block := docs[*a.BlockArtifactID]
-	var state string
-	if err := s.pool.QueryRow(ctx, `select state from asks where id = $1`, local).Scan(&state); err != nil {
-		return err
-	}
-	if state != "resolved" {
-		w, body, err := askResolveBody(a)
-		if err != nil {
-			return err
-		}
-		if _, err := s.write(ctx, "resolve", key, len(block.text), block.local, "ask-resolve", a.ID, "POST", "/api/v1/asks/"+local+"/resolve", w, jsonBody(body)); err != nil {
-			return err
-		}
-	}
-	return s.ids.put(ctx, idAskResolve, a.ID, local)
-}
-
-// waitVersion waits (up to two minutes) until the document owes no settlement and stands at
-// version want; standing past it is an error at once.
-func (s *replaySeeder) waitVersion(ctx context.Context, d *issueDoc, want int) error {
-	deadline := time.Now().Add(2 * time.Minute)
-	for {
-		var pending, got int
-		if err := s.pool.QueryRow(ctx, `select (select count(*) from doc_settlements_pending where artifact_id = $1),
-			(select coalesce(max(number), 0) from artifact_versions where artifact_id = $1)`, d.local).Scan(&pending, &got); err != nil {
-			return err
-		}
-		if got > want {
-			return fmt.Errorf("document %s stands at version %d, want %d", d.a.ID, got, want)
-		}
-		if got == want && pending == 0 {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("document %s stands at version %d with %d settlements owed after 2 minutes, want version %d", d.a.ID, got, pending, want)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(250 * time.Millisecond):
-		}
-	}
-}
-
-// askEditedAt is the ask's edited_at as Dispatch serves it (GET /api/v1/asks/{id}), which an
-// answer must send back as expected_edited_at: a string, or null for an ask never edited.
-func (s *replaySeeder) askEditedAt(ctx context.Context, logged, local string) (json.RawMessage, error) {
-	res := s.api.call(ctx, "GET", "/api/v1/asks/"+local, who{}, nil)
-	if !res.ok() {
-		return nil, &seedError{step: "ask-read", logged: logged, status: res.status, code: dispatchCode(res.body)}
-	}
-	var r struct {
-		EditedAt json.RawMessage `json:"edited_at"`
-		Ask      *struct {
-			EditedAt json.RawMessage `json:"edited_at"`
-		} `json:"ask"`
-	}
-	if err := json.Unmarshal(res.body, &r); err != nil {
-		return nil, fmt.Errorf("ask-read %s: undecodable response", logged)
-	}
-	if r.Ask != nil && len(r.Ask.EditedAt) > 0 {
-		return r.Ask.EditedAt, nil
-	}
-	if len(r.EditedAt) > 0 {
-		return r.EditedAt, nil
-	}
-	return json.RawMessage("null"), nil
-}
-
-// --- step 5: fields and claim --------------------------------------------------------------------
-
-func (s *replaySeeder) finishIssue(ctx context.Context, p seedIssuePlan) error {
-	res := s.api.call(ctx, "GET", "/api/v1/issues/"+p.Key, who{}, nil)
-	if !res.ok() {
-		return &seedError{step: "issue-read", logged: p.Key, status: res.status, code: dispatchCode(res.body)}
-	}
-	var cur liveIssue
-	if err := json.Unmarshal(res.body, &cur); err != nil {
-		return fmt.Errorf("issue-read %s: undecodable response", p.Key)
-	}
-	if patch := issuePatch(cur, p.Issue); patch != nil {
-		patch["actor"] = sessionActor(replaySeedActorID)
-		if _, err := s.write(ctx, "patch", p.Key, 0, "", "patch", p.Key, "PATCH", "/api/v1/issues/"+p.Key, who{}, jsonBody(patch)); err != nil {
-			return err
-		}
-	}
-	if claimWanted(cur, p.Issue) {
-		w, actor, err := actorOf(&p.Issue.Claim.Actor)
-		if err != nil {
-			return fmt.Errorf("claim %s: %w", p.Key, err)
-		}
-		if _, err := s.write(ctx, "claim", p.Key, 0, "", "claim", p.Key, "POST", "/api/v1/issues/"+p.Key+"/claim", w, jsonBody(withActor(map[string]any{}, actor))); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// --- replay_ids ----------------------------------------------------------------------------------
-
-// idStore is loadtest.replay_ids, cached.
-type idStore struct {
-	pool *pgxpool.Pool
-	mu   sync.Mutex
-	m    map[[2]string]string
-	// byLocal counts, by kind, the logged ids that map to each local id.
-	byLocal map[string]map[string]int
-}
-
-func newIDStore(pool *pgxpool.Pool, m map[[2]string]string) *idStore {
-	s := &idStore{pool: pool, m: map[[2]string]string{}, byLocal: map[string]map[string]int{}}
-	for k, v := range m {
-		s.set(k, v)
-	}
-	return s
-}
-
-func loadIDStore(ctx context.Context, pool *pgxpool.Pool) (*idStore, error) {
-	s := newIDStore(pool, nil)
-	rows, err := pool.Query(ctx, `select kind, logged_id, local_id from loadtest.replay_ids`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var k, l, v string
-		if err := rows.Scan(&k, &l, &v); err != nil {
-			return nil, err
-		}
-		s.set([2]string{k, l}, v)
-	}
-	return s, rows.Err()
-}
-
-// set maps k to local, keeping byLocal; the caller holds s.mu or has not shared s yet.
-func (s *idStore) set(k [2]string, local string) {
-	kind := k[0]
-	if old, ok := s.m[k]; ok {
-		if s.byLocal[kind][old]--; s.byLocal[kind][old] == 0 {
-			delete(s.byLocal[kind], old)
-		}
-	}
-	s.m[k] = local
-	if s.byLocal[kind] == nil {
-		s.byLocal[kind] = map[string]int{}
-	}
-	s.byLocal[kind][local]++
-}
-
-func (s *idStore) get(kind, logged string) (string, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	v, ok := s.m[[2]string{kind, logged}]
-	return v, ok
-}
-
-func (s *idStore) put(ctx context.Context, kind, logged, local string) error {
-	if _, err := s.pool.Exec(ctx, `insert into loadtest.replay_ids (kind, logged_id, local_id) values ($1, $2, $3) on conflict do nothing`, kind, logged, local); err != nil {
-		return fmt.Errorf("record %s %s: %w", kind, logged, err)
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.set([2]string{kind, logged}, local)
-	return nil
-}
-
-// mapped says whether a logged id of kind maps to local.
-func (s *idStore) mapped(kind, local string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.byLocal[kind][local] > 0
-}
-
-func (s *idStore) count(kind string) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	n := 0
-	for k := range s.m {
-		if k[0] == kind {
-			n++
-		}
-	}
-	return n
-}
-
-func (s *idStore) len() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.m)
 }

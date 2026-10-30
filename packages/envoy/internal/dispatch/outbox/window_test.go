@@ -2,6 +2,7 @@ package outbox
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"strings"
 	"sync"
@@ -200,12 +201,154 @@ func TestABacklogPublishedAcrossANATSOutageKeepsItsOrder(t *testing.T) {
 	assertStreamInIDOrder(t, url, count+count/2)
 }
 
+// One issue's events reach its NATS subject in seq order, which is what the Legion daemon's sequence
+// fence consumes (packages/daemon/internal/admit/admit.go): it applies an issue's fact only above
+// the last seq it applied from that issue and drops the rest as stale. Event ids do not commit in
+// id order across issues (events.Broker.Append takes only its owner's row): here issue Y's first
+// event draws the lowest id and stays open while issue X's two events commit and are published.
+// Then Y's first commits, and Y's second, which can draw its id only once Y's row is free,
+// commits after it. The outbox claims every row still unpublished, lowest id first
+// (claimPendingEvents), so Y's late, lower id is published once it commits, and before Y's
+// second.
+//
+// An outbox that kept a cursor on events.id at the last id it had published, the way a reader
+// could while the ids committed in id order, would pass Y's first event's id when it published X's
+// second, and never send it: Y's subject would carry seq 2 with no seq 1, and the daemon would hold
+// an issue whose earlier fact never arrives.
+func TestOneIssuesEventsReachItsSubjectInSeqOrderWhileAnotherIssueCommitsAcrossThem(t *testing.T) {
+	ctx := context.Background()
+	_, url := testnats.Start(t)
+	client, err := bus.ConnectOwningStream([]string{url})
+	if err != nil {
+		t.Fatalf("connect the outbox's client: %v", err)
+	}
+	t.Cleanup(client.Close)
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	if _, err := database.Pool.Exec(ctx, `insert into projects (key, name) values ('TT', 'Test')`); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	const x, y = "TT-1", "TT-2"
+	for number, key := range []string{x, y} {
+		if _, err := database.Pool.Exec(ctx, `
+			insert into issues (key, project_key, number, title, created_by, rank)
+			values ($1, 'TT', $2, 'Order', '{"kind":"user","id":"alice"}', 'U')
+		`, key, number+1); err != nil {
+			t.Fatalf("create issue %s: %v", key, err)
+		}
+	}
+	stop := runOutbox(t, database, client, broker)
+	defer stop()
+
+	// issue.deployed by the system notifies no one, so each event has the issue's subject as its
+	// one destination.
+	deployed := func(key string, run int) model.Event {
+		return model.Event{
+			IssueKey: new(key), Type: "issue.deployed", Actor: model.Actor{Kind: "system", ID: "delivery-timeline"},
+			Payload: map[string]any{"repo": "acme/widgets", "number": 501, "run_id": run, "completed_at": "2024-01-01T02:10:00Z"},
+		}
+	}
+	committed := func(event model.Event) model.Event {
+		t.Helper()
+		event = appendEvent(t, database, broker, event)
+		broker.Publish(event)
+		return event
+	}
+
+	open, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin Y's first write: %v", err)
+	}
+	defer open.Rollback(context.Background())
+	y1, err := broker.Append(ctx, open, deployed(y, 1))
+	if err != nil {
+		t.Fatalf("append Y's first event: %v", err)
+	}
+	x1 := committed(deployed(x, 2))
+	x2 := committed(deployed(x, 3))
+	if y1.ID >= x1.ID {
+		t.Fatalf("Y's open event drew id %d, not below X's committed %d, so this test proves nothing", y1.ID, x1.ID)
+	}
+	waitFor(t, 30*time.Second, "X's events published while Y's first write is open", func() bool {
+		return publishedAt(t, database, x1.ID) != nil && publishedAt(t, database, x2.ID) != nil
+	})
+	if err := open.Commit(ctx); err != nil {
+		t.Fatalf("commit Y's first write: %v", err)
+	}
+	broker.Publish(y1)
+	y2 := committed(deployed(y, 4))
+	// One process scans one batch at a time, lowest id first, and records a batch before it claims
+	// the next, so once Y's second event is published every event below it that the outbox sends
+	// at all has been sent.
+	waitFor(t, 30*time.Second, "Y's second event published", func() bool {
+		return publishedAt(t, database, y2.ID) != nil
+	})
+
+	seqs, ids := issueSubjectOrder(t, url)
+	for _, key := range []string{x, y} {
+		if !slices.Equal(seqs[key], []int{1, 2}) {
+			t.Fatalf("issue %s's subject carried seqs %v, want [1 2]", key, seqs[key])
+		}
+	}
+	// The stream holds Y's first event after X's second although its id is lower: the write
+	// committed out of id order, and the outbox still sent it.
+	if want := []int64{x1.ID, x2.ID, y1.ID, y2.ID}; !slices.Equal(ids, want) {
+		t.Fatalf("the stream holds events %v, want %v", ids, want)
+	}
+}
+
+// issueSubjectOrder reads every message the notification stream holds on an issue's subject, in
+// stream order, and returns the seq of each event grouped by its issue, and the event ids of all of
+// them in stream order.
+func issueSubjectOrder(t *testing.T, url string) (map[string][]int, []int64) {
+	t.Helper()
+	reader, err := natsgo.Connect(url)
+	if err != nil {
+		t.Fatalf("connect the reader: %v", err)
+	}
+	defer reader.Close()
+	js, err := reader.JetStream()
+	if err != nil {
+		t.Fatalf("open JetStream: %v", err)
+	}
+	info, err := js.StreamInfo(bus.Stream)
+	if err != nil {
+		t.Fatalf("read the stream: %v", err)
+	}
+	seqs := map[string][]int{}
+	var ids []int64
+	for sequence := info.State.FirstSeq; sequence <= info.State.LastSeq && info.State.Msgs > 0; sequence++ {
+		message, err := js.GetMsg(bus.Stream, sequence)
+		if err != nil {
+			t.Fatalf("read stream message %d: %v", sequence, err)
+		}
+		if !strings.HasPrefix(message.Subject, "notifications.dispatch.issue.") {
+			continue
+		}
+		var envelope contracts.Envelope
+		if err := json.Unmarshal(message.Data, &envelope); err != nil {
+			t.Fatalf("decode an envelope: %v", err)
+		}
+		var event model.Event
+		if err := json.Unmarshal([]byte(envelope.Payload), &event); err != nil {
+			t.Fatalf("decode the event on %s: %v", message.Subject, err)
+		}
+		if event.IssueKey == nil || !strings.HasPrefix(message.Subject, "notifications.dispatch.issue."+*event.IssueKey+".") {
+			t.Fatalf("event %d of issue %v arrived on %s", event.ID, event.IssueKey, message.Subject)
+		}
+		seqs[*event.IssueKey] = append(seqs[*event.IssueKey], event.Seq)
+		ids = append(ids, event.ID)
+	}
+	return seqs, ids
+}
+
 // A connection cut while a batch is in flight - sent, its acknowledgements still on their way back
 // across a remote hub's round trip - keeps the backlog's order. The window sends nothing on the
 // connection that comes back, and every event that met the cut is released, not backed off, so
-// the next scan sends them again in id order and the stream's MsgId drops the copies of those that
-// had landed: once the backlog is published, the stream holds every destination once, each
-// issue's events in id order, and no event counted an attempt.
+// the next scan sends them again in id order and the stream's MsgId drops the copies of those
+// that had landed. A copy the window had to send again without its id is the exception, which the
+// stream stores as a message of its own. Once the backlog is published, the stream holds every
+// destination once, each issue's events in id order, and no event counted an attempt.
 func TestABatchCutOffInFlightKeepsItsOrder(t *testing.T) {
 	const issues, count = 4, 2 * batchSize
 	_, url := testnats.Start(t)

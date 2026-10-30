@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"maps"
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
@@ -29,7 +30,7 @@ const rpDetIssues = 24
 // and a resolve in an anchored thread, edits, uploads, creates and a typed ask's answer.
 func rpDetBundle(t *testing.T) *replayBundle {
 	t.Helper()
-	st := replayState{Project: "LINUX", At: rpAt, Until: rpAt.Add(39 * time.Minute)}
+	st := replayState{Project: "ACME", At: rpAt, Until: rpAt.Add(39 * time.Minute)}
 	files := map[string]string{}
 	var lines []string
 	id := int64(0)
@@ -39,7 +40,7 @@ func rpDetBundle(t *testing.T) *replayBundle {
 	}
 	cut := "--- a\n+++ b\n@@ -1,1 +1,1 @@\n-x\n+y\n… (truncated)\n"
 	for i := 1; i <= rpDetIssues; i++ {
-		key, n := "LINUX-"+itoa(i), itoa(i)
+		key, n := "ACME-"+itoa(i), itoa(i)
 		text := replaySynthDoc(1500+37*i, uint64(i))
 		fsize := 100 + i
 		files["docs/DD"+n+".md"] = text
@@ -53,7 +54,7 @@ func rpDetBundle(t *testing.T) *replayBundle {
 			Asks: []replayAsk{{ID: "K" + n, Kind: "question", State: "open", Question: "q", Author: rpSession,
 				BlockID: &blk, BlockArtifactID: &dd}}})
 		quote := fallbackCandidates(text)[0]
-		child, cn := "LINUX-"+itoa(100+i), itoa(100+i)
+		child, cn := "ACME-"+itoa(100+i), itoa(100+i)
 		at := func(k int) time.Duration { return time.Duration(i)*time.Millisecond + time.Duration(k)*20*time.Second }
 		ev("comment.created", key, rpSession, at(0), map[string]any{"id": "A" + n + "a", "body": "b", "anchor": map[string]any{"artifact_id": "DD" + n, "quote": quote}})
 		ev("comment.created", key, rpUser, at(1), map[string]any{"id": "A" + n + "b", "body": "b", "anchor": map[string]any{"artifact_id": "DD" + n, "quote": "No such quote here."}})
@@ -158,7 +159,7 @@ func sendShuffled(t *testing.T, p *replayPlan, o replayOptions, b *replayBundle)
 		time.Sleep(delay)
 		h := sha256.Sum256([]byte(r.Method + " " + rest + " " + string(body)))
 		x := hex.EncodeToString(h[:])
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": "loc-" + x[:12], "key": "LINUX-L" + x[:6], "primary_artifact_id": "pa-" + x[:12],
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "loc-" + x[:12], "key": "ACME-L" + x[:6], "primary_artifact_id": "pa-" + x[:12],
 			"last_seq": 25, "edited_at": "2026-10-26T23:00:00Z"})
 	}))
 	defer srv.Close()
@@ -344,9 +345,9 @@ func TestReplayReadsPrecedeTheirWrite(t *testing.T) {
 	for i := range 40 {
 		off := time.Duration(i+1) * time.Second
 		if i%2 == 0 {
-			lines = append(lines, rpEvent(int64(i+1), "comment.created", "LINUX-1", rpSession, off, map[string]any{"id": "W" + itoa(i), "body": "b"}))
+			lines = append(lines, rpEvent(int64(i+1), "comment.created", "ACME-1", rpSession, off, map[string]any{"id": "W" + itoa(i), "body": "b"}))
 		} else {
-			lines = append(lines, rpEvent(int64(i+1), "artifact.created", "LINUX-1", rpSession, off,
+			lines = append(lines, rpEvent(int64(i+1), "artifact.created", "ACME-1", rpSession, off,
 				map[string]any{"artifact": map[string]any{"id": "W" + itoa(i), "name": "n" + itoa(i), "kind": "doc", "versions": []any{map[string]any{"size": 50}}}}))
 		}
 	}
@@ -365,8 +366,10 @@ func TestReplayReadsPrecedeTheirWrite(t *testing.T) {
 	}
 }
 
-// TestEndStateDigest: two equal end states digest alike whatever their order; a changed version,
-// size, anchor quote or block, or a missing document digests otherwise.
+// TestEndStateDigest: two equal end states digest alike whatever their order, and so do two that
+// hold each anchor at the same block index under a different block id (Dispatch mints a fresh
+// uuid per block a write creates); a changed version, size, anchor quote or block index, or a
+// missing document digests otherwise.
 func TestEndStateDigest(t *testing.T) {
 	q := func(s string) string {
 		h := sha256.Sum256([]byte(s))
@@ -374,7 +377,8 @@ func TestEndStateDigest(t *testing.T) {
 	}
 	state := func() []replayEndDoc {
 		return []replayEndDoc{
-			{ArtifactID: "DD2", Version: 3, Size: 1200, Anchors: []replayEndAnchor{{q("beta"), "b2"}, {q("alpha"), "b1"}}},
+			{ArtifactID: "DD2", Version: 3, Size: 1200, Anchors: []replayEndAnchor{
+				{q("beta"), "b2", "4.1.0"}, {q("alpha"), "b1", "2"}}},
 			{ArtifactID: "DD1", Version: 5, Size: 900, Anchors: []replayEndAnchor{}},
 		}
 	}
@@ -385,15 +389,42 @@ func TestEndStateDigest(t *testing.T) {
 	if got := endStateDigest(b); got != base {
 		t.Fatalf("equal states digest %s and %s", base, got)
 	}
+	reblocked := state()
+	reblocked[0].Anchors[0].BlockID = "fresh-uuid-1"
+	reblocked[0].Anchors[1].BlockID = "fresh-uuid-2"
+	if got := endStateDigest(reblocked); got != base {
+		t.Fatalf("states equal but for their block ids digest %s and %s", base, got)
+	}
 	for name, change := range map[string]func([]replayEndDoc) []replayEndDoc{
-		"version": func(d []replayEndDoc) []replayEndDoc { d[0].Version++; return d },
-		"size":    func(d []replayEndDoc) []replayEndDoc { d[1].Size--; return d },
-		"quote":   func(d []replayEndDoc) []replayEndDoc { d[0].Anchors[0].QuoteSHA256 = q("gamma"); return d },
-		"block":   func(d []replayEndDoc) []replayEndDoc { d[0].Anchors[1].BlockID = "b3"; return d },
-		"missing": func(d []replayEndDoc) []replayEndDoc { return d[:1] },
+		"version":     func(d []replayEndDoc) []replayEndDoc { d[0].Version++; return d },
+		"size":        func(d []replayEndDoc) []replayEndDoc { d[1].Size--; return d },
+		"quote":       func(d []replayEndDoc) []replayEndDoc { d[0].Anchors[0].QuoteSHA256 = q("gamma"); return d },
+		"block index": func(d []replayEndDoc) []replayEndDoc { d[0].Anchors[1].BlockIndex = "3"; return d },
+		"moved cell":  func(d []replayEndDoc) []replayEndDoc { d[0].Anchors[0].BlockIndex = "4.1.1"; return d },
+		"orphaned":    func(d []replayEndDoc) []replayEndDoc { d[0].Anchors[0].BlockIndex = endStateBlockUnknown; return d },
+		"missing":     func(d []replayEndDoc) []replayEndDoc { return d[:1] },
 	} {
 		if got := endStateDigest(change(state())); got == base {
 			t.Fatalf("a changed %s digests as the base state", name)
 		}
+	}
+}
+
+// TestEndStateBlockIndexes: a document's blocks are indexed in document order, a table's rows and
+// cells under their table's index, and a block the live document has not stamped is left out.
+func TestEndStateBlockIndexes(t *testing.T) {
+	var served []servedBlock
+	body := `[{"id":"p1","type":"paragraph","from":0,"to":5},
+		{"id":"t1","type":"table","from":5,"to":40,"table":{"rows":[
+			{"id":"r0","index":0,"cells":[{"id":"c00"},{"id":""}]},
+			{"id":"","index":1,"cells":[{"id":"c10"}]}]}},
+		{"id":"p2","type":"paragraph","from":40,"to":50}]`
+	if err := json.Unmarshal([]byte(body), &served); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got := endStateBlockIndexes(served)
+	want := map[string]string{"p1": "0", "t1": "1", "r0": "1.0", "c00": "1.0.0", "c10": "1.1.0", "p2": "2"}
+	if !maps.Equal(got, want) {
+		t.Fatalf("block indexes %v, want %v", got, want)
 	}
 }

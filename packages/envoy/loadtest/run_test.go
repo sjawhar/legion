@@ -9,6 +9,8 @@ import (
 	"maps"
 	"math"
 	"math/rand/v2"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -245,6 +247,44 @@ func TestMetaRecordsAFailedPostgresVersionRead(t *testing.T) {
 	}
 	if !strings.Contains(string(b), `"postgres_version_error":`) {
 		t.Fatalf("meta.json lacks postgres_version_error:\n%s", b)
+	}
+}
+
+// TestMetaRecordsTheDispatchBuildOfEveryStep: a step's meta.json names the Dispatch binary it ran
+// (bin/envoy-dispatch.json), not only the checkout's commit, so a step run with
+// LOADTEST_DISPATCH_COMMIT names the Dispatch it measured. A synthetic step records it too.
+func TestMetaRecordsTheDispatchBuildOfEveryStep(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("LOADTEST_ROOT", root)
+	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const build = `{"dispatch_commit":"35efd326","dispatch_binary_sha256":"ab12","go_version":"go1.27.1","newest_migration":134}`
+	if err := os.WriteFile(filepath.Join(root, "bin", "envoy-dispatch.json"), []byte(build), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var logged bytes.Buffer
+	cfg := runConfig{buildCommit: "checkout99", boxBusyBefore: 0, ep: endpoints{pg: unreachablePG, pids: map[string]int{}}}
+	meta := collectMeta(context.Background(), cfg, log.New(&logged, "", 0))
+	if meta.BuildCommit != "checkout99" {
+		t.Fatalf("build_commit %q: want the checkout's commit", meta.BuildCommit)
+	}
+	if meta.DispatchCommit != "35efd326" || meta.DispatchBinarySHA256 != "ab12" {
+		t.Fatalf("dispatch_commit %q, dispatch_binary_sha256 %q: want the build record's", meta.DispatchCommit, meta.DispatchBinarySHA256)
+	}
+	b, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"dispatch_build":`) || !strings.Contains(string(b), `"go_version":"go1.27.1"`) {
+		t.Fatalf("meta.json lacks the whole build record:\n%s", b)
+	}
+	// No build record: the fields are empty and the log says so, and the step is not stopped.
+	t.Setenv("LOADTEST_ROOT", t.TempDir())
+	logged.Reset()
+	meta = collectMeta(context.Background(), cfg, log.New(&logged, "", 0))
+	if meta.DispatchCommit != "" || meta.DispatchBuild != nil || !strings.Contains(logged.String(), "no Dispatch build record") {
+		t.Fatalf("without the record: dispatch_commit %q, log %q", meta.DispatchCommit, logged.String())
 	}
 }
 

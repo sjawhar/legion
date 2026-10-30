@@ -50,10 +50,13 @@ type runConfig struct {
 	routes       routeMix
 	human        float64
 	live         int
-	rngSeed      uint64
-	natsConns    int
-	buildCommit  string
-	buildDirty   bool
+	// dashboard is the dashboard stream the build under test serves, probed once before the
+	// window (probeDashboard): dashboardLive or dashboardSSE.
+	dashboard   string
+	rngSeed     uint64
+	natsConns   int
+	buildCommit string
+	buildDirty  bool
 	// boxBusyBefore is the box's busy fraction read before Dispatch started (run-step.sh reads it
 	// with `loadgen box-busy` before its reset); negative means collectMeta reads it itself.
 	boxBusyBefore float64
@@ -63,9 +66,16 @@ type runConfig struct {
 	// copyMeta is the -copy-meta file's JSON object, which meta.json records under copy; nil
 	// without the flag.
 	copyMeta json.RawMessage
-	// source is the request source; replay is the replay's plan and roster under -source replay.
-	source string
+	// replay is the replay's plan and roster under -source replay; nil under -source requests.
 	replay *replaySetup
+}
+
+// sourceName is the request source: the replay when the run has one, else the route mix.
+func (c runConfig) sourceName() string {
+	if c.replay != nil {
+		return sourceReplay
+	}
+	return sourceRequests
 }
 
 func runLoad(args []string) error {
@@ -91,7 +101,7 @@ func runLoad(args []string) error {
 	buildDirty := fs.Bool("build-dirty", false, "the build's tree had uncommitted changes, for meta.json")
 	boxBusyBefore := fs.Float64("box-busy-before", -1, "the box's busy fraction read before Dispatch started (loadgen box-busy); default: read it now")
 	copyMetaPath := fs.String("copy-meta", "", "JSON object file that describes the copy a foreign run measures, recorded verbatim in meta.json under copy")
-	source := fs.String("source", sourceRequests, "request source: "+sourceRequests+" (the route mix) or "+sourceReplay+" (a replay bundle's logged writes, replay_source.go)")
+	source := fs.String("source", sourceRequests, "request source: "+sourceRequests+" (the route mix) or "+sourceReplay+" (a replay bundle's logged writes, replay_plan.go)")
 	rf := registerReplayFlags(fs)
 	_ = fs.Parse(args)
 
@@ -197,7 +207,7 @@ func runLoad(args []string) error {
 		warmup: *warmup, duration: *duration, grace: *grace, mix: mix, routes: routes,
 		human: *human, live: *live, rngSeed: *rngSeed, natsConns: *natsConns,
 		buildCommit: *buildCommit, buildDirty: *buildDirty, boxBusyBefore: *boxBusyBefore, args: recordedArgs(fs),
-		copyMeta: copyMeta, source: *source, replay: rs,
+		copyMeta: copyMeta, replay: rs,
 	}, sf)
 }
 
@@ -270,19 +280,23 @@ type requestsSummary struct {
 }
 
 type summaryConfig struct {
-	Step         string   `json:"step"`
-	EventsPerS   float64  `json:"events_per_s"`
-	Sessions     int      `json:"sessions"`
-	RequestsPerS float64  `json:"requests_per_s"`
-	Live         int      `json:"live"`
-	EventMix     eventMix `json:"event_mix"`
-	RouteMix     string   `json:"route_mix"`
-	Human        float64  `json:"human"`
-	WarmupS      float64  `json:"warmup_s"`
-	DurationS    float64  `json:"duration_s"`
-	GraceS       float64  `json:"grace_s"`
-	RNGSeed      uint64   `json:"rng_seed"`
-	NATSConns    int      `json:"nats_conns"`
+	Step         string  `json:"step"`
+	EventsPerS   float64 `json:"events_per_s"`
+	Sessions     int     `json:"sessions"`
+	RequestsPerS float64 `json:"requests_per_s"`
+	Live         int     `json:"live"`
+	// Dashboard is the dashboard stream those live streams ran on: live (one socket per tab on
+	// /ws/live) or sse (GET /api/v1/events, a build before that route was removed). The harness
+	// probes the build under test once before the window (probeDashboard).
+	Dashboard string   `json:"dashboard"`
+	EventMix  eventMix `json:"event_mix"`
+	RouteMix  string   `json:"route_mix"`
+	Human     float64  `json:"human"`
+	WarmupS   float64  `json:"warmup_s"`
+	DurationS float64  `json:"duration_s"`
+	GraceS    float64  `json:"grace_s"`
+	RNGSeed   uint64   `json:"rng_seed"`
+	NATSConns int      `json:"nats_conns"`
 	// MarkerNonce is the run's marker nonce (markerTag): every marker the run wrote starts with it,
 	// and the run counts only the commit rows that carry it.
 	MarkerNonce string `json:"marker_nonce"`
@@ -332,10 +346,17 @@ type metaFile struct {
 	GOMAXPROCS           string   `json:"gomaxprocs"`
 	// PostgresVersion is select version() on -pg, "" when it could not be read, and then
 	// PostgresVersionError is why.
-	PostgresVersion      string          `json:"postgres_version"`
-	PostgresVersionError string          `json:"postgres_version_error,omitempty"`
-	BuildCommit          string          `json:"build_commit"`
-	BuildDirty           bool            `json:"build_dirty"`
+	PostgresVersion      string `json:"postgres_version"`
+	PostgresVersionError string `json:"postgres_version_error,omitempty"`
+	BuildCommit          string `json:"build_commit"`
+	BuildDirty           bool   `json:"build_dirty"`
+	// DispatchCommit, DispatchBinarySHA256 and DispatchBuild are the Dispatch the step ran, from
+	// $LOADTEST_ROOT/bin/envoy-dispatch.json (stack.sh's build record): the commit that binary was
+	// built from, which LOADTEST_DISPATCH_COMMIT (--dispatch-commit) sets otherwise than
+	// BuildCommit, its sha256, and the whole record. Empty when that file is missing or not JSON.
+	DispatchCommit       string          `json:"dispatch_commit"`
+	DispatchBinarySHA256 string          `json:"dispatch_binary_sha256"`
+	DispatchBuild        json.RawMessage `json:"dispatch_build,omitempty"`
 	SeedMeta             json.RawMessage `json:"seed_meta,omitempty"`
 	Stack                string          `json:"stack"`
 	PGDirect             bool            `json:"pg_direct"`
@@ -361,30 +382,27 @@ func execute(cfg runConfig, sf seedFile) error {
 	defer logf.Close()
 	lg := log.New(io.MultiWriter(os.Stderr, logf), "", log.LstdFlags|log.Lmicroseconds)
 	nonce := newMarkerNonce()
-	liveURL, err := liveSocketURL(cfg.ep.dispatch)
-	if err != nil {
-		return err
-	}
+	lg.Printf("config: step=%s source=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f live=%d rng-seed=%d marker-nonce=%s",
+		cfg.name, cfg.sourceName(), cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.live, cfg.rngSeed, formatNonce(nonce))
 
 	if err := checkStack(ctx, cfg.ep); err != nil {
 		return err
 	}
-	// The dashboard transport is decided here, before any load: a step whose dashboard streams
-	// could open on neither endpoint is refused, never run with a lighter load than its name.
-	transport, err := decideLiveTransport(ctx, cfg.live, cfg.ep.dispatch, liveURL)
+	lg.Printf("guard: NATS, Dispatch and the listener are the stack's own (%s)", cfg.ep.stack)
+	dashboard, dashURL, err := probeDashboard(ctx, cfg.ep.dispatch)
 	if err != nil {
 		return err
 	}
-	lg.Printf("config: step=%s source=%s sessions=%d events=%g/s requests=%g/s event-mix=%s route-mix=%s warmup=%s duration=%s grace=%s human=%.2f live=%d (%s) rng-seed=%d marker-nonce=%s",
-		cfg.name, cfg.source, cfg.sessions, cfg.events, cfg.requests, cfg.mix.Name, cfg.routes.Source, cfg.warmup, cfg.duration, cfg.grace, cfg.human, cfg.live, transport, cfg.rngSeed, formatNonce(nonce))
-	lg.Printf("guard: NATS, Dispatch and the listener are the stack's own (%s)", cfg.ep.stack)
+	cfg.dashboard = dashboard
+	lg.Printf("dashboard: %d %s stream(s) on %s", cfg.live, dashboard, redactURL(dashURL))
 	meta := collectMeta(ctx, cfg, lg)
 	meta.MarkerNonce = formatNonce(nonce)
 	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, metaMode, lg)
 	logSamplerStart(lg, cfg.ep)
 	st := newStep(cfg, sf, lg, nonce)
+	a := newAPI(cfg.ep.dispatch, cfg.ep.token, 2048)
 	if cfg.replay != nil {
-		if err := st.prepareReplay(ctx); err != nil {
+		if err := st.prepareReplay(ctx, a); err != nil {
 			return err
 		}
 		meta.Replay = &st.replay.meta
@@ -403,8 +421,7 @@ func execute(cfg runConfig, sf seedFile) error {
 	writeJSONFile(filepath.Join(cfg.out, "meta.json"), meta, metaMode, lg)
 	lg.Printf("window %s to %s", st.winStart.UTC().Format(time.RFC3339), st.winEnd.UTC().Format(time.RFC3339))
 
-	a := newAPI(cfg.ep.dispatch, cfg.ep.token, 2048)
-	live := st.startLive(ctx, transport, liveURL)
+	live := st.startDashboard(ctx, dashURL)
 	writes, eventsDone := st.runEvents(ctx, newWriter(a, sf, nonce, lg))
 	var reqs *requestLoad
 	var requestsDone <-chan struct{}
@@ -498,27 +515,23 @@ func (st *step) inWindow(t time.Time) bool { return inWindow(t, st.winStart, st.
 
 func inWindow(t, winStart, winEnd time.Time) bool { return !t.Before(winStart) && t.Before(winEnd) }
 
-// liveSockets is what the dashboard streams read: their transport, their bytes and the event
-// frames that arrived in the window.
+// liveSockets is what the dashboard's streams read, live sockets or SSE streams: their bytes and
+// the event frames that arrived in the window.
 type liveSockets struct {
 	bytes  atomic.Int64
 	frames *collector[liveFrame]
-	// transport is how the streams followed the event feed (decideLiveTransport).
-	transport string
 }
 
-// startLive opens the dashboard streams, each following the event feed as a dashboard tab does
-// and reconnecting a second after its stream ends, until ctx ends. On liveTransportWS each is a
-// live socket on url, subscribed to the event feed (readLive); on liveTransportSSE, where
-// Dispatch serves no such socket, each is a stream of the SSE endpoint instead (readSSE). Every
-// event frame is timed on arrival, the same way on either transport. liveTransportNone opens
-// none: the step's -live is 0.
-func (st *step) startLive(ctx context.Context, transport, url string) *liveSockets {
-	ls := &liveSockets{frames: newCollector[liveFrame](1 << 14), transport: transport}
+// startDashboard opens the dashboard's streams on url, as many as -live: the live sockets of a
+// build that serves /ws/live, else the SSE streams of one that serves GET /api/v1/events
+// (probeDashboard). Each stream subscribes to the event feed as a dashboard tab does and
+// reconnects a second after it ends, until ctx ends. Every event frame is timed on arrival
+// (readLive, readSSE).
+func (st *step) startDashboard(ctx context.Context, url string) *liveSockets {
+	ls := &liveSockets{frames: newCollector[liveFrame](1 << 14)}
 	// A browser offers permessage-deflate, and Dispatch accepts it.
-	dialer := &websocket.Dialer{HandshakeTimeout: liveDialTimeout, EnableCompression: true}
+	dialer := &websocket.Dialer{HandshakeTimeout: 10 * time.Second, EnableCompression: true}
 	client := &http.Client{}
-	eventsURL := sseEventsURL(st.cfg.ep.dispatch)
 	for i := range st.cfg.live {
 		header := http.Header{"X-Dispatch-User": {fmt.Sprintf("viewer-%d", i)}}
 		onFrame := func(f liveFrame) {
@@ -527,11 +540,12 @@ func (st *step) startLive(ctx context.Context, transport, url string) *liveSocke
 			}
 		}
 		onBytes := func(n int64) { ls.bytes.Add(n) }
-		if transport == liveTransportSSE {
-			go followSSE(ctx, client, eventsURL, header, st.nonce, time.Second, onFrame, onBytes)
-		} else {
-			go followLive(ctx, dialer, url, header, st.nonce, time.Second, onFrame, onBytes)
+		if st.cfg.dashboard == dashboardSSE {
+			header.Set("Accept", "text/event-stream")
+			go followSSE(ctx, client, url, header, st.nonce, time.Second, onFrame, onBytes)
+			continue
 		}
+		go followLive(ctx, dialer, url, header, st.nonce, time.Second, onFrame, onBytes)
 	}
 	return ls
 }
@@ -739,9 +753,10 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 	sum := summary{
 		Config: summaryConfig{
 			Step: cfg.name, EventsPerS: cfg.events, Sessions: cfg.sessions, RequestsPerS: cfg.requests, Live: cfg.live,
-			EventMix: cfg.mix, RouteMix: cfg.routes.Source, Human: cfg.human, WarmupS: cfg.warmup.Seconds(),
+			Dashboard: cfg.dashboard,
+			EventMix:  cfg.mix, RouteMix: cfg.routes.Source, Human: cfg.human, WarmupS: cfg.warmup.Seconds(),
 			DurationS: durS, GraceS: cfg.grace.Seconds(), RNGSeed: cfg.rngSeed, NATSConns: cfg.natsConns,
-			MarkerNonce: formatNonce(st.nonce), Source: cfg.source,
+			MarkerNonce: formatNonce(st.nonce), Source: cfg.sourceName(),
 		},
 		Events:   joinDelivery(ws, commits, ns.receipts.snapshot(), watcherCount, durS),
 		Requests: summarizeRequests(reqs.recs.snapshot(), int(reqs.dropped.Load()), cfg.requests, durS),
@@ -754,7 +769,6 @@ func (st *step) buildSummary(ns *natsSessions, reg *registrar, writes *collector
 		Live:            summarizeLive(frames, ws, commits),
 		LiveBytes:       live.bytes.Load(),
 	}
-	sum.Live.Transport = live.transport
 	if commitsErr != nil {
 		sum.Events.CommitsError = commitsErr.Error()
 		st.lg.Printf("commits: %v", commitsErr)
@@ -929,7 +943,38 @@ func collectMeta(ctx context.Context, cfg runConfig, lg *log.Logger) metaFile {
 	if b, err := os.ReadFile(filepath.Join(loadtestRoot(), "seed.meta.json")); err == nil && json.Valid(b) {
 		m.SeedMeta = b
 	}
+	// The Dispatch binary the step ran, which is this checkout's build only when the step set no
+	// LOADTEST_DISPATCH_COMMIT.
+	if bld, ok := readDispatchBuild(loadtestRoot()); ok {
+		m.DispatchCommit, m.DispatchBinarySHA256, m.DispatchBuild = bld.commit, bld.binarySHA256, bld.raw
+	} else {
+		lg.Printf("meta: no Dispatch build record at %s", filepath.Join(loadtestRoot(), "bin", "envoy-dispatch.json"))
+	}
 	return m
+}
+
+// dispatchBuild is $LOADTEST_ROOT/bin/envoy-dispatch.json, stack.sh's record of the Dispatch binary
+// the stack runs: dispatch_commit, dispatch_tree, build_dirty, patch, patch_sha256,
+// dispatch_pprof_overlay, dispatch_binary_sha256, go_version and newest_migration.
+type dispatchBuild struct {
+	raw          json.RawMessage
+	commit       string
+	binarySHA256 string
+}
+
+// readDispatchBuild reads bin/envoy-dispatch.json under root; ok is false when it is absent or
+// holds no JSON.
+func readDispatchBuild(root string) (dispatchBuild, bool) {
+	b, err := os.ReadFile(filepath.Join(root, "bin", "envoy-dispatch.json"))
+	if err != nil || !json.Valid(b) {
+		return dispatchBuild{}, false
+	}
+	var r struct {
+		Commit       string `json:"dispatch_commit"`
+		BinarySHA256 string `json:"dispatch_binary_sha256"`
+	}
+	_ = json.Unmarshal(b, &r)
+	return dispatchBuild{raw: b, commit: r.Commit, binarySHA256: r.BinarySHA256}, true
 }
 
 // postgresVersion reads select version() on the Postgres at url.

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # packages/envoy/loadtest/common.test.sh
 #
-# Proves the run lock of common.sh (lock_root) without a stack. Each lock taker below sources
-# common.sh and calls lock_root, as run-series.sh, run-step.sh and stack.sh do.
+# Proves the run lock of common.sh (lock_root) and the ports it derives from LOADTEST_ROOT
+# (stack_ports), without a stack. Each lock taker below sources common.sh and calls lock_root, as
+# run-series.sh, run-step.sh and stack.sh do.
 #
 # The case this covers: a series' run-step.sh that re-opened descriptor 9 lost the lock
 # that it inherited from run-series.sh and went on by the token alone. Killing run-series.sh then
@@ -21,7 +22,11 @@
 # when the holder ends while the caller waits for its record; (f) two callers that wait at once on
 # such a holder, under a record of another PID namespace, never name each other as the holder: both
 # are refused as "not visible"; (g) a record of another PID namespace whose pid is a live process
-# here (this test's own) is refused as "not visible", without naming that process as the holder.
+# here (this test's own) is refused as "not visible", without naming that process as the holder;
+# (i) a root always gets the same set of ports, these two roots get two sets that share none (two
+# roots in general share all 7 when their paths hash into one block of the 200, which stack.sh
+# refuses), every port of every block lies in 1024-65535 and no two ports of two blocks meet, and a
+# LOADTEST_*_PORT overrides its own port alone.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -416,6 +421,61 @@ case_prepare_stack_built_migration() {
   printf 'PASS: prepare_stack compares the seed with the built Dispatch'"'"'s migrations, not the checkout'"'"'s\n'
 }
 
+# ports_for ROOT [NAME=VALUE...]: ROOT's ports, "KEY PORT" a line, from common.sh, in a shell that
+# holds no LOADTEST_*_PORT but the ones given.
+ports_for() {
+  local root=$1
+  shift
+  env -u LOADTEST_PG_PORT -u LOADTEST_PROXY_PORT -u LOADTEST_NATS_PORT \
+    -u LOADTEST_NATS_MONITOR_PORT -u LOADTEST_LISTENER_PORT -u LOADTEST_DISPATCH_PORT \
+    -u LOADTEST_PPROF_PORT "$@" bash -c 'source "$1"; stack_ports "$2"' ports "$helper" "$root"
+}
+
+# case_stack_ports: the stack's default ports follow LOADTEST_ROOT, so two Legion roles of one pod,
+# each on its own root, almost always start a stack each with no port variable set: each root's path
+# picks one of the 200 blocks of ports, and no two ports of one block or of two different blocks
+# meet. Two roots whose paths pick one block (about 1 pair in 200) hold the same 7 ports; the two
+# roots below do not.
+case_stack_ports() {
+  out=""
+  local one two again overlap
+  one=$(ports_for /legion/scratch/tmp/lt-one)
+  two=$(ports_for /legion/scratch/tmp/lt-two)
+  again=$(ports_for /legion/scratch/tmp/lt-one)
+  [ "$one" = "$again" ] || { out="$one"$'\n'"$again" fail "(i) one root got two sets of ports"; return; }
+  [ "$one" != "$two" ] || { out="$one" fail "(i) two roots got the same ports"; return; }
+  overlap=$(comm -12 <(awk '{print $2}' <<<"$one" | sort) <(awk '{print $2}' <<<"$two" | sort))
+  [ -z "$overlap" ] || { out="$one"$'\n'"$two" fail "(i) two roots share the ports $(tr '\n' ' ' <<<"$overlap")"; return; }
+  [ "$(wc -l <<<"$one")" = 7 ] || { out="$one" fail "(i) a root's ports are not the 7 stack.json keys"; return; }
+
+  # Every port of every block, against every other: all inside 1024-65535, none twice.
+  local report
+  report=$(bash -c '
+    source "$1"
+    declare -A seen=()
+    bad=""
+    for ((k = 0; k < PORT_BLOCKS; k++)); do
+      for key in "${PORT_KEYS[@]}"; do
+        p=$(default_port "$key" "$k")
+        ((p >= 1024 && p <= 65535)) || bad+="block $k $key is on port $p, outside 1024-65535; "
+        [ -z "${seen[$p]:-}" ] || bad+="block $k $key and ${seen[$p]} are both on port $p; "
+        seen[$p]="block $k $key"
+      done
+    done
+    printf "%s" "$bad"' blocks "$helper")
+  [ -z "$report" ] || { fail "(i) the port blocks do not hold: $report"; return; }
+
+  # A variable moves its own port alone.
+  local set_pg
+  set_pg=$(ports_for /legion/scratch/tmp/lt-one LOADTEST_PG_PORT=23456)
+  [ "$(awk '$1 == "postgres" {print $2}' <<<"$set_pg")" = 23456 ] ||
+    { out="$set_pg" fail "(i) LOADTEST_PG_PORT did not set the Postgres port"; return; }
+  [ "$(grep -v '^postgres ' <<<"$set_pg")" = "$(grep -v '^postgres ' <<<"$one")" ] ||
+    { out="$set_pg" fail "(i) LOADTEST_PG_PORT moved another port than Postgres'"; return; }
+  out=""
+  printf 'PASS: the default ports follow LOADTEST_ROOT, two roots in two blocks share no port, and each LOADTEST_*_PORT overrides its own\n'
+}
+
 failed=0
 case_orphaned_child || failed=$((failed + 1))
 case_stale_record || failed=$((failed + 1))
@@ -425,7 +485,8 @@ case_holder_ended || failed=$((failed + 1))
 case_waiting_callers || failed=$((failed + 1))
 case_foreign_record_live_pid || failed=$((failed + 1))
 case_prepare_stack_built_migration || failed=$((failed + 1))
+case_stack_ports || failed=$((failed + 1))
 if ((failed > 0)); then
-  printf 'FAIL: %d of 8 cases failed\n' "$failed" >&2
+  printf 'FAIL: %d of 9 cases failed\n' "$failed" >&2
   exit 1
 fi

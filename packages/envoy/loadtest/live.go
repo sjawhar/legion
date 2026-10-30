@@ -28,6 +28,44 @@ type liveFrame struct {
 	outOfOrder bool  // id <= the previous event frame's id on the same connection
 }
 
+// liveFrames builds the frames of one connection in order: each frame's marker and created_at come
+// from the event's JSON, and outOfOrder says the connection's ids did not rise. The live socket
+// reader and the SSE reader (sse.go) share it.
+type liveFrames struct {
+	nonce    int64
+	prevID   int64
+	havePrev bool
+}
+
+// frame is the frame of one event JSON that arrived at at, with id the connection's own id for it.
+// idFromEvent takes the id the event names instead, which is the SSE reader's rule; the live
+// socket keeps the frame's id.
+func (fs *liveFrames) frame(at, id int64, event []byte, idFromEvent bool) liveFrame {
+	f := liveFrame{at: at, id: id}
+	f.marker, _ = findMarker(event, fs.nonce)
+	var ev struct {
+		ID        *int64    `json:"id"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+	if json.Unmarshal(event, &ev) == nil {
+		if idFromEvent && ev.ID != nil {
+			f.id = *ev.ID
+		}
+		if !ev.CreatedAt.IsZero() {
+			f.created = ev.CreatedAt.UnixNano()
+		}
+	}
+	f.outOfOrder = fs.havePrev && f.id <= fs.prevID
+	fs.prevID, fs.havePrev = f.id, true
+	return f
+}
+
+// parseLiveID is a live frame's decimal id, 0 when it names none.
+func parseLiveID(s string) int64 {
+	id, _ := strconv.ParseInt(s, 10, 64)
+	return id
+}
+
 // liveSubscribe is the subscribe frame a dashboard tab sends for the events view. It names no
 // resume: a socket the load test opens follows the feed from its head.
 func liveSubscribe() map[string]any {
@@ -56,8 +94,9 @@ func readLive(conn *websocket.Conn, nonce int64, now func() time.Time, onFrame f
 	if err := conn.WriteJSON(liveSubscribe()); err != nil {
 		return 0, err
 	}
-	var n, prevID int64
-	havePrev, started := false, false
+	var n int64
+	fr := liveFrames{nonce: nonce}
+	started := false
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
@@ -83,17 +122,7 @@ func readLive(conn *websocket.Conn, nonce int64, now func() time.Time, onFrame f
 		case "error":
 			return n, fmt.Errorf("the events subscription was refused: %s: %s", m.Code, m.Message)
 		case "event":
-			f := liveFrame{at: at}
-			f.id, _ = strconv.ParseInt(m.ID, 10, 64)
-			f.marker, _ = findMarker(m.Event, nonce)
-			var ev struct {
-				CreatedAt time.Time `json:"created_at"`
-			}
-			if json.Unmarshal(m.Event, &ev) == nil && !ev.CreatedAt.IsZero() {
-				f.created = ev.CreatedAt.UnixNano()
-			}
-			f.outOfOrder = havePrev && f.id <= prevID
-			prevID, havePrev = f.id, true
+			f := fr.frame(at, parseLiveID(m.ID), m.Event, false)
 			onFrame(f)
 		}
 	}
@@ -129,69 +158,10 @@ func liveSocketURL(dispatch string) (string, error) {
 	return "", fmt.Errorf("the Dispatch URL %s is neither http:// nor https://", redactURL(dispatch))
 }
 
-// The dashboard transport a step's streams follow the event feed on.
-const (
-	// liveTransportWS is Dispatch's dashboard live socket, GET /ws/live (followLive).
-	liveTransportWS = "ws"
-	// liveTransportSSE is the SSE endpoint, GET /api/v1/events, that a Dispatch from before the
-	// live socket serves in its place (followSSE).
-	liveTransportSSE = "sse"
-	// liveTransportNone is a step with -live 0: it opens no dashboard stream, and probes neither
-	// endpoint.
-	liveTransportNone = "none"
-)
-
-// liveDialTimeout bounds a dashboard stream's handshake, and each of the transport probe's two
-// requests.
-const liveDialTimeout = 10 * time.Second
-
-// liveProbeUser is the user the probe asks as, the first dashboard viewer of the step.
-const liveProbeUser = "viewer-0"
-
-// decideLiveTransport picks the dashboard transport once per step, before any load: it dials the
-// live socket, and takes it when the handshake opens. A handshake answered 404 is a Dispatch from
-// before that socket, so the probe asks the SSE endpoint instead, and takes it when that answers
-// 200 with an event-stream body. Any other answer refuses the step, naming both endpoints and
-// what each answered, so a step never runs with no dashboard load and nothing to mark it. A step
-// with -live 0 opens no stream, so it probes nothing.
-func decideLiveTransport(ctx context.Context, live int, dispatch, liveURL string) (string, error) {
-	if live == 0 {
-		return liveTransportNone, nil
-	}
-	header := http.Header{"X-Dispatch-User": {liveProbeUser}}
-	dialer := &websocket.Dialer{HandshakeTimeout: liveDialTimeout, EnableCompression: true}
-	conn, resp, err := dialer.DialContext(ctx, liveURL, header)
-	if err == nil {
-		_ = conn.Close()
-		return liveTransportWS, nil
-	}
-	wsAnswer, notFound := "could not be reached: "+err.Error(), false
-	if resp != nil {
-		wsAnswer = "answered HTTP " + resp.Status
-		notFound = resp.StatusCode == http.StatusNotFound
-		_ = resp.Body.Close()
-	}
-	eventsURL := sseEventsURL(dispatch)
-	if !notFound {
-		return "", fmt.Errorf("the dashboard transport could not be decided: the live socket %s %s, and the SSE endpoint %s was not asked, because only a handshake answered HTTP 404 is a Dispatch that serves the SSE endpoint in its place",
-			redactURL(liveURL), wsAnswer, redactURL(eventsURL))
-	}
-	ok, answer := probeSSE(ctx, eventsURL, header)
-	if ok {
-		return liveTransportSSE, nil
-	}
-	return "", fmt.Errorf("the dashboard transport could not be decided: the live socket %s %s, and the SSE endpoint %s %s",
-		redactURL(liveURL), wsAnswer, redactURL(eventsURL), answer)
-}
-
 // liveSummary times the dashboard streams' event frames that arrived in the window, on either
-// transport.
+// dashboard stream (probeDashboard).
 type liveSummary struct {
-	// Transport is how the step's streams followed the event feed: liveTransportWS,
-	// liveTransportSSE or liveTransportNone. A summary.json of a run from before the SSE
-	// transport has no such field; every one of those followed the live socket.
-	Transport string `json:"transport"`
-	Frames    int    `json:"live_frames"`
+	Frames int `json:"live_frames"`
 	// OrderViolations counts frames whose event id is not above the previous frame's on the same
 	// connection.
 	OrderViolations int `json:"live_order_violations"`

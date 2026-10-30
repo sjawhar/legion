@@ -1,8 +1,0 @@
-kind: Fixed
-body: |-
-  `loadgen run` against a Dispatch from before the live socket (#2449) opened no dashboard stream
-  and retried without a mark, so a step ran a lighter load than its name. It now decides the
-  transport once per step: `GET /ws/live`, or, when that handshake answers 404, the SSE endpoint
-  `GET /api/v1/events`. It refuses the step when neither opens, and records the choice in
-  `summary.json` `live.transport` and in the TABLES section of live socket frames.
-time: 2026-10-29T21:00:00Z

@@ -41677,8 +41677,12 @@ function renderAdvice(tool, key, advice, opts) {
       lines.push(`You still have an open ask on ${key}: "${ask.question.slice(0, 80)}" (${ask.id}). Still needed? See the \`dispatch\` skill, "Close what you opened".`);
     }
   }
+  const superseded = advice.superseded_approval;
+  if (superseded !== undefined && (tool === "dispatch_doc_edit" || tool === "dispatch_artifact")) {
+    lines.push(`Stored version ${superseded.version}, superseding version ${superseded.approved_version}, which ${superseded.approved_by} approved. That approval is stale until someone approves version ${superseded.version}, and no undo restores it: a Legion design gate on this document is closed meanwhile, so every READY in its tree is refused. Meant to change the approved design? Request approval with \`dispatch request-approval\`. Meant a correction beside it? Tell the tree's architect, and keep the next one in a comment or in the plan.`);
+  }
   if (hasIssueAdvice && writesSinceHuman !== undefined && writesSinceHuman >= 3 && (tool === "dispatch_message" || tool === "dispatch_ask" || tool === "dispatch_comment" && opts.isAskReply !== true)) {
-    const middle = writesSinceHuman >= 6 ? "Stop posting here until a human replies." : "Progress ledger or scratchpad? If so, stop.";
+    const middle = writesSinceHuman >= 6 ? "Stop posting here until a human replies. Their reply ends this: post then what you held back." : "Progress ledger or scratchpad? If so, stop.";
     lines.push(`Posted. You've sent ${writesSinceHuman} messages on ${key} with no human response. ${middle} See the \`dispatch\` skill, "Structure over stream".`);
   }
   return lines;

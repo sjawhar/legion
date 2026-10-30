@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -61,6 +62,22 @@ type replayEdits struct {
 	Substitute int `json:"substitute"`
 }
 
+// replayBaseDocs is summary.json's replay.base_docs: how the client's copy of each document the
+// plan modelled was matched to the build under test before the window (readBaseTexts).
+type replayBaseDocs struct {
+	// Read and Unread count the plan's documents whose current markdown the build served and
+	// those it did not (no local id, or no 2xx answer).
+	Read   int `json:"read"`
+	Unread int `json:"unread"`
+	// Differed counts the documents the build serves otherwise than the bundle holds them, which
+	// the client models from the build's text instead; Replanned says the plan was built again
+	// from those texts.
+	Differed  int  `json:"differed"`
+	Replanned bool `json:"replanned"`
+	// Documents are those documents' logged ids, sorted.
+	Documents []string `json:"documents"`
+}
+
 // replayRecord is summary.json's replay block.
 type replayRecord struct {
 	Inputs  replayInputs `json:"inputs"`
@@ -84,7 +101,12 @@ type replayRecord struct {
 	Timeouts          int                         `json:"timeouts"`
 	Saturated         bool                        `json:"saturated"`
 	SaturatedReasons  []string                    `json:"saturated_reasons"`
-	Roster            int                         `json:"roster"`
+	// SaturationCores is the cores the CPU criterion was measured against (saturationCores), and
+	// SaturationCoresFrom names which limit set it: "gomaxprocs", "nproc", "cgroup_cpu_max"
+	// (cgroup v2) or "cgroup_cpu_quota" (cgroup v1).
+	SaturationCores     float64 `json:"saturation_cores"`
+	SaturationCoresFrom string  `json:"saturation_cores_from"`
+	Roster              int     `json:"roster"`
 	// RosterSkipped counts the bundle roster's ids the listener refuses as a key (natsKey), which
 	// synthetic sessions replace.
 	RosterSkipped int `json:"roster_skipped"`
@@ -92,22 +114,54 @@ type replayRecord struct {
 	// and waited for it; DocOrderWaitS their waits in seconds.
 	DocOrderWaits int  `json:"doc_order_waits"`
 	DocOrderWaitS stat `json:"doc_order_wait_s"`
+	// BaseDocs says how the client's copy of each document was matched to the build under test
+	// before the window; null when the plan modelled no document.
+	BaseDocs *replayBaseDocs `json:"base_docs"`
 	// EndState digests the documents the run wrote, read after the drain; null when that read
 	// failed (no Postgres reachable).
 	EndState *replayEndState `json:"end_state"`
 }
 
+// replayCgroupQuota is the CPU quota the cgroup sets on this process, from whichever hierarchy
+// the box mounts (readCgroupCPUQuota).
+type replayCgroupQuota struct {
+	// Version is the cgroup hierarchy read: 2 for cpu.max, 1 for cpu.cfs_quota_us and
+	// cpu.cfs_period_us.
+	Version int `json:"version"`
+	// QuotaUS is the quota in microseconds per period, -1 when no quota is set (cgroup v2's
+	// "max"); PeriodUS is the period in microseconds.
+	QuotaUS  int64 `json:"quota_us"`
+	PeriodUS int64 `json:"period_us"`
+}
+
+// cores is the quota in cores; ok is false when no quota is set.
+func (q replayCgroupQuota) cores() (float64, bool) {
+	if q.QuotaUS <= 0 || q.PeriodUS <= 0 {
+		return 0, false
+	}
+	return float64(q.QuotaUS) / float64(q.PeriodUS), true
+}
+
+// source names the files the quota was read from, for saturation_cores_from.
+func (q replayCgroupQuota) source() string {
+	if q.Version == 1 {
+		return "cgroup_cpu_quota"
+	}
+	return "cgroup_cpu_max"
+}
+
 // replayMetaRecord is meta.json's replay record.
 type replayMetaRecord struct {
 	Inputs replayInputs `json:"inputs"`
-	// CgroupCPUMax is /sys/fs/cgroup/cpu.max; "" when absent.
+	// CgroupCPUMax is /sys/fs/cgroup/cpu.max (cgroup v2); "" when absent, as it is on a cgroup v1
+	// box.
 	CgroupCPUMax string `json:"cgroup_cpu_max"`
+	// CgroupCPUQuota is the quota read from either hierarchy (readCgroupCPUQuota); null when
+	// neither hierarchy's files are there.
+	CgroupCPUQuota *replayCgroupQuota `json:"cgroup_cpu_quota"`
 	// HeapStartAt and HeapEndAt are when heap-start.pprof and heap-end.pprof were requested.
 	HeapStartAt time.Time `json:"heap_start_at,omitzero"`
 	HeapEndAt   time.Time `json:"heap_end_at,omitzero"`
-	// DispatchBuild is $LOADTEST_ROOT/bin/envoy-dispatch.json (dispatch_commit, dispatch_tree,
-	// dispatch_pprof_overlay, dispatch_binary_sha256, go_version, ...).
-	DispatchBuild json.RawMessage `json:"dispatch_build,omitempty"`
 	// LastReset is $LOADTEST_ROOT/replay/last-reset.json, stack.sh reset --replay's record: the
 	// template, the build key, seed_dump_sha256, the checksum of database dispatch before Dispatch
 	// started, the migration and whether the block index owed nothing.
@@ -135,7 +189,8 @@ const (
 )
 
 // collectReplayMeta records the inputs only the stack knows: the seed dump, Dispatch's GOMAXPROCS
-// and build, the cgroup's CPU limit.
+// and commit, the cgroup's CPU limit. The Dispatch build itself is meta.json's top-level
+// dispatch_build (collectMeta), written once.
 func collectReplayMeta(in replayInputs, pid int, root string) replayMetaRecord {
 	m := replayMetaRecord{}
 	if b, err := os.ReadFile(filepath.Join(root, "replay", "last-reset.json")); err == nil && json.Valid(b) {
@@ -152,16 +207,11 @@ func collectReplayMeta(in replayInputs, pid int, root string) replayMetaRecord {
 		}
 	}
 	in.GOMAXPROCS = dispatchGOMAXPROCS(pid)
-	if b, err := os.ReadFile(filepath.Join(root, "bin", "envoy-dispatch.json")); err == nil && json.Valid(b) {
-		m.DispatchBuild = b
-		var r struct {
-			Commit string `json:"dispatch_commit"`
-		}
-		_ = json.Unmarshal(b, &r)
-		in.DispatchCommit = r.Commit
+	if bld, ok := readDispatchBuild(root); ok {
+		in.DispatchCommit = bld.commit
 	}
-	if b, err := os.ReadFile("/sys/fs/cgroup/cpu.max"); err == nil {
-		m.CgroupCPUMax = strings.TrimSpace(string(b))
+	if q, cpuMax, ok := readCgroupCPUQuota(cgroupCPURoot); ok {
+		m.CgroupCPUMax, m.CgroupCPUQuota = cpuMax, &q
 	}
 	m.Inputs = in
 	return m
@@ -222,15 +272,84 @@ func dispatchCoreSamples(ss []sample) []float64 {
 	return out
 }
 
+// cgroupCPURoot is where the cgroup CPU files are: cgroup v2's cpu.max, or cgroup v1's
+// cpu/cpu.cfs_quota_us and cpu/cpu.cfs_period_us.
+const cgroupCPURoot = "/sys/fs/cgroup"
+
+// parseCgroupCPUMax reads a cgroup v2 cpu.max text ("<quota> <period>", microseconds; "max" for
+// no quota) as a quota; ok is false when the text is not that shape.
+func parseCgroupCPUMax(cpuMax string) (replayCgroupQuota, bool) {
+	q, p, ok := strings.Cut(strings.TrimSpace(cpuMax), " ")
+	if !ok {
+		return replayCgroupQuota{}, false
+	}
+	period, err := strconv.ParseInt(strings.TrimSpace(p), 10, 64)
+	if err != nil || period <= 0 {
+		return replayCgroupQuota{}, false
+	}
+	if q == "max" {
+		return replayCgroupQuota{Version: 2, QuotaUS: -1, PeriodUS: period}, true
+	}
+	quota, err := strconv.ParseInt(q, 10, 64)
+	if err != nil {
+		return replayCgroupQuota{}, false
+	}
+	return replayCgroupQuota{Version: 2, QuotaUS: quota, PeriodUS: period}, true
+}
+
+// readCgroupCPUQuota reads the CPU quota under root: cgroup v2's cpu.max when it is there, else
+// cgroup v1's cpu/cpu.cfs_quota_us and cpu/cpu.cfs_period_us (a quota of -1 is no quota, as the
+// issue pods run). cpuMax is the cpu.max text, "" on a cgroup v1 box; ok is false when neither
+// hierarchy's files can be read.
+func readCgroupCPUQuota(root string) (q replayCgroupQuota, cpuMax string, ok bool) {
+	if b, err := os.ReadFile(filepath.Join(root, "cpu.max")); err == nil {
+		cpuMax = strings.TrimSpace(string(b))
+		q, ok = parseCgroupCPUMax(cpuMax)
+		return q, cpuMax, ok
+	}
+	readUS := func(name string) (int64, bool) {
+		b, err := os.ReadFile(filepath.Join(root, "cpu", name))
+		if err != nil {
+			return 0, false
+		}
+		n, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+		return n, err == nil
+	}
+	quota, qOK := readUS("cpu.cfs_quota_us")
+	period, pOK := readUS("cpu.cfs_period_us")
+	if !qOK || !pOK || period <= 0 {
+		return replayCgroupQuota{}, "", false
+	}
+	return replayCgroupQuota{Version: 1, QuotaUS: quota, PeriodUS: period}, "", true
+}
+
+// saturationCores are the cores Dispatch can in fact use: the least of its GOMAXPROCS, the box's
+// nproc and the cgroup's CPU quota in cores when one is set. GOMAXPROCS alone is not a limit a
+// 2-core box can reach (--gomaxprocs 3 there), and neither is a GOMAXPROCS above the cgroup quota.
+// from names which of the three set the figure, the quota by the files it was read from
+// (replayCgroupQuota.source).
+func saturationCores(gomaxprocs, nproc int, cgroup *replayCgroupQuota) (float64, string) {
+	cores, from := float64(gomaxprocs), "gomaxprocs"
+	if nproc > 0 && float64(nproc) < cores {
+		cores, from = float64(nproc), "nproc"
+	}
+	if cgroup != nil {
+		if q, ok := cgroup.cores(); ok && q < cores {
+			cores, from = q, cgroup.source()
+		}
+	}
+	return cores, from
+}
+
 // replaySaturation says whether the run saturated and why: Dispatch's 5 s cores reached 0.9 x
-// GOMAXPROCS in at least 10% of the window's samples, an action hit its deadline, or more than 20
-// actions were in flight at the window end.
-func replaySaturation(cores []float64, gomaxprocs, timeouts, inflightAtEnd int) (bool, []string) {
+// satCores (saturationCores) in at least 10% of the window's samples, an action hit its deadline,
+// or more than 20 actions were in flight at the window end.
+func replaySaturation(cores []float64, satCores float64, timeouts, inflightAtEnd int) (bool, []string) {
 	reasons := []string{}
-	if len(cores) > 0 && gomaxprocs > 0 {
+	if len(cores) > 0 && satCores > 0 {
 		high := 0
 		for _, c := range cores {
-			if c >= 0.9*float64(gomaxprocs) {
+			if c >= 0.9*satCores {
 				high++
 			}
 		}
@@ -256,7 +375,7 @@ func (rr *replayRun) record(ss []sample, windowS float64) *replayRecord {
 		Inputs: rr.meta.Inputs, WindowS: windowS, CPUSource: "none", Writes: map[string]replayWriteCount{}, SkippedMissingDep: map[string]int{},
 		Substitutes: rr.subs, Edits: rr.edits, InflightAtEnd: rr.inflightAtEnd, Timeouts: int(rr.timeouts.Load()), Roster: len(rr.setup.roster),
 		RosterSkipped: rr.setup.rosterSkipped,
-		DocOrderWaits: len(rr.docWaits), DocOrderWaitS: mkStat(rr.docWaits), EndState: rr.endState,
+		DocOrderWaits: len(rr.docWaits), DocOrderWaitS: mkStat(rr.docWaits), BaseDocs: rr.baseDocs, EndState: rr.endState,
 	}
 	for k, w := range rr.writes {
 		rec.Writes[k] = *w
@@ -283,7 +402,8 @@ func (rr *replayRun) record(ss []sample, windowS float64) *replayRecord {
 			rec.DrainCPUS = &drain
 		}
 	}
-	rec.Saturated, rec.SaturatedReasons = replaySaturation(dispatchCoreSamples(ss), rec.Inputs.GOMAXPROCS, rec.Timeouts, rec.InflightAtEnd)
+	rec.SaturationCores, rec.SaturationCoresFrom = saturationCores(rec.Inputs.GOMAXPROCS, runtime.NumCPU(), rr.meta.CgroupCPUQuota)
+	rec.Saturated, rec.SaturatedReasons = replaySaturation(dispatchCoreSamples(ss), rec.SaturationCores, rec.Timeouts, rec.InflightAtEnd)
 	return rec
 }
 
@@ -294,12 +414,20 @@ type replayEndState struct {
 	SHA256    string `json:"sha256"`
 }
 
-// replayEndAnchor is an unresolved anchored root comment's anchor: its quote's sha256 and its
-// block id.
+// replayEndAnchor is an unresolved anchored root comment's anchor: its quote's sha256, its block
+// id and where that block stands in the document (endStateBlockIndexes). The digest covers
+// block_index, not block_id: Dispatch mints a fresh uuid for every block a replay write creates,
+// so two runs that did the same work hold the same anchor on different block ids. block_id is
+// kept for debugging.
 type replayEndAnchor struct {
 	QuoteSHA256 string `json:"quote_sha256"`
 	BlockID     string `json:"block_id"`
+	BlockIndex  string `json:"block_index"`
 }
+
+// endStateBlockUnknown is the block index of an anchor whose block the document no longer holds
+// (an orphaned anchor).
+const endStateBlockUnknown = "-1"
 
 // replayEndDoc is one written document's end state, by its logged id (stable across runs, unlike
 // the local id of a document the run creates): its highest version number and that version's
@@ -311,14 +439,20 @@ type replayEndDoc struct {
 	Anchors    []replayEndAnchor `json:"anchors"`
 }
 
+// endStateDigestFields says which fields the sha256 covers, for a reader of end_state.json.
+const endStateDigestFields = "sha256 over, per document sorted by artifact_id: artifact_id, version, size, " +
+	"and each anchor's quote_sha256@block_index sorted; block_id is not covered, as Dispatch mints " +
+	"a fresh uuid for every block a write creates"
+
 // replayEndStateFile is end_state.json: ids, numbers and hashes only.
 type replayEndStateFile struct {
 	Documents []replayEndDoc `json:"documents"`
 	SHA256    string         `json:"sha256"`
+	Digest    string         `json:"digest"`
 }
 
 // endStateDigest sorts the documents by id and each one's anchors, and returns the sha256 of one
-// line per document: "<artifact id> <version> <size> <quote sha256>@<block id>,...".
+// line per document: "<artifact id> <version> <size> <quote sha256>@<block index>,...".
 func endStateDigest(docs []replayEndDoc) string {
 	slices.SortFunc(docs, func(a, b replayEndDoc) int { return strings.Compare(a.ArtifactID, b.ArtifactID) })
 	h := sha256.New()
@@ -327,31 +461,63 @@ func endStateDigest(docs []replayEndDoc) string {
 			if c := strings.Compare(a.QuoteSHA256, b.QuoteSHA256); c != 0 {
 				return c
 			}
-			return strings.Compare(a.BlockID, b.BlockID)
+			return strings.Compare(a.BlockIndex, b.BlockIndex)
 		})
 		anchors := make([]string, len(d.Anchors))
 		for i, a := range d.Anchors {
-			anchors[i] = a.QuoteSHA256 + "@" + a.BlockID
+			anchors[i] = a.QuoteSHA256 + "@" + a.BlockIndex
 		}
 		fmt.Fprintf(h, "%s %d %d %s\n", d.ArtifactID, d.Version, d.Size, strings.Join(anchors, ","))
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// endStateBlockIndexes is, by block id, where each of a document's blocks stands in document
+// order: "<i>" for the i-th top-level block, "<i>.<r>" for its r-th table row and "<i>.<r>.<c>"
+// for that row's c-th cell. A block the live document has not stamped with an id is left out.
+func endStateBlockIndexes(served []servedBlock) map[string]string {
+	ix := make(map[string]string, len(served))
+	for i, b := range served {
+		top := strconv.Itoa(i)
+		if b.ID != "" {
+			ix[b.ID] = top
+		}
+		if b.Table == nil {
+			continue
+		}
+		for r, row := range b.Table.Rows {
+			rp := top + "." + strconv.Itoa(r)
+			if row.ID != "" {
+				ix[row.ID] = rp
+			}
+			for c, cell := range row.Cells {
+				if cell.ID != "" {
+					ix[cell.ID] = rp + "." + strconv.Itoa(c)
+				}
+			}
+		}
+	}
+	return ix
+}
+
 // readEndState reads, over the stack's Postgres URL, the end state of every document the run
-// wrote, writes end_state.json and sets the record's end_state; a failed read leaves it null.
-func (rr *replayRun) readEndState() {
+// wrote, and over the run's own Dispatch client where each anchor's block stands in its document,
+// writes end_state.json and sets the record's end_state; a failed read leaves it null.
+func (rr *replayRun) readEndState(a *api) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	rr.mu.Lock()
 	logged := slices.Sorted(maps.Keys(rr.wrote))
 	rr.mu.Unlock()
-	docs, err := rr.queryEndState(ctx, logged)
+	docs, local, err := rr.queryEndState(ctx, logged)
+	if err == nil {
+		err = readEndStateBlocks(ctx, a, docs, local)
+	}
 	if err != nil {
 		rr.lg.Printf("replay: end state not read (end_state is null): %v", err)
 		return
 	}
-	f := replayEndStateFile{Documents: docs, SHA256: endStateDigest(docs)}
+	f := replayEndStateFile{Documents: docs, SHA256: endStateDigest(docs), Digest: endStateDigestFields}
 	writeJSONFile(filepath.Join(rr.out, "end_state.json"), f, 0o644, rr.lg)
 	rr.mu.Lock()
 	rr.endState = &replayEndState{Documents: len(docs), SHA256: f.SHA256}
@@ -359,41 +525,79 @@ func (rr *replayRun) readEndState() {
 	rr.lg.Printf("replay: end state of %d documents, sha256 %s", len(docs), f.SHA256)
 }
 
-func (rr *replayRun) queryEndState(ctx context.Context, logged []string) ([]replayEndDoc, error) {
+// readEndStateBlocks sets each anchor's block index from the blocks of its document in document
+// order (GET /api/v1/artifacts/{id}/blocks, over the run's agent bearer), endStateBlockUnknown
+// for a block id the document no longer holds. local is the local id of each document by its
+// logged id; a document with no anchor is not read.
+func readEndStateBlocks(ctx context.Context, a *api, docs []replayEndDoc, local map[string]string) error {
+	for i := range docs {
+		d := &docs[i]
+		if len(d.Anchors) == 0 {
+			continue
+		}
+		id, ok := local[d.ArtifactID]
+		if !ok {
+			return fmt.Errorf("artifact %s blocks: no local id", d.ArtifactID)
+		}
+		res := a.callRetry(ctx, "GET", "/api/v1/artifacts/"+url.PathEscape(id)+"/blocks", who{}, nil)
+		if !res.ok() {
+			return fmt.Errorf("artifact %s blocks: status %d %s: %v", d.ArtifactID, res.status, res.errorCode(), res.err)
+		}
+		var served []servedBlock
+		if err := json.Unmarshal(res.body, &served); err != nil {
+			return fmt.Errorf("artifact %s blocks: %w", d.ArtifactID, err)
+		}
+		ix := endStateBlockIndexes(served)
+		for j := range d.Anchors {
+			bi, ok := ix[d.Anchors[j].BlockID]
+			if !ok {
+				bi = endStateBlockUnknown
+			}
+			d.Anchors[j].BlockIndex = bi
+		}
+	}
+	return nil
+}
+
+// queryEndState reads each written document's version, size and anchors over Postgres, and
+// returns the local id of every document that exists locally, by its logged id.
+func (rr *replayRun) queryEndState(ctx context.Context, logged []string) ([]replayEndDoc, map[string]string, error) {
 	if rr.pg == "" {
-		return nil, errors.New("no Postgres URL")
+		return nil, nil, errors.New("no Postgres URL")
 	}
 	conn, err := pgx.Connect(ctx, rr.pg)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: %w", err)
+		return nil, nil, fmt.Errorf("postgres: %w", err)
 	}
 	defer conn.Close(context.Background())
 	docs := make([]replayEndDoc, 0, len(logged))
+	locals := make(map[string]string, len(logged))
 	for _, id := range logged {
 		d := replayEndDoc{ArtifactID: id, Anchors: []replayEndAnchor{}}
 		if local, ok := rr.localNow(replayRef{idArtifact, id}); ok {
+			locals[id] = local
 			if err := conn.QueryRow(ctx, `select coalesce(max(number), 0),
 				coalesce((select coalesce(size, octet_length(markdown), octet_length(content), 0) from artifact_versions
 					where artifact_id = $1 order by number desc limit 1), 0)
 				from artifact_versions where artifact_id = $1`, local).Scan(&d.Version, &d.Size); err != nil {
-				return nil, fmt.Errorf("artifact_versions: %w", err)
+				return nil, nil, fmt.Errorf("artifact_versions: %w", err)
 			}
 			rows, err := conn.Query(ctx, `select coalesce(anchor->>'quote', ''), coalesce(anchor->>'block_id', '') from comments
 				where anchor is not null and reply_to is null and not resolved and anchor->>'artifact_id' = $1`, local)
 			if err != nil {
-				return nil, fmt.Errorf("comments: %w", err)
+				return nil, nil, fmt.Errorf("comments: %w", err)
 			}
 			var quote, block string
 			if _, err := pgx.ForEachRow(rows, []any{&quote, &block}, func() error {
 				d.Anchors = append(d.Anchors, replayEndAnchor{QuoteSHA256: sha256Hex([]byte(quote)), BlockID: block})
 				return nil
 			}); err != nil {
-				return nil, fmt.Errorf("comments: %w", err)
+				return nil, nil, fmt.Errorf("comments: %w", err)
 			}
 		}
 		docs = append(docs, d)
 	}
-	return docs, nil
+	return docs, locals, nil
 }
 
 // localNow is the local id of a logged object once the run is over: the response of the run's

@@ -22,14 +22,16 @@
 # A --replay step replays the LINUX bundle (README.md, The replay) instead: stack.sh setup
 # (incremental; with --dispatch-commit, envoy-dispatch from that commit, a rev that names no commit
 # refused before anything starts), start, replay-get (the manifest's parts, default
-# replay-2026-10-26.json; nothing to do once done), replay-prepare (this build's template, once per
-# build) and reset --replay, then `loadgen run -source replay` with the -replay-* flags: --rate,
-# --reads, --read-mix, --uploads, --from, --to, --roster and --keys-file are -replay-rate,
-# -replay-reads, -replay-read-mix, -replay-uploads, -replay-from, -replay-to, -replay-roster and
-# -replay-keys-file. --events, --sessions, --requests and the other flags of the generated load are
-# refused; the synthetic seed and its migration check are not used. Dispatch reaches Postgres
-# directly (LOADTEST_PG_DIRECT=1) unless the environment sets LOADTEST_PG_DIRECT; --gomaxprocs sets
-# LOADTEST_GOMAXPROCS. The reset's replay/last-reset.json is copied into the step directory.
+# replay-2026-10-26.json; nothing to do once done; LOADTEST_REPLAY_ISSUE names the issue they are
+# file artifacts of and is required, refused here before anything starts), replay-prepare (this
+# build's template, once per build) and reset --replay, then `loadgen run -source replay` with the
+# -replay-* flags: --rate, --reads, --read-mix, --uploads, --from, --to, --roster and --keys-file
+# are -replay-rate, -replay-reads, -replay-read-mix, -replay-uploads, -replay-from, -replay-to,
+# -replay-roster and -replay-keys-file. --events, --sessions, --requests and the other flags of
+# the generated load are refused; the synthetic seed and its migration check are not used.
+# Dispatch reaches Postgres directly (LOADTEST_PG_DIRECT=1) unless the environment sets
+# LOADTEST_PG_DIRECT; --gomaxprocs sets LOADTEST_GOMAXPROCS. The reset's replay/last-reset.json is
+# copied into the step directory.
 #
 # Dispatch is stopped when the step ends, pass or fail, so the box is idle between steps; Postgres,
 # the proxy, NATS and the listener keep running (stack.sh stop stops them).
@@ -123,6 +125,12 @@ fi
 if [ -n "$dispatch_rev" ]; then
   dispatch_commit=$(git -C "$SRC" rev-parse --verify --quiet "$dispatch_rev^{commit}" 2>/dev/null) ||
     die "--dispatch-commit '$dispatch_rev' names no commit in $SRC"
+fi
+if $replay; then
+  # stack.sh replay-get takes the issue the replay's parts are file artifacts of from the
+  # environment, as the manifest names none; refuse here too, before the step touches the stack.
+  [ -n "${LOADTEST_REPLAY_ISSUE:-}" ] ||
+    die "LOADTEST_REPLAY_ISSUE is required for a --replay step: set it to the issue the replay's parts are file artifacts of"
 fi
 
 lock_root "$ROOT"
