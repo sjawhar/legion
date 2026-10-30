@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-493",
+  "completed": "2026-10-30T03:53:40Z",
+  "decision": "approved",
+  "round": 6,
+  "fingerprint": "417950e3… at 30042b42 (my last review, APPROVE) → 67574c6d… at 1021e903: changed, in one file only. packages/daemon/internal/record/project.go: the merge of main (53bf175c) reflowed TreeLive's doc comment, where main rewrote the sentence before this PR's two added comment lines ('waits on a person with its architect live'). Main changed no code in the file; this PR's TreeLive body (len(line([]Issue{root}, slots)) == 1) is unchanged and still agrees with liveRoots for one root, since lingering, awaiting a person and holding a slot are each decided before line.",
+  "codeHead": "53bf175c1aa36044042a0fc96eadef3c7b5b8538",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "thermonuclear": "none: the round's delta is a comment, no runtime code; the architect also asked for no new subagent batches while Opus 5.5 calls are refused.",
+  "ci": "CI run 40981291840 at 53bf175c (compare to 1021e903 handoffsOnly true, 2 files), queued from about 00:45Z behind 77 runs: ci-ok, lint, typecheck, test success; pr-title success."
+}
