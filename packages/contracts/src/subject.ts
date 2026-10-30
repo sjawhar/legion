@@ -4,6 +4,38 @@ import { sha256Hex } from "./sha256";
 export const AGENT_TOPIC_PREFIX = "notifications.agent." as const;
 export const ROLE_TOPIC_PREFIX = "notifications.role." as const;
 
+export const KEPT_TOPIC_PREFIX = "notifications.envoy.kept." as const;
+
+export type KeptRoleSubject<Role extends string = string> =
+  `${typeof KEPT_TOPIC_PREFIX}role.${Role}`;
+
+/**
+ * The kept lane of `role`: the one role message the listener could not deliver, held until the
+ * role is claimed and then forwarded to the new holder. The listener alone publishes it and
+ * reads it; it is no session's interest and is never replayed. The role name is written into the
+ * segment as `ROLE_TOPIC_PREFIX` writes it, unsanitized, so a role's kept subject follows from
+ * its role topic.
+ */
+export function keptRoleSubject<Role extends string>(role: Role): KeptRoleSubject<Role>;
+export function keptRoleSubject(role: string) {
+  return `${KEPT_TOPIC_PREFIX}role.${role}`;
+}
+
+export type KeptRoleCursorSubject<Role extends string = string> =
+  `${typeof KEPT_TOPIC_PREFIX}cursor.${Role}`;
+
+/**
+ * The drain cursor of `role`: how far the listener has read that role's kept lane, so a kept
+ * message already forwarded is not forwarded again. The listener alone publishes it and reads it;
+ * it is no session's interest and is never replayed. The role name is written into the segment as
+ * `ROLE_TOPIC_PREFIX` writes it, unsanitized, so a role's cursor subject follows from its role
+ * topic.
+ */
+export function keptRoleCursorSubject<Role extends string>(role: Role): KeptRoleCursorSubject<Role>;
+export function keptRoleCursorSubject(role: string) {
+  return `${KEPT_TOPIC_PREFIX}cursor.${role}`;
+}
+
 export const LEGION_NOTICE_TOPIC_PREFIX = "notifications.legion." as const;
 
 export type LegionNoticeSubject<

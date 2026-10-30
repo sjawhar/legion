@@ -19,6 +19,7 @@ type Envelope struct {
 	DedupeKey      string          `json:"dedupe_key"`
 	IssuedAt       int64           `json:"issued_at"`
 	ExpiresAt      *int64          `json:"expires_at,omitempty"`
+	KeptAt         *int64          `json:"kept_at,omitempty"`
 	PayloadSummary string          `json:"payload_summary"`
 	PayloadRef     string          `json:"payload_ref,omitempty"`
 	Payload        string          `json:"payload,omitempty"`
@@ -134,6 +135,27 @@ func validateWireNonEmpty(fields map[string]json.RawMessage, field, path string)
 
 const AgentTopicPrefix = "notifications.agent."
 const RoleTopicPrefix = "notifications.role."
+
+// KeptTopicPrefix begins the listener's kept lane (KEPT_TOPIC_PREFIX, packages/contracts/src/subject.ts).
+// The listener alone publishes under it and reads it, no session may register a topic under it, and
+// no consumer of the notification stream delivers one.
+const KeptTopicPrefix = "notifications.envoy.kept."
+
+// KeptRoleSubject is the kept lane of role: the one role message the listener could not deliver,
+// held until the role is claimed and then forwarded to the new holder. The role name is written
+// into the segment as RoleTopicPrefix writes it, unsanitized, so a role's kept subject follows
+// from its role topic. Mirrored on the TS side as `keptRoleSubject`.
+func KeptRoleSubject(role string) string {
+	return KeptTopicPrefix + "role." + role
+}
+
+// KeptRoleCursorSubject is the drain cursor of role: how far the listener has read that role's
+// kept lane, so a kept message already forwarded is not forwarded again. The role name is written
+// into the segment as RoleTopicPrefix writes it, unsanitized, so a role's cursor subject follows
+// from its role topic. Mirrored on the TS side as `keptRoleCursorSubject`.
+func KeptRoleCursorSubject(role string) string {
+	return KeptTopicPrefix + "cursor." + role
+}
 
 // DeliveryDuplicateWindow is how long a repeated delivery is recognised as a duplicate, by the
 // notification stream and by every host that subscribes over core NATS. Generated from

@@ -143,6 +143,10 @@ var streamSubjects = []string{
 	"notifications.ghostwispr.>",
 	"notifications.whatsapp.>",
 	ExceptionTopicPrefix + contracts.AgentTopicPrefix + ">",
+	// The role messages the listener kept because it could not deliver them, and the per-role
+	// drain cursor. The listener alone publishes and reads them, and no consumer of the
+	// notification stream delivers them (DurableNotificationSubjects).
+	contracts.KeptTopicPrefix + ">",
 }
 
 // Every subject of streamSubjects is classified for POST /v1/replay (cmd/listener/replay.go) by
@@ -180,6 +184,10 @@ var (
 		// A failed delivery's report, carrying the undelivered message's payload and the session it
 		// was for (cmd/listener publishDeliveryException); a session's own lane included.
 		ExceptionTopicPrefix + contracts.AgentTopicPrefix + ">",
+		// A role message the listener could not deliver, carrying that message's payload and the
+		// holder it was meant for, and the per-role drain cursor over them: no session may
+		// register a topic under it and no replay hands one out.
+		contracts.KeptTopicPrefix + ">",
 	}
 )
 
@@ -204,9 +212,21 @@ func ReachesPrivateStreamSubject(sessionID, topic string) bool {
 	return topic != contracts.AgentSubject(sessionID) || strings.ContainsAny(sessionID, "*>")
 }
 
-// StreamSubjects reports the durable notification subjects, excluding role lanes.
+// StreamSubjects reports the subjects the stream carries, excluding role lanes. A consumer's
+// filter over the notification subjects takes DurableNotificationSubjects instead.
 func StreamSubjects() []string {
 	return slices.Clone(streamSubjects)
+}
+
+// DurableNotificationSubjects reports the stream subjects every consumer filter built over the
+// notification subjects uses: StreamSubjects without the kept prefix. A kept copy still carries
+// its role topic in the envelope, so a consumer handed one would deliver it as a role message and
+// re-trigger role delivery on every listener; the listener reads the kept lane itself instead
+// (cmd/listener).
+func DurableNotificationSubjects() []string {
+	return slices.DeleteFunc(StreamSubjects(), func(subject string) bool {
+		return strings.HasPrefix(subject, contracts.KeptTopicPrefix)
+	})
 }
 
 // StreamCaptures reports whether the stream retains a publish to topic: some subject this binary

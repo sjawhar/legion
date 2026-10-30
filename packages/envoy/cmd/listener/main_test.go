@@ -2661,7 +2661,7 @@ func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrated consumer: %v", err)
 	}
-	if consumerInfo.Config.FilterSubject != "" || len(consumerInfo.Config.FilterSubjects) != len(bus.StreamSubjects()) {
+	if consumerInfo.Config.FilterSubject != "" || !slices.Equal(consumerInfo.Config.FilterSubjects, bus.DurableNotificationSubjects()) {
 		t.Fatalf("migrated consumer filters = %#v", consumerInfo.Config)
 	}
 	if consumerInfo.Config.InactiveThreshold != consumerInactiveThreshold {
