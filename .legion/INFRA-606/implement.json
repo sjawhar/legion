@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-606",
-  "completed": "2026-10-30T08:05:38Z",
+  "completed": "2026-10-30T11:57:55Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2406",
   "proof": [
     {
@@ -212,6 +212,14 @@
       "observed": "The event publishes with one held row for s1; once the lane supersedes attempt 1, s1 gets exactly one copy. A pass on an ended context releases its row. The claimant test: 50 of 50, no 'claim fallback copies' error.",
       "headSha": "e4846fb7e96ad5ca8c5efb4e1f3ecd2cdffe5607",
       "negativeControl": "With the previous MentionResumedSQL the event stays unpublished; with the claim on the pass's context the row stays claimed and 'context canceled' is logged."
+    },
+    {
+      "criterion": "Review round 7 (architect's ruling): a superseded mention attempt stands until its successor is delivered; a failed Retry, a keyed repeat, the sweep, a dead sender and a Retry in flight never leave a mentioned session without the comment, and never deliver it twice.",
+      "surface": "The API handler, a Retry through POST /api/v1/comments/{id}/deliveries, the post-response mention sender, a keyed repeat, main's delivery sweep and the outbox against Postgres, on an issue with no route",
+      "command": "go test -p 2 -parallel 4 ./internal/dispatch/api/ -run 'TestTheQueuedAttemptIsSentWhenNoRetryOvertakesIt|TestAFailedRetryLeavesTheQueuedAttemptToItsLane|TestARetryThatIsSentSupersedesTheAttemptItOvertook|TestARetryInFlight|TestAKeyedRepeatSendsTheAttemptAFailedRetryOvertook|TestTheSweepSendsTheAttemptAFailedRetryOvertookOnceItsClaimLapses' -count=1",
+      "observed": "After a failed Retry the lane sends attempt 1 (one copy); an in-flight Retry makes the lane stand down, then the sweep sends attempt 1 if the Retry fails, or the Retry's sender supersedes it if it lands (one copy); a keyed repeat and the sweep send an overtaken attempt once.",
+      "headSha": "edaaae7e9436a2a5b6b06ad12bbcad0c49f5f72f",
+      "negativeControl": "On e4846fb7 the reproduction reads attempt 1 failed 'superseded' with no copy, and every path test but the sent Retry (a guard) fails."
     }
   ],
   "filesChanged": [
@@ -251,6 +259,7 @@
     "packages/envoy/internal/dispatch/api/comment_delivery_receipt_test.go",
     "packages/envoy/internal/dispatch/api/comment_delivery_resolution_test.go",
     "packages/envoy/internal/dispatch/api/comment_delivery_sender_test.go",
+    "packages/envoy/internal/dispatch/api/comment_delivery_supersede_test.go",
     "packages/envoy/internal/dispatch/api/comment_document_authors_test.go",
     "packages/envoy/internal/dispatch/api/comment_mention_sender.go",
     "packages/envoy/internal/dispatch/api/comment_mentions_test.go",
@@ -347,7 +356,9 @@
     "A card Retry while a send is still queued now opens attempt 2 rather than resuming attempt 1 (the queued attempt holds a live claim), the documented rule for a live claim.",
     "Forward merges at 1b1b727a (main de546ed2) and 5a26d3ab (main cd5ca7c3): main's #2463 took 0142-0144, so the fallback table is 0145_comment_fallback_copies; route pin 146.",
     "Forward merge at e4846fb7 (main a21100c5): main took 0145-0147, so the fallback table is 0148_comment_fallback_copies; route pin 147; main's session_answers_test.go fixture waits for a mentioned comment's post-response send.",
-    "TestAnAbandonedMentionIsSettledByTheOutboxOrLeftToTheClaimThatTookItFirst's 'a claim commits first' case now expects the event published with a held fallback row (the attempt is past a lease), not deferred."
+    "TestAnAbandonedMentionIsSettledByTheOutboxOrLeftToTheClaimThatTookItFirst's 'a claim commits first' case now expects the event published with a held fallback row (the attempt is past a lease), not deferred.",
+    "Forward merge at fd9f4e1c (main 96a7e5ea): the fallback pass counts its publish failures through Deps.countPublishFailure; route pin 148 (main's own pin is stale at 146 against 147 routes).",
+    "Two existing assertions changed with the supersede rule: the routed failed-Retry test now expects the lane to send attempt 1 (the copy assertions unchanged), and the sweep test expects the overtaken attempt 1 settled superseded once attempt 2 lands."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
@@ -356,7 +367,7 @@
     "The NUL-refusal test raced the fixture mention's asynchronous send (a comment.delivery event landing between its table snapshots); it now waits for the send to settle.",
     "The pod was replaced mid-round and the unpushed first fix was lost; every verified fix is now pushed as it lands."
   ],
-  "round": 14,
+  "round": 15,
   "answersTest": "735b6cde36e432bdc4bd6290e57e7dd4b71f6e0e",
-  "answersReview": "9472e8497461b65289223bb963e2b16db812c7ec"
+  "answersReview": "f0c9a14add01314b30b6c42dbce283c44e835b2c"
 }
