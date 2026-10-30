@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-590",
-  "completed": "2026-10-30T19:40:00Z",
+  "completed": "2026-10-30T20:20:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2395",
-  "head": "811dced0a4dc90f503b3e5b89befe365df32c2d4",
-  "round": "20 (the daemon reported `test` red at the handoff head 2db7e8d6, which runs no CI and carries code head 811dced0's verdict): at 811dced0 the `test` check run 124157504642 (run 41074105291 attempt 1) failed in packages/daemon's TestARecoveryTellsTheArchitectOfTheChildrenItDidNotRecord, which this PR does not change, and its one re-run, check run 124238434559 (attempt 2), completed success at 18:59:33Z, as did envoy-go. No later run is red; the re-run's ci-ok is still queued behind its long jobs. No code changed; code head stays 811dced0.",
+  "head": "fd93819c3426058f1f42b121f57c8bb934637473",
+  "round": "20 (sent back on a red `test` at the handoff head 2db7e8d6, which carried attempt 1's red from 811dced0 though attempt 2 was green; the head also conflicted with main's #2504): forward merge of main 0be366cf8 (fd93819c), a full round. nats.go keeps #2504's RepairGrace/HookStall/markHooksDueLocked and this PR's ConnectionChanged signal; a replacement connection calls markHooksDueLocked then connectionChangedLocked; recovery.go and cmd/listener/main.go auto-merged. Migrations 0149/0150 stand (main's last 0148), connections 89, CI filters 0 uncovered (#2552 now carries the api/testdata line). Code pushed first, handoff second. Diff-check comment 6532101928.",
   "proof": [
     {
       "criterion": "Exactly one process publishes at a time through a lease on the outbox's own database connection; /healthz carries boolean outbox_publisher",
@@ -198,6 +198,14 @@
       "observed": "ok 20.28 s at 811dced0 (20 of 20) and ok 20.15 s at d126b19d (20 of 20); run 41074105291 attempt 2: test success, envoy-go success.",
       "headSha": "811dced0a4dc90f503b3e5b89befe365df32c2d4",
       "negativeControl": "Attempt 1 of the same run failed in that test ('mapping_refresh_test.go:1489: LEGION-1603 = <nil>, want the recovery to record it in LEGION-1600's tree'); the PR changes 0 files under packages/daemon."
+    },
+    {
+      "criterion": "The head merged with main's #2504 keeps both the connection-change signal and #2504's hook-stall repair and /healthz stall report, and the touched packages pass.",
+      "surface": "bus, listener, kvwatch, outbox, duty and store packages on in-process NATS and pod Postgres 17 (fresh UTF8 database)",
+      "command": "cd packages/envoy && go build ./... && go vet ./... && go test -p 2 -parallel 4 -count=1 ./internal/bus/ && DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -p 2 -parallel 4 -count=1 ./internal/dispatch/outbox/ ./internal/dispatch/duty/ ./internal/dispatch/store/ && go test -p 2 -parallel 4 -count=1 ./cmd/listener/ ./internal/kvwatch/",
+      "observed": "build and vet clean (envoy and infra); bus ok 348.9 s; outbox ok 270.3 s, duty ok 23.4 s, store ok 247.2 s; listener ok 450.3 s, kvwatch ok 62.7 s; TestDispatchConnectionsPerPodIsTheServers ok at 89; main's CI filter check 0 uncovered.",
+      "headSha": "fd93819c3426058f1f42b121f57c8bb934637473",
+      "negativeControl": "Before the merge, git merge-tree reported 'CONFLICT (content): Merge conflict in packages/envoy/internal/bus/nats.go' against main 0be366cf8, and GitHub showed the head conflicting."
     }
   ],
   "filesChanged": [
@@ -222,7 +230,8 @@
     "Round 15 merge: cmd/dispatch/README.md, migrations renamed to 0145_duty_holds/0146_outbox_claim and references, .github/workflows/ci.yaml (one filter line)",
     "Round 16 merge: .dispatch/architecture/dispatch-outbox.md, cmd/dispatch/README.md, migrations renamed to 0148_duty_holds/0149_outbox_claim and references, outbox/session_answers_test.go and api/session_answers_test.go (setup)",
     "Round 17: merge (ci.yaml, docs-pages.yaml, AGENTS.md, cmd/dispatch/main.go and main_test.go, internal/bus/{async.go,nats.go,core_permission_test.go,publish_denied_window_test.go}, outbox/{batch.go,publisher.go,publisher_test.go,core_denied_test.go}); fix: internal/bus/{async.go,nats.go,export_test.go,window_request_test.go}",
-    "Round 18: internal/bus/{async.go,confirm.go,confirm_reconnect_test.go,denials.go,export_test.go,nats.go,stored.go,window_request_test.go,request_denied_window_test.go}, outbox/{batch.go,publisher.go,core_denied_test.go,role_test.go}, cmd/dispatch/{main.go,README.md}, running-dispatch.md, changelog fragment; merge: README, migrations renamed to 0149_duty_holds/0150_outbox_claim and references, ci.yaml"
+    "Round 18: internal/bus/{async.go,confirm.go,confirm_reconnect_test.go,denials.go,export_test.go,nats.go,stored.go,window_request_test.go,request_denied_window_test.go}, outbox/{batch.go,publisher.go,core_denied_test.go,role_test.go}, cmd/dispatch/{main.go,README.md}, running-dispatch.md, changelog fragment; merge: README, migrations renamed to 0149_duty_holds/0150_outbox_claim and references, ci.yaml",
+    "Round 20 merge: packages/envoy/internal/bus/nats.go (both conflicts resolved keeping both sides)"
   ],
   "trickyParts": [
     "Blocked events take their blocker's next_attempt_at (no attempt), so they are not re-read on every wake while the blocker waits out a back-off; an owner whose first 100 events all wait has its later due event deferred to the earliest of them (deferPastWindow).",
