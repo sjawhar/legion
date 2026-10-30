@@ -9,7 +9,7 @@
       "surface": "go test on a real Postgres 16 (pgserver, UTF8) with the real events.Broker and events.Horizon, at the fix head",
       "command": "cd packages/envoy && go test -p 2 -parallel 4 -count=1 ./internal/dispatch/api/ -run 'TestTheSuggestionSweepTrailsTheSafeHorizon|TestTheFirstPassOfAJustStartedProcessStartsAtTheNewestEvent|Suggestion|Maintenance|Sweep'; then one at a time -timeout 30m: ./internal/dispatch/api/ ./internal/dispatch/store/ ./internal/pgmigrate/ ./internal/dispatch/events/ ./cmd/dispatch/ ./internal/dispatch/docs/",
       "observed": "the held-insert test passes: cursor below the held id and suggestion pending after the first pass, with a later pass requested; judged once and cursor at or past it after the commit. First-pass test: a just-started Horizon's pass starts a null cursor at the newest event. Suites ok: store 222 s (fresh database), pgmigrate, events, cmd/dispatch 252 s, docs 986 s; api ok but for main's C-locale collation guard. Build and vet (both tags, infra, natslive) clean; connections 90. PR comment 6534600973.",
-      "headSha": "e91f96bf298d73f33d8b83e1d77f2a1fa6b18b01",
+      "headSha": "e91f96bf298da2fb8373e42cdc18695fd3805765",
       "negativeControl": "the same held-insert test on the merge without the fix failed: 'cursor = 6 after a pass run while event 5 could still commit; want it below that id'; the first-pass test without the Await step failed: 'cursor = 0 after the first pass of a just-started process; want 3'"
     }
   ],
