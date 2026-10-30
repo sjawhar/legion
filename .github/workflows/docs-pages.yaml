@@ -110,7 +110,7 @@ on:
       - 'packages/daemon/internal/workflow/*'
       - 'packages/daemon/internal/workspace/*'
       - 'packages/envoy/listenfd/*'
-      # ci.yaml's *dispatch_server, 45 patterns:
+      # ci.yaml's *dispatch_server, 49 patterns:
       - 'packages/envoy/cmd/dispatch/*'
       - 'packages/envoy/internal/bus/*'
       - 'packages/envoy/internal/contracts/*'
