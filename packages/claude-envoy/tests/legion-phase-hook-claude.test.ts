@@ -419,7 +419,6 @@ async function runWorker(options: {
         HOME: root,
         // `claudelaunch.Environment`.
         CLAUDE_CONFIG_DIR: configDir,
-        CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
         CLAUDE_CODE_DISABLE_CRON: "1",
         // The stand-in Anthropic API drives the model, and nothing else may reach a real one.
         ANTHROPIC_BASE_URL: base,

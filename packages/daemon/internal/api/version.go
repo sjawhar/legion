@@ -407,4 +407,17 @@ package api
 // refuses either pair. This change adds no store migration. (This branch took 36 through 41 in
 // turn; main landed each of those numbers first, the controller start command last at 41, so this
 // branch takes the number above them, as the collision note says.)
-const DaemonAPIVersion = 42
+//
+// 43: INFRA-338 -- a Claude Code role's start command and pane no longer carry
+// CLAUDE_CODE_DISABLE_BACKGROUND_TASKS; CLAUDE_CONFIG_DIR and CLAUDE_CODE_DISABLE_CRON stay, and
+// the name is no longer the runtime's, so an operator's `runtime.kubernetes.pod.env` and
+// `runtime.tmux.pane_env` may set it as they may set Claude Code's other variables. A role may
+// leave a background task running past the end of a turn: when it finishes, Claude Code starts a
+// turn of its own, which the bridge reports to the daemon as a turn (`internal/claudebridge`), so
+// the result is read in a turn the daemon sees rather than after one the daemon thinks has ended.
+// The worker container's and the pane's environment is one of this contract's surfaces, so
+// dropping a variable from it bumps the number, as adding the three at 42 did, and the image probe
+// holds this daemon and the image that runs its roles together. This change adds no store
+// migration. (42 is on main before this change, so this change takes the number above it, as the
+// collision note says.)
+const DaemonAPIVersion = 43

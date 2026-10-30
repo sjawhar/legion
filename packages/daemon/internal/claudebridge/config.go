@@ -9,7 +9,13 @@
 //   - `abort` becomes an interrupt control request, answered once Claude Code acknowledges it;
 //   - `get_state` and `negotiate_protocol` are the bridge's own to answer;
 //   - each user message's `result` ends one step of the turn, and the turn ends (`agent_end`) once
-//     no Envoy delivery waits.
+//     no Envoy delivery waits;
+//   - a turn Claude Code starts by itself, when a background task it had left running finishes, is
+//     a turn of the daemon's too: the `system` `init` line Claude Code writes at the start of every
+//     turn is `agent_start` when it arrives between turns, and that turn's one `result` is
+//     `agent_end`. Claude Code's background tasks are on under either runtime
+//     (`claudelaunch.Environment`), so a role may leave work running past a turn's end and read
+//     its result in the turn it starts.
 //
 // The bridge is transport: the phase-stall machine — a worker whose turn ends with its phase still
 // open is reminded — runs in the pane's `legion` MCP server

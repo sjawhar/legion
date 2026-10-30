@@ -78,8 +78,11 @@ type bridge struct {
 	held    [][]byte
 
 	// inRun is a turn the daemon was told of (agent_start) and not yet told is over; stepping is a
-	// user message whose result Claude Code has yet to give. Within a turn the bridge is always
-	// stepping: each result either sends the next message or ends the turn.
+	// user message whose result Claude Code has yet to give. In a turn the bridge itself started it
+	// is always stepping: each result either sends the next message or ends the turn. In a turn
+	// Claude Code started by itself — a background task's result waking it, which the bridge reads
+	// from the `system` `init` line that begins every turn (systemInit) — it is in a turn with no
+	// step of its own open, and that turn's one result ends it.
 	inRun, stepping bool
 	// queue is the Envoy deliveries waiting for the next step or turn.
 	queue []delivery
@@ -390,8 +393,9 @@ func (b *bridge) fromDaemon(line []byte) {
 	}
 }
 
-// prompt is the daemon's task. Between turns it starts one; during a turn it is acknowledged and
-// then refused as Oh My Pi refuses it, so the daemon sends it again once the turn ends.
+// prompt is the daemon's task. Between turns it starts one; during a turn, the bridge's own or one
+// Claude Code started by itself, it is acknowledged and then refused as Oh My Pi refuses it, so the
+// daemon sends it again once the turn ends.
 func (b *bridge) prompt(p shimwire.Prompt) {
 	b.respond(shimwire.Response{ID: p.ID, Command: shimwire.TypePrompt, Success: true})
 	if b.inRun {
@@ -417,8 +421,9 @@ func (b *bridge) abort(id string) {
 	b.writeClaude(map[string]any{"type": "control_request", "request_id": b.interrupt, "request": map[string]string{"subtype": "interrupt"}})
 }
 
-// deliver queues an Envoy delivery: between turns it starts one at once, and during a turn it is the
-// next step's message.
+// deliver queues an Envoy delivery: between turns it starts one at once; during a turn of the
+// bridge's own it is the next step's message, and during one Claude Code started by itself it is
+// the turn the bridge starts when that one ends.
 func (b *bridge) deliver(d delivery) {
 	d.queued <- nil
 	if b.inRun || b.seeding {
@@ -429,7 +434,7 @@ func (b *bridge) deliver(d delivery) {
 	b.startRun(d.content)
 }
 
-// startRun tells the daemon a turn starts and sends its first message.
+// startRun tells the daemon a turn of the bridge's own starts and sends its first message.
 func (b *bridge) startRun(message string) {
 	b.inRun = true
 	b.emit(shimwire.AgentStart{})
@@ -460,6 +465,10 @@ func (b *bridge) fromClaude(line []byte) {
 	switch head.Type {
 	case "assistant":
 		b.assistant(head.Message)
+	case "system":
+		if head.Subtype == "init" {
+			b.systemInit()
+		}
 	case "control_response":
 		b.controlResponse(head.Response)
 	case "control_request":
@@ -469,6 +478,22 @@ func (b *bridge) fromClaude(line []byte) {
 	case "result":
 		b.result(head.Subtype, head.IsError, head.Errors)
 	}
+}
+
+// systemInit acts on the `init` line Claude Code writes at the start of every turn and at no other
+// time: of a turn the daemon's prompt, an Envoy delivery or the seed started, and of one Claude
+// Code started by itself when a background task it had left running finished. Between turns it is
+// that second kind, a turn no step of the bridge's is open in, and the daemon is told of it as it
+// is told of any other, so the background result is read inside a turn rather than after one the
+// daemon thinks has ended. During a turn or the seeding it is the turn already begun: the bridge
+// set that state when it wrote the user message, before this line came back.
+func (b *bridge) systemInit() {
+	if b.inRun || b.seeding {
+		return
+	}
+	b.log.Printf("Claude Code started a turn of its own")
+	b.inRun = true
+	b.emit(shimwire.AgentStart{})
 }
 
 // contentBlock is one block of a stream-json message's content.
@@ -525,8 +550,10 @@ func (b *bridge) controlResponse(raw json.RawMessage) {
 	b.abortIDs = nil
 }
 
-// result ends a step. The seed's ends the seeding; a turn's step is followed by the next Envoy
-// delivery, else the turn's end. A step an interrupt ended ends the turn at once.
+// result ends a step, or the turn Claude Code started by itself. The seed's ends the seeding; a
+// step of a turn's is followed by the next Envoy delivery, else the turn's end; a self-started
+// turn's ends that turn, no step of the bridge's being open in it, and the next Envoy delivery
+// then starts a turn of the bridge's own. A step an interrupt ended ends the turn at once.
 func (b *bridge) result(subtype string, isError bool, errs []string) {
 	if b.seeding {
 		b.seeding = false
@@ -547,20 +574,21 @@ func (b *bridge) result(subtype string, isError bool, errs []string) {
 		}
 		return
 	}
-	if !b.stepping {
-		b.log.Printf("ignoring a %s result outside any step", subtype)
+	if !b.inRun {
+		b.log.Printf("ignoring a %s result outside any turn", subtype)
 		return
 	}
+	stepped := b.stepping
 	b.stepping = false
 	if isError && !b.aborted {
 		// Oh My Pi reports a failed step as the assistant message that ends it, stopReason "error";
 		// the daemon reads neither, so the log line is what puts the failure on the pane.
 		failure := "Claude Code: " + subtype + " " + strings.Join(errs, "; ")
-		b.log.Printf("the step failed: %s", failure)
+		b.log.Printf("the turn failed: %s", failure)
 		b.emitRaw(map[string]any{"type": "message_end", "message": map[string]any{
 			"role": "assistant", "stopReason": "error", "errorMessage": failure}})
 	}
-	if !b.aborted && len(b.queue) > 0 {
+	if stepped && !b.aborted && len(b.queue) > 0 {
 		next := b.queue[0]
 		b.queue = b.queue[1:]
 		b.step(next.content)
