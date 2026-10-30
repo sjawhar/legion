@@ -2,56 +2,53 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-557",
-  "completed": "2026-10-30T09:40:00Z",
-  "round": "review round 6",
+  "completed": "2026-10-30T13:00:00Z",
+  "round": "review round 7",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2404",
-  "codeHead": "a8a5d08a1046bf5c5a3b1e614f2af3aa0a8f0f55",
-  "answersReview": "ade51352f0776cfbcf1a50cb8f3d5b4df563f1e7",
+  "codeHead": "5a088bf9b19a7dc8b1454145d6da7251838c4a62",
+  "answersReview": "f1d28bd6bd7282b6ab45029fd6fd2d69bdf204d9",
   "proof": [
     {
-      "criterion": "A clean graceful stop with a handler retry outstanding still delivers within 10 s, through the clean-hand-back mark",
-      "surface": "two real cmd/listener processes against one nats-server 2.10.29, each a NATS nkey user holding exactly the rendered ListenerPermissions grant (mark key included)",
-      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -v -run TestTwoPodsGracefulStopWithARetryOutstandingDeliversWithin10s ./cmd/listener",
-      "observed": "all 60 messages reached their session within 10s, the slowest after 3.315s; pod-a logged hand_back_marked true",
-      "headSha": "a8a5d08a1046bf5c5a3b1e614f2af3aa0a8f0f55",
-      "negativeControl": "mark write disabled: slowest after 7.21s and 'pod-a did not mark its hand-back clean'"
+      "criterion": "Item 1: a stop whose handler is still running after its cancel writes no mark; the successor holds past 3 s",
+      "surface": "two in-process pods on one NATS server under the rendered grant, the standby receiving",
+      "command": "cd packages/envoy && go test -count=1 -run TestAStopWhoseHandlerIgnoresItsCancelMarksNoHandBack ./cmd/listener/",
+      "observed": "pass: hand_back_marked false, no_mark names the running handler, successor unmarked past 3 s",
+      "headSha": "5a088bf9b19a7dc8b1454145d6da7251838c4a62",
+      "negativeControl": "gate disabled: 'hand_back_marked:true ... linger_end:receiving holder seen'"
     },
     {
-      "criterion": "Reviewer gap 1: a successor whose subscribe flush the server never got holds the 7 s cap and keeps the debt",
-      "surface": "in-process receivers on one NATS server under the rendered grant, the SUB swallowed by a relay",
-      "command": "cd packages/envoy && go test -count=1 -run 'TestASuccessorWhoseSubscribeTheServerNeverGotSettlesForTheAckWait|TestASuccessorThatSubscribesAfterTheLingerLetGoSettlesForTheAckWait|TestASettleHoldsCapIsWhatThePreviousHolderCanStillHaveOutstanding' ./cmd/listener/",
-      "observed": "pass",
-      "headSha": "a8a5d08a1046bf5c5a3b1e614f2af3aa0a8f0f55",
-      "negativeControl": "mark read disabled: 'settle hold ended inside the hand-back's 3s with no mark to end it'; 'pod-b delivered \"newer\", want \"lost\"'; 'delivered \"fresh\" 2.954s after it subscribed, want ... once the 7s hold ended'"
-    },
-    {
-      "criterion": "Reviewer gap 2: a late release after a timed-out one owes the ack wait and gets no mark",
+      "criterion": "Item 2: a mark vouches only for the stopping term's own release",
       "surface": "lease on a real NATS KV bucket with a renewal held past the release bound",
-      "command": "cd packages/envoy && go test -count=1 -run TestLeaseAReleaseThatTimedOutLeavesTheTermOwingTheAckWait ./cmd/listener/",
-      "observed": "pass: record unsettled and ack_wait_owed, no mark",
-      "headSha": "a8a5d08a1046bf5c5a3b1e614f2af3aa0a8f0f55",
-      "negativeControl": "debt not recorded: 'AckWaitOwed:false'; mark vouching for the current revision: 'marked the hand-back true (<nil>), want none'"
+      "command": "cd packages/envoy && go test -count=1 -run TestLeaseAStopMarksNoHandBackForTheRevisionAnEarlierGiveUpReleased ./cmd/listener/",
+      "observed": "pass: MarkHandBack false, no handback key for the give-up's revision",
+      "headSha": "5a088bf9b19a7dc8b1454145d6da7251838c4a62",
+      "negativeControl": "reset removed: 'the stop marked the hand-back true (<nil>), want none'"
+    },
+    {
+      "criterion": "Item 3: the stale and drained gates each write no mark",
+      "surface": "two in-process pods with a receiving successor; a relay swallowing the UNSUB for the drain row",
+      "command": "cd packages/envoy && go test -count=1 -run 'TestAGracefulStop.*Mark|Unmarked' ./cmd/listener/ (rows 'the term had a lost node's binding open', 'the drain's wait ran out')",
+      "observed": "pass",
+      "headSha": "5a088bf9b19a7dc8b1454145d6da7251838c4a62",
+      "negativeControl": "each gate disabled: 'hand_back_marked:true' with 'linger_end:receiving holder seen'"
     },
     {
       "criterion": "Everything holds after the merge of main; the PR merges",
-      "surface": "multiprocess rows, listener/bus suites, infra core/gcp, ci.yaml router check, GitHub",
-      "command": "go test -tags multiprocess -count=1 -timeout 30m -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; untagged ./cmd/listener; ./internal/bus/; infra ./core/... ./gcp/...; .github/scripts/check-ci-filters.sh; gh api repos/sjawhar/legion/pulls/2404",
-      "observed": "multiprocess ok 682.606s; listener ok 848.273s; bus ok 336.237s; core ok; gcp ok (mkfs.ext4 tests skipped: not installed here); 26 gates; mergeable true, blocked. https://github.com/sjawhar/legion/pull/2404#issuecomment-6520193406",
-      "headSha": "a8a5d08a1046bf5c5a3b1e614f2af3aa0a8f0f55",
-      "negativeControl": "before the merge GitHub read dirty (infra/README.md); before adding sessionanswers to the filter check-ci-filters reported 2 problems"
+      "surface": "real cmd/listener binaries under the rendered grant; listener suite; infra core/gcp; ci.yaml router check; GitHub",
+      "command": "go test -tags multiprocess -count=1 -timeout 30m -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; untagged ./cmd/listener; infra ./core/... ./gcp/...; .github/scripts/check-ci-filters.sh; gh api repos/sjawhar/legion/pulls/2404",
+      "observed": "multiprocess ok 651.190s; listener ok 868.168s; core ok; gcp ok (mkfs.ext4 tests skipped: not installed); 26 gates; mergeable true, blocked. https://github.com/sjawhar/legion/pull/2404#issuecomment-6522807750",
+      "headSha": "5a088bf9b19a7dc8b1454145d6da7251838c4a62",
+      "negativeControl": "before the merge GitHub read dirty (infra/README.md)"
     }
   ],
   "filesChanged": [
-    "5e475795: awaitDone helper (durable.go) for the four done-before-ctx waits; lease.go split into lease_bucket.go and lease_record.go; Release records the ack-wait debt on timeout; test comments state rules",
-    "eafa3120: clean-hand-back mark (lease_handback.go: MarkHandBack, HandBackMarked), bus.ListenerHandBackPrefix, the timing bridge removed (handBackBridge, HandBackHolds, leaseHandBackBridge), settle hold ends at 3 s only on the mark, drain reports a confirmed close, the grant gains handback.<durable>.>, testnats fixtures and GCP goldens regenerated, README/AGENTS/infra README/changie fragments",
-    "a8a5d08a: merge of main (infra/README.md alarm paragraph; sessionanswers in the listener_multiprocess filter)"
+    "3e68eaae: receive_stop.go (settleInHand reports the handler, markHandBack(end, drained, handled) with a reason, typed lingerEnd), lease.go (startTermLocked resets released/releasedStale), lease_handback.go doc, receive.go/receive_term.go (termStart and fromHandBack deleted, readHandBackMark helper), README.md, main.go, changie fragment, tests",
+    "5a088bf9: merge of main (infra/README.md listener probe paragraph)"
   ],
   "trickyParts": [
-    "The mark is keyed by the released record's revision, which the stopping pod's own letGo wrote and the successor reads as previous.Revision(); a stop whose Release timed out has no revision of its own and marks nothing."
+    "The stop's worst-case sum is now 11 s (12.25 s with flush and release at their bounds); past the 10 s shutdown budget a stop loses at most the mark, and the next holder holds its 7 s cap."
   ],
-  "deviations": [
-    "A graceful stop after a node loss (stale_binding on the released record) writes no mark by the architect's rule, so that hand-over settles for 7 s and the row is bounded at 15 s instead of 10 s; recorded on the PR's Not proven / risk line."
-  ],
+  "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": []
 }
