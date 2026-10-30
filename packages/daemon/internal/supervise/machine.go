@@ -500,6 +500,15 @@ type Machine struct {
 	unansweredAsks int
 	// held is the suspension held for the agent's turn (holdSuspension), nil for none.
 	held *RequestSuspend
+	// staleRelaunch is the stale-plugin relaunch held for the agent's turn to end, naming the pass
+	// that found the claim ("boot", "sweep"); nil for none. A claim whose plugin cannot answer an
+	// update round is relaunched rather than asked, and relaunching it where it stands would end a
+	// turn whose worker cannot be asked to push first, so the relaunch waits for the turn
+	// (refreshPlugin, turnEnded). It is memory only, as the held suspension's deadline timer is:
+	// the daemon's boot pass and every orphan sweep post StalePlugin again for a claim still
+	// stale (refreshStalePlugins in internal/daemon), so a restart that forgets this mark finds
+	// the same claim again, and letGo drops it with the process it was made for.
+	staleRelaunch *string
 	// interrupt is the turn this claim was interrupted in for a start that takes over its issue's
 	// phase (Quiesce), nil for none; quiesced is the newest such start that has found the claim out
 	// of a turn. Both are memory only (Quiesce).
@@ -1215,15 +1224,18 @@ func (m *Machine) retire(ctx context.Context) error {
 }
 
 // letGo ends what the machine had with the claim's process: no timer watches it, no relaunch waits
-// on one (relaunchLater), no send talks to it, no suspension is held for its turn and no turn of it
-// is interrupted any more (the interrupt's start finds it over, quiesced), and the process the
-// claim records, when it records one, moves into previous — the claim no longer runs it (it was
-// stopped, found dead, or left behind), and the next launch of the same session waits it out.
+// on one (relaunchLater), no send talks to it, no suspension is held for its turn, no stale-plugin
+// relaunch waits for that turn either (refreshPlugin) — the process it was to replace is gone —
+// and no turn of it is interrupted any more (the interrupt's start finds it over, quiesced), and
+// the process the claim records, when it records one, moves into previous — the claim no longer
+// runs it (it was stopped, found dead, or left behind), and the next launch of the same session
+// waits it out.
 func (m *Machine) letGo() {
 	m.disarmAll()
 	m.relaunch = nil
 	m.forgetSend()
 	m.held = nil
+	m.staleRelaunch = nil
 	m.interruptOver()
 	if enrollment := ClearEnrollment(&m.claim); enrollment != nil {
 		m.revoke(*enrollment)

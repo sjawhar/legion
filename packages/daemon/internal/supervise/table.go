@@ -586,7 +586,9 @@ func fillTable(t *builder) {
 	t.ignore(onTurnStart, "the agent is not ready, so no delivery is in flight", unready...)
 	t.ignore(onTurnStart, noProcess, gone...)
 
-	t.row(onTurnEnd, "the turn ended", turnEnded, []ClaimState{StateIdle, StateWorking}, StateWorking)
+	// A turn whose end runs a stale-plugin relaunch held for it (refreshPlugin) ends launching, or
+	// failed when that launch spends the claim's budget, as the stale-plugin row itself does.
+	t.row(onTurnEnd, "the turn ended", turnEnded, []ClaimState{StateIdle, StateWorking, StateLaunching, StateFailed}, StateWorking)
 	t.ignore(onTurnEnd, "no turn is in flight", prompted...)
 	t.ignore(onTurnEnd, "the agent is not ready, so no turn of a delivery is in flight", unready...)
 	t.ignore(onTurnEnd, noProcess, gone...)
@@ -1086,6 +1088,16 @@ func (m *Machine) takeBackSignal(ownTask bool) {
 // runtime refuses leaves the claim idle, still holding it. A turn interrupted for a start that takes
 // over the issue's phase lets that start go on (Quiesce). The agent just said where it is, so
 // nothing is left to ask it after a restart.
+//
+// A stale-plugin relaunch held for this turn (refreshPlugin) runs here instead of the queued
+// task's send: the claim's process speaks a plugin contract that cannot answer an update round,
+// so it is replaced now that its worker has finished the turn, and the task waiting behind it
+// goes to the process the relaunch starts rather than to the one it replaces. The settlement
+// runs first, so the turn's own finished task retires before the relaunch rather than being
+// taken back and sent again to a worker that already did it. refreshPlugin is what decides it,
+// not relaunchStale: by now a registration may have recorded this daemon's contract, and the
+// claim's state and held suspension are what they are at this moment, not what they were when
+// the sweep found it.
 func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 	m.askFirst = false
 	m.interruptOver()
@@ -1107,6 +1119,10 @@ func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 	}
 	if err := m.settle(ctx); err != nil {
 		return err
+	}
+	if held := m.staleRelaunch; held != nil {
+		m.staleRelaunch = nil
+		return m.refreshPlugin(ctx, *held)
 	}
 	return m.sendPending(ctx)
 }

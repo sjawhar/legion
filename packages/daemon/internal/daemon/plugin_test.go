@@ -145,10 +145,14 @@ func TestRunRelaunchesAClaimOnAnotherPluginContractAtBootChargingNothing(t *test
 // A boot relaunch the launch path itself refuses — a tree lifecycle cleanup already reserved, here
 // — leaves the claim exactly as it found it: refreshPlugin's own checkLaunch runs before the Warn,
 // the PluginRelaunchFor mark, and the turn's interruption, so the refused attempt changes nothing,
-// its confirmed pending delivery included, and logs no relaunching line while the refusal lasts.
-// The orphan sweep is the one periodic pass that already reads every claim, so once the refusal
+// the task waiting for it included, and logs no relaunching line while the refusal lasts. The
+// orphan sweep is the one periodic pass that already reads every claim, so once the refusal
 // clears the claim relaunches at the next sweep without a restart. A current claim seeded beside
 // it is never touched.
+//
+// The stale claim is seeded idle, not working: a claim in a turn is not relaunched at all until
+// that turn ends (supervise's refreshPlugin), so the launch path would never be asked and this
+// test would be waiting on a refusal nothing makes.
 func TestAStalePluginRelaunchTheLaunchPathRefusesIsRetriedAtTheNextSweep(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	cfg := testConfig(t)
@@ -170,9 +174,9 @@ func TestAStalePluginRelaunchTheLaunchPathRefusesIsRetriedAtTheNextSweep(t *test
 	seedWorkflowTree(t, cfg.PostgresDSN, project,
 		record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: cfg.Project, Tree: root, Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress", HandedOver: true, Rank: "U"},
 		supervise.Claim{Token: stale, Project: project, Tree: root, Issue: root, Role: claim.RoleImplementer,
-			Generation: 1, State: supervise.StateWorking, Session: "ses_implementer", SessionFile: sessionFile,
+			Generation: 1, State: supervise.StateIdle, Session: "ses_implementer", SessionFile: sessionFile,
 			PluginContract: 0, Locator: pluginTestLocator(stale),
-			Pending: &supervise.Delivery{ID: "outbox:1", Task: "implement the plan", Generation: 1, Phase: phase.Implementing, ConfirmedAt: time.Now().Add(-time.Minute)},
+			Pending: &supervise.Delivery{ID: "outbox:1", Task: "implement the plan", Generation: 1, Phase: phase.Implementing, QueuedAt: time.Now().Add(-time.Minute)},
 		},
 		supervise.Claim{Token: current, Project: project, Tree: root, Issue: root, Role: claim.RoleArchitect,
 			Generation: 1, State: supervise.StateReady, Session: "ses_architect", SessionFile: filepath.Join(cfg.StateDir, "architect.jsonl"),
@@ -198,11 +202,11 @@ func TestAStalePluginRelaunchTheLaunchPathRefusesIsRetriedAtTheNextSweep(t *test
 	testwait.Eventually(t, "the launch gate asked more than once while refusing "+string(stale), func() bool {
 		return asked.Load() > 1
 	})
-	if c := storedClaim(t, cfg, stale); c.PluginRelaunchFor != 0 || c.State != supervise.StateWorking || c.Generation != 1 {
-		t.Fatalf("the stale claim after the refused boot relaunch = %+v, want it exactly as it was: working at generation 1, no relaunch marked", c)
+	if c := storedClaim(t, cfg, stale); c.PluginRelaunchFor != 0 || c.State != supervise.StateIdle || c.Generation != 1 {
+		t.Fatalf("the stale claim after the refused boot relaunch = %+v, want it exactly as it was: idle at generation 1, no relaunch marked", c)
 	}
-	if p := storedClaim(t, cfg, stale).Pending; p == nil || p.ConfirmedAt.IsZero() || p.Interrupted {
-		t.Fatalf("pending after the refused relaunch = %+v, want the confirmed delivery untouched", p)
+	if p := storedClaim(t, cfg, stale).Pending; p == nil || p.ID != "outbox:1" || p.Interrupted {
+		t.Fatalf("pending after the refused relaunch = %+v, want the waiting task untouched", p)
 	}
 	if lines := loggedLines(t, logs.String(), "relaunching it onto the current plugin"); len(lines) != 0 {
 		t.Fatalf("logs %s carry a relaunching line while the refusal lasted, want none", logs.String())
@@ -223,8 +227,8 @@ func TestAStalePluginRelaunchTheLaunchPathRefusesIsRetriedAtTheNextSweep(t *test
 	if c := storedClaim(t, cfg, stale); c.PluginRelaunchFor != api.DaemonAPIVersion {
 		t.Fatalf("PluginRelaunchFor after the sweep's relaunch = %d, want %d", c.PluginRelaunchFor, api.DaemonAPIVersion)
 	}
-	if p := storedClaim(t, cfg, stale).Pending; p == nil || !p.Interrupted || !p.ConfirmedAt.IsZero() {
-		t.Fatalf("pending after the sweep's relaunch = %+v, want the task taken back, unconfirmed and interrupted", p)
+	if p := storedClaim(t, cfg, stale).Pending; p == nil || p.ID != "outbox:1" || p.Interrupted {
+		t.Fatalf("pending after the sweep's relaunch = %+v, want the task still waiting for the process the relaunch starts", p)
 	}
 	testwait.Eventually(t, "the sweep-triggered relaunch line", func() bool {
 		return len(loggedLines(t, logs.String(), `"trigger":"sweep"`)) > 0

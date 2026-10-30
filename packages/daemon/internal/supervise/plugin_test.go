@@ -21,9 +21,11 @@ import (
 // A claim found re-adopted, registered or later, on a plugin contract the daemon does not speak is
 // relaunched at once, charged nothing: the process did nothing wrong, it simply predates this
 // daemon's plugin. The relaunch resumes the recorded session, since every one of these states has
-// already registered one, at the next generation.
+// already registered one, at the next generation. A claim in a turn is the one state this is not
+// true of — its relaunch waits for that turn
+// (TestAStalePluginBelowTheUpdateContractIsRelaunchedWhenItsTurnEnds) — so it is not in this list.
 func TestAStalePluginRelaunchesTheClaimChargingNothing(t *testing.T) {
-	for _, state := range []ClaimState{StateRegistered, StateReady, StateWorking, StateIdle} {
+	for _, state := range []ClaimState{StateRegistered, StateReady, StateIdle} {
 		t.Run(string(state), func(t *testing.T) {
 			h := newHarness(t)
 			h.reach(state)
@@ -66,14 +68,24 @@ func TestAStalePluginAlreadyCurrentDoesNothing(t *testing.T) {
 	h.wantCalls("Spawn", 1)
 }
 
-// A process found stale mid-turn is replaced mid-turn: that turn used whatever plugin it was
-// running, and the relaunch ends it. The task goes back to waiting first (interrupted), charged
-// nothing, and the agent resumes from its last saved turn once the relaunch registers.
-func TestAStalePluginMidTurnInterruptsTheTaskChargingNothing(t *testing.T) {
-	h := newHarness(t)
+// The project controller's process found stale mid-turn is replaced mid-turn: that turn used
+// whatever plugin it was running, and the relaunch ends it. The task goes back to waiting first
+// (interrupted), charged nothing, and the agent resumes from its last saved turn once the
+// relaunch registers. A workflow role's turn is waited out instead, because what it would lose is
+// work it has not pushed; the controller works no checkout and has nothing to push, and a round
+// it could answer does not exist for it, so waiting would only leave it on a plugin whose
+// `legion` tool this daemon does not speak.
+func TestAStaleControllerPluginMidTurnInterruptsTheTaskChargingNothing(t *testing.T) {
+	h := newBareHarness(t)
+	c := controllerClaim()
+	h.token = c.Token
+	if err := h.store.PutClaim(h.ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	h.start(c)
 	h.reach(StateReady)
-	h.must(RequestDeliver{Claim: testToken, Task: "implement the plan"})
-	h.must(StreamTurnStart{Claim: testToken})
+	h.must(RequestDeliver{Claim: h.token, Task: "Legion controller start"})
+	h.must(StreamTurnStart{Claim: h.token})
 	sent := h.wantPrompts(1)[0].DeliveryID
 	h.m.deps.PluginContract = 25
 
@@ -135,9 +147,11 @@ func (s *refusableCheckLaunchStore) CheckLaunch(ctx context.Context, c Claim) er
 // A relaunch the launch path refuses (a reserved tree cleanup, the same refusal
 // relaunchAfterFailure already pays for before its charge) leaves a stale claim exactly as it
 // found it: refreshPlugin's own checkLaunch runs before the Warn, the PluginRelaunchFor mark, and
-// the turn's interruption, so the refused boot attempt changes nothing — the claim stays working
-// its turn on the stale contract, its confirmed pending delivery untouched. Once the refusal
-// clears, the sweep's re-post (refreshStalePlugins in internal/daemon) relaunches it for real.
+// the turn's interruption, so the refused attempt changes nothing. The claim here is in a turn,
+// so the refusal is met where the relaunch now runs — at the turn's end, the refused attempt
+// leaving the claim idle on the stale contract — and the post that found it mid-turn refuses
+// nothing, because it only records that the relaunch waits. Once the refusal clears, the sweep's
+// re-post (refreshStalePlugins in internal/daemon) relaunches it for real.
 func TestAStalePluginRefusedByTheLaunchPathChangesNothing(t *testing.T) {
 	h := newBareHarness(t)
 	c := fixture(StateWorking)
@@ -153,15 +167,21 @@ func TestAStalePluginRefusedByTheLaunchPathChangesNothing(t *testing.T) {
 	h.m.deps.Store = store
 	h.m.deps.PluginContract = 24
 
-	if err := h.handle(StalePlugin{Claim: h.token, Trigger: "boot"}); !errors.Is(err, treelifecycle.ErrCleanupReserved) {
-		t.Fatalf("StalePlugin refused by the launch path = %v, want the reservation's wait", err)
+	if err := h.handle(StalePlugin{Claim: h.token, Trigger: "boot"}); err != nil {
+		t.Fatalf("StalePlugin while the turn runs = %v, want nil: the relaunch waits for the turn", err)
 	}
 	h.wantState(StateWorking)
+	if p := h.pending(); p.Interrupted || p.ConfirmedAt.IsZero() {
+		t.Fatalf("pending while the turn runs = %+v, want the confirmed delivery untouched", p)
+	}
+	h.wantCalls("Resume", 0)
+
+	if err := h.handle(StreamTurnEnd{Claim: h.token}); !errors.Is(err, treelifecycle.ErrCleanupReserved) {
+		t.Fatalf("the held relaunch refused by the launch path = %v, want the reservation's wait", err)
+	}
+	h.wantState(StateIdle)
 	if claim := h.claim(); claim.PluginRelaunchFor != 0 {
 		t.Fatalf("PluginRelaunchFor after the refusal = %d, want 0", claim.PluginRelaunchFor)
-	}
-	if p := h.pending(); p.Interrupted || p.ConfirmedAt.IsZero() {
-		t.Fatalf("pending after the refusal = %+v, want the confirmed delivery untouched", p)
 	}
 	h.wantCalls("Resume", 0)
 	if lines := h.logs.lines("relaunching it onto the current plugin"); len(lines) != 0 {
@@ -177,9 +197,6 @@ func TestAStalePluginRefusedByTheLaunchPathChangesNothing(t *testing.T) {
 		t.Fatalf("claim after the sweep relaunch = %+v, want PluginRelaunchFor 24 at generation 4", claim)
 	}
 	h.wantCalls("Resume", 1)
-	if p := h.pending(); !p.Interrupted || !p.ConfirmedAt.IsZero() {
-		t.Fatalf("pending after the sweep relaunch = %+v, want the task taken back, unconfirmed and interrupted", p)
-	}
 	if lines := h.logs.lines("relaunching it onto the current plugin"); len(lines) != 1 {
 		t.Fatalf("logged %v, want exactly one relaunching line once the refusal clears", lines)
 	}

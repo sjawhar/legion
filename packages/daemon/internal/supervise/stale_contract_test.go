@@ -72,3 +72,49 @@ func TestAStalePluginBelowTheUpdateContractIsRelaunchedWhenItsTurnEnds(t *testin
 		}
 	})
 }
+
+// The turn the relaunch waited for ends as any turn does, and its own finished task retires
+// before the relaunch rather than being taken back and sent again: the worker did that task, and
+// a relaunch that re-delivered it would have the resumed agent do it twice. The relaunch itself
+// prompts the stale process nothing — it is being replaced in the same decision.
+func TestAStalePluginBelowTheUpdateContractRetiresTheFinishedTaskBeforeItRelaunches(t *testing.T) {
+	h := updateHarness(t, PodUpdateContract-2)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: h.token, Task: "implement the plan"})
+	h.must(StreamTurnStart{Claim: h.token})
+	sent := h.wantPrompts(1)
+	h.m.deps.PluginContract = PodUpdateContract
+	h.must(StalePlugin{Claim: h.token, Trigger: "sweep"})
+
+	h.must(StreamTurnEnd{Claim: h.token})
+
+	h.wantState(StateLaunching)
+	h.wantCalls("Resume", 1)
+	h.wantPrompts(len(sent))
+	if p := h.claim().Pending; p != nil {
+		t.Errorf("pending after the relaunch = %+v, want the finished turn's task retired, not taken back for the new process", p)
+	}
+}
+
+// A claim whose process goes while its relaunch waits for the turn — it died, the operator
+// suspended it, its tree closed — drops the hold with the process it was made for (letGo), so
+// nothing relaunches a claim that has no process to replace, and the launch that brings it back
+// installs this daemon's plugin anyway.
+func TestAStalePluginBelowTheUpdateContractDropsTheHeldRelaunchWithItsProcess(t *testing.T) {
+	h := updateHarness(t, PodUpdateContract-2)
+	h.reach(StateReady)
+	h.must(RequestDeliver{Claim: h.token, Task: "implement the plan"})
+	h.must(StreamTurnStart{Claim: h.token})
+	h.m.deps.PluginContract = PodUpdateContract
+	h.must(StalePlugin{Claim: h.token, Trigger: "sweep"})
+	if h.m.staleRelaunch == nil {
+		t.Fatal("no relaunch is held for the turn")
+	}
+
+	h.must(RequestStop{Claim: h.token})
+
+	if h.m.staleRelaunch != nil {
+		t.Errorf("the relaunch still waits for a turn of a process the claim no longer runs: %q", *h.m.staleRelaunch)
+	}
+	h.wantCalls("Resume", 0)
+}

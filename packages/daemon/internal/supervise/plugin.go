@@ -62,18 +62,29 @@ func CannotAnswerUpdate(c Claim) bool { return HoldsCapability(c.State) && !CanA
 // turn in flight, and a worker that never pushed loses that turn's work with it, so a claim
 // whose recorded contract is PodUpdateContract or above gets an update round of its own instead
 // (openPluginUpdate) and keeps running until it answers. A claim below that contract cannot
-// answer at all and is relaunched at once, as every such claim was before this round existed. The
-// relaunch keeps the pod and the disk under every runtime, so what it costs is one interrupted
-// turn. The other caller of relaunchStale is the stale registration (staleRegistration), which
-// calls it rather than this: that agent is refused and its process exits on the refusal, so a
-// round there would wait for a signal no running turn could send.
+// answer at all and is relaunched, which keeps the pod and the disk under every runtime, so what
+// it costs is the turn alone. That turn is not spent either: a claim in one is left running and
+// the relaunch waits for it (staleRelaunch, run by turnEnded), because the worker that cannot be
+// asked to push first is exactly the worker whose unpushed turn this relaunch would throw away —
+// the harm this round exists to end, measured live on 2026-10-30, when an issue's claims came up
+// on the previous image at a contract below this one. The wait costs nothing: such a claim holds
+// no round open, nothing else of its pod waits on it, and the machine already waits a turn out
+// this way for a held suspension and for a plugin round's own end (endPodUpdate). It is not
+// unbounded either: the turn ends, or the process dies or is suspended, and letGo drops the mark
+// with it. A claim whose suspension is already held is relaunched where it stands as before,
+// since replaceProcess ends that hold in a suspension rather than a launch (endHeld) and the
+// suspension, not this lane, decides what happens to the turn. The other caller of relaunchStale
+// is the stale registration (staleRegistration), which calls it rather than this: that agent is
+// refused and its process exits on the refusal, so a round there would wait for a signal no
+// running turn could send, and its claim is registering rather than in a turn.
 //
 // The project controller's own claim keeps the immediate relaunch too, whatever contract it
-// records: the `legion` tool its session holds is the controller's, which has read_state and
-// set_status and no ready_for_update op at all (packages/pi-legion/src/tools.ts), so a round over
-// it would ask for an answer no controller turn can give and would stay open for ever. The
-// relaunch costs it the turn in flight and nothing else — its pod holds no issue workspace, so it
-// has nothing to push.
+// records, and it keeps it mid-turn: the `legion` tool its session holds is the controller's,
+// which has read_state and set_status and no ready_for_update op at all
+// (packages/pi-legion/src/tools.ts), so a round over it would ask for an answer no controller
+// turn can give and would stay open for ever, and the turn it loses costs it nothing else — its
+// pod holds no issue workspace, so it has nothing to push, which is the whole reason a worker's
+// turn is waited out and the controller's is not.
 //
 // What it does once it decides the claim is still stale is exactly repoint: the turn in flight is
 // interrupted and its task kept waiting for the relaunch to send again, a held suspension ends in a
@@ -101,10 +112,30 @@ func (m *Machine) refreshPlugin(ctx context.Context, trigger string) error {
 	if m.claim.PluginContract == m.deps.PluginContract {
 		return nil
 	}
-	if !CannotAnswerUpdate(m.claim) && !claim.IsController(m.claim.Role, m.claim.Issue, m.claim.Tree) {
+	controller := claim.IsController(m.claim.Role, m.claim.Issue, m.claim.Tree)
+	if !CannotAnswerUpdate(m.claim) && !controller {
 		return m.openPluginUpdate(ctx)
 	}
+	if m.claim.State == StateWorking && m.held == nil && !controller {
+		m.holdStaleRelaunch(trigger)
+		return nil
+	}
 	return m.relaunchStale(ctx, trigger)
+}
+
+// holdStaleRelaunch leaves the relaunch waiting for the agent's turn to end (turnEnded), which
+// re-decides it through refreshPlugin as it stands then: by that point the claim is idle, so the
+// relaunch runs, and a registration that recorded this daemon's contract meanwhile leaves it
+// alone. trigger is the pass that found the claim, carried so the line the relaunch logs names
+// the pass that asked for it. A sweep finds the same claim every tick while its turn runs, so
+// only the first of them logs; the rest replace the trigger and say nothing.
+func (m *Machine) holdStaleRelaunch(trigger string) {
+	if m.staleRelaunch == nil {
+		m.log.Info("supervise: the process speaks another plugin contract; its relaunch waits for the agent's turn to end",
+			"incarnation", m.claim.Locator.Incarnation, "pluginContract", m.claim.PluginContract,
+			"daemonApiVersion", m.deps.PluginContract, "trigger", trigger)
+	}
+	m.staleRelaunch = &trigger
 }
 
 // relaunchStale replaces the claim's process now, onto this daemon's plugin: the stale lane for a

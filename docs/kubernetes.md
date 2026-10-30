@@ -2191,7 +2191,7 @@ pod would buy nothing. Opening it logs
 before the process is replaced`, and the round is asked again every `pod_update_retask_hours` and
 reported `update-stalled` to the controller `pod_update_notice_hours` after it opened.
 
-Three cases keep the immediate relaunch, each costing the one turn in flight and no disk: a claim
+Three cases keep the immediate relaunch, each costing at most the one turn in flight and no disk: a claim
 whose recorded contract is below that contract, whose plugin has no op to answer with; a
 registration that still differs from the daemon's, whose own agent is refused and whose process
 exits on that refusal, so no running turn could ever send the signal; and the project
@@ -2199,9 +2199,17 @@ controller's own claim, whatever contract it records, because the controller's `
 `read_state` and `set_status` and no `ready_for_update` at all
 (`packages/pi-legion/src/tools.ts`), so a round over it would wait for an answer no controller
 turn can give. The controller loses nothing by it: its pod holds no issue workspace, so it has
-nothing to push. Each is relaunched once,
+nothing to push, and it is the one of the three relaunched where it stands while a turn runs.
+A worker's turn is waited out instead: a claim below the contract that is in a turn is left
+running, its relaunch held until the turn ends (`refreshPlugin` records it, `turnEnded` runs it,
+both in `packages/daemon/internal/supervise/`), because a worker that cannot be asked to push
+first is exactly the worker whose unpushed turn the relaunch would throw away. The hold logs
+`supervise: the process speaks another plugin contract; its relaunch waits for the agent's turn to
+end` once, and goes with the process it was made for if that process dies, is suspended or is
+retired first. Each relaunch is made once,
 uncharged, through the moved-address relaunch path (`interrupted` → `launch`; the task of a turn
-in flight goes back to waiting and is delivered again; a claim whose suspension is held for its
+in flight goes back to waiting and is delivered again, while a turn that was waited out has
+already retired its own finished task; a claim whose suspension is held for its
 turn is suspended instead of relaunched, and its next resume launches on the current plugin; a
 claim still launching is left to its registration, which decides it the moment it arrives). Each
 relaunch logs one line, exactly
