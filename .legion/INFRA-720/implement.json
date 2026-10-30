@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-720",
-  "completed": "2026-10-29T23:15:00Z",
+  "completed": "2026-10-30T04:30:00Z",
   "proof": [
+    {
+      "criterion": "Merge round (accepted, CONFLICTING with main 49e23926): the head merges into main with migrations in sequence (0145 after main's 0142-0144), README keeps main's paragraphs and ours, the fingerprint changes by the renumber alone, and the merged sequence boots over the stored anchor spellings on a database main migrated to its latest",
+      "surface": "a real local Dispatch server built from the merge head, booted over the LINUX replay seed migrated to 0144 by main 49e23926, holding nine asks opened through main's API on LINUX-344's spec and rewritten by SQL (block_artifact_id set) to anchor artifact_id canonical, upper case, braces, trailing newline, '', '5', leading space, not-a-uuid, JSON number 5",
+      "command": "prep-r9.sh: BASE_TEMPLATE=dispatch_replay_fd0564e4c3a2578e shapes-proof.sh bin/dispatch-head-r9 merged9; fingerprint per conflicts-and-rewrites.md at ee124abf and a46b10cb, then diff of the two fingerprinted diffs (fp-delta.txt) (dispatch://INFRA-720/artifact/infra720-r9-merged-shapes-tgz)",
+      "observed": "schema 144 -> 145, WARN 'left out of asks_anchor_artifact_id' count=8; ask list and events 200; every single-ask read 200; canonical, upper case, braces resolve spec, the six others none; fingerprint 18a1db02... -> 5d2b1d89..., all 20 changed lines are 0142 -> 0145; GitHub MERGEABLE; store, refs, model, pgmigrate, targeted docs and api ok on a fresh database",
+      "headSha": "a46b10cb20fe9a93b917d8cae3397ac20b3872f3",
+      "negativeControl": "main 49e23926 over the same data: ask list 500 and single read 500 for the six uncastable shapes (22P02)"
+    },
     {
       "criterion": "Merge round (tester fail on merge state alone): the head merges into main with migrations in sequence (0142 after main's 0141_drop_broadcast_idempotency_keys), README keeps both paragraphs, and the merged sequence boots over the stored anchor spellings",
       "surface": "a real local Dispatch server built from the merge head, booted over the LINUX replay seed migrated to 0141 by main 08c2e8ad, holding nine asks opened through main's API on LINUX-344's spec and rewritten by SQL (block_artifact_id set) to anchor artifact_id canonical, upper case, braces, trailing newline, '', '5', leading space, not-a-uuid, JSON number 5",
@@ -102,8 +110,8 @@
     "packages/envoy/internal/dispatch/store/asks_anchor_artifact_id_migration_test.go",
     "packages/envoy/internal/dispatch/store/asks_anchor_artifact_index.go",
     "packages/envoy/internal/dispatch/store/canonical_uuid.go",
-    "packages/envoy/internal/dispatch/store/migrations/0142_asks_anchor_artifact_id.census.sql",
-    "packages/envoy/internal/dispatch/store/migrations/0142_asks_anchor_artifact_id.up.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0145_asks_anchor_artifact_id.census.sql",
+    "packages/envoy/internal/dispatch/store/migrations/0145_asks_anchor_artifact_id.up.sql",
     "packages/envoy/internal/dispatch/store/store_test.go"
   ],
   "trickyParts": [
@@ -114,14 +122,15 @@
   "deviations": [
     "Round 3 (tester fail on the architect's requirement): 0137's index and every ask-anchor reader guard the cast with store.CanonicalUUID; the census is select 0 and a boot log counts the left-out rows (architect's accepted design, Envoy 4f4150f2, 07:36Z); the readers were widened into this PR on the architect's decision (a), Envoy 538813ee, 08:05Z.",
     "Hardening ledger: the tester's red test 92cbecc9 (census refuses 0137) was replaced, not made to pass, by TestMigration0139BootsOverAnAskWhoseAnchorArtifactIDDoesNotCast, on the architect's requirement that the migration boot over any data.",
-    "Forward merge with main 8a911ecc (GitHub reported CONFLICTING: main took 0137_request_keys and 0138); migration renumbered 0142_asks_anchor_artifact_id with identical SQL; fingerprint 787ec9f0... -> 0ad6c541..., changed only by the renumbering.",
+    "Forward merge with main 8a911ecc (GitHub reported CONFLICTING: main took 0137_request_keys and 0138); migration renumbered 0145_asks_anchor_artifact_id with identical SQL; fingerprint 787ec9f0... -> 0ad6c541..., changed only by the renumbering.",
     "The search guard is consistency only: both search arms read coalesce(artifact_id, block_artifact_id, <anchor>), which never reaches the anchor for any row an index allows; their tests pin the route answering over the real row shape, not the unreachable cast.",
     "Task 5(b) ran on INFRA-639's replay (b1367e2c) at F=0.15, minutes 19-35, on the INFRA-512 architect's instruction; base is 8a911ecc, the main commit the head was merged with; all six runs on one pod.",
     "Round 4 (narrowed by the INFRA-512 architect, Envoy 28bf3ef6, 15:13Z): only the reader guard switch to store.CastableUUID (pg_input_is_valid) and the non-string artifact_id decode; boot, index, census and sweep rows are settled, so the replay runs were not repeated. The A2/A3 entries above are round 3's at 1f4f79e7.",
     "On head, a single-ask read of an uncastable anchor answers 200 and logs WARN 'answer a comment or ask read without its anchor's block position' (DOC_SERVICE_UNAVAILABLE from the document stamp read of that id): the read degrades as it does for any document it cannot open.",
     "Round 5: forward merge with main 30ecdcd4 (GitHub CONFLICTING: main took 0139_related_checks and 0140_issue_embedding_spec; search.go and README conflicted); migration renumbered 0141 with identical SQL; fingerprint 115bb0e9... -> 83332516..., changed only by the renumbering and main's searchKeywordLegs signature. A local Postgres that had applied this branch's earlier 0139 refuses 0141 (index exists); no deployment ever ran an unmerged number.",
     "Review round 1 item 2: the reviewer and architect named a fast path in Anchor.UnmarshalJSON; measured, that method still cost +51% per well-formed decode, so the lenient read is model.DecodeAnchor called at each stored-anchor decode site, which meets the stated criterion (decode not measurably costlier than main's: ~ p=0.105).",
-    "Merge round: forward merge with main 08c2e8ad (CONFLICTING: main took 0141_drop_broadcast_idempotency_keys; README conflicted); migration renumbered 0142 with identical SQL and census; fingerprint 8868f24b... -> 7eeb1e8b..., changed only by the renumbering."
+    "Merge round: forward merge with main 08c2e8ad (CONFLICTING: main took 0141_drop_broadcast_idempotency_keys; README conflicted); migration renumbered 0142 with identical SQL and census; fingerprint 8868f24b... -> 7eeb1e8b..., changed only by the renumbering.",
+    "Merge round: forward merge with main 49e23926 (CONFLICTING: main took 0142_item_blocks, 0143 and 0144; README conflicted); migration renumbered 0145 with identical SQL and census; fingerprint 18a1db02... -> 5d2b1d89..., changed only by the renumber (fp-delta.txt)."
   ],
   "openQuestions": [
     "Comment-anchor casts (api/search.go comment arms, refs/graph.go:587, outbox/recipients.go:62) stay unguarded: comments_anchor_artifact (0032) casts every comment row, so no stored comment anchor fails. Approval casts are held by asks_approval_kind_check (0053), which requires a canonical uuid."
