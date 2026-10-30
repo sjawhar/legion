@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-590",
-  "completed": "2026-10-30T19:14:00Z",
+  "completed": "2026-10-30T19:40:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2395",
   "head": "811dced0a4dc90f503b3e5b89befe365df32c2d4",
-  "round": "19 (the daemon sent the round back on a red required `test` at ac662be1): the failure is TestARecoveryTellsTheArchitectOfTheChildrenItDidNotRecord in packages/daemon/internal/daemon, a package this PR does not change. It passes 20 of 20 locally at 811dced0 and 20 of 20 at main's tip d126b19d; the failed job's one re-run (run 41074105291, attempt 2) passed, test and envoy-go green. No code change; code head stays 811dced0. The round-18 diff check (comment 6530419615) and the PR body record the merge's resolutions and both results.",
+  "round": "20 (the daemon reported `test` red at the handoff head 2db7e8d6, which runs no CI and carries code head 811dced0's verdict): at 811dced0 the `test` check run 124157504642 (run 41074105291 attempt 1) failed in packages/daemon's TestARecoveryTellsTheArchitectOfTheChildrenItDidNotRecord, which this PR does not change, and its one re-run, check run 124238434559 (attempt 2), completed success at 18:59:33Z, as did envoy-go. No later run is red; the re-run's ci-ok is still queued behind its long jobs. No code changed; code head stays 811dced0.",
   "proof": [
     {
       "criterion": "Exactly one process publishes at a time through a lease on the outbox's own database connection; /healthz carries boolean outbox_publisher",
