@@ -733,7 +733,7 @@ export function Inbox({
           <Link
             aria-label="Clear agent filter"
             className="inline-flex min-h-11 items-center rounded-full"
-            to={buildInboxPath({ assignees: filter.assignees })}
+            to={buildInboxPath({ assignees: filter.assignees, item: filter.item })}
           >
             <LabelPill selected>
               Asks from {name}
