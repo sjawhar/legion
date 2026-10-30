@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"strconv"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
@@ -14,26 +15,25 @@ import (
 //
 // Its live source is the process's event stream relay (event_stream_relay.go), which publishes
 // every committed event it reads back out of Postgres - this process's and the other
-// envoy-dispatch process's alike. A subscription subscribes to the relay before it reads the log's
-// head, which is what leaves no gap: an event committing after the relay subscription exists lands
-// in its channel whatever its id, while one committing before it is at or below the head read next
-// and so is replayed by the catch-up. The relay reads its cursor before it answers a subscription,
-// so it cannot already stand past that head either.
+// envoy-dispatch process's alike - up to the safe horizon (events.Horizon), in id order. A
+// subscription takes its relay subscription together with the relay's published cursor, which is
+// what leaves no gap: every event at or below that cursor is final and is replayed by the
+// catch-up, and every event above it reaches the relay subscription (feedEvents).
 //
-// That ordering is also why a subscription that names no since resolves the head itself rather
-// than a page asking for it first: a page that read the head through a separate request and then
-// subscribed from it would lose an event committing between the two, excluded from the catch-up
-// (id <= since) and missed by a relay subscription made only afterwards. The one head a page reads
-// beforehand is GET /auth/whoami's event_head, which it reads before it starts any read the feed
-// keeps current, so what commits after it is the feed's to replay.
+// That handover is also why a subscription that names no since starts where the relay stands
+// rather than at a head a page asked for first: a page that read the newest id through a separate
+// request and subscribed from it would lose an event that drew a lower id and committed after
+// that read. The one head a page reads beforehand is GET /auth/whoami's event_head, which it reads
+// before it starts any read the feed keeps current: an id at or below which every event is already
+// final (eventFeedHead), so what commits after it stands above it and is the feed's to replay.
 //
-// Every subscription resolves the head, a resuming one too. The event log can be reset under a
-// reader (`truncate events restart identity`, the browser suite's e2e/seed.ts): the ids restart at
-// 1 and the relay, which notices, ends every open subscription, and the page subscribes again. A
-// page only ever raises its cursor and never lowers it, so it resumes with a since above the new
-// log's head. Unclamped, the live loop would then drop every event of the new log for ever, on a
-// subscription that stays open: a reader silent for good, with nothing logged and nothing failed.
-// So a since above the head starts at the head, as no since does.
+// The event log can be reset under a reader (`truncate events restart identity`, the browser
+// suite's e2e/seed.ts): the ids restart at 1 and the relay, which notices, ends every open
+// subscription, and the page subscribes again. A page only ever raises its cursor and never lowers
+// it, so it resumes with a since above the new log's newest id. Unclamped, the live loop would
+// then drop every event of the new log for ever, on a subscription that stays open: a reader
+// silent for good, with nothing logged and nothing failed. So a since above the newest id starts
+// at the relay's cursor, as no since does.
 
 // startEventsView checks an events view and its resume, then starts the view's subscription. The
 // view names its kind alone, and the resume the decimal id of the last event the page applied.
@@ -65,27 +65,93 @@ func (s *server) startEventsSubscription(ctx context.Context, stream liveStreame
 
 // feedEvents is one events subscription's whole life: it returns once the subscription has ended,
 // on its own or because ctx did.
+//
+// Event ids do not commit in id order across owners (events.Broker.Append), so a page's resume
+// point and every point this subscription hands over at must be ones no later commit can fall at
+// or below. The relay publishes only up to the safe horizon (events.Horizon), each event once and
+// in id order, and its published cursor, read together with the relay subscription
+// (eventStreamRelay.subscribe), is the handover: every event at or below it is final and is
+// replayed here from the log, and every event above it reaches the relay subscription.
+//
+// A subscription that names no since starts at the relay's published cursor. One that names a
+// since at or below the log's newest id starts there, is replayed every event after it up to the
+// published cursor, and says so in its events_start (replay_complete), so its page may skip the
+// whole refresh it owes a gap: the page's since is an id it was sent, at or below a horizon, or the
+// event_head GET /auth/whoami answered (eventFeedHead), at or below which every event was already
+// final. A since above the newest id is an id of a log this one replaced, which starts at the
+// published cursor and says no such thing.
+//
+// The relay keeps a reset log's cursor until its reset check has run (resetCursor), which waits for
+// a horizon proven after the reset. A relay subscription taken meanwhile carries a published cursor
+// that names a position in the old log: above the new log's newest id, or at an id whose row is
+// gone or carries another created_at than the relay read (eventLogWasReset). Started there, the
+// subscription would drop the new log's events up to it, or start and then be ended by the relay's
+// reset, sending the page through a resubscribe and, for a page with no complete replay, the whole
+// refresh it owes a gap. So the subscription waits
+// for that reset, which ends the relay subscription, and subscribes again on the cursor the relay
+// moved to. A subscription with no since then starts at replacedFrom, read when it found the relay
+// on the replaced log, rather than at the relay's new cursor: that cursor is taken under a horizon
+// proven after the reset, so an event of the new log that commits while that proof is awaited can
+// stand at or below it. replacedFrom is the id before the first one missing from the new log,
+// whose ids restart at 1, which is every event committed then and none still open.
 func (s *server) feedEvents(ctx context.Context, stream liveStreamer, sub string, since *int64) {
-	relayed, unsubscribe, err := s.eventRelay.subscribe(ctx)
-	if err != nil {
-		endEventsAfterFailure(ctx, stream, sub, "subscribe to the event stream relay", err)
-		return
+	replacedFrom := int64(-1)
+	var relayed <-chan model.Event
+	var unsubscribe func()
+	defer func() {
+		if unsubscribe != nil {
+			unsubscribe()
+		}
+	}()
+	var published, head int64
+	for {
+		var err error
+		var publishedAt time.Time
+		var cursorAt *time.Time
+		relayed, unsubscribe, published, publishedAt, err = s.eventRelay.subscribe(ctx)
+		if err != nil {
+			unsubscribe = nil
+			endEventsAfterFailure(ctx, stream, sub, "subscribe to the event stream relay", err)
+			return
+		}
+		// The log's newest id, and the row at the relay's cursor, as they stand now, after the
+		// relay subscription began. A cursor above the newest id, or one whose row is gone or
+		// carries another created_at, is a relay whose reset check has not yet run
+		// (eventLogWasReset, the relay's own test).
+		if head, cursorAt, err = eventCursorCheck(ctx, s.deps.Store.Pool, published); err != nil {
+			endEventsAfterFailure(ctx, stream, sub, "read the event log's head", err)
+			return
+		}
+		if !eventLogWasReset(published, publishedAt, head, cursorAt) {
+			break
+		}
+		if since == nil && replacedFrom < 0 {
+			if replacedFrom, err = s.eventLogUnbrokenThrough(ctx); err != nil {
+				endEventsAfterFailure(ctx, stream, sub, "read the event log's unbroken ids", err)
+				return
+			}
+		}
+		signal(s.eventRelay.wake)
+		// Whatever the relay publishes before its reset check is a position in the old log, so it
+		// is dropped; the close is its reset ending this relay subscription.
+		for open := true; open; {
+			select {
+			case <-ctx.Done():
+				return
+			case _, open = <-relayed:
+			}
+		}
+		unsubscribe()
+		unsubscribe = nil
 	}
-	defer unsubscribe()
-	head, err := EventHead(ctx, s.deps.Store)
-	if err != nil {
-		endEventsAfterFailure(ctx, stream, sub, "read the event log's head", err)
-		return
-	}
-	// A resuming subscription whose since is at or below the head is replayed every event after it
-	// below, so it missed nothing while it was away, and says so in its events_start: a page may
-	// then skip the whole refresh it owes a gap. A subscription that names no since asked for no
-	// backlog, and a since above the head can only be an id of a log this one replaced; neither was
-	// replayed what it missed, so neither says it was, and both start at the head just read.
+
 	replayComplete := since != nil && *since <= head
-	from := head
-	if replayComplete {
+	from := published
+	switch {
+	case replayComplete:
 		from = *since
+	case replacedFrom >= 0:
+		from = min(replacedFrom, published)
 	}
 	if stream.SendWait(ctx, liveEventsStart(sub, from, replayComplete)) != nil {
 		return
@@ -99,18 +165,13 @@ func (s *server) feedEvents(ctx context.Context, stream liveStreamer, sub string
 		return stream.SendWait(ctx, frame) == nil
 	}
 
-	// Ids are assigned by nextval() when the insert statement runs, before commit, so a lower id
-	// can commit after a higher one is already visible to a catch-up query - a still-open
-	// transaction that took an earlier id is the case the relay subscription above, taken before
-	// any catch-up query runs, exists to cover. The catch-up pages through the whole backlog on that
-	// one subscription without ever ending it: a capped page that ended the subscription and sent
-	// the page to subscribe again would leave a gap between "read this page" and "the next
-	// subscription subscribes" where a low id could commit and be missed by both the next page's
-	// `id > cursor` read and the relay subscription already ended.
-	cursor := from
-	sentDuringCatchup := map[int64]bool{}
-	for {
-		page, err := s.readEventsAfterID(ctx, cursor)
+	// The catch-up: (from, published] from the log. Every event in it is final, since published is
+	// at or below the safe horizon, so a page read now holds the rows any later read would, and
+	// moving the cursor to a page's last row skips nothing. It pages through the whole range on the
+	// one relay subscription, never ending it partway: whatever the relay publishes meanwhile waits
+	// in the subscription (or overflows it, which ends the subscription with an ended frame, behind).
+	for cursor := from; cursor < published; {
+		page, err := s.readEventsAfterID(ctx, cursor, published)
 		if err != nil {
 			endEventsAfterFailure(ctx, stream, sub, "read the event log", err)
 			return
@@ -119,7 +180,6 @@ func (s *server) feedEvents(ctx context.Context, stream liveStreamer, sub string
 			if !send(event) {
 				return
 			}
-			sentDuringCatchup[event.ID] = true
 			cursor = event.ID
 		}
 		if len(page) < maxEventReplay {
@@ -127,26 +187,21 @@ func (s *server) feedEvents(ctx context.Context, stream liveStreamer, sub string
 		}
 	}
 
-	// The live loop never compares an event's id with the last id it sent: a lower id committing
-	// after a higher one was already sent would be dropped for ever, and that is exactly what the
-	// relay sends after a redial. The one comparison it makes is with from, which is fixed for the
-	// subscription: the commit-order lock events.Broker.Append holds until commit means no id at or
-	// below a committed max(id) is still uncommitted, so nothing above from can hide below it later.
-	// A relay still catching up to a subscription made after it sends ids at or below from - events
-	// this page has already seen, or backlog a page with no since asked not to get - and
-	// sentDuringCatchup cannot be asked about them, since it holds only the ids catch-up sent, all
-	// above from.
+	// The live feed sends only events above both from and published. The relay publishes into this
+	// subscription only events above published, each once and in strictly increasing id order, so
+	// the catch-up's (from, published] and the feed's ids above max(from, published) are together
+	// every event after from, each sent exactly once and in id order. A from above published
+	// belongs to a page that has already seen events this process's relay has not yet published
+	// (read from the other process, or before a resubscribe): the relay's ids at or below it are
+	// events that page has, and the comparison drops them.
 	//
 	// That argument covers a log whose ids only ever grow. A reset reuses them, and the clamp above
-	// is what extends the comparison across one: from is held at or below the head this
-	// subscription resolved, so an id the new log hands out is never taken for an id the old log
-	// already showed this page. What the clamp cannot do is tell this page apart from the events of
-	// the log it was reading; the relay ends the subscription at a reset instead, and the page comes
-	// back on a new subscription, which resolves the new log's head.
-	//
-	// sentDuringCatchup is for an id catch-up sent that is also still in the relay subscription's
-	// channel: committed, and so readable, in the narrow window between the relay subscription and
-	// a catch-up read, but not yet drained from it.
+	// is what extends the comparison across one: a since above the newest id is replaced by
+	// published, so an id the new log hands out is not dropped as one the old log already showed
+	// this page. What the clamp cannot do is tell this page apart from the events of the log it was
+	// reading; the relay ends the subscription at a reset instead, and the page comes back on a new
+	// subscription, which clamps its since against the log as it then stands.
+	floor := max(from, published)
 	for {
 		select {
 		case <-ctx.Done():
@@ -159,7 +214,7 @@ func (s *server) feedEvents(ctx context.Context, stream liveStreamer, sub string
 				_ = stream.SendWait(ctx, liveEnded(sub, liveEndedBehind))
 				return
 			}
-			if event.ID <= from || sentDuringCatchup[event.ID] {
+			if event.ID <= floor {
 				continue
 			}
 			if !send(event) {

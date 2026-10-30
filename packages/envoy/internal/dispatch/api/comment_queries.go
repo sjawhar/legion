@@ -216,7 +216,7 @@ func scanComment(row pgx.Row, extra ...any) (model.Comment, error) {
 	}
 	if len(anchor) > 0 {
 		var value model.Anchor
-		if err := json.Unmarshal(anchor, &value); err != nil {
+		if err := model.DecodeAnchor(anchor, &value); err != nil {
 			return model.Comment{}, fmt.Errorf("decode comment anchor: %w", err)
 		}
 		comment.Anchor = &value
