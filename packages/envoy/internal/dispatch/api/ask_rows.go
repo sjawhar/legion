@@ -167,6 +167,102 @@ func attachAskBacklinkCounts(ctx context.Context, q queryer, asks []*model.Ask) 
 	return nil
 }
 
+// attachAskPartIDs reads, in one query over `ask_blocks`, the part id of every listed ask's
+// options and answer and the ask's current part revision, so every read that shows an ask's
+// options shows the reference of each: `dispatch://<key>/ask/<id>#b-<part id>`, pinned to the
+// ask's `revision` with `@v<N>`. It is read beside attachAskBacklinkCounts, which every list and
+// detail read of an ask already pays for, and never by a write, whose answer carries no id.
+//
+// A part is matched to the option it stands for by its stored position and type, never by
+// hashing the option's label a second time: the index owns the identity of a part, and a reader
+// of this id must get back exactly the part the index wrote. An ask whose parts are not indexed
+// yet - owed by migration 0146's trigger and never drained, so no build with the index has
+// written them - has no state row or no parts, and carries no id and revision 0: a read of an ask
+// never depends on the index being current. So does an ask whose stored parts stand for other
+// options than the row now holds, where the index is behind the row and positions no longer line
+// up; the revision it has reached is still its own.
+func attachAskPartIDs(ctx context.Context, q queryer, asks []*model.Ask) error {
+	if len(asks) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(asks))
+	for _, ask := range asks {
+		ids = append(ids, ask.ID)
+	}
+	parts, err := readAskParts(ctx, q, ids)
+	if err != nil {
+		return err
+	}
+	for _, ask := range asks {
+		stored, indexed := parts[ask.ID]
+		if !indexed {
+			continue
+		}
+		ask.Revision = stored.revision
+		optionIDs := make([]string, 0, len(stored.ids))
+		answerID := ""
+		for index, partType := range stored.types {
+			switch partType {
+			case refs.AskOptionPart:
+				optionIDs = append(optionIDs, stored.ids[index])
+			case refs.AskAnswerPart:
+				answerID = stored.ids[index]
+			}
+		}
+		if len(optionIDs) != len(ask.Options) || (answerID != "") != (ask.Answer != nil) {
+			continue
+		}
+		for index := range ask.Options {
+			ask.Options[index].ID = optionIDs[index]
+		}
+		if ask.Answer != nil {
+			ask.Answer.ID = answerID
+		}
+	}
+	return nil
+}
+
+// askParts is one ask's indexed parts as attachAskPartIDs reads them: the revision its parts have
+// reached, and the id and type of each current part in position order (AskParts' order: the
+// question, then the options, then the answer the ask holds now).
+type askParts struct {
+	revision   int
+	ids, types []string
+}
+
+// readAskParts reads the indexed parts of each ask, keyed by ask id; an ask with no state row,
+// which no build with the part index has written, is absent. One statement for the whole list,
+// with the parts of each ask as arrays in position order, as api/item_blocks.go reads a comment's
+// blocks; an ask whose state row holds no part yet reads as an empty list.
+func readAskParts(ctx context.Context, q queryer, askIDs []string) (map[string]askParts, error) {
+	rows, err := q.Query(ctx, `
+		select s.ask_id::text, s.revision,
+		       coalesce(array_agg(b.block_id order by b.position) filter (where b.block_id is not null), '{}') as ids,
+		       coalesce(array_agg(b.type order by b.position) filter (where b.block_id is not null), '{}') as types
+		from ask_block_state s
+		left join ask_blocks b on b.ask_id = s.ask_id and b.position is not null
+		where s.ask_id = any($1::uuid[])
+		group by s.ask_id, s.revision
+	`, askIDs)
+	if err != nil {
+		return nil, fmt.Errorf("read ask parts: %w", err)
+	}
+	defer rows.Close()
+	parts := make(map[string]askParts, len(askIDs))
+	for rows.Next() {
+		var askID string
+		var stored askParts
+		if err := rows.Scan(&askID, &stored.revision, &stored.ids, &stored.types); err != nil {
+			return nil, fmt.Errorf("scan ask parts: %w", err)
+		}
+		parts[askID] = stored
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read ask parts: %w", err)
+	}
+	return parts, nil
+}
+
 func (s *server) loadAskAnchorArtifact(
 	ctx context.Context,
 	q queryer,

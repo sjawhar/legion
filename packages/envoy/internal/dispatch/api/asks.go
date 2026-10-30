@@ -70,6 +70,10 @@ func validateAskQuestion(question string) error {
 	return nil
 }
 
+// validateAskOptions checks the options a write sends, trims each label, and empties each
+// option's id. An option's id is read-only: it is the part the index minted for that option
+// (attachAskPartIDs), so a caller sending an option back as it read it neither mints a part id
+// nor moves one, and the id never reaches the ask's row.
 func validateAskOptions(options []model.AskOption) error {
 	if len(options) > maxAskOptions {
 		return countExceededError("CAP_EXCEEDED", "options", len(options), maxAskOptions)
@@ -85,6 +89,7 @@ func validateAskOptions(options []model.AskOption) error {
 		}
 		seen[label] = struct{}{}
 		options[index].Label = label
+		options[index].ID = ""
 	}
 	return nil
 }
@@ -763,8 +768,13 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The ask read is the one caller that serialises the count; the write paths load the row
-	// only to check its owner and answer from their own re-read, so they do not pay for it.
+	// only to check its owner and answer from their own re-read, so they do not pay for it. The
+	// same goes for the part ids of its options and of its answer, and its part revision.
 	if err := attachAskBacklinkCounts(r.Context(), s.deps.Store.Pool, []*model.Ask{&ask}); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := attachAskPartIDs(r.Context(), s.deps.Store.Pool, []*model.Ask{&ask}); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -954,9 +964,10 @@ const (
 )
 
 // queryOwnerAsks returns an owner's asks, oldest first, filtered by state ("all",
-// "open", or "answered"), each with its opening event id, its block document, and
-// WaitingOn when open. The newest reply in each ask's thread is returned keyed by
-// ask id; an ask nobody has replied to has no entry.
+// "open", or "answered"), each with its opening event id, its block document, the part ids of its
+// options and answer with its part revision (attachAskPartIDs), and WaitingOn when open. The
+// newest reply in each ask's thread is returned keyed by ask id; an ask nobody has replied to has
+// no entry. The issue detail's `open_asks` and the issue's own ask list read through it.
 func (s *server) queryOwnerAsks(ctx context.Context, q queryer, owner owner, state string) ([]model.Ask, map[string]model.AskLastReply, error) {
 	var query, value string
 	switch {
@@ -1011,6 +1022,9 @@ func (s *server) queryOwnerAsks(ctx context.Context, q queryer, owner owner, sta
 		return nil, nil, err
 	}
 	if err := attachAskBacklinkCounts(ctx, q, askPointers); err != nil {
+		return nil, nil, err
+	}
+	if err := attachAskPartIDs(ctx, q, askPointers); err != nil {
 		return nil, nil, err
 	}
 	return asks, replies, nil

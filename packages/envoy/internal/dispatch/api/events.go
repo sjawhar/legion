@@ -187,10 +187,11 @@ type decodedAskEventPayload struct {
 }
 
 // attachAskEventFields fills the ask fields an event payload cannot carry from the write that
-// appended it: the id of the event that opened the ask, its inbound backlink count, and its anchor
-// document. Ask payloads are decoded because those fields are added, and an ask.answered payload's
-// selected lists are read as model.AskAnswer reads them (normalizeAnsweredSelected); every other
-// payload passes through as the database returned it.
+// appended it: the id of the event that opened the ask, its inbound backlink count, the part ids
+// of the options and answer it shows with the ask's part revision, and its anchor document. Each
+// is the ask's fact now, not the write's. Ask payloads are decoded because those fields are
+// added, and an ask.answered payload's selected lists are read as model.AskAnswer reads them
+// (normalizeAnsweredSelected); every other payload passes through as the database returned it.
 func (s *server) attachAskEventFields(ctx context.Context, events []model.Event) error {
 	asks := []model.Ask{}
 	payloads := []decodedAskEventPayload{}
@@ -217,7 +218,7 @@ func (s *server) attachAskEventFields(ctx context.Context, events []model.Event)
 		if !ok || askID == "" {
 			return fmt.Errorf("decode %s payload: ask id missing", events[index].Type)
 		}
-		asks = append(asks, model.Ask{ID: askID})
+		asks = append(asks, askEventShell(askID, payload))
 		payloads = append(payloads, decodedAskEventPayload{event: &events[index], payload: payload})
 	}
 	askPointers := make([]*model.Ask, len(asks))
@@ -230,9 +231,13 @@ func (s *server) attachAskEventFields(ctx context.Context, events []model.Event)
 	if err := attachAskBacklinkCounts(ctx, s.deps.Store.Pool, askPointers); err != nil {
 		return err
 	}
+	if err := attachAskPartIDs(ctx, s.deps.Store.Pool, askPointers); err != nil {
+		return err
+	}
 	for index := range payloads {
 		payloads[index].payload["opened_event_id"] = *asks[index].OpenedEventID
 		payloads[index].payload[model.ReferencedByCountKey] = *asks[index].ReferencedByCount
+		attachAskEventPartIDs(payloads[index].payload, asks[index])
 	}
 	if err := s.attachAskDocumentArtifacts(ctx, payloads); err != nil {
 		return err
@@ -245,6 +250,46 @@ func (s *server) attachAskEventFields(ctx context.Context, events []model.Event)
 		payload.event.Payload = json.RawMessage(encoded)
 	}
 	return nil
+}
+
+// askEventShell is the ask attachAskPartIDs matches the payload's parts against: its id, one
+// option per option the payload lists, and an answer when the payload carries one. A part is
+// matched to an option by position and type alone, so no label or text is read, and the payload's
+// own options and answer stay as the write recorded them.
+func askEventShell(askID string, payload map[string]any) model.Ask {
+	ask := model.Ask{ID: askID}
+	if options, listed := payload["options"].([]any); listed {
+		ask.Options = make([]model.AskOption, len(options))
+	}
+	if _, answered := payload["answer"].(map[string]any); answered {
+		ask.Answer = &model.AskAnswer{}
+	}
+	return ask
+}
+
+// attachAskEventPartIDs writes the part ids attachAskPartIDs read onto the payload's own options
+// and answer, with the ask's part revision beside them, so a payload names each option it shows as
+// every other read of the ask names it. A payload the ask has moved past - an ask.opened of an ask
+// whose options an edit has since replaced - carries no id, and an ask whose parts are not indexed
+// yet no revision either: attachAskPartIDs filled neither.
+func attachAskEventPartIDs(payload map[string]any, ask model.Ask) {
+	if ask.Revision > 0 {
+		payload["revision"] = ask.Revision
+	}
+	options, _ := payload["options"].([]any)
+	for index, option := range options {
+		entry, decoded := option.(map[string]any)
+		if !decoded || ask.Options[index].ID == "" {
+			continue
+		}
+		entry["id"] = ask.Options[index].ID
+	}
+	if ask.Answer == nil || ask.Answer.ID == "" {
+		return
+	}
+	if answer, carried := payload["answer"].(map[string]any); carried {
+		answer["id"] = ask.Answer.ID
+	}
 }
 
 // normalizeAnsweredSelected writes model.AskAnswer's reading of selected into an ask.answered

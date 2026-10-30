@@ -647,3 +647,141 @@ func TestAnAnsweredAsksPartEdgesAreListedSince(t *testing.T) {
 		t.Fatalf("?from= the ask since the answer's own event lists %#v, want none", edges)
 	}
 }
+
+// readPartAsk reads GET /api/v1/asks/<id> as a human: the ask as its own read carries it, with
+// the part id of every option, of its answer, and the revision of its parts a pin names.
+func readPartAsk(t *testing.T, handler http.Handler, askID string) model.Ask {
+	t.Helper()
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+askID, nil, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("read ask %s: status=%d body=%s", askID, response.Code, response.Body.String())
+	}
+	return decodeBody[struct {
+		Ask model.Ask `json:"ask"`
+	}](t, response).Ask
+}
+
+// askOptionIDs is the part id each of the ask's options carries, "" for an option carrying none.
+func askOptionIDs(ask model.Ask) []string {
+	ids := make([]string, len(ask.Options))
+	for index, option := range ask.Options {
+		ids[index] = option.ID
+	}
+	return ids
+}
+
+// askOptionsJSON is the ask row's options column as it was stored.
+func askOptionsJSON(t *testing.T, database *store.Store, askID string) string {
+	t.Helper()
+	var options string
+	if err := database.Pool.QueryRow(context.Background(), `
+		select options::text from asks where id = $1::uuid
+	`, askID).Scan(&options); err != nil {
+		t.Fatalf("read the options of ask %s: %v", askID, err)
+	}
+	return options
+}
+
+// An ask's own read names every part it shows: each option carries the part id its reference
+// uses, so the reader writes `dispatch://KEY/ask/<id>#b-<that id>` from the ask's JSON rather
+// than guessing it, the answer carries its own id, and the ask carries the revision of its parts
+// that `@v<N>` pins.
+func TestAnAsksReadCarriesThePartIDsOfItsOptionsAndAnswer(t *testing.T) {
+	const monday = "Monday — Ship at the start of the week."
+	handler, _ := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Ask part ids", "A spec")
+	ask := createPartAsk(t, handler, issue.Key, "Which day do we ship?",
+		map[string]string{"label": "Monday", "description": "Ship at the start of the week."},
+		map[string]string{"label": "Tuesday"})
+
+	read := readPartAsk(t, handler, ask.ID)
+	if got := askOptionIDs(read); !reflect.DeepEqual(got, []string{"b2", "b3"}) {
+		t.Fatalf("the read ask's option ids = %v, want b2 and b3", got)
+	}
+	if read.Revision != 1 {
+		t.Fatalf("the read ask's revision = %d, want the revision of its first indexing", read.Revision)
+	}
+	node := readNode(t, handler, askPartRef(issue.Key, ask.ID, read.Options[0].ID))
+	if node.Kind != "block" || node.ID != "ask/"+ask.ID+"#"+read.Options[0].ID || node.Text != monday {
+		t.Fatalf("the reference of option %q reads %#v, want the part reading %q", read.Options[0].ID, node, monday)
+	}
+
+	answerPartAsk(t, handler, ask, "alice", []string{"Monday"}, "Ship it then.")
+	answered := readPartAsk(t, handler, ask.ID)
+	if answered.Answer == nil || answered.Answer.ID != "b4" {
+		t.Fatalf("the answered ask's answer = %#v, want the part id b4", answered.Answer)
+	}
+	if got := askOptionIDs(answered); !reflect.DeepEqual(got, []string{"b2", "b3"}) {
+		t.Fatalf("the answered ask's option ids = %v, want b2 and b3 still", got)
+	}
+	if answered.Revision != 2 {
+		t.Fatalf("the answered ask's revision = %d, want 2: the answer is a revision of its parts", answered.Revision)
+	}
+	if answer := readNode(t, handler, askPartRef(issue.Key, ask.ID, answered.Answer.ID)); answer.Text != "Monday - Ship it then." {
+		t.Fatalf("the reference of the answer part reads %#v, want the answer's text", answer)
+	}
+}
+
+// A part id is the index's to mint: an option a write sends back with an id of its own is stored
+// without it, so no caller mints a part id or moves one, and the ask's parts keep the ids they
+// were minted with.
+func TestAWriteCannotMintOrMoveAnAskPartID(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Minted part ids", "A spec")
+	ask := createPartAsk(t, handler, issue.Key, "Which day do we ship?",
+		map[string]string{"label": "Monday", "id": "b9"})
+	requireAskParts(t, database, ask.ID, "the ask opened with an id of the caller's", "b1@1 b2@1", 1)
+	if stored := askOptionsJSON(t, database, ask.ID); strings.Contains(stored, `"id"`) {
+		t.Fatalf("the opened ask's options row = %s, want no id of the caller's", stored)
+	}
+	if got := askOptionIDs(readPartAsk(t, handler, ask.ID)); !reflect.DeepEqual(got, []string{"b2"}) {
+		t.Fatalf("the opened ask's option ids = %v, want the minted b2", got)
+	}
+
+	editPartAskOptions(t, handler, ask.ID, "send the option back with an id of its own",
+		map[string]string{"label": "Monday", "id": "b7"})
+	requireAskParts(t, database, ask.ID, "after the write sending an id back", "b1@1 b2@1", 1)
+	if stored := askOptionsJSON(t, database, ask.ID); strings.Contains(stored, `"id"`) {
+		t.Fatalf("the edited ask's options row = %s, want no id of the caller's", stored)
+	}
+	if got := askOptionIDs(readPartAsk(t, handler, ask.ID)); !reflect.DeepEqual(got, []string{"b2"}) {
+		t.Fatalf("the edited ask's option ids = %v, want the minted b2, unmoved", got)
+	}
+}
+
+// An ask carries the same part ids wherever it is listed: the issue detail's open_asks and the
+// human Inbox name each option as the ask's own read names it, so a reader cites an option from
+// the list in front of it.
+func TestAListedAskCarriesThePartIDsItsOwnReadCarries(t *testing.T) {
+	handler, _ := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Listed part ids", "A spec")
+	ask := createPartAsk(t, handler, issue.Key, "Which day do we ship?",
+		map[string]string{"label": "Monday"}, map[string]string{"label": "Tuesday"})
+	want := readPartAsk(t, handler, ask.ID)
+	if got := askOptionIDs(want); !reflect.DeepEqual(got, []string{"b2", "b3"}) {
+		t.Fatalf("the ask's own read carries the option ids %v, want b2 and b3", got)
+	}
+
+	detail := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key, nil, "alice")
+	if detail.Code != http.StatusOK {
+		t.Fatalf("read issue %s: status=%d body=%s", issue.Key, detail.Code, detail.Body.String())
+	}
+	open := decodeBody[struct {
+		OpenAsks []model.Ask `json:"open_asks"`
+	}](t, detail).OpenAsks
+	if len(open) != 1 || !reflect.DeepEqual(askOptionIDs(open[0]), askOptionIDs(want)) || open[0].Revision != want.Revision {
+		t.Fatalf("the issue detail's open_asks = %#v, want the ask's option ids %v at revision %d",
+			open, askOptionIDs(want), want.Revision)
+	}
+
+	inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "alice")
+	if inbox.Code != http.StatusOK {
+		t.Fatalf("read inbox: status=%d body=%s", inbox.Code, inbox.Body.String())
+	}
+	rows := decodeBody[[]model.Ask](t, inbox)
+	if len(rows) != 1 || rows[0].ID != ask.ID ||
+		!reflect.DeepEqual(askOptionIDs(rows[0]), askOptionIDs(want)) || rows[0].Revision != want.Revision {
+		t.Fatalf("the inbox rows = %#v, want the ask's option ids %v at revision %d",
+			rows, askOptionIDs(want), want.Revision)
+	}
+}
