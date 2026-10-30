@@ -18,6 +18,9 @@ missing instruction.
 
 ## Accepting
 
+Sign off an issue with no children once its evidence holds; a parent only after its last round
+(below), because before it the approved head does not carry its children's merges.
+
 ```text
 dispatch comment --issue LEGION-40 --body-file - <<'EOF'
 <acceptance: scope, integration evidence, the tester's handoff, both E2E lines, the approved head>
