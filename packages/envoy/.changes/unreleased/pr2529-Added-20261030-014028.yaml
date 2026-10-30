@@ -10,6 +10,6 @@ body: |-
     and bucket (1 to 5, and not `replicas`, the app's pod count), and `streamMaxBytes`, the
     stream's byte limit, each rendered on both of those containers and independent of
     `natsInCluster`. With the three unset, the SOCKS5 path renders as it did before.
-time: 2026-10-29T21:30:00.000000000Z
+time: 2026-10-30T01:40:28.963538508Z
 custom:
-    Issue: INFRA-550
+    Issue: pr2529
