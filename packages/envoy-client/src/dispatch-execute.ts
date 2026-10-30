@@ -1,3 +1,4 @@
+// Probe commit: selects CI's pi-envoy job on an otherwise unchanged main. Do not merge.
 import { resolve as resolvePath } from "node:path";
 import type {
   Actor,
