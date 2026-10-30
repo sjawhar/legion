@@ -305,3 +305,46 @@ func TestAQueuedWriterThatFindsNoAdmissionRoomIsRefusedOverloaded(t *testing.T) 
 	}
 	next()
 }
+
+// A comment edit whose input is refused on its own - blocks with no base_revision - is answered
+// at once with its 400, before it queues for the document's writer gate: it changes nothing, so a
+// writer holding that gate must not delay it, and a queue full of writers must not turn it into a
+// retryable 429 that a client would send again for ever.
+func TestACommentEditRefusedForItsInputWaitsOnNoWriterGate(t *testing.T) {
+	handler, service, _ := writerGateHandler(t, 8, nil, nil)
+	issue := createInteractionIssue(t, handler, "TEST", "Refused edit", "alpha bravo charlie")
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"anchor": map[string]string{"artifact": "spec", "quote": "bravo"},
+		"body":   "Anchored note.",
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create the anchored comment: status=%d body=%s", created.Code, created.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, created)
+	_, hold, err := service.AcquireDocumentWriter(context.Background(), issue.PrimaryArtifactID)
+	if err != nil {
+		t.Fatalf("hold the document's writer gate: %v", err)
+	}
+	var held sync.Once
+	releaseHold := func() { held.Do(hold) }
+	defer releaseHold()
+
+	answered := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		answered <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/comments/"+comment.ID, map[string]any{
+			"body":   "Edited.",
+			"blocks": []map[string]any{{"id": "b1", "from": 0}},
+		}, "alice")
+	}()
+	select {
+	case refused := <-answered:
+		if refused.Code != http.StatusBadRequest {
+			t.Errorf("an edit with blocks and no base_revision: status=%d body=%s, want 400", refused.Code, refused.Body.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Errorf("an edit with blocks and no base_revision is still unanswered 2 s into another writer's hold of the document's gate (%d writers queued), want its 400 at once",
+			service.QueuedDocumentWriters())
+		releaseHold()
+		<-answered
+	}
+}
