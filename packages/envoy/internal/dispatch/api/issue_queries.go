@@ -330,7 +330,9 @@ func (s *server) scanIssueSummaries(ctx context.Context, listQuery string, argum
 // second round trip at all.
 //
 // Each batch's results are closed before anything else reads: a batch holds its connection until
-// then, and a second one taken while it is held is what the pool refuses (store.ErrNestedAcquire).
+// then, and a second connection taken while it is held is the nesting store.ErrNestedAcquire exists
+// to stop. The pool would not refuse it here: store.Pool.SendBatch checks the request's mark when
+// the batch is sent but sets none while the batch is open, so no callback below reads the database.
 // readRouteRoster is an HTTP read of the listener with a cache of its own, not a database read,
 // and runs after both.
 func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
