@@ -31,8 +31,8 @@ interface ObjectSource {
 interface BlockVolume {
   name: string;
   projected?: { sources: (TokenSource | ObjectSource)[] };
-  config_map?: { name: string; items?: { key: string; path: string }[] };
-  secret?: { name: string };
+  config_map?: { name: string; items?: { key: string; path: string }[]; default_mode?: string };
+  secret?: { name: string; default_mode?: string };
   persistent_volume_claim?: { name: string };
   nfs?: { server: string; path: string };
 }
@@ -52,8 +52,8 @@ interface PodToken {
 interface PodVolume {
   name: string;
   projected?: { sources: { serviceAccountToken: PodToken }[] };
-  configMap?: { name: string; items?: { key: string; path: string }[] };
-  secret?: { secretName: string };
+  configMap?: { name: string; items?: { key: string; path: string }[]; defaultMode?: number };
+  secret?: { secretName: string; defaultMode?: number };
   persistentVolumeClaim?: { claimName: string };
   nfs?: { server: string; path: string };
 }
@@ -290,6 +290,47 @@ describe("deployment-pod-block verdict", () => {
     expect(verdict(p).wrong).toEqual([
       "volume kubernetes-api-ca is secret, not config_map",
       "volume operator-creds is Secret someone-else, not legion-operator-creds",
+    ]);
+  });
+
+  test("a default_mode the block sets is read against the pod's defaultMode", () => {
+    const b = block();
+    b.volumes[1] = {
+      name: "kubernetes-api-ca",
+      config_map: {
+        name: "kube-root-ca.crt",
+        items: [{ key: "ca.crt", path: "ca.crt" }],
+        default_mode: "0o444",
+      },
+    };
+    b.volumes[2] = {
+      name: "operator-creds",
+      secret: { name: "legion-operator-creds", default_mode: "0440" },
+    };
+    const p = pod();
+    p.spec.volumes[2] = {
+      name: "kubernetes-api-ca",
+      configMap: {
+        name: "kube-root-ca.crt",
+        items: [{ key: "ca.crt", path: "ca.crt" }],
+        defaultMode: 0o444,
+      },
+    };
+    p.spec.volumes[3] = {
+      name: "operator-creds",
+      secret: { secretName: "legion-operator-creds", defaultMode: 0o440 },
+    };
+    expect(verdict(p, b)).toEqual({ process: { pid: 10, comm: "legion" }, missing: [], wrong: [] });
+
+    // The API server stores 0644 for a volume that sets no mode, so one the pod left out reads so.
+    const open = pod();
+    open.spec.volumes[3] = {
+      name: "operator-creds",
+      secret: { secretName: "legion-operator-creds", defaultMode: 0o644 },
+    };
+    expect(verdict(open, b).wrong).toEqual([
+      "volume kubernetes-api-ca has defaultMode 0644, not 0444",
+      "volume operator-creds has defaultMode 0644, not 0440",
     ]);
   });
 

@@ -1,0 +1,11 @@
+kind: Changed
+body: |-
+  Migrations `0150`–`0152` are additive, and each census answers `0`. `0150` adds a trigger on
+  `issues`, which takes `SHARE ROW EXCLUSIVE` on `issues` for milliseconds: a write to `issues`
+  waits behind it, and a read does not. `0151` creates `doc_ask_block_authors` and `0152` creates
+  `doc_conditional_edit_queue`. Each takes `ACCESS EXCLUSIVE` on its new table and
+  `SHARE ROW EXCLUSIVE` on `artifacts` for its foreign key. The earlier release runs over the new
+  schema unchanged.
+time: 2026-10-28T12:12:19Z
+custom:
+  Issue: pr2414

@@ -1959,10 +1959,12 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	}
 	// Every update this settlement read is settled once it commits, so the row that left the
 	// settlement to a later load goes with that commit. It goes before the first event this
-	// settlement appends: a transaction marking this document owed as a copy (owedCopiesOf) holds
-	// its row while it waits for the events' commit-order lock, which this settlement would then be
-	// holding. The pending authors stay unless this settlement's version lists them (deleted
-	// below): a settlement that writes no version lists no one.
+	// settlement appends. A transaction marking this document owed as a copy (owedCopiesOf) holds
+	// its row until it commits, and this settlement then waits for it holding its owner row and
+	// room lock, which that transaction never takes; nor does it take what this settlement goes on
+	// to lock, its events locking only this document's owner row. The pending authors stay unless
+	// this settlement's version lists them (deleted below): a settlement that writes no version
+	// lists no one.
 	if err := clearSettlementPending(ctx, tx, room); err != nil {
 		return abandon(err)
 	}
@@ -2588,7 +2590,7 @@ func (s *Service) readRoomIssueStates(ctx context.Context, sql string, arg any) 
 
 // issueOpenChanged is issueOpenChangedChannel's handler, on its room-sync lane (roomSync.handlers):
 // issueKey's closed_at changed, in a transaction of any process - this one's, another's, or an
-// earlier build's - whose commit the trigger of migration 0149 announced. It reads the issue's
+// earlier build's - whose commit the trigger of migration 0150 announced. It reads the issue's
 // state now rather than trusting the notification for it: a close and a reopen in quick
 // succession may both be read as the second, which is the truth by then. Every room this process
 // holds of the issue's documents takes that state (setRoomIssueOpen). A document no room here

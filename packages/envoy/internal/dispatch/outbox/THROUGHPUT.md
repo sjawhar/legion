@@ -107,7 +107,10 @@ against main with #2225.
 
 - The Legion daemon applies an issue's facts by their per-issue `seq` and drops one at or below the
   last it applied (`daemon/internal/workflow/engine.go`, `admit/admit.go`). So on the success
-  path each issue's events must reach its subject in id order. A late older event is lost.
+  path each issue's events must reach its subject in id order. A late older event is lost. One
+  issue's ids commit in id order, since the broker draws them under the issue's row lock; two
+  issues' ids do not, and no consumer of NATS relies on an order across issues
+  (`TestOneIssuesEventsReachItsSubjectInSeqOrderWhileAnotherIssueCommitsAcrossThem`).
 - The Envoy listener dedupes by `dedupe_key` and relies on no order (`cmd/listener/delivery.go`).
 - The SSE stream reads Postgres, not NATS.
 

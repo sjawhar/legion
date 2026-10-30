@@ -6,7 +6,7 @@ body: |-
   answers `409 DOCUMENT_LIVE`. The settlement resumption runs once per minute across the
   processes, under the lease `settlement-resumption`, not once per process. The cap of 32 queued
   conditional edits of one document counts the queue of every member
-  (`doc_conditional_edit_queue`, migration `0151`), so the 33rd answers `429 EDIT_QUEUE_FULL`
+  (`doc_conditional_edit_queue`, migration `0152`), so the 33rd answers `429 EDIT_QUEUE_FULL`
   whichever process takes it. Each process first queues a document's conditional edits in memory
   and admits them one at a time, and the admitted edits take turns. On each process, at most
   three of a document's conditional edits hold a database connection at once: the edit being

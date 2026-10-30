@@ -329,8 +329,8 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	// An edit credited to authors names its latest edit source, none included when no one
 	// peer made it; an update no one is credited with keeps the row's. The row is taken here, with
 	// the write, so a route that goes on to append an event (an upload, issue creation) holds it
-	// before the events' commit-order lock, as an answer marking this document a copy owed does
-	// (owedCopiesOf); Ledger.Commit's later recordLatestEditSource then waits on nothing.
+	// before its event, as an answer marking this document a copy owed does (owedCopiesOf), and
+	// Ledger.Commit's later recordLatestEditSource waits on nothing.
 	if include && (len(authors) > 0 || lastActor != nil) {
 		if err := markUpdateOwedBy(ctx, tx, room, lastActor, anyPerson(authors)); err != nil {
 			return 0, err
