@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-825",
+  "completed": "2026-10-30T16:46:57Z",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase worker's own rules — the shared workspace, the handoff, the push and the App identity of each commit.",
+      "legion-worker/references/pr-body.md: the pull request body and what a proof is; the live proof of this change is one of its six-field proof entries, and the simplify pass runs from here.",
+      "legion-worker/references/skip-checks-trailer.md: the scratch commits of the live proof carry the trailer so the proof starts no workflow run, and the handoff-only push carries it too.",
+      "legion-worker/references/default-branch-check.md: every commit's App identity is checked before the push, since several roles share this workspace.",
+      "legion-worker/references/findings.md: the four open points go to the architect and the controller, never to a new issue this worker files.",
+      "ce-simplify-code: the simplify pass over the one changed Go file and its test, which the pull request body records.",
+      "dispatch-first: searched before any Dispatch write, and before any question to a person."
+    ],
+    "test": [
+      "legion-worker: the tester's phase, its handoff and its push.",
+      "legion-worker/references/pr-body.md: the tester's proof entries re-run the four commands of the plan's acceptance table at the head under test, each with scratch branches of its own, since the implementer's are deleted.",
+      "legion-worker/references/skip-checks-trailer.md: the tester's own scratch commits carry the trailer, so re-running the live proof starts no workflow run.",
+      "dispatch-first: searched before any Dispatch write."
+    ],
+    "review": [
+      "legion-worker: the reviewer's phase, its rounds and what goes back against what it fixes itself.",
+      "legion-worker/references/review-threads.md: how each finding is answered on the pull request and how a bot's finding is judged.",
+      "legion-worker/references/merge-gate.md: the approval of the head and what READY compares above it.",
+      "ce-simplify-code: judging the implementer's simplify pass over the changed Go file."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1: the recipe writes the pull request's title verbatim, and titles carry deployment issue keys today (one of 60 open pull requests, two of the last 100 base-branch subjects). So the issue's title, 'key-free commit title and body', is not what the change delivers; the body is.",
+        "answer": "D1 and O1. The daemon strips nothing: the sibling pull request #2539's merger command passes the title verbatim too, and the spec requires the two to match. The title already becomes the base branch's subject today (COMMIT_OR_PR_TITLE), so this change neither causes nor fixes it. O1 puts the wording of the acceptance line, and where the title check belongs, to the architect."
+      },
+      {
+        "finding": "F2: .github/scripts/release-bump.sh:63 classifies commit subjects and bodies, and its header (lines 12-16) says it relies on the squash body's bullets so a non-conventional title still releases and a BREAKING CHANGE: footer bumps the major version. An empty body makes the release level title-only, silently.",
+        "answer": "D5 and T5. The contract is already title-driven (pr-title is a required check of the base branch's ruleset, and release-bump.sh:71 reads '!' on the subject), so the change states it where authors read it: release-bump.sh's header, pr-title.yaml's message about the squash body, and the AGENTS.md sentence at line 156. It is measured, not asserted: the live proof runs release-bump.sh over both scratch merges and quotes the two tokens."
+      },
+      {
+        "finding": "F3: on a merge-queue base GitHub ignores both inputs (its schema's own note), and the enqueue arm is the one that runs on the other repository this project serves, whose base carries a merge_queue rule. 'Both mutations' therefore does not mean every merge.",
+        "answer": "D4. The enqueue arm carries the same variables and GitHub ignores them; nothing in the daemon can change it, since EnqueuePullRequestInput has no message field at all. That repository is private, so no public leak follows. The limit is recorded in the code comment, the plan and the pull request body; its only lever is a repository setting, which is a person's."
+      },
+      {
+        "finding": "F4: whether commitBody: \"\" is read as a value or as an omission is unproven, and the whole fix rests on it. GitHub's documented contract covers omission only ('if omitted, a default message will be used'). A unit test cannot decide GitHub's reading.",
+        "answer": "T1 measures it on a real scratch merge before the code is written, and T7 repeats the measurement at the head that merges. If it is read as an omission, the implementer stops and reports to the architect with the measurement; the fallback (a Co-authored-by: body, or the repository's squash setting) is a product decision, not the implementer's."
+      },
+      {
+        "finding": "F5: acceptance 2 names a surface that does not exist — no harness drives the daemon's merge against real GitHub, and the deployed daemon merges only after a release.",
+        "answer": "The live proof section builds the surface: a scratch base branch of this repository, driven with the daemon's own mutation text read out of the source, as the implement App. The base branch's ruleset applies to the base branch alone while the repository's squash settings apply to every base, so the proof meets the real default and nothing reaches the base branch. The acceptance table names it as a command the tester re-runs."
+      },
+      {
+        "finding": "F6: the sibling pull request #2539 deletes all three files of this package and the spec says only that the two must match, not which lands first.",
+        "answer": "The ordering section. This change lands on the code production runs today, since the leak is live until it ships. The implementer checks that pull request's state before its first commit and, if it has merged, reports to the architect rather than recreating the package. If this change lands first, that pull request's roles keep their deletion; nothing needs re-applying there, because its merger instructions already carry the rule. The plan touches none of the files it rewrites."
+      },
+      {
+        "finding": "F7: the daemon has no title (the read query selects none, the pull request type has no field, the outbox payload carries none), and the arm stores a headline GitHub may merge under hours later.",
+        "answer": "D2 adds title to the existing read, so no extra request and no payload change; GitHub's schema makes PullRequest.title non-null, so no empty-title branch is written. O3 puts the stale-headline case to the architect: the daemon disarms on a push but not on a title edit, and re-arming on an edit is new machinery the plan does not build."
+      },
+      {
+        "finding": "F8: the change breaks the package's own fake, which records each submission as verb, id, head and method (ghautomerge_test.go:96) with expectations reading those four words, and the read answers carry no title (ghautomerge_test.go:170; auto_merge_test.go:1157 and :1647).",
+        "answer": "T3 and T4 name each site. The recorded submission string grows to carry the headline and the body, which gives acceptance 1 its assertion for every arm, and the read answers gain a title, with one case whose title differs from the default so the headline is read rather than hard-coded."
+      },
+      {
+        "finding": "F9: an empty body drops the Co-authored-by: trailers GitHub writes today, which carry no key, no session id and no skip-checks line, so the spec's own rule does not exclude them.",
+        "answer": "O4. The plan follows the spec's 'the body is empty' and names the consequence; the architect decides whether the attribution is wanted, in which case the body is that block alone — which is also F4's fallback."
+      },
+      {
+        "finding": "F10: no document or changelog fragment is named, while AGENTS.md:156 and pr-title.yaml:118 state as live contract what the change falsifies.",
+        "answer": "T5 corrects both, plus release-bump.sh's header; T6 adds the daemon package's fragment, named without a key as the one fragment already there is. The plan touches no merge-gate text, which the sibling pull request rewrites."
+      },
+      {
+        "finding": "F11: the rule the spec cites traces to an issue a person dropped at its design gate ('This is not a priority. Drop this.'); the live source is a controller relay on another issue. The parent of this issue is about wasted Actions minutes, and the proof spends them.",
+        "answer": "O2 puts the citation and the parenting to the architect; the plan proceeds, since the issue is labelled, admitted and in todo. The proof spends no Actions minutes: each scratch head commit carries the skip-checks trailer, so no workflow run starts, and the closed-pull-request workflow's only job is if: false. The plan records the empty run list as evidence."
+      },
+      {
+        "finding": "F12: by-hand merges keep GitHub's default — the manual-merge packet a person merges, and the end-to-end driver's own gh pr merge.",
+        "answer": "Out of this change's scope and said so: the sibling pull request already carries the rule into the merger's command, and the driver merges on a private scratch repository, where no public leak follows. The one path left is a person's merge of a manual-merge packet on this repository; it is named to the architect in the completion report rather than fixed in files that pull request rewrites."
+      },
+      {
+        "finding": "F13: acceptance 1 as written proves one arm and asserts a tautology — choose has three arms, two of them using the enable mutation, and the fake has no notion of the pull request's commit messages.",
+        "answer": "The acceptance table restates it as what a machine reads: each of the three arms sends headline == '<title> (#<n>)' and body == ''. 'The body holds no commit message' is proven on GitHub by the live proof and its negative control, not in the unit test."
+      },
+      {
+        "finding": "F14: unstated whether GitHub appends (#<n>) to a supplied headline, what happens when the title already ends in one, and whether a long title is truncated.",
+        "answer": "T1's one measurement answers all three before the code is written, and the live proof's assertion is exact: the merge commit's message must read the one subject line and nothing else, with no second (#<n>)."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": []
+}
