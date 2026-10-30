@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-594",
-  "completed": "2026-10-30T19:28:58Z",
+  "completed": "2026-10-30T19:56:54Z",
   "proof": [
     {
       "criterion": "Sessions take every event (agent, issue, role) once through restarts of the session, its NATS connection, either listener and a Dispatch pod; the plugin acks after the transcript write; an unacked message is redelivered",
@@ -155,6 +155,14 @@
       "observed": "both runs PASS reading /var/run/model-gateway-key/key; grep of the key over every run output and log: 0 hits; /nonexistent refused with exit 2 naming the file",
       "headSha": "c6be54a40eae45bf8d6a9e0cfe9236692697d2d5",
       "negativeControl": "SESSION_DELIVERY_MODEL_KEY_FILE=/nonexistent: 'the model key file /nonexistent is not readable', exit 2"
+    },
+    {
+      "criterion": "Tester round 8: required `test` is red because .github/e2e-scripts.json lists scripts/e2e/envoy-session-delivery.sh nowhere",
+      "surface": ".github/scripts/select-e2e-proofs.sh and its test suite on this tree",
+      "command": "bash .github/scripts/select-e2e-proofs.test.sh; GITHUB_OUTPUT=/dev/stdout EVENT=schedule bash .github/scripts/select-e2e-proofs.sh",
+      "observed": "Results: 94 passed, 0 failed; PASS: select-e2e-proofs.sh; the selector prints no ::error",
+      "headSha": "f2c0ca9efd28cd48a9d8b5c99c88d08ef3efbd37",
+      "negativeControl": "at c6be54a4 (no entry) the tester's run of the same suite failed 17 cases with JSONDecodeError, and the selector printed ::error file=.github/e2e-scripts.json naming scripts/e2e/envoy-session-delivery.sh"
     }
   ],
   "filesChanged": [
@@ -177,7 +185,8 @@
     "Round 1 review: packages/envoy/cmd/listener/{session_relay,serve_port_workers,delivery,durable,role_lane,role_holder,main,session_delivery,unplaceable_delivery}.go, internal/bus/{session_consumers,session_pull,stream_state,stored,role_lane,nats,confirm}.go, internal/session/{registry,session,handler}.go, packages/envoy/{AGENTS.md,docs/architecture.md}, .github/workflows/ci.yaml comments",
     "Round 6: packages/envoy-client/src/consumer-delivery.ts (followedOnCorePath) + its test, README.md and changelog fragment; packages/pi-envoy/extensions/envoy.test.ts, AGENTS.md; packages/claude-envoy/AGENTS.md; packages/envoy/cmd/listener/main_test.go and unplaceable_delivery_acceptance_test.go (pushLog); merge: packages/envoy/internal/bus/nats.go (onAsyncError), packages/envoy/AGENTS.md",
     "Review round 2: packages/envoy/cmd/listener/{delivery,serve_port_workers,role_lane,session_delivery,session_relay,api,claim_wiring,main}.go and tests (session_relay_test, main_test, dispatch_resolution_test, serve_port_workers_test, api_test, delivery_role_supersession_test), internal/session/session.go, packages/envoy/AGENTS.md, changelog fragment; packages/envoy-client/src/{consumer-delivery,tool-contract}.ts and tests, changelog fragment; packages/pi-envoy/extensions/envoy.ts; packages/claude-envoy/src/envoy-channel-server.ts; merge of main d9aee5bf: packages/envoy-client/package.json",
-    "Round 8: merge of main cc825086 (76da2c10: .github/workflows/ci.yaml, docs/site/.../dispatch/envoy.md, packages/envoy/AGENTS.md, cmd/listener/main.go, internal/bus/nats.go); packages/envoy/cmd/listener/interest_record_unreadable_test.go; scripts/e2e/envoy-session-delivery.sh, scripts/e2e/README.md"
+    "Round 8: merge of main cc825086 (76da2c10: .github/workflows/ci.yaml, docs/site/.../dispatch/envoy.md, packages/envoy/AGENTS.md, cmd/listener/main.go, internal/bus/nats.go); packages/envoy/cmd/listener/interest_record_unreadable_test.go; scripts/e2e/envoy-session-delivery.sh, scripts/e2e/README.md",
+    "Round 9: .github/e2e-scripts.json (envoy-session-delivery.sh under elsewhere, never hosted: it needs an issue pod and a model provider)"
   ],
   "trickyParts": [
     "nats-server 2.10.29 reports ack floor 0 for a fresh consumer, so every session consumer is created at a start sequence (stream last+1) and the floor is read never below it",
