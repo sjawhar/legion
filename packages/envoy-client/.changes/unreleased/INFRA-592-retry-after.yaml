@@ -12,4 +12,5 @@ body: |-
   answer comes back as before. A write sent again is a new intent under a key of its own, except
   where the caller named that key (`projectArtifact`, `docEdit`): neither refusal leaves a key
   behind to replay, so the caller's one intent across calls and processes keeps its one key. The
-  constructor takes an optional `RetryClock` after the signal (INFRA-592).
+  wait is taken on the clock and timer the constructor's `writeRetry` already carries (`now`,
+  `pause`), which a test replaces (INFRA-592).

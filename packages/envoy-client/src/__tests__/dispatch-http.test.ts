@@ -4,7 +4,7 @@ import {
   DISPATCH_WRITE_RETRY,
   DispatchClient,
   DispatchGatewayError,
-  type RetryClock,
+  type DispatchWriteRetry,
 } from "../dispatch-http";
 import { fakeSearchResponse } from "./fake-search-response";
 
@@ -1256,36 +1256,29 @@ describe("syncArchitectureSources against a server older than the every-source s
 // Dispatch answers 429 OVERLOADED or EDIT_QUEUE_FULL before a request runs, and 503 DATABASE_BUSY
 // or REQUEST_TIMEOUT when a read could not get a connection or passed its deadline, each with
 // Retry-After. The client waits that out (plus jitter) and asks again, at most twice and never past
-// its 60 s deadline; a write's 503 may have committed, so it is never repeated. The clock is the
-// test's: a wait moves it instead of sleeping.
+// its 60 s deadline; a write's 503 may have committed, so it is never repeated.
 describe("DispatchClient waits out Retry-After", () => {
+  // The client reads its deadline and waits out `Retry-After` on the write retry's own clock and
+  // timer, so here a wait moves `at` instead of sleeping. A write's own retries under its key are
+  // another mechanism (dispatch-keyed-writes.test.ts), which `pausesMs: []` leaves out: each
+  // attempt below is one send, so what the rows count is the wait-out alone.
   function fakeClock() {
     const state = { at: 0, waits: [] as number[] };
-    const clock: RetryClock = {
+    const writeRetry: DispatchWriteRetry = {
+      ...DISPATCH_WRITE_RETRY,
+      pausesMs: [],
+      withinMs: 0,
       now: () => state.at,
-      sleep: async (ms) => {
+      pause: async (ms) => {
         state.waits.push(ms);
         state.at += ms;
       },
     };
-    return { state, clock };
+    return { state, writeRetry };
   }
 
-  // A write's own retries under its key are another mechanism (dispatch-keyed-writes.test.ts);
-  // here each attempt is one send, so what the rows below count is the wait-out alone.
-  function retryClient(fetchImpl: typeof fetch, clock: RetryClock): DispatchClient {
-    return new DispatchClient(
-      "http://dispatch.test",
-      "secret",
-      fetchImpl,
-      undefined,
-      {
-        ...DISPATCH_WRITE_RETRY,
-        pausesMs: [],
-        withinMs: 0,
-      },
-      clock
-    );
+  function retryClient(fetchImpl: typeof fetch, writeRetry: DispatchWriteRetry): DispatchClient {
+    return new DispatchClient("http://dispatch.test", "secret", fetchImpl, undefined, writeRetry);
   }
 
   function refusal(status: number, code: string, retryAfter?: string): Response {
@@ -1304,8 +1297,8 @@ describe("DispatchClient waits out Retry-After", () => {
   ])("a GET answered 503 %s succeeds after the Retry-After wait", async (code) => {
     const issue = { key: "DSP-1", title: "Issue" };
     const { fetchImpl, requests } = fakeFetch([refusal(503, code, "2"), jsonResponse(issue)]);
-    const { state, clock } = fakeClock();
-    const client = retryClient(fetchImpl, clock);
+    const { state, writeRetry } = fakeClock();
+    const client = retryClient(fetchImpl, writeRetry);
 
     await expect(client.getIssue("DSP-1")).resolves.toMatchObject(issue);
 
@@ -1321,8 +1314,8 @@ describe("DispatchClient waits out Retry-After", () => {
   ])("a POST answered 429 %s is sent again after its Retry-After", async (code) => {
     const posted = { id: "message-1", issue_key: "DSP-1" };
     const { fetchImpl, requests } = fakeFetch([refusal(429, code, "3"), jsonResponse(posted)]);
-    const { state, clock } = fakeClock();
-    const client = retryClient(fetchImpl, clock);
+    const { state, writeRetry } = fakeClock();
+    const client = retryClient(fetchImpl, writeRetry);
 
     await expect(client.message("DSP-1", { body: "Shipped.", actor })).resolves.toMatchObject(
       posted
@@ -1350,8 +1343,8 @@ describe("DispatchClient waits out Retry-After", () => {
       refusal(429, "OVERLOADED", "1"),
       jsonResponse({ id: "message-1", issue_key: "DSP-1" }),
     ]);
-    const { clock } = fakeClock();
-    const client = retryClient(fetchImpl, clock);
+    const { writeRetry } = fakeClock();
+    const client = retryClient(fetchImpl, writeRetry);
     const callerKey = "askgate-doc.3f7a91";
 
     await expect(
@@ -1379,8 +1372,8 @@ describe("DispatchClient waits out Retry-After", () => {
     "REQUEST_TIMEOUT",
   ])("a POST answered 503 %s is not sent again, since it may have committed", async (code) => {
     const { fetchImpl, requests } = fakeFetch([refusal(503, code, "1")]);
-    const { state, clock } = fakeClock();
-    const client = retryClient(fetchImpl, clock);
+    const { state, writeRetry } = fakeClock();
+    const client = retryClient(fetchImpl, writeRetry);
 
     await expect(client.message("DSP-1", { body: "Shipped.", actor })).rejects.toMatchObject({
       name: "DispatchServiceError",
@@ -1403,8 +1396,8 @@ describe("DispatchClient waits out Retry-After", () => {
       page,
     ]) {
       const { fetchImpl, requests } = fakeFetch([answer]);
-      const { state, clock } = fakeClock();
-      const client = retryClient(fetchImpl, clock);
+      const { state, writeRetry } = fakeClock();
+      const client = retryClient(fetchImpl, writeRetry);
 
       await expect(client.getIssue("DSP-1")).rejects.toMatchObject({ status: answer.status });
       expect(requests).toHaveLength(1);
@@ -1415,7 +1408,7 @@ describe("DispatchClient waits out Retry-After", () => {
   test("starts no retry whose wait would pass the deadline", async () => {
     const late = fakeFetch([refusal(503, "DATABASE_BUSY", "1")]);
     const lateClock = fakeClock();
-    const lateClient = retryClient(late.fetchImpl, lateClock.clock);
+    const lateClient = retryClient(late.fetchImpl, lateClock.writeRetry);
     lateClock.state.at = 59_500;
 
     await expect(lateClient.getIssue("DSP-1")).rejects.toMatchObject({
@@ -1433,8 +1426,8 @@ describe("DispatchClient waits out Retry-After", () => {
       refusal(429, "OVERLOADED", "30"),
       refusal(429, "OVERLOADED", "30"),
     ]);
-    const { state, clock } = fakeClock();
-    const client = retryClient(fetchImpl, clock);
+    const { state, writeRetry } = fakeClock();
+    const client = retryClient(fetchImpl, writeRetry);
 
     await expect(client.message("DSP-1", { body: "Shipped.", actor })).rejects.toMatchObject({
       code: "OVERLOADED",
@@ -1454,8 +1447,8 @@ describe("DispatchClient waits out Retry-After", () => {
       refusal(429, "EDIT_QUEUE_FULL", "soon"),
       refusal(429, "EDIT_QUEUE_FULL"),
     ]);
-    const { state, clock } = fakeClock();
-    const client = retryClient(fetchImpl, clock);
+    const { state, writeRetry } = fakeClock();
+    const client = retryClient(fetchImpl, writeRetry);
 
     await expect(
       client.docEdit("artifact-1", { ops: [{ op: "delete", find: "same" }], actor })

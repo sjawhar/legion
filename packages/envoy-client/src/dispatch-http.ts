@@ -224,6 +224,35 @@ function answerPayload(response: Response, text: string): unknown {
   }
 }
 
+/** An answer whose body is read: the text, what it says, and the answer rebuilt around it. */
+interface ReadAnswer {
+  /** The body as text. */
+  readonly text: string;
+  /** That text as `answerPayload` reads it. */
+  readonly payload: unknown;
+  /** The answer rebuilt from `text`, since reading the body emptied the one that arrived. */
+  readonly response: Response;
+}
+
+/**
+ * Reads `response`'s body to its end, once, for every reading of it a caller needs: the text, the
+ * payload `answerPayload` makes of it, and an answer that still holds the body for whoever reads
+ * it next. The status must be one that carries a body, since `new Response` refuses one for a 204
+ * or a 304.
+ */
+async function readAnswer(response: Response): Promise<ReadAnswer> {
+  const text = await response.text();
+  return {
+    text,
+    payload: answerPayload(response, text),
+    response: new Response(text, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    }),
+  };
+}
+
 /** Whether `error` is a server's answer that it has no route for the request (`404 NOT_FOUND`,
  *  "no route for …"), as a server older than a route answers it; a `404 NOT_FOUND` for a
  *  resource the server does not know says "not found" instead. */
@@ -299,35 +328,6 @@ const DEFAULT_RETRY_AFTER_SECONDS = 1;
  * overload refused together do not all come back in the same instant.
  */
 const RETRY_JITTER_MS = 250;
-
-/** The clock a `DispatchClient` reads its deadline from and waits out `Retry-After` on. */
-export interface RetryClock {
-  /** Milliseconds on a clock that only moves forward. */
-  now(): number;
-  /** Resolves after `ms`, or rejects with the signal's reason once `signal` aborts. */
-  sleep(ms: number, signal: AbortSignal): Promise<void>;
-}
-
-const systemClock: RetryClock = {
-  now: () => performance.now(),
-  sleep: (ms, signal) => {
-    const { promise, resolve, reject } = Promise.withResolvers<void>();
-    if (signal.aborted) {
-      reject(signal.reason);
-      return promise;
-    }
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(signal.reason);
-    };
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    signal.addEventListener("abort", onAbort, { once: true });
-    return promise;
-  },
-};
 
 /** Dispatch's own refusal: the JSON `{error, code}` its `writeError` sends. */
 type DispatchRefusal = DispatchServiceErrorShape & { readonly error: string };
@@ -570,22 +570,11 @@ async function writeAnswer(response: Response, key: string, method: string): Pro
     return { response, again: false, reached: false, echoed, unjudged: false };
   }
   const { status } = response;
-  const text = await response.text();
-  let shape: DispatchServiceErrorShape = {};
-  if (isJson(response)) {
-    try {
-      shape = asErrorShape(JSON.parse(text));
-    } catch {
-      shape = {};
-    }
-  }
+  const read = await readAnswer(response);
+  const shape = asErrorShape(read.payload);
   const again = retriesUnderKey(status, shape.code) && !waitsOut(method, status, shape.code);
   return {
-    response: new Response(text, {
-      status,
-      statusText: response.statusText,
-      headers: response.headers,
-    }),
+    response: read.response,
     again,
     reached: status >= 500 || (again && status === 409),
     echoed,
@@ -766,16 +755,15 @@ function excerpt(text: string, token: string): string {
  * JSON HTTP client for Dispatch's native-tool API. Every request goes through `#send`, under one
  * deadline, `DISPATCH_TOOL_DEADLINE_MS` from the client's construction (sooner when `signal`
  * aborts first). An answer Dispatch asks the client to wait out (`waitsOut`) is asked again after
- * its `Retry-After`, read on `clock`, while that deadline allows the wait. Each write (POST or
- * PATCH) also carries an `Idempotency-Key` of its own and asks again under it, as `writeRetry`
- * paces it, while its attempts get no definitive answer.
+ * its `Retry-After`, waited on `writeRetry`'s timer and clock, while that deadline allows the
+ * wait. Each write (POST or PATCH) also carries an `Idempotency-Key` of its own and asks again
+ * under it, as `writeRetry` paces it, while its attempts get no definitive answer.
  */
 export class DispatchClient {
   readonly #baseUrl: string;
   readonly #resolvedIssues = new Map<string, Promise<string>>();
   readonly #signal: AbortSignal;
-  readonly #clock: RetryClock;
-  /** When `#signal`'s own deadline passes, on `#clock`. */
+  /** When `#signal`'s own deadline passes, on the write clock (`#now`). */
   readonly #deadline: number;
 
   constructor(
@@ -783,13 +771,11 @@ export class DispatchClient {
     readonly token: string,
     readonly fetchImpl: typeof fetch = fetch,
     signal?: AbortSignal,
-    readonly writeRetry: DispatchWriteRetry = DISPATCH_WRITE_RETRY,
-    clock: RetryClock = systemClock
+    readonly writeRetry: DispatchWriteRetry = DISPATCH_WRITE_RETRY
   ) {
     this.#baseUrl = baseUrl.replace(/\/+$/, "");
     this.#signal = requestSignal(signal);
-    this.#clock = clock;
-    this.#deadline = clock.now() + DISPATCH_TOOL_DEADLINE_MS;
+    this.#deadline = this.#now() + DISPATCH_TOOL_DEADLINE_MS;
   }
 
   /**
@@ -1568,14 +1554,9 @@ export class DispatchClient {
     for (let attempt = 1; ; attempt++) {
       const response = await this.#sendOnce(method, url, body, accept, signal, callerKey);
       if (response.status !== 429 && response.status !== 503) return response;
-      const text = await response.text();
-      const refusal = asErrorShape(answerPayload(response, text));
       // The body is read, so the answer goes on as a Response that still holds it.
-      const answer = new Response(text, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers,
-      });
+      const { payload, response: answer } = await readAnswer(response);
+      const refusal = asErrorShape(payload);
       if (!isDispatchRefusal(refusal) || !waitsOut(method, response.status, refusal.code)) {
         return answer;
       }
@@ -1593,7 +1574,7 @@ export class DispatchClient {
             "(Retry-After) and try again"
         );
       }
-      if (this.#clock.now() + wait >= this.#deadline) {
+      if (this.#now() + wait >= this.#deadline) {
         throw refusalError(
           response.status,
           refusal,
@@ -1601,7 +1582,7 @@ export class DispatchClient {
             `call's ${DISPATCH_TOOL_DEADLINE_MS / 1000} s deadline, so wait ${seconds} s and try again`
         );
       }
-      await this.#clock.sleep(
+      await (this.writeRetry.pause ?? pauseFor)(
         wait,
         signal === undefined ? this.#signal : AbortSignal.any([this.#signal, signal])
       );
