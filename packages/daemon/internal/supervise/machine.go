@@ -313,6 +313,17 @@ type Deps struct {
 	// root architect's task of a run — never a phase worker's, never a task of no run such as an
 	// operator's or a production check's. nil sends every delivery.
 	RootHears func(ctx context.Context, c Claim, d Delivery) (bool, error)
+	// RootTask is what a root architect's held task of a run says now: its text, and what it names
+	// of the decisions a person made while nobody in the root's tree could hear them
+	// (Delivery.Kept), re-read from the record at the moment the task is about to be sent. The
+	// decisions such a task names were forgotten when the claim queued it, so the task is the only
+	// thing that carries them, and a hand-over of a child into a tree of its own keeps those of
+	// the child's subtree again for the child (record.Store.ReKeepDeliveredDecisions): they are
+	// owed to the child's architect from then on, and this task must stop naming them. An empty
+	// text is a task that names nothing now, which is retired rather than sent. It is asked only
+	// about a root architect's task of a run (asksRoot), once that root has an architect to hear
+	// it, and nil leaves every task as it was queued.
+	RootTask func(ctx context.Context, c Claim, d Delivery) (task string, kept []byte, err error)
 	// TreeClosable answers whether the operator may close this claim's tree: false refuses the
 	// close, and an error is the read itself failing, which the caller sees as a failure rather
 	// than a refusal. It is asked for the operator's own close — the workflow's linger close is its

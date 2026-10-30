@@ -323,6 +323,25 @@ func (s *keptForgetStore) ForgetKeptDecisions(ctx context.Context, tx pgx.Tx, ro
 	return s.Store.ForgetKeptDecisions(ctx, tx, root, kept, row)
 }
 
+// keptClaimStore is the claim store this run's supervisor writes through: the daemon's own
+// (store.Store), over the run's database, so every claim and the task pending on it stand in
+// `claims` and `pending_task_deliveries` as a live daemon leaves them. The held task's decisions
+// are the reason it is the real one: what such a task names of what its root keeps is persisted
+// with the delivery (pending_task_deliveries.kept_decisions), and that row is where a hand-over
+// reads what to keep again for the child (record.Store.ReKeepDeliveredDecisions) and where a
+// restart reads the claims back from (keptRun.storedClaims).
+//
+// Two answers are not the daemon's: a claim is admitted by writing it, and every launch passes.
+// Both are the tree lifecycle's, which this run opens for the root alone — the child it hands over
+// takes an architect claim of its own, under a tree no lifecycle here opens.
+type keptClaimStore struct{ *store.Store }
+
+func (s keptClaimStore) AdmitClaim(ctx context.Context, c supervise.Claim) (supervise.Claim, error) {
+	return c, s.PutClaim(ctx, c)
+}
+
+func (keptClaimStore) CheckLaunch(context.Context, supervise.Claim) error { return nil }
+
 // keptRuntime is the fake runtime with every launch of the architect refused while the run's
 // toggle is on — the pod the cluster would not open, the session it could not resume — so a start
 // spends the claim's launch budget (supervise.Limits.LaunchFailures) and leaves the claim failed.
@@ -474,7 +493,7 @@ type keptRun struct {
 	engine    *workflow.Engine
 	admission *admit.Admission
 	trees     *store.Store
-	claims    *outboxClaimStore
+	claims    keptClaimStore
 	rt        *keptRuntime
 	publisher *keptPublisher
 	sup       *supervisor
@@ -665,6 +684,7 @@ func newKeptRun(t *testing.T, seed int64, steps int) *keptRun {
 	base := record.NewStore()
 	records := &keptForgetStore{Store: base}
 	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
+	trees := outboxTreeStore(t, pool, keptRoot)
 	run := &keptRun{
 		t: t, ctx: ctx, seed: seed, rng: rand.New(rand.NewPCG(uint64(seed), uint64(seed))), steps: steps,
 		pool: pool, base: base, records: records,
@@ -673,8 +693,8 @@ func newKeptRun(t *testing.T, seed int64, steps int) *keptRun {
 		// project's live issues match (record.Store.LiveIssues); the claims it opens are keyed by
 		// the normalized token of it (claim.ProjectToken), the one the supervisor uses.
 		admission:          admit.New(records, engine, 2, "LEGION", quietLogger()),
-		trees:              outboxTreeStore(t, pool, keptRoot),
-		claims:             &outboxClaimStore{},
+		trees:              trees,
+		claims:             keptClaimStore{Store: trees},
 		rt:                 &keptRuntime{Runtime: fake.NewRuntime()},
 		publisher:          &keptPublisher{genAt: map[string]uint64{}},
 		stateDir:           t.TempDir(),
@@ -726,9 +746,10 @@ func (r *keptRun) restart() {
 	sup := newSupervisor(r.ctx, nil, "legion", r.stateDir, quietLogger())
 	sup.deps = supervise.Deps{
 		Runtime: r.rt, Conns: fake.NewConns(), Store: r.claims, Specs: outboxSpecs{}, Clock: stillClock{}, Log: quietLogger(),
-		// The daemon's own reading of whether a root architect's task may be sent
-		// (workflowRuntime.rootHears), over this run's pool and store.
+		// The daemon's own readings of whether a root architect's task may be sent and of what that
+		// task says now (workflowRuntime.rootHears, rootTask), over this run's pool and store.
 		RootHears:      (&workflowRuntime{pool: r.pool, records: r.records}).rootHears,
+		RootTask:       (&workflowRuntime{pool: r.pool, records: r.records}).rootTask,
 		Limits:         supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
 		Timeouts:       supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond},
 		PluginContract: 24,
@@ -753,15 +774,9 @@ func (r *keptRun) restart() {
 // storedClaims is every claim the store holds, each with the delivery the store holds for it, as
 // the boot reads them (store.Store.Claims): a restart rebuilds the machines from these alone.
 func (r *keptRun) storedClaims() []supervise.Claim {
-	r.claims.mu.Lock()
-	defer r.claims.mu.Unlock()
-	stored := make([]supervise.Claim, 0, len(r.claims.claims))
-	for token, held := range r.claims.claims {
-		if delivery, ok := r.claims.deliveries[token]; ok {
-			pending := delivery
-			held.Pending = &pending
-		}
-		stored = append(stored, held)
+	stored, err := r.claims.Claims(r.ctx)
+	if err != nil {
+		r.fatalf("read the stored claims: %v", err)
 	}
 	return stored
 }
@@ -999,10 +1014,13 @@ func (r *keptRun) handOverEnabled() bool {
 // it would make is applied here, which is the path a person's label takes.
 func (r *keptRun) handOver() {
 	now := time.Now()
-	// Every row the outbox holds now was composed while the child was still in the root's tree: a
-	// task or catch-up of one of them may name a decision on the child, and telling the old
-	// architect it is the one extra telling the invariant accepts (held).
-	r.handedRow = r.lastRow()
+	// Every row the outbox has issued by now was composed while the child was still in the root's
+	// tree: a task or catch-up of one of them may name a decision on the child, and telling the old
+	// architect it is the one extra telling the invariant accepts (held). It is the newest id the
+	// outbox has issued, not the newest row it still holds: a row whose run is over is deleted, and
+	// the task it gave waits on its claim, to be prompted whenever that claim is next ready — which
+	// is the very row whose telling the invariant accepts.
+	r.handedRow = r.issuedRows()
 	r.noteTheDebtsTheHandOverMoves()
 	if err := pgx.BeginFunc(r.ctx, r.pool, func(tx pgx.Tx) error {
 		if err := r.records.PutHandover(r.ctx, tx, record.Handover{Issue: keptChild, Tree: r.root.issue.Tree,
@@ -1032,8 +1050,8 @@ func (r *keptRun) handOver() {
 	r.child.issue, r.child.handed = *carried, true
 	r.roots = append(r.roots, r.child)
 	r.counts.handovers++
-	r.tracef("hand-over child=%s tree=%s generation=%d status=%s phase=%s last-row=%d", keptChild, carried.Tree,
-		carried.Generation, carried.Status, carried.Phase, r.lastRow())
+	r.tracef("hand-over child=%s tree=%s generation=%d status=%s phase=%s rows-issued-before=%d last-row=%d", keptChild,
+		carried.Tree, carried.Generation, carried.Status, carried.Phase, r.handedRow, r.lastRow())
 }
 
 // noteTheDebtsTheHandOverMoves records every decision the hand-over is about to move into the
@@ -2202,6 +2220,19 @@ func (r *keptRun) enqueue(issue string, payload record.OutboxPayload) {
 	}); err != nil {
 		r.fatalf("enqueue an outbox row: %v", err)
 	}
+}
+
+// issuedRows is the newest id the outbox has issued, whether or not that row still stands: a row
+// is deleted when its run finishes, so the newest row the outbox holds says nothing about which
+// rows were composed before a moment. It is the sequence's own last value, read as the hand-over
+// draws the line between the rows composed while the child was still in the root's tree and those
+// composed after (handedRow, beforeTheHandOver).
+func (r *keptRun) issuedRows() int64 {
+	var id int64
+	if err := r.pool.QueryRow(r.ctx, "select coalesce(pg_sequence_last_value('outbox_id_seq'), 0)").Scan(&id); err != nil {
+		r.fatalf("read the newest outbox row the run has issued: %v", err)
+	}
+	return id
 }
 
 // lastRow is the newest outbox row's id, which names in the trace the row an operation wrote.

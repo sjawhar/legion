@@ -813,6 +813,149 @@ func TestAClosingTreeNamesEveryDecisionStillOwedToItsArchitect(t *testing.T) {
 	}
 }
 
+// A tree whose linger expires hands each child it leaves in the workflow to Legion, and that
+// child's re-admission takes what a person decided on it and on everything below it into the tree
+// of its own: the rows the root still keeps move, and what the held, unconfirmed task of the old
+// architect names of that subtree is kept again under the child
+// (record.Store.MoveKeptDecisions, ReKeepDeliveredDecisions). Such a decision is not one the close
+// leaves behind, so the close must not warn that it still owes it: the child's own architect is
+// told it at its start. The close says so in one Info line each, and its Warn lines name only what
+// really stands where it is — what was decided on the root itself, and on a member the close hands
+// to nobody.
+func TestAClosingTreeDoesNotWarnAboutTheDecisionsItHandsToAChild(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	until := time.Now().Add(-time.Minute)
+	root := record.Issue{Key: "LEGION-218", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+		Project: "LEGION", Tree: "LEGION-218", Title: "Root", Phase: phase.Done, Generation: 3, Status: "done",
+		Rank: "U", LastDispatchSeq: 5, LingerUntil: &until}
+	rootKey, childKey := root.Key, "LEGION-219"
+	// The child is still working when the linger ends, so the close hands it to Legion with its
+	// run. The grandchild below it has finished, so the close hands it to nobody, but it goes into
+	// the child's new tree all the same: the child's re-admission moves what was decided on its
+	// whole subtree (admit.Admission.subtree, which walks the parent links whatever the status).
+	// The parked member stands under the root and goes nowhere.
+	child := record.Issue{Key: childKey, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+		Project: "LEGION", Tree: root.Tree, Parent: &rootKey, Title: "Child", Phase: phase.Planning, Generation: 1,
+		Status: "in_progress", Rank: "B", LastDispatchSeq: 2}
+	grandchild := record.Issue{Key: "LEGION-220", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+		Project: "LEGION", Tree: root.Tree, Parent: &childKey, Title: "Grandchild", Phase: phase.Done,
+		Generation: 1, Status: "done", Rank: "C", LastDispatchSeq: 2}
+	parked := record.Issue{Key: "LEGION-221", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+		Project: "LEGION", Tree: root.Tree, Parent: &rootKey, Title: "Parked", Phase: phase.Done, Generation: 1,
+		Status: "backlog", Rank: "D", LastDispatchSeq: 2}
+	for _, issue := range []record.Issue{root, child, grandchild, parked} {
+		putOutboxIssue(t, pool, records, issue)
+	}
+
+	at := time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)
+	onTheRoot, onTheChild := "dispatch://LEGION-218/ask/ask-1", "dispatch://LEGION-219/ask/ask-2"
+	onTheGrandchild, onTheParked := "dispatch://LEGION-220/ask/ask-3", "dispatch://LEGION-221/ask/ask-4"
+	for _, kept := range []record.ParkedDecision{
+		{Root: rootKey, Ref: onTheRoot, Issue: rootKey, Decision: record.DecisionAskAnswered, Actor: "user:alice", At: at},
+		{Root: rootKey, Ref: onTheChild, Issue: childKey, Decision: record.DecisionAskResolved, Actor: "user:bob", At: at},
+		{Root: rootKey, Ref: onTheGrandchild, Issue: grandchild.Key, Decision: record.DecisionAskAnswered, Actor: "user:bob", At: at},
+		{Root: rootKey, Ref: onTheParked, Issue: parked.Key, Decision: record.DecisionAskResolved, Actor: "user:alice", At: at},
+	} {
+		if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error { return records.AddParkedDecision(ctx, tx, kept) }); err != nil {
+			t.Fatalf("keep the decision %s: %v", kept.Ref, err)
+		}
+	}
+	// The root architect's claim holds a start task nobody sent and nobody confirmed, naming one
+	// decision of the root and one of the child: the rows went when the claim took the task, so
+	// the task is all that carries them, and the hand-over keeps the child's again for the child.
+	heldOnTheRoot, heldOnTheChild := "dispatch://LEGION-218/ask/ask-5", "dispatch://LEGION-219/ask/ask-6"
+	seedHeldArchitectTask(t, pool, rootKey, record.KeptDecisions{Decisions: []record.DecisionMark{
+		{Ref: heldOnTheRoot, At: at, Issue: rootKey, Decision: record.DecisionAskAnswered, Actor: "user:alice"},
+		{Ref: heldOnTheChild, At: at, Issue: childKey, Decision: record.DecisionAskResolved, Actor: "user:bob"}}})
+
+	var logged bytes.Buffer
+	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: testRepositories},
+		slog.New(slog.NewJSONHandler(&logged, nil)))
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records,
+		handlers: []intake.Handler{engine}, now: time.Now}
+	row := mustOutboxRow(t, rootKey, record.LingerClose{Generation: root.Generation}, time.Now())
+	if err := runner.execute(ctx, row); err != nil {
+		t.Fatalf("close the tree at its linger's end: %v", err)
+	}
+
+	want := []string{
+		"WARN " + onTheRoot + " root=LEGION-218 issue=LEGION-218 where=kept for its root",
+		"WARN " + onTheParked + " root=LEGION-218 issue=LEGION-221 where=kept for its root",
+		"WARN " + heldOnTheRoot + " root=LEGION-218 issue=LEGION-218 where=held by its architect's unconfirmed task",
+	}
+	if got := owedDecisionsLogged(t, logged.Bytes()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the close warned about %q, want only what it leaves standing: %q", got, want)
+	}
+	wantHanded := []string{
+		"INFO " + onTheChild + " root=LEGION-218 issue=LEGION-219 where=kept for its root",
+		"INFO " + onTheGrandchild + " root=LEGION-218 issue=LEGION-220 where=kept for its root",
+		"INFO " + heldOnTheChild + " root=LEGION-218 issue=LEGION-219 where=held by its architect's unconfirmed task",
+	}
+	if got := handedDecisionsLogged(t, logged.Bytes()); !reflect.DeepEqual(got, wantHanded) {
+		t.Fatalf("the close logged %q as handed over, want %q", got, wantHanded)
+	}
+	// The close really did hand the child over: its status write is queued, which is what
+	// re-admits it into a tree of its own and tells its architect what this close did not warn
+	// about.
+	if handed := handOverRows(t, pool); !reflect.DeepEqual(handed, []string{childKey}) {
+		t.Fatalf("the close queued hand-overs for %q, want the one child still in the workflow", handed)
+	}
+}
+
+// handedDecisionsLogged is every line the close wrote for a decision that goes with a child it
+// handed to Legion, in the order it wrote them, in the shape owedDecisionsLogged reads.
+func handedDecisionsLogged(t *testing.T, logged []byte) []string {
+	t.Helper()
+	var lines []string
+	for _, line := range bytes.Split(bytes.TrimSpace(logged), []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		var entry struct {
+			Level string `json:"level"`
+			Msg   string `json:"msg"`
+			Ref   string `json:"ref"`
+			Root  string `json:"root"`
+			Issue string `json:"issue"`
+			Where string `json:"where"`
+		}
+		if err := json.Unmarshal(line, &entry); err != nil {
+			t.Fatalf("decode the log line %q: %v", line, err)
+		}
+		if !strings.Contains(entry.Msg, "goes to the architect of the child this close handed to Legion") {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%s %s root=%s issue=%s where=%s", entry.Level, entry.Ref, entry.Root, entry.Issue, entry.Where))
+	}
+	return lines
+}
+
+// handOverRows is every issue the outbox holds a hand-over status write for, in row order: what
+// the close handed to Legion.
+func handOverRows(t *testing.T, pool *pgxpool.Pool) []string {
+	t.Helper()
+	rows, err := pool.Query(context.Background(), `select issue from outbox
+		where kind = 'dispatch_status' and (payload->>'handOver')::boolean order by id`)
+	if err != nil {
+		t.Fatalf("read the hand-over rows: %v", err)
+	}
+	defer rows.Close()
+	var handed []string
+	for rows.Next() {
+		var issue string
+		if err := rows.Scan(&issue); err != nil {
+			t.Fatalf("scan a hand-over row: %v", err)
+		}
+		handed = append(handed, issue)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the hand-over rows: %v", err)
+	}
+	return handed
+}
+
 // seedHeldArchitectTask records root's architect ready with a start task it has been given and
 // nobody has sent: unconfirmed, naming kept, as a task held while its root has no architect to
 // hear it stands (supervise's sendPending).

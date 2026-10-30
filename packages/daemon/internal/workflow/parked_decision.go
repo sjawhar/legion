@@ -85,27 +85,43 @@ func ParkedDecisionTask(ctx context.Context, tx pgx.Tx, store record.Store, gate
 	if err != nil {
 		return "", nil, err
 	}
-	var parts []string
 	var kept record.KeptDecisions
-	if len(decisions) > 0 {
-		named := make([]string, 0, len(decisions))
-		for _, d := range decisions {
-			named = append(named, fmt.Sprintf("%s (%s by %s)", d.Ref, d.Decision, d.Actor))
-			kept.Decisions = append(kept.Decisions, record.DecisionMark{Ref: d.Ref, At: d.At, Issue: d.Issue,
-				Decision: d.Decision, Actor: d.Actor})
-		}
-		parts = append(parts, fmt.Sprintf("While nobody in %s's tree could hear it, a person decided on the tree: %s. Read each before you continue.",
-			root.Key, strings.Join(named, "; ")))
+	for _, d := range decisions {
+		kept.Decisions = append(kept.Decisions, record.DecisionMark{Ref: d.Ref, At: d.At, Issue: d.Issue,
+			Decision: d.Decision, Actor: d.Actor})
 	}
 	if approved > 0 && gate != config.DesignGateOff {
-		parts = append(parts, fmt.Sprintf("The spec is approved at version %d and is now at version %d: request approval of version %d, "+
-			"as skill://legion-architect/references/design-gate.md (\"The armed gate\") says.", approved, latest, latest))
 		kept.Approved, kept.Latest = approved, latest
 	}
-	if len(parts) == 0 {
+	task := KeptDecisionsTask(root.Key, kept)
+	if task == "" {
 		return "", nil, nil
 	}
-	return strings.Join(parts, " "), &kept, nil
+	return task, &kept, nil
+}
+
+// KeptDecisionsTask is the text that names kept to root's architect, the one wording a start task
+// and a catch-up both use (ParkedDecisionTask) and the one a held task is written back to when the
+// hand-over of a child takes part of what it names into a tree of its own (supervise's
+// Deps.RootTask, the daemon's rootTask): a task whose decisions have all left this root is written
+// back to "", which is a task that names nothing and is retired rather than sent. The approval
+// pair is the root's own and never moves, so it is named whenever kept carries one — the gate was
+// read where the pair was first kept.
+func KeptDecisionsTask(root string, kept record.KeptDecisions) string {
+	var parts []string
+	if len(kept.Decisions) > 0 {
+		named := make([]string, 0, len(kept.Decisions))
+		for _, d := range kept.Decisions {
+			named = append(named, fmt.Sprintf("%s (%s by %s)", d.Ref, d.Decision, d.Actor))
+		}
+		parts = append(parts, fmt.Sprintf("While nobody in %s's tree could hear it, a person decided on the tree: %s. Read each before you continue.",
+			root, strings.Join(named, "; ")))
+	}
+	if kept.Approved > 0 {
+		parts = append(parts, fmt.Sprintf("The spec is approved at version %d and is now at version %d: request approval of version %d, "+
+			"as skill://legion-architect/references/design-gate.md (\"The armed gate\") says.", kept.Approved, kept.Latest, kept.Latest))
+	}
+	return strings.Join(parts, " ")
 }
 
 // ParkedDecisionTask is ParkedDecisionTask over the engine's store and design gate.

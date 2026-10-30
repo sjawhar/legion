@@ -1,6 +1,7 @@
 package supervise
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -219,7 +220,14 @@ func (m *Machine) sendPending(ctx context.Context) error {
 				"delivery", p.ID, "issue", m.claim.Issue, "run", p.Generation)
 			return nil
 		}
-		m.startSend(conn, *p)
+		sends, err := m.currentRootTask(ctx)
+		if err != nil {
+			return err
+		}
+		if !sends {
+			return nil
+		}
+		m.startSend(conn, *m.claim.Pending)
 		return nil
 	}
 	// The question a restart left — whether the turn the agent may be in is the pending
@@ -275,6 +283,50 @@ func (m *Machine) rootHears(ctx context.Context, d Delivery) (bool, error) {
 		return false, fmt.Errorf("read whether the root of %s has an architect to hear its task: %w", m.claim.Token, err)
 	}
 	return hears, nil
+}
+
+// currentRootTask writes the held task back to what it says now (Deps.RootTask) and answers
+// whether there is still a task to send. The decisions such a task names were forgotten when the
+// claim queued it, so the task is their only carrier; a hand-over of a child into a tree of its
+// own keeps those of the child's subtree again under the child
+// (record.Store.ReKeepDeliveredDecisions) and they are owed to the child's architect from then on.
+// This is where the task stops naming them, because it is the machine that owns the pending
+// delivery: the hand-over commits in a transaction of the admission's own, with no lock on this
+// claim, and a task rewritten there would be overwritten by the machine's next write of what
+// memory still held.
+//
+// A task left naming nothing is retired rather than sent: there is nothing to tell this architect,
+// and the start row that queued it is recorded on the claim (Claim.DeliveredRows), so no retry
+// gives it again. The id is kept across the rewrite: it is this delivery, under the row that
+// queued it, with less in it than when it was queued, and the prompt that would be deduped against
+// it carried more rather than less. The narrowed task is persisted before it is sent, so a restart
+// reads the same task this send carried.
+func (m *Machine) currentRootTask(ctx context.Context) (bool, error) {
+	p := m.claim.Pending
+	if m.deps.RootTask == nil {
+		return true, nil
+	}
+	task, kept, err := m.deps.RootTask(ctx, m.claim, *p)
+	if err != nil {
+		return false, fmt.Errorf("read what the task held for %s says now: %w", m.claim.Token, err)
+	}
+	if task == p.Task && bytes.Equal(kept, p.Kept) {
+		return true, nil
+	}
+	if task == "" {
+		m.log.Info("supervise: everything this held task named is owed to another tree now; it is retired rather than sent",
+			"delivery", p.ID, "issue", m.claim.Issue, "run", p.Generation)
+		return false, m.retirePending(ctx)
+	}
+	next := *p
+	next.Task, next.Kept = task, kept
+	if err := m.saved(m.deps.Store.PutDelivery(ctx, m.claim.Token, next)); err != nil {
+		return false, err
+	}
+	*p = next
+	m.log.Info("supervise: a decision this held task named is owed to another tree now; the task is sent without it",
+		"delivery", p.ID, "issue", m.claim.Issue, "run", p.Generation)
+	return true, nil
 }
 
 // phaseHolds asks whether the issue is still in the phase and run this task was queued for. A delivery

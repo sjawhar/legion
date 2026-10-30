@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -454,6 +455,59 @@ func (w *workflowRuntime) rootHears(ctx context.Context, c supervise.Claim, _ su
 		return false, fmt.Errorf("read whether the root of %s has an architect to hear its task: %w", c.Tree, err)
 	}
 	return hears, nil
+}
+
+// rootTask answers supervise's Deps.RootTask: what a root architect's held task of a run says now.
+// Such a task names the decisions a person made while nobody in the root's tree could hear them,
+// and those rows went the moment the claim queued it (the outbox's settleKept), so the task is the
+// only thing that carries them. A child handed over into a tree of its own takes what was decided
+// on it and its descendants with it, kept again under the child in the admission's own transaction
+// (record.Store.ReKeepDeliveredDecisions): from then on the child's architect is owed them, and
+// this task must not name them to the architect of the tree the child left. The decisions whose
+// issue the record still shows in this root's tree are kept, in the order the task named them, and
+// the text is written again from them (workflow.KeptDecisionsTask), which is the wording the start
+// that queued the task used. An issue the record does not hold is kept rather than dropped: a
+// person's decision is never lost, and this answer drops one only where the record says another
+// tree is owed it.
+//
+// It is read in a short read-only transaction of its own, as rootHears is: the machine asks it
+// holding its own lock, so the answer may take none of the daemon's.
+func (w *workflowRuntime) rootTask(ctx context.Context, c supervise.Claim, d supervise.Delivery) (string, []byte, error) {
+	if len(d.Kept) == 0 {
+		return d.Task, d.Kept, nil
+	}
+	var named record.KeptDecisions
+	if err := json.Unmarshal(d.Kept, &named); err != nil {
+		return "", nil, fmt.Errorf("decode what the task held for %s names: %w", c.Token, err)
+	}
+	stays := record.KeptDecisions{Approved: named.Approved, Latest: named.Latest}
+	if err := pgx.BeginTxFunc(ctx, w.pool, pgx.TxOptions{AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+		for _, mark := range named.Decisions {
+			issue, err := w.records.Issue(ctx, tx, mark.Issue)
+			if err != nil {
+				return err
+			}
+			if issue != nil && issue.Tree != c.Tree {
+				continue
+			}
+			stays.Decisions = append(stays.Decisions, mark)
+		}
+		return nil
+	}); err != nil {
+		return "", nil, fmt.Errorf("read what the task held for %s still names of %s's tree: %w", c.Token, c.Tree, err)
+	}
+	if len(stays.Decisions) == len(named.Decisions) {
+		return d.Task, d.Kept, nil
+	}
+	task := workflow.KeptDecisionsTask(c.Tree, stays)
+	if task == "" {
+		return "", nil, nil
+	}
+	kept, err := keptJSON(&stays)
+	if err != nil {
+		return "", nil, fmt.Errorf("encode what the task held for %s still names: %w", c.Token, err)
+	}
+	return task, kept, nil
 }
 
 // treeClosable answers supervise's Deps.TreeClosable: a tree a workflow issue backs closes when
