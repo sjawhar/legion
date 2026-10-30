@@ -9,7 +9,11 @@
 //   - `abort` becomes an interrupt control request, answered once Claude Code acknowledges it;
 //   - `get_state` and `negotiate_protocol` are the bridge's own to answer;
 //   - each user message's `result` ends one step of the turn, and the turn ends (`agent_end`) once
-//     no Envoy delivery waits and the phase-stall check owes no follow-up (stall.go).
+//     no Envoy delivery waits.
+//
+// The bridge is transport: the phase-stall machine — a worker whose turn ends with its phase still
+// open is reminded — runs in the pane's `legion` MCP server
+// (packages/claude-envoy/src/legion-phase-hook.ts), driven by Claude Code's own hooks.
 //
 // A fresh session (`--session-id`) is seeded with a local `/rename` before anything else: Claude
 // Code writes no transcript until its first input, and the Legion claim (packages/claude-envoy)
@@ -23,7 +27,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
 	"strings"
 )
 
@@ -38,8 +41,6 @@ type Config struct {
 	SessionID string
 	Seed      bool
 	Title     string
-	// StallFile holds this session's phase-stall state across relaunches (stall.go).
-	StallFile string
 	// Stdin carries the daemon's frames from the shim, Stdout the frames back to it. Log receives
 	// the bridge's own lines and Claude Code's stderr: what the pane shows.
 	Stdin  io.Reader
@@ -48,9 +49,8 @@ type Config struct {
 }
 
 // Configure reads a bridge's configuration from the claude argv and the environment the runtime
-// gave it: the session from argv, the seed title from LEGION_ROLE and LEGION_ISSUE, and the
-// phase-stall file under CLAUDE_CONFIG_DIR (the claim's own Claude Code directory, which must be
-// absolute). Every refusal names what is missing.
+// gave it: the session from argv and the seed title from LEGION_ROLE and LEGION_ISSUE. Every
+// refusal names what is missing.
 func Configure(argv, env []string) (Config, error) {
 	if len(argv) == 0 {
 		return Config{}, errors.New("no claude command to run after --")
@@ -59,16 +59,11 @@ func Configure(argv, env []string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	configDir := envValue(env, "CLAUDE_CONFIG_DIR")
-	if !filepath.IsAbs(configDir) {
-		return Config{}, fmt.Errorf("CLAUDE_CONFIG_DIR must be an absolute path (got %q): the claim's Claude Code directory holds its phase-stall state", configDir)
-	}
 	cfg := Config{
 		Argv:      argv,
 		Env:       env,
 		SessionID: session,
 		Seed:      fresh,
-		StallFile: filepath.Join(configDir, "legion-phase-stall-"+session+".json"),
 	}
 	if fresh {
 		role, issue := envValue(env, "LEGION_ROLE"), envValue(env, "LEGION_ISSUE")

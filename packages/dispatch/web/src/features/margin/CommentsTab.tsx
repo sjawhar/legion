@@ -12,6 +12,7 @@ import {
 } from "../../theme/classes";
 import type { ComposerAnchor, ComposerKind, ComposerOwner } from "../conversation/composer-model";
 import { MentionComposer } from "../conversation/MentionComposer";
+import type { SaveCommentEdit } from "../conversation/send-request";
 import { AskCard } from "../inbox/AskCard";
 import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
 import { marginComposeSendKey } from "./margin-context";
@@ -52,7 +53,7 @@ interface CommentsTabProps {
   markPlacements: ReadonlyMap<string, MarkPlacement>;
   needsYou: Ask[];
   onAction: (id: string, action: MarginItemAction) => void;
-  onEdit: (id: string, body: string) => Promise<unknown>;
+  onEdit: SaveCommentEdit;
   onRetryAction: () => void;
   onRetryAnsweredAsk: (() => void) | undefined;
   onRetryComments: () => void;

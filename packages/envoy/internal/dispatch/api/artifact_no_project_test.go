@@ -114,7 +114,7 @@ func TestArtifactReadsServeARowWithNoProject(t *testing.T) {
 	} else if anchor.Project != "" {
 		t.Errorf("loadAskAnchorArtifact project = %q, want none", anchor.Project)
 	}
-	if payload, err := s.commentEventPayload(ctx, tx, model.Comment{ArtifactID: &photoID}, "", commentEventThread{}, model.ReferenceChanges{}); err != nil {
+	if payload, err := s.commentEventPayload(ctx, tx, &model.Comment{ArtifactID: &photoID}, "", commentEventThread{}, model.ReferenceChanges{}); err != nil {
 		t.Errorf("commentEventPayload on the file: %v", err)
 	} else if payload.ProjectKey != "" || payload.ArtifactSlug != "photo-png" {
 		t.Errorf("commentEventPayload on the file = project %q slug %q, want no project and the slug", payload.ProjectKey, payload.ArtifactSlug)
@@ -132,7 +132,7 @@ func TestArtifactReadsServeARowWithNoProject(t *testing.T) {
 				t.Errorf("search over a comment on the conversation's file panicked: %v", recovered)
 			}
 		}()
-		found, err := s.runFusedSearch(ctx, "zebraquill", "", 10, 0)
+		found, err := s.runFusedSearchQuery(ctx, "zebraquill", "", 10, 0)
 		if err != nil {
 			t.Errorf("search over a comment on the conversation's file: %v", err)
 			return

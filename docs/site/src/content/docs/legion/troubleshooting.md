@@ -32,9 +32,8 @@ legion start --config legion.yaml --check-config
 | `postgres_dsn is required (or set LEGION_POSTGRES_DSN)` | Give the daemon its database. |
 | `unknown key <key>` | A typo, or a setting Legion no longer has; the message says which when it knows. `Unknown key "projects.<KEY>.repo": the project's repositories are Dispatch's mapping …` is one: map the repositories in Dispatch and delete the key ([Upgrade](/legion/legion/running-legion/#upgrade)). |
 | `omp_invocation is not used when runtime is kubernetes: …` | Remove it: every pod runs the worker image's Oh My Pi. |
-| `worker_backends.<role> is claude, which runs only under runtime: tmux` | Only the tmux runtime runs a role on Claude Code; set the role back to `omp` (or remove it) under Kubernetes. |
 | `worker_backends.architect is claude (Claude Code), which runs only planner, implementer, tester, reviewer, merger: …` | Claude Code runs the phase workers alone; leave the architect on `omp`. |
-| `worker_backends runs a role on claude, and boot is missing …` | Under tmux, give the daemon's environment what the message names: `LEGION_CLAUDE_PATH` and `LEGION_BUN_PATH` (or `claude` and `bun` on `PATH`), and `LEGION_CLAUDE_PLUGIN_DIR`, the absolute path of a built `packages/claude-envoy`. |
+| `worker_backends runs a role on claude, and boot is missing …` | Under tmux, give the daemon's environment what the message names: `LEGION_CLAUDE_PATH` and `LEGION_BUN_PATH` (or `claude` and `bun` on `PATH`), and `LEGION_CLAUDE_PLUGIN_DIR`, the absolute path of a built `packages/claude-envoy`. A Kubernetes daemon needs none of them: the worker image carries the plugin and Claude Code's pin, and each Claude role's pod installs the pinned Claude Code at launch, so `worker_backends` is accepted there with nothing else set. A launch whose install fails or does not verify fails, printing a `legion claude-code: …` line, so such a pod must reach the npm registry. |
 | `role_config_files.<role> entry <file> is under no runtime.kubernetes.pod.volume_mounts mount_path: …` (or `… is not among the items volume <name> projects …`) | Under Kubernetes a role's overlay must be a file the operator's mounts carry: mount the ConfigMap holding it, or add the item. |
 | `role_config_files.<role> names <file>, which the <role>'s Oh My Pi could not read: …` | Under tmux the file must exist on the host and be readable by the daemon's user, as every pane is. |
 | `role_config_files.<role> …` (another refusal) | The message names the entry: a role that is not Legion's, an empty list, a relative path, a path named twice or already every role's, the controller without `controller: daemon`, or a role on `claude`. |
@@ -273,8 +272,8 @@ Check, in order:
 ## A tree waits on a person
 
 When a root's architect asked a person a question on the root and nothing else of its tree runs,
-its phase is `awaiting_person`: it returned its admission slot and its architect's session is
-suspended until the answer. Read the wait:
+its phase is `awaiting_person`: it returned its admission slot while its architect stays live to
+read the person's comments and replies. Read the wait:
 
 ```sh
 legion state --config legion.yaml --json |
@@ -399,8 +398,8 @@ architect by its admission; a notice to an architect with no process waits for i
 starting it. A suspended worker of its issue's current phase that the daemon suspended is resumed
 by the daemon at boot. One an operator suspended (`legion claims suspend`, one claim at a time or a
 whole fleet before a restart), or whose suspension predates the release that records who suspended
-it (`suspendedBy: unknown`), is not; neither is a tree's architect, whoever suspended it, nor a
-claim whose launches ran out. Each of those is woken by nothing: the daemon looks healthy and the
+it (`suspendedBy: unknown`), is not; neither is an operator-suspended or failed tree architect, nor
+a claim whose launches ran out. Each of those is woken by nothing: the daemon looks healthy and the
 state shows the tree active, but the tree stops for good at the worker's phase, or at the first
 decision that needs its architect. Once a boot has re-adopted its claims, the daemon names every
 such claim in one error line, under the move that brings it back:
@@ -483,12 +482,12 @@ is `legion-<project>-<issue, lowercased>-<role>`, as `legion claims list` shows.
 
 The list names only claims of trees that hold an admission slot, and leaves out claims that
 something will still start: a worker whose phase is not its own is started again when its phase
-comes, a parked tree's claims wait for its re-admission, the architect of a tree re-admitted
-while every slot was taken waits for admission to start it once one frees, and the architect of a
-root in `awaiting_person` waits for the person's answer, after which admission resumes it at the
-next free slot. Never resume or retry by hand a claim of a lingering tree or of an issue parked out
-of the workflow, nor those waiting architects: they would run outside the admission cap, and
-re-admission, the answer, or the issue's return to `todo` starts it.
+comes, a parked tree's claims wait for its re-admission, and the architect of a tree re-admitted
+while every slot was taken waits for admission to start it once one frees. A root in
+`awaiting_person` is different: its architect stays live while it waits for the person's answer,
+and the answer's task is delivered once the root takes a slot. Never resume or retry by hand a
+claim of a lingering tree or of an issue parked out of the workflow; re-admission or the issue's
+return to `todo` starts it.
 A claim an operator suspended is listed even when a workflow start is queued for it: that start
 waits for the operator's resume. One whose `suspendedBy` is `unknown` is listed only while no start
 is queued for it, since the next phase start or re-admission resumes it as before.

@@ -95,7 +95,10 @@ func (p *typedDirectiveParser) Continue(node ast.Node, reader gmtext.Reader, _ p
 		reader.AdvanceToEOL()
 		return parser.Close
 	}
-	if strip := min(indent, directive.indent); strip > 0 && offset < len(line) {
+	// The typed block takes its own indentation from every line it continues, a whitespace-only
+	// one included, and so the document's last line with no line feed, where nothing follows the
+	// whitespace: the code inside reads the line from past it, as the browser editor's parser does.
+	if strip := min(indent, directive.indent); strip > 0 {
 		pos, padding := util.IndentPosition(line, reader.LineOffset(), strip)
 		reader.AdvanceAndSetPadding(pos, padding)
 	}

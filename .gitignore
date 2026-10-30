@@ -135,6 +135,8 @@ web_modules/
 
 # Output of 'npm pack'
 *.tgz
+# The nats chart gcp:ClusteredNatsHub's live test renders, vendored at the version the component pins.
+!packages/envoy/infra/gcp/testdata/nats-2.15.1.tgz
 
 # Yarn Integrity file
 .yarn-integrity

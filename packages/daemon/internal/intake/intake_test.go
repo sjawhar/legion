@@ -1087,12 +1087,9 @@ func TestConsumeAppliesADispatchStartThroughItsOwnDurable(t *testing.T) {
 	defer stop()
 
 	publish(t, js, serverStartedSubject, envelopeJSON(t, "dispatch-server-started-none", "dispatch", `{"commit":"","started_at":"2026-10-19T06:00:00Z"}`))
-	publish(t, js, serverStartedSubject, envelopeJSON(t, "dispatch-server-started-1", "dispatch", `{"commit":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c","started_at":"2026-10-19T06:00:00Z"}`))
+	stamped := publish(t, js, serverStartedSubject, envelopeJSON(t, "dispatch-server-started-1", "dispatch", `{"commit":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c","started_at":"2026-10-19T06:00:00Z"}`))
 	testwait.Eventually(t, "the stamped start committed", func() bool { return writeCount(t, pool) == 1 })
-	assertNoAckPending(t, stream, dispatchServerConsumerName(spec.Project))
-	testwait.Eventually(t, "both starts delivered to the server durable", func() bool {
-		return consumerInfo(t, stream, dispatchServerConsumerName(spec.Project)).Delivered.Consumer == 2
-	})
+	assertAcknowledgedThrough(t, stream, dispatchServerConsumerName(spec.Project), stamped)
 	if delivered := consumerInfo(t, stream, dispatchConsumerName(spec.Project)).Delivered.Consumer; delivered != 0 {
 		t.Fatalf("the issue durable was delivered %d messages, want none: the start is not an issue event", delivered)
 	}
@@ -1132,15 +1129,8 @@ func TestConsumeAcknowledgesAnotherProjectsDispatchEventWithoutApplyingIt(t *tes
 	stop := startConsume(t, js, spec, pool, writeHandler("foreign", nil))
 	defer stop()
 
-	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
-	testwait.Eventually(t, "the foreign event acknowledged", func() bool {
-		consumer, err := stream.Consumer(context.Background(), dispatchConsumerName(spec.Project))
-		if err != nil {
-			return false
-		}
-		info, err := consumer.Info(context.Background())
-		return err == nil && info.AckFloor.Consumer == 1 && info.NumAckPending == 0
-	})
+	sent := publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
+	assertAcknowledgedThrough(t, stream, dispatchConsumerName(spec.Project), sent)
 	if got := writeCount(t, pool); got != 0 {
 		t.Fatalf("handler writes for another project's event = %d, want 0", got)
 	}
@@ -1161,15 +1151,8 @@ func TestConsumeAcknowledgesAnotherRepositorysGitHubEventWithoutApplyingIt(t *te
 	defer stop()
 
 	foreign := bytes.ReplaceAll(capturedGitHubEnvelope(t, "pr-opened.json"), []byte("sjawhar/legion"), []byte("sjawhar/legion.x"))
-	publish(t, js, "notifications.github.sjawhar.legion.x.pr.42", foreign)
-	testwait.Eventually(t, "the foreign pull request acknowledged", func() bool {
-		consumer, err := stream.Consumer(context.Background(), githubConsumerName(spec.Project))
-		if err != nil {
-			return false
-		}
-		info, err := consumer.Info(context.Background())
-		return err == nil && info.AckFloor.Consumer == 1 && info.NumAckPending == 0
-	})
+	sent := publish(t, js, "notifications.github.sjawhar.legion.x.pr.42", foreign)
+	assertAcknowledgedThrough(t, stream, githubConsumerName(spec.Project), sent)
 	if got := writeCount(t, pool); got != 0 {
 		t.Fatalf("handler writes for another repository's pull request = %d, want 0", got)
 	}
@@ -1194,15 +1177,8 @@ func TestConsumeAppliesOnlyAPushToAnIssuesBranch(t *testing.T) {
 		foreign = bytes.ReplaceAll(foreign, []byte(`"task315-push"`), []byte(fmt.Sprintf(`"foreign-push-%d"`, i)))
 		publish(t, js, "notifications.github.sjawhar.legion.push.branch."+branch, foreign)
 	}
-	publish(t, js, "notifications.github.sjawhar.legion.push.branch.legion/LEGION-208", captured)
-	testwait.Eventually(t, "every push acknowledged", func() bool {
-		consumer, err := stream.Consumer(context.Background(), githubConsumerName(spec.Project))
-		if err != nil {
-			return false
-		}
-		info, err := consumer.Info(context.Background())
-		return err == nil && info.AckFloor.Consumer == 6 && info.NumAckPending == 0
-	})
+	last := publish(t, js, "notifications.github.sjawhar.legion.push.branch.legion/LEGION-208", captured)
+	assertAcknowledgedThrough(t, stream, githubConsumerName(spec.Project), last)
 	if got := writeHandlers(t, pool); !slices.Equal(got, []string{"push"}) {
 		t.Fatalf("handler writes = %q, want one, for the push to the issue's branch", got)
 	}
@@ -1479,11 +1455,29 @@ func testJetStream(t *testing.T) (jetstream.JetStream, jetstream.Stream) {
 	return js, testnats.CreateStream(t, js, jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}})
 }
 
-func publish(t *testing.T, js jetstream.JetStream, subject string, data []byte) {
+func publish(t *testing.T, js jetstream.JetStream, subject string, data []byte) *jetstream.PubAck {
 	t.Helper()
-	if _, err := js.Publish(context.Background(), subject, data); err != nil {
+	ack, err := js.Publish(context.Background(), subject, data)
+	if err != nil {
 		t.Fatalf("publish %s: %v", subject, err)
 	}
+	return ack
+}
+
+// assertAcknowledgedThrough waits for consumer to have acknowledged every message of its filter up
+// to the one last names, with none left to deliver. It reads the stream position, not a count of
+// deliveries: JetStream delivers a message again once its AckWait passes unacknowledged, which is
+// at-least-once delivery the consumer deduplicates, and which a delivery count would read as more.
+func assertAcknowledgedThrough(t *testing.T, stream jetstream.Stream, consumer string, last *jetstream.PubAck) {
+	t.Helper()
+	testwait.Eventually(t, fmt.Sprintf("%s has acknowledged through stream sequence %d", consumer, last.Sequence), func() bool {
+		item, err := stream.Consumer(context.Background(), consumer)
+		if err != nil {
+			return false
+		}
+		info, err := item.Info(context.Background())
+		return err == nil && info.AckFloor.Stream == last.Sequence && info.NumPending == 0 && info.NumAckPending == 0
+	})
 }
 
 func assertNoAckPending(t *testing.T, stream jetstream.Stream, consumer string) {

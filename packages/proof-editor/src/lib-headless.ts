@@ -43,6 +43,7 @@ import { remarkSoftBreakAsLine, remarkSoftBreakAsSpace } from './dispatch-soft-b
 import { remarkContainerDirectives } from './lib-remark-directive-plugin.js';
 import { remarkReadOnlyDirectives } from './read-only-directives.js';
 import { remarkUnfitTypedBlocks } from './typed-block-drawing.js';
+import { relaxAskContentCheck } from './ask-content.js';
 
 /**
  * What a single newline inside a paragraph (a CommonMark soft break) becomes. `'space'`, the
@@ -64,9 +65,10 @@ export interface HeadlessProofEditor {
    * tag-shaped substring outside a code span or fence, e.g. `<img src=x>`) and a mark span of
    * a kind this schema does not carry. Outside read-only mode, with a `blockSchema`, it also
    * throws for the parser's directive refusals (an unknown typed block, a refused attribute, a
-   * paragraph line that opens like a directive), and draws a typed block whose content breaks
-   * its content rule as its literal lines, as the live (browser) editor imports it; read-only
-   * mode draws a refused directive as text too and does not apply the paragraph-line refusals.
+   * paragraph line that opens like a directive), as the pmdoc fixture generators need to match
+   * the document service, and draws a typed block whose content breaks its content rule as its
+   * literal lines. The live (browser) editor, like read-only mode, draws a refused directive as
+   * text too and does not apply the paragraph-line refusals.
    * A throw leaves the parser's own stack mid-document,
    * which would make the next parses of unrelated text throw too, so the parser of that
    * policy is dropped and the next parse through it starts on a fresh one.
@@ -88,11 +90,14 @@ export interface HeadlessProofOptions {
    *  its literal fence lines around its formatted content, as is an accepted typed block whose
    *  content breaks its content rule (both through `remarkReadOnlyDirectives`), the
    *  paragraph-line directive refusals are not applied, and a typed block kept typed loses the
-   *  block schema's `server` attributes, so they read at their defaults. The default, false, is
-   *  what the live (browser) editor imports: with a `blockSchema` it keeps the parser's directive
-   *  refusals listed at `parseMarkdown`, which the pmdoc fixture generators rely on, and draws a
-   *  typed block whose content breaks its content rule as its literal lines through
-   *  `remarkUnfitTypedBlocks` rather than dropping it. A general read-only mode, so later
+   *  block schema's `server` attributes, so they read at their defaults. The live (browser)
+   *  editor's typed-block step makes the same drawing decision but keeps those attributes
+   *  (`liveTypedBlocksRemarkPlugin`). The default, false, with a `blockSchema` keeps the parser's
+   *  directive refusals listed at `parseMarkdown`, which the pmdoc fixture generators rely on to
+   *  refuse what the document service refuses, and draws a typed block whose content breaks its
+   *  content rule as its literal lines through `remarkUnfitTypedBlocks` rather than dropping it.
+   *  In both modes an ask's content check (a built node's, not a parse's) accepts what the
+   *  document service accepts (`relaxAskContentCheck`). A general read-only mode, so later
    *  read-only rules hang on it too. */
   readOnly?: boolean;
 }
@@ -144,6 +149,8 @@ export async function createHeadlessProof(options: HeadlessProofOptions = {}): P
   const nodes = Object.fromEntries(ctx.get(nodesCtx) as never);
   const marks = Object.fromEntries(ctx.get(marksCtx) as never);
   const schema = new Schema({ nodes, marks });
+  // An ask a live document holds off its content rule is built, not refused (./ask-content.ts).
+  relaxAskContentCheck(schema);
 
   // Match the browser editor's GFM features (tables, task lists, strikethrough,
   // autolinks, ...), plus proof span and dispatchAsk span parsing. The schema and plugin list

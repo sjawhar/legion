@@ -20,12 +20,12 @@ const queryClient = new DispatchQueryClient({
     queries: {
       // An auth outcome (401) is definitive — everything else (a dropped connection,
       // a 5xx) is worth a couple of quick retries before we show an error, after the wait a
-      // server refusing excess load asks for (`Retry-After`), or 500 ms.
+      // server refusing excess load asks for (`Retry-After`, `queryRetryDelay`), or 500 ms.
       retry: (failureCount, error) => failureCount < 2 && isRetryableQueryError(error),
       retryDelay: queryRetryDelay,
-      // The event stream is the source of freshness; a stale query still gets
-      // invalidated the moment a relevant event arrives. This just avoids an
-      // unconditional refetch-on-mount for data the stream keeps current.
+      // The live socket's event feed is the source of freshness; a stale query still gets
+      // invalidated the moment a relevant event arrives. This just avoids an unconditional
+      // refetch-on-mount for data the feed keeps current.
       refetchOnWindowFocus: true,
       staleTime: 30_000,
     },

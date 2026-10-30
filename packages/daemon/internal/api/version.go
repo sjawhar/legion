@@ -386,7 +386,29 @@ package api
 // as the collision note says. Other open branches may declare 41 too: whichever merges after
 // another takes the next free number, as the collision note says.)
 //
-// 42: sjawhar/legion#2354 -- a phase's handoff is a record on its Dispatch issue, which the
+// 42: a worker's environment gains the four LEGION_STALL_* numbers under both
+// runtimes (`internal/daemon/specs.go` merges each one the daemon holds into `spec.Env`, which a
+// pane's `-e` pairs and a pod launcher's start command carry verbatim), and a Claude Code role
+// gains CLAUDE_CONFIG_DIR, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS and CLAUDE_CODE_DISABLE_CRON in
+// its start command's environment. Both plugins read the four numbers through
+// `packages/pi-shared/src/stall-limits.ts`, and `@sjawhar/claude-envoy` reads the Claude
+// directory, so the daemon and the image that carries them ship together. With 37's disk dying
+// with its pod, a Claude Code role's session is kept in Oh My Pi's session table by the pod's
+// own launcher: each Claude launch's start command carries LEGION_CLAUDE_SESSION_ID, the session
+// it starts or resumes (`claudelaunch.SessionVariable`), and the image's `legion launcher` reads
+// it, in the manager of that role in the one `roles` container, to keep the transcript and the
+// phase-reminder record as rows of `omp_session_files` keyed by their paths, restoring both before
+// a resume's child starts, and writes `<transcript>.legion-saved` once its first save of a fresh
+// transcript has committed, which the image's `@sjawhar/claude-envoy` waits for before it
+// registers the transcript. A launcher before 42 ignores the variable and keeps nothing, so the
+// next pod's resume of that transcript is refused, and a claude-envoy before 42 registers a
+// transcript the table may not hold yet; an image at 42 under a daemon before 42 is told no
+// session, so its claude-envoy waits for no marker and its launcher keeps nothing. The image probe
+// refuses either pair. This change adds no store migration. (This branch took 36 through 41 in
+// turn; main landed each of those numbers first, the controller start command last at 41, so this
+// branch takes the number above them, as the collision note says.)
+//
+// 43: sjawhar/legion#2354 -- a phase's handoff is a record on its Dispatch issue, which the
 // worker writes with `dispatch handoff-write` under its own session, rather than a committed
 // `.legion/<KEY>/<phase>.json`. `api.HandoffCompleteRequest` gains `handoffId` and
 // `handoffVersion`, the record a file-backed phase's completion (planning, implementing, testing,
@@ -399,17 +421,17 @@ package api
 // commit) and the merger's; the planner, tester and reviewer send none, and the daemon no longer
 // requires one of them. `api.PhaseView` gains `handoffRecord`, `{id, version}`, absent until the
 // worker's completion of its current file-backed phase names one; store migration 0062 keeps it
-// on the phase row. A 41 plugin posts a commit and no record, which this daemon refuses, and its
+// on the phase row. A 42 plugin posts a commit and no record, which this daemon refuses, and its
 // strict reader refuses a state carrying `handoffRecord`, so the boot gate and `legion
 // probe-image` refuse the mixed pair. (This branch took 40 and store migration 0055; main then
 // landed `awaiting_person` at 40 with store migrations 0055 to 0058, and `issue_ancestry` as store
 // migration 0059, so this change took 41 and store migration 0060; main then landed
 // `pull_request_head_move_starts` as store migration 0060 at 40, so this change took store
 // migration 0061; main then landed `pull_request_head_run` as store migration 0061, so this change
-// took store migration 0062; main then landed the controller start command at 41, so this change
-// takes 42 and keeps store migration 0062, as the collision note says. Other open branches may
-// declare 42 or a store migration 0062 too: whichever merges after another takes the next free
-// contract number and renumbers its store migration past main's, every site that names either
-// included, among them the rollback's `delete from schema_version where version = 62` in
-// docs/kubernetes.md.)
-const DaemonAPIVersion = 42
+// took store migration 0062; main then landed the controller start command at 41 and the worker
+// stall and Claude session environment at 42, so this change takes 43 and keeps store migration
+// 0062, as the collision note says. Other open branches may declare 43 or a store migration 0062
+// too: whichever merges after another takes the next free contract number and renumbers its store
+// migration past main's, every site that names either included, among them the rollback's `delete
+// from schema_version where version = 62` in docs/kubernetes.md.)
+const DaemonAPIVersion = 43

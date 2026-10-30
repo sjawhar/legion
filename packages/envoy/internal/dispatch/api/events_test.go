@@ -1,17 +1,13 @@
 package api
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"reflect"
 	"slices"
-	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -70,7 +66,8 @@ func TestReadEventsKeepsNonAskPayloadRaw(t *testing.T) {
 }
 
 func TestEventPayloadsAreServedAsStoredForEveryEventKind(t *testing.T) {
-	handler, database := newTestHandlerWithStore(t)
+	rig := newLiveSocketRig(t, testServerOptions{}, nil)
+	handler, database := rig.handler, rig.database
 	issue := createInteractionIssue(t, handler, "TEST", "Event response bytes", "A spec")
 	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
 		"question": "Which path?",
@@ -191,40 +188,24 @@ func TestEventPayloadsAreServedAsStoredForEveryEventKind(t *testing.T) {
 	}
 	checkServed("HTTP", decodeBody[[]servedEvent](t, response))
 
-	server := httptest.NewServer(handler)
-	defer server.Close()
-	request, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/v1/events?since=%d", server.URL, firstID-1), nil)
-	if err != nil {
-		t.Fatalf("construct SSE request: %v", err)
-	}
-	request.Header.Set("Authorization", "Bearer agent-token")
-	stream, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatalf("open SSE stream: %v", err)
-	}
-	defer stream.Body.Close()
-	if stream.StatusCode != http.StatusOK {
-		t.Fatalf("SSE status = %d, want 200", stream.StatusCode)
-	}
-	scanner := bufio.NewScanner(stream.Body)
+	// The event feed's catch-up replays them through the same read, one event frame each.
+	client := rig.dial(t, withBearer("agent-token"))
+	subscribeEvents(t, client, "events", new(firstID-1))
 	frames := make([]servedEvent, 0, len(stored))
 	for read := 0; len(frames) < len(stored); read++ {
 		if read == len(stored)+20 {
-			t.Fatalf("SSE replay held %d of %d inserted events after %d frames", len(frames), len(stored), read)
+			t.Fatalf("the event feed's replay held %d of %d inserted events after %d frames", len(frames), len(stored), read)
 		}
-		frame := readSSEFrame(t, scanner)
-		if len(frame) != 3 || !strings.HasPrefix(frame[2], "data: ") {
-			t.Fatalf("SSE frame = %#v, want id, event and data", frame)
-		}
+		frame := client.event(t, eventFeedWait, "events")
 		var event servedEvent
-		if err := json.Unmarshal([]byte(strings.TrimPrefix(frame[2], "data: ")), &event); err != nil {
-			t.Fatalf("decode SSE frame %#v: %v", frame, err)
+		if err := json.Unmarshal(frame.Event, &event); err != nil {
+			t.Fatalf("decode event frame %+v: %v", frame, err)
 		}
 		if _, ok := stored[event.ID]; ok {
 			frames = append(frames, event)
 		}
 	}
-	checkServed("SSE replay", frames)
+	checkServed("event feed replay", frames)
 }
 
 // issueEventFields is what an issue.created, issue.updated or issue.closed says about its write.
@@ -434,66 +415,14 @@ func TestUserStateEventSaysWhichFieldsMoved(t *testing.T) {
 	put(map[string]any{"pinned": false, "last_read_seq": 5}, []string{"pinned", "last_read_seq"})
 }
 
-// A resuming connection whose since is at or below the log's head is replayed everything after it,
-// and says so in X-Dispatch-Event-Replay, by since= or by Last-Event-ID alike; a cold connect
-// (nothing replayed) and a since above the head (an id of a log since replaced) do not.
-func TestEventStreamSaysWhenItsReplayCoversTheGap(t *testing.T) {
-	handler, database := newTestHandlerWithStore(t)
-	createInteractionIssue(t, handler, "TEST", "Replayed", "A spec")
-	head := eventHead(t, database)
-	httpServer := httptest.NewServer(handler)
-	t.Cleanup(httpServer.Close)
-
-	for _, connection := range []struct {
-		name   string
-		resume func(*http.Request)
-		want   string
-	}{
-		{name: "cold", resume: func(*http.Request) {}, want: ""},
-		{name: "resuming below the head by since", resume: func(request *http.Request) {
-			request.URL.RawQuery = fmt.Sprintf("since=%d", head-1)
-		}, want: "complete"},
-		{name: "resuming at the head by since", resume: func(request *http.Request) {
-			request.URL.RawQuery = fmt.Sprintf("since=%d", head)
-		}, want: "complete"},
-		{name: "resuming below the head by Last-Event-ID", resume: func(request *http.Request) {
-			request.Header.Set("Last-Event-ID", strconv.FormatInt(head-1, 10))
-		}, want: "complete"},
-		{name: "since above the head", resume: func(request *http.Request) {
-			request.URL.RawQuery = fmt.Sprintf("since=%d", head+100)
-		}, want: ""},
-	} {
-		t.Run(connection.name, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(t.Context(), sseStreamDeadline)
-			defer cancel()
-			request, err := http.NewRequestWithContext(ctx, http.MethodGet, httpServer.URL+"/api/v1/events", nil)
-			if err != nil {
-				t.Fatalf("construct SSE request: %v", err)
-			}
-			request.Header.Set("Authorization", "Bearer agent-token")
-			connection.resume(request)
-			stream, err := http.DefaultClient.Do(request)
-			if err != nil {
-				t.Fatalf("open SSE stream: %v", err)
-			}
-			defer stream.Body.Close()
-			if stream.StatusCode != http.StatusOK {
-				t.Fatalf("SSE status = %d, want 200", stream.StatusCode)
-			}
-			if got := stream.Header.Get(eventReplayHeader); got != connection.want {
-				t.Fatalf("%s = %q, want %q", eventReplayHeader, got, connection.want)
-			}
-		})
-	}
-}
-
 // TestAnsweredEventStoredWithNullSelectedServesEmptyLists: an ask.answered event written before
 // answers stored an empty list holds null in answer.selected and previous_answer.selected. The
 // issue event log and the stream's catch-up send [] there instead, the reading model.AskAnswer
 // gives an answer, so a client can read the list's length. A live frame is read through the same
 // attachAskEventFields (TestLiveAskEventFrameCarriesTheReadTimeFields).
 func TestAnsweredEventStoredWithNullSelectedServesEmptyLists(t *testing.T) {
-	handler, database := newTestHandlerWithStore(t)
+	rig := newLiveSocketRig(t, testServerOptions{}, nil)
+	handler, database := rig.handler, rig.database
 	issue := createInteractionIssue(t, handler, "TEST", "Null selected events", "A spec")
 	ask := createChangeableAsk(t, handler, issue.Key)
 	first := answerAskForChange(t, handler, ask.ID, "alice", "Ship", nil)
@@ -523,14 +452,6 @@ func TestAnsweredEventStoredWithNullSelectedServesEmptyLists(t *testing.T) {
 		ID      int64           `json:"id"`
 		Payload json.RawMessage `json:"payload"`
 	}
-	frameEvent := func(frame []string) servedEvent {
-		t.Helper()
-		var event servedEvent
-		if len(frame) != 3 || json.Unmarshal([]byte(strings.TrimPrefix(frame[2], "data: ")), &event) != nil {
-			t.Fatalf("SSE frame = %#v, want id, event and a JSON event", frame)
-		}
-		return event
-	}
 
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
 	if response.Code != http.StatusOK {
@@ -546,13 +467,11 @@ func TestAnsweredEventStoredWithNullSelectedServesEmptyLists(t *testing.T) {
 	if !logged {
 		t.Fatalf("issue event log = %s, want event %d", response.Body.String(), changedID)
 	}
-
-	httpServer := httptest.NewServer(handler)
-	t.Cleanup(httpServer.Close)
-	replay := openSSEStream(t, fmt.Sprintf("%s/api/v1/events?since=%d", httpServer.URL, changedID-1))
-	replayed := frameEvent(readSSEFrameOfType(t, replay, "ask.answered"))
+	replay := rig.dial(t, withBearer("agent-token"))
+	subscribeEvents(t, replay, "events", new(changedID-1))
+	_, replayed := nextEvent(t, replay, "events")
 	if replayed.ID != changedID {
-		t.Fatalf("SSE catch-up sent ask.answered %d first, want %d", replayed.ID, changedID)
+		t.Fatalf("live replay sent ask.answered %d first, want %d", replayed.ID, changedID)
 	}
-	requireBothSelectedEmpty("SSE catch-up", replayed.Payload)
+	requireBothSelectedEmpty("live replay", replayed.Payload)
 }

@@ -5,6 +5,8 @@ import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
+import { answerIssuePatches } from "../../__tests__/send-answers";
 import { ApiError, api } from "../../api/client";
 import type {
   Agent,
@@ -509,7 +511,7 @@ test("IssuePage creates a label from the multi-select and saves the final draft 
     { ...labeledIssue, open_asks: 0 },
     { ...issue, key: "CORE-2", labels: ["frontend"], open_asks: 0 },
   ]);
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue({
+  const patchIssue = answerIssuePatches().mockResolvedValue({
     ...labeledIssue,
     labels: ["bug", "urgent"],
   });
@@ -527,7 +529,7 @@ test("IssuePage creates a label from the multi-select and saves the final draft 
     fireEvent.click(screen.getByRole("button", { name: "Edit labels" }));
 
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { labels: ["bug", "urgent"] })
+      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { labels: ["bug", "urgent"] }, keyedAttempt)
     );
     expect(patchIssue).toHaveBeenCalledTimes(1);
   } finally {
@@ -544,7 +546,7 @@ test("IssuePage does not save after a label is toggled off and back on", async (
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([
     { ...labeledIssue, open_asks: 0 },
   ]);
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue(labeledIssue);
+  const patchIssue = answerIssuePatches().mockResolvedValue(labeledIssue);
   const view = renderIssuePage();
 
   try {
@@ -576,7 +578,7 @@ test("IssuePage returns focus to the label trigger when Escape closes an unchang
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([
     { ...labeledIssue, open_asks: 0 },
   ]);
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue(labeledIssue);
+  const patchIssue = answerIssuePatches().mockResolvedValue(labeledIssue);
   const view = renderIssuePage();
 
   try {
@@ -1749,7 +1751,12 @@ test("IssuePage's pin refreshes the sidebar's pinned list once the pin is saved"
     await waitFor(() =>
       expect(queryClient.getQueryState(["issues", "pinned"])?.isInvalidated).toBe(true)
     );
-    expect(putIssueState).toHaveBeenCalledWith("CORE-1", { pinned: true });
+    // The pin is a keyed write of the page's store, so its bounds name the key it goes under.
+    expect(putIssueState).toHaveBeenCalledWith(
+      "CORE-1",
+      { pinned: true },
+      expect.objectContaining({ key: expect.any(String) })
+    );
   } finally {
     view.unmount();
     putIssueState.mockRestore();
@@ -1819,7 +1826,7 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
   });
   const closeSave = Promise.withResolvers<IssueDetails>();
   const reopenSave = Promise.withResolvers<IssueDetails>();
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(async (_key, input) => {
+  const patchIssue = answerIssuePatches().mockImplementation(async (_key, input) => {
     if (input.status === "done") return closeSave.promise;
     if (input.status === "backlog") return reopenSave.promise;
     throw new Error(`Unexpected issue update: ${JSON.stringify(input)}`);
@@ -1831,7 +1838,9 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
     expect([...openStatus.options].map((option) => option.value)).not.toContain("done");
 
     fireEvent.click(screen.getByRole("button", { name: "Close issue" }));
-    await waitFor(() => expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "done" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "done" }, keyedAttempt)
+    );
     // While the write is in flight the control is disabled: no second close can be queued.
     expect(
       (screen.getByRole("button", { name: "Close issue" }) as HTMLButtonElement).disabled
@@ -1848,7 +1857,7 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Reopen issue" }));
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" })
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" }, keyedAttempt)
     );
     expect(
       (screen.getByRole("button", { name: "Reopen issue" }) as HTMLButtonElement).disabled
@@ -1871,7 +1880,7 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
 
 test("IssuePage lets a human move a Todo issue to In progress", async () => {
   const restore = stubIssuePage(issue);
-  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue({
+  const patchIssue = answerIssuePatches().mockResolvedValue({
     ...issue,
     status: "in_progress",
   });
@@ -1895,7 +1904,7 @@ test("IssuePage lets a human move a Todo issue to In progress", async () => {
 
     fireEvent.change(status, { target: { value: "in_progress" } });
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "in_progress" })
+      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "in_progress" }, keyedAttempt)
     );
   } finally {
     view.unmount();

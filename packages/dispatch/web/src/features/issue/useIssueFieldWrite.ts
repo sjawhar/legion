@@ -1,11 +1,12 @@
-import { type QueryKey, useMutation, useQueryClient } from "@tanstack/react-query";
+import { type QueryKey, useQueryClient } from "@tanstack/react-query";
 import { useRef } from "react";
 
-import { api } from "../../api/client";
+import { issuePatchRequest } from "../../api/client";
 import { mergeIssue } from "../../api/issue-cache";
 import { inboxQuery } from "../../api/queries";
 import type { InboxRow, IssueDetails, IssueSummary, UpdateIssueInput } from "../../api/types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 
 export interface IssueFieldWrite<Value> {
   /** The server's reason after a refused save, until the next attempt. */
@@ -40,7 +41,12 @@ export const inboxKey = inboxQuery().queryKey;
  */
 export function useIssueFieldWrite<Value>(
   issueKey: string,
-  field: { patch: (value: Value) => UpdateIssueInput; show: (value: Value) => void }
+  field: {
+    patch: (value: Value) => UpdateIssueInput;
+    show: (value: Value) => void;
+    /** What the shell's indicator names one save of this field. */
+    label: (value: Value) => string;
+  }
 ): IssueFieldWrite<Value> {
   const queryClient = useQueryClient();
   const guard = useSubmitGuard();
@@ -54,8 +60,15 @@ export function useIssueFieldWrite<Value>(
     inbox: queryClient.getQueriesData<InboxRow[]>({ queryKey: inboxKey }),
     lists: queryClient.getQueriesData<IssueSummary[]>({ queryKey: projectListsKey }),
   });
-  const mutation = useMutation({
-    mutationFn: (value: Value) => api.patchIssue(issueKey, field.patch(value)),
+  // The control says why its save was refused and offers Retry where the reader just picked, so
+  // the shell's indicator shows the save only while it is out. Every write to the issue's fields
+  // goes in the issue's line (`issue:<key>`), so one still being tried after its surface is gone
+  // never lands after a newer one.
+  const mutation = useKeyedWrite({
+    inline: true,
+    label: (value: Value) => field.label(value),
+    target: () => `issue:${issueKey}`,
+    request: (value: Value) => issuePatchRequest(issueKey, field.patch(value)),
     onMutate: async (value): Promise<Snapshot> => {
       await Promise.all(
         [detailKey, projectListsKey, inboxKey].map((queryKey) =>
@@ -86,7 +99,8 @@ export function useIssueFieldWrite<Value>(
       }
     },
     onSuccess: (next) => {
-      if (queued.current === null) {
+      // Saved with no answer to give: `onSettled` reads the issue again.
+      if (queued.current === null && next !== null) {
         mergeIssue(queryClient, next);
       }
     },

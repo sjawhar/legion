@@ -13,7 +13,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/aes"
@@ -58,6 +57,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/startup"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -145,55 +145,46 @@ func (p *dispatchPair) name(one *dispatchProcess) string {
 	return "B"
 }
 
-// ───── server-sent events ───────────────────────────────────────────────────
+// ───── the live socket's event feed ─────────────────────────────────────────
 
-// sseFrame is one server-sent event the stream handler wrote: its type and its data line. Its
-// `id:` line names the event, which the data carries too, so nothing here keeps it.
-type sseFrame struct {
-	event string
-	data  string
+// feedEvent is one event the event feed sent: its type and the event's JSON.
+type feedEvent struct {
+	eventType string
+	data      string
 }
 
-// openEventStream holds GET /api/v1/events open as a dashboard tab does and reports every frame
-// it reads on the returned channel, until the test ends or the connection does. One request, read
-// to the end: a row about a live stream carrying the other process's event has to show that event
-// arriving on the connection the reader already had, never on a reconnect's catch-up.
-func (p *dispatchProcess) openEventStream(t *testing.T) <-chan sseFrame {
+// openEventFeed holds GET /ws/live open as a dashboard tab does, subscribed to the event feed, and
+// reports every event it is sent on the returned channel, until the test ends or the socket does.
+// One subscription, read to the end: a row about the live feed carrying the other process's event
+// has to show that event arriving on the subscription the page already had, never on a
+// resubscribe's catch-up.
+func (p *dispatchProcess) openEventFeed(t *testing.T) <-chan feedEvent {
 	t.Helper()
-	response, err := p.send(http.MethodGet, "/api/v1/events", "")
-	if err != nil {
-		t.Fatalf("open the event stream: %v", err)
-	}
-	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(response.Body)
-		_ = response.Body.Close()
-		t.Fatalf("open the event stream: status %d: %s", response.StatusCode, body)
-	}
-	t.Cleanup(func() { _ = response.Body.Close() })
-	frames := make(chan sseFrame, 256)
+	conn := p.openLiveEvents(t)
+	events := make(chan feedEvent, 256)
 	go func() {
-		defer close(frames)
-		reader := bufio.NewReader(response.Body)
-		var frame sseFrame
+		defer close(events)
 		for {
-			line, err := reader.ReadString('\n')
-			switch trimmed := strings.TrimRight(line, "\r\n"); {
-			case trimmed == "":
-				if frame.data != "" {
-					frames <- frame
-				}
-				frame = sseFrame{}
-			case strings.HasPrefix(trimmed, "event: "):
-				frame.event = strings.TrimPrefix(trimmed, "event: ")
-			case strings.HasPrefix(trimmed, "data: "):
-				frame.data = strings.TrimPrefix(trimmed, "data: ")
+			var frame struct {
+				Type  string          `json:"type"`
+				Event json.RawMessage `json:"event"`
 			}
-			if err != nil {
+			if err := conn.ReadJSON(&frame); err != nil {
 				return
 			}
+			if frame.Type != "event" {
+				continue
+			}
+			var event struct {
+				Type string `json:"type"`
+			}
+			if err := json.Unmarshal(frame.Event, &event); err != nil {
+				return
+			}
+			events <- feedEvent{eventType: event.Type, data: string(frame.Event)}
 		}
 	}()
-	return frames
+	return events
 }
 
 // ───── the API a row drives ─────────────────────────────────────────────────
@@ -255,11 +246,11 @@ func (p *dispatchProcess) documentText(t *testing.T, artifactID string) string {
 	return document.Markdown
 }
 
-// ───── a live stream carries the other process's events ─────────────────────
+// ───── the live feed carries the other process's events ─────────────────────
 
 // A dashboard tab is open on one process and the work happens on the other: the event of an issue
-// created through B's API has to reach the stream A is holding, on the connection it already has.
-// The live source of an open stream is no longer this process's in-memory broker, which hears
+// created through B's API has to reach the event feed A's socket holds, on the subscription it
+// already has. The live source of an open feed is not this process's in-memory broker, which hears
 // only its own writes, but a relay over `listen dispatch_events`, so what either process commits
 // every process publishes.
 func TestALiveStreamOnOneProcessCarriesTheOtherProcessesEvent(t *testing.T) {
@@ -267,21 +258,21 @@ func TestALiveStreamOnOneProcessCarriesTheOtherProcessesEvent(t *testing.T) {
 	project := uniqueProjectKey(t, "XPR")
 	pair.a.createProject(t, project, "Cross process")
 
-	frames := pair.a.openEventStream(t)
+	events := pair.a.openEventFeed(t)
 	key, _ := pair.b.createIssueIn(t, project, "Created on the other process", "spec")
 
 	deadline := time.After(30 * time.Second)
 	for {
 		select {
-		case frame, open := <-frames:
+		case event, open := <-events:
 			if !open {
-				t.Fatalf("the stream A held closed before B's event arrived:\n%s", pair.a.Output.String())
+				t.Fatalf("the feed A held closed before B's event arrived:\n%s", pair.a.Output.String())
 			}
-			if frame.event == "issue.created" && strings.Contains(frame.data, `"`+key+`"`) {
+			if event.eventType == "issue.created" && strings.Contains(event.data, `"`+key+`"`) {
 				return
 			}
 		case <-deadline:
-			t.Fatalf("the stream A held never carried the issue B created (%s):\nA:\n%s\nB:\n%s",
+			t.Fatalf("the feed A held never carried the issue B created (%s):\nA:\n%s\nB:\n%s",
 				key, pair.a.Output.String(), pair.b.Output.String())
 		}
 	}
@@ -1108,9 +1099,7 @@ func durableText(t *testing.T, pair *dispatchPair, artifactID string) string {
 func captureDefaultLog(t *testing.T) *storetest.LockedLog {
 	t.Helper()
 	logs := &storetest.LockedLog{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(logs, nil))
 	return logs
 }
 
@@ -1188,22 +1177,31 @@ func lockTables(t *testing.T, database *store.Store, mode string, tables ...stri
 // holds - which is the only way two processes' passes are made to overlap on purpose rather than
 // by luck.
 //
-// Four of the nine leases are observable inside a window a test can wait out:
-// reference-excerpts, block-index and webhook-redelivery, whose first pass is immediate, and
-// suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in. The other five
-// are not, and this row says so rather than pretending: document-compaction's ticker is 24 h;
-// issue-ask-repair's first leased pass is one IssueAskRepairInterval (10 min) in, the boot's
-// repair taking no lease; architecture-import's and delivery-reconcile's first pass is jittered
-// uniformly over SyncInterval/ReconcileInterval (5 min) and each process draws its own, so whether
-// their passes ever overlap is a coin toss no test should turn into a flake; and edit-notices'
-// period is five seconds, so this window holds many of its periods, each served once
-// (docs.TestEditNoticeSweepOfTwoServicesSendsEachNoticeOnce holds what its lease is for).
+// Five of the eleven leases are observable inside a window a test can wait out:
+// reference-excerpts, block-index, search-term-stats and webhook-redelivery, whose first pass is
+// immediate, and suggestion-outcomes, whose first is one SuggestionSweepInterval (a minute) in.
+// The other six are not, and this row says so rather than pretending: document-compaction's
+// interval is 24 h; issue-ask-repair's first leased pass is one IssueAskRepairInterval (10 min) in,
+// the boot's repair taking no lease; architecture-import's and delivery-reconcile's first pass is
+// jittered uniformly over SyncInterval/ReconcileInterval (5 min) and each process draws its own,
+// so whether their passes ever overlap is a coin toss no test should turn into a flake;
+// edit-notices' period is five seconds, so this window holds many of its periods, each served once
+// (docs.TestEditNoticeSweepOfTwoServicesSendsEachNoticeOnce holds what its lease is for); and
+// server-processes' prune is one delete on server_processes, the table every process's heartbeat
+// writes every five seconds, so a lock that held the prune would hold the registry itself.
 func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	pair := newPair(t)
 	fake := startGitHubFake(t)
+	// The term-statistics refresh writes nothing for a database with no project, so one exists
+	// before either process starts.
+	if _, err := pair.database.Pool.Exec(context.Background(), `insert into projects (key, name) values ('LEASE', 'Lease')`); err != nil {
+		t.Fatalf("create the project the term-statistics refresh rebuilds: %v", err)
+	}
 	// refs is where the reference-excerpt reconciliation's first statement writes
-	// (refs.MarkStaleExcerpts), write_suggestions where the suggestion-outcome sweep's does.
-	gate := lockTables(t, pair.database, "exclusive", "refs", "write_suggestions")
+	// (refs.MarkStaleExcerpts), write_suggestions where the suggestion-outcome sweep's does, and
+	// search_term_totals where the term-statistics refresh's first write for a project goes (its
+	// first statement only reads projects, which an exclusive lock does not hold).
+	gate := lockTables(t, pair.database, "exclusive", "refs", "write_suggestions", "search_term_totals")
 	// The block-index reconciliation's first statements read document_block_versions and
 	// block_grammar_owed, which only access exclusive mode holds back. They are held in a gate of
 	// their own, released as soon as the other process has found the lease held: that pass's
@@ -1220,6 +1218,10 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	waitForLease(t, pair, leaseSkipped, "reference-excerpts", 60*time.Second)
 	if ran := countLease(pair.a, leaseRan, "reference-excerpts") + countLease(pair.b, leaseRan, "reference-excerpts"); ran != 0 {
 		t.Errorf("a reference-excerpt pass reported running %d times while the one holding the lease is still inside the refs lock", ran)
+	}
+	waitForLease(t, pair, leaseSkipped, "search-term-stats", 60*time.Second)
+	if ran := countLease(pair.a, leaseRan, "search-term-stats") + countLease(pair.b, leaseRan, "search-term-stats"); ran != 0 {
+		t.Errorf("a term-statistics pass reported running %d times while the one holding the lease is still inside the search_term_totals lock", ran)
 	}
 
 	if waiting := storetest.WaitForLockWaiters(t, blockGate, 1, 60*time.Second); waiting < 1 {
@@ -1251,10 +1253,12 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 	}
 	waitForLease(t, pair, leaseRan, "reference-excerpts", 60*time.Second)
 	waitForLease(t, pair, leaseRan, "suggestion-outcomes", 60*time.Second)
+	waitForLease(t, pair, leaseRan, "search-term-stats", 60*time.Second)
 	requireLeasedOnce(t, pair, "reference-excerpts")
 	requireLeasedOnce(t, pair, "suggestion-outcomes")
+	requireLeasedOnce(t, pair, "search-term-stats")
 	for _, unobserved := range []struct{ lease, why string }{
-		{"document-compaction", "its ticker is 24 h, so no pass is due inside any window a test can wait out"},
+		{"document-compaction", "its interval is 24 h, so no pass is due inside any window a test can wait out"},
 		{"issue-ask-repair", "its first leased pass is one IssueAskRepairInterval (10 min) after each process started"},
 		{"architecture-import", "its first pass is jittered over SyncInterval (5 min) and each process draws its own"},
 		{"delivery-reconcile", "its first pass is jittered over ReconcileInterval (5 min) and each process draws its own"},
@@ -1270,7 +1274,7 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 }
 
 // A rolling update starts the second process minutes after the first, and at a steady two
-// replicas each process keeps a ticker of its own: two ticks of one leased loop almost never
+// replicas each process keeps a timer of its own: two ticks of one leased loop almost never
 // overlap, because a pass is seconds and its interval is minutes. This row is that shape - the
 // second process is started only after the first has finished a pass and given the lease back -
 // and it is where "runs once overall" has to hold, not only while a pass is in flight.
@@ -1281,14 +1285,14 @@ func TestEachLeasedMaintenanceLoopRunsOnceAcrossBothProcesses(t *testing.T) {
 // list calls for one result", redeliver/sweep.go). So the GitHub fake's count of those listings
 // is what one sweep window cost the installation's rate limit, whichever process paid it.
 //
-// A period is a bucket of the database's clock (duty.Exclusive, migration 0115), so both
+// A period is a bucket of the tick's due time (duty.Exclusive, migration 0115), so both
 // processes are started inside one bucket on purpose: a second process whose first tick lands
 // past a bucket boundary is entitled to sweep, and this row is about the one that lands inside
 // the bucket its peer has already served. waitOutABucketBoundary is what keeps which of the two
 // this run gets from being luck.
 func TestALeasedLoopRunsOnceAcrossAStaggeredStart(t *testing.T) {
 	pair := newPair(t)
-	waitOutABucketBoundary(t, pair, redeliver.Interval)
+	waitOutABucketBoundary(t, redeliver.Interval)
 	fake := startGitHubFake(t)
 	// Nothing is held here: this row is about two passes that never meet, so the first one must
 	// finish and give the lease back before the second process exists.
@@ -1327,20 +1331,16 @@ func TestALeasedLoopRunsOnceAcrossAStaggeredStart(t *testing.T) {
 }
 
 // waitOutABucketBoundary returns with enough of period's current bucket left for a row to start
-// both processes and read their first ticks inside it. A period is floor(epoch / period) on the
-// database's clock, so a row that straddles a boundary watches a second process legitimately
-// sweep rather than skip; this waits the boundary out instead, on the same clock the gate reads,
-// and waits at most the margin it needs.
-func waitOutABucketBoundary(t *testing.T, pair *dispatchPair, period time.Duration) {
+// both processes and read their first ticks inside it. A period is floor(epoch / period) of a
+// tick's due time, on the clock of the process that ticks, so a row that straddles a boundary
+// watches a second process legitimately sweep rather than skip; this waits the boundary out
+// instead, on the clock both processes share with this test (one host), and waits at most the
+// margin it needs.
+func waitOutABucketBoundary(t *testing.T, period time.Duration) {
 	t.Helper()
 	// What one run of the row needs inside the bucket: two process starts and their first ticks.
 	const margin = 45 * time.Second
-	var left time.Duration
-	if err := pair.database.Pool.QueryRow(context.Background(),
-		`select make_interval(secs => $1 - mod(extract(epoch from now()), $1))`, period.Seconds(),
-	).Scan(&left); err != nil {
-		t.Fatalf("read how much of the period's bucket is left: %v", err)
-	}
+	left := period - time.Duration(time.Now().UnixNano()%period.Nanoseconds())
 	if left >= margin {
 		return
 	}

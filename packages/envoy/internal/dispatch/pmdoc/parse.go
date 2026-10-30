@@ -38,7 +38,7 @@ var blockReader = markdownReader{md: goldmark.New(
 	goldmark.WithParserOptions(
 		parser.WithBlockParsers(
 			util.Prioritized(elementBlockCounter{}, -1),
-			util.Prioritized(nestingGuard{BlockParser: &typedDirectiveParser{}}, 950),
+			util.Prioritized(frontmatterAttempt{nestingGuard{BlockParser: &typedDirectiveParser{}}}, 950),
 			util.Prioritized(&unsupportedDirectiveParser{}, 900),
 			util.Prioritized(lineRecordingParagraph{parser.NewParagraphParser()}, 999),
 		),
@@ -97,6 +97,22 @@ func Parse(markdown string) (*Node, error) {
 // tree's: its padding spends a budget of its own (readBackBudget), not a caller write's.
 func ParseRendering(markdown string) (*Node, error) {
 	return parseStamped(markdown, readBackBudget())
+}
+
+// ParseWithSourceStarts parses markdown as Parse does and also answers, for each of the tree's
+// top-level children, the byte offset in markdown where the goldmark block it was converted from
+// starts (startOf): a paragraph's first line, and every other block's recorded position, so a
+// fenced code block starts at its opening fence. Front matter starts at 0. A child converted from
+// no goldmark block (the empty paragraph of a document with no blocks), or from one that records
+// no position, answers -1.
+func ParseWithSourceStarts(markdown string) (*Node, []int, error) {
+	var starts []int
+	doc, err := parseMarkdown(markdown, fromStart, true, NewWriteBudget(), &starts)
+	if err != nil {
+		return nil, nil, err
+	}
+	EnsureBlockIDs(doc)
+	return doc, starts, nil
 }
 
 func parseStamped(markdown string, budget *WriteBudget) (*Node, error) {
@@ -205,13 +221,19 @@ func LineFeedAttrs(attrs map[string]any) map[string]any {
 // block that names none has none yet. Without readFrontmatter a closed front-matter block is read
 // as the blocks its lines make. at is where markdown stands in what the caller wrote, which a
 // refusal's line number counts from.
-func parseUnstamped(markdown string, at origin, readFrontmatter bool, budget *WriteBudget) (doc *Node, err error) {
+func parseUnstamped(markdown string, at origin, readFrontmatter bool, budget *WriteBudget) (*Node, error) {
+	return parseMarkdown(markdown, at, readFrontmatter, budget, nil)
+}
+
+// parseMarkdown is parseUnstamped that, given starts, also sets it to where each of the tree's
+// top-level children starts in markdown (sourceStarts).
+func parseMarkdown(markdown string, at origin, readFrontmatter bool, budget *WriteBudget, starts *[]int) (doc *Node, err error) {
 	defer recoverPanic(&doc, &err, "reading markdown")
 	source := []byte(markdown)
 	var front *Node
 	unclosedFrontmatter := false
+	rest := 0
 	if readFrontmatter {
-		var rest int
 		front, rest, unclosedFrontmatter = parseFrontmatterBlock(source)
 		at.line += bytes.Count(source[:rest], []byte("\n"))
 		at.server = max(0, at.server-rest)
@@ -242,7 +264,43 @@ func parseUnstamped(markdown string, at origin, readFrontmatter bool, budget *Wr
 	if err := doc.Validate(); err != nil {
 		return nil, err
 	}
+	if starts != nil {
+		*starts = sourceStarts(doc, root, front != nil, rest)
+	}
 	return doc, nil
+}
+
+// sourceStarts is where each of doc's top-level children starts in the markdown parsed: front
+// matter at 0, and every other child where the block of root it was converted from starts
+// (sourceStart), past the front matter's offset bytes. Each of root's blocks converts to one child
+// (parseBlocks); a child past root's last block, the empty paragraph of a document with no blocks,
+// answers -1.
+func sourceStarts(doc *Node, root ast.Node, front bool, offset int) []int {
+	starts := make([]int, len(doc.Children))
+	index := 0
+	if front {
+		index = 1
+	}
+	for block := root.FirstChild(); index < len(starts); index++ {
+		starts[index] = -1
+		if block == nil {
+			continue
+		}
+		if start := sourceStart(block); start >= 0 {
+			starts[index] = offset + start
+		}
+		block = block.NextSibling()
+	}
+	return starts
+}
+
+// sourceStart is startOf, or -1 for a block that records neither the position nor the line startOf
+// reads.
+func sourceStart(block ast.Node) int {
+	if (isParagraph(block) || block.Pos() < 0) && block.Lines().Len() == 0 {
+		return -1
+	}
+	return startOf(block)
 }
 
 // inlineParserOptions is how inline markdown is read: a paragraph is the only block, so a leading
@@ -257,8 +315,8 @@ func inlineParserOptions(rules delimiterRules) []parser.Option {
 		parser.WithInlineParsers(inlineParsers(rules)...),
 		parser.WithInlineParsers(
 			util.Prioritized(elementInlineCounter{}, -1),
-			util.Prioritized(newLinkifyGuard(), 999),
 		),
+		parser.WithInlineParsers(linkifyParsers()...),
 	}
 }
 
@@ -804,7 +862,7 @@ func parseTableRow(row ast.Node, header bool, source []byte, footnotes map[int]s
 			// refuseBlocks refuses every block outside convertedBlocks, and goldmark builds a row of cells.
 			panic(fmt.Sprintf("conversion reached a table row holding a %s block, which parseTableRow does not convert", child.Kind()))
 		}
-		content, err := parseTableCellInline(cell, source, nil, footnotes)
+		content, err := parseInline(cell, source, nil, footnotes)
 		if err != nil {
 			return nil, err
 		}
@@ -855,16 +913,8 @@ func parseImage(image *ast.Image, source []byte, footnotes map[int]string) (*Nod
 	}}, nil
 }
 
-func parseTableCellInline(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string) ([]*Node, error) {
-	return parseInlineWithTableCellLinks(parent, source, initial, footnotes, true)
-}
-
 func parseInline(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string) ([]*Node, error) {
-	return parseInlineWithTableCellLinks(parent, source, initial, footnotes, false)
-}
-
-func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string, tableCell bool) ([]*Node, error) {
-	children, _, err := parseInlineMarks(parent, source, initial, footnotes, tableCell)
+	children, _, err := parseInlineMarks(parent, source, initial, footnotes)
 	return children, err
 }
 
@@ -874,7 +924,7 @@ func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mar
 // opened it, whose own close would have ended it. So `*x *y* z*` is `x y` in emphasis and ` z`
 // without, and `****a****` is strong once. ended is the marks of initial such a close inside parent
 // ended, which the text after parent does not carry either.
-func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string, tableCell bool) (children []*Node, ended []Mark, err error) {
+func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string) (children []*Node, ended []Mark, err error) {
 	trimLineSuffixes(parent, source)
 	active := append([]Mark(nil), initial...)
 	// within reads a mark node's content under active and marks, then ends for the text after it
@@ -886,7 +936,7 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 				next = append(next, mark)
 			}
 		}
-		content, inner, err := parseInlineMarks(node, source, next, footnotes, tableCell)
+		content, inner, err := parseInlineMarks(node, source, next, footnotes)
 		if err != nil {
 			return nil, err
 		}
@@ -963,23 +1013,17 @@ func parseInlineMarks(parent ast.Node, source []byte, initial []Mark, footnotes 
 			}
 			children = append(children, content...)
 		case *ast.Link:
-			href := string(current.Destination)
-			if tableCell {
-				href = string(util.UnescapePunctuations(current.Destination))
-			}
+			// A destination's escapes and character references are decoded, as the browser editor's
+			// parser decodes them (escapeLinkDestination writes it back).
+			href := decodeMarkdownText(current.Destination)
 			content, err := within(current, Mark{Type: "link", Attrs: Attrs{"href": href, "title": titleOrNil(current.Title)}})
 			if err != nil {
 				return nil, nil, err
 			}
 			children = append(children, content...)
 		case *ast.AutoLink:
-			// goldmark gives an email autolink the bare address as its URL; the browser editor's
-			// engine, like a comment's renderer, links it to the address's mailto: URL.
-			href := string(current.URL(source))
-			if current.AutoLinkType == ast.AutoLinkEmail {
-				href = "mailto:" + href
-			}
-			children = appendTextPiece(children, string(current.Label(source)), append(active, Mark{Type: "link", Attrs: Attrs{"href": href, "title": nil}}))
+			label, href := autolinkText(current, source)
+			children = appendTextPiece(children, label, append(active, Mark{Type: "link", Attrs: Attrs{"href": href, "title": nil}}))
 		case *extensionast.Strikethrough:
 			content, err := within(current, Mark{Type: "strike_through"})
 			if err != nil {

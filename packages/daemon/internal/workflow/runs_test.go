@@ -18,13 +18,10 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// A human moving an in-flight child back to todo starts the child's next run, and the run it
-// interrupted still has a worker: the implementer pane keeps the workspace and would report its
-// handoff into the new run. The previous run's worker is suspended first, and that suspend is
-// stamped with the generation the child now holds, since that is what the outbox fences it against.
-// The child may re-enter at the phase it was taken from (planning, under an open gate), and the
-// suspend is queued all the same: it ends a run, not a phase.
-func TestAnInFlightChildSetBackToTodoSuspendsThePreviousRunsWorker(t *testing.T) {
+// A human moving an in-flight child back to todo starts the child's next run. The worker of the
+// prior run stays live, but a handoff it reports is fenced to that previous generation. Re-entry
+// queues no suspension: roles stay live while the child remains in the workflow.
+func TestAnInFlightChildSetBackToTodoKeepsThePreviousRunsWorkerLive(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		phase phase.Phase
@@ -57,42 +54,30 @@ func TestAnInFlightChildSetBackToTodoSuspendsThePreviousRunsWorker(t *testing.T)
 				t.Fatalf("list the child's supervise rows: %v", err)
 			}
 			defer rows.Close()
-			var suspends, starts int
+			var suspends int
 			for rows.Next() {
 				var op, role string
 				var generation int64
 				if err := rows.Scan(&op, &role, &generation); err != nil {
 					t.Fatalf("scan a supervise row: %v", err)
 				}
-				switch {
-				case op == "suspend" && role == string(tc.role):
-					if generation != 2 {
-						t.Errorf("suspend of the previous run = generation %d, want the 2 the child now holds", generation)
-					}
-					if starts > 0 {
-						t.Error("the new run started before the previous run's worker was suspended")
-					}
+				if op == "suspend" {
 					suspends++
-				case op == "start":
-					starts++
 				}
 			}
 			if err := rows.Err(); err != nil {
 				t.Fatalf("iterate the child's supervise rows: %v", err)
 			}
-			if suspends != 1 {
-				t.Fatalf("suspends of the interrupted run = %d, want 1", suspends)
+			if suspends != 0 {
+				t.Fatalf("suspends of the interrupted run = %d, want none while the child remains in the workflow", suspends)
 			}
 		})
 	}
 }
 
-// A child taken back to todo re-enters at a new generation, and its interrupted worker keeps its
-// pane: the stop is an outbox row the runtime can refuse for as long as it likes. That worker
-// finishes the turn it was in and reports the completion of a run that is over. Nothing else on
-// the fact tells the two runs apart — the claim token is stable across runs and the session is
-// kept across a suspend — so the daemon names the run from the task the worker took, and a
-// completion of a generation the issue has left changes nothing.
+// A child taken back to todo re-enters at a new generation while its interrupted worker remains
+// live. The claim token is stable across runs, so the daemon names the completion's run from the
+// task the worker took; a completion of a generation the issue has left changes nothing.
 func TestACompletionFromAnInterruptedRunIsRefused(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()

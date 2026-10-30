@@ -57,6 +57,10 @@ func (s *server) listAgentTokens(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, tokens)
 }
 
+// createAgentToken is POST /api/v1/me/agent-tokens. Its answer is the one time the token's
+// plaintext is shown, so an Idempotency-Key never keeps it (keyedWrites, answerHoldsSecret): the
+// insert commits in a transaction of its own, which marks the key committed, and a repeat under the
+// key is 409 KEY_COMMITTED - the token was made and cannot be shown again - never a second token.
 func (s *server) createAgentToken(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
@@ -81,14 +85,24 @@ func (s *server) createAgentToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	prefix := plaintext[len("dsp_") : len("dsp_")+agentTokenPrefixLength]
+	tx, err := s.begin(r.Context())
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	defer tx.Rollback(r.Context())
 	var token model.AgentToken
-	if err := s.deps.Store.Pool.QueryRow(r.Context(), `
+	if err := tx.QueryRow(r.Context(), `
 		insert into agent_tokens (owner, name, token_hash, prefix)
 		values ($1, $2, $3, $4)
 		returning id::text, name, prefix, created_at, last_used_at, revoked_at
 	`, actor.ID, input.Name, hash[:], prefix).Scan(
 		&token.ID, &token.Name, &token.Prefix, &token.CreatedAt, &token.LastUsedAt, &token.RevokedAt,
 	); err != nil {
+		s.writeHandlerError(w, fmt.Errorf("create agent token: %w", err))
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, fmt.Errorf("create agent token: %w", err))
 		return
 	}

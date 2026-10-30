@@ -18,6 +18,7 @@ import {
 import type { ActiveDispatchConfig } from "./dispatch-config";
 import type { DispatchHost } from "./dispatch-cwd";
 import { checkDispatchCall, dispatchServerUrls, executeDispatchTool } from "./dispatch-execute";
+import { DispatchWriteLandedError } from "./dispatch-http";
 import {
   appendResult,
   loadSessionMemory,
@@ -479,8 +480,16 @@ export async function runDispatchCli(
     code = OK;
   } catch (error) {
     text = messageFor(error);
-    entry = { tool, error: text };
-    code = REFUSED;
+    // The command's write landed but its answer was lost: it is done, so the call succeeded, and
+    // its one line says to read back what it made. The executor turns a landing of a write that
+    // was only a step of its command (a picture, a closing reason) into a failure of its own.
+    if (error instanceof DispatchWriteLandedError) {
+      entry = { tool, details: { landed_without_answer: error.code } };
+      code = OK;
+    } else {
+      entry = { tool, error: text };
+      code = REFUSED;
+    }
   }
   try {
     recordOutcome(dir, sessionId, follows, entry);

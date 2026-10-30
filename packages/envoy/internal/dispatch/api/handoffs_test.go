@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -21,6 +22,23 @@ func postHandoff(t *testing.T, handler http.Handler, issueKey, phase, body strin
 	return sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issueKey+"/handoffs/"+phase, map[string]any{
 		"actor": sessionActor(), "body": body,
 	})
+}
+
+// keyedHandoffPost posts one handoff write under key, the Idempotency-Key a client sends with
+// every attempt of that one write.
+func keyedHandoffPost(t *testing.T, handler http.Handler, issueKey, phase, body, key string) *httptest.ResponseRecorder {
+	t.Helper()
+	data, err := json.Marshal(map[string]any{"actor": sessionActor(), "body": body})
+	if err != nil {
+		t.Fatalf("encode handoff write: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/issues/"+issueKey+"/handoffs/"+phase, bytes.NewReader(data))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer agent-token")
+	request.Header.Set(contracts.IdempotencyKeyHeader, key)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
 }
 
 func recordedHandoff(t *testing.T, handler http.Handler, issueKey, phase, body string) model.HandoffSummary {
@@ -339,5 +357,33 @@ func TestHandoffWriteAppendsHandoffRecordedWithoutTheBody(t *testing.T) {
 		if event.Actor.Kind != "session" || event.Actor.ID != handoff.Author.ID || event.Notify {
 			t.Fatalf("event %d actor = %#v notify = %v, want the writing session and no notification", index, event.Actor, event.Notify)
 		}
+	}
+}
+
+// A handoff write is a keyed write: a retry under the same Idempotency-Key, which the `dispatch`
+// command and the dashboard send with every attempt of one intent, is answered the first call's
+// 201 as it stands, marked replayed, and records one version rather than a second.
+func TestARetriedHandoffWriteReplaysItsAnswerAndRecordsOneVersion(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Keyed handoff write", "spec")
+	const key = "11111111-2222-3333-4444-555555555555"
+	const body = `{"schemaVersion":1,"phase":"implement"}`
+
+	first := keyedHandoffPost(t, handler, issue.Key, "implement", body, key)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first write: status=%d body=%s", first.Code, first.Body.String())
+	}
+	repeat := keyedHandoffPost(t, handler, issue.Key, "implement", body, key)
+	if repeat.Code != first.Code || repeat.Body.String() != first.Body.String() {
+		t.Fatalf("repeat = %d %s, want the first answer %d %s", repeat.Code, repeat.Body.String(), first.Code, first.Body.String())
+	}
+	if replayed := repeat.Header().Get(contracts.IdempotencyReplayedHeader); replayed != "?1" {
+		t.Fatalf("repeat's %s = %q, want ?1: the key answered it, the handler did not run again", contracts.IdempotencyReplayedHeader, replayed)
+	}
+
+	listed := decodeBody[[]model.HandoffSummary](t, sessionRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/handoffs", nil))
+	written := decodeBody[model.HandoffSummary](t, first)
+	if len(listed) != 1 || !sameHandoff(listed[0], written) {
+		t.Fatalf("the issue holds %#v, want exactly the one record %#v the first write made", listed, written)
 	}
 }

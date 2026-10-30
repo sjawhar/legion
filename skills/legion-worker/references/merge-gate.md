@@ -42,10 +42,19 @@ other change to the head voids it.
   (`gh api repos/<o>/<r>/commits/<headRefOid>/check-runs --paginate --jq '.check_runs[] | [.name, .status, .conclusion] | @tsv'`):
   every required name present, `completed` and `success` (GitHub counts `neutral` and `skipped`
   as passing for a required check). A required check
-  `queued` or `in_progress`: wait. One `completed` as
-  `cancelled`, or absent: `gh run rerun <run-id>` once, then wait; when nothing will run it (a
-  check only a commit status reports, a workflow another repository defines), tell the architect
-  and do not approve.
+  `queued` or `in_progress`: wait. One `completed` as `cancelled`, or absent: re-run that run's
+  failed and cancelled jobs, once, then wait — never the whole run, which runs again every job that
+  succeeded too. Find the run and job at the head: the head's runs
+  (`gh api 'repos/<o>/<r>/actions/runs?head_sha=<headRefOid>&per_page=100' --jq '.workflow_runs[] | [.id, .name, .event, .status, .conclusion] | @tsv'`),
+  then each candidate run's jobs
+  (`gh api repos/<o>/<r>/actions/runs/<run-id>/jobs --jq '.jobs[] | [.id, .name, .status, .conclusion] | @tsv'`).
+  A cancelled job: `gh run rerun <run-id> --failed`, which GitHub applies to the run's failed and
+  cancelled jobs and the jobs that depend on them, and to nothing that succeeded. Never
+  `--job <job-id>` alone: under a routing workflow, re-running only the final job reads the
+  cancelled results again and stays red. GitHub refuses a re-run while an attempt of that run is
+  still in progress: wait for it. When no
+  run at the head holds the job, or nothing will run it (a check only a commit status reports, a
+  workflow another repository defines), tell the architect and do not approve.
   Approval is refused while either `E2E (implementer)` or `E2E (tester)` is missing: `REQUEST_CHANGES` naming the missing line.
   Skip the `Thermo` line entirely on a docs-only PR. Submit **one review per round** —
   `REQUEST_CHANGES` when any correctness finding stands, otherwise `APPROVE` of the head you

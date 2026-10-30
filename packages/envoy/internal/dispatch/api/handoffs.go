@@ -16,7 +16,7 @@ import (
 )
 
 // handoffPhasePattern is a handoff's phase, the routes' {phase}: a lowercase slug. Legion writes
-// plan, implement, test and review. The handoffs.phase check (migration 0137) holds the same rule,
+// plan, implement, test and review. The handoffs.phase check (migration 0145) holds the same rule,
 // generated from contracts' HANDOFF_PHASE_PATTERN, which the dispatch command checks too.
 var handoffPhasePattern = regexp.MustCompile(contracts.HandoffPhasePattern)
 
@@ -25,6 +25,14 @@ var handoffPhasePattern = regexp.MustCompile(contracts.HandoffPhasePattern)
 // writes < as \u003c, or a two-byte character as \u00e9), so a body at the cap must fit six times
 // over beside the actor; the cap itself is checked on the decoded body.
 const handoffRequestLimit = 6*contracts.DispatchHandoffBodyMax + 4<<10
+
+// handoffWriteRoute is the handoff write, the one JSON route whose body limit is its own rather
+// than maxJSONRequestBytes (routeBodyLimit), and errHandoffTooLarge the refusal past it: the drain
+// and keyed layers answer a body too large for it exactly as createHandoff does.
+const handoffWriteRoute = http.MethodPost + " /api/v1/issues/{key}/handoffs/{phase}"
+
+var errHandoffTooLarge = errorf(http.StatusRequestEntityTooLarge, "CAP_EXCEEDED",
+	"request body exceeds %d bytes: a handoff body is at most %d bytes", handoffRequestLimit, contracts.DispatchHandoffBodyMax)
 
 // handoffColumns is the handoffs select list scanHandoff reads, in scan order.
 const handoffColumns = `id::text, issue_key, phase, version, author, created_at`
@@ -59,8 +67,7 @@ func (s *server) createHandoff(w http.ResponseWriter, r *http.Request) {
 	if err := decodeJSONWithin(r, &input, handoffRequestLimit); err != nil {
 		var apiErr *apiError
 		if errors.As(err, &apiErr) && apiErr.status == http.StatusRequestEntityTooLarge {
-			writeError(w, "CAP_EXCEEDED", http.StatusRequestEntityTooLarge,
-				fmt.Sprintf("request body exceeds %d bytes: a handoff body is at most %d bytes", handoffRequestLimit, contracts.DispatchHandoffBodyMax))
+			s.writeHandlerError(w, errHandoffTooLarge)
 			return
 		}
 		s.writeHandlerError(w, err)

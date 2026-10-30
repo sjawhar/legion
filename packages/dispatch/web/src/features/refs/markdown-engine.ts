@@ -33,10 +33,11 @@ export interface MarkdownEngine {
    * as one plain-text node. The engine parses read-only: a container directive the block schema
    * refuses (`:::note` … `:::`), or a typed block whose content breaks its content rule (an ask
    * holding a heading), is drawn as its literal fence lines around its formatted content rather
-   * than refused or silently dropped, and a Pandoc `::: warning` fence or a `::leaf` / `:text{`
-   * line reads as paragraph text, so none of them throws. Proof's schema has no node for
-   * CommonMark's raw-HTML spans (a bare tag-shaped substring outside a code span or fence, e.g.
-   * `<img src=x>`) or a mark span of a kind this schema does not carry, so the parser still
+   * than refused or silently dropped, a Pandoc `::: warning` fence or a `::leaf` / `:text{` line
+   * reads as paragraph text, and so does a `:::` opener inside 32 open container directives, the
+   * deepest the parser nests them (INFRA-581), so none of them throws. Proof's schema has no node
+   * for CommonMark's raw-HTML spans (a bare tag-shaped substring outside a code span or fence,
+   * e.g. `<img src=x>`) or a mark span of a kind this schema does not carry, so the parser still
    * throws for them. HTML-like text inside a code span or fence parses safely as literal text,
    * so nothing is escaped beforehand:
    * escaping the whole source regardless of context would print literal backslashes around any

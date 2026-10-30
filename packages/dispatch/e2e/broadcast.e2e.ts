@@ -1,9 +1,11 @@
+import { shortSessionId } from "@legion/contracts";
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import {
+  BROADCAST_REFUSED,
+  broadcastSends,
   type FakeSession,
   getSentMessages,
-  postedBroadcasts,
   refuseBroadcasts,
   setLiveSessions,
   setSessionLive,
@@ -18,6 +20,7 @@ import {
   replyToMessageDelivery,
 } from "./api";
 import { resetDatabase } from "./seed";
+import { sessionIds } from "./session-ids";
 import { asUser } from "./users";
 
 // No `last_seen`: the fixture answers every read of the session with the current time. A literal
@@ -29,7 +32,7 @@ const planner: FakeSession = {
   dir: "/workspaces/planner",
   machine_id: "build-host",
   roles: ["planner"],
-  session_id: "planner-session",
+  session_id: sessionIds.planner,
   title: "Planner",
 };
 const tester: FakeSession = {
@@ -37,7 +40,7 @@ const tester: FakeSession = {
   dir: "/workspaces/tester",
   machine_id: "build-host",
   roles: ["tester"],
-  session_id: "tester-session",
+  session_id: sessionIds.tester,
   title: "Tester",
 };
 const reviewer: FakeSession = {
@@ -45,7 +48,7 @@ const reviewer: FakeSession = {
   dir: "/workspaces/reviewer",
   machine_id: "review-host",
   roles: ["reviewer"],
-  session_id: "reviewer-session",
+  session_id: sessionIds.reviewer,
   title: "Reviewer",
 };
 
@@ -56,7 +59,7 @@ const observer: FakeSession = {
   dir: "/workspaces/observer",
   machine_id: "build-host",
   roles: [],
-  session_id: "observer-session",
+  session_id: sessionIds.observer,
   title: "Observer",
 };
 
@@ -118,25 +121,23 @@ test("a broadcast lists recipient cards in the non-alphabetical order the sender
 
     // One message per recipient: the listener was asked to send once to every selected session.
     const sends = await getSentMessages();
-    expect(sends.map((entry) => entry.target_session).sort()).toEqual([
-      "observer-session",
-      "planner-session",
-      "tester-session",
-    ]);
+    expect(sends.map((entry) => entry.target_session).sort()).toEqual(
+      [observer.session_id, planner.session_id, tester.session_id].sort()
+    );
 
     // The Planner answers its own delivery, and the open view picks the answer up from the
-    // event stream without a reload.
+    // live event feed without a reload.
     const [summary] = await listBroadcasts();
     if (summary === undefined) throw new Error("the broadcast was not recorded");
     const stored = await getBroadcast(summary.id);
     const plannerMessage = stored.recipients.find(
-      (recipient) => recipient.session_id === "planner-session"
+      (recipient) => recipient.session_id === planner.session_id
     );
     if (plannerMessage === undefined) throw new Error("the planner received no message");
     await replyToMessageDelivery(
       plannerMessage.message.id,
       { attempt: 1, body: "Standing down; build is green." },
-      { id: "planner-session", kind: "session" }
+      { id: planner.session_id, kind: "session" }
     );
     await expect(view.getByText("Standing down; build is green.")).toBeVisible();
     await expect(
@@ -369,7 +370,7 @@ test("a broadcast reaches sessions the listener's list has dropped while their r
     await expect(page.getByText(/Excluded:/)).toHaveCount(0);
     await expect
       .poll(async () => (await getSentMessages()).map((entry) => entry.target_session).sort())
-      .toEqual(["planner-session", "tester-session"]);
+      .toEqual([planner.session_id, tester.session_id].sort());
   } finally {
     await alice.close();
   }
@@ -386,7 +387,7 @@ test("a second identical send of one composition is answered the original broadc
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const posted = postedBroadcasts(page);
+    const posted = broadcastSends(page);
     await page.goto("/agents");
     await page
       .getByRole("region", { name: "Agents" })
@@ -403,9 +404,10 @@ test("a second identical send of one composition is answered the original broadc
     expect(posted).toHaveLength(1);
     const [request] = posted;
     if (request === undefined) throw new Error("the press sent nothing");
-    expect(request.idempotency_key).not.toBe("");
+    expect(request.key).toEqual(expect.any(String));
+    expect(request.input).not.toHaveProperty("idempotency_key");
 
-    const replay = await createBroadcast(request);
+    const replay = await createBroadcast(request.input, { idempotencyKey: request.key });
     expect(replay.id).toBe(first);
     expect((await listBroadcasts()).map((summary) => summary.id)).toEqual([first]);
     await expect
@@ -416,10 +418,9 @@ test("a second identical send of one composition is answered the original broadc
       )
       .toBe(true);
     const sends = await getSentMessages();
-    expect(sends.map((entry) => entry.target_session).sort()).toEqual([
-      "planner-session",
-      "tester-session",
-    ]);
+    expect(sends.map((entry) => entry.target_session).sort()).toEqual(
+      [planner.session_id, tester.session_id].sort()
+    );
   } finally {
     await alice.close();
   }
@@ -439,7 +440,7 @@ test("a session that leaves between a refused send and its restore is still in t
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    const posted = postedBroadcasts(page);
+    const posted = broadcastSends(page);
     const refusal = await refuseBroadcasts(page);
     await page.goto("/agents");
     await page
@@ -454,9 +455,9 @@ test("a session that leaves between a refused send and its restore is still in t
     await composer.getByRole("button", { name: "Send to 2" }).click();
     const sends = page.getByRole("region", { name: "Sends" });
     await expect(sends.getByRole("status")).toHaveText(
-      "Could not send to 2 agents: Envoy listener unreachable"
+      `Could not send to 2 agents: ${BROADCAST_REFUSED}`
     );
-    expect(posted[0]?.session_ids).toEqual(["planner-session", "observer-session"]);
+    expect(posted[0]?.input.session_ids).toEqual([planner.session_id, observer.session_id]);
 
     // Genuinely ended, not merely dropped from the listener's list: the server resolves each
     // selected session by id now, so only a session the store holds no record of is excluded.
@@ -470,11 +471,19 @@ test("a session that leaves between a refused send and its restore is still in t
     await expect(
       composer.getByRole("heading", { name: "Broadcast to 2 of 2 selected" })
     ).toBeVisible();
-    await expect(composer.getByRole("button", { name: /^session:observer… ✕$/ })).toBeVisible();
+    // The session left the registry, so its chip reads the short form of its id, not its title.
+    await expect(
+      composer.getByRole("button", {
+        name: `${shortSessionId(observer.session_id)} ✕`,
+        exact: true,
+      })
+    ).toBeVisible();
     await composer.getByRole("button", { name: "Send to 2" }).click();
     await page.waitForURL(/\/agents\/broadcasts\/[0-9a-f-]+$/);
     expect(posted).toHaveLength(2);
-    expect(posted[1]).toEqual(posted[0]);
+    // Word for word, under a key of its own: Dispatch would answer the refused key its refusal.
+    expect(posted[1]).toEqual({ input: posted[0]?.input, key: expect.any(String) });
+    expect(posted[1]?.key).not.toBe(posted[0]?.key);
 
     const view = page.getByRole("region", { name: "Broadcast" });
     await expect(
@@ -483,7 +492,7 @@ test("a session that leaves between a refused send and its restore is still in t
     await expect(view.getByRole("article")).toHaveText([/Planner/]);
     await expect
       .poll(async () => (await getSentMessages()).map((entry) => entry.target_session))
-      .toEqual(["planner-session"]);
+      .toEqual([planner.session_id]);
   } finally {
     await alice.close();
   }
@@ -524,7 +533,7 @@ test("opening a broadcast reads the answers it shows, on the badge, every agent'
 }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "one browser proves the broadcast flow");
   await setLiveSessions([planner, tester, observer]);
-  const id = await answeredBroadcast(["tester-session", "observer-session", "planner-session"]);
+  const id = await answeredBroadcast([tester.session_id, observer.session_id, planner.session_id]);
 
   const alice = await asUser(browser, "alice");
   try {
@@ -539,7 +548,7 @@ test("opening a broadcast reads the answers it shows, on the badge, every agent'
     await page.goto(`/agents/broadcasts/${id}`);
     const view = page.getByRole("region", { name: "Broadcast" });
     await expect(view.getByText("3 of 3 answered")).toBeVisible();
-    for (const session of ["tester-session", "observer-session", "planner-session"]) {
+    for (const session of [tester.session_id, observer.session_id, planner.session_id]) {
       await expect(view.getByText(`${session} reporting.`)).toBeVisible();
     }
     await expect(page.getByText(/^New repl/)).toHaveCount(0);
@@ -574,7 +583,7 @@ test("opening a broadcast leaves unread the answers it does not show, older and 
     { attempt: 1, body: "At /dash." },
     { id: planner.session_id, kind: "session" }
   );
-  const id = await answeredBroadcast(["tester-session", "observer-session", "planner-session"]);
+  const id = await answeredBroadcast([tester.session_id, observer.session_id, planner.session_id]);
   const newer = await createAgentMessage(tester.session_id, {
     body: "Did the rerun pass?",
     delivery: "aside",

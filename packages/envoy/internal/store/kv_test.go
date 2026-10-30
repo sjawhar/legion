@@ -23,6 +23,7 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/kvwatch"
+	"github.com/sjawhar/envoy/internal/logtest"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -53,6 +54,33 @@ func TestMatch_FiltersByMachineID(t *testing.T) {
 	got = r.Match("machine-X", "notifications.test")
 	if len(got) != 0 {
 		t.Fatalf("expected 0 results for unknown machine, got %d", len(got))
+	}
+}
+
+// MatchAll is Match without the machine filter: a sender confirming delivery to every subscribed
+// session must find the ones registered through another machine's listener, by an exact topic or
+// a wildcard alike, and none whose patterns miss the topic.
+func TestMatchAll_ReturnsMatchingSessionsOnEveryMachine(t *testing.T) {
+	r := &Registry{cache: map[string]Interest{
+		"ses_b_exact": {SessionID: "ses_b_exact", MachineID: "machine-B", Topics: []string{"notifications.team.deploy"}},
+		"ses_a_star":  {SessionID: "ses_a_star", MachineID: "machine-A", Topics: []string{"notifications.team.*"}},
+		"ses_a_other": {SessionID: "ses_a_other", MachineID: "machine-A", Topics: []string{"notifications.team.review"}},
+		"ses_b_chev":  {SessionID: "ses_b_chev", MachineID: "machine-B", Topics: []string{"notifications.slack.>", "notifications.>"}},
+		"ses_b_slack": {SessionID: "ses_b_slack", MachineID: "machine-B", Topics: []string{"notifications.slack.>"}},
+	}}
+
+	got := r.MatchAll("notifications.team.deploy")
+	ids := make([]string, len(got))
+	for i, item := range got {
+		ids[i] = item.SessionID
+	}
+	want := []string{"ses_a_star", "ses_b_chev", "ses_b_exact"}
+	if strings.Join(ids, ",") != strings.Join(want, ",") {
+		t.Fatalf("MatchAll(notifications.team.deploy) = %v, want %v in SessionID order", ids, want)
+	}
+
+	if got := r.MatchAll("notifications.agent.ses_x.extra.tokens"); len(got) != 1 || got[0].SessionID != "ses_b_chev" {
+		t.Fatalf("MatchAll of a topic only notifications.> matches = %v, want [ses_b_chev]", got)
 	}
 }
 
@@ -962,6 +990,183 @@ func TestUpsert_ColdCacheDuplicateTopicDeduped(t *testing.T) {
 	}
 }
 
+// manualClock is a registry clock (WithClock) the test moves by hand.
+type manualClock struct {
+	mu sync.Mutex
+	at time.Time
+}
+
+func (c *manualClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.at
+}
+
+// Set moves the clock to at.
+func (c *manualClock) Set(at time.Time) {
+	c.mu.Lock()
+	c.at = at
+	c.mu.Unlock()
+}
+
+// clockedRegistry opens a registry on the clock, over an interest bucket no earlier test wrote,
+// waits for its cache, and returns it with that bucket.
+func clockedRegistry(t *testing.T, clock *manualClock) (*Registry, natsgo.KeyValue) {
+	t.Helper()
+	conn, cleanup := connectNATS(t)
+	t.Cleanup(cleanup)
+	reg, err := Open(conn, WithReplicas(1), WithClock(clock.Now))
+	if err != nil {
+		t.Fatalf("Open failed: %v", err)
+	}
+	t.Cleanup(reg.StopWatch)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := reg.WaitForCacheReady(ctx); err != nil {
+		t.Fatalf("interest cache not ready: %v", err)
+	}
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("jetstream: %v", err)
+	}
+	kv, err := js.KeyValue(bus.InterestBucket)
+	if err != nil {
+		t.Fatalf("interest bucket: %v", err)
+	}
+	return reg, kv
+}
+
+// interestRevision is the bucket's revision of the session's interest row.
+func interestRevision(t *testing.T, kv natsgo.KeyValue, sessionID string) uint64 {
+	t.Helper()
+	entry, err := kv.Get(sessionID)
+	if err != nil {
+		t.Fatalf("get interest %s: %v", sessionID, err)
+	}
+	return entry.Revision()
+}
+
+// upsertOrFail upserts the heartbeat-shaped item and topics and returns what Upsert returned.
+func upsertOrFail(t *testing.T, reg *Registry, sessionID string, topics ...string) Interest {
+	t.Helper()
+	item, err := reg.Upsert(Interest{SessionID: sessionID, MachineID: "m1", Dir: "/work/" + sessionID}, topics)
+	if err != nil {
+		t.Fatalf("Upsert %s: %v", sessionID, err)
+	}
+	return item
+}
+
+// A heartbeat that changes nothing writes the interest row only once the row is
+// InterestRefreshAge old: before that Upsert returns the stored row, UpdatedAt and all, and the
+// bucket gains no revision; at that age, and past it, the row is written and restamped.
+func TestUpsertWritesAnUnchangedRowOnlyOnceItIsInterestRefreshAgeOld(t *testing.T) {
+	start := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	clock := &manualClock{at: start}
+	reg, kv := clockedRegistry(t, clock)
+	topics := []string{"notifications.agent.ses_hb", "notifications.team.heartbeat"}
+
+	upsertOrFail(t, reg, "ses_hb", topics...)
+	created := interestRevision(t, kv, "ses_hb")
+	for _, after := range []time.Duration{90 * time.Second, 180 * time.Second, 270 * time.Second, InterestRefreshAge - time.Millisecond} {
+		clock.Set(start.Add(after))
+		got := upsertOrFail(t, reg, "ses_hb", topics...)
+		if revision := interestRevision(t, kv, "ses_hb"); revision != created {
+			t.Fatalf("unchanged heartbeat %v after the write moved the row from revision %d to %d", after, created, revision)
+		}
+		if got.UpdatedAt != start.UnixMilli() {
+			t.Fatalf("unchanged heartbeat %v after the write returned updated_at %d, want the stored row's %d", after, got.UpdatedAt, start.UnixMilli())
+		}
+	}
+
+	refreshed := start.Add(InterestRefreshAge)
+	clock.Set(refreshed)
+	if got := upsertOrFail(t, reg, "ses_hb", topics...); got.UpdatedAt != refreshed.UnixMilli() {
+		t.Fatalf("heartbeat at InterestRefreshAge returned updated_at %d, want %d", got.UpdatedAt, refreshed.UnixMilli())
+	}
+	if revision := interestRevision(t, kv, "ses_hb"); revision != created+1 {
+		t.Fatalf("heartbeat at InterestRefreshAge left revision %d, want one write (%d)", revision, created+1)
+	}
+
+	clock.Set(refreshed.Add(90 * time.Second))
+	upsertOrFail(t, reg, "ses_hb", topics...)
+	if revision := interestRevision(t, kv, "ses_hb"); revision != created+1 {
+		t.Fatalf("heartbeat 90s after the refresh moved the row to revision %d, want %d", revision, created+1)
+	}
+
+	clock.Set(refreshed.Add(InterestRefreshAge + time.Minute))
+	upsertOrFail(t, reg, "ses_hb", topics...)
+	if revision := interestRevision(t, kv, "ses_hb"); revision != created+2 {
+		t.Fatalf("heartbeat past InterestRefreshAge left revision %d, want one more write (%d)", revision, created+2)
+	}
+	entry, err := kv.Get("ses_hb")
+	if err != nil {
+		t.Fatalf("get ses_hb: %v", err)
+	}
+	var stored Interest
+	if err := json.Unmarshal(entry.Value(), &stored); err != nil {
+		t.Fatalf("decode ses_hb: %v", err)
+	}
+	if want := refreshed.Add(InterestRefreshAge + time.Minute).UnixMilli(); stored.UpdatedAt != want {
+		t.Fatalf("stored updated_at = %d, want the last write's %d", stored.UpdatedAt, want)
+	}
+}
+
+// A heartbeat that adds a topic is written at once, however young the row; one that re-sends the
+// stored topics in another order changes nothing, since the merge sorts them.
+func TestUpsertWritesAChangedTopicSetAtOnce(t *testing.T) {
+	start := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	clock := &manualClock{at: start}
+	reg, kv := clockedRegistry(t, clock)
+
+	upsertOrFail(t, reg, "ses_topics", "notifications.agent.ses_topics")
+	created := interestRevision(t, kv, "ses_topics")
+
+	clock.Set(start.Add(time.Second))
+	got := upsertOrFail(t, reg, "ses_topics", "notifications.team.new", "notifications.agent.ses_topics")
+	if revision := interestRevision(t, kv, "ses_topics"); revision != created+1 {
+		t.Fatalf("a new topic left revision %d, want one write (%d)", revision, created+1)
+	}
+	if want := []string{"notifications.agent.ses_topics", "notifications.team.new"}; !slices.Equal(got.Topics, want) || got.UpdatedAt != start.Add(time.Second).UnixMilli() {
+		t.Fatalf("Upsert with a new topic returned %+v, want topics %v stamped now", got, want)
+	}
+
+	clock.Set(start.Add(2 * time.Second))
+	upsertOrFail(t, reg, "ses_topics", "notifications.team.new", "notifications.agent.ses_topics")
+	upsertOrFail(t, reg, "ses_topics", "notifications.agent.ses_topics", "notifications.team.new")
+	if revision := interestRevision(t, kv, "ses_topics"); revision != created+1 {
+		t.Fatalf("re-sending the stored topics moved the row to revision %d, want %d", revision, created+1)
+	}
+}
+
+// A row stored with a null topic list is not the [] a write would store, so the first heartbeat
+// over it writes it once, however young it is, and the next one finds it unchanged.
+func TestUpsertWritesARowStoredWithNullTopicsOnce(t *testing.T) {
+	start := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	clock := &manualClock{at: start}
+	reg, kv := clockedRegistry(t, clock)
+	putInterest(t, kv, Interest{SessionID: "ses_null", MachineID: "m1", Dir: "/work/ses_null", UpdatedAt: start.UnixMilli()})
+	stored := interestRevision(t, kv, "ses_null")
+
+	clock.Set(start.Add(time.Second))
+	upsertOrFail(t, reg, "ses_null")
+	if revision := interestRevision(t, kv, "ses_null"); revision != stored+1 {
+		t.Fatalf("Upsert over a null topic list left revision %d, want one write (%d)", revision, stored+1)
+	}
+	entry, err := kv.Get("ses_null")
+	if err != nil {
+		t.Fatalf("get ses_null: %v", err)
+	}
+	if !bytes.Contains(entry.Value(), []byte(`"topics":[]`)) {
+		t.Fatalf("stored row = %s, want an empty topic list", entry.Value())
+	}
+
+	clock.Set(start.Add(2 * time.Second))
+	upsertOrFail(t, reg, "ses_null")
+	if revision := interestRevision(t, kv, "ses_null"); revision != stored+1 {
+		t.Fatalf("Upsert over the rewritten row moved it to revision %d, want %d", revision, stored+1)
+	}
+}
+
 func TestRemove_ColdCacheReadsFromKV(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -1498,6 +1703,238 @@ func TestReaperGraceWindow(t *testing.T) {
 	}
 }
 
+// A session that heartbeats every 90 seconds and then pauses keeps its interest row as it did when
+// every heartbeat wrote the row: the unchanged row is not rewritten for up to InterestRefreshAge,
+// so its UpdatedAt lags the last heartbeat, but the listener's reaper (InterestReapGrace, plus
+// InterestRefreshAge in Reap) deletes nothing within InterestReapGrace of that heartbeat, long
+// after the session row's 5-minute TTL has made the session dead. A session back under the same
+// id at 6 or at 9 minutes finds its row and topics.
+func TestAPausedSessionKeepsItsInterestThroughTheReapGrace(t *testing.T) {
+	const sessionTTL = 5 * time.Minute // the session bucket's MaxAge, the liveness clock
+	start := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	clock := &manualClock{at: start}
+	reg, kv := clockedRegistry(t, clock)
+	const github = "notifications.github.acme.widgets.pr.>"
+	ids := []string{"ses_back6", "ses_back9", "ses_gone"}
+	lastHeartbeat := map[string]time.Time{}
+	heartbeat := func(sessionID string, topics ...string) Interest {
+		t.Helper()
+		lastHeartbeat[sessionID] = clock.Now()
+		return upsertOrFail(t, reg, sessionID, topics...)
+	}
+	isAlive := func(sessionID string) bool { return clock.Now().Sub(lastHeartbeat[sessionID]) < sessionTTL }
+	reapNothing := func(when string) {
+		t.Helper()
+		count, err := reg.Reap(isAlive, InterestReapGrace)
+		if err != nil {
+			t.Fatalf("%s: Reap: %v", when, err)
+		}
+		if count != 0 {
+			t.Fatalf("%s: Reap deleted %d interests, want none", when, count)
+		}
+		if _, err := kv.Get("ses_gone"); err != nil {
+			t.Fatalf("%s: ses_gone's interest row is gone: %v", when, err)
+		}
+	}
+
+	revisions := map[string]uint64{}
+	for _, id := range ids {
+		heartbeat(id, "notifications.agent."+id, github)
+		revisions[id] = interestRevision(t, kv, id)
+	}
+	for beat := 1; beat <= 3; beat++ {
+		clock.Set(start.Add(time.Duration(beat) * 90 * time.Second))
+		for _, id := range ids {
+			heartbeat(id, "notifications.agent."+id, github)
+			if revision := interestRevision(t, kv, id); revision != revisions[id] {
+				t.Fatalf("heartbeat %d moved %s's unchanged row from revision %d to %d", beat, id, revisions[id], revision)
+			}
+		}
+		reapNothing(fmt.Sprintf("heartbeat %d", beat))
+	}
+	last := clock.Now()
+
+	for _, after := range []time.Duration{90 * time.Second, sessionTTL, 6 * time.Minute, 9 * time.Minute, InterestReapGrace - time.Millisecond, InterestReapGrace} {
+		clock.Set(last.Add(after))
+		if after >= sessionTTL && isAlive("ses_gone") {
+			t.Fatalf("ses_gone is alive %v after its last heartbeat, past the session TTL", after)
+		}
+		reapNothing(fmt.Sprintf("%v after the last heartbeat", after))
+		var back string
+		switch after {
+		case 6 * time.Minute:
+			back = "ses_back6"
+		case 9 * time.Minute:
+			back = "ses_back9"
+		default:
+			continue
+		}
+		if isAlive(back) {
+			t.Fatalf("%s is alive %v after its last heartbeat, past the session TTL", back, after)
+		}
+		got := heartbeat(back, "notifications.agent."+back)
+		if want := []string{"notifications.agent." + back, github}; !slices.Equal(got.Topics, want) {
+			t.Fatalf("%s back %v after its last heartbeat has topics %v, want %v", back, after, got.Topics, want)
+		}
+	}
+
+	// The reaper does take the row that never came back, once it is InterestReapGrace plus
+	// InterestRefreshAge past its last write.
+	clock.Set(start.Add(InterestReapGrace + InterestRefreshAge + time.Millisecond))
+	count, err := reg.Reap(isAlive, InterestReapGrace)
+	if err != nil {
+		t.Fatalf("final Reap: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("final Reap deleted %d interests, want ses_gone's alone", count)
+	}
+	if _, err := kv.Get("ses_gone"); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		t.Fatalf("ses_gone should be reaped, got %v", err)
+	}
+}
+
+// upsertWithin upserts item on another goroutine and reports whether it finished within five
+// seconds, failing the test when it did not or when it failed. A reaper pass calls it from isAlive,
+// so a pass that held the interest lock there would make it time out rather than deadlock.
+func upsertWithin(t *testing.T, reg *Registry, item Interest, topics []string) bool {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		_, err := reg.Upsert(item, topics)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Upsert(%s) during the reaper pass: %v", item.SessionID, err)
+			return false
+		}
+		return true
+	case <-time.After(5 * time.Second):
+		t.Errorf("Upsert(%s) did not finish while Reap was calling isAlive: the pass holds the interest lock", item.SessionID)
+		return false
+	}
+}
+
+func TestReapCallsIsAliveWithoutHoldingTheInterestLock(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	putInterest(t, kv, Interest{SessionID: "ses_dead", MachineID: "m1", Topics: []string{"notifications.>"}, UpdatedAt: time.Now().Add(-10 * time.Minute).UnixMilli()})
+	if _, err := reg.Get(context.Background(), "ses_dead"); err != nil {
+		t.Fatalf("Get ses_dead failed: %v", err)
+	}
+
+	upserted := false
+	count, err := reg.Reap(func(sessionID string) bool {
+		if sessionID == "ses_dead" {
+			upserted = upsertWithin(t, reg, Interest{SessionID: "ses_other", MachineID: "m1"}, []string{"notifications.agent.ses_other"})
+		}
+		return false
+	}, 0)
+	if err != nil {
+		t.Fatalf("Reap failed: %v", err)
+	}
+	if !upserted {
+		t.Fatal("isAlive never upserted ses_other")
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 reaped, got %d", count)
+	}
+	if _, err := kv.Get("ses_dead"); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		t.Fatalf("ses_dead should be deleted, got err: %v", err)
+	}
+	if _, err := kv.Get("ses_other"); err != nil {
+		t.Fatalf("ses_other, upserted during the pass, should exist: %v", err)
+	}
+}
+
+func TestReapKeepsAnInterestReupsertedDuringThePass(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	putInterest(t, kv, Interest{SessionID: "ses_back", MachineID: "m1", Topics: []string{"notifications.>"}, UpdatedAt: time.Now().Add(-10 * time.Minute).UnixMilli()})
+	if _, err := reg.Get(context.Background(), "ses_back"); err != nil {
+		t.Fatalf("Get ses_back failed: %v", err)
+	}
+
+	// The session heartbeats again while the pass is deciding it is dead.
+	count, err := reg.Reap(func(sessionID string) bool {
+		if sessionID == "ses_back" {
+			upsertWithin(t, reg, Interest{SessionID: "ses_back", MachineID: "m1"}, []string{"notifications.agent.ses_back"})
+		}
+		return false
+	}, 0)
+	if err != nil {
+		t.Fatalf("Reap failed: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 reaped, got %d", count)
+	}
+	if _, err := kv.Get("ses_back"); err != nil {
+		t.Fatalf("ses_back, re-upserted during the pass, should exist: %v", err)
+	}
+	if _, err := reg.Get(context.Background(), "ses_back"); err != nil {
+		t.Fatalf("ses_back should stay cached: %v", err)
+	}
+}
+
+func TestReapKeepsAnInterestWrittenAfterItsRecheck(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	reg, kv := coldRegistry(t, conn)
+	putInterest(t, kv, Interest{SessionID: "ses_raced", MachineID: "m1", Topics: []string{"notifications.>"}, UpdatedAt: time.Now().Add(-10 * time.Minute).UnixMilli()})
+	if _, err := reg.Get(context.Background(), "ses_raced"); err != nil {
+		t.Fatalf("Get ses_raced failed: %v", err)
+	}
+	// Another listener's write lands after the pass re-checked the candidate and before its delete
+	// reaches the bucket.
+	fresh := Interest{SessionID: "ses_raced", MachineID: "m2", Topics: []string{"notifications.>"}, UpdatedAt: time.Now().UnixMilli()}
+	reg.watcher = kvwatch.New("interest registry", bus.KeyValue{KeyValue: &putBeforeDeleteKeyValue{
+		KeyValue:     kv,
+		beforeDelete: func() { putInterest(t, kv, fresh) },
+	}}, reg.applyWatched, reg.resetCache)
+
+	count, err := reg.Reap(func(string) bool { return false }, 0)
+	if err != nil {
+		t.Fatalf("Reap failed: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected 0 reaped, got %d", count)
+	}
+	entry, err := kv.Get("ses_raced")
+	if err != nil {
+		t.Fatalf("ses_raced, written before the delete landed, should exist: %v", err)
+	}
+	var got Interest
+	if err := json.Unmarshal(entry.Value(), &got); err != nil {
+		t.Fatalf("decode ses_raced: %v", err)
+	}
+	if got.MachineID != "m2" {
+		t.Fatalf("ses_raced = %+v, want the write that landed during the pass", got)
+	}
+}
+
+// putBeforeDeleteKeyValue runs beforeDelete before its first Delete reaches the bucket, and then
+// sends that Delete as it was asked to.
+type putBeforeDeleteKeyValue struct {
+	natsgo.KeyValue
+
+	deletes      int
+	beforeDelete func()
+}
+
+func (kv *putBeforeDeleteKeyValue) Delete(key string, opts ...natsgo.DeleteOpt) error {
+	kv.deletes++
+	if kv.deletes == 1 {
+		kv.beforeDelete()
+	}
+	return kv.KeyValue.Delete(key, opts...)
+}
+
 func TestPing_HealthyConnReturnsNil(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -1967,9 +2404,7 @@ func assertInterestMissing(t *testing.T, reg *Registry, sessionID string) {
 func captureRegistryLogs(t *testing.T) *lockedBuffer {
 	t.Helper()
 	var logs lockedBuffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
+	logtest.SetDefault(t, slog.NewTextHandler(&logs, nil))
 	return &logs
 }
 

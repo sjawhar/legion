@@ -1,13 +1,14 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo, useState } from "react";
 import { useLocation } from "react-router-dom";
 
-import { api } from "../../api/client";
+import { api, type WriteBounds } from "../../api/client";
 import { inboxQuery, userStateQuery } from "../../api/queries";
 import type { Actor, Anchor, Artifact, Ask, Comment, Event } from "../../api/types";
 import { compareTimestamps } from "../../lib/timestamps";
 import type { ComposerOwner } from "../conversation/composer-model";
 import { rootOf } from "../conversation/conversation-model";
+import type { CarriedBlockIds } from "../conversation/send-request";
 import { useProjectArtifact } from "../document/useProjectArtifact";
 import {
   type ConversationPinKind,
@@ -473,12 +474,6 @@ export function useMarginItems(
       }
     },
   });
-  const edit = useMutation({
-    mutationFn: ({ body, id }: { body: string; id: string }) => api.editComment(id, { body }),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: commentsQueryKey });
-    },
-  });
 
   const answeredAskError = answeredAsks.error;
   const retryAnsweredAsk =
@@ -491,7 +486,19 @@ export function useMarginItems(
     commentsError: comments.isError,
     commentsPending: comments.isPending,
     commentRecords: comments.data ?? [],
-    editComment: (id: string, body: string) => edit.mutateAsync({ body, id }),
+    /** One attempt of an edit's save, under the composer's key (`sendRequest`), carrying the
+     *  block ids the editor followed through the edit: what it saved is read again once it
+     *  lands. */
+    editComment: async (
+      id: string,
+      body: string,
+      carried: CarriedBlockIds | undefined,
+      bounds: WriteBounds
+    ) => {
+      const saved = await api.editComment(id, { body, ...carried }, bounds);
+      void queryClient.invalidateQueries({ queryKey: commentsQueryKey });
+      return saved;
+    },
     items,
     marginItems,
     needsYou,
