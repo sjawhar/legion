@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
@@ -110,7 +111,7 @@ func printClaims(w io.Writer, answer []byte) error {
 
 func writeClaimLine(w io.Writer, c api.OperatorClaim) {
 	fmt.Fprintf(w, "%s %s %s %s %d %d %s %s\n", c.Token, c.Role, c.Issue, c.State, c.Generation, c.PluginContract,
-		orNone(c.UpdateRound), orNone(c.UpdateHead))
+		orNone(c.UpdateRound), quotedOrNone(c.UpdateHead))
 }
 
 // orNone is a field a claim need not have, as the line prints it.
@@ -119,6 +120,17 @@ func orNone(value string) string {
 		return "-"
 	}
 	return value
+}
+
+// quotedOrNone is a field a worker supplies, as the line prints it: Go-quoted, so a newline or any
+// other control character in it is an escape rather than another row of this listing. The head a
+// worker reports when it answers an update round is its own word, which nothing verifies
+// (api.OperatorClaim.UpdateHead).
+func quotedOrNone(value string) string {
+	if value == "" {
+		return "-"
+	}
+	return strconv.Quote(value)
 }
 
 // runClaimsSpawn creates the claim on --role of --issue, in the tree --tree roots, and launches

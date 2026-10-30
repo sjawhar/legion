@@ -589,27 +589,38 @@ func (r *Runtime) movedSessionStore(pod *corev1.Pod) (movedAddress, bool) {
 	return movedAddress{where: "the session store", held: held, handed: handed}, true
 }
 
-// sessionStoreInPod names the session store pod was created under, read back from the pod itself:
-// the providers volume's session item under postgres (providers), the session proxy's flags a
-// launcher container carries under cloudsql-iam (sessionProxyFlags), and neither under the volume
-// store.
+// sessionStoreInPod names the session store pod was created under, read back from the pod itself
+// (heldSessionStore, sessionStoreName).
 func sessionStoreInPod(pod *corev1.Pod) string {
-	for _, volume := range pod.Spec.Volumes {
+	return sessionStoreName(heldSessionStore(pod.Spec))
+}
+
+// heldSessionStore is the session store the pod spec was created under, and the one field that
+// kind carries in a pod: the providers volume's session item under postgres (providers), the
+// session proxy's flags a launcher container carries under cloudsql-iam (sessionProxyFlags), and
+// neither under the volume store, which is what a pod created before any store was configured
+// reads as.
+//
+// It is asked of a running pod's spec and of a Sandbox's stored pod template alike, as
+// movedRoleOverlays is: the template is the pod's own build, which is what a launch that keeps
+// the pod reads to tell its role the URL file that pod can actually give it (keptBy, keptPod).
+func heldSessionStore(pod corev1.PodSpec) (ompsessions.StoreKind, string, []string) {
+	for _, volume := range pod.Volumes {
 		if volume.Name != providersVolume || volume.Secret == nil {
 			continue
 		}
 		for _, item := range volume.Secret.Items {
 			if item.Path == ompsessions.DSNFileName {
-				return sessionStoreName(ompsessions.StorePostgres, item.Key, nil)
+				return ompsessions.StorePostgres, item.Key, nil
 			}
 		}
 	}
-	for _, container := range pod.Spec.Containers {
+	for _, container := range pod.Containers {
 		if proxy := sessionProxyFlagsIn(container.Command); proxy != nil {
-			return sessionStoreName(ompsessions.StoreCloudSQLIAM, "", proxy)
+			return ompsessions.StoreCloudSQLIAM, "", proxy
 		}
 	}
-	return sessionStoreName(ompsessions.StoreVolume, "", nil)
+	return ompsessions.StoreVolume, "", nil
 }
 
 // sessionProxyFlagsIn are the session proxy's flags command carries, in the order sessionProxyFlags

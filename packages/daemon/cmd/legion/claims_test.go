@@ -612,6 +612,38 @@ func TestClaimsListPrintsOneLinePerClaim(t *testing.T) {
 	}
 }
 
+// The head a worker reports when it answers an update round is an agent's own string, which
+// nothing verifies (api.OperatorClaim.UpdateHead), and two listings print it: one row per claim in
+// `legion claims list`, and the open-rounds line of `legion state`. A newline in it would forge a
+// row of either — a claim that is not there, a round nobody opened — so each prints it quoted.
+func TestAWorkerReportedHeadIsPrintedQuoted(t *testing.T) {
+	const forged = "c0ffee\nlegion-legion-legion-299-tester tester LEGION-299 ready 1 0 - -"
+	const round = "pod:0f3c8d21-5b47-4e90-9a16-2c7d5e8b40af"
+
+	var line bytes.Buffer
+	writeClaimLine(&line, api.OperatorClaim{
+		Token: architectClaim, Tree: "LEGION-208", Issue: "LEGION-208", Role: "architect",
+		Generation: 1, State: "ready", UpdateRound: round, UpdateHead: forged,
+	})
+	if rows := strings.Count(line.String(), "\n"); rows != 1 {
+		t.Errorf("one claim printed %d rows: %q", rows, line.String())
+	}
+	if !strings.Contains(line.String(), strconv.Quote(forged)) {
+		t.Errorf("the claim line is %q, want the head quoted as %s", line.String(), strconv.Quote(forged))
+	}
+
+	summary := roundsSummary(map[string]api.Issue{"LEGION-208": {
+		Key:       "LEGION-208",
+		Architect: &api.ClaimView{State: "ready", UpdateRound: round, UpdateHead: forged},
+	}})
+	if strings.Contains(summary, "\n") {
+		t.Errorf("the open-rounds line is %q, want one line", summary)
+	}
+	if !strings.Contains(summary, strconv.Quote(forged)) {
+		t.Errorf("the open-rounds line is %q, want the head quoted as %s", summary, strconv.Quote(forged))
+	}
+}
+
 func TestClaimsListOfNoClaimsPrintsNothing(t *testing.T) {
 	d := newOperatorDaemon(t)
 

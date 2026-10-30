@@ -255,6 +255,12 @@ type keptPod struct {
 	// actually holds, in configuration order: the only ones its generation's PI_CONFIG_FILES may
 	// name (heldRoleOverlays, roleOperatorEnv).
 	overlays []string
+	// store is the session store this pod was built under (heldSessionStore), the kind alone: it
+	// is all a start command names, since the URL itself is in the file the pod projects or its
+	// own launcher writes (sessionDSNFile). A pod created before the store was configured carries
+	// none, and its role is told neither of Oh My Pi's two session variables rather than a URL
+	// file it cannot read.
+	store ompsessions.Store
 }
 
 // enrollsIn is the one decision whether a generation of role started now in a pod holds the
@@ -299,6 +305,21 @@ func (l launch) overlays(r *Runtime) []string {
 		return l.kept.overlays
 	}
 	return r.roleConfigFiles[l.spec.Role]
+}
+
+// sessionStore is the store this launch's generation keeps its session in: the one the kept pod
+// was built under, which is the only one its role can reach (keptPod.store), and the
+// configuration's for a launch that builds the pod itself. Oh My Pi refuses to start on a URL
+// file it cannot read, so a role of a kept pod told the configuration's store — a key the pod's
+// providers volume does not project, a proxy its launcher does not serve — would never register
+// and never answer the round that is to replace that pod (INFRA-484). What it costs is that such
+// a role writes its session into the store its pod has until the round replaces the pod, which a
+// role that never started could not do at all.
+func (l launch) sessionStore(r *Runtime) ompsessions.Store {
+	if l.kept != nil {
+		return l.kept.store
+	}
+	return r.sessionStore
 }
 
 // claudeInputs are the parts of a Claude Code launch that are decided before the pod is touched:
@@ -776,12 +797,14 @@ func (r *Runtime) sessionDSNPointer() []corev1.EnvVar {
 	return []corev1.EnvVar{{Name: ompsessions.DSNFileVariable, Value: providersDSNFile}}
 }
 
-// sessionDSNFile is the file a generation's Oh My Pi reads its session database's URL from: the
+// sessionDSNFile is the file a generation of l reads its session database's URL from: the
 // providers mount's projection of the Secret key under postgres, and, under cloudsql-iam, the file
-// the generation's own launcher writes in its private directory beside the socket it proxies.
-func (r *Runtime) sessionDSNFile(generation uint64) string {
-	if r.sessionStore.Kind == ompsessions.StoreCloudSQLIAM {
-		return generationDir(generation) + "/" + ompsessions.DSNFileName
+// the generation's own launcher writes in its private directory beside the socket it proxies. The
+// store is the one the pod that generation runs in was built under, which is the configuration's
+// for a launch that builds the pod and the kept pod's own otherwise (launch.sessionStore).
+func (r *Runtime) sessionDSNFile(l launch) string {
+	if l.sessionStore(r).Kind == ompsessions.StoreCloudSQLIAM {
+		return generationDir(l.spec.Generation) + "/" + ompsessions.DSNFileName
 	}
 	return providersDSNFile
 }
@@ -1092,23 +1115,26 @@ func (r *Runtime) LaunchBound() time.Duration {
 // roleOperatorEnv), then the spec's own, then one `<NAME>_FILE` pointer per secret into
 // the generation's private launcher directory, then one per providers secret into the providers
 // mount, then OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming the URL file of the
-// session database every session is a row in (Options.SessionStore, sessionDSNFile), which a pod
-// created before the store was configured does not carry: Oh My Pi refuses to start on an
-// unreadable URL file, so such a generation fails rather than writing a session onto a disk that
-// dies with its pod (the relaunch replaces that pod first, movedSessionStore). None of them repeats
-// another: the runtime refuses a spec naming one of its own (runtimeOwned), and the daemon an
-// operator's variable naming one of the runtime's or a spec's. The temporary directory, XDG homes
-// and tool caches are the issue pod's disk's (roleEnvironment) — the issue's scratch and its Go
-// caches, which every role of it is told the same of, but the state home, one per role — carried
-// to the role's shim by the start command (launcherCommand's Env). POD_UID is the pod's own
-// incarnation, from the downward API. The secrets broker is told when the runtime enrolls pods.
-// PI_SHELL_PREFIX puts the `legion` directory first on PATH alone: a pod's gh is the image's, so no
-// directory of the issue's disk leads PATH. The GIT_CONFIG pairs are the GitHub credential of every
-// git the role runs, in the issue's clone or outside it, and two settings that would run a program
-// another role planted in the clone, the fsmonitor and the hooks, turned off (gitConfigEnv); other
-// settings of the shared clone can still run one. A Claude Code role, and no other, is also told
-// Claude Code's own three (claudelaunch.Environment, runsClaude) and the session its launcher keeps
-// (claudelaunch.SessionVariable).
+// session database every session is a row in (Options.SessionStore, sessionDSNFile) — of the pod
+// the generation runs in, which is the configuration's store for a launch that builds the pod and
+// the kept pod's own otherwise (launch.sessionStore). Oh My Pi refuses to start on an unreadable
+// URL file, so a generation told a file its pod does not carry never starts, never registers and
+// never answers the round that is to replace that pod (INFRA-484); a pod created before the store
+// was configured carries no URL file at all, and its generation is told neither variable rather
+// than one it cannot read, until the round replaces the pod (movedSessionStore, keptPod.store).
+// None of them repeats another: the runtime refuses a spec naming one of its own (runtimeOwned),
+// and the daemon an operator's variable naming one of the runtime's or a spec's. The temporary
+// directory, XDG homes and tool caches are the issue pod's disk's (roleEnvironment) — the issue's
+// scratch and its Go caches, which every role of it is told the same of, but the state home, one
+// per role — carried to the role's shim by the start command (launcherCommand's Env). POD_UID is
+// the pod's own incarnation, from the downward API. The secrets broker is told when the runtime
+// enrolls pods. PI_SHELL_PREFIX puts the `legion` directory first on PATH alone: a pod's gh is the
+// image's, so no directory of the issue's disk leads PATH. The GIT_CONFIG pairs are the GitHub
+// credential of every git the role runs, in the issue's clone or outside it, and two settings that
+// would run a program another role planted in the clone, the fsmonitor and the hooks, turned off
+// (gitConfigEnv); other settings of the shared clone can still run one. A Claude Code role, and no
+// other, is also told Claude Code's own three (claudelaunch.Environment, runsClaude) and the
+// session its launcher keeps (claudelaunch.SessionVariable).
 func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	spec := l.spec
 	env := l.kind.agentEnv(l)
@@ -1182,13 +1208,22 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	}
 	env = append(env, r.providersPointers()...)
 	// Oh My Pi's own two variables, which place the session in the database the generation's URL
-	// file names (sessionDSNFile): every pod gets them, since the store must keep sessions in a
-	// database and nothing in a pod may keep a session as a file (internal/podsafety's baseline
-	// covers only a container the runtime tells neither, the image probe's). A Claude role is told
-	// them too: Claude Code ignores them, and its launcher reaches the table through them to keep
-	// the Claude session's files (claudelaunch.SessionVariable).
-	add(ompsessions.StorageVariable, ompsessions.SQLStorage)
-	add(ompsessions.DSNFileVariable, r.sessionDSNFile(spec.Generation))
+	// file names (sessionDSNFile): every pod this runtime builds gets them, since the store must
+	// keep sessions in a database and nothing in a pod may keep a session as a file
+	// (internal/podsafety's baseline covers only a container the runtime tells neither, the image
+	// probe's). A Claude role is told them too: Claude Code ignores them, and its launcher reaches
+	// the table through them to keep the Claude session's files (claudelaunch.SessionVariable).
+	//
+	// They are gated on the store of the pod the generation runs in, as the broker's two are on
+	// that pod's enrollment (launch.sessionStore, l.enrolls): a kept pod created before any store
+	// was configured projects no URL file, and a role told one it cannot read would refuse to
+	// start, never register and never answer the round that is to replace that pod — so it is told
+	// neither and keeps its session as a file on the pod's disk until the round replaces the pod
+	// (INFRA-484, keptPod.store).
+	if store := l.sessionStore(r); store.InDatabase() {
+		add(ompsessions.StorageVariable, ompsessions.SQLStorage)
+		add(ompsessions.DSNFileVariable, r.sessionDSNFile(l))
+	}
 	return env
 }
 

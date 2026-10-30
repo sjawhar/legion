@@ -9,6 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
@@ -17,13 +18,16 @@ import (
 // describes. A launch into a live drifted pod keeps that pod, since the update round, not the
 // launch, is what ends the roles already working in it (INFRA-484), so the start command is built
 // from what that pod was built with (keptPod): no agent-secrets flag the pod carries no volumes
-// for, no PI_CONFIG_FILES entry the pod does not hold.
+// for, no PI_CONFIG_FILES entry the pod does not hold, no session URL file the pod neither
+// projects nor writes.
 //
 // The tester's own TestARoleStartedInAKeptDriftedPodIsStartedAsItsPodWasBuilt holds the kept pod
-// that carries neither facet. These three hold the rest of the rule: a launch that replaces the pod
-// still builds the start from the configuration as it now reads, since the pod it makes carries it;
-// a kept pod that does carry both is started with both; and a stored template this daemon cannot
-// read makes the launch replace the pod rather than guess what it carries.
+// that carries neither of the first two facets. These four hold the rest of the rule: a launch
+// that replaces the pod still builds the start from the configuration as it now reads, since the
+// pod it makes carries it; a kept pod that does carry both is started with both; a stored template
+// this daemon cannot read makes the launch replace the pod rather than guess what it carries; and
+// a kept pod's role is told the session store that pod has, never the one the configuration names
+// now.
 
 // keptRolesVolume is the operator's volume of per-role settings overlays and keptRolesMount the
 // mount every pod built with it holds, keptOverlayFile the tester's own file under that mount: the
@@ -205,5 +209,128 @@ func forgetPodContainers(t *testing.T, g *rig, r *Runtime, name string) {
 	g.eventually("the sandbox store to see "+name+" with no container in its pod template", func() bool {
 		stored, err := r.storedSandbox(name)
 		return err == nil && stored != nil && len(stored.Spec.PodTemplate.Spec.Containers) == 0
+	})
+}
+
+// A role started in a kept pod is told the session store that pod carries, never the one the
+// configuration names now. The store is the third facet a round, not a launch, replaces a pod for
+// (driftedInPod, movedSessionStore), and it reaches the role's start as Oh My Pi's own two
+// variables: OMP_SESSION_SQL_DSN_FILE names a URL file the pod's providers volume projects under
+// postgres, or one the pod's own launcher writes beside the socket it proxies under cloudsql-iam.
+// A role told the configuration's file instead is told a path its pod has nobody to fill — Oh My
+// Pi refuses to start on an unreadable URL file — so it never registers and never answers the
+// round that is to replace that pod, and only an operator's drain ends the round. The cost of
+// telling it the pod's own store is that it reads the store its pod has until the round replaces
+// the pod, which a role that never started could not do at all.
+func TestARoleStartedInAKeptPodIsToldTheSessionStoreThatPodCarries(t *testing.T) {
+	for name, tc := range map[string]struct {
+		// built is the configuration the pod was created under, now the one the restarted daemon
+		// reads, and forget a pod created before any session store was configured at all.
+		built  func(*Options)
+		now    func(*Options)
+		forget bool
+		// want is the two session variables the kept pod's role is told, by generation; a variable
+		// absent from it is one the start must not carry.
+		want func(generation uint64) map[string]string
+	}{
+		"a pod created before the store was configured": {
+			forget: true,
+			want:   func(uint64) map[string]string { return nil },
+		},
+		"a cloudsql-iam pod under a postgres configuration": {
+			built: func(o *Options) { o.SessionStore = cloudSQLStore },
+			want: func(generation uint64) map[string]string {
+				return map[string]string{
+					ompsessions.StorageVariable: ompsessions.SQLStorage,
+					ompsessions.DSNFileVariable: generationDir(generation) + "/" + ompsessions.DSNFileName,
+				}
+			},
+		},
+		"a postgres pod under a cloudsql-iam configuration": {
+			now: func(o *Options) { o.SessionStore = cloudSQLStore },
+			want: func(uint64) map[string]string {
+				return map[string]string{
+					ompsessions.StorageVariable: ompsessions.SQLStorage,
+					ompsessions.DSNFileVariable: providersDSNFile,
+				}
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var options []rigOption
+			if tc.built != nil {
+				options = append(options, withOptions(tc.built))
+			}
+			g := newRig(t, nil, options...)
+			loc := g.spawn(workerSpec(t))
+			r2 := restartedOver(t, g, loc, func(o *Options) {
+				if tc.now != nil {
+					tc.now(o)
+				}
+			})
+			if tc.forget {
+				forgetSessionStore(t, g, r2, loc.Sandbox.Name)
+			}
+			drifted := driftOf(t, g.ctx, r2, loc)
+			if !slices.ContainsFunc(drifted, func(reason string) bool { return strings.Contains(reason, "the session store") }) {
+				t.Fatalf("the pod has drifted in %v, want its session store among it: this case proves nothing otherwise", drifted)
+			}
+			kept := resumeTester(t, g, r2, loc)
+			if kept.Sandbox.PodUID != loc.Sandbox.PodUID {
+				t.Fatalf("Resume replaced the drifted pod; this case is about the pod a launch keeps")
+			}
+			env := startEnv(startSent(t, g, 2))
+			want := tc.want(2)
+			for _, variable := range sessionStoreVariables {
+				got, told := env[variable]
+				wanted, wants := want[variable]
+				if told != wants || got != wanted {
+					t.Errorf("the start command carries %s=%q (told %t), want %q (told %t): its kept pod carries %s",
+						variable, got, told, wanted, wants, sessionStoreInPod(g.pod(loc.Sandbox.Name)))
+				}
+			}
+		})
+	}
+}
+
+// forgetSessionStore leaves the stored Sandbox's pod template and the pod itself projecting no
+// session URL file at all — the pod of a daemon that ran before the session store was configured,
+// which a running pod cannot be changed into carrying one — and waits for the store and the pod
+// cache the runtime reads to hold both.
+func forgetSessionStore(t *testing.T, g *rig, r *Runtime, name string) {
+	t.Helper()
+	drop := func(spec *corev1.PodSpec) {
+		for i, volume := range spec.Volumes {
+			if volume.Name != providersVolume || volume.Secret == nil {
+				continue
+			}
+			spec.Volumes[i].Secret.Items = slices.DeleteFunc(slices.Clone(volume.Secret.Items),
+				func(item corev1.KeyToPath) bool { return item.Path == ompsessions.DSNFileName })
+		}
+	}
+	s := g.sandbox(name)
+	if s == nil {
+		t.Fatalf("sandbox %s is absent", name)
+	}
+	drop(&s.Spec.PodTemplate.Spec)
+	u, err := encodeSandbox(*s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := g.dyn.Tracker().Update(sandboxGVR, u, testNamespace); err != nil {
+		t.Fatal(err)
+	}
+	g.update(g.pod(name), func(pod *corev1.Pod) { drop(&pod.Spec) })
+	forgotten := func(spec corev1.PodSpec) bool {
+		kind, _, _ := heldSessionStore(spec)
+		return kind == ompsessions.StoreVolume
+	}
+	g.eventually("the sandbox and pod stores to see "+name+" projecting no session URL file", func() bool {
+		stored, err := r.storedSandbox(name)
+		if err != nil || stored == nil {
+			return false
+		}
+		pod := r.storedPod(name)
+		return pod != nil && forgotten(stored.Spec.PodTemplate.Spec) && forgotten(pod.Spec)
 	})
 }

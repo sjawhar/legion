@@ -2078,7 +2078,12 @@ describe("Legion OMP extension", () => {
 
       expect(await worker.settles(answered)).toBeUndefined();
       expect(steered(worker)).toEqual([]);
-      expect(worker.timers.map((timer) => timer.delayMs)).toEqual([DEFAULT_STALL_LIMITS.waitingMs]);
+      // The wait the answer created arms no timer: the daemon's update round is its watchdog, and
+      // a reminder fired here would steer a real `agent_start`, which the daemon reads as a new
+      // turn and so as the answer retracted — the round would restart at every wait and never
+      // converge (INFRA-484, `awaitingUpdate` in `@legion/pi-shared/phase-reminder`). The WAITING
+      // reply's own wait keeps its timer, which the case above holds.
+      expect(worker.timers).toEqual([]);
       expect(recorded(worker).at(-1)).toEqual({
         state: "waiting",
         count: 0,
@@ -2086,16 +2091,11 @@ describe("Legion OMP extension", () => {
         lastMessage: answered,
       });
 
-      // The phase is open, so the reminding has not stopped: a replacement that never comes is
-      // asked about once the quiet wait is over, exactly as a WAITING reply's wait is.
-      await fires(worker);
-      expect(steered(worker)).toEqual([steeredReminder(REMINDER)]);
-      expect(recorded(worker).at(-1)).toEqual({
-        state: "open",
-        count: 1,
-        reported: false,
-        lastMessage: answered,
-      });
+      // A second turn in the same wait — a question answered while the pod waits to be replaced —
+      // arms none either, and steers nothing.
+      expect(await worker.settles("Still waiting for the pod.")).toBeUndefined();
+      expect(worker.timers).toEqual([]);
+      expect(steered(worker)).toEqual([]);
     });
 
     test("a successful handoff_complete posts the completion with a fresh grant and the commit found in the pane, and closes the phase; an inbound event does not reopen it, the next assignment does", async () => {

@@ -710,7 +710,10 @@ func openRounds(issues map[string]api.Issue) []issueRound {
 		}
 		named := role
 		if view.UpdateHead != "" {
-			named += " answered at " + view.UpdateHead
+			// The head is the worker's own word, which nothing verifies, so it is quoted: a
+			// newline in it would otherwise forge a row of this summary (claims.go's
+			// quotedOrNone).
+			named += " answered at " + strconv.Quote(view.UpdateHead)
 		}
 		rounds[key].roles = append(rounds[key].roles, named)
 	}

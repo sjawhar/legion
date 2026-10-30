@@ -295,18 +295,17 @@ test("a ready_for_update answer blocks no Stop: the answering turn ends, with th
     expect(await endpoint.handle({ event: "Stop", lastAssistantMessage: answered })).toEqual({})
     const said = { reported: false, lastMessage: answered }
     expect(await record()).toEqual({ state: "waiting", count: 0, ...said })
-    // Nothing is written into the wait itself: the answer bought the quiet wait, not the
-    // reminder's own shorter one. A case asserting that nothing happens has no condition to
-    // wait for, so this is one of the file's fixed waits, under the quiet wait above and over
-    // the reminder interval, and the endpoint's own `setTimeout` is what runs on the real clock.
-    await Bun.sleep(30)
+    // Nothing is written into the wait the answer created, and nothing ever will be: it arms no
+    // timer at all. The daemon's update round is its watchdog, and a reminder fired here would be
+    // a prompt, which starts a turn the daemon reads as the answer retracted — the round would
+    // restart at every wait and never converge (INFRA-484, `awaitingUpdate` in
+    // `@legion/pi-shared/phase-reminder`). A case asserting that nothing happens has no condition
+    // to wait for, so this is one of the file's fixed waits, over the quiet wait itself and so
+    // over every wait this endpoint arms, and the endpoint's own `setTimeout` is what runs on the
+    // real clock. The WAITING reply's own wait keeps its reminder, which its own case holds.
+    await Bun.sleep(200)
     expect(inbox).toEqual([])
-
-    // The phase is open, so the reminding has not stopped: a replacement that never comes is
-    // asked about once the quiet wait is over, exactly as a WAITING reply's wait is.
-    await waitFor(async () => inbox.length > 0, "the reminder the wait earned")
-    expect(inbox).toEqual([REMINDER])
-    expect(await record()).toEqual({ state: "open", count: 1, ...said })
+    expect(await record()).toEqual({ state: "waiting", count: 0, ...said })
   } finally {
     await close()
   }

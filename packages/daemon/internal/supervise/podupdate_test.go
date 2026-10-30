@@ -21,6 +21,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 const (
@@ -329,6 +330,52 @@ func TestPodUpdateEndedInAPluginRoundReplacesTheProcess(t *testing.T) {
 	}
 	if c.UpdateSignalledAt != nil || c.UpdateHead != "" {
 		t.Errorf("claim after the round ended = %+v, want every update field cleared", c)
+	}
+	h.wantBudgets(Budgets{})
+}
+
+// A relaunch the launch path refuses at a plugin round's end leaves the round exactly as the post
+// found it. The end is a second entry to the relaunch relaunchStale makes, and that path checks
+// the launch before it changes anything for this reason: a refusal here after the ask was dropped,
+// the round cleared and PluginRelaunchFor marked would throw the worker's answer away — the next
+// StalePlugin post would ask it to push again — and would leave the mark of a relaunch that never
+// happened, which the next stale registration reads as the second in a row and charges toward
+// failed (staleRegistration). Once the refusal clears, the next sweep's post ends the round for
+// real.
+func TestPodUpdateARefusedRelaunchLeavesThePluginRoundStanding(t *testing.T) {
+	h := updateHarness(t, PodUpdateContract)
+	h.reach(StateIdle)
+	round := PluginRound(PodUpdateContract + 1)
+	h.openUpdate(round, testReasons)
+	h.signalUpdate("c0ffee")
+	answered := h.claim()
+	store := &refusableCheckLaunchStore{memStore: h.store, refuse: true}
+	h.m.deps.Store = store
+
+	if err := h.handle(PodUpdateEnded{Claim: h.token}); !errors.Is(err, treelifecycle.ErrCleanupReserved) {
+		t.Fatalf("the round's end refused by the launch path = %v, want the reservation's wait", err)
+	}
+
+	h.wantState(answered.State)
+	h.wantCalls("Resume", 0)
+	c := h.wantRound(round)
+	if c.PluginRelaunchFor != 0 {
+		t.Errorf("PluginRelaunchFor after the refusal = %d, want 0: no relaunch was made", c.PluginRelaunchFor)
+	}
+	if c.UpdateSignalledAt == nil || c.UpdateHead != answered.UpdateHead {
+		t.Errorf("claim after the refusal = %+v, want the worker's answer at %q standing", c, answered.UpdateHead)
+	}
+	if _, held := h.store.delivery(h.token); !held {
+		t.Errorf("the round's ask was taken back by an end that relaunched nothing")
+	}
+
+	store.refuse = false
+	h.must(PodUpdateEnded{Claim: h.token})
+
+	h.wantState(StateLaunching)
+	h.wantCalls("Resume", 1)
+	if got := h.wantRound("").PluginRelaunchFor; got != h.m.deps.PluginContract {
+		t.Errorf("PluginRelaunchFor after the end that relaunched = %d, want the daemon's own contract %d", got, h.m.deps.PluginContract)
 	}
 	h.wantBudgets(Budgets{})
 }

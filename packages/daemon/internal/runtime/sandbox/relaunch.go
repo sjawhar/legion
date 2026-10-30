@@ -18,6 +18,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -269,14 +270,15 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 
 // keptBy is what the live pod of the Sandbox read as s was built with, for the role l starts in
 // it: the enrollment decision for that role in that pod (enrollsIn, which reads the broker's
-// volumes the pod carries) and which of the role's own overlays its container holds
-// (heldRoleOverlays). A launch that keeps such a pod builds its start command from these rather
-// than from the configuration as it now reads, so the role is started as its pod was built
-// (launcherCommand, roleOperatorEnv) and runs degraded until the update round replaces the pod —
-// able to push its work and answer that round, where a start naming what its pod cannot carry
-// would refuse to run at all (keptPod, INFRA-484).
-// The same decision writes the generation's address record (recordAddresses), so the record says
-// what the start said.
+// volumes the pod carries), which of the role's own overlays its container holds
+// (heldRoleOverlays), and the session store it was built under (heldSessionStore, the URL file
+// its generation is pointed at). A launch that keeps such a pod builds its start command from
+// these rather than from the configuration as it now reads, so the role is started as its pod was
+// built (launcherCommand, roleOperatorEnv, mainEnvironment) and runs degraded until the update
+// round replaces the pod — able to push its work and answer that round, where a start naming what
+// its pod cannot carry would refuse to run at all (keptPod, INFRA-484).
+// The same enrollment decision writes the generation's address record (recordAddresses), so the
+// record says what the start said.
 //
 // It reads the Sandbox's stored pod template, the build of the pod the controller made from it,
 // and not the pod-shape annotation (podShapeAnnotation): the annotation is written only by this
@@ -290,7 +292,8 @@ func (r *Runtime) keptBy(s *sandbox, l launch) (keptPod, bool) {
 	if !readable {
 		return keptPod{}, false
 	}
-	return keptPod{enrolled: r.enrollsIn(&spec, l.spec.Role), overlays: overlays}, true
+	kind, _, _ := heldSessionStore(spec)
+	return keptPod{enrolled: r.enrollsIn(&spec, l.spec.Role), overlays: overlays, store: ompsessions.Store{Kind: kind}}, true
 }
 
 // stopIssuedChild stops generation of token's launcher in podUID after its Start returned startErr,

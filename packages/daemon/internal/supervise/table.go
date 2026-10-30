@@ -1700,6 +1700,17 @@ func (m *Machine) askForUpdate(ctx context.Context, open PodUpdateOpen, now time
 // is suspended, launching or queued has no process to replace, and its next launch installs this
 // daemon's plugin anyway, so the round ends there and launches nothing: relaunching a claim an
 // operator suspended would end that suspension, which only the operator's resume may do.
+//
+// The relaunch this end makes is the one relaunchStale makes, so it takes that path's own guard
+// before it changes anything: the launch can be refused — a tree lifecycle cleanup already
+// reserved, a moved epoch, a transient store error — and a refusal after the task was dropped,
+// the round cleared and PluginRelaunchFor marked would throw away the worker's answer and the
+// round for a refusal that is nobody's fault. The next StalePlugin post would ask it to push
+// again, and the next stale registration would read the mark as a relaunch that happened and
+// charge the claim toward failed (staleRegistration). So checkLaunch runs first, where no
+// suspension is already held (the case replaceProcess would launch rather than end in a
+// suspension, as relaunchStale reads it), and the round is left exactly as the post found it for
+// the next sweep to end again.
 func endPodUpdate(m *Machine, ctx context.Context, _ Event) error {
 	if m.claim.UpdateRound == "" {
 		m.log.Info("supervise: this claim is in no update round; the end posted for it decides nothing")
@@ -1711,6 +1722,11 @@ func endPodUpdate(m *Machine, ctx context.Context, _ Event) error {
 		return nil
 	}
 	relaunch := m.claim.InPluginRound() && HoldsCapability(m.claim.State)
+	if relaunch && m.held == nil {
+		if err := m.checkLaunch(ctx); err != nil {
+			return err
+		}
+	}
 	m.log.Info("supervise: the update round is over for this claim", "round", m.claim.UpdateRound, "relaunch", relaunch)
 	if !relaunch {
 		return m.leaveRound(ctx)
