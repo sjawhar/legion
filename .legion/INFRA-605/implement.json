@@ -2,15 +2,23 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-605",
-  "completed": "2026-10-29T14:40:00Z",
+  "completed": "2026-10-30T00:40:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2445",
   "proof": [
+    {
+      "criterion": "Review 5700658567's one finding (envoy-go-race red: docs hit the 30m race deadline) answered as the INFRA-514 architect decided: no ci.yaml change here; main merged forward with INFRA-756 (#2516, de546ed2), which runs internal/dispatch/docs under -race in its own envoy-go-race-docs job with -timeout 60m",
+      "surface": "jj merge of main de546ed2 into legion/INFRA-605 (never a rebase); Dispatch's Go suites against a real Postgres 17.11 in the issue pod; CI on the pull request",
+      "command": "jj new legion/INFRA-605 main@origin; cd packages/envoy && GOMAXPROCS=4 go test -p 2 -parallel 4 -count=1 ./internal/dispatch/docs/ ; ... ./internal/dispatch/api/ ; ... ./cmd/dispatch/ ./internal/dispatch/store/ ./internal/dispatch/events/ ./internal/pglisten/ ./loadtest/",
+      "observed": "two conflicts resolved keeping both sides (read_cache.go: main's foldLoaded with the branch's head token and s.reads.put(read, s.heads) in foldDocument; websocket.go: the branch's slot reservation, main's ask-blocks sentence in admitDocument's comment); build and vet ok; docs ok 1,087 s, api ok 1,103 s, the rest ok; pod memory peak 3.5 GiB; docs under -race whole in the 2-core pod 2,092 s, inside 60 minutes; CI on f99cd804 queued at completion, envoy-go-race and envoy-go-race-docs among its jobs",
+      "headSha": "f99cd8043925833c0ce97b47e3a2833f0a1c7611",
+      "negativeControl": "at a529f15f, before the merge, envoy-go-race ran docs in the shared step under -timeout 30m and failed: panic: test timed out after 30m0s at 1,801 s with about 60 docs tests refusing to start (run 40888302487, job 123503246603)"
+    },
     {
       "criterion": "Round 6 (tester round 5 fail, architect's cap: forward merge only): the pull request merges with main fe315392 or later, with the connection figure at main's sum plus the 8-connection room-appends pool",
       "surface": "jj merge of main 1f5b0828 (descends from fe315392) into legion/INFRA-605, never a rebase; Dispatch's Go suites against a real Postgres 17.11 in the issue pod; envoy-infra's gcp tests",
       "command": "jj new legion/INFRA-605 main@origin; cd packages/envoy && go test -count=1 ./internal/dispatch/docs/ ./cmd/dispatch/ ./internal/dispatch/store/ ./internal/dispatch/events/ ./internal/pglisten/ ./loadtest/ && (cd infra && go test -count=1 ./gcp/)",
       "observed": "four conflicts (dispatch-docs.md, running-dispatch.md, cmd/dispatch/README.md, infra/gcp/dispatch.go), resolved keeping both sides; store.ConnectionsPerProcess = 64+4+8+1+13+1+1+3 = 95 from the merged constants, dispatchConnectionsPerPod 95, documents say 95 and 13 lease passes, the changie fragment says 95 from 87; docs ok 902.5 s, the rest ok, infra/gcp ok but for the two data-disk tests that need mkfs.ext4 (absent in the pod); TestDispatchConnectionsPerPodIsTheServers green; no .github change in the diff, so nothing to move into ci.yaml",
-      "headSha": "a529f15fb3960643130adb33de94c6614514caae",
+      "headSha": "f99cd8043925833c0ce97b47e3a2833f0a1c7611",
       "negativeControl": "TestDispatchConnectionsPerPodIsTheServers requires store.ConnectionsPerProcess == dispatchConnectionsPerPod, so either side alone (87 from main, 94 from the branch) against the merged sum of 95 fails it"
     },
     {
@@ -18,7 +26,7 @@
       "surface": "Dispatch's Go suites against a real Postgres 17.11 in the issue pod, and GitHub Actions on the pull request at the head",
       "command": "cd packages/envoy && go test -count=1 -timeout 45m ./internal/dispatch/docs/ ; CGO_ENABLED=1 go test -race -count=1 -timeout 60m ./internal/dispatch/docs/ ; go test ./cmd/dispatch/ ./internal/dispatch/store/ ./internal/dispatch/events/ ./internal/pglisten/ ./loadtest/ ; gh pr view 2445 --json statusCheckRollup",
       "observed": "docs ok 930.6 s, race docs ok 2091.8 s, cmd/dispatch, store, events, pglisten, loadtest ok at 97fdb416; api at 3e13f14a ok but for #2449's TestARepeatedSubReplacesAnotherKind, which fails on main alone; multiprocess ok 644.7 s; CI lint, typecheck, test, pr-title green, envoy-go-race, dispatch-multiprocess, dispatch-browser-multiprocess, envoy-infra-go green, envoy-go red only on internal/dispatch/startup TestTwoAnnouncersAtOnceAnnounceAndPublishOnce (untouched package, known chance failure INFRA-747, 10/10 locally), re-run; TestDispatchConnectionsPerPodIsTheServers green with 94 = 64+4+8+1+12+1+1+3; 10 review threads answered and resolved",
-      "headSha": "a529f15fb3960643130adb33de94c6614514caae",
+      "headSha": "f99cd8043925833c0ce97b47e3a2833f0a1c7611",
       "negativeControl": "the two new tests fail at 5e119d38 and at ad4d0c50: 'timed out waiting for the room that loaded behind the other process's write to be closed' and 'the cold document's write while a room waits on its lock: the evictor heard nothing for <document>'"
     },
     {
@@ -26,7 +34,7 @@
       "surface": "Dispatch's Go suites against a real Postgres 17.11 in the issue pod, and two real envoy-dispatch processes on one database of INFRA-589's load stack: one REST edit on process 1 (POST /api/v1/artifacts/<id>/edits), 110 s for its room to leave, then a 60 s idle window with pings counted on a separate LISTEN connection",
       "command": "go test -count=3 -run 'TestHearingAnotherProcesssWriteAloneStartsNoPing|TestAServiceWithNothingTheTrackerProtectsSendsNoPing|TestFourServicesHoldingSomethingSendAboutOnePingASecondBetweenThem|TestAColdReadSeesAnotherServicesWriteWhileItsListenConnectionIsHalfOpen|TestACachedColdReadNeedsNoDatabaseReadWhileTheTrackerTrustsIt|...|TestTheHeadTracker|Hold|Drop' ./internal/dispatch/docs/; idle.sh <head|base> <db> 2 60 edit; whole docs, api, cmd/dispatch, store, events, pglisten, loadtest, multiprocess and race docs lanes at the head",
       "observed": "all named tests ok (3 runs); real processes after the edit: head 0 pings/min, both processes {resident_rooms 0, cache 0, head_tracker entries 0} (round 3: entries 1 each, 47 pings/min), base 0 pings; Dispatch round trips 219 vs 224/min base; docs ok 603.8 s, api ok 854.7 s, multiprocess ok 319.2 s, race docs ok 1174.3 s, the rest ok",
-      "headSha": "a529f15fb3960643130adb33de94c6614514caae",
+      "headSha": "f99cd8043925833c0ce97b47e3a2833f0a1c7611",
       "negativeControl": "the red test (with its sync re-pointed as below) at the tester's round-3 head 008a8f42 fails: 'a service that only heard another service's write - no room, no cached read, no preload - sent 3 pings on dispatch_doc_ping in 5s, want none'"
     },
     {
@@ -34,7 +42,7 @@
       "surface": "Dispatch's Go suites against a real Postgres 17.11 in the issue pod, and real envoy-dispatch processes (2 and 4) on one database of INFRA-589's load stack, idle 60 s, pings counted on a separate LISTEN connection",
       "command": "go test -count=2 -run 'TestAServiceWithNothingTheTrackerProtectsSendsNoPing|TestFourServicesHoldingSomethingSendAboutOnePingASecondBetweenThem|TestAColdReadSeesAnotherServicesWriteWhileItsListenConnectionIsHalfOpen|TestACachedColdReadNeedsNoDatabaseReadWhileTheTrackerTrustsIt' -v ./internal/dispatch/docs/; then idle.sh <base|head> <db> <2|4> 60 <none|read> (base legion/INFRA-589 9692d2fd, head 218146f0); whole docs, api, cmd/dispatch, store, events, pglisten, loadtest, multiprocess and race docs lanes",
       "observed": "the tester's test passes unmodified (0 pings); 4 services holding a cached read sent 10 pings in 12 s (0.83/s); half-open read fresh in about 3 s; idle real processes: nothing held 0 pings/min on 2 and 4 processes (round 2: 118 and 240), read held 46 and 53 pings/min (base 0), Dispatch CPU +0.06 to +0.18 s/min, Postgres within noise (https://github.com/sjawhar/legion/pull/2445#issuecomment-6475562321); docs ok 595.3 s, api ok 849.4 s, multiprocess ok 322.8 s, race docs ok 1167.2 s, the rest ok",
-      "headSha": "a529f15fb3960643130adb33de94c6614514caae",
+      "headSha": "f99cd8043925833c0ce97b47e3a2833f0a1c7611",
       "negativeControl": "at the tester's commit 30366da2 on f137a4d4: 'a service with no room, no cached read, no preload and no tracker entry sent 4 pings on dispatch_doc_ping'; round 2's head idle sent 118 and 240 pings a minute for 2 and 4 processes"
     },
     {
@@ -42,7 +50,7 @@
       "surface": "Dispatch's Go suites in internal/dispatch/docs against a real Postgres 17.11 in the issue pod: ten real document websockets opened at once through the service's ServeHTTP, and two Services on one database with the reader's LISTEN connection behind a TCP proxy that goes silent without closing",
       "command": "cd packages/envoy && env DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -count=5 -run TestConcurrentSocketOpensStayWithinTheCapsAndAreRefusedWith503 ./internal/dispatch/docs/ ; go test -count=3 -v -run TestAColdReadSeesAnotherServicesWriteWhileItsListenConnectionIsHalfOpen ./internal/dispatch/docs/ ; then the whole docs (ok 584.6 s) and api (ok 827.9 s) packages, cmd/dispatch, store, events, pglisten, loadtest, -tags multiprocess ./cmd/dispatch (ok 281.5 s), and -race ./internal/dispatch/docs/ (ok 1124.7 s)",
       "observed": "the tester's two red tests pass unmodified: caps 5/5 (and under -race); half-open 3/3, the write seen 2.95 s after it committed each run (bound 10 s); every lane above ok",
-      "headSha": "a529f15fb3960643130adb33de94c6614514caae",
+      "headSha": "f99cd8043925833c0ce97b47e3a2833f0a1c7611",
       "negativeControl": "at the tester's commits on 411492d8 both tests fail: '10 sockets opened at once on 10 documents: 10 admitted and 10 rooms live, want at most the room cap of 2', '... the rest answered map[401:7]', and 'the reader still reads \"Write 0.\\n\" 10.006s after the other service's write committed while its LISTEN connection was half-open, want \"Write 1.\\n\" within 10s'"
     },
     {
@@ -50,7 +58,7 @@
       "surface": "Dispatch's Go suites in internal/dispatch/docs, api and cmd/dispatch against a real Postgres 17.11 (ICU template1) in the issue pod",
       "command": "cd packages/envoy && env DISPATCH_TEST_DATABASE_URL=<pod Postgres> go test -count=1 -timeout 45m ./internal/dispatch/docs/ ; go test -count=1 -timeout 55m ./internal/dispatch/api/ ; go test -count=1 ./cmd/dispatch/ ./internal/dispatch/store/ ./internal/dispatch/events/ ./internal/pglisten/ ./loadtest/ ; go test -tags multiprocess ./cmd/dispatch ; go test -race ./internal/dispatch/docs/ ./internal/dispatch/api/",
       "observed": "all ok at c0e85657 (docs 716.8 s, api 1015.3 s, multiprocess 327.2 s, race docs 1593.7 s, race api 1656.1 s); the head 59a3aeae changes only loadtest/ and INFRA-589's files beyond it, whose loadtest tests pass there. The 14 red tests pass: 20 queued updates in 1 transaction of 3 round trips with 0 shared-pool connections; 0 evictor head reads for 100 own updates and 10 live writes; 0 rooms-pool reads for 100 cached cold reads; at most 3 settlement wake-ups for a 500 ms lag; 1 lock statement at shutdown; 1 issue read and 1 caller read and 0 room walks per socket open; 0/1 renders warm/cold; 4 round trips under the commit-order lock for 20 changed anchors; class shares ygo's slice; losing preload released; read budget 256 MiB/1 GiB/64 MiB; /debug/vars dispatch_rooms names 2 rooms and 2 connections; round 2 re-ran every lane at 2fdeabab: docs ok 584.6 s, api ok 827.9 s, multiprocess ok 281.5 s, race docs ok 1124.7 s",
-      "headSha": "a529f15fb3960643130adb33de94c6614514caae",
+      "headSha": "f99cd8043925833c0ce97b47e3a2833f0a1c7611",
       "negativeControl": "the same tests at the test commits on the base (pklruqkq, wuzuoumx over c3d09eec) fail for the reason each tests: '20 queued updates committed in 20 transactions ... 10 round trips ... 20 connections of the shared request pool', 'the evictor read the document's head 101 times ... want 0', '100 cold reads ... took 100 connections of the rooms pool', 'the settlement woke 361 times ... want at most 3', 'sent 46 lock statements ... want 1', 'a cold open read the document's issue 4 times', '20 changed anchors made 175 round trips ... against 4'"
     },
     {
@@ -58,7 +66,7 @@
       "surface": "INFRA-589's committed load reproduction (packages/envoy/loadtest) on the issue pod: local Postgres 16 via the latency proxy, NATS, the Envoy listener and Dispatch built from each tree, same seed, 5 runs per side per step",
       "command": "LOADTEST_SRC=<tree> packages/envoy/loadtest/run-step.sh <step>-<before|after>-<n> for editors-1x-over-0.25x (--events 1 --sessions 100 --requests 15 --editors 20 --editor-docs 10), editors-10x-over-0.25x (--editors 200 --editor-docs 100), 1x (--events 4 --sessions 400 --requests 60 --editors 20 --editor-docs 10), 10x (--events 40 --sessions 4000 --requests 600 --editors 200 --editor-docs 100); before = legion/INFRA-589 9692d2fd with this branch's loadtest/, after = 59a3aeae; all 46 runs and MEDIANS.md at dispatch://INFRA-605/artifact/infra605-loadtest-runs-tar-gz (version 3)",
       "observed": "medians: editors-1x-over-0.25x room round trips per editor update 9.51 -> 2.98, connections held by rooms p99 9 -> 4, shared-pool share 100% -> 32%, durable p50 60 -> 73 ms, p99 264 -> 157 ms, REST unchanged; 1x+editors acknowledged 5,356 -> 7,193 of 7,193, relay p50 58,291 -> 34 ms, durable p50 33,062 -> 173 ms, markers stored 3% -> 100%, but REST 2xx 100% -> 78% from render CPU (renderedReplica.observe 17.6 s -> 31.6 s per window); editors-10x-over-0.25x acknowledged 25,493 -> 50,683, markers stored 0% -> 72%, rooms' connections p50 38 -> 11, 75.8 updates per batch, REST 2xx 73% -> 52%; 10x both builds 0.01% 2xx, no editor connects",
-      "headSha": "a529f15fb3960643130adb33de94c6614514caae",
+      "headSha": "f99cd8043925833c0ce97b47e3a2833f0a1c7611",
       "negativeControl": "1x REST mix with no editors (1x-rest-only, 3 runs per side): 100% 2xx on both builds, p50 42 / 41 ms, p99 442 / 466 ms, event-lock hold 79 ms both, so the REST drop with editors is the editors' rendering, not the change's database path; and the before build's /debug/vars answers 404, so the batch columns read 'not served by this build' there"
     }
   ],
@@ -78,7 +86,8 @@
     "round 3: docs/stale_room.go (hold gate, jittered quiet window), docs/head_tracker.go (doc), docs/head_tracker_test.go (4-service ping test), AGENTS.md, .dispatch/architecture/dispatch-docs.md, cmd/dispatch/README.md, the changie fragment (cost statement)",
     "round 4: docs/head_tracker.go (holds, hold/release, drop), docs/roomstate.go, docs/read_cache.go, docs/websocket.go, docs/stale_room.go (ping gate counts rooms, cached reads, preloads), docs/head_tracker_test.go (new hold/drop and in-flight-read tests; the two setup lines above), AGENTS.md, .dispatch/architecture/dispatch-docs.md, cmd/dispatch/README.md, the changie fragment",
     "review round: merges of main c55e05f0, ad4d0c50, 3e13f14a, 97fdb416; store/pool.go ConnectionsPerProcess + healthPool + QueueExec; infra/gcp/dispatch.go dispatchConnectionsPerPod 94; docs/stale_room.go, room_instance.go (load-window notices, off-listener decisions); docs/stale_room_decisions_test.go (new); docs/append_gate.go, head_liveness.go, head_notice.go (split out); head_tracker_test.go split into head_notice_test.go, head_read_freshness_test.go, head_liveness_test.go; marks.go typed slices; websocket.go registerConnectionLocked; README, running-dispatch.md, the changie fragment (94)",
-    "round 6: merge a529f15f of main 1f5b0828; infra/gcp/dispatch.go 95; .dispatch/architecture/dispatch-docs.md, docs/site/.../running-dispatch.md, cmd/dispatch/README.md (95, 13 leased passes); the changie fragment (95 from 87)"
+    "round 6: merge a529f15f of main 1f5b0828; infra/gcp/dispatch.go 95; .dispatch/architecture/dispatch-docs.md, docs/site/.../running-dispatch.md, cmd/dispatch/README.md (95, 13 leased passes); the changie fragment (95 from 87)",
+    "round 7: merge f99cd804 of main de546ed2; docs/read_cache.go, docs/websocket.go (conflict resolutions only)"
   ],
   "trickyParts": [
     "A batch is the call's own update and the run queued after it, decided under the room's state lock before the store call and only shrunk after the document lock (a member another batch stored is dropped); every committing transaction marks what it stored before it releases the locks, and an update stored alone is a batch of one with the same protocol, so no update is stored twice (TestALoneUpdateAndABatchHoldingItStoreItOnce, three orders).",
@@ -115,5 +124,5 @@
   "discoveredComplexity": [
     "With database throttling of typing gone, DR-02's per-keystroke whole-document render is the next limit for editing load on 2 cores (render CPU 17.6 s -> 31.6 s per window at 1x; two thirds of Dispatch CPU at 200 editors)."
   ],
-  "round": 6
+  "round": 7
 }
