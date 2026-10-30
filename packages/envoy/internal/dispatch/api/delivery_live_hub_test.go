@@ -862,7 +862,7 @@ func TestAnIssueTitleChangeReachesPagesThatNameTheIssue(t *testing.T) {
 	rig.settle(t)
 	start := rig.mark()
 	patchHubIssue(t, rig.handler, named, map[string]any{"title": "Ship the widgets"})
-	delta := conn.delta(t, 3*time.Second, "names")
+	delta := conn.delta(t, eventFeedWait, "names")
 	if got := liveMapValues(t, delta, "issue_titles"); got[named] != "Ship the widgets" {
 		t.Fatalf("the delta's issue_titles = %v, want %s retitled", got, named)
 	}
@@ -888,7 +888,7 @@ func TestAParentsComponentChangeReachesPagesHoldingItsChildren(t *testing.T) {
 
 	// The child inherits what its parent chooses.
 	patchHubIssue(t, rig.handler, parent, map[string]any{"components": map[string]any{"mode": "explicit", "ids": []string{"api"}}})
-	delta := conn.delta(t, 3*time.Second, "t")
+	delta := conn.delta(t, eventFeedWait, "t")
 	if got := liveUpsertIDs(t, delta, "prs"); !slices.Equal(got, []string{"acme/widgets#1"}) {
 		t.Fatalf("the parent's component change upserts %v, want the child's pull request", got)
 	}
@@ -1030,7 +1030,7 @@ func TestAResetEventLogIsCaughtAndEveryViewRecomputed(t *testing.T) {
 		t.Fatalf("truncate events: %v", err)
 	}
 	patchHubIssue(t, rig.handler, key, map[string]any{"title": "Ship the widgets"})
-	delta := conn.delta(t, 3*time.Second, "t")
+	delta := conn.delta(t, eventFeedWait, "t")
 	if got := liveMapValues(t, delta, "issue_titles"); got[key] != "Ship the widgets" {
 		t.Fatalf("after the event log's reset the delta's issue_titles = %v, want %s retitled", got, key)
 	}
@@ -1060,7 +1060,7 @@ func TestAResetEventLogIsCaughtAndEveryViewRecomputed(t *testing.T) {
 		t.Fatalf("move the project's sequence: %v", err)
 	}
 	notifyChannel(t, rig.database, dispatchEventsChannel, "")
-	delta = conn.delta(t, 3*time.Second, "t")
+	delta = conn.delta(t, eventFeedWait, "t")
 	if got := liveMapValues(t, delta, "issue_titles"); got[key] != "Ship every widget" {
 		t.Fatalf("after the second reset the delta's issue_titles = %v, want %s retitled", got, key)
 	}
@@ -1093,7 +1093,7 @@ func TestACatchUpPastIgnoredEventsAdvancesTheCursor(t *testing.T) {
 		t.Fatalf("read the newest event: %v", err)
 	}
 	notifyChannel(t, rig.database, dispatchEventsChannel, "")
-	rig.waitFor(t, start, 3*time.Second, "the catch-up", func(note deliveryHubNote) bool {
+	rig.waitFor(t, start, eventFeedWait, "the catch-up", func(note deliveryHubNote) bool {
 		return note.what == "events caught up" && note.through == newest
 	})
 	if n := rig.count(start, func(note deliveryHubNote) bool {
@@ -1144,7 +1144,40 @@ func (r *hubRig) settle(t *testing.T) {
 		}
 	}
 	r.waitForEventCursor(t, eventHead(t, r.database), "the log's head before the measurement")
-	r.waitQuiet(t, 2*viewQuiet)
+	r.waitNoRecompute(t, 2*viewQuiet)
+}
+
+// A delta an event brings waits eventFeedWait rather than a few seconds: the hub reads events only
+// up to the safe horizon, which a transaction held anywhere on the shared test Postgres holds back.
+//
+// waitNoRecompute waits until the hub has begun or ended no recompute for quiet. It counts no other
+// note: while a gap stands open above the safe horizon, which a transaction held anywhere on the
+// shared test Postgres keeps open, the hub re-reads the log every 10-250 ms and notes each re-read,
+// so a wait for no note at all could last as long as that transaction.
+func (r *hubRig) waitNoRecompute(t *testing.T, quiet time.Duration) {
+	t.Helper()
+	recomputes := func() int {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		n := 0
+		for _, note := range r.notes {
+			if note.what == "recompute begin" || note.what == "recompute end" {
+				n++
+			}
+		}
+		return n
+	}
+	deadline := time.Now().Add(eventFeedWait)
+	last, since := recomputes(), time.Now()
+	for time.Since(since) < quiet {
+		if time.Now().After(deadline) {
+			t.Fatalf("the hub was still recomputing after %s", eventFeedWait)
+		}
+		time.Sleep(10 * time.Millisecond)
+		if n := recomputes(); n != last {
+			last, since = n, time.Now()
+		}
+	}
 }
 
 // waitForEventCursor waits for the hub's event cursor to reach want. The wait is generous: an open
@@ -1408,7 +1441,7 @@ func TestAnEventAnotherTaskCommittedReachesThisHub(t *testing.T) {
 	otherTask := http.NewServeMux()
 	t.Cleanup(Register(otherTask, t.Context(), deps).Wait)
 	patchHubIssue(t, otherTask, key, map[string]any{"title": "Ship the widgets"})
-	delta := conn.delta(t, 3*time.Second, "t")
+	delta := conn.delta(t, eventFeedWait, "t")
 	if got := liveMapValues(t, delta, "issue_titles"); got[key] != "Ship the widgets" {
 		t.Fatalf("the delta's issue_titles = %v, want %s retitled by the other task", got, key)
 	}
@@ -1451,6 +1484,25 @@ func TestAPresetViewSendsItsOldestPullRequestLeavingWithoutAReadingTheDatabase(t
 	snapshot := conn.snapshot(t, 5*time.Second, "p")
 	rig.waitConnected(t)
 	rig.settle(t)
+	// A delivery change the snapshot did not hold may have marked the view dirty, and on this
+	// clock, standing still, its recompute is due only once the clock moves. Moving it by less than
+	// the two seconds the oldest pull request has left runs that recompute before the measurement,
+	// and its delta, if any, is applied to the page's copy here.
+	held := snapshot.Body
+	clock.Advance(2 * viewQuiet)
+	rig.waitNoRecompute(t, 2*viewQuiet)
+	for drained := false; !drained; {
+		select {
+		case frame := <-conn.frames:
+			earlier, ok := frame.(DeliveryLiveDelta)
+			if !ok {
+				t.Fatalf("frame before the expiry = %+v, want a delta of a change the snapshot did not hold", frame)
+			}
+			held = requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, held, earlier, "")
+		default:
+			drained = true
+		}
+	}
 	before := acquires(rig.database)
 
 	clock.Advance(3 * time.Second)
@@ -1462,7 +1514,7 @@ func TestAPresetViewSendsItsOldestPullRequestLeavingWithoutAReadingTheDatabase(t
 		t.Fatalf("the expiry's delta removes %v, want acme/widgets#1", got)
 	}
 	conn.none(t, time.Second, "the expiry's one delta")
-	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, snapshot.Body, delta, "")
+	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, held, delta, "")
 }
 
 func TestAPipelineViewMovesItsDaysAtMidnightWithoutReadingTheDatabase(t *testing.T) {
