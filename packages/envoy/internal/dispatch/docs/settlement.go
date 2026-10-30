@@ -116,13 +116,15 @@ type settlementPass struct {
 	cursor *roomCursor
 	// read is the tree the pass copied, with markdown and offsets its rendering and renderErr why
 	// it has none. stamping says that tree lacks block ids, and stampChanged whether stamping them
-	// changes the markdown a version stores.
-	read         *pmdoc.Node
-	markdown     string
-	offsets      []pmdoc.BlockOffset
-	renderErr    error
-	stamping     bool
-	stampChanged bool
+	// changes the markdown a version stores. stampSuperseded says a settlement whose stamp commits
+	// alone ends with it (applyStamp).
+	read            *pmdoc.Node
+	markdown        string
+	offsets         []pmdoc.BlockOffset
+	renderErr       error
+	stamping        bool
+	stampChanged    bool
+	stampSuperseded bool
 	// The pass's transaction and what it read under the document's locks: the ledger its version
 	// records its events on, the document's owner row, the latest version, the update cursor a
 	// version of this pass would record, and what that version credits.
@@ -331,8 +333,14 @@ func (s *settlement) settlePass(parent context.Context) (settleStep, settleOutco
 	if ended, step, outcome := pass.readLocked(ctx, parent); ended {
 		return step, outcome
 	}
-	if ended, step, outcome := pass.commitStamp(ctx); ended {
+	if ended, step, outcome := pass.applyStamp(ctx); ended {
 		return step, outcome
+	}
+	if len(pass.slots) > 0 {
+		// The stamp is in the room: it commits alone, and the pass ends with it. This return is
+		// what keeps the copy lock reconcileAskBlocks takes below out of the transaction that
+		// holds the stamp's pending row.
+		return pass.commitStamp(ctx)
 	}
 	reconciliation, err := s.service.reconcileAskBlocks(ctx, tx, s.room, owner, pass.read, pass.credit)
 	if err != nil {
@@ -618,12 +626,12 @@ func (p *settlementPass) committed() {
 	}
 }
 
-// commitStamp stamps the block ids the pass's tree lacks into the room and commits them alone,
-// which is all that pass does; a pass whose tree lacks none writes nothing here. It is also where
-// the pass meets a room gone or a settlement superseded, under the one hold of the room's state
-// that records the blocks the stamp renamed. ended says the pass ends here, on the step and
-// outcome beside it; a pass that goes on holds the ask blocks' sources read under that state.
-func (p *settlementPass) commitStamp(ctx context.Context) (bool, settleStep, settleOutcome) {
+// applyStamp stamps the block ids the pass's tree lacks into the room; a pass whose tree lacks none
+// writes nothing here. It is also where the pass meets a room gone or a settlement superseded, under
+// the one hold of the room's state that records the blocks the stamp renamed. ended says the pass
+// ends here, on the step and outcome beside it. A pass whose stamp is in the room (p.slots) goes on
+// only to commitStamp; any other that goes on holds the ask blocks' sources read under that state.
+func (p *settlementPass) applyStamp(ctx context.Context) (bool, settleStep, settleOutcome) {
 	s, room, state := p.service, p.room, p.state
 	// The stamp is written into the room as it stands, read inside the stamp's own transaction.
 	var renamed []stampedAsk
@@ -661,41 +669,11 @@ func (p *settlementPass) commitStamp(ctx context.Context) (bool, settleStep, set
 	}
 	if len(p.slots) > 0 {
 		// The stamp commits alone, superseded or not: the room and its peers hold it, and dropped
-		// here it would never reach the store. A superseded settlement ends with it; any other
-		// reconciles and versions the stamped document in its next pass.
+		// here it would never reach the store (commitStamp). A superseded settlement ends with it;
+		// any other reconciles and versions the stamped document in its next pass.
+		p.stampSuperseded = superseded
 		s.unlockState(room, state)
-		// The room holds the stamp, so what is left to store it runs apart from the settlement's
-		// deadline, under a bound of its own (finishInRoom): a deadline falling between the write
-		// and the commit would fail the room over an update the room already holds.
-		ctx, cancel := finishInRoom(ctx)
-		defer cancel()
-		identityUpdate, err := mergeUpdates(p.updates)
-		if err != nil {
-			return true, settleDone, p.abandon(err)
-		}
-		if err := s.srv.BroadcastUpdate(ctx, room, identityUpdate); err != nil {
-			return true, settleDone, p.abandon(fmt.Errorf("broadcast document identity update: %w", err))
-		}
-		repaired, err := s.persistence.AppendUpdateTx(ctx, p.tx, room, identityUpdate, p.stampChanged)
-		if err != nil {
-			return true, settleDone, p.abandon(err)
-		}
-		// The room already holds this repair (applySuppressed wrote it there), so the instance
-		// takes the version it is stored at. It is recorded before the commit, under the advisory
-		// lock this transaction holds until then, so nothing reads the cursor in between; a
-		// rollback here fails the room, which reloads the document (abandon).
-		advanceRoomCursor(p.cursor, repaired)
-		if s.afterSettleRepairAppend != nil {
-			s.afterSettleRepairAppend(room)
-		}
-		if err := p.tx.Commit(ctx); err != nil {
-			return true, settleDone, p.abandon(fmt.Errorf("commit document identity update: %w", err))
-		}
-		p.finishSlots()
-		if superseded {
-			return true, settleDone, settleOutcome{}
-		}
-		return true, settleAgain, settleOutcome{}
+		return false, settleDone, settleOutcome{}
 	}
 	if superseded {
 		s.unlockState(room, state)
@@ -713,6 +691,45 @@ func (p *settlementPass) commitStamp(ctx context.Context) (bool, settleStep, set
 	p.credit.askSources = state.askSources()
 	state.mu.Unlock()
 	return false, settleDone, settleOutcome{}
+}
+
+// commitStamp stores the stamp applyStamp put into the room and commits it alone, which is all the
+// pass does: a superseded settlement ends with it, any other reconciles and versions the stamped
+// document in its next pass.
+func (p *settlementPass) commitStamp(ctx context.Context) (settleStep, settleOutcome) {
+	s, room := p.service, p.room
+	// The room holds the stamp, so what is left to store it runs apart from the settlement's
+	// deadline, under a bound of its own (finishInRoom): a deadline falling between the write
+	// and the commit would fail the room over an update the room already holds.
+	ctx, cancel := finishInRoom(ctx)
+	defer cancel()
+	identityUpdate, err := mergeUpdates(p.updates)
+	if err != nil {
+		return settleDone, p.abandon(err)
+	}
+	if err := s.srv.BroadcastUpdate(ctx, room, identityUpdate); err != nil {
+		return settleDone, p.abandon(fmt.Errorf("broadcast document identity update: %w", err))
+	}
+	repaired, err := s.persistence.AppendUpdateTx(ctx, p.tx, room, identityUpdate, p.stampChanged)
+	if err != nil {
+		return settleDone, p.abandon(err)
+	}
+	// The room already holds this repair (applySuppressed wrote it there), so the instance
+	// takes the version it is stored at. It is recorded before the commit, under the advisory
+	// lock this transaction holds until then, so nothing reads the cursor in between; a
+	// rollback here fails the room, which reloads the document (abandon).
+	advanceRoomCursor(p.cursor, repaired)
+	if s.afterSettleRepairAppend != nil {
+		s.afterSettleRepairAppend(room)
+	}
+	if err := p.tx.Commit(ctx); err != nil {
+		return settleDone, p.abandon(fmt.Errorf("commit document identity update: %w", err))
+	}
+	p.finishSlots()
+	if p.stampSuperseded {
+		return settleDone, settleOutcome{}
+	}
+	return settleAgain, settleOutcome{}
 }
 
 // planRepairs answers for the repairs this pass's reconciliation found: it plans the ones no pass
