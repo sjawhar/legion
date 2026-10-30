@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ArchitectureSource, IssueSummary } from "@legion/contracts";
+import type { ArchitectureSource, IssueSummary, ItemBlocks } from "@legion/contracts";
 import { DISPATCH_WRITE_RETRY, DispatchClient, DispatchGatewayError } from "../dispatch-http";
 import { fakeSearchResponse } from "./fake-search-response";
 
@@ -239,6 +239,34 @@ describe("DispatchClient", () => {
       method: "GET",
       headers: { Authorization: "Bearer secret", Accept: "application/json" },
     });
+  });
+
+  test("reads a session's answers with since and max_chars, and the caller's signal aborts it", async () => {
+    const body = { session_id: "session-1", since: "2026-10-24T00:00:00Z", total: 0, items: [] };
+    const { fetchImpl, requests } = fakeFetch([jsonResponse(body), jsonResponse(body)]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+    const controller = new AbortController();
+
+    await expect(
+      client.sessionAnswers("session-1", {
+        since: "2026-10-24T00:00:00Z",
+        maxChars: 8000,
+        signal: controller.signal,
+      })
+    ).resolves.toEqual(body);
+    await expect(client.sessionAnswers("session-1")).resolves.toEqual(body);
+
+    expect(
+      requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
+    ).toEqual([
+      "/api/v1/agents/session-1/answers?since=2026-10-24T00%3A00%3A00Z&max_chars=8000",
+      "/api/v1/agents/session-1/answers",
+    ]);
+    const signal = requests[0]?.init.signal;
+    expect(signal?.aborted).toBe(false);
+    controller.abort();
+    expect(signal?.aborted).toBe(true);
+    expect(requests[1]?.init.signal?.aborted).toBe(false);
   });
 
   test("maps project document and reference routes to authenticated API requests", async () => {
@@ -981,6 +1009,32 @@ describe("DispatchClient", () => {
     expect(
       requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
     ).toEqual(["/api/v1/comments/comment-1"]);
+  });
+
+  test("maps a comment's and a message's blocks reads to the API", async () => {
+    const blocks: ItemBlocks = {
+      item: { kind: "comment", id: "comment-1" },
+      revision: 1,
+      indexed: true,
+      blocks: [{ id: "b1", type: "paragraph", text: "Alpha.", from: 0, to: 6 }],
+    };
+    const { fetchImpl, requests } = fakeFetch([
+      jsonResponse(blocks),
+      jsonResponse({ ...blocks, item: { kind: "message", id: "message-1" } }),
+      jsonResponse({ ...blocks, item: { kind: "message", id: "message-2" } }),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    expect(await client.commentBlocks("comment-1")).toEqual(blocks);
+    await client.messageBlocks("message-1");
+    await client.messageBlocks("message-2", "s1");
+    expect(
+      requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
+    ).toEqual([
+      "/api/v1/comments/comment-1/blocks",
+      "/api/v1/messages/message-1/blocks",
+      "/api/v1/messages/message-2/blocks?session=s1",
+    ]);
   });
 });
 

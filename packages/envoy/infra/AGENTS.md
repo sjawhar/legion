@@ -69,8 +69,10 @@ versions. Never add the module to the root `go.work`.
 
 - **Component-built Kubernetes providers.** `gcp:Dispatch` requires the consumer's `gcp` and
   `random` providers before registering anything, then builds a Kubernetes provider from its
-  cluster's exec-plugin kubeconfig. Every Kubernetes child uses that explicit provider and depends
-  on the cluster; none falls back to a default Kubernetes provider. `gcp:ClusteredNatsHub` takes
+  cluster's exec-plugin kubeconfig; with `clusterOnly` it requires the `gcp` provider alone and
+  builds no Kubernetes provider, since it registers no `RandomPassword` and no Kubernetes object.
+  Every Kubernetes child uses that explicit provider and depends on the cluster; none falls back
+  to a default Kubernetes provider. `gcp:ClusteredNatsHub` takes
   the cluster's `kubeconfig` as a secret input and builds its own provider, `<name>-kubernetes`,
   with `enableServerSideApply` and `enableConfigMapMutable` on, and calls no `providers.Require`,
   since it creates every resource through that provider (the chart through `pulumi.Providers`).

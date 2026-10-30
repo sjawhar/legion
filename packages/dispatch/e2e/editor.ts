@@ -236,6 +236,62 @@ export function conversationThreadScope(page: Page, project: string, turn: Locat
   return project === "iphone" ? page.getByRole("dialog", { name: "Thread" }) : turn;
 }
 
+/** One paragraph of a reading: its whole text, with runs of whitespace collapsed, and the text of
+ *  each `<em>`, `<strong>` and `<del>` in it, in document order. */
+export interface ParagraphReading {
+  emphasized: string[];
+  strong: string[];
+  struck: string[];
+  text: string;
+}
+
+/** Asserts the paragraphs `view` draws read as `reading`, the whole table at once, so a failure
+ *  reports every row's reading. */
+export async function expectParagraphReadings(
+  view: Locator,
+  reading: ParagraphReading[]
+): Promise<void> {
+  const rows = view.locator("p");
+  await expect(rows).toHaveCount(reading.length);
+  await expect
+    .poll(() =>
+      rows.evaluateAll((paragraphs) =>
+        paragraphs.map((paragraph) => {
+          const texts = (selector: string) =>
+            [...paragraph.querySelectorAll(selector)].map((element) => element.textContent);
+          return {
+            emphasized: texts("em"),
+            strong: texts("strong"),
+            struck: texts("del"),
+            text: paragraph.textContent?.replace(/\s+/g, " ").trim(),
+          };
+        })
+      )
+    )
+    .toEqual(reading);
+}
+
+/** Opens the comment's thread in the Conversation and asserts the engine drew its body as
+ *  `reading`. */
+export async function expectCommentReading(
+  page: Page,
+  issueKey: string,
+  commentId: string,
+  project: string,
+  reading: ParagraphReading[]
+): Promise<void> {
+  await page.goto(`/issues/${issueKey}/conversation`);
+  // A collapsed card previews the body inline; the expanded thread draws its paragraphs, in
+  // place on a wide screen and in the Thread sheet on a phone.
+  const turn = page.locator(`[data-turn="comment:${commentId}"]`);
+  await turn.getByRole("button", { name: "Expand thread" }).click();
+  const thread = conversationThreadScope(page, project, turn);
+  await expectParagraphReadings(thread.locator(".dispatch-markdown"), reading);
+  // The engine drew the body: no literal-text fallback stands in for it.
+  await expect(turn.locator("[data-markdown-fallback]")).toHaveCount(0);
+  await expect(thread.locator("[data-markdown-fallback]")).toHaveCount(0);
+}
+
 /** The Conversation's All / Open / Closed control, the one filter over its cards. It starts on
  *  All every visit and is not persisted. */
 export function conversationFilter(page: Page, label: "All" | "Closed" | "Open"): Locator {
