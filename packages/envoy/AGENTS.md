@@ -894,9 +894,9 @@ for the log: two transactions' observers run concurrently in either order, and e
 the room's whole delete set. The log records the room's state as of just before its first
 transaction since the load, which the replica starts from, so a room that is only read holds no
 replica. The load rendered that very state already (`onLoadDocument`, before it opens the log),
-and hands that rendering and its layout to the replica (`keepReplica`, `loadedRendering`), which
-holds it only through a weak pointer: the replica's first run takes it in place of rendering its
-base again while no collection has taken it (`renderedReplica.start`, `catchUpFromLoad`), and
+and hands that rendering, markdown and layout in one value (`keepReplica`, `replicaRendering`),
+which holds it only through a weak pointer: the replica's first run takes it in place of rendering
+its base again while no collection has taken it (`renderedReplica.start`, `catchUpFromLoad`), and
 renders the base otherwise (`catchUpRendered`), so the handover keeps nothing resident. A replica
 that cannot apply an update starts again from a fresh base at the room's next commit
 (`UpdateLog.Reset`), which it always renders, and counts the updates it could not place as content
@@ -910,15 +910,15 @@ resident.
 
 Where the observer cannot know an update's rendering otherwise (above), it renders no more of the
 replica than the update can have changed (`renderedReplica.updateChangesMarkdown`), on one of three
-paths, each counted (`renderPathCounts`). On a replica whose markdown and layout are known, an
-update that touched nothing under the document's fragment changed no rendering, and nothing is
-read or rendered (`observerUntouched`); one that changed something inside some top-level blocks,
+paths, each counted (`renderPathCounts`). On a replica that holds a rendering, an update that
+touched nothing under the document's fragment changed no rendering, and nothing is read or
+rendered (`observerUntouched`); one that changed something inside some top-level blocks,
 and added, deleted or moved none, renders just those blocks, each read alone
 (`pmdoc.ReadBlockForRendering`), into the markdown the replica keeps (`pmdoc.Layout.Splice`,
 `observerIncremental`). Anything else renders the whole replica, as every update did before
 INFRA-644, and records a fresh layout from the same render (`renderDocumentForUpdate`,
 `observerRendered`): an update that changed the fragment itself, one that touched more than 64
-blocks (`maxTouchedBlocks`), one on a replica whose markdown or layout is unknown, and one `Splice`
+blocks (`maxTouchedBlocks`), one on a replica that holds no rendering, and one `Splice`
 declines. `Splice` answers exactly what the whole render of the new document writes, and declines
 wherever the rest of the document could read a changed block differently (its guards, G0 to G8):
 a document of one block or whose first block is a rule, a changed block that held or holds a
@@ -931,12 +931,12 @@ update to the replica, it reads the shared types ygo says the transaction change
 (`crdt.Transaction.ChangedTypes`) and walks each up its `Parent` chain to the top-level block it
 sits in, and it marks the update for a whole render when one is the fragment itself or sits deeper
 than any document in the schema nests (`noteChangedTypes`). Both accessors are the sjawhar/ygo
-fork's since v1.51.3-sami.8 (reearth/ygo#336). Beside its markdown the replica keeps that
-markdown's `pmdoc.Layout`, 5 bytes per top-level block (each block's end offset and flags); a
-published live write's rendering carries its own layout (`publishedRendering.layout`), which the
-replica takes with the markdown, and a rendering that carries none leaves the next update a whole
-render. The ask blocks an update left are walked only when its classification asks for them, and
-on the incremental path only in the blocks the layout says hold one.
+fork's since v1.51.3-sami.8 (reearth/ygo#336). The markdown the replica keeps and that markdown's
+`pmdoc.Layout`, 5 bytes per top-level block (each block's end offset and flags), are one value
+(`replicaRendering`), so a replica holding a rendering holds that rendering's layout; a published
+live write's rendering is one value too (`publishedRendering`), which the replica takes whole when
+it takes it. The ask blocks an update left are walked only when its classification asks for them,
+and on the incremental path only in the blocks the layout says hold one.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. Inside a code

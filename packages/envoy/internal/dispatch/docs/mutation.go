@@ -363,7 +363,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	// (publishedRendering): this operation's rendering and its layout, when its fork was read warm.
 	var rendering publishedRendering
 	if op.read.warm {
-		rendering = publishedRendering{forkReadMark: op.read, markdown: markdown, layout: layout}
+		rendering = publishedRendering{forkReadMark: op.read, rendered: &replicaRendering{markdown: markdown, layout: layout}}
 		if contentChanged {
 			rendering.askBlocks = askBlockIDs(tree)
 		}
@@ -463,7 +463,7 @@ func (s *Service) applyMargin(ctx context.Context, artifactID string, actor mode
 	if !op.write.cold {
 		room = op.write.forkedFrom
 		if op.read.warm {
-			rendering = publishedRendering{forkReadMark: op.read, markdown: rendered.markdown}
+			rendering = publishedRendering{forkReadMark: op.read, rendered: &replicaRendering{markdown: rendered.markdown}}
 		}
 	}
 	return s.recordLiveOperation(ctx, &op, actor, rendered, false, rendering, room)

@@ -17,6 +17,7 @@ import (
 
 	"github.com/reearth/ygo/crdt"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -240,6 +241,15 @@ func sameRendering(a, b *string) bool {
 	return *a == *b
 }
 
+// replicaMarkdown is the markdown of the rendering the replica keeps, or nil for a replica that
+// keeps none. The caller holds the replica's lock.
+func replicaMarkdown(replica *renderedReplica) *string {
+	if replica.rendering == nil {
+		return nil
+	}
+	return &replica.rendering.markdown
+}
+
 func describeRendering(markdown *string) string {
 	if markdown == nil {
 		return "outside the schema"
@@ -317,8 +327,8 @@ func (sh *renderShadow) observed(room *shadowRoom, log *crdt.UpdateLog, replica 
 		return
 	}
 	sh.aligned++
-	if !sameRendering(replica.markdown, room.markdown) {
-		sh.failf("after commit %d the replica renders %s and the shadow %s", len(room.updates), describeRendering(replica.markdown), describeRendering(room.markdown))
+	if !sameRendering(replicaMarkdown(replica), room.markdown) {
+		sh.failf("after commit %d the replica renders %s and the shadow %s", len(room.updates), describeRendering(replicaMarkdown(replica)), describeRendering(room.markdown))
 	}
 }
 
@@ -514,7 +524,7 @@ func (sh *renderShadow) check(t *testing.T) {
 				t.Errorf("room %d commit %d: observed %d times", roomIndex, index, update.observed)
 			}
 			if published, ok := update.origin.(*liveWriteOrigin); ok {
-				if rendering := published.rendering; rendering.markdown != "" || rendering.layout != nil || rendering.askBlocks != nil || rendering.forkReadMark != (forkReadMark{}) {
+				if rendering := published.rendering; rendering.rendered != nil || rendering.askBlocks != nil || rendering.forkReadMark != (forkReadMark{}) {
 					t.Errorf("room %d commit %d: the published update kept its rendering", roomIndex, index)
 				}
 			}
@@ -556,8 +566,8 @@ func (sh *renderShadow) check(t *testing.T) {
 			}
 			time.Sleep(time.Millisecond)
 		}
-		if !sameRendering(replica.markdown, room.markdown) {
-			t.Errorf("the replica renders %s and the shadow %s", describeRendering(replica.markdown), describeRendering(room.markdown))
+		if !sameRendering(replicaMarkdown(replica), room.markdown) {
+			t.Errorf("the replica renders %s and the shadow %s", describeRendering(replicaMarkdown(replica)), describeRendering(room.markdown))
 		}
 		replica.mu.Unlock()
 	}
@@ -1498,6 +1508,74 @@ func TestRenderReuseABrowserTypingScript(t *testing.T) {
 	}
 }
 
+// A3. A splice's walk of the ask blocks the layout flags reads each of those blocks; one it
+// cannot read leaves the room's ask blocks and their authors as they are, as an update whose own
+// render failed does, rather than taking an empty set for the room's record and forgetting every
+// author. No update can leave the room an unreadable flagged block - a change that broke one
+// would touch it, so the update carrying it is rendered whole and the layout recorded afresh -
+// so the test breaks the block in the replica's own copy, the one the walk reads, after the
+// layout that flags it was recorded.
+func TestRenderReuseAnUnreadableAskBlockKeepsTheRoomsAskAuthors(t *testing.T) {
+	logs := &storetest.LockedLog{}
+	logtest.SetDefault(t, slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "The typed paragraph opens the document.\n\nThe last paragraph closes it.\n")
+	browser := newTypingBrowser(t, service, artifactID, reuseBob)
+	browser.editTree(insertBlocksAfter(t, "The typed paragraph",
+		":::ask{#unreadable-ask urgency=\"high\" multiple=\"false\"}\nWhich option does the room take?\n:::\n"))
+	waitForLandedAppends(t, service, artifactID)
+	state := service.room(artifactID)
+	state.mu.Lock()
+	blocks, authors := maps.Clone(state.askBlocks), maps.Clone(state.askAuthors)
+	state.mu.Unlock()
+	if _, recorded := blocks["unreadable-ask"]; !recorded || authors["unreadable-ask"] != reuseBob {
+		t.Fatalf("the room records ask blocks %v with authors %v, want the browser's ask block credited to it", sortedIDs(blocks), authors)
+	}
+
+	// The replica's own ask block is given a chain deeper than a document in the schema nests, so
+	// pmdoc.ReadBlockForRendering refuses it. The replica's next update resets what this
+	// transaction's finder recorded (renderedReplica.observe), so the keystroke below is still
+	// measured as touching its own block alone.
+	replica := service.replicaOf(service.srv.GetDoc(artifactID))
+	replica.mu.Lock()
+	ask := topLevelAskElement(t, replica.fragment)
+	replica.doc.Transact(func(txn *crdt.Transaction) {
+		docstest.WriteDeepChain(txn, &ask.YXmlFragment, pmdoc.MaxTreeDepth+1, "deeper than the schema nests")
+	})
+	replica.mu.Unlock()
+
+	before := readRenderPaths(service)
+	text := browser.text("The last paragraph")
+	browser.send(func(txn *crdt.Transaction) { text.Insert(txn, len("The last paragraph"), " still", nil) })
+	waitForLandedAppends(t, service, artifactID)
+	if paths := readRenderPaths(service).minus(before).withoutCatchUps(); paths != (renderPaths{observerIncremental: 1}) {
+		t.Fatalf("the keystroke took the paths %+v, want one incremental render", paths)
+	}
+	state.mu.Lock()
+	keptBlocks, keptAuthors := maps.Clone(state.askBlocks), maps.Clone(state.askAuthors)
+	state.mu.Unlock()
+	if !maps.Equal(keptBlocks, blocks) || !maps.Equal(keptAuthors, authors) {
+		t.Errorf("after the keystroke the room records ask blocks %v with authors %v, want %v with %v",
+			sortedIDs(keptBlocks), keptAuthors, sortedIDs(blocks), authors)
+	}
+	if logged := logs.String(); !strings.Contains(logged, "read a block of the updated document to list its ask blocks") {
+		t.Errorf("the failed read logged %q, want the refusal of the block it could not read", logged)
+	}
+}
+
+// topLevelAskElement is the one ask block among fragment's top-level blocks.
+func topLevelAskElement(t *testing.T, fragment *crdt.YXmlFragment) *crdt.YXmlElement {
+	t.Helper()
+	for _, child := range fragment.Children() {
+		if element, isElement := child.(*crdt.YXmlElement); isElement && element.NodeName == "ask" {
+			return element
+		}
+	}
+	t.Fatal("the document holds no top-level ask block")
+	return nil
+}
+
 // A4. A room's replica takes, as its base's, the rendering the room's load made of the state the
 // replica starts from, in place of rendering that base again, when its first run starts while the
 // rendering is still there; a collection since the load, or a recover, leaves the run to render its
@@ -1604,7 +1682,7 @@ func loadRoomForCatchUp(t *testing.T, service *Service, artifactID string) *rend
 }
 
 // heldLoadRendering is the load's rendering replica still holds, or nil.
-func heldLoadRendering(replica *renderedReplica) *loadedRendering {
+func heldLoadRendering(replica *renderedReplica) *replicaRendering {
 	replica.mu.Lock()
 	defer replica.mu.Unlock()
 	return replica.loaded.Value()

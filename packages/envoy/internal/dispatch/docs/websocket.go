@@ -449,10 +449,10 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// whose first run takes it as its base's: nothing from here to OpenUpdateLog hands the document
 	// to anything, so the state rendered here is the one the log opens on
 	// (renderedReplica.start). This load holds it only until it hands it over.
-	var loaded *loadedRendering
+	var loaded *replicaRendering
 	tree, err := treeOf(doc)
 	if err == nil {
-		rendering := &loadedRendering{}
+		rendering := &replicaRendering{}
 		rendering.markdown, _, rendering.layout, err = documentRenderingWithLayout(tree)
 		if err == nil {
 			loaded = rendering
@@ -609,8 +609,17 @@ func soleConnectedActor(connected map[uint64]model.Actor) (sole *model.Actor, am
 // each update in the order the replica took them, so the room's record of its ask blocks moves
 // forward only. The walk that lists those ask blocks (the asks function renderedReplica.observe
 // hands its classify) runs only once the cheap markdown comparison inside observe already showed a
-// real change, so the no-op path, the common one, pays for neither.
+// real change, so the no-op path, the common one, pays for neither. A nil askBlocks is that
+// walk's answer when it could not read the document, never a document holding no ask block
+// (askBlockIDs): the room's record is left as it is.
 func (s *Service) observeAskBlocksForUpdate(room string, askBlocks map[string]struct{}) {
+	if askBlocks == nil {
+		// The walk could not read the document it had to walk, and logged that
+		// (renderedReplica.spliceTouched): the room keeps the ask blocks and the authors it
+		// recorded, as it does for an update whose own render failed, which is handed no asks
+		// at all.
+		return
+	}
 	state := s.lockState(room)
 	defer s.unlockState(room, state)
 	var author *model.Actor

@@ -831,6 +831,19 @@ func TestIncrementalRenderLayoutRecordsAsksAndSize(t *testing.T) {
 	if got := layout.AskBlocks(); !slices.Equal(got, []int{1, 3}) {
 		t.Errorf("AskBlocks() = %v, want [1 3]", got)
 	}
+	// The blocks the layout flags are the blocks WalkAskBlocks finds an ask in: the agreement the
+	// incremental path's ask ids rest on (holdsBlocks).
+	var walked []int
+	for index, block := range doc.Children {
+		holdsAsk := false
+		WalkAskBlocks(block, func(string) { holdsAsk = true })
+		if holdsAsk {
+			walked = append(walked, index)
+		}
+	}
+	if got := layout.AskBlocks(); !slices.Equal(got, walked) {
+		t.Errorf("AskBlocks() = %v, WalkAskBlocks finds an ask in blocks %v", got, walked)
+	}
 	if layout.Blocks() != 4 {
 		t.Errorf("Blocks() = %d, want 4", layout.Blocks())
 	}

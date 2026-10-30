@@ -25,7 +25,7 @@ type blockFlags uint8
 
 const (
 	// blockHoldsAsk: the block holds an ask block anywhere in it, itself included, as the tree is
-	// read (the walk of docs.walkAskBlocks).
+	// read (the walk of WalkAskBlocks).
 	blockHoldsAsk blockFlags = 1 << iota
 	// blockHoldsFootnoteDefinition: the block holds a footnote definition anywhere in it, whose
 	// label every block's rendering reads (footnoteLabelSet).
@@ -144,19 +144,51 @@ func markerClass(block *Node) blockFlags {
 	return 0
 }
 
+// askBlockType is the node type of an ask block, the one type WalkAskBlocks visits and
+// blockHoldsAsk flags a block for.
+const askBlockType = "ask"
+
+// holdsBlocks reports whether a node's child can hold a block under it, and so whether a walk over
+// the blocks of a document descends into it: text holds none. WalkAskBlocks and holdsFlags walk by
+// this one rule, so the blocks a layout flags as holding an ask are exactly the blocks in which
+// WalkAskBlocks finds one.
+func holdsBlocks(child *Node) bool {
+	return child.Type != "text"
+}
+
+// WalkAskBlocks calls visit with the id of each ask block node holds, in document order, wherever
+// it stands: in a blockquote, a list item or another typed block, node itself included. The id is
+// the block's BlockIDAttr attribute, "" for a block carrying none. It does not descend into text,
+// which holds no block (holdsBlocks).
+func WalkAskBlocks(node *Node, visit func(id string)) {
+	if node == nil {
+		return
+	}
+	if node.Type == askBlockType {
+		id, _ := node.Attrs[BlockIDAttr].(string)
+		visit(id)
+	}
+	for _, child := range node.Children {
+		if holdsBlocks(child) {
+			WalkAskBlocks(child, visit)
+		}
+	}
+}
+
 // holdsFlags reports whether block holds an ask block or a footnote definition, itself included.
-// Like docs.walkAskBlocks, it does not descend into text, which holds no block. asWritten keeps
-// every node that is not inline, so the tree as read and as written answer alike.
+// It walks as WalkAskBlocks walks (holdsBlocks), so the ask blocks of a block this flags are the
+// ones that walk finds. asWritten keeps every node that is not inline, so the tree as read and as
+// written answer alike.
 func holdsFlags(block *Node) blockFlags {
 	var flags blockFlags
 	switch block.Type {
-	case "ask":
+	case askBlockType:
 		flags |= blockHoldsAsk
 	case "footnote_definition":
 		flags |= blockHoldsFootnoteDefinition
 	}
 	for _, child := range block.Children {
-		if child.Type != "text" {
+		if holdsBlocks(child) {
 			flags |= holdsFlags(child)
 		}
 	}
