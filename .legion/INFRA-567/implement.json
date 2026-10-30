@@ -2,56 +2,49 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-567",
-  "completed": "2026-10-30T08:20:00Z",
-  "round": 10,
-  "answers": "Review round 6: lint and test red at the code head for a reference only the merge with main carries, which is a need only the base meets",
+  "completed": "2026-10-30T11:05:00Z",
+  "round": 11,
+  "answers": "GitHub reported the head CONFLICTING against main at 10:23Z: the forward merge, its two conflict resolutions, and the gates at the merged head",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2512",
-  "head": "a205689346992d20023a6fd52495261c570480c2",
+  "head": "0c04d48095fd6993950558991fb4bf440114e204",
   "proof": [
     {
-      "criterion": "Review round 6: CI run 41009980170 failed lint and test at the code head e4d33f45, both in check-ci-images.sh, because GitHub tests the merge with main and main added envoy-go-race-docs (de546ed2, #2516) whose services Postgres names mirror.gcr.io/pgvector/pgvector, a reference this change's gate forbids",
-      "surface": "The gate over the merged tree, which is the tree GitHub tests",
-      "command": "jj new legion/INFRA-567 main@origin ; uv run --with pyyaml==6.0.2 --no-project -- bash .github/scripts/check-ci-images.sh tree",
-      "observed": "The merge is clean, no conflict. Before the repoint the gate reproduced CI's two problems at the merged head, naming ci.yaml:2486 twice: the postgres service's image names mirror.gcr.io/pgvector/pgvector, and a CI job runs this file and it names mirror.gcr.io. After pointing that service at ghcr.io/sjawhar/legion/ci@sha256:2358fcba... — the digest .github/ci-images.yaml already holds for pgvector/pgvector, with the comment line its ten sibling services carry — the gate passes: 12 rows, 36 references in 32 files of CI's reach, and of 6423 text files swept the 28 that name mirror.gcr.io are all in the exception list.",
-      "headSha": "a205689346992d20023a6fd52495261c570480c2",
-      "negativeControl": "The gate run at the merged head before the repoint is the control: it printed the same two problems CI's lint job printed, and `check-ci-images.test.sh`'s real-tree case failed with it (97 passed, 2 failed in CI's test job). Both pass at this head."
+      "criterion": "The pull request conflicts with main (GitHub, CONFLICTING at cca71371), and a conflicting head computes no merge ref, so no check runs on it at all",
+      "surface": "The issue workspace, with jj, and the merged tree it produced",
+      "command": "jj new legion/INFRA-567 main@origin -m 'merge: resolve conflict against main@origin' ; jj status",
+      "observed": "main came to 0e636ed7. Two 2-sided conflicts, both where main moved under this branch, each resolved in the merge commit itself: .github/scripts/ci_job_reads.py, where main added the check_settlement_test.go and redelivered_test.go entries while this branch rewrote the file (both entries kept, and the two citations that moved read off the merged files: internal/daemon/daemon_test.go:1120 and internal/intake/intake_test.go:782,855); and packages/daemon/internal/daemon/merged_root_waits_live_test.go, where main gave the proof its parent, child and childPR variables and a two-argument mergedRootWaitsGitHub while this branch put the runtime on newRuntime() (the merge keeps main's fields with this branch's runtime). jj status then reports no conflict, and the push was a fast-forward from cca71371 to 0c04d480.",
+      "headSha": "0c04d48095fd6993950558991fb4bf440114e204",
+      "negativeControl": "jj's own conflict markers are the control on the resolution being mine rather than a guess: the merge was refused as conflicted until both files held no marker, and `go vet -tags e2e ./internal/daemon/` exits 0, which a resolution that kept this branch's one-argument mergedRootWaitsGitHub call against main's two-parameter signature could not do."
     },
     {
-      "criterion": "Every rule this change adds holds for main's new job too",
-      "surface": "The repository's own gates over the merged tree, and a parse of every workflow file",
-      "command": "uv run --with pyyaml==6.0.2 --no-project -- bash .github/scripts/check-ci-filters.sh ; bash .github/scripts/ci-ok.test.sh ; a yaml parse of the twelve workflow files at both heads",
-      "observed": "envoy-go-race-docs carries timeout-minutes: 70, written by main itself and above its step's -timeout 60m; its filter (envoy_go_race_docs), ci-ok's needs entry (ci.yaml:3017) and its SELECTED_BY mapping (ci.yaml:3056) all came with it from main. check-ci-filters.sh reads 26 gates, one more than before the merge, and reports ci-images at 6 files 0 uncovered; ci-ok.test.sh passes 40 assertions; ci_job_reads.py needs no new entry. The parse of both heads shows the merge added exactly one job definition, that one: 58 definitions with 53 limits before, 59 with 54 after, 5 reusable-workflow calls on both sides, and no job without a limit. The body's job table carries its row and its re-measured counts.",
-      "headSha": "a205689346992d20023a6fd52495261c570480c2",
-      "negativeControl": "check-ci-filters.sh is the control on a job whose filter misses a file it reads, and the timeout parse names any job definition with no limit; it names none at this head, and the body quotes pr-title's removal as its red case."
+      "criterion": "No image main brought in is one this change's gate refuses, and every gate still passes on the merged tree, which is the tree GitHub tests",
+      "surface": "The repository's own gates and harnesses over the merged tree",
+      "command": "uv run --with pyyaml==6.0.2 --no-project -- bash .github/scripts/<each gate and harness> ; bunx biome check . ; go vet -tags e2e ./internal/daemon/",
+      "observed": "check-ci-images.sh tree: 12 rows, 36 references in 32 files of CI's reach, and of 6490 text files swept the 28 that name mirror.gcr.io are all in the exception list — no new main-born image to repoint, unlike the previous merge. check-ci-filters.sh 26 gates; check-bun-version.sh 1.4.4; check-image-trigger-paths.sh 5 image builds; check-action-pins.sh 21 files; the harnesses 99, 45, 121, 132 and ci-ok.test.sh 40, all 0 failed; bunx biome check . exits 0; go vet -tags e2e ./internal/daemon/ exits 0.",
+      "headSha": "0c04d48095fd6993950558991fb4bf440114e204",
+      "negativeControl": "The same gate at the previous merge, before its repoint, failed naming ci.yaml's mirror.gcr.io service, which is what proves this set is not vacuous on a merged tree."
     },
     {
-      "criterion": "The forward merge changed nothing of the branch's own diff but the line it had to change",
+      "criterion": "The forward merge changed nothing of the branch's own diff but what the resolution required",
       "surface": "The unchanged-diff fingerprint of skill://legion-worker/references/conflicts-and-rewrites.md, at the tip before and after",
-      "command": "jj diff --from 'fork_point(\"main\"@origin | <head>)' --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, at d3396741 and at a2056893, then a diff of the two bodies",
-      "observed": "0818b06b615cfa5b400b9e25e407baa178d0f8313263ebd83c6e3d176e495a1a -> 4dc2c3a98f18472f6cca8e7469cdb90a2c7c5059bd46f57284f46c11be6b3d28, changed. Both sides cover the same 51 files, and the whole difference is the three lines of ci.yaml above: the mirror.gcr.io line removed, the comment and the package reference added. Posted on the pull request as the forward-merge comment, with that diff quoted.",
-      "headSha": "a205689346992d20023a6fd52495261c570480c2",
-      "negativeControl": "The fingerprint is computed with pipefail so a failed read prints nothing and counts as changed; both sides printed, and the per-file diff names the only delta rather than leaving 'changed' unexplained."
-    },
-    {
-      "criterion": "The rest of the change still passes at the merged head, which is a new tree: main brought 164 files added, 286 modified and 16 removed",
-      "surface": "The repository's own gates and harnesses over the merged tree, and Biome over the whole tree",
-      "command": "uv run --with pyyaml==6.0.2 --no-project -- bash .github/scripts/<each gate and harness> ; bunx biome check .",
-      "observed": "check-bun-version.sh (1.4.4), check-image-trigger-paths.sh (5 image builds), check-action-pins.sh (21 files, one more than before the merge), check-ci-images.test.sh 99, mirror-ci-images.test.sh 45, check-bun-version.test.sh 121, check-ci-filters.test.sh 132, ci-ok.test.sh 40, all 0 failed; bunx biome check . exits 0.",
-      "headSha": "a205689346992d20023a6fd52495261c570480c2",
-      "negativeControl": "Each harness carries its own red cases, and the gate run before the repoint showed this set is not vacuous at the merged head: it failed exactly where CI failed."
+      "command": "jj diff --from 'fork_point(\"main\"@origin | <head>)' --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, at cca71371 and at 0c04d480, then a diff of the two bodies",
+      "observed": "4dc2c3a98f18472f6cca8e7469cdb90a2c7c5059bd46f57284f46c11be6b3d28 -> 9d22b22f22e6f58ab0299a64c541cda58f8384f3a588043d5d9296ebb2bb5d8c, changed. Both sides cover the same 51 files, and the whole difference is two lines: daemon_test.go:1119 -> :1120 and intake_test.go:780,845 -> :782,855, the citations main's own edits moved. Posted on the pull request with that diff quoted.",
+      "headSha": "0c04d48095fd6993950558991fb4bf440114e204",
+      "negativeControl": "The fingerprint runs under pipefail, so a failed read prints nothing and counts as changed; both sides printed, and the per-file diff names the only delta rather than leaving 'changed' unexplained."
     }
   ],
   "filesChanged": [
-    ".github/workflows/ci.yaml: envoy-go-race-docs's services Postgres repointed onto the package's pgvector row, with its comment line",
-    "the merge commit itself, which brings main up to dd552dfd and changes nothing else of the branch's diff"
+    ".github/scripts/ci_job_reads.py: main's two new entries kept, two citations read off the merged files",
+    "packages/daemon/internal/daemon/merged_root_waits_live_test.go: main's parent/child/childPR fields with this branch's newRuntime()",
+    "the merge commit itself, which brings main to 0e636ed7"
   ],
   "deviations": [],
   "openQuestions": [
-    "CI is running at the merged head a2056893, which is the head GitHub now tests; the earlier run 41009980170 at e4d33f45 is the one that found this, and its ci-images job succeeded, so the package holds all 12 rows.",
-    "The pod carries no PyYAML, so every gate is run here through uv run --with pyyaml==6.0.2 --no-project -- bash .github/scripts/<script> (skills/legion-worker/references/tools.md). The hosted runners are unaffected.",
-    "The body's Not proven line had been rewritten back to 'not yet observed' between rounds; merged-root-waits is green on a hosted runner in run 40999737194, and the line is corrected again this round."
+    "The approval at cca71371 (review 5710927148) is of the code a2056893, which this merge does not change: the only lines that moved are the two citations above. The new head needs its own approval by SHA.",
+    "CI is running at 0c04d480, the head GitHub now tests. The five hosted e2e proofs were green at b072400f, whose daemon code this merge changes only by taking main's parent/child fields into merged_root_waits_live_test.go; that proof is the one to re-run if the reviewer wants it at this head.",
+    "The pod carries no PyYAML, so every gate is run here through uv run --with pyyaml==6.0.2 --no-project -- bash .github/scripts/<script>. The hosted runners are unaffected."
   ],
   "discoveredComplexity": [
-    "A gate that forbids a reference across the whole tree is a gate on the merge, not on either head: a branch and its base can each be green while the tree GitHub tests is red, and the branch is the only side that can fix it."
+    "A file of citations into other files conflicts whenever either side edits the cited file: the merge cannot be resolved by choosing a side, since both citations are stale at the merged head, and the resolution has to be read off the merged tree."
   ]
 }
