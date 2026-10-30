@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-631",
+  "completed": "2026-10-30T00:03:47Z",
+  "round": 19,
+  "headReviewed": "the handoff commit this file is pushed in (code head 1a5f08b1, merge of main de546ed2; earlier merge 5660ba42 of main dec4b715 onto retro's 03162de9)",
+  "decision": "approved",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "reason": "the controller's fast path for the re-merge (architect 2026-10-29 23:50Z)",
+  "fingerprint": {
+    "approvedDiff": "935720c8 against main c1f746a4",
+    "newDiff": "70886476 against main de546ed2",
+    "sameChange": "the same 17 files outside .legion/; byte-identical +/- lines in all but the two guides and two docs/solutions notes: the script, its two tests, package.json, bun.lock, ci.yaml, ci_job_reads.py, packages/pi-envoy/AGENTS.md and five notes",
+    "differences": [
+      "retro 99ae940d: two pr2422 notes cite ci.yaml in place of pr-and-main.yaml (the architect's named retro edit); checked true at the head: ci.yaml's test job holds the only two tsc steps (:1472, :1482) and concurrency group ci-<pull request number> with cancel-in-progress on pull_request (:62-64)",
+      "restructure.ts at 1a5f08b1 (the commit the PR body's recipe pins): migration constant 0141 with 0141_drop_broadcast_idempotency_keys on main, and two split anchors of the existing kind for main's longer cache warm-up item",
+      "both guides: restructure.ts --strict on main de546ed2's files exits 0 and is byte-identical to the head"
+    ]
+  },
+  "verified": [
+    "bunx biome check (script, tests, docs/solutions, .github), strict bunx tsc --noEmit: exit 0; bun test: 90 pass; checker exit 0 on both guides; check-private-names.sh, check-body-embed-limit.sh exit 0; check-ci-filters.sh 25 gates, 0 uncovered; bun install --frozen-lockfile exit 0",
+    "required checks at code head 1a5f08b1: none red (router run queued at 00:02Z)",
+    "main moved to edc99283 (#2523), touching neither guide; git merge-tree is clean and GitHub reports MERGEABLE"
+  ],
+  "keyFindings": [],
+  "notes": ["merge commit 1a5f08b1's subject says 'pinned at dbf4509b', but it changes restructure.ts itself; the PR body's recipe pins 1a5f08b1, which matches the head's script"],
+  "thermonuclear": "not run: the fast path, and no code of the pull request changed since approved code head e6f60222"
+}
