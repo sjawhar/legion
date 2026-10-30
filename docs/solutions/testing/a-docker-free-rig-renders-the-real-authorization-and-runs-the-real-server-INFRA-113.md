@@ -90,6 +90,8 @@ allows but its contract never meant it to reach, and read the side effect rather
 
 ## Where the rig lives
 
-Under `.legion/<issue>/`, which retro removes, so it never reaches the default branch and nothing
-of it survives but this page. If the shape is worth keeping for a repository, promote it to
-`scripts/` in its own issue; otherwise quote the skeleton in the learning, as above.
+Outside the workspace, under `$TMPDIR`, because jj snapshots every file in the workspace into the
+working-copy commit and nothing removes a stray file before the merge. Before sjawhar/legion#2354
+the rig lived under `.legion/<issue>/`, which the retro phase removed. Nothing of it survives but
+this page either way. If the shape is worth keeping for a repository, promote it to `scripts/` in
+its own issue; otherwise quote the skeleton in the learning, as above.

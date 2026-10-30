@@ -1,5 +1,5 @@
 ---
-title: "The private-names check reads each event's frozen body: fix the text, then push, and lint a handoff before its trailered commit"
+title: "The private-names check reads each event's frozen body: fix the text, then push"
 category: legion
 tags:
   - public-repository
@@ -16,7 +16,7 @@ related_issues:
   - "sjawhar/legion#2059"
 ---
 
-# The private-names check reads each event's frozen body: fix the text, then push, and lint a handoff before its trailered commit
+# The private-names check reads each event's frozen body: fix the text, then push
 
 Extends docs/solutions/legion/a-pod-name-copied-from-dispatch-into-a-pull-request-carries-the-deployments-project-key-and-fails-the-private-names-check-LEGION-164.md.
 
@@ -25,11 +25,13 @@ Extends docs/solutions/legion/a-pod-name-copied-from-dispatch-into-a-pull-reques
   `PR Title` on a body line goes green only on a *new* event with the corrected body — the next
   push, or a `pull_request` edit — never by `gh run rerun --failed`, which replays the old payload.
   Fix the body, then push; do not spend reruns on it.
-- A handoff push (only `.legion/`, `skip-checks: true`) starts no workflow, so nothing lints a
-  handoff's text until the next code push, which then fails `lint` on it. Run
-  `.github/scripts/check-private-names.sh .legion/<issue>/<phase>.json` over the file before its
-  commit, every role: a pod label copied from the cluster spells the deployment's project key in
-  lowercase, and the check reads that too.
+- Before sjawhar/legion#2354 a handoff push (only `.legion/`, `skip-checks: true`) started no
+  workflow, so nothing linted a handoff's text until the next code push, which then failed `lint`
+  on it, and every role ran `.github/scripts/check-private-names.sh` over its
+  `.legion/<issue>/<phase>.json` before its commit. Since then a handoff is a record on the
+  Dispatch issue, not a file in the repository, so the check does not read it. A pod label copied
+  from the cluster still spells the deployment's project key in lowercase, and the check reads
+  that in any file or pull request text you write.
 - Your own prose is the usual source, not pasted output: a `Not proven / risk` sentence that says
   whose merged roots the sweep touches first names the key. Write "the deployment's".
 
@@ -42,5 +44,5 @@ all seven red on `body:19: names the private deployment repository or its Dispat
 first event carrying the corrected body, the round-14 push (ab4eccee), was green (run
 39517494021). The same push would have failed `lint`: the tester's `.legion/LEGION-781/test.json:21`
 noted "the <project> daemon's" pod on a shared node, the key in lowercase as the pod label spells
-it, never linted because every handoff push is trailered; one word redacted to "another
+it, never linted because every handoff push was trailered; one word redacted to "another
 project's" before the push.

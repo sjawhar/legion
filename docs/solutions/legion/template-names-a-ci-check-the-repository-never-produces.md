@@ -107,10 +107,11 @@ outright: "There is no planner phase for this issue and no `.legion/plan.json`: 
 table already names the exact files and lines, so the architect skipped the plan handoff
 deliberately. Work from the spec and this task; do not wait for or ask about a plan handoff."
 
-That sentence is what made the skip safe. `packages/pi-envoy/roles/implementer.md` tells the
-implementer to "read the plan handoff's `requiredSkills` for your role" and to "read the plan and
-existing `.legion/` handoffs first"; the worker skill lists `plan.json` second in the handoff
-order. A worker that finds no `plan.json` and no statement about it has a missing predecessor,
+That sentence is what made the skip safe. Before sjawhar/legion#2354 the implementer role prompt
+told the implementer to "read the plan handoff's `requiredSkills` for your role" and to "read the
+plan and existing `.legion/` handoffs first", and the worker skill listed `plan.json` second in
+the handoff order. A worker reads a predecessor's handoff with `dispatch handoff-read` now. A
+worker that finds no plan handoff and no statement about it has a missing predecessor,
 and the correct response to a missing predecessor is to stop and ask the architect. The architect
 who skips a phase owns telling each worker it spawns (implementer, tester, reviewer) that the
 phase was skipped and what stands in for its output — here, the spec's Design table.
@@ -126,16 +127,18 @@ commit that stayed local. On
 `legion/LEGION-38@origin (behind by 2 commits)`. That is the expected state, not drift: do not
 abandon or rewrite it.
 
-The cleanup commit is made on top of it in the ordinary way — `rm -r .legion`, then
+The cleanup commit was made on top of it in the ordinary way — `rm -r .legion`, then
 `jj split -m "chore(legion): remove phase handoffs before merge" .legion`, then the push
 procedure in `skills/legion-worker/SKILL.md` (bookmark set with `-r @- --allow-backwards` after its
-ancestry check, then push). The push advances the remote two commits
-(`move forward from 614eefeef587 to d4970b559f9c`), and the deletion commit's own diff still lists
+ancestry check, then push). The push advanced the remote two commits
+(`move forward from 614eefeef587 to d4970b559f9c`), and the deletion commit's own diff listed
 only `.legion/implement.json`, `.legion/test.json`, `.legion/review.json` — the reviewer's commit
-is a parent of the deletion, not part of it. The reviewer then confirms the approved head against
-the reviewed one with `compare/<reviewed>...<cleanup>`, which lists only `implement.json` and
-`test.json` because `review.json` is added and removed inside the range, and
-`contents/.legion?ref=<cleanup>` returns 404.
+was a parent of the deletion, not part of it. The reviewer then confirmed the approved head
+against the reviewed one with `compare/<reviewed>...<cleanup>`, which listed only
+`implement.json` and `test.json` because `review.json` was added and removed inside the range,
+and `contents/.legion?ref=<cleanup>` returned 404. Since sjawhar/legion#2354 a handoff is a
+record on the Dispatch issue, so there is no handoff commit and no cleanup commit, and the
+reviewer approves the code head it reviewed.
 
 One attribution wrinkle to read correctly: `jj split` keeps the working-copy commit's author and
 sets only the committer to the current identity, and the working-copy commit was created by

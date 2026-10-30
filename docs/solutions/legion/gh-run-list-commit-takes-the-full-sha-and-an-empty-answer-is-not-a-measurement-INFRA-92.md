@@ -24,12 +24,13 @@ two of them nearly cost a force-push on a clean branch.
   the id first — `jj log -r <short> --no-graph -T commit_id` — and never extend a short commit id
   into a full sha by hand.
 - **A check run belongs to a commit, not to a pull request.** `gh pr checks` reports the checks of
-  the pull request's **head**. A branch whose head is a handoff-only commit — which carries
-  `skip-checks: true` by design and starts no workflow — shows only the checks the pull-request
-  event itself produced, while the code beneath it is being checked at its own commit. Read
-  `gh api repos/{owner}/{repo}/commits/<code-commit-sha>/check-runs` before concluding a head is
-  unchecked. That shape is the designed one: the daemon carries the code head's verdict to the
-  handoff head.
+  the pull request's **head**. Before sjawhar/legion#2354 a branch head could be a handoff-only
+  commit, which carried `skip-checks: true` by design and started no workflow. `gh pr checks` then
+  showed only the checks the pull-request event itself produced, while the code beneath it was
+  checked at its own commit, and the daemon carried the code head's verdict to the handoff head.
+  A handoff is a record on the Dispatch issue now, so every pushed head is a code head and runs
+  CI. Read `gh api repos/{owner}/{repo}/commits/<commit-sha>/check-runs` at the commit you judge
+  before concluding a head is unchecked.
 - **An empty answer is not a measurement until the query is known to be well formed.** A query
   that returns nothing for a malformed argument and nothing for a true absence cannot tell you
   which you have. Give it a case whose answer you already know — a commit you are certain has
