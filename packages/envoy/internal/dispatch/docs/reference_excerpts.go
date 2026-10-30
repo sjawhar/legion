@@ -91,15 +91,11 @@ func (s *Service) indexUnrenderedVersion(ctx context.Context, tx pgx.Tx, artifac
 // located in its version, stores excerpts on them (nil: marks them owed), and counts the targets
 // moved, which its blocks and their mentions moved, as well (refs.ReplaceDocumentCounted).
 func replaceVersionRefs(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, located []text.Located, moved []refs.Target, excerpts map[refs.Target]model.GraphExcerpt) (model.ReferenceChanges, error) {
-	found := make([]text.Ref, len(located))
-	for i, mention := range located {
-		found[i] = mention.Ref
-	}
-	return refs.ReplaceDocumentCounted(ctx, tx, artifactID, version, versionAt, found, moved, excerpts)
+	return refs.ReplaceDocumentCounted(ctx, tx, artifactID, version, versionAt, text.Refs(located), moved, excerpts)
 }
 
 // ExcerptsOwedChannel is the Postgres notification channel every artifact mention left owed an
-// excerpt announces itself on at commit (refs_excerpts_owed_notify, migration 0144): the channel
+// excerpt announces itself on at commit (refs_excerpts_owed_notify, migration 0147): the channel
 // whose pglisten.Hub wake the server passes to RunReferenceExcerptReconciliation.
 const ExcerptsOwedChannel = "dispatch_excerpts_owed"
 

@@ -1,9 +1,9 @@
--- 0145_suggestion_outcome_cursor.up.sql
+-- 0148_suggestion_outcome_cursor.up.sql
 -- How far the suggestion outcome sweep (api.RunSuggestionOutcomeSweep) has read the event log: one
 -- row, whose event_id is the highest events.id a pass has judged the pending write_suggestions
 -- against. A pass reads only the events after it, and judges only the pending suggestions those
 -- events' issues and documents name plus the suggestions recorded since the last pass
--- (write_suggestions.swept, migration 0146), so its work follows what changed rather than how
+-- (write_suggestions.swept, migration 0149), so its work follows what changed rather than how
 -- many suggestions are still pending. The pass holds this row `for update` in its transaction,
 -- which is also what keeps two passes from judging one page twice.
 --
