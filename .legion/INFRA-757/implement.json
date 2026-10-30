@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-757",
+  "completed": "2026-10-30T13:35:00Z",
+  "proof": [
+    {
+      "criterion": "The head no longer conflicts with main, and the branch's own change is unchanged except where the merge and main's drift required it.",
+      "surface": "GitHub's own mergeability for pull request 2517, and the unchanged-diff fingerprint at each head.",
+      "command": "jj diff --from 'fork_point(main@origin | <head>)' --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, at 19b7716e and at 89ce0fbf; gh pr view 2517 -R sjawhar/legion --json mergeStateStatus,mergeable",
+      "observed": "a7d766555fecc063a5954408585ed51ffe4a924c1731e5c8043cfc7229feed71 -> 2cd180755f5e8a366cf575911261cde3b922021e5d8f9cdc736fc039267c36cf, changed, for the two reasons the pull request comment names: the merged fixture citation list of the envoy_go filter, and one pattern added to listener_server_change. GitHub reported DIRTY before and MERGEABLE after.",
+      "headSha": "89ce0fbf6381",
+      "negativeControl": "The merge was made with jj new against main@origin, never a rebase, so the branch's own commits are untouched and the push was a fast-forward; jj reported exactly one conflicted path, .github/workflows/ci.yaml, and the other four files the merge touched were read after it to confirm they keep both sides."
+    },
+    {
+      "criterion": "ci-filters is green at the merged head, which it was not when the merge was made.",
+      "surface": "The repository's own drift check and its test suite, run offline in this pod.",
+      "command": "cd $LEGION_WORKSPACE && PATH=\"$TMPDIR/venv/bin:$PATH\" .github/scripts/check-ci-filters.sh, and the same with check-ci-filters.test.sh",
+      "observed": "At the merge, before the fix: '::error file=packages/envoy/internal/dispatch/api/testdata/decision-block-inserts.json::listener-server-change reads ... which its filter listener_server_change does not match, so a change to it skips the job' and '1 CI filter problem(s)'. After naming packages/envoy/internal/dispatch/api/testdata/** in that filter: 'every ci.yaml filter matches every file its job reads (27 gates)', 2625 files and 0 uncovered for ci_filters, and the test suite 134 of 134.",
+      "headSha": "89ce0fbf6381",
+      "negativeControl": "The failure itself is the control, and it is main's rather than this branch's: the file and the test that reads it (write_advice_test.go:504) both come from main, and the filter on main names only packages/envoy/internal/dispatch/api/*, so main carries the same gap."
+    },
+    {
+      "criterion": "The race lane's own packages pass at the merged head, after main moved 170 files.",
+      "surface": "This pod's Go test runs of exactly the packages the lane's four jobs run, against its rootless PostgreSQL 17 and the in-process NATS.",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=... go test ./internal/kvwatch/... ./internal/store/ ./internal/session/ -count=1 -timeout 30m, then ./cmd/listener/ ./internal/dispatch/delivery/... ./internal/bus/ -count=1 -timeout 60m",
+      "observed": "ok internal/kvwatch 63.728s, ok internal/store 31.973s, ok internal/session 10.561s, ok cmd/listener 450.292s, ok internal/dispatch/delivery 117.711s, ok internal/dispatch/delivery/measures 0.031s, ok internal/bus 322.183s. go build ./... and go vet over kvwatch, the store and the listener are clean.",
+      "headSha": "89ce0fbf6381",
+      "negativeControl": "cmd/listener carries this change's two regression tests, TestHealthzStillReportsALostDurableWhileTheRoleClaimViewIsIncomplete and TestHealthzReportsARoleClaimViewThatCompletesNoScanDegraded, each of which fails against the handler as it was before this change; their passing here is what says the merge did not undo the change."
+    }
+  ],
+  "filesChanged": [
+    ".github/workflows/ci.yaml: the merged fixture citation list of the envoy_go filter, and packages/envoy/internal/dispatch/api/testdata/** named in listener_server_change.",
+    "Everything else at this head is main's, brought in by the merge, or this branch's own work unchanged."
+  ],
+  "trickyParts": [
+    "The merge's one conflict was a comment, not code: two sides each edited the envoy_go filter's citation list, main adding a citation and this branch correcting one. Both citations were read at their own lines in the merged tree before the resolution was written.",
+    "check-ci-filters.sh failed at the merge for a gap that is main's: listener-server-change reads packages/envoy/internal/dispatch/api/testdata/decision-block-inserts.json and its filter named only api/*. Main carries the same gap, so a change to that testdata skips the job there too."
+  ],
+  "deviations": [
+    "This round is a forward merge on GitHub's CONFLICTING report, plus the one filter pattern that gap required. No behaviour of the change moved, and the pull request comment carries both fingerprints and names each reason the diff fingerprint changed."
+  ],
+  "openQuestions": [
+    "Main's listener_server_change filter still misses packages/envoy/internal/dispatch/api/testdata/** until this pull request merges. Any other branch that touches that testdata before then skips the listener-server-change job."
+  ]
+}
