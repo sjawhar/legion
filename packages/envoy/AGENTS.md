@@ -2580,10 +2580,34 @@ fields it names: the row holds the question as plain text, so rebuilding the who
 flatten an untouched question's formatting and links and mint fresh ids for the paragraphs a
 comment anchors into. Naming `urgency` or `multiple` alone therefore goes through the attribute
 path and leaves every child node, mark and inner block id exactly as it was; naming `question`
-or `options` replaces that part with what the markdown pipeline parses, so it carries the same
-list attributes any other document write gives it, and anchors inside the text actually replaced
-are affected as they are by any document edit. A field named but unchanged is not rewritten, so
-an idempotent retry of the whole ask writes nothing, versions nothing and keeps every anchor.
+replaces the question's paragraphs with what the markdown pipeline parses, so they carry the
+attributes any other document write gives them, and anchors inside the text actually replaced are
+affected as they are by any document edit. Naming `options` writes only the lines it sends: each
+sent option is paired with the list item already holding it, first the unused item that says
+exactly what the option says, label and description, then the first unused item holding its
+label, so an option the edit does not change keeps its own node - its line as it stands, its
+block id, its marks and the sub-list, second paragraph or link a person wrote under it - and
+one whose description it changes keeps every block under its line, which is rewritten in place
+(`editedOptionList` in `docs/ask_option_merge.go`). An item no sent option matches is dropped only
+where it holds nothing but its plain line, and a line is rewritten only where it writes nothing
+but its text; otherwise the whole edit is refused `400 ASK_BLOCK_TEXT` with field `options`,
+nothing written, quoting that item or that line whole and naming the `dispatch doc-edit` that
+removes or rewrites it, since the ask row shows an option's label and description alone and the
+sender cannot see what dropping it deletes - which is what a removal, a rename and an edit
+sending no option at all come to - or what rewriting a line holding a link's address, bold,
+code or an image deletes. What those refusals weigh is what the markdown writes, never what the
+nodes hold, so a mark no reader sees -
+the editor's own on every character a person types - is nothing to lose. Settlement's restore of a
+decided ask's recorded wording goes through the same merge with no caller to answer a refusal
+(`writeDecidedWording`), so it drops an item no decided option is paired with, whatever that item
+holds, and rewrites a line this route would refuse: a block left disagreeing with the row of the
+ask it was decided on would disagree for good. The items the caller sends - a new option's item
+whole, a rewritten line alone - are parsed on the write's own budget beside the question, and
+the merged list is rendered and parsed back as any other document write is, on a budget of its
+own, since what it carries under an option is the document's text and not the caller's, and the list's
+and the kept items' own block ids and nodes are put back afterwards. A field named but unchanged
+is not rewritten, so an idempotent retry of the whole ask writes nothing, versions nothing and
+keeps every anchor.
 Text the block cannot carry unchanged is refused `400 ASK_BLOCK_TEXT` naming the field, with
 nothing written. The rule is a round trip through settlement's own parser and the canonical
 markdown a version records, never a list of forbidden characters: whatever the block cannot carry
@@ -2604,13 +2628,39 @@ after them, then edit the ask, which the route then applies as for any valid ask
 has no id or an id repeats in the document (before settlement stamps ids), it names no delete and
 says to retry once the document settles. The one edit it names also deletes, by id, the extra
 blocks of every decision nested in the blocks it keeps that breaks its own rule, so one doc-edit
-repairs them together; before naming it, the refusal checks that, with those deletes applied, the
+repairs them together, and a nested decision the rule leaves nothing of - one no paragraph of
+which holds text - is named whole, by its own block id, rather than its children, since deleting
+its children would leave a block no parse reads as a decision; before naming it, the refusal
+checks that, with those deletes applied, the
 ask, every nested decision losing a block and every decision holding the ask read strictly, as
-doc-edit requires (`planAskRepair`). When no such edit exists - a delete here would leave a
+doc-edit requires (`planAskRepair`). A delete list naming a decision block carries one more
+clause, since a document edit may not take a decision out of the document while its ask is open
+(`refuseRemovingOpenDecisionBlocks` in `packages/envoy-client`): that ask is answered or resolved,
+or the decision repaired by hand, before the delete. A decision that never held a question never
+had a row, so the common case passes that guard untouched. When no such edit exists - a delete
+here would leave a
 decision holding this one unreadable, or a decision needs words written rather than blocks
 deleted - it names no delete and no ask edit of another decision, and says the decision is
-repaired in the document editor. An ask with no paragraph holding text is refused earlier, as having an empty
-question. Tests follow the refusal for every body of up to five blocks drawn from paragraphs,
+repaired in the document editor. An ask no paragraph of which holds text is weighed on that
+question instead of its content rule: no document edit repairs it, since an insert anchored on one of
+its blocks lands beside the decision rather than in it (`pmdoc.BlockBoundary` reads the
+document-level block holding the anchor) and a delete may not leave a decision asking nothing, so
+an ask edit carrying a question is what repairs it. Such an edit is written into the block
+whatever its content rule says, the question's paragraphs followed by every bullet list the block
+holds, each the node the document already holds (`askBlockChildren`); every paragraph it
+replaces holds no text, and one holding what is no text - an image, a link whose text is empty -
+is refused instead, quoted, naming the two places the question is written without losing it: an
+upload of the document as a new version, which carries such a block and is the path an agent has,
+and the document editor, where a person writes it. A repair that leaves the block holding more
+than one list says so (`docs.AskBlockText.SeveralOptionLists`), since what that block parses back
+to joins the options of every one of its lists, the reading a row must not take: the route writes
+the question, `multiple` and `urgency` into the row and keeps the options the row holds, which
+settlement leaves alone while the block reads as no decision (`editAsk`). An edit of such a block
+carrying no question is refused `400 ASK_BLOCK_TEXT` with field `block`, naming that step, and one naming
+`options` on a block holding more than one list is refused with field `options`, since no sent
+option can say which list it is in. A decision that still breaks its content rule once it asks
+something is refused as above, and the document edit that refusal names then applies.
+Tests follow the refusal for every body of up to five blocks drawn from paragraphs,
 empty paragraphs, lists and lists holding a nested list, and for every body of up to four that
 adds an option holding a decision of up to three such blocks. Before, an edit naming only `urgency` or `multiple` wrote the
 options joined across both lists to the row.
@@ -2628,7 +2678,9 @@ breaks its content rule, a second bullet list or a paragraph after its list, whi
 can leave and the browser editor keeps - carries the server-owned `invalid` attribute naming the
 reason and emits `block.invalid`. An open ask's indexed row stays open and unchanged; an answered
 or resolved ask keeps its decided row and answer. Repairing its body clears `invalid` before
-updating the ask row, and writes a decided ask's decided wording back into the block.
+updating the ask row, and writes a decided ask's decided wording back into the block. An emptied
+question is repaired by an ask edit carrying one, the route's own path above; every other reading
+failure is repaired where a person writes it, or by the document edit the refusal names.
 Markdown that becomes a whole document - a spec at issue creation, an uploaded document or version -
 is refused with `400 INVALID_ASK_BLOCK` when an ask's body breaks its content rule,
 `paragraph+ bullet_list?` - one or more paragraphs, then at most one bullet list, last
