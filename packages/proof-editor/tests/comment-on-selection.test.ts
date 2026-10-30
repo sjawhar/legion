@@ -39,7 +39,7 @@ test("commentOnSelection marks the selection as a comment and hands it to onMark
           from: 5,
           kind: "comment",
           markId: expect.any(String),
-          placement: { blockId: expect.any(String), prefix: "The ", suffix: " fox" },
+          placement: { blockId: expect.any(String), prefix: "The ", readings: 1, suffix: " fox" },
           quote: "quick brown",
           to: 16,
         },
@@ -99,7 +99,7 @@ test("the selection bar's Comment button takes the same path: a mark, then onMar
           from: 5,
           kind: "comment",
           markId: expect.any(String),
-          placement: { blockId: expect.any(String), prefix: "The ", suffix: " fox" },
+          placement: { blockId: expect.any(String), prefix: "The ", readings: 1, suffix: " fox" },
           quote: "quick brown",
           to: 16,
         },
@@ -142,6 +142,7 @@ test("the selection bar records the words' surroundings, capped, and shorter at 
           placement: {
             blockId,
             prefix: before.slice(-QUOTE_CONTEXT_CHARS),
+            readings: 1,
             suffix: after.slice(0, QUOTE_CONTEXT_CHARS),
           },
           quote,
@@ -174,15 +175,60 @@ test("the selection bar records the words' surroundings, capped, and shorter at 
         {
           blockId: expect.any(String),
           prefix: "",
+          readings: 2,
           suffix: edged.slice(quote.length, quote.length + QUOTE_CONTEXT_CHARS),
         },
         {
           blockId: expect.any(String),
           prefix: edged.slice(0, edged.length - quote.length).slice(-QUOTE_CONTEXT_CHARS),
+          readings: 2,
           suffix: "",
         },
       ]);
     },
     { onMarkAction: (action) => void edges.push(action) }
+  );
+});
+
+/** The count the recovery reads the surroundings against: a block that held the words once when
+ *  the reader selected them is their passage however its sentence is rewritten afterwards, and a
+ *  block that held them more than once is not, so the bar has to report which it was
+ *  (`remarkRecordMark`). */
+test("the selection bar records how many readings of the words the block held", async () => {
+  const once: MarkAction[] = [];
+  const quote = "the lazy dog";
+  await withMarksEditor(
+    `The quick brown fox jumps over ${quote}.`,
+    ({ handle, view }) => {
+      const at = 1 + `The quick brown fox jumps over `.length;
+      select(view, at, at + quote.length);
+      expect(handle.commentOnSelection()).toBe(true);
+      expect(
+        once.map((action) => (action.kind === "comment" ? action.placement?.readings : null))
+      ).toEqual([1]);
+    },
+    { onMarkAction: (action) => void once.push(action) }
+  );
+
+  // The same words again in the same block, which the reader's own selection is now one of: the
+  // paragraph of the defect this count was added for.
+  const twice: MarkAction[] = [];
+  const paragraph = `Alpha ${quote}. Beta ${quote}.`;
+  await withMarksEditor(
+    paragraph,
+    ({ handle, view }) => {
+      const at = paragraph.lastIndexOf(quote) + 1;
+      select(view, at, at + quote.length);
+      expect(handle.commentOnSelection()).toBe(true);
+      expect(twice.map((action) => (action.kind === "comment" ? action.placement : null))).toEqual([
+        {
+          blockId: expect.any(String),
+          prefix: `Alpha ${quote}. Beta `,
+          readings: 2,
+          suffix: ".",
+        },
+      ]);
+    },
+    { onMarkAction: (action) => void twice.push(action) }
   );
 });

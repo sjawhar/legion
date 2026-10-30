@@ -395,7 +395,7 @@ const MARK_ANCHOR = {
   // The words the editor read on each side of the selected ones, in the block it marked them in:
   // what it reported when the bar wrote the mark, and all the margin has to find them by once
   // the mark is gone.
-  placement: { blockId: "b-1", prefix: "The quick brown fox ", suffix: "." },
+  placement: { blockId: "b-1", prefix: "The quick brown fox ", readings: 1, suffix: "." },
   quote: "jumps over the lazy dog",
 };
 

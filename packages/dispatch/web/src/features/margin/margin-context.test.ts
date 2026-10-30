@@ -5,7 +5,12 @@ import type { RemarkRefusal } from "../doc/editor";
 import { REANCHOR_REFUSALS } from "./margin-context";
 
 const KINDS: readonly ComposerKind[] = ["ask", "comment", "suggestion"];
-const REASONS: readonly RemarkRefusal["refused"][] = ["gone", "unmarkable", "unplaceable"];
+const REASONS: readonly RemarkRefusal["refused"][] = [
+  "gone",
+  "unmarkable",
+  "unplaceable",
+  "unsurrounded",
+];
 
 /** The sentence a comment whose words are gone has always read, which the document rows measure
  *  (`packages/dispatch/e2e/compose-wait.e2e.ts`): every other refusal is built around it. */
@@ -25,6 +30,8 @@ test("every re-anchor refusal names what the reader is writing, in its own word"
     "The text you selected is still in the document, but no longer where you selected it, so " +
       "this ask cannot be attached on its own. Your draft is kept — select the text again to " +
       "attach it.",
+    "The text around the words you selected changed, so nothing is left to say which reading " +
+      "of them this ask is about. Your draft is kept — select the text again to attach it.",
   ]);
   expect(REASONS.map((reason) => REANCHOR_REFUSALS[reason]("suggestion"))).toEqual([
     "The text you selected was changed or deleted, so this suggestion has nothing to attach " +
@@ -34,6 +41,9 @@ test("every re-anchor refusal names what the reader is writing, in its own word"
     "The text you selected is still in the document, but no longer where you selected it, so " +
       "this suggestion cannot be attached on its own. Your draft is kept — select the text " +
       "again to attach it.",
+    "The text around the words you selected changed, so nothing is left to say which reading " +
+      "of them this suggestion is about. Your draft is kept — select the text again to attach " +
+      "it.",
   ]);
   expect(REASONS.map((reason) => REANCHOR_REFUSALS[reason]("comment"))).toEqual([
     "The text you selected was changed or deleted, so this comment has nothing to attach to. " +
@@ -43,6 +53,8 @@ test("every re-anchor refusal names what the reader is writing, in its own word"
     "The text you selected is still in the document, but no longer where you selected it, so " +
       "this comment cannot be attached on its own. Your draft is kept — select the text again " +
       "to attach it.",
+    "The text around the words you selected changed, so nothing is left to say which reading " +
+      "of them this comment is about. Your draft is kept — select the text again to attach it.",
   ]);
 });
 
@@ -85,12 +97,30 @@ test("only the refusal for words that read nowhere says they were changed or del
     expect({ kind, says: REANCHOR_REFUSALS.gone(kind).includes("was changed or deleted") }).toEqual(
       { kind, says: true }
     );
-    for (const reason of ["unmarkable", "unplaceable"] as const) {
+    for (const reason of ["unmarkable", "unplaceable", "unsurrounded"] as const) {
       expect({
         kind,
         reason,
         says: REANCHOR_REFUSALS[reason](kind).includes("changed or deleted"),
       }).toEqual({ kind, reason, says: false });
     }
+  }
+});
+
+/** The refusal for a block that still reads the words while nothing around them says which
+ *  reading was the reader's: the word in front of their own reading was edited, or their own
+ *  sentence was deleted and the reading left is one they never selected
+ *  (`packages/dispatch/e2e/compose-wait.e2e.ts`). Both are the text around their words changing,
+ *  and neither is the words being taken out of the document, so it must say neither that nor
+ *  that the words moved. */
+test("the refusal for changed surroundings tells the reader what did change, and what did not", () => {
+  for (const kind of KINDS) {
+    const text = REANCHOR_REFUSALS.unsurrounded(kind);
+    expect({
+      kind,
+      moved: text.includes("no longer where you selected it"),
+      says: text.includes("The text around the words you selected changed"),
+      which: text.includes("which reading of them"),
+    }).toEqual({ kind, moved: false, says: true, which: true });
   }
 });

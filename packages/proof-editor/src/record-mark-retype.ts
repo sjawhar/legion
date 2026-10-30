@@ -21,20 +21,24 @@
  * time, so the mark is gone and the send the server refuses (`409 ANCHOR_MISSING`) has nothing to
  * anchor to. The margin hands back what the composer kept of the selection: the quote its own
  * request carries, and the placement the bar reported for it (`RecordMarkPlacement` - the id of
- * the textblock those words sat in, and the text the editor read on each side of them). Quote
- * and surroundings together are the ordinary three-part text-quote selector, and a reading of
- * the quote is the reader's own only where the text before it ends with the remembered prefix
- * and the text after it starts with the remembered suffix.
+ * the textblock those words sat in, the text the editor read on each side of them, and how many
+ * readings of the quote that block held then). Quote and surroundings together are the ordinary
+ * three-part text-quote selector, and a reading of the quote is the reader's own only where the
+ * text before it ends with the remembered prefix and the text after it starts with the
+ * remembered suffix.
  *
  * The fresh mark goes over the first of these that holds: the mark's own range, while the
  * document still has it; the tracked range the plugin below keeps, when its text reads as that
  * quote; inside the remembered block, while the document still holds it and it still reads the
  * quote, the one reading there whose surroundings match, or its only reading of the quote when
- * none of them match (the block the reader selected in, holding their words once, is their
- * passage even when the words around them changed); and otherwise, the block being gone or
- * reading the quote nowhere, the one reading in the whole document whose surroundings match.
- * Nothing is taken for the reader's passage on the strength of the words alone: another
- * paragraph that reads them among different words is a different passage.
+ * none of them match and the block held the quote once when the reader selected it (a block that
+ * read their words once then and reads them once now is their passage however the sentence
+ * around them was rewritten, there having been no other reading there to confuse it with, while
+ * a block that read them twice may have been left the reading they never selected); and
+ * otherwise, the block being gone or reading the quote nowhere, the one reading in the whole
+ * document whose surroundings match. Nothing is taken for the reader's passage on the strength
+ * of the words alone: another paragraph that reads them among different words is a different
+ * passage.
  *
  * Only the first two steps ask this editor's state for anything, and nothing of it survives
  * another writer's change: y-prosemirror applies a remote update by rebuilding the document
@@ -43,12 +47,13 @@
  * through that, because the composer keeps it outside the editor and the editor resolves it by
  * reading the document alone - no browser-versus-server counting, and no index that another
  * writer's reading of the same words in front of the reader's silently moves. Where no reading
- * can be chosen - more than one answers the surroundings, or none does and the block holds the
+ * can be chosen - more than one answers the surroundings, or none does and the block held the
  * words more than once - the re-mark is refused rather than anchored to a passage the reader
  * never selected, which no refusal would ever tell them about. The refusal says which case it
- * was: the words read nowhere (`"gone"`), or they are still in the document and no reading of
- * them is the reader's own to take (`"unplaceable"`), which the margin puts to the reader in
- * different words.
+ * was: the words read nowhere (`"gone"`), their own block still reads them but no reading there
+ * is surrounded as theirs was (`"unsurrounded"`), or they read elsewhere in the document and no
+ * reading of them is the reader's own to take (`"unplaceable"`), which the margin puts to the
+ * reader in different words.
  *
  * `removeRecordMark` is the precise removal both this module and the handle's `removeMark` use:
  * span by span, by id, whatever the mark's type. Upstream's `deleteMark` is not it - it cannot
@@ -95,12 +100,14 @@ export type RetypeOutcome = RetypedMark | RetypeRefusal;
 
 /** Why a re-mark changed nothing: the new kind cannot be written over the text, as a retype's
  *  `"unmarkable"` says; the words the mark was written over read nowhere in the document any
- *  more (`"gone"`); or they are still in the document and no reading of them can be taken for
- *  the reader's own (`"unplaceable"`). The last two are not the same thing to say to a reader,
- *  so they are not the same answer. A re-mark never answers `"missing"`: a mark the document has
- *  lost is the case it is for. */
+ *  more (`"gone"`); the block the reader selected in still reads them, but no reading there is
+ *  surrounded as theirs was, so the text around their words changed and nothing says which
+ *  reading was theirs (`"unsurrounded"`); or they read somewhere else in the document and no
+ *  reading of them can be taken for the reader's own (`"unplaceable"`). None of the three is the
+ *  same thing to say to a reader, so none of them is the same answer. A re-mark never answers
+ *  `"missing"`: a mark the document has lost is the case it is for. */
 export interface RemarkRefusal {
-  readonly refused: "gone" | "unmarkable" | "unplaceable";
+  readonly refused: "gone" | "unmarkable" | "unplaceable" | "unsurrounded";
 }
 
 export type RemarkOutcome = RetypedMark | RemarkRefusal;
@@ -409,12 +416,21 @@ function blockWithId(
   return found;
 }
 
+/** How many readings of `quote` the block text `text` holds, counted the way `readingsInBlock`
+ *  finds them, so a placement's count and a later scan of the same block agree. */
+function readingCount(text: string, quote: string): number {
+  let count = 0;
+  for (let at = text.indexOf(quote); at !== -1; at = text.indexOf(quote, at + 1)) count += 1;
+  return count;
+}
+
 /** Where a mark written over `range` sits, for the composer that owns it to remember: the id of
- *  the textblock that holds it, and the text that block reads on each side of `quote`, at most
- *  `QUOTE_CONTEXT_CHARS` of it and shorter where the block begins or ends nearer than that. Null
- *  when there is nothing to remember - the range is not inside a textblock, or that block's text
- *  does not read `quote` there - which leaves a later re-mark the quote alone to go by. A block
- *  with no id is remembered all the same: its surroundings still say which passage this is. */
+ *  the textblock that holds it, the text that block reads on each side of `quote`, at most
+ *  `QUOTE_CONTEXT_CHARS` of it and shorter where the block begins or ends nearer than that, and
+ *  how many readings of `quote` that block holds. Null when there is nothing to remember - the
+ *  range is not inside a textblock, or that block's text does not read `quote` there - which
+ *  leaves a later re-mark the quote alone to go by. A block with no id is remembered all the
+ *  same: its surroundings still say which passage this is. */
 export function placementOf(
   doc: ProseMirrorNode,
   range: MarkRange,
@@ -430,6 +446,7 @@ export function placementOf(
   return {
     blockId: blockIdOf($start.parent),
     prefix: text.slice(Math.max(0, offset - QUOTE_CONTEXT_CHARS), offset),
+    readings: readingCount(text, quote),
     suffix: text.slice(after, after + QUOTE_CONTEXT_CHARS),
   };
 }
@@ -448,14 +465,15 @@ function trackedRange(state: EditorState, markId: string, quote: string): MarkRa
   return to > from && state.doc.textBetween(from, to, "\n", "\n") === quote ? { from, to } : null;
 }
 
-/** Where the fresh mark goes, by the order this module's banner gives; null when no reading of
- *  `quote` can be taken for the one the composer was opened over. */
+/** Where the fresh mark goes, by the order this module's banner gives, or the refusal to answer
+ *  where no reading of `quote` can be taken for the one the composer was opened over: the step
+ *  that refuses names it, because only it knows which case the document is in. */
 function remarkRange(
   state: EditorState,
   markId: string,
   quote: string,
   placement: RecordMarkPlacement | null
-): MarkRange | null {
+): MarkRange | RemarkRefusal {
   const held = findRecordMark(state.doc, markId);
   if (held !== null) return held.range;
   const tracked = trackedRange(state, markId, quote);
@@ -470,18 +488,26 @@ function remarkRange(
     // theirs was is theirs; two are a refusal, since another writer's reading of the same words
     // among the same words is not one this editor may choose between.
     const surrounded = readingsInBlock(block.block, block.base, quote, 2, surroundings);
-    if (surrounded.length > 0) return surrounded.length === 1 ? surrounded[0] : null;
+    if (surrounded.length === 1) return surrounded[0];
+    if (surrounded.length > 1) return { refused: "unplaceable" };
     // Nothing there is surrounded as theirs was: another writer rewrote the words around them.
-    // The block they selected in, holding their words once, is their passage all the same;
-    // holding them more than once, it cannot say which of those readings was theirs.
+    // A block that held those words once and holds them once now is the same passage however
+    // the sentence around them was rewritten - there was never another reading there to confuse
+    // it with. A block that held them more than once is not: the reading left may be the one
+    // the reader never selected, which is what deleting their own sentence leaves behind.
     const readings = readingsInBlock(block.block, block.base, quote, 2);
-    if (readings.length > 0) return readings.length === 1 ? readings[0] : null;
+    if (readings.length === 1 && placement?.readings === 1) return readings[0];
+    if (readings.length > 0) return { refused: "unsurrounded" };
   }
   // The block is gone, or reads those words nowhere: the one reading in the whole document
   // surrounded as the reader's was. Words alone are not enough - a reading among other words is
   // another passage, and a record moved there is something no refusal would ever tell them about.
   const readings = readingsInDoc(state.doc, quote, 2, surroundings);
-  return readings.length === 1 ? readings[0] : null;
+  if (readings.length === 1) return readings[0];
+  // Only the document can say which of the two this is, and the margin needs to know: telling the
+  // reader the words were changed or deleted while they are plainly on the page is false.
+  const onThePage = readings.length > 0 || readingsInDoc(state.doc, quote, 1).length > 0;
+  return { refused: onThePage ? "unplaceable" : "gone" };
 }
 
 /**
@@ -491,9 +517,11 @@ function remarkRange(
  * mark's own range, while the document still holds it; the tracked range, when its text reads as
  * `quote`; inside the block `placement` names, while that block still reads the quote, the one
  * reading there surrounded as `placement` remembers, or its only reading of the quote when none
- * of them is; and otherwise the one reading in the whole document so surrounded. Anything else
- * is a refusal: readings the editor cannot tell apart, and readings among words the reader never
- * read beside theirs, are passages it may not choose for them.
+ * of them is and that block held the quote once when the reader selected it; and otherwise the
+ * one reading in the whole document so surrounded. Anything else is a refusal: readings the
+ * editor cannot tell apart, readings in a block that held the words more than once and no longer
+ * surrounds any of them as the reader's, and readings among words the reader never read beside
+ * theirs, are passages it may not choose for them.
  *
  * The id is always a fresh one. The server refuses a send because it cannot see the mark, and a
  * mark it has dropped whose local copy has not caught up would be refused again under that id, so
@@ -508,12 +536,7 @@ export function remarkRecordMark(
   placement: RecordMarkPlacement | null
 ): RemarkOutcome {
   const range = remarkRange(view.state, markId, quote, placement);
-  if (range === null) {
-    // Only the document can say which refusal this is, and the margin needs to know: telling the
-    // reader the words were changed or deleted while they are plainly on the page is false.
-    const onThePage = readingsInDoc(view.state.doc, quote, 1).length > 0;
-    return { refused: onThePage ? "unplaceable" : "gone" };
-  }
+  if ("refused" in range) return range;
   // What the mark ends up over, which is the quote itself except under a mark the document still
   // holds over text that has changed since: the record is re-addressed to the words it marks.
   const marked = view.state.doc.textBetween(range.from, range.to, "\n", "\n");

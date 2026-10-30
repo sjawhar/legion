@@ -15,12 +15,13 @@ export type ComposerKind = "ask" | "comment" | "suggestion";
 export interface ComposerAnchor {
   readonly artifact: string;
   readonly mark_id: string;
-  /** The words the editor read on each side of `quote`, in the block it wrote the mark in, as it
-   *  reported when the selection bar made it. The composer keeps it because the editor keeps
-   *  nothing a rebuilt document or a reconnect does not take with it, and the margin hands it
-   *  back when the mark has to be written again (`DocumentBridge.remarkMark`), where it is what
-   *  tells the reader's own reading of those words from another of them. Absent where the editor
-   *  had none to give, which leaves that recovery the quote alone. */
+  /** The words the editor read on each side of `quote`, in the block it wrote the mark in, and
+   *  how many readings of those words that block held, as it reported when the selection bar made
+   *  it. The composer keeps it because the editor keeps nothing a rebuilt document or a reconnect
+   *  does not take with it, and the margin hands it back when the mark has to be written again
+   *  (`DocumentBridge.remarkMark`), where it is what tells the reader's own reading of those words
+   *  from another of them. Absent where the editor had none to give, which leaves that recovery
+   *  the quote alone. */
   readonly placement?: RecordMarkPlacement;
   readonly quote: string;
 }

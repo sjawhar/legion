@@ -34,19 +34,22 @@ export type SelectionBarActionKind = 'comment' | 'ask' | 'suggest';
 export type PopoverActionKind = 'reply' | 'resolve' | 'unresolve' | 'accept' | 'reject' | 'delete';
 
 /** Where a record mark was written, in a form that outlives this editor: the id of the textblock
- *  that held it, and the text the editor read on each side of the selected words at the moment
- *  they were selected. With the quote the composer carries beside it, that is the ordinary
- *  three-part text-quote selector, and a reading of those words is the reader's own only where
- *  the words and their surroundings both match. A remote change arrives as a rebuilt document
- *  and a reconnect rebuilds the editor, so nothing the editor keeps survives either; a host that
- *  keeps this beside the quote can have the mark written again over the passage its reader
- *  selected rather than another reading of the same words (`remarkRecordMark`). */
+ *  that held it, the text the editor read on each side of the selected words at the moment they
+ *  were selected, and how many readings of those words that block held then. With the quote the
+ *  composer carries beside it, that is the ordinary three-part text-quote selector, and a reading
+ *  of those words is the reader's own only where the words and their surroundings both match. A
+ *  remote change arrives as a rebuilt document and a reconnect rebuilds the editor, so nothing the
+ *  editor keeps survives either; a host that keeps this beside the quote can have the mark written
+ *  again over the passage its reader selected rather than another reading of the same words
+ *  (`remarkRecordMark`). */
 export interface RecordMarkPlacement {
   /** Null for a textblock that carries no id, which leaves a re-anchor the whole document. */
   readonly blockId: string | null;
   /** The text immediately before the selected words, as the editor read it: at most
    *  `QUOTE_CONTEXT_CHARS` of it, and shorter where the block begins nearer than that. */
   readonly prefix: string;
+  /** How many readings of the quote the block held when the reader selected one of them. */
+  readonly readings: number;
   /** The text immediately after them, capped and cut short at the block's end the same way. */
   readonly suffix: string;
 }

@@ -33,9 +33,10 @@ export interface DocumentBridge {
   /** Writes the provisional mark `markId` again, as one of `kind` under a fresh id, over `quote` -
    *  the words the refused send is anchored to - wherever they read now, so a send the server
    *  refused for a mark it cannot see has something to anchor to. The words travel with the
-   *  request, and `placement` - the block the editor wrote the mark in and the text it read on
-   *  each side of those words - with them, because the editor may have kept nothing: another
-   *  writer's change reaches it as a rebuilt document, and a reconnect rebuilds the editor. */
+   *  request, and `placement` - the block the editor wrote the mark in, the text it read on each
+   *  side of those words and how many readings of them that block held - with them, because the
+   *  editor may have kept nothing: another writer's change reaches it as a rebuilt document, and
+   *  a reconnect rebuilds the editor. */
   remarkMark(
     markId: string,
     kind: ComposerKind,
@@ -66,9 +67,10 @@ const DRAFT_KEPT = "Your draft is kept — select the text again to attach it.";
 /** What the composer says in place of the server's `ANCHOR_MISSING` words when the margin could
  *  not write the mark again: what became of the words the send is anchored to, about the thing
  *  the reader is writing. A `ComposerKind` reads as its own word - comment, ask, suggestion -
- *  and this is the one place that puts it in a sentence. The three cases are three different
- *  things to be told: the words read nowhere in the document; they are still there but not where
- *  the reader selected them, so no reading of them can be taken for theirs; or they cannot carry
+ *  and this is the one place that puts it in a sentence. The four cases are four different
+ *  things to be told: the words read nowhere in the document; the block the reader selected in
+ *  still reads them, but the text around them changed, so nothing says which reading was theirs;
+ *  they read somewhere else, but not in the block the reader selected in; or they cannot carry
  *  a suggestion's mark at all. The server's own message is unchanged - agents' clients read it -
  *  and this one is the reader's. */
 export const REANCHOR_REFUSALS: Record<RemarkRefusal["refused"], (kind: ComposerKind) => string> = {
@@ -78,6 +80,8 @@ export const REANCHOR_REFUSALS: Record<RemarkRefusal["refused"], (kind: Composer
     `A suggestion needs whole words inside one table cell, so this ${kind} cannot be marked over the text you selected. ${DRAFT_KEPT}`,
   unplaceable: (kind) =>
     `The text you selected is still in the document, but no longer where you selected it, so this ${kind} cannot be attached on its own. ${DRAFT_KEPT}`,
+  unsurrounded: (kind) =>
+    `The text around the words you selected changed, so nothing is left to say which reading of them this ${kind} is about. ${DRAFT_KEPT}`,
 };
 
 /** How long the margin waits for the mark it wrote again to reach the server before it sends the

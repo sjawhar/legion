@@ -107,7 +107,7 @@ test("retypeMark refuses, changing nothing, a mark the document does not hold an
     expect(marksInDoc(view)).toEqual(before);
     expect(retypeMark(view, start.id, "comment", BY)).toEqual({
       markId: start.id,
-      placement: { blockId: expect.any(String), prefix: "The ", suffix: " fox" },
+      placement: { blockId: expect.any(String), prefix: "The ", readings: 1, suffix: " fox" },
       quote: "quick brown",
     });
     expect(marksInDoc(view)).toEqual(before);
@@ -419,6 +419,7 @@ test("remarkRecordMark puts the mark back on the reading its surroundings name, 
     expect(placement).toEqual({
       blockId: expect.any(String),
       prefix: TWICE.slice(SECOND - 1 - QUOTE_CONTEXT_CHARS, SECOND - 1),
+      readings: 2,
       suffix: " again.",
     });
     // The tab was away past the sweep and came back: the mark is gone, the reconnect rebuilt the
@@ -548,34 +549,75 @@ test("remarkRecordMark refuses two readings of a block whose surroundings both m
   });
 });
 
-test("remarkRecordMark marks a block's one reading of the quote where the words around it changed, and refuses where it holds none", async () => {
-  const kept = "The vet looks at the lazy dog again.";
-  await withMarksEditor(TWICE, ({ view }) => {
-    const start = comment(view, REPEATED, BY, "", SECOND_RANGE);
-    const placement = placementFor(view, SECOND_RANGE, REPEATED);
-    // Another writer cut the sentence the reader's own reading was the second of. The block
-    // reads those words once now, among different ones, and that one reading is still theirs:
-    // the block they selected in, holding their words once, is the passage they selected.
-    rewriteParagraph(view, kept);
+test("remarkRecordMark marks the one reading of a block that held the quote once, however its sentence was rewritten", async () => {
+  const rewritten = `The swift red fox ${QUOTE}.`;
+  await withMarksEditor(PARAGRAPH, ({ view }) => {
+    const start = comment(view, QUOTE, BY, "", quoteRange());
+    const placement = placementFor(view, quoteRange(), QUOTE);
+    expect(placement.readings).toBe(1);
+    // Another writer rewrote the words in front of the reader's, which took the mark with them.
+    // The block read those words once when the reader selected them and reads them once now, so
+    // there was never another reading there to confuse this one with: it is their passage.
+    rewriteParagraph(view, rewritten);
     rebuildEditorState(view);
 
-    const again = remarkRecordMark(view, start.id, "comment", BY, REPEATED, placement);
+    const again = remarkRecordMark(view, start.id, "comment", BY, QUOTE, placement);
     if ("refused" in again) throw new Error(`the re-mark was refused: ${again.refused}`);
-    const only = kept.indexOf(REPEATED) + 1;
     expect(again.placement).toEqual({
       blockId: placement.blockId,
-      prefix: "The vet looks at ",
-      suffix: " again.",
+      prefix: "The swift red fox ",
+      readings: 1,
+      suffix: ".",
     });
     expect(marksInDoc(view)).toEqual([
       expect.objectContaining({
         type: "proofComment",
         id: again.markId,
-        from: only,
-        to: only + REPEATED.length,
+        ...quoteRange(rewritten),
       }),
     ]);
   });
+});
+
+test("remarkRecordMark refuses the reading left in a block that held the quote twice when the reader's own words are deleted", async () => {
+  const kept = "Alpha the lazy dog.";
+  await withMarksEditor(TWO_READINGS, ({ view }) => {
+    const range = lastReading(TWO_READINGS);
+    const start = comment(view, REPEATED, BY, "", range);
+    const placement = placementFor(view, range, REPEATED);
+    expect(placement.readings).toBe(2);
+    // Another writer deleted the sentence the reader's own reading was in. The block reads those
+    // words once now, in the sentence the reader never selected, and nothing in the text around
+    // it says it was theirs: a comment put there is a record on another passage.
+    rewriteParagraph(view, kept);
+    rebuildEditorState(view);
+
+    expect(remarkRecordMark(view, start.id, "comment", BY, REPEATED, placement)).toEqual({
+      refused: "unsurrounded",
+    });
+    expect(marksInDoc(view)).toEqual([]);
+  });
+});
+
+test("remarkRecordMark refuses a block whose readings are all surrounded by words the reader never read", async () => {
+  await withMarksEditor(TWO_READINGS, ({ view }) => {
+    const range = lastReading(TWO_READINGS);
+    const start = comment(view, REPEATED, BY, "", range);
+    const placement = placementFor(view, range, REPEATED);
+    // Another writer edited the word in front of the reader's own reading. Their words are
+    // exactly where they were - it is the text around them that changed - so neither reading
+    // answers the surroundings, and the block holding two of them says nothing about which.
+    rewriteParagraph(view, "Alpha the lazy dog. Bravo the lazy dog.");
+    rebuildEditorState(view);
+
+    expect(remarkRecordMark(view, start.id, "comment", BY, REPEATED, placement)).toEqual({
+      refused: "unsurrounded",
+    });
+    expect(marksInDoc(view)).toEqual([]);
+  });
+});
+
+test("remarkRecordMark refuses when the reader's own block reads the quote nowhere and another block does", async () => {
   await withMarksEditor(`${TWICE}\n\nAnd again: ${REPEATED}.`, ({ view }) => {
     const start = comment(view, REPEATED, BY, "", SECOND_RANGE);
     const placement = placementFor(view, SECOND_RANGE, REPEATED);

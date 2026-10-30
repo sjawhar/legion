@@ -554,7 +554,7 @@ test("a selection-bar action opens the margin composer for the mark and settles 
           from: 11,
           kind: "comment",
           markId: "m-9",
-          placement: { blockId: "b-1", prefix: "The quick ", suffix: " fox" },
+          placement: { blockId: "b-1", prefix: "The quick ", readings: 1, suffix: " fox" },
           quote: "brown",
           to: 16,
         })
@@ -568,7 +568,7 @@ test("a selection-bar action opens the margin composer for the mark and settles 
       anchor: {
         artifact: artifact.id,
         mark_id: "m-9",
-        placement: { blockId: "b-1", prefix: "The quick ", suffix: " fox" },
+        placement: { blockId: "b-1", prefix: "The quick ", readings: 1, suffix: " fox" },
         quote: "brown",
       },
       kind: "comment",
