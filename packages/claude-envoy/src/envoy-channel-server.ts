@@ -15,10 +15,8 @@ import {
   type RenderInboundResult,
   renderInbound,
 } from "@legion/envoy-client/delivery"
-import {
-  sessionDirectory as dispatchSessionDirectory,
-  writeSessionTitle,
-} from "@legion/envoy-client/dispatch-session-state"
+import { sessionDirectory as dispatchSessionDirectory } from "@legion/envoy-client/dispatch-session-directory"
+import { writeSessionTitle } from "@legion/envoy-client/dispatch-session-state"
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe"
 import { messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"

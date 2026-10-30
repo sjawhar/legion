@@ -1,4 +1,5 @@
 import { DISPATCH_FIRST_MARKER } from "@legion/envoy-client/dispatch-first";
+import { leadingText, userTextMessage } from "./context-message";
 
 /**
  * The messages one provider request carries, with the dispatch-first skill as a user message
@@ -24,29 +25,8 @@ export function withDispatchFirst(
     if (!summary) break;
     index += 1;
   }
-  const present = messages[index];
-  if (
-    typeof present === "object" &&
-    present !== null &&
-    "role" in present &&
-    present.role === "user" &&
-    "content" in present &&
-    Array.isArray(present.content)
-  ) {
-    const [first]: unknown[] = present.content;
-    if (
-      typeof first === "object" &&
-      first !== null &&
-      "text" in first &&
-      typeof first.text === "string" &&
-      first.text.startsWith(DISPATCH_FIRST_MARKER)
-    ) {
-      return undefined;
-    }
+  if (leadingText(messages[index], "user")?.startsWith(DISPATCH_FIRST_MARKER) === true) {
+    return undefined;
   }
-  return [
-    ...messages.slice(0, index),
-    { role: "user", content: [{ type: "text", text: context }], timestamp: 0 },
-    ...messages.slice(index),
-  ];
+  return [...messages.slice(0, index), userTextMessage(context), ...messages.slice(index)];
 }

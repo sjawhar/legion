@@ -71,6 +71,28 @@ For tmux to accept OSC 52 clipboard writes, enable clipboard support in the tmux
 set -g set-clipboard on
 ```
 
+## What every model request carries
+
+A session with Dispatch configured — a top-level session, a Legion pane or a `task` subagent —
+sends two extra user messages with every model request of its conversation. At the head, after
+any compaction summary, it sends the `dispatch-first` skill, whose text never changes. At the
+tail, after the request's last message, it sends what people wrote to the session in the last 72
+hours that Dispatch delivered to it: answers to its asks, replies on them and in its comment
+threads, comments on its documents and routed issues, mentions, and messages, newest first and
+word for word. A subagent reads its parent's list. The list stays under 8,000 characters (at most 7,999): the oldest
+items that do not fit are left out, and its last line says how many and that `dispatch answers`
+prints them all. It is read on every request and waits at most 800 ms for Dispatch. Past that,
+or when the read fails, the request carries the last list read, with the time it was read and why
+this read failed, or, when no list read has an item from the last 72 hours, one line saying the
+list could not be read and why. A Dispatch without the answers route is not asked again for 5
+minutes. The list sits at the tail so that a change in it costs only its own tokens: the cached
+conversation before it is sent byte for byte as before.
+
+Oh My Pi also builds requests that are not turns of the conversation from it; those carry the
+skill but no list, and wait on no read: a side turn (a Dispatch BTW, the stop-time self-check,
+`/btw`), whose last message stays its question; the handoff, whose last message stays the handoff
+prompt; and a remote compaction's request, which ends where the compaction cuts the conversation.
+
 ## Development install
 
 This package declares one OMP extension entry in `package.json`, `extensions/envoy.ts`: Envoy
