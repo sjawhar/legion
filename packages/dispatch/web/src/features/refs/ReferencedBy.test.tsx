@@ -201,3 +201,107 @@ test("one source citing two blocks of the shown document is two rows, each linke
   expect(rows()).toEqual([["/issues/CORE-1/spec#b-b", "true"]]);
   expect(consoleError.mock.calls.some((call) => String(call[0]).includes("same key"))).toBeFalse();
 });
+
+/** An edge from block `blockId` of comment or message `id` on OPS-1, as the graph lists a mention
+ *  a comment's or message's block holds: its node is the block, naming no document, and its parent
+ *  the item. */
+function itemBlockEdge(kind: "comment" | "message", id: string, blockId: string, text: string) {
+  const item = `dispatch://OPS-1/${kind}/${id}`;
+  return {
+    created_at: createdAt,
+    direction: "in",
+    excerpt: { block_id: blockId, text },
+    kind: "mentions",
+    node: {
+      block_id: blockId,
+      id: `${kind}/${id}#${blockId}`,
+      issue_key: "OPS-1",
+      kind: "block",
+      parent: { id, kind, ref: item },
+      project: "OPS",
+      ref: `${item}#b-${blockId}`,
+    },
+    source_seq: 10,
+  } satisfies GraphEdge;
+}
+
+test("blocks of one comment citing the node are rows under that comment, labelled and linked as it, each row at its block", async () => {
+  const comment = "11111111-1111-4111-8111-111111111111";
+  const message = "33333333-3333-4333-8333-333333333333";
+  const { getReferences, view } = renderPanel({
+    edges: [
+      itemBlockEdge("comment", comment, "b1", "Alpha cites dispatch://CORE-1."),
+      itemBlockEdge("comment", comment, "b2", "Beta cites it too."),
+      itemBlockEdge("message", message, "b1", "The message cites dispatch://CORE-1."),
+    ],
+    node: { id: "CORE-1", issue_key: "CORE-1", kind: "issue", ref: "dispatch://CORE-1" },
+  });
+  restore = () => {
+    getReferences.mockRestore();
+    view.unmount();
+  };
+
+  const panel = await screen.findByRole("region", { name: "Referenced by" });
+  await within(panel).findByText("Beta cites it too.");
+  const sources = panel.querySelectorAll<HTMLElement>(":scope > ul > li");
+  expect(sources).toHaveLength(2);
+  // The comment is one source: its header names and opens the comment.
+  const commentSource = within(sources[0] as HTMLElement);
+  expect(commentSource.getByRole("link", { name: "Comment · OPS-1" }).getAttribute("href")).toBe(
+    `/issues/OPS-1/comments/${comment}`
+  );
+  const rows = (sources[0] as HTMLElement).querySelectorAll(":scope > ul > li");
+  expect(
+    [...rows].map((row) => [
+      row.querySelector("p")?.textContent,
+      row.querySelector("a")?.getAttribute("href"),
+    ])
+  ).toEqual([
+    ["Alpha cites dispatch://CORE-1.", `/issues/OPS-1/comments/${comment}#b-b1`],
+    ["Beta cites it too.", `/issues/OPS-1/comments/${comment}#b-b2`],
+  ]);
+  // A message's one block is a source of one node: its header opens the message at the block.
+  const messageSource = within(sources[1] as HTMLElement);
+  expect(messageSource.getByRole("link", { name: "Message · OPS-1" }).getAttribute("href")).toBe(
+    `/issues/OPS-1/messages/${message}#b-b1`
+  );
+  expect(messageSource.getByText("The message cites dispatch://CORE-1.")).toBeTruthy();
+});
+
+// A project document's comment opens on its document's page (`?comment=`), where a `#b-`
+// fragment names a block of the document: a block of that comment links to the comment, with no
+// fragment.
+test("a block of a project document's comment links to its comment, with no fragment", async () => {
+  const comment = "11111111-1111-4111-8111-111111111111";
+  const item = `dispatch://CORE/artifact/handbook-md/comment/${comment}`;
+  const { getReferences, view } = renderPanel({
+    edges: [
+      {
+        created_at: createdAt,
+        direction: "in",
+        excerpt: { block_id: "b2", text: "Beta cites dispatch://CORE-1." },
+        kind: "mentions",
+        node: {
+          block_id: "b2",
+          id: `comment/${comment}#b2`,
+          kind: "block",
+          parent: { id: comment, kind: "comment", ref: item },
+          project: "CORE",
+          ref: `${item}#b-b2`,
+        },
+        source_seq: 10,
+      },
+    ],
+    node: { id: "CORE-1", issue_key: "CORE-1", kind: "issue", ref: "dispatch://CORE-1" },
+  });
+  restore = () => {
+    getReferences.mockRestore();
+    view.unmount();
+  };
+
+  const panel = await screen.findByRole("region", { name: "Referenced by" });
+  await within(panel).findByText("Beta cites dispatch://CORE-1.");
+  expect(within(panel).getByRole("link", { name: "Comment · CORE" }).getAttribute("href")).toBe(
+    `/projects/CORE/documents/handbook-md?comment=${comment}`
+  );
+});

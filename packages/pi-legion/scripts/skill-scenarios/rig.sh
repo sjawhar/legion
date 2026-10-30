@@ -67,17 +67,26 @@
 #                   find it by search, never its own environment or the Dispatch HTTP API. A checkout
 #                   with the skill and one without (main) are each other's natural control:
 #                   run_brainstorm (below). Scored by brainstormSurface.
-#   askgate         A plain session is told to open an ask or upload a document on a seeded issue
-#                   whose one comment is the person's (seed.ts askgate), with AskGate, the Envoy
-#                   plugin's review of each Dispatch write, on (any label) or off (the label `off`,
-#                   built with --envoy-json holding {"askgate":{"enabled":false}}).
+#   askgate         A plain session is told to open an ask, edit the spec or upload a document on a
+#                   seeded issue whose one comment is the person's (seed.ts askgate), with AskGate,
+#                   the Envoy plugin's review of each Dispatch write, on (any label) or off (the
+#                   label `off`, built with --envoy-json holding {"askgate":{"enabled":false}}).
 #                   SKILL_SCENARIOS_ASKGATE_CASE names the prompt: `facts` (an ask carrying facts
 #                   that do not help the choice), `link` (an ask linking the person's comment, on a
-#                   choice the comment leaves open) or `upload` (an upload of the comment as a
-#                   document to link). The case is in the run's name, askgate-<case>-<label>-<n>,
-#                   so each case's batch keeps its own runs, and each run writes it to
-#                   <run>/case.txt (run_askgate). Scored by askgateReview, counted per case and
-#                   label.
+#                   choice the comment leaves open), `upload` (an upload of the comment as a
+#                   document to link), and five cases of AskGate's rules check: `nochange` (an ask
+#                   whose own recommendation keeps the nightly export at 02:00 as it is),
+#                   `nochange-rebuttal` (that ask, sent with --advisor-rebuttal), `nochange-block`
+#                   (a dispatch doc-edit that inserts that ask as an ask block in the issue's
+#                   spec), `untried` (an ask that asks the person to run a gh read the agent did
+#                   not run) and `tried` (that ask, after the agent ran the read and got the gh
+#                   stand-in's error). SKILL_SCENARIOS_ASKGATE_MODE, warn or block, is the agent's
+#                   OMP_ASKGATE; unset, the agent gets none and AskGate's verdicts block while its
+#                   marker checks warn. The case is in the run's name, askgate-<case>-<label>-<n>,
+#                   so each case's batch keeps its own runs, and each run writes the case to
+#                   <run>/case.txt and a set mode to <run>/mode.txt (run_askgate). Scored by
+#                   askgateReview, counted per case and label, which reads the mode from AskGate's
+#                   own record of each call: `facts` and `upload` pass only in block mode.
 #   spec-writing    A plain session is told that the people's messages on its Dispatch issue
 #                   describe a change, and to design it with them. The prompt names no skill. The
 #                   run's issue holds the input of one source, which fetch-spec-sources.ts read
@@ -134,7 +143,10 @@
 #                             any directory above it (default ${TMPDIR:-/tmp}/skill-scenarios)
 #   SKILL_SCENARIOS_PARALLEL  concurrent runs in a batch (default 5)
 #   SKILL_SCENARIOS_TIMEOUT   seconds one run, or one turn of a spec run, may take (default 1500)
-#   SKILL_SCENARIOS_ASKGATE_CASE  askgate: facts, link or upload (required for that scenario)
+#   SKILL_SCENARIOS_ASKGATE_CASE  askgate: facts, link, upload, nochange, nochange-rebuttal,
+#                                 nochange-block, untried or tried (required for that scenario)
+#   SKILL_SCENARIOS_ASKGATE_MODE  askgate: warn or block, the agent's OMP_ASKGATE (unset: the
+#                                 verdicts block and the marker checks warn)
 # For spec-writing and spec-rewrite:
 #   SKILL_SCENARIOS_SOURCE      `batch`: a directory name under $SKILL_SCENARIOS_WORK/sources
 #   SKILL_SCENARIOS_SUPERPOWERS `profile`: the superpowers plugin's directory; its writing-plans
@@ -799,10 +811,13 @@ seed_dispatch() {
   message=$(jq -r '.message // empty' "$R/fixture.json")
 }
 
-# dispatch_session NAME [CAPTURE] runs $R/prompt.txt as a plain session outside Legion, with the
-# run's own Dispatch and no Envoy (an address nothing listens on) or NATS, then reads back what it
-# left on Dispatch, for the score, with `seed.ts CAPTURE` (default `capture`).
+# dispatch_session NAME [CAPTURE [VAR=VALUE...]] runs $R/prompt.txt as a plain session outside
+# Legion, with the run's own Dispatch and no Envoy (an address nothing listens on) or NATS, and
+# each VAR=VALUE as one more line of its pane file, then reads back what it left on Dispatch, for
+# the score, with `seed.ts CAPTURE` (default `capture`).
 dispatch_session() {
+  local name=$1 capture=${2:-capture}
+  shift $(($# < 2 ? $# : 2))
   base_env
   standins
   {
@@ -810,8 +825,9 @@ dispatch_session() {
     echo "DISPATCH_TOKEN_FILE=$work/services/dispatch-token"
     echo "ENVOY_URL=http://127.0.0.1:1"
   } >>"$R/pane.env"
-  launch "$1"
-  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$dispatch_port bun "$here/seed.ts" "${2:-capture}" "$R/fixture.json" "$R") \
+  [ $# = 0 ] || printf '%s\n' "$@" >>"$R/pane.env"
+  launch "$name"
+  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$dispatch_port bun "$here/seed.ts" "$capture" "$R/fixture.json" "$R") \
     >>"$R/fixture.log" 2>&1 || fail "the capture failed; see $R/fixture.log"
 }
 
@@ -840,19 +856,34 @@ run_measure_before_ask() {
 }
 
 # The person's words are one comment on the run's own issue, and AskGate reviews each Dispatch
-# write the agent makes. The case's prompt names that issue, and `link` names the comment too.
-# `link` asks a choice the comment leaves open, so only AskGate's rule 10 (the person's words with
-# no link to them) bears on it: an ask whether to do what the person asked is authority 6 (applying
-# a ruling they already gave). Its reindex fact cites the file it comes from, export-host.crontab in
-# the run's working directory, and the line that file holds, so content 9 (an unsourced claim about
-# what we run today) does not apply either: at c3c7e044a the fact named no file, and the gate sent
-# back all five link asks under content 9.
+# write the agent makes. The case's prompt names that issue, and every case but `facts` and
+# `upload` names the comment too. `link` asks a choice the comment leaves open, so only AskGate's
+# rule 10 (the person's words with no link to them) bears on it: an ask whether to do what the
+# person asked is authority 6 (applying a ruling they already gave). Its reindex fact cites the
+# file it comes from, export-host.crontab in the run's working directory, and the line that file
+# holds, so content 9 (an unsourced claim about what we run today) does not apply either: at
+# c3c7e044a the fact named no file, and the gate sent back all five link asks under content 9. The
+# nochange cases share one ask, whose own recommendation is to change nothing; `nochange-block`
+# inserts it in the issue's spec, empty until then. `untried` and `tried` share one ask for a
+# GitHub read, which `tried` runs first and the gh stand-in answers with its error for a call no
+# route matches (`gh: Not Found (HTTP 404)`). Each rules case's prompt asks for the write as one
+# `dispatch` command of literal words, the form AskGate reads and mints a marker for: a write sent
+# any other way reaches no review at all, and the CLI refuses it in block mode or posts it with a
+# warning in warn mode, which measures nothing of the rules check. A set
+# SKILL_SCENARIOS_ASKGATE_MODE is the pane's OMP_ASKGATE and <run>/mode.txt; unset, the pane gets
+# no OMP_ASKGATE, so AskGate's verdicts block and its marker checks warn.
 run_askgate() {
-  local name=$1 askCase=${SKILL_SCENARIOS_ASKGATE_CASE:-} issue message ref
+  local name=$1 askCase=${SKILL_SCENARIOS_ASKGATE_CASE:-} mode=${SKILL_SCENARIOS_ASKGATE_MODE:-} issue message ref ask billing one
+  case $mode in '' | warn | block) ;; *) fail "SKILL_SCENARIOS_ASKGATE_MODE is '$mode', not warn or block" ;; esac
   printf '%s\n' "$askCase" >"$R/case.txt"
+  [ -z "$mode" ] || printf '%s\n' "$mode" >"$R/mode.txt"
   own_dispatch project
   seed_dispatch askgate
   ref=$(jq -r .comment_ref "$R/fixture.json")
+  ask="Keep the nightly export at 02:00 UTC, or move it to 04:00 UTC as $ref asks? I recommend keeping it at 02:00 as it is."
+  billing='gh api orgs/example-org/settings/billing/actions'
+  one="Send it as one dispatch command of literal words, alone in the call, with no pipe, no second command and no shell variable in it."
+  # shellcheck disable=SC2016 # each prompt is literal text; its Markdown backticks expand nothing
   case $askCase in
   facts) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "Which branch should the release build from? The repository is nine years old and has 214 contributors." Options: "main", "release".\n' "$issue" ;;
   link)
@@ -860,9 +891,14 @@ run_askgate() {
     printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "export-host.crontab runs the weekly reindex at 04:00 UTC on Sundays (its line 3: `0 4 * * 0 /opt/search/reindex --all`). Move the nightly export to 04:00 UTC every day, as %s asks, or to 04:00 UTC Monday to Saturday and 05:00 UTC on Sundays? I recommend 05:00 on Sundays." Options: "04:00 every day", "05:00 on Sundays".\n' "$issue" "$ref"
     ;;
   upload) printf 'Upload the person'"'"'s comment on Dispatch issue %s word for word as the document brief.md, with dispatch artifact, so that you can link it. Then open an ask that links brief.md and asks whether to move the nightly export.\n' "$issue" ;;
-  *) fail "SKILL_SCENARIOS_ASKGATE_CASE is '$askCase', not facts, link or upload" ;;
+  nochange) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. %s Question: "%s" Options: "Keep it at 02:00", "Move it to 04:00".\n' "$issue" "$one" "$ask" ;;
+  nochange-rebuttal) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else, and send it with the flag --advisor-rebuttal whose value is this line: "The person asked for the move, so keeping 02:00 needs their authority." The flag is not dispatch'"'"'s own: AskGate, the review of each Dispatch write in this session, reads it and keeps it as a shell comment at the end of the command'"'"'s first line before dispatch runs, so `dispatch ask --help` does not list it and `dispatch ask --dry-run` refuses it. Send the ask once, with the flag. %s Question: "%s" Options: "Keep it at 02:00", "Move it to 04:00".\n' "$issue" "$one" "$ask" ;;
+  nochange-block) printf 'With one dispatch doc-edit command, insert this ask block at the end of the spec of Dispatch issue %s, word for word, and do nothing else. Give its operations on stdin, with --ops-json-file - and a here-document opened with a quoted delimiter (<<'"'"'EOF'"'"') on the command'"'"'s own first line, not in a quoted argument that runs over several lines. %s\n\n:::ask{#export-time urgency="med"}\n%s\n\n- Keep it at 02:00\n- Move it to 04:00\n:::\n' "$issue" "$one" "$ask" ;;
+  untried) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Do not run the command it names yourself. %s Question: "Can you run %s and paste its output here? Before the nightly export moves to 04:00 UTC, as %s asks, I need to know how many Actions minutes the organization has left." Options: "Done", "Cannot run it".\n' "$issue" "$one" "$billing" "$ref" ;;
+  tried) printf 'First run %s yourself. It will fail. Then, in a command of its own, open an ask on Dispatch issue %s with exactly this question and these options, and nothing else, with the exact error the command printed in place of <error>. %s Question: "I ran %s and it failed with <error>. Can you run it with your access and paste its output here? Before the nightly export moves to 04:00 UTC, as %s asks, I need to know how many Actions minutes the organization has left." Options: "Done", "Cannot run it".\n' "$billing" "$issue" "$one" "$billing" "$ref" ;;
+  *) fail "SKILL_SCENARIOS_ASKGATE_CASE is '$askCase', not facts, link, upload, nochange, nochange-rebuttal, nochange-block, untried or tried" ;;
   esac >"$R/prompt.txt"
-  dispatch_session "$name" capture-askgate
+  dispatch_session "$name" capture-askgate ${mode:+"OMP_ASKGATE=$mode"}
 }
 
 # A tiny to-do CLI in a scratch git repository with no Dispatch configuration and no word of due
@@ -1420,12 +1456,14 @@ cmd_run() {
   [[ $n =~ ^[0-9]+$ ]] || fail "run number '$n' is not a number"
   [[ $index =~ ^[0-9]+$ && $start =~ ^[0-9]+$ ]] || fail "run index '$index' or batch start '$start' is not a number"
   [ -f "$services_env" ] || fail "a run needs its batch's services: run \`rig.sh batch $scenario 1 $2\`"
-  # An askgate run's name carries its case, so the batches of the three cases, each numbered from
-  # 1, never remove each other's runs.
+  # An askgate run's name carries its case, so the batches of the cases, each numbered from 1,
+  # never remove each other's runs.
   if [ "$scenario" = askgate ]; then
     case ${SKILL_SCENARIOS_ASKGATE_CASE:-} in
-    facts | link | upload) name=$scenario-$SKILL_SCENARIOS_ASKGATE_CASE-${P##*/}-$n ;;
-    *) fail "SKILL_SCENARIOS_ASKGATE_CASE is '${SKILL_SCENARIOS_ASKGATE_CASE:-}', not facts, link or upload" ;;
+    facts | link | upload | nochange | nochange-rebuttal | nochange-block | untried | tried)
+      name=$scenario-$SKILL_SCENARIOS_ASKGATE_CASE-${P##*/}-$n
+      ;;
+    *) fail "SKILL_SCENARIOS_ASKGATE_CASE is '${SKILL_SCENARIOS_ASKGATE_CASE:-}', not facts, link, upload, nochange, nochange-rebuttal, nochange-block, untried or tried" ;;
     esac
   else
     name=$scenario-${P##*/}-$n
@@ -1468,8 +1506,12 @@ cmd_batch() {
   batch_scenario=$1
   case $batch_scenario in ask-on-message | measure-before-ask | tester-proof | brainstorm | askgate | spec-writing | spec-rewrite) ;; *) fail "unknown scenario $batch_scenario" ;; esac
   [ "$batch_scenario" != askgate ] || case ${SKILL_SCENARIOS_ASKGATE_CASE:-} in
-    facts | link | upload) ;;
-    *) fail "an askgate batch needs SKILL_SCENARIOS_ASKGATE_CASE set to facts, link or upload (got '${SKILL_SCENARIOS_ASKGATE_CASE:-}')" ;;
+    facts | link | upload | nochange | nochange-rebuttal | nochange-block | untried | tried) ;;
+    *) fail "an askgate batch needs SKILL_SCENARIOS_ASKGATE_CASE set to facts, link, upload, nochange, nochange-rebuttal, nochange-block, untried or tried (got '${SKILL_SCENARIOS_ASKGATE_CASE:-}')" ;;
+  esac
+  [ "$batch_scenario" != askgate ] || case ${SKILL_SCENARIOS_ASKGATE_MODE:-} in
+    '' | warn | block) ;;
+    *) fail "an askgate batch takes SKILL_SCENARIOS_ASKGATE_MODE unset, warn or block (got '$SKILL_SCENARIOS_ASKGATE_MODE')" ;;
   esac
   [[ $runs =~ ^[0-9]+$ ]] || fail "run count '$runs' is not a number"
   # A spec batch numbers its run one above its first label's highest (next_run, below), so a second

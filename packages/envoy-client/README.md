@@ -22,8 +22,15 @@ parsed event under `dispatch: { issue_key, type, actor, payload }` with `payload
 type; a payload whose shape disagrees with its event type's schema is preserved as its raw parsed
 value under `dispatch`, never dropped or reduced to prose. A dispatch envelope with no payload at
 all falls back to the same `summary` field every other source gets and marks `unrecognised:
-payload`. The renderer skips Dispatch events marked `notify: false` on an issue topic before a host
-can steer or record them in its inbox, as well as events authored by the reader's own session.
+payload`. On a `notifications.dispatch.*` topic, which carries every event of its owner, the
+renderer skips the events Dispatch marks `quiet` — a delivery receipt, an anchor refresh,
+settings or per-viewer bookkeeping, a targeted message its session already had, an ask edit that
+only moved a version, or a version nobody named — before a host can steer or record them in its
+inbox, as well as events authored by the reader's own session. It does not skip on `notify`,
+which answers whether to wake the owner's route and is false for every event an agent wrote: a
+session that subscribed to an issue's topic subscribed for exactly that activity. A frame with no
+`quiet` was published before Dispatch stated it and is judged by `notify`, so a replay of the 72
+hours the stream still holds shows no receipts.
 
 ## Missed messages
 
@@ -362,7 +369,11 @@ Dispatch alone, now: `{ dispatch, warnings, missing }`, Dispatch's resolution be
 read found and did not read and the missing-file record, for a command, which says the `warnings`
 itself, and for a plugin whose Dispatch calls follow a file that changes. `activeDispatchSettings`
 turns its `dispatch` into the configuration a caller uses, null when nothing configures Dispatch,
-or a `dispatch config: <reason>` throw. `sessionEnvoySettings(file, env, { cwd, nats })` reads
+or a `dispatch config: <reason>` throw. `sessionDispatchUrl(file, env, { cwd })` is the URL alone
+(`dispatchUrl`), resolved without reading the token, so no `!` command runs, or undefined when
+Dispatch is off before its token is read: what a caller on a deadline names to
+`readSessionAnswers` as `dispatchUrl` while a kept resolution is off with an error, so only the list
+read from that URL stands in. `sessionEnvoySettings(file, env, { cwd, nats })` reads
 Envoy alone, for a command such as `envoy-send`.
 
 ## Dispatch

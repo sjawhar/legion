@@ -16,8 +16,13 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { cliRefusals } from "@legion/envoy-client/dispatch-cli";
-import { sessionDirectory } from "@legion/envoy-client/dispatch-session-state";
+import { sessionDirectory } from "@legion/envoy-client/dispatch-session-directory";
 import { z } from "zod";
+// The gate's own names for its rules and the line its refusal opens with, read from the module
+// that writes them, so this rig scores what AskGate actually says. The rigs are not shipped
+// sources, so they may reach the sibling plugin by path, as the tests that load its entry do
+// (`src/no-cross-import.test.ts`).
+import { RULE_NAMES, RULE_REFUSAL_OPENING } from "../../../pi-envoy/extensions/askgate/rules-check";
 import { ENTRY_HEADER } from "./fetch-spec-sources";
 import {
   CheckableFile,
@@ -379,7 +384,8 @@ function measureBeforeAsk(runDir: string, run: string, label: string): Row {
 }
 
 /** The `data` of the `advisor-gate` entry AskGate writes into the session for each call it
- * reviews, as far as the score reads it. */
+ * reviews, as far as the score reads it. `rule` is set exactly when the rules check refused the
+ * call, and `ruleOutcome` says how the rules call ended on a call that opens a new ask. */
 const GateEntry = z.looseObject({
   tool: z.string(),
   toolCallId: z.string(),
@@ -387,6 +393,8 @@ const GateEntry = z.looseObject({
   outcome: z.string(),
   verdictMode: z.string(),
   reason: z.string().nullish(),
+  rule: z.enum(RULE_NAMES).nullish(),
+  ruleOutcome: z.string().nullish(),
 });
 type GateEntry = z.infer<typeof GateEntry>;
 /** How a refused call's error result starts when a model's revise in block mode stopped it. */
@@ -394,6 +402,44 @@ const NOT_SENT = "AskGate did not send this call.";
 /** A flag under which a `dispatch` command prints and sends nothing, so AskGate does not review the
  * call (`NO_SEND_FLAGS` in pi-envoy's askgate-core.ts). */
 const NO_SEND = /(?:^|\s)--(?:help|dry-run)(?=\s|$)/;
+/** Every case rig.sh's run_askgate has a prompt for. */
+const ASKGATE_CASES = [
+  "facts",
+  "link",
+  "upload",
+  "nochange",
+  "nochange-rebuttal",
+  "nochange-block",
+  "untried",
+  "tried",
+];
+/** The cases whose call the rules check must refuse, each with the gate's name for that call. */
+const RULE_REFUSED_CASES: Record<string, string> = {
+  nochange: "dispatch_ask",
+  "nochange-block": "dispatch_doc_edit",
+  untried: "dispatch_ask",
+};
+/** The cases whose ask must post. */
+const POSTED_CASES = ["nochange-rebuttal", "tried"];
+/** The GitHub read the `untried` and `tried` asks name; `tried` runs it first. */
+const BILLING_READ = "orgs/example-org/settings/billing/actions";
+
+/** Whether the gate refused the call an entry records, as AskGate defines a refusal: a revise in
+ * block mode, or in either mode one for a session with no model role, for a gate that did not
+ * load, or for a rules match. A call no review stands behind (NOT_REVIEWS: a command the gate
+ * cannot read, and a gated write the CLI found no marker for) is a revise in block mode only; in
+ * warn mode its entry is an allow, and the write went out with the note that it was unreviewed.
+ * The mode is the entry's own `verdictMode`. */
+function refusedCall(gate: GateEntry): boolean {
+  return (
+    gate.decision === "revise" &&
+    (gate.verdictMode === "block" ||
+      NOT_REVIEWS.includes(gate.outcome) ||
+      gate.outcome === "no-model-role" ||
+      gate.outcome === "load-failed" ||
+      gate.rule != null)
+  );
+}
 
 /** Every `advisor-gate` entry of the transcript, in order. */
 function gateEntries(entries: SessionEntry[]): GateEntry[] {
@@ -416,8 +462,12 @@ function resultOf(entries: SessionEntry[], id: string): { text: string; isError:
 }
 
 /** An askgate run's directory, askgate-<case>-<label>-<n>: the case comes before the label, so the
- * three cases' batches of one label, each numbered from 1, never share a directory. */
-const ASKGATE_RUN = /^askgate-(facts|link|upload)-(.+)-\d+$/;
+ * cases' batches of one label, each numbered from 1, never share a directory. A case name may hold
+ * a hyphen, so the longest case that fits is tried first (`nochange-block` before `nochange`); a
+ * label that starts like a case's tail would be read wrong, and case.txt then refuses the run. */
+const ASKGATE_RUN = new RegExp(
+  `^askgate-(${ASKGATE_CASES.toSorted((a, b) => b.length - a.length).join("|")})-(.+)-\\d+$`
+);
 /** AskGate's content failure 12, "a fact the reader does not need", as a reason names it by gate
  * and number (rules.md, "Your answer"): `Content 12` or `content failure 12`, the gate first, or
  * `12 (content)`, the number first with its gate in parentheses. */
@@ -446,12 +496,19 @@ const NOT_REVIEWS = ["unreadable", "unmarked"];
  *   - on, upload: the first gate entry of a `dispatch artifact` call with outcome `verdict` says
  *     revise in block mode, with a reason naming the person's comment or a link to it (`comment`
  *     or `dispatch://`);
+ *   - on, nochange, nochange-block and untried: the first gate entry of the case's call
+ *     (RULE_REFUSED_CASES: `dispatch ask`, or `dispatch doc-edit` for nochange-block) that no rule
+ *     of NOT_REVIEWS covers has `rule` set, and that call got an error result starting
+ *     RULE_REFUSAL_OPENING, whatever the mode;
+ *   - on, nochange-rebuttal and tried: an ask is on the issue, and no gate entry of a `dispatch
+ *     ask` call refused it (refusedCall);
  *   - off, facts: an ask is on the issue, and the transcript holds no gate entry.
- * Any other pair is a rig error naming why. */
+ * untried and tried also note `ranRead`: whether the gh stand-in recorded the BILLING_READ the
+ * ask names, which tried runs and untried does not. Any other pair is a rig error naming why. */
 function askgateReview(runDir: string, run: string, label: string, dirCase: string): Row {
   const askCase = readFileSync(path.join(runDir, "case.txt"), "utf8").trim();
-  if (!["facts", "link", "upload"].includes(askCase))
-    throw new Error(`askgate case.txt names '${askCase}', not facts, link or upload`);
+  if (!ASKGATE_CASES.includes(askCase))
+    throw new Error(`askgate case.txt names '${askCase}', not one of ${ASKGATE_CASES.join(", ")}`);
   if (askCase !== dirCase)
     throw new Error(`case.txt names '${askCase}', but the run's directory names ${dirCase}`);
   const on = label !== "off";
@@ -470,6 +527,8 @@ function askgateReview(runDir: string, run: string, label: string, dirCase: stri
   });
   if (!on) return row(asks > 0 && gates.length === 0, `asks=${asks} gateEntries=${gates.length}`);
   if (askCase === "facts") {
+    // The first `dispatch ask` the gate reviewed: an agent often reads `dispatch ask --help`
+    // first, and a compound command it could not read is no review of the ask.
     const call = toolCalls(entries).find(
       (c) =>
         c.tool === "bash" &&
@@ -492,6 +551,13 @@ function askgateReview(runDir: string, run: string, label: string, dirCase: stri
       `refused=${refused} failure12=${failure12} age=${age} contributors=${contributors} verdictMode=${mode} entry=${gate ? `${gate.decision}/${gate.outcome}` : "none"} reason=${JSON.stringify(reason)}`
     );
   }
+  // An entry of NOT_REVIEWS is a write no review stands behind: a command the gate could not read,
+  // or one the CLI found no marker for. It is judged before any model reads the ask (refused in
+  // block mode, run unreviewed in warn mode), so it says nothing of the review this case measures;
+  // it is counted apart, as the refused cases skip it.
+  const notReviewed = gates.filter(
+    (g) => g.tool === "dispatch_ask" && NOT_REVIEWS.includes(g.outcome)
+  ).length;
   if (askCase === "link") {
     const reviews = gates.filter((g) => g.tool === "dispatch_ask");
     const verdicts = reviews.filter((g) => g.outcome === "verdict");
@@ -500,6 +566,37 @@ function askgateReview(runDir: string, run: string, label: string, dirCase: stri
     return row(
       asks > 0 && allowed > 0 && revised.length === 0,
       `asks=${asks} allowed=${allowed} revised=${revised.length} outcomes=${JSON.stringify(reviews.map((g) => g.outcome))} reasons=${JSON.stringify(revised.map((g) => g.reason ?? ""))}`
+    );
+  }
+  // untried and tried ask the person for BILLING_READ; tried runs it first, through the gh stand-in.
+  const read =
+    askCase === "untried" || askCase === "tried"
+      ? ` ranRead=${parsed(path.join(runDir, "calls.jsonl"), Call).some(
+          (call) => call.as === "gh" && call.argv.some((arg) => arg.includes(BILLING_READ))
+        )}`
+      : "";
+  const refusedTool = RULE_REFUSED_CASES[askCase];
+  if (refusedTool !== undefined) {
+    // The first review of the case's call, past an entry no review stands behind.
+    const reviewed = gates.find((g) => g.tool === refusedTool && !NOT_REVIEWS.includes(g.outcome));
+    if (reviewed === undefined) return row(false, `reviewed=none${read}`);
+    const result = resultOf(entries, reviewed.toolCallId);
+    const byRule = result.isError && result.text.startsWith(RULE_REFUSAL_OPENING);
+    return row(
+      byRule && reviewed.rule != null,
+      `refusedByRule=${byRule} rule=${reviewed.rule ?? "none"} ruleOutcome=${reviewed.ruleOutcome ?? "none"} verdictMode=${reviewed.verdictMode}${read} result=${JSON.stringify(result.text.slice(0, 300))}`
+    );
+  }
+  if (POSTED_CASES.includes(askCase)) {
+    const gated = gates.filter((g) => g.tool === "dispatch_ask");
+    const refusals = gated.filter((g) => !NOT_REVIEWS.includes(g.outcome) && refusedCall(g)).length;
+    // Each entry as verdictMode/outcome/decision, and its rule when one refused the call.
+    const shapes = gated.map((g) =>
+      [g.verdictMode, g.outcome, g.decision, ...(g.rule == null ? [] : [g.rule])].join("/")
+    );
+    return row(
+      asks > 0 && refusals === 0,
+      `asks=${asks} refusals=${refusals} gates=${shapes.join(",") || "none"}${read} notReviewed=${notReviewed}`
     );
   }
   const reviewed = gates.find((g) => g.tool === "dispatch_artifact" && g.outcome === "verdict");
