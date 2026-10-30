@@ -2,46 +2,34 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-750",
-  "completed": "2026-10-30T12:04:00Z",
-  "round": 3,
-  "reviewedCodeHead": "3de30a206f8e",
-  "previousReview": "5711144669, APPROVE at 3b7030c01a68 (code 73196dfca8cd)",
-  "forwardMerge": {
-    "merge": "3de30a206f8e brings main 88818a3b9b14 into the branch",
-    "fingerprintBefore": "47c0c5cf22cfd099e0ba99c934efcfdfe59118461d1ec5e8f7b6942ca9ad312f at 3b7030c01a68",
-    "fingerprintAfter": "2210db3128b1bcee1b8f4aa8e8b891486c1ecdfacbff948536802197c5a14d9f at b5e0b681d0c2",
-    "verdict": "changed, so a new round: the PR's own lines differ only in packages/envoy/docs/architecture.md's outcome list, where the merge joined this PR's stream_full and main's publish_denied correctly (architecture.md:95-96, :163-166, matching cmd/listener/request_record.go's constants)"
-  },
-  "decision": "changes_requested",
+  "completed": "2026-10-30T14:22:30Z",
+  "round": 4,
+  "reviewedCodeHead": "3fec0f3465e2",
+  "previousReview": "5711970885, REQUEST_CHANGES at 8ee4dcaab64d after the forward merge 3de30a206f8e",
+  "decision": "approved",
   "critical": 0,
   "important": 0,
-  "minor": 2,
-  "keyFindings": [
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/webhook/github_test.go:645-659",
-      "description": "Main added TestAGitHubDeliveryAnsweredNotStoredIsRepublishedWithoutItsID with its own copy of the fill loop, line for line what bustest.FillStream does, so on the new base this pull request's bustest docs are false: bustest.go:1-6 says only package bus keeps copies, and bustest.go:150-151 names one caller. Replace the loop with `bustest.FillStream(t, client, 64)` (github_test.go already imports bustest) and name both callers in FillStream's doc. Code, so it goes through the tester."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/AGENTS.md:1441-1442",
-      "description": "Fixed by the reviewer in cb63e006 (prose only): the duplicate-window paragraph named only the outbox window as the send without its id, while the listener's send and publish routes make the same resend in publishJetStream (internal/bus/nats.go:1294). It now names both."
-    }
-  ],
-  "mergeChecks": [
-    "recovery.go on main still sets hookedEvents only after a successful hook run (recovery.go:198-215), and ConnectOwningStream still registers its reconcile inside the constructor (nats.go:414), so HookedConnectionEvents holds.",
-    "workflow.go on main still dials through natsauth.Connect alone (workflow.go:364).",
-    "api.go's writeBusUnavailable checks ErrPublishDenied first, then errors.Is(err, ErrStreamFull), so an ErrNotStored-wrapped full stream still answers stream_full as full_stream_answer_test.go asserts.",
-    "The async.go and publisher.go doc corrections still describe main's code; both resends still exist."
+  "minor": 0,
+  "keyFindings": [],
+  "threads": [
+    "PRRT_kwDORFy7ds6x9MaS (bustest.go:150): fixed in 3fec0f3465e2. github_test.go:645 calls bustest.FillStream(t, client, 64); limit still feeds WithStreamMaxBytes at :617; both bustest docs name both callers. Reviewer reply 4423500211 accepts it; the implementer resolved it."
   ],
   "ci": {
-    "ciHead": "3de30a206f8e",
-    "state": "run 41045708436 still queued at 11:58Z; a request for changes does not wait on it"
+    "requiredChecks": ["lint", "typecheck", "test", "pr-title"],
+    "ciHead": "3fec0f3465e272f0bac6a1c6f7f59a803293396f",
+    "required": "lint, typecheck, test and pr-title completed success (run 41053055532, read 14:08Z)",
+    "alsoGreen": "envoy-client, claude-envoy, envoy-session-stall; internal/bus passed inside envoy-go-race",
+    "notGreen": "envoy-go and envoy-go-race fail on TestRoutesTablePinsEveryRegisteredRoute in internal/dispatch/api (routes() 147, pin 146): main's red at 3d5548da (run 41041086299), carried by the merged base 88818a3b. This pull request does not touch internal/dispatch/api. The controller says main fixed it in sjawhar/legion#2551 at 13:12Z. The envoy-go step runs that package first under set -e, so CI ran none of this pull request's other packages at this head; the reviewer ran them in the pod (below).",
+    "handoffsOnlySinceCiHead": true
   },
-  "thermonuclear": {
-    "head": "b5e0b681d0c29ae363eae222c39e8e51707c7aed",
-    "deepReview": "APPROVE; one minor (the fill-loop copy main added), not a correctness defect; read-only, no builds",
-    "codeQuality": "CHANGES on one low doc finding (AGENTS.md:1439-1442), fixed by the reviewer in cb63e006"
+  "reviewerRuns": {
+    "head": "eabdf5a4ed57 (code 3fec0f3465e2)",
+    "commands": [
+      "From packages/envoy: go test -count=1 -timeout 30m ./cmd/dispatch/ ./internal/kvwatch/ ./internal/webhook/ ./internal/dispatch/outbox/ ./internal/bus/bustest/: ok 51.283s, 62.671s, 2.492s, 5.691s (bustest has no tests)",
+      "go test -count=1 -timeout 30m -skip <the four dispatch-rig tests that need a container runtime> ./cmd/listener/: ok 455.854s"
+    ],
+    "skipped": "TestDispatchBroadcastResolvesSessionsTheCacheHasNotRefilled, TestDispatchMentionResolvesASessionTheCacheHasNotRefilled, TestDispatchRefusesABroadcastWhenASessionReadDoesNotAnswer, TestDispatchRefusesAClaimTakeoverWhileTheCacheRefills: they need rootless Docker, which this pod lacks; this pull request does not touch the code they cover."
   },
-  "security": "agent-def: AGENTS.md edits are factual corrections with no instructions to agents (packages/envoy/AGENTS.md:40,1439-1443,2812-2813); no other sensitive surface."
+  "thermonuclear": "Not run again: this round's code change since the pair ran at b5e0b681 is a test fold and two doc comments (3fec0f3465e2), no runtime code.",
+  "security": "no sensitive surface in this round's diff; the whole PR's rows stand as review 5711970885 recorded them."
 }
