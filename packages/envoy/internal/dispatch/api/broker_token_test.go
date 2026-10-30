@@ -309,18 +309,19 @@ func TestAPersonScopedBrokerTokenCarriesNoProject(t *testing.T) {
 // TestABrokerTokenWritesAsTheSessionItProves: the body's actor does not decide the session, which
 // the token carries. An absent one and a matching one are both taken, a matching one's origin is
 // kept because nothing else carries it, and the write is recorded as the token's session with the
-// person and project the token named.
+// person and project the token named. The project the writes go into is made by a person: a
+// token scoped to one project may not create another (project_scope.go).
 func TestABrokerTokenWritesAsTheSessionItProves(t *testing.T) {
 	rig := newBrokerTokenRig(t)
 	caller := newBrokerCaller(t)
 	const token = "a-token-that-writes"
 	rig.broker.says(token, liveNamedToken(caller.jkt))
 
-	created := rig.serve(caller.presenting(t, http.MethodPost, "/api/v1/projects", token, map[string]any{
+	created := rig.asPerson(t, http.MethodPost, "/api/v1/projects", map[string]any{
 		"key": brokerTestProject, "name": "Broker",
-	}))
+	})
 	if created.Code != http.StatusCreated {
-		t.Fatalf("create a project with no actor in the body: status=%d body=%s", created.Code, created.Body.String())
+		t.Fatalf("create the project as a person: status=%d body=%s", created.Code, created.Body.String())
 	}
 
 	issue := rig.serve(caller.presenting(t, http.MethodPost, "/api/v1/issues", token, map[string]any{
@@ -339,6 +340,13 @@ func TestABrokerTokenWritesAsTheSessionItProves(t *testing.T) {
 	key := decodeBody[struct {
 		Key string `json:"key"`
 	}](t, issue).Key
+
+	noActor := rig.serve(caller.presenting(t, http.MethodPost, "/api/v1/issues/"+key+"/comments", token, map[string]any{
+		"body": "Written with no actor in the body.",
+	}))
+	if noActor.Code != http.StatusCreated {
+		t.Fatalf("comment with no actor in the body: status=%d body=%s", noActor.Code, noActor.Body.String())
+	}
 
 	listed := rig.serve(withPerson(brokerRequest(t, http.MethodGet, "/api/v1/issues/"+key+"/events", nil, "", ""), brokerTestPerson))
 	if listed.Code != http.StatusOK {
@@ -390,14 +398,15 @@ func TestABrokerTokenRefusesABodyActorNamingAnotherSession(t *testing.T) {
 	caller := newBrokerCaller(t)
 	const token = "a-token-whose-body-lies"
 	rig.broker.says(token, liveNamedToken(caller.jkt))
+	own := seedProject(t, rig, brokerTestProject, "Broker")
 
 	for name, actor := range map[string]any{
 		"another session": map[string]string{"kind": "session", "id": "ses_someone_else"},
 		"a person":        map[string]string{"kind": "user", "id": brokerTestPerson},
 	} {
 		t.Run(name, func(t *testing.T) {
-			response := rig.serve(caller.presenting(t, http.MethodPost, "/api/v1/projects", token, map[string]any{
-				"key": "OTH", "name": "Other", "actor": actor,
+			response := rig.serve(caller.presenting(t, http.MethodPost, "/api/v1/issues/"+own.issue+"/comments", token, map[string]any{
+				"body": "Written as someone else.", "actor": actor,
 			}))
 			if response.Code != http.StatusForbidden {
 				t.Fatalf("status=%d body=%s, want 403", response.Code, response.Body.String())

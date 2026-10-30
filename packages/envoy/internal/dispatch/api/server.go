@@ -488,6 +488,11 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 	s.eventRelay = newEventStreamRelay(s, lifetime)
 	s.deliveryHub = newDeliveryHub(s, lifetime, deliveryHubClock{})
 	routes := s.routes()
+	if unclassed := s.unclassedWrites(routes); len(unclassed) > 0 {
+		// A mutating row the project check cannot decide would serve a project-scoped caller a
+		// write nothing judged, so the table is refused rather than mounted (project_scope.go).
+		panic("api.Register: the route table holds a mutating row with no write class: " + strings.Join(unclassed, "; "))
+	}
 	s.routeIndex = routeIndexEntries(routes)
 	replays := s.keyedReplays()
 	for _, route := range routes {
@@ -497,6 +502,11 @@ func register(mux *http.ServeMux, lifetime context.Context, deps Deps) *server {
 		}
 		if route.Method+" "+route.Pattern == issueUploadRoute {
 			handler = s.refuseUploadToAClosedIssue(handler)
+		}
+		if route.Method != http.MethodGet {
+			// Outside the keyed layer and the upload's spool, so a write to another project's
+			// object claims no idempotency key and costs no body (withinProjectScope).
+			handler = s.withinProjectScope(route, handler)
 		}
 		if route.Method != http.MethodGet {
 			handler = s.refuseChangedLogin(handler)

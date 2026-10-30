@@ -147,6 +147,13 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_ISSUE", http.StatusBadRequest, projectKeyProblem("project", input.Project))
 		return
 	}
+	// The one write whose project its address does not name, so withinProjectScope leaves it
+	// here: before the duplicate check reads the project's titles, and before anything is
+	// written (issueCreateRoute).
+	if covers, scoped := s.callerProject(r); scoped && covers != input.Project {
+		refuseWriteOutsideProjectScope(w, covers, input.Project)
+		return
+	}
 	if input.Title == "" {
 		writeError(w, "INVALID_ISSUE", http.StatusBadRequest, "title is required")
 		return

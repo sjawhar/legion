@@ -25,14 +25,147 @@ const (
 	authBearer routeAuth = "bearer"
 )
 
+// writeScope is what a mutating route's write belongs to, which is what lets one check decide a
+// caller whose credential names one project (project_scope.go). Unlike routeAuth, which
+// describes a check its handler makes, this is the enforcement point itself: register wraps
+// every mutating route in it.
+type writeScope string
+
+const (
+	// scopeProject is a write to an object that belongs to one project: the issue-key rows, the
+	// project-key rows, the artifact-id rows, the ask-id rows, the comment-id rows, and the
+	// message rows that carry an issue. A caller whose credential names another project is
+	// refused, naming both projects.
+	scopeProject writeScope = "project"
+	// scopeSession is a write that belongs to the calling session rather than to any project:
+	// an agent conversation's own artifact and messages, the two routes a session answers its
+	// own delivery on, and the caller-private `me` rows. There is no project to compare, and
+	// each of those routes already holds its caller to its own session.
+	scopeSession writeScope = "session"
+	// scopeDeployment is a write that belongs to the deployment rather than to any project: a
+	// credential that may write one project may not create another or change a deployment-wide
+	// setting, so a project-scoped caller is refused these by name.
+	scopeDeployment writeScope = "deployment"
+)
+
+// writeClasses is the class of every mutating route, by "<method> <pattern>". It stands beside
+// the table rather than in each row because Go leaves no field out of a positional composite
+// literal: a sixth value on the row would have to be written on all 146 rows, every GET row
+// included, and a GET row needs no class. routes() stamps it onto the row, so apiRoute.Scope is
+// what every reader of a route sees, and unclassedWrites holds the two in exact correspondence
+// — a mutating row this table does not name, and a name that is no mutating row, each fail
+// TestEveryMutatingRouteIsClassed and refuse to mount (register).
+var writeClasses = map[string]writeScope{
+	// The rows that write an object belonging to one project: its issue, its project, its
+	// document, its ask, its comment, or a message on one of its issues.
+	"POST /api/v1/issues":                                  scopeProject,
+	"PATCH /api/v1/issues/{key}":                           scopeProject,
+	"POST /api/v1/issues/{key}/claim":                      scopeProject,
+	"DELETE /api/v1/issues/{key}/claim":                    scopeProject,
+	"DELETE /api/v1/issues/{key}/subscribers/{session_id}": scopeProject,
+	"POST /api/v1/issues/{key}/artifacts":                  scopeProject,
+	"POST /api/v1/issues/{key}/artifacts/{slug}/versions":  scopeProject,
+	"POST /api/v1/issues/{key}/artifacts/{slug}/edits":     scopeProject,
+	"POST /api/v1/issues/{key}/messages":                   scopeProject,
+	"POST /api/v1/issues/{key}/asks":                       scopeProject,
+	"POST /api/v1/issues/{key}/comments":                   scopeProject,
+
+	"POST /api/v1/projects/{key}/artifacts":                                scopeProject,
+	"POST /api/v1/projects/{key}/artifacts/{slug}/versions":                scopeProject,
+	"POST /api/v1/projects/{key}/artifacts/{slug}/edits":                   scopeProject,
+	"PUT /api/v1/projects/{key}/default-assignee":                          scopeProject,
+	"PUT /api/v1/projects/{key}/architecture-sources/{owner}/{repo}":       scopeProject,
+	"DELETE /api/v1/projects/{key}/architecture-sources/{owner}/{repo}":    scopeProject,
+	"POST /api/v1/projects/{key}/architecture-sources/{owner}/{repo}/sync": scopeProject,
+	"POST /api/v1/projects/{key}/architecture-sources/sync":                scopeProject,
+	"POST /api/v1/projects/{key}/architecture-source/sync":                 scopeProject,
+
+	"POST /api/v1/artifacts/{id}/asks":                       scopeProject,
+	"POST /api/v1/artifacts/{id}/comments":                   scopeProject,
+	"DELETE /api/v1/artifacts/{id}/subscribers/{session_id}": scopeProject,
+	"POST /api/v1/artifacts/{id}/rebuild":                    scopeProject,
+	"POST /api/v1/artifacts/{id}/reviews":                    scopeProject,
+	"POST /api/v1/artifacts/{id}/approval-requests":          scopeProject,
+	"POST /api/v1/artifacts/{id}/versions":                   scopeProject,
+	"POST /api/v1/artifacts/{id}/edits":                      scopeProject,
+	"POST /api/v1/artifacts/{id}/_test/outside-schema":       scopeProject,
+
+	"PUT /api/v1/asks/{id}/followers/{session_id}":    scopeProject,
+	"DELETE /api/v1/asks/{id}/followers/{session_id}": scopeProject,
+	"PATCH /api/v1/asks/{id}":                         scopeProject,
+	"POST /api/v1/asks/{id}/answer":                   scopeProject,
+	"POST /api/v1/asks/{id}/resolve":                  scopeProject,
+
+	"POST /api/v1/comments/{id}/resolve":    scopeProject,
+	"POST /api/v1/comments/{id}/reopen":     scopeProject,
+	"POST /api/v1/comments/{id}/deliveries": scopeProject,
+	"POST /api/v1/comments/{id}/reply":      scopeProject,
+	"POST /api/v1/comments/{id}/accept":     scopeProject,
+	"PATCH /api/v1/comments/{id}":           scopeProject,
+	"POST /api/v1/comments/{id}/reject":     scopeProject,
+
+	"POST /api/v1/messages/{id}/deliveries": scopeProject,
+
+	// The rows that write what belongs to the calling session: its own conversation, its answer
+	// to its own delivery, and the caller-private `me` rows.
+	"POST /api/v1/messages/{id}/deliveries/{attempt}/accept": scopeSession,
+	"POST /api/v1/messages/{id}/reply":                       scopeSession,
+	"POST /api/v1/agents/{session_id}/messages":              scopeSession,
+	"POST /api/v1/agents/{session_id}/artifacts":             scopeSession,
+	"POST /api/v1/agents/{session_id}/stream/_test/publish":  scopeSession,
+	"POST /api/v1/me/agent-tokens":                           scopeSession,
+	"DELETE /api/v1/me/agent-tokens/{id}":                    scopeSession,
+	"PUT /api/v1/me/threads/{id}/read":                       scopeSession,
+	"PUT /api/v1/me/issues/{key}/state":                      scopeSession,
+	"PUT /api/v1/me/agents/{session_id}/state":               scopeSession,
+	"PUT /api/v1/me/asks/{id}/snooze":                        scopeSession,
+	"DELETE /api/v1/me/asks/{id}/snooze":                     scopeSession,
+
+	// The rows that write what belongs to the deployment: a project-scoped credential may not
+	// create another project, remap a repository, change a deployment-wide setting, broadcast,
+	// decide a credential, or reach into this process.
+	"POST /api/v1/projects":                                scopeDeployment,
+	"PUT /api/v1/settings/repo-projects/{owner}/{repo}":    scopeDeployment,
+	"DELETE /api/v1/settings/repo-projects/{owner}/{repo}": scopeDeployment,
+	"PUT /api/v1/settings/delivery":                        scopeDeployment,
+	"POST /api/v1/delivery/session-groups":                 scopeDeployment,
+	"PATCH /api/v1/delivery/session-groups/{id}":           scopeDeployment,
+	"DELETE /api/v1/delivery/session-groups/{id}":          scopeDeployment,
+	"POST /api/v1/broadcasts":                              scopeDeployment,
+	"POST /api/v1/credential-requests/{id}/approve":        scopeDeployment,
+	"POST /api/v1/credential-requests/{id}/deny":           scopeDeployment,
+	"POST /api/v1/credential-requests/machine-lookup":      scopeDeployment,
+	"POST /api/v1/credential-grants/{id}/revoke":           scopeDeployment,
+	"POST /api/v1/machine-logins/{id}/revoke":              scopeDeployment,
+	"POST /api/v1/live/_test/disconnect":                   scopeDeployment,
+	"POST /api/v1/live/_test/rotate":                       scopeDeployment,
+	"POST /api/v1/artifacts/_test/quiesce":                 scopeDeployment,
+	"POST /api/v1/writes/_test/slow":                       scopeDeployment,
+}
+
+// routeRow is a row as the table writes it: the five columns every route has. The write class
+// is not among them because Go leaves no field out of a positional composite literal, so a
+// sixth column would have to be written on all 146 rows, every GET row included, and a GET row
+// needs no class; routes() stamps it from writeClasses instead.
+type routeRow struct {
+	Method      string
+	Pattern     string
+	Auth        routeAuth
+	Description string
+	Handler     http.HandlerFunc
+}
+
 // apiRoute is one mounted route. Register mounts the table and GET /api/v1 lists it, so the
-// two can never disagree about what the server serves.
+// two can never disagree about what the server serves. Scope is what the row's write belongs
+// to, stamped from writeClasses: every mutating row carries one, and a GET row carries none
+// (project_scope.go).
 type apiRoute struct {
 	Method      string
 	Pattern     string
 	Auth        routeAuth
 	Description string
 	Handler     http.HandlerFunc
+	Scope       writeScope
 }
 
 // routeIndexEntry is the public shape of a route in GET /api/v1.
@@ -46,9 +179,12 @@ type routeIndexEntry struct {
 // routeIndexDocs names the agent-facing guide for the routes below.
 const routeIndexDocs = "skills/dispatch/SKILL.md"
 
-// routes lists every native-workspace route. Add a row here, never a mux.HandleFunc line.
+// routes lists every native-workspace route. Add a row here, never a mux.HandleFunc line. A
+// mutating row's write class comes from writeClasses, which Register's project-scope check
+// reads; a row that names no class there is one that check cannot decide, and Register refuses
+// to mount it (unclassedWrites).
 func (s *server) routes() []apiRoute {
-	routes := []apiRoute{
+	rows := []routeRow{
 		{http.MethodGet, "/api/v1", authPublic, "This index: every route with its method, auth, and purpose.", s.getRouteIndex},
 		{http.MethodGet, "/api/v1/schema/blocks", authPublic, "The typed document block schema as JSON.", s.getBlockSchema},
 		{http.MethodGet, "/api/v1/projects", authAny, "List projects.", s.listProjects},
@@ -191,14 +327,18 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPost, "/api/v1/machine-logins/{id}/revoke", authHuman, "Revoke a machine login, expired or not, ending every session it enrolled, a service's pods included: anyone signed in revokes a service's login, and only the person who approved a person's machine login revokes that one.", s.revokeMachineLogin},
 	}
 	if s.deps.TestHooksEnabled {
-		routes = append(routes,
-			apiRoute{http.MethodPost, "/api/v1/live/_test/disconnect", authAny, "Test hook: close every open live socket with 1012, as a restart does.", s.disconnectLiveSockets},
-			apiRoute{http.MethodPost, "/api/v1/live/_test/rotate", authAny, "Test hook: close every open live socket with 4001 (max age), as its age does.", s.rotateLiveSockets},
-			apiRoute{http.MethodPost, "/api/v1/artifacts/_test/quiesce", authAny, "Test hook: close every live document and finish the settlements in flight.", s.quiesceDocuments},
-			apiRoute{http.MethodPost, "/api/v1/artifacts/{id}/_test/outside-schema", authAny, "Test hook: write a crafted tree outside the Proof schema.", s.injectArtifactSchemaFailure},
-			apiRoute{http.MethodPost, "/api/v1/agents/{session_id}/stream/_test/publish", authHuman, "Test hook: publish one frame to a session's conversation viewers.", s.publishAgentStreamFrame},
-			apiRoute{http.MethodPost, "/api/v1/writes/_test/slow", authAny, "Test hook: {method, path, delay_ms} delays every keyed run of that method and path by delay_ms after its key is claimed, on the handler's own context; 0 disarms.", s.armSlowWrite},
+		rows = append(rows,
+			routeRow{http.MethodPost, "/api/v1/live/_test/disconnect", authAny, "Test hook: close every open live socket with 1012, as a restart does.", s.disconnectLiveSockets},
+			routeRow{http.MethodPost, "/api/v1/live/_test/rotate", authAny, "Test hook: close every open live socket with 4001 (max age), as its age does.", s.rotateLiveSockets},
+			routeRow{http.MethodPost, "/api/v1/artifacts/_test/quiesce", authAny, "Test hook: close every live document and finish the settlements in flight.", s.quiesceDocuments},
+			routeRow{http.MethodPost, "/api/v1/artifacts/{id}/_test/outside-schema", authAny, "Test hook: write a crafted tree outside the Proof schema.", s.injectArtifactSchemaFailure},
+			routeRow{http.MethodPost, "/api/v1/agents/{session_id}/stream/_test/publish", authHuman, "Test hook: publish one frame to a session's conversation viewers.", s.publishAgentStreamFrame},
+			routeRow{http.MethodPost, "/api/v1/writes/_test/slow", authAny, "Test hook: {method, path, delay_ms} delays every keyed run of that method and path by delay_ms after its key is claimed, on the handler's own context; 0 disarms.", s.armSlowWrite},
 		)
+	}
+	routes := make([]apiRoute, len(rows))
+	for index, row := range rows {
+		routes[index] = apiRoute{row.Method, row.Pattern, row.Auth, row.Description, row.Handler, writeClasses[row.Method+" "+row.Pattern]}
 	}
 	return routes
 }

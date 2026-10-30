@@ -1,0 +1,22 @@
+kind: Added
+body: |-
+    Dispatch: a credential that names one project now writes that project and nothing else. Every
+    mutating route declares what its write belongs to — a project's (the issue-key, project-key,
+    artifact-id, ask-id and comment-id rows, and the message rows that carry an issue), the
+    calling session's (an agent conversation's own artifact and messages, the two routes a session
+    answers its own delivery on, and the caller-private `me` rows), or the deployment's (the
+    project create, the repository-to-project map, the delivery settings and session groups, the
+    broadcast, and the credential and machine-login decisions) — and one check in front of every
+    one of them resolves the project the addressed object belongs to and refuses a caller whose
+    credential names another: `403 PROJECT_SCOPE`, naming the project the credential covers and
+    the project the write belongs to and nothing of the credential, or `403
+    PROJECT_SCOPE_DEPLOYMENT` for a deployment-wide write, naming that project and the route. A
+    target that does not exist keeps the `404` its handler already answered, so an unknown id
+    never says which projects exist. The check is a no-op for every credential that carries no
+    project — a browser cookie, a personal agent token, a Kubernetes service-account token, the
+    shared token, and an access token the secrets broker scoped to a person rather than to one
+    project — so no caller that exists today is affected; that is the rule and not a transitional
+    measure.
+time: 2026-10-29T00:00:00.000000000Z
+custom:
+    Issue: INFRA-264

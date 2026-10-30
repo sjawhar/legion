@@ -97,6 +97,38 @@ second time. Without `DISPATCH_AGENT_SECRETS_URL` there is no such credential,
 and a `DPoP` presentation is the `401 UNAUTHORIZED` `invalid bearer token` any
 Authorization header that is not a bearer has always been.
 
+A credential that names one project may write that project and nothing else.
+Every mutating row of the route table declares what its write belongs to
+(`internal/dispatch/api/routes_table.go`, `writeClasses`; a `GET` row declares
+nothing), in three classes: *a project's* — the issue-key rows, the
+project-key rows, the artifact-id rows, the ask-id rows, the comment-id rows,
+and the message rows that carry an issue; *the calling session's* — an agent
+conversation's own artifact and messages, the two routes a session answers its
+own delivery on, and the caller-private `me` rows; and *the deployment's* — the
+project create, the repository-to-project map, the delivery settings and
+session groups, the broadcast, and the credential and machine-login decisions.
+`Register` wraps every mutating route in one check
+(`internal/dispatch/api/project_scope.go`), which runs after the caller is
+resolved and before the handler, so no route is left to check this for itself:
+it resolves the project the addressed object belongs to — an issue key, a
+project key, an artifact id, an ask id, a comment id or a message id, each by
+one read — and refuses a caller whose credential names another with
+`403 PROJECT_SCOPE`, naming the project the credential covers and the project
+the write belongs to, and nothing of the credential. A deployment-wide write is
+`403 PROJECT_SCOPE_DEPLOYMENT`, naming the credential's project and the route:
+a credential that may write one project may not create another or change a
+setting that is not any project's. A target that does not exist resolves to no
+project and keeps the `404` its handler has always answered, so an unknown id
+never becomes an answer about which projects exist. `POST /api/v1/issues` takes
+its project from the body rather than its address, so its handler makes the
+same check, with the same refusal, before the create does any work.
+
+The check is a no-op for a credential that carries no project — a browser
+cookie, a personal agent token, a Kubernetes service-account token, the shared
+token, and an access token the broker scoped to a person rather than to one
+project. That is the rule and not a transitional measure: every caller that
+exists today writes exactly what it wrote before.
+
 GitHub App credentials come either from the `DISPATCH_APP_*` variables or from
 `~/.local/share/dispatch/app.json`; the variables take precedence. Two of them
 carry rules beyond their row:
