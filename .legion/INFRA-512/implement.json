@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-512",
-  "completed": "2026-10-30T09:20:00Z",
+  "completed": "2026-10-30T12:15:00Z",
   "scope": "This round is the plan's section 0 items (c) and (d) only: the issue read's database round trips and INFRA-653's four pmdoc render cleanups, plus the project artifact list route's one-statement version read (the last per-artifact version query; the architect put it in scope). Items (a), the garbage-collection pass, and (b), deliverable 3, are NOT in this head: they start when the last child of INFRA-512 closes. The architect holds the root in accepting until then and sends it back to implementing for (a)+(b) in this same pull request. Round 2 answers the tester's round 1 (fail at 75918db5: the branch conflicted with main in refs/graph.go against #2463, so no CI had run). It merges main forward twice and redoes proof entries 2-5 at the merge head; the code of (c) and (d) is unchanged.",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2535",
   "proof": [
@@ -10,32 +10,32 @@
       "criterion": "(c) The issue read's round trips are cut, and the count is quoted before and after",
       "surface": "GET /api/v1/issues/{key} on a Postgres-backed Dispatch test server, with a pgx tracer that counts each statement and each batch (packages/envoy/internal/dispatch/api/issue_read_batch_test.go)",
       "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:15432/postgres?sslmode=disable CGO_ENABLED=1 go test -race ./internal/dispatch/api/ -count=1 -run \"TestBatchedIssueRead|TestIssueReadCostsTwoRoundTrips|TestMissingIssueReadKeepsTheConnectionsPreparedStatements\"",
-      "observed": "The full test issue takes 2 round trips (14 before this change), an issue with no artifact and no open ask takes 1, counting only the counted request statements. The batched body equals the reference read built from the loaders production keeps. A missing key answers the same 404 body and leaves the connection prepared statements in place.",
-      "headSha": "2a19134ea25b04be1f9c78d61ff6afb42d108f5a",
+      "observed": "The full test issue takes 2 round trips (14 before this change), an issue with no artifact and no open ask takes 1, counting only the counted request statements. The batched body equals the reference read built from the loaders production keeps. A missing key answers the same 404 body and leaves the connection prepared statements in place. Round 4 adds: a single document read takes 2 round trips instead of 4 (by id and by slug), and the transactional approval request is driven in sequence and concurrently (roundFour.transactionalBatch).",
+      "headSha": "1b91d67fec0927d286a2830f793e4cc6692c65cd",
       "negativeControl": "With the issue-row callback returning pgx.ErrNoRows again, TestMissingIssueReadKeepsTheConnectionsPreparedStatements fails: 6 of the 11 prepared statements remain."
     },
     {
       "criterion": "(c) The issue read's answer stays byte-identical over real issues, backlink counts included, after #2463",
       "surface": "Dispatch server under packages/envoy/loadtest on this pod (3 cores, Postgres 16.2, real migrations), INFRA-639's LINUX replay seed (linux-replay-seed-0114, dump sha256 9b0349e4...)",
-      "command": "round3.sh part B (dispatch://INFRA-512/artifact/infra512-pr2535-round3-evidence-tar-gz): round 2 drained LINUX template (migration 144, 0 owed) copied for base 5dc21cb9 and head 2a19134e; each side reads, as a person and as an agent, GET /api/v1/issues/{key}, /issues/{key}/artifacts, /issues/{key}/asks?state=all and /issues/{key}/events for all 1,047 LINUX issues, /artifacts/{id}/asks for each document (an issue document answers its documented 400 ARTIFACT_LINKED), /projects/LINUX/artifacts and the Inbox",
-      "observed": "11,900 answers (8,380 200, 3,520 the documented 400), 105,245,850 bytes; base on two resets identical, head identical to base (list sha256 d3796078... on both sides); owed 0 at every dump.",
-      "headSha": "2a19134ea25b04be1f9c78d61ff6afb42d108f5a",
+      "command": "round4.sh part B (dispatch://INFRA-512/artifact/infra512-pr2535-round4-evidence-tar-gz): round 2 drained LINUX template copied for base cd2e246d and head 1b91d67f; as a person and as an agent: GET /api/v1/issues/{key}, /issues/{key}/artifacts, /issues/{key}/asks?state=all, /issues/{key}/events, /artifacts/{id} and /issues/{key}/artifacts/{slug} for every artifact, /artifacts/{id}/asks for each document, /projects/LINUX/artifacts and the Inbox",
+      "observed": "19,052 answers (15,532 200, 3,520 the documented 400 ARTIFACT_LINKED of an issue document's asks route), 115,799,870 bytes; base on two resets identical, head identical to base (list sha256 bdad4f55... on both sides); owed 0 at every dump. The single-artifact reads (3,576 by id, 3,576 by slug) are the routes finding 1 changed.",
+      "headSha": "1b91d67fec0927d286a2830f793e4cc6692c65cd",
       "negativeControl": "Base dumped twice from two resets gives identical lists. In round 1 the head with its batch path approval fill removed answered 2,180 of 2,180 seeded reads differently."
     },
     {
       "criterion": "(c) The parts LINUX lacks (external links, blockers, open and answered asks, cited asks, approvals, backlink counts) stay byte-identical after #2463",
       "surface": "Dispatch server under packages/envoy/loadtest on this pod: the load-test seed made fresh by main cd5ca7c3 (migration 144, with main's reference seeding), 300 issues given those parts through the API (augment.py augment), drained, kept as a template",
-      "command": "round3.sh part A: the round 2 augmented seed (drained) with base 5dc21cb9 and head 2a19134e; the same routes as the LINUX comparison for all 1,090 issues, the four project lists and the Inbox (all and per project)",
-      "observed": "13,733 answers (8,733 200, 5,000 the documented 400), 104,589,061 bytes, identical at base and head (list sha256 e934ee02...); owed 0 at each dump. The issue, its artifact list, its asks (queryOwnerAsks with loadAskDetails), its event page (loadAskDetails) and the Inbox (loadAskDetails) are each compared, backlink counts included.",
-      "headSha": "2a19134ea25b04be1f9c78d61ff6afb42d108f5a",
+      "command": "round4.sh part A: the round 2 augmented seed (drained) with base cd2e246d and head 1b91d67f; the same routes for all 1,090 issues, their artifacts, the four project lists and the Inbox",
+      "observed": "23,841 answers (18,841 200, 5,000 the documented 400), 136,823,737 bytes, identical at base and head (list sha256 1da72ce8...); owed 0 at each dump; 5,054 single-artifact reads by id and 5,054 by slug, including approved, awaiting and stale documents.",
+      "headSha": "1b91d67fec0927d286a2830f793e4cc6692c65cd",
       "negativeControl": "The approval-fill mutation of round 1 changed 2,180 of 2,180 issue answers of this comparison."
     },
     {
       "criterion": "(c) The change is not slower: the median head run's whole-process CPU is not above the highest base run's",
       "surface": "packages/envoy/loadtest route mix (INFRA-589's routes-2026-10-26-1719Z.txt) on this pod (nproc 3), from the drained run seed",
-      "command": "round3.sh part C: run-step.sh <side>-<n> --events 1.5 --sessions 150 --requests 22 --rng-seed 1, 180 s window, each from its own reset of the drained run seed, alternating base and head in one session",
-      "observed": "Base 5dc21cb9, window starts 2026-10-30 08:45:41, 08:54:13, 09:02:46 UTC: 42.80, 40.28, 42.68 CPU-s, getIssue share 1.79%, 2.16%, 1.88%. Head 2a19134e, window starts 08:49:58, 08:58:27, 09:07:01: 39.93, 42.55, 44.34 CPU-s, getIssue share 0.52%, 0.59%, 0.42%. Median head 42.55 is not above the highest base 42.80; base spread 2.52 s. Issue route p50 browser 49.9-50.3 ms at base, 18.9-19.2 ms at head; cli 45.8-46.1 and 14.8-15.1 ms. Every run 4,088 of 4,088 requests 2xx and 261 of 261 writes committed, box busy before 0.4-1.9%. Heap in use p50 base 520/521/500 MiB, head 481/510/507; RSS max base 911/907/915, head 880/907/918. nproc 3.",
-      "headSha": "2a19134ea25b04be1f9c78d61ff6afb42d108f5a",
+      "command": "round4.sh part C: run-step.sh <side>-<n> --events 1.5 --sessions 150 --requests 22 --rng-seed 1, 180 s window, each from its own reset of the drained run seed, alternating base cd2e246d and head 1b91d67f in one session",
+      "observed": "Base cd2e246d, window starts 2026-10-30 11:37:54, 11:46:26, 11:55:11 UTC: 45.98, 42.26, 40.11 CPU-s. Head 1b91d67f, window starts 11:42:11, 11:50:54, 11:59:25: 40.08, 39.84, 40.95 CPU-s. Median head 40.08 is not above the highest base 45.98; base spread 5.87 s. pod GET /api/v1/artifacts/{artifact_id}/text (which reads its artifact through loadArtifactRow) p50 26.3-27.3 ms at base, 17.8-18.3 ms at head. Every run 4,088 of 4,088 requests 2xx and 261 of 261 writes committed, box busy before 0.7-2.5%. Heap in use p50 base 506/473/493 MiB, head 531/474/497; RSS max base 911/889/918, head 916/898/906. nproc 3.",
+      "headSha": "1b91d67fec0927d286a2830f793e4cc6692c65cd",
       "negativeControl": "INFRA-651 found that --events 2 --sessions 200 --requests 30 saturates the pod (76.8% 2xx); these flags gave 100% 2xx in every run."
     },
     {
@@ -43,13 +43,14 @@
       "surface": "pmdoc renderer, read-back and misread checks, and StripAnchorMarks, over every LINUX issue's current spec (1,210 specs fetched read-only on 2026-10-30, not committed, corpus sha256 36546917...)",
       "command": "A throwaway harness (harness_dump_test.go) built in main cd5ca7c3's tree and in the merge head da947e18's tree, writing RenderWithBlockOffsets, RefuseMisreadDocument, NewMisread against the read-back, StripAnchorMarks and its render, for each spec and for an anchored copy (each text run cut in three, the middle third under dispatchAsk or proofComment, every seventh run holding a U+0000); Parse's random block ids masked by order (mask.py)",
       "observed": "The two dumps are identical: 1,210 documents, masked sha256 f7324c09... on both sides. Measured at the merge head da947e18 (main cd5ca7c3); 9f3303df is a later forward merge of main 5dc21cb9 whose unchanged-diff fingerprint equals da947e18's (618dbe4e...), and main changed nothing under dispatch/api, pmdoc, refs, events or store/storetest in between. The code of (d) is unchanged since da947e18; this round adds only the strip test sample.",
-      "headSha": "2a19134ea25b04be1f9c78d61ff6afb42d108f5a",
+      "headSha": "1b91d67fec0927d286a2830f793e4cc6692c65cd",
       "negativeControl": "The merge head with StripAnchorMarks as cloneNode(node) dumped 1,210 of 1,210 documents differently."
     }
   ],
   "filesChanged": [
     "packages/envoy/.changes/unreleased/pr2535-Changed-20261030-010000.yaml",
     "packages/envoy/AGENTS.md",
+    "packages/envoy/internal/dispatch/api/approval_request_batch_test.go",
     "packages/envoy/internal/dispatch/api/artifacts.go",
     "packages/envoy/internal/dispatch/api/ask_rows.go",
     "packages/envoy/internal/dispatch/api/asks.go",
@@ -88,7 +89,7 @@
   "discoveredComplexity": [
     "TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves fails on this pod's pgserver Postgres, whose default collation is already byte order. The test refuses such a database at its first line (rank_test.go:313-318), before any code this change touches runs. CI's Postgres is not affected."
   ],
-  "round": 3,
+  "round": 4,
   "roundTwo": {
     "merges": [
       "e00f224a -> da947e18: main cd5ca7c3. graph.go resolved as a semantic merge: #2463's uuid import and doc comment, this branch's pgx import and BacklinkCountsStatement/ScanBacklinkCounts split; heldByABlock is #2463's version, byte-identical to main's, and BacklinkCountsStatement calls it, so the batched count applies #2463's item-block rule. Fingerprint cbc11b75... -> 618dbe4e... (changed: the merge).",
@@ -107,5 +108,14 @@
       "6 the round-trip test counts only the counted request (context value); the sequential estimate is deleted. The strip sample holds an isInline hard break and a line feed; writtenTree(node, true) fails it."
     ],
     "errorTextDifference": "loadArtifacts, listProjectArtifacts, queryOwnerAsks, the Inbox and the event page now send their detail statements as one batch: a failure that is not a statement own (dead connection, unencodable argument, failed prepare) surfaces from SendBatch(...).Close() without the loader prefix that attachApprovals added before; every statement own error keeps its wrap."
+  },
+  "roundFour": {
+    "answers": "Review round 2 at cd2e246d (review 5710976883, changes requested, two findings), narrowed by the architect to those two. Both fixed in 1b91d67f; both threads replied and resolved.",
+    "findings": [
+      "1 queueApprovals (reviews.go) is the one approval queue-and-apply: queueArtifactDetails queues versions then calls it (apply: versions first); attachApprovals sends it as a batch of its own (one round trip per attachApproval in requestArtifactApproval's transaction); loadArtifactRow calls loadArtifactDetails for its one artifact. The scans fill caller-made maps; their comments and applyApprovals' say what the code does.",
+      "2 storetest.Reopened is the one way a test opens a second pool; Traced and SingleConnection are one-liners over it."
+    ],
+    "roundTrips": "Measured with the traced pool (count_artifact_reads_test.go, throwaway, in the round 4 evidence): GET /api/v1/artifacts/{id} and GET /api/v1/issues/{key}/artifacts/{slug} of a document take 4 round trips at cd2e246d and 2 at 1b91d67f (the row, then one batch of versions, latest review, open approval request); of a file, 2 at both.",
+    "transactionalBatch": "requestArtifactApproval (POST /api/v1/artifacts/{id}/approval-requests) now sends two batches on its pgx.Tx, the second after it opened or renewed the ask. Every read before each batch has run to its end (loadArtifact, requireOpenOwner, settledVersionNumber, OpenApprovalAsk return values, not cursors), so no open cursor meets either batch. TestApprovalRequestsReadTheirApprovalInTheirTransactionInSequenceAndAtOnce drives it in sequence, on seven documents at once and sixteen times at once on one document, with a 90 s bound, and checks each document awaiting and the pool empty afterwards; it passes three times under -race and fails (first request 500) when attachApprovals leaves its batch unclosed."
   }
 }
