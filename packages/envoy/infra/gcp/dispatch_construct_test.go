@@ -524,11 +524,12 @@ func TestConstructRefusesADispatchInputWithClusterOnly(t *testing.T) {
 // policy, account or Secret, and no serve ConfigMap.
 func TestConstructDispatchSandbox(t *testing.T) {
 	inputs := dispatchConstructInputs()
-	for _, input := range []string{
-		"tailnetDnsName", "tags", "tailnetAuthKey", "tailnetService", "tailscaleImage", "frontDoorToolsImage",
-		"signInClientId", "signInClientSecret", "signInDomain",
-	} {
-		delete(inputs, input)
+	// The nine inputs of the two groups, from the groups' own lists, so a group that gains an
+	// input leaves it out of this call too.
+	for _, group := range [][]dispatchClusterOnlyRefusal{dispatchSandboxTailnetGroup, dispatchSandboxSignInGroup} {
+		for _, in := range group {
+			delete(inputs, in.input)
+		}
 	}
 	inputs["allowedNamespaces"] = property.New(property.NewArray([]property.Value{property.New("legion")}))
 	inputs["natsUrl"] = property.New(inClusterNatsURL)

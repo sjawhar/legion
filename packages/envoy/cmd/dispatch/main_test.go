@@ -66,15 +66,22 @@ func headerIdentityEnvironment(overrides map[string]string) map[string]string {
 	return values
 }
 
-// noSignInEnvironment is a cookie-identity boot environment with no sign-in setting: the sandbox
-// deployment, which has no sign-in client and asks nobody to sign in.
-func noSignInEnvironment(overrides map[string]string) map[string]string {
-	values := signInEnvironment(map[string]string{
+// noSignInSettings empties the four sign-in settings, which is how a deployment asks for no
+// browser sign-in at all: they go together or not at all, so a boot carrying none of them runs
+// the agent-token API alone.
+func noSignInSettings() map[string]string {
+	return map[string]string{
 		"DISPATCH_SIGNIN_ISSUER":        "",
 		"DISPATCH_SIGNIN_CLIENT_ID":     "",
 		"DISPATCH_SIGNIN_CLIENT_SECRET": "",
 		"DISPATCH_SIGNIN_GROUP":         "",
-	})
+	}
+}
+
+// noSignInEnvironment is a cookie-identity boot environment with no sign-in setting: the sandbox
+// deployment, which has no sign-in client and asks nobody to sign in.
+func noSignInEnvironment(overrides map[string]string) map[string]string {
+	values := signInEnvironment(noSignInSettings())
 	for name, value := range overrides {
 		values[name] = value
 	}

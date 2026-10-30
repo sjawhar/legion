@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -445,6 +446,15 @@ func (s dispatchSettings) socks5Proxy() string {
 	return clusterLocal(s.hostname+"-tailnet", s.namespace) + ":" + strconv.Itoa(dispatchSOCKS5Port)
 }
 
+// clusterURL is the app's own Service inside the cluster, the address a caller already in the
+// cluster reaches Dispatch at: http because that Service terminates no TLS, on the 8766 it
+// publishes. It is what a sandbox tells a reader it is at (serverURL) and what the front door's
+// serve configuration forwards a tailnet request to, so both come from here and can never
+// disagree.
+func (s dispatchSettings) clusterURL() string {
+	return "http://" + clusterLocal(s.hostname, s.namespace) + ":8766"
+}
+
 // serverURL is the address Dispatch tells a reader it is at, the url output and the app's
 // DISPATCH_SERVER_URL: the tailnet name the front door hosts, or, in the sandbox, the app's own
 // Service inside the cluster, which is all there is to reach. It carries no trailing slash, it is
@@ -454,7 +464,7 @@ func (s dispatchSettings) serverURL() string {
 	if s.frontDoor {
 		return "https://" + core.TailnetHostName(s.hostname, s.tailnetDNSName)
 	}
-	return "http://" + clusterLocal(s.hostname, s.namespace) + ":8766"
+	return s.clusterURL()
 }
 
 // dispatchAzure is the Azure embedder's plain configuration, the zero value when
@@ -558,11 +568,11 @@ func dispatchStrategyFor(replicas int) dispatchStrategy {
 	}
 }
 
-// dispatchClusterOnlyInput is one row of the cluster-only refusal table: an input's schema name,
-// and whether the consumer set it. A plain string is set when it is not empty, a slice when it has
-// an element, and a pointer or a pulumi.*Input when it is not nil, as newDispatchAzure judges its
-// pointers and Inputs, so a value unknown at preview is set as it will be at update.
-type dispatchClusterOnlyInput struct {
+// dispatchInput is one input of a refusal table: the input's schema name, and whether the
+// consumer set it. A plain string is set when it is not empty, a slice when it has an element,
+// and a pointer or a pulumi.*Input when it is not nil, as newDispatchAzure judges its pointers
+// and Inputs, so a value unknown at preview is set as it will be at update.
+type dispatchInput struct {
 	input string
 	set   bool
 }
@@ -571,8 +581,8 @@ type dispatchClusterOnlyInput struct {
 // Dispatch rather than the cluster, which clusterOnly refuses by name. Only the four inputs both
 // modes use are absent: clusterOnly itself, region and hostname, which name every cloud resource,
 // and deletionProtection, which guards the cluster as well as the database.
-func dispatchClusterOnlyRefusals(args *DispatchArgs) []dispatchClusterOnlyInput {
-	return []dispatchClusterOnlyInput{
+func dispatchClusterOnlyRefusals(args *DispatchArgs) []dispatchInput {
+	return []dispatchInput{
 		{"tailnetDnsName", args.TailnetDnsName != ""},
 		{"tags", len(args.Tags) > 0},
 		{"tailnetAuthKey", args.TailnetAuthKey != nil},
@@ -625,51 +635,61 @@ func dispatchClusterOnlyRefusals(args *DispatchArgs) []dispatchClusterOnlyInput 
 	}
 }
 
+// dispatchNamedInputs selects the named inputs from dispatchClusterOnlyRefusals, which is the one
+// definition of what "the consumer set this input" means for each of them: a group judged here
+// and a group refused there can never read the same input two ways. The rows come back in the
+// table's order, which is the order each group names them in, so dispatchGroupUnset's list reads
+// as the group does. A name no row carries would shrink the group it is selecting, and a group
+// short an input turns a mode on rather than refusing, so it panics instead: the names are
+// written in this file beside the table and read at every resolve, so one that matches nothing is
+// a programming error here and never a consumer's mistake.
+func dispatchNamedInputs(args *DispatchArgs, names ...string) []dispatchInput {
+	group := make([]dispatchInput, 0, len(names))
+	for _, in := range dispatchClusterOnlyRefusals(args) {
+		if slices.Contains(names, in.input) {
+			group = append(group, in)
+		}
+	}
+	if len(group) < len(names) {
+		for _, name := range names {
+			if !slices.ContainsFunc(group, func(in dispatchInput) bool { return in.input == name }) {
+				panic("dispatchNamedInputs: " + name + " is no input of dispatchClusterOnlyRefusals")
+			}
+		}
+	}
+	return group
+}
+
 // dispatchTailnetInputs is the tailnet group: every input that exists only because Dispatch has a
 // front door on a tailnet, from the name it is served at to the images its pods run. A consumer
 // sets all six, for a Dispatch readers reach over the tailnet, or none, for the sandbox, where no
 // front door is built and the app is reached inside its cluster alone. It is the group's one
 // definition, so the resolver's mode and the refusals of a half-set group can never disagree.
-func dispatchTailnetInputs(args *DispatchArgs) []dispatchClusterOnlyInput {
-	return []dispatchClusterOnlyInput{
-		{"tailnetDnsName", args.TailnetDnsName != ""},
-		{"tags", len(args.Tags) > 0},
-		{"tailnetAuthKey", args.TailnetAuthKey != nil},
-		{"tailnetService", args.TailnetService != nil},
-		{"tailscaleImage", args.TailscaleImage != ""},
-		{"frontDoorToolsImage", args.FrontDoorToolsImage != ""},
-	}
+func dispatchTailnetInputs(args *DispatchArgs) []dispatchInput {
+	return dispatchNamedInputs(args,
+		"tailnetDnsName", "tags", "tailnetAuthKey", "tailnetService", "tailscaleImage", "frontDoorToolsImage")
 }
 
 // dispatchSignInInputs is the sign-in group: the Google client Dispatch hands a browser to, and
 // the domain whose accounts it admits. All three or none, as the tailnet group; with none the app
 // runs no browser sign-in at all, which is what the sandbox is for.
-func dispatchSignInInputs(args *DispatchArgs) []dispatchClusterOnlyInput {
-	return []dispatchClusterOnlyInput{
-		{"signInClientId", args.SignInClientId != ""},
-		{"signInClientSecret", args.SignInClientSecret != nil},
-		{"signInDomain", args.SignInDomain != ""},
-	}
+func dispatchSignInInputs(args *DispatchArgs) []dispatchInput {
+	return dispatchNamedInputs(args, "signInClientId", "signInClientSecret", "signInDomain")
 }
 
 // dispatchGroupSet reports whether the consumer set any input of group, which is what turns the
 // feature the group configures on: one input is enough, so a consumer who meant to set the group
 // and missed an input is refused by that group's own checks rather than silently given the mode
 // it did not ask for.
-func dispatchGroupSet(group []dispatchClusterOnlyInput) bool {
-	for _, in := range group {
-		if in.set {
-			return true
-		}
-	}
-	return false
+func dispatchGroupSet(group []dispatchInput) bool {
+	return slices.ContainsFunc(group, func(in dispatchInput) bool { return in.set })
 }
 
 // dispatchGroupUnset names every input of group the consumer left unset, comma-joined and in the
 // group's order, and "" for a whole group. A refusal carries it so one run names the whole
 // shortfall: the checks stop at the first input missing, and a consumer told only about that one
 // would set it and be refused again for the next.
-func dispatchGroupUnset(group []dispatchClusterOnlyInput) string {
+func dispatchGroupUnset(group []dispatchInput) string {
 	unset := make([]string, 0, len(group))
 	for _, in := range group {
 		if !in.set {
@@ -756,9 +776,8 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	// left unset names the rest of the shortfall (dispatchGroupClause).
 	tailnetGroup, signInGroup := dispatchTailnetInputs(args), dispatchSignInInputs(args)
 	frontDoor, signInOn := dispatchGroupSet(tailnetGroup), dispatchGroupSet(signInGroup)
-	tailnetUnset, signInUnset := dispatchGroupUnset(tailnetGroup), dispatchGroupUnset(signInGroup)
-	tailnetClause := func(set bool) string { return dispatchGroupClause("tailnet", tailnetUnset, set) }
-	signInClause := func(set bool) string { return dispatchGroupClause("sign-in", signInUnset, set) }
+	tailnetClause := func(set bool) string { return dispatchGroupClause("tailnet", dispatchGroupUnset(tailnetGroup), set) }
+	signInClause := func(set bool) string { return dispatchGroupClause("sign-in", dispatchGroupUnset(signInGroup), set) }
 	if frontDoor {
 		if !tailnetDNSNameRule.MatchString(args.TailnetDnsName) {
 			return dispatchSettings{}, fmt.Errorf("tailnetDnsName %q must match %s%s", args.TailnetDnsName, tailnetDNSNameRule, tailnetClause(args.TailnetDnsName != ""))
@@ -787,11 +806,11 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 		if image.frontDoorOnly && !frontDoor {
 			continue
 		}
-		clause := ""
-		if image.frontDoorOnly {
-			clause = tailnetClause(image.ref != "")
-		}
 		if !imageRule.MatchString(image.ref) {
+			clause := ""
+			if image.frontDoorOnly {
+				clause = tailnetClause(image.ref != "")
+			}
 			return dispatchSettings{}, fmt.Errorf("%s %q must be pinned by digest, as <name>@sha256:<64 lowercase hex digits>%s", image.field, image.ref, clause)
 		}
 	}

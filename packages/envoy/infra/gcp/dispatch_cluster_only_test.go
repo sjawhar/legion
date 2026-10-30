@@ -169,6 +169,30 @@ func dispatchClusterOnlyRefusals() []dispatchClusterOnlyRefusal {
 	}
 }
 
+// dispatchNamedRefusals selects the named rows of dispatchClusterOnlyRefusals, in the table's
+// order, so a test that sets a group of inputs sets each to the value that table already holds
+// rather than to a second copy of it. A name no row carries panics: it would leave the group a
+// row short, and a group short an input asks for a mode rather than a refusal. The names are
+// written in this package beside the table and the groups are built at package initialisation,
+// so a name matching nothing is a programming error here and not anything a consumer sends, as
+// it is for the resolver's own groups.
+func dispatchNamedRefusals(names ...string) []dispatchClusterOnlyRefusal {
+	rows := make([]dispatchClusterOnlyRefusal, 0, len(names))
+	for _, row := range dispatchClusterOnlyRefusals() {
+		if slices.Contains(names, row.input) {
+			rows = append(rows, row)
+		}
+	}
+	if len(rows) < len(names) {
+		for _, name := range names {
+			if !slices.ContainsFunc(rows, func(row dispatchClusterOnlyRefusal) bool { return row.input == name }) {
+				panic("dispatchNamedRefusals: " + name + " is no row of dispatchClusterOnlyRefusals")
+			}
+		}
+	}
+	return rows
+}
+
 // Every input that configures Dispatch rather than the cluster is refused by name when it arrives
 // with clusterOnly, so a stack already running Dispatch cannot turn the mode on: such a stack sets
 // these inputs, and the update is refused before anything it would no longer build is deleted. The

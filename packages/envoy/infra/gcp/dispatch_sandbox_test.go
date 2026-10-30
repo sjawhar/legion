@@ -21,27 +21,30 @@ import (
 // and natsSeedSecret are the sandbox's as much as the tailnet's: the app's pod runs those two
 // images and mounts that seed in either mode.
 func dispatchSandboxArgs() *gcp.DispatchArgs {
-	return &gcp.DispatchArgs{
+	args := &gcp.DispatchArgs{
 		Region:             "us-central1",
 		Hostname:           "example-dispatch",
 		EnvoyImage:         dispatchEnvoyImage,
 		CloudSqlProxyImage: dispatchProxyImage,
-		NatsInCluster:      pulumi.BoolRef(true),
-		NatsUrl:            pulumi.String(inClusterNatsURL),
 		NatsSeedSecret:     pulumi.String("projects/example-project/secrets/example-nats-seed"),
 		AllowedNamespaces:  []string{"legion"},
 	}
+	setInClusterNats(args)
+	return args
 }
 
 // dispatchSandboxURL is where a sandbox Dispatch is reached: its own Service in its namespace, on
 // the 8766 that Service publishes, over http because that Service terminates no TLS.
 const dispatchSandboxURL = "http://example-dispatch.dispatch.svc.cluster.local:8766"
 
-// runDispatchSandbox runs args through the mock engine with both providers, which a sandbox needs
-// as the default mode does: it builds the same database and the same generated passwords. check,
-// when not nil, runs on the constructed component inside the program, where its outputs resolve.
-func runDispatchSandbox(t *testing.T, args *gcp.DispatchArgs, check func(*gcp.Dispatch)) (*pulumitest.Mocks, error) {
+// readDispatchSandboxURL runs a sandbox and reads its url output inside the program, which is
+// where the engine resolves the component's outputs: await runs on the test's goroutine there,
+// so the value is read after the engine resolved it rather than awaited once the program has
+// returned. Both providers are given, which a sandbox needs as the default mode does: it builds
+// the same database and the same generated passwords.
+func readDispatchSandboxURL(t *testing.T, args *gcp.DispatchArgs) (*pulumitest.Mocks, string) {
 	t.Helper()
+	var url string
 	m := newMocks()
 	err := m.Run(func(ctx *pulumi.Context) error {
 		gcpProvider, err := newGCPProvider(ctx)
@@ -56,12 +59,11 @@ func runDispatchSandbox(t *testing.T, args *gcp.DispatchArgs, check func(*gcp.Di
 		if err != nil {
 			return err
 		}
-		if check != nil {
-			check(dispatch)
-		}
+		url = await(t, dispatch.Url)
 		return nil
 	})
-	return m, err
+	require.NoError(t, err)
+	return m, url
 }
 
 // dispatchSandboxFrontDoor is the front door, as the default mode's registration golden holds it:
@@ -116,7 +118,7 @@ func dispatchSandboxGolden(t *testing.T) string {
 // comparison below is of the whole registration set, so a front-door resource registering, or any
 // other resource going missing, is a line it does not hold and fails naming it.
 func TestDispatchSandboxRegistrations(t *testing.T) {
-	m, err := runDispatchSandbox(t, dispatchSandboxArgs(), nil)
+	m, err := runDispatch(t, dispatchSandboxArgs(), true)
 	require.NoError(t, err)
 	require.Equal(t, dispatchSandboxGolden(t), dispatchRegistrations(m))
 }
@@ -126,11 +128,7 @@ func TestDispatchSandboxRegistrations(t *testing.T) {
 // DISPATCH_SERVER_URL the app builds its own links from are one address, so a browser the app
 // sends somewhere and a client the output sends somewhere arrive at the same server.
 func TestDispatchSandboxServesInTheCluster(t *testing.T) {
-	var url string
-	m, err := runDispatchSandbox(t, dispatchSandboxArgs(), func(dispatch *gcp.Dispatch) {
-		url = await(t, dispatch.Url)
-	})
-	require.NoError(t, err)
+	m, url := readDispatchSandboxURL(t, dispatchSandboxArgs())
 
 	require.Equal(t, dispatchSandboxURL, url)
 	require.Equal(t, url, appEnv(t, m)["DISPATCH_SERVER_URL"], "the output and the app agree on where Dispatch is")
@@ -140,7 +138,7 @@ func TestDispatchSandboxServesInTheCluster(t *testing.T) {
 // setting to read, and the client secret is not a key of its Secret, so nothing in the cluster
 // holds an OAuth credential the deployment never got.
 func TestDispatchSandboxRendersNoSignIn(t *testing.T) {
-	m, err := runDispatchSandbox(t, dispatchSandboxArgs(), nil)
+	m, err := runDispatch(t, dispatchSandboxArgs(), true)
 	require.NoError(t, err)
 
 	for name := range appEnv(t, m) {
@@ -155,7 +153,7 @@ func TestDispatchSandboxRendersNoSignIn(t *testing.T) {
 // SOCKS5 proxy at all, the key being absent rather than empty, since the binaries read an empty
 // one as a proxy to use. There is no front door to run such a proxy here.
 func TestDispatchSandboxDialsTheInClusterHub(t *testing.T) {
-	m, err := runDispatchSandbox(t, dispatchSandboxArgs(), nil)
+	m, err := runDispatch(t, dispatchSandboxArgs(), true)
 	require.NoError(t, err)
 
 	for container, env := range dispatchNatsEnvs(t, m) {
@@ -172,7 +170,7 @@ func TestDispatchSandboxDialsTheInClusterHub(t *testing.T) {
 func TestDispatchSandboxAdmitsOnlyTheAllowedNamespaces(t *testing.T) {
 	args := dispatchSandboxArgs()
 	args.AllowedNamespaces = []string{"envoy", "legion"}
-	m, err := runDispatchSandbox(t, args, nil)
+	m, err := runDispatch(t, args, true)
 	require.NoError(t, err)
 
 	rule := policyIngressRules(t, m, "example-dispatch", 1)[0].(map[string]any)
@@ -196,21 +194,24 @@ func TestDispatchSandboxAdmitsOnlyTheAllowedNamespaces(t *testing.T) {
 // sign-in input, which needs an origin an OAuth provider takes as a redirect and so needs the
 // tailnet inputs. The resolver is what refuses, and it needs no engine.
 func TestDispatchSandboxRefusesWhatItDoesNotBuild(t *testing.T) {
-	for _, row := range []struct {
+	type refusal struct {
 		name, input string
 		set         func(*gcp.DispatchArgs)
-	}{
+	}
+	// The three rows no refusal table holds: every row of one sets an input, and these leave one
+	// unset, which is how a sandbox goes without the in-cluster hub and the ingress it has no
+	// front door to do without.
+	rows := []refusal{
 		{"natsInCluster unset", "natsInCluster", func(a *gcp.DispatchArgs) { a.NatsInCluster = nil }},
 		{"natsInCluster false", "natsInCluster", func(a *gcp.DispatchArgs) { a.NatsInCluster = pulumi.BoolRef(false) }},
 		{"allowedNamespaces empty", "allowedNamespaces", func(a *gcp.DispatchArgs) { a.AllowedNamespaces = nil }},
-		{"frontDoorReplicas", "frontDoorReplicas", func(a *gcp.DispatchArgs) { a.FrontDoorReplicas = pulumi.IntRef(2) }},
-		{"frontDoorPdbMinAvailable", "frontDoorPdbMinAvailable", func(a *gcp.DispatchArgs) { a.FrontDoorPdbMinAvailable = pulumi.IntRef(1) }},
-		{"signInClientId", "signInClientId", func(a *gcp.DispatchArgs) { a.SignInClientId = "example-client-id" }},
-		{"signInClientSecret", "signInClientSecret", func(a *gcp.DispatchArgs) {
-			a.SignInClientSecret = pulumi.String("example-client-secret")
-		}},
-		{"signInDomain", "signInDomain", func(a *gcp.DispatchArgs) { a.SignInDomain = "example.com" }},
-	} {
+	}
+	// The front door's two sizes and the whole sign-in group, each set to the value the
+	// package's own refusal table holds for it, and named by the input it sets.
+	for _, row := range append(dispatchNamedRefusals("frontDoorReplicas", "frontDoorPdbMinAvailable"), dispatchSandboxSignInGroup...) {
+		rows = append(rows, refusal{row.input, row.input, row.set})
+	}
+	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			args := dispatchSandboxArgs()
 			row.set(args)
@@ -223,34 +224,16 @@ func TestDispatchSandboxRefusesWhatItDoesNotBuild(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// dispatchSandboxGroupInput is one input of a group a consumer sets together or not at all: its
-// schema name, and what sets that input alone, holding a value a consumer would plausibly send.
-type dispatchSandboxGroupInput struct {
-	input string
-	set   func(*gcp.DispatchArgs)
-}
-
 // dispatchSandboxTailnetGroup is the tailnet group: the name Dispatch is served at, the tags its
 // front-door nodes carry, the key they join the tailnet with, the Tailscale Service they host, and
-// the two images their pods run.
-var dispatchSandboxTailnetGroup = []dispatchSandboxGroupInput{
-	{"tailnetDnsName", func(a *gcp.DispatchArgs) { a.TailnetDnsName = "example-tailnet.ts.net" }},
-	{"tags", func(a *gcp.DispatchArgs) { a.Tags = []string{"tag:example-dispatch"} }},
-	{"tailnetAuthKey", func(a *gcp.DispatchArgs) { a.TailnetAuthKey = pulumi.String("tskey-auth-example-0123456789") }},
-	{"tailnetService", func(a *gcp.DispatchArgs) { a.TailnetService = pulumi.String("svc:example-dispatch") }},
-	{"tailscaleImage", func(a *gcp.DispatchArgs) { a.TailscaleImage = dispatchTailscaleImage }},
-	{"frontDoorToolsImage", func(a *gcp.DispatchArgs) { a.FrontDoorToolsImage = dispatchToolsImage }},
-}
+// the two images their pods run. Each input is set as dispatchClusterOnlyRefusals sets it, the
+// package's one table of plausible values.
+var dispatchSandboxTailnetGroup = dispatchNamedRefusals(
+	"tailnetDnsName", "tags", "tailnetAuthKey", "tailnetService", "tailscaleImage", "frontDoorToolsImage")
 
 // dispatchSandboxSignInGroup is the sign-in group: the Google client Dispatch hands a browser to,
 // and the domain whose accounts it admits.
-var dispatchSandboxSignInGroup = []dispatchSandboxGroupInput{
-	{"signInClientId", func(a *gcp.DispatchArgs) { a.SignInClientId = "example-client-id" }},
-	{"signInClientSecret", func(a *gcp.DispatchArgs) {
-		a.SignInClientSecret = pulumi.String("example-client-secret")
-	}},
-	{"signInDomain", func(a *gcp.DispatchArgs) { a.SignInDomain = "example.com" }},
-}
+var dispatchSandboxSignInGroup = dispatchNamedRefusals("signInClientId", "signInClientSecret", "signInDomain")
 
 // setDispatchTailnetGroup sets the whole tailnet group, the Dispatch a consumer reaches over its
 // tailnet, from the group's own list, so a tailnet input added later is set here too.
@@ -270,7 +253,7 @@ func TestDispatchPartialTailnetGroupNamesEveryMissingInput(t *testing.T) {
 	for _, group := range []struct {
 		name   string
 		rest   func(*gcp.DispatchArgs)
-		inputs []dispatchSandboxGroupInput
+		inputs []dispatchClusterOnlyRefusal
 	}{
 		{"tailnet", nil, dispatchSandboxTailnetGroup},
 		{"sign-in", setDispatchTailnetGroup, dispatchSandboxSignInGroup},

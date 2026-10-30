@@ -622,7 +622,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": ""}, "DISPATCH_SIGNIN_ISSUER missing")
 			// The sign-in settings go together or not at all: with none of them set the server
 			// boots and runs no browser sign-in.
-			noSignIn := resolveWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": "", "DISPATCH_SIGNIN_CLIENT_ID": "", "DISPATCH_SIGNIN_CLIENT_SECRET": "", "DISPATCH_SIGNIN_GROUP": ""})
+			noSignIn := resolveWith(t, noSignInSettings())
 			if noSignIn.SignInIssuer != "" {
 				t.Errorf("with no sign-in setting: SignInIssuer = %q, want a boot with no sign-in", noSignIn.SignInIssuer)
 			}
