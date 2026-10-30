@@ -1445,8 +1445,11 @@ func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.C
 	// loops stop, the handler takes no more messages, the message in hand gets inflightGrace (3 s)
 	// before its prompt is cancelled and it is NAKed, every message not handled is NAKed with a
 	// delay for the next holder, and the lease is marked released, so a standby takes the lease at
-	// its next poll; the subscription stays until the standby receives, 3 s at most (1 s when no
-	// other pod takes the lease), and then drains (durableReceiver.handBack, 9 s at most in all).
+	// its next poll; the subscription then stays until the standby receives, at least 1.25 s after
+	// the release (lingerUntaken and a poll, the window the standby's hold counts on) and up to
+	// lingerMax (3 s) after the NAKs, and then drains (durableReceiver.handBack): 9 s at most, and
+	// 10.25 s when the flush (1 s) and the release (2 s) both run to their bounds and leave that
+	// floor past the cap, which this budget then cuts short in the HTTP stop.
 	// HTTP keeps serving meanwhile.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1467,8 +1470,12 @@ func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.C
 	// process after its HTTP listener is gone.
 	select {
 	case <-loops.monitorDone:
-	case <-shutdownCtx.Done():
-		logger.Warn("self-health monitor still running at shutdown")
+	default:
+		select {
+		case <-loops.monitorDone:
+		case <-shutdownCtx.Done():
+			logger.Warn("self-health monitor still running at shutdown")
+		}
 	}
 	// The live lane drains before the main client, within 3 s: a live delivery still in its handler
 	// publishes its exception through the main client, and reads the caches stopped below. Core

@@ -96,8 +96,11 @@ func (r *durableReceiver) endWithoutLease(t *receiveTerm) {
 // NAK (it comes back at its ack wait). The linger ends once the lease record names another holder
 // that is receiving, or lingerMax after the batch was NAKed, the flush and the release included,
 // or once no other pod has taken the record; no end but a receiving holder comes before
-// lingerUntaken and a poll have passed since the release, the window a take-over counts as this
-// release's hand-back in (leaseHandBackBridge, durableReceiver.linger). Then the subscription
+// lingerUntaken and a poll have passed since the release, so this subscription is on the deliver
+// subject for at least that long. That floor is what a take-over counts on: a term that
+// subscribes within leaseHandBackBridge of the release, a lingerPoll inside the floor, settles
+// for the hand-back delay alone, and one slower than that settles for an ack wait instead
+// (durableReceiver.linger, leaseStatus.HandedBackAt). Then the subscription
 // drains, by the same rule.
 func (r *durableReceiver) handBack(t *receiveTerm) {
 	t.stopHandling()
@@ -133,17 +136,20 @@ func (r *durableReceiver) handBack(t *receiveTerm) {
 // receiving, or until deadline, or until every read has answered that no other pod has taken the
 // record, and reports how long it waited and which ended it.
 //
-// It starts just after the release, and no end but a receiving holder comes before the hand-back
-// window the next holder judges by (leaseHandBackBridge, lingerUntaken) has passed since: a
-// take-over inside that window counts as this release's graceful hand-back and settles for the
-// hand-back delay alone, so the deliver subject must still have this subscription then. The
-// deadline is set before the flush and the release, so a slow one would otherwise end the linger
-// with "timeout" inside the window, and the "not taken" end reads the record one lingerPoll past
-// it, so a take-over written inside the window is read as taken, however the two pods' clocks
-// differ in rate, and the linger waits for that holder to receive.
+// It starts just after the release, and holds the subscription for lingerUntaken and a poll past
+// that start however far the deadline has run: the deadline is set before the flush and the
+// release, which a slow one can leave in the past. That floor is this stop's guarantee to its
+// successor - a term that subscribes within leaseHandBackBridge of the release, a lingerPoll
+// inside it, settles for the hand-back delay alone, and judges itself no hand-back past that
+// (leaseStatus.HandedBackAt), so nothing rests on the linger lasting longer. A take-over read as
+// taken past the floor is waited for until the deadline all the same, which is where a stop with
+// its cap unspent holds the deliver subject for a successor still preparing.
 func (r *durableReceiver) linger(deadline time.Time) (time.Duration, string) {
 	start := time.Now()
 	bridged := start.Add(r.timing.lingerUntaken + r.timing.lingerPoll)
+	if deadline.Before(bridged) {
+		deadline = bridged
+	}
 	poll := time.NewTicker(r.timing.lingerPoll)
 	defer poll.Stop()
 	untaken := true
@@ -157,13 +163,11 @@ func (r *durableReceiver) linger(deadline time.Time) (time.Duration, string) {
 		case taken:
 			untaken = false
 		}
-		if now := time.Now(); !now.Before(bridged) {
-			switch {
-			case !now.Before(deadline):
-				return time.Since(start), "timeout"
-			case untaken:
-				return time.Since(start), "not taken"
-			}
+		switch now := time.Now(); {
+		case !now.Before(deadline):
+			return time.Since(start), "timeout"
+		case untaken && !now.Before(bridged):
+			return time.Since(start), "not taken"
 		}
 		<-poll.C
 	}

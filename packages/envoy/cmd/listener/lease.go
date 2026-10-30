@@ -36,14 +36,39 @@ const (
 )
 
 // leaseHandBackBridge is how long after a release a take-over still counts as that release's
-// graceful hand-back (leaseStatus.HandedBack), by the server's timestamps of the two writes: a
-// stopping pod lingers on the deliver subject until the next holder receives, and ends a linger no
-// pod has taken the record in only once lingerUntaken (two standby polls) has passed since its
-// release, whatever its linger cap says (durableReceiver.linger, which reads the record one
-// lingerPoll past that, so a take written inside the window is read as taken and the linger waits
-// for it). So a take-over later than that found no linger to bridge to it, whatever the record
-// says, and must settle for an ack wait as after a hard take-over.
+// graceful hand-back (leaseStatus.HandedBackAt): the stopping pod lingers on the deliver subject
+// until the next holder receives, and guarantees its subscription there only until lingerUntaken
+// (two standby polls) and a poll have passed since its release, whatever its linger cap says
+// (durableReceiver.linger). A pod that takes the record counts the hand-back only while it
+// subscribes inside this window of the release, which leaves a lingerPoll of the guarantee for
+// its SUB's round trip and for the two pods' clock rates; past it the deliver subject can have
+// been left to a lost node's binding alone, or to no subscriber at all, so what the durable
+// pushed meanwhile comes back only at its ack wait and the term settles as after a hard
+// take-over.
 const leaseHandBackBridge = lingerUntaken
+
+// handBackBridge is what a term taken from a released record knows about the age of that release,
+// as conservatively as two pods' clocks allow: delta is the server's own time from the release
+// write to this term's acquiring write, both timestamps of writes to the one lease key, and at is
+// this pod's monotonic reading taken just before that acquiring write, so at is never later than
+// the write the server stamped. elapsed(now) is therefore never less than the time since the
+// release at now.
+type handBackBridge struct {
+	delta time.Duration
+	at    time.Time
+}
+
+// elapsed is the time since the release write at now, rounded up: the server's gap between the
+// two writes and this pod's own time since a reading it took before the acquiring write.
+func (b handBackBridge) elapsed(now time.Time) time.Duration {
+	return b.delta + now.Sub(b.at)
+}
+
+// bridged reports whether a stopping pod's linger still guarantees the deliver subject its
+// subscription at now (leaseHandBackBridge). It is the one place the window is judged.
+func (b handBackBridge) bridged(now time.Time) bool {
+	return b.elapsed(now) < leaseHandBackBridge
+}
 
 // leaseConfig carries the lease's timing, so a test of this package shortens it;
 // productionLeaseConfig is the only value the listener runs with.
@@ -319,17 +344,36 @@ type leaseStatus struct {
 	// unsettled.
 	Settle bool
 	// HandedBack is whether Term was taken from a released record carrying unsettled and not
-	// ack_wait_owed, within leaseHandBackBridge of the release: its holder stopped gracefully and
-	// NAKed what it held with the hand-back delay, it left no ack wait owed, and its linger on the
-	// deliver subject can still have bridged to this take-over, so nothing outstanding waits out
-	// an ack wait (durableReceiver.serve picks the settle hold's cap by it).
+	// ack_wait_owed, while the stopping pod's linger could still have bridged to the acquiring
+	// write: its holder stopped gracefully and NAKed what it held with the hand-back delay, and it
+	// left no ack wait owed. It says nothing of how long the term then took to subscribe, which is
+	// what decides the hold (HandedBackAt).
 	HandedBack bool
+	// handBack is how old the release Term was taken from was at that acquiring write, by which
+	// HandBackSince and HandedBackAt judge the window at any later instant. It is zero for a term
+	// that is no hand-back.
+	handBack handBackBridge
 	// Resumed is whether Term is this process's own record resumed after its renewals lapsed (the
 	// lapse branch of renew), rather than a record another pod wrote: no other pod held the lease
 	// between the term before it and this one. Only the lease knows that, and the receive loop
 	// needs it to tell its own resume from a take-over over a dead holder's record, both of which
 	// How reports as expired.
 	Resumed bool
+}
+
+// HandBackSince is how long before now the release Term was taken from was written, never less
+// than the truth (handBackBridge). It is meaningless for a term that is no hand-back.
+func (s leaseStatus) HandBackSince(now time.Time) time.Duration {
+	return s.handBack.elapsed(now)
+}
+
+// HandedBackAt reports whether Term still counts as taken from a graceful hand-back at now: it
+// was taken from one and the window the stopping pod's linger guarantees the deliver subject its
+// subscription for (leaseHandBackBridge) has not passed since that release. A term that takes
+// longer than that to subscribe settles as after a hard take-over, since what the durable pushed
+// in between can have reached no subscriber of this pod's (durableReceiver.serve).
+func (s leaseStatus) HandedBackAt(now time.Time) bool {
+	return s.HandedBack && s.handBack.bridged(now)
 }
 
 // lease is one pod's view of its machine's delivery lease, the record lease.<durable> in the
@@ -359,14 +403,18 @@ type lease struct {
 	givenUpRev     uint64
 	givenUpAt      time.Time
 
-	mu             sync.Mutex
-	held           bool
-	rev            uint64
-	validUntil     time.Time
-	term           uint64
-	how            leaseAcquisition
-	settle         bool
+	mu         sync.Mutex
+	held       bool
+	rev        uint64
+	validUntil time.Time
+	term       uint64
+	how        leaseAcquisition
+	settle     bool
+	// handedBack is whether the term was taken from a graceful hand-back and still counts as one:
+	// the receive loop clears it when the term subscribes past the window (HandBackLapsed).
+	// handBack is how old that release was at the acquiring write (leaseStatus.handBack).
 	handedBack     bool
+	handBack       handBackBridge
 	resumed        bool
 	record         leaseRecord
 	deliverSubject string
@@ -375,7 +423,7 @@ type lease struct {
 	// Settled, Unsettle, SetReceiving). ackWaitOwed is the ack wait the term owes its successor,
 	// which its release writes as ack_wait_owed: set by the acquisition of a term that must settle
 	// (acquire, and renew's lapse), cleared when the term's settle hold ends (Settled) or, for a
-	// term taken from a graceful hand-back, when it subscribes (SetReceiving).
+	// term that still counts as taken from a graceful hand-back, when it subscribes (SetReceiving).
 	staleBinding bool
 	unsettled    bool
 	receiving    bool
@@ -460,6 +508,7 @@ func (l *lease) Status() leaseStatus {
 		ServiceSince: l.record.ServiceSince,
 		Settle:       l.settle,
 		HandedBack:   l.handedBack,
+		handBack:     l.handBack,
 		Resumed:      l.resumed,
 	}
 	if !l.record.Released {
@@ -511,10 +560,12 @@ func (l *lease) Unsettle(term uint64) {
 }
 
 // SetReceiving records that term's holder has subscribed to the durable's deliver subject, and
-// has the running loop renew at once to write receiving. A term taken from a graceful hand-back
-// owes its successor no ack wait from then on: the stopping holder's linger bridged to this
-// subscription, so what it handed back reaches this pod, and this pod's own stop hands it on with
-// the hand-back delay again. A term that is no longer current changes nothing.
+// has the running loop renew at once to write receiving. A term that still counts as taken from a
+// graceful hand-back when it subscribes owes its successor no ack wait from then on: the stopping
+// holder's linger bridged to this subscription, so what it handed back reaches this pod, and this
+// pod's own stop hands it on with the hand-back delay again. One that subscribed past that window
+// (HandBackLapsed) owes the ack wait as any other settling term does. A term that is no longer
+// current changes nothing.
 func (l *lease) SetReceiving(term uint64) {
 	l.mu.Lock()
 	set := l.term == term && !l.receiving
@@ -531,6 +582,20 @@ func (l *lease) SetReceiving(term uint64) {
 		default:
 		}
 	}
+}
+
+// HandBackLapsed records that term, taken from a graceful hand-back, is subscribing past the
+// window that hand-back holds for (leaseStatus.HandedBackAt): the stopping pod guaranteed the
+// deliver subject its subscription no longer, so this term settles as after a hard take-over and
+// owes its successor the ack wait every other settling term owes until its hold ends (Settled) -
+// what the durable pushed in between may be back only at its ack wait. A term that is no longer
+// current changes nothing.
+func (l *lease) HandBackLapsed(term uint64) {
+	l.mu.Lock()
+	if l.term == term {
+		l.handedBack = false
+	}
+	l.mu.Unlock()
 }
 
 // GiveUp has the running loop release term's record, as Release does, and go on as a standby, so
@@ -601,6 +666,12 @@ func (l *lease) FormerHolder(boot string) bool {
 // is, and that is no error. It returns ctx.Err() when ctx ends before the loop has stopped, and
 // the write's error when the record could not be marked; either way this process no longer holds
 // the lease, and a record left unreleased is taken as an expired one.
+//
+// A loop that has already stopped is read before ctx: the receiver's own stop calls Release again
+// with the shutdown context a graceful stop can have run out of (durableReceiver.Stop, after
+// handBack's release timed out), and a select over a closed done and an ended ctx together would
+// pick either, skipping the write of half of those stops and leaving a standby to wait the record
+// out as an expired one.
 func (l *lease) Release(ctx context.Context) error {
 	l.mu.Lock()
 	stop, done := l.stop, l.done
@@ -609,8 +680,12 @@ func (l *lease) Release(ctx context.Context) error {
 		stop()
 		select {
 		case <-done:
-		case <-ctx.Done():
-			return ctx.Err()
+		default:
+			select {
+			case <-done:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
 	}
 	_, err := l.letGo()
@@ -752,7 +827,7 @@ func (l *lease) renew() time.Duration {
 	l.rev, l.record = next, record
 	l.validUntil = start.Add(l.cfg.ttl - l.cfg.margin)
 	if lapsed {
-		l.startTermLocked(leaseTakenExpired, true, false, true)
+		l.startTermLocked(leaseTakenExpired, true, false, handBackBridge{}, true)
 	}
 	term := l.term
 	l.mu.Unlock()
@@ -767,15 +842,16 @@ func (l *lease) renew() time.Duration {
 // startTermLocked begins a term of this process's hold and is where every term's state is set,
 // whichever way it was taken: the take of a record (acquire) and the resume of this process's own
 // after its renewals lapsed (renew). It counts the acquisition, records how it was taken, whether
-// it must settle, whether it was taken from a graceful hand-back and whether it is a resume
-// (leaseStatus), and sets the flags that follow from settle: a term that must settle is unsettled
-// and owes its successor an ack wait from here until its settle hold ends (Settled), and no term
-// has subscribed when it starts. acquire records stale_binding itself, which it carries over from
-// the record it took. Callers must hold l.mu.
-func (l *lease) startTermLocked(how leaseAcquisition, settle, handedBack, resumed bool) {
+// it must settle, whether it was taken from a graceful hand-back and how old that release was
+// then (bridge, zero when it is no hand-back), and whether it is a resume (leaseStatus), and sets
+// the flags that follow from settle: a term that must settle is unsettled and owes its successor
+// an ack wait from here until its settle hold ends (Settled), and no term has subscribed when it
+// starts. acquire records stale_binding itself, which it carries over from the record it took.
+// Callers must hold l.mu.
+func (l *lease) startTermLocked(how leaseAcquisition, settle, handedBack bool, bridge handBackBridge, resumed bool) {
 	l.term++
 	l.how = how
-	l.settle, l.handedBack, l.resumed = settle, handedBack, resumed
+	l.settle, l.handedBack, l.handBack, l.resumed = settle, handedBack, bridge, resumed
 	l.unsettled, l.ackWaitOwed, l.receiving = settle, settle, false
 }
 
@@ -863,9 +939,12 @@ func (l *lease) poll() time.Duration {
 // written when the term must settle (leaseAcquisition), and receiving is written false until the
 // term subscribes. A term that must settle owes its successor an ack wait from here until its
 // settle hold ends, but for one taken from a graceful hand-back, which owes none once it has
-// subscribed (SetReceiving). former_boots adds previous's boot to previous's own (formerBoots):
-// the acquiring write stamps it with previous's timestamp, the latest server time known before it,
-// and once the write's own timestamp is read back it is stamped with that. The record is renewed at
+// subscribed inside the hand-back's window (SetReceiving, leaseStatus.HandedBackAt): a reading
+// taken just before the acquiring write, and the server's gap from the release write to it, are
+// what that window is judged by later (handBackBridge). former_boots adds previous's boot to
+// previous's own (formerBoots): the acquiring write stamps it with previous's timestamp, the
+// latest server time known before it, and once the write's own timestamp is read back it is
+// stamped with that. The record is renewed at
 // once to store service_since, acquired_at and that stamp. The write is read back by key, a direct
 // get on the key's own subject, which the listener's grant allows; a get by revision is a direct
 // get on the stream's bare subject, which it does not. A read back that finds another revision, or
@@ -891,6 +970,9 @@ func (l *lease) acquire(previous nats.KeyValueEntry, record leaseRecord, how lea
 		return l.cfg.standbyPoll
 	}
 	var rev uint64
+	// The reading is taken before the write the server stamps, so now minus it never understates
+	// the time since that write (handBackBridge).
+	writeAt := l.now()
 	if previous == nil {
 		rev, err = l.kv.Create(l.key, value)
 	} else {
@@ -920,18 +1002,24 @@ func (l *lease) acquire(previous nats.KeyValueEntry, record leaseRecord, how lea
 	if previous == nil || record.ServiceSince.IsZero() || written.Created().Sub(previous.Created()) > 2*l.cfg.ttl {
 		record.ServiceSince = written.Created()
 	}
-	// A released record carrying unsettled and no debt is a graceful hand-back only while the
-	// stopping pod's linger can still have bridged to this write: it keeps its subscription until
-	// another pod receives, but lets go lingerUntaken after its release when no pod has taken the
-	// record (durableReceiver.handBack), and whatever the durable pushed after that went to a lost
-	// node's binding alone, or to no subscriber at all, and comes back only at its ack wait. Both
-	// timestamps are the server's, of writes to this one key.
+	// A released record carrying unsettled and no debt is a graceful hand-back while the stopping
+	// pod's linger can still have bridged to this pod's subscription: it keeps its subscription
+	// until another pod receives, but guarantees it only until lingerUntaken and a poll after its
+	// release (durableReceiver.handBack), and whatever the durable pushed after that went to a
+	// lost node's binding alone, or to no subscriber at all, and comes back only at its ack wait.
+	// The window is judged again when the term subscribes (leaseStatus.HandedBackAt), which is
+	// what the hold rests on; a take-over already past it when it was written is none from the
+	// start. The gap is the server's own, between two writes of this one key.
+	var bridge handBackBridge
+	if previous != nil {
+		bridge = handBackBridge{delta: written.Created().Sub(previous.Created()), at: writeAt}
+	}
 	handedBack := how == leaseTakenReleased && before.Unsettled && !before.AckWaitOwed &&
-		written.Created().Sub(previous.Created()) < leaseHandBackBridge
+		bridge.bridged(l.now())
 	l.mu.Lock()
 	l.held, l.rev, l.record = true, rev, record
 	l.validUntil = start.Add(l.cfg.ttl - l.cfg.margin)
-	l.startTermLocked(how, settle, handedBack, false)
+	l.startTermLocked(how, settle, handedBack, bridge, false)
 	l.staleBinding = record.StaleBinding
 	term := l.term
 	l.mu.Unlock()

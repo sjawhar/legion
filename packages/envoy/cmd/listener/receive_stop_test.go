@@ -309,11 +309,12 @@ func TestAGracefulStopLingersToItsCapForATakerThatNeverReceives(t *testing.T) {
 
 // A linger whose cap has already run out when it starts - the deadline is set before the NAK
 // batch, and a flush and a release that both ran to their bounds leave it in the past - still
-// keeps the subscription for the window a take-over counts as this release's graceful hand-back
-// (leaseHandBackBridge): such a take-over settles for the hand-back delay alone, on the premise
-// that this subscription was still on the deliver subject when it wrote. At 57c6d1c5 (INFRA-557
-// review finding) the linger returned "timeout" at its first read, leaving the deliver subject to
-// a lost node's binding, or to no subscriber at all, while the next holder held for 3 s.
+// keeps the subscription for the floor it guarantees its successor, lingerUntaken and a poll
+// after the release: a take-over that subscribes inside the hand-back window
+// (leaseHandBackBridge, a poll inside that floor) settles for the hand-back delay alone, on the
+// premise that this subscription was still on the deliver subject when it did. At 57c6d1c5
+// (INFRA-557 review finding) the linger returned "timeout" at its first read, leaving the deliver
+// subject to a lost node's binding, or to no subscriber at all, while the next holder held for 3 s.
 func TestAStoppingPodsLingerOutlastsTheHandBackWindowThoughItsCapHasRun(t *testing.T) {
 	uri := testnats.URL(t)
 	handle, _ := recordingHandler()
@@ -322,4 +323,139 @@ func TestAStoppingPodsLingerOutlastsTheHandBackWindowThoughItsCapHasRun(t *testi
 	if how != "timeout" || lingered < leaseHandBackBridge {
 		t.Fatalf("a linger past its cap ended %q after %s, want it held for the %s hand-back window first", how, lingered, leaseHandBackBridge)
 	}
+}
+
+// A successor that takes the released record inside the hand-back window but subscribes past it
+// settles for the ack wait's cap, not the hand-back's. The stopping pod's flush and release run
+// to their bounds here, so its linger's cap is in the past and it holds the deliver subject only
+// for the floor it guarantees (lingerUntaken and a poll after the release): what the durable
+// pushes between that and the successor's subscribe reaches no subscriber of this machine's and
+// comes back only at its ack wait. The successor judges itself by the same window and holds for
+// 7 s, so that message lands in its held batch and is delivered in stream order, before the newer
+// one published after it subscribed. At 9baccf21 (INFRA-557 review finding) it counted the
+// hand-back from the take-over alone, held for 3 s, delivered what it had, and the message that
+// had gone nowhere came back behind newer events of the same session.
+func TestASuccessorThatSubscribesPastTheHandBackWindowSettlesForTheAckWait(t *testing.T) {
+	uri := testnats.URL(t)
+	const machineID = "box-late-subscriber"
+	// A flush and a release that both ran to their bounds leave the linger's deadline in the
+	// past, which a zero cap stands for: the linger then ends at its floor whatever the successor
+	// is doing.
+	timing := handBackTiming()
+	timing.lingerMax = 0
+	active := startReceiverRig(t, uri, machineID, "pod-a", func(ctx context.Context, msg *natsgo.Msg) {
+		// A prompt that never answers: the stop cancels it and the handler NAKs it, so pod-a's
+		// linger hands that message back with the delay too.
+		<-ctx.Done()
+		_ = msg.Nak()
+	}, timing, testLeaseTiming())
+	active.awaitState(t, receiveActive, 10*time.Second)
+	handle, received := recordingHandler()
+	standby := newReceiverRig(t, uri, machineID, "pod-b", handle, testReceiveTiming(), testLeaseTiming())
+
+	published := []string{"in hand", "handed back"}
+	for _, data := range published {
+		publishDurable(t, active.client, data)
+	}
+	waitFor(t, 5*time.Second, "pod-a to hold both messages", func() bool {
+		info, err := active.client.JS().ConsumerInfo(bus.Stream, active.consumer)
+		return err == nil && info.NumAckPending == len(published)
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		active.receiver.Stop(ctx)
+	}()
+	released := awaitReleased(t, active)
+
+	// pod-b takes the released record inside the hand-back window, as a standby's poll does.
+	time.Sleep(time.Until(released.Add(850 * time.Millisecond)))
+	standby.lease.Start(context.Background())
+	waitFor(t, 2*time.Second, "pod-b to take the released lease", standby.lease.Holding)
+	took := standby.lease.Status()
+	if !took.HandedBack || took.HandBackSince(time.Now()) >= leaseHandBackBridge {
+		t.Fatalf("pod-b took the record %s after the release, %+v: the row needs a take-over inside the %s window", took.HandBackSince(time.Now()), took, leaseHandBackBridge)
+	}
+	<-stopped
+	// The window has not passed yet, and pod-a has already let go: what the durable pushes now
+	// reaches a binding of a lost node alone.
+	pushToALostBinding(t, uri, active.client, active.consumer, "lost", len(published)+1)
+
+	// pod-b subscribes past the window, as one whose prepare was slow does.
+	time.Sleep(time.Until(released.Add(1300 * time.Millisecond)))
+	standby.receiver.Start()
+	subscribed := standby.awaitState(t, receiveActive, 10*time.Second)
+	if since := subscribed.Sub(released); since <= leaseHandBackBridge {
+		t.Fatalf("pod-b subscribed %s after the release, want it past the %s window the row is about", since, leaseHandBackBridge)
+	}
+	publishDurable(t, standby.client, "newer")
+
+	for _, want := range append(append([]string{}, published...), "lost", "newer") {
+		message := awaitReceived(t, received, consumerAckWait+5*time.Second, "pod-b's "+want)
+		if message.data != want {
+			t.Fatalf("pod-b delivered %q, want %q: the messages in the order they were published", message.data, want)
+		}
+	}
+	noneReceived(t, received, time.Second, "after every message was delivered once")
+	if standby.lease.Status().HandedBack {
+		t.Fatal("pod-b still counts its term a hand-back though it subscribed past the window")
+	}
+	passed := standby.logRecord(t, "hand-back window passed before subscribing; holding for the ack wait", time.Second)
+	if passed["cap"] != (consumerAckWait + settleMargin).String() {
+		t.Fatalf("pod-b's hold after the window passed = %v, want the %s cap of a term owed an ack wait", passed, consumerAckWait+settleMargin)
+	}
+	if end := standby.settleHoldEnd(t, time.Second); end["outcome"] != "settled" || end["messages"] != float64(4) {
+		t.Fatalf("pod-b's settle hold ended %v, want settled holding all four messages", end)
+	}
+}
+
+// awaitReleased waits for the rig's lease record to read released and returns when it did, within
+// a few milliseconds of the write: a row that times a successor's take-over against the release
+// needs that instant more closely than a renewal's poll gives it.
+func awaitReleased(t *testing.T, rig *receiverRig) time.Time {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if entry, err := rig.lease.kv.Get(rig.lease.key); err == nil {
+			if record, err := decodeLeaseRecord(entry.Value()); err == nil && record.Released {
+				return time.Now()
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the stopping pod did not release its lease within 10s")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// pushToALostBinding publishes data to consumer's durable while no pod of the machine is
+// subscribed, into a connection of the test's own that takes the push and goes without an ack, as
+// a lost node's binding does: nothing hands it back, so it comes back only at its ack wait. It
+// returns once the durable has pushed it and holds pending messages outstanding in all.
+func pushToALostBinding(t *testing.T, uri string, client *bus.Client, consumer, data string, pending int) {
+	t.Helper()
+	info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
+	if err != nil {
+		t.Fatalf("read the durable: %v", err)
+	}
+	conn := testnats.Connect(t, uri)
+	defer conn.Close()
+	sub, err := conn.SubscribeSync(info.Config.DeliverSubject)
+	if err != nil {
+		t.Fatalf("subscribe as a lost node's binding: %v", err)
+	}
+	publishDurable(t, client, data)
+	if _, err := sub.NextMsg(5 * time.Second); err != nil {
+		t.Fatalf("the durable did not push %q to the lost binding: %v", data, err)
+	}
+	if err := sub.Unsubscribe(); err != nil {
+		t.Fatalf("unsubscribe the lost node's binding: %v", err)
+	}
+	waitFor(t, 5*time.Second, "the pushed message to stay outstanding with no subscriber", func() bool {
+		info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
+		return err == nil && info.NumAckPending == pending && info.NumPending == 0
+	})
 }

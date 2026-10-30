@@ -15,8 +15,11 @@ body: |-
     message not handled is NAKed with a 2 s delay in stream order, and the lease is marked released
     and `unsettled`, so a standby takes it at its next poll and settles (below), delivering about 2
     to 3 s after the stop and keeping each session's order. The stopping pod keeps its subscription
-    until the lease record says the next holder is `receiving` (3 s at most, 1 s when no other pod
-    takes the lease), handing back what still reaches it, since nats-server loses a message whose
+    until the lease record says the next holder is `receiving` (3 s at most after the NAKs, and
+    1.25 s after its release at least, the floor the next holder's cap counts on: a stop whose
+    flush and release both run to their bounds takes 10.25 s rather than the 9 s a stop takes
+    otherwise, which its 10 s budget then takes out of the HTTP stop),
+    handing back what still reaches it, since nats-server loses a message whose
     first delivery is still queued when a push consumer's last subscriber goes. A pod that takes
     the lease over a holder that was killed or lost its node subscribes at once and holds what it
     receives until every message the durable has outstanding is in its hands (its `NumAckPending`
@@ -26,18 +29,21 @@ body: |-
     outstanding and about 12 to 13 s after it otherwise; a NAK-delayed retry stays outstanding,
     holds the hold to its cap and arrives after it. After a graceful stop the cap is the 2 s
     hand-back delay and a second, 3 s, every hand-over alike, as long as a standby took the
-    released record while the stopping pod's linger could still have bridged to it. The lease
+    released record and subscribed on it while the stopping pod's linger could still have bridged
+    to it. The lease
     record carries
     `stale_binding` (its holder subscribed beside a lingering push binding), `unsettled` (its
     term's hold had not ended, kept by a release, or its holder handed messages back on a graceful
     stop, or its renewals had lapsed when it was stopped), `ack_wait_owed` (the ack wait the
     releasing term still owed: a term that must settle owes one from its acquiring write until its
-    hold ends, and a term taken from a hand-back until it has subscribed, so a stop, a lapse, a
+    hold ends, and a term taken from a hand-back until it has subscribed inside the hand-back's
+    window, so a stop, a lapse, a
     give-up or a stop before the term ever subscribed hands the debt on) and `receiving` (its
     holder's subscription is up), and a pod that takes a
     released record carrying `stale_binding` or `unsettled` settles the same way, capped at 3 s
-    when it carries `unsettled` without `ack_wait_owed` and the take-over's write is less than
-    1 s after the release, no shorter than any linger lasts, and at 7 s otherwise. A holder that
+    when it carries `unsettled` without `ack_wait_owed` and the take-over both writes and
+    subscribes less than 1 s after the release, a poll inside the shortest linger, and at 7 s
+    otherwise. A holder that
     takes an absent record, or a released one with neither flag, and finds the durable push-bound
     by a listener build from before the lease waits for that binding to end and subscribes within
     a second of it; past 135 s it logs `lease holder cannot deliver from the durable` at ERROR,

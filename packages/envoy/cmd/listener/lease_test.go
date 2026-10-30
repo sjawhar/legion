@@ -340,3 +340,35 @@ func TestLeaseReleasedRecordIsTakenAtTheNextPollKeepingServiceSince(t *testing.T
 		t.Fatalf("record = %+v, want pod-b's unreleased record keeping service_since %v", record.leaseFields, since)
 	}
 }
+
+// A Release whose context has already ended writes the release all the same once the lease's loop
+// has stopped: the receiver's own stop calls Release again with the shutdown context a graceful
+// stop can have overrun (durableReceiver.Stop, after the hand-back's own release timed out at
+// handBackReleaseWait), and a record left unreleased is taken only once its TTL runs out, with
+// the ack wait's cap - a graceful stop delivering like a hard one. At 9baccf21 (INFRA-557 review
+// finding) Release selected over the stopped loop and the ended context together, so Go picked
+// either: half of those stops skipped the write and logged a false warning.
+func TestLeaseReleaseWritesWithAnExpiredContextAfterTheLoopStopped(t *testing.T) {
+	kv := leaseBucket(t)
+	clock := newFakeLeaseClock()
+	// Both channels are closed at every call, so a select over the two would take the context's
+	// branch about half the time; 50 runs make that certain.
+	for run := range 50 {
+		l := testLease(kv, "pod-a", productionLeaseConfig(), clock.now)
+		ctx, stop := context.WithCancel(context.Background())
+		l.Start(ctx)
+		awaitLease(t, "pod-a to hold the lease", 5*time.Second, l.Holding)
+		stop()
+		<-l.done
+		expired, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		if err := l.Release(expired); err != nil {
+			t.Fatalf("release %d with an expired context: %v", run+1, err)
+		}
+		record, _ := readLease(t, kv)
+		if !record.Released || record.Holder != "pod-a" {
+			t.Fatalf("release %d with an expired context left the record %+v, want it marked released", run+1, record.leaseFields)
+		}
+	}
+}

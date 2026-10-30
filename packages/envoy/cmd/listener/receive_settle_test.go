@@ -291,6 +291,49 @@ func TestASettleHoldsCapIsWhatThePreviousHolderCanStillHaveOutstanding(t *testin
 	}
 }
 
+// The hand-back's cap is judged when the term subscribes, not when it took the record: the
+// stopping pod guarantees the deliver subject its subscription for leaseHandBackBridge after the
+// release and no longer (lingerUntaken and a poll, durableReceiver.linger), so a term that took
+// the record inside that window and is slower to subscribe - a prepare that retried, a durable
+// that refused the first subscribe - holds for the ack wait's cap instead. The lease carries the
+// release's age at the acquiring write (handBackBridge), so both pods judge the one window.
+func TestAHandBacksCapIsJudgedWhenTheTermSubscribes(t *testing.T) {
+	receiver := &durableReceiver{durableReceiverOptions: durableReceiverOptions{timing: productionReceiveConfig()}}
+	release := time.Now()
+	// The acquiring write landed 100 ms after the release write by the server's timestamps, and
+	// the taking pod read its own clock just before that write.
+	taken := leaseStatus{Settle: true, HandedBack: true,
+		handBack: handBackBridge{delta: 100 * time.Millisecond, at: release.Add(100 * time.Millisecond)}}
+	for _, row := range []struct {
+		name        string
+		status      leaseStatus
+		subscribeAt time.Duration
+		handedBack  bool
+		limit       time.Duration
+	}{
+		{"subscribes inside the window", taken, 900 * time.Millisecond, true, handBackDelay + settleMargin},
+		{"subscribes past the window", taken, 1100 * time.Millisecond, false, consumerAckWait + settleMargin},
+		{"no hand-back to count", leaseStatus{Settle: true}, 0, false, consumerAckWait + settleMargin},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			now := release.Add(row.subscribeAt)
+			if row.status.HandedBack {
+				if since := row.status.HandBackSince(now); since != row.subscribeAt {
+					t.Fatalf("the release reads %s old at the subscribe, want %s", since, row.subscribeAt)
+				}
+			}
+			handedBack := row.status.HandedBackAt(now)
+			if handedBack != row.handedBack {
+				t.Fatalf("a term subscribing %s after the release counts as handed back %v, want %v: the window is %s",
+					row.subscribeAt, handedBack, row.handedBack, leaseHandBackBridge)
+			}
+			if hold := receiver.settleHold(handedBack); hold != row.limit {
+				t.Fatalf("its settle hold is capped at %s, want %s", hold, row.limit)
+			}
+		})
+	}
+}
+
 // A graceful stop of a pod during a settle hold over an expired record, the dead holder's binding
 // gone with its connection (a SIGKILL), marks the released record ack_wait_owed as well as
 // unsettled, and not stale_binding, since it found no binding beside its own: the message the dead

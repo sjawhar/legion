@@ -180,21 +180,25 @@ func TestLeaseAckWaitOwedIsTheTermsDebtAndDecidesTheHandBack(t *testing.T) {
 	}
 }
 
-// A term taken from a graceful hand-back owes its successor an ack wait until it has subscribed:
-// the stopping pod's linger bridges the deliver subject to that subscription and no further. A
-// term that stops, or gives the lease up, before it subscribes (a Stop during prepare, a holder
-// stuck on its durable) releases the record owing the ack wait, so the next holder's hold waits
-// one out; one that subscribed first releases it owing nothing, and the hand-over keeps the 3 s
-// cap.
+// A term taken from a graceful hand-back owes its successor an ack wait until it has subscribed
+// inside the hand-back's window: the stopping pod's linger bridges the deliver subject to that
+// subscription and no further. A term that stops, or gives the lease up, before it subscribes (a
+// Stop during prepare, a holder stuck on its durable) releases the record owing the ack wait, so
+// the next holder's hold waits one out; one that subscribed first releases it owing nothing, and
+// the hand-over keeps the 3 s cap. One that subscribed past the window (HandBackLapsed, the
+// receive loop's judgement) owes it like any other settling term: what the durable pushed while
+// no pod of this machine was subscribed comes back only at its ack wait.
 func TestLeaseATermTakenFromAHandBackOwesTheAckWaitUntilItSubscribes(t *testing.T) {
 	clock := newFakeLeaseClock()
 	for _, row := range []struct {
 		name      string
+		lapsed    bool
 		subscribe bool
 		owed      bool
 	}{
-		{"stopped before it subscribed", false, true},
-		{"stopped after it subscribed", true, false},
+		{"stopped before it subscribed", false, false, true},
+		{"stopped after it subscribed", false, true, false},
+		{"subscribed past the hand-back window", true, true, true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			kv := leaseBucket(t)
@@ -204,6 +208,9 @@ func TestLeaseATermTakenFromAHandBackOwesTheAckWaitUntilItSubscribes(t *testing.
 			status := a.Status()
 			if !status.Holding || status.How != leaseTakenReleased || !status.Settle || !status.HandedBack {
 				t.Fatalf("pod-a status = %+v, want held from a graceful hand-back, settling", status)
+			}
+			if row.lapsed {
+				a.HandBackLapsed(status.Term)
 			}
 			if row.subscribe {
 				a.SetReceiving(status.Term)
