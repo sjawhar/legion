@@ -194,8 +194,6 @@ stack_set() {
 
 set_pid() { stack_set '.pids[$n] = $p' --arg n "$1" --argjson p "$2"; }
 
-random_hex() { od -An -N"$1" -tx1 /dev/urandom | tr -d ' \n'; }
-
 # write_stack_json writes stack.json on the first setup, and rewrites its ports from the environment
 # on a later one, keeping the name, tokens and pids; it refuses to move a port while the stack runs.
 write_stack_json() {
@@ -702,17 +700,7 @@ cmd_seed() {
 
   local migration counts
   migration=$(sql dispatch 'select max(version) from schema_migrations')
-  counts=$(sql dispatch "select json_build_object(
-      'projects', (select count(*) from projects),
-      'issues', (select count(*) from issues),
-      'comments', (select count(*) from comments),
-      'artifacts', (select count(*) from artifacts),
-      'artifact_versions', (select count(*) from artifact_versions),
-      'ref_targets', (select count(*) from artifacts where name like 'ref-target-%'),
-      'ref_target_versions', (select count(*) from artifact_versions v join artifacts a on a.id = v.artifact_id where a.name like 'ref-target-%'),
-      'ref_sources', (select count(*) from artifacts where name = 'references.md'),
-      'artifact_refs', (select count(*) from refs where to_kind = 'artifact'),
-      'events', (select count(*) from events))")
+  counts=$(sql dispatch "$SEED_COUNTS_SQL")
   jq -n --argjson migration "$migration" --arg commit "$(build_commit)" --argjson dirty "$(build_dirty)" \
     --argjson counts "$counts" --arg at "$(date -u +%FT%TZ)" --arg pg "$("$PGBIN/postgres" --version)" \
     --argjson seconds "$((SECONDS - started))" \

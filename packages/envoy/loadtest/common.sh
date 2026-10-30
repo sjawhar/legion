@@ -242,6 +242,25 @@ prepare_stack() {
   BUILD=$("$stack" build-info)
 }
 
+# random_hex N: N random bytes in hex.
+random_hex() { od -An -N"$1" -tx1 /dev/urandom | tr -d ' \n'; }
+
+# SEED_COUNTS_SQL: the seed's counts that seed.meta.json records, one JSON object, the same for
+# stack.sh seed and cluster.sh seed, so the record tells a seed with the reference documents
+# (loadgen seed-refs) from one without them.
+SEED_COUNTS_SQL="select json_build_object(
+  'projects', (select count(*) from projects),
+  'issues', (select count(*) from issues),
+  'comments', (select count(*) from comments),
+  'artifacts', (select count(*) from artifacts),
+  'artifact_versions', (select count(*) from artifact_versions),
+  'ref_targets', (select count(*) from artifacts where name like 'ref-target-%'),
+  'ref_target_versions', (select count(*) from artifact_versions v join artifacts a on a.id = v.artifact_id where a.name like 'ref-target-%'),
+  'ref_sources', (select count(*) from artifacts where name = 'references.md'),
+  'artifact_refs', (select count(*) from refs where to_kind = 'artifact'),
+  'events', (select count(*) from events))"
+export SEED_COUNTS_SQL
+
 # ---- the replay's inputs ------------------------------------------------------------------------------
 
 # sha256_of FILE: FILE's sha256, in hex.

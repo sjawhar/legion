@@ -964,6 +964,12 @@ pg_password=$(jq -r .secrets.pg_password "$run_dir/state.json")
 run_cluster seed --namespace "$ns"
 ((RC == 0)) || fail "seed exited $RC"
 [ -f "$run_dir/seed.json" ] || fail "seed kept no seed.json in the run directory"
+# seed.meta.json's counts are stack.sh's (common.sh SEED_COUNTS_SQL), the reference documents' among
+# them, so a seed with loadgen seed-refs is told from one without.
+seed_counts=$(tr '\n' ' ' <"$fake/kubectl.log" | grep -oE "select json_build_object\(.{0,1200}'events'" | head -n1)
+for k in artifact_versions ref_targets ref_target_versions ref_sources artifact_refs events; do
+  [[ $seed_counts == *"'$k'"* ]] || fail "seed's counts query does not count $k, as stack.sh's does: $seed_counts"
+done
 
 run_cluster step --namespace "$ns" smoke 1 --duration 1m
 ((RC == 0)) || fail "step exited $RC"

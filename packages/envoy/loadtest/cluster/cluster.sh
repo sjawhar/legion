@@ -259,8 +259,6 @@ TRANSIENT_RETRY_SECONDS=5
 
 utc_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
-random_hex() { od -An -N"$1" -tx1 /dev/urandom | tr -d ' \n'; }
-
 # kube ARGS: kubectl in the copy's namespace, bounded by timeout (never --request-timeout, which
 # drops a pod's in-cluster config: kubernetes/kubernetes#93474). kube_for SECONDS ARGS: the same
 # with its own bound.
@@ -2895,9 +2893,7 @@ seed_run() {
   mv -- "$RUN_DIR/seed.json.tmp" "$RUN_DIR/seed.json"
   local migration counts
   migration=$(psql_at dispatch 'select max(version) from schema_migrations') || die "reading the seed's migration failed"
-  counts=$(psql_at dispatch "select json_build_object('projects', (select count(*) from projects),
-    'issues', (select count(*) from issues), 'comments', (select count(*) from comments),
-    'artifacts', (select count(*) from artifacts), 'events', (select count(*) from events))") || die "counting the seed failed"
+  counts=$(psql_at dispatch "$SEED_COUNTS_SQL") || die "counting the seed failed"
   stop_copy
   psql_write postgres 'alter database dispatch rename to dispatch_seed' >/dev/null || die "renaming dispatch to dispatch_seed failed"
   jq -n --argjson migration "$migration" --arg commit "$(state .dispatch_commit)" --arg at "$started" \
