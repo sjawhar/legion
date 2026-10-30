@@ -175,9 +175,13 @@ const bytesOfHeapAStruct = 620
 // charged at the heaviest kind's price its two splits came to 1,240 bytes a copy against the 338.8
 // the insert and its split keep together: the room budget charged a mebibyte of prose typed with
 // 2,000 keystrokes and ten pastes of 4 KiB a structure part of 7,657,120 bytes, which took its
-// charge to 1.179 times the 52,421,760 bytes of heap it held, past the 1.176 a priced shape may be
-// charged; at this price the same room is charged 1.116 times its heap
-// (TestATypedAndPastedRoomIsChargedAtLeastItsHeapAndWithinTheFactor, measured on 2026-10-29).
+// charge to 61,801,120, 1.179 times the 52,421,760 bytes of heap a single reading of 2026-10-29
+// found the room holding. That reading was 3.2 MB short (the test now cross-checks it against what
+// dropping the room frees); against
+// the 55,591,872 bytes the cross-checked reading of 2026-10-30 finds, that price charged 1.112
+// times the heap and this one charges 1.051 times it
+// (TestATypedAndPastedRoomIsChargedAtLeastItsHeapAndWithinTheFactor). The price stands on the
+// per-struct measurement above, not on that factor.
 const bytesOfHeapASplit = 200
 
 // bytesOfHeapAByteOfText is the heap one copy of a document holds for each byte of text a

@@ -227,22 +227,33 @@ const typedRoomHeapMeasurement = "DISPATCH_MEASURE_TYPED_ROOM_HEAP"
 // copies and everything the room holds besides. It takes one reading rather than the least of
 // three, since each build is the 2,010 updates' run; the readings of a room's heap agree to the
 // byte from one build to the next in a process of its own (heldByUpdates), and this one is
-// measured in one (measuredAlone). The structure part is checked against the prices too: each
+// measured in one (measuredAlone). One difference of HeapAlloc can still carry garbage the build
+// left behind, so the reading is cross-checked against what a collection frees once every
+// reference to the room is dropped (runtime.KeepAlive, placed so the room lives through the
+// reading of its charge and no longer), which what else the process allocates or frees meanwhile
+// does not move: the two must agree within a hundredth, and the heap the factor is weighed
+// against is not trusted otherwise. The state and the updates, allocated before the first
+// reading, are kept past the last; freed between the readings they would be taken off the room's
+// heap, as they were in the reading of 2026-10-29 below, which read the room 3,244,400 bytes short.
+// The room's update log is left open, so nothing outside the room holds it and a room dropped is
+// collected whole (loadAndType). The structure part is checked against the prices too: each
 // update's struct at bytesOfHeapAStruct with its splits at bytesOfHeapASplit and its text at
 // bytesOfHeapAByteOfText, as the walk reads the text, its length prefix included
 // (updateStruct.content) - two bytes for a keystroke, 4,098 for a paste - at both copies, and
 // nothing for the delete set each update carries, which the room holds.
 //
-// Measured on 2026-10-29, in a process of its own that peaked at 227 MiB resident: a mebibyte of
+// Measured on 2026-10-30, in a process of its own that peaked at 249 MiB resident: a mebibyte of
 // prose, 1,048,359 bytes of markdown making 57,600 elements, loaded and given its 2,010 updates in
-// 10 m 46 s. The typed room renders 1,091,319 bytes, still 57,600 elements, from 79,720 structs,
-// and holds 52,347,472 bytes of heap at both copies, where the same state read and not typed into
-// reads 53,654,544 - the read room's replica keeps no rendering, and its reading is the least of
-// three builds against this room's one. It is charged 58,424,320 bytes: its count's 54,144,000
-// beside a structure part of 4,280,320, which is what its updates are priced at, 1.116 times the
-// heap it holds. At the price the structure part charged a split before bytesOfHeapASplit, the
-// heaviest kind's, the same room was charged 61,801,120 bytes, 1.179 times its heap, which is what
-// that price was measured again for.
+// 6 m 16 s. The typed room renders 1,091,319 bytes, still 57,600 elements, from 79,720 structs,
+// and holds 55,591,872 bytes of heap at both copies, 1,937,504 more than the same room loaded and
+// not typed into (53,654,368); dropping it frees 55,581,272, 10,600 bytes from that reading. It is
+// charged 58,424,320 bytes: its count's 54,144,000 beside a structure part of 4,280,320, which is
+// what its updates are priced at, 1.051 times the heap it holds. The reading of 2026-10-29, taken
+// before the cross-check, when the state and updates could be freed between the readings, read
+// the typed room at 52,347,472 bytes and its charge at 1.116 times that. At the price the
+// structure part charged a split before bytesOfHeapASplit, the heaviest kind's, the same room was
+// charged 61,801,120 bytes, 1.179 times that reading's heap, which is what that price was
+// measured again for.
 func TestATypedAndPastedRoomIsChargedAtLeastItsHeapAndWithinTheFactor(t *testing.T) {
 	const keystrokes, runs, pastes, pasteBytes, leastHeldOfCharge = 2_000, 100, 10, 4 << 10, 0.85
 	if os.Getenv(typedRoomHeapMeasurement) == "" {
@@ -262,29 +273,41 @@ func TestATypedAndPastedRoomIsChargedAtLeastItsHeapAndWithinTheFactor(t *testing
 	// The loaded room, untyped, weighed as the heap test weighs it; its first build is the
 	// discarded one that keeps the decoder's one-time setup out of the typed room's reading.
 	loaded := heldByResidentRoom(t, state, false)
-	var before, after runtime.MemStats
-	runtime.GC()
-	runtime.GC()
-	runtime.ReadMemStats(&before)
+	collected := func() int64 {
+		var stats runtime.MemStats
+		runtime.GC()
+		runtime.GC()
+		runtime.ReadMemStats(&stats)
+		return int64(stats.HeapAlloc)
+	}
+	before := collected()
 	started := time.Now()
 	room := loadAndType(t, state, updates)
 	took := time.Since(started)
-	runtime.GC()
-	runtime.GC()
-	runtime.ReadMemStats(&after)
-	held := int64(after.HeapAlloc) - int64(before.HeapAlloc)
+	after := collected()
 	structure, content, measuredAt, weight := chargeParts(room.charge)
 	bytes, elements, _ := room.replica.size()
 	structs := room.replica.structs.countedStructs()
+	// The room lives through the readings of its charge and no longer, so what the collection
+	// below frees is the room's own heap; the state and the updates outlive that collection, so
+	// neither is freed into the figure the reading is cross-checked against.
 	runtime.KeepAlive(room)
+	dropped := collected()
+	runtime.KeepAlive(state)
+	runtime.KeepAlive(updates)
+	held, freed := after-before, after-dropped
 
 	counted := copyHeap(bytes, elements, structs) * roomCopies
 	t.Logf("%d B of markdown making %d elements; the loaded room holds %d B of heap", rendering.Bytes, rendering.Elements, loaded)
 	t.Logf("%d updates (%d keystrokes in %d runs, %d pastes of %d B) in %s; the room renders %d B making %d elements from %d structs",
 		len(updates), keystrokes, runs, pastes, pasteBytes, took.Round(time.Second), bytes, elements, structs)
-	t.Logf("the typed room holds %d B of heap, %d more than loaded; it is charged %d B: its count %d and a structure part of %d, against %d its updates are priced at",
-		held, held-loaded, weight, counted, structure, priced)
+	t.Logf("the typed room holds %d B of heap, %d more than loaded, and its drop frees %d, %d from that reading; it is charged %d B: its count %d and a structure part of %d, against %d its updates are priced at",
+		held, held-loaded, freed, held-freed, weight, counted, structure, priced)
 	t.Logf("the charge is %.3fx the heap, want 1.000x to %.3fx (1/%.2f)", float64(weight)/float64(held), 1/leastHeldOfCharge, leastHeldOfCharge)
+	if diff := held - freed; diff > held/100 || -diff > held/100 {
+		t.Fatalf("the room reads %d B of heap and its drop frees %d, more than a hundredth apart: the two readings disagree, so the heap the factor is weighed against is not trustworthy",
+			held, freed)
+	}
 	if content != measuredAt {
 		t.Fatalf("the room's charge holds %d B of content its last count did not measure, want every update counted before it is weighed", content-measuredAt)
 	}
@@ -304,10 +327,9 @@ func TestATypedAndPastedRoomIsChargedAtLeastItsHeapAndWithinTheFactor(t *testing
 }
 
 // typedResidentRoom is a room typed into (loadAndType): the room as heldByResidentRoom holds one,
-// with its update log and its charge in the room budget.
+// with its charge in the room budget.
 type typedResidentRoom struct {
 	residentRoom
-	log    *crdt.UpdateLog
 	charge *roomCharge
 }
 
@@ -317,6 +339,9 @@ type typedResidentRoom struct {
 // budget of roomBudgetBytes, and an update observer on live that moves the replica through each
 // commit. It then hands each of updates to the peer hook as one browser's, applied as the room
 // applies a peer's update, and returns once the measurer has counted the room's last rendering.
+// The room's update log is left open, as a room's load leaves it (websocket.go:606): it goes with
+// the replica that drains it, which the room holds, so nothing outside the room holds the log and
+// a room dropped is collected whole, which the heap reading's cross-check rests on.
 func loadAndType(t *testing.T, state []byte, updates [][]byte) *typedResidentRoom {
 	t.Helper()
 	live := newDocumentCopy()
@@ -333,9 +358,7 @@ func loadAndType(t *testing.T, state []byte, updates [][]byte) *typedResidentRoo
 	}
 	service := &Service{}
 	service.budget.limit = roomBudgetBytes
-	log := live.OpenUpdateLog()
-	t.Cleanup(log.Close)
-	replica := service.keepReplica(live, log, &markdown, decoded.doc)
+	replica := service.keepReplica(live, live.OpenUpdateLog(), &markdown, decoded.doc)
 	replica.scans.rescanned(decoded.scans)
 	charge := service.chargeLoadedRoom("room", live, replica)
 	live.OnUpdate(func([]byte, any) { replica.observe("room", nil) })
@@ -347,7 +370,7 @@ func loadAndType(t *testing.T, state []byte, updates [][]byte) *typedResidentRoo
 		}
 	}
 	service.measurer.waitIdle()
-	return &typedResidentRoom{residentRoom: residentRoom{service: service, live: live, replica: replica}, log: log, charge: charge}
+	return &typedResidentRoom{residentRoom: residentRoom{service: service, live: live, replica: replica}, charge: charge}
 }
 
 // typedAndPastedUpdates is the updates one browser sends typing into state as a person types:
