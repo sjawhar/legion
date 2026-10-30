@@ -336,11 +336,15 @@ export function useRenderedMarkdown(
         // cards, the links and the pictures mounted into the paint the reader is reading move
         // to the new one with it rather than a few tasks later.
         const first = !formatted.current;
-        // Where the reader is, read once for the whole paint, slices and all.
-        const before = whereTheContentUnderItWas(element);
+        // Where the reader is, read once for the whole paint, slices and all, and only for the
+        // paint that replaces one the reader was shown as pending: that is the one that lands
+        // after its own commit and grows the element under them. A paint that replaces nothing
+        // pending - every body parsed on the page's own thread - measures nothing, so a short
+        // body never lays the page out in this effect.
+        const before = replacesPending ? whereTheContentUnderItWas(element) : undefined;
         // Everything a surface reads from the element, once the whole body is in it.
         const finish = (): void => {
-          keepTheReadersPlace(element, before);
+          if (before !== undefined) keepTheReadersPlace(element, before);
           setIsPending(false);
           let hosts = NO_ASK_HOSTS;
           if (engine !== undefined && parsed !== undefined && Card !== undefined) {

@@ -1,12 +1,11 @@
-import {
-  createHeadlessProof,
-  type HeadlessProofEditor,
-  type SoftBreaks,
-} from "@legion/proof-editor/headless";
+import { createHeadlessProof, type HeadlessProofEditor } from "@legion/proof-editor/headless";
 
 import serverBlockSchema from "../../../../../envoy/internal/dispatch/pmdoc/schema/blocks.json";
 import type { BlockSchema } from "../../api/types";
-import * as markdownEngine from "./markdown-engine";
+import { setParseWorkerFactory } from "./markdown-engine";
+// The worker's own protocol, which this fake answers; a type import, so nothing of the worker's
+// module runs in the test's process.
+import type { ParseReply, ParseRequest } from "./markdown-parse.worker";
 
 /**
  * The page's parse worker, faked in process, for the rows that prove what a reader sees while a
@@ -32,23 +31,6 @@ import * as markdownEngine from "./markdown-engine";
  * Installing a factory leaves the engine holding no worker, so each row starts from a page that
  * has created none; `restoreParseWorker` puts the page's own factory back.
  */
-
-/** One body the engine sends the worker. */
-export interface ParseRequest {
-  readonly id: number;
-  readonly markdown: string;
-  readonly softBreaks?: SoftBreaks;
-}
-
-/** The worker's answer to one request: the parsed document as plain JSON, or no `doc` at all for
- *  a body the parser refused, which is a body's one final failure. */
-export interface ParseReply {
-  readonly id: number;
-  readonly doc?: unknown;
-}
-
-/** The longest body the engine parses on the page's own thread (`markdown-engine.ts`). */
-export const { markdownWorkerThreshold } = markdownEngine;
 
 type Listener = (event: unknown) => void;
 
@@ -151,7 +133,7 @@ export function installFakeParseWorker({
   const taken: { request: ParseRequest; worker: FakeParseWorker }[] = [];
   let asked = 0;
 
-  markdownEngine.setParseWorkerFactory(() => {
+  setParseWorkerFactory(() => {
     asked += 1;
     if (refuseToCreate) {
       throw new Error("This page cannot create a parse worker.");
@@ -194,7 +176,7 @@ export function installFakeParseWorker({
       const { request, worker } = await sent(index);
       headless ??= createHeadlessProof({ blockSchema, readOnly: true });
       const engine = await headless;
-      let doc: unknown;
+      let doc: object | undefined;
       try {
         doc = engine.parseMarkdown(request.markdown, request.softBreaks).toJSON();
       } catch {
@@ -215,7 +197,7 @@ export function installFakeParseWorker({
 
 /** Puts the page's own worker factory back, so the next page creates a real one. */
 export function restoreParseWorker(): void {
-  markdownEngine.setParseWorkerFactory(undefined);
+  setParseWorkerFactory(undefined);
 }
 
 /** Lets the tasks already queued run, so a body the engine was about to send has been sent by the

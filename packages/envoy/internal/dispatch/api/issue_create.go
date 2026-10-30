@@ -378,8 +378,17 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// documentReadBack is the rendering the seed stored, read back by its own parse (docs'
+	// Ledger.ReadBackOf): the task count and the advice's blocks read that tree rather than
+	// parsing the same markdown again, and parse it themselves when the write left none.
+	documentReadBack := ledger.ReadBackOf(artifactID, markdown)
 	// The version row exists now, so the count names it (LEGION-542).
-	if err := docs.RecordTaskProgressMarkdown(r.Context(), tx, artifactID, markdown); err != nil {
+	if documentReadBack != nil {
+		err = docs.RecordTaskProgress(r.Context(), tx, artifactID, documentReadBack)
+	} else {
+		err = docs.RecordTaskProgressMarkdown(r.Context(), tx, artifactID, markdown)
+	}
+	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -428,7 +437,11 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	s.deps.Docs.ScheduleSettlement(artifactID)
 	s.publish(event)
 	if advice != nil && input.Spec != nil && strings.TrimSpace(*input.Spec) != "" {
-		advice.documentBlocks = readDocumentBlocks(markdown)
+		if documentReadBack != nil {
+			advice.documentBlocks = documentBlocksOf(documentReadBack)
+		} else {
+			advice.documentBlocks = readDocumentBlocks(markdown)
+		}
 	}
 	// The related-item check runs after the write committed, whatever writeAdvice
 	// answered, and waits at most relatedAllowance; its result rides the advice, or advice of its

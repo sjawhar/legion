@@ -1,5 +1,11 @@
+import { DISPATCH_BODY_MAX } from "@legion/contracts/dispatch-tools";
 import { type BrowserContext, expect, type Locator, type Page, test } from "@playwright/test";
 
+// `markdownWorkerThreshold` comes from the module that carries it and imports nothing: the
+// engine around it (`markdown-engine.ts`) is a browser module this spec's process cannot load.
+// The two shortest rows below sit one character under it, so they prove the body the page parses
+// on its own thread stays inside the same bound as the ones the worker takes.
+import { markdownWorkerThreshold } from "../web/src/features/refs/markdown-worker-threshold";
 import {
   createAsk,
   createComment,
@@ -29,13 +35,6 @@ const agent = {
 
 /** The longest the main thread may go without running a task while the card draws. */
 const longestGapMs = 1_000;
-/** The longest comment, message or broadcast body the server accepts
- *  (`contracts.DispatchBodyMax`): the size every heavy shape below is measured at. */
-const bodyCap = 32_000;
-/** A body of fewer characters than this parses on the page's own thread rather than in the parse
- *  worker (sjawhar/legion#2403); the two shortest rows sit one character under it, so they prove
- *  the synchronous path stays inside the same bound. */
-const workerThreshold = 4_000;
 
 /**
  * The parse worker's own chunk, as Vite names a module worker's bundle - the diagram renderer
@@ -65,8 +64,8 @@ function nestedByIndentation(count: number): string {
 /** 8,000 list items: the shape a reader meets most, and the one no parse fix brings under a
  *  second on the page's own thread. */
 const plainList = "- x\n".repeat(8_000);
-const nestedThenBlankLines = padTo(nestedByIndentation(100), "\n", bodyCap);
-const nestedThenTextLines = padTo(nestedByIndentation(100), "x\n", bodyCap);
+const nestedThenBlankLines = padTo(nestedByIndentation(100), "\n", DISPATCH_BODY_MAX);
+const nestedThenTextLines = padTo(nestedByIndentation(100), "x\n", DISPATCH_BODY_MAX);
 const lazyQuote = `> x\n${"x\n".repeat(15_998)}`;
 const lazyListItem = `- x\n${"x\n".repeat(15_998)}`;
 const bracketRun = "[".repeat(15_000) + "]".repeat(15_000);
@@ -74,7 +73,7 @@ const calloutBracketRun = `:::callout[${"[".repeat(15_000)}${"]".repeat(14_989)}
 const markerChain = `${"- ".repeat(15_999)}x`;
 /** 49 items nested on one line, which Go accepts (49 lists and 49 items is 98 of its 100
  *  blocks), then blank lines to the cap. */
-const nested49ThenBlankLines = padTo(`${"- ".repeat(49)}x\n`, "\n", bodyCap);
+const nested49ThenBlankLines = padTo(`${"- ".repeat(49)}x\n`, "\n", DISPATCH_BODY_MAX);
 
 /** Go's nesting bound, which the browser now counts the same way (`pmdoc/nesting.go`
  *  `maxNesting`): a list and its item each count one, so 50 levels stand and the 51st reads as
@@ -334,7 +333,7 @@ const rows: readonly Row[] = [
     name: "15,999 list markers on one line",
   },
   {
-    body: padTo(`${"- ".repeat(49)}x\n`, "\n", workerThreshold - 1),
+    body: padTo(`${"- ".repeat(49)}x\n`, "\n", markdownWorkerThreshold - 1),
     formatted: async (body) => {
       await expect(body.locator("li")).toHaveCount(49);
       await expect.poll(() => deepestNesting(body, "ul")).toBe(49);
@@ -342,7 +341,7 @@ const rows: readonly Row[] = [
     name: "49 list markers on one line then blank lines, just under the worker's threshold",
   },
   {
-    body: padTo("", "- x\n", workerThreshold - 1),
+    body: padTo("", "- x\n", markdownWorkerThreshold - 1),
     formatted: async (body) => {
       await expect(body.locator("li")).toHaveCount(1_000);
     },
@@ -545,7 +544,7 @@ test("a document write of each heavy body answers in under a second, stored or r
     expect(
       row.body.length,
       `${row.name}: the row is longer than a comment's body cap`
-    ).toBeLessThanOrEqual(bodyCap);
+    ).toBeLessThanOrEqual(DISPATCH_BODY_MAX);
     if (row.warm === true) {
       // The first parse of this shape in a server process pays for the memory it touches, not for
       // the parsing (the table above): write it once, record that, and hold the bound against the

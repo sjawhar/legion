@@ -326,6 +326,13 @@ function resolveContentExits(events: Event[], context: TokenizeContext): void {
       end,
       lastChunk,
       chunk,
+      // Whether the last content is only a line ending. The stream is read here, once for the
+      // run: the rule that reads it runs once per exit of the run, and a run ending several
+      // nested containers would otherwise slice the same chunk again for each of them.
+      bareChunk:
+        chunk !== undefined &&
+        chunk.end.offset - chunk.start.offset <= 2 &&
+        context.sliceStream(chunk).length === 1,
       // The line after the last content, when that content ends in a line ending.
       nextLine: chunk !== undefined && chunk.end.line !== chunk.start.line ? chunk.end.line : -1,
       lazyLine: false,
@@ -389,6 +396,8 @@ interface ExitRun {
   lastChunk: number;
   /** That content, or undefined where no line has ended yet. */
   chunk: Token | undefined;
+  /** Whether that content is only a line ending. */
+  bareChunk: boolean;
   /** The line after it, when it ends in a line ending, or -1. */
   nextLine: number;
   /** Whether that line was lazy for the flow construct (`exitsOfALazyLine`). */
@@ -436,17 +445,13 @@ function exitsOfAnUnclosedDirectiveContainer(
   block: DirectiveBlock,
   own: DirectiveBlock | undefined
 ): ExitPlacement {
-  const { events, context, index, lastChunk, chunk, nextLine } = run;
+  const { events, index, lastChunk, chunk, nextLine } = run;
   let gap = contentEnd(events, block, index);
   const lazy = run.lazyLine && block.contentStarts[nextLine - block.line] === undefined;
-  // Whether the last content is only a line ending.
-  const bareChunk =
-    chunk !== undefined &&
-    chunk.end.offset - chunk.start.offset <= 2 &&
-    context.sliceStream(chunk).length === 1;
   const bare =
     lazy &&
-    bareChunk &&
+    chunk !== undefined &&
+    run.bareChunk &&
     gap === lastChunk + 1 &&
     block.contentStarts[chunk.start.line - block.line] === chunk.start.offset &&
     !flowTokenEndsIn(chunk);

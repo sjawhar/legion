@@ -6,6 +6,7 @@ import type { BlockSchema } from "../../api/types";
 import { loadBlockSchema } from "../doc/schema";
 import { renderAskBlockShell, renderTypedBlock } from "../doc/typed-block-drawing";
 import type { ParseReply, ParseRequest, ParseSchema } from "./markdown-parse.worker";
+import { markdownWorkerThreshold } from "./markdown-worker-threshold";
 import { referenceSpans } from "./reference-spans";
 import {
   buildDispatchReference,
@@ -28,6 +29,10 @@ export type { SoftBreaks };
  * engine's life, and every render on the page would otherwise rebuild the same serializer.
  */
 export interface MarkdownEngine {
+  /** The block schema it was built from, which the parse worker is built from too, so a long
+   *  body reads the same above and below the threshold. Its version names a body's parse in the
+   *  answer cache. */
+  readonly blockSchema: BlockSchema;
   readonly serializer: DOMSerializer;
   /** The schema this engine parses with, which the parse worker is built from too: what turns
    *  the worker's answer, a document as `ProseMirrorNode.toJSON()` gives it, back into a document
@@ -71,9 +76,6 @@ const engines = new Map<number, Promise<MarkdownEngine>>();
  *  engine serves every soft-break policy (the policy is a parse argument), and a parse that
  *  throws no longer evicts it - the headless editor drops only its own refused parser. */
 let readyEngine: MarkdownEngine | undefined;
-/** The schema `readyEngine` was built from, which the parse worker is built from too, so a long
- *  body reads the same above and below the threshold. */
-let readySchema: BlockSchema | undefined;
 
 /**
  * Proof's DOM serializer, except for a picture whose address is a Dispatch reference
@@ -118,8 +120,9 @@ function pictureSerializer(schema: Schema): DOMSerializer {
   );
 }
 
-function buildEngine(proof: HeadlessProofEditor): MarkdownEngine {
+function buildEngine(proof: HeadlessProofEditor, blockSchema: BlockSchema): MarkdownEngine {
   return {
+    blockSchema,
     schema: proof.schema,
     serializer: pictureSerializer(proof.schema),
     parse(markdown, softBreaks = "space") {
@@ -148,9 +151,8 @@ function loadEngine(blockSchema: BlockSchema): Promise<MarkdownEngine> {
       })
     )
     .then((proof) => {
-      const engine = buildEngine(proof);
+      const engine = buildEngine(proof, blockSchema);
       readyEngine = engine;
-      readySchema = blockSchema;
       return engine;
     });
   engines.set(blockSchema.version, created);
@@ -163,20 +165,16 @@ export async function warmMarkdownRenderer(): Promise<void> {
   await loadEngine(await loadBlockSchema());
 }
 
-/**
- * The longest body parsed on the page's own thread. After this change's linear-time fixes the
- * worst shape costs about 46 µs per character in Chromium on a three-core pod, so a body of this
- * length holds the thread for about 0.2 s - five times under the second a reader may wait - and
- * every longer one is parsed in the worker (sjawhar/legion#2403).
- */
-export const markdownWorkerThreshold = 4_000;
+/** The longest body parsed on the page's own thread, which a Playwright spec reads from
+ *  `markdown-worker-threshold.ts`, the module that carries it and imports nothing. */
+export { markdownWorkerThreshold };
 
 /** How long the worker may hold one body before the page parses it itself. It runs from the
  *  moment the worker can start on that body, never while its chunk is still downloading, as the
  *  diagram renderer's own limit does (`mermaid-diagrams.ts`). */
 const PARSE_TIME_LIMIT_MS = 10_000;
 
-/** How many parsed documents the answer cache keeps; the oldest insertion goes first. A long
+/** How many parsed documents the answer cache keeps; the one read longest ago goes first. A long
  *  body's document is large, and the renders that read one again are a page's own repaints, so a
  *  few are enough: the bodies on screen, and the streaming turn growing among them. */
 const ANSWER_LIMIT = 4;
@@ -232,7 +230,9 @@ interface SentBody {
   /** Its entry in the answer cache: the schema version, the soft-break policy and the source. */
   readonly key: string;
   readonly markdown: string;
-  readonly schema: BlockSchema;
+  /** It has been posted to the worker the page holds, which is parsing it: the one body the
+   *  worker has. */
+  posted: boolean;
   readonly softBreaks: SoftBreaks;
   /** Every render waiting on it; a body two surfaces draw at once is sent once. */
   readonly waiters: ParseWaiter[];
@@ -244,7 +244,7 @@ let createParseWorker: ParseWorkerFactory | undefined;
 let parseWorker: Worker | undefined;
 /** The worker has posted `{ ready: true }`: it starts on a body as soon as it has one. */
 let workerReady = false;
-/** The bodies the worker holds, oldest first; the first is the one it is parsing. */
+/** The bodies waiting on the worker, oldest first; the first is the one it holds. */
 let sentBodies: SentBody[] = [];
 let lastBodyId = 0;
 /** A cancel has queued `dropAbandonedBodies` and it has not run yet. */
@@ -285,7 +285,7 @@ function documentFromJSON(schema: Schema, json: DocumentJSON): ProseMirrorNode {
   return schema.nodes[json.type].create(json.attrs, content, marks);
 }
 
-/** Keeps `answer` under `key`, dropping the oldest entry where the cache is full. */
+/** Keeps `answer` under `key`, dropping the entry read longest ago where the cache is full. */
 function remember(key: string, answer: ParsedAnswer): void {
   if (answers.size >= ANSWER_LIMIT) {
     const oldest = answers.keys().next();
@@ -320,6 +320,8 @@ function stopParseWorker(): SentBody[] {
   for (const body of held) {
     window.clearTimeout(body.timer);
     body.timer = undefined;
+    // The worker it was posted to is gone, so a body sent to the next one is posted again.
+    body.posted = false;
   }
   parseWorker?.terminate();
   parseWorker = undefined;
@@ -346,13 +348,35 @@ function armDeadline(): void {
 }
 
 /**
+ * Posts the body at the head of the queue, once there is a worker ready to start on it and it
+ * holds nothing else. The worker parses one body at a time and the page keeps the rest: a turn
+ * streaming into the live view abandons the frames behind the one the reader waits for before
+ * the worker ever sees them (`dropAbandonedBodies`), where a message already posted could not be
+ * taken back, and the worker starts on the frame the reader is waiting for rather than parsing
+ * its way to it through every stale one.
+ */
+function postNextBody(): void {
+  const next = sentBodies[0];
+  if (next === undefined || next.posted || !workerReady || parseWorker === undefined) {
+    return;
+  }
+  next.posted = true;
+  parseWorker.postMessage({
+    id: next.id,
+    markdown: next.markdown,
+    softBreaks: next.softBreaks,
+  } satisfies ParseRequest);
+}
+
+/**
  * Drops every body no render waits for any more, so a turn streaming into the live view leaves
  * the worker only the frame someone is reading. It runs on the microtask after a cancel, not in
  * it: React runs a layout effect's cleanup and the next run of it in one commit, so a body the
  * same commit asks for again keeps its place in the worker's queue, and its answer.
  *
- * A body already posted is still parsed by the worker - a message cannot be taken back - and its
- * answer is dropped on arrival, with nothing kept for a source the page has moved on from.
+ * A body the worker is already parsing is parsed to the end - a message cannot be taken back -
+ * and its answer is dropped on arrival, with nothing kept for a source the page has moved on
+ * from; every body behind it the page simply forgets.
  */
 function dropAbandonedBodies(): void {
   dropQueued = false;
@@ -364,6 +388,7 @@ function dropAbandonedBodies(): void {
     body.timer = undefined;
     return false;
   });
+  postNextBody();
   armDeadline();
 }
 
@@ -374,6 +399,7 @@ function answerFromWorker(worker: Worker, reply: ParseReply): void {
   }
   if ("ready" in reply) {
     workerReady = true;
+    postNextBody();
     armDeadline();
     return;
   }
@@ -384,6 +410,7 @@ function answerFromWorker(worker: Worker, reply: ParseReply): void {
   const [body] = sentBodies.splice(at, 1);
   window.clearTimeout(body.timer);
   body.timer = undefined;
+  postNextBody();
   let answer: ParsedAnswer;
   if (reply.doc === undefined) {
     // The parser refused the body: its one final failure, which reads as its literal text.
@@ -442,8 +469,9 @@ function newParseWorker(): Worker {
   return new Worker(new URL("./markdown-parse.worker.ts", import.meta.url), { type: "module" });
 }
 
-/** Sends `body` to the worker, starting one where none runs. A worker that cannot be created
- *  leaves the body to the page, as a crashed one does. */
+/** Queues `body` for the worker, starting one where none runs; it is posted once the worker has
+ *  no other body (`postNextBody`). A worker that cannot be created leaves the body to the page,
+ *  as a crashed one does. */
 function sendToWorker(body: SentBody): void {
   if (parseWorker === undefined) {
     if (noParseWorker) {
@@ -472,14 +500,10 @@ function sendToWorker(body: SentBody): void {
     });
     // The page loads one schema version per session (`doc/schema.ts`), so the worker is built
     // from the schema of the first long body it is sent and parses every later one the same way.
-    worker.postMessage({ blockSchema: body.schema } satisfies ParseSchema);
+    worker.postMessage({ blockSchema: body.engine.blockSchema } satisfies ParseSchema);
   }
   sentBodies.push(body);
-  parseWorker.postMessage({
-    id: body.id,
-    markdown: body.markdown,
-    softBreaks: body.softBreaks,
-  } satisfies ParseRequest);
+  postNextBody();
   armDeadline();
 }
 
@@ -510,7 +534,6 @@ export function setParseDeadline(limitMs = PARSE_TIME_LIMIT_MS): void {
  *  document once the worker answers. */
 function renderLoaded(
   engine: MarkdownEngine,
-  schema: BlockSchema,
   markdown: string,
   softBreaks: SoftBreaks,
   render: (rendering: MarkdownRendering) => void
@@ -527,9 +550,13 @@ function renderLoaded(
   // The schema version, the soft-break policy and the source are all a parse reads, so one
   // answer serves every later render of the same three: a new decision card, paint or decorate
   // pass repaints the body it already has rather than asking for it again.
-  const key = `${schema.version}\u0000${softBreaks}\u0000${markdown}`;
+  const key = `${engine.blockSchema.version}\u0000${softBreaks}\u0000${markdown}`;
   const cached = answers.get(key);
   if (cached !== undefined) {
+    // Reading an answer keeps it: what the cache drops is the body read longest ago, never one
+    // the page is still repainting.
+    answers.delete(key);
+    answers.set(key, cached);
     render({
       engine,
       openMermaidFence: cached.openMermaidFence,
@@ -551,7 +578,7 @@ function renderLoaded(
       id: lastBodyId,
       key,
       markdown,
-      schema,
+      posted: false,
       softBreaks,
       timer: undefined,
       waiters: [waiter],
@@ -602,8 +629,8 @@ export function renderWithEngine(
   softBreaks: SoftBreaks,
   render: (rendering: MarkdownRendering) => void
 ): () => void {
-  if (readyEngine !== undefined && readySchema !== undefined) {
-    return renderLoaded(readyEngine, readySchema, markdown, softBreaks, render);
+  if (readyEngine !== undefined) {
+    return renderLoaded(readyEngine, markdown, softBreaks, render);
   }
   let cancelled = false;
   let cancelAnswer: (() => void) | undefined;
@@ -614,21 +641,19 @@ export function renderWithEngine(
   }
   void (async () => {
     let engine: MarkdownEngine | undefined;
-    let schema: BlockSchema | undefined;
     try {
-      schema = await loadBlockSchema();
-      engine = await loadEngine(schema);
+      engine = await loadEngine(await loadBlockSchema());
     } catch (error) {
       console.error("Rendering literal Markdown, the block schema is unavailable", error);
     }
     if (cancelled) {
       return;
     }
-    if (engine === undefined || schema === undefined) {
+    if (engine === undefined) {
       render({ engine: undefined, openMermaidFence: undefined, parsed: undefined, pending: false });
       return;
     }
-    cancelAnswer = renderLoaded(engine, schema, markdown, softBreaks, render);
+    cancelAnswer = renderLoaded(engine, markdown, softBreaks, render);
   })();
   return () => {
     cancelled = true;

@@ -3,13 +3,13 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import serverBlockSchema from "../../../../../envoy/internal/dispatch/pmdoc/schema/blocks.json";
 import type { BlockSchema } from "../../api/types";
 import * as schemaModule from "../doc/schema";
-import { type MarkdownRendering, renderWithEngine, warmMarkdownRenderer } from "./markdown-engine";
 import {
-  flushTasks,
-  installFakeParseWorker,
+  type MarkdownRendering,
   markdownWorkerThreshold,
-  restoreParseWorker,
-} from "./parse-worker-fixture";
+  renderWithEngine,
+  warmMarkdownRenderer,
+} from "./markdown-engine";
+import { flushTasks, installFakeParseWorker, restoreParseWorker } from "./parse-worker-fixture";
 
 const blockSchema = serverBlockSchema as unknown as BlockSchema;
 

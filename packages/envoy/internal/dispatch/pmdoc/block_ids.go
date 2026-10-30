@@ -40,35 +40,42 @@ func mintBlockID() string {
 // document of 8,000 list items spent about half its parse inside sixteen-byte reads, one per item
 // (the plain list of heavy_bodies_test.go). Every id still comes from those bytes alone, 122 of
 // them as a version 4 UUID holds.
-var blockIDEntropy struct {
-	sync.Mutex
-	bytes [blockIDEntropyIDs * len(uuid.UUID{})]byte
-	// minted is how many ids the buffer has given out; it is refilled on the first and then on
-	// every blockIDEntropyIDs-th.
-	minted int
-}
+var blockIDEntropy blockIDBytes
 
 // blockIDEntropyIDs is how many ids one read of crypto/rand fills. Each costs sixteen bytes, so
 // the buffer is four kibibytes.
 const blockIDEntropyIDs = 256
 
+// blockIDBytes hands out the bytes of blockIDEntropy.
+type blockIDBytes struct {
+	sync.Mutex
+	bytes [blockIDEntropyIDs * len(uuid.UUID{})]byte
+	// unread is how many bytes at the end of the buffer no id has taken yet: zero before the
+	// first id of the process, and again once a block of them is spent.
+	unread int
+}
+
+// Read fills p from the block of bytes read last, reading crypto/rand again once they are spent,
+// so uuid.NewRandomFromReader mints an id without a read of its own. It is the io.Reader
+// uuid.NewRandomFromReader draws from, so what a block id holds of those bytes, and where its
+// version and variant go, is the library's own doing rather than this package's.
+func (b *blockIDBytes) Read(p []byte) (int, error) {
+	b.Lock()
+	defer b.Unlock()
+	if b.unread == 0 {
+		if _, err := rand.Read(b.bytes[:]); err != nil {
+			return 0, fmt.Errorf("pmdoc: reading randomness for a block id: %w", err)
+		}
+		b.unread = len(b.bytes)
+	}
+	read := copy(p, b.bytes[len(b.bytes)-b.unread:])
+	b.unread -= read
+	return read, nil
+}
+
 // newBlockID is a version 4 UUID, as uuid.NewString writes one, minted from blockIDEntropy.
 func newBlockID() string {
-	var id uuid.UUID
-	blockIDEntropy.Lock()
-	at := blockIDEntropy.minted % blockIDEntropyIDs
-	if at == 0 {
-		if _, err := rand.Read(blockIDEntropy.bytes[:]); err != nil {
-			blockIDEntropy.Unlock()
-			panic(fmt.Sprintf("pmdoc: reading randomness for a block id: %v", err))
-		}
-	}
-	copy(id[:], blockIDEntropy.bytes[at*len(id):])
-	blockIDEntropy.minted++
-	blockIDEntropy.Unlock()
-	id[6] = (id[6] & 0x0f) | 0x40
-	id[8] = (id[8] & 0x3f) | 0x80
-	return id.String()
+	return uuid.Must(uuid.NewRandomFromReader(&blockIDEntropy)).String()
 }
 
 // EnsureBlockIDs gives every block in tree a unique blockId. Existing unique IDs stay

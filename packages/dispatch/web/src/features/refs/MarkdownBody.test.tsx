@@ -14,13 +14,8 @@ import type {
 import { TextAskBlockCard } from "../doc/AskBlockCard";
 import { MarkdownBody } from "./MarkdownBody";
 import { TextAskCard } from "./markdown-cards";
-import { setParseDeadline, warmMarkdownRenderer } from "./markdown-engine";
-import {
-  flushTasks,
-  installFakeParseWorker,
-  markdownWorkerThreshold,
-  restoreParseWorker,
-} from "./parse-worker-fixture";
+import { markdownWorkerThreshold, setParseDeadline, warmMarkdownRenderer } from "./markdown-engine";
+import { flushTasks, installFakeParseWorker, restoreParseWorker } from "./parse-worker-fixture";
 
 function withQueries(children: ReactNode): ReactNode {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });

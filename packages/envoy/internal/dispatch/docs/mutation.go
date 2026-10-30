@@ -573,11 +573,11 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		if repairing {
 			current = nil
 		}
-		target, read2, err := parseWrittenReplacing(current, markdown)
+		var target *pmdoc.Node
+		target, read, err = parseWrittenReplacing(current, markdown)
 		if err != nil {
 			return err
 		}
-		read = read2
 		// A repair is a whole new document, held to the ask content rule for every ask, as
 		// RebuildDocument holds supplied markdown, and it keeps every open ask block.
 		if repairing {
@@ -661,11 +661,9 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 		}
 		return nil
 	})
-	if unchanged && errors.Is(err, websocket.ErrNoChanges) {
-		ledgerFrom(ctx).wroteReadBack(artifactID, read)
-		return canonical, nil
-	}
-	if err != nil {
+	// A write the document already held makes no change, and is as much a write that read its
+	// markdown back as one the fragment took.
+	if err != nil && !(unchanged && errors.Is(err, websocket.ErrNoChanges)) {
 		return "", wrapUnlessTooLarge(err, "replace live document")
 	}
 	// The parse read its markdown back already, to refuse a document that reads back otherwise;

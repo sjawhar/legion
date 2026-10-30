@@ -9,7 +9,10 @@
  * The engine is built read-only and with no `renderBlock`: a typed block's host drawing is read
  * only by `toDOM` (`block-schema.ts`), and the answer this worker posts is the parsed document as
  * `toJSON` gives it, which the page turns back into a node of its own schema - the one carrying
- * the page's `renderBlock` - with `nodeFromJSON`.
+ * the page's `renderBlock` - with `documentFromJSON` (`markdown-engine.ts`), node by node.
+ * `Schema.nodeFromJSON` is not that path and cannot be: it checks each attribute against the
+ * type its schema gives it, and this page's own parser writes `title: null` for a picture with
+ * no title where `image.title` is a string, so every body holding one would be refused.
  *
  * Once its imports have loaded it posts `{ ready: true }`, so the page starts a body's deadline
  * when the worker can start on it, never while its chunk is still downloading. The page then
