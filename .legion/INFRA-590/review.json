@@ -2,25 +2,24 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-590",
-  "completed": "2026-10-30T00:53:00Z",
-  "round": 11,
-  "reviewedCodeHead": "bb6c22f975342594a32f777ac87c66b8059aa32d",
+  "completed": "2026-10-30T07:23:00Z",
+  "round": 12,
+  "reviewedCodeHead": "74bcfc093f230af602bf983b3a57774cf1b46e1b",
   "decision": "approved",
   "critical": 0,
   "important": 0,
   "minor": 0,
-  "fingerprint": "61f47ca7d911a54dc8baac0fba32f313509e24cb97a0289f721eed213e0000bf at 5d0cf73b -> bd52726b41f4deff09685e8df550ca4f759359005343218ebbf3c109e8bff345 at bb6c22f9: changed (forward merge of main dfd128f14 with #2377, migrations renumbered, the tester's test), so a new round.",
-  "ci": "At code head bb6c22f9 (compare to f5a4898b handoffs only): required lint, typecheck, test, pr-title success; envoy-go, dispatch, dispatch-memory, dispatch-multiprocess success. envoy-go-race failed on internal/dispatch/api TestAnUploadHoldsNoIssueLockWhileTheStoreWrites (files_test.go:306, a nowait lock on the issue row found it held, 55P03): this PR changes neither the upload path nor files_test.go (api changes are a test helper and a comment), the same package passed in envoy-go, and main's race job fails too (run 40955932013, docs package); recorded as main's.",
-  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at bb6c22f9; both approve with no finding.",
+  "fingerprint": "bd52726b41f4deff09685e8df550ca4f759359005343218ebbf3c109e8bff345 at e8f61f55 -> be743defbd5ed1468927150190e1b6512a7443dc5acd1167060603d528129286 at 74bcfc09. The PR's own diff differs only by the migration renumbering (0142/0143 -> 0145_duty_holds/0146_outbox_claim; changed lines identical modulo the numbers) and one ci.yaml filter line (internal/dispatch/itemblocks/* in envoy_go_race_docs). Main changed files the PR changes, so a full round under the architect's rule.",
+  "ci": "Re-run 40986956963 at 74bcfc09 (the 02:10Z drain cancelled the first): lint, typecheck, test, pr-title, envoy-go, envoy-go-race, envoy-go-race-docs, dispatch, dispatch-memory, dispatch-multiprocess all completed success; compare 74bcfc09...6e6655b6 is handoffs only.",
+  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at 74bcfc09; both approve with no finding.",
   "keyFindings": [],
   "notes": [
-    "Not fixed, at the architect's instruction to push nothing during the run: the second subtest of TestCoreRoleDeliverySkipsAHolderThatStoppedHeartbeating (delivery_role_stale_holder_test.go:62) names 'a holder that stopped heartbeating before the claim went stale' where it means one that last heartbeated longer ago than session.ClaimStaleAfter. Wording only.",
-    "The publish route's later attempts (confirmed.go:351) use the same laneHolderFresh gate and have no stale-holder test."
+    "GitHub reports the head CONFLICTING again: main moved after this run (#2376, #2528, #2506, #2537 which adds the same itemblocks filter line, and others). The next forward merge goes through the confirmation-round rule."
   ],
   "verifiedCorrect": [
-    "#2377 keeps writing the session row on every heartbeat (PutWithin via mergeForClaim), so roles.Fresh reads a current UpdatedAt; the outbox reads the session bucket directly; ReleaseExpiredRoleClaim and the rewatch hooks are unchanged.",
-    "Migrations 0141_drop_broadcast_idempotency_keys (main), 0142_duty_holds, 0143_outbox_claim with census files; no stale reference; connections 89; ci-filters green.",
-    "AGENTS.md and cmd/dispatch/README.md conflicts keep both sides word for word.",
-    "TestCoreRoleDeliverySkipsAHolderThatStoppedHeartbeating fails with laneHolderFresh forced true and checks the claim release."
+    "The five files both sides touched (cmd/dispatch/main_test.go, infra/gcp/dispatch.go, store/store_test.go, cmd/dispatch/AGENTS.md, infra/README.md) equal a clean git merge-file of base dfd128f148, branch e8f61f55 and main 10fc3b77a.",
+    "#2463's item_blocks triggers write no events and send no notify; the outbox takes no row locks; reply_to keeps its meaning; a reply naming a block already reaches the block's author; reply_block is a nested payload field.",
+    "#2521 is daemon-only; #2371 changes no Dispatch bus path or grant.",
+    "No stale 0142/0143 reference for the branch's migrations; README migration paragraphs in number order; connections 89; check-ci-filters.sh 0 uncovered; go build and go vet clean in packages/envoy and packages/envoy/infra (natslive), go.work.sum unchanged."
   ]
 }
