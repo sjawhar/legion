@@ -2,49 +2,73 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-567",
-  "completed": "2026-10-29T23:10:00Z",
-  "round": 4,
-  "answers": "Test round 3's three findings, narrowed by the architect to exactly those three",
+  "completed": "2026-10-30T00:55:00Z",
+  "round": 5,
+  "answers": "Review round 1 (review 5706303462): one High, three Medium and four Minor findings, each answered on its own thread and resolved; plus the defect the e2e run that settled under this round found",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2512",
-  "head": "37ded4e7505541b77fc45dd98108b122e6f5cf8c",
+  "head": "368e3d2bbdff611006ec4dc00c2b4c9133c2bdb4",
   "proof": [
     {
-      "criterion": "Spec, `Also delivered (part 1 of dispatch://INFRA-333)`: \"The pull request lists each job with its slowest green run and its limit\" — the tester's finding 1, the table being 56 rows against 58 jobs",
-      "surface": "The pull request body, rebuilt from the eleven workflow files at this head rather than edited by hand",
-      "command": "A PyYAML parse of .github/workflows/*.yaml joined with the measurement of main this change made in round 1, written straight into the body through `gh api repos/sjawhar/legion/pulls/2512 --method PATCH`",
-      "observed": "58 rows for 58 job definitions, counted back out of the live body with awk between the table's header and the section after it. `mirror-images.yaml | mirror` is gone with the workflow round 3 deleted. The three jobs the last rounds added are in it: `ci.yaml:ci-images` at 15 and `e2e.yaml:select` at 10, each a job with no green run in the window and so on the 30-minute rule's floor, and `e2e.yaml:proof`, whose limit is its matrix row's `timeout_minutes` in .github/e2e-scripts.json, 20 to 30 by proof. The five reusable-workflow calls carry none, as GitHub's keywords leave it out.",
-      "headSha": "37ded4e7505541b77fc45dd98108b122e6f5cf8c",
-      "negativeControl": "The same parse is the control that no limit is missing: it asserts every job that is not a reusable-workflow call carries a timeout-minutes and raises the job's name otherwise. It passes at this head, 58 jobs, 5 calls."
+      "criterion": "Review round 1, High (worker.Dockerfile:439): in a worker pod every Go version query answered from the warm cache, so a role never saw a newer release",
+      "surface": "The Go toolchain a role runs (go1.27.1), with a scratch download cache filled as the image's `go` stage fills it and a fresh GOMODCACHE each time",
+      "command": "Two runs. The version query: `GOPROXY='file://<cache>/cache/download|https://proxy.golang.org|direct' go list -m -versions golang.org/x/text`, before and after deleting the cache's `@v/list` and `@latest` files. The offline read: the same proxy list with the public proxy replaced by `http://127.0.0.1:1`, then `go mod download golang.org/x/text` at the pinned version.",
+      "observed": "Before the deletion the query answered `golang.org/x/text v0.3.0` and nothing more, which is the defect. After it the same command ends `… v0.41.0 v0.42.0 v0.43.0`, fresh from proxy.golang.org. Offline, `go mod download` at the pinned version exits 0 with v0.3.0.info, .mod, .zip and .ziphash written into the fresh cache, so an exact version still comes from the image with no network. The `go` stage now deletes those files after its download and the final stage's own check fails the build when one is left.",
+      "headSha": "368e3d2bbdff611006ec4dc00c2b4c9133c2bdb4",
+      "negativeControl": "Offline, `go list -m golang.org/x/text@latest` with the same proxy list fails `dial tcp 127.0.0.1:1: connect: connection refused` rather than answering v0.3.0 from the image. That refusal is the fall-through working: with no list in the cache the file proxy answers 404 and the next source is asked, and when the next source is dead the command says so instead of lying."
     },
     {
-      "criterion": "The tester's finding 3 — the refusal discipline this change's own gates keep: a line a check cannot read is a refusal that names it, never a traceback",
-      "surface": "The selector itself, driven over fixture trees by a harness of its own, as every other check of this repository is",
-      "command": "bash .github/scripts/select-e2e-proofs.test.sh",
-      "observed": "`Results: 94 passed, 0 failed` over 15 cases. The `select` job's Python moved to .github/scripts/select-e2e-proofs.sh, where one table names each key a hosted row gives the matrix and what it must hold; the validation and the matrix entry are both built from that table, so a key added later is a key every row must then carry. Its refusals keep their old wording and gain: a hosted row missing keys, naming the row and every key it lacks; a key of the wrong kind, naming the row, the key and what it must hold; a row that is not an object or has no `script` string; an `elsewhere` row with no `needs` text; a file that is not JSON or a top level without both lists; and an empty EVENT or GITHUB_OUTPUT. e2e.yaml's select job runs the script, and ci.yaml's test job runs the harness beside its siblings.",
-      "headSha": "37ded4e7505541b77fc45dd98108b122e6f5cf8c",
-      "negativeControl": "The tester's own input is a case: a hosted row with `jj` deleted now fails with `::error file=.github/e2e-scripts.json::` naming the row and every key the matrix reads, and the case asserts the output holds no `Traceback` and that no matrix was written. A case over the repository's own .github/e2e-scripts.json and scripts/e2e/ proves the real data still passes, for a schedule run and for a workflow_dispatch of each of the five."
+      "criterion": "Review round 1, Medium (mirror-ci-images.sh:55): a row refreshed on a branch moved the shared tag, turning every other ci-images run red and leaving main's digest untagged",
+      "surface": "The copy and the gate, driven over fixtures by their own harnesses with a stand-in registry",
+      "command": "bash .github/scripts/mirror-ci-images.test.sh ; bash .github/scripts/check-ci-images.test.sh ; bash .github/scripts/check-ci-images.sh tree",
+      "observed": "`Results: 25 passed, 0 failed` and `Results: 89 passed, 0 failed`; the tree mode passes on the real tree. The copy reads `<the upstream repository>@<the row's digest>`, so it lands at that row's bytes whatever upstream has done since, and every row's tag now ends with the first eight hex characters of its own digest, which the gate refuses otherwise, naming the tag the row should carry. A shared tag is therefore impossible rather than discouraged. The post-copy refusal is re-worded: with a digest source it can no longer mean `correct the row's digest`.",
+      "headSha": "368e3d2bbdff611006ec4dc00c2b4c9133c2bdb4",
+      "negativeControl": "The copy's new case: the stand-in registry has moved the upstream tag to another digest, and the run still asks for `docker.io/oven/bun@<the row's digest>`, lands there and exits 0. The gate's new red case covers both tag shapes, a row whose upstream names a tag and one whose upstream names a digest alone."
     },
     {
-      "criterion": "The round's other checks, which the two changes above could have broken",
-      "surface": "The repository's own gates, over the real tree",
-      "command": "bash .github/scripts/check-ci-filters.sh ; check-ci-images.sh tree ; check-action-pins.sh ; check-private-names.sh ; a PyYAML parse of every workflow file",
-      "observed": "`every ci.yaml filter matches every file its job reads (25 gates), and every PUSH_WORKFLOWS workflow's on.push.paths equals its filter (1)`; `.github/ci-images.yaml holds 12 row(s); 35 reference(s) in 31 file(s) of CI's reach name one of those rows; of 6275 text file(s) swept, the 29 that name mirror.gcr.io are all in the exception list`; `every remote action across 20 files is pinned to a commit SHA`; `no file or path names the private deployment repository or the company`; every workflow file parses.",
-      "headSha": "37ded4e7505541b77fc45dd98108b122e6f5cf8c",
-      "negativeControl": "check-ci-filters.sh is itself the control on the new step: ci.yaml's test job gained a step, and the check fails a step whose reads its filter misses. .github/e2e-scripts.json is now named in the test filter and cited in ci_job_reads.py to that step."
+      "criterion": "Review round 1, Medium (check-ci-images.sh:556): a Bun or Go bump had to change its row and its consumers in one commit, so those consumers raced the copy",
+      "surface": "The gate over fixtures and over the real tree, and the prose that tells a reader what to do",
+      "command": "bash .github/scripts/check-ci-images.test.sh ; bash .github/scripts/check-ci-images.sh tree ; bash .github/scripts/check-bun-version.sh",
+      "observed": "Rule 3 now refuses a tree where no row copies `oven/bun` at the `.bun-version` pin or no row copies `library/golang` at `ARG GO_VERSION`, and admits an extra row for another version, so a bump is two commits: the row, then the pin and the FROMs. check-bun-version.sh still refuses a FROM on a row of any other version, so nothing loosens. The two-commit order is in .github/ci-images.yaml's header, AGENTS.md's Tech Stack bullet and the solution document, whose two wrong sentences are corrected: `does not race its own gate` now says it is true of the package half alone and names the consumers that do race it, and the `do not re-run` step now says to read the failure against that run's own ci-images job first.",
+      "headSha": "368e3d2bbdff611006ec4dc00c2b4c9133c2bdb4",
+      "negativeControl": "Two red cases and one green: every bun row off the pin fails naming it; a golang pin no row carries fails; and a tree carrying a next-version row beside the pinned one passes, which is the case the old rule refused and the whole point of the change."
+    },
+    {
+      "criterion": "Review round 1, Medium (stage1-skeleton.sh:153): the forward merge put that proof back on PostgreSQL 16, undoing main's #2498",
+      "surface": "The rows file and the script, with the digest read back from Docker Hub before it was written",
+      "command": "An anonymous Docker Hub manifest read of `docker.io/library/postgres@sha256:979bccfd…`, then `grep -n postgres .github/ci-images.yaml scripts/e2e/stage1-skeleton.sh`",
+      "observed": "Docker Hub answers that digest. The rows file holds one postgres row, `postgres-979bccfd`, and the script's one `docker run` names it; the `postgres-16` row is deleted, and the gate's tree mode passes, which proves nothing else named it. The row's comment says it is PostgreSQL 18, the major version CI's service and Cloud SQL run, and that CI gives the script a DSN so this pull happens on a devbox alone.",
+      "headSha": "368e3d2bbdff611006ec4dc00c2b4c9133c2bdb4",
+      "negativeControl": "The gate is the control that the old row is really gone and nothing dangles: rule 6 refuses a reference whose digest has no row, and the tree mode passes at this head with 12 rows and 35 references."
+    },
+    {
+      "criterion": "The e2e workflow this issue adds: the five hosted proofs pass on a GitHub-hosted runner — and the defect the first settled run under this round found",
+      "surface": "GitHub Actions in sjawhar/legion, the `e2e` label on this pull request, read from each job's evidence artifact",
+      "command": "E2E proofs run 40966595125 at 4d8ae1f7, then run 40979438094 at 368e3d2b",
+      "observed": "40966595125 settled: `select`, `child-adoption`, `dispatch-claimant-delivery`, `no-required-checks` and `stage1-skeleton` passed, and `merged-root-waits` failed. Its evidence artifact names a defect older than this pull request: its live test builds `fake.NewRuntime()` without `InPod`, so the daemon takes the tmux answer and tries `jj git clone https://github.com/acme/widgets`, a repository that does not exist, and the architect it waits for never launches (`timed out waiting for the launch of …-architect`; the daemon log shows three launch failures on that clone). Its two sibling proofs set `rt.InPod = true` and pass. One line and the comment its siblings carry, in 368e3d2b. Run 40979438094 is that head's run and had not settled at completion.",
+      "headSha": "368e3d2bbdff611006ec4dc00c2b4c9133c2bdb4",
+      "negativeControl": "`go vet -tags e2e ./internal/daemon/` passes at this head. The run itself was the control for the workflow: four proofs green and one red, each reporting its own cause with its own artifact, which is how the defect was read. No machine could have passed that proof as it stood, which is why only a run found it."
     }
   ],
   "filesChanged": [
-    ".github/scripts/select-e2e-proofs.sh and .github/scripts/select-e2e-proofs.test.sh (new): the selector and its 94 assertions",
-    ".github/workflows/e2e.yaml: the select job runs the script in place of its heredoc",
-    ".github/workflows/ci.yaml: the test job runs the new harness, and its filter names .github/e2e-scripts.json",
-    ".github/scripts/ci_job_reads.py: the test gate's reads and whys name the new step",
-    "The pull request body: the job table rebuilt from the workflows, 58 rows for 58 jobs"
+    "packages/daemon/docker/worker.Dockerfile: the go stage deletes every @v/list and @latest from the cache it ships, and the final stage's check fails the build if one is left",
+    ".github/ci-images.yaml: one tag per digest, a PostgreSQL 18 row in place of the 16 one, and a header that states the two-commit bump",
+    ".github/scripts/mirror-ci-images.sh and its harness: the copy reads the row's digest, with a case where the upstream tag has moved",
+    ".github/scripts/check-ci-images.sh and its harness: the tag rule, rule 3's rewrite, the both-suffixes loop deleted, workflow_paths.walk imported, one exception dropped",
+    ".github/scripts/check-bun-version.sh and its harness: the ARG rule applies to a Dockerfile that reads the ARG, and the fixtures name docker.io",
+    "packages/envoy/docker/Dockerfile: the dead ARG BUN_VERSION deleted",
+    "scripts/e2e/stage1-skeleton.sh: the PostgreSQL 18 row",
+    "packages/daemon/internal/daemon/merged_root_waits_live_test.go: the pod runtime its two sibling proofs use",
+    "AGENTS.md, docs/kubernetes.md, docs/solutions/github/an-image-pull-that-fails-in-ci-…-INFRA-567.md: the prose each change falsified"
   ],
-  "deviations": [],
+  "deviations": [
+    "The High finding is answered by deleting the cache's version lists rather than by seeding a pod's GOMODCACHE from the image on first start, which the architect recommended and left open: the proxy form needs nothing outside the image, where seeding would change how a pod starts a role. The architect's condition for keeping it is met and recorded — @latest fresh and an exact version offline, both as runs.",
+    "packages/daemon/internal/daemon/merged_root_waits_live_test.go is a file this pull request did not touch before this round. It is fixed here because it is a clear defect in code this change's own deliverable runs, and leaving it would ship a nightly that is red for a reason this change did not cause."
+  ],
   "openQuestions": [
-    "E2E proofs run 40966595125 at 4d8ae1f7, which carries the jj fix, was still queued at completion; GitHub had 65 runs of this repository queued against 4 in progress. The settled run before it, 40957651922, is the evidence that the workflow runs the proofs and reports a failure with its cause and its artifacts. This round's selector change does not alter what that run does, so its result stands for this head too.",
-    "Docs (main) run 40946334589 on scratch pull request #2520 is still pending in the `pages` concurrency group, where main's own runs are pending. #2520 stays open until it settles.",
-    "The tester's observation, which is not a failure and which I have not acted on: with the package half of the gate selected by the ci_images filter, a row that .github/ci-images.yaml names and a consumer pins, but which the package no longer holds — a retention deletion, say — goes unnoticed until something in that filter changes. The per-row tag exists to stop exactly that, and the copy verifies each row's digest when it lands. A periodic run of `check-ci-images.sh package` would close it, and that is the architect's call rather than this round's, which was narrowed to three findings."
+    "E2E proofs run 40979438094 at 368e3d2b, which carries the merged-root-waits fix, had not settled at completion. The run before it is the evidence that the other four pass and that a failure reports its cause with its artifact.",
+    "Docs (main) run 40946334589 on scratch pull request #2520 is still pending in the `pages` concurrency group, where main's own runs are pending. #2520 stays open until it settles."
   ],
-  "discoveredComplexity": []
+  "discoveredComplexity": [
+    "A live proof that no machine runs is a proof nobody has checked: merged-root-waits could not have passed anywhere, because the repository it makes its daemon clone does not exist, and it took the first hosted run of it to find that."
+  ]
 }
