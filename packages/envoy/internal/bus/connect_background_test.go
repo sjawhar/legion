@@ -74,11 +74,7 @@ func TestHookedConnectionEventsCountsTheFirstReconcileOfABackgroundClient(t *tes
 	waitFor(t, 15*time.Second, "the client's hooks to cover a connection event", func() bool {
 		return client.HookedConnectionEvents() >= 1
 	})
-	js, err := testnats.Connect(t, uri).JetStream()
-	if err != nil {
-		t.Fatalf("JetStream context: %v", err)
-	}
-	if _, err := js.StreamInfo(bus.Stream); err != nil {
+	if _, err := client.JS().StreamInfo(bus.Stream); err != nil {
 		t.Fatalf("read %s once the hooks had covered a connection event: %v", bus.Stream, err)
 	}
 }

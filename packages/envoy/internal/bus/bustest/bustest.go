@@ -143,15 +143,15 @@ func RequireFirstStartAtOneCopyAndNoSecondWrite(t testing.TB, url string, stream
 
 // FillStream publishes messages of a kibibyte each through client, on subjects the stream captures
 // (notifications.github.fill.<n>), until the stream refuses one because it is full
-// (bus.ErrStreamFull), and returns how many it stored. The test must start the client on a stream
-// whose byte limit is small (bus.WithStreamMaxBytes), or the fill never ends: most bounds the
-// publishes, and a run that reaches it fails the test. A publish that fails for any other reason
-// fails the test too.
+// (bus.ErrStreamFull). The test must start the client on a stream whose byte limit is small
+// (bus.WithStreamMaxBytes), or the fill never ends: most bounds the publishes, and a run that
+// reaches it fails the test. A publish that fails for any other reason fails the test too.
 //
 // internal/webhook's full-stream test calls it (TestADeliveryToAFullStreamIsAnswered503). The
 // bus's own tests keep their copies of this loop, because package bus cannot import this package.
-func FillStream(t testing.TB, client *bus.Client, most int) int {
+func FillStream(t testing.TB, client *bus.Client, most int) {
 	t.Helper()
+	payload := strings.Repeat("x", 1<<10)
 	for filled := 0; ; filled++ {
 		if filled == most {
 			t.Fatalf("the stream took %d messages of a kibibyte, want it full within %d", filled, most)
@@ -161,7 +161,7 @@ func FillStream(t testing.TB, client *bus.Client, most int) int {
 			Source:         "github",
 			Topic:          fmt.Sprintf("notifications.github.fill.%d", filled),
 			DedupeKey:      fmt.Sprintf("fill.%d", filled),
-			PayloadSummary: strings.Repeat("x", 1<<10),
+			PayloadSummary: payload,
 		})
 		if err == nil {
 			continue
@@ -169,6 +169,6 @@ func FillStream(t testing.TB, client *bus.Client, most int) int {
 		if !errors.Is(err, bus.ErrStreamFull) {
 			t.Fatalf("fill publish %d = %v, want nil or bus.ErrStreamFull", filled, err)
 		}
-		return filled
+		return
 	}
 }

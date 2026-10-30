@@ -53,9 +53,9 @@ func TestBothOfTheListenersNATSClientsReportASilentCutWithinSeconds(t *testing.T
 	t.Cleanup(thaw)
 	cut := time.Now()
 
-	names := []string{"envoy", "envoy-live-topics"}
+	names := []string{"envoy", liveTopicsClientName}
 	reported := make(map[string]time.Duration, len(names))
-	for len(reported) < len(names) {
+	for {
 		output := listener.Output.String()[logged:]
 		for _, name := range names {
 			if _, done := reported[name]; !done && disconnectedUnderName(output, name) {

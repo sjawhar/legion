@@ -1,50 +1,13 @@
 package natsauth_test
 
 import (
-	"bufio"
-	"io"
 	"log/slog"
-	"net"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 )
-
-// silentServer starts a NATS server that admits one client and answers its handshake PING, and
-// then answers nothing at all with the socket open: a hub whose packets stop, with no close and no
-// reset. It returns the server's URL.
-func silentServer(t *testing.T) string {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { ln.Close() })
-	go func() {
-		c, err := ln.Accept()
-		if err != nil {
-			return
-		}
-		defer c.Close()
-		_, _ = io.WriteString(c, `INFO {"server_id":"fake","version":"2.10.0","proto":1,"max_payload":1048576}`+"\r\n")
-		lines := bufio.NewReader(c)
-		for {
-			line, err := lines.ReadString('\n')
-			if err != nil {
-				return
-			}
-			if strings.HasPrefix(line, "PING") {
-				break
-			}
-		}
-		_, _ = io.WriteString(c, "PONG\r\n")
-		// Every later line, the client's pings included, is read and left unanswered.
-		_, _ = io.Copy(io.Discard, c)
-	}()
-	return "nats://" + ln.Addr().String()
-}
 
 // A hub that stops answering without closing the connection is noticed within seconds, because
 // Connect itself pings every second and takes the connection for lost at the third unanswered ping
@@ -53,9 +16,13 @@ func silentServer(t *testing.T) string {
 // connects as the daemon's workflow does and so covers the production path, not the wiring. With
 // nats.go's own defaults the daemon reads the connection as connected for minutes into such a cut,
 // and reads no event in them.
+//
+// fakeServer with nothing to write after the handshake is that hub: it answers the handshake PING
+// and then reads every later line, the client's pings included, and answers none, with the socket
+// open and no reset.
 func TestAHubThatStopsAnsweringIsNoticedWithinSeconds(t *testing.T) {
 	var out lockedBuffer
-	conn, err := natsauth.Connect([]string{silentServer(t)}, "",
+	conn, err := natsauth.Connect([]string{fakeServer(t, "")}, "",
 		natsauth.LogEvents(slog.New(slog.NewTextHandler(&out, nil))), natsauth.ReconnectForever())
 	if err != nil {
 		t.Fatalf("connect: %v", err)
