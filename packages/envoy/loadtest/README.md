@@ -1919,7 +1919,7 @@ the worker pod.
 | `TABLES.md` | The tables (The tables, above) of every step, in the order the steps ran. |
 | `STORED-ORDER.md` | The stored-order check (above): the commit its `envoy-dispatch` was built from, the commit `browsertype` was built from, and one row for each step, in the order the steps ran, with `since`, the exit, the counts, the typed call's counts (`none` for a step that typed into no document) and the typing (`sent`, or `none`). |
 | `curves/CURVES.md`, `curves/curves.csv` | One row per step: the six series (delivery latency, throughput, CPU, memory, database connections, database CPU), pool waiters, commit-order lock waiters, failed rows, the Pass table, and the control's and the 4 vCPU step's comparisons. The memory series' Go heap is `heap_live_mib_p50` and `heap_live_mib_max` ("Go heap live … (heap profile)"), the heap profile's in-use bytes from `resources.heap_live_mib`; an older run's step, whose `summary.json` holds runtime.MemStats `HeapInuse` (`resources.heap_inuse_mib`), fills `memstats_heap_inuse_mib_p50` and `memstats_heap_inuse_mib_max` ("MemStats HeapInuse … (older run)") instead, so the two metrics never share a column. |
-| `curves/KNEES.md` | Each knee: the criteria it tripped, its bracket, the measured limit and the evidence files. |
+| `curves/KNEES.md` | The knee series' failed steps, each listed as `not judged (failed: <kinds>)`, then each knee: the criteria it tripped, its bracket, the measured limit and the evidence files. |
 | `curves/refine.txt` | The refinement's factors, one per line. Empty when no knee needs another step. |
 | `curves/TREND.md` | Only with an hour step: the trend of Dispatch's cores, working set and Go heap over minutes 5 to 60. The heap series is `Go heap live MiB (heap profile)`, or, from an older run's `samples.json` (`heap_inuse`), `MemStats HeapInuse MiB (older run)`. |
 | `upload/` | The tar parts, `cluster-load-test-<run id>-raw-<phase>.tar.zst.partNN`, each under 24 MiB, and the markers `<phase>.packed` and `<phase>.uploaded`. The run id begins with the run's date and time, so two runs of one day upload apart. The phase `results` holds `curves/`, `TABLES.md`, `STORED-ORDER.md`, and each step's `CODEPATHS.md` and `codepaths.json`. |
@@ -1931,7 +1931,7 @@ its cores and working set from `cgroup.json`. It also holds:
 | File | What it holds |
 | --- | --- |
 | `meta.json` | Also `copy` (`copy-meta.json`, as given) and `pg_clock`: at the start and after the window, the reads, `rtt_ms_min`, `rtt_ms_p50` and `offset_ms` (Postgres's clock minus `loadgen`'s), or `error`. The delivery latency from commit spans the two clocks. |
-| `copy-meta.json` | The copy at the step's start: the namespace, the run id, the commit, the deployment repository, the Postgres major, the images, Postgres's version, the SHA-256 of its `SHOW ALL`, its tier and settings, the node CPU model in the Dispatch and Postgres containers, and each pod's node and each container's image and resources. |
+| `copy-meta.json` | The copy at the step's start: the namespace, the run id, the step's phase (`phase`) and whether it sent reads alone (`reads_only`, which with `phase` places the step in the curves), the commit, the deployment repository, the Postgres major, the images, Postgres's version, the SHA-256 of its `SHOW ALL`, its tier and settings, the node CPU model in the Dispatch and Postgres containers, and each pod's node and each container's image and resources. |
 | `postgres-settings.txt` | Postgres's `SHOW ALL` at the step's start. |
 | `reset.json` | The reset before the step: `started`, `ended`, `seconds`, the template, the stream `ENVOY_NOTIFICATIONS` on 3 replicas, each KV bucket's replicas, and in a replay step `checksum` (`loadgen replay-checksum` of the new database before Dispatch started). |
 | `pg-stats-before.json`, `pg-stats-after.json` | Postgres's write-out counters just before and just after `loadgen run`: `at`, `bgwriter` (`pg_stat_bgwriter`) and, on Postgres 17 and later, `checkpointer` (`pg_stat_checkpointer`). The difference shows a disk-bound step: checkpoints, their write and sync times, and the buffers written. A failed read leaves no file. |
@@ -1954,8 +1954,18 @@ its cores and working set from `cgroup.json`. It also holds:
   waiters have a p50 of 0; (f) no failed row: no `step-failed.json`, and `cgroup.json` is present
   and not failed.
 - The knee series is the grid and refinement steps, in factor order. A knee is a step of it that
-  fails after a step that passed, or 1x when 1x fails. The control, the hour and the 4 vCPU step
-  are judged, but are not in the series.
+  fails after the previous judged step passed, or the series' first judged step when it fails. A
+  failed step is not judged: it gives no number, so it is neither a knee nor the end of a bracket,
+  and `KNEES.md` lists it as `not judged (failed: <kinds>)`. Its row still shows FAIL on (f) in
+  the Pass table, and a refinement never asks for its factor again. The control, the hour and the
+  4 vCPU step are judged, but are not in the series.
+- Where a step sits comes from the run, not from its name. With `meta.json`'s `copy` (the cluster
+  step's `copy-meta.json`): the hour is the phase `soak` or a window of an hour or more; the 4 vCPU
+  step is a copy whose Postgres has fewer than 16 vCPUs (`copy.postgres.cpu`, the knee series'
+  tier); the control is a step the run marked `reads_only` or one that offered no event; every
+  other step is in the knee series. Without `copy` (a `run-step.sh` run on the local stack, or a
+  run from before `cluster.sh` recorded the phase) the step's name says it: `-hour`, `-db4`,
+  `-reads`. The name is the row's label either way.
 
 ### Differences from production
 

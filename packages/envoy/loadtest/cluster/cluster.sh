@@ -1849,12 +1849,15 @@ cpu_model() {
 # save_pg_settings FILE: SHOW ALL of the copy's Postgres.
 save_pg_settings() { psql_at postgres 'show all' >"$1" || die "SHOW ALL failed in the copy's Postgres"; }
 
-# write_copy_meta FILE DIR: loadgen run's -copy-meta object (recorded under meta.json copy):
+# write_copy_meta FILE DIR PHASE READS_ONLY: loadgen run's -copy-meta object (recorded under
+# meta.json copy): the step's phase and whether it sends reads alone, which say what the run did,
+# so that loadgen curves places the step by the run and not by its name (curves.go, classify);
 # the images, Postgres's version and the sha256 of its SHOW ALL (DIR/postgres-settings.txt), the
 # node CPU model in the Dispatch and Postgres containers, the namespace, the run id and each copy
 # pod's resources as the live pods have them (COPY_PODS, container_snapshot's listing).
 write_copy_meta() {
-  local file=$1 dir=$2 version sha dpod cpu_d cpu_p pods
+  local file=$1 dir=$2 phase=$3 reads=$4 version sha dpod cpu_d cpu_p pods
+  [ "$reads" = true ] || [ "$reads" = false ] || die "write_copy_meta: reads_only '$reads' is not true or false"
   version=$(psql_at postgres 'select version()') || die "select version() failed in the copy's Postgres"
   save_pg_settings "$dir/postgres-settings.txt"
   sha=$(sha256_of "$dir/postgres-settings.txt")
@@ -1865,7 +1868,8 @@ write_copy_meta() {
   pods=$(jq -c '[.items[] | select(.metadata.deletionTimestamp == null)
     | {pod: .metadata.name, node: .spec.nodeName, containers: [.spec.containers[] | {name, image, resources}]}]' <<<"$COPY_PODS")
   jq --arg version "$version" --arg sha "$sha" --arg cpu_d "$cpu_d" --arg cpu_p "$cpu_p" --argjson pods "$pods" \
-    '{namespace, run_id: .run, dispatch_commit, production_repo, pg_major, images,
+    --arg phase "$phase" --argjson reads "$reads" \
+    '{namespace, run_id: .run, phase: $phase, reads_only: $reads, dispatch_commit, production_repo, pg_major, images,
       postgres: {version: $version, settings_sha256: $sha, settings_file: "postgres-settings.txt", tier: .postgres.tier, cpu: .postgres.cpu, memory: .postgres.memory, settings: .postgres.settings},
       node_cpu_model: {dispatch: $cpu_d, postgres: $cpu_p}, pods: $pods}' "$STATE" >"$file"
 }
@@ -1925,7 +1929,7 @@ run_step() {
 
   reset_copy "$dir/reset.json"
   container_snapshot "$dir/containers-before.tsv"
-  write_copy_meta "$dir/copy-meta.json" "$dir"
+  write_copy_meta "$dir/copy-meta.json" "$dir" "$phase" "$reads"
   put_loadgen
   runner_has "$RUN_DIR/seed.json" /work/seed.json -f || runner_put "$RUN_DIR/seed.json" /work/seed.json
   kube exec runner -c runner -- mkdir -p /work/meta /work/steps || die "mkdir in the runner failed"
@@ -2362,7 +2366,7 @@ run_replay() {
   put_loadgen
   reset_copy "$dir/reset.json" "$REPLAY_TEMPLATE"
   container_snapshot "$dir/containers-before.tsv"
-  write_copy_meta "$dir/copy-meta.json" "$dir"
+  write_copy_meta "$dir/copy-meta.json" "$dir" "$phase" false
   cp -- "$rec" "$dir/replay-prepared.json"
   if [ -n "$TYPING" ]; then
     local ids=$RUN_DIR/tmp/replay-ids-$name.txt

@@ -91,6 +91,7 @@ func readCurveStep(dir string) (*curveStep, error) {
 	case errors.Is(err, fs.ErrNotExist):
 		cs.noSummary = true
 		cs.name = filepath.Base(filepath.Clean(dir))
+		cs.meta = readMetaFile(dir)
 		if cs.cgroup, err = readCgroupFile(dir); err != nil {
 			return nil, err
 		}
@@ -136,9 +137,31 @@ func nameFactor(name string) (float64, bool) {
 	return f, err == nil && finite(f) && f > 0
 }
 
-// classify is the step's kind: the hour (a window of an hour or more, or a name ending -hour), the
-// 4 vCPU database (-db4), the reads-only control (-reads, or no events), else the knee series.
+// seriesPGCPUs is the Postgres tier the knee series runs on, 16 vCPU (cluster.sh up's default, the
+// size of production's instance). A step whose copy has fewer is the 4 vCPU database step.
+const seriesPGCPUs = 16
+
+// classify is the step's kind. For a cluster step, meta.json's copy (cluster.sh's
+// write_copy_meta) says what the run did, so the kind comes from the run and not from the step's
+// name: the hour is the phase soak, or a window of an hour or more; the 4 vCPU database is a copy
+// whose Postgres has fewer than seriesPGCPUs vCPUs; the reads-only control is a step the run
+// marked reads-only, or one that offered no event; every other step is in the knee series.
+// Without copy (a local stack run, or a run from before cluster.sh recorded the phase) the name
+// says it, as it always did: a window of an hour or more or -hour, -db4, -reads. The name is the
+// row's label either way.
 func (s *curveStep) classify() curveKind {
+	if c, ok := readStepCopy(s.meta); ok {
+		cpus, haveCPUs := c.pgCPUs()
+		switch {
+		case c.Phase == phaseSoak || s.sum.Config.DurationS >= 3600:
+			return kindHour
+		case haveCPUs && cpus < seriesPGCPUs:
+			return kindDB4
+		case c.ReadsOnly || (!s.noSummary && s.sum.Config.EventsPerS == 0):
+			return kindControl
+		}
+		return kindSeries
+	}
 	switch {
 	case s.sum.Config.DurationS >= 3600 || strings.HasSuffix(s.name, "-hour"):
 		return kindHour
@@ -586,25 +609,33 @@ func lockFigure(f func(lockSummary) float64) func(*curveStep) (float64, bool) {
 
 // --- knees and refinement -------------------------------------------------------------------
 
-// knee is a step of the knee series that fails after one that passed (pass), or the series' first
-// step when it fails (pass nil).
+// knee is a step of the knee series that fails a criterion after a step that passed (pass), or
+// the series' first judged step when it fails (pass nil). Only steps that are not failed are
+// judged, so both are steps with numbers.
 type knee struct {
 	pass, fail *curveStep
 }
 
-// findKnees are the knees of series, the knee-series steps in factor order.
+// findKnees are the knees of series, the knee-series steps in factor order. The walk takes the
+// steps that are not failed: a failed row gives no number, so it is judged by (f) alone (judge),
+// and is neither a knee nor the end of a bracket. A knee is a step that fails after the previous
+// judged step passed, or the first judged step when it fails.
 func findKnees(series []*curveStep) []knee {
 	var out []knee
-	for i, s := range series {
-		if s.passes() {
+	var prev *curveStep
+	for _, s := range series {
+		if s.failed {
 			continue
 		}
-		switch {
-		case i == 0:
-			out = append(out, knee{fail: s})
-		case series[i-1].passes():
-			out = append(out, knee{pass: series[i-1], fail: s})
+		if !s.passes() {
+			switch {
+			case prev == nil:
+				out = append(out, knee{fail: s})
+			case prev.passes():
+				out = append(out, knee{pass: prev, fail: s})
+			}
 		}
+		prev = s
 	}
 	return out
 }
@@ -612,7 +643,9 @@ func findKnees(series []*curveStep) []knee {
 // refineFactors is one factor per knee whose bracket is wider than 1.0 and whose grid interval
 // (the grid factors at or around the bracket) holds fewer than two refinement steps: the bracket's
 // midpoint rounded to 0.5, moved by 0.5 steps inside the bracket when a step already has that
-// factor. A knee at the series' first step has no bracket to narrow.
+// factor. A knee at the series' first judged step has no bracket to narrow. A failed step ends no
+// bracket (findKnees), but its factor is taken: the cluster script refuses to run a step whose
+// directory exists, so a refinement never names it again.
 func refineFactors(knees []knee, steps []*curveStep) []float64 {
 	var out []float64
 	taken := func(f float64) bool {
@@ -937,17 +970,28 @@ func pairTableMD(md *markdown, p [2]*curveStep, cols []curveCol) {
 	}
 }
 
-// renderKnees is KNEES.md: each knee's tripped criteria, bracket, measured limit and evidence.
+// renderKnees is KNEES.md: the series' failed rows, which no knee can be, then each knee's
+// tripped criteria, bracket, measured limit and evidence.
 func renderKnees(series []*curveStep, knees []knee) string {
 	var md markdown
 	md.line("# Knees\n")
 	names := make([]string, len(series))
+	var failed []*curveStep
 	for i, s := range series {
 		names[i] = s.name
+		if s.failed {
+			failed = append(failed, s)
+		}
 	}
-	md.line("The knee series is the grid and refinement steps in factor order: %s. A knee is each step that fails a criterion of CURVES.md's Pass table after a step that passed, and the series' first step when it fails. The control, hour and 4 vCPU database steps are judged in the Pass table but are not in the series.", mdCell(strings.Join(names, ", ")))
+	md.line("The knee series is the grid and refinement steps in factor order: %s. A knee is each step that fails a criterion of CURVES.md's Pass table after the previous judged step passed, and the series' first judged step when it fails. A failed step is not judged: it gives no number, so it is neither a knee nor the end of a bracket. The control, hour and 4 vCPU database steps are judged in the Pass table but are not in the series.", mdCell(strings.Join(names, ", ")))
+	if len(failed) > 0 {
+		md.line("")
+		for _, s := range failed {
+			md.line("- %sx (step %s): not judged %s.", fmtFloat(s.factor), s.name, failedMark(s.failedKinds))
+		}
+	}
 	if len(knees) == 0 {
-		md.line("\nNo knee: every step of the knee series passes.")
+		md.line("\nNo knee: every judged step of the knee series passes.")
 	}
 	for _, k := range knees {
 		f := k.fail
@@ -957,7 +1001,7 @@ func renderKnees(series []*curveStep, knees []knee) string {
 			md.line("  - (%s) %s", passCriteria[c].id, passCriteria[c].text)
 		}
 		if k.pass == nil {
-			md.line("- Bracket: (none, %s): the series' first step fails, so no step passed before it.", fmtFloat(f.factor))
+			md.line("- Bracket: (none, %s): the series' first judged step fails, so no step passed before it.", fmtFloat(f.factor))
 		} else {
 			md.line("- Bracket: (%s, %s): last passing factor %s (step %s), failing factor %s.", fmtFloat(k.pass.factor), fmtFloat(f.factor),
 				fmtFloat(k.pass.factor), k.pass.name, fmtFloat(f.factor))
@@ -1008,9 +1052,8 @@ func kneeLimit(k knee, c int) string {
 	case critPool:
 		return "requests/s sent: " + both(colSent, "") + "; pool acquire waiters p50 at " + f.name + ": " + colPoolP50.cell(f) + "."
 	}
-	if len(f.failedKinds) > 0 {
-		return "failure kinds: " + strings.Join(f.failedKinds, ", ") + "."
-	}
+	// (f) at a knee is a step that is not failed and holds no cgroup.json: a failed step is no
+	// knee (findKnees).
 	return "the step directory holds no cgroup.json."
 }
 

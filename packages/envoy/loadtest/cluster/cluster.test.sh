@@ -960,6 +960,9 @@ for want in "run -allow-foreign" "-events 4 " "-sessions 400 " "-requests 60 " "
 done
 jq -e '.namespace == "'"$ns"'" and .postgres.version != "" and .postgres.settings_sha256 != "" and .node_cpu_model.dispatch == "Fake CPU @ 2.00GHz" and (.pods | length) == 8' \
   "$run_dir/steps/smoke/copy-meta.json" >/dev/null || fail "copy-meta.json lacks a field: $(cat "$run_dir/steps/smoke/copy-meta.json")"
+# The phase and the reads-only flag, which loadgen curves reads to place the step in the curves.
+jq -e '.phase == "steps" and .reads_only == false' "$run_dir/steps/smoke/copy-meta.json" >/dev/null ||
+  fail "copy-meta.json does not record the step's phase and reads_only: $(cat "$run_dir/steps/smoke/copy-meta.json")"
 jq -e '.bgwriter.buffers_clean == 0' "$run_dir/steps/smoke/pg-stats-after.json" >/dev/null ||
   fail "pg-stats-after.json does not hold pg_stat_bgwriter: $(cat "$run_dir/steps/smoke/pg-stats-after.json")"
 # The stored-order check after the step: --since the window start, DATABASE_URL set from standard
@@ -1072,6 +1075,8 @@ grep -qF "step reads: the stored-order evidence of 2 mismatched or refused docum
   fail "step reads did not name where the stored-order evidence is"
 start=$(grep '^step-reads ' "$fake/runner-starts")
 [[ $start == *"-events 0 "* && $start == *"-requests 600 "* ]] || fail "a --reads-only step at 10x is not 0 events and 600 requests: $start"
+jq -e '.phase == "steps" and .reads_only == true' "$run_dir/steps/reads/copy-meta.json" >/dev/null ||
+  fail "a --reads-only step's copy-meta.json does not record reads_only true: $(cat "$run_dir/steps/reads/copy-meta.json")"
 boxes=$(($(grep -c -- "-l dispatch-loadtest/run=$run,dispatch-loadtest/role=nats-box -o json" "$fake/kubectl.log") - boxes))
 ((boxes == 1)) || fail "a step's reset looked up the nats-box pod $boxes times, not once"
 [ "$(grep -c -- "^-n $ns cp $run_dir/seed.json runner:/work/seed.json " "$fake/kubectl.log")" = 1 ] ||
@@ -1110,6 +1115,8 @@ done
 for f in reset.json replay-prepared.json last-reset.json envoy-dispatch.json pg-stats-before.json pg-stats-after.json summary.json CODEPATHS.md; do
   [ -f "$run_dir/steps/r16/$f" ] || fail "the replay step directory has no $f"
 done
+jq -e '.phase == "replay" and .reads_only == false' "$run_dir/steps/r16/copy-meta.json" >/dev/null ||
+  fail "the replay's copy-meta.json does not record the phase replay: $(cat "$run_dir/steps/r16/copy-meta.json")"
 jq -e '.template == "dispatch_replay" and .checksum.md5 == "fakemd5"' "$run_dir/steps/r16/reset.json" >/dev/null ||
   fail "replay r16's reset is not from dispatch_replay with its checksum: $(cat "$run_dir/steps/r16/reset.json")"
 jq -e --arg dump "$(jq -r .seed.dump_sha256 "$seeded")" '.seed_dump_sha256 == $dump' "$run_dir/steps/r16/last-reset.json" >/dev/null ||

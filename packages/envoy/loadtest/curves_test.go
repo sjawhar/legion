@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/csv"
 	"encoding/json"
+	"fmt"
 	"math"
 	"math/rand/v2"
 	"os"
@@ -48,6 +49,25 @@ func writeFixtureJSON(t *testing.T, path string, v any) {
 	if err := os.WriteFile(path, b, 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// withCopyMeta rewrites the step directory's meta.json with the copy a cluster step records
+// (cluster.sh's write_copy_meta): the phase, the reads-only flag and the copy's Postgres tier.
+// It returns dir.
+func withCopyMeta(t *testing.T, dir, phase string, readsOnly bool, pgCPUs string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m metaFile
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	m.Copy = json.RawMessage(fmt.Sprintf(`{"namespace":"loadtest","phase":%q,"reads_only":%t,"postgres":{"tier":"db-custom-%s","cpu":%q}}`,
+		phase, readsOnly, pgCPUs, pgCPUs))
+	writeFixtureJSON(t, filepath.Join(dir, "meta.json"), m)
+	return dir
 }
 
 // goodSummary is a 10-minute step at factor f that passes every criterion: all events committed
@@ -192,7 +212,7 @@ func TestCurvesNameAKneeAtAFailingFirstStep(t *testing.T) {
 	knees := readText(t, filepath.Join(out, "KNEES.md"))
 	for _, want := range []string{
 		"## Knee at 1x (step 1x)",
-		"- Bracket: (none, 1): the series' first step fails, so no step passed before it.",
+		"- Bracket: (none, 1): the series' first judged step fails, so no step passed before it.",
 		"  - (b) requests/s succeeded (2xx): 30.0 at 1x (target 60.0, sent 60.0); no step passed before it.",
 	} {
 		if !strings.Contains(knees, want) {
@@ -205,8 +225,8 @@ func TestCurvesNameAKneeAtAFailingFirstStep(t *testing.T) {
 }
 
 // TestCurvesShowAFailedRowWithoutNumbers: a step whose container restarted fails (f), shows its
-// failure kind and no number in any series table or in curves.csv, and is a knee whose limit is
-// the failure kind.
+// failure kind and no number in any series table or in curves.csv, and is no knee: KNEES.md
+// lists it as not judged.
 func TestCurvesShowAFailedRowWithoutNumbers(t *testing.T) {
 	root := t.TempDir()
 	out := curves(t,
@@ -242,8 +262,77 @@ func TestCurvesShowAFailedRowWithoutNumbers(t *testing.T) {
 		t.Errorf("curves.csv 2x: failed %q, dispatch cores %q, offered %q, (f) %q; want restart, empty, empty, FAIL",
 			r["failed"], r["dispatch_cores_mean"], r["events_offered_per_s"], r["pass_f_no_failure"])
 	}
-	if knees := readText(t, filepath.Join(out, "KNEES.md")); !strings.Contains(knees, "  - (f) failure kinds: restart.") {
-		t.Errorf("KNEES.md lacks the failure kind as the limit:\n%s", knees)
+	knees := readText(t, filepath.Join(out, "KNEES.md"))
+	if !strings.Contains(knees, "- 2x (step 2x): not judged (failed: restart).") || strings.Contains(knees, "## Knee at") {
+		t.Errorf("KNEES.md does not list the failed row as not judged, or makes it a knee:\n%s", knees)
+	}
+}
+
+// TestCurvesWalkTheKneesPastAFailedRow: 1x, 2x and 3x pass, 5x failed its sampler and 7x has a
+// delivery p99 of 5,000 ms: the knee is 7x over the bracket (3, 7), the last judged step that
+// passed; 5x is listed as not judged and ends no bracket, so the refinement narrows (3, 7) and
+// not (3, 5).
+func TestCurvesWalkTheKneesPastAFailedRow(t *testing.T) {
+	root := t.TempDir()
+	slow := goodSummary(7)
+	slow.Events.DeliveryMsFromArrival.P99 = 5000
+	dirs := []string{
+		curveFixture(t, root, "1x", goodSummary(1), fixtureCgroup(2)),
+		curveFixture(t, root, "2x", goodSummary(2), fixtureCgroup(3)),
+		curveFixture(t, root, "3x", goodSummary(3), fixtureCgroup(4)),
+		curveFixture(t, root, "5x", goodSummary(5), fixtureCgroup(5),
+			stepFailedReason{Kind: stepFailedKindSamplerGap, Role: "postgres", Detail: "no good sample for 45 s"}),
+		curveFixture(t, root, "7x", slow, fixtureCgroup(6)),
+	}
+	out := curves(t, dirs...)
+	knees := readText(t, filepath.Join(out, "KNEES.md"))
+	for _, want := range []string{
+		"## Knee at 7x (step 7x)",
+		"  - (c) delivery p99 from arrival ≤ 1,000 ms",
+		"- Bracket: (3, 7): last passing factor 3 (step 3x), failing factor 7.",
+		"- 5x (step 5x): not judged (failed: sampler_gap).",
+	} {
+		if !strings.Contains(knees, want) {
+			t.Errorf("KNEES.md lacks %q:\n%s", want, knees)
+		}
+	}
+	if n := strings.Count(knees, "## Knee at"); n != 1 || strings.Contains(knees, "## Knee at 5x") {
+		t.Errorf("KNEES.md names %d knees, want the one at 7x:\n%s", n, knees)
+	}
+	// The bracket (3, 7) has no refinement step in the grid interval 3 to 7; its midpoint 5 is
+	// the failed step's factor, so the factor is 5.5. The old walk refined (3, 5) and asked for 4.
+	if got := readText(t, filepath.Join(out, "refine.txt")); got != "5.5\n" {
+		t.Errorf("refine.txt = %q, want %q", got, "5.5\n")
+	}
+	if md := readText(t, filepath.Join(out, "CURVES.md")); !strings.Contains(md, "| 5x (failed: sampler_gap) | 5 | n/a | n/a | n/a | n/a | n/a | FAIL | no |") {
+		t.Errorf("the Pass table does not show the failed row failing (f) alone:\n%s", md)
+	}
+}
+
+// TestCurvesTakeAStepsKindFromTheRun: with meta.json's copy, the run says where a step sits, not
+// its name: a step on a 4 vCPU copy is the db4 row however it is named, a step named -db4 on the
+// series' 16 vCPU copy is in the knee series, the phase soak is the hour, and a reads-only step
+// is the control.
+func TestCurvesTakeAStepsKindFromTheRun(t *testing.T) {
+	root := t.TempDir()
+	out := curves(t,
+		withCopyMeta(t, curveFixture(t, root, "1x-other", goodSummary(1), fixtureCgroup(2)), "db4", false, "4"),
+		withCopyMeta(t, curveFixture(t, root, "5x-db4", goodSummary(5), fixtureCgroup(2)), "series", false, "16"),
+		withCopyMeta(t, curveFixture(t, root, "10x-long", goodSummary(10), fixtureCgroup(2)), "soak", false, "16"),
+		withCopyMeta(t, curveFixture(t, root, "2x-quiet", goodSummary(2), fixtureCgroup(2)), "steps", true, "16"))
+	order, rows := curvesCSV(t, out)
+	for _, c := range []struct{ step, want string }{
+		{"1x-other", "db4"}, {"5x-db4", "grid"}, {"10x-long", "hour"}, {"2x-quiet", "control"},
+	} {
+		if got := rows[c.step]["kind"]; got != c.want {
+			t.Errorf("step %s: kind %q, want %q", c.step, got, c.want)
+		}
+	}
+	if got := strings.Join(order, ","); got != "5x-db4,2x-quiet,10x-long,1x-other" {
+		t.Errorf("row order %s, want the knee series, the control, the hour, then the 4 vCPU step", got)
+	}
+	if knees := readText(t, filepath.Join(out, "KNEES.md")); !strings.Contains(knees, "knee series is the grid and refinement steps in factor order: 5x-db4.") {
+		t.Errorf("the knee series is not 5x-db4 alone:\n%s", knees)
 	}
 }
 

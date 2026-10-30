@@ -87,17 +87,26 @@ func readStep(dir string) (stepData, error) {
 	if st.sum.Config.Step != "" {
 		st.name = st.sum.Config.Step
 	}
-	if b, err := os.ReadFile(filepath.Join(dir, "meta.json")); err == nil {
-		var m metaFile
-		if json.Unmarshal(b, &m) == nil {
-			st.meta = &m
-		}
-	}
+	st.meta = readMetaFile(dir)
 	if st.cgroup, err = readCgroupFile(dir); err != nil {
 		return st, err
 	}
 	st.failedKinds, st.failed = readFailedKinds(dir)
 	return st, nil
+}
+
+// readMetaFile is the step directory's meta.json, nil when the directory holds none or it is not
+// readable as one.
+func readMetaFile(dir string) *metaFile {
+	b, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+	if err != nil {
+		return nil
+	}
+	var m metaFile
+	if json.Unmarshal(b, &m) != nil {
+		return nil
+	}
+	return &m
 }
 
 // num formats x with d decimals and thousands separators.
