@@ -2088,10 +2088,17 @@ its parser unquotes back. Marks are read as that parser reads them, as a set, wh
 them: a mark opened where the same mark is already open adds nothing, and its close ends the mark
 for the rest of the text around it, up to the node that opened it (`parseInlineMarks`), so
 `*x *y* z*` is
-`x y` in emphasis and ` z` without, and `****a****` is strong once. An image is read without the
-marks around it, a link among them, as the browser editor's store (y-prosemirror, which keeps a
-mark on text alone) holds it, so a linked image is stored without its link (LEGION-365) rather than
-refused. Delimiter runs pair as that parser pairs them: CommonMark's rule of three is judged on the
+`x y` in emphasis and ` z` without, and `****a****` is strong once. An inline leaf - a node that is
+inline, holds no content of its own and is not text: raw HTML, an image, a hard break, a footnote
+reference - is read without the marks around it, a link among them, by both readers, since a mark
+lives on text alone, as the browser editor's store (y-prosemirror) holds it and as the engine
+itself reads it; so a linked image is stored without its link (LEGION-365) rather than refused,
+and a comment and a past version draw what the document stores. An autolink inside a link label
+carries its own link, in place of the label's, on its own text (the autolink arm of
+`parseInlineMarks`, where a mark excludes another of its own type), and the label's link covers the
+runs around it: stacking the two would put a text under two links, a tree ProseMirror cannot hold,
+and the write would be refused. Delimiter runs
+pair as that parser pairs them: CommonMark's rule of three is judged on the
 lengths two runs have left after the pairs already made from them (`emphasisDelimiters`), where
 goldmark judged the lengths they were written with, so in `***a.****&#32;b*` the closer's last `**`
 is text. A run of `*` or `_` can also open where another `*` or `_` follows it and close where one
@@ -2287,7 +2294,16 @@ grammar decides, since an escaped `<` reads as text in both: goldmark reads a de
 `<!` and an uppercase letter, and an unquoted attribute value holding no control character, where
 CommonMark 0.31 and the engine also read a lowercase one (`<!doctype x;[a@b.cc](mailto:a@b.cc)>`)
 and a U+0001 in an unquoted value as raw HTML. Only a `<` the run's first writing reads so is
-escaped, so a run that reads back keeps its bytes. A text `<` first after its line's container
+escaped, so a run that reads back keeps its bytes. The reader opens a declaration by the rule the
+scan already judged it by (`opensDeclaration`, which `rawHTMLCloser` asks for the reader and for the
+scan alike): `<!` and any ASCII letter, as CommonMark 0.31 and the engine open one, where goldmark's
+raw HTML parser opens one only after an uppercase letter, so `p <!a> q` is read as inline raw HTML
+and stored unescaped. Every kind of inline raw HTML that ends at a closer of its own is read by the
+one parser (`inlineRawHTMLParser`), which walks a block to its end at most once per kind: the first
+opener of a kind whose walk finds no closer is recorded (`unclosedRawHTML` for a parse,
+`rawHTMLScan.ends` for a write) and every later opener of it in that block is refused without a
+walk, so a kind added to `rawHTMLCloser` keeps that guarantee only by recording what its own walk
+answered. A text `<` first after its line's container
 prefix is also escaped where micromark's html-flow start conditions open an HTML block there, judged
 in `endLine` on the line as written across nodes (`htmlBlockStart`), since goldmark can read a
 paragraph there: `<span title=a=b;[a@b.cc](mailto:a@b.cc)>` alone on a paragraph's first line is a
@@ -3289,7 +3305,10 @@ blind republishing.
   `pr.<n>.comment`, `pr.<n>.review`, `pr.<n>.mention`, and
   `pr.<n>.checks` when a commit's checks settle: every commit of the pull request, its current head or not, whose `sha` the settlement carries (a head pushed with GitHub's `skip-checks` trailer runs no CI, so the commit it replaced settles for it, and consumers decide which commit a settlement stands for). Check settlement is at-least-once: a settlement can be followed by a `superseded_settlement: "true"` payload. Every settlement carries its attempt set `check_runs` — the latest GitHub check-run id per check name, sorted by name — plus the listener's `generation` (the record's state version, which rises with every write that changes the record's snapshot, once per write however many observations that write folds in) and `snapshot` (the record's hash). Consumers order settlements of one commit by the attempt set, compared per shared name: no id lower and some id higher (or a new name — a new name counts as higher) is newer; every shared id equal and no new name is the same set; no id higher, no new name, and some id lower is older; anything else (a higher or new alongside a lower) is a mixed view and is dropped as a conflict (names only in the stored set are ignored — a check can vanish from GitHub's view, and a record recreated after the seven-day KV TTL starts sparse). Within one producer record per-name ids never decrease, and a consumer's fence is the per-name maximum over every view it has accepted — an accepted set merges into the fence, nothing is pruned — so the fence never decreases either: a newer attempt is newer whatever its completion time, no timestamps take part in ordering, and a name an incomplete view omitted cannot later reappear as new. At the same set the listener's `generation` orders its own settlements: lower is stale; equal is a duplicate when the `snapshot` matches and otherwise a conflict (an equal pair with a different snapshot cannot occur within one record's lifetime; a recreated record may reuse one and is dropped). A live settlement is a possibly incomplete view of the head (a missed webhook, a record recreated after the KV TTL): it decides the outcome of every name it reports — at any id the ordering accepted, including the same run observed in place — and says nothing about the rest: a known failure among them stands (the consumer keeps failure names, not a per-name status map), and the head is red while any failure remains. A consumer that reconciles a verdict from GitHub's rollup compares the rollup's attempt set the same way, but GitHub's read is complete: its failing check runs and failing commit statuses replace the stored ones wholesale. Statuses have no check run and the listener never sees them, so a consumer keeps them apart from check-run failures: a check run that shares a status's name cannot retire it — only GitHub does (likewise a deleted check's failure). A newer rollup set merges into the fence and takes the identity (no listener generation); the same set applies GitHub's verdict and keeps the listener identity for duplicate detection; an older, mixed, or empty-over-fenced set is ignored. A terminal read (green or red) then holds the tie at that set: a live settlement at the same set is accepted only if its effective outcome — the check-run failures it reports plus the stored ones it omits and the stored commit-status failures — agrees with the reconciled verdict, refreshing the listener identity without releasing GitHub's authority; a disagreeing one is stale whatever its generation until the set advances; a pending or cancelled-only read uncertifies a green head, leaves a red one untouched, and holds nothing — it releases any authority held at that set — so the terminal live settlement that follows applies at once, subject to the ordinary generation and duplicate rules (a replay or a lower generation still does not apply). Pending is therefore not a commutative join: a pending read after a live green uncertifies it until the next terminal view. Two remainders. An in-place conclusion change on an existing run id: GitHub's view stands and the listener's is recovered by the next successful, non-skipped read at that set — the dropped delivery is not replayed. A check whose highest run is deleted on GitHub: the fence keeps that id, so a rollup reporting a lower run under the same name is older until a newer run appears. A consumer that orders head changes by the PR's `updated_at` (GitHub's second resolution) accepts a read of a different head at an equal clock — a stale read returning the previous head within the same second as its replacement rewinds that consumer until its next accurate, non-skipped read. A head publishes only when at least one check has a positive run id; legacy checks without one remain in the status groups and failing names but not in `check_runs`. A legacy in-progress check whose completion is never observed holds the head unsettled until it reruns; rerun the affected check to release it. A head whose CI record overflowed its bounds (`maxRecordBytes`, `maxSettlementBytes`), or whose settlement NATS refused, never settles from the listener again; one that had settled before keeps that last settlement. `workflow.<file>.<action>` carries only runs without an associated
   pull request.
-- A branch or tag push publishes `push.branch.<ref>` / `push.tag.<ref>` with the payload fields
+- A branch or tag push publishes `push.branch.<ref>` / `push.tag.<ref>` (a ref that would take
+  the subject past 4,032 bytes, the longest the bus publishes, is cut to fit and ends in `~` and
+  the first 16 hex digits of the whole ref name's SHA-256: `contracts.GithubPushSubject`) with
+  the payload fields
   `kind: "push"`, `repo`, `ref`, `after`, `before`, `pusher`, `head_subject` (the head commit's
   first non-empty message line, capped at 2,048 runes with a trailing `…` so the envelope stays
   under NATS's max payload), `commit_count`, `compare_url`, `changed_paths` (the unique paths
@@ -3323,16 +3342,21 @@ blind republishing.
   protocol line, over which the server would close the listener's connection (`bus.ErrTooLarge`,
   naming the size), or a subject holding whitespace or an empty token, which no stream matches
   (`bus.ErrInvalidSubject`). The webhook is answered 422, which Dispatch's
-  redelivery sweep takes as terminal, and logged `<source> publish refused` (or
+  redelivery sweep asks for again like any failed delivery, until GitHub records it `OK` or 72
+  hours after its first failed attempt, and logged `<source> publish refused` (or
   `github ci record refused`); any other failure stays a 503 logged `<source> publish failed`. A
-  commit's CI record is bounded at 384 KiB (`maxRecordBytes`, about 1,300 checks) and its settlement
-  at 960 KiB (`maxSettlementBytes`; a failing check's `"` costs three times as much there), since
-  GitHub allows 50,000 check runs in a suite: a check past either is refused the same way, and the
-  record is marked `overflowed` and never settles again. A commit that had already settled keeps its
-  last settlement, which nothing supersedes, so a consumer holding it learns about the refused
-  checks only from GitHub's own read. A settlement NATS refuses anyway (a server whose max payload
-  is set lower) marks the record overflowed too, logged once as `checks settlement refused`, rather
-  than being published again at every attempt.
+  GitHub delivery logs that line at its first failure in a listener process only: a redelivery
+  carries the same `X-GitHub-Delivery`, and each later failure of it the same way logs
+  `redelivery <delivery>: <action> refused` (or `failed`), which the `webhook-refused` and
+  `publish-failure` alarms do not count (`failedDeliveries`: the newest 4,096 deliveries, each for
+  72 hours). A commit's CI record is bounded at 384 KiB (`maxRecordBytes`, about 1,300 checks) and
+  its settlement at 960 KiB (`maxSettlementBytes`; a failing check's `"` costs three times as much
+  there), since GitHub allows 50,000 check runs in a suite: a check past either is refused the same
+  way, and the record is marked `overflowed` and never settles again. A commit that had already
+  settled keeps its last settlement, which nothing supersedes, so a consumer holding it learns
+  about the refused checks only from GitHub's own read. A settlement NATS refuses anyway (a server
+  whose max payload is set lower) marks the record overflowed too, logged once as
+  `checks settlement refused`, rather than being published again at every attempt.
 - The listener's HTTP server gives every route 10 s from the request's start to read its header
   and body, and 10 s from the end of its header to write its answer (`newHTTPServer`,
   `cmd/listener/main.go`). The GitHub webhook route alone moves its own connection's deadlines
@@ -4398,6 +4422,31 @@ once and named exactly, keyed by account in `Config.ServiceLogins`; read by the 
 is an account `BROKER_SERVICES` binds for a service's pods, since every such pod holds a token for
 it; needs `BROKER_K8S_OIDC_ISSUER`; unset, no service logs in with a token),
 `BROKER_K8S_OIDC_ISSUER` / `BROKER_K8S_OIDC_AUDIENCE` (set together or not at all),
+`BROKER_GOOGLE_OIDC_AUDIENCE` (optional; the audience a Google VM identity token must carry,
+`Config.GoogleOIDCAudience`; its issuer is always `https://accounts.google.com`, the constant
+`config.GoogleOIDCIssuer`, so there is no issuer variable; it needs `BROKER_VM_SERVICES`, since an
+audience no VM service is listed for could accept no token; unset, `BROKER_VM_SERVICES`,
+`BROKER_VM_PROJECTS` and `BROKER_VM_INSTANCES` are each refused, naming the variable and this one),
+`BROKER_VM_SERVICES` (optional; whitespace-separated `name=<service account email>` entries, such
+as `example-service=example-fleet@example-project.iam.gserviceaccount.com`, keyed by account in
+`Config.VMServicesByAccount`; read by its own parser (`parseVMServiceAccounts`), since
+`parseServiceAccounts` takes only Kubernetes subjects. After the same service-name form and refusal
+of `shared`, `vmAccountRefusal` takes only a user-managed account,
+`<account id>@<project id>.iam.gserviceaccount.com` in lowercase as a token carries it, and refuses
+with a message of its own such an address written with capital letters, a project's default
+account (Compute Engine's `<number>-compute@developer.gserviceaccount.com` or App Engine's
+`<project id>@appspot.gserviceaccount.com`, which the project's workloads run as by default), and a
+Google-managed service agent (`service-<number>@…`, or any `gcp-sa-` domain); then the refusal of
+an account given twice, naming both services when they differ, through the helper both parsers
+share (`bindOnce`); every account needs an entry in both settings below),
+`BROKER_VM_PROJECTS` / `BROKER_VM_INSTANCES` (optional; whitespace-separated
+`<service account email>=<project id>` and `<service account email>=<instance-name glob>` entries,
+keyed by account in `Config.VMProjects` and `Config.VMInstancePatterns`, each account read by
+`vmAccountRefusal` as above; the glob is `path.Match`'s syntax over an instance name's characters
+(lowercase letters, digits, `-`, and `*`, `?`, `[`, `]`, `^`), so a `/`, a capital, a `.`, a `\` or
+a `!` is refused; an account given twice is refused, and so is an entry naming an account
+`BROKER_VM_SERVICES` does not list, the first such entry as written; an account that setting lists
+with no project or no glob is refused, naming that account, its entry and the missing setting),
 `BROKER_EXCHANGE_K8S_AUDIENCE` (optional; the audience a pod's projected token must carry to be
 exchanged for a Dispatch access token — its own, beside `BROKER_K8S_OIDC_AUDIENCE`, so neither
 token is spendable where the other is; its issuer is the one cluster the broker is told about,
@@ -4475,7 +4524,9 @@ of the number among them) and a key name outside `global`; the other store's key
 `BROKER_SERVICE_LOGINS` or `BROKER_EXCHANGE_K8S_AUDIENCE` set with no cluster issuer, a
 `BROKER_EXCHANGE_ACCOUNTS` with no `BROKER_EXCHANGE_K8S_AUDIENCE` and a
 `BROKER_EXCHANGE_WORKFLOWS` with no `BROKER_EXCHANGE_GITHUB_ISSUER`, each naming the pair whose
-tokens its callers present; and a `_SECONDS` variable that isn't a
+tokens its callers present; any of `BROKER_VM_SERVICES`, `BROKER_VM_PROJECTS` and
+`BROKER_VM_INSTANCES` set with no `BROKER_GOOGLE_OIDC_AUDIENCE`, and that audience set with no
+`BROKER_VM_SERVICES`; each VM refusal of the paragraph above; and a `_SECONDS` variable that isn't a
 whole number between the min and max its row of Load's `ints` table gives (non-numeric fails the
 same check as out of range). `cmd/broker/main.go` logs at boot, before it loads the AWS config or
 opens the database, how it signs in (`database sign-in method=rds-iam` when `Config.DatabaseIAM`,
