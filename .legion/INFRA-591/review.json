@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-591",
+  "completed": "2026-10-30T19:03:52Z",
+  "decision": "approved",
+  "round": "6 (confirmation after a forward merge)",
+  "previousApproval": "39dff11a7edf03b3265affc3901e31f196add71b (review 5712710127)",
+  "codeHead": "2127dde7062cd3acac8d0bb492678e566c34e3a3",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "diffCheck": "I compared the PR's own diff (each head against its fork point with main, .legion/ and docs/solutions/ excluded, migration numbers normalised) at 39dff11a and 2127dde7: 60 files each, and one differs, packages/envoy/internal/dispatch/api/events.go. At 39dff11a the PR removed the store import, which events.go no longer used. Main now uses store.CastableUUID in events.go (line 369), so merge 2127dde7 keeps the import and the PR's diff no longer removes it. That hunk changes no behaviour of the PR. The rest of the merge's own resolution is event_horizon renumbered 0148 -> 0149 (up and census) and its changelog line. Between the approval and the merge sit retro's docs/solutions commit (48b1ff74) and the removal of .legion/INFRA-591/ (af78f59b).",
+  "keyFindings": [],
+  "ci": "At 2127dde7, read on GitHub: lint, typecheck, test and pr-title are green. The PR head 6a8f3dc6 adds only .legion/INFRA-591/ above it.",
+  "thermo": "None: a confirmation after a forward merge whose only change to the PR's own diff is an import that main's code needs and a migration renumber."
+}
