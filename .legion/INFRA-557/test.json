@@ -2,63 +2,55 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-557",
-  "completed": "2026-10-30T10:30:00Z",
-  "round": 12,
-  "testedHead": "a8a5d08a1046bf5c5a3b1e614f2af3aa0a8f0f55",
-  "handoffHead": "b4e2102ac09c5fd922d91fb49a3ffc30b0a3709a",
-  "scope": "Architect 10:13Z: the explicit clean-hand-back mark on real binaries under the rendered grant, against the a908e64f control (clean stop on the mark; unmarked cases hold the ack-wait rule and keep order; a graceful stop after a node loss writes no mark and delivers within 15 s, a departure the architect accepts; the mark key under the per-machine grant); then the multiprocess rows, a kill, what the merge changed, and the required checks.",
+  "completed": "2026-10-30T12:45:00Z",
+  "round": 13,
+  "testedHead": "5a088bf9b19a7dc8b1454145d6da7251838c4a62",
+  "handoffHead": "b2cacd72c45a9bd4019c361f5b5940646d23d298",
+  "scope": "Architect 12:28Z: only the six round-7 items and CI, on real binaries under the rendered grant against the a8a5d08a control: a stop whose handler outlives its cancel writes no mark; a clean graceful stop still writes the mark and delivers within 10 s; a stop past its 10 s budget writes no mark; no behaviour change elsewhere (multiprocess rows, a kill); the four required checks.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran `cd packages/envoy && go test -tags multiprocess -count=1 -timeout 40m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener` at a8a5d08a: 29 rows PASS, ok 652.708s, including TestTwoPodsGracefulStopWithARetryOutstandingDeliversWithin10s. Drove the mark on real binaries (proof 1-5)."
+    "how": "Re-ran `cd packages/envoy && go test -tags multiprocess -count=1 -timeout 40m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener` at 5a088bf9: 29 rows PASS, ok 629.582s. Drove item 1 on real binaries (proof 1) in place of its unit test TestAStopWhoseHandlerIgnoresItsCancelMarksNoHandBack, which is CI's lane."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "A clean graceful stop delivers within 10 s in order, the successor ending its hold at about 3 s on the mark",
-      "surface": "real cmd/listener processes built at a8a5d08a under the rendered ListenerPermissions nkey grant on a real nats-server 2.10.29; graceful stops A->B->C->D, each a second into a prompt in hand, a failing session's 30 s retry outstanding, a send every 100 ms to two healthy sessions",
-      "command": "python3 $TMPDIR/infra557-test/roll.py $TMPDIR/infra557-test/listener-head12 head12-roll roll",
-      "observed": "each stopping pod logged hand_back_marked true; each successor's settle hold ended with outcome 'handed back' at 3.0 s; 254 messages, 0 missing, 0 repeats, slowest 7.31 s, 0 later than 10 s, in order; 0 permission violations",
-      "headSha": "a8a5d08a1046bf5c5a3b1e614f2af3aa0a8f0f55",
-      "negativeControl": "the same run with an a908e64f binary: no mark; each hold ended on the 3 s cap (outcome cap)"
+      "criterion": "Round 7 item 1: a stop whose handler is still running after its cancel writes no mark",
+      "surface": "real cmd/listener processes built at 5a088bf9 under the rendered ListenerPermissions nkey grant on a real nats-server 2.10.29; pod-a has a prompt in hand (the serving port never answers it) at SIGTERM; its lease link, which the delivery ledger shares, freezes 2.95-4.6 s after the SIGTERM, so the cancelled handler's ledger Clear hangs past the 1 s cancel wait; messages to the same session published every 100 ms",
+      "command": "python3 $TMPDIR/infra557-test/handler.py $TMPDIR/infra557-test/listener-head13 head13-hd 4.6 2.95",
+      "observed": "pod-a logged 'the message in hand was still being handled after its cancel', released the record and logged hand_back_marked false; pod-b's hold ran unmarked (settled at 2.0 s once the stuck message was back in hand); all 120 messages delivered in order, the held one 6.96 s after the SIGTERM",
+      "headSha": "5a088bf9b19a7dc8b1454145d6da7251838c4a62",
+      "negativeControl": "the same run with an a8a5d08a binary: the same 'still being handled' line, but hand_back_marked true. Order was kept there too, because the handler unstuck before pod-b's hold ended: the out-of-order consequence is not reachable externally, since the ledger's connection must thaw within the release bound"
     },
     {
-      "criterion": "An unmarked stop holds the ack-wait rule and keeps order: a clean stop whose flush and release run to their bounds, with a successor that subscribes late",
-      "surface": "as above; pod-b's bus link frozen from its SIGTERM and its lease link 0.5-2.9 s after it (flush and release at their bounds, linger at the floor); pod-c's bus link 1.5 s latency; 330 messages published straight to NATS every 100 ms",
-      "command": "python3 $TMPDIR/infra557-test/latewin3.py $TMPDIR/infra557-test/listener-head12 head12-lw3; latewin2.py (the same after a node loss)",
-      "observed": "pod-b linger_end timeout, hand_back_marked false; pod-c held 6.5 s (outcome settled), all 330 in order; after a node loss likewise 6.5 s, in order",
-      "headSha": "a8a5d08a1046bf5c5a3b1e614f2af3aa0a8f0f55",
-      "negativeControl": "a908e64f also held 6.5 s and kept order in both runs; round 11's f93c21be control broke order in latewin2 (3.5 s cap, out of order from smk-154)"
+      "criterion": "A clean graceful stop still writes the mark and delivers within 10 s",
+      "surface": "as above; graceful stops A->B->C->D, each a second into a prompt in hand, with a failing session's 30 s retry outstanding and a send every 100 ms",
+      "command": "python3 $TMPDIR/infra557-test/roll.py $TMPDIR/infra557-test/listener-head13 h13-roll roll",
+      "observed": "every stopping pod hand_back_marked true; every successor held 3.0 s (outcome 'handed back'); 257 messages, 0 missing, slowest 7.52 s, 0 later than 10 s, in order; 0 permission violations",
+      "headSha": "5a088bf9b19a7dc8b1454145d6da7251838c4a62",
+      "negativeControl": "the handler run above, where the mark is withheld"
     },
     {
-      "criterion": "A late release after handBack's own release timed out writes no mark",
-      "surface": "pod-a behind a relay with separate bus and lease gates, a prompt in hand; bus frozen from the SIGTERM, lease 3.6-7.2 s after it",
-      "command": "python3 $TMPDIR/infra557-test/overrun.py $TMPDIR/infra557-test/listener-head12 head12-ov2 7.2 3.6",
-      "observed": "pod-a logged 'listener lease not released ... nats: timeout' and hand_back_marked false; pod-b took the record from released and its hold ended settled at 251 ms with only the in-hand message outstanding (the cap had nothing to wait on)",
-      "headSha": "a8a5d08a1046bf5c5a3b1e614f2af3aa0a8f0f55",
-      "negativeControl": "a908e64f: same outcome (no mark exists there)"
-    },
-    {
-      "criterion": "A graceful stop after a node loss, with that binding open, writes no mark, holds 7 s, keeps order and delivers within 15 s (architect-accepted departure from 10 s)",
-      "surface": "pod-a SIGSTOPped (lost node); the pod that took its expired lease and each later holder stopped gracefully, each with a prompt in hand and a retry outstanding",
-      "command": "python3 $TMPDIR/infra557-test/roll.py $TMPDIR/infra557-test/listener-head12 head12-loss loss; python3 $TMPDIR/infra557-test/window.py $TMPDIR/infra557-test/listener-head12 head12-w 0.3",
-      "observed": "roll loss: hand_back_marked false, holds 7.0 s (outcome cap), 224 messages, 0 missing, in order, slowest 11.56 s (32 past 10 s, none past 15 s); window: no mark, all 330 in order",
-      "headSha": "a8a5d08a1046bf5c5a3b1e614f2af3aa0a8f0f55",
+      "criterion": "A stop that runs past its 10 s budget writes no mark, and the successor holds the ack-wait rule and keeps order",
+      "surface": "pod-a's bus link frozen from the SIGTERM (flush and drain at their bounds) and its lease link 3.6-7.2 s after it, with a prompt in hand",
+      "command": "FREEZE_BUS=1 python3 $TMPDIR/infra557-test/handler.py $TMPDIR/infra557-test/listener-head13 h13-budget 7.2 3.6",
+      "observed": "the hand-back line came 10.5 s after the SIGTERM with hand_back_marked false; pod-b took the record from expired, held 6.0 s; all 120 messages in order",
+      "headSha": "5a088bf9b19a7dc8b1454145d6da7251838c4a62",
       "negativeControl": "the box-other refusal below"
     },
     {
-      "criterion": "The mark key is written and read under the per-machine grant, and another machine's user is refused it; kills under the grant 40 of 40 in order",
-      "surface": "two (then three) cmd/listener processes built at a8a5d08a under the rendered grant on a real nats-server; probe connections as box-other's NATS user",
-      "command": "python3 $TMPDIR/infra557-test/kill.py $TMPDIR/infra557-test/listener-head12 h12-KILL KILL",
-      "observed": "SIGKILL after message 15: 40 of 40, in send order, last 6.25 s after the signal; holder lists the session across the take-over and one registered on the standby 0.6 s after a NATS restart; 0 permission violations; the marks in proof 1 were written under the same grant with 0 violations",
-      "headSha": "a8a5d08a1046bf5c5a3b1e614f2af3aa0a8f0f55",
-      "negativeControl": "as box-other: put handback.listener-box-smoke.999 and lease.listener-box-smoke refused with a permissions violation; handback.listener-box-other.999 and lease.listener-box-other accepted"
+      "criterion": "No behaviour change from the remaining items: kills under the grant, 40 of 40 in order",
+      "surface": "two (then three) cmd/listener processes built at 5a088bf9 under the rendered grant on a real nats-server; a port session; sends through the standby",
+      "command": "python3 $TMPDIR/infra557-test/kill.py $TMPDIR/infra557-test/listener-head13 h13-KILL KILL",
+      "observed": "SIGKILL after message 15: 40 of 40, in send order, last 6.23 s after the signal; the holder lists the session across the take-over and one registered on the standby 0.6 s after a NATS restart; 0 permission violations",
+      "headSha": "5a088bf9b19a7dc8b1454145d6da7251838c4a62",
+      "negativeControl": "as machine box-other's NATS user: put lease.listener-box-smoke and handback.listener-box-smoke.999 refused with a permissions violation; its own keys accepted"
     }
   ],
+  "ci": "Required checks at 5a088bf9 (lint, typecheck, test, pr-title) NOT settled when read at 12:40Z: changes queued (lint, typecheck and test not started), pr-title queued. Not green yet; not waited on.",
   "notes": [
-    "Not driven on real binaries: a stale mark from an earlier term (a mark is keyed by the lease revision it vouches for; no external fault writes one for another revision) and a resubscribe beyond TestTwoPodsReconnectInPlaceDeliversEachMessageOnce (passed). The implementer's unit tests cover them.",
-    "Merge a8a5d08a brought main's #2508 (denied publishes named; issue-topic sessions hear agents) into internal/bus (async.go, confirm.go, denials.go, nats.go, recovery.go), cmd/listener/api.go and ci.yaml; the conflict resolution kept the infra/README.md alarm paragraph and the sessionanswers filter line. All runs above use the merged binary.",
-    "Required checks lint, typecheck, test, pr-title at a8a5d08a: queued when read at 10:25Z (changes queued). Not waited on.",
-    "Evidence: https://github.com/sjawhar/legion/pull/2404#issuecomment-6520470675"
+    "Merge 5a088bf9 brought main's changes to 59 files, none under cmd/listener, internal/bus, internal/session, infra/core or ci.yaml; its conflict resolution was the infra/README.md listener-probe paragraph.",
+    "Throwaway scripts in $TMPDIR/infra557-test (handler.py, roll.py, kill.py); not committed.",
+    "Evidence: https://github.com/sjawhar/legion/pull/2404#issuecomment-6523094557"
   ]
 }
