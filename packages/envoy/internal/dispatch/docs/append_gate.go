@@ -12,7 +12,7 @@ import (
 
 // The append gate: the one read, under the document's advisory lock the appending transaction
 // holds, that says which version an append goes after and whether it is admitted at all
-// (gateAppend, decideAppend), and what each append is judged against - the cursor of the document
+// (gateAppend), and what each append is judged against - the cursor of the document
 // it was made on (documentCursor, appendingCursor) and, for a browser's update, what its room's
 // observer recorded with it (BrowserAppend).
 
@@ -34,7 +34,7 @@ type documentCursor interface {
 // a replaced history until it reloads.
 var ErrRoomBehindHead = fmt.Errorf("%w: the document's room is behind its durable head", ErrServiceUnavailable)
 
-// appendKind is which rule the gate applies to an append (decideAppend).
+// appendKind is which rule the gate applies to an append (gateAppend).
 type appendKind int
 
 const (
@@ -128,38 +128,19 @@ func observedBeforeClose(observed time.Time, age, closedFor time.Duration) bool 
 	return !observed.IsZero() && age+closeMargin >= closedFor
 }
 
-// decideAppend is the gate's decision over row, one read of room's stored history, for an append
-// from a room instance whose cursor holds every version through through, ruled by kind, of an
-// update the room's observer took at observed (zero for a derived write or an append with no
-// class) and age ago on this process's clock: the version the append goes after (it is stored at
-// head+1), ErrIssueClosed or ErrRoomBehindHead. An appendBrowser append is refused when the
-// document's issue is closed and its room observed it later than closeMargin after the close
-// (observedBeforeClose), or when the room's history was replaced (historyReplaced), which
-// replaced reports so that a caller holding the update can admit it after all (gateAppend); an
+// gateAppend is the gate: its one read of room, under the document's advisory lock the appending
+// transaction holds, so no append lands between the read and its own, and the verdict over that
+// read for update - the version the append goes after (it is stored at latest+1), ErrIssueClosed
+// or ErrRoomBehindHead. The append comes from a room instance whose cursor holds every version
+// through through, ruled by kind, of an update the room's observer took at observed (zero for a
+// derived write or an append with no class). An appendBrowser append is refused when the
+// document's issue is closed and its room took the update later than closeMargin after the close
+// (observedBeforeClose), or when the room's history was replaced (historyReplaced); an
 // appendDerived append unless the room holds the head exactly. Equality for the derived rule, not
 // `through < head`: a room standing past the head holds a history the store no longer has.
 //
-// It reads nothing itself, so a caller that queues the read on a batch of its own decides by
-// these very rules once that batch's results are read.
-func decideAppend(room string, through int64, kind appendKind, observed time.Time, age time.Duration, row appendGateRow) (head int64, replaced bool, err error) {
-	switch {
-	case kind == appendBrowser && row.closedFor != nil && !observedBeforeClose(observed, age, *row.closedFor):
-		return 0, false, fmt.Errorf("%w: room %s's document belongs to an issue closed %s ago, and the room took the update %s ago",
-			ErrIssueClosed, room, row.closedFor.Round(time.Millisecond), age.Round(time.Millisecond))
-	case historyReplaced(through, row.latest, row.intact):
-		return 0, true, fmt.Errorf("%w: room %s holds the document through update %d, and the stored history was replaced under it (head %d)",
-			ErrRoomBehindHead, room, through, row.latest)
-	case kind == appendDerived && through != row.latest:
-		return 0, false, fmt.Errorf("%w: room %s holds the document through update %d, the stored document stands at %d",
-			ErrRoomBehindHead, room, through, row.latest)
-	}
-	return row.latest, false, nil
-}
-
-// gateAppend is the gate: its one read of room, under the document's advisory lock the appending
-// transaction holds, so no append lands between the read and its own, and decideAppend's verdict
-// over it for update. A browser's update refused for a replaced history above its room's cursor is
-// admitted at the head after all when that history still holds every item the update builds on
+// A browser's update refused for a replaced history above its room's cursor is admitted at the
+// head after all when that history still holds every item the update builds on
 // (storedHistoryHolds): a compaction folded the rows the room held into a later one, keeping their
 // items, which is no replacement for a delta that commutes. Refused, the update was dropped with
 // its room, and a browser whose issue closed meanwhile reconnects read-only and cannot send it
@@ -183,17 +164,27 @@ func gateAppend(ctx context.Context, tx pgx.Tx, room string, through int64, kind
 	if !observed.IsZero() {
 		age = time.Since(observed)
 	}
-	latest, replacedHistory, err := decideAppend(room, through, kind, observed, age, row)
-	if replacedHistory && kind == appendBrowser && row.latest > through {
-		holds, holdsErr := storedHistoryHolds(ctx, tx, room, row.latest, update)
-		if holdsErr != nil {
-			return 0, false, holdsErr
+	switch {
+	case kind == appendBrowser && row.closedFor != nil && !observedBeforeClose(observed, age, *row.closedFor):
+		return 0, false, fmt.Errorf("%w: room %s's document belongs to an issue closed %s ago, and the room took the update %s ago",
+			ErrIssueClosed, room, row.closedFor.Round(time.Millisecond), age.Round(time.Millisecond))
+	case historyReplaced(through, row.latest, row.intact):
+		if kind == appendBrowser && row.latest > through {
+			holds, holdsErr := storedHistoryHolds(ctx, tx, room, row.latest, update)
+			if holdsErr != nil {
+				return 0, false, holdsErr
+			}
+			if holds {
+				return row.latest, true, nil
+			}
 		}
-		if holds {
-			return row.latest, true, nil
-		}
+		return 0, false, fmt.Errorf("%w: room %s holds the document through update %d, and the stored history was replaced under it (head %d)",
+			ErrRoomBehindHead, room, through, row.latest)
+	case kind == appendDerived && through != row.latest:
+		return 0, false, fmt.Errorf("%w: room %s holds the document through update %d, the stored document stands at %d",
+			ErrRoomBehindHead, room, through, row.latest)
 	}
-	return latest, false, err
+	return row.latest, false, nil
 }
 
 // storedHistoryHolds reports whether room's stored history through head holds every item update

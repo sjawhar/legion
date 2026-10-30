@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/reearth/ygo/awareness"
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/persistence"
 	"github.com/reearth/ygo/provider/websocket"
@@ -137,6 +138,11 @@ type Service struct {
 	// afterSettleLock runs after settleRoom has taken the document's advisory lock and before
 	// it touches the room. Nil outside tests; tests use it to fail the room in that window.
 	afterSettleLock func(room string)
+	// beforeAwarenessWatch is given a room's awareness before the relay registers its own
+	// observer on it (awarenessRelay.watchRoomAwareness). Nil outside tests; tests use it to put
+	// an observer of their own ahead of the relay's, since ygo fires a room's update observers in
+	// the order they were registered.
+	beforeAwarenessWatch func(room string, aw *awareness.Awareness)
 	// beforeSettleStart runs as a settlement starts (settleRoomWithin), before it compares the
 	// room's generation under the state lock: after its timer fired, while the timer is still
 	// registered, or after settleLastPeer took the timer and counted the settlement running. Nil
@@ -2582,7 +2588,7 @@ func (s *Service) readRoomIssueStates(ctx context.Context, sql string, arg any) 
 
 // issueOpenChanged is issueOpenChangedChannel's handler, on its room-sync lane (roomSync.handlers):
 // issueKey's closed_at changed, in a transaction of any process - this one's, another's, or an
-// earlier build's - whose commit the trigger of migration 0142 announced. It reads the issue's
+// earlier build's - whose commit the trigger of migration 0148 announced. It reads the issue's
 // state now rather than trusting the notification for it: a close and a reopen in quick
 // succession may both be read as the second, which is the truth by then. Every room this process
 // holds of the issue's documents takes that state (setRoomIssueOpen). A document no room here

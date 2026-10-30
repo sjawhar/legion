@@ -9,9 +9,11 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/reearth/ygo/awareness"
 	"github.com/reearth/ygo/encoding"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
@@ -231,6 +233,92 @@ func TestADisconnectOnOneProcessRemovesTheClientsAwarenessOnTheOther(t *testing.
 	requireAwareness(t, bob, lacksAwareness(aliceClient), "alice leaving task A removing her from bob's reader on task B")
 }
 
+// A reader leaving is relayed at the clock its awareness client stood at, whatever else the room
+// is doing in that moment. ygo fires a room's update observers with the awareness unlocked, and
+// every inbound apply and every other removal purges the room's tombstones as it goes
+// (reclaimAwarenessSlots, a grace of one nanosecond), so a purge can free the departing client's
+// entry between the removal's apply and the relay's encode of it. Read from the room's awareness
+// then, the removal would name the client at a clock of 0, which task B drops as older than the
+// state it holds, and alice's cursor would sit in bob's reader until it expired (awarenessExpiry,
+// 30 s). Here the purge is put ahead of the relay's own observer, so it lands in that window
+// every time.
+func TestAReaderLeavingIsRelayedAtItsClientsClockThoughAPurgeRacesTheEncode(t *testing.T) {
+	pair := newSeededProcessPair(t, "First.\n\nSecond.\n")
+	var purged atomic.Int64
+	pair.taskA.beforeAwarenessWatch = func(room string, aw *awareness.Awareness) {
+		aw.OnUpdate(func(event awareness.UpdateEvent) {
+			if len(event.Removed) == 0 {
+				return
+			}
+			purged.Add(1)
+			reclaimAwarenessSlots(room, aw)
+		})
+	}
+	runAwareness(t, pair.taskA)
+	handledB := runAwareness(t, pair.taskB)
+	alice := pair.openReader(t, pair.serverA, "alice")
+	bob := pair.openReader(t, pair.serverB, "bob")
+	setAwareness(t, alice, aliceClient, cursorOf("alice", 1))
+	requireAwareness(t, bob, holdsAwareness(aliceClient, cursorOf("alice", 1)), "alice's cursor on task A reaching bob on task B")
+	clock := awarenessClockOf(t, pair.taskA, pair.artifactID, aliceClient)
+
+	alice.Close()
+	relayed := relayedRemovalClock(t, handledB, pair.artifactID, aliceClient)
+	if purged.Load() == 0 {
+		t.Fatal("no purge ran ahead of the relay's observer on task A's room, so the race this test is about never happened")
+	}
+	if relayed < clock {
+		t.Errorf("alice's removal was relayed at clock %d, want at least the %d her client stood at: task B holds her at %d and drops a lower clock, so her cursor stays in its room until it expires",
+			relayed, clock, clock)
+	}
+	requireAwareness(t, bob, lacksAwareness(aliceClient),
+		"alice leaving task A, with a tombstone purge between the removal and the relay's encode of it, removing her from bob's reader on task B")
+}
+
+// awarenessClockOf is the clock service's resident room of artifactID holds client's state at.
+func awarenessClockOf(t *testing.T, service *Service, artifactID string, client uint64) uint64 {
+	t.Helper()
+	aw, resident := service.srv.GetAwareness(artifactID)
+	if !resident {
+		t.Fatalf("no resident room of %s to read client %d's clock from", artifactID, client)
+	}
+	state, held := aw.GetStates()[client]
+	if !held {
+		t.Fatalf("the resident room of %s holds no state of client %d", artifactID, client)
+	}
+	return state.Clock
+}
+
+// relayedRemovalClock is the clock of the removal of client that reaches handled for artifactID,
+// the first one relayed within roomWait.
+func relayedRemovalClock(t *testing.T, handled <-chan awarenessMessage, artifactID string, client uint64) uint64 {
+	t.Helper()
+	deadline := time.After(roomWait(t))
+	for {
+		select {
+		case message := <-handled:
+			if message.Room != artifactID || message.Query {
+				continue
+			}
+			update, err := base64.StdEncoding.DecodeString(message.Data)
+			if err != nil {
+				t.Fatalf("decode a relayed awareness update: %v", err)
+			}
+			entries, err := decodeAwarenessEntries(update)
+			if err != nil {
+				t.Fatalf("read a relayed awareness update: %v", err)
+			}
+			for _, entry := range entries {
+				if entry.client == client && entry.removed {
+					return entry.clock
+				}
+			}
+		case <-deadline:
+			t.Fatalf("no removal of client %d was relayed for %s within %v", client, artifactID, roomWait(t))
+		}
+	}
+}
+
 // A room this process closes itself - here a forced close, as a replaced history, a closed issue
 // or a failed room's eviction makes - removes its readers' states on the other processes too,
 // though the close disconnects them and tears the room's relay down together.
@@ -321,31 +409,23 @@ func TestAnAwarenessStateTooLargeToRelayIsDroppedAndCounted(t *testing.T) {
 	}
 }
 
-// awarenessFlood is one y-protocols awareness update announcing clients 1 through clients, each
-// with a cursor-sized state, as one peer's frame can.
-func awarenessFlood(clients uint64) []byte {
+// awarenessStates is one y-protocols awareness update announcing count clients from first, each
+// at a clock of 1 with state, as one peer's frame carries them: the state of a cursor, or "null"
+// to take those clients away as the disconnect of the peer that sent them does. It is the one
+// encoder the tests of this package announce awareness clients with.
+func awarenessStates(first, count uint64, state string) []byte {
 	return encoding.EncodeBytes(func(encoder *encoding.Encoder) {
-		encoder.WriteVarUint(clients)
-		for client := uint64(1); client <= clients; client++ {
+		encoder.WriteVarUint(count)
+		for client := first; client < first+count; client++ {
 			encoder.WriteVarUint(client)
 			encoder.WriteVarUint(1)
-			encoder.WriteVarString(`{"user":{"name":"flood"}}`)
+			encoder.WriteVarString(state)
 		}
 	})
 }
 
-// awarenessFloodRemoval takes away the clients awarenessFlood announced, as the disconnect of the
-// peer that sent them does: a null state at the clock they stand at.
-func awarenessFloodRemoval(clients uint64) []byte {
-	return encoding.EncodeBytes(func(encoder *encoding.Encoder) {
-		encoder.WriteVarUint(clients)
-		for client := uint64(1); client <= clients; client++ {
-			encoder.WriteVarUint(client)
-			encoder.WriteVarUint(1)
-			encoder.WriteVarString("null")
-		}
-	})
-}
+// floodState is the state each client of a flood announces below.
+const floodState = `{"user":{"name":"flood"}}`
 
 // relayedClients is how many of room's clients service's relay is sending to the other processes.
 func relayedClients(service *Service, room string) int {
@@ -373,13 +453,17 @@ func TestAnAwarenessFrameOverTheClientBoundRelaysNoMoreThanTheBound(t *testing.T
 	}
 
 	const flood = 8 * maxAwarenessClientsPerRoom
-	if err := aw.ApplyUpdate(awarenessFlood(flood), "a peer of task A"); err != nil {
+	if err := aw.ApplyUpdate(awarenessStates(1, flood, floodState), "a peer of task A"); err != nil {
 		t.Fatalf("apply a frame of %d awareness clients: %v", flood, err)
 	}
 	waitFor(t, roomWait(t), "task A's relay to be sending the bound's clients of the frame", func() bool {
 		return relayedClients(pair.taskA, pair.artifactID) == maxAwarenessClientsPerRoom
 	})
-	if tracked := trackedAwarenessClients(t, pair.taskA, pair.artifactID); tracked != maxAwarenessClientsPerRoom {
+	tracked, err := pair.taskA.heldAwarenessClients(pair.artifactID)
+	if err != nil {
+		t.Fatalf("read the awareness task A's room holds: %v", err)
+	}
+	if tracked != maxAwarenessClientsPerRoom {
 		t.Fatalf("task A's room tracks %d of the frame's %d clients, want the bound's %d", tracked, flood, maxAwarenessClientsPerRoom)
 	}
 
@@ -429,25 +513,25 @@ func TestAwarenessClientsThatLeaveFreeTheRoomsBoundAtOnce(t *testing.T) {
 	}
 
 	const flood = 8 * maxAwarenessClientsPerRoom
-	if err := aw.ApplyUpdate(awarenessFlood(flood), "a peer of task A"); err != nil {
+	if err := aw.ApplyUpdate(awarenessStates(1, flood, floodState), "a peer of task A"); err != nil {
 		t.Fatalf("apply a frame of %d awareness clients: %v", flood, err)
 	}
 	waitFor(t, roomWait(t), "task A's relay to be sending the bound's clients of the frame", func() bool {
 		return relayedClients(pair.taskA, pair.artifactID) == maxAwarenessClientsPerRoom
 	})
-	if err := aw.ApplyUpdate(awarenessFloodRemoval(flood), "a peer of task A"); err != nil {
+	if err := aw.ApplyUpdate(awarenessStates(1, flood, "null"), "a peer of task A"); err != nil {
 		t.Fatalf("take the frame's %d awareness clients away: %v", flood, err)
 	}
 	waitFor(t, roomWait(t), "task A's relay to be sending none of the frame's clients once they have left", func() bool {
 		return relayedClients(pair.taskA, pair.artifactID) == 0
 	})
 
-	// A client id of the joining reader's own: awarenessFlood claims 1 through flood, and a
-	// client the frame has left a tombstone of stands at a clock of its own.
+	// A client id of the joining reader's own: the frame claims 1 through flood, and a client the
+	// frame has left a tombstone of stands at a clock of its own.
 	const joined = flood + aliceClient
 	setAwareness(t, alice, joined, cursorOf("alice", 1))
 	requireAwareness(t, bob, holdsAwareness(joined, cursorOf("alice", 1)),
-		"alice's cursor, announced on task A just after a frame of 2,048 clients had come and gone, reaching bob on task B")
+		fmt.Sprintf("alice's cursor, announced on task A just after a frame of %d clients had come and gone, reaching bob on task B", flood))
 }
 
 // awarenessEntryUpdate is a one-client awareness update, as y-protocols encodes one.

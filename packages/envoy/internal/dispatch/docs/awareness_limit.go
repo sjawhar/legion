@@ -15,12 +15,16 @@ import (
 )
 
 // Awareness - a reader's cursor and presence - reaches a document room through the socket that
-// announces it, and a socket announces one client: its browser tab's y-protocols client. Nothing
-// in the protocol says so. ygo applies a peer's awareness frame whole and broadcasts it to the
-// room's other peers whatever it names (provider/websocket/peer.go:96-117), and the room's relay
-// then sends it to every other process (awareness_relay.go), so one tab's frame naming thousands
-// of invented client ids used to cost every reader of every process an entry each, and the room
-// it filled had nothing left for the reader who joined next.
+// sends it, and a socket sends more than its own client. @hocuspocus/provider 2.15.3 listens on
+// its awareness (hocuspocus-provider.cjs:2522) and sends every client that a change touched,
+// whatever made that change (:2595-2601). A tab applies the awareness the server sends it for
+// the room's other readers (:2265), and that apply fires the same change (:1582-1586), so every
+// tab sends the other readers' client ids back on its own socket. Nothing in the protocol bounds
+// what a socket names. ygo applies a peer's awareness frame whole and broadcasts it to the room's
+// other peers whatever it names (provider/websocket/peer.go:96-117), and the room's relay then
+// sends it to every other process (awareness_relay.go), so one tab's frame naming thousands of
+// invented client ids used to cost every reader of every process an entry each, and the room it
+// filled had nothing left for the reader who joined next.
 //
 // So the bound is the socket's: a document socket may hold maxAwarenessClientsPerSocket awareness
 // clients at once, and the entries of the clients past that are taken out of its frame before ygo
@@ -39,12 +43,16 @@ import (
 
 const (
 	// maxAwarenessClientsPerSocket is how many awareness clients one document socket may hold at
-	// once. A browser tab announces exactly one - the y-protocols client of the provider on that
-	// socket - and keeps it for the life of the connection; four leaves room for a tab that swaps
-	// the document under its provider and announces the new client before the old one is taken
-	// away, and is far below any number a room would notice. The clients a frame names past it
-	// are dropped, so a tab inventing thousands reaches its room, its readers and the other
-	// processes as four.
+	// once. The first client a tab sends is its own: startSync announces it at the socket's first
+	// sync (hocuspocus-provider.cjs:2669-2679), and an echo can only follow an awareness message
+	// the server sent that tab. The tab then echoes the room's other readers back on the same
+	// socket (see the top of this file), so the three places left fill with echoes, and a room of
+	// more than four readers loses the echoes past them. The room loses nothing by that: an echo
+	// carries the state and clock the tab read from the room, which the room holds already. Four
+	// also leaves room for a tab that swaps the document under its provider and announces the new
+	// client before the old one is taken away, and is far below any number a room would notice.
+	// The clients a frame names past it are dropped, so a tab inventing thousands reaches its
+	// room, its readers and the other processes as four.
 	maxAwarenessClientsPerSocket = 4
 	// maxAwarenessMessageBytes is the largest awareness message the filter reads whole, to rewrite
 	// it. One client's cursor is a few hundred bytes and a room holds no more state than
@@ -206,14 +214,7 @@ func (c *awarenessLimitConn) readFrame() error {
 		}
 		return nil
 	case limitSkipping:
-		if _, err := io.CopyN(io.Discard, c.src, payload); err != nil {
-			return err
-		}
-		if final {
-			c.mode = limitIdle
-			c.writeAwareness(nil)
-		}
-		return nil
+		return c.skip(payload, final)
 	case limitAwareness:
 		return c.collect(payload, final)
 	default:
@@ -276,15 +277,7 @@ func (c *awarenessLimitConn) collect(n int64, final bool) error {
 		slog.Debug("dispatch: drop a document socket's awareness message past the size one carries",
 			"room", c.room, "bytes", int64(len(c.message))+n, "limit", maxAwarenessMessageBytes)
 		c.message = c.message[:0]
-		c.mode = limitSkipping
-		if _, err := io.CopyN(io.Discard, c.src, n); err != nil {
-			return err
-		}
-		if final {
-			c.mode = limitIdle
-			c.writeAwareness(nil)
-		}
-		return nil
+		return c.skip(n, final)
 	}
 	start := len(c.message)
 	c.message = append(c.message, make([]byte, n)...)
@@ -299,6 +292,22 @@ func (c *awarenessLimitConn) collect(n int64, final bool) error {
 	c.mode = limitIdle
 	c.writeAwareness(c.allowed(c.message))
 	c.message = c.message[:0]
+	return nil
+}
+
+// skip reads n more bytes of an awareness message being dropped - one too large to rewrite
+// (collect) and the frames after it - and hands ygo none of what it carried. The message ends
+// with its final frame, where ygo is given an awareness message naming no client in its place
+// (writeAwareness), which it applies and broadcasts as no change.
+func (c *awarenessLimitConn) skip(n int64, final bool) error {
+	c.mode = limitSkipping
+	if _, err := io.CopyN(io.Discard, c.src, n); err != nil {
+		return err
+	}
+	if final {
+		c.mode = limitIdle
+		c.writeAwareness(nil)
+	}
 	return nil
 }
 
@@ -402,22 +411,6 @@ func maskedFrameHeader(opcode byte, final bool, length int64, key [4]byte) []byt
 		header = binary.BigEndian.AppendUint64(append(header, maskedFrame|127), uint64(length))
 	}
 	return append(header, key[:]...)
-}
-
-// framePayloadLength is the payload length the frame header names, or -1 when it names one past
-// what an int64 holds (RFC 6455 keeps the top bit of a 64-bit length clear).
-func framePayloadLength(header []byte) int64 {
-	switch length := int64(header[1] &^ maskedFrame); length {
-	case 126:
-		return int64(binary.BigEndian.Uint16(header[2:4]))
-	case 127:
-		if named := binary.BigEndian.Uint64(header[2:10]); named <= uint64(1<<63-1) {
-			return int64(named)
-		}
-		return -1
-	default:
-		return length
-	}
 }
 
 // documentMessageKind reads a document message's Hocuspocus header - the document it names and

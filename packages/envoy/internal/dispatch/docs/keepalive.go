@@ -268,18 +268,32 @@ func frameHeaderLength(header []byte) int {
 	return length
 }
 
+// framePayloadLength is the payload length the frame header names, or -1 when it names one past
+// what an int64 holds (RFC 6455 keeps the top bit of a 64-bit length clear). It is the one place
+// a frame's length is decoded: the keep-alive's watch of what this service writes (frameBegins)
+// and the awareness filter's read of what a socket sends (awarenessLimitConn.readFrame) both
+// take it from here.
+func framePayloadLength(header []byte) int64 {
+	switch length := int64(header[1] &^ maskedFrame); length {
+	case 126:
+		return int64(binary.BigEndian.Uint16(header[2:4]))
+	case 127:
+		if named := binary.BigEndian.Uint64(header[2:10]); named <= uint64(1<<63-1) {
+			return int64(named)
+		}
+		return -1
+	default:
+		return length
+	}
+}
+
 // frameBegins reads the frame header just written: the frame's payload follows it.
 func (w *frameWatch) frameBegins() {
 	header := w.header[:w.headerRead]
 	w.headerRead = 0
-	payload := uint64(header[1] &^ maskedFrame)
-	switch payload {
-	case 126:
-		payload = uint64(binary.BigEndian.Uint16(header[2:4]))
-	case 127:
-		payload = binary.BigEndian.Uint64(header[2:10])
-	}
-	w.payloadLeft = payload
+	// A length past what an int64 holds (-1) is a frame no writer of this service makes, and
+	// nothing follows it to count.
+	w.payloadLeft = uint64(max(framePayloadLength(header), 0))
 	switch opcode := int(header[0] & 0x0f); {
 	case opcode == gws.CloseMessage:
 		w.closed = true

@@ -20,7 +20,7 @@ import (
 )
 
 // Closing or reopening an issue changes every process's rooms of its documents (plan
-// D5). The trigger migration 0142 puts on issues.closed_at notifies dispatch_issue_open_changed
+// D5). The trigger migration 0148 puts on issues.closed_at notifies dispatch_issue_open_changed
 // from the transaction that wrote it, whichever process wrote it; each process's room sync reads
 // the issue and closes its rooms of the issue's documents (issueOpenChanged), so their browsers
 // reconnect with the scope the issue now allows, which ygo fixes when a browser connects. A
@@ -175,7 +175,7 @@ func TestClosingAnIssueOnOneProcessClosesEveryProcessesRoomsAndReopeningMakesThe
 // or waits on the document's lock behind a settlement or a compaction, and the close's notification
 // closes the room meanwhile, which hands the room's queued updates to the gate (CloseRoom flushes
 // it). The room's observer took the update before the close, which the gate tells by comparing the
-// update's age with how long ago the issue closed (decideAppend). Here task A's persistence is
+// update's age with how long ago the issue closed (gateAppend). Here task A's persistence is
 // held while the issue closes through task B; alice's socket closes, the hold runs out, her
 // keystroke is stored, and her browser comes back read-only holding it.
 func TestAKeystrokeTakenBeforeTheIssueClosedIsStoredWhenItsAppendReachesTheGateAfter(t *testing.T) {

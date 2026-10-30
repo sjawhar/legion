@@ -91,9 +91,10 @@ const (
 	// socket may hold (maxAwarenessClientsPerSocket, awareness_limit.go), and the clients
 	// another process relays, which that process's own sockets are held to in the same way
 	// before they cross (received). They share this bound: four thousand entries is every
-	// connection this process admits, all of them on one document, each announcing four
-	// clients where a browser tab announces one, and a process refuses the socket after that
-	// whatever its rooms hold (Service.canAddConnection). Relayed clients reach it no sooner:
+	// connection this process admits, all of them on one document, each holding the four clients
+	// a socket may hold, of which only one is a client of that tab's own (awareness_limit.go),
+	// and a process refuses the socket after that whatever its rooms hold
+	// (Service.canAddConnection). Relayed clients reach it no sooner:
 	// a document would have to hold four thousand tabs at once - every socket of four
 	// processes at their connection caps - against the handful any document of this service
 	// has. What stops one tab from spending the room's bound on invented ids is the socket's
@@ -134,7 +135,11 @@ type awarenessMessage struct {
 // awarenessEntry is one client's entry in a y-protocols awareness update.
 type awarenessEntry struct {
 	client uint64
+	// clock is the clock the entry stands at: the one a receiver compares what it holds of that
+	// client against (awareness/awareness.go:566-581).
+	clock uint64
 	// raw is the entry as the update encodes it: the client's id, its clock and its state JSON.
+	// It is nil for an entry the flush is to read from the room's awareness (resolve).
 	raw []byte
 	// removed is whether the state is null: the client left.
 	removed bool
@@ -155,7 +160,8 @@ func decodeAwarenessEntries(update []byte) ([]awarenessEntry, error) {
 		if err != nil {
 			return nil, err
 		}
-		if _, err := decoder.ReadVarUint(); err != nil {
+		clock, err := decoder.ReadVarUint()
+		if err != nil {
 			return nil, err
 		}
 		state, err := decoder.ReadVarString()
@@ -163,7 +169,7 @@ func decodeAwarenessEntries(update []byte) ([]awarenessEntry, error) {
 			return nil, err
 		}
 		end := len(update) - decoder.Remaining()
-		entries = append(entries, awarenessEntry{client: client, raw: update[start:end], removed: state == "null"})
+		entries = append(entries, awarenessEntry{client: client, clock: clock, raw: update[start:end], removed: state == "null"})
 	}
 	return entries, nil
 }
@@ -206,12 +212,15 @@ type awarenessRelay struct {
 	// mark never covers a change of this process's own.
 	inbound map[string]map[uint64]int
 	// local is, per room, the awareness clients of this process's own peers that the relay is
-	// sending to the other processes: every client the room's observer has seen a state of and
-	// not since a removal, less the ones another process's notification brought (inbound). The
-	// room's sockets hold the list to maxAwarenessClientsPerSocket clients each
-	// (awareness_limit.go). It is what a query is answered with and what a close of a room
-	// removes (localRemoval).
-	local map[string]map[uint64]struct{}
+	// sending to the other processes, each with the clock its last state stood at: every client
+	// the room's observer has seen a state of and not since a removal, less the ones another
+	// process's notification brought (inbound). The room's sockets hold the list to
+	// maxAwarenessClientsPerSocket clients each (awareness_limit.go). It is what a query is
+	// answered with, what a close of a room removes (localRemoval), and the clock a removal the
+	// room's own observer relays stands at, which is read from here rather than from the room's
+	// awareness because a purge may have freed the departing client's tombstone by then
+	// (touched).
+	local map[string]map[uint64]uint64
 	// closed refuses every later send; Close sets it.
 	closed bool
 	// sends counts the batches and queries on their way to the sender, which Close waits for.
@@ -225,7 +234,7 @@ func newAwarenessRelay(service *Service) *awarenessRelay {
 		service: service,
 		pending: make(map[string]map[uint64][]byte),
 		inbound: make(map[string]map[uint64]int),
-		local:   make(map[string]map[uint64]struct{}),
+		local:   make(map[string]map[uint64]uint64),
 	}
 }
 
@@ -292,28 +301,15 @@ func (r *awarenessRelay) Close() error {
 	return nil
 }
 
-// enqueue adds an awareness update of room's own clients to the room's pending batch, each entry
-// as it stands (record): a snapshot a query is answered with (answer) or the removal a closing
-// room makes of its own clients (removeLocalAwareness). A room's own changes reach the batch
-// through its observer instead (watchRoomAwareness).
-func (r *awarenessRelay) enqueue(room string, update []byte) {
-	entries, err := decodeAwarenessEntries(update)
-	if err != nil {
-		slog.Debug("dispatch: drop an awareness update the relay cannot read", "room", room, "error", err)
-		return
-	}
-	r.record(room, entries)
-}
-
 // record puts each of entries into room's pending batch - a client's entry replacing any earlier
 // one of its own, and a nil entry leaving the flush to read that client's current state
 // (resolve) - and arms the batch's send when it is the room's first. It keeps the room's list of
-// the clients it relays (local) as it goes: a client's state puts it on the list, a removal takes
-// it off and is relayed like any other entry. What one batch can hold is what the room's sockets
-// may announce: a change touches the clients of the frame that made it, and a socket's frame
-// touches no more than maxAwarenessClientsPerSocket of them (awareness_limit.go), so a tab
-// inventing thousands reaches the relay as its own handful and the readers who join after it are
-// relayed at once.
+// the clients it relays (local) as it goes: a client's state puts it on the list at the clock
+// that state stands at, a removal takes it off and is relayed like any other entry. What one
+// batch can hold is what the room's sockets may announce: a change touches the clients of the
+// frame that made it, and a socket's frame touches no more than maxAwarenessClientsPerSocket of
+// them (awareness_limit.go), so a tab inventing thousands reaches the relay as its own handful
+// and the readers who join after it are relayed at once.
 func (r *awarenessRelay) record(room string, entries []awarenessEntry) {
 	if len(entries) == 0 {
 		return
@@ -333,10 +329,10 @@ func (r *awarenessRelay) record(room string, entries []awarenessEntry) {
 			delete(clients, entry.client)
 		} else {
 			if clients == nil {
-				clients = make(map[uint64]struct{})
+				clients = make(map[uint64]uint64)
 				r.local[room] = clients
 			}
-			clients[entry.client] = struct{}{}
+			clients[entry.client] = entry.clock
 		}
 		batch[entry.client] = entry.raw
 	}
@@ -522,24 +518,33 @@ func (r *awarenessRelay) localClients(room string, aw *awareness.Awareness) map[
 	return clients
 }
 
+// awarenessRemoval is the entry of an awareness update that takes client away at clock: a null
+// state, which every receiver holding that client at clock or below takes and the client's own
+// next announcement, one clock later, undoes (awareness/awareness.go:566-581). The clock is the
+// client's own, unbumped, as ygo's removal for a peer that disconnects stands at
+// (provider/websocket/peer.go, encodeAwarenessRemoval): bumped, it would be the clock the
+// rejoining client's next announcement carries, and one of the two would be dropped.
+func awarenessRemoval(client, clock uint64) []byte {
+	return encoding.EncodeBytes(func(encoder *encoding.Encoder) {
+		encoder.WriteVarUint(client)
+		encoder.WriteVarUint(clock)
+		encoder.WriteVarString("null")
+	})
+}
+
 // localRemoval is the awareness update that removes room's local clients from aw, the room's
-// awareness, or nil when it holds none. Each removal stands at its client's current clock, as
-// ygo's removal for a peer that disconnects does: a null state at an equal clock is taken by
-// every receiver, and the client's own next announcement, one clock later, brings it back.
+// awareness, or nil when it holds none. Each removal stands at its client's current clock
+// (awarenessRemoval).
 func (r *awarenessRelay) localRemoval(room string, aw *awareness.Awareness) []byte {
 	clients := r.localClients(room, aw)
 	if len(clients) == 0 {
 		return nil
 	}
-	ids := slices.Sorted(maps.Keys(clients))
-	return encoding.EncodeBytes(func(encoder *encoding.Encoder) {
-		encoder.WriteVarUint(uint64(len(ids)))
-		for _, client := range ids {
-			encoder.WriteVarUint(client)
-			encoder.WriteVarUint(clients[client])
-			encoder.WriteVarString("null")
-		}
-	})
+	entries := make([][]byte, 0, len(clients))
+	for _, client := range slices.Sorted(maps.Keys(clients)) {
+		entries = append(entries, awarenessRemoval(client, clients[client]))
+	}
+	return encodeAwarenessEntries(entries)
 }
 
 // received is documentAwarenessChannel's handler, on room sync's awareness lane. This process's own
@@ -602,7 +607,8 @@ func (r *awarenessRelay) received(ctx context.Context, payload string) {
 }
 
 // answer sends, for another process's query, the states of room's local clients, when room is
-// resident here and has any.
+// resident here and has any: each entry as it stands, which puts it in the room's pending batch
+// and refreshes the clock the relay holds for that client (record).
 func (r *awarenessRelay) answer(room string) {
 	aw, resident := r.service.srv.GetAwareness(room)
 	if !resident {
@@ -612,8 +618,12 @@ func (r *awarenessRelay) answer(room string) {
 	if len(clients) == 0 {
 		return
 	}
-	ids := slices.Collect(maps.Keys(clients))
-	r.enqueue(room, aw.EncodeUpdate(ids))
+	entries, err := decodeAwarenessEntries(aw.EncodeUpdate(slices.Collect(maps.Keys(clients))))
+	if err != nil {
+		slog.Debug("dispatch: drop an awareness update the relay cannot read", "room", room, "error", err)
+		return
+	}
+	r.record(room, entries)
 }
 
 // watchRoomAwareness has aw, a room's awareness, tell the relay what each of the room's changes
@@ -623,14 +633,17 @@ func (r *awarenessRelay) answer(room string) {
 // hears of every client a change touched where the lane behind Publish would hand it only the
 // latest change's (see the top of this file). The entry a removal leaves behind is reclaimed
 // there and then (reclaimAwarenessSlots), so a room of readers that come and go costs no more
-// than the readers in it now, and the removal is encoded first, while the tombstone the purge
-// frees still holds the departing client's clock.
+// than the readers in it now; what the removal is relayed at is the clock the relay recorded for
+// the client (touched), which no purge can take away.
 //
 // It watches updates rather than changes, so a heartbeat - the same state at a later clock, which
 // fires no change observer - is relayed as the presence it is. The observer is dropped with the
 // room instance's awareness itself; a successor instance under the same name is a new awareness,
 // and RoomActivated gives it its own.
 func (r *awarenessRelay) watchRoomAwareness(room string, aw *awareness.Awareness) {
+	if ahead := r.service.beforeAwarenessWatch; ahead != nil {
+		ahead(room, aw)
+	}
 	aw.OnUpdate(func(event awareness.UpdateEvent) {
 		r.record(room, r.touched(room, aw, event))
 		if len(event.Removed) > 0 {
@@ -641,14 +654,25 @@ func (r *awarenessRelay) watchRoomAwareness(room string, aw *awareness.Awareness
 
 // touched is what the relay is to send of event, the change room's awareness has just made: an
 // entry each of the clients it added or updated, left for the flush to read their state as it
-// stands then (resolve), and the removal of each client it took away, encoded here at the clock
-// that client held. A client another process's notification is being applied for is left to the
-// process it came from (inbound, received).
+// stands then (resolve), and the removal of each client it took away, encoded here. A client
+// another process's notification is being applied for is left to the process it came from
+// (inbound, received).
+//
+// A removal stands at the clock the relay holds for that client (local), raised to the clock of
+// the tombstone the room still holds, and never at what the room's awareness would encode now:
+// ygo fires its update observers with the awareness unlocked, and a purge of a tombstone this
+// one's age (awarenessTombstoneAge, one nanosecond) runs after every inbound apply (received)
+// and after every other removal of the room's own. One landing between the apply and this encode
+// leaves EncodeUpdate nothing to read, so it names the client at a clock of 0
+// (awareness/awareness.go:477-480), which every other process drops as older than the state it
+// holds (awareness/awareness.go:566-581) - the departed reader's cursor would then sit in every
+// other process's rooms until it expired, thirty seconds later (awarenessExpiry).
 func (r *awarenessRelay) touched(room string, aw *awareness.Awareness, event awareness.UpdateEvent) []awarenessEntry {
 	entries := make([]awarenessEntry, 0, len(event.Added)+len(event.Updated)+len(event.Removed))
-	var left []uint64
+	left := make([]awarenessEntry, 0, len(event.Removed))
 	r.mu.Lock()
 	inbound := r.inbound[room]
+	relayed := r.local[room]
 	for _, changed := range [][]uint64{event.Added, event.Updated} {
 		for _, client := range changed {
 			if inbound[client] == 0 {
@@ -658,19 +682,24 @@ func (r *awarenessRelay) touched(room string, aw *awareness.Awareness, event awa
 	}
 	for _, client := range event.Removed {
 		if inbound[client] == 0 {
-			left = append(left, client)
+			left = append(left, awarenessEntry{client: client, clock: relayed[client], removed: true})
 		}
 	}
 	r.mu.Unlock()
-	if len(left) == 0 {
-		return entries
+	for i, entry := range entries {
+		// The clock the room holds now, which is the one the flush will read its state at.
+		if meta, known := aw.Meta(entry.client); known {
+			entries[i].clock = meta.Clock
+		}
 	}
-	removals, err := decodeAwarenessEntries(aw.EncodeUpdate(left))
-	if err != nil {
-		slog.Debug("dispatch: drop the removals of a document room the relay cannot read", "room", room, "error", err)
-		return entries
+	for _, gone := range left {
+		if meta, known := aw.Meta(gone.client); known && meta.Clock > gone.clock {
+			gone.clock = meta.Clock
+		}
+		gone.raw = awarenessRemoval(gone.client, gone.clock)
+		entries = append(entries, gone)
 	}
-	return append(entries, removals...)
+	return entries
 }
 
 // mark counts the clients entries names as ones another process's notification is applying to
@@ -747,8 +776,9 @@ func (s *Service) holdsRoomForReaders(room string) bool {
 // removes a peer's states as it disconnects, but a close disconnects the room's peers and tears
 // its relay down together, and a peer's removal that comes after the teardown would reach no
 // other process, whose readers would keep the cursor until it expired (awarenessExpiry). So the
-// removal is applied to the room and handed to the relay here, while the room is still the
-// server's: the relay sends it within its window whatever the close does next.
+// removal is applied to the room here, while the room is still the server's: the room's own
+// observer records it as the apply runs (watchRoomAwareness), and the relay sends it within its
+// window whatever the close does next.
 func (s *Service) removeLocalAwareness(room string) {
 	aw, resident := s.srv.GetAwareness(room)
 	if !resident {
@@ -758,7 +788,6 @@ func (s *Service) removeLocalAwareness(room string) {
 	if removal == nil {
 		return
 	}
-	s.awarenessRelay.enqueue(room, removal)
 	if err := aw.ApplyUpdate(removal, nil); err != nil {
 		slog.Warn("dispatch: remove a closing document room's awareness", "room", room, "error", err)
 	}

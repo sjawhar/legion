@@ -3,37 +3,7 @@ package docs
 import (
 	"testing"
 	"time"
-
-	"github.com/reearth/ygo/encoding"
 )
-
-// trackedAwarenessClients is how many client entries room's awareness on service holds, the
-// tombstones of the clients that left included: the clients a full awareness update encodes.
-func trackedAwarenessClients(t *testing.T, service *Service, room string) int {
-	t.Helper()
-	aw, resident := service.srv.GetAwareness(room)
-	if !resident {
-		t.Fatalf("no resident room %s on the service", room)
-	}
-	entries, err := decodeAwarenessEntries(aw.EncodeUpdate(nil))
-	if err != nil {
-		t.Fatalf("read the room's full awareness: %v", err)
-	}
-	return len(entries)
-}
-
-// awarenessFloodFrom is awarenessFlood with client ids from first: count clients, each with state,
-// as one peer's frame carries them.
-func awarenessFloodFrom(first, count uint64, state string) []byte {
-	return encoding.EncodeBytes(func(encoder *encoding.Encoder) {
-		encoder.WriteVarUint(count)
-		for client := first; client < first+count; client++ {
-			encoder.WriteVarUint(client)
-			encoder.WriteVarUint(1)
-			encoder.WriteVarString(state)
-		}
-	})
-}
 
 // A peer that sends frame after frame of invented awareness clients - some announced and taken
 // away again, some sent as null states straight away - must not grow a room's awareness without
@@ -57,13 +27,13 @@ func TestRepeatedAwarenessFloodsDoNotGrowARoomsAwarenessWithoutLimit(t *testing.
 	next := uint64(1_000_000)
 	for frame := range frames {
 		if frame%2 == 0 {
-			if err := aw.ApplyUpdate(awarenessFloodFrom(next, perFrame, `{"user":{"name":"flood"}}`), "a peer of task A"); err != nil {
+			if err := aw.ApplyUpdate(awarenessStates(next, perFrame, floodState), "a peer of task A"); err != nil {
 				t.Fatalf("frame %d: %v", frame, err)
 			}
-			if err := aw.ApplyUpdate(awarenessFloodFrom(next, perFrame, "null"), "a peer of task A"); err != nil {
+			if err := aw.ApplyUpdate(awarenessStates(next, perFrame, "null"), "a peer of task A"); err != nil {
 				t.Fatalf("frame %d's removal: %v", frame, err)
 			}
-		} else if err := aw.ApplyUpdate(awarenessFloodFrom(next, perFrame, "null"), "a peer of task A"); err != nil {
+		} else if err := aw.ApplyUpdate(awarenessStates(next, perFrame, "null"), "a peer of task A"); err != nil {
 			t.Fatalf("frame %d: %v", frame, err)
 		}
 		next += perFrame
@@ -73,7 +43,10 @@ func TestRepeatedAwarenessFloodsDoNotGrowARoomsAwarenessWithoutLimit(t *testing.
 	waitFor(t, roomWait(t), "task A's relay to have sent what it relays of the frames", func() bool {
 		return relayedClients(pair.taskA, pair.artifactID) == 0
 	})
-	onA := trackedAwarenessClients(t, pair.taskA, pair.artifactID)
+	onA, err := pair.taskA.heldAwarenessClients(pair.artifactID)
+	if err != nil {
+		t.Fatalf("read the awareness task A's room holds: %v", err)
+	}
 	if onA > bound {
 		t.Errorf("after %d frames of %d invented awareness clients, task A's room tracks %d client entries, want at most %d: each frame grows the room by its clients until a purge two expiries later",
 			frames, perFrame, onA, bound)
@@ -82,7 +55,11 @@ func TestRepeatedAwarenessFloodsDoNotGrowARoomsAwarenessWithoutLimit(t *testing.
 	// the relay has had three seconds, sixty coalescing windows, to land.
 	var onB int
 	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
-		if onB = trackedAwarenessClients(t, pair.taskB, pair.artifactID); onB > bound {
+		onB, err = pair.taskB.heldAwarenessClients(pair.artifactID)
+		if err != nil {
+			t.Fatalf("read the awareness task B's room holds: %v", err)
+		}
+		if onB > bound {
 			break
 		}
 	}

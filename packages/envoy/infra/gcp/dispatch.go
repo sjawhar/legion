@@ -129,32 +129,38 @@ var (
 // value the consumer's program knows when it runs; the pulumi.*Input fields may come from another
 // resource or stack.
 type DispatchArgs struct {
-	Region         string             `pulumi:"region"`
-	Hostname       string             `pulumi:"hostname"`
-	TailnetDnsName string             `pulumi:"tailnetDnsName"`
-	Tags           []string           `pulumi:"tags"`
-	TailnetAuthKey pulumi.StringInput `pulumi:"tailnetAuthKey" provider:"secret"`
+	Region   string `pulumi:"region"`
+	Hostname string `pulumi:"hostname"`
+	// Every input from tailnetDnsName through signInDomain configures Dispatch itself, and is
+	// optional in the schema while the resolver is what requires it: a generated Go SDK emits a
+	// nil check in its constructor for every required input whose type can be nil, so a
+	// cluster-only consumer, which sets none of these, could not call the component at all while
+	// they stayed required. With clusterOnly off newDispatchSettings refuses each one missing, in
+	// the wording it always used; with clusterOnly on it refuses each one set.
+	TailnetDnsName string             `pulumi:"tailnetDnsName,optional"`
+	Tags           []string           `pulumi:"tags,optional"`
+	TailnetAuthKey pulumi.StringInput `pulumi:"tailnetAuthKey,optional" provider:"secret"`
 	// TailnetService is the Tailscale Service the front door's pods host, as Tailscale's API names
 	// it: svc:<hostname>, and once resolved anything else is refused. The consumer declares the
 	// Service (with an auto-approval for the tags) and passes its name output here, so the serve
 	// ConfigMap, and through it the front door's Deployment, waits for the Service: a node that
 	// advertises a Service before it exists is not approved when it appears.
-	TailnetService pulumi.StringInput `pulumi:"tailnetService"`
+	TailnetService pulumi.StringInput `pulumi:"tailnetService,optional"`
 
-	EnvoyImage         string `pulumi:"envoyImage"`
-	TailscaleImage     string `pulumi:"tailscaleImage"`
-	CloudSqlProxyImage string `pulumi:"cloudSqlProxyImage"`
+	EnvoyImage         string `pulumi:"envoyImage,optional"`
+	TailscaleImage     string `pulumi:"tailscaleImage,optional"`
+	CloudSqlProxyImage string `pulumi:"cloudSqlProxyImage,optional"`
 	// FrontDoorToolsImage is the image the front door's cert-publish container runs on, pinned by
 	// digest: it needs /bin/sh, curl, openssl 3, base64, GNU date, sed, grep and tr, which the envoy
 	// image carries. An input of its own, so a release of the app's image never rolls the front door.
-	FrontDoorToolsImage string `pulumi:"frontDoorToolsImage"`
+	FrontDoorToolsImage string `pulumi:"frontDoorToolsImage,optional"`
 
-	NatsUrl        pulumi.StringInput `pulumi:"natsUrl"`
-	NatsSeedSecret pulumi.StringInput `pulumi:"natsSeedSecret"`
+	NatsUrl        pulumi.StringInput `pulumi:"natsUrl,optional"`
+	NatsSeedSecret pulumi.StringInput `pulumi:"natsSeedSecret,optional"`
 
-	SignInClientId     string             `pulumi:"signInClientId"`
-	SignInClientSecret pulumi.StringInput `pulumi:"signInClientSecret" provider:"secret"`
-	SignInDomain       string             `pulumi:"signInDomain"`
+	SignInClientId     string             `pulumi:"signInClientId,optional"`
+	SignInClientSecret pulumi.StringInput `pulumi:"signInClientSecret,optional" provider:"secret"`
+	SignInDomain       string             `pulumi:"signInDomain,optional"`
 
 	// AgentSecretsUrl and agentSecretsAudience turn on Dispatch's secrets-broker relay together:
 	// DISPATCH_AGENT_SECRETS_URL (an absolute http(s) URL with no path; a trailing slash is
@@ -189,6 +195,17 @@ type DispatchArgs struct {
 	// (another program owns the namespace).
 	ExistingNamespace *bool `pulumi:"existingNamespace,optional"`
 
+	// ClusterOnly builds the cluster alone: the VPC, its subnetwork, the router, Cloud NAT and the
+	// Autopilot cluster, and nothing else. No Cloud SQL instance, database or user, no generated
+	// password, no Secret Manager grant, no Kubernetes provider and no Kubernetes object is
+	// registered, and the component requires no random provider. Every input that configures
+	// Dispatch rather than the cluster is refused by name, so only region, hostname and
+	// deletionProtection come with it; clusterName, kubeconfig and serviceAccountIssuer carry the
+	// cluster's own values and url, databaseInstance, principal, agentToken and
+	// serviceAccountSubject are "". A stack already running Dispatch cannot turn it on: such a
+	// stack sets the inputs this mode refuses, so the update is refused before anything is deleted.
+	ClusterOnly *bool `pulumi:"clusterOnly,optional"`
+
 	// Replicas is the app Deployment's replica count, 1 by default. Above 1 the Deployment rolls
 	// its pods instead of being recreated.
 	Replicas *int `pulumi:"replicas,optional"`
@@ -197,6 +214,25 @@ type DispatchArgs struct {
 	// Deployment is recreated at one replica and rolls above one, by its own count.
 	FrontDoorReplicas *int `pulumi:"frontDoorReplicas,optional"`
 	ListenerReplicas  *int `pulumi:"listenerReplicas,optional"`
+
+	// NatsInCluster: the app and the listener dial natsUrl directly, at an address their own
+	// cluster resolves, rather than through the front door's SOCKS5 proxy. Neither NATS client
+	// carries ENVOY_NATS_SOCKS5_PROXY then, and the component renders no SOCKS5 proxy on the front
+	// door's pods, no port-1055 Service and no ingress rule admitting the two workloads to it.
+	// Unset, the SOCKS5 path renders as it does today, for a deployment whose NATS hub is outside
+	// this cluster.
+	NatsInCluster *bool `pulumi:"natsInCluster,optional"`
+	// NatsReplicas is the number of copies JetStream keeps of every stream and bucket, from 1 to
+	// bus.MaxReplicas: ENVOY_NATS_REPLICAS on the app's and the listener's containers, which every
+	// Envoy program of a deployment carries alike. It is not replicas, the app Deployment's pod
+	// count above: more than one copy needs a clustered NATS, which no pod count gives. Unset
+	// renders nothing and both binaries keep one copy (bus.ParseNATSReplicas).
+	NatsReplicas *int `pulumi:"natsReplicas,optional"`
+	// StreamMaxBytes is the stream's byte limit, at least 1: ENVOY_STREAM_MAX_BYTES on the same two
+	// containers. A deployed limit is never lowered, so programs carrying different limits leave
+	// the largest. Unset renders nothing and both binaries set no limit, so a deployed stream keeps
+	// the one it has (bus.ParseStreamMaxBytes).
+	StreamMaxBytes *int `pulumi:"streamMaxBytes,optional"`
 
 	// AppCpu and appMemory size the app Deployment's envoy-dispatch container, as Kubernetes
 	// quantities set as both its request and its limit: 1 CPU and 4Gi by default. The pod's
@@ -367,8 +403,12 @@ type Dispatch struct {
 }
 
 // dispatchSettings are the plain inputs, validated, with the defaults applied, so they are known at
-// preview. images.tools is frontDoorToolsImage.
+// preview. images.tools is frontDoorToolsImage. With clusterOnly set only hostname, region and
+// deletionProtection are resolved: no other field is read by the cluster the mode builds.
+// natsReplicas and streamMaxBytes are 0 when their inputs are unset, where the component renders
+// neither setting.
 type dispatchSettings struct {
+	clusterOnly                                 bool
 	hostname, tailnetDNSName, region, namespace string
 	tags                                        []string
 	images                                      struct{ envoy, tailscale, proxy, tools string }
@@ -381,10 +421,22 @@ type dispatchSettings struct {
 	deletionProtection, existingNamespace       bool
 	replicas                                    int
 	frontDoorReplicas, listenerReplicas         int
+	natsInCluster                               bool
+	natsReplicas, streamMaxBytes                int
 	appResources                                dispatchAppResources
 	pprofPort                                   int
 	disruption                                  dispatchDisruption
 	azure                                       dispatchAzure
+}
+
+// socks5Proxy is the address of the front door's SOCKS5 proxy, the one the app and the listener
+// dial the NATS hub through, and "" with natsInCluster, where no proxy runs and the two dial
+// natsUrl themselves. One derivation, so the mode and the address can never disagree.
+func (s dispatchSettings) socks5Proxy() string {
+	if s.natsInCluster {
+		return ""
+	}
+	return clusterLocal(s.hostname+"-tailnet", s.namespace) + ":" + strconv.Itoa(dispatchSOCKS5Port)
 }
 
 // dispatchAzure is the Azure embedder's plain configuration, the zero value when
@@ -488,14 +540,132 @@ func dispatchStrategyFor(replicas int) dispatchStrategy {
 	}
 }
 
+// dispatchClusterOnlyInput is one row of the cluster-only refusal table: an input's schema name,
+// and whether the consumer set it. A plain string is set when it is not empty, a slice when it has
+// an element, and a pointer or a pulumi.*Input when it is not nil, as newDispatchAzure judges its
+// pointers and Inputs, so a value unknown at preview is set as it will be at update.
+type dispatchClusterOnlyInput struct {
+	input string
+	set   bool
+}
+
+// dispatchClusterOnlyRefusals is every pulumi-tagged input of DispatchArgs that configures
+// Dispatch rather than the cluster, which clusterOnly refuses by name. Only the four inputs both
+// modes use are absent: clusterOnly itself, region and hostname, which name every cloud resource,
+// and deletionProtection, which guards the cluster as well as the database.
+func dispatchClusterOnlyRefusals(args *DispatchArgs) []dispatchClusterOnlyInput {
+	return []dispatchClusterOnlyInput{
+		{"tailnetDnsName", args.TailnetDnsName != ""},
+		{"tags", len(args.Tags) > 0},
+		{"tailnetAuthKey", args.TailnetAuthKey != nil},
+		{"tailnetService", args.TailnetService != nil},
+		{"envoyImage", args.EnvoyImage != ""},
+		{"tailscaleImage", args.TailscaleImage != ""},
+		{"cloudSqlProxyImage", args.CloudSqlProxyImage != ""},
+		{"frontDoorToolsImage", args.FrontDoorToolsImage != ""},
+		{"natsUrl", args.NatsUrl != nil},
+		{"natsSeedSecret", args.NatsSeedSecret != nil},
+		{"signInClientId", args.SignInClientId != ""},
+		{"signInClientSecret", args.SignInClientSecret != nil},
+		{"signInDomain", args.SignInDomain != ""},
+		{"agentSecretsUrl", args.AgentSecretsUrl != ""},
+		{"agentSecretsAudience", args.AgentSecretsAudience != ""},
+		{"appClientId", args.AppClientId != ""},
+		{"appId", args.AppId != ""},
+		{"appPrivateKeySecretName", args.AppPrivateKeySecretName != ""},
+		{"appPrivateKeySecretKey", args.AppPrivateKeySecretKey != ""},
+		{"databaseVersion", args.DatabaseVersion != nil},
+		{"databaseTier", args.DatabaseTier != nil},
+		{"databaseAvailabilityType", args.DatabaseAvailabilityType != nil},
+		{"namespace", args.Namespace != nil},
+		{"existingNamespace", args.ExistingNamespace != nil},
+		{"replicas", args.Replicas != nil},
+		{"frontDoorReplicas", args.FrontDoorReplicas != nil},
+		{"listenerReplicas", args.ListenerReplicas != nil},
+		{"natsInCluster", args.NatsInCluster != nil},
+		{"natsReplicas", args.NatsReplicas != nil},
+		{"streamMaxBytes", args.StreamMaxBytes != nil},
+		{"appCpu", args.AppCpu != nil},
+		{"appMemory", args.AppMemory != nil},
+		{"proxyCpu", args.ProxyCpu != nil},
+		{"proxyMemory", args.ProxyMemory != nil},
+		{"appEphemeralStorage", args.AppEphemeralStorage != nil},
+		{"proxyEphemeralStorage", args.ProxyEphemeralStorage != nil},
+		{"pprofPort", args.PprofPort != nil},
+		{"priorityClassName", args.PriorityClassName != nil},
+		{"appPdbMinAvailable", args.AppPdbMinAvailable != nil},
+		{"frontDoorPdbMinAvailable", args.FrontDoorPdbMinAvailable != nil},
+		{"listenerPdbMinAvailable", args.ListenerPdbMinAvailable != nil},
+		{"allowedNamespaces", len(args.AllowedNamespaces) > 0},
+		{"azureEmbedEndpoint", args.AzureEmbedEndpoint != nil},
+		{"azureEmbedDeployment", args.AzureEmbedDeployment != nil},
+		{"azureEmbedTokensPerMinute", args.AzureEmbedTokensPerMinute != nil},
+		{"azureEmbedKeySecret", args.AzureEmbedKeySecret != nil},
+		{"azureTenantId", args.AzureTenantId != nil},
+		{"azureClientId", args.AzureClientId != nil},
+		{"azureFederationAudience", args.AzureFederationAudience != nil},
+	}
+}
+
+// refuseDispatchHostname refuses a hostname that is not hostnameRule's shape. Both resolvers run
+// it, so a cluster-only component holds its hostname, which names every cloud resource, to the
+// rule the full resolver holds it to, with the same refusal.
+func refuseDispatchHostname(hostname string) error {
+	if !hostnameRule.MatchString(hostname) {
+		return fmt.Errorf("hostname %q must match %s", hostname, hostnameRule)
+	}
+	return nil
+}
+
+// refuseDispatchRegion refuses an unset region, which both modes need: it is the location of the
+// cluster and of every resource around it.
+func refuseDispatchRegion(region string) error {
+	if region == "" {
+		return errors.New("region is required")
+	}
+	return nil
+}
+
+// dispatchDeletionProtection resolves deletionProtection, true when the consumer sets nothing. It
+// guards the cluster as well as the database, so both resolvers default it the same way.
+func dispatchDeletionProtection(value *bool) bool {
+	if value == nil {
+		return true
+	}
+	return *value
+}
+
+// newDispatchClusterOnlySettings resolves the inputs clusterOnly leaves live, hostname, region and
+// deletionProtection, each as the full resolver resolves it, and refuses every input that
+// configures Dispatch, which this mode does not build. It validates nothing else and applies no
+// other default: no other value reaches a resource here.
+func newDispatchClusterOnlySettings(args *DispatchArgs) (dispatchSettings, error) {
+	if err := refuseDispatchHostname(args.Hostname); err != nil {
+		return dispatchSettings{}, err
+	}
+	if err := refuseDispatchRegion(args.Region); err != nil {
+		return dispatchSettings{}, err
+	}
+	s := dispatchSettings{clusterOnly: true, hostname: args.Hostname, region: args.Region, deletionProtection: dispatchDeletionProtection(args.DeletionProtection)}
+	for _, in := range dispatchClusterOnlyRefusals(args) {
+		if in.set {
+			return dispatchSettings{}, fmt.Errorf("%s configures Dispatch, which clusterOnly does not build: unset it, or unset clusterOnly", in.input)
+		}
+	}
+	return s, nil
+}
+
 // newDispatchSettings validates the component's plain inputs and renders the values known before
 // any cloud resource is registered. Every refusal names the input that needs correction.
 func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	if input, ok := dispatchSeededInput(args); ok {
 		return dispatchSettings{}, core.SeedRefusal(input)
 	}
-	if !hostnameRule.MatchString(args.Hostname) {
-		return dispatchSettings{}, fmt.Errorf("hostname %q must match %s", args.Hostname, hostnameRule)
+	if args.ClusterOnly != nil && *args.ClusterOnly {
+		return newDispatchClusterOnlySettings(args)
+	}
+	if err := refuseDispatchHostname(args.Hostname); err != nil {
+		return dispatchSettings{}, err
 	}
 	if !tailnetDNSNameRule.MatchString(args.TailnetDnsName) {
 		return dispatchSettings{}, fmt.Errorf("tailnetDnsName %q must match %s", args.TailnetDnsName, tailnetDNSNameRule)
@@ -518,8 +688,8 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 			return dispatchSettings{}, fmt.Errorf("%s %q must be pinned by digest, as <name>@sha256:<64 lowercase hex digits>", image.field, image.ref)
 		}
 	}
-	if args.Region == "" {
-		return dispatchSettings{}, errors.New("region is required")
+	if err := refuseDispatchRegion(args.Region); err != nil {
+		return dispatchSettings{}, err
 	}
 	if args.SignInClientId == "" {
 		return dispatchSettings{}, errors.New("signInClientId is required")
@@ -596,14 +766,13 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	}
 
 	s := dispatchSettings{
-		hostname:           args.Hostname,
-		tailnetDNSName:     args.TailnetDnsName,
-		region:             args.Region,
-		tags:               args.Tags,
-		databaseVersion:    defaultDispatchDatabaseVersion,
-		databaseTier:       defaultDispatchDatabaseTier,
-		deletionProtection: true,
-		namespace:          defaultDispatchNamespace,
+		hostname:        args.Hostname,
+		tailnetDNSName:  args.TailnetDnsName,
+		region:          args.Region,
+		tags:            args.Tags,
+		databaseVersion: defaultDispatchDatabaseVersion,
+		databaseTier:    defaultDispatchDatabaseTier,
+		namespace:       defaultDispatchNamespace,
 	}
 	s.images.envoy = args.EnvoyImage
 	s.images.tailscale = args.TailscaleImage
@@ -640,9 +809,7 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 				availability, dispatchAvailabilityZonal, dispatchAvailabilityRegional, dispatchAvailabilityZonal)
 		}
 	}
-	if args.DeletionProtection != nil {
-		s.deletionProtection = *args.DeletionProtection
-	}
+	s.deletionProtection = dispatchDeletionProtection(args.DeletionProtection)
 	if s.replicas, err = dispatchReplicas("replicas", args.Replicas, defaultDispatchReplicas); err != nil {
 		return dispatchSettings{}, err
 	}
@@ -651,6 +818,26 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	}
 	if s.listenerReplicas, err = dispatchReplicas("listenerReplicas", args.ListenerReplicas, defaultDispatchListenerReplicas); err != nil {
 		return dispatchSettings{}, err
+	}
+	s.natsInCluster = args.NatsInCluster != nil && *args.NatsInCluster
+	// The two deployment settings both NATS clients carry, each unset (0) rendering nothing: the
+	// binaries then keep one copy and set no byte limit (bus.ParseNATSReplicas,
+	// bus.ParseStreamMaxBytes).
+	if args.NatsReplicas != nil {
+		replicas := *args.NatsReplicas
+		switch {
+		case replicas < 1:
+			return dispatchSettings{}, core.InputErrorf("natsReplicas", "natsReplicas %d is below 1; leave it unset for one copy", replicas)
+		case replicas > bus.MaxReplicas:
+			return dispatchSettings{}, core.InputErrorf("natsReplicas", "natsReplicas %d is above %d, the most copies NATS keeps", replicas, bus.MaxReplicas)
+		}
+		s.natsReplicas = replicas
+	}
+	if args.StreamMaxBytes != nil {
+		if limit := *args.StreamMaxBytes; limit < 1 {
+			return dispatchSettings{}, core.InputErrorf("streamMaxBytes", "streamMaxBytes %d is below 1; leave it unset for no limit", limit)
+		}
+		s.streamMaxBytes = *args.StreamMaxBytes
 	}
 	if s.appResources, err = newDispatchAppResources(args); err != nil {
 		return dispatchSettings{}, err
@@ -993,29 +1180,46 @@ func NewDispatch(ctx *pulumi.Context, name string, args *DispatchArgs, opts ...p
 	if err := providers.Require(ctx.Context(), dispatchType, "gcp", opts...); err != nil {
 		return nil, err
 	}
-	if err := providers.Require(ctx.Context(), dispatchType, "random", opts...); err != nil {
-		return nil, err
+	// clusterOnly registers no RandomPassword, so it requires no random provider: a cluster-only
+	// program would otherwise have to declare one it never uses.
+	if !s.clusterOnly {
+		if err := providers.Require(ctx.Context(), dispatchType, "random", opts...); err != nil {
+			return nil, err
+		}
 	}
 
 	comp := &Dispatch{}
 	if err := ctx.RegisterComponentResource(dispatchType, name, comp, opts...); err != nil {
 		return nil, err
 	}
-	cloud, err := newDispatchCloud(ctx, comp, name, args, s, opts...)
+	cloud, err := newDispatchCluster(ctx, comp, name, s, opts...)
 	if err != nil {
 		return nil, err
 	}
-	kube, err := newDispatchKubernetes(ctx, comp, name, args, s, cloud)
-	if err != nil {
-		return nil, err
-	}
+	// The three outputs the cluster alone decides, which both modes carry.
 	comp.ClusterName = cloud.cluster.Name
-	comp.DatabaseInstance = cloud.instance.ConnectionName
-	comp.Kubeconfig = kube.kubeconfig
-	comp.Principal = cloud.principal
-	comp.AgentToken = cloud.agentToken.Result
-	comp.Url = pulumi.String("https://" + core.TailnetHostName(s.hostname, s.tailnetDNSName)).ToStringOutput()
+	comp.Kubeconfig = cloud.kubeconfig
 	comp.ServiceAccountIssuer = cloud.issuer
+	if s.clusterOnly {
+		// The five outputs Dispatch would decide are an explicit empty string: an output field
+		// left unset awaits as unknown, which is one value in preview and another in update,
+		// while "" is the same in both and is what a consumer already reads as "not applied".
+		empty := pulumi.String("").ToStringOutput()
+		comp.Url, comp.DatabaseInstance, comp.Principal = empty, empty, empty
+		comp.AgentToken, comp.ServiceAccountSubject = empty, empty
+		return comp, nil
+	}
+	database, err := newDispatchDatabase(ctx, comp, name, args, s, cloud)
+	if err != nil {
+		return nil, err
+	}
+	if err := newDispatchKubernetes(ctx, comp, name, args, s, cloud, database); err != nil {
+		return nil, err
+	}
+	comp.DatabaseInstance = database.instance.ConnectionName
+	comp.Principal = database.principal
+	comp.AgentToken = database.agentToken.Result
+	comp.Url = pulumi.String("https://" + core.TailnetHostName(s.hostname, s.tailnetDNSName)).ToStringOutput()
 	// The app's and the listener's pods run as ServiceAccount <hostname> in the component's
 	// namespace, the account newDispatchKubernetes registers, and Kubernetes names a token's subject
 	// after it. The front door's pods run as <hostname>-tailnet, which this subject never names.

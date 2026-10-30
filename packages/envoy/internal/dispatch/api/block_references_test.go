@@ -451,8 +451,9 @@ func requireReferenceNotFound(t *testing.T, handler http.Handler, query url.Valu
 }
 
 // A1: a comment that cites a block is listed on the block alone, and on its document as a link
-// at that block; read from the comment, its one link is the block. The document's blocks are
-// part_of it, an edge its read lists only when asked for.
+// at that block; read from the comment, its one link is the block. Each is listed from the
+// comment's block holding the link (R7). The document's blocks are part_of it, an edge its read
+// lists only when asked for.
 func TestReferencesToABlockListOnlyLinksNamingIt(t *testing.T) {
 	handler, database := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
@@ -478,19 +479,19 @@ func TestReferencesToABlockListOnlyLinksNamingIt(t *testing.T) {
 	if !reflect.DeepEqual(toBlock.Node, wantNode) {
 		t.Fatalf("block node = %#v, want %#v", toBlock.Node, wantNode)
 	}
-	if len(toBlock.Edges) != 1 || toBlock.Edges[0].Kind != "mentions" || toBlock.Edges[0].Node.Kind != "comment" || toBlock.Edges[0].Node.ID != citesBlock.ID {
-		t.Fatalf("links to the block = %#v, want comment %s's mention alone", toBlock.Edges, citesBlock.ID)
+	if len(toBlock.Edges) != 1 || toBlock.Edges[0].Kind != "mentions" || !blockOf(toBlock.Edges[0].Node, "comment", citesBlock.ID) {
+		t.Fatalf("links to the block = %#v, want comment %s's mention alone, from its block", toBlock.Edges, citesBlock.ID)
 	}
 
 	toSpec := graphEdges(t, handler, url.Values{"to": {specRef}})
 	atBlock := map[string]string{}
 	for _, edge := range toSpec.Edges {
-		if edge.Kind != "mentions" || edge.Node.Kind != "comment" {
-			t.Fatalf("links to the spec = %#v, want the two comments' mentions alone, no part_of", toSpec.Edges)
+		if edge.Kind != "mentions" || edge.Node.Kind != "block" || edge.Node.Parent == nil || edge.Node.Parent.Kind != "comment" {
+			t.Fatalf("links to the spec = %#v, want the two comments' mentions alone, each from its block, no part_of", toSpec.Edges)
 		}
-		atBlock[edge.Node.ID] = ""
+		atBlock[edge.Node.Parent.ID] = ""
 		if edge.Block != nil {
-			atBlock[edge.Node.ID] = edge.Block.BlockID
+			atBlock[edge.Node.Parent.ID] = edge.Block.BlockID
 		}
 	}
 	if want := map[string]string{citesBlock.ID: "ship_it", citesSpec.ID: ""}; len(toSpec.Edges) != 2 || !reflect.DeepEqual(atBlock, want) {
@@ -525,8 +526,8 @@ func TestReferencesToADeletedBlockAnswer404AndReturnWithTheBlock(t *testing.T) {
 
 	editSpec(t, handler, issue.Key, []map[string]any{{"op": "insert", "markdown": shipIt("Ship it."), "before": "Other paragraph."}})
 	edges := graphEdges(t, handler, url.Values{"to": {blockRef}}).Edges
-	if len(edges) != 1 || edges[0].Node.Kind != "comment" || edges[0].Node.ID != comment.ID {
-		t.Fatalf("links to the restored block = %#v, want comment %s's mention again", edges, comment.ID)
+	if len(edges) != 1 || !blockOf(edges[0].Node, "comment", comment.ID) {
+		t.Fatalf("links to the restored block = %#v, want comment %s's mention again, from its block", edges, comment.ID)
 	}
 }
 
@@ -787,8 +788,8 @@ func TestAPinnedReferenceShowsItsVersionsText(t *testing.T) {
 		t.Fatalf("pinned node = %#v, want changed in version %d with its current text", pinned.Node, version.Number)
 	}
 	for _, read := range []model.GraphReferences{unpinned, pinned} {
-		if len(read.Edges) != 1 || read.Edges[0].Node.ID != comment.ID {
-			t.Fatalf("links to %s = %#v, want the comment's one mention", read.Node.Ref, read.Edges)
+		if len(read.Edges) != 1 || !blockOf(read.Edges[0].Node, "comment", comment.ID) {
+			t.Fatalf("links to %s = %#v, want the comment's one mention, from its block", read.Node.Ref, read.Edges)
 		}
 	}
 
@@ -941,7 +942,7 @@ func TestABlockReferenceAtTheTargetBoundIsWrittenAndRead(t *testing.T) {
 	edges := graphEdges(t, handler, url.Values{"to": {block}}).Edges
 	var fromComment, fromCiter bool
 	for _, edge := range edges {
-		fromComment = fromComment || edge.Node.Kind == "comment" && edge.Node.ID == comment.ID
+		fromComment = fromComment || blockOf(edge.Node, "comment", comment.ID)
 		fromCiter = fromCiter || edge.Node.Kind == "block" && edge.Node.Document == citerRef
 	}
 	if len(edges) != 2 || !fromComment || !fromCiter {

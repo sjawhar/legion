@@ -28,7 +28,7 @@ import (
 // it. Only a room whose stored history was replaced under it - a rebuild, a prune, a compaction
 // that folded the rows it stands on - is closed and reloaded. The tests here run the catch-up over
 // two services on one database, as production's two tasks are (processPair,
-// room_behind_head_test.go).
+// process_pair_test.go).
 
 // catchUpNotes is what a service's catch-up reports while a test watches it: decided, one artifact
 // id per notification decided on the lane, and reads, one per catch-up read.
