@@ -2,38 +2,25 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-745",
-  "completed": "2026-10-29T22:45:00Z",
-  "round": 2,
-  "decision": "changes_requested",
-  "reviewedCodeHead": "954e01a2c4e9dfb732766a105dcb26fedb386187",
-  "fingerprint": "d8bd6568 b09fe4f9... -> ac2d8870 35560573...: changed (packages/envoy/AGENTS.md send/publish rows, packages/envoy/docs/architecture.md), so a new round with the thermonuclear pair again",
+  "completed": "2026-10-30T06:10:00Z",
+  "round": 3,
+  "decision": "approved",
+  "reviewedCodeHead": "7ad8cb615d0328a3ef3a9dd255817b4d6f2bcbb4",
   "critical": 0,
-  "important": 3,
+  "important": 0,
   "minor": 0,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/infra/core/dispatch_permissions_live_test.go:317",
-      "description": "The PR's own live test is red at the merge head (envoy-infra-go, job 123735869041, both 2.10 and hub): requireCommentQuietPublished's POST /api/v1/issues with title \"quiet example\" is refused 409 POSSIBLE_DUPLICATE of ACME-1 \"example\", which requireIssueEventPublished created first. Main's related-item check (#2397, internal/dispatch/api/issue_create.go:205-216) arrived with the forward merge. Fix: send \"force\":true in that create (issue_create.go:196), or a title that shares no term with the earlier issue, and run the lane."
-    },
-    {
-      "severity": "important",
-      "file": ".github/workflows/ci.yaml (the changes job's filters)",
-      "description": "ci-filters is red (job 123735869153): cmd/dispatch now imports internal/metrics, so docs, dispatch, dispatch-browser-multiprocess, dispatch-memory and dispatch-multiprocess read packages/envoy/internal/metrics/metrics.go, which none of their filters match, and a change to it would skip them. Fix: add the path to those filters, as .github/scripts/check-ci-filters.sh asks."
-    },
-    {
-      "severity": "important",
-      "file": "skills/dispatch/SKILL.md:48",
-      "description": "pi-envoy is red (job 123735869279): packages/pi-envoy/src/skills-guard.test.ts:100 wants the three Dispatch skills under 2,000 words. Main has 1999, and this head has 2016: the clause this PR adds to skills/dispatch/SKILL.md:48 crosses it. Fix: bring the three skills back under 2,000 words, by cutting at least 17 words from that clause or as many elsewhere in them."
-    }
+  "keyFindings": [],
+  "roundTwoFindings": [
+    "envoy-infra-go live test 409 POSSIBLE_DUPLICATE: fixed in e09361f8 (force:true); envoy-infra-go green at 1b8ecc25 and at 7ad8cb61.",
+    "ci-filters missing packages/envoy/internal/metrics: fixed in e09361f8 (ci.yaml dispatch_server, dispatch_command_tests; docs-pages.yaml); ci-filters green at 1b8ecc25.",
+    "Dispatch skills over 2,000 words: fixed in e09361f8 and cc7413c4; pi-envoy green at 1b8ecc25 and at 7ad8cb61 (1,998 words)."
   ],
-  "notAttributed": [
-    "envoy-go-race (job 123735868902): internal/dispatch/docs hit the 30 m package timeout (the running test had run 0 s), in a package this PR does not change. It is not judged a finding here; read it again at the next head."
-  ],
+  "forwardMerge": "1b8ecc25 merges main 61e55841. One conflict, the /v1/messages/publish row of packages/envoy/AGENTS.md, resolved by keeping main's holder_lapsed text and re-applying this PR's denial wording; the send row stands whole. Checked against diff-check comment 6511182862 and by both audits.",
   "proseFixes": [
-    "8ebb15fb and 954e01a2 (reviewer): the deniedPublishes field comment and install's comment in internal/bus/nats.go and clearPublishDenials' doc in denials.go now say that only a reconnect clears the record, that install finds it empty, and what covers ensureConnWithContext's replacement; two comments in internal/dispatch/outbox/core_denied_test.go name the per-subject record; packages/envoy/docs/architecture.md's send table carries the 403 for a denied publish, which is no longer one of the publish route's own refusals; cmd/dispatch/main.go and the metric's changelog fragment say /metrics is readable by whoever reaches Dispatch's HTTP port."
+    "7ad8cb61 (reviewer): the live test's force comment names the real cause (the shared title word, duplicateCandidates); skills/dispatch keeps 'retry in a few seconds' at 1,998 words; GET /metrics documented in packages/envoy/cmd/dispatch/README.md (route row, no access-log line) and docs/site running-dispatch.md."
   ],
-  "thermonuclear": "Round 2 pair at 8ebb15fb: deep-review approve, no critical or important, 3 minor (stale test comments, install's dead clear and comment, /metrics reach), all prose and fixed in 954e01a2; code-quality 1 important (architecture.md send table had no 403 row) and 1 minor (install's clear), prose, fixed in 954e01a2. Neither read CI.",
-  "threads": "PRRT_kwDORFy7ds6xtlYL (round 1, the listener docs): fixed in 91610e26 and 528d0fc9; I replied and accepted it, and the implementer resolved it. No other thread.",
-  "ci": "CI run 40952537039 at 954e01a2: required lint, typecheck, test, pr-title green; red: envoy-infra-go, ci-filters, pi-envoy (findings above) and envoy-go-race (not attributed); dispatch and dispatch-memory were still running at the read."
+  "thermonuclear": "Round-3 pair at 7838d2af (code 1b8ecc25): deep-review approve, no critical or important, 2 minor (the force comment's cause, /metrics undocumented); code-quality no critical or important, 2 minor (the force comment, 'retry shortly'). All four are prose, fixed in 7ad8cb61. Neither found any interaction with main's 17 commits.",
+  "threads": "All four threads answered by me and resolved by the implementer: PRRT_kwDORFy7ds6xtlYL, PRRT_kwDORFy7ds6xx8BJ, PRRT_kwDORFy7ds6xx8BS, PRRT_kwDORFy7ds6xx8BY.",
+  "ci": "At code head 1b8ecc25 (run 40975023646): every lane green except envoy-go-race (internal/dispatch/docs 30 m package timeout, TestAnUploadOfTheDocumentsOwnMarkdownKeepsAsksOverSpannedTables; a package this PR does not change, main's, as the architect ruled) and ci-ok cancelled. At the prose head 7ad8cb61: required lint, typecheck, test, pr-title green, and the lanes the prose touches (pi-envoy, envoy-infra-go, docs) green, as are envoy-go-race, envoy-go-race-docs, envoy-client, contracts; envoy-go, listener-server-change, dispatch, dispatch-memory, dispatch-multiprocess, ci-filters, envoy-session-stall still queued or running at 06:06Z, all green at 1b8ecc25 and untouched by a comment-and-docs commit.",
+  "e2eLines": "E2E (implementer) rounds 1-5 and E2E (tester) round 6 PASS at c2a7fe6b are present."
 }
