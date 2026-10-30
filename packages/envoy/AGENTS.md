@@ -2094,8 +2094,8 @@ of either length paired, a run after any `~` refused, every run in one loop; `fl
 the same with flanking alone), and failing that under the first two, and failing that under
 that parser's alone (`inlineWithEscapes`), so wherever the bytes the writer before
 sjawhar/legion#2360 wrote read back as that parser reads them they stay: the one rule is that the
-writer keeps the earliest spelling of the greatest read-back prefix depth under `readBackReaders`
-(`inlineWithEscapes`, `readsBackUnder`). A text
+writer keeps the earliest spelling of the greatest read-back prefix depth under those three readers
+(`inlineWithEscapes`, `readsBackUnder`, `readBackReaderCount`). A text
 `!` written right before a link's `[` is written `\!`, since `![` opens an image
 (`needsInlineEscape`'s `beforeLabel`).
 A code block whose language holds a backtick is fenced with tildes, since a backtick fence's info
