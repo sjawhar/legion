@@ -5,7 +5,6 @@ import type { SessionAnswer } from "@legion/contracts";
 import { DISPATCH_FIRST_MARKER } from "@legion/envoy-client/dispatch-first";
 import {
   isSessionAnswersText,
-  NO_ANSWERS_ROUTE_REASON,
   renderSessionAnswers,
   SESSION_ANSWERS_DEADLINE_MS,
   sessionAnswersFailureLine,
@@ -723,7 +722,7 @@ test.skipIf(skipped)(
 );
 
 test.skipIf(skipped)(
-  "(g) a Dispatch with no answers route: the failure line, and no answers request on the next turn",
+  "(g) a Dispatch with no answers route: no line on the request, and no answers request on the next turn",
   async () => {
     const session = await runSession(binary(), [
       { route: { kind: "missing" } },
@@ -733,9 +732,13 @@ test.skipIf(skipped)(
 
     const [first, second, ...rest] = session.turns;
     expect(rest).toEqual([]);
-    const failure = sessionAnswersFailureLine(NO_ANSWERS_ROUTE_REASON);
-    expect(listOf(first as Seen)).toBe(failure);
-    expect(listOf(second as Seen)).toBe(failure);
+    // `dispatch answers` fails against that Dispatch too, so neither request names it.
+    for (const turn of [first as Seen, second as Seen]) {
+      expect(carriesList(turn)).toBe(false);
+      expect(JSON.stringify(messagesOf(turn))).not.toContain("dispatch answers");
+    }
+    expect(textOf(messagesOf(first as Seen).at(-1))).toContain("First question.");
+    expect(textOf(messagesOf(second as Seen).at(-1))).toContain("Second question.");
     expect(session.answers).toHaveLength(1);
     expect((session.answers[0] as Seen).at).toBeLessThan((first as Seen).at);
   },

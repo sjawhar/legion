@@ -42,9 +42,14 @@ export interface ResultEntry {
    * file or arguments differ: refused in `block` mode (`error` holds the refusal); in `warn` mode a
    * line of its own, with neither `details` nor `error`, written before the write is sent, and the
    * result's own line after it. pi-envoy turns each into an `advisor-gate` entry, so the report
-   * counts it.
+   * counts it. `asksCarried` is how many asks for a person the write's own text carries, which
+   * pi-envoy records on Dispatch; the line carries that count and never the ask text.
    */
-  readonly askgate?: { readonly mode: "warn" | "block"; readonly why: string };
+  readonly askgate?: {
+    readonly mode: "warn" | "block";
+    readonly why: string;
+    readonly asksCarried?: number;
+  };
 }
 
 interface SessionMemory {

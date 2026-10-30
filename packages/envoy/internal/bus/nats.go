@@ -93,9 +93,10 @@ func WithPublishAcknowledgementClock(clock AcknowledgementClock) ConnectOption {
 	return clientOption(func(o *connectOpts) { o.publishAcknowledgementClock = clock })
 }
 
-// WithReconnectErrClock overrides the clock that throttles the warning a failed reconnect attempt
-// logs (reconnectErrThrottle), so a test can see a minute pass without waiting one. nil, the
-// default, is time.Now.
+// WithReconnectErrClock overrides the clock the bus reads for the time-based parts of its
+// reconnect reporting: the throttle of the warning a failed reconnect attempt logs
+// (reconnectErrThrottle) and the stall HookStall reports, so a test can see a minute pass without
+// waiting one. nil, the default, is time.Now.
 func WithReconnectErrClock(now func() time.Time) DialOption {
 	return func(o *connectOpts) { o.reconnectErrClock = now }
 }
@@ -284,6 +285,14 @@ type Client struct {
 	// two differ.
 	connEvents   uint64
 	hookedEvents uint64
+	// hooksDueSince is when the oldest connection event the hooks have not covered was counted,
+	// under mu, and the zero time while the hooks are current: a second event that lands while they
+	// are already due keeps the first one's time, since the stall HookStall reports is how long the
+	// state behind the hooks, a KV cache among it, has been off its buckets, not how long the last
+	// event has waited. lastHookErr is the error of the last run that failed, so the stall is
+	// reported with the reason for it.
+	hooksDueSince time.Time
+	lastHookErr   error
 	// drainedReconnects is how many times c.Conn had reconnected in place when Drain stopped the
 	// client, set under mu in the step that stops it, so a reconnect callback can tell a reconnect
 	// before the drain from one during it (closeStopped). Once the client is stopped c.Conn never
@@ -521,15 +530,62 @@ func (c *Client) Connected() bool {
 }
 
 // HookedConnectionEvents is how many connection events this client's reconnect hooks have run to
-// completion for, counted as rewatch records a run that succeeded. It is state about the client's
-// own hooks, for a test that must wait for them and for nothing else. A hook a caller adds after
-// the constructor returns can miss the first connection event, because a run of the hooks copies
-// the list at its start (runReconnectHooks). ConnectOwningStream registers its reconcile hook
-// inside the constructor, before a caller can add one, so this count covers that reconcile.
+// completion for: the count the last run that succeeded began at (rewatch). It is state about the
+// client's own hooks, for a test that must wait for them and for nothing else. A hook a caller
+// adds after the constructor returns can miss the first connection event, because a run of the
+// hooks copies the list at its start (runReconnectHooks). ConnectOwningStream registers its
+// reconcile hook inside the constructor, before a caller can add one, so this count covers that
+// reconcile.
 func (c *Client) HookedConnectionEvents() uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.hookedEvents
+}
+
+// RepairGrace is how long the reconnect hooks may be uncovered before a failed run of them is an
+// operator's business. A failure under it is run again by the recovery within seconds
+// (recoverUntilHealthy), so it is reported at WARN; at or past it the hooks have still not covered
+// their connection event, the state behind them is stale, and the report is an ERROR.
+// internal/kvwatch waits the same constant for a repair of a watcher that stopped before it
+// reports it, so both halves of the same outage report at the same minute.
+const RepairGrace = time.Minute
+
+// HookStall reports how long the reconnect hooks have been due without a run that succeeded, zero
+// while none is due, and the error of the last run that failed. That error is nil when no run has
+// failed since the last run that succeeded (rewatch clears it on every success, even one a
+// connection event overtook), so a caller can read a stall with no error behind it, which
+// cmd/listener's /healthz reports as the stall alone. That handler is a reader, as
+// reportHookFailure is, so this takes the client's state under mu and touches no connection, as
+// Connected and SubOK do.
+func (c *Client) HookStall() (time.Duration, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.hooksDueSince.IsZero() {
+		return 0, nil
+	}
+	// A clock a test moves itself can stand before the event it timed, and a wall clock can step
+	// back, so the stall never reads as a negative duration.
+	return max(c.now().Sub(c.hooksDueSince), 0), c.lastHookErr
+}
+
+// now reads the clock the client takes for its reconnect reporting (WithReconnectErrClock),
+// time.Now when it took none.
+func (c *Client) now() time.Time {
+	if c.reconnectErrClock == nil {
+		return time.Now()
+	}
+	return c.reconnectErrClock()
+}
+
+// markHooksDueLocked counts a connection event the reconnect hooks have yet to cover, under mu,
+// and starts the stall at it when the hooks were current. An event that lands while they are
+// already due leaves the stall where it is: it is the first uncovered event that says how long the
+// hooks' state has been stale.
+func (c *Client) markHooksDueLocked() {
+	c.connEvents++
+	if c.hooksDueSince.IsZero() {
+		c.hooksDueSince = c.now()
+	}
 }
 
 // Subscribe creates the client's recoverable JetStream subscription. The client keeps one
@@ -1043,7 +1099,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 		}
 		c.Conn = nc
 		c.js = js
-		c.connEvents++
+		c.markHooksDueLocked()
 		c.mu.Unlock()
 		return nil
 	}

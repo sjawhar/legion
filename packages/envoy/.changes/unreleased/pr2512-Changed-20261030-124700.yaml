@@ -1,0 +1,16 @@
+kind: Changed
+body: |-
+    Every container image this package builds from or starts now comes from
+    `ghcr.io/sjawhar/legion/ci`, one package this repository publishes, named by digest: the
+    listener image's web, build and runtime stages (`docker/Dockerfile`), the held-port wrapper's
+    build stage (`infra/host/heldportwrapper/Dockerfile`), and the servers the Go test helpers
+    start (`internal/testpg`'s pgvector, `internal/testnats`'s NATS and NATS hub,
+    `internal/tests3`'s SeaweedFS). `.github/ci-images.yaml` holds one row per image, and
+    `.github/scripts/mirror-ci-images.sh` copies the rows the package does not hold yet with
+    `crane copy`, which keeps the digest, so each copy's digest is its upstream's. No build or
+    test of this package reads a third-party registry, and a failed pull is this repository's own
+    fault. The developer scripts under `scripts/`, which fetch nothing in CI, and the compose files
+    under `deploy/compose/`, which no CI job runs, still name Google's mirror.
+time: 2026-10-30T12:47:00.376127734Z
+custom:
+    Issue: pr2512
