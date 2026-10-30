@@ -13,8 +13,8 @@ import (
 // anchor->>'artifact_id') and the issue's event log, whose ask payloads are hydrated by the same
 // join (attachAskDocumentArtifacts). An artifact_id that is not a uuid at all answered 500 for
 // the whole route before store.CastableUUID's guard; one stored as a JSON number also has to
-// decode, which model.Anchor reads as an anchor naming no document rather than failing on a
-// number where it holds a string. Both asks below carry block_artifact_id too, the shape
+// decode, which model.DecodeAnchor reads as an anchor naming no document rather than failing on
+// a number where it holds a string. Both asks below carry block_artifact_id too, the shape
 // asks_anchor_artifact (0032) never cast, which is how an earlier release could leave such a
 // value stored.
 func TestAskRoutesAnswerOverAnAnchorArtifactIDThatNamesNoDocument(t *testing.T) {

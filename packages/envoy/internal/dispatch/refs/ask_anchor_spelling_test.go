@@ -11,7 +11,7 @@ import (
 
 // An anchor artifact_id that spells the spec's id in upper case, or inside braces, still casts to
 // the spec's uuid, so the ask node keeps the spec as its parent, as it did before the guard: only
-// an artifact_id that cannot cast reads as an ask belonging to its issue.
+// an artifact_id that cannot cast falls through to the ask's block document.
 func TestAskNodeKeepsTheDocumentAnUpperCaseOrBracedAnchorNames(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()
