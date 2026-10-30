@@ -115,6 +115,11 @@ type Claim struct {
 	// its delivery and whose next turn an Envoy notice starts with no delivery behind it. Zero is
 	// a claim that has retired no confirmed task of a run.
 	ServingGeneration uint64
+	// ServingAssignmentID is the assignment of the last confirmed delivery this claim retired, the
+	// assignment side of ServingGeneration: what ServingAssignment answers with once no delivery
+	// backs the worker's turn. Empty is a claim that has retired no confirmed task of an
+	// assignment, which every claim of a daemon upgraded in place is until its role's next start.
+	ServingAssignmentID string
 	// LastStartRow is the outbox row id of the newest start run against this claim, and 0 for one
 	// no start has run for. A stop from an older row is one the newer start superseded: it was
 	// written to end a run that is over, and acting on it would stop the run that start began.
@@ -642,6 +647,28 @@ func (c Claim) ServingRun() uint64 {
 		return p.Generation
 	}
 	return c.ServingGeneration
+}
+
+// ServingAssignment is the assignment of the task this claim's worker took, and "" for a claim
+// that has taken none that carried one. It reads the same three sources as ServingRun, in the
+// same order and for the same reasons — the task whose turn is running, then the assignment the
+// claim is left serving, then, for a claim serving none, a first task the agent may have read —
+// and is the finer of the two: every phase entry of one run carries that run, where each entry
+// that hands this role a task carries an assignment of its own. A task of no assignment answers
+// for none of them: an operator's own, a resume, a production check's look, and every task a
+// daemon older than the assignment delivered.
+func (c Claim) ServingAssignment() string {
+	p := c.Pending
+	if p == nil || p.Assignment == "" {
+		return c.ServingAssignmentID
+	}
+	if !p.ConfirmedAt.IsZero() {
+		return p.Assignment
+	}
+	if c.ServingAssignmentID == "" && !p.DeliveredAt.IsZero() {
+		return p.Assignment
+	}
+	return c.ServingAssignmentID
 }
 
 // Claim is a copy of the claim as the machine holds it now. It waits for the decision in flight,

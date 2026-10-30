@@ -236,6 +236,12 @@ type RequestDeliver struct {
 	// Generation is the issue generation the task belongs to, and is what a completion reported
 	// for it is attributed to. An operator's own task names none.
 	Generation uint64
+	// Assignment is the task the issue's current phase hands the role, which the workflow minted
+	// for the start that queued this delivery (record.SuperviseRequest.Assignment). A completion is
+	// held to it as well as to the run, since every phase entry of one run carries that run. A task
+	// of no assignment — an operator's own, a resume, a production check's look — names none, and
+	// leaves the assignment the claim is serving alone.
+	Assignment string
 }
 
 // RequestExit is the agent reporting its own end.

@@ -999,9 +999,11 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		}
 		if payload.Task != "" {
 			// The row's phase, already held to the issue's above, travels with the delivery: it is
-			// what says the task is still the work to do once the delivery has outlived its id.
+			// what says the task is still the work to do once the delivery has outlived its id. The
+			// row's assignment travels with it too, the one the start's own transaction wrote on the
+			// role's phases row: it is what the completion this task's turn reports is held to.
 			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: payload.Task, Phase: payload.Phase, Generation: payload.Generation,
-				ID: fmt.Sprintf("%s%d", outboxDeliveryPrefix, row.ID)}); err != nil {
+				Assignment: payload.Assignment, ID: fmt.Sprintf("%s%d", outboxDeliveryPrefix, row.ID)}); err != nil {
 				return fmt.Errorf("deliver to claim %s: %w", token, err)
 			}
 		}

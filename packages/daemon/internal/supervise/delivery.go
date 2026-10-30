@@ -47,7 +47,14 @@ type Delivery struct {
 	// relaunched — so the pane's own environment names the run it was launched for, which may be
 	// an earlier one. The work a worker reports is the task it was given, and this is that task's
 	// run. Zero for a task of no run: an operator's own, an architect's.
-	Generation  uint64
+	Generation uint64
+	// Assignment is the assignment this task is of, from the start row that queued it: the token
+	// the workflow minted when the issue's phase handed this role a task, which stands on the
+	// role's phases row too. It is what tells one phase entry from the next within a run, so a
+	// turn that outlived its phase cannot complete the phase's next entry (api/handoff.go,
+	// HANDOFF_STALE_ASSIGNMENT). Empty for a task of no assignment: an operator's own, a resume,
+	// a production check's look, and every task queued before the daemon was upgraded to mint one.
+	Assignment  string
 	Phase       phase.Phase
 	QueuedAt    time.Time
 	DeliveredAt time.Time
@@ -99,9 +106,9 @@ func pendingID(p *Delivery) string {
 	return p.ID
 }
 
-// queue gives the claim the task a deliver request carries, with the phase it was queued for. An
-// outbox repeats its row id after a crash before FinishOutbox; the same task and id are therefore
-// accepted without changing the persisted delivery.
+// queue gives the claim the task a deliver request carries, with the phase and the assignment it
+// was queued for. An outbox repeats its row id after a crash before FinishOutbox; the same task
+// and id are therefore accepted without changing the persisted delivery.
 func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 	id, task := request.ID, request.Task
 	if pending := m.claim.Pending; pending != nil {
@@ -113,7 +120,8 @@ func (m *Machine) queue(ctx context.Context, request RequestDeliver) error {
 	if id == "" {
 		id = rand.Text()
 	}
-	d := Delivery{ID: id, Task: task, Phase: request.Phase, Generation: request.Generation, QueuedAt: m.deps.Clock.Now()}
+	d := Delivery{ID: id, Task: task, Phase: request.Phase, Generation: request.Generation,
+		Assignment: request.Assignment, QueuedAt: m.deps.Clock.Now()}
 	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, d); err != nil {
 		return err
 	}
@@ -203,13 +211,14 @@ func (m *Machine) phaseHolds(ctx context.Context, d Delivery) (bool, error) {
 // for a delivery whose life is over, and sendPending for a task the issue's phase has left behind.
 // The claim keeps its state — the task is stale, not the agent.
 //
-// A confirmed task of a run leaves the run behind it: the worker goes on working it in whatever
-// turn comes next — one an Envoy notice starts, with no delivery of its own — and its completion
-// belongs to that run. Only a delivery whose turn actually ran moves it, so a confirmation taken
-// back by a busy refusal never does, and only a task of a run: an operator's task carries no
-// generation and leaves the run the claim is serving alone. Every retire of a confirmed task of a
-// run writes the row, the second task of one run included: the write is unconditional on the
-// value, not a diff.
+// A confirmed task of a run leaves the run behind it, and its assignment with it: the worker goes
+// on working it in whatever turn comes next — one an Envoy notice starts, with no delivery of its
+// own — and its completion belongs to that run and that assignment. Only a delivery whose turn
+// actually ran moves them, so a confirmation taken back by a busy refusal never does, and only a
+// task that carries them: an operator's task carries no generation and no assignment, a resume and
+// a production check's look no assignment, and each leaves what the claim is serving alone. Every
+// retire of a confirmed task of a run writes the row, the second task of one run included: the
+// write is unconditional on the value, not a diff.
 //
 // The claim goes with the delete, in the store's one transaction, and is durable there rather
 // than left for the claim's next write: the wait that follows can be hours long — a tester on CI,
@@ -221,6 +230,9 @@ func (m *Machine) retirePending(ctx context.Context) error {
 	retired := m.stored()
 	if !p.ConfirmedAt.IsZero() && p.Generation != 0 {
 		retired.ServingGeneration = p.Generation
+	}
+	if !p.ConfirmedAt.IsZero() && p.Assignment != "" {
+		retired.ServingAssignmentID = p.Assignment
 	}
 	// The deaths were charged against this task, so they end with it, in the same write.
 	retired.Budgets.Deaths = 0

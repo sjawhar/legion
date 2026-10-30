@@ -1851,7 +1851,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 			"github_repo", "awaiting_ask", "awaiting_gate_version", "awaiting_artifact", "awaiting_answered_at", "awaiting_answered_by",
 			"awaiting_answered_detail", "awaiting_since_seq", "awaiting_since", "handout_seq", "declared_seq", "declared_at", "caught_up_seq",
 			"ancestry", "handed_over_from"},
-		"phases":            {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at", "merge_note"},
+		"phases":            {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at", "merge_note", "assignment"},
 		"pull_requests":     {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_moves", "head_counted", "head_run", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability", "merge_sha"},
 		"production_checks": {"issue", "project", "tree", "repo", "pr_number", "merge_sha", "opened_at", "bound_at", "looks", "look_open", "look_wake_at", "last_wake_kind", "last_wake_detail", "last_wake_at", "pending_cause_kind", "pending_cause_detail", "last", "closed_at", "outcome"},
 		"design_gates":      {"issue", "artifact_id", "latest_version", "approved_version", "approved_seq", "approved_at", "told_changes_version", "told_changes_reason", "told_changes_seq", "told_changes_at"},

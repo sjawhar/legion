@@ -329,6 +329,14 @@ type SuperviseRequest struct {
 	// finishes without acting. It is empty for the architect, which serves every phase, and for a
 	// suspend or a tree's close, which must still act after the issue moves on.
 	Phase phase.Phase `json:"phase,omitempty"`
+	// Assignment is the task the issue's current phase hands the role, as the workflow minted it
+	// for this start (workflow.Engine.start): the same token stands on the role's phases row,
+	// written in the transition's transaction. It travels to the claim's delivery and, once a
+	// confirmed delivery is retired, onto the claim, so a completion can be held to the assignment
+	// the turn reporting it was given (api/handoff.go, HANDOFF_STALE_ASSIGNMENT) rather than to the
+	// run alone, whose value every phase entry of one run shares. Empty for a start that hands no
+	// new task — a resume, a production check's look — and for every other operation.
+	Assignment string `json:"assignment,omitempty"`
 	// ResumeTask marks Task as the phase's resume task (workflow.ResumePhaseTask), the one a
 	// re-admitted tree's promotion gives a mid-phase child: a claim that already holds a task for
 	// the same generation and phase is given it once it is ready, so the start delivers none.
