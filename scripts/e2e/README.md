@@ -2033,11 +2033,13 @@ the run that owns it. A signal to the whole process group does not stop the remo
   went to `/dev/null`;
 - a teardown command that fails prints `cleanup warning: line N exited S`, never a check's `FAIL`
   line, and leaves the exit status the checks set.
-- **Production NATS, stream `ENVOY_NOTIFICATIONS`**: the daemon's two durable consumers. They are
-  named by the Dispatch key: `legion-go-<project>-dispatch` (`notifications.dispatch.issue.>`) and
+- **Production NATS, stream `ENVOY_NOTIFICATIONS`**: the daemon's three durable consumers. They are
+  named by the Dispatch key: `legion-go-<project>-dispatch` (`notifications.dispatch.issue.>`),
+  `legion-go-<project>-dispatch-server` (`notifications.dispatch.server.started`) and
   `legion-go-<project>-github` (`notifications.github.sjawhar.legion-smoke.>`) — `LEGSMOKE` by default.
-  - The teardown deletes both by exact name and prints `deleted` or `absent` for each.
-  - `hygiene` fails if either remains, and the preflight refuses to start while either exists.
+  - The teardown deletes every consumer named under `legion-go-<project>-` and notes each it
+    deleted or could not delete, so a consumer the daemon gains needs no change here.
+  - `hygiene` fails if any remains, and the preflight refuses to start while any exists.
   - A SIGKILLed driver runs no trap, and the next run of the same identity's preflight names what it left; a different identity's run never sees it.
 - **Production Dispatch, project `LEGSMOKE` by default**: three root issues per run. The preflight moves stale
   todo issues to backlog, roots and the children a failed run left todo alike. The proof human's writes use the agents' bearer and name the session

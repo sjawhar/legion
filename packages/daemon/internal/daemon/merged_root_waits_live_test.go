@@ -110,11 +110,13 @@ func newMergedRootWaitsLive(t *testing.T) *mergedRootWaitsLive {
 	if err != nil {
 		t.Fatal(err)
 	}
+	parent, child := proof.cfg.Project+"-1", proof.cfg.Project+"-2"
+	childPR := int(number) + 2
 	r := &mergedRootWaitsLive{
 		liveProof: proof, rt: newRuntime(), built: &built{},
-		parent: proof.cfg.Project + "-1", child: proof.cfg.Project + "-2",
-		parentPR: int(number) + 1, childPR: int(number) + 2, openedPR: int(number) + 3,
-		github: mergedRootWaitsGitHub(t), seq: 1,
+		parent: parent, child: child,
+		parentPR: int(number) + 1, childPR: childPR, openedPR: int(number) + 3,
+		github: mergedRootWaitsGitHub(t, "legion/"+child, childPR), seq: 1,
 	}
 	r.seedTree()
 	r.boot()
@@ -134,10 +136,11 @@ func newRuntime() *fake.Runtime {
 }
 
 // mergedRootWaitsGitHub is GitHub as this proof's daemon reads it: every repository of the
-// mapping has default branch main, and its GraphQL root answers that it knows no pull request, so
-// each disarm the workflow queues finishes with nothing armed to take back. Nothing else is
+// mapping has default branch main, its GraphQL root answers that it knows no pull request, so
+// each disarm the workflow queues finishes with nothing armed to take back, and its open pull
+// requests are number on branch, which the child's implementer's completion reads. Nothing else is
 // answered, and nothing reaches github.com.
-func mergedRootWaitsGitHub(t *testing.T) string {
+func mergedRootWaitsGitHub(t *testing.T, branch string, number int) string {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rest, isRepository := strings.CutPrefix(r.URL.Path, "/repos/")
@@ -146,6 +149,8 @@ func mergedRootWaitsGitHub(t *testing.T) string {
 			_, _ = io.WriteString(w, `{"data":{"repository":{"pullRequest":null}}}`)
 		case r.Method == http.MethodGet && isRepository && len(parts) == 2:
 			_, _ = io.WriteString(w, `{"full_name":"`+parts[0]+"/"+parts[1]+`","default_branch":"main"}`)
+		case r.Method == http.MethodGet && isRepository && len(parts) == 3 && parts[2] == "pulls":
+			_, _ = fmt.Fprintf(w, `[{"number":%d,"state":"open","head":{"ref":%q,"sha":"head-child"},"base":{"ref":"main"},"updated_at":"2026-10-28T00:00:00Z"}]`, number, branch)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = io.WriteString(w, `{"message":"Not Found"}`)
