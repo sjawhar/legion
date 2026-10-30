@@ -1,0 +1,5 @@
+kind: Added
+body: |-
+  `legion-worker`'s reference table sends a phase worker to `skill://outside-message` before its
+  text reaches a person outside the company: a comment, issue or pull request on a repository the
+  company does not own, an email, or a message to another project's maintainers.
