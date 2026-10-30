@@ -2,25 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-562",
-  "completed": "2026-10-30T11:32:00Z",
-  "round": 10,
-  "scope": "Narrowed by the INFRA-63 architect: the forward merge by fingerprint (accepted diff plus the conflict resolution, with #2478's redeliver change and item 3's retry both kept), migration versions against main, and CI at the code head. Approve when they hold; a later text-only conflict with main does not hold the approval.",
-  "reviewedHead": "0eac5e95ae35880d639053c3c3c2f7e802afcf6c",
-  "codeHead": "51702b24f103",
-  "decision": "changes_requested",
+  "completed": "2026-10-30T14:03:15Z",
+  "round": 11,
+  "scope": "Narrowed by the INFRA-63 architect: the DATABASE_URL fix (every caller of redeliver-webhooks covered, the census entry complete), any merge of main by fingerprint, migration versions against main, and the four required checks green at the code head. Approve when they hold; do not hold for a migration landing after the read; a text-only conflict with main at landing is approved and said so.",
+  "reviewedHead": "8725ff13fc70a132f113aaa6bea2ed5ace617fca",
+  "codeHead": "1d914afe59a78d3e908670a627281ad74cf07eee",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
   "scopeResults": {
-    "forwardMerge": "Holds. I compared the PR's patch over 71e31498 -> 05185b33 with its patch over 96a7e5ea -> 51702b24, file by file. Only redeliver/sweep.go, sweep_test.go, cmd/dispatch/AGENTS.md and README.md differ, all from resolving against #2478's schedule (every failed delivery asked again on a backoff until OK or 72 h, Waiting/Expired). Item 3 survives: a record carries InFlight and ClaimedAt (sweep.go:238-244); a claim younger than claimDeadline (3 x RequestTimeout) reads ClaimedElsewhere, and an older one is voided and the delivery decided and asked again (sweep.go:522-531). The listing-independent read brings back an open in-flight record too (sweep.go:~457-487). Tests: sweep_test.go's TestADeliveryWhoseSweeperDiedBeforeItsRequestIsRequestedPastTheClaimDeadline, TestALiveClaimantsDeliveryIsClaimedElsewhereInsideTheDeadline and TestADryRunReportsAClaimByItsDeadline; tester round 14 ran the two-process TestAWebhookRedeliveryWhoseProcessDiedAfterItsClaimIsRequestedAgain (PASS, GitHub got exactly one request, from the second process). go vet (with and without -tags multiprocess) and gofmt are clean.",
-    "migrationVersions": "Hold at main@origin 3d5548da (git ls-tree, 10:29Z): main's highest is 0147; this PR's 0148-0151 are not on main, and TestMigrationSetIsNumberedOneToN passes at the head."
+    "databaseUrlFix": "Holds. 1d914afe gives packages/daemon/internal/intake/redelivered_test.go a database of its own (testpg.Database), migrates it with envoy-dispatch backfill-block-ids (cmd/dispatch has no bare migrate subcommand; openMigrated is how the subcommands migrate), and passes DATABASE_URL to redeliver-webhooks. Tester round 15: PASS 8.23 s, and CI's required test job is green at 02362d13. Re-running the census search, every caller of the command passes a migrated database: redelivered_test.go:154, multiprocess_test.go:2717 (startRedeliverWebhooks; callers pass DATABASE_URL), settings_test.go:953 and stream_replicas_test.go:192 (storetest.Open). No script, workflow or deploy runs it; theorem-labs/agent-infra has no hit (code search). Census item 1 lists the daemon test with disposition 'fixed in this PR (1d914afe)', and lists the other callers and the doc mentions.",
+    "mergeOfMain": "None this round: the only code commit since round 10 is 1d914afe, one test file.",
+    "migrationVersions": "Held at my read at 12:07Z: main@origin 2d3a725f's highest was 0147, so 0148-0151 were free. Since then main's #2483 (a4af0341, 13:41Z) added 0148_asks_anchor_artifact_id, which collides with this PR's 0148. Per the architect's rule this does not hold the approval; the forward merge the conflict below needs must renumber to 0149-0152 or above."
   },
-  "ci": "Does not hold. The CI workflow run 41037662914 at d77a4ae0 (code 51702b24 plus implement.json): the required 'test' job FAILED in 'Test the Go daemon': packages/daemon/internal/intake TestADeliveryNATSRefusedIsRedeliveredByTheSweepAndApplied, redelivered_test.go:153, 'envoy-dispatch redeliver-webhooks --since 1h: exit status 2 ... redeliver-webhooks: DATABASE_URL is required'. lint success, typecheck skipped, pr-title success. envoy-go and dispatch-multiprocess still queued at 11:32Z.",
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/daemon/internal/intake/redelivered_test.go:140",
-      "description": "main's #2478 (202d0168) added this daemon test. It runs the real `envoy-dispatch redeliver-webhooks --since 1h` with only HOME, XDG_CONFIG_HOME, NATS_URLS, the App credentials and DISPATCH_GITHUB_API_BASE. This PR makes that command refuse without DATABASE_URL (its Breaking change, census item 1), so the merged tree fails the required `test` job. It is a consumer the census could not list, since it landed after. Give the test a database this release has migrated and pass DATABASE_URL (redeliver-webhooks migrates nothing). Add the hit to the census's item 1 with its disposition, and show `test` green at the new code head."
-    }
-  ]
+  "ci": "At 02362d13 (code 1d914afe plus implement.json): lint, typecheck, test and pr-title all success; dispatch-multiprocess success. envoy-go failed only on TestRoutesTablePinsEveryRegisteredRoute ('routes() has 147 rows, want 146'), and main fails it identically (job 124035532618 at 3d5548da), because the fork point 96a7e5ea registers 147 routes under a pin of 146. That is main's, fixed on main by #2551 (cd9b50df) and taken in at the next merge. The compare from 02362d13 to the head touches only .legion/ (1 file).",
+  "mergeState": "GitHub reports CONFLICTING against main a4af0341. git merge-tree of 1d914afe with a4af0341 conflicts in packages/envoy/cmd/dispatch/README.md alone, a text-only conflict; main.go, model.go, AGENTS.md and dispatch-execute.ts auto-merge. That merge must also renumber this PR's migrations above main's 0148 and take main's route-pin fix.",
+  "threads": "No open thread.",
+  "keyFindings": []
 }
