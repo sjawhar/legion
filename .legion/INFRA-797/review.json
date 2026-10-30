@@ -2,59 +2,41 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-797",
-  "completed": "2026-10-30T13:44:00Z",
+  "round": 2,
+  "completed": "2026-10-30T19:05:00Z",
   "decision": "changes_requested",
-  "reviewedHead": "9c72c27a7d9557027deb494d1fae4aff1f29de41",
-  "codeHead": "d4acfcdb20466a2d8197a165fd96a73b56227a99",
+  "reviewedCodeHead": "9af8b64a2817fa81cc40b404bea356ac2356d0fe",
   "critical": 0,
-  "important": 3,
-  "minor": 6,
+  "important": 2,
+  "minor": 3,
+  "roundOneFindings": "All ten round-1 threads are fixed at 9af8b64a; the authz fix (identity.NoBrowserIdentity from requestIdentityFor when cookie identity has no issuer and no dev sign-in) holds on every browser path (the one identity value reaches the document service and the routes; signin.go builds the only production CookieIdentity; identity.go is the only production caller of auth.SessionFromRequest).",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/cmd/dispatch/signin.go:179-187 (requestIdentityFor), reached through main.go:790-792",
-      "description": "Security[authz]: with requireCookieSignIn removed, a cookie-identity server with no DISPATCH_SIGNIN_* and no dev sign-in builds identity.CookieIdentity{SigningKey, Sessions} with Membership nil, so CookieIdentity.Login (internal/dispatch/identity/identity.go:42-62) accepts every dsession cookie signed with the persistent DISPATCH_SIGNING_KEY for its 30-day life with no membership confirmation. A stack that drops its sign-in inputs (D3 allows tailnet set + sign-in unset; D7's lost-settings case) keeps every earlier browser session live, including for a person since removed from the domain, who can still mint non-expiring personal tokens. Fix: when cookie mode has no sign-in flow and !boot.DevSignIn, refuse every cookie (leave Sessions nil, which Login already turns into ErrNoIdentity, or a refusing identity); add a test that mints a cookie with the deployment key, boots with no sign-in and expects 401; correct identity.go:34-35 and the READMEs that say only that nobody signs in."
+      "file": "packages/envoy/infra/gcp/dispatch_sandbox_test.go:297-338",
+      "description": "The four `… malformed` rows of TestDispatchPartialTailnetGroupNamesEveryMissingInput never assert that the bad value's own refusal fired; they rely on `valid` matching the resolver's check order. The signInDomain row has valid=0, so signInClientId's 'required' refusal fires first: with signInClause removed from the signInDomain refusal (dispatch.go:823) the subtest still passes (reviewer's mutation, reverted). The code-quality audit's scratch mutation (clause removed from the tailnetDnsName, tags and image refusals, tailnetAuthKey check moved first) left all four rows green. Fix: each row asserts the bad value's own refusal text (for example `signInDomain \"Example.com\" must be a lowercase DNS name`) plus the unset list, with an explicit per-row setup rather than a positional prefix."
     },
     {
       "severity": "important",
-      "file": "packages/envoy/infra/gcp/dispatch.go:638-678",
-      "description": "dispatchNamedInputs picks the two groups out of dispatchClusterOnlyRefusals by string name and panics on a miss; the test side repeats the loop and panic (dispatch_cluster_only_test.go dispatchNamedRefusals) and writes the group lists a second time (dispatch_sandbox_test.go:231-236), so the 'one definition' comments (dispatch.go:667, dispatch_sandbox_test.go:239, dispatch_construct_test.go:527) are false. Fix: literal dispatchTailnetInputs/dispatchSignInInputs rows, the cluster-only table built with slices.Concat of them and the rest; same in the tests; delete both selectors and the panics."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/infra/gcp/dispatch_kube.go:343-383,512-545,754-762",
-      "description": "The front door is built behind four separate `if s.frontDoor` gates, with zero-value carriers (authKeySecret, frontDoorPod, frontDoorOpts) and the Deployment's comment now detached above a bare `//` at :519. Registration order is free (dispatchRegistrations sorts), so build the auth-key Secret, newDispatchFrontDoor, the Deployment, the 1055 Service and the front-door policy in one block (or inside newDispatchFrontDoor); only the app-ingress rule keeps its own gate."
+      "file": "packages/envoy/infra/gcp/dispatch.go:747-842",
+      "description": "Each group's checks are spread across newDispatchSettings: the tailnet group gated at :757, inside the shared image loop by frontDoorOnly and a clause column (:774-789), at :799 and again at :826; the sign-in group at :818 and :840, with region, natsUrl and natsSeedSecret between. Follow newDispatchAzure's pattern: one refuse function per mode (tailnet, sandbox, sign-in), each called once; the image loop goes back to the two app images. The comments at :135-140 (DispatchArgs: 'refuses each one missing, in the wording it always used') and :770-773 ('the sandbox block below' never checks the images) are false and go with it."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/infra/gcp/dispatch.go:779-783,790,850",
-      "description": "A refusal of a set-but-malformed input in a half-set group (tailnetDnsName 'bad' alone, a bad tag, signInDomain 'Example.com' with the secret unset) carries no unset list, against the README/PR claim that one run names the whole shortfall. Fold dispatchGroupUnset into dispatchGroupClause(feature, group), compute each clause once as a string, append it whenever the group has an unset input, and drop the set parameter and the two closures."
+      "file": "packages/envoy/infra/gcp/dispatch_cluster_only_test.go:104-105",
+      "description": "dispatchClusterOnlyRefusal's doc says a row sets an input 'alone on a valid cluster-only DispatchArgs'; its rows now also feed the two group tables and the Construct test. Rename it (the production type became dispatchInput for the same reason) and fix the doc."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/infra/gcp/dispatch_sandbox_test.go",
-      "description": "No test renders the combination D3 keeps allowed, tailnet group set and sign-in group unset: add one registration test asserting the front door is built, the app carries no DISPATCH_SIGNIN_* and the Secret has no DISPATCH_SIGNIN_CLIENT_SECRET."
+      "file": "packages/envoy/cmd/dispatch/main_test.go:72-80, settings_test.go:623-628",
+      "description": "noSignInSettings has one caller left, settings_test.go:625, which repeats signin_off_test.go:17-19's SignInIssuer == \"\" assertion; delete both."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/infra/gcp/dispatch_sandbox_test.go:45, dispatch_construct_test.go:543-546",
-      "description": "readDispatchSandboxURL repeats runDispatchWithProviders' provider setup only to await Url, which TestConstructDispatchSandbox already checks; the construct test re-lists the front-door names dispatchSandboxFrontDoor already holds."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/cmd/dispatch/main_test.go:83-89,132-135",
-      "description": "noSignInEnvironment builds the full sign-in environment then blanks it; the no-sign-in boot check is repeated in main_test.go, signin_off_test.go and settings_test.go."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/deploy/README.md:235, deploy/compose/dispatch.env.example:35-36, cmd/dispatch/settings.go:73, cmd/dispatch/signin.go:120,134, internal/dispatch/identity/identity.go:34-35",
-      "description": "Prose the change made false: cookie identity no longer requires the sign-in settings at startup; DISPATCH_SERVER_URL is the sign-in callback origin only where sign-in is configured; signInRule/signInFlow are nil for cookie identity with no sign-in too; Membership is nil on more than the dev sign-in server. Bundled with the authz fix because their wording depends on it."
-    },
-    {
-      "severity": "minor",
-      "file": "CI",
-      "description": "At code head d4acfcdb the CI run 41059366704 ('changes' job) was still queued at 13:43Z, 45 minutes after creation; pr-title succeeded. The next round reads it again at the new head."
+      "file": "prose (fixed by the reviewer in 4717e434)",
+      "description": "'every browser request answers 401' overstated (static files and /auth/start answer otherwise) in infra/README.md, deploy/README.md, dispatch.env.example, cmd/dispatch/README.md, identity.go and the changelog fragment; main.go's cookie arm now says 'and no DISPATCH_DEV_SIGNIN'; requestIdentityFor's doc cut to the rule; dispatch_kube.go names the front door's Role and RoleBinding; infra/README.md's sign-in-unset paragraph now carries the envoyImage floor and says to revoke personal agent tokens before dropping sign-in (revokeAgentToken needs a person, agent_tokens.go:113)."
     }
   ],
-  "thermonuclear": "Both run once at 9c72c27a: thermonuclear-deep-review CHANGES (1 important authz, 3 minor, 1 hardening: in-cluster plain http, bounded by the NetworkPolicy and already true of the front door's upstream), thermonuclear-code-quality CHANGES (2 important structural, 4 minor). Every finding above was checked against the code at the head by the reviewer."
+  "ci": "Required set lint, typecheck, test, pr-title (rulesets). At code head 9af8b64a run 41078189271: lint, test, pr-title success, typecheck skipped; dispatch and dispatch-memory still in progress at 18:13Z; envoy-go (not required) failed on cmd/listener TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering, a package this branch does not touch. The reviewer's prose push starts a new run.",
+  "thermonuclear": "Both run once at c253e267: thermonuclear-deep-review APPROVE (no Medium/High; three Minor doc findings and two hardening notes, taken into the prose commit), thermonuclear-code-quality CHANGES (two important: resolver structure, malformed rows; four minor). Every finding checked by the reviewer at the head."
 }
