@@ -2,20 +2,20 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-156",
-  "completed": "2026-10-30T05:55:00Z",
-  "decision": "approved",
+  "completed": "2026-10-30T07:12:00Z",
+  "decision": "changes_requested",
   "round": 13,
   "scope": "The architect scoped round 13 to three items in one push: the pmdoctest CI filter with one merge of main to 49e23926 or later, narrowing the TS item-block reader to Go's two shapes with two corpus rows, and dropping blockHolds' anyKind flag. Approve once the four required checks are green.",
-  "headReviewed": "2d88496caf047be7c8ff2023282de35692e3d7e2",
+  "headReviewed": "f4ec2c6f75bafc77ed7d8a6ac1f468abf4e69589",
   "codeHead": "691cb8ab84b7",
   "previousReview": "5708033128 (REQUEST_CHANGES at d4f98e38)",
   "critical": 0,
-  "important": 0,
+  "important": 1,
   "minor": 1,
   "items": "(1) ci.yaml envoy_go_race_docs lists pmdoc/pmdoctest/*; merge 691cb8ab brings main 49e23926 with no conflict; check-ci-filters.sh at the head exits 0 with no uncovered file. (2) ITEM_BLOCK_REFERENCE takes Go's two shapes (issue comment/message, project-document comment) and itemBlockKind decodes the id as decodeBlockId; two new corpus rows give Go's 'is not a block reference' wording in both languages; with the old reader restored, those two TS rows fail. (3) blockHolds has one any-kind rule; behaviour unchanged since item block refs hold only mentions.",
   "localRuns": "contracts dispatch-block-ref.test.ts 119 pass, contracts tsc and biome clean; go build and vet clean; pmdoc and text pointer tests pass; refs, api and docs graph-reader tests pass on a scratch Postgres.",
   "ci": "CI head ba17acf8 (compare to 2d88496c: handoffsOnly true). Required lint, typecheck, test and pr-title all success at 05:33Z. Other checks: contracts, docs, envoy-plugin, pi-envoy, pi-legion, pi-shared, worker-image build success; the rest still queued or running when approved; I read them when they settle.",
-  "migrations": "Main's highest is 0144; the PR's 0145_block_pointer_links is free.",
+  "migrations": "main's highest is 0147_message_deliveries_session_created; 0145_block_pointer_links collides with main's 0145_events_person_words. git merge-tree reports no textual conflict, so GitHub shows MERGEABLE, but the migrator and store's TestMigrationSetIsNumberedOneToN refuse two 0145s.",
   "threads": "20, all resolved. The two round-12 threads (PRRT_kwDORFy7ds6x2C2w, PRRT_kwDORFy7ds6x2C22) are fixed in 752d79ec; accepted in the approval.",
   "thermonuclear": {
     "deepReview": "Verdict: APPROVE at 2d88496c (Opus 5.5). Dropping anyKind changes no result (item block refs are mentions only). itemBlockKind agrees with Go on every input class the diff targets; Minors: values holding a referenceEnd character, or a trimmed or cut fragment, get a different refusal reason than Go, though both refuse (older than this diff).",
@@ -23,10 +23,16 @@
   },
   "keyFindings": [
     {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/store/migrations/0145_block_pointer_links.up.sql",
+      "description": "Collides with main's 0145_events_person_words (a21100c5, #2376, 06:48Z); main is now at 0147. Merge main forward and renumber to 0148 or later with every reference (header, census comment, AGENTS.md, cmd/dispatch README and AGENTS, the .changes fragment, the PR body), checking main's highest again before the push."
+    },
+    {
       "severity": "minor",
       "file": "packages/contracts/src/dispatch-block-ref.ts",
       "description": "For values holding ' \" < > ` [ ] | or whitespace, or a fragment Go trims or cuts, the TS refusal reason can differ from Go's; both refuse, and the gap is older than this round. Documented in the doc comment by the reviewer's prose fix; no behaviour change."
     }
   ],
-  "reviewerProseFix": "The reviewer's own commit corrects the itemBlockKind doc comment in packages/contracts/src/dispatch-block-ref.ts to describe what it does (Go's parseDispatch rules on the whole value; a value Go's ParseRef cuts at a referenceEnd character or trims may get a different refusal reason; both refuse). No code changed."
+  "reviewerProseFix": "The reviewer's own commit corrects the itemBlockKind doc comment in packages/contracts/src/dispatch-block-ref.ts to describe what it does (Go's parseDispatch rules on the whole value; a value Go's ParseRef cuts at a referenceEnd character or trims may get a different refusal reason; both refuse). No code changed.",
+  "approvalWithdrawn": "I approved f4ec2c6f at 07:07Z (review 5709115859), having checked main's highest migration at 05:33Z (0144). main's a21100c5 (#2376), merged at 06:48Z, added 0145_events_person_words, plus 0146 and 0147. The PR's 0145_block_pointer_links now collides, so I am replacing the approval with a request for changes at the next head."
 }
