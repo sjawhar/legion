@@ -2,24 +2,23 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-590",
-  "completed": "2026-10-30T07:23:00Z",
-  "round": 12,
-  "reviewedCodeHead": "74bcfc093f230af602bf983b3a57774cf1b46e1b",
-  "decision": "approved",
+  "completed": "2026-10-30T10:55:00Z",
+  "round": 13,
+  "reviewedCodeHead": "bcf50ed5282d0655405e648be162f1df774ab173",
+  "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
+  "important": 2,
   "minor": 0,
-  "fingerprint": "bd52726b41f4deff09685e8df550ca4f759359005343218ebbf3c109e8bff345 at e8f61f55 -> be743defbd5ed1468927150190e1b6512a7443dc5acd1167060603d528129286 at 74bcfc09. The PR's own diff differs only by the migration renumbering (0142/0143 -> 0145_duty_holds/0146_outbox_claim; changed lines identical modulo the numbers) and one ci.yaml filter line (internal/dispatch/itemblocks/* in envoy_go_race_docs). Main changed files the PR changes, so a full round under the architect's rule.",
-  "ci": "Re-run 40986956963 at 74bcfc09 (the 02:10Z drain cancelled the first): lint, typecheck, test, pr-title, envoy-go, envoy-go-race, envoy-go-race-docs, dispatch, dispatch-memory, dispatch-multiprocess all completed success; compare 74bcfc09...6e6655b6 is handoffs only.",
-  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at 74bcfc09; both approve with no finding.",
-  "keyFindings": [],
-  "notes": [
-    "GitHub reports the head CONFLICTING again: main moved after this run (#2376, #2528, #2506, #2537 which adds the same itemblocks filter line, and others). The next forward merge goes through the confirmation-round rule."
+  "roundShape": "PR diff at c60e2b72 vs bcf50ed5 (each against its own fork point with main, excluding .legion/ and docs/solutions/): differing files are the renumbered migrations (0145/0146 -> 0148_duty_holds/0149_outbox_claim), docs (.dispatch/architecture/dispatch-outbox.md, packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md, the changelog fragment), .github/workflows/ci.yaml (the itemblocks line left the PR diff because main's #2537 added it) and two test files (internal/dispatch/api/session_answers_test.go, internal/dispatch/outbox/session_answers_test.go, setup only): a confirmation round under the 10:27Z rule.",
+  "ci": "At bcf50ed5 (compare to eb717dc9 handoffs only): lint, typecheck, test, pr-title, envoy-go-race, envoy-go-race-docs, dispatch, dispatch-multiprocess success; envoy-go failed on TestARequestWhoseConnectionIsLostAnswersUnavailable (internal/bus/window_request_test.go:163, 'no answer within 10s'), a test this PR adds, so not main's.",
+  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at bcf50ed5 over the merge; both approve the merge with no finding.",
+  "keyFindings": [
+    {"severity": "important", "file": "packages/envoy/internal/bus/async.go:355", "description": "window.request's answer goroutine calls confirmFlushed, whose conn.FlushTimeout runs for the request's whole remaining timeout when nats.go already moved the connection to RECONNECTING (nats.go v1.50 clears pending flushes only at the CONNECTED->RECONNECTING transition, nats.go:3329-3341, and FlushTimeout queues a new PING that no server answers). So a Request whose connection drops before its flush starts answers ErrUnavailable only after its timeout, not once the loss is seen, which its doc and TestARequestWhoseConnectionIsLostAnswersUnavailable assert; the test went red in envoy-go at bcf50ed5. Probe (go test -overlay): confirmFlushed on a connection nats.go saw drop returned 'nats: timeout after 3.001s'. Fix: do not wait on the flush past a connection change (watch ConnectionChanged while flushing, or skip the flush when the window's connection is no longer current)."},
+    {"severity": "important", "file": "PR #2395 (mergeability)", "description": "GitHub reports the head CONFLICTING: main took #2508 (9535672730) after a21100c5bc, which changes runtime files this PR rewrites: internal/dispatch/outbox/publisher.go (envelope() adds a quiet field from events.Quiet; Deps.PublishFailures and countPublishFailure counting denied, failed and refused publishes), internal/bus/async.go, confirm.go, denials.go (new), nats.go, recovery.go, cmd/dispatch/main.go, cmd/listener/api.go. The forward merge resolves runtime conflicts, so it is a full round."}
   ],
   "verifiedCorrect": [
-    "The five files both sides touched (cmd/dispatch/main_test.go, infra/gcp/dispatch.go, store/store_test.go, cmd/dispatch/AGENTS.md, infra/README.md) equal a clean git merge-file of base dfd128f148, branch e8f61f55 and main 10fc3b77a.",
-    "#2463's item_blocks triggers write no events and send no notify; the outbox takes no row locks; reply_to keeps its meaning; a reply naming a block already reaches the block's author; reply_block is a nested payload field.",
-    "#2521 is daemon-only; #2371 changes no Dispatch bus path or grant.",
-    "No stale 0142/0143 reference for the branch's migrations; README migration paragraphs in number order; connections 89; check-ci-filters.sh 0 uncovered; go build and go vet clean in packages/envoy and packages/envoy/infra (natslive), go.work.sum unchanged."
+    "Merge bcf50ed5: the PR's own diff is unchanged apart from the renumbering, the dispatch-outbox.md text conflict (main's #2376 sentence kept) and setup-only changes to main's two session-answers tests; files both sides touched equal a clean git merge-file of base 10fc3b77a, branch c60e2b72 and main a21100c5bc, apart from renumbered lines.",
+    "sessionanswers against the PR's published_destinations: no event listed that a session did not receive, none omitted, no duplicate; a role forward is recorded under the role topic, as on main.",
+    "Main's 0145-0147 indexes do not touch the outbox's partial indexes or reads; #2506's bus files merged byte for byte."
   ]
 }
