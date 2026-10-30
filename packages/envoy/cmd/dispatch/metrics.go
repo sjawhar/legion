@@ -150,8 +150,9 @@ var gcPauseBuckets = []float64{
 // newDispatchMetrics is the registry the metrics endpoint serves. Every series is read from
 // sources when a scrape comes, the pools' from one reading of their Stats a scrape, but the outbox
 // lag, which is lag's latest sample. A pool's series appear once the pool has opened: the ones
-// opened on first use (rooms, settlements, the listener's, the outbox's) are absent until
-// something uses them, rather than reported as an empty pool.
+// opened on first use (rooms, health, the listener's, live, settlements) are absent until
+// something uses them, and the outbox's on a server with no NATS, rather than reported as an
+// empty pool.
 func newDispatchMetrics(sources metricsSources, lag *outboxLag) *metrics.Registry {
 	registry := metrics.New()
 	// pools is the scrape's reading of every pool's Stats, taken once before any family is written

@@ -459,7 +459,7 @@ which one query on the background pool samples every 5 seconds whatever the scra
 
 | Series | What it counts |
 | --- | --- |
-| `dispatch_db_pool_max_conns`, `dispatch_db_pool_total_conns`, `dispatch_db_pool_in_use_conns`, `dispatch_db_pool_idle_conns` | Each database pool's connections: its size, open, held by callers, open and idle. Label `pool`: the pool's `application_name` less `dispatch-` (`requests`, `rooms`, `health`, `listen`, `leases`, `outbox`, `background`, `live`, `settlements`). A pool opened on first use (rooms, settlements, the listener's, the outbox's) has no series until it opens. |
+| `dispatch_db_pool_max_conns`, `dispatch_db_pool_total_conns`, `dispatch_db_pool_in_use_conns`, `dispatch_db_pool_idle_conns` | Each database pool's connections: its size, open, held by callers, open and idle. Label `pool`: the pool's `application_name` less `dispatch-` (`requests`, `rooms`, `health`, `listen`, `leases`, `outbox`, `background`, `live`, `settlements`, `registry`). A pool opened on first use (rooms, health, the listener's, live, settlements) has no series until it opens, and the outbox's none on a server with no NATS. |
 | `dispatch_db_pool_waiting` | Acquires of the pool in progress: callers waiting for a connection. Label `pool`. |
 | `dispatch_db_pool_acquire_seconds` | Histogram of how long each acquire waited for a connection, 1 ms to 30 s; its `_count` is the pool's checkouts. Label `pool`. |
 | `dispatch_db_pool_acquire_timeouts_total` | Acquires that ran out the pool's acquire bound (`store.ErrPoolBusy`, which a request answers `503 DATABASE_BUSY`). Label `pool`. |
@@ -2293,8 +2293,8 @@ node type weighs:
 ## Load errors
 
 Past what it can serve, Dispatch refuses a request at once rather than queueing it without end,
-and tells the client when to ask again. Every `/api/v1` route but the two event streams and the
-test hooks is admitted before it runs: reads (GET, HEAD) and writes (every other method) each have
+and tells the client when to ask again. Every `/api/v1` route but the test hooks is admitted
+before it runs: reads (GET, HEAD) and writes (every other method) each have
 a limit of the request pool's 48 connections, 14 reads and 6 writes per CPU the server may use up
 to 28 reads and 12 writes (28 and 12 on two CPUs or more), and the delivery timeline, measures and
 pipeline count twice, since each runs two reads side by side. A request that finds no room waits,

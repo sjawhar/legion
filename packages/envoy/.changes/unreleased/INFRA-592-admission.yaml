@@ -1,7 +1,7 @@
 kind: Changed
 body: |-
   Past what it can serve, Dispatch refuses a request at once rather than queueing it without end.
-  Every `/api/v1` route but the two event streams and the test hooks is admitted first: reads
+  Every `/api/v1` route but the test hooks is admitted first: reads
   (GET, HEAD) up to 14 at once and writes up to 6 at once per CPU the server may use, at most 28
   reads and 12 writes (28 and 12 on two CPUs or more), of the request pool's 48 connections, the
   delivery timeline, measures and pipeline counting two each (they now run at most two reads at

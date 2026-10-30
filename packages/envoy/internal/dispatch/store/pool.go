@@ -190,10 +190,9 @@ func NewPool(pool *pgxpool.Pool) *Pool {
 // shares, partitioned rather than grown: requests 48, background 6 (Background), live 4 (Live),
 // settlements 4 (Settlements), rooms 4, health 1, the three permanent listeners (the listener
 // pool's one dial is one of them redialling), leases leasePoolSize (15), outbox 1 and the server
-// process registry's own 1 (registryPoolSize). The partition itself added nothing: it is the 86
+// process registry's own 1 (registryPoolSize). The partition itself added nothing: it is the 87
 // the process opened before, the request pool having given up 16, which background, live,
-// settlements and the leases' two spare connections took, and one more for the lease added since
-// (duty's thirteenth name, the term-statistics refresh). A write takes a connection per statement
+// settlements and the leases' two spare connections took. A write takes a connection per statement
 // one after another, and a read pins one for its whole length (PinConnection), so under load the
 // API holds every connection of this pool; the background loops, the live-update readers and the
 // settlements wait on pools of their own, so neither side can starve the other, and an acquire

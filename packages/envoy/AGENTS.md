@@ -448,7 +448,7 @@ and settlement's repairs carry caller text. A rebuild's supplied markdown is wei
 document's rendering is (`SeedText`), and its latest version, the server's own text, is restored
 whatever it weighs. Settlement's is the answer an ask keeps, written back into a block that returns
 to the document: settlement weighs each such answer and leaves out the ones the document has no
-room for (`withholdAnswers`). A joined
+room for (`weighAnswers`). A joined
 operation never writes the room: it runs on the transaction's fork of the room's document
 (`docs/livewrite.go`), appends its update inside the transaction, and reads through the same fork.
 A document no room holds is forked from the store (`coldFork`) and loads no room until the
@@ -1376,7 +1376,7 @@ outbox included, waited behind them. Sixty-four did not hold either, because the
 loops, the live-update readers and the settlements waited for the same connections as the
 requests, and past capacity each side starved the other.
 
-So a process's connections are one budget, partitioned rather than grown, 87 in all (`store.ConnectionsPerProcess`), as many as before the partition but for the lease added since (the comment
+So a process's connections are one budget, partitioned rather than grown, 87 in all (`store.ConnectionsPerProcess`), as many as before the partition (the comment
 on `store.sharedPoolSize` is its record): each pool below is sized in `store/pool.go`, and every
 connection carries `dispatch-<pool>` in `application_name`, so `pg_stat_activity` groups a
 process's connections by pool (`configurePool`; a connection string's own `application_name` is
@@ -1384,9 +1384,9 @@ replaced), and the metrics' `pool` label is the part after `dispatch-`.
 
 | Pool | Connections | Acquire bound | What takes them |
 | --- | --- | --- | --- |
-| `requests` (`store.Open`) | 48 | 3 s | every API request; outside admission, the event streams' catch-up, the websockets' identity checks, the browsers' durable document appends, `/auth/*`, the GitHub proxy and the dashboard's assets of other builds (`dashboard.NewStore`) |
+| `requests` (`store.Open`) | 48 | 3 s | every API request; outside admission, the websockets' identity checks, the browsers' durable document appends, `/auth/*`, the GitHub proxy and the dashboard's assets of other builds (`dashboard.NewStore`) |
 | `background` (`Background`) | 6 | 30 s | the embedding queue and its coverage pass, the suggestion sweep, the term-statistics refresh, the delivery reconcile and intakes, the architecture importer's ticker, the settlement resumption's query, task progress, reference-excerpt and block-index reconciliation, the edit-notice sweep, the repair of closed and reopened issues' asks, the server process registry's prune, the fleet build announcer, the outbox lag sample |
-| `live` (`Live`) | 4 | 3 s | the event stream relay's and the delivery hub's reads |
+| `live` (`Live`) | 4 | 3 s | the event stream relay's and the delivery hub's reads, and the live socket's catch-up |
 | `settlements` (`Settlements`) | 4 | 30 s | document settlements, one connection per settlement slot |
 | `rooms` (`Rooms`) | 4 | 3 s | cold document loads |
 | `health` (`Healthy`) | 1 | the probe's own 2 s | `/healthz` |
@@ -1409,8 +1409,8 @@ from its caller's cancellation (`store.CommitContext`, bounded at 10 s): a commi
 leaving cut short has an unknown outcome, and the document service fails every room such a
 transaction wrote.
 
-**Past capacity a request is refused, not queued.** Every table route but the two event streams
-and the test hooks is admitted before its handler runs (`api.serveRoute`,
+**Past capacity a request is refused, not queued.** Every table route but the test hooks is
+admitted before its handler runs (`api.serveRoute`,
 `internal/dispatch/admission`). Reads (GET, HEAD) and writes (every other method) each have a
 limit of the request pool's 48 connections: 14 read units and 6 write units per CPU the process
 may use (`runtime.GOMAXPROCS`, which follows the container's CPU limit), capped at 28 reads and 12
