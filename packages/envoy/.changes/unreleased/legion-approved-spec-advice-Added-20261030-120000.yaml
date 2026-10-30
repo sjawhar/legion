@@ -1,0 +1,14 @@
+kind: Added
+body: |-
+    A Dispatch document write that stored a version replacing the one a person had approved says
+    so in its advice: `superseded_approval` names the approved version, the version the write
+    stored and who gave that approval. A document edit and an upload that replaced an existing
+    document each read the document's newest review, in the order the reviews' events committed
+    (`docs.ReviewOrder`), inside their own transaction, after their
+    version row and any approval carry, and report only an approval of the version right below
+    the one they stored - so the write that closed a Legion design gate is told, while a write on
+    a document nobody approved, one whose approval was already stale, one a changes request had
+    already closed and one whose version carried the approval forward report nothing.
+time: 2026-10-30T12:00:00.000000000Z
+custom:
+    Issue: legion-approved-spec-advice
