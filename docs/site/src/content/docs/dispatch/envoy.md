@@ -401,8 +401,17 @@ install it, what each component deploys and which settings it sets.
 | --- | --- |
 | `200` `starting` | The listener is still binding its durable consumer. |
 | `200` `healthy` | Everything answers. The body includes the consumer's lag, and `live_topics`: `subscribed` when the listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`), `not_applicable` when it does not. |
-| `200` `degraded` | A passing key-value failure the listener is retrying, or a role claim view that answers no read: its watcher's first scan has not delivered every claim, so `GET /v1/sessions` and `GET /v1/registry/<session_id>` answer the bus-unavailable `503` until it has. Both repair themselves, so the answer stays `200`. A key-value failure's body carries `status` and `error` alone, and the listener checks nothing after it, so it can stand in front of a lost durable consumer. The role claim view is checked last, after every check that can answer `unhealthy`, and its body keeps the `healthy` body's fields. |
+| `200` `degraded` | A passing key-value failure the listener is retrying, or a role claim view that answers no read: its watcher's first scan has not delivered every claim, so `GET /v1/sessions` and `GET /v1/registry/<session_id>` answer the bus-unavailable `503` until it has. Both repair themselves, so the answer stays `200`. A key-value failure's body carries `status` and `error` alone, and the listener checks nothing after it, so it can stand in front of a lost durable consumer. The role claim view is checked last, after every check that can answer `unhealthy`, and its body keeps the `healthy` body's fields. Also `KV watch rebuild unavailable` when the listener has not rebuilt its key-value watches for a minute after a NATS reconnect: its caches serve what they last held, and the answer stays a `200` because the container health check and the readiness probe both read `/healthz`, so refusing would take out the one listener still serving those caches and replace it with one that rebuilds into the same failure with empty caches. |
 | `503` `unhealthy` | NATS is unreachable, the subscription or a cache watcher stopped, the durable consumer is gone, or the durable consumer is `not bound to this listener's subscription`, which a durable deleted and created again under the listener leaves. With `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, also `live subscription inactive` when the subscription to every topic is gone or the server refuses it, as one restarted without that grant does. |
+
+After a NATS reconnect the listener rebuilds the key-value watches its caches read through. A
+rebuild that fails is tried again within seconds, so one that fails and then succeeds inside that
+minute leaves the listener `healthy` and logs a warning rather than an error; only a rebuild that
+has not succeeded for a minute is logged as an error and makes `/healthz` answer `200` `degraded`,
+naming the rebuild and how long it has gone without succeeding. Page on that error line, not on
+the health check: the health check and the readiness probe act on `/healthz` themselves, so a
+listener taken out for a stalled rebuild is replaced by one that rebuilds into the same failure
+with caches that warm up empty and drop the messages the running one still delivers.
 
 `/v1` opens before `/healthz` leaves `starting`: as soon as NATS is connected and the session and
 subscription caches are loaded. Until then `/v1` answers `503` `service starting`. During a rolling

@@ -4,8 +4,10 @@
 # must say what ci.yaml says, a claimed go command the check does not reduce (another form, a
 # step that is more than the go line, a shell, a container, a BASH_ENV) and a step off its exact
 # entry's pinned script count as reading every Go file of the repository and every file under a
-# Go module's directory, ci-ok's SELECTED_BY and PULL_REQUEST_ONLY must say what each
-# needed job's if: tests, and a PUSH_WORKFLOWS workflow's on.push.paths must equal its filter.
+# Go module's directory, a why that cites a step must name a workflow file that still holds it,
+# ci-ok must need and map every job changes gates, its SELECTED_BY and PULL_REQUEST_ONLY must
+# say what each needed job's if: tests, and a PUSH_WORKFLOWS workflow's on.push.paths must equal
+# its filter.
 #
 # Each case builds a miniature repository under a temporary directory - a go.work binding one
 # module, a ci.yaml whose `changes` job gates one job, and a ci_job_reads.py describing it - and
@@ -326,6 +328,16 @@ run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names the job" "$(contains "$out" "ci-ok's PULL_REQUEST_ONLY lacks image, whose if: admits only pull_request")"
 
+echo "case: a job changes gates is in neither ci-ok's needs nor its SELECTED_BY"
+root=$(fixture ci-ok-unheld)
+replace "$root/.github/workflows/ci.yaml" "    needs: [changes, app, image]" "    needs: [changes, image]"
+replace "$root/.github/workflows/ci.yaml" "SELECTED_BY: '{\"app\": \"app\", \"image\": \"image\"}'" \
+  "SELECTED_BY: '{\"image\": \"image\"}'"
+run_check "$root"
+check "fails" "$(is "$status" 1)"
+check "names the job and both lists it is missing from" \
+  "$(contains "$out" "job app tests an output of changes in its if:, and ci-ok's needs and SELECTED_BY do not name it, so ci-ok passes while app fails. Add app to ci-ok's needs and SELECTED_BY.")"
+
 echo "case: a push workflow's paths miss a pattern of its filter"
 root=$(fixture push-paths-missing)
 replace "$root/.github/workflows/site.yaml" "      - 'mod/go.mod'"$'\n' ""
@@ -348,6 +360,23 @@ rm "$root/.github/workflows/site.yaml"
 run_check "$root"
 check "fails" "$(is "$status" 1)"
 check "names it" "$(contains "$out" 'PUSH_WORKFLOWS names .github/workflows/site.yaml for filter site, which is not in the repository')"
+
+# A job that calls a reusable workflow keeps its gate in ci.yaml and gives its steps away, so a
+# why cites the step in the file that holds it. ci.yaml's docs job does that with docs-site.yaml.
+echo "case: a why cites a step of another workflow file"
+root=$(fixture cited-step-elsewhere)
+replace "$root/.github/workflows/ci.yaml" "              - 'fixtures/**'" \
+  $'              - \'fixtures/**\'\n              - \'.github/workflows/site.yaml\''
+replace "$root/.github/scripts/ci_job_reads.py" \
+  '    ], reads=[Read(".github/workflows/ci.yaml", "a job reads its own definition")]),' \
+  $'    ], reads=[Read(".github/workflows/ci.yaml", "a job reads its own definition"),\n              Read(".github/workflows/site.yaml", at("build", "echo build", ".github/workflows/site.yaml"))]),'
+run_check "$root"
+check "passes while that file holds the cited step" "$(is "$status" 0)"
+replace "$root/.github/workflows/site.yaml" "      - run: echo build" "      - run: echo publish"
+run_check "$root"
+check "fails once the step is gone" "$(is "$status" 1)"
+check "names the step, its job and the file that does not have it" \
+  "$(contains "$out" 'a why cites step "echo build" of job build, which .github/workflows/site.yaml does not have')"
 
 echo "case: a package added to a go command the table claims, outside the job's filter"
 root=$(fixture appended-package)

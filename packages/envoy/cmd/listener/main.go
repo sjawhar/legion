@@ -383,11 +383,36 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 // healthzBudget, or the durable consumer is
 // "not bound to this listener's subscription" because it was recreated server-side and now
 // delivers elsewhere; and 200 "degraded" for a transient KV failure the self-health monitor and
-// the NATS reconnect retry. A listener that mounts no GitHub webhook route keeps no CI cache,
-// and its answer carries "ci_cache": "not_applicable". "live_topics" says whether the live topics
-// lane is "subscribed" or, with ENVOY_SUBSCRIBE_ALL_TOPICS off, "not_applicable"; with it on, a
-// live client that is not connected or holds no valid subscription is 503 "live subscription
-// inactive", since every topic the stream does not store then reaches no session.
+// the NATS reconnect retry, and for a KV watch rebuild stalled past bus.RepairGrace (below). A
+// listener that mounts no GitHub webhook route keeps no CI cache, and its answer carries
+// "ci_cache": "not_applicable". "live_topics" says whether the live topics lane is "subscribed"
+// or, with ENVOY_SUBSCRIBE_ALL_TOPICS off, "not_applicable"; with it on, a live client that is
+// not connected or holds no valid subscription is 503 "live subscription inactive", since every
+// topic the stream does not store then reaches no session.
+//
+// A rewatch of the KV caches that keeps failing after a reconnect ends no watcher and clears no
+// cache, so every other check still passes while the caches follow buckets they no longer watch
+// (INFRA-743). The handler therefore reads the client's HookStall, how long the bus's reconnect
+// hooks have been due without a run that succeeded, and reports the dependency "KV watch rebuild"
+// once it reaches bus.RepairGrace. It reads it last, below every 503 check and immediately before
+// the healthy answer, so a stall never stands in for a worse fault: a durable consumer that is
+// gone, unbound, or whose info read did not answer is still 503, since a listener that receives
+// nothing is not the case the 200 is for. That answer is 200 "degraded" and not 503, because the
+// probes act on /healthz: the ECS container health check is curl -sf /healthz, every 30 s with 3
+// retries (infra/aws/rendering/listener.go:202-203), on a service of one task
+// (infra/aws/webhooklistener.go:227), and GKE's readiness probe reads it too
+// (infra/gcp/dispatch_kube.go, readyProbe). A 503 would replace, or unroute, the only listener
+// there is, and its replacement rebuilds into the same failing rewatch with cold caches that warm
+// up empty, whose fanout then acknowledges general-topic messages as unmatched and loses them
+// (delivery.go, fanoutDelivery), while the running task still serves from the caches it holds,
+// stale but not empty. The paging signal for this state is the bus's ERROR "envoy nats reconnect
+// hooks have not succeeded" (internal/bus/recovery.go, reportHookFailure), which the AWS rendering
+// counts as a log metric filter (infra/aws/rendering/metricfilters.go). A shorter stall is reported
+// nowhere here: the bus runs the hooks again within seconds of a failure (internal/bus/recovery.go,
+// recoverUntilHealthy), so a rebuild under the bound is being repaired, and a listener would
+// otherwise read as degraded over every reconnect. The stall is one bus.Client's, naming no
+// cache, so a listener that keeps no CI cache needs no branch of its own, and the live topics
+// lane's client, which carries no reconnect hook, has no stall to report.
 //
 // The checks that go to the bus share one healthzBudget taken from the request's own context: the
 // flush, each cache's KV ping and the durable consumer's info read. A ping or that read that has
@@ -450,17 +475,6 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 				return
 			}
 		}
-		response := map[string]interface{}{"status": "healthy"}
-		for k, v := range sessionHealthFields(d.sessions) {
-			response[k] = v
-		}
-		if d.ciStore == nil {
-			response["ci_cache"] = "not_applicable"
-		}
-		response["live_topics"] = "not_applicable"
-		if d.live != nil {
-			response["live_topics"] = "subscribed"
-		}
 		consumerInfo, err := d.client.JS().ConsumerInfo(bus.Stream, d.consumer, nats.Context(ctx))
 		if err != nil {
 			// A read ctx ended did not answer, the info read's own form of healthzPing's unanswered.
@@ -473,6 +487,29 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 		if durableUnbound(consumerInfo, d.client) {
 			writeDependencyHealth(w, "durable consumer", errDurableUnbound, true)
 			return
+		}
+		// Last, below every 503 check: "degraded" is the answer only when nothing worse holds.
+		if stall, hookErr := d.client.HookStall(); stall >= bus.RepairGrace {
+			rebuild := fmt.Errorf("no rebuild has succeeded for %s", stall.Round(time.Second))
+			if hookErr != nil {
+				// The last failure says what is broken; the stall, for how long. A run still in
+				// flight past the grace has no error of its own, and writeDependencyHealth needs
+				// one, so then the stall is the whole report.
+				rebuild = fmt.Errorf("%w (%w)", hookErr, rebuild)
+			}
+			writeDependencyHealth(w, "KV watch rebuild", rebuild, false)
+			return
+		}
+		response := map[string]interface{}{"status": "healthy"}
+		for k, v := range sessionHealthFields(d.sessions) {
+			response[k] = v
+		}
+		if d.ciStore == nil {
+			response["ci_cache"] = "not_applicable"
+		}
+		response["live_topics"] = "not_applicable"
+		if d.live != nil {
+			response["live_topics"] = "subscribed"
 		}
 		response["num_pending"] = consumerInfo.NumPending
 		response["num_ack_pending"] = consumerInfo.NumAckPending
