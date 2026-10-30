@@ -2,63 +2,55 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-557",
-  "completed": "2026-10-30T01:55:00Z",
-  "round": "review round 4",
+  "completed": "2026-10-30T06:40:00Z",
+  "round": "review round 5",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2404",
-  "codeHead": "f93c21be0ef23067cefff24ba4d3bce08be4b52b",
-  "answersReview": "3208830585f1a8790fea0c2efabd068355fd2992",
+  "codeHead": "a908e64f4c0898759f84ba1398b0f3b8af6db29d",
+  "answersReview": "43b73de3ed0323ceee005cb09d5e63c1c3a76b8a",
   "proof": [
     {
-      "criterion": "Defect 1: the hand-back window ends inside the linger",
-      "surface": "in-process lease and receivers on grant users",
-      "command": "cd packages/envoy && go test -count=1 -run 'TestLeaseTakesAReleasedRecordPastTheLinger|TestAStoppingPodsLinger' ./cmd/listener/",
-      "observed": "pass: a take-over at 1.2 s is no hand-back; a linger past its cap holds for the window",
-      "headSha": "f93c21be0ef23067cefff24ba4d3bce08be4b52b",
-      "negativeControl": "fix reverted: 'pod-a status = {... HandedBack:true ...}'; 'a linger past its cap ended \"timeout\" after 560.946µs'"
+      "criterion": "Defect 1: a successor that took inside the 1 s window but subscribes late is not left on the 3 s hold; order kept",
+      "surface": "in-process receivers (two pods) on one NATS server under the rendered grant, flush and release slowed",
+      "command": "cd packages/envoy && go test -count=1 -run 'TestASuccessorThatSubscribesPastTheHandBackWindowSettlesForTheAckWait|TestAHandBacksCapIsJudgedWhenTheTermSubscribes' ./cmd/listener/",
+      "observed": "pass: subscribe at 0.9 s -> 3 s cap, at 1.1 s -> 7 s cap; the late successor delivers 'lost' before 'newer'",
+      "headSha": "a908e64f4c0898759f84ba1398b0f3b8af6db29d",
+      "negativeControl": "window judged at the take only: 'pod-b delivered \"newer\", want \"lost\"' (cap 3s); 'a term subscribing 1.1s after the release counts as handed back true, want false'"
     },
     {
-      "criterion": "Defect 2: a stop during a lapse releases the ack-wait debt as the term stands",
-      "surface": "in-process lease",
-      "command": "cd packages/envoy && go test -count=1 -run TestLeaseAStopDuringALapseReleasesTheRecordUnsettled ./cmd/listener/",
-      "observed": "pass: released, unsettled, owing an ack wait",
-      "headSha": "f93c21be0ef23067cefff24ba4d3bce08be4b52b",
-      "negativeControl": "fix reverted: 'record released during a lapse = {... Unsettled:false AckWaitOwed:false ...}'"
+      "criterion": "Defect 2: Release with an expired context after the loop stopped still writes the release",
+      "surface": "lease on a real NATS KV bucket",
+      "command": "cd packages/envoy && go test -count=1 -run TestLeaseReleaseWritesWithAnExpiredContextAfterTheLoopStopped ./cmd/listener/",
+      "observed": "pass, 50 of 50 releases written",
+      "headSha": "a908e64f4c0898759f84ba1398b0f3b8af6db29d",
+      "negativeControl": "single random select restored: 'release 3 with an expired context: context canceled'"
     },
     {
-      "criterion": "Defect 3 (spec item 7): every pod answers the same last_seen at any time after the last write",
-      "surface": "two session registries (two pods) on one NATS with the state bucket; the bucket's configuration",
-      "command": "cd packages/envoy && go test -count=1 ./internal/session/... && go test -count=1 -run 'TestTheListenerStateBucket|TestOpeningTheListenerStateBucket' ./cmd/listener/",
-      "observed": "pass: pods answer alike once the bucket's record is gone; the bucket keeps records 20 min and an existing 10 min bucket is raised",
-      "headSha": "f93c21be0ef23067cefff24ba4d3bce08be4b52b",
-      "negativeControl": "fix reverted: 'pod a ... reports last seen 1793318121361 once the bucket's record is gone; pod b reports 0'; 'the listener state bucket keeps a record for 10m0s'"
-    },
-    {
-      "criterion": "Required 4 and 7: a lapsed holder answers degraded; GET /v1/interests/ answers within its budget while the bucket hangs",
-      "surface": "in-process receivers with /healthz; the listener API over a hung last-seen bucket",
-      "command": "cd packages/envoy && go test -count=1 -run 'TestALapsedHolderDoesNotAnswerHealthy|TestTheInterestsListAnswersWithinItsBudget' ./cmd/listener/",
+      "criterion": "Required 1: RaiseMaxAge leaves an unlimited (MaxAge 0) or longer bucket alone",
+      "surface": "real NATS JetStream bucket",
+      "command": "cd packages/envoy && go test -count=1 -run 'RaiseMaxAge|Replicas' ./internal/bus/",
       "observed": "pass",
-      "headSha": "f93c21be0ef23067cefff24ba4d3bce08be4b52b",
-      "negativeControl": "fixes reverted: 'a lapsed holder's /healthz = 200 map[... status:healthy]'; 'GET /v1/interests/ did not answer within 8.5s while the last-seen bucket hung'"
+      "headSha": "a908e64f4c0898759f84ba1398b0f3b8af6db29d",
+      "negativeControl": "old comparison restored: 'the bucket keeps a value for 20m0s after the raise, want the unlimited age (0) the operator set'"
     },
     {
       "criterion": "Everything holds together after the merge of main, and the PR merges",
-      "surface": "real listener binaries under the rendered grant; the listener suites; ci.yaml router check; GitHub",
-      "command": "go test -tags multiprocess -count=1 -timeout 30m -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; untagged listener suite; .github/scripts/check-ci-filters.sh; gh api repos/sjawhar/legion/pulls/2404",
-      "observed": "multiprocess ok 618.555s; untagged ok 829.788s; check-ci-filters 26 gates pass; mergeable true, state blocked. https://github.com/sjawhar/legion/pull/2404#issuecomment-6512958729",
-      "headSha": "f93c21be0ef23067cefff24ba4d3bce08be4b52b",
-      "negativeControl": "before the merge GitHub read dirty; before adding itemblocks to two filters check-ci-filters reported 12 then 6 problems"
+      "surface": "real cmd/listener binaries (two or three per row) against one nats-server under the rendered grant; the listener, session, dedupe and bus suites; ci.yaml router check; GitHub",
+      "command": "go test -tags multiprocess -count=1 -timeout 30m -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; untagged ./cmd/listener (four Postgres tests skipped), ./internal/session/... ./internal/dedupe/... ./internal/bus/; .github/scripts/check-ci-filters.sh; gh api repos/sjawhar/legion/pulls/2404",
+      "observed": "multiprocess ok 610.754s; listener ok 844.901s; session ok; dedupe ok; bus ok 320.280s; 26 gates; mergeable true, state blocked. https://github.com/sjawhar/legion/pull/2404#issuecomment-6516104126",
+      "headSha": "a908e64f4c0898759f84ba1398b0f3b8af6db29d",
+      "negativeControl": "before the merge GitHub read mergeable false, state dirty (kv.go conflict with main #2506)"
     }
   ],
   "filesChanged": [
-    "9baccf21: lease.go (window, lapse release, startTermLocked, 20 min MaxAge, RaiseMaxAge call), receive.go/receive_stop.go (linger floor, Deliverer report, stop paths moved), delivery.go/delivery_outcome.go (settleNone fields removed, outcome code moved), internal/session/registry.go (LastSeen from the bucket alone, ctx-bounded readSeen), internal/dedupe (one hold rule, AttemptedAge config gone), internal/bus (RaiseMaxAge, KeepBucket), api.go/role_holder.go (ctx through), session.OwnedBy by value, docs and changie fragments",
-    "f93c21be: merge of main (AGENTS.md jobs list; itemblocks in the listener_multiprocess and envoy_go_race_docs filters)"
+    "c8fadd9c: cmd/listener/lease.go (handBackBridge, leaseStatus.HandedBackAt/HandBackSince, HandBackLapsed, Release done-first), receive.go (serve judges the window before begin, Stop/waitLoops done-first, docs), receive_stop.go (linger flattened, docs), main.go (step-2 comment, monitorDone done-first), README.md, AGENTS.md, changie fragment, tests",
+    "8063362a: internal/bus/kv.go (raiseBucketSetting, RaiseMaxAge error-only, unlimited stands), lease.go caller and listenerStateMaxAge doc, delivery.go -> delivery_outcome.go (four exception helpers), receive.go report() one snapshot, api.go and AGENTS.md last_seen text, test comments without branch shas, new internal/bus/kv_max_age_test.go",
+    "a908e64f: merge of main (kv.go doc: main's overlap-retry sentence moved to raiseBucketSetting)"
   ],
   "trickyParts": [
-    "The state bucket's MaxAge is now 20 min so a lapsed session's seen. record lasts the whole last_seen window; an unreleased lease record now lingers up to 20 min, so after every pod of this build died hard a pod starting within 20 min treats a binding as the dead holder's (it did within 10 min before); the README says so."
+    "The hand-back is judged at the successor's subscribe, conservatively: server delta between the release and acquire writes plus the pod's own time since just before its acquiring write. The 1 s window sits a lingerPoll (250 ms) inside the linger floor."
   ],
   "deviations": [
-    "A shutdown with flush and release both at their bounds can take 10.25 s in the receiver, past its 10 s share; documented in receive.go rather than shortening the linger, which would reopen defect 1.",
-    "envoy_go_race_docs (main's job) also lacked internal/dispatch/itemblocks; added in this PR so check-ci-filters passes."
+    "Defect 1 is fixed on the successor's side rather than by a longer linger: a wait for the successor can only be bounded, and no bound past the 1.25 s floor fits the stop's 10 s share when flush and release run to their bounds, so the successor judges against the floor both sides share. The linger still waits for a taken successor until its deadline, which nothing relies on."
   ],
   "openQuestions": [],
   "discoveredComplexity": []
