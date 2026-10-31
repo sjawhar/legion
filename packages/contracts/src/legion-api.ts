@@ -596,8 +596,9 @@ const legionDeliveryView = z.strictObject({
 });
 
 /** `api.OperatorClaim`, the body of the operator routes that act on one claim (`POST
- * /legion/v1/operator/claims`, `…/{token}/deliver|suspend|resume|stop|retry|close`): the claim as its
- * supervisor holds it, but its hashes. */
+ * /legion/v1/operator/claims`, `…/{token}/deliver|suspend|resume|stop|retry|forget-session|close`):
+ * the claim as its supervisor holds it, but its hashes. `forgottenSession` and
+ * `forgottenSessionFile` appear only in a successful `forget-session` response. */
 export const LegionOperatorClaimResponse = z.strictObject({
   token: nonEmptyString,
   tree: nonEmptyString,
@@ -607,6 +608,8 @@ export const LegionOperatorClaimResponse = z.strictObject({
   state: z.enum(LEGION_CLAIM_STATES),
   session: z.string(),
   sessionFile: z.string(),
+  forgottenSession: nonEmptyString.optional(),
+  forgottenSessionFile: nonEmptyString.optional(),
   locator: legionLocator.optional(),
   budgets: z.strictObject({
     launchFailures: z.number().int().nonnegative(),

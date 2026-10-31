@@ -133,20 +133,32 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260706201446-f0a921348800 // indirect
 )
 
-// The sjawhar/ygo fork is upstream ygo v1.54.0 plus changes Dispatch depends on while each waits in
-// an upstream pull request: a document logs each committed transaction's update in commit order
-// under its own lock (UpdateLog), each logged update carrying what its commit parked
-// (LoggedUpdate.Parked), so the room's update observer measures each update against a replica
-// that holds the room as the commit before it left it, parked structs included (reearth/ygo#332);
-// a transaction names the shared types it changed (Transaction.ChangedTypes) and every shared type
-// its container (Parent), so that observer renders only the top-level blocks an update touched
-// (INFRA-644, reearth/ygo#336); a text observer's event no longer panics, holding the document's
-// lock, on a mark whose value is a map (reearth/ygo#335); an update the pending cap refuses is
-// refused before it changes anything; a partly applied update relays what it parked; a stored
-// document with a clock past 2^53-1 or a client past 2^55-1 is refused when it loads; a document
+// The sjawhar/ygo fork is upstream ygo v1.54.0 plus fixes, each carried until upstream ships it;
+// its release notes list every member with its upstream pull request. Upstream merged, and the
+// fork dropped, every member of the v1.51.3-sami.N line it does not list again: the transactional
+// GC range search (reearth/ygo#258, which replaces the fork's closed #262), the iterative delete
+// cascade (#263), right-origin merges (#266), large incremental updates in the stores (#268), the
+// idle stamp after Apply (#269), whole states resolving within the pending budget (#260), a
+// SyncStatus for every Hocuspocus sync frame (#291), Server.OnPeerUpdate (#304), which Dispatch
+// does not set, and deferred items integrating in dependency order (#296, #311, #312). Seventeen
+// members wait in open upstream pull requests: CloseRoom closes a browser that joins while it runs
+// (#331); a document logs each commit's update in commit order under its own lock (UpdateLog,
+// #332), against which the room's update observer measures each update; a remote update's scans
+// can be bounded (#333); parked delete ranges are capped, and a room loads its stored state with
+// the cap lifted (#334); a map-valued text format no longer panics with the lock held (#335); a
+// transaction names the shared types it changed and every shared type its container
+// (ChangedTypes and Parent, #336), so the room's update observer renders only the top-level blocks
+// an update touched; awareness reaches its sending peer and a read-only peer gets a
+// bounded empty awareness response, so an idle provider stays connected (#338); a failed write
+// closes the peer (#339); the pending cap refuses an update before it changes the document (#340);
+// a relay-injected update that fails partway reaches the node's peers (#341); a per-peer write
+// queue byte budget (#342); a server close drops the peer's buffered input (#343); a re-sent
+// pending struct parks once (#344); the token hook can receive the connection's request context
+// (Server.OnTokenAuthContext, #351), which Dispatch does not set; clocks past 2^53-1 and clients
+// past 2^55-1 are refused, so a stored state holding one does not load (#356); a partly applied
+// update reaches the other peers with what it parked as well as what landed (#357); and a document
 // can apply remote updates without the format cleanup Yjs runs after them (WithFormatCleanup,
-// reearth/ygo#369), which every copy that replays the room's commits turns off (newDocumentCopy);
-// and the fork's opt-in bounds and hooks (WithMaxIntegrateScan, WithIntegrateScanBudget,
-// Server.OnPeerUpdate; reearth/ygo#333), which are off unless set and which Dispatch does not set.
-// The fixes the 1.51.3-sami.N line carried that upstream has merged come from v1.54.0 itself.
+// #369), which every copy that replays the room's commits turns off (newDocumentCopy). One is
+// fork-only, with no upstream pull request yet: a per-apply scan budget stacked on #333, which
+// Dispatch does not set.
 replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.54.1-sami.3
