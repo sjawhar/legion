@@ -7,7 +7,9 @@ body: |-
   which is the request pool's 48 connections less the 8 its uncounted users need. The class
   limits add up to more than the 40, so a class reaches its own only while the other is quiet,
   and a request past the 40 is refused here rather than left to queue on the pool and time out
-  there. A
+  there. 22 of the 40 units are kept for reads while a read is waiting for room, so writes hold
+  at most 18 under read pressure, where they held 24 and left the reads too few to serve the
+  reads the everyday load offers, and reach their 24 only while the reads are light. A
   route that runs two reads side by side counts two: the delivery timeline, measures and pipeline
   (which now run at most two reads at once, where the timeline ran up to seven), and every route
   that runs the related-item check, whose keyword and meaning searches are two such reads - the

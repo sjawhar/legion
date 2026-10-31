@@ -120,12 +120,27 @@ func (r *Refusal) Error() string {
 // 40 committed 8.34 and served 8.7%, since writes then hold 24 of the 40 units and reads the rest;
 // the request pool's waiters peaked at 1 against the 29 that 24 writes without the combined cap
 // left on it.
+//
+// Of the 40, reads keep ReservedReadUnits (22) while they are waiting for room: a write is
+// admitted only while the units it takes, beside the reserved read units the reads have not
+// taken yet, are within the 40, so under read pressure writes hold at most 40 - 22 = 18 and the
+// reads reach their 22. The room is held back only while a read is queued for it, so with the
+// reads light nothing is reserved and writes still reach their whole cap of 24, which 1x needs:
+// its write units in flight reach 19-24, and the 28 reads and 24 writes above refused nothing
+// of it in three runs.
+//
+// What it is for: at 10x the writes took 24 of the 40 units and the reads, left about 16, were
+// served about 50/s, below the 60/s the 1x step offers them. Holding the writes to 18 leaves
+// the reads the 22 units that rate asks for, and the writes half again the 12 the base ran with.
+//
+// MEASURED-ROUND-10
 const (
-	MaxReadLimit     = 28
-	MaxWriteLimit    = 24
-	MaxAdmittedUnits = 40
-	readsPerCPU      = 14
-	writesPerCPU     = 12
+	MaxReadLimit      = 28
+	MaxWriteLimit     = 24
+	MaxAdmittedUnits  = 40
+	ReservedReadUnits = 22
+	readsPerCPU       = 14
+	writesPerCPU      = 12
 )
 
 // readLimit and writeLimit are the limits for procs usable CPUs: perCPU each, at least one CPU's
@@ -154,8 +169,8 @@ const DefaultWait = time.Second
 const queueFactor = 2
 
 // Limits are a Limiter's concurrency limits in units (a request takes its route's weight): one
-// per class, one over the two together, and how long a request may wait for room; a zero Wait is
-// DefaultWait.
+// per class, one over the two together, how much of that one is kept for reads, and how long a
+// request may wait for room; a zero Wait is DefaultWait.
 type Limits struct {
 	Read, Write int
 	// Total is the units both classes may hold together. Zero is no combined cap beyond the
@@ -166,21 +181,32 @@ type Limits struct {
 	// the total.
 	Total int
 	Wait  time.Duration
+	// ReservedReads is how many of Total's units writes leave to the reads while a read is
+	// waiting for room: a write is admitted only while its units, beside the reserved units
+	// the reads have not taken yet, are within Total, so the reads reach the reservation
+	// under write pressure and the writes hold at most Total minus it. Zero is no
+	// reservation; DefaultLimits sets ReservedReadUnits. New clamps it to the read limit and
+	// to Total.
+	ReservedReads int
 }
 
 // DefaultLimits are the limits the server runs with: reads and writes by the CPUs the process may
 // use (readLimit and writeLimit of runtime.GOMAXPROCS), MaxAdmittedUnits over the two of them,
-// and DefaultWait.
+// ReservedReadUnits of those kept for the reads, and DefaultWait.
 func DefaultLimits() Limits {
 	procs := runtime.GOMAXPROCS(0)
-	return Limits{Read: readLimit(procs), Write: writeLimit(procs), Total: MaxAdmittedUnits, Wait: DefaultWait}
+	return Limits{
+		Read: readLimit(procs), Write: writeLimit(procs), Total: MaxAdmittedUnits,
+		ReservedReads: ReservedReadUnits, Wait: DefaultWait,
+	}
 }
 
-// Limiter admits requests per class under Limits. A request is admitted only while its own class
-// has room and both classes together are under Limits.Total; one that finds no room waits in its
-// class's queue, first come first served, for at most Limits.Wait, and one that finds that queue
-// already holding queueFactor times the class's limit is refused at once. A Limiter is safe for
-// concurrent use.
+// Limiter admits requests per class under Limits. A read is admitted while its class and both
+// classes together are under their limits; a write while its class is and its units fit under
+// Limits.Total beside the read units Limits.ReservedReads still keeps for waiting reads. One
+// that finds no room waits in its class's queue, first come first served, for at most
+// Limits.Wait, and one that finds that queue already holding queueFactor times the class's
+// limit is refused at once. A Limiter is safe for concurrent use.
 type Limiter struct {
 	// mu guards every count and queue below: the combined cap is one number over both
 	// classes, so granting reads and moves the two together.
@@ -189,12 +215,14 @@ type Limiter struct {
 	arrived uint64 // arrivals so far: a waiter's place in the order the two queues are served in
 	classes [classCount]*gate
 
-	total int // the combined cap, and wait, both set once by New
-	wait  time.Duration
+	total         int // the combined cap, the read reservation under it, and wait, all set once by New
+	reservedReads int
+	wait          time.Duration
 }
 
-// New returns a Limiter with limits. A limit below one is one, and a Total of zero is Read plus
-// Write: no combined cap beyond the classes' own.
+// New returns a Limiter with limits. A limit below one is one, a Total of zero is Read plus
+// Write (no combined cap beyond the classes' own), and a ReservedReads is kept within zero and
+// the smaller of the read limit and the total, which is all the reads could ever hold.
 func New(limits Limits) *Limiter {
 	l := &Limiter{wait: limits.Wait}
 	if l.wait <= 0 {
@@ -208,6 +236,7 @@ func New(limits Limits) *Limiter {
 	if limits.Total > 0 {
 		l.total = limits.Total
 	}
+	l.reservedReads = min(max(limits.ReservedReads, 0), l.classes[Read].limit, l.total)
 	return l
 }
 
@@ -253,16 +282,18 @@ func (l *Limiter) Stats() []ClassStats {
 
 // Totals is what a Limiter holds across both classes.
 type Totals struct {
-	// Limit is the combined cap in units (Limits.Total) and InFlight the units the admitted
-	// requests of both classes hold under it now.
-	Limit, InFlight int
+	// Limit is the combined cap in units (Limits.Total), InFlight the units the admitted
+	// requests of both classes hold under it now, and ReservedReads the units of the cap
+	// writes leave to the reads while a read waits for room (Limits.ReservedReads).
+	Limit, InFlight, ReservedReads int
 }
 
-// Totals reads the combined cap and what is held under it, the two together.
+// Totals reads the combined cap, the read room reserved under it and what is held under it, the
+// three together.
 func (l *Limiter) Totals() Totals {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return Totals{Limit: l.total, InFlight: l.used}
+	return Totals{Limit: l.total, InFlight: l.used, ReservedReads: l.reservedReads}
 }
 
 // Ticket is one admitted request's hold on its class. It rides on the request's context
@@ -452,16 +483,36 @@ func (l *Limiter) release(class Class, units int) {
 	l.grant()
 }
 
-// fits reports whether units may start in g now: g's class and the combined cap both have room,
-// and no queue head is held up by the combined cap alone. Such a head arrived before this
-// request and waits for room of the whole Limiter, which this request would take from it.
-// l.mu is held.
+// fits reports whether units may start in g now: g's class and the combined cap, the reserved
+// read room counted, both have room, and no queue head is held up by the combined cap alone.
+// Such a head arrived before this request and waits for room of the whole Limiter, which this
+// request would take from it. l.mu is held.
 func (l *Limiter) fits(g *gate, units int) bool {
-	return g.used+units <= g.limit && l.used+units <= l.total && l.heldByTotal() == nil
+	return l.hasRoom(g, units) && l.heldByTotal() == nil
+}
+
+// hasRoom reports whether g's class and the combined cap hold units on top of what they hold
+// now, the room reserved for the reads counted against a write. l.mu is held.
+func (l *Limiter) hasRoom(g *gate, units int) bool {
+	return g.used+units <= g.limit && l.used+units+l.reservedFor(g.class) <= l.total
+}
+
+// reservedFor is the room of the combined cap class may not take: for a write, the read units
+// reserved that the reads have not taken yet, while a read is waiting for them. A read takes
+// the reserved room itself, and reserving it against nobody would only idle the units, so it is
+// held back only while the read queue has someone in it. l.mu is held.
+func (l *Limiter) reservedFor(class Class) int {
+	reads := l.classes[Read]
+	if class == Read || reads.waiters.Len() == 0 {
+		return 0
+	}
+	return max(l.reservedReads-reads.used, 0)
 }
 
 // heldByTotal is the earliest waiter at the head of a class's queue that fits its own class but
-// not the combined cap, or nil when neither head is one. l.mu is held.
+// not the combined cap itself, or nil when neither head is one. A write the read reservation
+// alone holds up is not one: the reads it waits for must be able to take that room, so it holds
+// back the writes queued behind it and nothing else. l.mu is held.
 func (l *Limiter) heldByTotal() *waiter {
 	var earliest *waiter
 	for _, g := range l.classes {
@@ -479,10 +530,11 @@ func (l *Limiter) heldByTotal() *waiter {
 }
 
 // grant hands room to the waiters at the heads of the two class queues, the earlier arrival of
-// the two first, while each fits. A head the combined cap alone holds up stops the pass for both
-// classes: the room it waits for is the whole Limiter's, and the later arrivals of the other
-// class would take it a unit at a time, so a weight-2 head is never starved by weight-1 requests
-// beside it. A head its own class's limit holds up stops only its own queue. l.mu is held.
+// the two first, while each fits. A head the combined cap itself alone holds up stops the pass
+// for both classes: the room it waits for is the whole Limiter's, and the later arrivals of the
+// other class would take it a unit at a time, so a weight-2 head is never starved by weight-1
+// requests beside it. A head its own class's limit, or the read reservation, holds up stops only
+// its own queue. l.mu is held.
 func (l *Limiter) grant() {
 	for {
 		held := l.heldByTotal()
@@ -494,7 +546,7 @@ func (l *Limiter) grant() {
 				continue
 			}
 			head := front.Value.(*waiter)
-			if g.used+head.units > g.limit || l.used+head.units > l.total {
+			if !l.hasRoom(g, head.units) {
 				continue
 			}
 			if next == nil || head.seq < next.seq {

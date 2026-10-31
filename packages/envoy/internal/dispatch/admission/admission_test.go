@@ -466,3 +466,192 @@ func TestAParkedTicketFreesCombinedRoom(t *testing.T) {
 		t.Fatalf("totals %+v after every release, want %+v", l.Totals(), got)
 	}
 }
+
+// With the reads idle the writes take their whole class cap; with the reads asking for all 28 of
+// their units the reservation hands the room back to them, one released write at a time, until
+// the reads hold ReservedReadUnits and the writes the rest of the combined cap - and only then
+// is the write that has been waiting all along granted.
+func TestTheReservationKeepsReadRoomFromWritesWhileReadsWait(t *testing.T) {
+	l := New(Limits{
+		Read: MaxReadLimit, Write: MaxWriteLimit, Total: MaxAdmittedUnits,
+		ReservedReads: ReservedReadUnits, Wait: patient,
+	})
+	writes := make([]*Ticket, 0, MaxWriteLimit)
+	for range MaxWriteLimit {
+		writes = append(writes, admit(t, l, Write, 1))
+	}
+	if stats := classStats(l, Write); stats.InFlight != MaxWriteLimit {
+		t.Fatalf("write stats %+v with no read held, want its whole cap of %d units in flight", stats, MaxWriteLimit)
+	}
+	reads := make([]*Ticket, 0, MaxReadLimit)
+	for range MaxAdmittedUnits - MaxWriteLimit {
+		reads = append(reads, admit(t, l, Read, 1))
+	}
+	// A write asks for the next unit ahead of every read that queues after it, and the reads
+	// ask for the 28 their class holds.
+	waitingWrite := admitInBackground(t, l, context.Background(), Write, 1)
+	readWaiters := make([]<-chan admitted, 0, MaxReadLimit-(MaxAdmittedUnits-MaxWriteLimit))
+	for range MaxReadLimit - (MaxAdmittedUnits - MaxWriteLimit) {
+		readWaiters = append(readWaiters, admitInBackground(t, l, context.Background(), Read, 1))
+	}
+	const toTheReads = MaxWriteLimit - (MaxAdmittedUnits - ReservedReadUnits)
+	for index := range toTheReads {
+		writes[index].Release()
+		granted := receive(t, readWaiters[index])
+		if granted.err != nil {
+			t.Fatalf("the read waiting for the reserved room: %v", granted.err)
+		}
+		reads = append(reads, granted.ticket)
+		assertPending(t, waitingWrite)
+	}
+	if stats := classStats(l, Write); stats.InFlight != MaxAdmittedUnits-ReservedReadUnits {
+		t.Fatalf("write stats %+v with the reads waiting, want the %d units the reservation leaves them",
+			stats, MaxAdmittedUnits-ReservedReadUnits)
+	}
+	if stats := classStats(l, Read); stats.InFlight != ReservedReadUnits {
+		t.Fatalf("read stats %+v, want the reserved %d units in flight", stats, ReservedReadUnits)
+	}
+	if got := (Totals{Limit: MaxAdmittedUnits, InFlight: MaxAdmittedUnits, ReservedReads: ReservedReadUnits}); l.Totals() != got {
+		t.Fatalf("totals %+v, want %+v", l.Totals(), got)
+	}
+
+	// The reads hold their reservation now, so the next unit a write gives up is the waiting
+	// write's and not theirs.
+	writes[toTheReads].Release()
+	granted := receive(t, waitingWrite)
+	if granted.err != nil {
+		t.Fatalf("the write waiting under the reservation: %v", granted.err)
+	}
+	if stats := classStats(l, Write); stats.InFlight != MaxAdmittedUnits-ReservedReadUnits {
+		t.Fatalf("write stats %+v once the reads hold the reservation, want %d units in flight",
+			stats, MaxAdmittedUnits-ReservedReadUnits)
+	}
+
+	granted.ticket.Release()
+	for _, ticket := range writes[toTheReads+1:] {
+		ticket.Release()
+	}
+	for _, outcome := range readWaiters[toTheReads:] {
+		result := receive(t, outcome)
+		if result.err != nil {
+			t.Fatalf("a read still queued once the writes were done: %v", result.err)
+		}
+		reads = append(reads, result.ticket)
+	}
+	for _, ticket := range reads {
+		ticket.Release()
+	}
+	if got := (Totals{Limit: MaxAdmittedUnits, ReservedReads: ReservedReadUnits}); l.Totals() != got {
+		t.Fatalf("totals %+v after every release, want %+v", l.Totals(), got)
+	}
+}
+
+// A write the reservation alone holds up is not in the way of the reads the room is kept for:
+// the read queued behind it takes the unit the write may not, though the write arrived first.
+func TestAWriteHeldByTheReservationDoesNotHoldBackTheReads(t *testing.T) {
+	l := New(Limits{Read: 4, Write: 4, Total: 4, ReservedReads: 2, Wait: patient})
+	writes := []*Ticket{admit(t, l, Write, 1), admit(t, l, Write, 1), admit(t, l, Write, 1)}
+	read := admit(t, l, Read, 1)
+	waitingWrite := admitInBackground(t, l, context.Background(), Write, 1)
+	waitingRead := admitInBackground(t, l, context.Background(), Read, 1)
+
+	writes[0].Release()
+	granted := receive(t, waitingRead)
+	if granted.err != nil {
+		t.Fatalf("the read queued behind the held write: %v", granted.err)
+	}
+	assertPending(t, waitingWrite)
+	if got := (Totals{Limit: 4, InFlight: 4, ReservedReads: 2}); l.Totals() != got {
+		t.Fatalf("totals %+v, want %+v: the freed unit is the reads' reserved one", l.Totals(), got)
+	}
+
+	// Nothing of the reads waits now, so the write takes the next unit itself.
+	writes[1].Release()
+	late := receive(t, waitingWrite)
+	if late.err != nil {
+		t.Fatalf("the write once no read waited for the reserved room: %v", late.err)
+	}
+	read.Release()
+	granted.ticket.Release()
+	late.ticket.Release()
+	writes[2].Release()
+	if got := (Totals{Limit: 4, ReservedReads: 2}); l.Totals() != got {
+		t.Fatalf("totals %+v after every release, want %+v", l.Totals(), got)
+	}
+}
+
+// A write the reservation holds up is granted once the reads drop below the reservation and ask
+// for nothing more: the room is reserved against the reads that want it, not idled.
+func TestAWriteHeldByTheReservationRunsWhenTheReadsDropBelowIt(t *testing.T) {
+	l := New(Limits{Read: 8, Write: 8, Total: 8, ReservedReads: 5, Wait: patient})
+	writes := make([]*Ticket, 0, 4)
+	for range 4 {
+		writes = append(writes, admit(t, l, Write, 1))
+	}
+	reads := make([]*Ticket, 0, 4)
+	for range 4 {
+		reads = append(reads, admit(t, l, Read, 1))
+	}
+	waitingWrite := admitInBackground(t, l, context.Background(), Write, 1)
+	waitingRead := admitInBackground(t, l, context.Background(), Read, 1)
+
+	// The first read's unit goes back to the reads, which hold less than the reserved 5.
+	reads[0].Release()
+	granted := receive(t, waitingRead)
+	if granted.err != nil {
+		t.Fatalf("the read waiting for the reserved room: %v", granted.err)
+	}
+	assertPending(t, waitingWrite)
+
+	// With no read waiting the reservation keeps nothing back, so the write takes the room the
+	// reads left, past the 3 units the reservation would leave it.
+	reads[1].Release()
+	late := receive(t, waitingWrite)
+	if late.err != nil {
+		t.Fatalf("the write once the reads dropped below the reservation: %v", late.err)
+	}
+	if stats := classStats(l, Write); stats.InFlight != 5 {
+		t.Fatalf("write stats %+v with the reads light, want 5 units in flight", stats)
+	}
+	if stats := classStats(l, Read); stats.InFlight != 3 {
+		t.Fatalf("read stats %+v, want the 3 units the reads kept", stats)
+	}
+	if got := (Totals{Limit: 8, InFlight: 8, ReservedReads: 5}); l.Totals() != got {
+		t.Fatalf("totals %+v, want %+v", l.Totals(), got)
+	}
+
+	for _, ticket := range append(writes, reads[2], reads[3], granted.ticket, late.ticket) {
+		ticket.Release()
+	}
+	if got := (Totals{Limit: 8, ReservedReads: 5}); l.Totals() != got {
+		t.Fatalf("totals %+v after every release, want %+v", l.Totals(), got)
+	}
+}
+
+// The server keeps ReservedReadUnits of the combined cap for the reads, and New takes a
+// reservation of zero as none and holds one past the read limit or the cap down to what the
+// reads could hold at all.
+func TestTheDefaultLimitsReserveReadRoom(t *testing.T) {
+	if limits := DefaultLimits(); limits.ReservedReads != ReservedReadUnits {
+		t.Errorf("DefaultLimits() = %+v, want %d of its units reserved for reads", limits, ReservedReadUnits)
+	}
+	if got := New(DefaultLimits()).Totals(); got.ReservedReads != ReservedReadUnits {
+		t.Errorf("totals %+v of a default limiter, want %d of its units reserved for reads", got, ReservedReadUnits)
+	}
+	for _, limits := range []struct {
+		name  string
+		given Limits
+		want  int
+	}{
+		{"none unless it is asked for", Limits{Read: 8, Write: 4, Total: 10}, 0},
+		{"never below none", Limits{Read: 8, Write: 4, Total: 10, ReservedReads: -3}, 0},
+		{"never past the read limit", Limits{Read: 6, Write: 4, Total: 10, ReservedReads: 8}, 6},
+		{"never past the combined cap", Limits{Read: 8, Write: 4, Total: 5, ReservedReads: 7}, 5},
+	} {
+		t.Run(limits.name, func(t *testing.T) {
+			if got := New(limits.given).Totals().ReservedReads; got != limits.want {
+				t.Errorf("New(%+v) reserved %d read units, want %d", limits.given, got, limits.want)
+			}
+		})
+	}
+}
