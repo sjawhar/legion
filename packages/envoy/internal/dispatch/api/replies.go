@@ -197,8 +197,8 @@ func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
 // issue message) holds that owner's lock exclusively from its read phase on, before its trigger
 // fires, so a mark that took the row first could wait on a writer waiting on it. The shared lock
 // waits for that writer to commit, as the owner row's `for share` waited for its `for no key
-// update`, and two marks never wait on each other. Owner first, then the project the event names,
-// is the order every multi-owner transaction takes (LockOwners).
+// update`, and two marks never wait on each other. It takes the owner's lock first, then the
+// project's, which the event's append takes.
 func (s *server) putThreadRead(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {

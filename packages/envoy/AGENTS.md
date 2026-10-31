@@ -1780,7 +1780,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   Issue and pinned lists sort by lifecycle status, then rank, then creation time, then key;
   priority is a badge and a filter, never a sort key, so the List and the Board (whose columns keep the list's order) show the same order.
   `PATCH /api/v1/issues/{key}` accepts neighboring issue keys as `rank.before` and/or `rank.after`, validates they share the project, and serializes rank allocation per project;
-  it locks both neighbours together with every other issue row the PATCH names, in one key order, then rewrites only that issue's order key.
+  it takes the owner locks of both neighbours together with every other issue the PATCH names, in one lock-key order (`store.LockOwners`), then rewrites only that issue's order key.
 
 - Every issue has a nullable `parent_key` (`graph_edges.child_of` is a live view over it).
   `POST /api/v1/issues` validates a supplied `parent` exists in the same project (`400 PARENT_INPUT`) and leaves the new issue at most `parentDepthCap` (32) links below its root (`409 PARENT_INPUT`), and `PATCH /api/v1/issues/{key}` accepts a tri-state `parent`:

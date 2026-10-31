@@ -413,11 +413,11 @@ type PendingAnchor struct {
 	Open bool
 	// Event prepares the row's anchor-refresh event (ask.anchor_refreshed,
 	// comment.anchor_refreshed). A refresh that moves the row's anchor calls it in the read phase,
-	// in tx, to read what the event needs, and calls the builder it returns in the write phase,
-	// with the anchor refreshed to, after the steps queued before the refresh have run, so the
-	// builder may read what they captured - the id of the event that opened the ask - and does
-	// only the light work of a step. Nil reads the row from the table in the read phase, as the
-	// refresh reads a stored row, which only a row the table already holds can be.
+	// in tx, to read what the event needs, and calls the builder it returns while the write phase
+	// builds its batch, with the anchor refreshed to. That is before any queued statement has run,
+	// so the builder uses only what the read phase read and does only the light work of a step.
+	// Nil reads the row from the table in the read phase, as the refresh reads a stored row, which
+	// only a row the table already holds can be.
 	Event func(ctx context.Context, tx pgx.Tx) (func(refreshed model.Anchor) (model.Event, error), error)
 }
 

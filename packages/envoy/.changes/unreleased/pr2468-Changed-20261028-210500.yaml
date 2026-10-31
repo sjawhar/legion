@@ -10,7 +10,7 @@ body: |-
     its owner's `last_seq` and `updated_at`, an `ask.opened` payload's `opened_event_id`, an event's
     `thread_logins`, the event a write's references and a review are stamped with - are now derived
     in SQL, with the same stored results. A live update that waits for every older transaction id
-    to end before it is published (INFRA-591's event horizon) therefore waits only for other writes'
+    to end before it is published (the event horizon) therefore waits only for other writes'
     statements, so live updates publish promptly under load. Writers of one issue or document still
     take turns, now on a transaction advisory lock (`pg_advisory_xact_lock`, namespace `0x4F574E52`)
     in place of a lock of the owner's row; a write still holds its pooled connection while it does
@@ -19,7 +19,8 @@ body: |-
     Rollout: a pod of this release and a pod of an earlier one do not exclude each other's writes
     to the same issue or document. Dispatch can run on more than one pod, but a deployment that
     does must first serve this release at one pod with the `Recreate` strategy (the one-pod
-    default), and only then add pods (INFRA-636).
+    default), and only then add pods; a rollback to an earlier release goes back the same way, at
+    one pod with `Recreate` first.
 time: 2026-10-28T21:05:00.000000000Z
 custom:
-    Issue: INFRA-636
+    Issue: pr2468

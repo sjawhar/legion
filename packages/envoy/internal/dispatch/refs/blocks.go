@@ -18,7 +18,7 @@ import (
 
 // IndexBlocks records version `version` (written at versionAt) of document artifactID's blocks as
 // graph nodes, and each mention written inside a block as an edge out of the innermost block
-// holding its start, in the caller's transaction, which holds the document's owner row. blocks
+// holding its start, in the caller's transaction, which holds the document's owner lock. blocks
 // are the version's rendered blocks in document order, each parent before its children; the first
 // holder of a repeated id is the node. located must be text.ExtractAt(markdown, …). A block whose
 // id is longer than text.MaxBlockIDBytes, which no key of the index can hold, is no node: a

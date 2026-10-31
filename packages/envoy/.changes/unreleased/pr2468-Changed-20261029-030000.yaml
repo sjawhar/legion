@@ -13,7 +13,7 @@ body: |-
     10-250 ms re-read remains only as the fallback for a holder that ends without notifying,
     running only while such a gap is open, so an idle process still observes nothing. The relay's
     coalescing window is 2 ms instead of 25 ms: a transaction's notifications all arrive at its
-    commit, and the longer window only held each live frame back (INFRA-636).
+    commit, and the longer window only held each live frame back.
 time: 2026-10-29T03:00:00.000000000Z
 custom:
-    Issue: INFRA-636
+    Issue: pr2468

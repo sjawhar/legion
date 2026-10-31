@@ -1788,11 +1788,11 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// Every update this settlement read is settled once it commits, so the row that left the
 	// settlement to a later load goes with that commit. It goes before the first event this
 	// settlement appends. A transaction marking this document owed as a copy (owedCopiesOf) holds
-	// its row until it commits, and this settlement then waits for it holding its owner row and
+	// its row until it commits, and this settlement then waits for it holding its owner lock and
 	// room lock, which that transaction never takes; nor does it take what this settlement goes on
-	// to lock, its events locking only this document's owner row. The pending authors stay unless
-	// this settlement's version lists them (deleted below): a settlement that writes no version
-	// lists no one.
+	// to lock, its events locking only this document's owner and owner row. The pending authors
+	// stay unless this settlement's version lists them (deleted below): a settlement that writes no
+	// version lists no one.
 	if err := clearSettlementPending(ctx, tx, room); err != nil {
 		return abandon(err)
 	}

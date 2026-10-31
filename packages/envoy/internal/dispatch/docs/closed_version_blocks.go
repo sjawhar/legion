@@ -21,7 +21,7 @@ type indexedBlock struct {
 }
 
 // indexedBlocks is each block row the index holds for document artifactID, by id, read in the
-// caller's transaction, which holds the document's owner row.
+// caller's transaction, which holds the document's owner lock.
 func indexedBlocks(ctx context.Context, tx pgx.Tx, artifactID string) ([]indexedBlock, error) {
 	rows, err := tx.Query(ctx, `
 		select block_id, type, text_sha256 from document_blocks where artifact_id = $1 order by block_id

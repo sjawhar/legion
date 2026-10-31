@@ -389,10 +389,10 @@ func (s *server) resolveCommentRoute(
 	return route, nil
 }
 
-// beginCommentWrite opens the comment's transaction, locks its owner, and verifies that the
-// route the listener resolved is still the one the locked issue row carries. A route that
-// moved in between leaves the resolution unusable, so the write is resolved once more rather
-// than suppressing the wrong session's fan-out.
+// beginCommentWrite opens the comment's transaction, takes its owner's lock, and verifies that the
+// route the listener resolved is still the one the issue row carries, read under that lock. A
+// route that moved in between leaves the resolution unusable, so the write is resolved once more
+// rather than suppressing the wrong session's fan-out.
 func (s *server) beginCommentWrite(ctx context.Context, owner owner, route commentRoute) (commentWrite, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {

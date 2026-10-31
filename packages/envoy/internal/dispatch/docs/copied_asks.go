@@ -304,8 +304,8 @@ func owedCopiesOf(ctx context.Context, tx pgx.Tx, documents ...documentAsks) ([]
 // block's id (copiesOf). A document's latest version is read for the block's opener
 // (`:::ask{#<id> …}`), so one that quotes the opener elsewhere, in code, is settled for nothing.
 // The caller has taken no pending row and appended no event. A copy's settlement waits on the row
-// this marks holding its own owner row and room lock, which the caller never takes, and deletes its
-// own row before it appends an event, so the two can wait on each other in only one direction.
+// this marks holding its own owner lock and room lock, which the caller never takes, and deletes
+// its own row before it appends an event, so the two can wait on each other in only one direction.
 func lockedCopiesOf(ctx context.Context, tx pgx.Tx, documents ...documentAsks) ([]string, error) {
 	var projects []string
 	for _, document := range documents {
