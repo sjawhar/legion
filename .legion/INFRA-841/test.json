@@ -2,82 +2,76 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-841",
-  "round": 3,
-  "completed": "2026-10-31T00:02:00Z",
+  "round": 4,
+  "completed": "2026-10-31T02:00:00Z",
+  "forwardMerge": {
+    "oldHead": "f1716b5140e24f81dfa0a5f91fb88a856993eb1c (the head round 3's E2E line names)",
+    "newHead": "2096845f0c3c25e76d9db59ba41a525934042725 (code head f89294cde69191fead238b95ad45ef9b47d8d06d, the merge of 0b4e17c1aaab with main at 39b51494224f)",
+    "fingerprintBefore": "1febf71f78eefda4ff4f247b489c31973946f51b56d16ed3b08fe10a04695d48",
+    "fingerprintAfter": "756fb89b1b0d8f5ba38f18deef45354f689510358b15f9754de4db3ad510fe73",
+    "verdict": "changed, so this is a full test round and not a bare-gates re-check",
+    "how": "Computed by the tester with the procedure in skill://legion-worker/references/conflicts-and-rewrites.md, at the two heads above, against `main`: jj diff --from 'fork_point(\"main\"@origin | <head>)' --to <head> --git --context 0 '~(.legion | docs/solutions)' piped through the sed and sha256sum the reference gives. Both numbers match the implementer's own, and its PR comment records the same pair.",
+    "whatMoved": "Only packages/envoy/AGENTS.md's own diff, and only in shape: main's 8a72cf798a5f reflowed the Envoy guide to one sentence per line, so the single line this change replaces is a different line of text. The branch's diffs of stream_replicas_test.go, settings_test.go, settings.go and the changelog fragment are unchanged across the merge (same --stat on both sides, and the fingerprint's per-file reading). The merge also brought real code into cmd/dispatch (main.go, signin.go, signin_off_test.go, main_test.go and settings.go's sign-in rows) and a new checker, scripts/semantic-line-breaks.ts, which is why every proof below was run again at the merge head."
+  },
   "implementerProof": {
     "verdict": "verified",
-    "how": "All three entries of round 3's implement.json were re-run independently in this workspace at the tree of 2194913aa078d8843e5d842ba7d8d5039cbc0982 (code head ec5245610214). The test: 10 runs, 10 PASS at 1.59-1.98 s (the implementer claimed 5 of 5 at 1.57-1.60 s). The old rule put back inside awaitReconciled: FAIL at 1.22 s with the retried warning's error (the implementer recorded 0.82 s). The published settings table: the corrected sentence twice, round 1's 'on each connection' zero times, the base's 'while the retries stay under a minute' zero times, and `bun run generate` wrote the corrected sentence twice into the generated configuration page at this head, where the implementer carried round 1's and the reviewer's runs forward (settings.go is in fact unchanged since 4430e212, checked with jj diff). The acceptance run: ok cmd/dispatch 58.680s, ok internal/bus 327.515s. Nothing overstated. The implementer's vacuity control on the new last assertion (asking AwaitStreamCopies for 4 copies) was replaced here by a stronger one that degrades the real stream; it fails the same way."
+    "how": "Round 4's implement.json carries round 3's three entries plus a fourth for the merge. Re-run independently at the tree of 2096845f0c3c25e76d9db59ba41a525934042725: the test 10 of 10 PASS at 1.51-1.96 s (the implementer recorded 3 of 3 at 1.61-1.68 s at the merge head), the old-rule control FAIL at 0.74 s, the acceptance suite ok cmd/dispatch 60.486s and ok internal/bus 341.144s (the implementer recorded 58.847 s and 336.182 s), and the settings table still printing both corrected rows. The merge entry's own claims were checked rather than taken: the fingerprint pair reproduces exactly, the conflicted file is packages/envoy/AGENTS.md alone, both sides are kept, and GitHub reports the pull request MERGEABLE. Nothing overstated."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Item 3, and review round 2's two important findings: the repair test's last check can fail, and the reconcile timeout names the error that blocks the reconcile now.",
-      "surface": "The packages/envoy/cmd/dispatch test binary against a real in-process three-member NATS cluster (testnats.StartCluster), the Dispatch publisher built exactly as main builds it (bus.ConnectOwningStream over serverClient(dispatchStreamOptions(boot, env)...)), the third member stopped before the start and started again between the two waits, every step on the test goroutine.",
+      "criterion": "The forward merge keeps this change whole: the one conflicted file carries both sides, and the branch's own diff is unchanged everywhere else.",
+      "surface": "packages/envoy/AGENTS.md as an agent reads it at the merge head, and the branch's diff against its new base.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && jj diff --from 'fork_point(\"main\"@origin | 2096845f0c3c25e76d9db59ba41a525934042725)' --to 2096845f0c3c25e76d9db59ba41a525934042725 --git --context 1 packages/envoy/AGENTS.md",
+      "observed": "One line replaced at AGENTS.md:2607, inside main's reflowed NATS bullet: main's 'a run that fails once the client has stopped stays the INFO `envoy nats reconnect hooks cancelled`.' gives way to this change's sentence naming both paths - the `stopped` guard in `bus.Client.onReconnect` logging INFO `envoy nats reconnect hooks cancelled` with the hook's error, and the guard after each attempt in `bus.Client.recoverUntilHealthy` logging INFO `envoy nats recovery cancelled` with `errors.Join` of the connect-or-restore error and the hook error. Both still match the code at this head (internal/bus/recovery.go:86-89 and :343-349), and main's reflow of every other sentence of that bullet is kept. The branch's --stat against its base is identical on both sides of the merge: 5 files, 160 insertions, 71 deletions.",
+      "headSha": "2096845f0c3c25e76d9db59ba41a525934042725",
+      "negativeControl": "The fingerprint is the control, and it refuses the easy answer: 1febf71f… → 756fb89b…, changed, so this round was run in full rather than re-checked on bare gates. Had the resolution dropped or duplicated the branch's sentence, the same per-file reading would have shown stream_replicas_test.go or AGENTS.md's content differing in substance rather than in line shape."
+    },
+    {
+      "criterion": "The merge brought a layout rule the branch's own line must obey: main's 8a72cf798a5f reflowed the Envoy guide to one sentence per line and added scripts/semantic-line-breaks.ts.",
+      "surface": "The checker a contributor runs over the two guides, scripts/semantic-line-breaks.guides.test.ts, which runs the script over packages/envoy/AGENTS.md and packages/envoy/cmd/dispatch/README.md.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && bun test scripts/semantic-line-breaks.guides.test.ts",
+      "observed": "1 pass, 0 fail, 2 expect() calls, 420 ms: the script prints nothing and exits 0 for both guides, so the sentence this change writes into the reflowed bullet keeps the layout main introduced. That test is deliberately out of CI (its own first line says so), so no lane would have caught a violation and this is the only place it is checked.",
+      "headSha": "2096845f0c3c25e76d9db59ba41a525934042725",
+      "negativeControl": "The checker is not vacuous on this file: it is the same script main's own commit used to reflow 4278 lines of cmd/dispatch/README.md and the Envoy guide, and it reports a file whose layout is wrong by printing it, which is what the test asserts is empty."
+    },
+    {
+      "criterion": "Item 3: a test makes the first reconcile fail once, then succeed; the start waits and the stream reconciles - re-proven at the merge head.",
+      "surface": "The packages/envoy/cmd/dispatch test binary against a real in-process three-member NATS cluster (testnats.StartCluster), the Dispatch publisher built exactly as main builds it, the third member stopped before the start and started again between the two waits.",
       "command": "cd packages/envoy && go test ./cmd/dispatch/ -run 'TestADispatchStartWaitsOutAReconcileFailureTheBusRetries' -count=10 -v",
-      "observed": "10 of 10 PASS, 1.59-1.98 s each. awaitHookFailure returns the retried WARN `envoy nats reconnect hook failed; it is retried` carrying `reconcile the ENVOY_NOTIFICATIONS stream: ENVOY_NATS_REPLICAS=3: nats: no suitable peers for placement, peer offline`, the test restarts the member outside every deadline, awaitReconciled returns, and testnats.AwaitStreamCopies finds the stream configured for three copies and holding three settled ones (internal/testnats/streams.go:55-62, which requires a leader, n-1 replicas and none of them offline or behind).",
-      "headSha": "2194913aa078d8843e5d842ba7d8d5039cbc0982",
-      "negativeControl": "The standing control, the old rule put back inside awaitReconciled in the working copy (a logged failure closes the client and ends the wait, nothing else changed): `--- FAIL: TestADispatchStartWaitsOutAReconcileFailureTheBusRetries (1.22s)` with `start Dispatch's stream: reconcile the ENVOY_NOTIFICATIONS stream: ENVOY_NATS_REPLICAS=3: nats: no suitable peers for placement, peer offline`. Reverted with `jj restore`; `jj status` clean, nothing committed."
+      "observed": "10 of 10 PASS, 1.51-1.96 s each, unchanged in shape and in timing from round 3 at the pre-merge head (1.59-1.98 s). awaitHookFailure returns the retried WARN `envoy nats reconnect hook failed; it is retried` with `reconcile the ENVOY_NOTIFICATIONS stream: ENVOY_NATS_REPLICAS=3: nats: no suitable peers for placement, peer offline`, the test restarts the member outside every deadline, awaitReconciled returns, and testnats.AwaitStreamCopies finds three settled copies.",
+      "headSha": "2096845f0c3c25e76d9db59ba41a525934042725",
+      "negativeControl": "The standing control, re-run at the merge head: the old rule put back inside awaitReconciled (a logged failure closes the client and ends the wait, nothing else changed) gives `--- FAIL: TestADispatchStartWaitsOutAReconcileFailureTheBusRetries (0.74s)` with `start Dispatch's stream: reconcile the ENVOY_NOTIFICATIONS stream: ENVOY_NATS_REPLICAS=3: nats: no suitable peers for placement, peer offline`. Reverted with `jj restore`; `jj status` clean, nothing committed."
     },
     {
-      "criterion": "Review round 2, important finding 1: the test's last assertion must be able to fail, and must check the three settled copies the test's doc promises.",
-      "surface": "The same test binary and cluster, with the repaired stream deliberately degraded: one of the three members stopped again after awaitReconciled returned and before the assertion.",
-      "command": "cd packages/envoy && go test ./cmd/dispatch/ -run 'TestADispatchStartWaitsOutAReconcileFailureTheBusRetries' -count=1 -v, with `cluster.Servers[1].Stop(t)` inserted before the final testnats.AwaitStreamCopies",
-      "observed": "`--- FAIL (36.85s)`: `stream ENVOY_NOTIFICATIONS did not hold 3 settled copies within 30s`, with the info it last read. The assertion that replaced the dead reconciledFor check does fail on a stream that is configured for three copies but does not hold three settled ones - which is exactly what the check it replaced could not do, since awaitReconciled had already established reconciledFor on the same boot. This is a stronger control than asking AwaitStreamCopies for four copies, because it leaves the assertion as the change ships it and breaks the world instead.",
-      "headSha": "2194913aa078d8843e5d842ba7d8d5039cbc0982",
-      "negativeControl": "The control is itself the negative: the unmodified test passes 10 of 10 with the same assertion, so the failure above is the degraded stream and not a bad assertion. Reverted with `jj restore`; `jj status` clean, nothing committed."
-    },
-    {
-      "criterion": "Review round 2, important finding 2: awaitReconciled's timeout must name what blocks the reconcile now, not the first logged failure.",
-      "surface": "The same test binary and cluster, with the repair removed and the repaired wait shortened to 2 s, so the timeout path runs and prints its message.",
-      "command": "cd packages/envoy && go test ./cmd/dispatch/ -run 'TestADispatchStartWaitsOutAReconcileFailureTheBusRetries' -count=1 -v, with the member restart deleted and `start.awaitReconciled(t, 2*time.Second)` in place of the repaired wait",
-      "observed": "The fatal reads `Dispatch's start for map[ENVOY_NATS_REPLICAS:3] did not reconcile the stream within 2s: <nil> (<nil>), hooked events 0, reconnect hooks due for 2.079687489s, last failed run reconcile the ENVOY_NOTIFICATIONS stream: ENVOY_NATS_REPLICAS=3: nats: no suitable peers for placement, peer offline`. The stall and the last failed run come from bus.Client.HookStall (internal/bus/nats.go:553-568), which returns the live stall and the error of the last run that failed, so after a repair it names the current blocker where reconcileFailure would still name the pre-repair WARN. Reverted with `jj restore`; `jj status` clean, nothing committed.",
-      "headSha": "2194913aa078d8843e5d842ba7d8d5039cbc0982",
-      "negativeControl": "The message is read off a real timeout rather than off the source: the probe forces the wait to expire, and the unmodified test never reaches that branch (10 of 10 PASS)."
-    },
-    {
-      "criterion": "Review round 2, minor finding: awaitHookFailure keeps no copy of awaitReconciled's own-reconcile check, and HookedConnectionEvents() >= 1 alone still catches a start the servers accepted.",
-      "surface": "The same test binary, with the cluster left whole so the start succeeds where the test expects a refusal.",
-      "command": "cd packages/envoy && go test ./cmd/dispatch/ -run 'TestADispatchStartWaitsOutAReconcileFailureTheBusRetries' -count=1 -v, with `cluster.Servers[2].Stop(t)` dropped",
-      "observed": "`--- FAIL (0.96s)`: `Dispatch's start for map[ENVOY_NATS_REPLICAS:3] ran its reconnect hooks through, so the servers accepted the start, want them to refuse it`. The simplified guard is as live as the StreamInfo read it replaced and fires as fast. It is sound because hookedEvents moves only when a run of the hooks succeeds (internal/bus/nats.go:284-288) and the reconcile is the publisher's only hook, so a refused start never reaches 1.",
-      "headSha": "2194913aa078d8843e5d842ba7d8d5039cbc0982",
-      "negativeControl": "The same guard does not fire on the shipped test, whose start is refused: 10 of 10 PASS with the member down, so the fatal above is the accepted start and not a guard that always trips."
-    },
-    {
-      "criterion": "Item 2: the two settings descriptions state the real bound between the WARN and the ERROR, on the surface an operator reads them through.",
+      "criterion": "Item 2: the two settings descriptions state the real bound between the WARN and the ERROR, on the surface an operator reads them through - re-proven at the merge head, where main changed settings.go itself.",
       "surface": "The Dispatch binary's own published settings table (`go run ./cmd/dispatch settings`) and the documentation site's generated configuration reference, which docs/site/generators/dispatch-config.ts builds from that output.",
       "command": "cd packages/envoy && go run ./cmd/dispatch settings ; cd ../../docs/site && bun run generate",
-      "observed": "The binary's table carries 'the minute runs from Dispatch's first connection to NATS, not from the first retry, and `stall_ms` on both lines is how long the reconcile has been due' twice, round 1's 'reconciles the stream on each connection' zero times and the base's 'while the retries stay under a minute' zero times. `bun run generate` rewrote docs/site/src/content/docs/dispatch/reference/configuration.md at 23:53:31Z with the corrected sentence twice; that page is generated and gitignored (docs/site/.gitignore:6) and `jj status` stayed clean. settings.go is unchanged since the reviewer's fix at 4430e212 (jj diff -r 4430e212e4b8..2194913a lists it nowhere), so rounds 2 and 3 cannot have moved this surface.",
-      "headSha": "2194913aa078d8843e5d842ba7d8d5039cbc0982",
-      "negativeControl": "The refusal the same row documents for a value outside its range: `DATABASE_URL=… DISPATCH_AGENT_TOKEN=x ENVOY_NATS_REPLICAS=9 go run ./cmd/dispatch` -> `level=ERROR msg=\"dispatch: resolve boot config\" error=\"invalid ENVOY_NATS_REPLICAS \\\"9\\\": want a whole number of copies from 1 to 5\"`, exit 1 (run in round 1 against the same table; the row's refusal path has not changed since)."
+      "observed": "The binary's table carries 'the minute runs from Dispatch's first connection to NATS, not from the first retry, and `stall_ms` on both lines is how long the reconcile has been due' twice, round 1's 'reconciles the stream on each connection' zero times and the base's 'while the retries stay under a minute' zero times. `bun run generate` rewrote docs/site/src/content/docs/dispatch/reference/configuration.md at 01:56:31Z with the corrected sentence twice; the page is generated and gitignored (docs/site/.gitignore:6) and `jj status` stayed clean. This surface had to be re-run rather than carried: main's merge rewrote settings.go's DISPATCH_IDENTITY, five DISPATCH_SIGNIN_* and DISPATCH_PUBLIC_ORIGIN rows, and the two rows this change owns are untouched by it (read line by line from the merge's own diff of that file).",
+      "headSha": "2096845f0c3c25e76d9db59ba41a525934042725",
+      "negativeControl": "The refusal the same row documents for a value outside its range: `DATABASE_URL=… DISPATCH_AGENT_TOKEN=x ENVOY_NATS_REPLICAS=9 go run ./cmd/dispatch` -> `level=ERROR msg=\"dispatch: resolve boot config\" error=\"invalid ENVOY_NATS_REPLICAS \\\"9\\\": want a whole number of copies from 1 to 5\"`, exit 1 (run in round 1 against the same two rows, whose text and refusal path the merge did not move)."
     },
     {
       "criterion": "Acceptance: `go test ./cmd/dispatch/ ./internal/bus/...` passes at the head.",
       "surface": "The two packages' test binaries, which run real in-process nats-server instances.",
       "command": "cd packages/envoy && go test ./cmd/dispatch/ ./internal/bus/... -count=1",
-      "observed": "exit 0: `ok github.com/sjawhar/envoy/cmd/dispatch 58.680s`, `ok github.com/sjawhar/envoy/internal/bus 327.515s`, `? github.com/sjawhar/envoy/internal/bus/bustest [no test files]`. internal/bus is unedited by this change, so that half is the regression check behind the claims items 1 and 2 make about it. The run includes settings_test.go's refusal case (connect, awaitHookFailure, close), which is the one other caller of the simplified guard.",
-      "headSha": "2194913aa078d8843e5d842ba7d8d5039cbc0982",
-      "negativeControl": "The three mutations above each turn this green red in cmd/dispatch (1.22 s, 36.85 s and 0.96 s), so the suite does not pass whatever the new test does."
+      "observed": "exit 0: `ok github.com/sjawhar/envoy/cmd/dispatch 60.486s`, `ok github.com/sjawhar/envoy/internal/bus 341.144s`, `? github.com/sjawhar/envoy/internal/bus/bustest [no test files]`. This matters more at the merge head than at any earlier one: main brought cmd/dispatch/main.go, signin.go, main_test.go and a new signin_off_test.go into the same package as this change's helpers, and the package still builds and passes as one.",
+      "headSha": "2096845f0c3c25e76d9db59ba41a525934042725",
+      "negativeControl": "The old-rule control above turns this green red in cmd/dispatch at this same head (0.773 s), so the suite does not pass whatever the start helper does."
     },
     {
-      "criterion": "Item 1: the AGENTS.md sentence names both paths that report a hook run which fails after the client stopped; and the active solution doc the reviewer corrected at 60fa0822 now describes the shipped helper.",
-      "surface": "packages/envoy/AGENTS.md and docs/solutions/testing/a-cmd-test-of-a-background-connect-builds-its-client-with-mains-options-and-reads-failures-from-the-log-pr2362.md as an agent reads them, each checked against the code at this head.",
-      "command": "cd packages/envoy && sed -n '2867p' AGENTS.md ; sed -n '80,95p;338,352p' internal/bus/recovery.go ; jj diff -r 60fa08227392 --git",
-      "observed": "AGENTS.md is unchanged since round 1 and still matches: `onReconnect`'s stopped guard logs INFO `envoy nats reconnect hooks cancelled` with the hook's error (recovery.go:86-89), and the guard after each attempt in `recoverUntilHealthy` logs INFO `envoy nats recovery cancelled` with `errors.Join(err, hookErr)` (recovery.go:343-349). The solution doc's added sentences - a logged failure no longer ends startDispatchStream, the WARN is a retry and not a refusal, and only dispatchStart.awaitHookFailure reads the first logged failure - are true of the file as it ships: awaitReconciled reads no log at all and awaitHookFailure is the only caller of reconcileFailure.",
-      "headSha": "2194913aa078d8843e5d842ba7d8d5039cbc0982",
-      "negativeControl": "The superseded claims fail on real runs: this round's runs log `envoy nats recovery cancelled name=dispatch` at each close and `envoy nats reconnect hooks cancelled` zero times, and the doc's old sentence ('the helper reads either logged failure as a refusal') is refuted by the standing control above, where restoring exactly that behaviour fails the shipped test."
+      "criterion": "Round 2's and round 3's findings stay fixed across the merge.",
+      "surface": "The shipped test file at the merge head, read against the mutations that proved each fix in round 3.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && jj diff --from f1716b5140e24f81dfa0a5f91fb88a856993eb1c --to 2096845f0c3c25e76d9db59ba41a525934042725 --stat packages/envoy/cmd/dispatch/stream_replicas_test.go",
+      "observed": "The merge changed no line of stream_replicas_test.go or settings_test.go (neither appears in that diff), so round 3's three mutation proofs stand at this head without being re-run: the final testnats.AwaitStreamCopies fails on a degraded stream (36.85 s), awaitReconciled's timeout names the live bus.Client.HookStall, and awaitHookFailure's HookedConnectionEvents() >= 1 guard fails an accepted start (0.96 s). The 10 passing runs above exercise all three paths' happy side at the merge head.",
+      "headSha": "2096845f0c3c25e76d9db59ba41a525934042725",
+      "negativeControl": "The claim that the merge left these files alone is the testable one, and the command above is its control: a merge that had touched them would list them with a line count, and the fingerprint's per-file reading would have differed for them as it did for AGENTS.md."
     }
   ],
-  "reviewFindingsChecked": [
-    "important, stream_replicas_test.go:238-241 (a second assertion that cannot fail): fixed and proven live by degrading the stream - FAIL at 36.85 s with 'did not hold 3 settled copies within 30s'.",
-    "important, stream_replicas_test.go:104-108 (the timeout names the wrong error): fixed and read off a forced timeout - the fatal now names the live stall (2.08 s) and the last failed run from bus.Client.HookStall.",
-    "minor, stream_replicas_test.go:121,126-130 (the copied own-reconcile check): deleted; the remaining HookedConnectionEvents() >= 1 guard still fails an accepted start at 0.96 s.",
-    "minor, comments at :30-34,39,59-61,217-220: all four rewritten or deleted in ec524561, read at the head; the implementer also corrected awaitHookFailure's 'when the stream reconciles instead' clause, which the branch it described had changed - the new wording matches the code.",
-    "minor, docs/solutions/.../pr2362.md:38-42: the reviewer's own fix at 60fa0822 is true of the shipped helper."
-  ],
   "ci": {
-    "head": "ec52456102149991e14ef490414b7d1886001a85 (the code head; the pull request's head 2194913a is the implementer's handoff-only push, which carries `skip-checks: true` and starts no run)",
-    "read": "GitHub, not re-run. At 2026-10-30T23:53Z: CI run 41146341687 (pull_request, ec524561) `queued` since 23:45Z with its `changes` job still queued - read as running, not green.",
-    "note": "Three rounds in, no CI lane has ever started on this branch, and each round's run is cancelled by the next push before a runner takes it: round 1's 41136465075 cancelled at 22:44Z, round 2's 41141630032 cancelled at 23:31Z, round 3's 41146341687 queued since 23:45Z. The repository's own main-branch runs queue the same way (41143781035 queued, 41144618686 cancelled, 41145614822 pending), so this is the runner pool's backlog and not this branch. The merge gate needs a green CI at the reviewed head, and at the present rate no head will hold one until the pushes stop; that is the architect's to weigh. The tester re-ran no lane and waited for none."
+    "head": "f89294cde69191fead238b95ad45ef9b47d8d06d (the code head, the forward merge; the pull request's head 2096845f is the implementer's handoff-only push, which carries `skip-checks: true` and started no run)",
+    "read": "GitHub, not re-run. At 2026-10-31T01:50Z: CI run 41156740094 (pull_request, f89294cd) `queued` since 01:43Z with its `changes` job still queued - read as running, not green. PR Title run 41146469773 at the previous code head concluded `success`.",
+    "note": "Four rounds in, no CI lane has ever started on this branch. Round 1's 41136465075 was cancelled at 22:44Z, round 2's 41141630032 at 23:31Z, round 3's 41146341687 at 01:43Z by the merge push, and round 4's 41156740094 has been queued since 01:43Z. The repository's own main-branch runs queue and cancel the same way (41155223276 pending, 41154533132 cancelled, 41154527572 pending), so the cause is the runner pool's backlog and not this branch. The merge gate needs a green CI at the reviewed head; the pushes have now stopped on the code side, so this run is the first with a chance to start. The tester re-ran no lane and waited for none."
   }
 }
