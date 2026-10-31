@@ -317,6 +317,7 @@ func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 		{"pod", block.Pod, PodConfig{}},
 		{"session_store", block.SessionStore, ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"}},
 		{"setup", block.Setup, []string(nil)},
+		{"test_postgres", block.TestPostgres, false},
 		{"repository_cache", block.RepositoryCache, RepositoryCacheConfig{
 			Volume: "20Gi", RefreshMinutes: 10, RetainHours: 168,
 			Resources: Reservation{CPU: "1", CPURequest: "1", Memory: "4Gi", MemoryRequest: "4Gi", EphemeralStorage: "2Gi", EphemeralStorageRequest: "1Gi"},
@@ -616,6 +617,16 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			name: "setup naming no command",
 			body: kubernetesFile + "    setup: []\n",
 			want: "runtime.kubernetes.setup must name a command: leave it out to run none",
+		},
+		{
+			name: "test_postgres a string",
+			body: kubernetesFile + "    test_postgres: yes please\n",
+			want: "runtime.kubernetes.test_postgres must be true or false",
+		},
+		{
+			name: "test_postgres a mapping",
+			body: kubernetesFile + "    test_postgres: {on: true}\n",
+			want: "runtime.kubernetes.test_postgres must be true or false",
 		},
 		{
 			name: "repository_cache volume zero",
@@ -1751,5 +1762,17 @@ func TestPluginsBlockRefusals(t *testing.T) {
 				t.Fatalf("err %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// test_postgres settles true when the file sets it, so the runtime gives every issue pod's
+// launcher the server to start and every role of that pod its DSN.
+func TestTestPostgresSettlesFromTheFile(t *testing.T) {
+	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    test_postgres: true\n"), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Runtime.Kubernetes.TestPostgres {
+		t.Error("test_postgres: true settled false")
 	}
 }

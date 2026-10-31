@@ -1762,6 +1762,150 @@ func requireSealedUnder(t *testing.T, database *store.Store, signingKey, what st
 	}
 }
 
+// ───── the component's three-apply key rotation ─────────────────────────────
+
+// The two keys the staged-rotation rows walk: generation 0's, the key the deployment already
+// runs under, and generation 1's, the key a rotation adds. They are a pair of their own so that
+// TestAKeyRotationKeepsPeopleSignedInAcrossTwoProcesses keeps rotationK0 and rotationK1 to
+// itself, and they stand for the keys envoy-infra:gcp:Dispatch generates, one per generation of
+// its signingKeyGenerations input.
+const (
+	stagedK0 = "multiprocess-staged-rotation-k0"
+	stagedK1 = "multiprocess-staged-rotation-k1"
+)
+
+// The four DISPATCH_SIGNING_KEY settings the component renders along the rotation it is built
+// for, [0] → [0, 1] → [1, 0] → [1]: one generation renders its key alone, several render the
+// generations' keys in the list's order with exactly one space between them. Each is written as
+// that join rather than as one literal, so what a reader checks against the component is the
+// setting's shape and the generations' order rather than this file's spelling of two keys.
+const (
+	stagedGeneration0   = stagedK0
+	stagedGenerations01 = stagedK0 + " " + stagedK1
+	stagedGenerations10 = stagedK1 + " " + stagedK0
+	stagedGeneration1   = stagedK1
+)
+
+// The whole rotation signingKeyGenerations is built for, three applies against two real
+// processes: [0], the deployment before it starts, then [0, 1], which adds generation 1's key
+// second, then [1, 0], which promotes it, then [1], which drops generation 0's. Each apply is a
+// rolling update, one process replaced at a time with a live peer beside it, which is the pairing
+// processes.keySetsShared judges at every boot: no step of the rotation is refused, and nobody
+// holding a cookie is signed out at any of them. Every cookie is read on both processes and never
+// only on the one that minted it, because a fleet halfway through a roll answers whichever
+// request the load balancer sends to either task.
+//
+// The last apply is the one step that does sign someone out, and by design: a cookie signed under
+// generation 0's key is refused once that key is gone, which is what dropping a generation means.
+// Only the cookies signed under generation 1 survive it, which is why the component's README
+// makes "no sooner than 30 days after the promote" - a session cookie's whole life - the
+// precondition of that apply: run it then, and every cookie signed under generation 0 has already
+// expired on its own, so the drop refuses nobody who is still signed in.
+func TestAStagedKeyRotationAcrossThreeAppliesKeepsPeopleSignedIn(t *testing.T) {
+	issuer := oidctest.New(t)
+	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), cookieClientID, cookieClientSecret)
+	pair := newPair(t)
+	// Every process of the walk runs the same unstamped build, and only its DISPATCH_SIGNING_KEY
+	// differs, so the binary is built once rather than once per start.
+	binary := cmdtest.Build(t, "envoy-dispatch")
+	start := func(setting string) *dispatchProcess {
+		t.Helper()
+		process := startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
+			NATSURL: pair.nats, SigningKey: setting, Env: cookieSignIn(issuer), Binary: binary,
+		})
+		process.waitHealthy(t)
+		return process
+	}
+	// apply is what one `pulumi up` of a changed signingKeyGenerations does to the app
+	// Deployment: a rolling update that replaces one pod at a time, so the process coming up
+	// always has a live peer still carrying the setting of the apply before it. That pairing,
+	// not the setting on its own, is what the registry admits or refuses at a boot.
+	apply := func(setting string) {
+		t.Helper()
+		pair.a.Terminate(t)
+		pair.a.WaitExit(t, "SIGTERM to A")
+		pair.a = start(setting)
+		pair.b.Terminate(t)
+		pair.b.WaitExit(t, "SIGTERM to B")
+		pair.b = start(setting)
+	}
+	// readOnBoth requires both processes to name the person on the cookie, which is what "nobody
+	// is signed out" means for a fleet: the browser's next request reaches either task.
+	readOnBoth := func(session *http.Cookie, what string) {
+		t.Helper()
+		requireWhoami(t, pair, pair.a, session, what)
+		requireWhoami(t, pair, pair.b, session, what)
+	}
+
+	// [0]: the deployment as it runs before the rotation, both processes on generation 0's key
+	// alone. The person signed in here is the one every later apply must not sign out.
+	pair.a, pair.b = start(stagedGeneration0), start(stagedGeneration0)
+	underK0 := signInThrough(t, pair.b, issuer)
+	readOnBoth(underK0, "the cookie B minted under generation 0")
+	requireSealedUnder(t, pair.database, stagedK0, "the refresh token B's sign-in stored")
+
+	// Apply 1, [0] → [0, 1]: generation 1's key is added second, so generation 0's still signs
+	// every new cookie and seals every new refresh token while the roll brings both processes to
+	// hold both keys. A sign-in during this apply is as good as the one before it, and the person
+	// signed in at [0] carries on, which is the whole point of adding a key before promoting it.
+	apply(stagedGenerations01)
+	readOnBoth(underK0, "the cookie minted at [0], once both processes held both keys")
+	alsoUnderK0 := signInThrough(t, pair.a, issuer)
+	readOnBoth(alsoUnderK0, "the cookie A minted at [0, 1], which generation 0 still signs")
+	requireSealedUnder(t, pair.database, stagedK0, "the refresh token after the add")
+
+	// Apply 2, [0, 1] → [1, 0]: generation 1's key moves first, so it signs every cookie minted
+	// from here on while generation 0's still verifies every cookie minted before it.
+	apply(stagedGenerations10)
+	readOnBoth(underK0, "the cookie minted at [0], after the promote")
+	readOnBoth(alsoUnderK0, "the cookie minted at [0, 1], after the promote")
+
+	// The seal follows the promote at the person's next hourly confirmation rather than at the
+	// roll: the request that finds the confirmation lapsed opens the token under generation 0's
+	// key and seals it again under generation 1's, so the drop two applies later leaves it
+	// readable. Nothing in the roll itself rewrites a seal, which is why this is worth showing.
+	lapseConfirmation(t, pair.database)
+	refreshes := issuer.Refreshes()
+	requireWhoami(t, pair, pair.a, underK0, "the cookie minted at [0], once the confirmation lapsed")
+	if got := issuer.Refreshes(); got != refreshes+1 {
+		t.Fatalf("A answered a lapsed confirmation with %d refreshes at the issuer, want 1", got-refreshes)
+	}
+	requireSealedUnder(t, pair.database, stagedK1, "the refresh token after the refresh that followed the promote")
+
+	underK1 := signInThrough(t, pair.b, issuer)
+	readOnBoth(underK1, "the cookie B minted at [1, 0], which generation 1 signs")
+
+	// Apply 3, [1, 0] → [1]: generation 0's key is dropped. Everything signed under generation 1
+	// - the cookies minted since the promote, and the seal the confirmation above moved - carries
+	// on across the roll, and the fleet signs people in as it did before the rotation began.
+	apply(stagedGeneration1)
+	readOnBoth(underK1, "the cookie minted at [1, 0], after the drop")
+	afterTheDrop := signInThrough(t, pair.a, issuer)
+	readOnBoth(afterTheDrop, "the cookie A minted at [1], the rotation's last setting")
+	requireSealedUnder(t, pair.database, stagedK1, "the refresh token after the drop")
+
+	// The cookies signed under generation 0's key are what the drop signs out: no process holds
+	// the key that verifies them any more, so each answers 401 rather than the person's name.
+	// This is the loss the README's 30 days prevent - waited out, no such cookie is left to
+	// refuse - and never something the component's inputs can guarantee, so the row asserts the
+	// refusal rather than pretending the drop is free.
+	for _, signedOut := range []struct {
+		what    string
+		session *http.Cookie
+	}{
+		{"the cookie minted at [0]", underK0},
+		{"the cookie minted at [0, 1]", alsoUnderK0},
+	} {
+		for _, process := range []*dispatchProcess{pair.a, pair.b} {
+			answer, status := whoami(t, process, signedOut.session)
+			if status != http.StatusUnauthorized {
+				t.Errorf("%s answered whoami on %s with %d %s, want 401: generation 0's key, which signed it, is gone\n%s",
+					pair.name(process), signedOut.what, status, answer, process.Output.String())
+			}
+		}
+	}
+}
+
 // ───── the fleet's build ────────────────────────────────────────────────────
 
 // The two builds TestTwoProcessesAnnounceTheirBuildOnce rolls between, stamped into its binaries

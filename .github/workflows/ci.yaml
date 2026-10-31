@@ -3059,6 +3059,12 @@ jobs:
       - name: Stall test of claude-envoy
         run: bun test tests/envoy-channel-stall.test.ts
         working-directory: packages/claude-envoy
+      # The role takeover smoke (INFRA-404, A5): one line per row of its spec's R8 table, driven
+      # with real client processes against a listener and natsd this job already sets Go up for.
+      # It needs no model provider and no deployment, so unlike the other smokes in
+      # packages/pi-envoy/scripts it runs here.
+      - name: Role takeover smoke
+        run: bash packages/pi-envoy/scripts/smoke-role-takeover.sh
       - if: github.event_name == 'push' && success() && steps.go-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:

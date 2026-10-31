@@ -37,13 +37,15 @@ func dispatchSandboxArgs() *gcp.DispatchArgs {
 const dispatchSandboxURL = "http://example-dispatch.dispatch.svc.cluster.local:8766"
 
 // dispatchSandboxFrontDoor is the front door, as the default mode's registration golden holds it:
-// the tailnet pods' Deployment, the Service the two NATS clients dial their SOCKS5 proxy at, the
-// policy fencing that proxy, the account those pods run as, the auth key they join the tailnet
-// with, the Secret they keep their certificate in and the Role and RoleBinding they write it
-// with, and the ConfigMap holding the serve.json they serve Dispatch by. Each resource is named
-// in full rather than matched on "tailnet": <hostname>-serve carries no such word, and a match on
-// one would leave the sandbox free to build the front door's serve configuration.
+// the Tailscale Service its pods host, the tailnet pods' Deployment, the Service the two NATS
+// clients dial their SOCKS5 proxy at, the policy fencing that proxy, the account those pods run
+// as, the auth key they join the tailnet with, the Secret they keep their certificate in and the
+// Role and RoleBinding they write it with, and the ConfigMap holding the serve.json they serve
+// Dispatch by. Each resource is named in full rather than matched on "tailnet": <hostname>-serve
+// carries no such word, and a match on one would leave the sandbox free to build the front door's
+// serve configuration.
 var dispatchSandboxFrontDoor = []string{
+	"tailscale:index/service:Service example-dispatch",
 	"kubernetes:apps/v1:Deployment example-dispatch-tailnet",
 	"kubernetes:core/v1:Service example-dispatch-tailnet",
 	"kubernetes:networking.k8s.io/v1:NetworkPolicy example-dispatch-tailnet",
@@ -231,15 +233,14 @@ func TestDispatchSandboxRefusesWhatItDoesNotBuild(t *testing.T) {
 }
 
 // dispatchSandboxTailnetGroup is the tailnet group: the name Dispatch is served at, the tags its
-// front-door nodes carry, the key they join the tailnet with, the Tailscale Service they host, and
-// the two images their pods run, each set to a value a consumer would plausibly send. The group is
-// written here and nowhere else, dispatchClusterOnlyRefusals taking these rows into its own table,
-// and the rows are in the order the resolver's own group names them in (dispatchTailnetInputs).
+// front-door nodes carry, the key they join the tailnet with and the two images their pods run,
+// each set to a value a consumer would plausibly send. The group is written here and nowhere
+// else, dispatchClusterOnlyRefusals taking these rows into its own table, and the rows are in
+// the order the resolver's own group names them in (dispatchTailnetInputs).
 var dispatchSandboxTailnetGroup = []dispatchInput{
 	{"tailnetDnsName", func(a *gcp.DispatchArgs) { a.TailnetDnsName = "example-tailnet.ts.net" }},
 	{"tags", func(a *gcp.DispatchArgs) { a.Tags = []string{"tag:example-dispatch"} }},
 	{"tailnetAuthKey", func(a *gcp.DispatchArgs) { a.TailnetAuthKey = pulumi.String("tskey-auth-example-0123456789") }},
-	{"tailnetService", func(a *gcp.DispatchArgs) { a.TailnetService = pulumi.String("svc:example-dispatch") }},
 	{"tailscaleImage", func(a *gcp.DispatchArgs) { a.TailscaleImage = dispatchTailscaleImage }},
 	{"frontDoorToolsImage", func(a *gcp.DispatchArgs) { a.FrontDoorToolsImage = dispatchToolsImage }},
 }

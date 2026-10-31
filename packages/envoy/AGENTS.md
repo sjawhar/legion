@@ -3111,8 +3111,12 @@ Each item below names an endpoint and its method, then its contract, and an item
 
   Claims a role for a live session; the claim alone makes it the holder, and the route also adds the role's topic to its interest record.
   Last-claim-wins by default.
-  With `"soft": true` the claim lands only if the role is unheld, already this session's, held by a session that is no longer live, or held by the declared `previous_session_id` (the id a fork/branch continues);
-  any other live holder answers `409 {error, role, holder}` and nothing changes.
+  With `"soft": true` the claim lands only if the role is unheld, already this session's, held by a session that is no longer live, or held by the declared `previous_session_id` (the id a fork/branch continues) in one of three cases:
+  that predecessor has no live registry entry, its live entry carries the claimant's own `client_instance_id`, or either side carries no instance id.
+  The third case is the one this route cannot tell from another client instance's, so it logs that takeover with both session ids.
+  A predecessor still live under another client instance keeps the role, and the claim answers `409 {error, role, holder}` naming it, as any other live holder does.
+  The predecessor's entry is read from the `envoy_sessions` bucket itself, never from this listener's trailing cache of it, and a predecessor read that did not answer is the bus-unavailable 503 with nothing changed.
+  The claimant's own entry is read from the bucket too, and a claimant read that does not answer falls back to the cached entry, so a cache that trails without the claimant's id decides that claim as the third case.
   A write route (below the list).
 
 - `/v1/interests/subscribe` (POST)
@@ -3123,6 +3127,9 @@ Each item below names an endpoint and its method, then its contract, and an item
   It also stores `plugin` and `plugin_version` on the session entry, trimmed of surrounding space and otherwise as sent:
   the npm package the session registers through and that plugin's build (`@legion/envoy-client`'s `subscribe()` sends both on every registration);
   a registration from an older plugin sends neither, and the entry keeps neither.
+  It stores `client_instance_id` the same way: the client instance driving the session, which is one Oh My Pi Envoy extension instance or one Claude Code channel-server process, each minting a random id when it starts.
+  Every registration replaces the stored id with the one it carries, or with none when it carries none, and `/v1/roles/set`'s refresh of the claimant's entry keeps the stored id.
+  That id is what decides a soft claim naming a predecessor and a deregistration that carries one, as those two entries say.
   A topic reaching a private stream subject (`bus.privateStreamSubjects`:
   each session's inbox `notifications.agent.>`, the failed-delivery lane `notifications.envoy.exceptions.notifications.agent.>`, the Legion controller lane `notifications.legion.>`) other than the session's own literal `notifications.agent.<id>` — another session's agent subject, any failed-delivery lane (its own included), a controller lane, or a wildcard overlapping one (`notifications.agent.*`, `notifications.envoy.>`, `notifications.>`, `notifications.*.<x>`;
   `bus.ReachesPrivateStreamSubject`) — is not stored, since `/v1/replay` answers the stored topics and the stored topics drive the fan-out to serve-port sessions, and such a topic would hand the session messages meant for another session or for the controller's role holder:
@@ -3214,7 +3221,11 @@ Each item below names an endpoint and its method, then its contract, and an item
 
 - `/v1/sessions/<session_id>` (DELETE)
 
-  Removes a live session registration.
+  Removes a live session registration, and answers 200 whether or not there was one to remove.
+  The optional `client_instance_id` query parameter names the client instance that is leaving:
+  with it the registration is removed only while it carries that id or carries none, answered `200 {"deleted":true}` for a registration that is gone and `200 {"deleted":false,"reason":…}` for one that stayed, since the caller has nothing to retry either way.
+  So a departing instance never removes the registration a later instance made under the same session id, which is what stops a Claude Code `/clear` handoff clearing the predecessor its own role claim is then weighed against.
+  Without the parameter the registration is removed whoever wrote it, and the answer carries no body at all, as this route always answered.
   A write route (below the list).
 
 The write routes - `POST /v1/interests/subscribe`, `POST /v1/interests/unsubscribe`, `POST /v1/roles/set`, `DELETE /v1/interests/<session_id>` and `DELETE /v1/sessions/<session_id>` - do every store read and write within one 3.5 s budget (`sendRequestBudget`) taken from the request's own context (`store.Registry.UpsertWithin`, `Remove`, `SetRoleWithPrevious`, `session.SessionRegistry.PutWithin` and `Delete`, each bucket call bounded by `bus.Bounded`), where a silent bus held them for the 10 s JetStream wait.
