@@ -11,18 +11,65 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/store"
 )
 
-// fixtureVMAccount is the Google service account the VM rows below run as, and fixtureVMRuntime
-// one VM of it, keyed as enroll.VMClaims.RuntimeID keys one.
+// fixtureVMAccount is the Google service account the VM rows below run as, fixtureVMRuntime one VM
+// of it, keyed as enroll.VMClaims.RuntimeID keys one, and fixtureVMHost that VM's credential host,
+// <project>/<zone>/<instance name>, as its token login records it.
 const (
 	fixtureVMAccount = "example-fleet@example-project.iam.gserviceaccount.com"
 	fixtureVMRuntime = fixtureVMAccount + "@example-project/example-zone-a/1000000000000000001"
+	fixtureVMHost    = "example-project/example-zone-a/example-vm-1"
 )
 
+// withVMFleet binds fixtureVMAccount to fixtureService in example-project for instances named
+// example-vm-*, as BROKER_VM_SERVICES, BROKER_VM_PROJECTS and BROKER_VM_INSTANCES do.
+func withVMFleet(m *Machine) {
+	m.VMServicesByAccount = map[string]string{fixtureVMAccount: fixtureService}
+	m.VMProjects = map[string]string{fixtureVMAccount: "example-project"}
+	m.VMInstancePatterns = map[string]string{fixtureVMAccount: "example-vm-*"}
+}
+
 // newVMEnrollment inserts a live vm enrollment running as account, under a launcher credential
-// naming service and no operator: the shape a VM's own token login and enrollment make.
+// naming service, no operator and fixtureVMHost: the shape a VM's own token login and enrollment
+// make.
 func newVMEnrollment(t *testing.T, st *store.Store, service, account, runtimeID string) (string, *ecdsa.PrivateKey) {
 	t.Helper()
-	return insertEnrollment(t, st, "vm", runtimeID, nil, &service, &account)
+	id, key := insertEnrollment(t, st, "vm", runtimeID, nil, &service, &account)
+	if _, err := st.Pool.Exec(context.Background(), `update launcher_credentials set host = $2
+		where id = (select launcher_credential_id from enrollments where id = $1)`, id, fixtureVMHost); err != nil {
+		t.Fatalf("set the VM credential's host: %v", err)
+	}
+	return id, key
+}
+
+// TestAVMsGrantStopsWhenItsFleetIsNarrowed pins that a VM's grant of its service's secret is
+// re-checked against its fleet's project and instance names on every use, not only at the VM's
+// login and renewal: once BROKER_VM_PROJECTS names another project, or BROKER_VM_INSTANCES a glob
+// its name does not match, its grant releases nothing and its next request is denied, while its
+// enrollment's lease has not lapsed.
+func TestAVMsGrantStopsWhenItsFleetIsNarrowed(t *testing.T) {
+	for name, narrow := range map[string]func(*Machine){
+		"another project":       func(m *Machine) { m.VMProjects = map[string]string{fixtureVMAccount: "example-other-project"} },
+		"another instance glob": func(m *Machine) { m.VMInstancePatterns = map[string]string{fixtureVMAccount: "other-vm-*"} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			m, _, _, _ := newFixture(t)
+			withVMFleet(m)
+			ctx := context.Background()
+			vm, vmKey := newVMEnrollment(t, m.Store, fixtureService, fixtureVMAccount, fixtureVMRuntime)
+			granted, err := m.Create(ctx, vm, signRequest(t, m, vmKey, "need it", "SERVICE_KEY"), "")
+			if err != nil || granted.State != "granted" || granted.GrantID == nil {
+				t.Fatalf("Create(the fleet's VM) = %+v, %v; want granted", granted, err)
+			}
+			narrow(m)
+			if values, _, err := m.Values(ctx, *granted.GrantID, vm, nil); !errors.Is(err, ErrGrantNotLive) {
+				t.Fatalf("Values after the fleet was narrowed to %s = %v, %v; want ErrGrantNotLive", name, values, err)
+			}
+			again, err := m.Create(ctx, vm, signRequest(t, m, vmKey, "need it again", "SERVICE_KEY"), "")
+			if err != nil || again.ID == granted.ID || again.State != "denied" || again.GrantID != nil {
+				t.Fatalf("Create after the fleet was narrowed to %s = %+v, %v; want a new request, denied", name, again, err)
+			}
+		})
+	}
 }
 
 // TestAServicesSecretGoesToItsOwnVMsAlone pins who a VM service's secret reaches: a VM enrolled
@@ -34,7 +81,7 @@ func newVMEnrollment(t *testing.T, st *store.Store, service, account, runtimeID 
 // service only through BROKER_SERVICES) are each denied it with no record.
 func TestAServicesSecretGoesToItsOwnVMsAlone(t *testing.T) {
 	m, _, _, _ := newFixture(t)
-	m.VMServicesByAccount = map[string]string{fixtureVMAccount: fixtureService}
+	withVMFleet(m)
 	ctx := context.Background()
 	vm, vmKey := newVMEnrollment(t, m.Store, fixtureService, fixtureVMAccount, fixtureVMRuntime)
 
@@ -80,7 +127,7 @@ func TestAServicesSecretGoesToItsOwnVMsAlone(t *testing.T) {
 // rather than reusing the grant.
 func TestAVMGrantStopsWhenItsServiceAccountChanges(t *testing.T) {
 	m, _, _, _ := newFixture(t)
-	m.VMServicesByAccount = map[string]string{fixtureVMAccount: fixtureService}
+	withVMFleet(m)
 	ctx := context.Background()
 	vm, vmKey := newVMEnrollment(t, m.Store, fixtureService, fixtureVMAccount, fixtureVMRuntime)
 	granted, err := m.Create(ctx, vm, signRequest(t, m, vmKey, "need it", "SERVICE_KEY"), "")

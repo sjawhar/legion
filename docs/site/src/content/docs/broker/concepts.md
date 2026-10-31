@@ -56,7 +56,9 @@ A `vm` enrollment renews with `agent-secrets renew --vm`, or by running `agent-s
 again over the same key directory. Every renewal of it carries the VM's current identity token,
 which must name the VM and account the enrollment was made for (`VM_IDENTITY_MISMATCH`, or
 `VM_TOKEN_EXPIRED`); a renewal with no token is refused `VM_TOKEN_REQUIRED`. So a copy of a VM's
-key renews nothing off the VM, since only that VM can fetch its tokens.
+key renews nothing off the VM, since only that VM can fetch its tokens. A VM its fleet's settings
+no longer allow, after its project or instance-name glob changed, is refused `VM_NOT_LISTED`, and
+the broker stops giving it the service's secrets at once rather than at its lease's end.
 
 An enrollment has **ended** once its launcher revokes it (the helper does
 as soon as a registered session's process exits), whoever may revoke its machine login revokes that

@@ -184,7 +184,12 @@ after the token was minted; its enrollment outlives it while it renews. Dispatch
 page lists each VM's login, its host `<project>/<zone>/<instance name>` and no approver, and anyone
 signed in may revoke it, which ends that VM's enrollment; the VM logs in again at its next
 `enroll --vm`. To stop a fleet logging in, remove its entries and redeploy the broker: each VM's
-credential stops authenticating at its next call, and its next login is refused.
+credential stops authenticating at its next call, and its next login is refused. Narrowing a fleet,
+by changing its project or its instance-name glob, takes effect the same way for every VM it no
+longer allows: that VM's next request for one of the service's secrets is denied, an existing grant
+releases nothing more, its credential stops authenticating, and its next renewal is refused
+`403 VM_NOT_LISTED`, on which `agent-secrets renew` stops (exit 76). Its enrollment then ends with
+its lease.
 
 Whoever can get an identity token for the fleet's account from a VM in that project with a matching
 name logs in as its service. Google Cloud IAM is that boundary: who may run a VM as the account

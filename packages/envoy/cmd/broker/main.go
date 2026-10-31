@@ -696,6 +696,8 @@ func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Curre
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Replay: replay,
 		ServicesByAccount:   cfg.ServicesByAccount,
 		VMServicesByAccount: cfg.VMServicesByAccount,
+		VMProjects:          cfg.VMProjects,
+		VMInstancePatterns:  cfg.VMInstancePatterns,
 		Minters:             kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}),
 	}
 	m.Chain = requests.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)

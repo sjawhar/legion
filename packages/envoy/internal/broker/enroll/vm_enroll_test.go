@@ -320,8 +320,9 @@ func TestARenewalCarryingTheVMsCurrentTokenExtendsTheLease(t *testing.T) {
 }
 
 // TestAVMCredentialAuthenticatesWhileItsAccountIsBound: a VM login's credential authenticates
-// while BROKER_VM_SERVICES binds its account to its service and BROKER_VM_PROJECTS names its
-// project, and stops at its next call once either changes, as a Kubernetes login's stops when
+// while its fleet still allows the VM (VMService: BROKER_VM_SERVICES binds its account to its
+// service, BROKER_VM_PROJECTS names its project, BROKER_VM_INSTANCES' glob matches its name), and
+// stops at its next call once any of them changes, as a Kubernetes login's stops when
 // BROKER_SERVICE_LOGINS drops it.
 func TestAVMCredentialAuthenticatesWhileItsAccountIsBound(t *testing.T) {
 	r := newVMRig(t)
@@ -343,6 +344,14 @@ func TestAVMCredentialAuthenticatesWhileItsAccountIsBound(t *testing.T) {
 		t.Fatal("a VM's credential authenticates after its account's project changed")
 	}
 	r.svc.VMProjects = map[string]string{vmTokenAccount: vmTokenProject}
+	r.svc.VMInstancePatterns = map[string]string{vmTokenAccount: "other-vm-*"}
+	if authenticates() {
+		t.Fatal("a VM's credential authenticates after its fleet's instance names changed")
+	}
+	r.svc.VMInstancePatterns = map[string]string{vmTokenAccount: "example-vm-*"}
+	if !authenticates() {
+		t.Fatal("a VM's credential does not authenticate once its fleet allows it again")
+	}
 	r.svc.VMServicesByAccount = map[string]string{vmTokenAccount: "another-service"}
 	if authenticates() {
 		t.Fatal("a VM's credential authenticates after its account was bound to another service")
@@ -354,5 +363,42 @@ func TestAVMCredentialAuthenticatesWhileItsAccountIsBound(t *testing.T) {
 	r.svc.ServiceLogins = map[string]string{cred.ID.String(): vmFleetService, *cred.Subject: vmFleetService}
 	if authenticates() {
 		t.Fatal("a VM's credential authenticates through BROKER_SERVICE_LOGINS")
+	}
+}
+
+// TestANarrowedFleetEndsAnEnrolledVMAtItsNextRenewal: once BROKER_VM_PROJECTS names another
+// project, BROKER_VM_INSTANCES a glob the VM's name does not match, or BROKER_VM_SERVICES drops its
+// account, the VM's renewal with its own current token is ErrVMNotListed and leaves its lease where
+// it was, and a new enrollment of it is ErrVMNotListed too.
+func TestANarrowedFleetEndsAnEnrolledVMAtItsNextRenewal(t *testing.T) {
+	for name, narrow := range map[string]func(*Service){
+		"another project":       func(s *Service) { s.VMProjects = map[string]string{vmTokenAccount: "example-other-project"} },
+		"another instance glob": func(s *Service) { s.VMInstancePatterns = map[string]string{vmTokenAccount: "other-vm-*"} },
+		"the account dropped":   func(s *Service) { s.VMServicesByAccount = map[string]string{} },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newVMRig(t)
+			ctx := context.Background()
+			one := vm(vmTokenZone, "1001")
+			cred := r.login(t, one)
+			enr := r.enroll(t, cred, one)
+			narrow(r.svc)
+			var before time.Time
+			if err := r.svc.Store.Pool.QueryRow(ctx, `select lease_expires_at from enrollments where id = $1`, enr.ID).Scan(&before); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := r.svc.RenewVM(ctx, enr.ID.String(), r.current(t, one)); !errors.Is(err, ErrVMNotListed) {
+				t.Fatalf("RenewVM after %s = %v, want ErrVMNotListed", name, err)
+			}
+			var after time.Time
+			if err := r.svc.Store.Pool.QueryRow(ctx, `select lease_expires_at from enrollments where id = $1`, enr.ID).Scan(&after); err != nil || !after.Equal(before) {
+				t.Fatalf("lease after the refused renewal = %s, %v; want it unchanged at %s", after, err, before)
+			}
+			two := vm(vmTokenZone, "1002")
+			_, err := r.svc.Create(ctx, r.login(t, two), Enrollment{Kind: "vm", RuntimeID: two.RuntimeID(), Thumbprint: "tp-two", VMToken: r.current(t, two)})
+			if !errors.Is(err, ErrVMNotListed) {
+				t.Fatalf("Create after %s = %v, want ErrVMNotListed", name, err)
+			}
+		})
 	}
 }

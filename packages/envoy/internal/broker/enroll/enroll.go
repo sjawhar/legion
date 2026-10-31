@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -277,11 +278,11 @@ func (s *Service) AuthenticateLauncher(ctx context.Context, lid string) (string,
 	if _, err := uuid.Parse(lid); err != nil {
 		return "", false, nil
 	}
-	var thumbprint string
+	var thumbprint, host string
 	var recordID, service, subject *string
 	var expiresAt time.Time
-	err := s.Store.Pool.QueryRow(ctx, `select key_thumbprint, record_id, service, subject, expires_at from launcher_credentials where id=$1 and revoked_at is null`, lid).
-		Scan(&thumbprint, &recordID, &service, &subject, &expiresAt)
+	err := s.Store.Pool.QueryRow(ctx, `select key_thumbprint, host, record_id, service, subject, expires_at from launcher_credentials where id=$1 and revoked_at is null`, lid).
+		Scan(&thumbprint, &host, &recordID, &service, &subject, &expiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", false, nil
 	}
@@ -292,7 +293,7 @@ func (s *Service) AuthenticateLauncher(ctx context.Context, lid string) (string,
 		return "", false, nil
 	}
 	if subject != nil {
-		if !s.tokenLoginListed(*subject, *service) {
+		if !s.tokenLoginListed(*subject, *service, host) {
 			return "", false, nil
 		}
 		return thumbprint, true, nil
@@ -310,12 +311,15 @@ func (s *Service) AuthenticateLauncher(ctx context.Context, lid string) (string,
 }
 
 // tokenLoginListed reports whether a token login's subject still logs in as service: a VM's
-// runtime id while BROKER_VM_SERVICES binds its account to service and BROKER_VM_PROJECTS to its
-// project, and a Kubernetes ServiceAccount while BROKER_SERVICE_LOGINS names it for service.
-func (s *Service) tokenLoginListed(subject, service string) bool {
+// runtime id while its fleet still allows it (VMService, its project from the runtime id and its
+// instance name from the credential's host, <project>/<zone>/<instance name>), and a Kubernetes
+// ServiceAccount while BROKER_SERVICE_LOGINS names it for service.
+func (s *Service) tokenLoginListed(subject, service, host string) bool {
 	if account, project, ok := vmRuntimeAccount(subject); ok {
-		bound, listed := s.VMServicesByAccount[account]
-		return listed && bound == service && s.VMProjects[account] == project
+		_, rest, _ := strings.Cut(host, "/")
+		_, instance, _ := strings.Cut(rest, "/")
+		bound, err := s.VMService(VMClaims{Account: account, Project: project, Instance: instance})
+		return err == nil && bound == service
 	}
 	listed, ok := s.ServiceLogins[subject]
 	return ok && listed == service

@@ -27,7 +27,7 @@ var (
 	// ErrTokenLoginsOff is VerifyServiceToken's refusal on a broker that trusts no Kubernetes token
 	// issuer (BROKER_K8S_OIDC_ISSUER unset) and no Google VM audience (BROKER_GOOGLE_OIDC_AUDIENCE
 	// unset).
-	ErrTokenLoginsOff = errors.New("this broker trusts no Kubernetes token issuer, so no service logs in with a token")
+	ErrTokenLoginsOff = errors.New("this broker trusts no Kubernetes token issuer and no Google VM audience, so no service logs in with a token")
 	// ErrTokenExpired is VerifyServiceToken's refusal of a token past its expiry: the caller logs in
 	// again with its current token.
 	ErrTokenExpired = errors.New("the ServiceAccount token has expired")
@@ -74,7 +74,7 @@ func (s *Service) VerifyServiceToken(ctx context.Context, token string) (Service
 	if vm := s.Enroll.VM; vm != nil && (s.Enroll.Pod == nil || vm.Issues(token)) {
 		claims, err := vm.VerifyVM(ctx, token)
 		if err != nil {
-			return ServiceAccount{}, tokenRefusal(err)
+			return ServiceAccount{}, vmTokenRefusal(err)
 		}
 		return s.verifyVM(claims)
 	}
@@ -88,8 +88,8 @@ func (s *Service) VerifyServiceToken(ctx context.Context, token string) (Service
 	return s.verifyKubernetes(claims)
 }
 
-// tokenRefusal is a token that did not verify: ErrTokenExpired for one past its expiry, else
-// ErrTokenInvalid, each naming why.
+// tokenRefusal is a ServiceAccount token that did not verify: ErrTokenExpired for one past its
+// expiry, else ErrTokenInvalid, each naming why.
 func tokenRefusal(err error) error {
 	if errors.Is(err, oidc.ErrExpired) {
 		return fmt.Errorf("%w (%v)", ErrTokenExpired, err)
@@ -97,22 +97,40 @@ func tokenRefusal(err error) error {
 	return fmt.Errorf("%w (%v)", ErrTokenInvalid, err)
 }
 
-// checkLifetime refuses a verified token that names no issue time, or lives longer than
-// MaxTokenLoginLifetime from it.
-func (s *Service) checkLifetime(claims enroll.AccountClaims) error {
+// vmRefusal is a refusal of a VM's identity token: it matches sentinel, so it is answered with
+// sentinel's code, and reads as text, which names the VM's token rather than a ServiceAccount's.
+type vmRefusal struct {
+	sentinel error
+	text     string
+}
+
+func (r vmRefusal) Error() string { return r.text }
+func (r vmRefusal) Unwrap() error { return r.sentinel }
+
+// vmTokenRefusal is tokenRefusal for a VM's identity token.
+func vmTokenRefusal(err error) error {
+	if errors.Is(err, oidc.ErrExpired) {
+		return vmRefusal{ErrTokenExpired, fmt.Sprintf("the VM identity token has expired (%v)", err)}
+	}
+	return vmRefusal{ErrTokenInvalid, fmt.Sprintf("the VM identity token does not verify (%v)", err)}
+}
+
+// lifetimeProblem says why a verified token is ErrTokenTooLongLived: it names no issue time, or
+// lives longer than MaxTokenLoginLifetime from it. "" is a token that is not.
+func (s *Service) lifetimeProblem(claims enroll.AccountClaims) string {
 	if claims.IssuedAt.IsZero() {
-		return fmt.Errorf("%w: it names no issue time (iat)", ErrTokenTooLongLived)
+		return "names no issue time (iat)"
 	}
 	if lives := claims.Expiry.Sub(claims.IssuedAt); lives > MaxTokenLoginLifetime+s.Skew {
-		return fmt.Errorf("%w: it lives %s", ErrTokenTooLongLived, lives)
+		return fmt.Sprintf("lives %s", lives)
 	}
-	return nil
+	return ""
 }
 
 // verifyKubernetes maps a verified ServiceAccount token through BROKER_SERVICE_LOGINS.
 func (s *Service) verifyKubernetes(claims enroll.AccountClaims) (ServiceAccount, error) {
-	if err := s.checkLifetime(claims); err != nil {
-		return ServiceAccount{}, err
+	if problem := s.lifetimeProblem(claims); problem != "" {
+		return ServiceAccount{}, fmt.Errorf("%w: it %s", ErrTokenTooLongLived, problem)
 	}
 	service, listed := s.Enroll.ServiceLogins[claims.Subject]
 	if !listed {
@@ -124,15 +142,16 @@ func (s *Service) verifyKubernetes(claims enroll.AccountClaims) (ServiceAccount,
 
 // verifyVM maps a verified VM identity token to its service (enroll.Service.VMService: its
 // account, project and instance name), refusing any other VM ErrAccountNotListed. The login's
-// subject is the VM's runtime id, so each VM of the fleet holds a credential of its own.
+// subject is the VM's runtime id, so each VM of the fleet holds a credential of its own. Every
+// refusal names the VM's token, not a ServiceAccount.
 func (s *Service) verifyVM(vm enroll.VMClaims) (ServiceAccount, error) {
 	claims := enroll.AccountClaims{Subject: vm.RuntimeID(), Expiry: vm.Expiry, IssuedAt: vm.IssuedAt}
-	if err := s.checkLifetime(claims); err != nil {
-		return ServiceAccount{}, err
+	if problem := s.lifetimeProblem(claims); problem != "" {
+		return ServiceAccount{}, vmRefusal{ErrTokenTooLongLived, "the VM identity token " + problem + "; it may live at most an hour from its issue"}
 	}
 	service, err := s.Enroll.VMService(vm)
 	if err != nil {
-		return ServiceAccount{}, fmt.Errorf("%w: %v", ErrAccountNotListed, err)
+		return ServiceAccount{}, vmRefusal{ErrAccountNotListed, "this VM does not log in as a service: " + err.Error()}
 	}
 	return ServiceAccount{AccountClaims: claims, Service: service, Host: vm.Project + "/" + vm.Zone + "/" + vm.Instance}, nil
 }

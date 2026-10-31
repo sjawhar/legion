@@ -13,8 +13,12 @@ import (
 	"github.com/sjawhar/envoy/internal/oidc"
 )
 
-// ErrVMEmailNotVerified indicates that a VM identity token has no verified email.
+// ErrVMEmailNotVerified indicates that a VM identity token's email is not verified.
 var ErrVMEmailNotVerified = errors.New("vm token email is not verified")
+
+// ErrVMNoEmail indicates that a VM identity token names no email at all: one minted without
+// format=full, or for no service account.
+var ErrVMNoEmail = errors.New("vm token names no email (request it with format=full)")
 
 // ErrVMComputeEngineClaims indicates that a VM identity token lacks a Compute Engine identity.
 var ErrVMComputeEngineClaims = errors.New("vm token has no Compute Engine claims")
@@ -103,7 +107,10 @@ func (v GoogleVMVerifier) VerifyVM(ctx context.Context, raw string) (VMClaims, e
 	if err := parsed.UnsafeClaimsWithoutVerification(&registered, &private); err != nil {
 		return VMClaims{}, err
 	}
-	if private.Email == "" || !isVMEmailVerified(private.EmailVerified) {
+	if private.Email == "" {
+		return VMClaims{}, ErrVMNoEmail
+	}
+	if !isVMEmailVerified(private.EmailVerified) {
 		return VMClaims{}, ErrVMEmailNotVerified
 	}
 	compute := private.Google.ComputeEngine

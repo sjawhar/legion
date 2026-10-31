@@ -48,8 +48,9 @@ type client struct {
 // terminalRenewal is the closed set of renewal refusals `agent-secrets renew` stops on, exiting
 // exitRenewRefused (76) so the worker shim does not restart it; every other refusal keeps the retry
 // backoff. Each member is an answer no retry can change: POD_TOKEN_REQUIRED is a pod enrollment's
-// renewal that carried no token and VM_TOKEN_REQUIRED a vm enrollment's, and ENROLLMENT_NOT_LIVE
-// an enrollment that has ended, lapsed or never existed. A broker that predates
+// renewal that carried no token and VM_TOKEN_REQUIRED a vm enrollment's, VM_NOT_LISTED a VM its
+// fleet's broker settings no longer allow (only an operator's change of them can), and
+// ENROLLMENT_NOT_LIVE an enrollment that has ended, lapsed or never existed. A broker that predates
 // ENROLLMENT_NOT_LIVE answers an ended enrollment
 // PROOF_INVALID with a message saying "not live" (its renew handler's "enrollment is not live" and
 // its proof check's "proof invalid: not live"), which no recoverable proof failure says.
@@ -61,7 +62,7 @@ var terminalRenewal = struct {
 	Codes                     []string
 	LegacyCode, LegacyMessage string
 }{
-	Codes:         []string{"POD_TOKEN_REQUIRED", "VM_TOKEN_REQUIRED", "ENROLLMENT_NOT_LIVE"},
+	Codes:         []string{"POD_TOKEN_REQUIRED", "VM_TOKEN_REQUIRED", "VM_NOT_LISTED", "ENROLLMENT_NOT_LIVE"},
 	LegacyCode:    "PROOF_INVALID",
 	LegacyMessage: "not live",
 }

@@ -34,11 +34,14 @@ const (
 	strangerAccount = "example-stranger@example-project.iam.gserviceaccount.com"
 )
 
-// vmServer is a testServer that also trusts the VM issuer, with the issuer and its key.
+// vmServer is a testServer that also trusts the VM issuer, with the issuer and its key, and the
+// broker's live BROKER_VM_PROJECTS and BROKER_VM_INSTANCES, which a test edits to narrow the fleet
+// as an operator changing them and redeploying does.
 type vmServer struct {
 	*testServer
-	vmIssuer *oidctest.Issuer
-	vmKey    *oidctest.Key
+	vmIssuer            *oidctest.Issuer
+	vmKey               *oidctest.Key
+	projects, instances map[string]string
 }
 
 // newVMTestServer is newTestServer as cmd/broker/main.go wires it with BROKER_GOOGLE_OIDC_AUDIENCE
@@ -52,6 +55,7 @@ func newVMTestServer(t *testing.T) *vmServer {
 	if err != nil {
 		t.Fatalf("oidc.New(the VM issuer): %v", err)
 	}
+	var projects, instances map[string]string
 	ts := newTestServerWith(t, func(d *api.Deps) {
 		local := d.Machine.Secrets.(secrets.AWS).Client.(*secrets.Local)
 		local.Put(policytest.Secret("FLEET_KEY", fleetService, policy.TierAgent, "fleet-v1"))
@@ -61,9 +65,10 @@ func newVMTestServer(t *testing.T) *vmServer {
 		d.Enroll.VMServicesByAccount = map[string]string{fleetAccount: fleetService}
 		d.Enroll.VMProjects = map[string]string{fleetAccount: fleetProject}
 		d.Enroll.VMInstancePatterns = map[string]string{fleetAccount: fleetInstances}
-		d.Machine.VMServicesByAccount = d.Enroll.VMServicesByAccount
+		d.Machine.VMServicesByAccount, d.Machine.VMProjects, d.Machine.VMInstancePatterns = d.Enroll.VMServicesByAccount, d.Enroll.VMProjects, d.Enroll.VMInstancePatterns
+		projects, instances = d.Enroll.VMProjects, d.Enroll.VMInstancePatterns
 	})
-	return &vmServer{testServer: ts, vmIssuer: issuer, vmKey: key}
+	return &vmServer{testServer: ts, vmIssuer: issuer, vmKey: key, projects: projects, instances: instances}
 }
 
 // fleetVM is one VM: an account, project, zone, instance name and id. Its token is the one its
@@ -456,5 +461,74 @@ func TestAVMRenewsOnlyWithItsCurrentToken(t *testing.T) {
 	box, boxKey := ts.newSessionEnrollment(t, "session-"+t.Name(), testApprover)
 	if status, body := ts.renewVM(t, boxKey, box, map[string]any{"vm_token": ts.current(t, vm)}); status != http.StatusForbidden || decode[wireError](t, body).Code != "VM_IDENTITY_MISMATCH" {
 		t.Fatalf("a machine session's renewal carrying a VM token = %d %s, want 403 VM_IDENTITY_MISMATCH", status, body)
+	}
+}
+
+// TestANarrowedFleetStopsAnEnrolledVMAtOnce: once the fleet's project or instance names are changed
+// so that an enrolled VM is no longer one of them, the VM's existing grant of FLEET_KEY releases
+// nothing, its next request for it is denied, its renewal with its own current token is 403
+// VM_NOT_LISTED, and its launcher credential no longer enrolls: all while its lease is still live.
+func TestANarrowedFleetStopsAnEnrolledVMAtOnce(t *testing.T) {
+	for name, narrow := range map[string]func(*vmServer){
+		"another project":       func(ts *vmServer) { ts.projects[fleetAccount] = "example-other-project" },
+		"another instance glob": func(ts *vmServer) { ts.instances[fleetAccount] = "other-vm-*" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			ts := newVMTestServer(t)
+			vm := member("example-zone-a", "1001")
+			credentialID, launcherKey, enrollmentID, sessionKey := ts.enrolled(t, vm)
+			ask := func() wireCreateRequestResponse {
+				t.Helper()
+				status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
+					map[string]any{"request": signAgentSecretRequest(t, sessionKey, ts.URL, "git fetch", "FLEET_KEY"), "session_id": nil})
+				if status != http.StatusOK {
+					t.Fatalf("POST /v1/requests FLEET_KEY = %d %s", status, body)
+				}
+				return decode[wireCreateRequestResponse](t, body)
+			}
+			granted := ask()
+			if granted.State != "granted" || granted.GrantID == nil {
+				t.Fatalf("the fleet's VM asking for FLEET_KEY = %+v, want granted", granted)
+			}
+			narrow(ts)
+			if status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/grants/"+*granted.GrantID+"/values", nil); status == http.StatusOK {
+				t.Fatalf("the VM's grant values after the fleet was narrowed = %d %s, want a refusal", status, body)
+			}
+			if again := ask(); again.State != "denied" || again.GrantID != nil {
+				t.Fatalf("the VM asking again after the fleet was narrowed = %+v, want denied", again)
+			}
+			if status, body := ts.renewVM(t, sessionKey, enrollmentID, map[string]any{"vm_token": ts.current(t, vm)}); status != http.StatusForbidden || decode[wireError](t, body).Code != "VM_NOT_LISTED" {
+				t.Fatalf("the VM's renewal after the fleet was narrowed = %d %s, want 403 VM_NOT_LISTED", status, body)
+			}
+			if status, body := ts.enrolVM(t, credentialID, launcherKey, vm, ts.current(t, vm), newSigningKey(t)); status != http.StatusUnauthorized {
+				t.Fatalf("the VM's credential enrolling after the fleet was narrowed = %d %s, want 401", status, body)
+			}
+		})
+	}
+}
+
+// TestATokenGoesToItsOwnIssuersVerifierAlone: a VM's login never makes the broker read the
+// cluster's signing keys, and the Legion daemon's never makes it read the VM issuer's, so a flood of
+// one issuer's tokens costs the other issuer nothing.
+func TestATokenGoesToItsOwnIssuersVerifierAlone(t *testing.T) {
+	ts := newVMTestServer(t)
+	cluster, google := ts.podIssuer.JWKSFetches(), ts.vmIssuer.JWKSFetches()
+	ts.loggedIn(t, member("example-zone-a", "1001"))
+	if got := ts.podIssuer.JWKSFetches(); got != cluster {
+		t.Fatalf("the cluster issuer's key-set reads after a VM's login = %d, want %d", got, cluster)
+	}
+	if got := ts.vmIssuer.JWKSFetches(); got == google {
+		t.Fatalf("the VM issuer's key-set reads after a VM's login = %d, want more than %d", got, google)
+	}
+	google = ts.vmIssuer.JWKSFetches()
+	ts.mintServiceLauncherCredential(t)
+	if got := ts.vmIssuer.JWKSFetches(); got != google {
+		t.Fatalf("the VM issuer's key-set reads after the daemon's login = %d, want %d", got, google)
+	}
+	for _, token := range []string{"not-a-token", ts.accountToken(t, daemonAccount, "", -time.Minute)} {
+		ts.tokenLogin(t, token, ts.daemonRequest(t, newSigningKey(t)))
+	}
+	if got := ts.vmIssuer.JWKSFetches(); got != google {
+		t.Fatalf("the VM issuer's key-set reads after refused cluster tokens = %d, want %d", got, google)
 	}
 }
