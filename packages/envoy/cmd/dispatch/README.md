@@ -456,11 +456,23 @@ comments and a table-row anchor, the head of the longest mention chain, one of t
 the session ids for the agent activity read, the `model` value on every vector and the row whose
 embedding is the query vector to bind.
 
-Measurements are taken on Postgres 17 with durability on and memory pinned, and every number is
-recorded beside those settings: `fsync=on`, `synchronous_commit=on`, `full_page_writes=on`,
-`shared_buffers=2GB`, `maintenance_work_mem=1GB`, `effective_cache_size=6GB`. A cluster with the
-write settings off leaves no page all-visible, and a small `shared_buffers` decides a share-of-plan
-reading on its own. A full run at `--scale 1` takes TODO(run time).
+Measurements are taken with durability on and memory pinned, and every number is recorded beside
+those settings: `fsync=on`, `synchronous_commit=on`, `full_page_writes=on`, and a `shared_buffers`,
+`maintenance_work_mem` and `effective_cache_size` the run names. A cluster with the write settings
+off leaves no page all-visible, and a small `shared_buffers` decides a share-of-plan reading on its
+own. A full run at `--scale 1` takes about an hour and twenty minutes and leaves a database of
+about 14 GB.
+
+**What the seeded documents do not carry.** The seed writes `artifact_versions`, the block index
+and the reference rows, and it does not build the ygo document state that a version written
+through the API carries. Two things follow, and a measurement has to work around both: an upload
+over a seeded document (`POST /api/v1/issues/{key}/artifacts` under its name) answers `404`, where
+an upload over a document the API itself made answers `201`; and
+`GET /api/v1/issues/{key}/artifacts/{slug}/text` answers an empty markdown for one, however large
+its latest version is. `dispatch census` and every statement this tool exists to measure read the
+rows and are unaffected. A write-route measurement therefore creates its own document through the
+API on the seeded database and writes over that; the triggers a version insert fires, which is what
+such a measurement is about, do not depend on who wrote the document's earlier versions.
 
 
 ## Running locally
