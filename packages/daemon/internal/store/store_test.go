@@ -923,7 +923,7 @@ func TestTheUpgradeQueuesTheMergeOfAREADYAlreadyAwaitingIt(t *testing.T) {
 					continue
 				}
 				// The merger's phase row is written as the schema under test holds it, for the same
-				// reason: the record store's PutPhase writes columns later migrations add (0064's
+				// reason: the record store's PutPhase writes columns later migrations add (0067's
 				// assignment).
 				if _, err := tx.Exec(ctx, `insert into phases (issue, role, claim, handoff_commit, rounds, verdict, summary, merge_note)
 					values ($1, $2, 'merge-claim', 'ready-head', 0, '', '', $3)`,

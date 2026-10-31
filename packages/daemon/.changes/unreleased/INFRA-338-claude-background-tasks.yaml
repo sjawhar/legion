@@ -7,7 +7,7 @@ body: |-
     daemon as a turn (`agent_start` on the `system` `init` line that begins it, `agent_end` on its
     result), so the result is read in a turn the daemon sees; a task that finishes while a turn
     runs ends nothing, and a prompt that arrives during a turn Claude Code started is refused busy
-    and sent again at its end. The daemon API contract is 43.
+    and sent again at its end. The daemon API contract is 44.
 time: 2026-10-30T10:30:00Z
 custom:
     Issue: INFRA-338

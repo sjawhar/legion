@@ -185,7 +185,7 @@ test("a request another copy of the extension already gave the list gets no seco
   expect(await withSessionAnswers([skill, ask, list], requestOf(read, noBranch))).toBeUndefined();
   const failure = {
     role: "user",
-    content: [{ type: "text", text: sessionAnswersFailureLine("no route") }],
+    content: [{ type: "text", text: sessionAnswersFailureLine("database is down") }],
     timestamp: 0,
   };
   expect(await withSessionAnswers([ask, failure], requestOf(read, noBranch))).toBeUndefined();

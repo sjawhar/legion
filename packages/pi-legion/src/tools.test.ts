@@ -122,7 +122,9 @@ const OMP_LEGION_TOOL_DESCRIPTION =
   "HANDOFF_NOT_NEW (the commit is the one you reported for your previous phase: write and commit this phase's handoff), " +
   "HANDOFF_STALE_ASSIGNMENT (the issue left your phase and came back while your turn ran, so this completion is of the assignment before the one " +
   "the phase hands you now: end the turn without completing and call handoff_complete at the same commit in the new task's turn, which is " +
-  "applied) and, for READY, each " +
+  "applied), the implementer's " +
+  "completion of implementing with no open pull request on `legion/<issue>` and none recorded merged (HANDOFF_NO_PULL_REQUEST: open it; one " +
+  "naming a closed pull request is the architect's to decide) and, for READY, each " +
   "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " +
   "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. request_backward_move returns an issue to an earlier phase (`to`, `reason`): " +
   "a phase worker moves its own issue; the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which " +

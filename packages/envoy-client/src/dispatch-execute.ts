@@ -320,6 +320,18 @@ function renderAdvice(
     }
   }
 
+  // The gate line is last for the document tools, for the reason the cadence line is last for
+  // the others: behind `| tail -1` it is the only line the agent sees, and it is the one line of
+  // a document write that someone else has to act on. It describes this one write - the version
+  // it stored and the approval that version replaced - rather than a rule about editing a spec,
+  // because the server sends it only on the write that superseded the approval.
+  const superseded = advice.superseded_approval;
+  if (superseded !== undefined && (tool === "dispatch_doc_edit" || tool === "dispatch_artifact")) {
+    lines.push(
+      `Stored version ${superseded.version}, superseding version ${superseded.approved_version}, which ${superseded.approved_by} approved. That approval is stale until someone approves version ${superseded.version}, and no undo restores it: a Legion design gate on this document is closed meanwhile, so every READY in its tree is refused. Meant to change the approved design? Request approval with \`dispatch request-approval\`. Meant a correction beside it? Tell the tree's architect, and keep the next one in a comment or in the plan.`
+    );
+  }
+
   // The cadence line comes last and opens by saying the write went through: behind `| tail -1`
   // it is the only line an agent sees, and "Stop posting" alone reads as a refusal.
   if (
@@ -332,7 +344,7 @@ function renderAdvice(
   ) {
     const middle =
       writesSinceHuman >= 6
-        ? "Stop posting here until a human replies."
+        ? "Stop posting here until a human replies. Their reply ends this: post then what you held back."
         : "Progress ledger or scratchpad? If so, stop.";
     lines.push(
       `Posted. You've sent ${writesSinceHuman} messages on ${key} with no human response. ${middle} See the \`dispatch\` skill, "Structure over stream".`
@@ -1591,6 +1603,11 @@ async function resolveOwnerArguments(
   return { args: { ...args, issue }, ref, owner: { kind: "issue", issue } };
 }
 
+/** A document reference that names no document of its owner. Its message is the hint the Dispatch
+ * tools give; `readDocumentBlocks` tells it apart from every other refusal, as the first upload of
+ * a file. */
+class DocumentNotFoundError extends Error {}
+
 /** The document `artifactReference` names among `artifacts`. A bare reference is an id, a slug,
  * then a filename; a `canonical` one, the document part of a dispatch:// reference, is a slug by
  * definition (the address the dashboard and Dispatch's own routes use), so its slug match is the
@@ -1624,7 +1641,7 @@ function artifactByReference(
   }
   const [artifact] = byName;
   if (artifact === undefined) {
-    throw new Error(documentReferenceProblem(artifactReference, artifacts, owner));
+    throw new DocumentNotFoundError(documentReferenceProblem(artifactReference, artifacts, owner));
   }
   return artifact;
 }
@@ -1672,11 +1689,50 @@ async function resolveArtifact(
     artifact = artifactByReference(issue.artifacts, artifactReference, "issue", canonical);
   }
   if (!artifact) {
-    throw new Error(
+    throw new DocumentNotFoundError(
       documentReferenceProblem(artifactReference ?? "spec", issue.artifacts, "issue")
     );
   }
   return { owner, issue, artifact };
+}
+
+/** How a call's documents resolve once its owner is known (`documentTargets`). */
+interface DocumentTargets {
+  /** The call's owner, an issue reference resolved to the issue's key. */
+  readonly owner: Owner | null;
+  /** The owner, refused when the call names none. */
+  documentOwner(): Owner;
+  /** The document `reference` names under `owner`, read as the call's own reference reads it. */
+  resolveDocument(owner: Owner, reference: string | undefined): Promise<ResolvedArtifact>;
+}
+
+/**
+ * The owner a call's resolved arguments name, its issue reference resolved to the key, and how its
+ * document references resolve: the document part of the call's dispatch:// reference is a slug by
+ * definition (`canonical`), and a document argument the reference does not supply is a bare one, an
+ * id, slug or filename. The executor and `readDocumentBlocks` resolve documents through it.
+ */
+async function documentTargets(
+  client: DispatchClient,
+  resolution: OwnerResolution
+): Promise<DocumentTargets> {
+  const refDocument =
+    resolution.ref?.kind === "artifact" ? resolution.ref.id : resolution.ref?.artifact;
+  const owner: Owner | null =
+    resolution.owner?.kind === "issue"
+      ? { kind: "issue", issue: await resolveExistingIssue(client, resolution.owner.issue) }
+      : resolution.owner;
+  return {
+    owner,
+    documentOwner: () => {
+      if (owner === null) throw new Error("issue or project is required");
+      return owner;
+    },
+    resolveDocument: (documentOwner, reference) =>
+      resolveArtifact(client, documentOwner, reference, {
+        canonical: reference !== undefined && reference === refDocument,
+      }),
+  };
 }
 
 /** The id of the document an issue carries under `reference`: its artifact id, slug, or filename,
@@ -2608,15 +2664,13 @@ async function listDocumentBlocks(
   client: DispatchClient,
   artifact: Artifact
 ): Promise<{ text: string; token: string | undefined }> {
-  const before = await client.docRead(artifact.id);
-  const blocks = await client.artifactBlocks(artifact.id);
-  const after = await client.docRead(artifact.id);
-  if (before.token !== after.token || before.markdown !== after.markdown) {
+  const live = await liveBlocks(client, artifact);
+  if (live === undefined) {
     throw new Error(
       `${artifact.name} changed while dispatch doc-read --blocks read it, so the opening words could name the wrong text; nothing is listed. Run it again.`
     );
   }
-  const bytes = new TextEncoder().encode(before.markdown);
+  const { bytes, blocks } = live;
   const decoder = new TextDecoder();
   const lines = [
     `Blocks of ${artifact.name}, in document order, each indented under the block holding it: id, type, (token; anchored comments and asks), opening words. A table lists its rows by the index delete_row takes and its cells by the row and the column delete_column takes.`,
@@ -2657,7 +2711,119 @@ async function listDocumentBlocks(
     }
     holders.push(block);
   }
-  return { text: lines.join("\n"), token: before.token };
+  return { text: lines.join("\n"), token: live.token };
+}
+
+/** A live document's blocks and the UTF-8 bytes of the markdown their ranges index. */
+interface LiveBlocks {
+  readonly bytes: Uint8Array;
+  readonly token: string | undefined;
+  readonly blocks: ArtifactBlock[];
+}
+
+/**
+ * A live document's blocks, read between two reads of its markdown, since Dispatch reports each
+ * block's range as UTF-8 offsets into `/text`'s markdown; undefined when the token or the text
+ * moved between the two reads, since the offsets would slice text they were not computed over.
+ */
+async function liveBlocks(
+  client: DispatchClient,
+  artifact: Artifact
+): Promise<LiveBlocks | undefined> {
+  const before = await client.docRead(artifact.id);
+  const blocks = await client.artifactBlocks(artifact.id);
+  const after = await client.docRead(artifact.id);
+  if (before.token !== after.token || before.markdown !== after.markdown) return undefined;
+  return { bytes: new TextEncoder().encode(before.markdown), token: before.token, blocks };
+}
+
+/** A document as a Dispatch call names it: `dispatch doc-edit`'s owner and document arguments. */
+export interface DocumentTarget {
+  readonly issue?: string;
+  readonly project?: string;
+  readonly artifact?: string;
+  readonly ref?: string;
+}
+
+/** What a target's owner is resolved against, as a call's arguments are: the checkout and
+ *  environment the command runs in (`LEGION_ISSUE`, and the repository a bare issue number is
+ *  on), and the Dispatch addresses a dashboard-URL `ref` may be on. */
+export type DocumentTargetContext = Pick<
+  DispatchCallCheckInput,
+  "cwd" | "env" | "exec" | "serverUrls"
+>;
+
+/** One block of a document, and its markdown. */
+export interface DocumentBlock {
+  readonly id: string;
+  readonly text: string;
+}
+
+/** A live document's blocks, and the document's own name as Dispatch stores it. */
+export interface DocumentBlocks {
+  /**
+   * The document's name. The reference that found it may be a slug, an id or `spec`, while
+   * Dispatch finds the document an upload replaces by its exact name; a caller reading for an
+   * upload compares the two.
+   */
+  readonly name: string;
+  readonly blocks: DocumentBlock[];
+}
+
+/**
+ * The blocks of the live document `target` names, in document order, each with its markdown: the
+ * byte range Dispatch reports, sliced from the text it was computed over (`liveBlocks`), and the
+ * document's own name. The document is the one `dispatch doc-edit` edits for the same arguments:
+ * its owner from the target, its ref or `LEGION_ISSUE`, and its document by id, slug, filename,
+ * the ref's slug, or `spec` for an issue's primary document. A target naming no document of its
+ * owner answers "not-found", which is what the first upload of a file reads. Everything else
+ * throws: a refused target, a filename two documents answer to, a failed read, and a document
+ * that changed between its two text reads. Every request carries the client's signal, so a stop
+ * ends the read.
+ */
+export async function readDocumentBlocks(
+  client: DispatchClient,
+  target: DocumentTarget,
+  context: DocumentTargetContext
+): Promise<DocumentBlocks | "not-found"> {
+  const tool = "dispatch_doc_edit";
+  const args: ToolArguments = { ...target };
+  const problems: string[] = [];
+  const resolution = await resolveOwnerArguments(
+    tool,
+    args,
+    context.cwd,
+    context.env ?? process.env,
+    context.exec ?? defaultExec,
+    context.serverUrls,
+    problems
+  );
+  problems.push(
+    ...ownerConflictProblems(tool, args, resolution.ref, optionalString(resolution.args, "ref"))
+  );
+  if (problems.length > 0) throw new ToolInputError(tool, problems);
+  const { documentOwner, resolveDocument } = await documentTargets(client, resolution);
+  let resolved: ResolvedArtifact;
+  try {
+    resolved = await resolveDocument(documentOwner(), stringArg(resolution.args, "artifact"));
+  } catch (error) {
+    if (error instanceof DocumentNotFoundError) return "not-found";
+    throw error;
+  }
+  const live = await liveBlocks(client, resolved.artifact);
+  if (live === undefined) {
+    throw new Error(
+      `${resolved.artifact.name} changed while its blocks were read, so their byte ranges could slice the wrong text; nothing was read. Read it again.`
+    );
+  }
+  const decoder = new TextDecoder();
+  return {
+    name: resolved.artifact.name,
+    blocks: live.blocks.map((block) => ({
+      id: block.id,
+      text: decoder.decode(live.bytes.subarray(block.from, block.to)),
+    })),
+  };
 }
 
 /**
@@ -3074,21 +3240,7 @@ export async function executeDispatchTool(
   const args = checked.args;
   const actor = toolActor(await resolveOrigin(env, exec, input.cwd), input);
   const client = dispatchClient();
-  // The document part of the call's dispatch:// reference is a slug by definition; a document
-  // argument the reference does not supply is a bare one.
-  const refDocument =
-    ownerArguments.ref?.kind === "artifact" ? ownerArguments.ref.id : ownerArguments.ref?.artifact;
-  const resolveDocument = (documentOwner: Owner, reference: string | undefined) =>
-    resolveArtifact(client, documentOwner, reference, {
-      canonical: reference !== undefined && reference === refDocument,
-    });
-  const owner =
-    ownerArguments.owner?.kind === "issue"
-      ? {
-          kind: "issue" as const,
-          issue: await resolveExistingIssue(client, ownerArguments.owner.issue),
-        }
-      : ownerArguments.owner;
+  const { owner, documentOwner, resolveDocument } = await documentTargets(client, ownerArguments);
   // An external issue reference beside an issue ref is compared here, once Dispatch has resolved
   // it to the key the ref spells (`ownerConflictProblems` compares native keys before any request).
   const issueArgument = optionalString(input.args, "issue");
@@ -3108,10 +3260,6 @@ export async function executeDispatchTool(
   const issue = () => {
     if (owner?.kind !== "issue") throw new Error("issue is required");
     return owner.issue;
-  };
-  const documentOwner = () => {
-    if (owner === null) throw new Error("issue or project is required");
-    return owner;
   };
   // The text a call posts with its pictures, each uploaded first to the owner the address names.
   // An upload is a step before the call's own write, so one that landed without its answer leaves

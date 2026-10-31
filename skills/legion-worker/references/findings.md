@@ -29,7 +29,8 @@ A fix you are not sure of is not step 1: hand it over, or ask when a person must
   for correctness is deferred.
 - A problem inside your tree is work its root spec's acceptance needs. A phase worker's such
   problem outside its own issue goes to the tree's architect (`skill://legion-worker`, *Stop
-  rules*), which may file it as a child of the tree. Anything else, in the same
+  rules*), which adds it to an open pull request of the tree, or files a child when it is a
+  separately deliverable change. Anything else, in the same
   repository or not, is a finding.
 - Search first (`skill://dispatch-first`): when an open issue already tracks the problem, comment
   the evidence on that issue and send or ask nothing. When an open ask on the report issue already

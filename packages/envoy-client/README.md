@@ -22,8 +22,15 @@ parsed event under `dispatch: { issue_key, type, actor, payload }` with `payload
 type; a payload whose shape disagrees with its event type's schema is preserved as its raw parsed
 value under `dispatch`, never dropped or reduced to prose. A dispatch envelope with no payload at
 all falls back to the same `summary` field every other source gets and marks `unrecognised:
-payload`. The renderer skips Dispatch events marked `notify: false` on an issue topic before a host
-can steer or record them in its inbox, as well as events authored by the reader's own session.
+payload`. On a `notifications.dispatch.*` topic, which carries every event of its owner, the
+renderer skips the events Dispatch marks `quiet` — a delivery receipt, an anchor refresh,
+settings or per-viewer bookkeeping, a targeted message its session already had, an ask edit that
+only moved a version, or a version nobody named — before a host can steer or record them in its
+inbox, as well as events authored by the reader's own session. It does not skip on `notify`,
+which answers whether to wake the owner's route and is false for every event an agent wrote: a
+session that subscribed to an issue's topic subscribed for exactly that activity. A frame with no
+`quiet` was published before Dispatch stated it and is judged by `notify`, so a replay of the 72
+hours the stream still holds shows no receipts.
 
 ## Missed messages
 
@@ -132,10 +139,11 @@ redials. `patches/nats@2.29.3.patch` (root `package.json`'s `patchedDependencies
 at install and so carried by both plugins' bundles) makes `NodeTransport` keep the socket from the
 moment it dials and destroy it when a transport that never connected is closed, and makes the
 stale-connection close skip the flush (`transport.close()` in place of `transport.disconnect()`
-in `ProtocolHandler.disconnect()`; a client-initiated `reconnect()` still flushes);
-`src/__tests__/nats-stall.test.ts` fails without either. Bun ignores a `patchedDependencies` entry
-for a version that is not installed without a word, so moving nats means carrying the patch to
-the new version.
+in `ProtocolHandler.disconnect()`, which the stale-connection close after two unanswered pings and
+`handleAuthError` with no `connectError` handler both call, while a client-initiated `reconnect()`
+still flushes); `src/__tests__/nats-stall.test.ts` fails without either. Bun ignores a
+`patchedDependencies` entry for a version that is not installed without a word, so moving nats
+means carrying the patch to the new version.
 
 `@legion/envoy-client/test/stall-proxy`, `@legion/envoy-client/test/envoy-stack` and
 `@legion/envoy-client/test/stall-scenario` (Bun only, not built, in `test/`) are what the stall

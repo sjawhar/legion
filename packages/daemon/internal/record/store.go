@@ -63,6 +63,37 @@ func (s *Postgres) Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error) {
 	return issues, nil
 }
 
+// LiveIssues is every record of project that is not finished, by key: each not in phase done, each
+// set back to todo (a done root a person re-admits, a parked child of a live tree), and each done
+// one that still holds a slot, which the next release of slots frees. The first two are the
+// issues_live index's predicate (0062), so the read grows with the project's unfinished records,
+// which admission's cap bounds, and never with the done records a project keeps for good; the
+// last comes through the slots, which the cap bounds too.
+func (s *Postgres) LiveIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error) {
+	issues, err := queryIssues(ctx, tx, "select "+issueColumns+` from issues
+		where project = $1 and (phase <> 'done' or status = 'todo')
+		union all select `+issueColumns+` from issues
+		where project = $1 and phase = 'done' and status <> 'todo' and key in (select issue from slots)
+		order by key`, project)
+	if err != nil {
+		return nil, fmt.Errorf("list the live issues of project %s: %w", project, err)
+	}
+	return issues, nil
+}
+
+// IssuesOf is the record of each of keys that is an issue of project, by key; a key with no record
+// is left out. No keys read nothing.
+func (s *Postgres) IssuesOf(ctx context.Context, tx pgx.Tx, project string, keys []string) ([]Issue, error) {
+	if len(keys) == 0 {
+		return []Issue{}, nil
+	}
+	issues, err := queryIssues(ctx, tx, "select "+issueColumns+" from issues where project = $1 and key = any($2) order by key", project, keys)
+	if err != nil {
+		return nil, fmt.Errorf("read issues %v of project %s: %w", keys, project, err)
+	}
+	return issues, nil
+}
+
 func (s *Postgres) QueuedRootsUnder(ctx context.Context, tx pgx.Tx, key string) ([]Issue, error) {
 	issues, err := queryIssues(ctx, tx, "select "+issueColumns+` from issues
 		where status = 'todo' and handed_over and key = tree and $1 = any(ancestry)
@@ -205,11 +236,41 @@ func (s *Postgres) UnnamedIssues(ctx context.Context, tx pgx.Tx, project string)
 	return s.issuesWhere(ctx, tx, "project = $1 and repo <> '' and github_repo = ''", project, "with no GitHub spelling of their repository")
 }
 
-func (s *Postgres) HandedOffWithoutPullRequest(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error) {
-	return s.issuesWhere(ctx, tx, "project = $1 and github_repo <> '' and phase = '"+string(phase.Implementing)+"'"+
-		" and key in (select issue from phases where role = '"+string(claim.RoleImplementer)+"' and handoff_commit <> '')"+
-		" and key not in (select issue from pull_requests where state in ('"+string(PullRequestOpen)+"', '"+string(PullRequestMerged)+"'))",
-		project, "in implementing with a recorded handoff and no open or merged pull request")
+func (s *Postgres) HandedOffWithoutOpenOrMergedPullRequest(ctx context.Context, tx pgx.Tx, project string) ([]HandedOff, error) {
+	const what = "in implementing with a recorded handoff and no open or merged pull request"
+	rows, err := tx.Query(ctx, "select "+issueColumns+", implementer.handoff_commit from issues"+
+		" join (select issue, handoff_commit from phases where role = '"+string(claim.RoleImplementer)+"' and handoff_commit <> '')"+
+		" implementer (implementer_issue, handoff_commit) on implementer.implementer_issue = issues.key"+
+		" where project = $1 and github_repo <> '' and phase = '"+string(phase.Implementing)+"'"+
+		" and key not in (select issue from pull_requests where state = any($2))"+
+		" order by key", project, implementationMoveSQLStates)
+	if err != nil {
+		return nil, fmt.Errorf("list the issues of %s %s: %w", project, what, err)
+	}
+	defer rows.Close()
+	var handedOff []HandedOff
+	for rows.Next() {
+		var commit string
+		issue, err := scanIssue(scanThen{row: rows, after: []any{&commit}})
+		if err != nil {
+			return nil, fmt.Errorf("list the issues of %s %s: %w", project, what, err)
+		}
+		handedOff = append(handedOff, HandedOff{Issue: *issue, Commit: commit})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list the issues of %s %s: %w", project, what, err)
+	}
+	return handedOff, nil
+}
+
+// scanThen is row with after scanned from the columns that follow the ones a Scan names.
+type scanThen struct {
+	row   scanner
+	after []any
+}
+
+func (s scanThen) Scan(dest ...any) error {
+	return s.row.Scan(append(dest, s.after...)...)
 }
 
 // issuesWhere is every record of project the condition selects, by key; what names them in an
@@ -449,6 +510,22 @@ func (s *Postgres) PullRequestByNumber(ctx context.Context, tx pgx.Tx, repo stri
 		return nil, fmt.Errorf("read pull request %s#%d: %w", repo, number, err)
 	}
 	return pr, nil
+}
+
+// RowQuerier reads one row: a pool (*pgxpool.Pool), a connection or a transaction.
+type RowQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// PullRequestRecorded says whether a pull request of repo is recorded by number, as
+// PullRequestByNumber looks it up. It is one read of q: through a pool it takes no transaction and
+// no lock, so a caller with no fact lock can ask before it does any other work.
+func PullRequestRecorded(ctx context.Context, q RowQuerier, repo string, number int) (bool, error) {
+	var recorded bool
+	if err := q.QueryRow(ctx, `select exists(select 1 from pull_requests where repo = $1 and number = $2)`, repo, number).Scan(&recorded); err != nil {
+		return false, fmt.Errorf("read whether %s#%d is recorded: %w", repo, number, err)
+	}
+	return recorded, nil
 }
 
 // OpenPullRequests is every open pull request of the Dispatch project's issues, by issue key.

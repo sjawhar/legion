@@ -4,14 +4,12 @@ import (
 	"context"
 	"fmt"
 	"regexp"
-	"slices"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
@@ -478,22 +476,19 @@ func (e *Engine) compareBuilds(ctx context.Context, tx pgx.Tx, cause, build stri
 
 // deployRunCompleted is a completed run of a workflow (intake.WorkflowRunCompleted): for the
 // project's deploy (Config.Deploys, which names a repository and workflow file at most once) whose
-// repository (case-insensitively, as GitHub matches names) and workflow file are the run's, it
-// queues one check_compare row carrying the run and the deploy's step for every open check of this
-// project in that repository whose issue's recorded default branch is the run's branch. The row's
-// executor reads the run attempt and its jobs from GitHub, holds them to the row, and applies
-// intake.CheckWake for each job whose step succeeded after the pull request merged; the envelope is
-// trusted for nothing more than choosing what to read. A check whose last look has started gets
-// none, since no look follows, and a run of no deploy, or of another branch, queues nothing and
-// costs no GitHub read.
+// repository and workflow file are the run's (intake.DeployOf, the rule the decoder already dropped
+// every other run by, read here again for the deploy's step), it queues one check_compare row
+// carrying the run and the deploy's step for every open check of this project in that repository
+// whose issue's recorded default branch is the run's branch. The row's executor reads the run
+// attempt and its jobs from GitHub, holds them to the row, and applies intake.CheckWake for each
+// job whose step succeeded after the pull request merged; the envelope is trusted for nothing more
+// than choosing what to read. A check whose last look has started gets none, since no look follows,
+// and a run of no deploy, or of another branch, queues nothing and costs no GitHub read.
 func (e *Engine) deployRunCompleted(ctx context.Context, tx pgx.Tx, fact intake.WorkflowRunCompleted) (intake.Result, error) {
-	index := slices.IndexFunc(e.cfg.Deploys, func(deploy config.Deploy) bool {
-		return strings.EqualFold(deploy.Repo.String(), fact.Repo) && deploy.Workflow == fact.Path
-	})
-	if index < 0 {
+	deploy, ok := intake.DeployOf(e.cfg.Deploys, fact.Repo, fact.Path)
+	if !ok {
 		return intake.Result{}, nil
 	}
-	deploy := e.cfg.Deploys[index]
 	open, err := e.store.OpenProductionChecks(ctx, tx)
 	if err != nil {
 		return intake.Result{}, err

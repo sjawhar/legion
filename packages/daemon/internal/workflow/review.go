@@ -27,10 +27,12 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 	// that stands for the head can be of the code head it replaced, arriving after it. A
 	// settlement is for the commit it names, never the head by default. While a head run is open
 	// the settlement is recorded in it whether it stands or not (classify.ApplyCheckSettlement).
+	// The listener's duplicate of a settlement the pass built gives the record its fence and
+	// decides nothing: no run and no outcome changed.
 	candidate := classify.SettlementCandidate{Head: fact.HeadSHA, CheckRuns: fact.CheckRuns, Generation: fact.Generation, Snapshot: fact.Snapshot, Failing: fact.Failing, Cancelled: fact.Cancelled}
-	settled, applied := classify.ApplyCheckSettlement(*pr, candidate)
+	settled, applied, adopted := classify.ApplyCheckSettlement(*pr, candidate)
 	if !applied {
-		if pr.Run == nil {
+		if pr.Run == nil && !adopted {
 			return intake.Result{}, nil
 		}
 		return intake.Result{}, e.store.PutPullRequest(ctx, tx, settled)
@@ -601,14 +603,15 @@ func (e *Engine) stampRun(pr *record.PullRequest) {
 }
 
 // implementationReady moves issue from implementing to testing on the implementer's completion of
-// the round that row records, once the pull request pr is known (TriggerImplementationReady), and
-// then applies the CI rule to the head it hands on (standingRed). A red in implementing sends
-// nothing back, since the implementer is at work there, so a required check that settled red after
-// the implementer's push and before its completion stands for the head with nothing acted on it:
-// the implementer pushes and completes without waiting for CI, and the settlement does not come
-// again. The completion is the fact that lets that red stand in testing, so the work goes back to
-// implementing at once, as a settlement arriving in testing would send it, rather than through a
-// tester round on code CI has already found broken.
+// the round that row records, once the pull request pr is recorded open or merged
+// (TriggerImplementationReady: a record closed without merging, or none, moves nothing), and then
+// applies the CI rule to the head it hands on
+// (standingRed). A red in implementing sends nothing back, since the implementer is at work there,
+// so a required check that settled red after the implementer's push and before its completion
+// stands for the head with nothing acted on it: the implementer pushes and completes without
+// waiting for CI, and the settlement does not come again. The completion is the fact that lets that
+// red stand in testing, so the work goes back to implementing at once, as a settlement arriving in
+// testing would send it, rather than through a tester round on code CI has already found broken.
 //
 // The rule is applied only when the record's head is the commit the completion reports
 // (row.HandoffCommit). The completion waits on no

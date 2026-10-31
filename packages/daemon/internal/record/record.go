@@ -152,6 +152,13 @@ func (i Issue) Repository() (ghrepo.Repository, error) {
 	return ghrepo.Parse("the repository of "+i.Key, i.Repo)
 }
 
+// HandedOff is an issue whose implementer recorded its handoff, with the commit the handoff
+// recorded (PhaseRow.HandoffCommit).
+type HandedOff struct {
+	Issue  Issue
+	Commit string
+}
+
 // RepoNote is what the daemon last said on a Dispatch issue about its repository: the resolved
 // repository the issue showed then ("" for none) and the note posted, so an event that resolves the
 // same way posts nothing again.
@@ -622,6 +629,32 @@ const (
 	PullRequestClosed PullRequestState = "closed"
 )
 
+// implementationMoveStates are the pull request states that let an issue's implementation move on:
+// one open, whose work is still on its way, and one merged, whose work landed. Every place that
+// asks the question reads it from here — LetsImplementationMove for the workflow's
+// TriggerImplementationReady snapshot (workflow's transition), the notice that tells an architect
+// no pull request is there (workflow's pullRequestMissing), the implementer's completion of
+// implementing (api's implementationPullRequest) — and the one place that cannot call Go,
+// HandedOffWithoutOpenOrMergedPullRequest's SQL, reads the same list as the parameter of its
+// `state = any(...)` (implementationMoveSQLStates), so the query and the predicate cannot drift.
+var implementationMoveStates = []PullRequestState{PullRequestOpen, PullRequestMerged}
+
+// implementationMoveSQLStates is implementationMoveStates as the text array
+// HandedOffWithoutOpenOrMergedPullRequest passes its query, built once from that same list.
+var implementationMoveSQLStates = func() []string {
+	states := make([]string, len(implementationMoveStates))
+	for i, state := range implementationMoveStates {
+		states[i] = string(state)
+	}
+	return states
+}()
+
+// LetsImplementationMove reports whether pr lets an issue's implementation move on
+// (implementationMoveStates). It is nil-safe: no pull request recorded lets nothing move.
+func LetsImplementationMove(pr *PullRequest) bool {
+	return pr != nil && slices.Contains(implementationMoveStates, pr.State)
+}
+
 // Mergeability is GitHub's lazily computed verdict for whether a pull request's head can be
 // merged into its base without a conflict, decoded from GitHub's nullable `mergeable` field
 // (daemon.readRequiredChecks). "" (the zero value) means the daemon has never read it.
@@ -881,6 +914,14 @@ type Store interface {
 	MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID string) (fresh bool, err error)
 	Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, error)
 	Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error)
+	// LiveIssues is every record of project that is not finished, by key: each not in phase done,
+	// each set back to todo, and each done one that still holds a slot. It is what admission and
+	// every per-fact read take, so a fact's cost does not grow with the done records a project
+	// keeps; a done record is read only by key (Issue, IssuesOf) or by tree (TreeIssues).
+	LiveIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
+	// IssuesOf is the record of each of keys that is an issue of project, by key, leaving out a key
+	// with no record; no keys read nothing.
+	IssuesOf(ctx context.Context, tx pgx.Tx, project string, keys []string) ([]Issue, error)
 	// QueuedRootsUnder is every labelled todo root whose Ancestry holds key, by key: the roots the
 	// waiting line may hold under a live root on a chain key is on (Waiting), whose Ancestry an
 	// event of key reads again.
@@ -903,12 +944,13 @@ type Store interface {
 	// FillIssueRepository does.
 	UnnamedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
 	NameIssueRepository(ctx context.Context, tx pgx.Tx, key, repo, githubRepo string) error
-	// HandedOffWithoutPullRequest is every record of the Dispatch project key project in
+	// HandedOffWithoutOpenOrMergedPullRequest is every record of the Dispatch project key project in
 	// implementing, named on its repository as GitHub spells it, whose implementer has recorded its
-	// handoff and which has no open or merged pull request recorded, by key: an issue whose
-	// completion waits for the pull request record that only its opened webhook writes. A merged
-	// one is left out, as GitHub never reopens it and a new generation removes it.
-	HandedOffWithoutPullRequest(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
+	// handoff and which has no open or merged pull request recorded, by key, each with its
+	// implementer's handoff commit: an issue whose completion waits for an open pull request record,
+	// which the required-checks pass tells the architect of when GitHub lists none on its branch. A
+	// merged record waits for none: a completion moves on it, and its merge told the architect.
+	HandedOffWithoutOpenOrMergedPullRequest(ctx context.Context, tx pgx.Tx, project string) ([]HandedOff, error)
 	// RepoNote is what the daemon last said on issue about its repository, nil for nothing;
 	// PutRepoNote records a note it posts.
 	RepoNote(ctx context.Context, tx pgx.Tx, issue string) (*RepoNote, error)
@@ -928,9 +970,13 @@ type Store interface {
 	// arrives (DispatchIssues lists rows alone), so admission never sees an issue without its
 	// status and blockers. A seq of zero writes nothing.
 	PutDispatchClaim(ctx context.Context, tx pgx.Tx, key, holder string, seq int64) error
-	// DispatchIssues is every mirrored row of the Dispatch project key project, by key: both
-	// consumers read the whole project in one query and judge what is blocked in memory.
+	// DispatchIssues is every mirrored row of the Dispatch project key project, by key.
 	DispatchIssues(ctx context.Context, tx pgx.Tx, project string) ([]DispatchIssueRow, error)
+	// DispatchIssuesOf is the mirrored row of each of keys in project and the row of each issue
+	// those rows say they wait on, by key, read by primary key: what a judgement of keys reads
+	// (blockers.Load), whatever the number of rows the project's mirror holds. No keys read
+	// nothing.
+	DispatchIssuesOf(ctx context.Context, tx pgx.Tx, project string, keys []string) ([]DispatchIssueRow, error)
 	// DispatchClaim is who the claims mirror shows holding key's claim (`<kind>:<id>`, "" for
 	// nobody), "" when it holds no claim of key. It reads the claim alone (PutDispatchClaim), with
 	// or without a mirrored row of the issue: a claim event applied before the issue's first row is

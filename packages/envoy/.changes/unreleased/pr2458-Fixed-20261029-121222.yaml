@@ -1,5 +1,0 @@
-kind: Fixed
-body: 'A Dispatch document written through the API that the server reads as the browser editor reads it is now stored, where the server refused some with `400 INVALID_MARKDOWN` because the markdown it would store read back otherwise. The shapes it now stores include a letter right after a backslash beside an emphasis run (`p \~\a*~* q`, refused since sjawhar/legion#2360, now written with the backslash doubled before the letter''s character reference), a bare web address before a delimiter run (`*http\://a.example/a*b\)**`), an asterisk run beside bold or italic code, emphasis whose marks end apart (`***![\![`c`**\**`), and a code block whose language holds a backtick, which now takes a tilde fence. A document stored correctly before keeps its bytes: the new spellings are tried only where nothing else reads back.'
-time: 2026-10-29T12:12:22.30491146Z
-custom:
-    Issue: pr2458
