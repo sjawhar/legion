@@ -2,17 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-707",
-  "previousHandoff": "d178bdad0bf5a85bcd12f736e2dbe96ec10c624b",
+  "previousHandoff": "a767aee67ade6d932f9367f43b3616c9a3c408f7",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2496",
-  "codeHead": "688fe778051692832d1d21f7c20d3b74fea3a5d1",
-  "round": "answers review round 3 at 6b5c1050+4a9fcec3 (review.json, 2306f275): a confirmation forward merge of main 6a4aa615 so CI runs on a fresh merge ref; the PR diff fingerprint is unchanged (6da3c25e...)",
+  "codeHead": "220af58097b28aaf551218b961675f687f0cdd8c",
+  "round": "answers red ci-ok at 688fe778 (envoy-go-race-api TestAReconnectCatchesUpWhatTheListenerMissed, main flake fixed by #2594): a confirmation forward merge of main b4dc9f96",
   "proof": [
     {
       "criterion": "1. A test drives an agent write racing browser updates on one warm room, fails on main, passes at the head over enough rounds (count and main's failure rate stated).",
       "surface": "Go tests against a real Postgres 18.6 + pgvector 0.8.7 (local, as CI runs them)",
-      "command": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB DISPATCH_TEST_DATABASE_URL=<url> go test -p 1 ./internal/dispatch/docs/ -run 'TestStoredOrder|Backfill|TestAFailedRooms|TestAFlush|TestAReadPoint|TestAShadow' -count=1 ; go test -p 1 ./cmd/dispatch/ ./loadtest/browsertype/ -run 'StoredOrder|Protect' -count=1",
-      "observed": "Confirmation round at 688fe778 (PR diff byte-identical to 6b5c1050+4a9fcec3): go build and vet clean; TestStoredOrder*, Backfill, TestAFailedRooms*, TestAFlush*, TestAReadPoint*, TestAShadow* ok; cmd/dispatch stored-order and loadtest/browsertype ok. Full proof at 6b5c1050 (same diff): whole docs package ok 1472.1s, soak 200 rounds 0 mismatches, race ok. p = 1 on main, so n = 200.",
-      "headSha": "688fe778051692832d1d21f7c20d3b74fea3a5d1",
+      "command": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB DISPATCH_TEST_DATABASE_URL=<url> go test -p 1 ./internal/dispatch/docs/ -count=1 -timeout 75m ; go test -p 1 ./cmd/dispatch/ ./loadtest/browsertype/ -run 'StoredOrder|Protect' -count=1",
+      "observed": "At 220af580 (main b4dc9f96, ygo v1.54.1-sami.1): go build and vet clean; whole internal/dispatch/docs package ok 1398.0s (dispatch://INFRA-707/artifact/docs-suite-220af580-log); TestStoredOrder*, Backfill, TestAFailedRooms*, TestAFlush*, TestAReadPoint*, TestAShadow* ok; cmd/dispatch stored-order and loadtest/browsertype ok. Soak 200 rounds 0 mismatches and race ok at 6b5c1050 (same code diff). p = 1 on main, so n = 200.",
+      "headSha": "220af58097b28aaf551218b961675f687f0cdd8c",
       "negativeControl": "main 7c2effba's production code plus this branch's storedorder.go and storedorder_test.go: all ten window tests and the soak fail (179 mismatches over 12 of 12 counted rounds); the tester rebuilt the same control from main's own tree (170 mismatches)."
     },
     {
@@ -25,7 +25,7 @@
     }
   ],
   "filesChanged": [
-    "None of the PR's own files: a merge of main 6a4aa615 with no conflicts."
+    ".dispatch/architecture/dispatch-docs.md (merge resolution only)"
   ],
   "trickyParts": [
     "RoomFlush is exported (fields unexported) because it crosses VersionedStore, which a test store in internal/dispatch/api wraps.",
@@ -36,7 +36,6 @@
     "Acceptance 2 cluster evidence was taken at eb0fe0be; rounds since change no live write, settlement, snapshot, worker or checker behaviour except that the backfill now takes the document lock before its flush."
   ],
   "answersToReview": [
-    "Forward merge of main 6a4aa615 at 688fe778, no conflicts, fingerprint 6da3c25e34949f93a5ca0e06a392a5d479de11ab47c5f97105dd869857ba5322 before and after; the reviewer's 4a9fcec3 kept. Comment https://github.com/sjawhar/legion/pull/2496#issuecomment-6541753254. Main carries #2598 (broker claims test); #2594 (reconnect test) had not landed, so TestAReconnectCatchesUpWhatTheListenerMissed alone red would be main's flake.",
-    "All review threads were already resolved; none open."
+    "Forward merge of main b4dc9f96 (carries #2594's fix) at 220af580. One conflict, in the text file .dispatch/architecture/dispatch-docs.md: main's rewritten sentence kept whole, this PR's sentence appended; that line is the only fingerprint change (6da3c25e... -> 51c749df...). No code line of the PR changed. Comment https://github.com/sjawhar/legion/pull/2496#issuecomment-6543772349."
   ]
 }
