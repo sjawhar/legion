@@ -674,11 +674,23 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   branch; …`; the issue moves on once a pull request is recorded open, and when the next pass
   lists none open on the branch the architect is told
   ([An architect is told `pull-request-missing`](#an-architect-is-told-pull-request-missing)).
+- **A worker's completion refused `HANDOFF_STALE_ASSIGNMENT`.** The phase the completing turn was
+  working ended under that turn, and the role has since been handed the phase's work again: the
+  issue left the phase and came back, or CI settled red while the tester tested, while the reviewer
+  reviewed a round it had not completed, or while the merger worked toward its `READY`. The daemon
+  ends no turn, so the turn reporting the completion is the earlier assignment's and nothing is
+  recorded. The refusal names the issue, the role and the phase: the worker ends that turn without
+  completing, and calls `handoff_complete` at the same commit in the turn of the task the daemon
+  queued for the assignment the phase hands it now, which arrives as the session's next prompt.
+  When no such task is queued for it, the refusal says so and the worker tells its architect.
 
 An issue back in `in_progress` from `retro` or `merging` had a required check or workflow turn red
 on the head: the daemon sent it back to the implementer and told the architect which checks. From
 `retro` the implementer kept its turn and was handed the implementing task once that turn ended;
-from `merging` the merger's turn was interrupted. One back in `in_progress` after its `READY`,
+from `merging` the merger kept its turn, its jobs, its process and its session. Neither turn was
+interrupted: each role was told on its own Envoy role topic that its phase had ended and that the
+workspace is the implementer's now, and a completion either role sends for the phase it lost is
+refused (`HANDOFF_STALE_ASSIGNMENT`). One back in `in_progress` after its `READY`,
 while it awaited its merge, had a required check or workflow turn red on the head itself, or its
 head conflicts with its base (GitHub computes no merge ref for a conflicting head and runs no
 checks on it at all): the daemon sent it back to the implementer, told the architect which checks
