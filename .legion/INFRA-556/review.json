@@ -2,30 +2,33 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-556",
-  "completed": "2026-10-31T07:29:38Z",
-  "round": 6,
+  "completed": "2026-10-31T10:24:10Z",
+  "round": 7,
   "decision": "changes_requested",
-  "reviewedCodeHead": "106f21e595b76710ad85fb58bb13b8d704981cd7",
+  "reviewedCodeHead": "a2a0a2a1c32b4c06a2c31439b787e74c9247ef61",
   "critical": 0,
-  "important": 2,
-  "minor": 3,
+  "important": 1,
+  "minor": 5,
   "keyFindings": [
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/awareness_relay.go", "description": "Window 2 is still open: record's drop test (:347) assumes the clock local holds only rises, but record writes every non-removal entry's clock unconditionally (:356). answer (:642-647) records clocks it read by EncodeUpdate earlier, and touched's Meta reads (:737-739) can record late too, so a stale entry lowers local[X] from the return's c+1 back to c (and puts the old state in the batch). A removal at c then passes `c < c` false, deletes local[X] and replaces the batch entry; the other processes, still holding c, accept a null at an equal clock and drop a reader who is in the room."},
-    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/awareness_relay.go", "description": "Regression from the new drop test: when a purge frees the tombstone before the snapshot, the removal stands at local[X] read when touched began (:731), which can be behind a heartbeat recorded meanwhile; record then drops it (c < c+1) although the client is gone, resolve drops the client's nil entry because it is not live, and nothing is sent, so its cursor stays on the other processes until the 30 s expiry. Before e2a61748 that removal went out at c and was accepted."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/awareness_relay_test.go", "description": "The window-1 test (:352-418) runs its return from beforeAwarenessRemovalRead, before the single snapshot; at round-5 code that place was before GetStates, which already saw alice live, so the test passes with the bug (the tester's negative control moved the hook between the reads by hand). A return cannot land inside one locked EncodeUpdate; delete the test and the beforeAwarenessRemovalRead hook, or make it exercise a real window. The three window tests copy one body (:294-350, :363-417, :429-487); :278-289 still explains the race through Meta; :358 ends with a stray 'with'."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/awareness_relay.go", "description": "Comment errors: :221-222 'holds nothing older' should be 'holds no later clock'; :690-691 'what neither read sees' is wrong, the second read (Meta) saw the return's clock."},
-    {"severity": "minor", "file": "PR body", "description": "Size line was +16064/-4462; at 106f21e5 it is 127 files, +16031/-4429. The reviewer corrected it in the body (no push)."}
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/awareness_relay.go", "description": "Round-6 item 2 in the opposite order, still open (present at 106f21e5 too; reproduced by the deep reviewer with a real awareness and the beforeAwarenessRecord hook): a heartbeat's observer reads Meta = c+1 and records late; a removal of X at c+1 records first (local deleted, batch[X] = removal); the late state record finds X unlisted, so it relists X at c+1 and sets batch[X] = nil (:425-431); resolve drops X as not live (:516-524). The removal is never sent, the other processes keep the cursor until the 30 s expiry, and local keeps a client that left. Fix: settle a state entry for an unlisted client by awarenessClientStanding as an answer's is (drop it when not live); one rule by entry kind removes the answered parameter. Test: hold the heartbeat's record until after the removal's, failing first."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/awareness_relay.go", "description": "Comments that say more than the code does: the local field (:232-236) and record (:336-338) say a stale state is settled by reading the room, but :421-424 does no read; resolve (:497-498) and record (:360-361) assume a removal stays in the batch, which item 1 contradicts."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/awareness_relay.go", "description": "Dead store at :416 (entry.clock = held on the range copy)."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/awareness_relay_test.go", "description": "Test comments :501 and :588 say a stale state reaching bob after the removal 'is dropped there'; the receiver purges tombstones after every inbound apply (awareness_relay.go:719-721), so it would be taken as a new client."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/awareness_relay_test.go", "description": "The file grows from 824 to 1,115 lines; move the race tests (:245-778) into awareness_relay_race_test.go."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/awareness_relay_test.go", "description": "TestARoomsAwarenessFiresItsObserversWithItsLockReleased (:710-760) catches observers fired under ygo's write lock only; an observer fired under a read lock would pass it and deadlock once a writer queues. Say so in its comment, or have the observer wait on a write."}
   ],
   "verified": [
-    "Window 1 closed: touched decides each removal from one aw.EncodeUpdate snapshot (ygo RLock, awareness.go:458-482); a live state skips the removal.",
-    "Lock order: touched releases r.mu before aw.Meta and EncodeUpdate; record takes r.mu only; no new nesting with ygo's awareness lock.",
-    "106f21e5: frameHeader(opcode, final, length, key) writes the same bytes for all callers (c.key[:] is never nil; keepAliveFrame passes nil); stored_head.go comment names roomBehindHead and recordPublishedLoss.",
-    "Window-2 test (:429-487) places the return between touched and record through beforeAwarenessRecord and fails at dd63d61b; hooks are nil-checked and set only by tests."
+    "Round-6 item 1 closed: a listed client's clock is never lowered (answers use max(clock, held) at :406; a stale state leaves local alone at :421-424).",
+    "Round-6 item 2 closed for the order it named (:412-418): a stale removal is settled by one read of the room under r.mu.",
+    "Lock order: the only ygo call under r.mu is EncodeUpdate's read lock (awarenessClientStanding); every ygo path that fires observers releases its lock first (SetLocalState :266-275, Heartbeat :308-312, ApplyUpdate :724-733, RemoveExpired :851-858); no relay path takes ygo's lock and then r.mu.",
+    "No removal is decided from two reads: touched marks the entry from one snapshot, record's single read under r.mu alone decides live or not; answer and resolve read twice but decide no removal. The window-1 test and beforeAwarenessRemovalRead are fully gone.",
+    "Comments at former :221 and :690 corrected. The three window tests share aReturnRacingARemoval; new tests fail at 106f21e5 with only the answer hook added (tester).",
+    "7bde205e is byte-identical to merged #2598 (930cad24); the branch merges cleanly with main 8d0030ea; main's highest migration is still 0149."
   ],
-  "threads": {"accepted": ["PRRT_kwDORFy7ds6yNoxd", "PRRT_kwDORFy7ds6yNoxh", "PRRT_kwDORFy7ds6yNoxi"], "stands": ["PRRT_kwDORFy7ds6yKplk", "PRRT_kwDORFy7ds6yNoxf"]},
+  "threads": {"stands": ["PRRT_kwDORFy7ds6yNoxf", "PRRT_kwDORFy7ds6yKplk"]},
   "thermonuclear": {
-    "deepReview": "Verdict: CHANGES at 106f21e5 (window 2 still open through a late lower-clock record; new lost removal after a purge)",
-    "codeQuality": "Verdict: CHANGES at 106f21e5 (window-1 test is vacuous; triplicated test body; two comment errors)"
+    "deepReview": "Verdict: CHANGES at a2a0a2a1 (one High, present at 106f21e5: a late state record overwrites a pending removal; two Minor)",
+    "codeQuality": "Verdict: CHANGES at a2a0a2a1 (same High; record keyed by source not entry kind; comments, dead store, test file size)"
   },
-  "ci": "Required (rulesets): lint, typecheck, test, pr-title. CI head 106f21e5, run 41173430936 (CI, attempt 1) still running at 07:22Z: lint success, test success, typecheck skipped; pr-title success (runs 41173481304, 41173517285); ci-ok not posted; no job failed. compare 106f21e5...0154d80a handoffsOnly true (2 files)."
+  "ci": "Required (rulesets): lint, typecheck, test, pr-title. CI head a2a0a2a1: CI run 41189635046 queued, PR Title runs 41189697590 and 41189744395 pending, seven earlier pr-title runs cancelled, ci-ok not posted; no check has run. compare a2a0a2a1...8045e3f2 handoffsOnly true (2 files)."
 }
