@@ -1286,6 +1286,14 @@ jobs:
       - name: Check the release workflows keep credentials out of jobs that run dependency code
         run: .github/scripts/check-release-credentials.sh
 
+      # Every package the fold folds is a line of .github/changelog-packages, which the fold reads
+      # too: a fragment of any other package would stay on main unfolded, so it is refused here,
+      # on every pull request, rather than only warned about by the fold on main.
+      - name: Check every changelog fragment belongs to a package the fold folds
+        run: |
+          # shellcheck disable=SC2086 # the file is the spec list, split on purpose
+          .github/scripts/release-push.sh fold-orphans $(<.github/changelog-packages)
+
       # A pull request's title, body and commit messages reach main's squash commit, the
       # generated release notes and GitHub's pages, and its comments and reviews are public on its
       # page, so this job checks them at every push to a pull request that is not a draft and when
