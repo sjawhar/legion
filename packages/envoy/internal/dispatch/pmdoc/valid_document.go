@@ -4,18 +4,23 @@ import "fmt"
 
 // ValidDocument is a document tree that has been validated once (Validate), so that several reads
 // of it pay for one validation rather than one each. ValidateDocument and ReadUnshared make one,
-// after the validation passes, and so does a read inside this package that has just validated the
-// tree it holds. The contract is the holder's: nothing changes the tree after it was validated,
-// and every method reads the tree without validating it again.
+// after the validation passes. The contract is the holder's: nothing changes the tree after it was
+// validated, and every method reads the tree without validating it again.
 //
 // Most of what this type answers has no other form: a caller holding a plain tree validates it
 // first (ValidateDocument) and reads it through the value that gives. Where an exported function
 // still takes a plain tree (BlockPathsAndTableRows, TableRows, TableDescendantIDs,
-// RenderWithBlockOffsets, EncodeTokenJSON, DeleteBlock, Update), it is that validation in front of
-// the same core, so the two answer alike.
+// RenderWithBlockOffsets, EncodeTokenJSON, DeleteBlock, Update, FindQuote, NewQuoteFinder), it is
+// that validation in front of the same core as its method twin, so the two answer alike. MoveBlock
+// takes a plain tree and has no twin: it validates the tree for itself.
 //
-// The zero ValidDocument holds no tree and is not valid: each method refuses with the words
-// ValidateDocument refuses a tree that is no document with (wantsDocument).
+// The zero ValidDocument holds no tree, and each method answers for it what its plain counterpart
+// answers for a nil tree: Splice the invalid-splice refusal spliceShape gives, which it reads
+// before any tree, TokenJSON the nil node EncodeTokenJSON(nil) refuses, RenderWithBlockOffsets the
+// nil document the renderer refuses either way, QuoteFinder a finder answering FindQuote's
+// refusal of a nil document, and UpdateDocument, which takes the value rather than being a method
+// on it, updateShape's. A method with no plain counterpart refuses with the words ValidateDocument
+// refuses a tree that is no document with (wantsDocument).
 type ValidDocument struct {
 	doc *Node
 }

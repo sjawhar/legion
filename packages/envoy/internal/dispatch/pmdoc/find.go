@@ -161,10 +161,12 @@ func FindQuote(doc *Node, quote string, occurrence *int, near *int) (Range, erro
 	return NewQuoteFinder(doc).Find(quote, occurrence, near)
 }
 
-// QuoteFinder answers FindQuote for many quotes over one document. It validates the document and
-// flattens its text once, at its first Find, and every later Find reuses that text and the forms
-// derived from it, so a write that resolves many quotes against one tree walks it once rather than
-// once a quote. The document must not change while the finder is in use.
+// QuoteFinder answers FindQuote for many quotes over one document. It flattens the document's
+// text once, at its first Find, and every later Find reuses that text and the forms derived from
+// it, so a write that resolves many quotes against one tree walks it once rather than once a
+// quote. A finder from NewQuoteFinder validates the document there too, at that first Find; one
+// from ValidDocument.QuoteFinder holds a tree validated already and never validates it again. The
+// document must not change while the finder is in use.
 type QuoteFinder struct {
 	doc *Node
 	// valid says the document was validated before the finder was made (ValidDocument.QuoteFinder),

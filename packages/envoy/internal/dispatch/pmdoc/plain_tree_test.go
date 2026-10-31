@@ -1,20 +1,24 @@
 package pmdoc
 
-// The package's own tests address a plain tree, where every caller of this package now holds a
-// validated one (ValidDocument): an edit validates each tree it touches once and reads it through
-// that value, so the operations below have one form, the method. These helpers are that validation
-// in front of the method, for a test that has only a tree - the shape the exported functions had
-// before the callers moved. They are test-only on purpose: a second production entry point per
-// operation is what this package was cut down to remove.
+// The operations below have one production form, the method on ValidDocument: their callers hold
+// a tree validated once (ValidateDocument, ReadUnshared) and read it through that value, so an
+// edit pays for one validation of a tree rather than one for each read of it. These helpers are
+// that validation in front of the method, for a test that has only a tree - the shape those
+// operations' exported functions had before their callers moved. They are test-only on purpose: a
+// second production entry point for an operation already cut over is what that cutover removed.
 
 func splice(doc *Node, r Range, with *Node) (*Node, error) {
+	// The shape is read before the document is validated, as Splice reads it, so a splice whose
+	// shape cannot be read is refused with that error rather than the document's. Splice reads the
+	// shape again, which costs this test-only helper one more read of three fields.
 	if err := spliceShape(doc, r, with); err != nil {
 		return nil, err
 	}
-	if err := doc.Validate(); err != nil {
+	valid, err := ValidateDocument(doc, "Splice")
+	if err != nil {
 		return nil, err
 	}
-	return ValidDocument{doc: doc}.spliceValidated(r, with)
+	return valid.Splice(r, with)
 }
 
 func blockBoundary(doc *Node, target Range, after bool) (int, error) {
@@ -29,7 +33,7 @@ func blockBoundary(doc *Node, target Range, after bool) (int, error) {
 // ValidDocument.BlockIndexes gives for a range whose endpoints lie in one block, found the way
 // documentBlock finds it. The tests that hold BlockIndexes to its rule read it from here.
 func blockIndex(doc *Node, target Range) (int, error) {
-	valid, err := ValidateDocument(doc, "BlockIndex")
+	valid, err := ValidateDocument(doc, "BlockIndexes")
 	if err != nil {
 		return 0, err
 	}
@@ -45,14 +49,6 @@ func blockRange(doc *Node, blockID string) (Range, error) {
 	return valid.BlockRange(blockID)
 }
 
-func blockDescendantIDs(doc *Node, blockID string) ([]string, error) {
-	valid, err := ValidateDocument(doc, "BlockDescendantIDs")
-	if err != nil {
-		return nil, err
-	}
-	return valid.BlockDescendantIDs(blockID)
-}
-
 func deleteTextblock(doc *Node, r Range) (*Node, bool, error) {
 	valid, err := ValidateDocument(doc, "DeleteTextblock")
 	if err != nil {
@@ -62,11 +58,9 @@ func deleteTextblock(doc *Node, r Range) (*Node, bool, error) {
 }
 
 func insertTableRows(doc *Node, target Range, markdown string, after bool, budget *WriteBudget) (*Node, bool, error) {
-	if doc == nil || doc.Type != "doc" {
-		return nil, false, wantsDocument("InsertTableRows")
-	}
-	if err := doc.Validate(); err != nil {
+	valid, err := ValidateDocument(doc, "InsertTableRows")
+	if err != nil {
 		return nil, false, err
 	}
-	return ValidDocument{doc: doc}.InsertTableRows(target, markdown, after, budget)
+	return valid.InsertTableRows(target, markdown, after, budget)
 }

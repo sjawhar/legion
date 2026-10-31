@@ -7,27 +7,13 @@ import (
 
 // Splice returns a copy of d's tree with r replaced by with, using Proof's
 // ProseMirror-compatible range-fitting rules. It reads the splice's shape (spliceShape), then
-// validates with, the replacement, in that order; the document itself was validated once, when the
-// ValidDocument was made. The zero ValidDocument is a splice whose shape cannot be read.
+// validates with, the replacement, in that order, and only then fits the replacement into the
+// range; the document itself was validated once, when the ValidDocument was made. The zero
+// ValidDocument is a splice whose shape cannot be read.
 func (d ValidDocument) Splice(r Range, with *Node) (*Node, error) {
 	if err := spliceShape(d.doc, r, with); err != nil {
 		return nil, err
 	}
-	return d.spliceValidated(r, with)
-}
-
-// spliceShape refuses a splice whose document, replacement or range cannot be read, before either
-// tree is validated: the check both readers run before they part.
-func spliceShape(doc *Node, r Range, with *Node) error {
-	if doc == nil || with == nil || doc.Type != "doc" || with.Type != "doc" || r.From > r.To {
-		return fmt.Errorf("%w: invalid splice", ErrSchema)
-	}
-	return nil
-}
-
-// spliceValidated is Splice's body for a shape already read: it validates with, the last check the
-// splice runs, and fits the replacement into the range.
-func (d ValidDocument) spliceValidated(r Range, with *Node) (*Node, error) {
 	doc := d.doc
 	if err := with.Validate(); err != nil {
 		return nil, err
@@ -46,6 +32,15 @@ func (d ValidDocument) spliceValidated(r Range, with *Node) (*Node, error) {
 		return out, err
 	}
 	return ascend(doc, selection, r, with)
+}
+
+// spliceShape refuses a splice whose document, replacement or range cannot be read, before either
+// tree is validated: the check both readers run before they part.
+func spliceShape(doc *Node, r Range, with *Node) error {
+	if doc == nil || with == nil || doc.Type != "doc" || with.Type != "doc" || r.From > r.To {
+		return fmt.Errorf("%w: invalid splice", ErrSchema)
+	}
+	return nil
 }
 
 var ErrTableWidth = errors.New("table row exceeds table width")
