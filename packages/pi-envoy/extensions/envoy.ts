@@ -717,7 +717,6 @@ export default function envoyExtension(pi: PiApi): void {
   // off, unlike `requireEnvoy`, which throws: the queues exist whatever the session resolved, and
   // a queue cannot answer a throw with a deadline.
   const passDeadlineMs = (): number => active?.settings.passDeadlineMs ?? MIN_PASS_DEADLINE_MS;
-  const subscriptions = new Map<string, Subscription>();
   const delivered = createDeliveryDedupe();
   let connection: NatsConnection | undefined;
   let sessionDirectory = "";
@@ -4050,8 +4049,12 @@ export default function envoyExtension(pi: PiApi): void {
           );
           // A subject another plugin opened for the role this session holds lasts as long as the
           // role does, so the tool keeps it and says so rather than leave the session deaf to it.
+          // Each candidate is dropped on its own: `unfollow` would expand a named `X.>` back to
+          // `X` as well, and `X` can be the role's own subject, kept here.
           const kept = candidates.filter(isRoleBound);
-          const removed = candidates.filter((subject) => !isRoleBound(subject)).filter(unfollow);
+          const removed = candidates
+            .filter((subject) => !isRoleBound(subject))
+            .filter((subject) => followed.delete(subject));
           // Persisted at once, so the topic stays unfollowed across a restart.
           if (removed.length > 0) await replayFollowedChanged();
           const registryRemoved = removed.filter((topic) => !topic.startsWith(ROLE_TOPIC_PREFIX));
@@ -4076,7 +4079,7 @@ export default function envoyExtension(pi: PiApi): void {
         }
         case EnvoyToolOperation.listInterests: {
           const registry = await client.getInterest(sessionID);
-          const interests = mergeInterestSources(registry.topics, [...subscriptions.keys()]);
+          const interests = mergeInterestSources(registry.topics, [...followed]);
           return toolSuccess(
             JSON.stringify({ ...registry, topics: [...interests.keys()] }, null, 2),
             {
@@ -4197,7 +4200,7 @@ export default function envoyExtension(pi: PiApi): void {
             ),
             {
               sessionID: address,
-              topics: [...subscriptions.keys()],
+              topics: [...followed],
               ...(subagent === undefined ? {} : { subagent }),
             }
           );
