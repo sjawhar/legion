@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-646",
-  "completed": "2026-10-31T02:35:00Z",
+  "completed": "2026-10-31T05:40:00Z",
   "proof": [
     {
       "criterion": "A1, the merge rule: on LINUX's replay the change is not slower - the median of three head runs uses no more whole-process CPU-seconds than the highest of three base runs. Six runs alternating, base first, in one session on one pod (m-base-1 20:04:38Z, m-head-1 20:47:39Z, m-base-2 21:30:29Z, m-head-2 22:13:08Z, m-base-3 22:55:52Z, m-head-3 23:38:15Z).",
@@ -59,6 +59,14 @@
       "observed": "At the fixed head e4118455: gofmt and vet clean; the pmdoc suite 0 lines matching '^--- FAIL' and a final 'ok github.com/sjawhar/envoy/internal/dispatch/pmdoc 936.202s'; TestTheZeroValidDocumentWantsADocument passes with all eight of its cases. The run before the fix had 24 FAIL lines, every one the same cause - this pod's fresh disk had no proof-sdk module ('run bun install') - which the FAIL-count reading shows at once and a tail does not. The docs suite is not run here: this disk has no Postgres and the diff touches no docs code, so its lanes are CI's at this head and are read there.",
       "headSha": "e4118455e7becb6f3b6036ffde8bdc87900e1fa5",
       "negativeControl": "The 24-failure run before bun install is the control on the reading: it is a red suite whose tail names one test, which is how the previous round recorded a red pmdoc suite as green."
+    },
+    {
+      "criterion": "The head carries CI, and the merge keeps the change exactly",
+      "surface": "GitHub Actions on sjawhar/legion#2522, and the branch's own diff against main@origin",
+      "command": "gh run list --repo sjawhar/legion --branch legion/INFRA-646 --limit 4; jj diff --from 'fork_point(\"main\"@origin | <head>)' --to <head> --git --context 0 'glob:\"packages/**/*.go\"' | sed -e '/^@@/d' -e '/^index /d' | sha256sum",
+      "observed": "Code head 1c9ce28b (merge of main 5330bcb2) has CI run 41172647856 and PR Title 41172647835, both queued at 05:25Z, where e4118455 and af34d101 had check-runs total_count 0. The Go half of the branch's own diff is byte-equal across the merge: 1b8fd788ae228f9e2a0aa5f793ea63b12c7e827a0d91cff1bfb3f0a493361753 at e4118455 and at 1c9ce28b. The whole-diff fingerprints differ (e4118455 2d27ff8b, 1c9ce28b f8a74c51) and the entire delta is one hunk, packages/envoy/AGENTS.md, where main (#2466 and after) reflowed that file to one sentence per line and this branch's own paragraph was rewrapped to match; the changed-file list is identical (36 files, list hash 401d3a49).",
+      "headSha": "1c9ce28b07bf362063c339b3c5b8f1871e39f23d",
+      "negativeControl": "gh api repos/sjawhar/legion/commits/e4118455e7becb6f3b6036ffde8bdc87900e1fa5/check-runs --jq .total_count is 0, and 0 at af34d101: the previous push carried code and the handoff together under a skip-checks head, so GitHub started nothing. The same query at 1c9ce28b returns 2."
     }
   ],
   "filesChanged": [
@@ -78,13 +86,15 @@
     "packages/envoy/internal/dispatch/pmdoc/plain_tree_test.go: the validation-then-method shape the package's own tests use, test-only",
     "packages/envoy/internal/dispatch/docs/apply_operations_test.go: applyOperations, now a test helper; applyOperationsWithValidation gone",
     "packages/envoy/internal/dispatch/pmdoc/find.go: merged onto main's QuoteFinder rewrite (#2480), the valid gate in matches",
-    "packages/envoy/internal/dispatch/pmdoc/splice.go: BlockIndexes' refusal names BlockIndexes"
+    "packages/envoy/internal/dispatch/pmdoc/splice.go: BlockIndexes' refusal names BlockIndexes",
+    "packages/envoy/AGENTS.md, packages/envoy/internal/dispatch/docs/ask_block_text.go: the merge of main 5330bcb2 (two conflicts, resolved semantically)"
   ],
   "trickyParts": [
     "The token reuse (N1) is exact only because a document token carries no block identity, so the stamp between the precondition check and the batch cannot change it; TestStampingBlockIDsChangesNoDocumentToken pins that.",
     "editTree may hand back applyLive's own validated tree: that is sound because the stamp mints nothing on a tree whose ids are all there (BlockIDRepairCount is EnsureBlockIDsCount's own walk), so the tree and its validity are left as they are.",
     "The refusals that read a write's changed blocks read them against the tree each one holds, and the accept path changes its tree twice more (padding its tables, settling what it wrote), so matchBlocks keeps only what depends on the tree the write started from and lastAfter(after) is read per tree.",
-    "pmdoc's exported function and its ValidDocument method share one core, so a test comparing the two cannot catch a wrong core; what catches one is the base-against-head write corpus and the two differential tests (BlockIndexes against BlockIndex, the text walk against the delta comparison)."
+    "pmdoc's exported function and its ValidDocument method share one core, so a test comparing the two cannot catch a wrong core; what catches one is the base-against-head write corpus and the two differential tests (BlockIndexes against BlockIndex, the text walk against the delta comparison).",
+    "The two merge conflicts are both main's, not a contest over this change's code. packages/envoy/internal/dispatch/docs/ask_block_text.go: main replaced askBlockOf with askBlockToEdit, which returns an emptyQuestion beside the block, and this branch had added `tree := valid.Node()` above that call; the resolution keeps both, main's call reading this branch's validated tree. packages/envoy/AGENTS.md: main reflowed the file to one sentence per line while this branch inserted a paragraph in the old wrapped style; the resolution keeps main's reflow and rewrites this branch's own paragraph in it, which is the whole of the fingerprint delta."
   ],
   "deviations": [
     "The plan's measurement build (a counter of Validate calls, n_base and n_head) was not built: with the architect's rule of 2026-10-29 (S and E are evidence, not a gate) the same fact is read from the profiles, where Validate under the edit subtree falls from 0.82/0.74/0.75 s to 0.11/0.13/0.14 s.",
@@ -92,7 +102,8 @@
     "N1, N3 and N5 were built beyond the plan, at the architect's direction. N2, N4 and N6 are not built, each with its evidence and its head share in the pull request body.",
     "The equivalence corpus is 23 real LINUX specs and A5's is ten, not all 1,204: each spec costs about 40 s a side and the dumps are byte-compared, so more specs buy repetition rather than coverage.",
     "The FindQuote benchmark is the tester's throwaway, not a committed one, and it measures the preallocation alone; the validation a reused finder skips is the tester's A4 by agreement with the architect.",
-    "The previous round's handoff said the pmdoc suite was green at the merge head. It was not: the run had a second failure, TestTheZeroValidDocumentWantsADocument/BlockIndexes, which I never saw because I read the run's tail rather than every '^--- FAIL' line, re-ran the one test the tail named and recorded the suite green. That test is one this change added, so it was a test added and never seen to pass, and the tester found it red in CI (envoy-go and envoy-go-race, run 41061824411). A suite is now read by its FAIL count and its final line, and this handoff and the pull request body say how each was run."
+    "The previous round's handoff said the pmdoc suite was green at the merge head. It was not: the run had a second failure, TestTheZeroValidDocumentWantsADocument/BlockIndexes, which I never saw because I read the run's tail rather than every '^--- FAIL' line, re-ran the one test the tail named and recorded the suite green. That test is one this change added, so it was a test added and never seen to pass, and the tester found it red in CI (envoy-go and envoy-go-race, run 41061824411). A suite is now read by its FAIL count and its final line, and this handoff and the pull request body say how each was run.",
+    "Round 4's push was wrong twice and both are fixed here. (1) It put packages/envoy/internal/dispatch/pmdoc/splice.go and .legion/INFRA-646/implement.json in one push whose head commit carried the skip-checks trailer, so GitHub started no workflow and the code head had no verdict to carry; skill://legion-worker reserves that line for a push touching .legion/<issue>/ alone. This round pushes the merge as a code head with no trailer, waits for its run, and only then pushes this handoff. (2) The merge resolution of packages/envoy/AGENTS.md left jj's closing marker line in the file; it was pushed at 0967458a and removed at 1c9ce28b, which is why there are two merge commits rather than one."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
