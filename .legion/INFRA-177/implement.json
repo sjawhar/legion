@@ -2,41 +2,39 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-177",
-  "completed": "2026-10-31T01:49:25Z",
+  "completed": "2026-10-31T05:02:32Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2354",
   "proof": [
     {
-      "criterion": "The merge with main keeps the handoff routes and their limits working: the full Dispatch API package passes at the merged code",
+      "criterion": "The merge with main d7e1daaa keeps the handoff routes and their limits working",
       "surface": "Dispatch API handler on Postgres (ICU en-US template)",
       "command": "cd packages/envoy && go test -count=1 -p 1 -timeout 55m ./internal/dispatch/api/",
-      "observed": "ok (1350 s) at 11cb25c1, the merge with main 8fd342e4; the second merge (84641aed, main 39b51494) changes no Dispatch code, only the two guides, bun.lock and 0150_handoffs.up.sql's header comment",
-      "headSha": "11cb25c13e88",
-      "negativeControl": "the route-count pin in routes_table_test.go is still 151 against main's 147: with a row added or removed the package fails, as it did at a1a6523d"
+      "observed": "ok (1338 s) at e6a3698a; route-count pin 151 against main's 147",
+      "headSha": "e6a3698a4c16",
+      "negativeControl": "the route-count pin fails the package when a row is added or removed, as it did at a1a6523d"
     },
     {
       "criterion": "Handoff records end to end at the merged code",
       "surface": "scripts/e2e/handoff-records.sh: the Go daemon and a real Dispatch server on Postgres and NATS",
-      "command": "LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/m_hr bash scripts/e2e/handoff-records.sh",
-      "observed": "handoff records e2e: PASS in 62s at 11cb25c1",
-      "headSha": "11cb25c13e88",
+      "command": "LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:5433/p_hr bash scripts/e2e/handoff-records.sh",
+      "observed": "handoff records e2e: PASS in 147s",
+      "headSha": "e6a3698a4c16",
       "negativeControl": "the live test's own refusal: a record another session wrote is refused 403 HANDOFF_SESSION_MISMATCH and the phase does not move"
     },
     {
-      "criterion": "The guides keep every handoff change of this branch in main's new one-sentence-per-line layout, and 0150_handoffs still migrates",
-      "surface": "scripts/semantic-line-breaks.ts and its tests; the Dispatch store migrations on Postgres",
-      "command": "bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md; same for packages/envoy/cmd/dispatch/README.md; bun test scripts/semantic-line-breaks.guides.test.ts scripts/semantic-line-breaks.test.ts; go test -count=1 -p 1 -timeout 40m ./internal/dispatch/store/",
-      "observed": "both layout checks clean; 90 pass, 0 fail; store ok (272 s); every sentence the branch added to the two guides is present at the merged head, and the README's 0150_handoffs paragraph moved into the migration's own header, as main's new rule says",
-      "headSha": "84641aed8db6",
-      "negativeControl": "main's guides at 39b51494 lack the handoff list items, route items and the routeBody sentences"
+      "criterion": "The three guides main relaid (#2474) keep this branch's edits in main's one-sentence-per-line layout",
+      "surface": "scripts/semantic-line-breaks.ts and its tests; a word-level content check of the branch's diff against the merged files",
+      "command": "bun scripts/semantic-line-breaks.ts AGENTS.md (and scripts/e2e/README.md, docs/kubernetes.md, the two envoy guides); bun test scripts/semantic-line-breaks.guides.test.ts scripts/semantic-line-breaks.test.ts",
+      "observed": "all five guides exit 0; 107 pass, 0 fail; every block the branch added is present in order, every line it removed is gone",
+      "headSha": "e6a3698a4c16",
+      "negativeControl": "main's guides at d7e1daaa lack the handoff runbook section, the handoffs import command item and the handoff-records and handoff-cutover-github items"
     }
   ],
   "filesChanged": [
-    "11cb25c1: merge with main 8fd342e4 (#2576): architect-root.md, architect.md, legion-architect/SKILL.md, wake-routing.md and legion-worker/SKILL.md keep main's new text with this branch's handoff wording",
-    "84641aed: merge with main 39b51494 (#2422, #2577): the two guides take main's layout with this branch's changes re-applied; the 0150_handoffs paragraph moves into 0150_handoffs.up.sql's header; bun.lock is main's",
-    "8f21fdf7: main's three new pr2422 learnings corrected in place and listed in the superseding note"
+    "e6a3698a: merge with main d7e1daaa (#2572, #2474): skills/AGENTS.md keeps this branch's retro and worker rows and main's outside-message and plain-words rows; AGENTS.md, scripts/e2e/README.md and docs/kubernetes.md take main's layout with this branch's edits re-applied"
   ],
   "deviations": [
-    "The fingerprint moved from a9d4f392 to fac79d58: main's #2422 relaid the two guides this branch edits, so the same changes now sit on different lines, and the README migration paragraph moved into the .up.sql header.",
-    "Dispatch migration 0150, contract 44 and daemon migration 0065 are still free on main 39b51494; #2394 and #2546 are open."
+    "The 03:58Z release roll lost the first try at this merge; it was redone from 738f171f, so legion/INFRA-177-rescue-2 is superseded and deleted, as is the older legion/INFRA-177-rescue.",
+    "Dispatch 0150, contract 44 and daemon 0065 are still free on main 3f7b3e75 (#2394 and #2546 open)."
   ]
 }
