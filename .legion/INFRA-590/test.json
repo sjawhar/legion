@@ -2,32 +2,48 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-590",
-  "completed": "2026-10-31T13:50:00Z",
-  "round": 25,
-  "testedHead": "6281961837c6c9de25c410ab192d4f2688f85127",
-  "previousTestedHead": "3668fb95171b89ceabc2bbe411d10bea9aa31e07",
-  "roundShape": "Confirmation round, as briefed: a forward merge of main b0cc910f5 (with #2594) into 3668fb95, no conflict. round-shape.py v3, 3668fb95171b89ceabc2bbe411d10bea9aa31e07 -> 6281961837c6c9de25c410ab192d4f2688f85127, pull request 2395: files whose own diff differs: 0; nothing equal only after normalisation. Control: 2678be4b84 -> b5e8445e62 still prints 4 files. Round 22 and 23's live and suite evidence stands.",
+  "completed": "2026-10-31T17:40:00Z",
+  "round": 26,
+  "testedHead": "1b15f353a747d01eaf3505a5bd42c8420b123453",
+  "previousTestedHead": "6281961837c6c9de25c410ab192d4f2688f85127",
+  "roundShape": "Full round, as briefed (the merge of main 151d2d7996 with #2592 resolved conflicts in runtime code). round-shape.py v3, 6281961837c6c9de25c410ab192d4f2688f85127 -> 1b15f353a747d01eaf3505a5bd42c8420b123453, pull request 2395: files whose own diff differs: 2 (cmd/listener/api.go, cmd/listener/role_holder.go); nothing equal only after normalisation. In both, the PR's own change is the same as before - main's local registered liveness becomes roles.Registered (internal/roles/roles.go:111, identical to main's role_holder.go:326, 'any entry') - now applied where #2592 moved the soft claim's liveness read, roleSupersessionVerdict in role_holder.go, plus one comment naming bucketSessionEntry for the predecessor; api.go keeps main's verdict switch. #2592's tests are unmodified: claim_wiring_test.go, thermo_ops_test.go and the session package's tests differ from main by 0 lines; api_test.go and main_test.go differ only by this PR's earlier signature changes (roles.Registered, forwardRole's added argument), which the merge did not change.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The implementer's unchanged-fingerprint claim holds: round-shape.py v3 finds 0 files whose own diff differs. Build and vet re-run at 62819618 in packages/envoy and packages/envoy/infra, clean."
+    "how": "Re-ran at 1b15f353 under -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB, one package at a time, on fresh pod Postgres databases: roles, session, store, cmd/listener (#2592's soft-claim and client-instance tests among them), outbox and multiprocess ok; build, vet and gofmt clean. The diff-check's resolution reads as stated."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "The forward merge changes nothing in the PR's own diff; it builds",
-      "surface": "the workspace at 62819618 and round-shape.py v3",
-      "command": "python3 round-shape.py 3668fb9517 6281961837 2395; cd packages/envoy && GOWORK=off GOMAXPROCS=4 GOMEMLIMIT=12GiB go build -p 1 ./... && go vet -p 1 ./... && go vet -p 1 -tags multiprocess ./cmd/dispatch; gofmt -l internal cmd; in a scratch copy, packages/envoy/infra: go vet -p 1 ./... && go vet -p 1 -tags natslive ./core/",
-      "observed": "0 files whose own diff differs; build, vet (with -tags multiprocess) and gofmt clean in packages/envoy; infra vets clean. Sampled memory peak 2.77 GiB of 19 over the whole build and vet, 35 samples every 2 s (the sampler a named job, mem-sampler-INFRA-590, stopped by proc kill; the pod's cgroup, every role included).",
-      "headSha": "6281961837c6c9de25c410ab192d4f2688f85127",
-      "negativeControl": "round-shape.py v3 on 2678be4b84 -> b5e8445e62 prints 4 files, so the 0 is a measured result."
+      "criterion": "A soft claim from a second client instance cannot take a live holder's role, the same instance can, and the outbox forwards to the holder the claim route leaves",
+      "surface": "real envoy-listener and envoy-dispatch built at 1b15f353 on a real nats-server 2.10.29, sessions registered through the listener's POST /v1/interests/subscribe with client_instance_id, a NATS subscriber answering each session's forwards",
+      "command": "subscribe ses_A (client_instance_id inst-1), ses_B (inst-2), ses_C (inst-1); POST /v1/roles/set ses_A t590-rev (hard); ses_B soft naming previous_session_id ses_A; ses_B soft naming none; ses_C soft naming ses_A; GET /v1/roles/t590-rev after each; then a Dispatch issue routed to role:t590-rev with three comments",
+      "observed": "A's hard claim 200, holder ses_A. B (other instance) naming A: 409 'role t590-rev is held by ses_A', holder still ses_A. B naming no predecessor: 409, holder ses_A. C (A's instance) naming A: 200, holder ses_C. The outbox forwarded SC-1's issue.updated and three comments (events 3-6) to notifications.agent.ses_C, in order, nothing to ses_A or ses_B; all four published, no publish failure counted.",
+      "headSha": "1b15f353a747d01eaf3505a5bd42c8420b123453",
+      "negativeControl": "The second client instance's soft claim was refused 409 twice and left the holder unchanged."
     },
     {
-      "criterion": "lint, typecheck, test, pr-title, envoy-go, envoy-go-race and ci-ok at 62819618",
+      "criterion": "Round 22's live checks once: a silent holder delays no other issue; per-issue order once it answers and through a SIGKILL take-over",
+      "surface": "the same rig: a live holder that never answers (t590-unans, registered through the role and session buckets) and one that answers (t590-ans); then a second head dispatch on the same database",
+      "command": "RH-1 and RH-3 routed to t590-unans (three comments on RH-1), RH-2 to t590-ans; 30 comments on RH-2 one a second, latency to its holder's forward; the silent holder restarted answering; 20 issues LD-1..20 routed to t590-ans, 4 writers through both processes, kill -9 of the hold's holder 4 s in, forwards checked per issue against the events table",
+      "observed": "0 of 30 comments on RH-2 more than 1 s late, median 0.034 s, max 0.062 s, while RH-1 and RH-3's route events backed off (attempt 4) and RH-1's comments waited with attempt 0. Once the holder answered, RH-1's events arrived 11, 14, 15, 16 in order, then RH-3's 12. The other process took the hold 3.79 s after the SIGKILL (17:06:38.798 -> 17:06:42.591); every LD event published; 202 route and comment events, 203 forwards, every issue in id order, none missing, one repeat (LD-4) in order, the at-least-once repeat the holder drops by its dedupe key. Most writes had landed by the kill, so the take-over published the killed process's unpublished backlog rather than live writes.",
+      "headSha": "1b15f353a747d01eaf3505a5bd42c8420b123453",
+      "negativeControl": "Round 20's head fd93819c delayed 24 of 30 comments in the same rig."
+    },
+    {
+      "criterion": "roles, session, store, listener, outbox and multiprocess suites under the caps; build",
+      "surface": "packages/envoy, fresh pod Postgres databases, -p 1, GOMAXPROCS=4, GOMEMLIMIT=12GiB, one package at a time",
+      "command": "go test ./internal/roles/ ./internal/session/; ./internal/dispatch/store/; ./cmd/listener/; ./internal/dispatch/outbox/; -tags multiprocess ./cmd/dispatch; go build ./..., go vet ./..., go vet -tags multiprocess ./cmd/dispatch, gofmt -l",
+      "observed": "roles ok 0.3 s, session ok 10.2 s (#2592's client-instance tests pass), store ok 229.1 s, cmd/listener ok 415.5 s (TestRoleSetHandlerSoftClaimPredecessorInstance, TestASoftClaimWhoseSessionCacheTrailsTheBucketLeavesALiveHolderItsRole, the DeleteSessionHandler instance tests pass), outbox ok 266.1 s, multiprocess ok 811.6 s: take-over 5.076 s after SIGKILL, 3.004 s after a NATS cut, 2.272 s after a silent cut, 5.625 s after SIGSTOP, the resumed process logged the hold lost 10 ms after it resumed, 200/80/60 comments once and in order. Build, vet and gofmt clean. Sampled memory peak 3.06 GiB of 19 over the suites, 870 samples every 2 s (named job mem-sampler-INFRA-590, stopped by proc kill).",
+      "headSha": "1b15f353a747d01eaf3505a5bd42c8420b123453",
+      "negativeControl": "TestAFrozenPublisherSendsNothingWhenItResumes: the SIGSTOPped holder sent nothing after it resumed."
+    },
+    {
+      "criterion": "Every lane with ci-ok at 1b15f353",
       "surface": "GitHub check runs",
-      "command": "gh api repos/sjawhar/legion/commits/6281961837c6c9de25c410ab192d4f2688f85127/check-runs --paginate, read at 13:46Z and again before completing",
-      "observed": "CI run 41206814839 queued since 13:42:57Z with only its changes job created; pr-title queued (run 41206863892). Unread: lint, typecheck, test, pr-title, envoy-go, envoy-go-race and ci-ok. No envoy-go result, so no re-run of TestIdenticalViewsShareOneRecompute was called for. #2395 MERGEABLE.",
-      "headSha": "6281961837c6c9de25c410ab192d4f2688f85127",
+      "command": "gh api repos/sjawhar/legion/commits/1b15f353a747d01eaf3505a5bd42c8420b123453/check-runs --paginate, read at 17:06Z and 17:38Z",
+      "observed": "At 17:38Z: CI run 41222294411 queued since 16:59:24Z, its jobs created and queued (29 queued); pr-title success; changes success; ci-ok not yet created. Unread: lint, typecheck, test, envoy-go, envoy-go-race, ci-ok and every other CI job. #2395 MERGEABLE.",
+      "headSha": "1b15f353a747d01eaf3505a5bd42c8420b123453",
       "negativeControl": "none: a read of CI"
     }
   ]
