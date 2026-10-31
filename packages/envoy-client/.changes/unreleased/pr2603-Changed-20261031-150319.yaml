@@ -1,0 +1,5 @@
+kind: Changed
+body: 'A registration must be given a session consumer: SubscribeInput.delivery is required and parseSubscribeAnswer throws on an answer that is absent, says core or cannot be read, carrying the listener''s own reason. The POST /v1/replay sweep is deleted with the route; replay.ts is now delivery-ledger.ts, keeping the dedupe ledger, the failure and gap notices, rememberedTopics, replayFollowedSubjects and closeReplayedRemoval. Team topics are stored topics.'
+time: 2026-10-31T15:03:19.393829138Z
+custom:
+    Issue: pr2603

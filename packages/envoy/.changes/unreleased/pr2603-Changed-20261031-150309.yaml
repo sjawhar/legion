@@ -1,0 +1,5 @@
+kind: Changed
+body: 'No Envoy session receives from a plain NATS subscription: the listener refuses by name a registration it cannot give a session consumer (503 consumer_error or no_grant, 409 not_requested or invalid_session_id) and writes nothing for it, the core delivery answer and POST /v1/replay are gone, every role forward is stored-only (a 200 means the stream stored it for the holder''s consumer, and no receipt is waited for), notifications.team.> and its exception lane are stored while every other uncaptured notifications. topic is refused by name at publish and at interest subscribe, GET /v1/sessions and /v1/registry/<id> report each session''s delivery, and a controller session registers its own project''s notice lane and receives it from its consumer.'
+time: 2026-10-31T15:03:09.021145495Z
+custom:
+    Issue: pr2603
