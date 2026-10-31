@@ -2,6 +2,7 @@ package docs
 
 import (
 	"context"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -35,7 +36,7 @@ const anchoredMarkTimingLimit = 20
 // than copied a second time: two copies of one statement drift apart, and that oracle is what
 // the package's equality test is held to.
 func TestStatementTimings(t *testing.T) {
-	runner := benchtime.Open(t)
+	runner := benchtime.Open(t, os.Getenv(benchtime.DatabaseURLEnv))
 	document := runner.Subjects().AnchoredDocument
 	markIDs := anchoredMarkIDs(t, runner, document)
 	for _, read := range anchorReads() {

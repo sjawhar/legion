@@ -26,7 +26,6 @@ import (
 	"cmp"
 	"context"
 	"fmt"
-	"os"
 	"regexp"
 	"slices"
 	"strconv"
@@ -73,15 +72,18 @@ type Runner struct {
 }
 
 // Open connects to the measurement database, records the server settings every number is read
-// beside, and binds the subjects. It skips t while DatabaseURLEnv is unset, which is how CI
-// never runs a measurement.
-func Open(t *testing.T) *Runner {
+// beside, and binds the subjects. databaseURL is what DatabaseURLEnv names, read by the caller:
+// a non-test file of internal/dispatch may not read the process environment, which
+// cmd/dispatch's TestNoReaderBypassesTheSettingsTable holds, so each _test.go caller passes
+// os.Getenv(benchtime.DatabaseURLEnv) in. The gate itself stays here: an empty URL skips t,
+// which is how CI never runs a measurement, and the three callers share that one sentence
+// rather than each keeping a copy of it.
+func Open(t *testing.T, databaseURL string) *Runner {
 	t.Helper()
-	raw := os.Getenv(DatabaseURLEnv)
-	if raw == "" {
+	if databaseURL == "" {
 		t.Skip(DatabaseURLEnv + " must name the seeded measurement database (cmd/dispatch-seed); CI leaves it unset")
 	}
-	config, err := pgx.ParseConfig(raw)
+	config, err := pgx.ParseConfig(databaseURL)
 	if err != nil {
 		t.Fatalf("read %s: %v", DatabaseURLEnv, err)
 	}

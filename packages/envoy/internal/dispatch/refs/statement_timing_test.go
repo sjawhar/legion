@@ -2,6 +2,7 @@ package refs
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -32,7 +33,7 @@ import (
 //     so the pair is seam 7's two-commit run and what is measured here is the head side of it,
 //     with its plan, under the same protocol as every other reading.
 func TestStatementTimings(t *testing.T) {
-	runner := benchtime.Open(t)
+	runner := benchtime.Open(t, os.Getenv(benchtime.DatabaseURLEnv))
 	subjects := runner.Subjects()
 
 	// mainClosureQuery is main's text, held in closure_test.go as the equality oracle. It is

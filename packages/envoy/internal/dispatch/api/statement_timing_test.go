@@ -59,7 +59,7 @@ const (
 // second time: two copies of one statement drift apart, and those oracles are what the
 // package's equality tests are held to.
 func TestStatementTimings(t *testing.T) {
-	runner := benchtime.Open(t)
+	runner := benchtime.Open(t, os.Getenv(benchtime.DatabaseURLEnv))
 	subjects := runner.Subjects()
 
 	// The eight filters a listing request carries (listIssues' arguments), narrowed to the
@@ -199,7 +199,7 @@ func documentArmSide(t *testing.T, runner *benchtime.Runner) (documentArmStateme
 // after it counts every project in full by this build's own rule, and timing that would measure
 // a first-use full build rather than the steady state.
 func TestRelatedTermsRefreshTiming(t *testing.T) {
-	runner := benchtime.Open(t)
+	runner := benchtime.Open(t, os.Getenv(benchtime.DatabaseURLEnv))
 	project := runner.Subjects().Project
 	database := openRefreshTimingStore(t)
 	projects := refreshTimingProjects(t, database)
