@@ -1368,6 +1368,17 @@ never reads the index and serves beside it unchanged, except that its sweep stil
 of an ask holding both columns (no such row is written today), and rolling Dispatch back past
 `0148` is an image rollback alone: the index is left for the next release that reads it.
 
+Migration `0150_ask_followers_session` creates `ask_followers_session_id` on `ask_followers
+(session_id)`, for the `followed_by` arm of `graph_edges`, which `refs.BacklinkCounts` now reads
+directly rather than leaving the planner the whole view. The arm reads `ask_followers` by
+`session_id` and had no index for it: the table's primary key leads with `ask_id`, which cannot
+serve that predicate, and its only other index, `ask_followers_ask_id_text` (`0032`), is on the
+ask as well, so every count of a session's backlinks scanned the table. A plain `create index`
+inside the runner's transaction, it holds `SHARE` on `ask_followers` while it builds: the build
+waits out a write of a follower already open and holds off a new one for that moment, while
+reads are not held, and the table is small. Its census answers `0`: one index on an existing
+column, refusing no row and rewriting none.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
