@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-607",
+  "completed": "2026-10-31T02:54:23Z",
+  "decision": "approved",
+  "reviewedCodeHead": "85d493fccf9ccb3dccc82cee3e48a0fbfbe4f978",
+  "round": 12,
+  "critical": 0,
+  "important": 0,
+  "minor": 2,
+  "scope": "Full round over everything above my approval at code d4f37431: retro's .legion removal (775af5f9); the forward merge of main 733bac81 (6cf038e3), which brings #2392 (event ids no longer commit order; events.Horizon) and resolves runtime conflicts in api/event_stream_relay.go (main's firstRelayCursor with s.horizon().Await, the PR's EventsChannel) and infra/gcp/dispatch.go (dispatchConnectionsPerPod 90 = main's 89 plus the PR's shared wake listener; 64+4+1+13+1+1+2+4 = store.ConnectionsPerProcess), migrations now 0150-0156; the sweep fix e91f96bf (the suggestion cursor reads and moves only up to the server's one events.Horizon safe horizon, Await on a process's first pass, a minGap re-pass while Pending() || Proven() > safe); and my own prose commit 85d493fc.",
+  "proseFixed": "85d493fc: migration comments 0153/0154, the suggestion-cursor learning, cmd/dispatch/README.md and the suggestionOutcomePass comment no longer state the commit-order lock #2392 removed, and say the first pass takes Await. Comments only; no code line changed.",
+  "thermonuclear": {
+    "deepReview": "Verdict: APPROVE at e91f96bf (Minor only): no event skipped (cursor capped at H, every id at or below H final), none judged twice (cursor row for update), first pass via Await, re-pass condition sound, idle makes no statement, merge resolutions keep #2392 and the PR",
+    "codeQuality": "Verdict: CHANGES at e91f96bf, raised as: (1) the relay and the delivery hub, main's #2392 code, re-read on Pending() alone where the sweep correctly uses Pending() || Proven() > safe; a delay (until the next event commit when a gap's write rolls back), not loss, and not this PR's code: reported to the controller (Envoy 6c73230c); (2) the stale commit-order prose, fixed in 85d493fc; the rest cleanup"
+  },
+  "ci": "CI head 85d493fc (newest pull_request run, re-run once after the concurrency group cancelled it); compare 85d493fc...this handoff is .legion/ only. Green at 85d493fc: lint, typecheck, test, pr-title, dispatch, envoy-go (read 02:52Z), and every other job but one. envoy-go-race-api (a job new on main, not yet run on main) failed TestAReconnectCatchesUpWhatTheListenerMissed (delivery_live_hub_test.go:776, a delta while the hub's listener was blind); the PR's only change to the delivery hub, its test and pglisten.Listener is renaming the dispatchEventsChannel constant to EventsChannel, so the hub's behaviour there is main's (#2392's gap re-read timer); not required, not in the architect's list.",
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/suggestion_outcomes_test.go:119,151,172",
+      "description": "Waits of 5-10 s now depend on proofs of the instance-wide safe horizon; main bounds its horizon-dependent waits with eventFeedWait (30 s). A flake risk, not an observed failure (envoy-go and envoy-go-race passed at e91f96bf and 85d493fc)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/sweep_runners_test.go:71-75",
+      "description": "sweepHorizon is an identity wrapper around events.NewHorizon; cleanup."
+    }
+  ]
+}
