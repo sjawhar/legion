@@ -215,7 +215,7 @@ func TestTheClosureProbesDocumentBlocksThroughItsNodeIndex(t *testing.T) {
 	if err := tx.QueryRow(ctx, "explain (format json) "+closureQuery, "CORE-1").Scan(&raw); err != nil {
 		t.Fatalf("explain the closure: %v", err)
 	}
-	plan := onePlan(t, raw)
+	plan := explaintest.OnePlan(t, raw)
 
 	if explaintest.SeqScansRelation(t, plan, "document_blocks") {
 		t.Errorf("the closure reads document_blocks whole:\n%s", plan)

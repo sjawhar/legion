@@ -1,6 +1,7 @@
 package main
 
 import (
+	"math"
 	"math/rand/v2"
 	"sort"
 	"strings"
@@ -57,16 +58,11 @@ func newVocabulary() *vocabulary {
 	return v
 }
 
-// weightOfRank is the Zipf weight of the rank-th word, ranks counted from one.
+// weightOfRank is the Zipf weight of the rank-th word, ranks counted from one. Go specifies
+// Pow(x, 1) as x, so at the exponent of 1 the constant holds this is exactly 1/rank, and the
+// weight stays right for any exponent the constant is moved to.
 func weightOfRank(rank int) float64 {
-	if zipfExponent == 1.0 {
-		return 1 / float64(rank)
-	}
-	weight := 1.0
-	for range int(zipfExponent) {
-		weight /= float64(rank)
-	}
-	return weight
+	return 1 / math.Pow(float64(rank), zipfExponent)
 }
 
 // word draws one word.

@@ -30,16 +30,7 @@ func planWithoutSeqScans(t *testing.T, database *store.Store, statement string, 
 	if err := tx.QueryRow(ctx, "explain (format json) "+statement, arguments...).Scan(&raw); err != nil {
 		t.Fatalf("explain the statement: %v", err)
 	}
-	var plans []struct {
-		Plan json.RawMessage `json:"Plan"`
-	}
-	if err := json.Unmarshal(raw, &plans); err != nil {
-		t.Fatalf("decode the explain answer: %v", err)
-	}
-	if len(plans) != 1 {
-		t.Fatalf("explain answered %d plans; want one:\n%s", len(plans), raw)
-	}
-	return plans[0].Plan
+	return explaintest.OnePlan(t, raw)
 }
 
 // Ask reads resolve their opening event and edit history by the payload id. Both

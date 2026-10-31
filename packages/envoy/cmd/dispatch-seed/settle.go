@@ -22,10 +22,10 @@ func (r *seedRun) settleOwedWork(ctx context.Context) error {
 	if _, err := r.database.Pool.Exec(ctx, `delete from block_grammar_owed`); err != nil {
 		return fmt.Errorf("empty the block grammar queue: %w", err)
 	}
-	// The related-terms refresh queue the plan's seam 5 adds does not exist yet. When it does,
-	// its truncation goes here, before the term statistics are built: the seed's own inserts
-	// fire its triggers, so a head-seeded database would otherwise start with a queue row for
-	// every item rather than the empty queue a steady system has.
+	// The related-terms refresh queue (0157, filled by 0159's triggers on the seed's own
+	// inserts) needs no truncation here: buildTermStatistics empties it. Every project starts
+	// with no search_term_totals row, so each takes a full build, whose `drained` CTE deletes
+	// the queue rows its snapshot saw. A truncate added here would only duplicate that drain.
 	return r.checkNoOwedWork(ctx)
 }
 

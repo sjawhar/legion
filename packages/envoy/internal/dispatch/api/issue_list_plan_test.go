@@ -183,15 +183,6 @@ func TestAnUnpagedListingReadsEachResolvedTableOnce(t *testing.T) {
 // the grouped read counts, and a condition it does carry is held to its first key column.
 func TestTheListingReadsOpenAsksThroughTheirIndex(t *testing.T) {
 	fixture := newIssueListFixture(t)
-	ctx := context.Background()
-	tx, err := fixture.database.Pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin the plan's transaction: %v", err)
-	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, "set local enable_seqscan = off"); err != nil {
-		t.Fatalf("disable sequential scans: %v", err)
-	}
 	firstKeys := explaintest.NewIndexKeys(fixture.database.Pool)
 	for name, read := range map[string]struct {
 		statement string
@@ -200,21 +191,12 @@ func TestTheListingReadsOpenAsksThroughTheirIndex(t *testing.T) {
 		"the listing":       {listIssuesQuery, []any{"LIST", "", "", nil, []string{}, false, []int16{}, false}},
 		"the paged listing": {listIssuesPageQuery, []any{"LIST", "", "", nil, []string{}, false, []int16{}, false, 5, 10}},
 	} {
-		var raw []byte
-		if err := tx.QueryRow(ctx, "explain (format json) "+read.statement, read.arguments...).Scan(&raw); err != nil {
-			t.Fatalf("explain %s: %v", name, err)
-		}
-		var plans []struct {
-			Plan json.RawMessage `json:"Plan"`
-		}
-		if err := json.Unmarshal(raw, &plans); err != nil || len(plans) != 1 {
-			t.Fatalf("decode %s's plan (%v): %s", name, err, raw)
-		}
-		if explaintest.SeqScansRelation(t, plans[0].Plan, "asks") {
-			t.Fatalf("%s scans asks sequentially; want a search of asks_open:\n%s", name, raw)
+		plan := planWithoutSeqScans(t, fixture.database, read.statement, read.arguments...)
+		if explaintest.SeqScansRelation(t, plan, "asks") {
+			t.Fatalf("%s scans asks sequentially; want a search of asks_open:\n%s", name, plan)
 		}
 		searched := false
-		for _, scan := range explaintest.IndexScans(t, plans[0].Plan) {
+		for _, scan := range explaintest.IndexScans(t, plan) {
 			if scan.Index != "asks_open" {
 				continue
 			}
@@ -222,11 +204,11 @@ func TestTheListingReadsOpenAsksThroughTheirIndex(t *testing.T) {
 			firstKey := firstKeys.FirstKey(t, scan.Index)
 			if scan.Cond != "" && !explaintest.CondNamesFirstKey(scan.Cond, firstKey) {
 				t.Errorf("%s reads asks_open on `%s`, which names nothing of its first key column `%s`:\n%s",
-					name, scan.Cond, firstKey, raw)
+					name, scan.Cond, firstKey, plan)
 			}
 		}
 		if !searched {
-			t.Errorf("%s searches no asks_open:\n%s", name, raw)
+			t.Errorf("%s searches no asks_open:\n%s", name, plan)
 		}
 	}
 }

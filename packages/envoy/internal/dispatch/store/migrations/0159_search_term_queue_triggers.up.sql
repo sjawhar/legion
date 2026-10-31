@@ -37,49 +37,59 @@
 -- pg_proc and locks no table, so the lock window is the five create trigger statements alone.
 create or replace function asks_search_term_queue() returns trigger language plpgsql as $$
 declare
-  item asks%rowtype;
   previous tsvector;
 begin
-  if tg_op = 'DELETE' then item := old; else item := new; end if;
   if tg_op <> 'INSERT' then previous := coalesce(old.search, ''::tsvector); end if;
-  insert into search_term_queue (kind, item_id, issue_key, artifact_id, old_search)
-  values ('ask', item.id, item.issue_key, coalesce(item.artifact_id, item.block_artifact_id), previous);
+  if tg_op = 'DELETE' then
+    insert into search_term_queue (kind, item_id, issue_key, artifact_id, old_search)
+    values ('ask', old.id, old.issue_key, coalesce(old.artifact_id, old.block_artifact_id), previous);
+  else
+    insert into search_term_queue (kind, item_id, issue_key, artifact_id, old_search)
+    values ('ask', new.id, new.issue_key, coalesce(new.artifact_id, new.block_artifact_id), previous);
+  end if;
   return null;
 end $$;
 
 create or replace function comments_search_term_queue() returns trigger language plpgsql as $$
 declare
-  item comments%rowtype;
   previous tsvector;
 begin
-  if tg_op = 'DELETE' then item := old; else item := new; end if;
   if tg_op <> 'INSERT' then previous := coalesce(old.search, ''::tsvector); end if;
-  insert into search_term_queue (kind, item_id, issue_key, artifact_id, old_search)
-  values ('comment', item.id, item.issue_key, item.artifact_id, previous);
+  if tg_op = 'DELETE' then
+    insert into search_term_queue (kind, item_id, issue_key, artifact_id, old_search)
+    values ('comment', old.id, old.issue_key, old.artifact_id, previous);
+  else
+    insert into search_term_queue (kind, item_id, issue_key, artifact_id, old_search)
+    values ('comment', new.id, new.issue_key, new.artifact_id, previous);
+  end if;
   return null;
 end $$;
 
 create or replace function issues_search_term_queue() returns trigger language plpgsql as $$
 declare
-  item issues%rowtype;
   previous tsvector;
 begin
-  if tg_op = 'DELETE' then item := old; else item := new; end if;
   if tg_op <> 'INSERT' then previous := coalesce(old.search, ''::tsvector); end if;
-  insert into search_term_queue (kind, issue_key, old_search)
-  values ('issue', item.key, previous);
+  if tg_op = 'DELETE' then
+    insert into search_term_queue (kind, issue_key, old_search) values ('issue', old.key, previous);
+  else
+    insert into search_term_queue (kind, issue_key, old_search) values ('issue', new.key, previous);
+  end if;
   return null;
 end $$;
 
 create or replace function messages_search_term_queue() returns trigger language plpgsql as $$
 declare
-  item messages%rowtype;
   previous tsvector;
 begin
-  if tg_op = 'DELETE' then item := old; else item := new; end if;
   if tg_op <> 'INSERT' then previous := coalesce(old.search, ''::tsvector); end if;
-  insert into search_term_queue (kind, item_id, issue_key, old_search)
-  values ('message', item.id, item.issue_key, previous);
+  if tg_op = 'DELETE' then
+    insert into search_term_queue (kind, item_id, issue_key, old_search)
+    values ('message', old.id, old.issue_key, previous);
+  else
+    insert into search_term_queue (kind, item_id, issue_key, old_search)
+    values ('message', new.id, new.issue_key, previous);
+  end if;
   return null;
 end $$;
 

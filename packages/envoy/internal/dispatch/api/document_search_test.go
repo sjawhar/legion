@@ -211,11 +211,10 @@ func (f documentSearchFixture) statements() []documentSearchStatement {
 // which is the claim under test.
 func TestEveryDocumentArmSearchesTheDocumentSearchIndex(t *testing.T) {
 	fixture := newDocumentSearchFixture(t)
-	ctx := context.Background()
 	firstKey := explaintest.NewIndexKeys(fixture.database.Pool).FirstKey(t, documentSearchIndex)
 	for _, statement := range fixture.statements() {
 		t.Run(statement.name, func(t *testing.T) {
-			plan := documentSearchPlan(t, ctx, fixture.database, statement.statement, statement.arguments)
+			plan := planWithoutSeqScans(t, fixture.database, statement.statement, statement.arguments...)
 			searched := false
 			for _, scan := range explaintest.IndexScans(t, plan) {
 				if scan.Index != documentSearchIndex {
@@ -246,9 +245,8 @@ func TestEveryDocumentArmSearchesTheDocumentSearchIndex(t *testing.T) {
 // Without it a plan assertion that happened to hold for any statement would pass unnoticed.
 func TestMainsDocumentArmSearchesNoDocumentSearchIndex(t *testing.T) {
 	fixture := newDocumentSearchFixture(t)
-	ctx := context.Background()
 	statement := fixture.statements()[0]
-	plan := documentSearchPlan(t, ctx, fixture.database, statement.oracle, statement.arguments)
+	plan := planWithoutSeqScans(t, fixture.database, statement.oracle, statement.arguments...)
 	for _, scan := range explaintest.IndexScans(t, plan) {
 		if scan.Index == documentSearchIndex {
 			t.Fatalf("main's keyword search reads %s, a table it does not know:\n%s", documentSearchIndex, plan)
@@ -290,34 +288,6 @@ func TestEveryDocumentArmAnswersWhatMainsStatementDoes(t *testing.T) {
 			}
 		})
 	}
-}
-
-// documentSearchPlan is statement's plan with sequential scans off, as EXPLAIN (FORMAT JSON)
-// writes it: the one "Plan" node of its top-level array.
-func documentSearchPlan(t *testing.T, ctx context.Context, database *store.Store, statement string, arguments []any) json.RawMessage {
-	t.Helper()
-	tx, err := database.Pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin the plan's transaction: %v", err)
-	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, "set local enable_seqscan = off"); err != nil {
-		t.Fatalf("set local enable_seqscan off: %v", err)
-	}
-	var raw []byte
-	if err := tx.QueryRow(ctx, "explain (format json) "+statement, arguments...).Scan(&raw); err != nil {
-		t.Fatalf("explain: %v", err)
-	}
-	var plans []struct {
-		Plan json.RawMessage `json:"Plan"`
-	}
-	if err := json.Unmarshal(raw, &plans); err != nil {
-		t.Fatalf("decode the explain answer: %v", err)
-	}
-	if len(plans) != 1 {
-		t.Fatalf("explain answered %d plans; want one:\n%s", len(plans), raw)
-	}
-	return plans[0].Plan
 }
 
 // documentSearchPlanNode is what artifactVersionsTestingATSQuery reads of one plan node: the

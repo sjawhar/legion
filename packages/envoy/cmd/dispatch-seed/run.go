@@ -29,11 +29,8 @@ type seedRun struct {
 	// be watched and seldom enough to be read.
 	progressAt time.Time
 
-	// bands counts the versions written in each markdown size band; blockTotal and tableTotal
-	// count the blocks the latest versions were indexed with, for the report.
-	bands      map[string]int
-	blockTotal int
-	tableTotal int
+	// bands counts the versions written in each markdown size band, for the report.
+	bands map[string]int
 
 	// blockCounter numbers the blocks of the document being rendered (blockIDs), and tableRow is
 	// the block id of the first table's first body row, which every latest version shares and
@@ -45,30 +42,15 @@ type seedRun struct {
 	subject subjects
 }
 
-// subjects are the rows a measurement binds, which the command prints: a sibling measurement
-// cannot find them by reading the code (the review's finding 9).
+// subjects are the named rows a measurement binds that the run alone knows, which the command
+// prints: a sibling measurement cannot find them by reading the code (the review's finding 9).
+// Every other subject reportSubjects prints it reads from the plan or from the database as it
+// prints it, so it is not held here.
 type subjects struct {
-	BigProject     string
-	HubIssue       string
-	HubChildren    int
-	HubBlockers    int
-	DeepIssue      string
-	DeepDepth      int
-	ClosureIssue   string
-	ClosureHops    int
-	AnchorDocument string
-	AnchorRefKey   string
-	AnchorBlock    string
-	LargeDocument  string
-	Sessions       []string
 	Model          string
 	QueryVectorRow string
 	RareWord       string
 	RareHits       int
-	MediumWord     string
-	MediumHits     int
-	CommonWord     string
-	CommonHits     int
 }
 
 // batchRows is how many rows of a plain table one transaction writes, and batchDocuments how many

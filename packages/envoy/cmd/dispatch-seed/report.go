@@ -236,8 +236,6 @@ func (r *seedRun) reportWords(ctx context.Context) error {
 	}
 	rare, medium, common := hits[rarest], hits[(rarest+len(hits))/2], hits[len(hits)-1]
 	r.subject.RareWord, r.subject.RareHits = rare.word, rare.docs
-	r.subject.MediumWord, r.subject.MediumHits = medium.word, medium.docs
-	r.subject.CommonWord, r.subject.CommonHits = common.word, common.docs
 	fmt.Fprintln(r.out, "\nwords (documents whose latest version matches plainto_tsquery('english', word))")
 	fmt.Fprintf(r.out, "  vocabulary %d words, Zipf exponent %g\n", vocabularySize, zipfExponent)
 	fmt.Fprintf(r.out, "  rare    %-12s %d documents (search lists at most %d of a kind)\n", rare.word, rare.docs, contracts.SearchKindDepth)

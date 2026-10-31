@@ -102,12 +102,6 @@ func (r *seedRun) writeDocument(ctx context.Context, tx pgx.Tx, index int) error
 			return fmt.Errorf("record task progress: %w", err)
 		}
 	}
-	r.blockTotal += len(blocks)
-	for _, block := range blocks {
-		if block.Type == "table" {
-			r.tableTotal++
-		}
-	}
 	return nil
 }
 

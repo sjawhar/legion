@@ -202,16 +202,7 @@ func anchorReadPlan(t *testing.T, ctx context.Context, connection *pgxpool.Conn,
 	if _, err := connection.Exec(ctx, "deallocate "+name); err != nil {
 		t.Fatalf("deallocate the anchor read: %v", err)
 	}
-	var plans []struct {
-		Plan json.RawMessage `json:"Plan"`
-	}
-	if err := json.Unmarshal(raw, &plans); err != nil {
-		t.Fatalf("decode the explain answer: %v", err)
-	}
-	if len(plans) != 1 {
-		t.Fatalf("explain answered %d plans; want one:\n%s", len(plans), raw)
-	}
-	return plans[0].Plan
+	return explaintest.OnePlan(t, raw)
 }
 
 // anchorReadArguments are the parameter types a read is prepared with and the literals it is

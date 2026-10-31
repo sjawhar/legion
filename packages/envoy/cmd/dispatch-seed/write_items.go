@@ -83,7 +83,7 @@ func (r *seedRun) writeAsks(ctx context.Context) error {
 				ask.CreatedAt, blockID, blockArtifact); err != nil {
 				return fmt.Errorf("ask %s: %w", ask.ID, err)
 			}
-			mentions.add(ask.ID, question, ask.CreatedAt)
+			mentions.add(ask.ID, text.Refs(text.ExtractAt(question, serverURL)), ask.CreatedAt)
 			if index < r.sizes.AskFollowers {
 				followers = append(followers, []any{ask.ID, ask.Follower, ask.CreatedAt})
 			}
@@ -191,11 +191,12 @@ func (r *seedRun) writeComments(ctx context.Context) error {
 			if comment.Edited {
 				at = comment.CreatedAt.Add(time.Hour)
 			}
+			located := text.ExtractAt(body, serverURL)
 			if _, err := refs.IndexItem(ctx, tx, refs.ItemComment, comment.ID, body, at,
-				text.ExtractAt(body, serverURL), nil); err != nil {
+				located, nil); err != nil {
 				return fmt.Errorf("index comment %s: %w", comment.ID, err)
 			}
-			mentions.add(comment.ID, body, comment.CreatedAt)
+			mentions.add(comment.ID, text.Refs(located), comment.CreatedAt)
 		}
 		return mentions.write(ctx, tx)
 	})
@@ -237,11 +238,12 @@ func (r *seedRun) writeMessages(ctx context.Context) error {
 					return fmt.Errorf("index message %s under the older parser: %w", message.ID, err)
 				}
 			}
+			located := text.ExtractAt(body, serverURL)
 			if _, err := refs.IndexItem(ctx, tx, refs.ItemMessage, message.ID, body,
-				message.CreatedAt, text.ExtractAt(body, serverURL), nil); err != nil {
+				message.CreatedAt, located, nil); err != nil {
 				return fmt.Errorf("index message %s: %w", message.ID, err)
 			}
-			mentions.add(message.ID, body, message.CreatedAt)
+			mentions.add(message.ID, text.Refs(located), message.CreatedAt)
 		}
 		if err := mentions.write(ctx, tx); err != nil {
 			return err
@@ -280,8 +282,11 @@ func newMentionRows(kind string) *mentionRows {
 	return &mentionRows{kind: kind, seen: map[[3]string]struct{}{}}
 }
 
-func (m *mentionRows) add(id, body string, at time.Time) {
-	for _, ref := range text.Extract(body, serverURL) {
+// add collects the rows mentioned leaves for the item id, which is text.ExtractAt's reading of
+// the item's body read as references: the caller already made that reading for the indexer, so
+// the body is scanned once.
+func (m *mentionRows) add(id string, mentioned []text.Ref, at time.Time) {
+	for _, ref := range mentioned {
 		target, ok := refs.TargetOf(ref)
 		if !ok {
 			continue

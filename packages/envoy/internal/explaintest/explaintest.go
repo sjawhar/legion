@@ -35,6 +35,24 @@ type planNode struct {
 	Plans        []json.RawMessage `json:"Plans"`
 }
 
+// OnePlan is the one "Plan" node of raw, an `EXPLAIN (FORMAT JSON)` answer, which is what every
+// check below is given. A statement explains to a top-level array of one plan, so an answer
+// holding any other number is the explain the caller did not ask for, and the whole answer is
+// printed with the refusal.
+func OnePlan(t testing.TB, raw []byte) json.RawMessage {
+	t.Helper()
+	var plans []struct {
+		Plan json.RawMessage `json:"Plan"`
+	}
+	if err := json.Unmarshal(raw, &plans); err != nil {
+		t.Fatalf("decode the explain answer: %v", err)
+	}
+	if len(plans) != 1 {
+		t.Fatalf("explain answered %d plans; want one:\n%s", len(plans), raw)
+	}
+	return plans[0].Plan
+}
+
 // planNodes flattens planJSON - one "Plan" node of `EXPLAIN (FORMAT JSON)`'s top-level array -
 // into every node of the tree under it, each node before its children. Every check this package
 // exports is a filter over this one walk, so the tree is descended in one place rather than once
