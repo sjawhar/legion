@@ -741,3 +741,73 @@ test("a comment on words that run across two paragraphs keeps its anchor", async
     await alice.close();
   }
 });
+
+/** A second pair of paragraphs reading the same words as the first. */
+const ACROSS_BLOCKS_TWICE_SPEC = [
+  "## Review",
+  "",
+  "The fox jumps.",
+  "",
+  "Over the lazy dog it goes.",
+  "",
+  "A hound also jumps.",
+  "",
+  "Over the lazy dog it trots.",
+  "",
+].join("\n");
+
+/** A selection across a paragraph break keeps no block and no surroundings, so where the same
+ *  words read across another pair of paragraphs the editor cannot say which pair is the
+ *  reader's: refusing is right. Telling them their words are "no longer where you selected it"
+ *  is not - they are exactly where they were, and only the words around them changed. Each
+ *  refusal says what is true of the case it is reached in (the INFRA-512 architect's rule, this
+ *  review's finding 4); the sentence for words that read in more than one place already exists. */
+test("a cross-block refusal does not claim the words moved while they are where they were", async ({
+  browser,
+}) => {
+  test.setTimeout(240_000);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: ACROSS_BLOCKS_TWICE_SPEC,
+    title: "Review the spec",
+  });
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await openSpec(page, issue.key, "The fox jumps");
+    await expect(connectedDot(page)).toHaveText("connected");
+    await selectAcrossBlocks(page, "jumps.", "Over the lazy dog");
+    await barAction(page, "Comment");
+    await expect(documentEditor(page).locator('span[data-proof="comment"][data-id]')).toHaveCount(
+      2
+    );
+    await composer(page).getByLabel("Comment").fill("Which pair is this?");
+
+    // The reader's own words stay; the words around them change, which takes the mark.
+    await editArtifact(
+      issue.primary_artifact_id,
+      {
+        ops: [
+          { find: "The fox jumps.", op: "replace", with: "The swift fox jumps." },
+          {
+            find: "Over the lazy dog it goes.",
+            op: "replace",
+            with: "Over the lazy dog it bounds.",
+          },
+        ],
+      },
+      { actor: { id: "e2e-compose-wait", kind: "session" }, as: "agent" }
+    );
+    await expect(documentEditor(page)).toContainText("The swift fox jumps.");
+
+    await send(page);
+    await expect(composer(page)).toContainText("Your draft is kept");
+    await expect(composer(page).getByLabel("Comment")).toHaveValue("Which pair is this?");
+    expect(await listComments(issue.key, issue.primary_artifact_id)).toHaveLength(0);
+    // Their words are still where they selected them: the refusal must not say otherwise.
+    expect(await composer(page).textContent()).not.toContain("no longer where you selected it");
+  } finally {
+    await alice.close();
+  }
+});
