@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-623",
+  "completed": "2026-10-31T12:26:13Z",
+  "round": 1,
+  "reviewedHead": "529353e45ec38d85a841498cc0922c730700a27a",
+  "codeHead": "2abf344ea8d35ac7dc54550b67e8e47fe5a20d4c",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 4,
+  "minor": 2,
+  "thermonuclear": {
+    "deepReview": "Verdict: APPROVE at 529353e4 (four Minor findings; three confirmed and adopted below, one design note dismissed because the spec's D3 chose the refusal)",
+    "codeQuality": "Verdict: CHANGES at 529353e4 (five findings; 1-3 adopted, 4 and 5 judged not defects)"
+  },
+  "ci": "Required checks ci-ok and pr-title. CI head 97d310f3 (compare to 529353e4 is .legion/INFRA-623/ only); its CI run 41197350034 was still queued at 12:13Z, so ci-ok was absent. Not read as a verdict: this round requests changes on findings independent of CI.",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/workspace/config.go",
+      "description": "resolveExisting (config.go:436-462) duplicates resolvedPath (gitworktree.go:93-110) in the same package: both EvalSymlinks the longest existing prefix and rejoin the missing tail. Delete resolveExisting and its comment and call resolvedPath."
+    },
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/workspace/config.go",
+      "description": "The refusal says two false things about jj 0.45.1, measured in $TMPDIR: (a) a `.jj` that is a file is not 'jj's own workspace pointer form' (config.go:404-405) — jj counts only a `.jj` directory and answers 'There is no jj repo' under a `.jj` file, so the code refuses what jj ignores and the test row enclosingrepository_test.go:296 pins the false claim; (b) 'jj would open and write that one instead of creating it' (config.go:424, also :224-225 and enclosingrepository_test.go:271-273) — `jj git init --colocate c` run inside repository b migrates b's legacy config (writes b/.jj/repo/config-id) and also creates c. Match jj (os.Stat + IsDir, the file row becomes an allowed row) and make the message say jj reads and rewrites that repository's configuration; also name the resolved directory when it differs from the lexical one (the tester's observation in test.json)."
+    },
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/workspace/enclosingsymlink_test.go",
+      "description": "Repeats the 'a state directory inside it' subtest (enclosingrepository_test.go:55-72) step for step, and the copies drifted: the original asserts the lexical filepath.Join(decoy, \".jj\") (:68) while production names the resolved path, so it fails wherever t.TempDir() sits under a symlink (macOS /var). The copy's comment cites config.go:352-353, which this PR moved to :375-376, and says the base wrote the operator's repository 'exactly as it did before the fix', which the test does not show (it never t.Chdir's). Fold the symlink case into the subtest as a second row, assert against the EvalSymlinks'd decoy, cite refuseSymlinkedLayout by name, delete the file."
+    },
+    {
+      "severity": "important",
+      "file": "PR body",
+      "description": "The change adds refusals at a package boundary (workspace.Runner.Run, exported, refuses a Command with no absolute Dir; a jj create command under any `.jj`) and at a process boundary (legion workspace-init provision and the tmux daemon refuse a state_dir under a jj checkout), so the body needs a '## Contract change census': the search commands, each hit with its disposition (cmd/legion/workspace_init.go:154, workspace_fetch.go:79, workspace_cache.go:61, internal/daemon/daemon.go:918, outbox.go:152,160,163, repocache/server_test.go:75, sandbox/live_setup_unit_test.go:874), and a rollout line: an immediate refusal naming what it closes (the silent write of an enclosing repository)."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/testing.md",
+      "description": ":64 and jjWorkspaceRoot's comment (config.go:549-556) imply -R keeps jj off the working directory's repository; jj 0.45.1 loads it anyway (`jj -R b log` run inside a wrote a/.jj/repo/config-id, measured), so every -R command is safe only because its Dir is its -R target — say so. :71 names requireFilters, which this PR deleted (testbin.RequireJJFilters). :77 claims a TMPDIR inside a checkout refuses rather than corrupts, but the fixtures' own `jj git init --colocate` (runSetup, enclosingRepository) run outside the runner's refusal."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/runtime/sandbox/live_setup_unit_test.go",
+      "description": "The body says every git and jj child a daemon test starts names a directory, and docs/testing.md:68 says set Dir on every one; live_setup_unit_test.go:1041 and bookmark_test.go:359 still use `git -C` with no Dir. Set Dir there."
+    }
+  ],
+  "notAdopted": [
+    "code-quality 4 (the refusal restates legion.yaml's state_dir rule): the plan's risk section requires the message to name the way out, and the text is conditioned on runtime: tmux, which is true.",
+    "code-quality 5 (the 'an absolute directory of its own' row): it is the positive control that proves the stub's marker records a start, which the refusal rows' 'ran' check depends on.",
+    "deep-review 3's design note (run the create commands from a directory with no .jj instead of refusing): the spec's D3 chose the refusal."
+  ]
+}
