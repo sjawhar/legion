@@ -2,55 +2,62 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-588",
-  "completed": "2026-10-31T05:28:00Z",
-  "round": 12,
-  "head": "4ee7760ffc3ee0840dac87d739eabe791a8c311d",
-  "codeHead": "7fbb983fcc991a780a4e8f1893df458525c90bbd",
-  "roundNote": "Round 12 tests the answer to round 11 and the architect's scope (Envoy 86d49bda). c50be619 deletes the four daemon fragments: this PR's and main's three orphans. a02ce346 lays out scripts/conflicts/README.md. 7fbb983f adds refuse_unlisted to release-push.sh fold-plan, runs changelog-fold.yaml's fold_build on any PR that touches packages/*/.changes/**, adds the tests and adds one AGENTS.md line. It also answers the architect's two questions (Envoy 9e49f4e0): (A) does the refusal stop a PR before the merge, and (B) does an orphan on main now stop the whole fold. Migrations and scripts/conflicts code are unchanged since round 11, so its proofs of them still apply.",
+  "completed": "2026-10-31T06:05:00Z",
+  "round": 13,
+  "head": "c52575f988fd349f3ae54fcbbf6ebc98369e3fde",
+  "codeHead": "ea39694f1145d08301ba216cf2e5e45ac0796783",
+  "roundNote": "Round 13 tests the fix for round 12's two failures (ea39694f). fold-plan warns about an orphan fragment and still plans. A new release-push.sh fold-orphans refuses one, run in ci.yaml's lint job. The package list moved from changelog-fold.yaml's CHANGELOG_PACKAGES env into .github/changelog-packages. I also checked the architect's three move items (Envoy ee7df043). Migrations, stores and scripts/conflicts are unchanged since 75680e45, so round 11's proofs of them still apply. I added one commit to my own red test, e384dad8, which only updates its comment to name the new file.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The three items hold where I drove them. No packages/daemon/.changes remains, and c50be619 deletes exactly those 4 files. The README carries the note and passes the layout checker; a word-level diff shows only the note added and the flags table turned into a list. release-push.test.sh passes 628/0, and with the refuse_unlisted call removed 3 of its new checks fail, so the tests pin the refusal. The proof is right about what fold-plan does. It does not cover where fold-plan runs, which is both of the architect's questions, and both fail."
+    "how": "I drove both fixes on real trees at ea39694f: the lint step's command and the fold step's command, each on the clean tree and on a branch that adds packages/daemon/.changes/unreleased/x.yaml. I re-ran release-push.test.sh (my red test included), check-release-credentials.sh and its test, and check-ci-filters.sh. I compared the new list file with the old env value, and grepped the tree for the old name. Every claim holds."
   },
-  "failures": [
-    {
-      "criterion": "(A) The orphan-fragment refusal stops a pull request before the merge (architect, Envoy 9e49f4e0: a required check must go red on a branch that adds packages/daemon/.changes/unreleased/x.yaml)",
-      "evidence": "The refusal runs only in changelog-fold.yaml's fold_build job (workflow 'Fold Changelog Fragments'). gh api repos/sjawhar/legion/rulesets: ruleset 12331919 'main' (branch, active) requires exactly two contexts, ci-ok and pr-title. There is no branch protection to read beyond it (403 to this App). ci-ok is ci.yaml's aggregate of ci.yaml's own jobs, and its needs block mentions no fold or changelog job (awk over the block: 0 matches); a job cannot need a job of another workflow. On this head GitHub lists fold_build as its own check run (https://github.com/sjawhar/legion/actions/runs/41171920695/job/124451503859), apart from ci-ok and pr-title. ci.yaml runs release-push.test.sh, the script's unit tests over fixtures, not fold-plan over the repository's tree. Driven: a branch off 7fbb983f that adds packages/daemon/.changes/unreleased/x.yaml makes fold-plan exit 1 with the ::error:: naming the file, so fold_build would be red, but neither required context runs it, and the merge is not blocked. The gate does not gate. Fix, as the architect named it: run the same refusal in a job the base branch requires. I wrote no permanent red test for this one: it would have to assert what a workflow file contains, a check of a check, and the ruleset read plus the driven branch are the evidence."
-    },
-    {
-      "criterion": "(B) An orphan fragment that reaches main does not stop the fold of the packages it can fold, and is named (architect, Envoy 9e49f4e0)",
-      "evidence": "changelog-fold.yaml's 'Plan the fold' step runs plan=$(.github/scripts/release-push.sh fold-plan $CHANGELOG_PACKAGES), so a non-zero exit fails fold_build, and fold_publish (needs: fold_build) does not run. Driven on real trees with the CHANGELOG_PACKAGES list: at 7fbb983f, clean, fold-plan exits 0 and plans 23 fragments of 7 packages; with one commit adding packages/daemon/.changes/unreleased/x.yaml it exits 1 and prints no plan ('::error::release-push.sh fold-plan: packages/daemon/.changes/unreleased/x.yaml at HEAD: each is under the .changes/ of a package the fold was not given…'). The previous code, 710f02a2, with the same added file exits 0 and plans the same 23 fragments of 7 packages. So one orphan on main now stops every package's fold: a regression. Red test, its own commit a26683995f0f: .github/scripts/release-push.test.sh check 'fold-plan: an orphan fragment on main does not stop the plan of the packages the fold is given', in the implementer's fold-orphan fixture while the daemon fragment is present. It expects exit 0, the envoy plan line, and stderr naming packages/daemon/.changes/unreleased/pr-1-daemon.yaml. Command: bash .github/scripts/release-push.test.sh, which fails with 'FAIL: fold-plan: an orphan fragment on main does not stop the plan of the packages the fold is given', Results 628 passed, 1 failed. Under 710f02a2 the fixture gives exit 0 and the plan but an empty stderr, so the test needs both halves: the fold continues and the orphan is named. The implementer's own check 'a fragment of a package no spec names is refused by name, with no plan' asserts the opposite of the required behaviour and is theirs to change."
-    }
-  ],
-  "failed": 2,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
-      "criterion": "The four daemon fragments are gone and nothing else moved",
-      "surface": "the tree at this head, and commit c50be619",
-      "command": "ls packages/daemon/.changes; jj diff -r c50be619560f --stat; release-push.sh fold-plan <CHANGELOG_PACKAGES> at 7fbb983f",
-      "observed": "packages/daemon/.changes: no such directory. c50be619 deletes fix-open-roles-live.yaml, pr-2411-migration-timestamps.yaml, pr-2542-daemon-silent-cut.yaml and squash-commit-message.yaml, 4 files, 0 insertions. fold-plan on the clean tree: exit 0, 23 fragments of 7 packages",
-      "headSha": "4ee7760ffc3ee0840dac87d739eabe791a8c311d",
-      "negativeControl": "the same fold-plan with one daemon fragment added exits 1 (failure B)"
+      "criterion": "(A) A pull request that adds a fragment of a package the fold does not fold fails a required check (round 12 failure A)",
+      "surface": "ci.yaml's lint job step 'Check every changelog fragment belongs to a package the fold folds', run as written on real trees; the ruleset and ci-ok",
+      "command": "in worktrees of ea39694f, clean and with packages/daemon/.changes/unreleased/x.yaml committed: bash -c '.github/scripts/release-push.sh fold-orphans $(<.github/changelog-packages)'; read lint's if: and ci-ok's needs and comment in ci.yaml",
+      "observed": "clean: exit 0, silent. With the orphan: exit 1, '::error::release-push.sh fold-orphans: packages/daemon/.changes/unreleased/x.yaml at HEAD: each is under the .changes/ of a package the fold was not given…'. lint runs on every non-draft pull request (if: !cancelled() && !draft), and ci-ok, one of the ruleset's two required contexts, needs lint and requires it to succeed on every change (ci.yaml:3150). So the refusal now fails a required check",
+      "headSha": "c52575f988fd349f3ae54fcbbf6ebc98369e3fde",
+      "negativeControl": "round 12: the refusal ran only in changelog-fold.yaml's fold_build, which no required context needs"
     },
     {
-      "criterion": "scripts/conflicts/README.md is laid out one sentence per line with the note, and its words are unchanged",
-      "surface": "scripts/semantic-line-breaks.ts on the file; a word-level diff of c50be619..a02ce346",
-      "command": "bun scripts/semantic-line-breaks.ts scripts/conflicts/README.md; diff of the whitespace-split words of the two versions",
-      "observed": "layout exit 0, and the file-head note is present. The words added are the note's four sentences and list markers where the flags table became a list; the table's pipes and separator are gone; no other word changed",
-      "headSha": "4ee7760ffc3ee0840dac87d739eabe791a8c311d",
-      "negativeControl": "the same checker failed the file at 75680e45 (line 147, R1; round 11)"
+      "criterion": "(B) An orphan fragment that reaches main does not stop the fold of the packages it can fold, and is named (round 12 failure B)",
+      "surface": "changelog-fold.yaml's 'Plan the fold' step command, run as written on real trees; release-push.test.sh",
+      "command": "same two worktrees: bash -c 'packages=$(<.github/changelog-packages); .github/scripts/release-push.sh fold-plan $packages'; bash .github/scripts/release-push.test.sh",
+      "observed": "clean: exit 0, 23 plan lines across 7 packages, empty stderr. With the orphan: exit 0, the same 23 lines across 7 packages, and stderr '::warning::release-push.sh fold-plan: packages/daemon/.changes/unreleased/x.yaml at HEAD: …'. release-push.test.sh: 635 passed, 0 failed, including my red test 'an orphan fragment on main does not stop the plan of the packages the fold is given', whose assertion is unchanged since a26683995f0f",
+      "headSha": "c52575f988fd349f3ae54fcbbf6ebc98369e3fde",
+      "negativeControl": "the same red test failed at 7fbb983f (628 passed, 1 failed), where one orphan made fold-plan exit 1 with no plan"
     },
     {
-      "criterion": "The implementer's fold-plan tests pin the refusal",
-      "surface": ".github/scripts/release-push.test.sh",
-      "command": "bash .github/scripts/release-push.test.sh at 7fbb983f; again in a scratch tree with fold-plan's refuse_unlisted call replaced by a no-op",
-      "observed": "628 passed, 0 failed",
-      "headSha": "4ee7760ffc3ee0840dac87d739eabe791a8c311d",
-      "negativeControl": "with the call removed: 625 passed, 3 failed ('a fragment of a package no spec names is refused by name, with no plan', 'that refusal names the specs…', 'a file under .changes/ outside unreleased/ is refused too…')"
+      "criterion": "The package list's move: every fold job gets the same seven entries, and the credentialed job reads the file with no dependency code (architect item 1)",
+      "surface": ".github/changelog-packages and the three changelog-fold.yaml steps that read it (fold_build's plan and render steps, fold_publish's 'Fold and push' with the deploy key)",
+      "command": "diff of the old CHANGELOG_PACKAGES value at 4eb8b6cb, split to one word per line, against .github/changelog-packages; bash -c 'set -- $(<.github/changelog-packages); echo $#'; read fold_publish's steps",
+      "observed": "identical: the same seven specs, in the same order. Word splitting of $(<file) gives 7 arguments, packages/pi-legion=pi-legion-v … packages/envoy-client. All three steps read it with packages=$(<.github/changelog-packages), a bash redirection. fold_publish runs actions/checkout, actions/download-artifact and that one run step, which calls release-push.sh push-fold: no bun, go, node or other dependency code",
+      "headSha": "c52575f988fd349f3ae54fcbbf6ebc98369e3fde",
+      "negativeControl": "with that step's read changed to $(bun -e …; cat .github/changelog-packages), check-release-credentials.sh exits 1: 'job fold_publish holds a credential, but step Fold and push runs bun'"
+    },
+    {
+      "criterion": "check-release-credentials.sh and check-ci-filters.sh exit 0 at the head (architect item 2)",
+      "surface": "the two checks the lint job runs, on a worktree of ea39694f",
+      "command": "bash .github/scripts/check-release-credentials.sh; bash .github/scripts/check-release-credentials.test.sh; uv run --no-project --with pyyaml==6.0.2 -- bash .github/scripts/check-ci-filters.sh",
+      "observed": "credentials: exit 0, '7 credentialed job(s) and 10 build job(s) across 5 workflows keep credentials out of jobs that run dependency code'; its test PASS; filters: exit 0, 29 gates",
+      "headSha": "c52575f988fd349f3ae54fcbbf6ebc98369e3fde",
+      "negativeControl": "the bun mutation above fails the credentials check"
+    },
+    {
+      "criterion": "Every guide that named changelog-fold.yaml's CHANGELOG_PACKAGES now names .github/changelog-packages (architect item 3)",
+      "surface": "the whole tree at this head",
+      "command": "grep -rn CHANGELOG_PACKAGES outside .legion; grep -n changelog-packages AGENTS.md; grep the *.md files for 'changelog-fold.yaml … lists/names' and 'seven packages'",
+      "observed": "AGENTS.md:539 reads 'the seven packages `.github/changelog-packages` lists …, the one list the fold and the check below both read'. The only CHANGELOG_PACKAGES left are check-release-credentials.test.sh's synthetic fold-workflow fixture (lines 370-422 and 1345), which is no guide and still passes, and my own red test's comment, which I updated in e384dad8. No other guide names the list",
+      "headSha": "c52575f988fd349f3ae54fcbbf6ebc98369e3fde",
+      "negativeControl": "the same grep at 4eb8b6cb finds AGENTS.md naming CHANGELOG_PACKAGES in changelog-fold.yaml"
     }
   ],
   "observations": [
-    "CI: 7fbb983f has no check runs of its own, since it was pushed under 4ee7760f. At 4ee7760f, changes, fold_build, build and pr-title were queued when I read them (05:25Z), and no ci-ok result exists yet.",
-    "Round 11's migration, rolling-deploy and five-acceptance-check proofs apply: no migration, store or scripts/conflicts file changed since 75680e45.",
-    "Round 7's release-order note, round 4's squash-body note and round 1's `since`-edge note still apply."
+    "CI: ea39694f has no runs of its own. At c52575f9, changes and pr-title were queued when I read them (06:00Z), and no lint or ci-ok result exists yet.",
+    "changelog-fold.yaml no longer triggers on packages/*/.changes/** (the implementer's stated deviation); the lint job now carries that check.",
+    "Round 11's migration, rolling-deploy and five-acceptance-check proofs apply unchanged. Round 7's release-order note, round 4's squash-body note and round 1's `since`-edge note still apply."
   ]
 }
