@@ -2,34 +2,47 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-557",
-  "completed": "2026-10-30T22:20:00Z",
-  "round": "forward merge after retro (main's #2542)",
+  "completed": "2026-10-31T02:30:00Z",
+  "round": "review round 12",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2404",
-  "codeHead": "a14ba02f6f85a6f55d2c9fc4f2db9e5d7e30fd8e",
+  "codeHead": "ff705a787c7e128e525b17ecf1507493ce78d498",
+  "answersReview": "9acbebf28427371875bc47863603b4c4bcb1b082",
   "proof": [
     {
-      "criterion": "The forward merge keeps both sides: #2542's silent-cut detection on both listener clients and this branch's lease, mark, holds and per-pod names",
-      "surface": "real cmd/listener binaries under the rendered ListenerPermissions grant; the untagged listener suite incl. main's silent_cut_test.go and cut_rewatch_test.go; ci.yaml router check; GitHub",
-      "command": "go test -tags multiprocess -count=1 -timeout 30m -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; untagged ./cmd/listener; go test -run 'SilentCut|CutRewatch' ./cmd/listener/; .github/scripts/check-ci-filters.sh; gh api repos/sjawhar/legion/pulls/2404",
-      "observed": "multiprocess ok 621.873s; listener ok 866.959s; SilentCut/CutRewatch ok; 27 gates; mergeable true. https://github.com/sjawhar/legion/pull/2404#issuecomment-6534810080",
-      "headSha": "a14ba02f6f85a6f55d2c9fc4f2db9e5d7e30fd8e",
-      "negativeControl": "before the merge GitHub read dirty and ran no checks; main's silent_cut_test.go matched name=envoy whole and could not match this branch's quoted per-pod names"
+      "criterion": "A holder whose receive connection alone stays down releases the lease; the standby delivers every message in order within 15 s; the cut pod never takes the lease back while down and stands by after the heal",
+      "surface": "two real envoy-listener processes under the rendered ListenerPermissions grant on nats-server; pod-a behind mpLaneRelay, which freezes only its 'envoy-listener pod-a' connection and refuses its reconnects",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -v -run '^TestTwoPodsReceiveConnection' ./cmd/listener",
+      "observed": "pod-a WARN 'listener lease released: the receive connection is down' down_ms 3001; pod-b took the lease 6.163 s after the cut; 289 messages exactly once in publish order, the first after the cut at 12.109 s; pod-a held the lease at no poll over 20 s more of cut; after the heal 200 role standby. Quick reconnect (back 1.008 s after detection) kept the lease",
+      "headSha": "ff705a787c7e128e525b17ecf1507493ce78d498",
+      "negativeControl": "before the fix: 'waited 15s for pod-b to take the lease over' (TestTwoPodsReceiveConnectionLostHandsOverWithin15s)"
     },
     {
-      "criterion": "Measured: a lease holder whose receive connection alone is silently cut",
-      "surface": "two real envoy-listener pods under the rendered grant, a per-connection proxy freezing only pod-a's 'envoy-listener pod-a' link (throwaway probe, deleted)",
-      "command": "go test -tags multiprocess -count=1 -v -run '^TestProbeCutsOnlyTheActivePodsReceiveConnection$' ./cmd/listener (two runs)",
-      "observed": "disconnect 2.8 s / 2.78 s, reconnect 3.83 s / 3.86 s; pod-a kept the lease and delivered; pod-b never took over; in-flight messages back at the 6 s ack wait, after later ones",
-      "headSha": "a14ba02f6f85a6f55d2c9fc4f2db9e5d7e30fd8e",
-      "negativeControl": "the lease link 'envoy-listener-lease pod-a' logged no disconnect, and the frozen link was asserted to be the only one"
+      "criterion": "The lease's gate: release after the bound, not before; a standby with its receive connection down takes no record",
+      "surface": "lease on a real NATS KV bucket with a fake clock",
+      "command": "cd packages/envoy && go test -count=1 -run 'TestLeaseHolderReleases|TestLeaseHolderKeeps|TestLeaseStandbyTakesNoRecord' ./cmd/listener/",
+      "observed": "pass",
+      "headSha": "ff705a787c7e128e525b17ecf1507493ce78d498",
+      "negativeControl": "without the gate: 'the holder still holds the lease 3s after its receive connection went down'; 'the standby's poll of an absent record waits 1s holding true'"
+    },
+    {
+      "criterion": "The two merges of main keep both sides and the PR merges",
+      "surface": "listener suites; infra; ci.yaml router check; semantic-line-breaks check; GitHub",
+      "command": "go test -tags multiprocess -count=1 -timeout 40m -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; untagged ./cmd/listener; infra ./core/... ./aws/... ./render/... ./gcp/...; .github/scripts/check-ci-filters.sh; bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md; gh api repos/sjawhar/legion/pulls/2404",
+      "observed": "multiprocess ok 672.197s and listener ok 802.402s at 6c38d745; infra ok; 29 gates; layout check passes; mergeable true. https://github.com/sjawhar/legion/pull/2404#issuecomment-6537570887",
+      "headSha": "ff705a787c7e128e525b17ecf1507493ce78d498",
+      "negativeControl": "before each merge GitHub read dirty"
     }
   ],
   "filesChanged": [
-    "a14ba02f: merge of main: cmd/listener/live_topics.go, main.go (listenerStreamOptions doc), stream_replicas_test.go, silent_cut_test.go, cut_rewatch_test.go, packages/envoy/AGENTS.md"
+    "580089b5: cmd/listener/lease.go (leaseReceiveLost, SetReceiveSignal, receiveDown, releaseReceiveLost, poll gate), receive.go (receiveUp), main.go (wiring), lease_receive_test.go (new), multiprocess_harness_test.go (mpLaneRelay), multiprocess_takeover_test.go (two rows), lease_recovery_test.go (wait for the take's signal), README.md, AGENTS.md, changie fragment pr2404-receive-lost-release.yaml",
+    "6c38d745: merge of main (#2517 role claim view check in okAnswer; ci.yaml; docs)",
+    "ff705a78: merge of main (#2422 AGENTS.md layout)"
   ],
-  "deviations": [
-    "The lease connection does not get WithSilentCutDetection in this round (the architect: no lease behaviour change); the measured cut shows the holder recovers on its own receive reconnect."
+  "trickyParts": [
+    "The bound is 3 s: the measured reconnect after a cut came 1.008 s after detection, and 3 s still lands the take-over and first delivery at 12.1 s of the 15 s bound.",
+    "A receive-lost release whose bucket write fails keeps the hold and retries, so a short outage of both connections does not hand the lease over."
   ],
+  "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": []
 }
