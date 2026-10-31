@@ -251,8 +251,8 @@ export function observedClient(client: FakeClient): {
       },
       unsubscribe: (input) =>
         observe(`unsubscribe ${input.sessionID}`, () => client.unsubscribe(input)),
-      unregisterSession: (sessionID) =>
-        observe(`unregister ${sessionID}`, () => client.unregisterSession(sessionID)),
+      unregisterSession: (input) =>
+        observe(`unregister ${input.sessionID}`, () => client.unregisterSession(input)),
       setRole: (input) =>
         observe(`setRole ${input.sessionID} ${input.role}`, async () => {
           try {
@@ -307,7 +307,7 @@ export function recordingClient(calls: string[], overrides: Partial<FakeClient> 
     unsubscribe: async (input) => {
       calls.push(`unsubscribe ${input.sessionID} ${input.topics.join(",")}`)
     },
-    unregisterSession: async (sessionID) => {
+    unregisterSession: async ({ sessionID }) => {
       calls.push(`unregister ${sessionID}`)
     },
     setRole: async (input) => {

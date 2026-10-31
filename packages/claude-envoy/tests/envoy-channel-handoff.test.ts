@@ -225,7 +225,7 @@ test("two channel servers under different Claude processes rebind independently"
     sessionOptions(identityA, stateDirectory, {
       connection: new FakeNats(callsA),
       client: recordingClient(callsA, {
-        unregisterSession: async (sessionID) => {
+        unregisterSession: async ({ sessionID }) => {
           callsA.push(`unregister ${sessionID}`)
           rebound.resolve()
         },
@@ -321,7 +321,7 @@ test("a subscription made while a handoff deregisters the old id registers under
   const unregistering = Promise.withResolvers<void>()
   let unregisterStarted = false
   const client = recordingClient(calls, {
-    unregisterSession: async (sessionID) => {
+    unregisterSession: async ({ sessionID }) => {
       calls.push(`unregister ${sessionID}`)
       if (sessionID !== "ses_old") return
       unregisterStarted = true
@@ -515,7 +515,7 @@ test("a handoff that fails before the id switch leaves the new subject out of re
       return noInterest()
     },
     // Every handoff attempt fails before the id switch.
-    unregisterSession: async (sessionID) => {
+    unregisterSession: async ({ sessionID }) => {
       if (sessionID !== "ses_old") return
       refusedDeregistrations += 1
       throw new Error("listener unavailable")

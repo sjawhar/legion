@@ -3336,7 +3336,7 @@ export default function envoyExtension(pi: PiApi): void {
       const deregistration =
         sessionID === "" || active === undefined
           ? Promise.resolve()
-          : active.client.unregisterSession(sessionID).catch(() => undefined);
+          : active.client.unregisterSession({ sessionID }).catch(() => undefined);
       const draining = connection?.drain().catch(() => undefined) ?? Promise.resolve();
       await Promise.race([
         Promise.allSettled([deregistration, draining]).then(() => undefined),

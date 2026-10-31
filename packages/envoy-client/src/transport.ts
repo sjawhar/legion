@@ -156,6 +156,13 @@ export type SubscribeInput = {
   readonly capabilities?: readonly string[];
   readonly driving: boolean;
   readonly selfSubscribed?: boolean;
+  /**
+   * The client instance that drives this session: one Oh My Pi Envoy extension instance, one
+   * Claude Code channel-server process, minted once when that instance starts. The listener
+   * stores it on the session's registry entry, a soft role claim naming a predecessor compares
+   * it, and a deregistration carrying it deletes only an entry that is this instance's.
+   */
+  readonly clientInstanceID?: string;
   /** The plugin this session registers through (its npm package name) and that plugin's build,
    * sent on every registration so the listener's session list shows which build each session
    * runs. */
@@ -227,15 +234,19 @@ export type SetRoleInput = {
   readonly role: string;
   /**
    * Claim only if the role is unheld, its holder is no longer live, or its
-   * holder is `previousSessionID`. Any other live holder is left in place and
-   * reported in the result instead of being displaced. Default (false) is
-   * last-claim-wins.
+   * holder is `previousSessionID` and that predecessor is this client
+   * instance's (see `previousSessionID`). Any other live holder is left in
+   * place and reported in the result instead of being displaced. Default
+   * (false) is last-claim-wins.
    */
   readonly soft?: boolean;
   /**
    * The session id this claimant continues (a fork or branch mints a new id
-   * in the same process). Lets a soft claim take the role from that still-live
-   * predecessor. Sent only with `soft`.
+   * in the same process). A soft claim takes the role from that predecessor
+   * only when the predecessor has no live registry entry, when its live entry
+   * carries this client instance's own `clientInstanceID`, or when either
+   * side carries no instance id; a predecessor still live under another
+   * client instance keeps the role. Sent only with `soft`.
    */
   readonly previousSessionID?: string;
 };
@@ -317,7 +328,25 @@ export type EnvoyClient = {
   readonly getInterest: (sessionID: string) => Promise<Interest>;
   readonly send: (input: SendInput) => Promise<SendResult>;
   readonly publish: (input: PublishInput) => Promise<PublishResult>;
-  readonly unregisterSession: (sessionID: string) => Promise<void>;
+  /**
+   * Deletes the session's registry entry. With `clientInstanceID` the listener deletes the entry
+   * only when it carries the same instance id or none, so a departing client instance never
+   * deletes the registration a successor instance made under the same session id; without one
+   * the entry is deleted as before. The listener's answer says whether the entry stayed, and
+   * this resolves `void` because no caller acts on it: a deregistering client has nothing to
+   * retry either way.
+   */
+  readonly unregisterSession: (input: {
+    readonly sessionID: string;
+    readonly clientInstanceID?: string;
+  }) => Promise<void>;
+  /**
+   * Claims `role` for the session. A soft claim (`soft`) naming a predecessor
+   * (`previousSessionID`) takes the role from it only when that predecessor has no live registry
+   * entry, when its live entry carries this client instance's own instance id, or when either
+   * side carries no instance id; any other live holder keeps the role and is reported as
+   * `{ claimed: false, holder }`.
+   */
   readonly setRole: (input: SetRoleInput) => Promise<SetRoleResult>;
   readonly getRole: (role: string) => Promise<RoleInfo>;
   readonly listSessions: (input?: ListSessionsInput) => Promise<readonly SessionInfo[]>;
@@ -405,6 +434,12 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
             ...(input.selfSubscribed === undefined
               ? {}
               : { self_subscribed: input.selfSubscribed }),
+            // The client instance driving this session (`clientInstanceID`), omitted when the
+            // caller has none so an older listener sees an unchanged body. The listener stores it
+            // on the registry entry, where a soft role claim and a deregistration compare it.
+            ...(input.clientInstanceID === undefined
+              ? {}
+              : { client_instance_id: input.clientInstanceID }),
             // Where this session process actually runs (machineID(): ENVOY_MACHINE_ID, falling
             // back to the kernel hostname), sent on every subscribe and heartbeat (registerSession
             // re-subscribes on each tick). The listener stores it separately from the registering
@@ -469,12 +504,22 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
         ...(response.holder === undefined ? {} : { holder: response.holder }),
       };
     },
-    unregisterSession: async (sessionID) => {
-      await request(`/v1/sessions/${encodeURIComponent(sessionID)}`, { method: "DELETE" });
+    unregisterSession: async (input) => {
+      // The query parameter is omitted without an instance id, so that request stays
+      // byte-for-byte what an older client sent and the listener deletes unconditionally.
+      const query =
+        input.clientInstanceID === undefined
+          ? ""
+          : `?client_instance_id=${encodeURIComponent(input.clientInstanceID)}`;
+      await request(`/v1/sessions/${encodeURIComponent(input.sessionID)}${query}`, {
+        method: "DELETE",
+      });
     },
     setRole: async (input) => {
       // `soft` and `previous_session_id` are omitted from the wire unless set,
-      // so an older listener sees an unchanged hard-claim request.
+      // so an older listener sees an unchanged hard-claim request. The listener
+      // decides a soft claim against a live predecessor by the instance id each
+      // side's registry entry carries (`SubscribeInput.clientInstanceID`).
       const soft = input.soft === true;
       const previous = soft ? (input.previousSessionID ?? "") : "";
       const body: { session_id: string; role: string; soft?: true; previous_session_id?: string } =

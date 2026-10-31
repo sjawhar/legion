@@ -908,7 +908,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
         options.handoffFlushTimeoutMs ?? HANDOFF_FLUSH_TIMEOUT_MS,
         "flushing NATS",
       )
-      await options.client.unregisterSession(previous)
+      await options.client.unregisterSession({ sessionID: previous })
     } catch (error) {
       // The session stays on the old id until a later tick retries, so the new
       // subject leaves the topic list; otherwise the next registration would
@@ -1213,7 +1213,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       clearInterval(heartbeatTimer)
       if (handoffFile !== undefined) unwatchFile(handoffFile, handoffFileChanged)
       await forwarder.close()
-      await serialized(() => options.client.unregisterSession(identity.id)).catch(
+      await serialized(() => options.client.unregisterSession({ sessionID: identity.id })).catch(
         (error: unknown) => {
           process.stderr.write(
             `envoy-channel: session deregistration failed — ${messageFor(error)}\n`,
