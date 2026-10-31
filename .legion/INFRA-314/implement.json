@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-314",
-  "completed": "2026-10-31T11:05:00Z",
+  "completed": "2026-10-31T11:35:00Z",
   "proof": [
     {
       "criterion": "A1, A2, A3, A4, A9, A10, A11: the broker serves its own approval page with a sign-in on its own origin; only the signed-in approver decides, and the decision is bound to what the page showed; nothing Dispatch holds decides; the four sign-in settings are required; a sign-in crosses processes and restarts",
@@ -43,6 +43,14 @@
       "observed": "Each exits 0. broker-refgen accepts every route row and every configuration variable, which it refuses undocumented. The documentation site builds, 43 pages, every internal link valid. `grep -rniE 'approve (a secret|a secret request|it) in Dispatch|sign-in settings are optional' docs README.md packages/envoy packages/dispatch --include='*.md'` prints nothing.",
       "headSha": "04892e1e3ccd318abb6f9cdc9e5aa2ee1c8dd0f5",
       "negativeControl": "check-ci-filters.sh is the control that earns its keep: before the approval package was added to the four filters that read it, it named each of its twelve files and the gate that would skip a change to it, and it named packages/envoy/internal/broker/config and internal/redact once the page pulled them into the daemon's closure. It prints nothing at this head."
+    },
+    {
+      "criterion": "The tester's failure, and the spec's GET /signin/status row: \"the time of the last decision made on a page\" must be the time a person approved or denied something there, since the rollout's step 3 contracts the old approval paths away once that field shows a decision",
+      "surface": "the real broker binary's own package test against a real Postgres 17, driving the page's decision form through the broker as a browser resends it, and Dispatch's Playwright suite in real Chromium against the real broker binary",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:5433/broker_test?sslmode=disable go test -count=1 -v -run TestSignInStatusWritesNoDecisionWhenThePostDecidedNothing ./internal/broker/approval/; then go test -count=1 ./internal/broker/approval/ ./internal/broker/api/ ./cmd/broker/; then cd packages/dispatch && bun run e2e -- broker-approval.e2e.ts --project chromium",
+      "observed": "The tester's red test, committed unmodified at 51ed20ff124c, passes: a person signs in, approves her record, and the status carries that approval's time; she then resends the very same form, the broker answers 303 as before, the record is still approved with its one grant, and the status's last decision is the first approval's time, unmoved. The three Go packages are ok (approval 17.7 s, api 108.2 s, cmd/broker 256.4 s), so nothing else pinned the old behaviour, and broker-approval.e2e.ts is 5 passed: Approve from the Inbox, the lapsed session's one pass through the sign-in, \"Approve all 3 shown\", the sibling origin, and the account switch all still decide what they decided.",
+      "headSha": "58f976e9bfab5daf9000a24f7ff79b4c400ce142",
+      "negativeControl": "The same test's first half is the control: an approval that the broker did apply must still move the time, and it does. The change is in `decide`, which now answers whether this POST decided the record, so \"already decided\", \"expired\", \"no such record\", \"not decided: a machine login\" and \"refused: …\" write nothing, while an approval and a denial - including a denial the broker makes because the requesting enrollment is no longer live - write the time."
     }
   ],
   "filesChanged": [
@@ -62,7 +70,7 @@
   "trickyParts": [
     "Referrer-Policy is same-origin, not no-referrer: under no-referrer a browser sends Origin: null on the page's own form posts, which the exact-origin check refuses.",
     "The account switch is a GET link (/approve/<record>?switch=1), and a lapsed POST answers a page with a link rather than a redirect: the page's form-action 'self' governs a form submission's redirect, so a 302 to the provider would be blocked.",
-    "GET /approve/{record} checks the id's shape, then the session, then the record. The sign-in still names the record's approver as login_hint when a record has that id, which A1 requires, and names nobody for an id no record has, so a machine with no person behind it learns nothing about which records exist.",
+    "GET /approve/{record} checks the id's shape, then the session, then the record. The sign-in names the record's approver as login_hint when a record has that id, which A1 requires, and names nobody for an id no record has, so the hint is the one way the two redirects differ; a record id is a SHA-256 hash, so a caller that can name one already holds it.",
     "The two decide routes authenticate inside the handler, so they spend the shared per-address rate-limit bucket themselves: moving them off accountAuth had left that bucket unspent, which would have let an unauthenticated caller drive one database read per request.",
     "main took migration number 0020 while the branch held one, which TestMigrationSetIsNumberedOneToN refuses and which would stop the broker from starting. The branch forward-merged main a second time and renumbered to 0021 and 0022."
   ],
