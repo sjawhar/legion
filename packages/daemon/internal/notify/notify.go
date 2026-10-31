@@ -155,6 +155,16 @@ func New(baseURL, token string) *HTTPPublisher {
 // is gone, a receipt timeout reholds the notice, and a merge-queue row posts a Dispatch message
 // when the role is unheld. One message has one keeper, so this sender keeps its own
 // (packages/daemon/internal/daemon/outbox.go).
+//
+// THIS BINARY SHIPS BEFORE THE ENVOY LISTENER THAT CARRIES THE KEPT LANE. The Envoy listener and
+// this binary are separate releases (.github/workflows/release-envoy-listener.yaml and
+// release.yaml), and a binary of the release before this one sends no keep field at all. Against
+// the new listener that publish is answered 202 with the message kept, which the older code reads
+// as neither success nor ErrNoHolder: its outbox row is held and keeps retrying while Envoy also
+// hands the message to the role's next holder, so the role gets it twice. Deploying this binary
+// first leaves no window in which two keepers hold one message. Measured on a live listener by
+// INFRA-839's tester on 2026-10-31: the old publisher got `listener returned 202 Accepted` with
+// errors.Is(err, ErrNoHolder) false, and the kept lane then held that message.
 func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payload any, dedupeKey string) error {
 	// The listener carries a payload as a JSON document in a string (its messageBody,
 	// packages/envoy/cmd/listener/api.go:68-80); an object there is refused as invalid JSON.

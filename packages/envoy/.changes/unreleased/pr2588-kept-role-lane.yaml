@@ -9,3 +9,9 @@ body: |-
   dropped and counted on the new `envoy_role_kept_expired_total`. A sender that keeps a queue of
   its own publishes with `keep: false` and gets the 404 unchanged. `notifications.role.>` is still
   not a stream subject, and no NATS grant changed.
+
+  RELEASE ORDER: deploy the `legion` binary that sends `keep: false` before this listener. A
+  `legion` binary of the release before it sends no `keep` field, so the new listener keeps its
+  notice and answers 202, which that binary reads as neither success nor "no holder": its outbox
+  row keeps retrying while Envoy also hands the message to the role's next holder, and the role
+  gets it twice. In the other order there is no such window.
