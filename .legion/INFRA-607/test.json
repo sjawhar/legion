@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-607",
+  "completed": "2026-10-31T00:07:50Z",
+  "testedHead": "ace4d7658b5ebbde9a55eef4d5c200ba4feae231",
+  "codeHead": "e91f96bf298da2fb8373e42cdc18695fd3805765",
+  "round": 16,
+  "scope": "Full round (architect, 22:15Z). 6cf038e3 merges main 733bac81 (#2392's events.Horizon: event ids are no longer commit order); e91f96bf makes the suggestion outcome sweep read only up to the API server's one Horizon, never move its cursor past it, and ask for its next pass one minGap later while an observed id stands above it. Migrations are now 0150-0156; connections per pod 90.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "TestTheSuggestionSweepTrailsTheSafeHorizon passes at e91f96bf (1.34 s) and, transplanted to 6cf038e3 with a test-only shim that calls the old sweepSuggestionOutcomePages, fails: 'cursor = 6 after a pass run while event 5 could still commit; want it below that id'. Then the held-insert scenario below on the real binary."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "The suggestion sweep never passes an event id that could still commit, and judges it once after the commit (two processes)",
+      "surface": "Two real dispatch-head processes (e91f96bf) on database h and two dispatch-old processes (6cf038e3) on database o, one Postgres 16 with log_statement=all, NATS 2.10.29 and the Envoy listener, config A",
+      "command": "hold.sh <db>: psql begin; insert into events (SUG-1, actor session ses-x, the suggested issue of the swept suggestion SUG-3 -> SUG-1) and hold; then POST /api/v1/issues/SUG-2/comments as ses-z (committed id 6); sample suggestion_outcome_cursor every 15 s; touch commit-<db>; sample every 10 s. Evidence dispatch://INFRA-607/artifact/round15-held-insert-evidence-tar-gz",
+      "observed": "Held id 5 (both DBs), committed id 6 at 22:31:20. Old: cursor 4 -> 6 at about 22:32:20 while 5 was still open; after the commit at 22:35:27 the suggestion stays 'ignored' for good although an acted-on event by its actor on the suggested issue is committed. Head: cursor stays 4 through the whole hold (22:31:20-22:35:27); after the commit, one pass at 22:36:20.577 judges it acted_on ('the suggested issue was updated directly'), cursor 6; outcome_at unchanged at 22:47:46. While held, the two head processes ran 6 passes in 3.6 min (each process once a minute, at 22:32:20, 22:33:20, 22:34:20): 6 horizon observations, 6 cursor reads, 6 capped page reads. No tight loop.",
+      "headSha": "e91f96bf298da2fb8373e42cdc18695fd3805765",
+      "negativeControl": "The same scenario on 6cf038e3 (the merge without the fix) moves the cursor past the open id 5 and leaves the suggestion unjudged after 5 commits."
+    },
+    {
+      "criterion": "Idle: no changed loop makes a statement; numbers as in round 13",
+      "surface": "The two head processes on h after the judgement, nothing else writing to h",
+      "command": "count.py over the Postgres statement log, 22:37:46-22:47:46",
+      "observed": "3,977 statements in 10 minutes for two processes: 3.31 per second per process (rounds 13-14: 3.3-3.35). Statements on suggestion_outcome_cursor, write_suggestions, horizon observations, embeddings, document_edit_notices, refs, tasks_version, delivery_settings: 0. The remaining 'suggestion-outcomes' lease is main's once-a-minute maintenance sweep (20 lock/unlock pairs over both processes).",
+      "headSha": "e91f96bf298da2fb8373e42cdc18695fd3805765",
+      "negativeControl": "During the hold the same counter does show the sweep's statements (6 passes), so a 0 at idle is a real absence."
+    },
+    {
+      "criterion": "Migrations 0150-0156 forward from main; connections 90",
+      "surface": "Main 733bac81 created database h (schema 149) and seeded it; two head processes started beside it",
+      "command": "select version from schema_migrations where version >= 145; pool.go and infra/gcp/dispatch.go constants",
+      "observed": "145-156 with no gap and no ERROR line in either build's log. ConnectionsPerProcess = 64+4+1+13+1+1+2 (horizonPoolSize)+4 = 90 = dispatchConnectionsPerPod.",
+      "headSha": "e91f96bf298da2fb8373e42cdc18695fd3805765",
+      "negativeControl": "Main's build stops at 149, so 150-156 are the head's."
+    },
+    {
+      "criterion": "store, pgmigrate, events, docs and cmd/dispatch suites",
+      "surface": "An export of packages/envoy (plus packages/contracts/fixtures) at e91f96bf, test Postgres 16",
+      "command": "go test -p 2 -count=1 ./internal/dispatch/store/ ./internal/pgmigrate/... ./internal/dispatch/events/ ./cmd/dispatch/; go test -timeout 45m ./internal/dispatch/docs/",
+      "observed": "store ok 235.7 s, pgmigrate ok, pgmigratetest ok, events ok 13.5 s, docs ok 978.1 s. cmd/dispatch: in the -p 2 run TestSIGTERMWithOpenStreamsExitsPromptlyAndSettlesTheOwedDocument failed once (output not kept); it passed alone, the whole package passed on re-run (239.7 s), and it passed 8 of 8 at the head and 8 of 8 at main 733bac81 with the store suite running beside it. The test is main's (#1714) and the PR does not change it. I could not reproduce the failure, so I record it as a flake and not as a PR defect.",
+      "headSha": "e91f96bf298da2fb8373e42cdc18695fd3805765",
+      "negativeControl": "A first docs run without the contracts fixtures and with the default 10-minute timeout failed on the missing fixture files and the room test's deadline margin, which shows the run is a real run."
+    }
+  ],
+  "ci": "At e91f96bf (00:07Z): lint, typecheck, test and pr-title success; envoy-go success; envoy-go-race, envoy-go-race-docs, dispatch-memory, dispatch-multiprocess, dispatch-browser-multiprocess, envoy-infra-go, envoy-e2e-local, envoy-smoke, broker-multiprocess, worker-image success. NOT READ: 'dispatch' (job 124343957040) was still in_progress, started 23:12Z; I waited 40 minutes for it and completed without it.",
+  "mainReds": [
+    "TestRoutesTablePinsEveryRegisteredRoute (147 routes, pin 146) at main 0e636ed7, if not yet fixed; close-withdraws-asks.e2e.ts:126."
+  ]
+}
