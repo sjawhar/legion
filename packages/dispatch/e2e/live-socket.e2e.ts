@@ -195,11 +195,19 @@ test("a tab holds one live socket for every live view @phone", async ({ browser 
   }
 });
 
-// Forty seconds of real idling: a page that holds a request open shows it here and nowhere else.
-// It runs in every engine of this spec's projects, since what it proves - that the live socket
-// replaced the long-lived request - is each engine's own connection behaviour.
+// Sixteen seconds of real idling: a page that holds a request open shows it here and nowhere
+// else. It runs in every engine of this spec's projects, since what it proves - that the live
+// socket replaced the long-lived request - is each engine's own connection behaviour. The idle
+// spans one server heartbeat (15 s, `defaultStreamHeartbeat`,
+// `packages/envoy/internal/dispatch/api/server.go`) and one of the page's own silence checks
+// (`SILENCE_CHECK_MS`, `web/src/api/live-socket.ts`), so it covers a full cycle of the socket
+// that took the long-lived request's place.
+// SLOW(>=2s): real idling is the measurement. The ages below are read in this process, in real
+// wall time, and a connection Dispatch holds open ages whatever the page's timers believe, so no
+// page clock can stand in for the wait.
 test("no request to Dispatch stays open while the page idles @phone", async ({ browser }) => {
-  test.setTimeout(60_000);
+  // The 16 s idle and three page loads are all this row spends.
+  test.setTimeout(40_000);
   await createProject({ key: "CORE", name: "Core" });
   await createIssue({ project: "CORE", title: "Board issue" });
   await seedDeliveryFixture();
@@ -226,10 +234,13 @@ test("no request to Dispatch stays open while the page idles @phone", async ({ b
     for (const pageSockets of sockets) await untilFeedStarts(pageSockets);
     await Promise.all(pending.map(waitForReads));
 
-    await board.waitForTimeout(40_000);
+    await board.waitForTimeout(16_000);
+    // Half the idle. Every read this suite makes finishes well inside a second, while the
+    // long-lived request this row guards against is held open for tens of them, so a request
+    // still open after eight is one of those and nothing else.
     const old = pending.flatMap((requests) =>
       [...requests.entries()]
-        .filter(([, started]) => Date.now() - started > 20_000)
+        .filter(([, started]) => Date.now() - started > 8_000)
         .map(([request]) => request.url())
     );
     expect(old).toEqual([]);
@@ -241,8 +252,10 @@ test("no request to Dispatch stays open while the page idles @phone", async ({ b
 // The page rotates before it has seen any event, so its event feed resumes from the sign-in
 // check's head: the change committed while the next socket waits arrives on it, and the rotation
 // costs no request beyond what that change costs a page with no rotation (the control).
+// SLOW(>=2s): the two quiet windows below, one on the control page and one on the rotating
+// page, are what "no extra request" is counted over. A count of what a page did not do over a
+// window is that window's own real time, and the two must stay equal for the counts to compare.
 test("a rotation loses no event and makes no extra request @phone", async ({ browser }) => {
-  test.setTimeout(45_000);
   await createProject({ key: "CORE", name: "Core" });
   const baselineIssue = await createIssue({ project: "CORE", title: "Comment request control" });
 
@@ -254,7 +267,6 @@ test("a rotation loses no event and makes no extra request @phone", async ({ bro
     await control.goto(`/issues/${baselineIssue.key}/activity`);
     await expect(control.getByText("Comment request control", { exact: true })).toBeVisible();
     await controlSocket;
-    await control.waitForTimeout(1_000);
     await waitForReads(controlPending);
 
     const controlRequests: string[] = [];
@@ -273,7 +285,9 @@ test("a rotation loses no event and makes no extra request @phone", async ({ bro
     await expect(
       control.locator(`a[href="/issues/${baselineIssue.key}/comments/${controlComment.id}"]`)
     ).toBeVisible();
-    await control.waitForTimeout(5_000);
+    // A read an event invalidates goes out in the frame after that event, so a window that
+    // starts once the comment's link is on screen is a settle rather than a guess.
+    await control.waitForTimeout(1_500);
     countControlRequests = false;
     const expectedRequestCount = controlRequests.length;
     await control.close();
@@ -303,7 +317,6 @@ test("a rotation loses no event and makes no extra request @phone", async ({ bro
     );
     await first;
     await expect.poll(() => sockets.received.includes("events_start")).toBe(true);
-    await page.waitForTimeout(1_000);
     await waitForReads(pending);
 
     expect(sockets.received).not.toContain("event");
@@ -327,7 +340,8 @@ test("a rotation loses no event and makes no extra request @phone", async ({ bro
       page.locator(`a[href="/issues/${issue.key}/comments/${comment.id}"]`)
     ).toBeVisible();
     await expect(page.getByTestId("connection-pill")).toHaveCount(0);
-    await page.waitForTimeout(5_000);
+    // The control's window, to the millisecond: the two counts are of equal quiet.
+    await page.waitForTimeout(1_500);
     countRequests = false;
     expect(apiRequests).toHaveLength(expectedRequestCount);
   } finally {
@@ -409,7 +423,12 @@ test("a first live socket opening without a change makes no API request @phone",
     firstSocketReleased.resolve();
     // The socket opened and the feed started on it, so the quiet below is the open's own.
     await untilFeedStarts(sockets);
-    await page.waitForTimeout(5_000);
+    // One second of real quiet. A read the open itself causes goes out in the same tick as the
+    // `events_start` awaited above, so this window is many frames past it. The page's clock
+    // cannot stand in for it: a jump long enough to be worth making also fires the shell's own
+    // credential poll (15 s, `features/credentials/pending.ts`), a read on a cadence of its own
+    // that this row does not count.
+    await page.waitForTimeout(1_000);
     expect(requestsAfterOpen).toEqual([]);
   } finally {
     await alice.close();
