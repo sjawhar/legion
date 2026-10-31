@@ -1671,7 +1671,9 @@ envoy-infra:gcp:Dispatch needs a "random" provider in its providers option
 By default the docker provider waits up to 90 seconds for the container's health check to pass,
 and `pulumi up` fails if it does not. The check passes once `/healthz` answers `200`, which it does
 from `starting` on, before the listener has connected to NATS. A listener is connected when
-`/healthz` answers `"status":"healthy"`. The answers are listed under
+`/healthz` answers `"status":"healthy"` or `"status":"degraded"`: a degraded answer is a
+dependency that repairs itself, such as a role claim view whose first scan has not delivered every
+claim, and the listener behind it is connected and serving. The answers are listed under
 [Health and readiness](https://sjawhar.github.io/legion/dispatch/envoy/#health-and-readiness).
 
 `waitForHealthy: false` creates the container without waiting on its health check. Use it for a

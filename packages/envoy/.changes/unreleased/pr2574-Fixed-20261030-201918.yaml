@@ -1,5 +1,0 @@
-kind: Fixed
-body: The guard that holds every read of `artifact_reviews` to `docs.ReviewOrder` now reads a join as it reads a `from`, so a statement that reaches the table through a join and takes the newest row by `created_at desc, id desc` is refused.
-time: 2026-10-30T20:19:18.557455413Z
-custom:
-    Issue: pr2574
