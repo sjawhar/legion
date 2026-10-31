@@ -30,7 +30,7 @@ Legion's.
 
 The daemon's periodic wake, a minute after it starts and then every
 `controller_wake_interval_seconds` (an hour by default), whatever the slots. Run the skill's every-turn
-steps.
+steps, then the parked-root walk (`skill://legion-controller/references/parked-decisions.md#the-walk`).
 
 `openCapabilities`, when present, names the open capability rows; `read_state`'s `capabilities`
 gives each one's `detail`. A deployment row (the secrets broker, model fallback, a role's CPU and
@@ -70,6 +70,14 @@ slots](skill://legion-controller/SKILL.md#free-slots)). The person's answer puts
 `admission.waiting` by itself, and the next free slot delivers its task. A lost label or a foreign
 Dispatch claim sends the separate `unslotted` wake.
 
+## `parked-decision on <KEY>` (`{kind: "parked-decision", decision, root, ref, actor, version?, reason?}`)
+
+A person's spec decision, or answer, resolution or reply on an ask, on a tree Legion is not
+running, which nobody inside the tree heard. The payload names the decision, the tree's `root`,
+the decision's Dispatch `ref`, the person (`actor`), and a spec decision's `version` and a changes
+request's `reason`. Decide it as `skill://legion-controller/references/parked-decisions.md#deciding`
+says.
+
 ## `held on <KEY>` (`{kind: "held", phase, role?, reason?}`)
 
 Check that the issue's `phase` is `held`. Without `reason`, a phase worker's launches or prompts
@@ -79,10 +87,15 @@ handle it as an escalation (`skill://legion-controller/references/escalation.md`
 with no `holdReason` while its tree lingers (the time after its root closes when a reopen resumes
 it) or is closed waits for the tree's re-admission and needs nothing from you.
 
-When an escalated hold's cause is not gone, park the tree: `set_status` the root to `backlog`. Set
-the root back to `todo` only when you checked that the hold's cause is gone, or a person asks,
-because `todo` re-admits it as a new generation: a new run of the tree that starts again from its
-architect.
+When an escalated hold's cause is not gone, park the tree: `set_status` the root to `backlog`,
+then, in the same turn, post one comment on the root (`dispatch comment --issue <root>
+--body-file -`) whose first line is `Parked by Legion while it waits on: <the hold's cause>`, the
+cause being what you found the held phase waits on (the payload's `phase` and `role`, and the held
+issue's `dispatch read`). That mark is what makes the park Legion's own hold
+(`skill://legion-controller/references/parked-decisions.md#deciding`, step 2). Set the root back to
+`todo` only when you checked that the hold's cause is gone, a person asks, or a person's decision
+after the park gives its work a next step (that reference's step 4), because `todo` re-admits it
+as a new generation: a new run of the tree that starts again from its architect.
 
 ## `worker-died on <KEY>` (`role: "architect"`)
 

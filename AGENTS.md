@@ -322,6 +322,7 @@ the shim runs `legion claude-bridge -- claude -p …`, which speaks the shim's O
   the four `LEGION_E2E_*_APP_*` inputs name another deployment's two role Apps, this deployment's own by default, and the live proofs that drive the real Apps (this one, stage3-4b13b-acceptance.sh, claude-backend-tmux.sh, stage4b-sandbox-tree.sh, and stage4a-sandbox-runtime.sh for the implement App alone) prove each key is its id's App against GitHub's GET /app, with the write permission its role needs, before the run's first write (scripts/e2e/README.md, "lib/github-apps.sh")
 
 - `LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/claude-backend-tmux.sh`
+LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/parked-decision-devbox.sh   # the devbox proof that a person's decision on a parked tree reaches the controller, and that its next start walks the parked roots (scripts/e2e/README.md)
 
   The Claude Code backend's devbox-only live proof:
   an implementer `worker_backends` puts on claude registers its transcript, completes its phase through the `legion` MCP tool's handoff_complete with a pushed handoff commit, and resumes the same Claude Code session after its pane is killed;
@@ -782,6 +783,27 @@ a tree session's hand-back reply applied before its question's opening declares 
 and a person's answer of an approval request applied before the gate is registered on its document answers a waiting root as an act on an ask, where after the registration it is a review.
 Between boots nothing re-reads a waiting root's asks:
 if the event of a person's answer never reaches the daemon, the root waits until any newer act of a person on any ask of the root, or a review of its spec, reaches it, or until the daemon's next boot, whose catch-up applies the root's event log after its cursor (the site's troubleshooting page, "A tree waits on a person").
+
+A root parked out of the workflow (`backlog`, `icebox`) runs nothing, and its architect is suspended or gone.
+A person's spec decision on it (an approval, a changes request, or an approval carried to a child's new tree) that the daemon could not deliver to its architect, and a person's answer, resolution or reply on an ask of its issues (one that gives the turn to the agent, or one under a closed ask), goes to the controller as `parked-decision`, once per decision.
+The daemon keeps the newest decision per Dispatch reference, under the issue it was decided on, never under a root: the tree that owes the person an answer is the tree that issue stands in now, so a child a linger hands to Legion, a parked child a person's todo orphans, a grandchild handed over beside its parent and a queued root admission adopts into a live tree each take what was decided on them with them, in any order, with nothing to move.
+That tree's next architect start names each one: admission's start task, or the catch-up of a later launch (a `legion claims retry` relaunch), with both spec versions when the approved one is no longer the current one.
+Each kept decision is claimed by the one start or catch-up that names it, in the transaction that queues it, and a start whose task the architect's claim queues leaves it to that delivery, which holds it until the turn that takes the task starts: the write recording that confirmation is what tells it, and a published catch-up tells what it named itself.
+A claim or a hold counts only while it stands in the same tree as the row's own issue, and either telling deletes a row only while that issue still stands in the teller's tree — otherwise the row waits again for the tree it moved into, and the old architect hearing it as well is the lesser fault.
+A start that reached no claim (its generation is stale, its tree lingers) or a catch-up a newer one superseded hands what it claimed, in one transaction with the release, to a fresh catch-up of the architect of each tree those rows are owed to now, or leaves them waiting when that tree has no architect to hear them (parked, lingering, or waiting for its slot); a catch-up its architect cannot take (a failed claim, a refusing holder) leaves it for that architect's next launch, whose catch-up names it.
+A root architect's start task waits on its claim while its root has no architect to hear it, and is sent once the root runs again — narrowed first to what its delivery still holds of this tree, with whatever has left it released to the tree it moved into and that tree's architect written a catch-up at once, and retired rather than sent when nothing of it is left.
+So each is told once and none is lost, and a retried start whose task was delivered is not delivered again.
+A decision on a root that was set to `todo` and waits for its slot is kept the same way and goes to no controller, whichever path finds it.
+A decision on a lingering root someone moved back to a status of the workflow (`in_progress` and the like) is nobody's parked tree: it is neither kept nor relayed.
+A decision no person made (`gates.design: off`) is not relayed.
+A session's reply on such an ask is not relayed either: the daemon logs `workflow: a session's reply on a parked tree is not relayed`, the reply stays on the Dispatch ask for the person who asked, and the controller's walk skips it.
+The controller sets the root `todo` when the park is its own hold and a decision gives its work a next step.
+Its own hold is a park by `session legion-daemon:<PROJECT>` with the controller's comment `Parked by Legion while it waits on: …` beside it, which the controller posts when it parks a tree for a hold.
+Every other park stays parked until whoever made it sets the root to `todo`: a person's, another session's, and an operator's `legion status`, which the daemon writes under the same session with no mark.
+The controller says so in a comment, and the start task names the decision then.
+The controller answers a question on the question's own ask, from the record when the record holds the answer, and otherwise says that `todo` on the root brings its architect back to answer.
+Its parked-root walk, at its start and on each `tick`, finds a decision sent while no controller ran.
+The machinery's notices to a stopped tree (a child's status or close, a dead worker) stay dropped.
 
 **Gate:** the design gate, when armed (`gates.design: root-issues` in `legion.yaml`, the default), is a human approving the root issue's spec document at a version in Dispatch:
 once the spec's decision blocks are settled and the human has agreed to every point in it, the architect requests it with `dispatch request-approval` and a summary of what the human is approving, and registers the document id and version with the daemon, and the daemon opens the gate on the `artifact.approved` event for that document at its current version

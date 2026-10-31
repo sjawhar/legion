@@ -328,6 +328,60 @@ spec at its current version; `designGate.approvedVersion` is `null`, or lower th
 until someone approves the latest version from the document's header or the Inbox. An approval of an
 earlier version does not count: the spec changed since. The merger's `READY` waits on the same approval.
 
+## A parked tree did not come back after a decision
+
+A root in `backlog` or `icebox` runs again when a person sets it to `todo`, or when the controller
+parked it for a hold of its own and judges that a person's decision gives its work a next step. The
+controller marks such a park with a comment on the root that begins `Parked by Legion while it
+waits on:`. First find whether the daemon relayed the decision. Its JSON log names the issue and
+the root on each of these lines:
+
+- `outbox parked decision sent to the controller` or `workflow: a person's decision on a parked
+  tree goes to the controller`: the controller received the decision.
+- `outbox parked decision not relayed: it names no person`: the gate opened under
+  `gates.design: off`, so no person made the decision.
+- `outbox parked decision not relayed: its root is not parked` or `workflow: a decision on a
+  lingering root someone moved back into the workflow is not relayed`: someone moved the
+  lingering root back to a status of the workflow (`in_progress` and the like), so it is nobody's
+  parked tree.
+- `outbox parked decision not relayed: its tree hears it` or `outbox parked decision not relayed:
+  its root has no record`: the tree runs and its architect hears the decision, or the daemon keeps
+  no record of the root.
+- `outbox parked decision handled before under this key`: the same notice came through again (a
+  re-held copy, or a run of its row again); the first line logged under that key says what became
+  of it.
+- `outbox parked decision kept for its root's start, which waits for its slot` or `workflow: a
+  person's decision on a tree waiting for its slot is kept for its architect's start`: the root was
+  set to `todo` already, so no controller is told, and its architect's start names the decision.
+  The daemon keeps the decision under the issue it was made on, so the architect it is owed to is
+  the one of the tree that issue stands in now: a child handed over into a tree of its own, an
+  orphaned child and a queued root adopted into a live tree each take what was decided on them
+  with them. It is kept until the one start or catch-up that names it has told an architect of
+  that tree — a catch-up at its publish, a start's task at the moment the turn that takes it
+  starts — and one that reaches no architect hands it to a fresh catch-up of that tree's current
+  architect (`outbox start finished without giving its claim the task; the decisions it named are
+  handed over`), or leaves it for the next start while the tree is parked.
+- `supervise: the root of this task's tree has no architect to hear it; the task stays pending`: a
+  root architect's start task met a parked, lingering or waiting tree. It is sent when the tree's
+  next start runs; nothing to do.
+- `supervise: a decision this held task named is owed to another tree now; the task is sent without
+  it`, or `supervise: everything this held task named is owed to another tree now; it is retired
+  rather than sent`: while the task waited, an issue it named left this tree. What left is owed to
+  the tree it stands in now, whose architect is written a catch-up naming it at once; nothing to do.
+- `workflow: a session's reply on a parked tree is not relayed`, `workflow: a session's answer or
+  resolution on a parked tree is not relayed`, or `workflow: a session's decision on a tree waiting
+  for its slot is not kept`: an agent wrote it. It stays on the ask for the person who asked.
+
+Then read the controller's comment that begins `Parked decision read:`, on the root and on the
+issue where the decision was made. For a question, it is a reply on the question's own ask, which
+answers it or says that `todo` on the root brings the architect back to answer. It says what the
+controller judged. The tree stays parked when the park is not the controller's own hold, the park
+with its `Parked by Legion while it waits on:` comment beside it: a person's park, another agent's
+session's, or an operator's `legion status` (the comment names who, and the tree runs when they set
+it to `todo`). It stays parked too when the decision is older than the park, when the root is
+`done` or `triage`, or when the decision only questions the work. When the controller was down,
+its next start walks the parked roots. That walk reads only the last 10 events of each issue.
+
 ## An issue is held
 
 When an agent's budget runs out (launches that failed, deaths with work outstanding, prompts it

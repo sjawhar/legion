@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-251",
+  "completed": "2026-10-31T12:18:00Z",
+  "round": 16,
+  "headSha": "6adfab5a3cb6",
+  "handoffHead": "5f9c905eafc82175c451774e4f05b34c19d17e78",
+  "provider": "Every turn of this round ran on anthropic/claude-opus-5-5, this session's model; no subagent ran. No model ran inside any run.",
+  "scope": "Bare gates and one bounded sweep, as the architect asked. The compare 7179f6e5...6adfab5a moves no daemon code of this change. The only changed daemon files are main's prompt markdown (architect-common.md, worker-common.md, controller-root.md and the role prompts, from the forward merge) and the rewritten test. The branch's own diff against its fork point changed only in .github/e2e-scripts.json (one elsewhere row), the five docs/solutions renames to -pr2163.md, and confirmation_tell_failure_test.go.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "At 6adfab5a on my PostgreSQL 17.2 and nats-server 2.10.29: TestADecisionToldInATurnWhoseConfirmationFailedIsToldAgain passes, and it asserts the ruling's at-least-once. With store/claims.go's RetireDelivery changed to delete what the delivery held instead of releasing it (a loss), it fails: 'the root's next start task \"\" does not name dispatch://LEGION-310/ask/ask-told'. I reverted that with jj restore. bash .github/scripts/select-e2e-proofs.test.sh: 'Results: 94 passed, 0 failed'. EVENT=schedule select-e2e-proofs.sh exits 0, and parked-decision-devbox.sh is in the elsewhere list with its needs. No docs/solutions file names INFRA-251, and five end in -pr2163.md."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "The kept-decision tests and pinned seeds still hold after the forward merge",
+      "surface": "The daemon package on real PostgreSQL",
+      "command": "go test -count=1 -run 'TestADecisionToldInATurnWhoseConfirmationFailedIsToldAgain|TestKeptDecisionsRegressionSeeds|TestADecisionHeldInTheOldArchitectsTaskAtAHandOverReachesTheChild|TestAStartWhoseForgetFailedIsNotDeliveredAgainAfterItsTurn|TestADecisionAStaleStartReleasesReachesTheRunningArchitect|TestAHeldTask' -v ./internal/daemon/",
+      "observed": "All 7 PASS (211 s), every pinned seed included.",
+      "headSha": "6adfab5a3cb6",
+      "negativeControl": "With RetireDelivery deleting what the delivery held, the rewritten test FAILS naming the lost decision."
+    },
+    {
+      "criterion": "One bounded property sweep at this head",
+      "surface": "TestKeptDecisionsReachTheCurrentArchitectOnce, binary built from 5f9c905e",
+      "command": "LEGION_KEPT_PROPERTY_RUNS=300 LEGION_KEPT_PROPERTY_STEPS=300 timeout 4200 ./daemon16.test -test.run '^TestKeptDecisionsReachTheCurrentArchitectOnce$' -test.timeout=68m -test.v",
+      "observed": "PASS in 2061 s: 300 of 300 seeds. Across them: 461 members handed over (51 without their run), 139 orphans, 300 adoptions, 1217 trees closed, 274 streaming restarts, 279 foreign turns, 10 hand-overs inside a catch-up's publish, 35 between a held task and its confirmation, 928 claim failures.",
+      "headSha": "6adfab5a3cb6",
+      "negativeControl": "Round 13's 11 failing seeds are pinned and pass above."
+    },
+    {
+      "criterion": "The e2e list gate that was red at 386cddb1",
+      "surface": ".github/scripts/select-e2e-proofs.sh over this tree, as CI's test job runs it",
+      "command": "bash .github/scripts/select-e2e-proofs.test.sh; EVENT=schedule GITHUB_OUTPUT=... bash .github/scripts/select-e2e-proofs.sh",
+      "observed": "94 passed, 0 failed; the select exits 0.",
+      "headSha": "6adfab5a3cb6",
+      "negativeControl": "At 386cddb1 the same select printed '::error file=.github/e2e-scripts.json::scripts/e2e/parked-decision-devbox.sh is in neither list'."
+    }
+  ],
+  "notes": [
+    "A local go test of admit, workflow, record, store, supervise, intake and daemon was not usable as evidence. While the sweep ran, admit, workflow and daemon hit the default 10-minute test timeout. intake needs rootless Docker, and a few daemon tests need tmux or a scratch Dispatch, none of which this pod has. record, store and supervise passed. CI's test job is the gate for those packages."
+  ],
+  "ci": "Head 5f9c905e (no skip-checks trailer, so CI runs there), read 2026-10-31T12:17Z: changes and pr-title success; test, envoy-go, lint, typecheck and every other lane queued. Not waited on. GitHub: mergeable UNKNOWN."
+}

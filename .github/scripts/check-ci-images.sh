@@ -291,6 +291,7 @@ EXCEPTIONS = {
     "scripts/e2e/dispatch-user-turns.sh": NO_CI_JOB,
     "scripts/e2e/lib/bridge-tunnel.sh": NO_CI_JOB,
     "scripts/e2e/lib/kind-sandbox.sh": NO_CI_JOB,
+    "scripts/e2e/parked-decision-devbox.sh": NO_CI_JOB,
     "scripts/e2e/share-volumes-kind.sh": NO_CI_JOB,
     "scripts/e2e/stage2-tmux-supervision.sh": NO_CI_JOB,
     "scripts/e2e/stage3-devbox-workflow.sh": NO_CI_JOB,

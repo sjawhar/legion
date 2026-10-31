@@ -40,11 +40,13 @@ func tmuxClaim(token claim.Token) supervise.Claim {
 		BootTokenHash:   supervise.HashBootToken("boot-" + string(token)),
 		CapabilityHash:  []byte{0xca, 0xfe, 0x01},
 		UncertainStreak: 3,
-		// The two columns a restart reads to fence a stop and to attribute a completion: a daemon
-		// that rebuilt this claim without them would suspend a run that had already replaced the
-		// one its stop names, and refuse the completion of the worker it is waiting on.
+		// The columns a restart reads to fence a stop, to attribute a completion and to refuse a
+		// retried start's task: a daemon that rebuilt this claim without them would suspend a run
+		// that had already replaced the one its stop names, refuse the completion of the worker it
+		// is waiting on, and queue a task the claim was already given.
 		LastStartRow:      7,
 		ServingGeneration: 4,
+		DeliveredRows:     []int64{5, 6},
 	}
 }
 

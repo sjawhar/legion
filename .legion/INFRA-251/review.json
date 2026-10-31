@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-251",
+  "completed": "2026-10-31T12:45:36Z",
+  "decision": "changes_requested",
+  "round": "architect-scoped round on the issue-keyed rule: no tree change loses a decision or makes the only telling go to a tree the issue left; the model reaches those transitions; review 5720641456's three findings pass as tests",
+  "reviewedHead": "the handoff push above b4a4f9420bc1 (code head 6adfab5a3cb6)",
+  "critical": 0,
+  "important": 3,
+  "minor": 2,
+  "accepted": [
+    "Every tree change is sound under the issue-keyed rule: hand-over with or without the run, orphan, grandchild in either order, adoption into a running and a non-running tree, re-admission, and close. No move path is left.",
+    "Review 5720641456's three findings exist as tests in admit/lost_kept_decisions_test.go, and each fails on the old behaviour (for the grandchild, the child-first order).",
+    "The catch-up publish's deletes, DropReadmittedApproval and the newer-wins upsert are sound; the issue cascade is unreachable.",
+    "RootHears and RootTask leave main's resume paths unchanged: ResumeAwaitedRoot and a fresh start carry no Kept.",
+    "The architect's ruling stands: a decision told again after a failed confirmation write is accepted, not a finding."
+  ],
+  "keyFindings": [
+    {"severity": "important", "file": "packages/daemon/internal/store/kept_decisions.go:67", "description": "The confirmation's write deletes the rows the delivery holds, but the machine takes confirmations back. A turn of the agent's own (an Envoy notice) starts while the root task's prompt is in flight, so turnStarted confirms the task and the rows are deleted. The prompt is then refused 'Agent is already processing', and refused clears ConfirmedAt (supervise/table.go:806). lateRefused, takeBackPending and takesBackConfirmed do the same. On the resend, HeldKeptRefs no longer lists the refs, so rootTask drops them in silence, or retires the task. The architect never read the decision. Fix: put the marks back when a confirmed delivery is written unconfirmed, or tell only when the confirmed turn ends. Model a refusal after a confirmation."},
+    {"severity": "important", "file": "packages/daemon/internal/store/kept_decisions.go:46", "description": "holdKeptDecisions takes every row matching the delivery's (ref, at) on every unconfirmed write of it (queue, ack, narrowing, take-back after a death), whatever claim or hold now counts for the row. The comment says it takes only from the start row that claimed the row, and the approval statement below is limited to the holder's tree. A rewrite of the old tree's delivery after the issue moved takes the row from the new tree's delivery, which then drops it in silence at send time. If the old delivery is then retired unsent, the release leaves the row KEPT with no catch-up. Take only rows claimed by one of this claim's delivered rows or already held by this claim, as the comment says. Model the take-back after a death."},
+    {"severity": "important", "file": "packages/daemon/internal/store/kept_decisions.go:79", "description": "A row can carry a counting claim (claimed_by = r2, a catch-up of its new tree) and a void hold (old tree's claim) at once, because ClaimKeptDecisions leaves held_by_* in place. releaseKeptDecisions, ReleaseHeldDecisions and the second statement of ForgetKeptDecisions clear claimed_by along with the hold. They erase r2's claim, so when a newer catch-up supersedes r2, HandOverKept's ReleaseKeptClaims finds nothing, writes no catch-up, and the row waits KEPT while its tree's architect runs. A hold release must clear only the hold columns, and a claim must clear the void hold it overrides."},
+    {"severity": "minor", "file": "packages/daemon/internal/admit/lost_kept_decisions_test.go:92", "description": "The keptRefs(oldTree) checks at :92, :128, :161 and :247 cannot fail: ParkedDecisions now reads by the issue's current tree, which is never the old one there. Replace each with a check that the row still stands under its issue, or remove it. The first adoption test (:140-165) does not reach 'told at the architect's next ready': the adoption's own catch-up names the decision. Seed a tree whose architect does not run yet, or merge it with the second test."},
+    {"severity": "minor", "file": "packages/daemon/internal/daemon/workflow.go:441", "description": "Stale prose: rootHears' comment says the task's decisions 'were forgotten when the claim queued it (the outbox's settleKept)', and kept_decision_property_test.go:346 names the deleted ReKeepDeliveredDecisions. rootTask's silent-drop comment (:512-516) lists three reasons a ref is no longer held. A confirmation taken back and a hold taken by another delivery are two more, and the fixes above should make those comments true."}
+  ],
+  "notFindings": [
+    "The parked_decisions_issue index duplicates the primary key's leading column; tellKeptDecisions runs four statements for deliveries with empty Kept; the changelog fragment does not say decisions on a member left below a handed child now stay with the closing tree, which the state table and linger.go document. Not faults."
+  ],
+  "providers": "Verified from each run's own turns in the session store: DeepReview16, 58 assistant turns, all anthropic / claude-opus-5-5; CodeQuality16, 18 assistant turns, all anthropic / claude-opus-5-5.",
+  "ci": "CI head 5f9c905e (only .legion/INFRA-251/test.json above it), read 2026-10-31T12:45Z: changes and pr-title success; lint, typecheck, test and every package lane queued. A request for changes does not wait on CI."
+}

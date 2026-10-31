@@ -293,7 +293,8 @@ func decodeDispatchEvent(event dispatchEvent, unread *[]string) (Fact, error) {
 			}
 			kind = DispatchArtifactChangesRequested
 		}
-		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: kind, Version: artifact.Version, Reason: artifact.Reason, Mark: event.mark()}, nil
+		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: kind, Version: artifact.Version, Reason: artifact.Reason,
+			Mark: event.mark(), Actor: dispatch.Actor(event.Actor)}, nil
 	case "artifact.version":
 		var artifact struct {
 			ArtifactID string `json:"artifact_id"`
@@ -310,7 +311,8 @@ func decodeDispatchEvent(event dispatchEvent, unread *[]string) (Fact, error) {
 		if artifact.Version.Number <= 0 {
 			return nil, fmt.Errorf("Dispatch artifact.version payload has no positive integer version.number")
 		}
-		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: DispatchArtifactVersion, Version: artifact.Version.Number, Mark: event.mark()}, nil
+		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: DispatchArtifactVersion, Version: artifact.Version.Number,
+			Mark: event.mark(), Actor: dispatch.Actor(event.Actor)}, nil
 	case "issue.deployed":
 		var deployed struct {
 			Repo        string `json:"repo"`
@@ -402,6 +404,7 @@ func decodeDispatchEvent(event dispatchEvent, unread *[]string) (Fact, error) {
 		// comment_delivery), which joins its thread as comment.created does and carries the same
 		// ask_id, ask_state and ask_waiting_on. A comment on no ask is no fact.
 		var comment struct {
+			ID        string `json:"id"`
 			Ask       string `json:"ask_id"`
 			State     string `json:"ask_state"`
 			WaitingOn string `json:"ask_waiting_on"`
@@ -426,7 +429,8 @@ func decodeDispatchEvent(event dispatchEvent, unread *[]string) (Fact, error) {
 			*unread = append(*unread, fmt.Sprintf("ask_state %q disagrees with ask_waiting_on %q", comment.State, comment.WaitingOn))
 			return nil, nil
 		}
-		return DispatchAskReply{Key: event.IssueKey, Ask: comment.Ask, WaitingOn: comment.WaitingOn, Actor: dispatch.Actor(event.Actor), Mark: event.mark()}, nil
+		return DispatchAskReply{Key: event.IssueKey, Ask: comment.Ask, WaitingOn: comment.WaitingOn, Actor: dispatch.Actor(event.Actor),
+			Mark: event.mark(), Comment: comment.ID}, nil
 	case "issue.claimed", "issue.released":
 		var payload struct {
 			Claim json.RawMessage `json:"claim"`

@@ -39,12 +39,12 @@ func TestACallbackReplyDecodesAsTheReplyItIs(t *testing.T) {
 	for _, eventType := range []string{"comment.created", "comment.answered"} {
 		decoded := decodeEvent(t, eventType, architect, map[string]any{"id": "comment-1", "ask_id": "ask-approval", "ask_state": "open", "ask_waiting_on": "human"})
 		want := DispatchAskReply{Key: "LEGION-7", Ask: "ask-approval", WaitingOn: "human",
-			Actor: dispatch.Actor{Kind: "session", ID: "session-architect"}, Mark: askEventMark}
+			Actor: dispatch.Actor{Kind: "session", ID: "session-architect"}, Mark: askEventMark, Comment: "comment-1"}
 		if !reflect.DeepEqual(decoded.Fact, want) {
 			t.Fatalf("%s decoded to %#v, want %#v", eventType, decoded.Fact, want)
 		}
 		closed := decodeEvent(t, eventType, architect, map[string]any{"id": "comment-3", "ask_id": "ask-approval", "ask_state": "answered"})
-		if want.WaitingOn = ""; !reflect.DeepEqual(closed.Fact, want) || len(closed.Unread) != 0 {
+		if want.WaitingOn, want.Comment = "", "comment-3"; !reflect.DeepEqual(closed.Fact, want) || len(closed.Unread) != 0 {
 			t.Fatalf("%s on a closed ask decoded to %#v, unread %q; want %#v", eventType, closed.Fact, closed.Unread, want)
 		}
 		if plain := decodeEvent(t, eventType, architect, map[string]any{"id": "comment-2"}); plain.Fact != nil {

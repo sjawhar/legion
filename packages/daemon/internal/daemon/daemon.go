@@ -296,7 +296,8 @@ func run(ctx context.Context, cfg config.Config, build Build, log *slog.Logger, 
 		// Only a daemon with the workflow configured has issue records to read a phase or a tree
 		// from; Stage 2's supervision runs on claims alone, where every delivery holds and every
 		// tree closes.
-		plan.phaseHolds, plan.treeClosable = workflow.phaseHolds, workflow.treeClosable
+		plan.phaseHolds, plan.rootHears, plan.treeClosable = workflow.phaseHolds, workflow.rootHears, workflow.treeClosable
+		plan.rootTask = workflow.rootTask
 		plan.taskConfirmed = workflow.taskConfirmed
 	}
 	if cfg.Runtime.Name == "tmux" {
@@ -559,9 +560,12 @@ type plan struct {
 	// repositories is the project's repository mapping as the workflow serves it, empty until the
 	// workflow reads it at boot: every role's gh bundle holds a directory for each of its owners.
 	repositories *repositories
-	// phaseHolds and treeClosable are the workflow's answers to the supervisor's two predicates;
-	// nil without a workflow, where every delivery holds and every tree closes.
+	// phaseHolds, rootHears, rootTask and treeClosable are the workflow's answers to the
+	// supervisor's predicates; nil without a workflow, where every delivery is sent as it was
+	// queued and every tree closes.
 	phaseHolds   func(ctx context.Context, issue string, p phase.Phase, generation uint64) (bool, error)
+	rootHears    func(ctx context.Context, c supervise.Claim, d supervise.Delivery) (bool, error)
+	rootTask     func(ctx context.Context, c supervise.Claim, d supervise.Delivery) (string, []byte, error)
 	treeClosable func(ctx context.Context, c supervise.Claim) (bool, error)
 	// taskConfirmed tells the workflow each agent that took its task; nil without a workflow.
 	taskConfirmed func(c supervise.Claim)
@@ -1078,6 +1082,8 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		Identity:      adoptIdentity(p.identity, p.repository),
 		Secrets:       p.secretsEnroller,
 		PhaseHolds:    p.phaseHolds,
+		RootHears:     p.rootHears,
+		RootTask:      p.rootTask,
 		TreeClosable:  p.treeClosable,
 		TaskConfirmed: p.taskConfirmed,
 		Clock:         p.clock,
@@ -1678,6 +1684,17 @@ func (s projectRecords) Enqueue(ctx context.Context, tx pgx.Tx, row record.Outbo
 	}
 	s.wakeOnCommit(ctx, row)
 	return nil
+}
+
+// EnqueueID wakes the row's lane as Enqueue does: a start or catch-up naming kept decisions is
+// written with its id (workflow.EnqueueNaming), so the row it claims them for waits for no sweep.
+func (s projectRecords) EnqueueID(ctx context.Context, tx pgx.Tx, row record.OutboxRow) (int64, error) {
+	id, err := s.Store.EnqueueID(ctx, tx, row)
+	if err != nil {
+		return 0, err
+	}
+	s.wakeOnCommit(ctx, row)
+	return id, nil
 }
 
 func (s projectRecords) ExpediteOutbox(ctx context.Context, tx pgx.Tx, row record.OutboxRow, now time.Time) error {

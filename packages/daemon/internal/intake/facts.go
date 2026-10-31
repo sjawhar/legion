@@ -198,7 +198,10 @@ const (
 // gate seed read from Dispatch carries none, and says instead whether that read showed the
 // document's approval request waiting on the agent (RequestWaitsOnAgent), which is what a newer
 // version does to it: a version with neither a mark nor that cannot be placed against a root's
-// wait on its gate, and answers none.
+// wait on its gate, and answers none. Actor is the event's actor: for a review, the person who
+// reviewed, named on the notice the review sends, since that notice goes to the controller when
+// nobody in its tree can hear it (the daemon's parkDecision); the gate seed's read names the
+// reviewer that read found (dispatch.Approval.LatestReviewer).
 type DispatchArtifact struct {
 	Key                 string
 	ArtifactID          string
@@ -207,6 +210,7 @@ type DispatchArtifact struct {
 	Reason              string
 	Mark                record.EventMark
 	RequestWaitsOnAgent bool
+	Actor               dispatch.Actor
 }
 
 func (DispatchArtifact) isFact() {}
@@ -274,7 +278,9 @@ func (DispatchAskClosed) isFact() {}
 // through a delivery's callback), or Dispatch's ask.handed_back of an approval request (Kind
 // record.AskApproval and its Artifact; a comment names neither), with whose turn it leaves the ask
 // on (WaitingOn: `agent` or `human` on an open ask, a hand-back `human`, and "" on a closed one),
-// the actor who made it, and its event's place in the issue's Dispatch event log (Mark).
+// the actor who made it, its event's place in the issue's Dispatch event log (Mark), and the
+// comment's own id (Comment, empty for a hand-back), which is where in Dispatch a person's reply
+// relayed to the controller was made (workflow's relayParkedDecision).
 type DispatchAskReply struct {
 	Key       string
 	Ask       string
@@ -283,6 +289,7 @@ type DispatchAskReply struct {
 	WaitingOn string
 	Actor     dispatch.Actor
 	Mark      record.EventMark
+	Comment   string
 }
 
 func (DispatchAskReply) isFact() {}
@@ -732,7 +739,10 @@ func (SignOff) isFact() {}
 // RequestAsk is the approval request the read found open (dispatch.Approval.AskID, "" when none
 // was), and RequestWaitsOnAgent says it waited on the agent (a reply or a newer version since it
 // was handed to the person): the registration writes that request's mirror row as the read found
-// it, at Since.
+// it, at Since. ReviewedBy is who gave the review either version names
+// (dispatch.Approval.LatestReviewer), zero with neither: the notice the registration sends names
+// that person, since it goes to the controller when nobody in the tree can hear it (the daemon's
+// parkDecision).
 type GateRegistered struct {
 	Issue                   string
 	ArtifactID              string
@@ -746,6 +756,7 @@ type GateRegistered struct {
 	Since                   record.EventMark
 	RequestAsk              string
 	RequestWaitsOnAgent     bool
+	ReviewedBy              dispatch.Actor
 }
 
 func (GateRegistered) isFact() {}
