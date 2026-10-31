@@ -336,6 +336,12 @@ export function isDocumentSchemaError(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409 && error.code === "DOC_SCHEMA";
 }
 
+// The server refusing a send because the document does not hold the mark it names
+// (`docs.VerifyMark`): the margin answers it by writing the mark again over the same words.
+export function isAnchorMissing(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 409 && error.code === "ANCHOR_MISSING";
+}
+
 // A document whose stored history cannot load at all: the state a rebuild from its latest saved
 // version repairs, and retrying the read cannot.
 export function isDocumentUnloadable(error: unknown): boolean {

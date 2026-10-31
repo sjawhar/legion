@@ -144,9 +144,11 @@ export function stubDocumentBridge(
     focusBlock: () => {},
     focusMark: () => {},
     removeMark: () => {},
+    remarkMark: () => ({ refused: "gone" }),
     retypeMark: () => ({ refused: "missing" }),
     setActiveBlocks: () => {},
     setActiveMarks: () => {},
+    whenSent: async () => {},
     ...overrides,
   };
 }

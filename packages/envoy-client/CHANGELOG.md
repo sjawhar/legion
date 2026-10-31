@@ -1,5 +1,11 @@
 # Changelog
 
+## [main@1d3e69553791] - 2026-10-31
+
+### Fixed
+
+- With `DISPATCH_TOKEN_FILE` set and nothing naming the server, `dispatchSettings` and the start notice of `sessionSettings` say `DISPATCH_TOKEN_FILE is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started with. Export DISPATCH_URL again, set to the Dispatch server that token is for` (`lostDispatchUrlNotice`). They said `no envoy.json at <path>: Dispatch is off` or `<file> names no Dispatch server, …`. Legion sets the variable only beside `DISPATCH_URL`, and a Legion pod has no envoy.json, so an agent whose shell had run `unset DISPATCH_URL` looked for a lost file. When the chosen file is missing, its dangling link and the unread OpenCode-era user file still follow, the old file last. `DISPATCH_TOKEN` alone, a file that turns Dispatch off and a file that cannot be read keep their own notice or error.
+
 ## [main@d7e1daaaaf70] - 2026-10-31
 
 ### Added

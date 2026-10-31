@@ -45192,6 +45192,9 @@ function mergeInterestSources(registryTopics, liveTopics) {
   }
   return interests;
 }
+function newClientInstanceID() {
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
 function expandSubscriptionTopics(topics) {
   const expanded = new Set;
   for (const topic of topics) {
@@ -45286,6 +45289,7 @@ function createEnvoyClient(config) {
       ...input.capabilities === undefined ? {} : { capabilities: input.capabilities },
       driving: input.driving,
       ...input.selfSubscribed === undefined ? {} : { self_subscribed: input.selfSubscribed },
+      ...input.clientInstanceID === undefined ? {} : { client_instance_id: input.clientInstanceID },
       host: machineID(),
       plugin: input.plugin.name,
       plugin_version: input.plugin.version
@@ -45329,8 +45333,11 @@ function createEnvoyClient(config) {
         ...response.holder === undefined ? {} : { holder: response.holder }
       };
     },
-    unregisterSession: async (sessionID) => {
-      await request(`/v1/sessions/${encodeURIComponent(sessionID)}`, { method: "DELETE" });
+    unregisterSession: async (input) => {
+      const query = input.clientInstanceID === undefined ? "" : `?client_instance_id=${encodeURIComponent(input.clientInstanceID)}`;
+      await request(`/v1/sessions/${encodeURIComponent(input.sessionID)}${query}`, {
+        method: "DELETE"
+      });
     },
     setRole: async (input) => {
       const soft = input.soft === true;
@@ -47078,6 +47085,8 @@ var LegionOperatorClaimResponse = strictObject({
   state: _enum2(LEGION_CLAIM_STATES),
   session: string2(),
   sessionFile: string2(),
+  forgottenSession: nonEmptyString.optional(),
+  forgottenSessionFile: nonEmptyString.optional(),
   locator: legionLocator.optional(),
   budgets: strictObject({
     launchFailures: number2().int().nonnegative(),
@@ -52123,6 +52132,7 @@ async function startChannelSession(options) {
       capabilities: options.capabilities,
       driving: false,
       selfSubscribed: true,
+      clientInstanceID: options.clientInstanceID,
       plugin: { name, version: options.pluginVersion }
     });
   };
@@ -52138,7 +52148,8 @@ async function startChannelSession(options) {
       previousSessionID: persisted.session_id
     });
     if (!claim.claimed) {
-      await rm2(previousFile, { force: true });
+      if (claim.holder !== persisted.session_id)
+        await rm2(previousFile, { force: true });
       return;
     }
     heldRole = persisted.role;
@@ -52224,7 +52235,10 @@ async function startChannelSession(options) {
     forwarder.follow(nextSubject);
     try {
       await withTimeout(options.connection.flush(), options.handoffFlushTimeoutMs ?? HANDOFF_FLUSH_TIMEOUT_MS, "flushing NATS");
-      await options.client.unregisterSession(previous);
+      await options.client.unregisterSession({
+        sessionID: previous,
+        clientInstanceID: options.clientInstanceID
+      });
     } catch (error) {
       forwarder.unfollow([nextSubject]);
       throw error;
@@ -52418,7 +52432,10 @@ async function startChannelSession(options) {
       if (handoffFile !== undefined)
         unwatchFile(handoffFile, handoffFileChanged);
       await forwarder.close();
-      await serialized(() => options.client.unregisterSession(identity.id)).catch((error) => {
+      await serialized(() => options.client.unregisterSession({
+        sessionID: identity.id,
+        clientInstanceID: options.clientInstanceID
+      })).catch((error) => {
         process.stderr.write(`envoy-channel: session deregistration failed \u2014 ${messageFor(error)}
 `);
       });
@@ -52591,6 +52608,7 @@ async function runEnvoyChannelServer() {
     fetch: globalThis.fetch,
     token: envoy.token
   });
+  const clientInstanceID = newClientInstanceID();
   let runtime;
   let claim;
   const daemon = pane === undefined ? undefined : createLegionDaemonClient(pane.daemonUrl);
@@ -52686,6 +52704,7 @@ async function runEnvoyChannelServer() {
         heartbeatMs: envoy.heartbeatMs,
         configFile,
         stateDirectory,
+        clientInstanceID,
         title,
         pluginVersion: installedPluginVersion(bundlePath) ?? "source",
         ...stamping ? { stampTitle } : {},

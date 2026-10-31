@@ -921,7 +921,7 @@ test("the composer's kind switch retypes its mark through the document and sends
   const fake = fakeBridge((markId, kind) =>
     kind === "suggestion"
       ? { refused: "unmarkable" }
-      : { markId: `${markId}-${kind}`, quote: "selected" }
+      : { markId: `${markId}-${kind}`, placement: null, quote: "selected" }
   );
   const createAsk = spyOn(api, "createAsk").mockResolvedValue(undefined as never);
   const view = renderMarginWithBridge(fake.bridge);
@@ -967,9 +967,14 @@ test("the composer's kind switch retypes its mark through the document and sends
 });
 
 test("the margin removes the composer's mark when the composer is cancelled or replaced, in the document open then", async () => {
-  const fake = fakeBridge((markId, kind) => ({ markId: `${markId}-${kind}`, quote: "selected" }));
+  const fake = fakeBridge((markId, kind) => ({
+    markId: `${markId}-${kind}`,
+    placement: null,
+    quote: "selected",
+  }));
   const reopened = fakeBridge((markId, kind) => ({
     markId: `${markId}-${kind}`,
+    placement: null,
     quote: "selected",
   }));
   const view = renderMarginWithBridge(fake.bridge, reopened.bridge);
@@ -1009,7 +1014,11 @@ test("the margin removes the composer's mark when the composer is cancelled or r
 // way to the Retry's send, which is no Discard, so the mark stays in the document for it. Only
 // the reader's own Discard of a refusal takes the mark out.
 test("a refused compose's Retry keeps its mark and sends to it", async () => {
-  const fake = fakeBridge((markId, kind) => ({ markId: `${markId}-${kind}`, quote: "selected" }));
+  const fake = fakeBridge((markId, kind) => ({
+    markId: `${markId}-${kind}`,
+    placement: null,
+    quote: "selected",
+  }));
   const createComment = spyOn(api, "createComment")
     .mockRejectedValueOnce(new ApiError(400, { code: "INPUT_REFUSED", error: "refused" }))
     .mockResolvedValue({ body: "Kept", id: "comment-1" } as unknown as Comment);
@@ -1037,7 +1046,11 @@ test("a refused compose's Retry keeps its mark and sends to it", async () => {
 // the reader sees why: the open compose comes back on screen - here from under the Pinned tab -
 // saying its send is still out, until that send lands.
 test("a newer compose while the open compose's send is out brings that compose back, saying why", async () => {
-  const fake = fakeBridge((markId, kind) => ({ markId: `${markId}-${kind}`, quote: "selected" }));
+  const fake = fakeBridge((markId, kind) => ({
+    markId: `${markId}-${kind}`,
+    placement: null,
+    quote: "selected",
+  }));
   const sent = Promise.withResolvers<Comment>();
   const createComment = spyOn(api, "createComment").mockImplementation(() => sent.promise);
   const view = renderMarginWithBridge(fake.bridge);
@@ -1196,7 +1209,11 @@ function NavigateToFirstIssue(): ReactNode {
 // hidden, and so does the mark the send names. A refusal while the reader is away hands the draft
 // back to it, and coming back finds both, the open compose again.
 test("a compose left mid-send keeps its draft, its refusal and its mark for the reader's return", async () => {
-  const fake = fakeBridge((markId, kind) => ({ markId: `${markId}-${kind}`, quote: "selected" }));
+  const fake = fakeBridge((markId, kind) => ({
+    markId: `${markId}-${kind}`,
+    placement: null,
+    quote: "selected",
+  }));
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
@@ -1268,7 +1285,11 @@ test("a compose left mid-send keeps its draft, its refusal and its mark for the 
 // that document's own send - never another document's, and never none - so its send's outcome
 // lands on the compose and the mark it was sent from.
 test("a newer compose on a document whose send is out waits on it, after visits to another document with a send out", async () => {
-  const fake = fakeBridge((markId, kind) => ({ markId: `${markId}-${kind}`, quote: "selected" }));
+  const fake = fakeBridge((markId, kind) => ({
+    markId: `${markId}-${kind}`,
+    placement: null,
+    quote: "selected",
+  }));
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
