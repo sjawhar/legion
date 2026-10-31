@@ -2,73 +2,53 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-575",
-  "completed": "2026-10-30T22:15:00Z",
-  "round": 2,
+  "completed": "2026-10-31T00:20:00Z",
+  "round": 3,
   "answersTestFailures": [
-    "Failure 1 of .legion/INFRA-575/test.json (the architect's ruling 1): a question the server withdraws, resolves or answers elsewhere now leaves the list at once and the next visible row in list order is selected. The tester's red row `a question the server withdraws leaves the list at once and the next row is selected` passes unmodified.",
-    "Failure 2 (the ruling's one exception): a question the reader had typed an answer into is kept in the column, closed, with the typed text where they can copy it, until they select another row. The tester's red row `a withdrawn question the reader was answering keeps its text in the column, closed` passes unmodified.",
-    "Failure 3 (no CI had ever judged the head): the pull request was CONFLICTING, so GitHub computed no merge ref and started no on: pull_request workflow. The forward merge of main resolved it; GitHub now reports MERGEABLE, so Actions runs on this branch for the first time."
+    "The only failure of .legion/INFRA-575/test.json round 2: the `docs / build` job of CI run 41128214713 failed, and `ci-ok` with it, because four documentation screenshots open the Inbox at the desktop viewport and waited for a question's card in the list - which from 1280 px is a short row, the card having moved into the reading column, and for an approval request there is no card in the column at all. All four are taken again against the Inbox this change ships, and the pages that embed them say what a reader now sees."
   ],
   "proof": [
     {
-      "criterion": "The architect's ruling of 2026-10-30 (dispatch://INFRA-575/comment/78d233a3-81a6-4560-b60b-095c21266c04): a row the server drops leaves at once and the next visible row in list order is selected; the one exception is a question the reader has typed an answer into, which the column keeps in its closed state with that text until they select another row.",
-      "surface": "The Inbox page of a running Dispatch - the built SPA served by the real Go server against a real Postgres, driven in a real Chromium - at 1440 px.",
-      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- e2e/inbox-reading-pane.e2e.ts --project=chromium",
-      "observed": "8 passed, the tester's two red rows among them, unmodified: `a question the server withdraws leaves the list at once and the next row is selected` and `a withdrawn question the reader was answering keeps its text in the column, closed`.",
-      "headSha": "93c4ab6407d0de68b79c4d7324999fe692bfb1cd",
-      "negativeControl": "Both rows are red at the head the tester judged (f61c1394): the first `expect(locator).toHaveCount(expected) failed; Expected: 0; Received: 1` on the withdrawn row, the second `Expected: true; Received: false` where the poll reads the pane's text and every field value for the typed sentence. The unit test for the second hold fails with the fix reverted: `Expected: \"/?item=ask-a\"; Received: \"/?item=ask-b\"`."
+      "criterion": "The four documentation shots the `docs / build` job takes are taken again and pass: dispatch/inbox, dispatch/ask-card, dispatch/shortcuts and legion/spec-approval.",
+      "surface": "The documentation media harness - the same built SPA and real Go server the e2e suite runs, seeded with the example workspace and captured in a real Chromium (docs/site/media/README.md).",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run build:web, then DATABASE_URL=postgres://postgres@127.0.0.1:55432/dispatch_implementer_docs?sslmode=disable bun docs/site/media/shots.ts",
+      "observed": "Every shot of both sets taken, no failure line, exit 0: dispatch/inbox, ask-card, issue-spec, margin-thread, board, agents, broadcast, broadcast-result, palette, shortcuts, inbox-phone, delivery-measures, pipeline, and legion/handover, admitted, decision-block, spec-approval, status-events, pull-request, ready, signed-off, daily-report. I looked at the two that changed most: dispatch/inbox.png is the two columns - three short rows with their Decision and Question badges under Waiting on you, Later (1) folded, the CORE-1 decision row selected, and on the right the head (CORE-1, Open page, P1, Snooze, Skip to the answer) over the Local testing workflow document with the Which sign-in path? decision block drawn in it; legion/spec-approval.png is the SHOP-1 approval row selected in the list and, in the column, Awaiting approval with Approve and Request changes at the head, then Version 3 and the spec below.",
+      "headSha": "de8b7ea325de4f10a18aa134eba6ca61900452a4",
+      "negativeControl": "The tester's own control for this failure stands: the same command on a clean export of main (ecbc2c8f, /legion/scratch/tmp/main-docs) takes all three dispatch shots, so the failure was this change's; and at the previous head the run failed `4 shot(s) failed` with `getByRole('article', { name: 'Urgency: Blocking' })` not found. The shots that were green before are green now, which is the control in the other direction: the set is run whole, not only the four."
     },
     {
-      "criterion": "A refusal reaches the reader at pane width: an options-only answer the server refuses keeps its question in the column with the refusal and its Retry, as it does below 1280 px, while an answer the server records still hands the selection on.",
-      "surface": "The same running Dispatch in Chromium at 1440 px, the write refused by the harness.",
-      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- e2e/inbox-reading-pane.e2e.ts --project=chromium -g \"refuses\"",
-      "observed": "1 passed: `an options-only answer the server refuses keeps its question in the column, with a Retry` - the column still shows that question, the card's alert reads `Could not save your answer.`, and the row is listed again.",
-      "headSha": "93c4ab6407d0de68b79c4d7324999fe692bfb1cd",
-      "negativeControl": "With the hold reverted (`const kept = showing.kept || answerDraft(selectedId) !== \"\";`) that row fails: `expect(locator).toContainText(expected) failed … Expected substring: \"Could not save your answer.\" … element(s) not found` - the card the refusal lives on had been unmounted."
+      "criterion": "The documentation site still builds, and its prose no longer describes an Inbox the product does not have.",
+      "surface": "The Astro site build the `docs` job runs after the shots, over the pages that embed those images.",
+      "command": "cd docs/site && bun run typecheck && bun run build, and bunx biome check docs/ and bash .github/scripts/check-private-names.sh from the repository root",
+      "observed": "typecheck clean; `43 page(s) built in 9.69s`, `All internal links are valid.`; biome `Checked 40 files in 15s. No fixes applied.`; check-private-names: `no file or path names the private deployment repository or the company … (6652 files)`.",
+      "headSha": "de8b7ea325de4f10a18aa134eba6ca61900452a4",
+      "negativeControl": "The site build reads every embed's path, so a shot renamed or not taken fails it with a missing asset; the four images are written under docs/site/public/media/ by the run above, which is what the build then reads."
     },
     {
-      "criterion": "The whole layout change, not one row (INFRA-92), at the head that merges, after the forward merge of main.",
-      "surface": "The whole Chromium project of the Dispatch browser suite.",
-      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- --project=chromium",
-      "observed": "932 passed, 25 skipped, 1 failed (59.9m) at head 93c4ab6407d0. The one failure is e2e/hover-preview.e2e.ts:87, which is main's own and not this change's (below).",
-      "headSha": "93c4ab6407d0de68b79c4d7324999fe692bfb1cd",
-      "negativeControl": "The run before this round's fixes, at b73d9952, was 931 passed / 2 failed, and both failures reproduced with their files run alone rather than being shared-CPU flakes (INFRA-521): one was a row pinning the hold the ruling abolished and is rewritten, the other is main's."
-    },
-    {
-      "criterion": "The forward merge of main changed nothing of the branch's own diff but the two files main also touched, and the pull request can now be judged by CI.",
-      "surface": "GitHub's own merge state, and the unchanged-diff fingerprint of skill://legion-worker/references/conflicts-and-rewrites.md.",
-      "command": "gh pr view 2549 -R sjawhar/legion --json mergeable,mergeStateStatus, and the fingerprint command of that reference at each tip",
-      "observed": "Before the merge: CONFLICTING/DIRTY, and `gh api 'repos/sjawhar/legion/actions/runs?branch=legion%2FINFRA-575'` answered total_count 0 - no Actions run had ever started. After it: MERGEABLE. Fingerprint a87bdd144c5c 5d8b15f2b24a50a5 -> merge head b649ec0ac3d8 94bb604c2250a48d, changed, because biome.json and packages/proof-editor/AGENTS.md carry this branch's own lines and main added a legion-own proof-editor file of its own (ask-content.ts) to both. Posted on the pull request as https://github.com/sjawhar/legion/pull/2549#issuecomment-6531790946.",
-      "headSha": "93c4ab6407d0de68b79c4d7324999fe692bfb1cd",
-      "negativeControl": "The conflict was real, not a stale read: `jj new legion/INFRA-575 main@origin` reported `2-sided conflict` at exactly those two paths, and the merge-base it names is 14d907b6, the branch's own base."
+      "criterion": "Nothing of the product changed this round, so the browser proof the tester verified at the previous head still describes this one.",
+      "surface": "The branch's own diff.",
+      "command": "jj diff --from 232b6c25dccf --to de8b7ea3 --stat",
+      "observed": "Nine files: .legion/INFRA-575/test.json (the tester's handoff) and eight under docs/. Nothing under packages/. So the tester's round-2 verification stands unchanged: e2e/inbox-reading-pane.e2e.ts 8 passed, the whole chromium project 932 passed / 25 skipped / 1 failed, that one failure main's own.",
+      "headSha": "de8b7ea325de4f10a18aa134eba6ca61900452a4",
+      "negativeControl": "The claim is the diff itself: a file under packages/ in that listing would refute it."
     }
   ],
   "filesChanged": [
-    "packages/dispatch/web/src/features/inbox/Inbox.tsx - handId is the reader's hand again (anchor?.id); paneAsk/paneSubject keep a question the list no longer holds while a draft stands or an answer is outstanding; the selection moves on when the selected question leaves the listed rows; one root for both the one-column and two-column cases",
-    "packages/dispatch/web/src/features/inbox/answer-drafts.ts (new) - the unsent answer draft by ask id, modelled on reply-drafts.ts, read by the Inbox at the commit that drops the row and by the card as its kept text",
-    "packages/dispatch/web/src/features/inbox/outstanding-answers.ts (new) - the ask ids whose answer the reader sent and the server has not decided",
-    "packages/dispatch/web/src/features/inbox/useAskAnswerForm.ts - answerText lives in the draft store; onMutate marks the ask outstanding before the optimistic removal; unsentAnswer is the draft under a record the card did not write",
-    "packages/dispatch/web/src/features/inbox/AskCard.tsx - the closed-state branch shows the unsent answer as text in [data-testid=\"ask-unsent-answer\"], out of the form",
-    "packages/dispatch/web/src/__tests__/setup.ts - both stores reset after each test, as reply-drafts already is",
-    "packages/dispatch/e2e/inbox-reading-pane.e2e.ts - one new row for the refused answer (the tester's two rows untouched)",
-    "packages/dispatch/e2e/inbox-stability.e2e.ts, threads.e2e.ts, recipients-claim.e2e.ts - the rows that pinned the hold the ruling abolished, rewritten against it with their own subjects kept",
-    "packages/dispatch/AGENTS.md and packages/dispatch/.changes/unreleased/INFRA-575-reading-pane.yaml - the ruling, and the two questions that outlive their row",
-    "biome.json and packages/proof-editor/AGENTS.md - the forward merge's conflict resolution: both sides' legion-own proof-editor file kept, the count sentence reads nineteen"
+    "docs/site/media/shots.config.ts - inboxReady split into inboxPaneReady (the list, the column and one selected row) and inboxCardsReady (no column, the card in the row); the inbox shot selects the decision row and waits for its document in the column; the ask-card shot takes its own width below 1280 px, where the card is still in the row; the shortcuts shot waits for the pane behind its overlay",
+    "docs/site/media/legion/shots.config.ts - the spec-approval shot opens the Inbox at ?item=<the approval ask> and waits for Approve and Request changes in the column's head and the version below them",
+    "docs/site/media/shot-runner.ts and docs/site/media/README.md - a Shot may name its own size, which newViewerContext already honoured",
+    "docs/site/src/content/docs/dispatch/inbox-and-asks.md - a section for the two columns and what each kind of question opens as, the selection and the keys, the address, and what happens when the server drops a question; the narrow page and the drawer named as unchanged",
+    "docs/site/src/content/docs/dispatch/keyboard.md, dispatch/index.md, legion/walkthrough.md - the keys against the selected row, and the two embeds' alt text"
   ],
   "trickyParts": [
-    "The harness is rebuilt by /legion/harness/setup.sh after a pod replacement (it ran twice for this issue). After the merge of main the package resolves @playwright/test 1.64.1, which wants chromium build 1248 where the harness held 1243: every browser row failed `Executable doesn't exist … chromium_headless_shell-1248` until `bunx playwright install chromium` was run again with PLAYWRIGHT_BROWSERS_PATH at the harness. packages/contracts must be built (bun run build) after every install or e2e/agents.ts cannot import @legion/contracts.",
-    "The Inbox learns two things from module stores rather than props, because the column's card is often ProofDocument's own decision-block card and no prop route reaches it: answer-drafts.ts (what the reader typed) and outstanding-answers.ts (an answer sent and undecided). Both are read synchronously, with no subscription, on the commit that drops the row - a keystroke in the column never re-renders the list, and a hold registered a commit later would arrive after the card holding the refusal had been unmounted, which is why useAskAnswerForm marks the ask inside onMutate, before the optimistic removal.",
-    "recordAnswered reads the selection from a ref rather than its closure: the optimistic removal hands the selection on before the server answers, and the card's older onAnswered closure would otherwise hand it on a second time and skip a row.",
-    "The two red rows the tester wrote were taken as given and are unmodified; the three rows that pinned the old hold (inbox-stability.e2e.ts twice, threads.e2e.ts once) and recipients-claim.e2e.ts:311 were rewritten against the ruling, each keeping its own subject. recipients-claim's row now types an answer before the close, since at 1280 px the card it asserts is the column's and the control the reader presses is in the column, so their hand is on no row."
+    "The docs shots run on a database of their own: this role used dispatch_implementer_docs, never the tester's dispatch_tester_docs, since the harness truncates what it is given. packages/dispatch's web build must be current (bun run build:web) or the shots capture the previous head's page.",
+    "The approval shot shows no change marks, and says so: the example journey approves nothing of that spec before the request, so there is no baseline to mark against and the pane draws neither marks nor Next change. The conditional is stated in the Inbox page's prose rather than claimed by the picture."
   ],
-  "deviations": [
-    "The plan's decision D3 is replaced by the architect's ruling for the half about a dropped row; the rest of D3 (selection in React state, the URL carrying it, focus staying in the left column) stands.",
-    "A second hold was added that the ruling does not name: the column keeps the selected question while the reader's own answer for it is in flight or refused. Without it an options-only answer the server refuses left no refusal anywhere at pane width, because the optimistic removal unmounted the card that holds it. The spec's own words are the authority ('When the server accepts the answer, the next visible row in list order is selected'), as is packages/dispatch/AGENTS.md's rule for today's Inbox ('the card shows Answering…, or the error if the server refuses it … once the server records it the row is released and leaves')."
-  ],
+  "deviations": [],
   "openQuestions": [
-    "e2e/hover-preview.e2e.ts:87 ('hovering a board card previews the issue and moving onto the card keeps it open') is red in the whole-project run and is main's own, not this change's: it reproduces with its file run alone and on main at e65900f4438b exported into $TMPDIR with nothing of this branch in the tree. The second link.hover() never resolves its locator - pw:api logs 'waiting for …' and then nothing for 25 s, where the first hover of the same locator logs 'locator resolved to visible <a …>' - so the link is not in the Todo region after the drag. Sent to the controller with its evidence (dispatch://INFRA-49/comment/19bce48d-5646-46d4-968a-5afdeb025fce), and the session fixing it has this pod's full failure text and pw:api log. It is named in the pull request body so nobody reads that red as this change's."
+    "e2e/hover-preview.e2e.ts:87 is still red in the pod's whole-project run and is still main's, not this change's: it reproduces on a clean export of main with nothing of this branch in the tree, and CI's own `dispatch` lane passed at this head. It is with the controller (dispatch://INFRA-49/comment/19bce48d-5646-46d4-968a-5afdeb025fce) and the session fixing it has this pod's pw:api log."
   ],
   "discoveredComplexity": [
-    "The conflict was what kept CI off this branch entirely: while a pull request conflicts GitHub computes no merge ref and starts no on: pull_request workflow, so the reviewer had no static lane to read and READY could not merge. Both conflicting files conflicted for the same reason - main and this branch each added a legion-own file under packages/proof-editor/src/ and each had to list it in biome.json and in that package's AGENTS.md."
+    "The documentation shots are part of this change's acceptance in practice: they are taken from the running app by the `docs` job, so a page the change redraws stops them, and `ci-ok` fails with them. Nothing in the plan named them."
   ]
 }
