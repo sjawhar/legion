@@ -2,23 +2,21 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-707",
-  "completed": "2026-10-31T06:04:30Z",
+  "completed": "2026-10-31T09:24:30Z",
   "round": 3,
-  "reviewedCodeHead": "6b5c1050f718e2a7ccb4b6d1d71556753584c8f9",
-  "decision": "approved",
+  "reviewedCodeHead": "ee1add8ea9267568cabea13722aaceeed3ad2ea3",
+  "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
-  "minor": 2,
-  "roundDelta": "b67efab8 (backfill takes lockDocumentRoom right after Begin; Ledger.ownTx; takeRoomCursors pairs once; comments; TestStoredOrderBackfillDoesNotStoreTheRoomsCommittedEditTwice; TestAFailedRoomsEvictionWaitsForTheStampsCommitAndReloadsIt) and 6b5c1050, a forward merge of main f4ec92ee whose remerge-diff touches packages/envoy/AGENTS.md alone, in main's layout with this PR's three corrections.",
-  "round2Threads": "All four round-2 findings fixed in b67efab8. The implementer declined the hook-before-Begin option because an eviction there drops the stamp's class (the deep review confirmed: failRoomLocked purges the slot, StoreUpdateContext's failed-room path finishes the class, repairClass then refuses; the backfill reports an error for that one document and a rerun stamps it). The rewritten stale-room test asserts the eviction waits on the advisory lock until the stamp commits. I accept both.",
+  "important": 1,
+  "minor": 1,
+  "summary": "The code is approved in substance: the round-2 finding and three minors are fixed in b67efab8, the merge 6b5c1050 resolves only packages/envoy/AGENTS.md, and my prose commit 4a9fcec3 corrects appendingCursor's comment. The one request is a forward merge of main for a fresh CI run: ci-ok is red at ee1add8e only on main's own tests.",
+  "ci": "Required set (rulesets): ci-ok, pr-title. Run 41175096452 at ee1add8e: attempt 1 envoy-go failed on internal/dispatch/api TestAReconnectCatchesUpWhatTheListenerMissed (delivery_live_hub_test.go:776), which also failed on main e018f1d3 (run 41141376073, job 124387397825); attempt 2 (gh run rerun --failed) failed on internal/broker/oauth TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries (claims_doc_test.go:79), which main's #2598 (1a9095e6) fixes; #2594 fixes the reconnect flake. This PR changes nothing under internal/broker, docs/kubernetes.md or the delivery hub (git diff f4ec92ee ee1add8e on those paths is empty). Every other job of attempt 1 succeeded. A re-run reuses the old merge ref, so only a new head picks up main's fixes.",
   "thermonuclear": {
-    "deepReview": "Verdict: APPROVE at 6b5c1050; no deadlock, no double store; takeRoomCursors advances the same runs in every case; merge resolution only AGENTS.md; main's docs changes add no durable writer.",
-    "codeQuality": "Verdict: CHANGES at 6b5c1050; finding 2 (appendingCursor comment wrong for a live write's own flush) fixed by my prose commit 4a9fcec3; finding 1 (the afterAppendCommit hold setup copied between backfill_order_test.go and stale_room_test.go) judged Minor and not a defect: two test hooks for different windows with different payloads, no behaviour, error or gate involved."
+    "deepReview": "Verdict: APPROVE at 6b5c1050.",
+    "codeQuality": "Verdict: CHANGES at 6b5c1050; the appendingCursor comment fixed in 4a9fcec3; the copied afterAppendCommit hold setup judged not a defect."
   },
-  "proseFix": "4a9fcec3: roomcursor.go appendingCursor comment names the write branch as the one that decides a live write's own flush appends (the round-2 wording, which followed my own round-2 comment, said the flush branch).",
-  "ci": "Required set (rulesets): ci-ok, pr-title. Approval only once both are green at the head my prose push made.",
   "keyFindings": [
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/roomcursor.go", "description": "appendingCursor's comment said the flush branch decides a joined transaction's flush appends; for a live write's own flush the write branch decides. Fixed in 4a9fcec3."},
-    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/backfill_order_test.go", "description": "The afterAppendCommit hold setup repeats stale_room_test.go:1441-1456. Not a defect: test scaffolding for two different windows."}
+    {"severity": "important", "file": "(branch)", "description": "Merge main forward (at or past 1a9095e6, #2598) so CI runs on a merge ref carrying main's fixes; ci-ok is red at ee1add8e only on tests this PR does not touch."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/roomcursor.go", "description": "appendingCursor's comment named the flush branch for a live write's own flush appends; fixed in my prose commit 4a9fcec3."}
   ]
 }
