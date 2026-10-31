@@ -200,9 +200,14 @@ export interface TaskHandle {
   readonly readRoleHolder: (role: string) => Promise<string | undefined>;
   /** The listener's registered interests for a session; `undefined` when the read failed. */
   readonly readInterest: (sessionID: string) => Promise<Interest | undefined>;
-  /** Unregisters `topics` as `sessionID`'s interests at the listener. A failure is warned and
-   *  swallowed, as a recovery's own unregister was: the next pass reads the registry afresh. */
-  readonly unregisterTopics: (sessionID: string, topics: readonly string[]) => Promise<void>;
+  /** Unregisters `topics` as `sessionID`'s interests at the listener. A failure is warned under
+   *  `warning`, the caller's own sentence for it, and swallowed, as a recovery's own unregister
+   *  was: the next pass reads the registry afresh. */
+  readonly unregisterTopics: (
+    sessionID: string,
+    topics: readonly string[],
+    warning: string
+  ) => Promise<void>;
 
   // — NATS —
   /**
@@ -609,7 +614,7 @@ export function createRegistrationState(deps: RegistrationStateDeps): Registrati
         // hold is real at the listener, so leave it pending for the next pass to hand back.
         if (result.claimed) recordClaimAfterDeadline(topic, id);
         refuse(
-          `the role move that claimed ${role} for session ${id} was abandoned at its deadline while the claim was in flight; ${result.claimed ? "the hold the listener granted is left for the next pass to hand back" : "nothing was claimed"}`
+          `the role move that claimed ${role} for session ${id} was abandoned at its deadline while the claim was in flight`
         );
       }
       if (result.claimed) {
@@ -628,14 +633,12 @@ export function createRegistrationState(deps: RegistrationStateDeps): Registrati
         // The session moved while the claim was in flight. A hold that landed is kept as this
         // process's own, under the id the listener names, and the pass the move queues converges
         // it. Handing it back here would lose a role a fork should carry. The caller is told
-        // which of the two happened through the task's refusal.
+        // which of the two happened through the refusal's `claimAdopted`.
         if (result.claimed) {
           await moveHold(topic, id, previousTopic, previousHoldID);
           refusal.claimAdopted = true;
         }
-        refuse(
-          `the session moved on while its claim of role ${role} was in flight; ${result.claimed ? "the next pass keeps the hold for the session the host is on, or hands it back" : "nothing was claimed"}`
-        );
+        refuse(`the session moved on while its claim of role ${role} was in flight`);
       }
       if (!result.claimed) {
         endRole();
@@ -825,17 +828,13 @@ export function createRegistrationState(deps: RegistrationStateDeps): Registrati
           .getInterest(sessionID)
           .catch(() => undefined);
       },
-      unregisterTopics: async (sessionID, topics) => {
+      unregisterTopics: async (sessionID, topics, warning) => {
         guard();
         await deps
           .client()
           .unsubscribe({ sessionID, topics: [...topics] })
           .catch((error: unknown) =>
-            deps.log.warn("envoy: a session's registered topics were not unregistered", {
-              sessionID,
-              topics,
-              error: messageFor(error),
-            })
+            deps.log.warn(warning, { sessionID, topics, error: messageFor(error) })
           );
       },
       connect,

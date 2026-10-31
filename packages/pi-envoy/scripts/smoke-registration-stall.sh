@@ -259,22 +259,14 @@ if ((local_stack == 1)); then
   env -i PATH="$PATH" HOME="${scratch}/nats-home" "${natsd_argv[@]}" \
     >"${scratch}/natsd.log" 2>&1 &
   nats_pid=$!
-  for _ in $(seq 150); do
-    natsd_serving "${scratch}/natsd.log" && break
-    sleep 0.2
-  done
-  natsd_serving "${scratch}/natsd.log" ||
+  poll_until 30 0.2 natsd_serving "${scratch}/natsd.log" ||
     refuse "natsd did not start: $(tail -n 5 "${scratch}/natsd.log")"
   envoy_url="http://127.0.0.1:${listener_port}"
   set_listener_env "$listener_port" "nats://127.0.0.1:${nats_port}" "smoke-registration-stall-$$"
   env -i PATH="$PATH" HOME="${scratch}/listener-home" "${listener_env[@]}" \
     "${scratch}/bin/listener" >"${scratch}/listener.log" 2>&1 &
   listener_pid=$!
-  for _ in $(seq 300); do
-    listener_healthy "$envoy_url" && break
-    sleep 0.2
-  done
-  listener_healthy "$envoy_url" ||
+  poll_until 60 0.2 listener_healthy "$envoy_url" ||
     refuse "the listener did not become healthy at ${envoy_url}: $(tail -n 5 "${scratch}/listener.log")"
   note "local stack: natsd (pid ${nats_pid}) on nats://127.0.0.1:${nats_port}, listener (pid ${listener_pid}) at ${envoy_url}"
 fi

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ROLE_TOPIC_PREFIX } from "@legion/contracts";
+import { messageFor } from "@legion/envoy-client/errors";
 import {
   EnvoyApiError,
   type EnvoyClient,
@@ -552,7 +553,7 @@ describe("the serial queues", () => {
     const running = state.passes.run(async (handle) => {
       handle.actFor("ses_a");
       await handle.readInterest("ses_a");
-      await handle.unregisterTopics("ses_a", ["notifications.slack.channel.C1"]);
+      await handle.unregisterTopics("ses_a", ["notifications.slack.channel.C1"], "envoy: nope");
       return true;
     });
     await read.promise;
@@ -562,16 +563,24 @@ describe("the serial queues", () => {
     expect(handBacks).toEqual([]);
   });
 
-  test("the handle unregisters a session's topics, and a failure warns rather than fails the task", async () => {
+  test("the handle unregisters a session's topics, and a failure warns in its caller's own words rather than failing the task", async () => {
     const { state, control, handBacks, warnings } = createHarness();
     control.open = "ses_a";
     const unregistered = await state.passes.run(async (handle) => {
       handle.actFor("ses_a");
-      await handle.unregisterTopics("ses_a", ["notifications.slack.channel.C1"]);
+      await handle.unregisterTopics(
+        "ses_a",
+        ["notifications.slack.channel.C1"],
+        "envoy: could not unregister a resumed controller's retired Slack topics"
+      );
       control.unsubscribe = async () => {
         throw apiError(503);
       };
-      await handle.unregisterTopics("ses_a", ["notifications.slack.channel.C2"]);
+      await handle.unregisterTopics(
+        "ses_a",
+        ["notifications.slack.channel.C2"],
+        "envoy: could not unregister a resumed controller's retired Slack topics"
+      );
       return true;
     });
     expect(unregistered).toBe(true);
@@ -579,8 +588,15 @@ describe("the serial queues", () => {
       "notifications.slack.channel.C1@ses_a",
       "notifications.slack.channel.C2@ses_a",
     ]);
-    expect(warnings.map((warning) => warning.message)).toEqual([
-      "envoy: a session's registered topics were not unregistered",
+    expect(warnings).toEqual([
+      {
+        message: "envoy: could not unregister a resumed controller's retired Slack topics",
+        context: {
+          sessionID: "ses_a",
+          topics: ["notifications.slack.channel.C2"],
+          error: messageFor(apiError(503)),
+        },
+      },
     ]);
   });
 

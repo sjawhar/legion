@@ -2248,8 +2248,14 @@ export default function envoyExtension(pi: PiApi): void {
       ? registered.filter((topic) => slackTopicChannel(topic) !== undefined)
       : [];
     // A step of this pass, so a pass the host left behind unregisters nothing: the listener keeps
-    // the retired topics until the pass the move queued reads the registry itself.
-    if (retired.length > 0) await handle.unregisterTopics(sessionID, retired);
+    // the retired topics until the pass the move queued reads the registry itself. The failure is
+    // this branch's to name: the step warns under the sentence it is handed.
+    if (retired.length > 0)
+      await handle.unregisterTopics(
+        sessionID,
+        retired,
+        "envoy: could not unregister a resumed controller's retired Slack topics"
+      );
     // The newest replay state's topics (`rememberedTopics`), but a retired Slack topic.
     const remembered = rememberedSubjects(
       activeSessionContext?.sessionManager.getEntries() ?? []
