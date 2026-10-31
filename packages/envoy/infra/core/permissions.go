@@ -40,9 +40,10 @@ const inboxes = nats.InboxPrefix + ">"
 //     (/v1/messages/publish refuses by name a notifications. topic no stream subject captures);
 //   - the stream's info, create and update, its stored-message get, its durable's
 //     (bus.ListenerDurable) info and create, the durable's acknowledgements, and JetStream's
-//     account info. The stored-message get is the read /v1/replay makes to return the retained
-//     notifications a session missed while its subscription was down: it reads one stored message
-//     at a time and can create, change or delete nothing;
+//     account info. The stored-message get reads one stored message at a time and can create,
+//     change or delete nothing; SessionPermissions does not hold it, so no session reads the
+//     stream's stored messages itself and each takes its own from the consumer its listener
+//     relays;
 //   - for each bucket of bus.ListenerBuckets in turn (the buckets the listener's keeper raises),
 //     the calls nats.go's KV makes and the raise a start sends (bucketPermissions): the bucket's
 //     stream info, create and update, direct and stream message gets, writes to its keys, its

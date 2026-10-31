@@ -664,7 +664,7 @@ const GAP_NOTICE_NAMES: Record<ConsumerGapNotice["kind"], string> = {
 };
 
 /** What a gap notice says, field by field. */
-export function gapNoticeFields(notice: ConsumerGapNotice): Readonly<Record<string, string>> {
+function gapNoticeFields(notice: ConsumerGapNotice): Readonly<Record<string, string>> {
   return { notice: GAP_NOTICE_NAMES[notice.kind], detail: notice.message };
 }
 
@@ -675,4 +675,20 @@ export function gapNoticeFields(notice: ConsumerGapNotice): Readonly<Record<stri
  */
 export function gapNoticeText(notice: ConsumerGapNotice): string {
   return envoyNoticeText(gapNoticeFields(notice));
+}
+
+/**
+ * What a session is told when the listener can give it no consumer, worded once for every host:
+ * its registration was refused (`503 consumer_error|no_grant`, `409
+ * not_requested|invalid_session_id`) or failed, so nothing reaches it until a later registration
+ * is accepted. `why` is the listener's own message, which carries its machine-readable reason.
+ * Each host shows it where it shows a gap notice and says once per outage.
+ */
+export function inboundUnavailableNoticeText(why: string): string {
+  return envoyNoticeText({
+    notice: "Envoy inbound unavailable",
+    error: why,
+    detail:
+      "The listener gave this session no durable consumer, which is the only path an Envoy message reaches it by, so it receives none. Everything else works, and the session registers again at every heartbeat; what the stream stored meanwhile arrives once a registration is accepted.",
+  });
 }

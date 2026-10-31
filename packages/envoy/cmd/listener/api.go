@@ -1401,10 +1401,7 @@ func subscribeHandler(d *listenerDeps, machineID string, logger *logging.Logger)
 		// stored topics are the consumer's filter, and a notice published while the lane is out
 		// of it reaches the controller on no later path.
 		var roles []string
-		if slices.ContainsFunc(body.Topics, func(topic string) bool {
-			_, lane := bus.ControllerNoticeRole(topic)
-			return lane
-		}) {
+		if bus.NamesControllerNoticeLane(body.Topics) {
 			held, err := d.registry.RolesHeldBy(body.SessionID)
 			if err != nil {
 				logger.Warn("listener read of the session's roles failed",

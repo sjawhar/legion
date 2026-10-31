@@ -13,6 +13,7 @@ import {
   type ConsumerGapNotice,
   createConsumerDelivery,
   gapNoticeText,
+  inboundUnavailableNoticeText,
 } from "@legion/envoy-client/consumer-delivery"
 import {
   createDeliveryDedupe,
@@ -523,7 +524,8 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     return result
   }
 
-  // The live path's claims, which a replay sweep reads to leave a frame being delivered alone.
+  // The relay path's claims: a frame being delivered is not handed on a second time, and a claim
+  // outlives the frame, so a redelivery that arrives before the ledger records it is a repeat.
   const dedupe = createDeliveryDedupe()
   /**
    * The session id whose delivery record the ledger holds. The ledger does nothing until it is
@@ -737,8 +739,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
 
   /**
    * The relay's session left (a `/clear`) or shuts down: its unsettled frames are answered `nak`,
-   * the replay engine leaves consumer mode, its subject is unsubscribed, and the core path runs
-   * until a registration answers otherwise.
+   * its subject is unsubscribed, and nothing is relayed until the next registration is answered.
    */
   function closeRelay(): void {
     const owner = relay
@@ -826,7 +827,8 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
    * Said once per outage: the listener refused this session's registration, so it has no consumer
    * and receives nothing. The session still runs, and the heartbeat registers again every tick
    * until one is accepted; the reason is the listener's own (`consumer_error`, `no_grant`,
-   * `not_requested`, `invalid_session_id`), which the error carries in its message.
+   * `not_requested`, `invalid_session_id`), which the error carries in its message and which
+   * `inboundUnavailableNoticeText` words for every host.
    */
   let inboundUnavailableTold = false
   const tellInboundUnavailable = (error: unknown): void => {
@@ -836,20 +838,11 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     process.stderr.write(
       `envoy-channel: this session receives nothing (${why}); registering again every heartbeat\n`,
     )
-    delivery
-      .notice(
-        envoyNoticeText({
-          notice: "Envoy inbound unavailable",
-          error: why,
-          detail:
-            "The listener gave this session no durable consumer, which is the only path an Envoy message reaches it by, so it receives none. Everything else works, and the session registers again at every heartbeat; what the stream stored meanwhile arrives once a registration is accepted.",
-        }),
+    delivery.notice(inboundUnavailableNoticeText(why)).catch((noticeError: unknown) => {
+      process.stderr.write(
+        `envoy-channel: the session could not be told that it receives nothing — ${messageFor(noticeError)}\n`,
       )
-      .catch((noticeError: unknown) => {
-        process.stderr.write(
-          `envoy-channel: the session could not be told that it receives nothing — ${messageFor(noticeError)}\n`,
-        )
-      })
+    })
   }
 
   /** The title last stamped, so a heartbeat stamps nothing new. */

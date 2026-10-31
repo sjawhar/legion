@@ -203,6 +203,18 @@ func ControllerNoticeRole(topic string) (string, bool) {
 	return "legion-" + project + "-controller", true
 }
 
+// NamesControllerNoticeLane reports whether any of topics is a controller notice lane
+// (ControllerNoticeRole). It is the one question a caller asks before reading a session's roles:
+// that lane is the only private stream subject whose owner ReachesPrivateStreamSubject reads them
+// for, so a topic set naming none needs no read (cmd/listener's subscribeHandler,
+// store.Registry's controllerLaneRoles).
+func NamesControllerNoticeLane(topics []string) bool {
+	return slices.ContainsFunc(topics, func(topic string) bool {
+		_, lane := ControllerNoticeRole(topic)
+		return lane
+	})
+}
+
 // ReachesPrivateStreamSubject reports whether a topic sessionID registers as an interest reaches a
 // private stream subject (privateStreamSubjects) that is not its own: it overlaps one under NATS
 // wildcard rules (subjectsOverlap), so another session's inbox, a failed-delivery lane (a session's

@@ -43,9 +43,8 @@ const (
 	outcomeRoleClaimUnreadable requestOutcome = "role_claim_unreadable"
 	// outcomePublishDenied is a publish the server refused under this listener's own publish
 	// permissions (bus.ErrPublishDenied). Only refuseBusUnavailable records it, from the 403 that
-	// writeBusUnavailable writes; the replay route answers the same error as 503
-	// REPLAY_UNAVAILABLE and records nothing. It is not outcomeBusUnavailable: the bus answered,
-	// with a denial no retry can get past.
+	// writeBusUnavailable writes. It is not outcomeBusUnavailable: the bus answered, with a denial
+	// no retry can get past.
 	outcomePublishDenied requestOutcome = "publish_denied"
 	// outcomeDeliveryFailed is the publish route's role send answered 504 (confirmed.go): its
 	// window ended with no forward the stream stored for the holder.

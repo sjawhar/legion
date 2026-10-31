@@ -24,9 +24,8 @@ const ENVOY_MESSAGE = "envoy-message";
 export const REPLAY_DELIVERED_ENTRY = "envoy-replay-delivered";
 
 /**
- * Transcript entry holding the replay state (`LedgerState`: `{stream_id, stream_created, subjects,
- * notices}`), written only when it changed, and a cursor that only followed the stream's end at
- * most hourly (`REPLAY_STATE_REFRESH_MS`); the newest one is the state. Its subjects are every
+ * Transcript entry holding the ledger state (`LedgerState`: `{topics}`), written only when it
+ * changed; the newest one is the state. Its topics are every
  * subject the session followed, so a restart after the listener reaped its interests still follows
  * its topics.
  */

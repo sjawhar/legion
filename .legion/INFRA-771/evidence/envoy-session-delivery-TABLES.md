@@ -1,0 +1,72 @@
+build: listener and bridge this checkout (dca4b39d0 plus the working copy); plugins this checkout (dca4b39d0 plus the working copy)
+disruption             kind   event             marker           pi   cc
+a session-restart      issue  comment-1         LDT5427-001Z      1    1
+a session-restart      issue  comment-2         LDT5427-002Z      1    1
+a session-restart      agent  dispatch-message  LDT5427-003Z      1    -
+a session-restart      agent  dispatch-message  LDT5427-004Z      -    1
+a session-restart      agent  listener-send     LDT5427-005Z      1    -
+a session-restart      agent  listener-send     LDT5427-006Z      -    1
+a session-restart      role   listener-publish  LDT5427-007Z      1    -
+a session-restart      role   listener-publish  LDT5427-008Z      -    1
+a session-restart      role   core-publish      LDT5427-009Z      1    -
+a session-restart      role   core-publish      LDT5427-010Z      -    1
+a session-restart      team   team-publish      LDT5427-011Z      1    1
+b nats-cut             issue  comment-1         LDT5427-012Z      1    1
+b nats-cut             issue  comment-2         LDT5427-013Z      1    1
+b nats-cut             agent  dispatch-message  LDT5427-014Z      1    -
+b nats-cut             agent  dispatch-message  LDT5427-015Z      -    1
+b nats-cut             agent  listener-send     LDT5427-016Z      1    -
+b nats-cut             agent  listener-send     LDT5427-017Z      -    1
+b nats-cut             role   listener-publish  LDT5427-018Z      1    -
+b nats-cut             role   listener-publish  LDT5427-019Z      -    1
+b nats-cut             role   core-publish      LDT5427-020Z      1    -
+b nats-cut             role   core-publish      LDT5427-021Z      -    1
+b nats-cut             team   team-publish      LDT5427-022Z      1    1
+c listener-shared      issue  comment-1         LDT5427-023Z      1    1
+c listener-shared      issue  comment-2         LDT5427-024Z      1    1
+c listener-shared      agent  dispatch-message  LDT5427-025Z      1    -
+c listener-shared      agent  dispatch-message  LDT5427-026Z      -    1
+c listener-shared      agent  listener-send     LDT5427-027Z      1    -
+c listener-shared      agent  listener-send     LDT5427-028Z      -    1
+c listener-shared      role   listener-publish  LDT5427-029Z      1    -
+c listener-shared      role   listener-publish  LDT5427-030Z      -    1
+c listener-shared      role   core-publish      LDT5427-031Z      1    -
+c listener-shared      role   core-publish      LDT5427-032Z      -    1
+c listener-shared      team   team-publish      LDT5427-033Z      1    1
+d listener-dispatch    issue  comment-1         LDT5427-034Z      1    1
+d listener-dispatch    issue  comment-2         LDT5427-035Z      1    1
+d listener-dispatch    agent  dispatch-message  LDT5427-036Z    0/0    -
+d listener-dispatch    agent  dispatch-message  LDT5427-037Z      -  0/0
+d listener-dispatch    agent  listener-send     LDT5427-038Z      1    -
+d listener-dispatch    agent  listener-send     LDT5427-039Z      -    1
+d listener-dispatch    role   listener-publish  LDT5427-040Z      1    -
+d listener-dispatch    role   listener-publish  LDT5427-041Z      -    1
+d listener-dispatch    role   core-publish      LDT5427-042Z      1    -
+d listener-dispatch    role   core-publish      LDT5427-043Z      -    1
+d listener-dispatch    team   team-publish      LDT5427-044Z      1    1
+e dispatch-kill        issue  comment-1         LDT5427-045Z      1    1
+e dispatch-kill        issue  comment-2         LDT5427-046Z      1    1
+e dispatch-kill        agent  dispatch-message  LDT5427-047Z      1    -
+e dispatch-kill        agent  dispatch-message  LDT5427-048Z      -    1
+e dispatch-kill        agent  listener-send     LDT5427-049Z      1    -
+e dispatch-kill        agent  listener-send     LDT5427-050Z      -    1
+e dispatch-kill        role   listener-publish  LDT5427-051Z      1    -
+e dispatch-kill        role   listener-publish  LDT5427-052Z      -    1
+e dispatch-kill        role   core-publish      LDT5427-053Z      1    -
+e dispatch-kill        role   core-publish      LDT5427-054Z      -    1
+e dispatch-kill        team   team-publish      LDT5427-055Z      1    1
+f none                 issue  comment-1         LDT5427-056Z      1    1
+f none                 issue  comment-2         LDT5427-057Z      1    1
+f none                 agent  dispatch-message  LDT5427-058Z      1    -
+f none                 agent  dispatch-message  LDT5427-059Z      -    1
+f none                 agent  listener-send     LDT5427-060Z      1    -
+f none                 agent  listener-send     LDT5427-061Z      -    1
+f none                 role   listener-publish  LDT5427-062Z      1    -
+f none                 role   listener-publish  LDT5427-063Z      -    1
+f none                 role   core-publish      LDT5427-064Z      1    -
+f none                 role   core-publish      LDT5427-065Z      -    1
+f none                 team   team-publish      LDT5427-066Z      1    1
+(a cell is the count of entries carrying the marker in that session's transcript; "!" marks a count other than expected; "/0" marks an event its publisher refused, expected 0 times; "-" an event not meant for that session)
+note: Dispatch published LIVE-1's comments in another order than they were written: written ; stored 
+issue order: every comment of LIVE-1 appears in its stream order in both transcripts
+transcripts: pi /legion/scratch/tmp/envoy-session-delivery.LTiOe2Rw/sessions/pi/sessions/2026-10-31T14-01-29-324Z_01a19243-f3ec-731e-8ec6-1d80703a1b25.jsonl; cc /legion/scratch/tmp/envoy-session-delivery.LTiOe2Rw/sessions/cc/config/projects/-legion-scratch-tmp-envoy-session-delivery-LTiOe2Rw-sessions-cc-cwd/a9d01126-fea4-4cb5-ae25-8ed6255eec93.jsonl

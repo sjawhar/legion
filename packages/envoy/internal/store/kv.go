@@ -702,20 +702,15 @@ func mergeForUpsert(cur Interest, getErr error, item Interest, topics []string, 
 }
 
 // controllerLaneRoles reports the roles sessionID holds (RolesHeldBy) when one of the topic sets
-// names a Legion controller notice lane (bus.ControllerNoticeRole), and nil when none does: that
-// lane is the one private stream subject whose owner the rule reads a session's roles for
+// names a Legion controller notice lane (bus.NamesControllerNoticeLane), and nil when none does:
+// that lane is the one private stream subject whose owner the rule reads a session's roles for
 // (bus.ReachesPrivateStreamSubject), so a write naming none makes no view read and is refused for
 // none. A write that names one is refused while the view cannot answer (ErrRoleViewNotReady)
 // rather than storing the row without the lane: the row drives the session's consumer filter, and
 // a notice published while the lane was out of that filter reaches the controller on no later
 // path.
 func (r *Registry) controllerLaneRoles(sessionID string, topics ...[]string) ([]string, error) {
-	named := slices.ContainsFunc(topics, func(set []string) bool {
-		return slices.ContainsFunc(set, func(topic string) bool {
-			_, lane := bus.ControllerNoticeRole(topic)
-			return lane
-		})
-	})
+	named := slices.ContainsFunc(topics, bus.NamesControllerNoticeLane)
 	if !named {
 		return nil, nil
 	}
