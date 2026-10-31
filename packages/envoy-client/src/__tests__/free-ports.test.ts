@@ -1,5 +1,5 @@
-import { createServer } from "node:net";
 import { describe, expect, test } from "bun:test";
+import { createServer } from "node:net";
 import { freePorts } from "../../test/envoy-stack";
 
 // The ports the real-stack harness gives one stack (natsd's client port, natsd's monitoring port

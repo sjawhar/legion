@@ -7,7 +7,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { createServer } from "node:net";
+import { createServer, type Server } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Subprocess } from "bun";
@@ -63,19 +63,36 @@ async function buildBinaries(bin: string): Promise<void> {
   }
 }
 
-/** A loopback port nothing listens on now. */
-async function freePort(): Promise<number> {
-  const server = createServer();
-  const listening = Promise.withResolvers<void>();
-  server.once("error", listening.reject);
-  server.listen(0, "127.0.0.1", () => listening.resolve());
-  await listening.promise;
-  const address = server.address();
-  const closed = Promise.withResolvers<void>();
-  server.close(() => closed.resolve());
-  await closed.promise;
-  if (address === null || typeof address === "string") throw new Error("no free loopback port");
-  return address.port;
+/**
+ * `count` distinct loopback ports nothing listens on now. Every probe socket stays open until all
+ * of them are bound, so the kernel cannot hand one ephemeral port out twice; one at a time, each
+ * closed before the next opened, it can, and two processes of one stack then race for one port.
+ */
+export async function freePorts(count: number): Promise<number[]> {
+  const servers: Server[] = [];
+  try {
+    const ports: number[] = [];
+    for (let i = 0; i < count; i++) {
+      const server = createServer();
+      servers.push(server);
+      const listening = Promise.withResolvers<void>();
+      server.once("error", listening.reject);
+      server.listen(0, "127.0.0.1", () => listening.resolve());
+      await listening.promise;
+      const address = server.address();
+      if (address === null || typeof address === "string") throw new Error("no free loopback port");
+      ports.push(address.port);
+    }
+    return ports;
+  } finally {
+    await Promise.all(
+      servers.map((server) => {
+        const closed = Promise.withResolvers<void>();
+        server.close(() => closed.resolve());
+        return closed.promise;
+      })
+    );
+  }
 }
 
 /** The last lines of a log file, for an error that names why a process failed. */
@@ -180,11 +197,7 @@ export async function startEnvoyStack(
   try {
     const bin = path.join(work, "bin");
     await buildBinaries(bin);
-    const [natsPort, monitorPort, listenerPort] = [
-      await freePort(),
-      await freePort(),
-      await freePort(),
-    ];
+    const [natsPort, monitorPort, listenerPort] = await freePorts(3);
     const natsHome = path.join(work, "nats-home");
     const listenerHome = path.join(work, "listener-home");
     mkdirSync(natsHome);
