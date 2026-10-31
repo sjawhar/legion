@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/encoding"
 	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -132,6 +133,67 @@ func TestRebuildDocumentRestoresDocumentThatCannotLoad(t *testing.T) {
 	}
 	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
 		t.Fatalf("load after the rebuild commits: %v", err)
+	}
+}
+
+// refusedDeleteRangeUpdate is a V1 update with no structs and one delete range, which ygo refuses
+// whenever it decodes it: clock + length passes 2^53-1, the highest clock a Yjs peer can make and
+// the highest ygo's own state encodings carry. An earlier release took such an update, so a
+// document stored before this one's ygo can hold it; AppendUpdate refuses it now.
+func refusedDeleteRangeUpdate(client, clock, length uint64) []byte {
+	return encoding.EncodeBytes(func(enc *encoding.Encoder) {
+		enc.WriteVarUint(0) // no struct groups
+		enc.WriteVarUint(1) // one client's deletions
+		enc.WriteVarUint(client)
+		enc.WriteVarUint(1) // one range
+		enc.WriteVarUint(clock)
+		enc.WriteVarUint(length)
+	})
+}
+
+// A stored history ygo refuses from its clocks reads as a document that cannot load
+// (ErrDocumentUnloadable), the answer every history that does not decode gets. Such a history
+// does not even merge: the fold cannot apply the refused update, so the stored updates are served
+// merged (stateThrough), and the merge refuses them as the apply did. A read that meets a merge
+// ygo will not make must still name the document unloadable, which tells the caller the document
+// is the one a person decides to rebuild, rather than a server fault it should retry past.
+func TestAStoredHistoryYgoRefusesFromItsClocksCannotLoad(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before\n")
+	tree, err := pmdoc.Parse("before\n")
+	if err != nil {
+		t.Fatalf("parse the document: %v", err)
+	}
+	seed := crdt.New()
+	fragment := seed.GetXmlFragment(fragmentName)
+	seed.Transact(func(txn *crdt.Transaction) {
+		if err := pmdoc.Update(txn, fragment, tree); err != nil {
+			t.Errorf("write the seed document: %v", err)
+		}
+	})
+	persist := NewPgVersioned(database)
+	if _, err := persist.AppendUpdate(ctx, artifactID, crdt.EncodeStateAsUpdateV1(seed, nil)); err != nil {
+		t.Fatalf("store the document's first update: %v", err)
+	}
+	refused := refusedDeleteRangeUpdate(7, 1<<53, 2)
+	if _, err := persist.AppendUpdate(ctx, artifactID, refused); err == nil {
+		t.Fatal("the store appended an update ygo refuses")
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		insert into doc_updates (artifact_id, version, update, content_changed) values ($1, 2, $2, true)
+	`, artifactID, refused); err != nil {
+		t.Fatalf("store the update an earlier release took: %v", err)
+	}
+
+	service := newSchemaRepairService(database)
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown service: %v", err)
+		}
+	})
+	if _, err := service.Text(ctx, artifactID); !errors.Is(err, ErrDocumentUnloadable) {
+		t.Fatalf("read the history ygo refuses: %v, want ErrDocumentUnloadable", err)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -319,4 +320,130 @@ func TestASettlementStampsMoreBlocksThanYgosDefaultQueue(t *testing.T) {
 	if repairs := pmdoc.BlockIDRepairCount(tree); repairs != 0 {
 		t.Fatalf("the stored document still needs %d block-id repairs", repairs)
 	}
+}
+
+// A browser's two edits reach the room out of order: the one that leans on the other lands first
+// and parks, waiting for it, and the one it waits for lands next. The room's rendered replica is
+// the copy of the room every read walks (holdLive), so after each commit it must hold what the
+// room holds, the structs and deletions that commit parked included: ygo leaves those out of the
+// update its observers are handed, as Yjs does, and carries them beside it
+// (crdt.LoggedUpdate.Parked). A replica that takes only the update is a copy of the room that has
+// lost the browser's parked edit: caught up with the edit that fills the gap, as the room is, it
+// shows the room's text without it.
+func TestTheRoomsRenderedReplicaHoldsWhatACommitParked(t *testing.T) {
+	service, artifactID := newTestService(t)
+	// Settlement is not under test, and its stamp of the browser's blocks would commit into the
+	// room while the edit is parked.
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n")
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("open a room on the seeded document: %v", err)
+	}
+	room := service.srv.GetDoc(artifactID)
+	if room == nil {
+		t.Fatal("the document's room is not resident")
+	}
+	replica := service.replicaOf(room)
+	if replica == nil {
+		t.Fatal("the room keeps no rendered replica")
+	}
+
+	browser := crdt.New()
+	if err := crdt.ApplyUpdateV1(browser, crdt.EncodeStateAsUpdateV1(room, nil), nil); err != nil {
+		t.Fatalf("open the document in the browser: %v", err)
+	}
+	synced := browser.StateVector()
+	peerAppend(t, browser, "Second.\n")
+	filler := crdt.EncodeStateAsUpdateV1(browser, synced)
+	gap := browser.StateVector()
+	peerAppend(t, browser, "Third.\n")
+	parking := crdt.EncodeStateAsUpdateV1(browser, gap)
+	want, err := renderDocument(browser)
+	if err != nil {
+		t.Fatalf("render the browser's document: %v", err)
+	}
+
+	if err := crdt.ApplyUpdateV1(room, parking, "peer"); err != nil {
+		t.Fatalf("apply the browser's second edit to the room: %v", err)
+	}
+	if parked := room.PendingStats(); parked.Items == 0 {
+		t.Fatal("the room integrated the browser's second edit whole; without the first it must park it")
+	}
+	if got := renderedWith(t, replicaState(t, replica), filler); got != want {
+		t.Errorf("a copy of the replica taken while the edit was parked, caught up, renders %q, want %q", got, want)
+	}
+	if got := renderedWith(t, crdt.EncodeStateAsUpdateV1(room, nil), filler); got != want {
+		t.Errorf("a copy of the room taken while the edit was parked, caught up, renders %q, want %q", got, want)
+	}
+
+	if err := crdt.ApplyUpdateV1(room, filler, "peer"); err != nil {
+		t.Fatalf("apply the browser's first edit to the room: %v", err)
+	}
+	if got, err := renderDocument(room); err != nil || got != want {
+		t.Fatalf("the room renders %q (%v), want the browser's %q", got, err, want)
+	}
+	replica.mu.Lock()
+	defer replica.mu.Unlock()
+	if replica.doc == nil {
+		t.Fatal("the replica holds no document")
+	}
+	if got, err := renderDocument(replica.doc); err != nil || got != want {
+		t.Errorf("the replica renders %q (%v), want the room's %q", got, err, want)
+	}
+	if got, want := replica.doc.StateVector(), room.StateVector(); !maps.Equal(got, want) {
+		t.Errorf("the replica's state vector = %v, want the room's %v", got, want)
+	}
+	if got := renderedWith(t, crdt.EncodeStateAsUpdateV1(replica.doc, nil), nil); got != want {
+		t.Errorf("a copy of the replica renders %q, want the room's %q", got, want)
+	}
+}
+
+// peerAppend appends markdown's blocks to peer's tree in one transaction, as a browser's edit
+// does. peerEdit makes one such edit on a document freshly synced from the room; a browser that
+// edits twice keeps its document and sends each edit on its own.
+func peerAppend(t *testing.T, peer *crdt.Doc, markdown string) {
+	t.Helper()
+	tree, err := treeOf(peer)
+	if err != nil {
+		t.Fatalf("read the browser's document: %v", err)
+	}
+	edit := appendBlocks(t, markdown)
+	fragment := peer.GetXmlFragment(fragmentName)
+	peer.Transact(func(txn *crdt.Transaction) {
+		if err := pmdoc.Update(txn, fragment, edit(tree)); err != nil {
+			t.Errorf("edit the browser's document: %v", err)
+		}
+	})
+}
+
+// replicaState is the replica's whole state, parked structs and deletions included, taken under
+// the lock its update observer holds, as a read served from the replica takes it.
+func replicaState(t *testing.T, replica *renderedReplica) []byte {
+	t.Helper()
+	replica.mu.Lock()
+	defer replica.mu.Unlock()
+	if replica.doc == nil {
+		t.Fatal("the replica holds no document")
+	}
+	return crdt.EncodeStateAsUpdateV1(replica.doc, nil)
+}
+
+// renderedWith renders state in a document of its own, with later applied to it first unless it is
+// nil: what a copy taken from that state shows once the update that fills its gap arrives.
+func renderedWith(t *testing.T, state, later []byte) string {
+	t.Helper()
+	doc := newDocumentCopy()
+	if err := crdt.ApplyUpdateV1(doc, state, nil); err != nil {
+		t.Fatalf("decode the copied state: %v", err)
+	}
+	if later != nil {
+		if err := crdt.ApplyUpdateV1(doc, later, nil); err != nil {
+			t.Fatalf("apply the edit that fills the gap: %v", err)
+		}
+	}
+	markdown, err := renderDocument(doc)
+	if err != nil {
+		t.Fatalf("render the copy: %v", err)
+	}
+	return markdown
 }
