@@ -197,6 +197,56 @@ func TestAStoredHistoryYgoRefusesFromItsClocksCannotLoad(t *testing.T) {
 	}
 }
 
+// A stored history ygo refuses from its clocks reads as a document that cannot load, and the
+// answer offers a rebuild from the latest saved version. The repair it offers must work: the
+// rebuild reads the latest saved version, not the history that cannot load, so it restores the
+// document. A read that offers no rebuild for this cause would be the other way to keep the answer
+// true, and the test accepts it; what it refuses is an offered rebuild that then fails.
+func TestTheRebuildAStoredHistoryYgoRefusesIsOfferedRestoresTheDocument(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before\n")
+	tree, err := pmdoc.Parse("before\n")
+	if err != nil {
+		t.Fatalf("parse the document: %v", err)
+	}
+	seed := crdt.New()
+	fragment := seed.GetXmlFragment(fragmentName)
+	seed.Transact(func(txn *crdt.Transaction) {
+		if err := pmdoc.Update(txn, fragment, tree); err != nil {
+			t.Errorf("write the seed document: %v", err)
+		}
+	})
+	if _, err := NewPgVersioned(database).AppendUpdate(ctx, artifactID, crdt.EncodeStateAsUpdateV1(seed, nil)); err != nil {
+		t.Fatalf("store the document's first update: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		insert into doc_updates (artifact_id, version, update, content_changed) values ($1, 2, $2, true)
+	`, artifactID, refusedDeleteRangeUpdate(7, 1<<53, 2)); err != nil {
+		t.Fatalf("store the update an earlier release took: %v", err)
+	}
+
+	service := newSchemaRepairService(database)
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown service: %v", err)
+		}
+	})
+	_, readErr := service.Text(ctx, artifactID)
+	if readErr == nil {
+		t.Fatal("the history ygo refuses read as a document")
+	}
+	if !strings.Contains(readErr.Error(), "rebuild") {
+		return
+	}
+	if _, _, err := rebuildDocument(t, service, artifactID, nil); err != nil {
+		t.Fatalf("the read offered a rebuild (%v), and the rebuild failed: %v", readErr, err)
+	}
+	if text, err := service.Text(ctx, artifactID); err != nil || text != "before\n" {
+		t.Fatalf("read the rebuilt document: %q (%v), want the latest saved version", text, err)
+	}
+}
+
 // A resident room remains live even when no writer holds its advisory lock, so the server registry
 // refuses rebuilding it without changing durable history. The refusal names what a rebuild would
 // discard, names no other repair, and tells the caller to stop and ask a person.
