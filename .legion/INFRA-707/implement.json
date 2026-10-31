@@ -2,53 +2,46 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-707",
-  "completed": "2026-10-30T23:40:00Z",
+  "completed": "2026-10-31T05:29:50Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2496",
-  "codeHead": "00441179b54d3a15314f25ed7fec848a4219491c",
-  "round": "answers review round 1 at eb0fe0be (review.json, cd88c3cd): structural changes, no behaviour change except the block-id backfill now flushes first",
-  "answersToReview": [
-    "persistence.go:122: the worker's flush is VersionedStore.AppendRoomFlush(ctx, room, flush, through, credit), called from StoreUpdateContext; AppendUpdateWithCredit is one update again; withWorkerFlush/workerFlushFrom deleted; every store wrapper that held or failed the browser's append now does so in AppendRoomFlush; the worker still decodes its own update before anything is stored.",
-    "flush.go:158: flushGateContextKey/flushGateFrom/gated context deleted; appendingCursor(ctx, room, flush) takes the flush explicitly or the ledger's.",
-    "ledger.go:237: RoomFlush.appended(own) is the one fold (heldThrough, withOwnAppends, uploadCapture, commitSettlement, takeRoomCursors); advanceRoomCursorThrough the one advance; the taken type gone.",
-    "flush.go:329: backfillBlockIDs stores through a settling Ledger with storeRepair and commitSettlement; closureChangedMarkdown deleted. It takes the advisory lock at its first append (its subcommand's service serves no browser; TestARoomLoadingWhileAStampCommitsStandsBehindTheHeadAndReloads holds that window), documented at both sites.",
-    "pending_authors.go:471: room-cursor code moved to roomcursor.go (330 lines); pending_authors.go 725 lines.",
-    "flush.go:284: nil-cursor return at the top of Ledger.flushThrough; flushRead and storeRead deleted.",
-    "flush.go:111: ran deleted; two room_handover_test.go classes now carry real seqs (1, 2), assertions unchanged.",
-    "livewrite.go:376: errForkReleased wraps ErrServiceUnavailable (503, retryable).",
-    "README.md:1509: note on the per-document snapshot and vacuum; pass --since or read a replica.",
-    "Body findings: packages/envoy/AGENTS.md corrected (queueUpdateClass, finishUpdateClass, readPoint for captures, repairClass, lock-order rewrite naming observe, readPoint and drainedSeq and the rule their callers follow); the two retrySettleSoon comments corrected (service.go SettleNow, cmd/dispatch/multiprocess_test.go). All nine threads replied to and resolved."
-  ],
+  "codeHead": "6b5c1050f718e2a7ccb4b6d1d71556753584c8f9",
+  "round": "answers review round 2 at f33d68d2 (review.json, 3b11437f): the backfill lock and three minors (b67efab8), then a forward merge of main f4ec92ee (6b5c1050)",
   "proof": [
     {
       "criterion": "1. A test drives an agent write racing browser updates on one warm room, fails on main, passes at the head over enough rounds (count and main's failure rate stated).",
       "surface": "Go tests against a real Postgres 18.6 + pgvector 0.8.7 (local, as CI runs them)",
-      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<url> go test ./internal/dispatch/docs/ -count=1 -timeout 75m ; go test ./internal/dispatch/docs/ -run TestStoredOrderSoak -count=1 -v -args -stored-order-rounds=200 ; CGO_ENABLED=1 go test -race ./internal/dispatch/docs/ -run 'TestStoredOrder|TestAFlush|TestAReadPoint|TestAShadow|TestAFailedRooms|Backfill|Undecodable' -count=1 ; go test ./cmd/dispatch/ ./loadtest/browsertype/ -count=1",
-      "observed": "At 00441179: whole docs package ok 938.3s; soak rounds=200 counted=200 mismatching_counted_rounds=0 mismatches=0; race lane ok, no data race; cmd/dispatch and browsertype ok. p = 1 on main, so n = 200.",
-      "headSha": "00441179b54d3a15314f25ed7fec848a4219491c",
+      "command": "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<url> go test ./internal/dispatch/docs/ -count=1 -timeout 75m ; go test ./internal/dispatch/docs/ -run TestStoredOrderSoak -count=1 -v -args -stored-order-rounds=200 ; CGO_ENABLED=1 go test -race ./internal/dispatch/docs/ -run 'TestStoredOrder|TestAFlush|TestAReadPoint|TestAShadow|TestAFailedRooms|Backfill' -count=1 ; go test ./cmd/dispatch/ ./loadtest/browsertype/ -count=1",
+      "observed": "At 6b5c1050: whole docs package ok 1472.1s; soak rounds=200 counted=200 mismatching_counted_rounds=0 mismatches=0; race lane ok, no data race; cmd/dispatch and browsertype ok; TestStoredOrderBackfillDoesNotStoreTheRoomsCommittedEditTwice passes (and fails with the backfill's lock line removed). p = 1 on main, so n = 200.",
+      "headSha": "6b5c1050f718e2a7ccb4b6d1d71556753584c8f9",
       "negativeControl": "main 7c2effba's production code plus this branch's storedorder.go and storedorder_test.go: all ten window tests and the soak fail (179 mismatches over 12 of 12 counted rounds); the tester rebuilt the same control from main's own tree (170 mismatches)."
     },
     {
       "criterion": "Stored history replays under real browsers and agent HTTP writes on a real Dispatch server; browsertype -protect leaves the protected paragraph alone",
       "surface": "local real envoy-dispatch built from the head, Postgres 18.6 + pgvector, browsertype peers over the document websocket, agent writes over the HTTP API, envoy-dispatch stored-order from the same head",
-      "command": "PROTECT='The last paragraph of the seed.' HEAD_SRC=<00441179 packages/envoy> bash run.sh head <00441179 packages/envoy> 18801 60 (run.sh, agent.py, pg.sh in dispatch://INFRA-707/artifact/infra-707-implementer-evidence-tar-gz version 5)",
-      "observed": "agent: 56 delete + 44 insert + 19 replace edits, 64 named versions, 51 uploads accepted; 6 peers errors=0; stored-order documents=2 clean=2 mismatched=0 refused=0 failed=0 unchecked=0 (1702 and 1722 updates, 93 and 95 versions checked), exit 0; protected sentence intact in both documents.",
-      "headSha": "00441179b54d3a15314f25ed7fec848a4219491c",
+      "command": "PROTECT='The last paragraph of the seed.' HEAD_SRC=<6b5c1050 packages/envoy> bash run.sh head <6b5c1050 packages/envoy> 18801 60 (run.sh, agent.py, pg.sh in dispatch://INFRA-707/artifact/infra-707-implementer-evidence-tar-gz version 6)",
+      "observed": "agent: 56 delete + 44 insert + 19 replace edits, 66 named versions, 55 uploads accepted; 6 peers errors=0; stored-order documents=2 clean=2 mismatched=0 refused=0 failed=0 unchecked=0 (1706 and 1735 updates, 95 and 99 versions checked), exit 0; protected sentence intact in both documents; server log 0 ERROR lines.",
+      "headSha": "6b5c1050f718e2a7ccb4b6d1d71556753584c8f9",
       "negativeControl": "Same script with the server built from main 5455925b and no -protect (round 3): stored-order documents=2 clean=0 mismatched=2, 34 mismatches, exit 1; the unprotected sentence was typed into."
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/docs/{flush.go,ledger.go,livewrite.go,mutation.go,pending_authors.go,persistence.go,roomcursor.go (new),service.go,shadow.go,tree.go,websocket.go}",
-    "test store wrappers and signatures: room_recovery_test.go, service_test.go, shutdown_test.go, room_handover_test.go, lock_order_test.go, authors_test.go, mutation_test.go, pending_authors_test.go, settlement_credit_test.go, settlement_repair_test.go, internal/dispatch/api/live_write_test.go, cmd/dispatch/multiprocess_test.go (comment)",
-    "packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md"
+    "packages/envoy/internal/dispatch/docs/{service.go,ledger.go,flush.go,roomcursor.go}",
+    "packages/envoy/internal/dispatch/docs/backfill_order_test.go (new race test), stale_room_test.go (eviction waits for the stamp's commit)",
+    "packages/envoy/AGENTS.md (merge resolution in main's one-sentence-per-line layout)"
   ],
   "trickyParts": [
     "RoomFlush is exported (fields unexported) because it crosses VersionedStore, which a test store in internal/dispatch/api wraps.",
     "Local harness: pg.sh (Postgres 18.6 + pgvector under $TMPDIR/pg18, port 55418); restart it if tests fail with connection refused."
   ],
-  "deviations": [
-    "The block-id backfill takes the document's advisory lock at its first append rather than before its flush reads the room's queue; documented at backfillBlockIDs and Service.flushThrough."
-  ],
+  "deviations": [],
   "openQuestions": [
-    "Acceptance 2 cluster evidence was taken at eb0fe0be; this round moves no behaviour of a live write, settlement, snapshot, the worker or the checker."
+    "Acceptance 2 cluster evidence was taken at eb0fe0be; rounds since change no live write, settlement, snapshot, worker or checker behaviour except that the backfill now takes the document lock before its flush."
+  ],
+  "answersToReview": [
+    "service.go:2349 (blocking): backfillBlockIDs takes lockDocumentRoom right after Begin, before storeRepair reads the room's queue; the exception paragraph and flushThrough's exception sentence are gone. New TestStoredOrderBackfillDoesNotStoreTheRoomsCommittedEditTwice: red with the lock line removed (bob's edit stored in 2 rows, class mismatch), green with it. The stale-room test is now TestAFailedRoomsEvictionWaitsForTheStampsCommitAndReloadsIt (option B; option A failed because an eviction before Begin drops the stamp's class).",
+    "service.go:2355: Ledger.settling renamed ownTx at both sites and in inTransaction; the type doc names settlement and the backfill.",
+    "ledger.go:240: takeRoomCursors decides the write/flush pairing once.",
+    "roomcursor.go:301: appendingCursor's comment corrected.",
+    "Forward merge of main f4ec92ee at 6b5c1050: only packages/envoy/AGENTS.md conflicted (main re-laid it out one sentence per line); resolved in main's layout with this PR's corrections. Comment https://github.com/sjawhar/legion/pull/2496#issuecomment-6539229273. All four threads replied to and resolved."
   ]
 }
