@@ -2,18 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-607",
-  "completed": "2026-10-31T09:20:00Z",
+  "completed": "2026-10-31T13:25:00Z",
   "proof": [
     {
-      "criterion": "Forward merge of main 1a9095e6 (no rebase) gives PR #2391 a CI run on a main whose broker/oauth claims test passes, with the PR's own diff unchanged",
-      "surface": "jj diff fingerprints of the PR's own diff at 3390b679 and 04e390bf; go build/vet and the broker/oauth claims test at the merge head; semantic-line-breaks on the two re-laid docs",
-      "command": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB go build ./... && go vet ./... && go vet -tags multiprocess ./cmd/dispatch/ && (cd infra && go vet ./... && go test ./gcp/ -run Connections) && go test -p 1 ./internal/broker/oauth/ -run TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries; bun scripts/semantic-line-breaks.ts packages/envoy/AGENTS.md packages/envoy/cmd/dispatch/README.md",
-      "observed": "no conflict; fingerprints identical (plain d0a8917d2479, normalised fbb6758c71d8) at both heads; main changed only packages/envoy/AGENTS.md of this PR's files and its layout check passes; build and vet clean, go.work.sum unchanged; the claims test that failed envoy-go at 3390b679 passes; migrations 0150-0156, connections 90. PR comment 6541436301.",
-      "headSha": "04e390bf6e613f7ec9f07473c3ccc0ec25e588f1",
-      "negativeControl": "at 3390b679 (merge ref with main before #2598) envoy-go failed TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries in run 41172450499; at 04e390bf, which carries #2598, the same test passes"
+      "criterion": "Forward merge of main b4dc9f96 (no rebase) gives PR #2391 a fresh merge ref and CI run, with the PR's own diff byte-identical to the approved one",
+      "surface": "jj diff fingerprints of the PR's own diff at 04e390bf and 28140303; go build/vet and the touched api tests on a real Postgres 16 at the merge head; gh pr view mergeable after the push",
+      "command": "cd packages/envoy && GOMAXPROCS=4 GOMEMLIMIT=12GiB go build ./... && go vet ./... && go vet -tags multiprocess ./cmd/dispatch/ && (cd infra && go vet ./... && go test ./gcp/ -run Connections) && go test -p 1 ./internal/dispatch/api/ -run 'DeliveryHub|DeliveryLive|Reconnect|CatchUp|Suggestion|Maintenance|Sweep'; gh pr view 2391 -R sjawhar/legion --json mergeable",
+      "observed": "fingerprints identical (plain d0a8917d2479, normalised fbb6758c71d8) at both heads; one text-only conflict in .dispatch/architecture/dispatch-docs.md, both sides kept; build and vet clean; api tests ok in 89 s; MERGEABLE after the push; migrations 0150-0156, connections 90. PR comment on 2391 after this push.",
+      "headSha": "2814030326bc55e74be057cf968bd9d7293f518d",
+      "negativeControl": "at 04e390bf, envoy-e2e-local failed checking out the gone merge ref 304da3dd (job 124502788802, 'upload-pack: not our ref'); 28140303 is a new head whose merge ref GitHub computes afresh"
     }
   ],
   "filesChanged": [
-    "04e390bf (forward merge of main 1a9095e6, no conflict): no file of this PR's own diff changed"
+    "28140303 (forward merge of main b4dc9f96): .dispatch/architecture/dispatch-docs.md conflict (this PR's depends_on and loops paragraph, main's first paragraph); no other file of this PR's own diff changed"
   ]
 }
