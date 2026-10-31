@@ -2,31 +2,48 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-557",
-  "completed": "2026-10-31T02:30:00Z",
-  "round": 18,
-  "testedHead": "ff705a787c7e",
-  "handoffHead": "f33da395f6f1928c80449d69baf15f9a2872f7cc",
-  "scope": "The round-17 risk fix (580089b5: release the lease when the receive connection is down past leaseReceiveLost) and the two merges of main (6c38d745 with #2517, ff705a78 with #2422).",
+  "completed": "2026-10-31T10:08:00Z",
+  "round": 19,
+  "testedHead": "9c2471397600f57efa702c1859cfe390e3b499b8",
+  "handoffHead": "911f19de34f60f74bee602676a407e8668e2559c",
+  "scope": "The round-18 fix (6828bbb3: the lease reads the receive signal from atomics, not through nats.go's connection lock) and the merge of main 9c247139.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the whole multiprocess suite at the head: go test -tags multiprocess -count=1 -timeout 40m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener -> 31 PASS, ok 670.056s, including TestTwoPodsReceiveConnectionLostHandsOverWithin15s and TestTwoPodsReceiveConnectionBackInsideTheBoundKeepsTheLease. The receive-lost row's relay closes reconnects at their CONNECT frame, so it does not reach the case in the failure below."
+    "how": "I re-ran each of the implementer's three proofs myself. (1) The unchanged red row at 9c247139, -count=7: 7 of 7 PASS, slowest message 12.025 s; the implementer reported 11.95 s over 3 runs. (2) The two new unit tests: they fail at 7494c07d with only the test file copied in (4.891 s and 4.898 s against a 100 ms bound) and pass 3 of 3 at 9c247139. (3) Multiprocess suite ok 708.281s (32 PASS); internal/bus under -race ok 345.391s; untagged ./cmd/listener ok 853.751s."
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "proof": [
     {
-      "criterion": "INFRA-14 risk from round 17: when only the holder's receive connection is lost, a standby takes over and delivers within the 15 s hard bound (the fix's design: release after leaseReceiveLost, 3 s down).",
-      "evidence": "Red test TestTwoPodsReceiveConnectionLostToADroppingRouteReleasesTheLeaseWithin15s (packages/envoy/cmd/listener/multiprocess_takeover_test.go, with mpLaneRelay.blackholeNew in multiprocess_harness_test.go, commit 'test(envoy-listener): red row for a receive connection lost to a route that drops its packets'). Command: cd packages/envoy && go test -tags multiprocess -count=3 -timeout 20m -run '^TestTwoPodsReceiveConnectionLostToADroppingRouteReleasesTheLeaseWithin15s$' -v ./cmd/listener -> FAIL 3 of 3 at ff705a78 (twice '10 of 150 messages reached their session later than 15s', first at 15.966s; once 'pod-a never released the lease for its lost receive connection'). Real-binary run (cut.py recv, 7 runs): the standby takes the EXPIRED lease at 7.94 s in 5 runs, with first delivery 13.95 s after the cut; in 2 runs the lease is released only at 9.85 s, with first delivery at 15.95 s. Cause, from a SIGQUIT goroutine dump of pod-a 5.5 s into the cut: lease.step -> receiveDown -> durableReceiver.receiveUp -> bus.Client.Connected -> nats.Conn.Status blocks on the connection RWMutex, which nats.go doReconnect -> processConnectInit holds while it waits for the INFO of a reconnect that never answers. So the lease loop, renewals included, stalls whenever the receive connection's reconnect dials hang (a route that drops packets, a blackholed hub address)."
+      "criterion": "A holder whose receive connection alone is lost, on a route that drops packets (reconnect dials hang), releases the lease, and a standby delivers within the 15 s hard bound (round-18 finding).",
+      "surface": "two real envoy-listener processes, signed in as the machine's nkey user under the rendered ListenerPermissions grant, against a real nats-server. pod-a's receive connection is cut by mpLaneRelay.cut, and blackholeNew holds every new dial; its lease connection stays up.",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=7 -timeout 30m -run '^TestTwoPodsReceiveConnectionLostToADroppingRouteReleasesTheLeaseWithin15s$' -v ./cmd/listener",
+      "observed": "7 of 7 PASS; slowest message per run 11.963, 11.946, 11.939, 11.957, 12.025, 12.014 and 11.953 s. A throwaway copy that logs the lease lines, 7 runs: pod-a logs 'listener lease released: the receive connection is down' once per run, 5.82-5.92 s after the cut, and its lease never lapses; pod-b logs 'listener lease acquired' from released 5.93-6.05 s after the cut; the first message after the cut arrives 11.94-12.07 s after; every message arrives once and in publish order.",
+      "headSha": "9c2471397600f57efa702c1859cfe390e3b499b8",
+      "negativeControl": "The same row on 7494c07d (before 6828bbb3), -count=2: FAIL 2 of 2, 'pod-a never released the lease for its lost receive connection' and '11 of 151 messages reached their session later than 15s'."
+    },
+    {
+      "criterion": "Neither the lease's receive signal nor Client.Connected waits on nats.go's connection lock.",
+      "surface": "internal/bus client against a real nats-server while a reconnect dial hangs; the listener's receiver with the receive connection's locks held.",
+      "command": "cd packages/envoy && go test -count=3 -run TestConnectedAnswersWhileAReconnectDialHangs -v ./internal/bus/ && go test -count=3 -run TestTheReceiveSignalAnswersWhileTheReceiveConnectionsLocksAreHeld -v ./cmd/listener/",
+      "observed": "3 of 3 PASS each at 9c247139.",
+      "headSha": "9c2471397600f57efa702c1859cfe390e3b499b8",
+      "negativeControl": "At 7494c07d, with only the new test files copied in: 'Connected took 4.891114286s while nats.go held the connection's lock, want it within 100ms' and 'the receive signal took 4.89752939s to answer while the receive connection's locks were held, want it within 100ms'."
+    },
+    {
+      "criterion": "No regression: the refused-reconnect row, a short cut, SIGKILL take-overs, every multiprocess row, internal/bus under -race, and the listener suite.",
+      "surface": "real listener binaries (multiprocess); the package suites.",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 40m -v -run '^Test(TwoPods|TwoBuilds)' ./cmd/listener; CGO_ENABLED=1 go test -race -count=1 ./internal/bus/...; DISPATCH_TEST_DATABASE_URL=<private Postgres 17 + pgvector on the issue volume> go test -count=1 ./cmd/listener; the throwaway 2 s dropping-cut probe, -count=7",
+      "observed": "Multiprocess: 32 PASS, ok 708.281s, including TestTwoPodsReceiveConnectionLostHandsOverWithin15s, TestTwoPodsReceiveConnectionBackInsideTheBoundKeepsTheLease and five SIGKILL rows; in TestTwoPodsSIGKILLHandsOverInOrderWithin15s all 71 messages arrive within 15 s and in order, slowest 10.946 s. Bus -race: ok 345.391s. Listener: ok 853.751s. 2 s cut, 7 runs: pod-a keeps the lease, pod-b never takes it, 169-172 messages arrive once and in order, slowest 2.01 s.",
+      "headSha": "9c2471397600f57efa702c1859cfe390e3b499b8",
+      "negativeControl": "Without a Postgres, the untagged listener suite panics 'rootless Docker not found' in TestDispatchMentionResolvesASessionTheCacheHasNotRefilled, because the pod has no Docker. That is the environment, not the change; the suite passes with DISPATCH_TEST_DATABASE_URL set."
     }
   ],
-  "failed": 1,
   "observations": [
-    "Receive connection cut for 2 s: not noticed, the lease is kept, all 230 messages in order, slowest 1.97 s.",
-    "Receive connection cut 3.2 s (noticed at 2.1 s, then healed): the lease is kept, but order breaks because messages pushed to the old connection come back at the 6 s ack wait. The 18194add control breaks the same way, so this round did not cause it.",
-    "SIGKILL of the active pod after message 15: 40 of 40 in send order, the last 6.11 s after the kill.",
-    "Clean graceful hand-over: hand_back_marked true, first delivery 2.42 s after the SIGTERM, in order. Frozen hub under the holder: pod-b takes the lease at 4.93 s, first delivery 10.94 s after the cut, in order.",
-    "Negative control: as machine box-other's NATS user, puts to lease.listener-box-smoke and handback.listener-box-smoke.999 were refused (nats: timeout), and a put to its own lease.listener-box-other was accepted.",
-    "Merge 6c38d745 changed the branch-side diff in cmd/listener/main.go, internal/store/kv.go, healthz_role_view_test.go, ci.yaml and docs (#2517's role-claim-view check). Merge ff705a78 changed only packages/envoy/AGENTS.md. Every run used the merged binary.",
-    "Required checks at ff705a78, read 02:23Z: changes and pr-title queued; not green."
+    "The red row's two files (multiprocess_takeover_test.go, multiprocess_harness_test.go) have no diff between 7494c07d and 9c247139: the row is unchanged.",
+    "Merge 9c247139, fingerprinted against 6828bbb3: the branch-side diff changed only in scripts/e2e/README.md (main's one-sentence-per-line layout). The branch's /healthz sentence is still there at line 3095. Nothing main brought touches cmd/listener or internal/bus.",
+    "Required checks at 9c247139, read 10:04-10:06Z: CI run 41187851497 has changes success and the other lanes queued (lint, typecheck, test, listener-multiprocess among them); ci-ok has no check run yet; PR Title run 41187912742 is in progress. Not green when read."
   ],
-  "evidence": "https://github.com/sjawhar/legion/pull/2404#issuecomment-6537750668",
-  "notes": "Throwaway scripts in $TMPDIR/infra557-test (cut.py, health.py), not committed."
+  "evidence": "https://github.com/sjawhar/legion/pull/2404#issuecomment-6542016522",
+  "notes": "The throwaway timing probe and the control tree are in $TMPDIR/r19, not committed. The private Postgres in $TMPDIR/pg was stopped after the run."
 }
