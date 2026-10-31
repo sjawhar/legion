@@ -26,7 +26,11 @@ async function markdownFile(text: string) {
 /** Runs the script as a contributor does: `bun scripts/semantic-line-breaks.ts [--write] <files>`. */
 function run(args: string[]) {
   const result = Bun.spawnSync(["bun", SCRIPT, ...args], { cwd: REPO_ROOT });
-  return { exitCode: result.exitCode, stdout: result.stdout.toString() };
+  return {
+    exitCode: result.exitCode,
+    stdout: result.stdout.toString(),
+    stderr: result.stderr.toString(),
+  };
 }
 
 /** `--write` on `text`; the file's content afterwards and the exit code. */
@@ -122,6 +126,65 @@ test("an ordered marker whose number is not 1 does not interrupt a paragraph, so
   expect(stdout).not.toContain("R2");
 });
 
+/** `count` lines, each one sentence, indented by `indent`. */
+function sentenceLines(count: number, indent: string, word: string) {
+  return Array.from({ length: count }, (_, n) => `${indent}${word} ${n + 1}.\n`).join("");
+}
+
+test("R3 does not count a nested list toward its parent: a short parent passes", async () => {
+  // The 30 nested items and the 29 blank lines between them run 59 screen rows, 61 with the
+  // parent's own two lines.
+  const nested = Array.from({ length: 30 }, (_, n) => `  - Nested item ${n + 1}.\n`).join("\n");
+  const path = await markdownFile(`- Parent item.\n\n${nested}`);
+  const { exitCode, stdout } = run([path]);
+  expect(stdout).toBe("");
+  expect(exitCode).toBe(0);
+});
+
+test("R3 does not count the blank lines R2 requires between nested items toward their parent", async () => {
+  // The 50 nested items and the 49 blank lines between them run 99 screen rows, 101 with the
+  // parent's own two lines, and `--write` could remove none of the blank lines.
+  const nested = Array.from({ length: 50 }, (_, n) => `  - Child ${n + 1}.\n`).join("\n");
+  const path = await markdownFile(`- Parent item.\n\n${nested}`);
+  const { exitCode, stdout } = run([path]);
+  expect(stdout).toBe("");
+  expect(exitCode).toBe(0);
+});
+
+test("R3 reports a nested item longer than one screen at the nested item, not its parent", async () => {
+  const path = await markdownFile(
+    `- Parent item.\n\n  - Nested item.\n${sentenceLines(55, "    ", "Line")}`
+  );
+  const { exitCode, stdout } = run([path]);
+  expect(stdout).toBe(`${path}:3: R3: 56 screen rows: - Nested item.\n`);
+  expect(exitCode).toBe(1);
+});
+
+test("R3 counts a parent's paragraph after its nested list toward the parent", async () => {
+  const path = await markdownFile(
+    `- Parent item.\n\n  - Nested item.\n\n${sentenceLines(50, "  ", "Continuation")}`
+  );
+  const { exitCode, stdout } = run([path]);
+  expect(stdout).toBe(`${path}:1: R3: 52 screen rows: - Parent item.\n`);
+  expect(exitCode).toBe(1);
+});
+
+test("R3 gives a nested item the same verdict whether a sibling follows it or nothing does", async () => {
+  // The blank line after the nested item counts toward no item, whether a sibling follows it or the
+  // file ends: the nested item runs its marker line plus `extra` rows.
+  const parent = (extra: number, after: string) =>
+    `- Parent item.\n\n  - Nested item.\n${sentenceLines(extra, "    ", "Line")}\n${after}`;
+  for (const after of ["", "  - Sibling item.\n"]) {
+    const fits = run([await markdownFile(parent(49, after))]);
+    expect(fits.stdout).toBe("");
+    expect(fits.exitCode).toBe(0);
+    const path = await markdownFile(parent(50, after));
+    const long = run([path]);
+    expect(long.stdout).toBe(`${path}:3: R3: 51 screen rows: - Nested item.\n`);
+    expect(long.exitCode).toBe(1);
+  }
+});
+
 test("--write does not join a 01. item into the paragraph above it: 01. starts at 1, so it interrupts", async () => {
   const result = await written("A paragraph line\n01. An item.\n");
   expect(result.text.split("\n")).toContain("01. An item.");
@@ -146,6 +209,55 @@ test("--write leaves an HTML block opened by a custom element named script-somet
 
 test("R1 does not end a sentence at the abbreviation incl.", async () => {
   const path = await markdownFile("Every phase worker (incl. sub-architect) resumes.\n");
+  const { exitCode, stdout } = run([path]);
+  expect(stdout).toBe("");
+  expect(exitCode).toBe(0);
+});
+
+test("R1 finds a second sentence that opens with a parenthesis", async () => {
+  const path = await markdownFile(
+    "The model turns fail, loudly, which is right for a proof. (A call's parent is a helper.)\n"
+  );
+  const { exitCode, stdout } = run([path]);
+  expect(stdout).toContain(`${path}:1: R1:`);
+  expect(exitCode).toBe(1);
+});
+
+test("--write cuts before a second sentence that opens with a parenthesis", async () => {
+  const result = await written(
+    "The model turns fail, loudly, which is right for a proof. (A call's parent is a helper.)\n"
+  );
+  expect(result.text).toBe(
+    "The model turns fail, loudly, which is right for a proof.\n(A call's parent is a helper.)\n"
+  );
+  expect(result.exitCode).toBe(0);
+});
+
+test("R1 reads a parenthesis that opens with a backtick after a sentence end as a sentence start", async () => {
+  const path = await markdownFile("The gate runs first. (`make check` runs it.)\n");
+  const { exitCode, stdout } = run([path]);
+  expect(stdout).toContain(`${path}:1: R1:`);
+  expect(exitCode).toBe(1);
+});
+
+test("R1 reads no sentence start at a parenthesis in the middle of a sentence", async () => {
+  const path = await markdownFile("Run the tests, see (Foo) for why, and then merge.\n");
+  const { exitCode, stdout } = run([path]);
+  expect(stdout).toBe("");
+  expect(exitCode).toBe(0);
+});
+
+test("R1 reads no sentence start at a parenthesis after an abbreviation", async () => {
+  const text = "Name a limit, e.g. (Memory) or (CPU), for each pod.\n";
+  const path = await markdownFile(text);
+  const { exitCode, stdout } = run([path]);
+  expect(stdout).toBe("");
+  expect(exitCode).toBe(0);
+  expect((await written(text)).text).toBe(text);
+});
+
+test("R1 reads no sentence start at a parenthesis that opens with a lowercase word", async () => {
+  const path = await markdownFile("The pod restarts. (or not, if it is pinned.)\n");
   const { exitCode, stdout } = run([path]);
   expect(stdout).toBe("");
   expect(exitCode).toBe(0);
@@ -521,6 +633,55 @@ test("--write keeps a byte order mark", async () => {
   const result = await written("\uFEFFSome words. More words.\n");
   expect(result.text).toBe("\uFEFFSome words.\nMore words.\n");
   expect(result.exitCode).toBe(0);
+});
+
+/** The warning the script prints for a verbatim element opened by `tag` on 1-based `line`. */
+function verbatimWarning(path: string, line: number, tag: string) {
+  return `${path}:${line}: warning: ${tag} opens a verbatim element; from this block to the end of the file, R1 and R2 are not checked and --write changes nothing\n`;
+}
+
+test("check warns at the verbatim tag's own line in a multi-line paragraph and keeps exit 0", async () => {
+  const path = await markdownFile("A first line\nsecond line\nthird line has <PRE>x</PRE> here.\n");
+  const { exitCode, stdout, stderr } = run([path]);
+  expect(stdout).toBe("");
+  expect(stderr).toBe(verbatimWarning(path, 3, "<pre>"));
+  expect(exitCode).toBe(0);
+});
+
+test("check warns about a verbatim tag after a finding and keeps exit 1", async () => {
+  const path = await markdownFile(
+    "One sentence. Two sentences.\n\nIntro line\nwith <code>x</code>.\n"
+  );
+  const { exitCode, stdout, stderr } = run([path]);
+  expect(stdout).toContain(`${path}:1: R1:`);
+  expect(stderr).toBe(verbatimWarning(path, 4, "<code>"));
+  expect(exitCode).toBe(1);
+});
+
+test("--write warns on a file it changes and on a file it leaves unchanged", async () => {
+  const changed = await markdownFile("One sentence. Two sentences.\n\n<kbd>Ctrl</kbd> opens it.\n");
+  const unchanged = await markdownFile("One sentence.\n\n<kbd>Ctrl</kbd> opens it.\n");
+  const { exitCode, stderr } = run(["--write", changed, unchanged]);
+  expect(stderr).toBe(
+    verbatimWarning(changed, 3, "<kbd>") + verbatimWarning(unchanged, 3, "<kbd>")
+  );
+  expect(exitCode).toBe(0);
+  expect(await readFile(changed, "utf8")).toBe(
+    "One sentence.\nTwo sentences.\n\n<kbd>Ctrl</kbd> opens it.\n"
+  );
+});
+
+test("a <code> in a code span or a fenced block warns nothing", async () => {
+  const span = await markdownFile("Write `<code>` here.\n");
+  const fenced = await markdownFile("```html\n<code>x</code>\n```\n");
+  for (const args of [
+    [span, fenced],
+    ["--write", span, fenced],
+  ]) {
+    const { exitCode, stderr } = run(args);
+    expect(stderr).toBe("");
+    expect(exitCode).toBe(0);
+  }
 });
 
 test("no rule reads a leading byte order mark as part of line 1", async () => {
