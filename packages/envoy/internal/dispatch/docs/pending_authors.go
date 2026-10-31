@@ -206,8 +206,8 @@ type roomInstance struct {
 type roomLoad struct {
 	mu   sync.Mutex
 	head int64
-	// state is the durable state the load read, which the room's load applies itself
-	// (applyLoadedState) rather than ygo, and drops once it has.
+	// state is the durable state the load read, which the room's load takes before anything that
+	// can refuse it (takeLoadedState) and applies itself (applyLoadedState) rather than ygo.
 	state []byte
 	// appended are the versions took recorded before the instance existed, folded into its cursor
 	// when it does (start). instance is that instance, which took advances directly from then on.

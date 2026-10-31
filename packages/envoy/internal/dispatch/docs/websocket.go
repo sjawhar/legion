@@ -405,28 +405,42 @@ func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) er
 	return nil
 }
 
-// applyLoadedState applies the durable state room's load read (LoadDoc, roomLoad) to the room's
-// document. ygo would apply it with the format cleanup on, which follows a remote apply that
-// touches formatted text with a commit of the room's own; that commit reaches no persistence
-// (ygo registers it after the load), and the stored history already holds every cleanup the room
-// made, so the reloaded room would hold a tree the room before it never held. So the state is
-// applied with the cleanup off, and with the pending queue ygo lifts for a load, and both are set
-// back before any peer or write reaches the room: it cleans up after a browser's update as Yjs
-// does.
-func (s *Service) applyLoadedState(room string, doc *crdt.Doc) error {
+// takeLoadedState takes the durable state room's load read (LoadDoc, roomLoad), once. The load
+// takes it before anything that can refuse the room, so a refused load holds no state.
+func (s *Service) takeLoadedState(room string) []byte {
 	record, ok := s.roomLoads.Load(room)
 	if !ok {
 		return nil
 	}
-	state := record.(*roomLoad).takeState()
+	return record.(*roomLoad).takeState()
+}
+
+// applyLoadedState applies state, the durable state room's load read, to the room's document.
+// ygo would apply it with the format cleanup on, which follows a remote apply that touches
+// formatted text with a commit of the room's own; that commit reaches no persistence (ygo
+// registers it after the load), and the stored history already holds every cleanup the room
+// made, so the reloaded room would hold a state the room before it never held. So the state is
+// applied with the cleanup off, and with the pending queue ygo lifts for a load, and both are set
+// back before any peer or write reaches the room: it cleans up after a browser's update as Yjs
+// does. The setter does not cancel a cleanup an earlier commit armed, so the cleanup is off before
+// the apply starts and on again only once it has returned; and it is never called inside a
+// transaction, which holds the document's lock. The apply runs inside ygo's OnLoadDocument hook,
+// which logs a panic and goes on as if the hook succeeded, so a panic is returned as the load's
+// error, as ygo's own load returns one.
+func (s *Service) applyLoadedState(room string, doc *crdt.Doc, state []byte) (err error) {
 	if len(state) == 0 {
 		return nil
 	}
 	doc.SetFormatCleanup(false)
 	doc.SetMaxPendingItems(math.MaxInt)
 	defer func() {
-		doc.SetMaxPendingItems(maxUpdateItems)
+		doc.SetMaxPendingItems(s.srv.MaxPendingItems)
 		doc.SetFormatCleanup(true)
+	}()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("bootstrapping room %q: panic: %v", room, recovered)
+		}
 	}()
 	if err := crdt.ApplyUpdateV1(doc, state, nil); err != nil {
 		return fmt.Errorf("bootstrapping room %q: %w", room, err)
@@ -435,6 +449,7 @@ func (s *Service) applyLoadedState(room string, doc *crdt.Doc) error {
 }
 
 func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc) error {
+	loaded := s.takeLoadedState(room)
 	// A load never waits for its own room's recovery. That recovery's eviction waits in ygo's
 	// CloseRoom for the ready barrier this load holds (sjawhar/ygo v1.51.3-sami.1,
 	// provider/websocket/inject.go:517-525) and closes the channel awaitRoomRecovery waits on
@@ -451,7 +466,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	if err := s.roomFailure(room); err != nil {
 		return err
 	}
-	if err := s.applyLoadedState(room, doc); err != nil {
+	if err := s.applyLoadedState(room, doc, loaded); err != nil {
 		return err
 	}
 	// Everything this load needs comes from the pool that owns loads. A writer holding a

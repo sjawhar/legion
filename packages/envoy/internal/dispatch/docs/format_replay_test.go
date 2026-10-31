@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -126,6 +127,72 @@ func TestEveryCopyOfARoomReplaysItsFormattedCommitsToItsMarkdown(t *testing.T) {
 	})
 	if cleanups == 0 {
 		t.Fatal("the reloaded room made no cleanup commit after the browser's updates; its load left the cleanup off")
+	}
+}
+
+// A room loads its stored history as it was stored. A whole-state load runs ygo's full cleanup,
+// which removes only repeated markers at a text's start, and such markers reach a history when two
+// peers that do not clean up format the same text at once (as rooms did before ygo cleaned up
+// after a remote apply). With the cleanup on, the load deleted one of them in a commit the store
+// never sees, so the room held a state its history and every copy of it lack; the markdown is the
+// same either way, so only the state shows it.
+func TestARoomLoadsItsStoredHistoryAsItWasStored(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "seed")
+	ctx := context.Background()
+	base := encodedRoom(t, service, artifactID)
+	if err := service.Evict(ctx, artifactID); err != nil {
+		t.Fatalf("evict the room: %v", err)
+	}
+
+	// Two peers that do not clean up: one writes a paragraph, both then bold it at once.
+	first := newDocumentCopy(crdt.WithClientID(1001))
+	second := newDocumentCopy(crdt.WithClientID(1002))
+	for _, peer := range []*crdt.Doc{first, second} {
+		if err := crdt.ApplyUpdateV1(peer, base, nil); err != nil {
+			t.Fatalf("open the document in a peer: %v", err)
+		}
+	}
+	before := first.StateVector()
+	first.Transact(func(txn *crdt.Transaction) {
+		fragment := txn.GetXmlFragment(fragmentName)
+		paragraph := crdt.NewYXmlElement("paragraph")
+		fragment.InsertElement(txn, fragment.Len(), paragraph)
+		text := crdt.NewYXmlText()
+		paragraph.InsertText(txn, 0, text)
+		text.Insert(txn, 0, "abc", nil)
+	})
+	written := crdt.EncodeStateAsUpdateV1(first, before)
+	if err := crdt.ApplyUpdateV1(second, written, nil); err != nil {
+		t.Fatalf("send the paragraph to the second peer: %v", err)
+	}
+	strong := crdt.Attributes{"strong": crdt.Attributes{"marker": "**"}}
+	bold := func(peer *crdt.Doc) []byte {
+		children := peer.GetXmlFragment(fragmentName).Children()
+		paragraph := children[len(children)-1].(*crdt.YXmlElement)
+		target := paragraph.Children()[0].(*crdt.YXmlText)
+		before := peer.StateVector()
+		peer.Transact(func(txn *crdt.Transaction) { target.Format(txn, 0, 3, strong) })
+		return crdt.EncodeStateAsUpdateV1(peer, before)
+	}
+	stored := [][]byte{written, bold(first), bold(second)}
+	fold := newDocumentCopy()
+	if err := crdt.ApplyUpdateV1(fold, base, nil); err != nil {
+		t.Fatalf("fold the base: %v", err)
+	}
+	for index, update := range stored {
+		if _, err := service.persistence.AppendUpdate(ctx, artifactID, update); err != nil {
+			t.Fatalf("store update %d: %v", index, err)
+		}
+		if err := crdt.ApplyUpdateV1(fold, update, nil); err != nil {
+			t.Fatalf("fold update %d: %v", index, err)
+		}
+	}
+
+	want := crdt.EncodeStateAsUpdateV1(fold, nil)
+	if got := encodedRoom(t, service, artifactID); !bytes.Equal(got, want) {
+		t.Fatalf("the loaded room holds a state of %d bytes, want its stored history's %d bytes", len(got), len(want))
 	}
 }
 
