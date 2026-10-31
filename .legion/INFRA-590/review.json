@@ -2,24 +2,16 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-590",
-  "completed": "2026-10-31T04:26:00Z",
-  "round": 16,
-  "reviewedCodeHead": "2678be4b84152baa164f065f54350e33ae432f1e",
-  "reviewerProseCommit": "7fc3a1fb3ab65452ff8d0a729ca47f03ed585682 (comments only, outbox/publisher.go recordBatch: a failed write leaves only the events it covered; outbox/lease.go: the scan's re-read can meet a batch a wake starts beside it)",
-  "decision": "changes_requested",
+  "completed": "2026-10-31T06:35:30Z",
+  "round": 17,
+  "reviewedCodeHead": "b5e8445e62fbeabecc151f82b7e52762866b1572",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "ci": "Code head 2678be4b: lint, typecheck, test, pr-title, envoy-go, envoy-go-race all completed success. My comment-only push 7fc3a1fb has no CI run at all: GitHub reports the pull request CONFLICTING (mergeable_state dirty) with main's d7e1daaaaf (#2474, scripts/e2e/README.md re-laid one sentence per line), and GitHub runs no pull_request workflow for a conflicting head.",
-  "thermonuclear": "thermonuclear-deep-review and thermonuclear-code-quality ran at 2678be4b; both approve with no correctness finding.",
-  "threads": "Round-15 threads PRRT_kwDORFy7ds6yL80U and PRRT_kwDORFy7ds6yL80X accepted (replies 4430238584, 4430238742); none unresolved.",
-  "keyFindings": [
-    {"severity": "important", "file": "PR #2395 (mergeability)", "description": "The head conflicts with main's #2474 on scripts/e2e/README.md (text only), so no CI runs on 7fc3a1fb and the PR cannot merge. Merge main forward carrying 7fc3a1fb; a text-only conflict with an unchanged PR diff is a confirmation round under the architect's 10:27Z rule."}
-  ],
-  "verifiedCorrect": [
-    "Round-15 finding 1 closed: lanes.reserve reports excluded owners, batchResult.excluded sets missed, the re-read runs with nothing in flight and cannot loop; TestAnEventCommittedWhileItsOwnerIsInFlightIsReadWhenThatOwnerIsBack fails at 9cabeaf6.",
-    "Round-15 finding 2 closed: settleAndRecord is the single settle-and-record path; settleOwner leaves connection, fenced and unsent owners to the batch end; each owner settled once; TestAnOwnerLeftForTheBatchsEndLogsItsFailureOnce fails at 9cabeaf6.",
-    "loadLookups under the statement gate: batches hold at most one outbox connection, the renewal keeps the other; lock order mu then statements, no cycle.",
-    "Merge 2678be4b (#2422): AGENTS.md and cmd/dispatch/README.md keep main's layout with this PR's content; no code conflict; migrations 0150/0151, connections 91."
-  ]
+  "roundShape": "Confirmation round (10:27Z rule). The PR's own diff at 572ce9ee vs b5e8445e, each against its fork point with main, excluding .legion/ and docs/solutions/, differs in four places only: outbox/owner_lane_test.go matches event_id=<id>; outbox/publisher.go drops settlement.wrote for result.fenced (settleAndRecord sets result.fenced on its only no-write path, and both callers check err first); scripts/e2e/README.md takes #2474's layout with publishClaimantRoute -> addClaimantRoute re-applied; my comment-only 7fc3a1fb is carried. No runtime conflict.",
+  "ci": "At b5e8445e (compare to aa154824 handoffs only): lint, typecheck, test, pr-title, envoy-go-race success. envoy-go failed on internal/broker/oauth TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries (docs/kubernetes.md's claim list after #2474's re-layout); main's own envoy-go at d7e1daaaaf fails the same test (job 124441333720, run 41164510541), and this PR changes neither file: main's.",
+  "thermonuclear": "None this round: a confirmation round; the pair ran at 2678be4b with no finding.",
+  "threads": "24, none unresolved.",
+  "keyFindings": []
 }
