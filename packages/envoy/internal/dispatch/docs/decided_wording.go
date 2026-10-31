@@ -54,7 +54,8 @@ const decidedWordingRestore = `
 		and (a.question, a.options, a.multiple, a.urgency) is distinct from
 			(f.wording->>'question', coalesce(f.wording->'options', a.options),
 			 coalesce((f.wording->>'multiple')::boolean, a.multiple), coalesce(f.wording->>'urgency', a.urgency))
-	returning a.id::text, a.block_artifact_id::text, a.block_id, a.question, a.options, a.multiple, a.urgency`
+	returning a.id::text, a.block_artifact_id::text, a.block_id, a.question, a.options, a.multiple, a.urgency,
+		a.answer`
 
 // restoredWording is one ask decidedWordingRestore gave back its decided wording.
 type restoredWording struct {
@@ -62,6 +63,9 @@ type restoredWording struct {
 	document *string
 	block    *string
 	wording  model.AskEditPrevious
+	// answer is the decision the restored wording was given on, which the restore leaves as it
+	// is: the restored ask's parts are read with it beside the wording (restoreWordings).
+	answer *model.AskAnswer
 }
 
 // decidedWordingRollbackTimeout bounds the rollback of a boot restoration that did not commit,
@@ -194,9 +198,13 @@ func (s *Service) restoreDocumentDecidedWordings(ctx context.Context, tx pgx.Tx,
 }
 
 // restoreWordings runs decidedWordingRestore over the decided asks ids names, or every decided ask
-// when ids is nil, and indexes each restored question's references again, as every write of an
-// ask's question does (refs.ReplaceCounted); no event carries the change, as none does for
-// refs.RebuildAll's.
+// when ids is nil, and indexes each restored ask again, as every write of an ask's question and
+// options does: its own references (refs.ReplaceCounted) and its parts (refs.IndexAskParts), the
+// parts read from the row the statement returned - the restored wording with the answer the
+// decision left on it. The parts are indexed at the time this restoration writes them, the
+// change they record, and not at the time of the edit it undoes, which the restore leaves on the
+// row (edited_at). No event carries the change, as none does for refs.RebuildAll's, so nothing
+// counts what the restoration moved.
 func (s *Service) restoreWordings(ctx context.Context, tx pgx.Tx, ids []string) ([]restoredWording, error) {
 	rows, err := tx.Query(ctx, decidedWordingRestore, ids)
 	if err != nil {
@@ -204,22 +212,39 @@ func (s *Service) restoreWordings(ctx context.Context, tx pgx.Tx, ids []string) 
 	}
 	restored, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (restoredWording, error) {
 		var wording restoredWording
-		var options []byte
+		var options, answer []byte
 		if err := row.Scan(&wording.ask, &wording.document, &wording.block, &wording.wording.Question, &options,
-			&wording.wording.Multiple, &wording.wording.Urgency); err != nil {
+			&wording.wording.Multiple, &wording.wording.Urgency, &answer); err != nil {
 			return restoredWording{}, err
 		}
 		if err := json.Unmarshal(options, &wording.wording.Options); err != nil {
 			return restoredWording{}, fmt.Errorf("decode the options of ask %s: %w", wording.ask, err)
+		}
+		if len(answer) > 0 {
+			var decided model.AskAnswer
+			if err := json.Unmarshal(answer, &decided); err != nil {
+				return restoredWording{}, fmt.Errorf("decode the answer of ask %s: %w", wording.ask, err)
+			}
+			wording.answer = &decided
 		}
 		return wording, nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("read the restored decided asks: %w", err)
 	}
+	at := time.Now().UTC()
 	for _, wording := range restored {
 		if _, err := refs.ReplaceCounted(ctx, tx, "ask", wording.ask, wording.wording.Question, s.serverURL); err != nil {
 			return nil, fmt.Errorf("index the restored question of ask %s: %w", wording.ask, err)
+		}
+		ask := model.Ask{
+			ID:       wording.ask,
+			Question: wording.wording.Question,
+			Options:  wording.wording.Options,
+			Answer:   wording.answer,
+		}
+		if _, err := refs.IndexAskParts(ctx, tx, ask, s.serverURL, at); err != nil {
+			return nil, fmt.Errorf("index the parts of the restored ask %s: %w", wording.ask, err)
 		}
 	}
 	return restored, nil

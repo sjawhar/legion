@@ -83,6 +83,14 @@ func readBlockAsk(t *testing.T, handler http.Handler, askID string) model.Ask {
 	}](t, read).Ask
 }
 
+// askOptionText is an option without its part id: the label and description a writer sent, which
+// is what a settlement must preserve. A read carries the id of the part the option is stored as
+// and a mutation's answer does not, so a comparison of the two reads the text alone.
+func askOptionText(option model.AskOption) model.AskOption {
+	option.ID = ""
+	return option
+}
+
 func documentMarkdown(t *testing.T, handler http.Handler, artifactID string) string {
 	t.Helper()
 	text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+artifactID+"/text", nil, "alice")
@@ -993,9 +1001,12 @@ func TestAskBlockOptionsEditKeepingContentSettlesUnchanged(t *testing.T) {
 			t.Fatalf("settlement marked the edited ask invalid: %#v", event)
 		}
 	}
+	// A read carries each option's part id (the reference a comment writes to name that option),
+	// which the edit never sent and which is no part of what settlement must preserve: compare the
+	// text the edit wrote.
 	ask := readBlockAsk(t, handler, askID)
-	if len(ask.Options) != 2 || ask.Options[0] != (model.AskOption{Label: "REST", Description: "Ship now"}) ||
-		ask.Options[1] != (model.AskOption{Label: "gRPC", Description: "Adds streaming"}) {
+	if len(ask.Options) != 2 || askOptionText(ask.Options[0]) != (model.AskOption{Label: "REST", Description: "Ship now"}) ||
+		askOptionText(ask.Options[1]) != (model.AskOption{Label: "gRPC", Description: "Adds streaming"}) {
 		t.Fatalf("the ask reads %#v after settling, want the options the edit sent", ask.Options)
 	}
 }
@@ -1051,7 +1062,11 @@ func TestEditOfAnAskWhoseBlockHoldsASecondListKeepsTheRowsOptions(t *testing.T) 
 		t.Fatalf("the repaired ask reads question=%q urgency=%q, want the edit's own",
 			repaired.Question, repaired.Urgency)
 	}
-	if !slices.Equal(repaired.Options, indexed) {
+	// The edit's own answer carries no part id, where the read that gave `indexed` does, so the
+	// comparison is of the text: what the row held, not the block's two lists joined.
+	if !slices.EqualFunc(repaired.Options, indexed, func(answered, stored model.AskOption) bool {
+		return askOptionText(answered) == askOptionText(stored)
+	}) {
 		t.Fatalf("the repaired ask holds options %#v, want the %#v its row held: the block's two lists "+
 			"joined are no decision's options", repaired.Options, indexed)
 	}
@@ -1106,10 +1121,14 @@ func TestEditOfAnAskWhoseBlockHoldsASecondListKeepsTheRowsOptions(t *testing.T) 
 	if repairedAgain.Question != "Which transport ships next week?" {
 		t.Fatalf("the repaired ask asks %q, want the question the edit sent", repairedAgain.Question)
 	}
-	if !slices.Equal(repairedAgain.Options, indexed) {
+	if !slices.EqualFunc(repairedAgain.Options, indexed, func(answered, stored model.AskOption) bool {
+		return askOptionText(answered) == askOptionText(stored)
+	}) {
 		t.Fatalf("the ask edited with options holds %#v, want the %#v its row held: the block's two lists "+
 			"joined are no decision's options, whichever fields the request named", repairedAgain.Options, indexed)
 	}
+	// This one is a read, so it carries the part ids the first read carried: the options kept their
+	// parts through the edit, and the comparison is of the whole option.
 	if stored := readBlockAsk(t, handler, askID); !slices.Equal(stored.Options, indexed) {
 		t.Fatalf("the ask row reads options %#v after the edit naming them, want the %#v it held",
 			stored.Options, indexed)

@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 type askTransition struct {
@@ -339,16 +340,26 @@ func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, tra
 	return ask, nil
 }
 
-// closeAskTx applies a transition to an open ask inside the caller's transaction, appends the
-// transition's event and runs its After; the caller commits and publishes the events.
+// closeAskTx applies a transition to an open ask inside the caller's transaction, indexes the
+// ask's parts, appends the transition's event and runs its After; the caller commits and
+// publishes the events.
 func (s *server) closeAskTx(ctx context.Context, tx pgx.Tx, id string, actor model.Actor, transition askTransition) (model.Ask, []model.Event, error) {
 	ask, err := s.transitionAskTx(ctx, tx, id, transition)
 	if err != nil {
 		return model.Ask{}, nil, err
 	}
-	// A transition writes no question text, so it moves no references and says so. The answer
-	// it may have written is in tx, so the ask's Replies rows are read after it.
-	base, err := events.AskEventPayload(ctx, tx, ask, model.ReferenceChanges{})
+	// A transition writes no question text, so it reconciles none of the ask's own references.
+	// An answer is a part of the ask, though, so both transitions index the parts here, where
+	// the ask row they wrote is held: a resolution adds no part, but its indexing still takes
+	// the ask's state row, reconciles the links its parts hold and clears owed_at, and writes
+	// every part of an ask an older build left owed. The answer a transition wrote is in tx, so
+	// the ask's Replies rows are read after it.
+	at := refs.AskPartsAt(ask)
+	changes, err := s.indexAskParts(ctx, tx, ask, at, model.ReferenceChanges{})
+	if err != nil {
+		return model.Ask{}, nil, err
+	}
+	base, err := events.AskEventPayload(ctx, tx, ask, changes)
 	if err != nil {
 		return model.Ask{}, nil, err
 	}
@@ -360,6 +371,11 @@ func (s *server) closeAskTx(ctx context.Context, tx pgx.Tx, id string, actor mod
 		transition.EventType, actor, payload,
 	))
 	if err != nil {
+		return model.Ask{}, nil, err
+	}
+	// The answer's part edges are new rows of this transaction, so they take the event's id and
+	// a ?since= read lists them, as a create's and an edit's do.
+	if err := refs.Stamp(ctx, tx, "ask", ask.ID, event.ID); err != nil {
 		return model.Ask{}, nil, err
 	}
 	events := []model.Event{event}

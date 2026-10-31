@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-369",
+  "completed": "2026-10-31T11:01:47Z",
+  "round": "confirmation after a forward merge, not a new round",
+  "decision": "approved",
+  "lastReview": "APPROVE at 9aa2f24b292afe49590cdefc352dfd88b7674c00 (review 5721824480)",
+  "newHead": "the head this commit makes, above 448a2f18148b29fb7944a6508044dbefc040e7f3",
+  "fingerprint": {
+    "before": "38855df249627b628013d7bbbeccc2fe1b86a8245bd9380c7a2229d348dc337a at 9aa2f24b292afe49590cdefc352dfd88b7674c00",
+    "after": "38855df249627b628013d7bbbeccc2fe1b86a8245bd9380c7a2229d348dc337a at 448a2f18148b29fb7944a6508044dbefc040e7f3",
+    "verdict": "unchanged",
+    "how": "Computed by the reviewer with the procedure in skill://legion-worker/references/conflicts-and-rewrites.md (fork_point against main@origin, --git --context 0, fileset '~(.legion | docs/solutions)', @@ and index lines dropped), with pipefail."
+  },
+  "aboveApproval": "35f2ec24 docs(solutions) and 6b6ba4b5 the removal of .legion/INFRA-369/ (retro), 20835c4d the forward merge of main 1a9095e6 (sjawhar/legion#2598, the claims-test fix), and handoffs. The fingerprint excludes docs/solutions and .legion, and the merge changed no line of the pull request's own diff.",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "keyFindings": []
+}

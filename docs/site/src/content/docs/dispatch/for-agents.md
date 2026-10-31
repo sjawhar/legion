@@ -288,6 +288,7 @@ dispatch://KEY
 dispatch://KEY/spec
 dispatch://KEY/artifact/<slug>
 dispatch://KEY/ask/<id>
+dispatch://KEY/ask/<id>#b-<part>[@v<N>]
 dispatch://KEY/comment/<id>
 dispatch://KEY/comment/<id>#b-<block>[@v<N>]
 dispatch://KEY/message/<id>
@@ -305,8 +306,14 @@ splits it in the dashboard (a split block's id stays with the part holding its s
 `@v<N>` pins it to revision N of the comment, so `dispatch read` shows the text it had then and
 whether it has changed or been removed since. A message never changes, so its blocks take no pin.
 
+An ask is made of parts the same way: its question, each of its options and its answer.
+`#b-<part>` names one, and `@v<N>` pins it to a revision of the ask's parts. `dispatch read` of
+the ask prints the reference of each option and of its answer, with whatever points at that part
+under it, so you can cite the option a decision turns on rather than the whole ask.
+
 To answer one block rather than the whole item, pass its reference to
-`dispatch comment --reply-to` or `dispatch message --in-reply-to`. Dispatch records the reply as
+`dispatch comment --reply-to` or `dispatch message --in-reply-to`, and a part of an ask to
+`dispatch comment --reply-to-ask`. Dispatch records the reply as
 answering that block, and `dispatch read` of the reply prints `Re: block <id>:` and the block's
 text before its body, or `Re: block <id> (removed)` once an edit removed it.
 

@@ -106,9 +106,11 @@ func sendFrame(t *testing.T, send map[string]any) (string, *model.ReplyBlock) {
 
 // A reply names a block of the comment it answers: the block is stored with the reply while
 // reply_to holds the thread's root, every read and the reply's event carry it, and the reply's
-// graph node belongs to the block. A reply in an ask's thread, a block the comment does not hold
-// and a block with no comment are refused; a comment an older build wrote is indexed first; an
-// edit that removes the block leaves the reply reading it removed, with its last text.
+// graph node belongs to the block. A comment in an ask's thread is no different - the block is
+// read from the comment reply_to names, never from the ask the thread hangs under
+// (TestAReplyNamesABlockOfTheItemTheRequestNamed) - and a block the comment does not hold and a
+// block with no comment are refused; a comment an older build wrote is indexed first; an edit
+// that removes the block leaves the reply reading it removed, with its last text.
 func TestAReplyNamesTheBlockItAnswers(t *testing.T) {
 	live := true
 	sent := []map[string]any{}
@@ -190,11 +192,16 @@ func TestAReplyNamesTheBlockItAnswers(t *testing.T) {
 	requireRefusal(t, "a block with no reply_to", post(map[string]any{"body": "On b2.", "reply_to_block": "b2"}),
 		"INVALID_COMMENT", "reply_to_block requires reply_to")
 	askID := openAskAs(t, handler, issue.Key, "s1", "Ship it?")
-	requireRefusal(t, "a reply to an ask naming a block", post(map[string]any{"body": "Yes.", "ask_id": askID, "reply_to_block": "b1"}),
-		"INVALID_COMMENT", replyBlockInAskThread)
 	underAsk := createThreadComment(t, handler, issue.Key, map[string]any{"body": "Yes.\n\nTonight.", "ask_id": askID}, "alice")
-	requireRefusal(t, "a reply under an ask naming a block", post(map[string]any{"body": "Tonight?", "reply_to": underAsk.ID, "reply_to_block": "b2"}),
-		"INVALID_COMMENT", replyBlockInAskThread)
+	underAskRef := "dispatch://" + issue.Key + "/comment/" + underAsk.ID
+	tonight := &model.ReplyBlock{Node: "comment/" + underAsk.ID + "#b2", Ref: underAskRef + "#b-b2", BlockID: "b2", Text: "Tonight."}
+	requireReplyBlock(t, "a reply naming a block of a comment in an ask's thread",
+		createThreadComment(t, handler, issue.Key, map[string]any{
+			"body": "Tonight it is.", "reply_to": underAsk.ID, "reply_to_block": "b2",
+		}, "alice").ReplyBlock, tonight)
+	requireRefusal(t, "a block a comment in an ask's thread does not hold",
+		post(map[string]any{"body": "Tonight?", "reply_to": underAsk.ID, "reply_to_block": "b9"}),
+		"INVALID_COMMENT", "reply_to_block b9 is not a block of comment "+underAsk.ID)
 
 	// A comment an older build wrote is owed its index; the reply's transaction indexes it first.
 	var old string
@@ -251,6 +258,31 @@ func TestAReplyNamesTheBlockItAnswers(t *testing.T) {
 		t.Fatalf("the replayed callback: status=%d body=%s", replayed.Code, replayed.Body.String())
 	}
 	requireReplyBlock(t, "the replayed callback", decodeBody[model.Comment](t, replayed).ReplyBlock, wait)
+
+	// A callback under an ask names a block of the comment it answers, as every other callback
+	// does: that comment is the only item its request names, where a reply naming the ask's
+	// `ask_id` on the comments route names a part of the ask.
+	underAskMention := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
+		"body": "Which is it?\n\nTell us tonight.", "ask_id": askID, "mentions": []map[string]any{{"target": "session:s1"}},
+	}))
+	askCallback := func(input map[string]any) *httptest.ResponseRecorder {
+		input["actor"] = map[string]any{"kind": "session", "id": "s1"}
+		input["attempt"] = 1
+		return bearerRequest(t, handler, http.MethodPost, "/api/v1/comments/"+underAskMention.ID+"/reply", input)
+	}
+	requireRefusal(t, "a callback under an ask naming a block its comment does not hold",
+		askCallback(map[string]any{"body": "Wait.", "reply_to_block": "b9"}),
+		"INVALID_COMMENT", "reply_to_block b9 is not a block of comment "+underAskMention.ID)
+	underAskAnswer := askCallback(map[string]any{"body": "Yes it is.", "reply_to_block": "b2"})
+	if underAskAnswer.Code != http.StatusCreated {
+		t.Fatalf("the callback reply under the ask: status=%d body=%s", underAskAnswer.Code, underAskAnswer.Body.String())
+	}
+	underAskMentionRef := "dispatch://" + issue.Key + "/comment/" + underAskMention.ID
+	requireReplyBlock(t, "the callback's answer under the ask", decodeBody[model.Comment](t, underAskAnswer).ReplyBlock,
+		&model.ReplyBlock{
+			Node: "comment/" + underAskMention.ID + "#b2", Ref: underAskMentionRef + "#b-b2",
+			BlockID: "b2", Text: "Tell us tonight.",
+		})
 }
 
 // A message reply names a block of the message it answers on every message route: an issue

@@ -17,11 +17,11 @@ import (
 
 // blockIndexDocumentBatch is how many owed documents one block-index tick reads,
 // blockIndexItemBatch how many items owed an index with the block grammar and, separately, how
-// many comments and messages owed a block index of their own blocks; blockIndexStep is the wait
-// before the next tick while any batch was full, BlockIndexReconcileInterval the wait once none
-// is. The owed reads go through partial indexes (document_block_versions_owed,
-// block_grammar_owed_enqueued, comment_block_state_owed, message_block_state_owed), so a tick that
-// finds nothing owed reads nothing else.
+// many comments, messages and asks owed a block index of their own blocks; blockIndexStep is the
+// wait before the next tick while any batch was full, BlockIndexReconcileInterval the wait once
+// none is. The owed reads go through partial indexes (document_block_versions_owed,
+// block_grammar_owed_enqueued, comment_block_state_owed, message_block_state_owed,
+// ask_block_state_owed), so a tick that finds nothing owed reads nothing else.
 const (
 	blockIndexDocumentBatch     = 20
 	blockIndexItemBatch         = 200
@@ -62,9 +62,10 @@ type BlockIndexTick struct {
 // version any build writes (migration 0122's trigger) that its own writer did not index, and each
 // rebuild-refs marks - every comment, ask and issue message whose text holds `#b-`, owed an
 // index with the block grammar (block_grammar_owed, migrations 0123-0126), which a build older
-// than the block grammar indexes without, and every comment and message owed a block index of its
-// own blocks (comment_block_state and message_block_state owed_at, set by migrations 0143-0144's
-// triggers on every write and by rebuild-refs), which a build older than item blocks leaves owed.
+// than the block grammar indexes without, and every comment, message and ask owed a block index
+// of its own blocks (comment_block_state, message_block_state and ask_block_state owed_at, set by
+// migrations 0143-0144's and 0151's triggers on every write and by rebuild-refs), which a build
+// older than item blocks leaves owed.
 // One tick per lease, at start, then every blockIndexStep while a batch is full and every
 // BlockIndexReconcileInterval once none is, until ctx ends.
 //
@@ -139,9 +140,9 @@ type liveAheadDocuments map[string]owedDocument
 
 // ReconcileBlockIndex runs one tick: one batch of the documents owed a block index past after (a
 // document id; empty is the start), one batch of the items owed an index with the block grammar,
-// oldest first (refs.ReindexOwedItem), and one batch of the comments and messages owed a block
-// index of their own blocks, oldest owed_at first (refs.IndexOwedItemBlocks), each in its own
-// transaction taking the item row then its state row, never an owner row. The item blocks run
+// oldest first (refs.ReindexOwedItem), and one batch of the comments, messages and asks owed a
+// block index of their own blocks, oldest owed_at first (refs.IndexOwedItemBlocks), each in its
+// own transaction taking the item row then its state row, never an owner row. The item blocks run
 // last, so an item the grammar batch indexed, blocks included, is no longer owed. The documents
 // are listed by keyset, so a document it skips never holds back the ones past it: the tick's
 // Cursor moves past every document its batch lists, indexed or not, and goes back to the start
@@ -231,7 +232,8 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhe
 		select (select count(*) from document_block_versions where version is null),
 		       (select count(*) from block_grammar_owed),
 		       (select count(*) from comment_block_state where owed_at is not null) +
-		       (select count(*) from message_block_state where owed_at is not null)
+		       (select count(*) from message_block_state where owed_at is not null) +
+		       (select count(*) from ask_block_state where owed_at is not null)
 	`).Scan(&tick.OwedDocuments, &tick.OwedItems, &tick.OwedItemBlocks); err != nil {
 		return tick, fmt.Errorf("count what is owed a block index: %w", err)
 	}

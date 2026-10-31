@@ -851,8 +851,8 @@ func TestRebuildRefsConvergesOnTheLiveIndex(t *testing.T) {
 	}
 	// Every document has a version (three, counting the two specs); the planted row from a message
 	// that does not exist is the one orphan. Each of the three is marked owed a block index, and
-	// the comment and the message are marked owed a block index of their own blocks.
-	if report != (refs.Rebuild{Documents: 3, Asks: 1, Comments: 1, Messages: 1, Orphans: 1, Edges: 6, BlocksOwed: 3, ItemsOwed: 2}) {
+	// the ask, the comment and the message are each marked owed a block index of their own parts.
+	if report != (refs.Rebuild{Documents: 3, Asks: 1, Comments: 1, Messages: 1, Orphans: 1, Edges: 6, BlocksOwed: 3, ItemsOwed: 3}) {
 		t.Fatalf("rebuild report = %#v", report)
 	}
 	var documents, owed int

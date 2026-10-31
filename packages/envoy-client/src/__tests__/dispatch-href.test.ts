@@ -39,8 +39,8 @@ test("an issue document URL carrying both item parameters is refused", () => {
 // A block's link on a live document page names the block, its id written as `encodeBlockId`
 // writes it; an item in the query, or a fragment that names no block, leaves it: the dashboard
 // writes a document block's fragment beside `?comment=`, so on any version of the document that
-// fragment names no block of the comment. A comment's or a message's own page names its block; an
-// ask's names the ask. (A document's version page is the shared table's.)
+// fragment names no block of the comment. An ask's, a comment's or a message's own page names its
+// block. (A document's version page is the shared table's.)
 test.each([
   ["/issues/CORE-1/spec#b-ship_it", "dispatch://CORE-1/spec#b-ship%5Fit"],
   [
@@ -64,7 +64,12 @@ test.each([
     "dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666",
   ],
   [
-    "/issues/CORE-1/asks/66666666-6666-4666-8666-666666666666#b-b2",
+    "/issues/CORE-1/asks/66666666-6666-4666-8666-666666666666#b-b3",
+    "dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666#b-b3",
+  ],
+  // A pin is written only as a dispatch:// reference, so a raw @ on an item's page is no pin.
+  [
+    "/issues/CORE-1/asks/66666666-6666-4666-8666-666666666666#b-b3@v2",
     "dispatch://CORE-1/ask/66666666-6666-4666-8666-666666666666",
   ],
   [
