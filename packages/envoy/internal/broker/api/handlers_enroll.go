@@ -138,6 +138,9 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred e
 	case errors.Is(err, enroll.ErrPodIdentity):
 		writeError(w, http.StatusForbidden, "POD_IDENTITY_MISMATCH", err.Error())
 		return
+	case errors.Is(err, enroll.ErrVMNotListed):
+		writeError(w, http.StatusForbidden, "VM_NOT_LISTED", err.Error())
+		return
 	case errors.Is(err, enroll.ErrVMTokenExpired):
 		writeError(w, http.StatusForbidden, "VM_TOKEN_EXPIRED", err.Error())
 		return
@@ -236,6 +239,9 @@ func (s *server) renewEnrollment(w http.ResponseWriter, r *http.Request, id stri
 	case errors.Is(err, enroll.ErrPodTokenRequired):
 		slog.Warn("broker: pod enrollment renewal refused: projected token required", "enrollment", id)
 		writeError(w, http.StatusForbidden, "POD_TOKEN_REQUIRED", err.Error())
+		return
+	case errors.Is(err, enroll.ErrVMNotListed):
+		writeError(w, http.StatusForbidden, "VM_NOT_LISTED", err.Error())
 		return
 	case errors.Is(err, enroll.ErrVMTokenExpired):
 		writeError(w, http.StatusForbidden, "VM_TOKEN_EXPIRED", err.Error())

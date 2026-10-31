@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"time"
 
 	"github.com/google/uuid"
@@ -58,6 +59,10 @@ var (
 	// ErrVMTokenRequired refuses a vm enrollment's renewal that carries no VM identity token: a VM
 	// renews only while it can prove it is still that VM.
 	ErrVMTokenRequired = errors.New("a VM enrollment's renewal must carry its VM identity token")
+	// ErrVMNotListed refuses a VM enrollment, or its renewal, once its fleet's settings no longer
+	// allow the VM (VMService): its account dropped from BROKER_VM_SERVICES, or another project or
+	// instance-name glob configured. So narrowing a fleet ends an enrolled VM at its next renewal.
+	ErrVMNotListed = errors.New("this VM is not one its fleet's settings allow")
 )
 
 type Credential struct {
@@ -316,6 +321,27 @@ func (s *Service) tokenLoginListed(subject, service string) bool {
 	return ok && listed == service
 }
 
+// VMService answers the service vm logs in as: the one BROKER_VM_SERVICES binds its account to,
+// when its project is the one BROKER_VM_PROJECTS names for that account and its instance name
+// matches the BROKER_VM_INSTANCES glob (path.Match). The account alone does not name a fleet:
+// anyone who can run a VM as it in any project could otherwise log in as its service. Any other VM
+// is an error naming what did not match; machine.Service.VerifyServiceToken refuses the login with
+// it, and Create and RenewVM the enrollment (ErrVMNotListed).
+func (s *Service) VMService(vm VMClaims) (string, error) {
+	service, listed := s.VMServicesByAccount[vm.Account]
+	if !listed {
+		return "", fmt.Errorf("%s is not in BROKER_VM_SERVICES", vm.Account)
+	}
+	if project := s.VMProjects[vm.Account]; vm.Project != project {
+		return "", fmt.Errorf("%s logs in from project %s only (BROKER_VM_PROJECTS), and this VM is in project %s", vm.Account, project, vm.Project)
+	}
+	pattern := s.VMInstancePatterns[vm.Account]
+	if matched, err := path.Match(pattern, vm.Instance); err != nil || !matched {
+		return "", fmt.Errorf("instance %s does not match %s's instance names %q (BROKER_VM_INSTANCES)", vm.Instance, vm.Account, pattern)
+	}
+	return service, nil
+}
+
 // Credential loads a launcher credential's own identity (operator, service, host, and a token
 // login's subject) by its id, for a handler that has already authenticated the caller via a
 // launcher proof (proof.Subject's LauncherID, verified live by AuthenticateLauncher through
@@ -377,6 +403,9 @@ func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (E
 		}
 		if id := claims.RuntimeID(); id != in.RuntimeID || cred.Subject == nil || *cred.Subject != id {
 			return Enrollment{}, fmt.Errorf("%w: the token is VM %s's, the enrollment names %q", ErrVMIdentity, id, in.RuntimeID)
+		}
+		if _, err := s.VMService(claims); err != nil {
+			return Enrollment{}, fmt.Errorf("%w: %v", ErrVMNotListed, err)
 		}
 		in.Subject = &claims.Account
 	}
@@ -730,6 +759,9 @@ func (s *Service) renew(ctx context.Context, id, podToken, vmToken string) (Rene
 	case kind == "vm":
 		if vm.RuntimeID() != renewal.RuntimeID || subject == nil || vm.Account != *subject {
 			return Renewal{}, fmt.Errorf("%w: the token is VM %s's, the enrollment VM %s's", ErrVMIdentity, vm.RuntimeID(), renewal.RuntimeID)
+		}
+		if _, err := s.VMService(vm); err != nil {
+			return Renewal{}, fmt.Errorf("%w: %v", ErrVMNotListed, err)
 		}
 	case kind == "pod" && withToken:
 		if claims.PodUID != renewal.RuntimeID || subject == nil || claims.Subject != *subject {

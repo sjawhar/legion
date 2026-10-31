@@ -52,14 +52,22 @@ func vmRuntimeAccount(id string) (account, project string, ok bool) {
 	return id[:at], project, ok
 }
 
-// VMVerifier verifies a VM identity token and returns its verified identity fields.
+// VMVerifier verifies a VM identity token and returns its verified identity fields. Issues reports,
+// without verifying anything, whether a token names the verifier's issuer, so a token login sends
+// a VM's token to this verifier alone and every other token to the cluster's.
 type VMVerifier interface {
 	VerifyVM(ctx context.Context, raw string) (VMClaims, error)
+	Issues(raw string) bool
 }
 
 // GoogleVMVerifier verifies Google Compute Engine identity tokens against one configured OIDC
 // verifier and reads the email and Compute Engine claims from the verified token.
 type GoogleVMVerifier struct{ Verifier *oidc.Verifier }
+
+// Issues is the OIDC verifier's Issues: whether raw's unverified iss claim names its issuer.
+func (v GoogleVMVerifier) Issues(raw string) bool {
+	return v.Verifier.Issues(raw)
+}
 
 func isVMEmailVerified(value json.RawMessage) bool {
 	var text string

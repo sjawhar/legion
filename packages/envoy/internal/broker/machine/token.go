@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path"
 	"strings"
 	"time"
 
@@ -60,40 +59,33 @@ type TokenCredential struct {
 	ExpiresAt time.Time
 }
 
-// VerifyServiceToken verifies a service's token and maps it to the service it logs in as. The
-// token is tried against the broker's Kubernetes issuer and audience first (s.Enroll.Pod, the
-// verifier pod enrollment uses), whose subject BROKER_SERVICE_LOGINS (s.Enroll.ServiceLogins) must
-// name; then, when that issuer is not configured or the token is not its issuer's, against Google's
-// (s.Enroll.VM, a Compute Engine VM's identity token), whose account BROKER_VM_SERVICES must bind,
-// from the project BROKER_VM_PROJECTS names and an instance whose name BROKER_VM_INSTANCES' glob
-// matches (verifyVM). Each is tried only when its verifier is configured, and a token neither
-// issuer issued is refused with the Kubernetes verifier's error, as before there was a second.
-// Either token is held to MaxTokenLoginLifetime from its issue. AuthenticateLauncher reads the same
-// settings for every credential a login issues. Refusals: ErrTokenLoginsOff, ErrTokenExpired,
-// ErrTokenInvalid, ErrTokenTooLongLived and ErrAccountNotListed; none repeats the token.
+// VerifyServiceToken verifies a service's token and maps it to the service it logs in as. A token
+// whose unverified iss claim names the VM verifier's issuer (s.Enroll.VM, Google's, for a Compute
+// Engine VM's identity token) goes to that verifier alone, and its account must be bound by
+// BROKER_VM_SERVICES from the right project and instance name (enroll.Service.VMService); every
+// other token goes to the Kubernetes verifier alone (s.Enroll.Pod, the one pod enrollment uses),
+// exactly as before there was a second, and its subject must be in BROKER_SERVICE_LOGINS. So no
+// token makes the other issuer's verifier fetch its keys. On a broker with no Kubernetes issuer
+// every token goes to the VM verifier. Either token is held to MaxTokenLoginLifetime from its
+// issue. AuthenticateLauncher reads the same settings for every credential a login issues.
+// Refusals: ErrTokenLoginsOff, ErrTokenExpired, ErrTokenInvalid, ErrTokenTooLongLived and
+// ErrAccountNotListed; none repeats the token.
 func (s *Service) VerifyServiceToken(ctx context.Context, token string) (ServiceAccount, error) {
-	if s.Enroll.Pod == nil && s.Enroll.VM == nil {
-		return ServiceAccount{}, ErrTokenLoginsOff
-	}
-	var kubernetes error
-	if s.Enroll.Pod != nil {
-		claims, err := s.Enroll.Pod.VerifyAccount(ctx, token)
-		if err == nil {
-			return s.verifyKubernetes(claims)
-		}
-		if s.Enroll.VM == nil || !errors.Is(err, oidc.ErrIssuer) {
+	if vm := s.Enroll.VM; vm != nil && (s.Enroll.Pod == nil || vm.Issues(token)) {
+		claims, err := vm.VerifyVM(ctx, token)
+		if err != nil {
 			return ServiceAccount{}, tokenRefusal(err)
 		}
-		kubernetes = err
+		return s.verifyVM(claims)
 	}
-	claims, err := s.Enroll.VM.VerifyVM(ctx, token)
-	if kubernetes != nil && errors.Is(err, oidc.ErrIssuer) {
-		return ServiceAccount{}, tokenRefusal(kubernetes)
+	if s.Enroll.Pod == nil {
+		return ServiceAccount{}, ErrTokenLoginsOff
 	}
+	claims, err := s.Enroll.Pod.VerifyAccount(ctx, token)
 	if err != nil {
 		return ServiceAccount{}, tokenRefusal(err)
 	}
-	return s.verifyVM(claims)
+	return s.verifyKubernetes(claims)
 }
 
 // tokenRefusal is a token that did not verify: ErrTokenExpired for one past its expiry, else
@@ -130,26 +122,17 @@ func (s *Service) verifyKubernetes(claims enroll.AccountClaims) (ServiceAccount,
 	return ServiceAccount{AccountClaims: claims, Service: service, Host: namespace + "/" + name}, nil
 }
 
-// verifyVM maps a verified VM identity token through BROKER_VM_SERVICES, and refuses a VM of the
-// bound account in another project than BROKER_VM_PROJECTS names, or whose instance name
-// BROKER_VM_INSTANCES' glob does not match: the account alone does not name the fleet, since
-// anyone who can run a VM as it in any project could otherwise log in as its service. The login's
+// verifyVM maps a verified VM identity token to its service (enroll.Service.VMService: its
+// account, project and instance name), refusing any other VM ErrAccountNotListed. The login's
 // subject is the VM's runtime id, so each VM of the fleet holds a credential of its own.
 func (s *Service) verifyVM(vm enroll.VMClaims) (ServiceAccount, error) {
 	claims := enroll.AccountClaims{Subject: vm.RuntimeID(), Expiry: vm.Expiry, IssuedAt: vm.IssuedAt}
 	if err := s.checkLifetime(claims); err != nil {
 		return ServiceAccount{}, err
 	}
-	service, listed := s.Enroll.VMServicesByAccount[vm.Account]
-	if !listed {
-		return ServiceAccount{}, fmt.Errorf("%w: %s is not in BROKER_VM_SERVICES", ErrAccountNotListed, vm.Account)
-	}
-	if project := s.Enroll.VMProjects[vm.Account]; vm.Project != project {
-		return ServiceAccount{}, fmt.Errorf("%w: %s logs in from project %s only (BROKER_VM_PROJECTS), and this VM is in project %s", ErrAccountNotListed, vm.Account, project, vm.Project)
-	}
-	pattern := s.Enroll.VMInstancePatterns[vm.Account]
-	if matched, err := path.Match(pattern, vm.Instance); err != nil || !matched {
-		return ServiceAccount{}, fmt.Errorf("%w: instance %s does not match %s's instance names %q (BROKER_VM_INSTANCES)", ErrAccountNotListed, vm.Instance, vm.Account, pattern)
+	service, err := s.Enroll.VMService(vm)
+	if err != nil {
+		return ServiceAccount{}, fmt.Errorf("%w: %v", ErrAccountNotListed, err)
 	}
 	return ServiceAccount{AccountClaims: claims, Service: service, Host: vm.Project + "/" + vm.Zone + "/" + vm.Instance}, nil
 }
