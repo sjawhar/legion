@@ -31,12 +31,14 @@ import (
 //	  "root": "<LOADTEST_ROOT>",
 //	  "dispatch_token": "<random>",  Dispatch's DISPATCH_AGENT_TOKEN
 //	  "listener_token": "<random>",  the listener's ENVOY_API_TOKEN
-//	  "ports": {"postgres": 15432, "proxy": 15433, "nats": 14222, "nats_monitor": 18222,
-//	            "listener": 19120, "dispatch": 18777, "pprof": 16061, "metrics": 16062},
+//	  "ports": {"postgres": 10000, "proxy": 10001, "nats": 10002, "nats_monitor": 10003,
+//	            "listener": 10004, "dispatch": 10005, "pprof": 10006, "metrics": 10007},
 //	  "pids": {"postgres": <postmaster>, "proxy": 0, "nats": 0, "listener": 0, "dispatch": 0},
 //	  "pg_direct": false             true when Dispatch reaches Postgres without the latency proxy
 //	}
 //
+// The ports above are a root whose port block is 0: each default is 10000 + 10k + the key's
+// offset, for the root's block k, and a LOADTEST_*_PORT variable replaces one (common.sh).
 // Every process listens on 127.0.0.1. The loadgen samplers and the lock probe always reach
 // Postgres directly (ports.postgres, database dispatch), never through the proxy.
 type stackFile struct {

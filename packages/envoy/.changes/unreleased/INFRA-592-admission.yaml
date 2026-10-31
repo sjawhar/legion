@@ -33,11 +33,13 @@ body: |-
   under its `Idempotency-Key`. The ERROR line is written whether or not the client is still there
   to read the 500, since the unknown outcome is the operator's to see; a client that left while
   the commit ran is answered nothing and recorded as `status=499`. Both 503s carry `Retry-After:
-  1` and `Cache-Control: no-store`. A request whose client went away is answered nothing and
-  logged at DEBUG, where it was a `500` and an ERROR line, and its access-log line now records
+  1` and `Cache-Control: no-store`; the 500 carries neither. A request whose client went away is
+  answered nothing, where it was a `500` and an ERROR line, and its access-log line now records
   `status=499`, nginx's client-closed code, where a write that rolled back because its client left
   read as a `200`: a client that left while its request was queued for room, while its body was
-  arriving, or while its handler ran is recorded that way. None of these answers is
+  arriving, or while its handler ran is recorded that way. Of these answers the 500 alone is
   logged above DEBUG (`cmd/dispatch/README.md`, "Load errors"). An
-  admitted read of weight one runs on one connection for its whole length, where an issue read
-  took twelve one after another (INFRA-592).
+  admitted read runs every statement on one pinned connection for its whole length, where an issue
+  read took twelve connections one after another; a read of weight two, whose two reads run side
+  by side, and the four file version downloads, which hold no connection while their bytes move,
+  pin none (INFRA-592).

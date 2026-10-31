@@ -250,7 +250,7 @@ For example, `--events 4 --sessions 400 --requests 60 --schedule 1x:60s,5x:60s,1
   `loadgen run` refuses, before any connection, an item that is not `<factor>x:<duration>`, a factor
   that is not a number more than 0 and a duration that is not more than 0, and names the item.
 - A factor multiplies the step's own `--events` and `--requests` for its segment. `--sessions` is
-  used as given. The `--sse` default takes the highest factor: `max(1, round(requests × f / 30))`.
+  used as given. The `--live` default takes the highest factor: `max(1, round(requests × f / 30))`.
 - The warm-up runs at 1x. The window is the schedule's total: a `--duration` given must equal it,
   or `loadgen run` refuses the step.
 - The event and request schedules stay open-loop Poisson from the same RNG streams, with a rate that

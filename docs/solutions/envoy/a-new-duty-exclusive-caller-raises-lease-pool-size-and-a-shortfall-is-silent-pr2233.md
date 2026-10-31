@@ -12,15 +12,18 @@ module: packages/envoy/internal/dispatch/store
 
 # A new duty.Exclusive caller raises leasePoolSize, and a shortfall is silent
 
-- When you add a Dispatch maintenance loop that takes a lease through `duty.Exclusive`, add one to
-  `leasePoolSize` in `packages/envoy/internal/dispatch/store/pools.go`, and add the loop's name to the
-  list in that constant's comment.
-- Count callers, not lease names. A caller that can be inside `Exclusive` at the same moment as
-  another needs its own connection. Each delivery durable's intake is its own caller.
-- Nothing checks the count. A pool one connection short makes the extra caller wait for a connection
-  for as long as the longest pass, which can be minutes for the compaction. It does not fail. So
-  recount the production `duty.Exclusive` callers with a grep whenever you add one, or merge a branch
-  that may have added one.
+- When you add a Dispatch maintenance loop that takes a lease through `duty.Exclusive`, add its
+  lease name to `leaseNames` in `packages/envoy/internal/dispatch/duty/exclusive.go` and raise
+  `leaseNameCount` in `packages/envoy/internal/dispatch/store/pools.go` with it. `leasePoolSize`
+  is `leaseNameCount + 2`, so the pool grows with the list.
+- Count lease names, not callers. The pool holds a connection for every name on the list and two
+  spare, and `Exclusive` refuses a name that is not on it, so a name added anywhere else takes a
+  connection a listed lease counted on. Each delivery durable's intake takes its own consumer
+  lease, and each of those names is on the list.
+- `TestTheLeasePoolCountsEveryLeaseName` (`store/pool_test.go`) fails when `leaseNameCount` or
+  `leasePoolSize` does not match `duty.LeaseNames()`, so a name added to the list without the
+  count is caught by the store's tests rather than by a pass that waits for a connection for as
+  long as the longest pass, which can be minutes for the compaction.
 
 ## Evidence
 
@@ -37,4 +40,6 @@ module: packages/envoy/internal/dispatch/store
 - It happened again on the sixteenth forward merge: main's sjawhar/legion#2137 added the edit-notice
   sweep (lease `edit-notices`), and each side held `leasePoolSize` at 10 for its own tenth caller.
   The merged tree has eleven callers, and `leasePoolSize` went from 10 to 11.
-- The size appears only in `pools.go`. Neither `duty/` nor `packages/envoy/AGENTS.md` mentions it.
+- The size appears only in `pools.go`, and the names it is counted from only in
+  `duty/exclusive.go`. `packages/envoy/AGENTS.md` states the rule under "Every pool's size is set
+  in code" and in its pool table (leases 15: one per lease name, 13, and 2 spare).

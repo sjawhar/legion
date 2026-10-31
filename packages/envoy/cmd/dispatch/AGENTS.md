@@ -32,8 +32,10 @@ heartbeat refuses (`processes.Registration.Lost`), and `serveUntilStopped`
 logs `dispatch: this server process no longer shares its signing keys with a
 live server process` at ERROR, stops serving as at SIGTERM (listener closed,
 requests in flight answered, row deleted) and returns the refusal, so the
-process exits 1. The registry's pool opens with that registration and the outbox's at boot when
-NATS is configured; the other pools open on first use. The Postgres store contains people,
+process exits 1. The request pool, the lease pool and the background pool open at boot, the
+outbox's too where NATS is configured, and the registry's with that registration; the rest -
+document loads, the health probe, the LISTEN dials, the live readers, settlements and the event
+horizon - open when a caller first takes a connection from them. The Postgres store contains people,
 native issues, artifacts, document updates, and the event outbox.
 A migration must leave the release before it able to read and write the
 schema, since two processes serve one database through a rolling update: a
