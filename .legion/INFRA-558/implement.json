@@ -2,87 +2,66 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-558",
-  "completed": "2026-10-31T03:05:00Z",
+  "completed": "2026-10-31T16:05:00Z",
   "proof": [
     {
-      "criterion": "Review round 4 N1: a revoked socket's kept entry never takes a live socket's token, so no live socket's own entry is left waiting and the read-only reconnect of the key is admitted.",
-      "surface": "schemaAdmissions in package docs",
-      "command": "cd packages/envoy && go test -count=1 -run TestARevokedSocket ./internal/dispatch/docs/ && CGO_ENABLED=1 go test -race -count=20 -run 'TestARevokedSocket|Admission|KeepAlive' ./internal/dispatch/docs/",
-      "observed": "Newer page admitted first, revoked, the older page's token answered from its own entry, and after remove(newer) a read-only admit of the key succeeds; all revoke and admission tests pass 20 times under -race; the whole docs package passes",
-      "headSha": "f7632be57ad2",
-      "negativeControl": "At 4e43e662 (the test before its fix 7efbd8af): 'the older page's token was answered from the revoked entry ...' and 'the revoked page's read-only reconnect was refused ...'."
+      "criterion": "Review round 5: each token answer goes only to the socket that sent it, in both orders of a revoked and a live socket.",
+      "surface": "ygo v1.54.1-sami.2's OnTokenAuthContext on the document socket's request contexts, package docs",
+      "command": "cd packages/envoy && CGO_ENABLED=1 go test -race -count=10 -run 'TestATokenIsAnsweredFromItsOwnSocketInEitherOrder|TestARevokedPagesReconnectIsAdmittedBesideItsLateToken|TestATokenIsAnsweredFromTheAdmissionItsSocketCarries' ./internal/dispatch/docs/",
+      "observed": "The live socket is answered writable and the revoked one read-only, revoked-first and live-first; a context with no admission is read-only; pass 10 runs under -race",
+      "headSha": "6176f738827a",
+      "negativeControl": "The same scenario against the round-5 key-and-order matching (scratch copy): the revoked socket was answered writable in both orders."
     },
     {
-      "criterion": "Review round 4: the D1 test proves nothing is written after the close frame.",
-      "surface": "A real loopback TCP socket wrapped as production wraps it, a gorilla client",
-      "command": "cd packages/envoy && go test -count=1 -run TestARevokedSocketTakesNoWriteAfterItsCloseFrame ./internal/dispatch/docs/",
-      "observed": "After closeBetweenMessages and before any Close, a Write returns net.ErrClosed, writeBetweenMessages writes nothing, and the page reads zero bytes after the 1012 frame",
-      "headSha": "f7632be57ad2",
-      "negativeControl": "With `if c.closed { return 0, net.ErrClosed }` deleted from keepAliveConn.Write: the write returns nil and the page reads 6 bytes after the close frame (FAIL)."
+      "criterion": "Review round 5 / architect: a revoke closes the page's socket with an application code ygo sends between messages, never inside a frame.",
+      "surface": "A real socket served by docs.Service on a ~1 MB document, the page with a 4 KB receive buffer, gorilla client",
+      "command": "cd packages/envoy && CGO_ENABLED=1 go test -race -count=10 -run 'TestARevokeWaitsForTheMessageTheServerHasInFlight|TestAdmissionRecheck' ./internal/dispatch/docs/",
+      "observed": "The page reads every message whole (the largest about 1,034,656 bytes) and then a CloseError 4412; no protocol error, no 1006",
+      "headSha": "6176f738827a",
+      "negativeControl": "Against the round-5 code (scratch copy): the revoke closed with 1012, not 4412."
     },
     {
-      "criterion": "Item 6 / acceptance 1: the two-build test passes for the current build against the previous release (CLI, documents, messages both ways).",
-      "surface": "Two real envoy-dispatch processes (legion-envoy-v24.6.0, the release --previous-release and CI resolve for this base, built from git archive, and this head) on one Postgres 17 + pgvector and one nats-server",
-      "command": "bash packages/envoy/scripts/build-dispatch-build.sh --previous-release --out $TMPDIR/dispatch-previous-246 && cd packages/envoy && DISPATCH_PREVIOUS_BUILD=$TMPDIR/dispatch-previous-246 DISPATCH_TEST_DATABASE_URL=<fresh db> go test -tags twobuild -count=1 -timeout 30m -v -run TestTwoBuilds ./cmd/dispatch",
-      "observed": "TestTwoBuildsAnswerEachOthersCLI PASS (18.8s), TestTwoBuildsReadAndEditEachOthersDocuments PASS (61.4s; 57 of 57 refs rows survive each way), TestTwoBuildsPassMessagesBothWays PASS (117.8s)",
-      "headSha": "f7632be57ad2",
-      "negativeControl": "This tree's intake stop made to skip its ack: TestTwoBuildsPassMessagesBothWays FAIL '#1011 2 times [current build ... current build ...]'."
+      "criterion": "The ygo pin's consumer rules: the rendered replica applies what each commit parked; a stored history the fork refuses reads as unloadable.",
+      "surface": "docs.Service rooms and stored histories on real Postgres",
+      "command": "cd packages/envoy && go test -count=1 -run 'TestTheRoomsRenderedReplicaHoldsWhatACommitParked|TestAStoredHistoryYgoRefusesFromItsClocksCannotLoad' ./internal/dispatch/docs/",
+      "observed": "A replica copy taken while a peer's edit is parked renders it once caught up, and replica and room agree on rendering, state vector and whole state; a refused multi-update history answers ErrDocumentUnloadable",
+      "headSha": "6176f738827a",
+      "negativeControl": "At 3dba8029 (tests before fb2a55a7): the replica copy rendered without the parked edit; the refused history answered document service unavailable."
     },
     {
-      "criterion": "Item 6 browser half: each build's page works against the other build's server.",
-      "surface": "Dispatch web app in real Chromium through the two-process proxy; process B is legion-envoy-v24.6.0",
-      "command": "cd packages/dispatch && DATABASE_URL=<fresh db> DISPATCH_E2E_BINARY_B=$TMPDIR/dispatch-previous-246/envoy-dispatch DISPATCH_E2E_WEB_DIST_B=$TMPDIR/dispatch-previous-246/web DISPATCH_E2E_PORT_B=<free port> bun run e2e:multiprocess -- cross-build.multiprocess; then DATABASE_URL=<fresh db> bun run e2e:multiprocess",
-      "observed": "2 passed (each build's page against the other's server), the newer-content row skipped by design with B on v24.6.0",
-      "headSha": "f7632be57ad2",
-      "negativeControl": "Proxy made to ignore the page/API pin cookies: all 3 rows FAIL."
+      "criterion": "Item 6 / acceptance 1: the two-build tests pass against the previous release, both ways, and each build's page works against the other's server.",
+      "surface": "Two real envoy-dispatch processes (legion-envoy-v24.7.0, which CI resolves for this base, and this head) on one Postgres 17 + pgvector and one nats-server; Chromium through the two-process proxy",
+      "command": "bash packages/envoy/scripts/build-dispatch-build.sh --previous-release --out $TMPDIR/dispatch-previous && cd packages/envoy && DISPATCH_PREVIOUS_BUILD=$TMPDIR/dispatch-previous go test -tags twobuild -count=1 -v -run TestTwoBuilds ./cmd/dispatch; cd packages/dispatch && DISPATCH_E2E_BINARY_B=$TMPDIR/dispatch-previous/envoy-dispatch DISPATCH_E2E_WEB_DIST_B=$TMPDIR/dispatch-previous/web bun run e2e:multiprocess -- cross-build.multiprocess; bun run e2e:multiprocess",
+      "observed": "CLI PASS (18s), documents PASS (66s; 57 of 57 refs rows each way), messages PASS (118s); cross-build 2 passed, 1 skipped by design, with no port set for B; full e2e:multiprocess 8 passed",
+      "headSha": "6176f738827a",
+      "negativeControl": "This tree's intake stop made to skip its ack: TestTwoBuildsPassMessagesBothWays FAIL '#1011 2 times'."
     },
     {
-      "criterion": "Review round 3 D1: a revoked document socket's 1012 close frame is never written inside a data frame.",
-      "surface": "A real loopback TCP socket wrapped as production wraps it (keepAliveWriter, admittedWriter), a gorilla websocket client on the other end",
-      "command": "cd packages/envoy && go test -count=20 -run TestARevokedSocketsCloseFrameWaitsForTheEndOfAMessage ./internal/dispatch/docs/ && CGO_ENABLED=1 go test -race -count=20 -run 'TestARevokedSocket|Admission|KeepAlive' ./internal/dispatch/docs/",
-      "observed": "The page reads the 10 000-byte message whole, then CloseError 1012; a later write is net.ErrClosed; 20 runs under -race pass",
-      "headSha": "bfb12f380708",
-      "negativeControl": "At b52a1c5d (the test before its fix d4d3d793): the page read 4139 bytes (the close frame inside the message) and 1006, 20 of 20 runs."
-    },
-    {
-      "criterion": "Review round 3 D2: a revoked socket's late token never takes another admitted socket's answer.",
-      "surface": "schemaAdmissions in package docs",
-      "command": "cd packages/envoy && go test -count=1 -run 'TestARevokedSocketKeepsItsPlaceUntilItsTokenIsAnswered|TestARevokedSocketWhoseTokenWasAnsweredIsForgotten' ./internal/dispatch/docs/",
-      "observed": "Both answers of the key are writable; a read-only admission of the key is refused while the revoked entry waits; an answered revoked entry is forgotten",
-      "headSha": "bfb12f380708",
-      "negativeControl": "At b52a1c5d: 'the second token of the key was answered read-only; the socket that is still admitted holds a writable admission'."
-    },
-    {
-      "criterion": "Forward merges of main (e65900f4, 1666ff48, 92619d8d, ecbc2c8f) and the round's cleanups keep every suite green.",
-      "surface": "Go packages on real Postgres (ICU) and in-process nats-server; bun packages",
-      "command": "cd packages/envoy && go vet ./... (and -tags twobuild, multiprocess) && go test ./internal/dispatch/store/... ./internal/dispatch/api/ ./internal/dispatch/docs/ ./internal/dispatch/processes/ ./internal/dispatch/embedqueue/ ./cmd/dispatch/ && go test -tags multiprocess ./cmd/dispatch && CGO_ENABLED=1 go test -race ./internal/bus/... ./internal/dispatch/delivery/ ./internal/dispatch/duty/ && (cd infra && go test ./gcp/ -skip DataDisk); bun test in contracts, envoy-client, pi-envoy, proof-editor, claude-envoy, dispatch web/src; bunx biome check .; bun run docs:build",
-      "observed": "All ok. Bun: contracts 336, envoy-client 1279, pi-envoy 1702, proof-editor 215, claude-envoy 271, dispatch web 2908 pass, 0 fail; tsc clean; biome clean; docs site built. infra/gcp's data-disk cases need mkfs.ext4, which this pod lacks (they fail the same way on main).",
-      "headSha": "bfb12f380708",
-      "negativeControl": "The answers read against a Dispatch with no answers route, before retryNoRoute: false in 78d73d81: a failure line after 800 ms instead of main's unavailable result from one ask."
+      "criterion": "Every suite stays green at the merged head.",
+      "surface": "Go packages on real Postgres and in-process NATS; bun packages; repository checks",
+      "command": "cd packages/envoy && go vet ./... (all tags) && go test ./internal/dispatch/docs/ ./internal/dispatch/api/ ./internal/dispatch/pmdoc/ -skip Linear ./cmd/dispatch/ && go test -tags multiprocess ./cmd/dispatch && CGO_ENABLED=1 go test -race ./internal/dispatch/delivery/ ./internal/bus/; bun test in contracts, envoy-client, dispatch (bun run test); check-ci-images.sh tree, check-ci-filters.sh, check-private-names.sh, biome",
+      "observed": "All ok, except TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, which refuses the pod's C-collation Postgres by its own message (CI's Postgres is en_US.utf8). contracts 336, envoy-client 1287, dispatch 2979 pass, 0 fail",
+      "headSha": "6176f738827a",
+      "negativeControl": "TestTheRoomsRenderedReplicaHoldsWhatACommitParked without the Parked apply fails (above)."
     }
   ],
   "filesChanged": [
-    "4e43e662/7efbd8af: docs/schema_admission.go (answer takes a revoked entry last), schema_admission_test.go (N1 test, the no-write-after-close test)",
-    "5049c682: delivery/held_durable.go (the hold comment), packages/envoy/AGENTS.md (0151_server_processes_schema)",
-    "f7632be5: merge of main 39b51494 (AGENTS.md and cmd/dispatch/README.md rewritten in main's one-sentence-per-line layout; bun.lock main's)",
-    "74666d32: .github/workflows/ci.yaml (dispatch-two-builds' Postgres service is the ghcr.io/sjawhar/legion/ci copy of pgvector, same digest)",
-    "b52a1c5d/d4d3d793: docs/keepalive.go (closeBetweenMessages), docs/schema_admission.go (Close, revokeUnless keeps an unanswered revoked entry), schema_admission_test.go",
-    "54967fa8/55cf521d: delivery/held_durable.go and intake.go (receivers, retryHeld logs once, takeOverConfig/startingAt moved, one account), api/server.go and agent_stream.go (refuseUndeclaredMembers), live_agent_test.go, twobuild_documents_test.go, routes_table_test.go",
-    "ef225a36: contracts dispatch-api.ts (jitteredDelay private, exhausted () => Error), envoy-client dispatch-http.ts (options object) and every caller",
-    "881417bc: cmd/dispatch/README.md (idempotency_key refused by name; intakeHoldToken's file)",
-    "78d73d81: merge of main e65900f4; session-answers.ts and dispatch-http.ts (retryNoRoute: false for the answers read)",
-    "bfb12f38 and its two parent merges: migrations 0150-0152, dispatchConnectionsPerPod 93, references.go keeps the unknown-kind guard with the horizon cap inside it"
+    "7a7c8f8c: docs/websocket.go, schema_admission.go, service.go (admission on the request context, OnTokenAuthContext, cancel-cause revoke with 4412), keepalive.go reverted, contracts dispatch-api.ts + gen-go.ts + generated.go (DOCUMENT_ADMISSION_REVOKED_CLOSE_CODE), docs and fragments",
+    "e96ad48e: delivery/held_durable.go comment",
+    "9a4a5df5: packages/dispatch/e2e harness (B serves on the held socket; no DISPATCH_E2E_PORT_B), ci.yaml two-builds browser step, build-dispatch-build.sh floor legion-envoy-v20.1.0, docs",
+    "3dba8029/fb2a55a7: go.mod/go.sum pin sjawhar/ygo v1.54.1-sami.2; docs/tree.go applies LoggedUpdate.Parked; docs/fold.go maps a refused merge to ErrDocumentUnloadable; tests",
+    "dca23bdf, 6176f738: merges of main (8d0030ea, f29f58bb; #2526's keep-alive move)"
   ],
   "trickyParts": [
-    "The 1012 frame waits on keepAliveConn's lock and condition, never on admittedConn.mu, because revoke runs under schemaAdmissions.mu.",
-    "A revoked unanswered entry still blocks a read-only admission of its key, so the revoked page's reconnect cannot take the writable answer it holds.",
-    "The per-request answers read must not retry a no-route answer: its own 5-minute back-off is its rolling-release answer, and retrying passes its 800 ms deadline."
+    "ygo's OnTokenAuthContext gets the request context; nothing cancels it while the hook runs, so the hook waits on nothing (a map read under the admissions' mutex).",
+    "A revoke cancels the socket's own context with a cause whose CloseCode is 4412; ygo writes the close through gorilla's WriteControl, which is serialized with frame writes, waiting at most 1 s.",
+    "From ygo 1.54.1-sami.1 a logged commit's parked structs are in LoggedUpdate.Parked, not Update; the replica applies both."
   ],
   "deviations": [
     "Plan departures 1-3 as approved.",
-    "The routes pin moved to 147 in 55cf521d for main's app-installation route; main fixed the same pin in #2551, and the merge kept one count.",
-    "Main's unreleased #2392 fragment now names dispatchConnectionsPerPod 93, the value both changes ship with.",
-    ".dispatch/architecture/dispatch-store.md now says the lease pool has seventeen connections."
+    "D1, D2 and N1's tests are gone with the code they tested (admittedConn, the shared waiting list); the architect's round-5 decision replaced both designs.",
+    "The two-build browser run needs a previous build of legion-envoy-v20.1.0 or later (held socket, shared cookie key); build-dispatch-build.sh refuses older ones.",
+    "RebuildDocument still answers 503 for a history whose pre-load fails; reported to the architect, not changed."
   ],
   "openQuestions": []
 }
