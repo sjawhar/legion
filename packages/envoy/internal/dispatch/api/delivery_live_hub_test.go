@@ -776,14 +776,7 @@ func TestAReconnectCatchesUpWhatTheListenerMissed(t *testing.T) {
 	conn.none(t, viewMaxWait+time.Second, "a merge the listener could not hear")
 	blind.Store(false)
 	rig.waitFor(t, start, 5*time.Second, "the listener's reconnection", func(note deliveryHubNote) bool { return note.what == "connected" })
-	// The note says the listener is back and a catch-up ran behind it, not that the catch-up read
-	// the merge: the intake notes "connected" however that catch-up's reads went, and a read that
-	// failed is left to the retry a second later (catchUp). The mark such a read leaves is
-	// recomputed viewQuiet later, or deliveryLiveRetry later again when the recompute's own read
-	// fails, which is the hub working as it is written rather than a delivery going missing. So
-	// the merge's delta is waited for over the hub's own worst case - one failed read's retry and
-	// the longest a mark waits for its recompute - and not over a bound the hub never promised.
-	delta := conn.delta(t, deliveryLiveRetry+viewMaxWait, "t")
+	delta := conn.delta(t, 3*time.Second, "t")
 	if got := liveUpsertIDs(t, delta, "prs"); !slices.Equal(got, []string{"acme/widgets#1"}) {
 		t.Fatalf("after the reconnection the delta upserts %v, want the merge it missed", got)
 	}
