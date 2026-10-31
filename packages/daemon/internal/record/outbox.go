@@ -545,19 +545,22 @@ type PhaseEnded struct {
 
 func (PhaseEnded) OutboxKind() OutboxKind { return OutboxKindPhaseEnded }
 
-// Message is what the runner publishes for issue: one sentence that the recipient's phase ended,
-// which phase the issue is in now and why, the implementer's own sentence where its task follows,
-// and the two that keep the role off the working copy the new phase owns without stopping it (the
-// worker prompt says the same, internal/prompts/go/worker-common.md).
+// Message is what the runner publishes for issue: one sentence that the recipient's phase ended
+// and which phase the issue is in now, the implementer's own sentence where its task follows, the
+// two that keep the role off the working copy the new phase owns without stopping it (the worker
+// prompt says the same, internal/prompts/go/worker-common.md), and the red last, behind the
+// `Reason:` label a started worker's task carries it under (workflow's task), so the GitHub check
+// and workflow names in it are marked off from the daemon's own sentences in both places.
 func (p PhaseEnded) Message(issue string) string {
 	follows := ""
 	if p.TaskFollows {
 		follows = fmt.Sprintf(" Your %s task follows.", p.To)
 	}
-	return fmt.Sprintf("%s: CI went red, so your %s phase has ended and the issue is in %s now: %s.%s"+
+	return fmt.Sprintf("%s: CI went red, so your %s phase has ended and the issue is in %s now.%s"+
 		" Nothing of yours is stopped: your turn, your jobs, your process and your session run on."+
-		" The workspace is the %s phase's now, so stop writing it at once and leave whatever you have uncommitted.",
-		issue, p.From, p.To, p.Reason, follows, p.To)
+		" The workspace is the %s phase's now, so stop writing it at once and leave whatever you have uncommitted."+
+		" Reason: %s.",
+		issue, p.From, p.To, follows, p.To, p.Reason)
 }
 
 // NewOutboxRow encodes one validated payload for durable delivery at nextAt.

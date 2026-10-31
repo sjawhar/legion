@@ -234,9 +234,14 @@ Legion uses GitHub's own review mechanisms rather than labels:
   completed, or the merger keeps its turn, its background jobs, its process and its session, and
   the implementer's start acts at once. Each of them is told on its own Envoy role topic that its
   phase has ended, which phase the issue is in now and why, and that the workspace belongs to the
-  new phase, so it stops writing there and leaves whatever it has uncommitted; a completion it
-  sends for the phase it lost is refused (`HANDOFF_STALE_ASSIGNMENT`). From retro the implementer
-  keeps its turn, is told the same way, and is handed the implementing task after it. The
+  new phase, so it stops writing there and leaves whatever it has uncommitted. Only the
+  implementer's row is re-minted, so a completion the tester, the reviewer or the merger sends for
+  the phase it lost still names the assignment that phase gave it and is refused
+  `HANDOFF_NOT_CURRENT_PHASE`; `HANDOFF_STALE_ASSIGNMENT` comes once the issue has handed that
+  role the phase again. From retro the implementer keeps its turn, is told the same way, and is
+  handed the implementing task after it; a retro completion that reaches the daemon after the move
+  reports the assignment retro handed it while the phase holds the implementing one, so it is
+  refused `HANDOFF_STALE_ASSIGNMENT` and made again in the implementing task's own turn. The
   implementer pushes and completes without waiting for CI: a red that settled while
   it was still implementing sends the work back the moment it completes, so no tester round runs
   on code CI already found broken. Once the issue awaits its merge, only a red of the head's own

@@ -28,12 +28,15 @@ import (
 // the same drain as the start: the tester in testing, the reviewer in reviewing whether or not it
 // completed its round, the merger in merging, and the implementer in retro, which is told besides
 // that its implementing task follows. The message is the daemon's own sentence, pinned here for
-// each of the five, and it carries the reason the architect's checks-red notice carries. It is no
+// each of the five, and it ends with the reason the architect's checks-red notice carries, behind
+// the `Reason:` label a started worker's task carries it under, so the check and workflow names
+// GitHub supplies stand apart from the daemon's own words. It is no
 // architect notice: the architect's own notice goes out beside it, to the architect's topic.
 func TestACIRedTellsTheRoleWhosePhaseEndedOnItsOwnTopic(t *testing.T) {
 	const red = "CI is red at sha-1: ci"
-	stopped := " Nothing of yours is stopped: your turn, your jobs, your process and your session run on." +
-		" The workspace is the implementing phase's now, so stop writing it at once and leave whatever you have uncommitted."
+	tail := " Nothing of yours is stopped: your turn, your jobs, your process and your session run on." +
+		" The workspace is the implementing phase's now, so stop writing it at once and leave whatever you have uncommitted." +
+		" Reason: " + red + "."
 	for _, tc := range []struct {
 		name   string
 		from   phase.Phase
@@ -44,16 +47,16 @@ func TestACIRedTellsTheRoleWhosePhaseEndedOnItsOwnTopic(t *testing.T) {
 		message     string
 	}{
 		{name: "the tester in testing", from: phase.Testing, status: "testing", role: claim.RoleTester,
-			message: "LEGION-208: CI went red, so your testing phase has ended and the issue is in implementing now: " + red + "." + stopped},
+			message: "LEGION-208: CI went red, so your testing phase has ended and the issue is in implementing now." + tail},
 		{name: "the reviewer in a round it completed", from: phase.Reviewing, status: "needs_review", role: claim.RoleReviewer,
-			message: "LEGION-208: CI went red, so your reviewing phase has ended and the issue is in implementing now: " + red + "." + stopped},
+			message: "LEGION-208: CI went red, so your reviewing phase has ended and the issue is in implementing now." + tail},
 		{name: "the reviewer in a round it did not complete", from: phase.Reviewing, status: "needs_review", role: claim.RoleReviewer, uncompleted: true,
-			message: "LEGION-208: CI went red, so your reviewing phase has ended and the issue is in implementing now: " + red + "." + stopped},
+			message: "LEGION-208: CI went red, so your reviewing phase has ended and the issue is in implementing now." + tail},
 		{name: "the merger in merging", from: phase.Merging, status: "retro", role: claim.RoleMerger,
-			message: "LEGION-208: CI went red, so your merging phase has ended and the issue is in implementing now: " + red + "." + stopped},
+			message: "LEGION-208: CI went red, so your merging phase has ended and the issue is in implementing now." + tail},
 		{name: "the implementer in retro", from: phase.Retro, status: "retro", role: claim.RoleImplementer,
-			message: "LEGION-208: CI went red, so your retro phase has ended and the issue is in implementing now: " + red + "." +
-				" Your implementing task follows." + stopped},
+			message: "LEGION-208: CI went red, so your retro phase has ended and the issue is in implementing now." +
+				" Your implementing task follows." + tail},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()

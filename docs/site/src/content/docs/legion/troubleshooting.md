@@ -692,8 +692,11 @@ on the head: the daemon sent it back to the implementer and told the architect w
 `retro` the implementer kept its turn and was handed the implementing task once that turn ended;
 from `merging` the merger kept its turn, its jobs, its process and its session. Neither turn was
 interrupted: each role was told on its own Envoy role topic that its phase had ended and that the
-workspace is the implementer's now, and a completion either role sends for the phase it lost is
-refused (`HANDOFF_STALE_ASSIGNMENT`). One back in `in_progress` after its `READY`,
+workspace is the implementer's now. The implementer's retro completion after the move reports the
+assignment retro handed it while the phase holds the implementing one, so it is refused
+(`HANDOFF_STALE_ASSIGNMENT`) and made again in the implementing task's own turn; the merger's row
+still names the assignment merging gave it, so a completion it sends for the phase it lost is
+refused (`HANDOFF_NOT_CURRENT_PHASE`). One back in `in_progress` after its `READY`,
 while it awaited its merge, had a required check or workflow turn red on the head itself, or its
 head conflicts with its base (GitHub computes no merge ref for a conflicting head and runs no
 checks on it at all): the daemon sent it back to the implementer, told the architect which checks
