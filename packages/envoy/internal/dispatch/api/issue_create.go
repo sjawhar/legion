@@ -319,7 +319,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	// is not written yet (writeAdviceBefore).
 	advice := s.writeAdviceBefore(
 		r.Context(), tx, "POST /api/v1/issues", key, actor, model.IssueStatusTriage,
-		adviceIssueRow{parent: parentRef, labels: labels},
+		adviceIssueRow{parent: parentRef, labels: labels}, adviceAsks{},
 	)
 
 	// The write phase: the statements from here on run back to back.
@@ -500,7 +500,7 @@ func (s *server) respondWithExistingExternalIssue(
 		return
 	}
 	advice := s.writeAdvice(
-		r.Context(), adviceReadTx, "POST /api/v1/issues", existingKey, actor, "", existingStatus, "",
+		r.Context(), adviceReadTx, "POST /api/v1/issues", existingKey, actor, adviceAsks{}, existingStatus, "",
 	)
 	if err := adviceReadTx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)

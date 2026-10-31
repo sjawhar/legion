@@ -109,6 +109,25 @@ func (b *Broker) Append(ctx context.Context, tx pgx.Tx, e model.Event) (model.Ev
 	return appended, nil
 }
 
+// nextOwnerSeq is the sequence an append takes: one past its owner row's last_seq, and 0 for an
+// event with no owner row (a session-addressed message). The insert names it for the event's own
+// seq and, for a payload that carries the owner row (ownerLastSeqPayload), for the last_seq that
+// payload stores; both read the one snapshot the statement runs in, so they are the same number.
+const nextOwnerSeq = `coalesce(
+				(select last_seq from issues where key = $1) + 1,
+				(select last_seq from artifacts where id = $2) + 1,
+				(select last_seq from projects where key = $3) + 1,
+				0)`
+
+// ownerLastSeqPayload is an event payload that carries its owner's row, last_seq included: an
+// issue event's issue (model.IssueEventPayload). The row's last_seq once the event is appended is
+// the event's own sequence, so the insert derives it rather than taking it from a caller, which
+// would have to count the events queued before its own - the ones a document write queued among
+// them, which it never sees (INFRA-636).
+type ownerLastSeqPayload interface {
+	WithOwnerLastSeq(seq int) any
+}
+
 // QueueAppend queues e's append on a write phase's batch: its owner's lock and row
 // (lockEventOwner), which take the transaction's id, and the insert, which takes the next sequence
 // from the owner row as it stands when the insert runs and advances the row's last_seq (and an
@@ -164,7 +183,9 @@ func (b *Broker) QueueAppendWithLogins(batch *store.WriteBatch, e model.Event, l
 	// sequence the insert took. Only the owner the event names matches a row: the other two keys
 	// are null, and an ownerless event (a session-addressed message) takes sequence 0 and advances
 	// nothing. The thread_logins the payload names are read in the same snapshot, which holds
-	// every write the transaction made before it.
+	// every write the transaction made before it, and so is the last_seq a payload that carries
+	// the owner row names (ownerLastSeqPayload): it reads nextOwnerSeq, the expression the event's
+	// own seq reads, so the payload records the sequence the event took.
 	storedPayload, storedLogins := `$6`, `null::jsonb`
 	args := []any{e.IssueKey, e.ArtifactID, e.ProjectKey, e.Type, actor, payload, e.Notify}
 	if logins != nil {
@@ -172,14 +193,13 @@ func (b *Broker) QueueAppendWithLogins(batch *store.WriteBatch, e model.Event, l
 		storedLogins = `payload->'thread_logins'`
 		args = append(args, logins.key)
 	}
+	if _, carriesOwnerSeq := e.Payload.(ownerLastSeqPayload); carriesOwnerSeq {
+		storedPayload = `jsonb_set(` + storedPayload + `, '{last_seq}', to_jsonb(` + nextOwnerSeq + `))`
+	}
 	batch.Queue("", `
 		with appended as (
 			insert into events (issue_key, artifact_id, project_key, seq, type, actor, payload, notify)
-			values ($1, $2, $3, coalesce(
-				(select last_seq from issues where key = $1) + 1,
-				(select last_seq from artifacts where id = $2) + 1,
-				(select last_seq from projects where key = $3) + 1,
-				0), $4, $5, `+storedPayload+`, $7)
+			values ($1, $2, $3, `+nextOwnerSeq+`, $4, $5, `+storedPayload+`, $7)
 			returning id, seq, created_at, `+storedLogins+` as thread_logins
 		), issue as (
 			update issues set last_seq = appended.seq, updated_at = greatest(issues.updated_at, appended.created_at)
@@ -202,6 +222,12 @@ func (b *Broker) QueueAppendWithLogins(batch *store.WriteBatch, e model.Event, l
 			}
 			event.Payload = withLogins
 			opened.ThreadLogins = threadLogins
+		}
+		// The appended event carries the last_seq its stored payload records: the sequence this
+		// insert took, read back from the row (ownerLastSeqPayload). The logins swap above keeps
+		// the payload's type, so it is read here after it.
+		if carrier, ok := event.Payload.(ownerLastSeqPayload); ok {
+			event.Payload = carrier.WithOwnerLastSeq(event.Seq)
 		}
 		if event.Type != "ask.opened" {
 			appended(*event)

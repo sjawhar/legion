@@ -322,7 +322,7 @@ func (s *server) createStoredMessage(
 		}
 		logins = events.ThreadLoginsOf(root)
 		advice = s.writeAdvice(
-			ctx, tx, "POST /api/v1/issues/{key}/messages", *issueKey, actor, "", status, eventType,
+			ctx, tx, "POST /api/v1/issues/{key}/messages", *issueKey, actor, adviceAsks{}, status, eventType,
 		)
 	}
 	message, err := insertedMessage(messageID, issueKey, author, input, createdAt)

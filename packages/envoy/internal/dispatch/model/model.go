@@ -1037,6 +1037,15 @@ func NewIssueEventPayload(issue Issue, changes ReferenceChanges) IssueEventPaylo
 	}
 }
 
+// WithOwnerLastSeq is the payload carrying seq as the issue's last_seq. An issue event's payload
+// holds the issue row as the event leaves it, and the event's own sequence is what that row's
+// last_seq becomes when it is appended, so the append derives both from one expression
+// (events.Broker.QueueAppend) and no writer counts the events queued before its own.
+func (p IssueEventPayload) WithOwnerLastSeq(seq int) any {
+	p.LastSeq = seq
+	return p
+}
+
 // AskEditEventPayload is the full edited ask plus its prior mutable content, the actor who made
 // the edit, and what the new question text moved in the reference graph.
 type AskEditEventPayload struct {

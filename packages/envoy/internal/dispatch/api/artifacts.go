@@ -632,7 +632,7 @@ func (s *server) storeArtifact(
 	var advice *writeAdvice
 	if target.IssueKey != nil && issueStatus != nil {
 		advice = s.writeAdvice(
-			r.Context(), tx, "POST /api/v1/issues/{key}/artifacts", *target.IssueKey, actor, "", *issueStatus, "",
+			r.Context(), tx, "POST /api/v1/issues/{key}/artifacts", *target.IssueKey, actor, adviceAsks{}, *issueStatus, "",
 		)
 	}
 	if err := ledger.Commit(r.Context()); err != nil {
@@ -1058,7 +1058,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	var advice *writeAdvice
 	if artifact.IssueKey != nil && status != nil {
 		advice = s.writeAdvice(
-			r.Context(), tx, "POST /api/v1/artifacts/{id}/edits", *artifact.IssueKey, actor, "", *status, "",
+			r.Context(), tx, "POST /api/v1/artifacts/{id}/edits", *artifact.IssueKey, actor, adviceAsks{}, *status, "",
 		)
 	}
 	if err := ledger.Commit(r.Context()); err != nil {

@@ -193,7 +193,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 	var advice *writeAdvice
 	if owner.IssueKey != nil && status != nil {
 		advice = s.writeAdvice(
-			r.Context(), tx, "POST /api/v1/issues/{key}/asks", *owner.IssueKey, actor, rowID, *status, "ask.opened",
+			r.Context(), tx, "POST /api/v1/issues/{key}/asks", *owner.IssueKey, actor, adviceAsks{excluded: []string{rowID}}, *status, "ask.opened",
 		)
 	}
 	anchor, artifactName, snapshot, err := s.resolveAnchor(documentCtx, tx, owner, input.Anchor, docs.MarkAsk, rowID, actor)
