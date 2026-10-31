@@ -2,38 +2,44 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-562",
-  "completed": "2026-10-31T11:33:15Z",
-  "round": 22,
-  "testedHead": "3633b6459ef1454a4407619124ae82b0fcb3f4d2",
-  "codeHead": "14e833d4c21d",
-  "scope": "Conflict return after the third retro: the merge with main cc3a30bb, where #2598 landed this PR's borrowed claims_doc_test.go and #2601 changed it; the branch takes main's file whole. Architect's ask: the merge adds nothing beyond the branch's own diff, the file equals main's, the claims test and the migration guard tests at the head, ci-ok and pr-title at 14e833d4.",
+  "completed": "2026-10-31T14:14:12Z",
+  "round": 23,
+  "testedHead": "5d3815b8f6a97fee5259e4d9d6eca803526d54fa",
+  "codeHead": "0b95c3c74545",
+  "scope": "The merge with main ff93d6c4 (text conflict in cmd/dispatch/AGENTS.md; #2594 landed). Architect's ask: the branch's diff equals a8c1b638's apart from the two borrowed test files, AGENTS.md carries both sides, the migration guards pass with 0150-0153, ci-ok and pr-title at 0b95c3c7.",
   "fingerprint": {
-    "previousVerifiedHead": "97d366f7436556ef93d31ae561ad13b7b2391dfc",
-    "previous": "457b9d99de6f1292d1bd55927e545b156f58cabbfcba1c340b6ce60c420851a3",
-    "current": "5353f2474ff8a4d8b68308915eec2f74f98bcde32338dd757c10c4c6fafa3d44",
-    "verdict": "the new head's branch diff (from its fork point, main cc3a30bb) is byte-identical (`cmp`) to round 20's branch diff at 61e2e802 (from its fork point 8a72cf79): the merge added nothing to the branch's own diff, and claims_doc_test.go left it. That file at the head equals main@origin cc3a30bb's (sha256 equal), so the PR no longer touches it."
+    "previousVerifiedHead": "a8c1b638444a",
+    "previous": "61825754fc740c8f0ad18dc2242bf50efcf8c9612c47ad9f6704103e9ba4b28a",
+    "current": "61825754fc740c8f0ad18dc2242bf50efcf8c9612c47ad9f6704103e9ba4b28a",
+    "verdict": "unchanged: the head's branch diff from its fork point (main ff93d6c4) is byte-identical (`cmp`) to a8c1b638's from 8a72cf79, round 19's code head, before either borrowed test file. Both borrowed files left the diff: api/delivery_live_hub_test.go and broker/oauth/claims_doc_test.go at the head each equal main ff93d6c4's (sha256 equal)."
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "At 3633b645 on the pod's Postgres 17: `cd packages/envoy && go test -count=1 -v -run TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries ./internal/broker/oauth/` -> PASS (in the head's own tree, which now holds main's docs/kubernetes.md and main's test file); `DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -count=1 -v -run 'TestMigrationSetIsNumberedOneToN|TestMigrateRefusesTwoMigrationsSharingAVersion' ./internal/dispatch/store/` -> both PASS; migrations run 0149_event_horizon (main's highest) then this PR's 0150-0153, unchanged."
+    "how": "AGENTS.md: main's `/ws/doc/{room}` row (ff93d6c4:packages/envoy/cmd/dispatch/AGENTS.md:699) is present verbatim at the head (:719), and each of this PR's quiesce, disconnect, rotate, publish and slow test-hook rows as they stood at a8c1b638 is present verbatim at the head; a word-level diff of the file against main counts 29 changed lines at the head, the same 29 as a8c1b638 against its fork point 8a72cf79, so the resolution kept both sides and added nothing. Migration guards at the head on Postgres 17: `cd packages/envoy && DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable go test -count=1 -v -run 'TestMigrationSetIsNumberedOneToN|TestMigrateRefusesTwoMigrationsSharingAVersion' ./internal/dispatch/store/` -> both PASS; main ends at 0149_event_horizon, the branch's are 0150-0153."
   },
   "failed": 0,
   "failures": [],
-  "negativeControl": "Round 21: the claims test with the file as it stood at 0fcb7729, on that head merged with main -> FAIL at claims_doc_test.go:79. Round 18: the pre-renumbering tree's two version-0149 migrations are refused by TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny.",
-  "ci": "Read on GitHub at 11:33Z at code head 14e833d4: CI run 41197170644 queued, PR Title run 41197170584 pending; pr-title queued; ci-ok not yet reported. Not waited for. The PR is MERGEABLE and APPROVED.",
+  "negativeControl": "Round 18: the pre-renumbering tree's two version-0149 migrations are refused by TestMigrateRefusesTwoMigrationsSharingAVersionBeforeApplyingAny; round 11: such a collision refuses boot on real binaries ('share version 142').",
+  "ci": "Read on GitHub at 14:14Z at code head 0b95c3c7: CI run 41209030154 and PR Title run 41209030121 queued; pr-title queued; ci-ok not yet reported, so no job result exists to record (the architect's TestAppendsOnDifferentIssuesDoNotWaitForEachOther exception has nothing to apply to yet). Not waited for.",
   "observations": [
-    "The third retro removed .legion/INFRA-562/ (727fc573); this handoff writes test.json back, so the next retro removes it again before READY.",
-    "delivery_live_hub_test.go keeps #2594's content (round 20), since #2594 is still open.",
     "Unchanged and not failures: a person's Retry during a take-over wait opens attempt 2 beside the renewed attempt 1 (existing rule); a resumed comment attempt opened by another person's Retry names the comment's author as actor; the test-hook fan-out (DISPATCH_TEST_HOOKS only) can miss a process whose LISTEN connection redials between the caller's pg_locks read and its NOTIFY; a claim or ask follow made during a comment request mid take-over can still give that session two copies."
   ],
   "proof": [
     {
-      "criterion": "The merge with main cc3a30bb adds nothing beyond the branch's own diff; the claims test and the migration guard hold at the head",
-      "surface": "the branch's diff from its fork point; the broker's oauth test package and the Dispatch migration guard on a rootless Postgres 17",
-      "command": "cmp of the fingerprinted diffs at 61e2e802 and 3633b645; go test -run TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries ./internal/broker/oauth/; go test -run 'TestMigrationSetIsNumberedOneToN|TestMigrateRefusesTwoMigrationsSharingAVersion' ./internal/dispatch/store/",
-      "observed": "diffs byte-identical; claims test PASS; both guard tests PASS",
-      "headSha": "3633b6459ef1454a4407619124ae82b0fcb3f4d2",
-      "negativeControl": "round 21: 0fcb7729's claims test on its merge with main -> FAIL at claims_doc_test.go:79"
+      "criterion": "The merge with main ff93d6c4 keeps both sides of cmd/dispatch/AGENTS.md and adds nothing to the branch's diff",
+      "surface": "the branch's diff from its fork point and the merged cmd/dispatch/AGENTS.md",
+      "command": "cmp of the fingerprinted diffs at a8c1b638 and 5d3815b8; grep -F of main's /ws/doc row and the branch's five test-hook rows in the head's AGENTS.md; git diff --no-index --word-diff=plain against main",
+      "observed": "diffs byte-identical; all six rows present verbatim; 29 changed lines against main, as before the merge",
+      "headSha": "5d3815b8f6a97fee5259e4d9d6eca803526d54fa",
+      "negativeControl": "before the resolution the merge reported cmd/dispatch/AGENTS.md as a 2-sided conflict (implementer's record)"
+    },
+    {
+      "criterion": "Migrations 0150-0153 sit above main's 0149 with no version taken twice",
+      "surface": "the Dispatch store's migration guard on a rootless Postgres 17",
+      "command": "cd packages/envoy && go test -count=1 -v -run 'TestMigrationSetIsNumberedOneToN|TestMigrateRefusesTwoMigrationsSharingAVersion' ./internal/dispatch/store/",
+      "observed": "both PASS",
+      "headSha": "5d3815b8f6a97fee5259e4d9d6eca803526d54fa",
+      "negativeControl": "round 18: two version-0149 migrations are refused by the same guard"
     }
   ]
 }
