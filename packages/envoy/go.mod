@@ -142,9 +142,9 @@ require (
 // its container (Parent), so that observer renders only the top-level blocks an update touched
 // (INFRA-644, reearth/ygo#336); a text observer's event no longer panics, holding the document's
 // lock, on a mark whose value is a map (reearth/ygo#335); an update the pending cap refuses is
-// refused before it changes anything; and the fork's opt-in bounds and hooks (WithMaxIntegrateScan,
-// WithIntegrateScanBudget, Server.OnPeerUpdate; reearth/ygo#333), which are off unless set and
-// which Dispatch does not set. The fixes the 1.51.3-sami.N line carried that upstream has merged
-// come from v1.54.0 itself. This pin is the fork's release candidate for v1.54.1-sami.1
-// (rc/v1.54.1-sami.1, commit 845ce79c); the tag replaces it before this merges.
-replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.50.1-0.20261030152837-845ce79c04ec
+// refused before it changes anything; a partly applied update relays what it parked; a stored
+// document with a clock past 2^53-1 or a client past 2^55-1 is refused when it loads; and the
+// fork's opt-in bounds and hooks (WithMaxIntegrateScan, WithIntegrateScanBudget,
+// Server.OnPeerUpdate; reearth/ygo#333), which are off unless set and which Dispatch does not set.
+// The fixes the 1.51.3-sami.N line carried that upstream has merged come from v1.54.0 itself.
+replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.54.1-sami.1
