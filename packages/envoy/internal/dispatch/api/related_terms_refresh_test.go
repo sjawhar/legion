@@ -738,7 +738,7 @@ func TestSearchTermItemsAnswerWhatMainsStatementDoes(t *testing.T) {
 	}
 
 	got := termItemVectors(t, fixture.database, searchTermItemsSQL, fixture.project)
-	want := termItemVectors(t, fixture.database, mainSearchTermItemsSQL, fixture.project)
+	want := termItemVectors(t, fixture.database, searchTermItemsBeforeSnapshotsSQL, fixture.project)
 	if !slices.Equal(got, want) {
 		t.Fatalf("the items statement answered\n%v\nwant main's rows\n%v", got, want)
 	}

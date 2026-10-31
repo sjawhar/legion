@@ -432,6 +432,15 @@ measured related-terms pass is a first-use full build, and with `vacuum (analyze
 a freshly loaded table has no all-visible pages, so the planner avoids an index-only scan on it
 however good the statistics are.
 
+That build is the one the database's own schema carries, read once from the catalogue rather than
+by running a build and catching its error, which could not tell a missing column from a real
+failure: a database holding `search_term_totals.snapshot` (migration 0158) is built by the server's
+own pass (`api.BuildEverySearchTermStats`, which calls `api.RefreshEverySearchTermStats`), so the
+row carries the snapshot that makes the first measured pass a step pass; a database migrated from
+an older commit, which is what `--no-migrate` seeds for the "before" side of a two-commit
+measurement, is built by that release's four statements, which write `items` and `refreshed_at`
+alone. Either way the step fails the command when it built fewer projects than the seed wrote.
+
 The command prints every table's row count; every figure the sizes are stated as a distribution
 rather than a count (the issues per project, the parent chain depths, the issues with three or more
 blockers, the documents with 28 versions, the markdown size bands, the anchored comments and asks,

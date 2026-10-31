@@ -14,11 +14,17 @@ import (
 )
 
 // buildTermStatistics runs one full term-statistics build for every project, the build the server
-// runs itself (api.RefreshEverySearchTermStats), so `search_term_totals` holds a row for each.
-// The refresh builds a project with no totals row in full whatever else it is asked to do, so a
+// runs itself (api.BuildEverySearchTermStats), so `search_term_totals` holds a row for each. The
+// refresh builds a project with no totals row in full whatever else it is asked to do, so a
 // measured pass on a database with no rows here would be measuring a first-use full build.
+//
+// The build is the one the database's own schema carries: the measurement protocol seeds a
+// database migrated from main with --no-migrate and this tool, where the refresh of this release
+// reads a search_term_totals column and a queue table that are not there.
 func (r *seedRun) buildTermStatistics(ctx context.Context) error {
-	api.RefreshEverySearchTermStats(ctx, r.database.Pool)
+	if err := api.BuildEverySearchTermStats(ctx, r.database.Pool); err != nil {
+		return err
+	}
 	var built int
 	if err := r.database.Pool.QueryRow(ctx, `select count(*) from search_term_totals`).Scan(&built); err != nil {
 		return err

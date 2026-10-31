@@ -335,21 +335,16 @@ func refreshSearchTermStats(ctx context.Context, pool *store.Pool, project strin
 
 // RefreshEverySearchTermStats is one pass of RunSearchTermStatsRefresh: every project, each in its
 // own transaction, so one project's failure leaves the others' rows fresh, and then one sweep of
-// the queued changes no project can apply. It is exported for cmd/dispatch-seed, which runs one
-// pass at the end of a seed so that `search_term_totals` holds a row for every project and no
-// measured refresh is a first-use full build.
+// the queued changes no project can apply. It is exported for BuildEverySearchTermStats, which
+// cmd/dispatch-seed runs at the end of a seed so that `search_term_totals` holds a row for every
+// project and no measured refresh is a first-use full build.
 //
 // Every project it changes is logged on a line of its own, with the mode it ran in and how many
 // items it applied, which is what says on a running server that the pass read a queue rather than
 // every item of every project.
 func RefreshEverySearchTermStats(ctx context.Context, pool *store.Pool) {
 	started := time.Now()
-	rows, err := pool.Query(ctx, `select key from projects order by key`)
-	if err != nil {
-		slog.Warn("dispatch: list the projects whose search term statistics to refresh", "error", err)
-		return
-	}
-	projects, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	projects, err := searchTermStatsProjects(ctx, pool)
 	if err != nil {
 		slog.Warn("dispatch: list the projects whose search term statistics to refresh", "error", err)
 		return
@@ -376,6 +371,17 @@ func RefreshEverySearchTermStats(ctx context.Context, pool *store.Pool) {
 	slog.Info("dispatch: search term statistics refreshed",
 		"projects", refreshed, "failed", len(projects)-refreshed, "items", items, "changes", changes,
 		"swept", swept, "duration", time.Since(started).Round(time.Millisecond))
+}
+
+// searchTermStatsProjects is every project a whole pass builds, in key order: the pass of this
+// release and the pass of the release before its snapshot columns
+// (buildEverySearchTermStatsBeforeSnapshots) read the same list in the same order.
+func searchTermStatsProjects(ctx context.Context, pool *store.Pool) ([]string, error) {
+	rows, err := pool.Query(ctx, `select key from projects order by key`)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
 }
 
 // sweepSearchTermQueue drops the queued changes no project's pass can apply and answers how many

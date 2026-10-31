@@ -71,6 +71,56 @@ func seedTestDatabase(t *testing.T) (*store.Store, *seedRun) {
 	return database, run
 }
 
+// TestSeedBuildsTermStatisticsOnMainsSchema seeds the shape the measurement protocol's "before"
+// side seeds: a database migrated from a checkout of main, filled by this tool with
+// --no-migrate. Its search_term_totals carries no snapshot column (migration 0158) and the build
+// of this release reads one, so without the step choosing its build by the schema every project
+// fails and the seed reports a data set whose term statistics were never built.
+//
+// The two columns are dropped from a database migrated to the head rather than the schema being
+// migrated from main, because a test process has no checkout of main to migrate from. Dropping
+// them leaves search_term_totals the shape migration 0139 gave it, which is the shape the step
+// reads the catalogue for; the rest of main's schema is older still, and the step's build reads
+// nothing of it that this head does not also have.
+func TestSeedBuildsTermStatisticsOnMainsSchema(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	if _, err := database.Pool.Exec(ctx,
+		`alter table search_term_totals drop column snapshot, drop column snapshot_at`); err != nil {
+		t.Fatalf("drop the snapshot columns 0158 added: %v", err)
+	}
+
+	started := time.Now()
+	run, err := seed(ctx, database, testScale, io.Discard)
+	if err != nil {
+		t.Fatalf("seed at scale %v on main's search_term_totals: %v", testScale, err)
+	}
+	t.Logf("seeded at scale %v in %s", testScale, time.Since(started).Round(time.Millisecond))
+
+	var built int
+	if err := database.Pool.QueryRow(ctx, `select count(*) from search_term_totals`).Scan(&built); err != nil {
+		t.Fatalf("count the totals rows: %v", err)
+	}
+	if built != len(run.plan.projects) {
+		t.Fatalf("the term statistics were built for %d projects, not %d", built, len(run.plan.projects))
+	}
+	// Every project's row holds a counted item total and the moment it was counted, which is
+	// every column main's search_term_totals has, and lexemes to go with it: a row claimed and
+	// never rebuilt would carry 0 items and no statistics.
+	var unbuilt int
+	if err := database.Pool.QueryRow(ctx, `
+		select count(*) from projects p
+		where not exists (select 1 from search_term_totals t
+		                   where t.project_key = p.key and t.items > 0 and t.refreshed_at is not null)
+		   or not exists (select 1 from search_term_stats s where s.project_key = p.key)
+	`).Scan(&unbuilt); err != nil {
+		t.Fatalf("count the projects whose statistics were not built: %v", err)
+	}
+	if unbuilt != 0 {
+		t.Fatalf("%d of %d projects hold no counted items or no lexemes", unbuilt, len(run.plan.projects))
+	}
+}
+
 // assertSameRowCounts holds every table of the two databases to the same count. The tables are
 // read from the catalogue rather than listed here, so a table a later migration adds is covered
 // without this test being edited.
