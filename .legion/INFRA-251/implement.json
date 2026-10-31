@@ -2,73 +2,57 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-251",
-  "completed": "2026-10-31T16:40:00Z",
-  "stateTable": [
-    "See .legion/INFRA-251/r15-state-table.md (states KEPT / CLAIMED(r) / HELD(c,d) / TOLD, the transitions with their code sites, the validity rule on naming and telling, how claims, holds and DeliveredRows read under issue keys)."
-  ],
+  "previousHandoff": "e1ebb3b08cef7c61f4b618a5b7489c1d7b5c9cc3",
+  "classification": "Seed 262 is (b), a defect, not (a). Row 72 (generation 11, launch 13) named ask-0014 while row 69, then its re-held copy 71, claimed it, and 71 then told it. The only rows that could compose row 72 between steps 215 and 227 are the two start rows that ran at step 222. At that step 69 was leased, and its re-hold moved the claim to 71, so a correct composer could not name ask-0014. Case (a) would need a receipt timeout that gets no copy (superseded, or the re-holds spent), which marks no telling. Here copy 71 was queued and told. The race this round closes by construction: the composer read what nothing claims in one statement and claimed it in a second. Under READ COMMITTED, a second composer reads a claim the first has not committed as no claim and names the decision too; its UPDATE then waits for the first and re-checks the row against a snapshot that cannot see the first's row, so the void-claim test passes and it takes the claim. TestTwoComposersNeverBothNameOneKeptDecision builds that interleaving directly. I did not catch seed 262's exact schedule: 1500 replays and a 1000-seed hunt with a probe did not reproduce it, so the trace's interleaving is built as the two-composer race, not replayed.",
   "proof": [
     {
-      "criterion": "Review 5722761728's three Important findings fixed on one ownership rule, each with a test that fails before its fix",
-      "surface": "internal/store/kept_decisions_test.go over real PostgreSQL 17.2: TestADeliveryWrittenBackUnconfirmedHoldsWhatItsConfirmationTold (finding 1), TestADeliveryRewriteDoesNotTakeARowAnotherTreeHolds (finding 2), TestAHoldReleaseLeavesAClaimThatCounts (finding 3)",
-      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 timeout 600 go test -count=1 -v -run 'TestADeliveryWrittenBackUnconfirmed|TestADeliveryRewriteDoesNotTake|TestAHoldReleaseLeaves' ./internal/store/",
-      "observed": "All three PASS. Before the fix each failed: 'stands false, held by \"\"/\"\"; want it standing again, held by legion-legion-LEGION-300-architect/outbox:1'; 'is held by \"legion-legion-LEGION-310-architect\"/\"outbox:1-interrupted\" after the old tree's task was rewritten, want it still held by legion-legion-LEGION-311-architect/outbox:2'; 'after the new tree's claim: claimed by 2, held by \"legion-legion-LEGION-320-architect\"; want claimed by 2 and no hold'.",
-      "headSha": "d758447861eebdd18df86386b040bbc6e8a22c18",
-      "negativeControl": "The before lines above are the same tests on 0d35ace8's code."
+      "criterion": "Two composers of one tree never both name one kept decision (seed 262, the architect's ruling (b))",
+      "surface": "internal/store/kept_decisions_test.go TestTwoComposersNeverBothNameOneKeptDecision on the pod's PostgreSQL 18.6: composer 1 reads, enqueues and claims, uncommitted. Composer 2 starts and is either done or waiting on a lock (pg_locks), and only then does composer 1 commit.",
+      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go test -count=1 -run TestTwoComposersNeverBothNameOneKeptDecision ./internal/store/",
+      "observed": "PASS at the head. With record/store.go as on edd9ad00 it failed: 'the second composer named [dispatch://LEGION-330/ask/ask-1] while the first claimed dispatch://LEGION-330/ask/ask-1; want nothing named twice'. The fix: UnclaimedKept locks every kept row of the tree, and the tree's readmitted approval, in a statement of its own before it reads. ClaimKeptDecisions now errors when it cannot claim everything the row names, so a row names only what it claims.",
+      "headSha": "9dda974d2bc78f9122436c1c3e4b21d0a79e0d29",
+      "negativeControl": "The before line above is the same test on edd9ad00's store code."
     },
     {
-      "criterion": "The property model reaches a refused and a late-refused confirmation and a take-back after a death, and catches finding 1",
-      "surface": "TestKeptDecisionsReachTheCurrentArchitectOnce with busyRefusalAfterAConfirmation, lateRefusalAfterAConfirmation and deathInTheTasksTurn",
-      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 LEGION_KEPT_PROPERTY_RUNS=500 LEGION_KEPT_PROPERTY_STEPS=300 timeout 3500 go test -count=1 -timeout 58m -v -run TestKeptDecisionsReachTheCurrentArchitectOnce ./internal/daemon/",
-      "observed": "First full sweep failed seed 427 (told twice): a re-held copy of a catch-up was dropped by a ready while the row it copies was publishing again after a lost finish. Fixed in DropCatchUps (a catch-up is kept while any row of its telling is leased); seed pinned. Final sweep ok in 1657 s: 158 sends refused busy after a confirmation, 504 replayed refusals took a confirmation back, 265 processes died in a task's turn, 769 hand-overs, 500 adoptions, 1991 closes.",
-      "headSha": "d758447861eebdd18df86386b040bbc6e8a22c18",
-      "negativeControl": "With holdKeptDecisions' put-back insert removed, the default run fails 5 of 30 seeds (seed 12: 'ask-0001 ... told 0 times'). With the ownership condition removed the model does not catch it at 100 seeds (the store test does). With DropCatchUps' telling-family guard reverted to the row's own lease, seed 427 fails 'told 2 times'."
+      "criterion": "A catch-up whose re-holds are spent while its architect stays live does not lose its decisions (seed 701)",
+      "surface": "internal/daemon/catch_up_settling_test.go TestACatchUpWhoseReholdsAreSpentHandsOverWhatItNamed: a catch-up with resends = len(noticeReholdDelays) gets a receipt timeout from the publisher while the architect claim is working; then the row finishes",
+      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go test -count=1 -run TestACatchUpWhoseReholdsAreSpentHandsOverWhatItNamed ./internal/daemon/",
+      "observed": "PASS at the head: one fresh catch-up names ask-2, and the kept row is claimed by it. reholdNotice's spent branch calls spentKept, which uses supersededKept's telling check and HandOverKept, so the decision waits in the outbox. With the spentKept call removed it fails: 'the catch-ups left after the spent catch-up name dispatch://LEGION-1/ask/ask-2 0 times'. In my debug sweep on e1ebb3b0, seed 701 failed 'told 0 times' after its row 37 (resends=3) timed out with no copy.",
+      "headSha": "9dda974d2bc78f9122436c1c3e4b21d0a79e0d29",
+      "negativeControl": "spentKept call removed: told 0 times, as quoted above."
     },
     {
-      "criterion": "The two Minors and nothing else regresses",
-      "surface": "admit/lost_kept_decisions_test.go (four checks that could not fail replaced by keptOwner: the row stands under its issue, claimed by the new tree's row; the two adoption tests merged so the ready is reached); the stale comments in daemon/workflow.go, kept_decision_property_test.go, supervise tests; the whole daemon module",
-      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_PG_DSN=postgres://postgres:pw@127.0.0.1:55432/postgres?sslmode=disable LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 go build ./... && go vet ./... && gofmt -l internal cmd; timeout 3300 go test -count=1 -p 1 -timeout 54m ./internal/... ./cmd/... -skip '<Docker-only, tmux, pgvector, keeper flake>'; then, after the last store change, ./internal/daemon ./internal/store ./internal/record ./internal/admit ./internal/supervise ./internal/workflow again",
-      "observed": "Every package ok in the whole run except three daemon tests that hand-build a start whose kept row is unclaimed (TestOnlyADeliveredStartHoldsTheDecisionsItNamed, TestAStartWhoseForgetFailedIsNotDeliveredAgainAfterItsTurn, TestAStartThatFindsTheRootArchitectRunningNamesEachKeptDecisionOnce); the ownership rule now also takes a KEPT row of the claim's own tree, and the six touched packages then pass (daemon 682 s, store 54 s, record 37 s, admit 275 s, supervise 24 s, workflow 431 s), with the sweep rerun after that change.",
-      "headSha": "d758447861eebdd18df86386b040bbc6e8a22c18",
-      "negativeControl": "The skipped tests need rootless Docker, a tmux binary or pgvector, or are the keeper flake."
+      "criterion": "Bounded property sweep of at least 400 seeds x 300 steps",
+      "surface": "TestKeptDecisionsReachTheCurrentArchitectOnce on the pod's PostgreSQL 18.6",
+      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 LEGION_KEPT_PROPERTY_RUNS=500 LEGION_KEPT_PROPERTY_STEPS=300 timeout 3500 go test -count=1 -timeout 58m -v -run '^TestKeptDecisionsReachTheCurrentArchitectOnce$' ./internal/daemon/",
+      "observed": "500 seeds ran in 1665 s. No seed failed an invariant: no 'told N times' and no 'still kept'. 126 receipt timeouts got no copy (superseded or spent). Five seeds (40, 92, 93, 280, 421) were marked FAIL only by their t.Cleanup: 'drop legion_outbox_test_\u2026: permission denied to terminate process (SQLSTATE 42501)'. That is the pod's PostgreSQL 18 refusing legion_test the right to end an autovacuum worker (sent to the controller, dispatch://INFRA-49/comment/a0f5b434-7d6f-4644-9e7a-19066eaf42b6; the controller ruled such cleanup-only failures not #2163's, and the merge lane fixes legion-testpg in #2613).",
+      "headSha": "9dda974d2bc78f9122436c1c3e4b21d0a79e0d29",
+      "negativeControl": "Without the composer lock, the store test above names the decision twice."
+    },
+    {
+      "criterion": "The touched packages still pass",
+      "surface": "go test of internal/daemon, store, admit, workflow and intake, with LEGION_TEST_PG_DSN on a database legion_test owns (infra251_suite); record and supervise on the pod DSN",
+      "command": "cd packages/daemon && env -u LEGION_WORKSPACE -u LEGION_WORKSPACE_RECREATED -u OMP_SESSION_SQL_DSN_FILE -u OMP_SESSION_STORAGE LEGION_TEST_NATS_URL=nats://127.0.0.1:54222 LEGION_TEST_NATS_MONITOR_URL=http://127.0.0.1:58222 LEGION_TEST_PG_DSN=postgres://legion_test@127.0.0.1:5433/infra251_suite?sslmode=disable timeout 3500 go test -count=1 -p 1 -timeout 58m ./internal/daemon/ ./internal/store/ ./internal/admit/ ./internal/workflow/ ./internal/intake/ -skip '<Docker-only, tmux, scratch Dispatch, keeper flake>'",
+      "observed": "record ok (36.9 s) and supervise ok (110.6 s). In the other five packages, every one of 85 failing tests failed only in cleanup, with 'permission denied to terminate process (SQLSTATE 42501)' when dropping its per-test database. None failed an assertion (each FAIL was checked with the three lines after it). On the pod's own DSN database, the migrating tests also hit 'permission denied for schema public'. Both are environment faults, which the controller ruled not #2163's. go build ./..., go vet and gofmt -l are clean.",
+      "headSha": "9dda974d2bc78f9122436c1c3e4b21d0a79e0d29",
+      "negativeControl": "TestConsumerLagCountsEveryConsumerWhileNATSRefusesTheOldestMessageRead needs rootless Docker and panics without it; it is skipped."
     }
   ],
   "filesChanged": [
-    "internal/store/migrations/0065_parked_decisions.up.sql (keyed (issue, ref); held_by_claim, held_by_delivery; readmitted_approvals keyed by issue), 0066 header; internal/store/kept_decisions.go (hold, tell at confirmation, release at retire), claims.go",
-    "internal/record/record.go, store.go, parked_decision.go: the validity rule in SQL; ParkedDecision.Issue/HeldBy; MoveKeptDecisions, ReKeepDeliveredDecisions, HeldKeptDecisions deleted; ReleaseHeldDecisions, ArchitectLaunches added",
-    "internal/workflow/parked_decision.go (naming by tree, HandOverKept to each tree owed, CatchUpTheTreesOwed), linger.go (owed list by issue tree; handedOverSubtrees deleted), adopt.go (catch-up at adoption)",
-    "internal/admit/admit.go: the subtree move and re-keep removed",
-    "internal/daemon/parked_decision.go, workflow.go (rootTask's send-time drop releases holds and writes catch-ups), outbox.go, notice_exceptions.go",
-    "internal/supervise: doc comments only",
-    "tests: lost_kept_decisions_test.go (+ the running-architect adoption test), kept_decision_property_test.go (transitions and interleavings), kept_decision_regression_seeds_test.go (48, 69), parked_decision_test.go, held_task_handover_test.go, catch_up_settling_test.go, root_hears_main_paths_test.go, admit/handed_over_decisions_test.go, store/migration_0065_test.go and the Root->Issue field renames",
-    "AGENTS.md, docs/site/.../troubleshooting.md, packages/daemon/.changes/unreleased/INFRA-251-kept-decision-once.yaml"
-  ],
-  "trickyParts": [
-    "Why rewrite at send time: the machine owns the pending delivery; a rewrite inside admission's transaction would be overwritten by the machine's next write of its memory. The record already says which tree owes a decision, so no new durable state is needed, and any route an issue leaves a tree by is covered. The narrowed task is persisted before the send, so a restore reads the same text; the delivery id is kept.",
-    "A mark whose issue the record does not hold is kept, never dropped: a decision is dropped from a task only where the record shows another tree owes it."
+    "packages/daemon/internal/record/store.go",
+    "packages/daemon/internal/store/kept_decisions_test.go",
+    "packages/daemon/internal/daemon/notice_exceptions.go",
+    "packages/daemon/internal/daemon/parked_decision.go",
+    "packages/daemon/internal/workflow/parked_decision.go",
+    "packages/daemon/internal/daemon/catch_up_settling_test.go",
+    "packages/daemon/internal/daemon/kept_decision_regression_seeds_test.go",
+    "packages/daemon/internal/daemon/kept_decision_property_test.go"
   ],
   "deviations": [
-    "Finding 3's fix (the smaller of the two offered): a delivery written back unconfirmed puts back, held by it, every mark its confirmation told whose issue still stands in the claim's tree; telling stays at the confirmation, so the architect's ruled behaviour on a failed confirmation write is unchanged.",
-    "Ownership (finding 2) also lets a delivery hold a row nobody claims or holds whose issue stands in the claim's own tree, beside rows claimed by its delivered starts and rows it already holds. A start's rows are always claimed by it in production; three existing tests (two the tester's) hand-build a start whose row is unclaimed, and this keeps them valid without changing them. It cannot reintroduce finding 2: a row another tree's start, catch-up or delivery claims or holds is never taken.",
-    "ForgetKeptDecisions' second statement clears only that catch-up's own claim (claimed_by = the row), not a hold: by the invariant a row it claims carries no hold, and no other claim is touched. The review cited it as clearing another claim; its WHERE always selected the row's own claim.",
-    "A sweep finding beyond the review (seed 427) is fixed in DropCatchUps and pinned.",
-    "The listener rollout case the reviewer judged out of scope remains."
+    "Seed 262's own schedule was not replayed deterministically; the architect asked for the trace's interleaving as a test, and TestTwoComposersNeverBothNameOneKeptDecision builds the race it reduces to. Seeds 262 and 701 are pinned in keptLongRegressionSeeds.",
+    "The lock is a separate SELECT ... FOR UPDATE ahead of the read, rather than one UPDATE ... RETURNING. An UPDATE re-checks a row that another transaction changed against its own start-time snapshot, so its void-claim subquery can still miss the other composer's committed row. Taking the lock first, in a statement of its own, gives the read a snapshot that sees it.",
+    "For a spent catch-up reported by an earlier listener after its row finished (claims 0), spentKept writes a fresh catch-up only when the tree has unclaimed decisions, as adoption does.",
+    "A catch-up's re-holds can now restart: a holder that never confirms gets a fresh catch-up every cycle of the three re-hold delays, as the architect decided."
   ],
-  "openQuestions": [],
-  "propertyModelGaps": [
-    "Spec decisions through the outbox's parkDecision, RelayNotParked and a session's decision: every keep path calls record.RelayParkedDecision, which writes one parked_decisions row keyed (issue, ref) and nothing else the naming or telling reads; RelayNotParked and a session's decision keep nothing, so the entry path cannot change how many times a row is told.",
-    "readmitted_approvals: keyed by the issue whose spec it is, with the same claim and hold columns, and every claim, hold, tell and release statement acts on both tables keyed by the same outbox row or delivery, so the pair moves through the states exactly when a decision of the same row does.",
-    "Retired claims: retire clears the delivery's holds in its transaction (releaseKeptDecisions at RetireDelivery), so a retired claim's rows return to KEPT for the tree their issue stands in; the model reaches retire through RetireDelivery at every turn end and suspension.",
-    "Issue deletion: the daemon has no code path that deletes an issue record; parked_decisions.issue cascades if a person deletes one by hand, and then no architect of that issue exists to tell.",
-    "An unroutable notice and a re-hold whose budget is spent finish the row without telling, so its deletion releases its claims (on delete set null) and the architect's next ready names them, the same ending as 'refused', which is modelled.",
-    "Concurrency and time: naming claims only rows with no counting claim or hold in its own transaction; settlements and hand-overs take the facts' advisory lock; the model runs due rows on concurrent goroutines and in random order and drops finishes, which covers what backoff, lease expiry or a re-hold delay can order."
-  ],
-  "round11Proof": "Round 11's proof entries are in this file at commit e8a595d31f14.",
-  "oracle": [
-    "A catch-up names the generation current when the daemon decided to send it (read at the start of its publish). The publish is network I/O outside every transaction; a re-admission landing inside it is followed by the new generation's own catch-up, queued behind it (earlierNoticeFor). The architect agreed (A).",
-    "A refused or denied catch-up keeps its decisions unclaimed; quiesce ends a refusal as it ends in real life, by relaunching the architect, whose ready names them. The architect agreed to keep that ending (B), on condition that a decision never vanishes silently: lingerExpired logs each decision still owed.",
-    "A decision counts as told when told once to the architect of the tree its issue stood in at that telling. After a child's hand-over, what was still kept or held is owed to the child's architect; one extra telling to the old tree, by a row composed before the hand-over, is allowed.",
-    "A decision is owed to the architect of the tree its issue stands in, moving with the issue whenever it moves while still kept or held; a telling to the tree it left counts at most once, by a row composed before it left."
-  ],
-  "sweep": "500 seeds x 300 steps passed (1287.3 s) at b7a78e76 after the four seeds it first found (363, 366, 388, 479, an oracle-boundary fault) were fixed and pinned; every failing seed so far is in TestKeptDecisionsRegressionSeeds.",
-  "mergeHead": "086b89c46a1111259c52ea7bcbd0c116f0451d24"
+  "openQuestions": []
 }
