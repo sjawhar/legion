@@ -363,11 +363,16 @@ export function setParseDeadline(limitMs = PARSE_TIME_LIMIT_MS): void {
 /** What a caller of `renderWithEngine` wants beyond the rendering itself. */
 export interface RenderWithEngineOptions {
   /** Keeps the caller's place on a parse the worker has already been posted when the render is
-   *  cancelled, so that answer still reaches `render` (`worker-queue.ts`, `keepIfPosted`). A
-   *  surface asks for it where an answer to a source it has moved on from is still worth
-   *  showing - a streaming turn, whose reader would otherwise watch a body that never changes -
-   *  and must then expect a rendering of a source it no longer holds. Off by default: a
-   *  cancelled render runs no more. */
+   *  cancelled, so that answer still reaches `render` (`worker-queue.ts`, `keepIfPosted`). Every
+   *  element `useRenderedMarkdown` draws asks for it, whatever surface it is on: the streaming
+   *  turn is where it matters - its reader would otherwise watch a body that never changes -
+   *  and no other surface is harmed by it, since an element decides for itself what an answer to
+   *  a source it has moved on from is worth (sjawhar/legion#2519). A caller that asks must
+   *  expect such an answer, and gets nothing in place of one: the deadline and a worker that
+   *  never runs answer a kept place with no parse at all, since the render that asked has gone.
+   *  `useMarkdownHeadline` is the caller that does not ask - a headline of a source it has moved
+   *  on from would read as the wrong one - and off is the default: a cancelled render runs no
+   *  more. */
   readonly keepAPostedParse?: boolean;
 }
 
@@ -438,7 +443,9 @@ function renderLoaded(
  * body's own text, and again with the parsed document when the worker answers. A worker that
  * cannot be created, whose chunk does not load, that crashes, or that holds a body past its
  * deadline leaves that body to the page's own thread, so a reader always ends with a formatted
- * body; only the parser refusing a body ends in its literal text.
+ * body; only the parser refusing a body ends in its literal text. That is for a render still
+ * waiting: a place kept on a posted parse belongs to a render already cancelled, so it takes
+ * the worker's own answer or none, and the page parses nothing for it (sjawhar/legion#2519).
  *
  * Returns the cancel: a cancelled `render` never runs again - unless the caller asked to keep a
  * posted parse (`RenderWithEngineOptions`) and the worker is holding that body, whose answer

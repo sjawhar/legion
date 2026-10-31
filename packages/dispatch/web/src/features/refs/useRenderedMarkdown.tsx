@@ -375,16 +375,18 @@ function keepTheReadersPlace(element: HTMLElement): ReadersPlace {
  * and is marked all the same, since between the tasks it holds part of a body and nothing says
  * so otherwise - and the ask hosts, the anchors, the pictures, the diagrams and `onRendered`
  * all wait for it, so no portal is mounted into a body still being built. A frame arriving mid
- * paint stops nothing: the paint goes on to put its whole body in, which is the newest the
- * reader can be shown until that frame's own answer lands. What does stop a paint is the paint
- * that replaces it, and the unmount; a paint stopped part-built puts back the body the element
- * held before it, so the reader is never left with the prefix of one (`MarkdownBody`'s
- * `paintBlockInSlices`). Only the paint that first puts a given source here is built
- * that way: a repaint of the source the element already shows - a new decision card, a new
- * `decorate` pass - lands in the commit that asked for it, so everything mounted into the paint
- * the reader is reading moves to the new one with it. A source that differs from the one
- * painted is sliced however much the element already holds, so an edit of a long comment, and a
- * streamed turn that crossed the threshold after a short paint, never land in one task.
+ * paint stops nothing and writes nothing: the paint goes on to put its whole body in, which is
+ * the newest the reader can be shown until that frame's own answer lands, and the element is
+ * left to it rather than taking that frame's own text, which would stand in front of the
+ * batches still arriving (sjawhar/legion#2519). What does stop a paint is the paint that
+ * replaces it, and the unmount; a paint stopped part-built puts back the body the element held
+ * before it, so the reader is never left with the prefix of one (`MarkdownBody`'s
+ * `paintBlockInSlices`). Only the paint that first puts a given source here is built that way:
+ * a repaint of the source the element already shows - a new decision card, a new `decorate`
+ * pass - lands in the commit that asked for it, so everything mounted into the paint the reader
+ * is reading moves to the new one with it. A source that differs from the one painted is sliced
+ * however much the element already holds, so an edit of a long comment, and a streamed turn
+ * that crossed the threshold after a short paint, never land in one task.
  */
 export function useRenderedMarkdown(
   root: RefObject<HTMLElement | null>,
@@ -408,7 +410,8 @@ export function useRenderedMarkdown(
   const [isPending, setIsPending] = useState(false);
   /** The source the element holds painted, which a pending source keeps rather than replacing
    *  with its text, and which says whether a paint is this source's first here. `undefined`
-   *  where the element holds no paint: nothing yet, or a body's literal text. */
+   *  where the element holds no paint: nothing yet, a body's literal text, or a paint of this
+   *  source still landing, which `painting` is what says. */
   const painted = useRef<string | undefined>(undefined);
   /** Whether the reader has been shown a pending element, so the paint that formats it replaces
    *  something they are already reading. */
@@ -423,7 +426,10 @@ export function useRenderedMarkdown(
   /** Stops the paint filling the element across tasks, and the diagrams the paint before it
    *  asked for. Both outlive the render that started them - a paint goes on while the next frame
    *  is pending, and a diagram draws into the paint the reader is reading - so each is stopped
-   *  by the paint that replaces it and by the unmount, never by a frame. */
+   *  by the paint that replaces it and by the unmount, never by a frame. `painting` is set only
+   *  while that paint is filling the element: it is cleared where the paint lands, so a source
+   *  still being painted here is as much a paint as a source painted whole
+   *  (sjawhar/legion#2519). */
   const painting = useRef<(() => void) | undefined>(undefined);
   const drawing = useRef<(() => void) | undefined>(undefined);
 
@@ -458,9 +464,12 @@ export function useRenderedMarkdown(
         if (pending) {
           setIsPending(true);
           wasPending.current = true;
-          if (painted.current !== undefined) {
+          if (painted.current !== undefined || painting.current !== undefined) {
             // The paint the reader is reading stays until the answer to this source lands, and
-            // with it every portal mounted into it.
+            // with it every portal mounted into it. A paint still filling the element across
+            // tasks is one of those: nothing but the paint that replaces it, or the unmount,
+            // stops it, so this source's text written here would stand in front of the batches
+            // that paint goes on attaching (sjawhar/legion#2519).
             return;
           }
           element.replaceChildren(document.createTextNode(markdown));
@@ -554,7 +563,12 @@ export function useRenderedMarkdown(
         // pending text: a body the engine already had the answer for is painted in slices on a
         // fresh mount without the worker having been waited for at all.
         setIsPending(true);
-        painting.current = paintAcrossTasks(inSlices(element, parsed, engine.serializer), {
+        // `paintAcrossTasks` runs its first slice in this task, so a body that fits in one -
+        // a long paragraph, whose whole tree is fewer nodes than a batch - is done before the
+        // cancel it returns is in hand: `running` is what keeps `painting.current` from being
+        // left holding a paint that is already over (sjawhar/legion#2519).
+        let running = true;
+        const stop = paintAcrossTasks(inSlices(element, parsed, engine.serializer), {
           afterPageBatch() {
             // The batch that has just arrived is laid out here, while it is all of the page that
             // is dirty. Left to the engine, the layout of every batch would fall into whichever
@@ -573,10 +587,15 @@ export function useRenderedMarkdown(
             place?.hold();
           },
           done() {
+            running = false;
+            painting.current = undefined;
             painted.current = markdown;
             finish();
           },
         });
+        if (running) {
+          painting.current = stop;
+        }
       },
       // The frame the worker is holding is the newest parse a streaming turn can be shown
       // before it pauses, so this element is still given that answer after it has asked for a

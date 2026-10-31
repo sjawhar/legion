@@ -1127,6 +1127,60 @@ function topParagraphs(container: HTMLElement): HTMLElement[] {
   return Array.from(markdownElement(container).querySelectorAll<HTMLElement>(":scope > p"));
 }
 
+/** The text standing in the element beside its blocks: a body's own literal text, which a paint
+ *  replaces rather than stands behind. */
+function looseText(container: HTMLElement): string {
+  return Array.from(markdownElement(container).childNodes)
+    .filter((node) => node.nodeName === "#text")
+    .map((node) => node.textContent ?? "")
+    .join("");
+}
+
+/** The next task, so a row reads what one slice of a paint left in the element: the task that
+ *  slice queued is ahead of this one, so exactly one of them has run when it resolves. */
+function nextTask(): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setTimeout(resolve, 0);
+  return promise;
+}
+
+/** Every count of the body's own paragraphs the element passes through from the call on, in
+ *  order and from its own changes rather than from what a task happens to leave; the call it
+ *  answers with ends the watch and gives them. */
+function paragraphCounts(element: HTMLElement): () => number[] {
+  const counts: number[] = [];
+  let count = element.querySelectorAll(":scope > p").length;
+  const take = (records: MutationRecord[]): void => {
+    for (const record of records) {
+      for (const node of Array.from(record.removedNodes)) {
+        count -= node.nodeName === "P" ? 1 : 0;
+      }
+      for (const node of Array.from(record.addedNodes)) {
+        count += node.nodeName === "P" ? 1 : 0;
+      }
+      counts.push(count);
+    }
+  };
+  const watch = new MutationObserver(take);
+  watch.observe(element, { childList: true });
+  return () => {
+    take(watch.takeRecords());
+    watch.disconnect();
+    return counts;
+  };
+}
+
+/** What the element held when the paint that replaced a part-built one took it over. That paint
+ *  empties the element a node at a time before its first batch, so what it took is the top of
+ *  the run of counts falling to nothing (`MarkdownBody`'s `paintBlockInSlices`). */
+function heldWhenEmptied(counts: readonly number[]): number {
+  let at = counts.lastIndexOf(0);
+  while (at > 0 && counts[at - 1] === counts[at] + 1) {
+    at -= 1;
+  }
+  return counts[at];
+}
+
 /**
  * A body longer than `markdownWorkerThreshold` is parsed in a Web Worker (sjawhar/legion#2519),
  * so the reader's own thread is free while the heaviest body on the page parses. These rows are
@@ -1376,6 +1430,111 @@ describe("A long body parsed in the worker", () => {
     }
   });
 
+  // The same frame mid-paint, on an element that had nothing painted in it when the paint
+  // began: a reader opening the live session view while a long turn streams gets a pending
+  // first render and a frame every 100 ms, so the first frame lands while the first paint is
+  // still filling the element. A paint is stopped by nothing but the paint that replaces it, so
+  // the element must be left to it: the new frame's own text written here would stand in front
+  // of the batches still arriving behind it, and that is what the reader would read until that
+  // frame's answer and its whole paint landed (sjawhar/legion#2519).
+  test("writes no text beside a paint filling a freshly mounted element when a frame arrives", async () => {
+    const worker = installFakeParseWorker();
+    const first = paragraphBody("A turn a reader opened while it streamed");
+    const grown = `${first}${"y\n\n".repeat(50)}`;
+    const view = render(<MarkdownBody markdown={first} />);
+
+    try {
+      // Nothing is painted here and nothing is painting: the reader has the body's own text,
+      // which is what a first render owes them.
+      await waitFor(() => expect(pendingMark(view.container)).toBe("true"));
+      expect(looseText(view.container)).toBe(first);
+      expect(topParagraphs(view.container)).toHaveLength(0);
+
+      await act(() => worker.answer(0));
+      // One task at a time up to the first batch, which is where the paint replaces that text.
+      for (let task = 0; task < 50 && topParagraphs(view.container).length === 0; task += 1) {
+        await act(nextTask);
+      }
+      const landed = topParagraphs(view.container).length;
+      expect(landed).toBeGreaterThan(0);
+      expect(landed).toBeLessThan(paragraphs + 1);
+
+      // The frame arrives in the middle of that paint.
+      view.rerender(<MarkdownBody markdown={grown} />);
+      // No text of that frame stands beside the blocks still arriving: 20,000 characters of it
+      // would otherwise read in front of them, so the count is what this asserts.
+      expect(looseText(view.container).length).toBe(0);
+      expect(topParagraphs(view.container).length).toBeGreaterThanOrEqual(landed);
+
+      // The paint still puts its whole body in, with no text of the new frame beside it, and
+      // the element stays pending because that frame is owed.
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 1));
+      expect(looseText(view.container).length).toBe(0);
+      expect(pendingMark(view.container)).toBe("true");
+      expect(fallbackMark(view.container)).toBeNull();
+
+      await act(() => worker.answer(1));
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 51));
+      expect(looseText(view.container).length).toBe(0);
+      expect(pendingMark(view.container)).toBeNull();
+      expect(fallbackMark(view.container)).toBeNull();
+    } finally {
+      view.unmount();
+    }
+  });
+
+  // What the paint that replaces a part-built one leaves on the way through. The answer to the
+  // frame after it is the one thing that stops a paint short, and the painter puts back what
+  // the element held before it started (`MarkdownBody`'s `paintBlockInSlices`), so what the
+  // replacing paint takes over is the whole body the reader was reading, never the few hundred
+  // paragraphs the stopped one had put in. Every task of this row leaves the element holding
+  // all of that body or a growing part of the new one (sjawhar/legion#2519).
+  test("holds none or all of the body it was reading while a part-built paint is replaced", async () => {
+    const worker = installFakeParseWorker();
+    const first = paragraphBody("A body a reader is reading");
+    const edited = `${first}${"y\n\n".repeat(50)}`;
+    const editedAgain = `${edited}${"z\n\n".repeat(50)}`;
+    const view = render(<MarkdownBody markdown={first} />);
+
+    try {
+      await act(() => worker.answer(0));
+      await waitFor(() => expect(topParagraphs(view.container)).toHaveLength(paragraphs + 1));
+
+      // Frame N is painted part-way: the element holds some of it, fewer blocks than the body
+      // the reader was reading.
+      view.rerender(<MarkdownBody markdown={edited} />);
+      await act(() => worker.answer(1));
+      await waitFor(() =>
+        expect(topParagraphs(view.container).length).toBeLessThan(paragraphs + 1)
+      );
+
+      // Frame N+1 answers mid-paint, which is what stops that paint. Its own paint empties the
+      // element before its first batch, and what it empties is what the stopped one left.
+      const changes = paragraphCounts(markdownElement(view.container));
+      view.rerender(<MarkdownBody markdown={editedAgain} />);
+      await act(() => worker.answer(2));
+
+      // Every task from there to the end of that paint: the whole body the reader had, or a
+      // part of the new one, which only grows.
+      const seen: number[] = [];
+      for (let task = 0; task < 200; task += 1) {
+        seen.push(topParagraphs(view.container).length);
+        if (seen.at(-1) === paragraphs + 101) {
+          break;
+        }
+        await act(nextTask);
+      }
+      expect(seen.at(-1)).toBe(paragraphs + 101);
+      const filling = seen.findIndex((count) => count !== paragraphs + 1);
+      expect(seen.slice(0, filling)).toEqual(seen.slice(0, filling).map(() => paragraphs + 1));
+      expect(seen.slice(filling)).toEqual([...seen.slice(filling)].sort((a, b) => a - b));
+      expect(new Set(seen.slice(filling)).size).toBe(seen.length - filling);
+      expect(heldWhenEmptied(changes())).toBe(paragraphs + 1);
+    } finally {
+      view.unmount();
+    }
+  });
+
   // A body the engine already has the answer for is rendered in the commit that mounts it, never
   // pending on the worker - and is still built across tasks, so between them the element holds
   // part of a body. It carries the marker all the same, which is what a reader's surface, and
@@ -1505,6 +1664,46 @@ describe("A long body parsed in the worker", () => {
       view.unmount();
     }
   }, 40_000);
+
+  // The other end of the same deadline. An element keeps its place on the parse the worker is
+  // holding when it goes (`keepIfPosted`), which is how a streaming turn is shown the frame the
+  // worker was on; what that place must not buy is the body parsed on the reader's own thread
+  // once the deadline fires, since the element it was for has gone and `useRenderedMarkdown`
+  // throws such an answer away - the freeze a reader who navigated away would feel for a body
+  // nobody is looking at (sjawhar/legion#2519). A parse on the page would have cached its
+  // answer, so the mount below would need no worker at all; it asks for one, which is what says
+  // the page parsed nothing.
+  test("parses nothing on the page when the deadline passes for a body its reader left", async () => {
+    const worker = installFakeParseWorker();
+    setParseDeadline(50);
+    const markdown = longBody("A body left with the worker");
+    const left = render(<MarkdownBody markdown={markdown} />);
+    try {
+      await worker.waitForRequests(1);
+    } finally {
+      left.unmount();
+    }
+    // Well past the deadline, which fires with the element gone and its place still on the job.
+    const pastTheDeadline = Promise.withResolvers<void>();
+    setTimeout(pastTheDeadline.resolve, 300);
+    await pastTheDeadline.promise;
+
+    const back = render(<MarkdownBody markdown={markdown} />);
+    try {
+      await worker.waitForRequests(2);
+      expect(worker.requests[1]?.markdown).toBe(markdown);
+      expect(worker.workers).toHaveLength(2);
+      expect(pendingMark(back.container)).toBe("true");
+
+      await act(() => worker.answer(1));
+      await waitFor(() => expect(topItems(back.container)).toHaveLength(longItems));
+      expect(pendingMark(back.container)).toBeNull();
+      expect(fallbackMark(back.container)).toBeNull();
+    } finally {
+      setParseDeadline();
+      back.unmount();
+    }
+  }, 20_000);
 
   // Every paint recomputes the ask hosts, so a body whose decision card arrives late draws it
   // from the answer it already has: the card is a dependency of the render, never a new parse.

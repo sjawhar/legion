@@ -41,6 +41,16 @@ export interface WorkerJob {
  */
 export type WorkerReply<Answered> = { ready: true } | ({ id: number } & Answered);
 
+/** One render's place on a job: the waiter its answer goes to, and whether the render that
+ *  asked has gone while the worker held the job (`keepIfPosted`). A kept place is worth the
+ *  worker's own answer, which is what `keepIfPosted` buys, and nothing else: the render was
+ *  cancelled, so an answer the queue makes without the worker would be work nobody reads - for
+ *  the parse, a parse of an abandoned body on the reader's own thread (sjawhar/legion#2519). */
+interface Waiter<Answer> {
+  readonly answer: (answer: Answer) => void;
+  kept: boolean;
+}
+
 /** One job in the queue: what its owner knows about it, the id it was posted under, and every
  *  render waiting on its answer. */
 interface Queued<Job extends WorkerJob, Answer> {
@@ -48,7 +58,13 @@ interface Queued<Job extends WorkerJob, Answer> {
   readonly job: Job;
   /** A job two surfaces asked for at once is posted once; a job none waits for any more is
    *  abandoned. */
-  readonly waiters: ((answer: Answer) => void)[];
+  readonly waiters: Waiter<Answer>[];
+}
+
+/** Whether any render still waits on `entry` for an answer of whatever kind, rather than only
+ *  for the worker's own (`Waiter`). */
+function anyoneIsWaiting<Job extends WorkerJob, Answer>(entry: Queued<Job, Answer>): boolean {
+  return entry.waiters.some((waiter) => !waiter.kept);
 }
 
 /** What a queue does that its two owners do differently. */
@@ -127,7 +143,10 @@ export class WorkerQueue<Job extends WorkerJob, Answered, Answer> {
    * (`markdown-engine.ts`): every frame cancels the frame before it, and the frame the worker is
    * holding carries the only parse the reader can be shown before the stream ends
    * (sjawhar/legion#2519). Such an owner must expect an answer to a source it has moved on from,
-   * and must say for itself when that answer stops being worth painting.
+   * and must say for itself when that answer stops being worth painting. The place a cancel
+   * leaves that way is worth the worker's own answer alone (`Waiter`): a deadline, or a worker
+   * that never runs, answers the job for whoever is still waiting on it and leaves that place
+   * unanswered, so a body the page has moved on from is never worked on here instead.
    */
   wait(
     key: string,
@@ -143,13 +162,14 @@ export class WorkerQueue<Job extends WorkerJob, Answered, Answer> {
     if (entry === undefined && this.inFlight?.job.key === key) {
       entry = this.inFlight;
     }
+    const place: Waiter<Answer> = { answer: waiter, kept: false };
     if (entry === undefined) {
       this.lastId += 1;
-      entry = { id: this.lastId, job: make(), waiters: [waiter] };
+      entry = { id: this.lastId, job: make(), waiters: [place] };
       this.queued.push(entry);
       this.postNext();
     } else {
-      entry.waiters.push(waiter);
+      entry.waiters.push(place);
     }
     const waiting = entry;
     let cancelled = false;
@@ -159,9 +179,10 @@ export class WorkerQueue<Job extends WorkerJob, Answered, Answer> {
       }
       cancelled = true;
       if (keepIfPosted && this.inFlight === waiting) {
+        place.kept = true;
         return;
       }
-      const at = waiting.waiters.indexOf(waiter);
+      const at = waiting.waiters.indexOf(place);
       if (at !== -1) {
         waiting.waiters.splice(at, 1);
       }
@@ -282,34 +303,42 @@ export class WorkerQueue<Job extends WorkerJob, Answered, Answer> {
   }
 
   /** The worker has not answered `held` within the limit: it is stopped, which stops that work,
-   *  `held` is settled without it, and the jobs behind it go to a fresh worker. */
+   *  `held` is settled without it for whoever still waits on it, and the jobs behind it go to a
+   *  fresh worker. */
   private expire(held: Queued<Job, Answer>): void {
     if (held !== this.inFlight) {
       return;
     }
     this.stopWorker();
-    if (held.waiters.length > 0) {
+    // What the policy does without the worker is for a render still waiting on this job - for
+    // the parse, the reader's own thread, which is where a body must end formatted. A place
+    // kept on a posted job is not one (`Waiter`): the deadline of a body whose element has gone
+    // would otherwise park that parse on the thread of a reader who left it
+    // (sjawhar/legion#2519).
+    if (anyoneIsWaiting(held)) {
       this.settle(held, this.policy.withoutTheWorker(held.job));
     }
     this.postNext();
     this.policy.settled?.();
   }
 
-  /** No worker will run: every job the queue holds is answered without one. */
+  /** No worker will run: every job someone still waits on is answered without one. */
   private giveUp(error: unknown): void {
     this.noWorker = true;
     const held = this.stopWorker();
     this.queued = [];
     this.policy.noWorkerFrom(error);
     for (const entry of held) {
-      this.settle(entry, this.policy.withoutAWorker(entry.job));
+      if (anyoneIsWaiting(entry)) {
+        this.settle(entry, this.policy.withoutAWorker(entry.job));
+      }
     }
     this.policy.settled?.();
   }
 
   private settle(entry: Queued<Job, Answer>, answer: Answer): void {
     for (const waiter of [...entry.waiters]) {
-      waiter(answer);
+      waiter.answer(answer);
     }
   }
 
@@ -319,10 +348,10 @@ export class WorkerQueue<Job extends WorkerJob, Answered, Answer> {
    *  the same commit asks for again keeps its place in the queue, and its answer. */
   private dropAbandoned(): void {
     this.dropQueued = false;
-    this.queued = this.queued.filter((entry) => entry.waiters.length > 0);
+    this.queued = this.queued.filter((entry) => anyoneIsWaiting(entry));
     if (
       this.inFlight !== undefined &&
-      this.inFlight.waiters.length === 0 &&
+      !anyoneIsWaiting(this.inFlight) &&
       this.policy.stopAnAbandonedJob
     ) {
       this.stopWorker();
