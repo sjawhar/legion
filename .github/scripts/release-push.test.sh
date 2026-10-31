@@ -2375,6 +2375,12 @@ check "fold-plan: a fragment of a package no spec names is refused by name, with
   "$(is "$rc|$out|$(grep -c '^::error::' <<<"$err")|$(contains "$err" "^::error::release-push\.sh fold-plan: packages/daemon/$u/pr-1-daemon\.yaml at HEAD: ")" "1||1|true")"
 check "fold-plan: that refusal names the specs it was given and says what to do about the file" \
   "$(is "$(contains "$err" 'here packages/envoy=envoy-v,')|$(contains "$err" 'remove it, or give its package a \.changie\.yaml and a CHANGELOG\.md and add it to CHANGELOG_PACKAGES in \.github/workflows/changelog-fold\.yaml$')" "true|true")"
+# changelog-fold.yaml's build job runs `fold-plan $CHANGELOG_PACKAGES` on main and fails its step
+# when fold-plan exits non-zero, so a refusal there folds no package at all. An orphan fragment
+# that reaches main must not stop the fold of the packages the fold is given: the plan still lists
+# packages/envoy's fragment, and the orphan is named on stderr for someone to remove.
+check "fold-plan: an orphan fragment on main does not stop the plan of the packages the fold is given" \
+  "$(is "$rc|$out|$(contains "$err" "packages/daemon/$u/pr-1-daemon\.yaml")" "0|$envoy_plan|true")"
 git -C "$ot" rm -q "packages/daemon/$u/pr-1-daemon.yaml"
 GIT_COMMITTER_DATE=2026-07-02T12:00:00+00:00 git -C "$ot" commit -q -m "chore: remove the daemon fragment"
 orphan_run
