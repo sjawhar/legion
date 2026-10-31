@@ -2,64 +2,46 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-251",
-  "completed": "2026-10-31T10:30:00Z",
-  "round": 15,
-  "headSha": "7179f6e5802f8a208b27684061a175ae9f49c728",
-  "handoffHead": "386cddb1ce2b958b056cb12622a1b86cee71fd56",
-  "provider": "Every turn of this round ran on anthropic/claude-opus-5-5, this session's model; no subagent ran. No model ran inside any drive: the agents are test shims.",
-  "rig": "The pod was recreated, so I started a new PostgreSQL 17.2 (UTF8, $TMPDIR/tester/pgdata, 127.0.0.1:55433) and nats-server 2.10.29 (127.0.0.1:54333). I rebuilt the round-14 whole-daemon drivers by replaying their write and edit commands from this session's own transcript (read-only from the session table), and then moved them to the new contract (decisions held by a delivery and told at its confirmation). The drivers are not committed; copies are at $TMPDIR/tester/zz_tester_parked_live_test.round15.go and zz_tester_telling_window_test.round15.go.",
+  "completed": "2026-10-31T12:18:00Z",
+  "round": 16,
+  "headSha": "6adfab5a3cb6",
+  "handoffHead": "5f9c905eafc82175c451774e4f05b34c19d17e78",
+  "provider": "Every turn of this round ran on anthropic/claude-opus-5-5, this session's model; no subagent ran. No model ran inside any run.",
+  "scope": "Bare gates and one bounded sweep, as the architect asked. The compare 7179f6e5...6adfab5a moves no daemon code of this change. The only changed daemon files are main's prompt markdown (architect-common.md, worker-common.md, controller-root.md and the role prompts, from the forward merge) and the rewritten test. The branch's own diff against its fork point changed only in .github/e2e-scripts.json (one elsewhere row), the five docs/solutions renames to -pr2163.md, and confirmation_tell_failure_test.go.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "At 7179f6e5 on my rig, every test the implementer names passes: the 7 new admit/daemon/store tests for review 5720641456's findings, TestOnlyADeliveredStartHoldsTheDecisionsItNamed, TestParkedDecisionsArriveWith0065AndGoWithTheirIssue, TestKeptDecisionsRegressionSeeds (all pinned seeds, 190 s), and my red tests from rounds 9, 10 and 13 (round 13's unmodified). The changed round-9 test still guards its scenario: with supervise/delivery.go:131's DeliveredRows check turned off, both TestAStartWhoseForgetFailedIsNotDeliveredAgainAfterItsTurn and TestARetriedStartDeliversItsTaskOnce fail ('the retried start queued &supervise.Delivery{ID:\"outbox:72\" ...'). But the failure round 9 injected has moved, not gone: see failures[0]."
+    "how": "At 6adfab5a on my PostgreSQL 17.2 and nats-server 2.10.29: TestADecisionToldInATurnWhoseConfirmationFailedIsToldAgain passes, and it asserts the ruling's at-least-once. With store/claims.go's RetireDelivery changed to delete what the delivery held instead of releasing it (a loss), it fails: 'the root's next start task \"\" does not name dispatch://LEGION-310/ask/ask-told'. I reverted that with jj restore. bash .github/scripts/select-e2e-proofs.test.sh: 'Results: 94 passed, 0 failed'. EVENT=schedule select-e2e-proofs.sh exits 0, and parked-decision-devbox.sh is in the elsewhere list with its needs. No docs/solutions file names INFRA-251, and five end in -pr2163.md."
   },
-  "failures": [
-    {
-      "criterion": "A person's decision reaches the architect once: a decision told in a turn is not told again when a write fails",
-      "evidence": "The tell moved from the start's forget to the delivery's confirmation write (store/claims.go putDelivery -> tellKeptDecisions). When that write fails, supervise's confirm leaves the delivery unsaved, settle retries it and logs 'supervise: the pending delivery is still not written', and when the turn ends retirePending calls RetireDelivery, whose releaseKeptDecisions leaves the row KEPT (supervise/delivery.go:365-376, 486-505). The architect was told in that turn, and the next start or catch-up tells it again. Red test: TestADecisionToldInATurnWhoseConfirmationFailedIsNotToldAgain (commit 37cd79f18b08, packages/daemon/internal/daemon/confirmation_tell_failure_test.go). Run: cd packages/daemon && LEGION_TEST_PG_DSN=... go test -count=1 -run TestADecisionToldInATurnWhoseConfirmationFailedIsNotToldAgain ./internal/daemon/ -> FAIL: 'the root's next start task \"... dispatch://LEGION-310/ask/ask-told (ask-answered by user:alice) ...\" names dispatch://LEGION-310/ask/ask-told again ... (kept now: dispatch://LEGION-310/ask/ask-told claimed-by=0)'. Whole daemon (real PostgreSQL and NATS, TestTesterCrashWindowLive): a Postgres trigger refused the confirmation's delete; the architect was prompted once with ask-1 and its turn ran; the log shows 'tell what the delivery outbox:221 ... held: ERROR: tester: the tell is refused'; after the turn kept=1 unheld=1 pending=0; after a daemon restart with the trigger dropped, a person parked and re-admitted the root, and its new start task named ask-2 and ask-1 again."
-    },
-    {
-      "criterion": "CI is green at the head",
-      "evidence": "At 386cddb1, CI's test job failed: 'Results: 77 passed, 17 failed' in .github/scripts/select-e2e-proofs.test.sh (job 124492545046). Locally, EVENT=schedule GITHUB_OUTPUT=... bash .github/scripts/select-e2e-proofs.sh prints '::error file=.github/e2e-scripts.json::scripts/e2e/parked-decision-devbox.sh is in neither list'. This branch adds that script, and .github/e2e-scripts.json (from main) does not list it; it belongs in `elsewhere` with the needs its header states. envoy-go also failed (TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries, job 124492545211), but that is the fork point's own test: main@origin has since changed claims_doc_test.go (82 lines) and docs/kubernetes.md is unchanged by this branch, so it clears with main. ci-ok, the required check, aggregates both."
-    },
-    {
-      "criterion": "Learnings are named as AGENTS.md says (docs/solutions/<category>/<slug>-pr<number>.md)",
-      "evidence": "The branch adds five docs/solutions files whose names end in -INFRA-251.md instead of -pr2163.md (e.g. docs/solutions/testing/a-wait-whose-one-poll-scales-with-the-host-needs-a-poll-floor-beside-its-deadline-INFRA-251.md); jj diff --from 1d3e69553791 --to 7179f6e5 --name-only -- docs lists them. They reach main with the merge."
-    }
-  ],
-  "failed": 3,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
-      "criterion": "The full property sweep holds at this head",
-      "surface": "TestKeptDecisionsReachTheCurrentArchitectOnce on my PostgreSQL, binary built from 386cddb1",
-      "command": "LEGION_KEPT_PROPERTY_RUNS=600 LEGION_KEPT_PROPERTY_STEPS=300 timeout 6600 ./daemon15b.test -test.run '^TestKeptDecisionsReachTheCurrentArchitectOnce$' -test.timeout=108m -test.v",
-      "observed": "PASS in 3088 s, 600 of 600 seeds. Across them: 917 members handed over (107 without their run), 283 children orphaned by a person's todo, 600 queued roots adopted, 2459 trees closed, 593 restarts with a streaming agent, 580 foreign turns, 160 superseded receipt timeouts, 14 hand-overs inside a catch-up's publish, 56 between a held task and its confirmation, 1860 claim failures; catch-up publishes answered 3954 delivered, 1024 no-holder, 670 refused, 1255 receipt-timeout, 695 denied, 929 delivery-failed. My first try (same counts, run while the drives ran) hit its 58 m limit on seed 599 of 600, with no failure printed.",
-      "headSha": "7179f6e5802f8a208b27684061a175ae9f49c728",
-      "negativeControl": "The guard mutations below fail the whole-daemon drives."
+      "criterion": "The kept-decision tests and pinned seeds still hold after the forward merge",
+      "surface": "The daemon package on real PostgreSQL",
+      "command": "go test -count=1 -run 'TestADecisionToldInATurnWhoseConfirmationFailedIsToldAgain|TestKeptDecisionsRegressionSeeds|TestADecisionHeldInTheOldArchitectsTaskAtAHandOverReachesTheChild|TestAStartWhoseForgetFailedIsNotDeliveredAgainAfterItsTurn|TestADecisionAStaleStartReleasesReachesTheRunningArchitect|TestAHeldTask' -v ./internal/daemon/",
+      "observed": "All 7 PASS (211 s), every pinned seed included.",
+      "headSha": "6adfab5a3cb6",
+      "negativeControl": "With RetireDelivery deleting what the delivery held, the rewritten test FAILS naming the lost decision."
     },
     {
-      "criterion": "The telling side's validity rule: hand the issue over between a catch-up's compose and its publish, and between a held task's queue and its confirmation; the new tree's architect still hears it",
-      "surface": "The daemon's outbox runner, workflow engine, admission and claim supervisor over the daemon's own claim store (heldTaskRig), on real PostgreSQL; the hand-over run inside the publish (hookPublisher) or before the turn starts",
-      "command": "go test -count=1 -run 'TestTesterHandOverBetween' -v ./internal/daemon/ (throwaway zz_tester_telling_window_test.go)",
-      "observed": "Compose then publish: the hand-over inside the publish queued the child's start naming ask-c (row 4 claims it); the old catch-up's settlement left the row standing and still claimed by row 4; the child's architect was prompted once with ask-c, and the row was gone after its turn started. Queue then confirmation: after the hand-over the child's start row 21 claims the row, still held by the old root's delivery; the child's architect was prompted once with ask-c and the row was gone after its turn. The old architect was prompted with it too, which the design accepts (store/kept_decisions.go). One state oddity: the old delivery's confirmation also cleared row 21's claim (releaseKeptDecisions nulls claimed_by), so the row stood unclaimed while row 21 still named it. I found no order of events where that is told twice or lost: the child's start re-holds it by ref and time when it runs.",
-      "headSha": "7179f6e5802f8a208b27684061a175ae9f49c728",
-      "negativeControl": "None run for this pair; the property model reaches both windows (14 and 56 times above)."
+      "criterion": "One bounded property sweep at this head",
+      "surface": "TestKeptDecisionsReachTheCurrentArchitectOnce, binary built from 5f9c905e",
+      "command": "LEGION_KEPT_PROPERTY_RUNS=300 LEGION_KEPT_PROPERTY_STEPS=300 timeout 4200 ./daemon16.test -test.run '^TestKeptDecisionsReachTheCurrentArchitectOnce$' -test.timeout=68m -test.v",
+      "observed": "PASS in 2061 s: 300 of 300 seeds. Across them: 461 members handed over (51 without their run), 139 orphans, 300 adoptions, 1217 trees closed, 274 streaming restarts, 279 foreign turns, 10 hand-overs inside a catch-up's publish, 35 between a held task and its confirmation, 928 claim failures.",
+      "headSha": "6adfab5a3cb6",
+      "negativeControl": "Round 13's 11 failing seeds are pinned and pass above."
     },
     {
-      "criterion": "On the whole daemon: a hand-over without its run, an orphaned parked child, a grandchild beside its parent in both orders, and an adopted queued root each reach the right architect once",
-      "surface": "The whole Legion daemon (startDaemonWithin) on real PostgreSQL and nats-server; Dispatch events only as envelopes on ENVOY_NOTIFICATIONS; a Dispatch stand-in answering blocked_by; architect shims registering and taking prompts over the daemon's own worker stream and routes",
-      "command": "go test -tags e2e -count=1 -run '^(TestTesterHandOverWithoutRunLive|TestTesterOrphanedParkedChildLive|TestTesterGrandchildHandOverLive|TestTesterAdoptedQueuedRootLive)$' -v ./internal/daemon/",
-      "observed": "All 4 PASS. Without its run: a child at admitted, blocked by an in_progress issue, got a person's answer after its root closed; the linger handed it over (todo, labelled); it waited with no start while its blocker was open; when the blocker closed, its architect got one prompt naming ask-c, and nothing stayed kept. Orphan: a parked tree's parked child got a person's answer (the controller got one parked-decision notice); a person set it todo; its own architect got one prompt naming ask-c. Grandchild, child's echo first and grandchild's first: each architect got one prompt naming its own decision and never the other's. Adoption: with the cap full, a queued root's decision was kept and the controller got no notice; a person made it a child of the live tree, and the running architect got one catch-up naming ask-q.",
-      "headSha": "7179f6e5802f8a208b27684061a175ae9f49c728",
-      "negativeControl": "With workflow/adopt.go's adoption catch-up disabled (if false &&, restored with jj restore), the adoption drive fails: 'timed out waiting for a catch-up to L's architect names the decision'."
-    },
-    {
-      "criterion": "Regression on the whole daemon: the round-7 drive, the crash window, the stale start, RootHears, the closing tree, and both hand-over drives",
-      "surface": "The same whole daemon",
-      "command": "TESTER_REAL_EVENTS=... go test -tags e2e -count=1 -run '^TestTester' -v ./internal/daemon/",
-      "observed": "Round-7: all 14 steps PASS once moved to tell-at-confirmation (a delivered start now holds; the architect's turn tells). Of 13 real Dispatch events, the 3 a person made are relayed; verdict jq: undelivered 2, sent 1, unrelayed ['its root is not parked'], unmatched []. Stale start, RootHears, closing tree, orphan hand-over and held-task hand-over: PASS. Crash window: FAIL, failures[0].",
-      "headSha": "7179f6e5802f8a208b27684061a175ae9f49c728",
-      "negativeControl": "The crash drive itself, a refused confirmation write: the told decision is named again."
+      "criterion": "The e2e list gate that was red at 386cddb1",
+      "surface": ".github/scripts/select-e2e-proofs.sh over this tree, as CI's test job runs it",
+      "command": "bash .github/scripts/select-e2e-proofs.test.sh; EVENT=schedule GITHUB_OUTPUT=... bash .github/scripts/select-e2e-proofs.sh",
+      "observed": "94 passed, 0 failed; the select exits 0.",
+      "headSha": "6adfab5a3cb6",
+      "negativeControl": "At 386cddb1 the same select printed '::error file=.github/e2e-scripts.json::scripts/e2e/parked-decision-devbox.sh is in neither list'."
     }
   ],
-  "ci": "Code head 7179f6e5 has no runs of its own. Handoff head 386cddb1, read 2026-10-31T10:20Z: test failure and envoy-go failure (failures[1]), dispatch in progress, every other job success. GitHub: mergeable UNKNOWN."
+  "notes": [
+    "A local go test of admit, workflow, record, store, supervise, intake and daemon was not usable as evidence. While the sweep ran, admit, workflow and daemon hit the default 10-minute test timeout. intake needs rootless Docker, and a few daemon tests need tmux or a scratch Dispatch, none of which this pod has. record, store and supervise passed. CI's test job is the gate for those packages."
+  ],
+  "ci": "Head 5f9c905e (no skip-checks trailer, so CI runs there), read 2026-10-31T12:17Z: changes and pr-title success; test, envoy-go, lint, typecheck and every other lane queued. Not waited on. GitHub: mergeable UNKNOWN."
 }
