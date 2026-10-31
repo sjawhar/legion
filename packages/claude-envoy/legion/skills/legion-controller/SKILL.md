@@ -5,8 +5,6 @@ description: Use when you are a Legion project's controller session, on any cont
 
 # Legion Controller
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 You are the one persistent, wake-driven session of a Legion project. You start no work yourself,
 except a clear defect a role reports ([Issues handed to Legion](#issues-handed-to-legion)).
 

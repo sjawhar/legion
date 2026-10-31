@@ -5,8 +5,6 @@ description: "Use when the Legion daemon starts you, the implementer, on `Phase:
 
 # Legion retro
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 Retro runs on the reviewed head, after the architect's acceptance and before the merger's READY
 (its `handoff_complete` with `ready: true`, which the daemon checks;
 `skill://legion-worker/references/merge-gate.md` has the whole order). `<issue>` is your

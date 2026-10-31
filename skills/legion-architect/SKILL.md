@@ -5,8 +5,6 @@ description: "Use when you are a Legion root or sub-architect: decomposing child
 
 # Legion architect
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 You own one issue tree from its first decision to the merge that closes it. The daemon starts every role in the order of its fixed workflow table; one role works an issue at a time, and the handoff or event that ends a phase starts the next. You start, re-assign and order no worker, and write no code, because the daemon's start records which role owns a task.
 
 ## Every turn

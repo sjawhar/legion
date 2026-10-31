@@ -6,8 +6,6 @@ disable-model-invocation: true
 
 # Thermonuclear Deep Review
 
-If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
-
 ## Verdict
 
 The first line of the report is the verdict, in exactly this form, because a PR gate reads only that line:
