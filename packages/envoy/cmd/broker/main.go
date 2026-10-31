@@ -12,6 +12,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"net"
@@ -21,6 +22,7 @@ import (
 	"os/signal"
 	"slices"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -98,7 +100,22 @@ const rereadListenWait = 5 * time.Second
 // margin rather than a duration.
 const oauthSecretTimeout = 10 * time.Second
 
+// clientCheckInterval is how often the broker asks its sign-in provider whether that provider
+// still accepts the broker's own client, after the pass it takes at boot. An hour is what the
+// answer is worth: a client is deleted or its secret rotated by a person doing it deliberately,
+// and the cost of hearing an hour late is an hour of a status page that is out of date, against
+// one token request per pod per hour at the provider.
+const clientCheckInterval = time.Hour
+
 func main() {
+	// A subcommand is read before flag.Parse, and serves nothing: it is the whole of what this
+	// process does. Reading it here is what makes an older image refuse `broker end-sessions`
+	// rather than fall through to serving - and so to migrating the database - when a
+	// deployment asks it for a subcommand it does not have (cmd/dispatch/main.go's own
+	// precedent, runSubcommand there).
+	if len(os.Args) > 1 {
+		os.Exit(runSubcommand(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
+	}
 	// The broker takes no flags; parsing refuses any flag given rather than ignoring it.
 	flag.Parse()
 
@@ -487,6 +504,14 @@ func main() {
 		Interval: sweep, Wake: waker,
 	}
 	go sweeper.Run(ctx)
+	// The client check, beside the sweeper and on the same context: at boot and every hour
+	// after, one token request asking the sign-in provider whether it still accepts the
+	// broker's own client, written into the row GET /signin/status answers. It never refuses a
+	// boot and never stops the process - a provider that is down stops nobody signing in later,
+	// since a sign-in reads the discovery document on its own path - so it is a goroutine with
+	// no error to return. It stops at the signal, as the sweeper does: a draining pod is
+	// answering its last requests, not reporting on a provider.
+	go runClientChecks(ctx, cfg.SignIn, st)
 
 	mux := http.NewServeMux()
 	// Under the GCP store a reread spends Secret Manager's shared metadata quota, so its overall
@@ -734,4 +759,108 @@ func kindMinters(githubApp secrets.GitHubApp, googleLogin secrets.GoogleLogin) m
 		policy.KindGitHubApp:   githubApp.Mint,
 		policy.KindGoogleLogin: googleLogin.Mint,
 	}
+}
+
+// runClientChecks checks the sign-in client at once and every clientCheckInterval after, until
+// ctx ends.
+func runClientChecks(ctx context.Context, signIn config.SignIn, st *store.Store) {
+	for {
+		checkSignInClient(ctx, signIn, st)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(clientCheckInterval):
+		}
+	}
+}
+
+// checkSignInClient takes one pass of the client check and writes what it found, with the time,
+// into the row GET /signin/status answers. A test drives this rather than waiting an hour for
+// the loop above to take its second pass.
+//
+// Neither half can stop the broker. A provider that cannot be asked is the answer
+// issuer_unreachable and a line in the log, not a boot that fails: people sign in through a
+// path that reads the discovery document again on its own, so a check that fails says nothing
+// about whether the next sign-in works. A write that fails loses this pass's answer and the
+// next pass writes again.
+func checkSignInClient(ctx context.Context, signIn config.SignIn, st *store.Store) {
+	check, err := oidc.CheckClient(ctx, signIn.Issuer, signIn.ClientID, signIn.ClientSecret)
+	if err != nil {
+		slog.Warn("broker: the sign-in client check", "state", check, "issuer", signIn.Issuer, "error", err)
+	}
+	if ctx.Err() != nil {
+		// The process is stopping: this answer is the end of the context, not the provider's.
+		return
+	}
+	if err := st.RecordClientCheck(ctx, string(check), time.Now()); err != nil {
+		slog.Warn("broker: the sign-in client check was not written", "state", check, "error", err)
+	}
+}
+
+// endSessionsCommand is the one argument the broker takes in place of serving.
+const endSessionsCommand = "end-sessions"
+
+// runSubcommand runs the subcommand args name and answers its exit code. It is every argument
+// this binary takes: an unknown one, a missing login or a second argument is refused with 2 and
+// a usage line, never a fall-through to serving.
+func runSubcommand(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	if args[0] != endSessionsCommand {
+		fmt.Fprintf(stderr, "broker: unknown subcommand %q; the only subcommand is %s <login>, and broker with no argument serves\n", args[0], endSessionsCommand)
+		return 2
+	}
+	if len(args) != 2 || strings.TrimSpace(args[1]) == "" {
+		fmt.Fprintf(stderr, "broker: usage: broker %s <login>, one login and nothing else\n", endSessionsCommand)
+		return 2
+	}
+	return endSessions(ctx, strings.TrimSpace(args[1]), stdout, stderr)
+}
+
+// endSessions deletes every session login is signed in to the approval page with, wherever and
+// whenever it was made, and prints how many it deleted: the operator's way to end one person's
+// sign-ins everywhere at once, run in a broker pod by whoever holds pods/exec in the broker's
+// namespace.
+//
+// It reads the same configuration the server does, so it reaches the same database and signs in
+// to it the same way, the RDS IAM token minter included, and it binds no listener. It does not
+// migrate: an image older than this subcommand cannot be allowed to boot and migrate the
+// database because a deployment asked it to end some sessions, so the schema is whatever the
+// servers have already applied (cmd/dispatch/main.go's subcommands take the opposite view, and
+// say why: each of them exists to work on a schema it brings up to date first).
+func endSessions(ctx context.Context, login string, stdout, stderr io.Writer) int {
+	cfg, err := config.Load(os.Getenv)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", endSessionsCommand, err)
+		return 1
+	}
+	var storeOpts []store.Option
+	if cfg.DatabaseIAM {
+		awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: load the AWS configuration: %v\n", endSessionsCommand, err)
+			return 1
+		}
+		mint, err := rdsAuthTokens(awsCfg)
+		if err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", endSessionsCommand, err)
+			return 1
+		}
+		storeOpts = append(storeOpts, store.WithTokenMinter(mint))
+	}
+	st, err := store.Open(ctx, cfg.DatabaseURL, storeOpts...)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: open the database: %v\n", endSessionsCommand, err)
+		return 1
+	}
+	defer st.Close()
+	ended, err := st.DeleteBrowserSessionsForLogin(ctx, login)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", endSessionsCommand, err)
+		return 1
+	}
+	sessions := "sessions"
+	if ended == 1 {
+		sessions = "session"
+	}
+	fmt.Fprintf(stdout, "%s: ended %d %s of %s\n", endSessionsCommand, ended, sessions, login)
+	return 0
 }

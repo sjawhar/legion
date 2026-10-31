@@ -22,6 +22,12 @@ const tokenTimeout = 10 * time.Second
 // signInScopes are the scopes a sign-in asks for: an ID token (openid) naming the person.
 var signInScopes = []string{gooidc.ScopeOpenID, "email", "profile"}
 
+// ErrNonce is an ID token whose nonce is not the one the sign-in that asked for it bound: the
+// token belongs to some other sign-in, so the exchange it answers is refused. It is a sentinel
+// of its own, as every Verify failure is (Reason), because a caller that reports why a sign-in
+// failed cannot otherwise tell this apart from a token that did not verify at all.
+var ErrNonce = errors.New("oidc: the ID token's nonce is not the sign-in's")
+
 // Session is what a code exchange or a refresh yields: the verified ID token's claims and the
 // refresh token that renews them. A refresh the issuer answers without a new refresh token keeps
 // the one that was used.
@@ -220,9 +226,10 @@ func (f *CodeFlow) OnlineAuthURL(ctx context.Context, redirectURL string, signIn
 
 // OnlineExchange trades the code the issuer redirected to redirectURL, with signIn's PKCE
 // verifier, for the signed-in person's verified ID token claims (the Workspace claims too, when
-// the flow has a hosted domain). The ID token must carry signIn's nonce. A refresh token the issuer
-// returns anyway is dropped, never returned: an online sign-in keeps none. It fails with
-// ErrIssuerUnavailable while the issuer is not discovered.
+// the flow has a hosted domain). The ID token must carry signIn's nonce, and fails with ErrNonce
+// when it carries another. A refresh token the issuer returns anyway is dropped, never returned:
+// an online sign-in keeps none. It fails with ErrIssuerUnavailable while the issuer is not
+// discovered.
 func (f *CodeFlow) OnlineExchange(ctx context.Context, redirectURL, code string, signIn OnlineSignIn) (Claims, error) {
 	if signIn.Nonce == "" || signIn.Verifier == "" {
 		return Claims{}, errors.New("oidc: an online sign-in needs its nonce and PKCE verifier")
@@ -242,7 +249,7 @@ func (f *CodeFlow) OnlineExchange(ctx context.Context, redirectURL, code string,
 		return Claims{}, err
 	}
 	if session.Claims.Nonce != signIn.Nonce {
-		return Claims{}, errors.New("oidc: the ID token's nonce is not the sign-in's")
+		return Claims{}, ErrNonce
 	}
 	return session.Claims, nil
 }

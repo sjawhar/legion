@@ -466,6 +466,48 @@ func (s *server) healthz(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, healthResponse{Status: "ok"})
 }
 
+// signInStatusResponse is GET /signin/status's answer, the broker's one signin_status row as it
+// stands. Every field is null for a fact that has never happened, so a reader never has to tell
+// a zero time from a real one, and no field holds free text: the two words that are not times
+// come from closed sets Postgres itself holds the broker to.
+type signInStatusResponse struct {
+	// What the last check of the broker's client at its sign-in provider found: "ready" (the
+	// provider accepted the client), "client_rejected" (it refused it, so nobody can sign in)
+	// or "issuer_unreachable" (it could not be asked, which says nothing about the client).
+	ClientCheck *string `json:"client_check"`
+	// When that check was taken (RFC 3339).
+	ClientCheckedAt *time.Time `json:"client_checked_at"`
+	// When a sign-in last completed.
+	LastSignInAt *time.Time `json:"last_sign_in_at"`
+	// When a sign-in last failed at the token exchange or at the ID-token check.
+	LastFailedSignInAt *time.Time `json:"last_failed_sign_in_at"`
+	// Why that sign-in failed, one of invalid_client, unauthorized_client,
+	// redirect_uri_mismatch, invalid_grant, issuer_unreachable, bad_issuer, bad_audience,
+	// bad_signature, bad_nonce, not_in_domain and email_not_verified.
+	LastFailedSignInReason *string `json:"last_failed_sign_in_reason"`
+	// When a decision was last made on the approval page.
+	LastDecisionAt *time.Time `json:"last_decision_at"`
+}
+
+// signInStatus answers the broker's sign-in status to any caller. It is read from Postgres on
+// every call rather than from this process's memory, so every replica and every restart answers
+// the same thing.
+func (s *server) signInStatus(w http.ResponseWriter, r *http.Request) {
+	status, err := s.deps.Enroll.Store.SignInStatus(r.Context())
+	if err != nil {
+		writeUnavailable(w, "DATABASE_UNAVAILABLE", "read the sign-in status", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, signInStatusResponse{
+		ClientCheck:            status.ClientCheckState,
+		ClientCheckedAt:        status.ClientCheckedAt,
+		LastSignInAt:           status.LastSignInAt,
+		LastFailedSignInAt:     status.LastFailedSignInAt,
+		LastFailedSignInReason: status.LastFailedSignInReason,
+		LastDecisionAt:         status.LastDecisionAt,
+	})
+}
+
 // approvalStylesheet serves the approval page's stylesheet (approval.ServeStylesheet) with no
 // credential, since every page it dresses is read before anyone has signed in.
 func (s *server) approvalStylesheet(w http.ResponseWriter, r *http.Request) {

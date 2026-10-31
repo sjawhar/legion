@@ -101,3 +101,39 @@ func TestDeleteExpiredBrowserSessionsDeletesOnlyTheExpired(t *testing.T) {
 		t.Fatalf("a second sweep = %d, %v; want 0", deleted, err)
 	}
 }
+
+// Ending one login's sessions ends every one of them, live or expired, and leaves another
+// person's alone; a login with no session is no error.
+func TestDeleteBrowserSessionsForLoginEndsThatLoginsSessionsAlone(t *testing.T) {
+	st := storetest.Open(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Microsecond)
+	sessions := []struct {
+		secret, login string
+		expires       time.Time
+	}{
+		{"ada's laptop", "ada@example.com", now.Add(time.Hour)},
+		{"ada's phone", "ada@example.com", now.Add(2 * time.Hour)},
+		{"ada's old session", "ada@example.com", now.Add(-time.Hour)},
+		{"ben's laptop", "ben@example.com", now.Add(time.Hour)},
+	}
+	for _, s := range sessions {
+		if err := st.CreateBrowserSession(ctx, sha256.Sum256([]byte(s.secret)), s.login, s.expires); err != nil {
+			t.Fatalf("CreateBrowserSession(%s): %v", s.secret, err)
+		}
+	}
+
+	ended, err := st.DeleteBrowserSessionsForLogin(ctx, "ada@example.com")
+	if err != nil || ended != 3 {
+		t.Fatalf("DeleteBrowserSessionsForLogin(ada) = %d, %v; want 3", ended, err)
+	}
+	if _, err := st.BrowserSession(ctx, sha256.Sum256([]byte("ada's laptop")), now); !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("ada's live session after the end = %v, want pgx.ErrNoRows", err)
+	}
+	if login, err := st.BrowserSession(ctx, sha256.Sum256([]byte("ben's laptop")), now); err != nil || login != "ben@example.com" {
+		t.Fatalf("ben's session after ada's sessions ended = %q, %v; want ben@example.com", login, err)
+	}
+	if ended, err := st.DeleteBrowserSessionsForLogin(ctx, "carol@example.com"); err != nil || ended != 0 {
+		t.Fatalf("DeleteBrowserSessionsForLogin of a login with no session = %d, %v; want 0", ended, err)
+	}
+}

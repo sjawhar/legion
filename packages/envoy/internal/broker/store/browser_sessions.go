@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// A browser session is a person signed in to the broker's approval page (0019's browser_sessions).
+// A browser session is a person signed in to the broker's approval page (0020's browser_sessions).
 // Each function takes the SHA-256 of the session's cookie secret, never the secret itself, and
 // the caller's now: a session is live while its expires_at is after now, so the lookup and the
 // sweep draw the same line, as the sweeper's other expiries do on the time it passes them.
@@ -39,6 +39,17 @@ func (s *Store) DeleteBrowserSession(ctx context.Context, hash [sha256.Size]byte
 // it deleted.
 func (s *Store) DeleteExpiredBrowserSessions(ctx context.Context, now time.Time) (int64, error) {
 	tag, err := s.Pool.Exec(ctx, `delete from browser_sessions where expires_at <= $1`, now)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+// DeleteBrowserSessionsForLogin deletes every session signed in as login, live or expired, and
+// answers how many it deleted: the `broker end-sessions <login>` subcommand, an operator ending
+// one person's sign-ins everywhere at once. A login with no session is no error and zero.
+func (s *Store) DeleteBrowserSessionsForLogin(ctx context.Context, login string) (int64, error) {
+	tag, err := s.Pool.Exec(ctx, `delete from browser_sessions where login = $1`, login)
 	if err != nil {
 		return 0, err
 	}

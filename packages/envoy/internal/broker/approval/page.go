@@ -412,6 +412,10 @@ func (p *Page) ServeDecide(w http.ResponseWriter, r *http.Request, sess Session)
 		slog.Info("approval page decision", "login", sess.Login, "record", id, "decision", form.Get("decision"),
 			"outcome", p.decide(r.Context(), id, approve, sess.Login))
 	}
+	// One write for the POST, whatever each record became of it: what GET /signin/status
+	// answers is when a person last decided on a page, not how many records that decision
+	// named (status.go).
+	p.recordDecision(r.Context())
 	redirect(w, http.StatusSeeOther, "/approve/"+decide[0]+"?decided="+strings.Join(decide, ","))
 }
 

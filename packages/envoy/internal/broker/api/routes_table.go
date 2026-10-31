@@ -231,6 +231,14 @@ func routes() []apiRoute {
 		// Sign out of the approval page, from the broker's own origin only: the session ends and
 		// its cookie is cleared, and the answer links back to the record.
 		{http.MethodPost, "/signin/logout", signInAuth((*approval.Page).ServeLogout)},
+		// Report the broker's sign-in: whether its sign-in provider accepted the broker's own
+		// client at the last hourly check and when, when a person last signed in, when a
+		// sign-in last failed and the coded reason it failed with, and when a decision was last
+		// made on the approval page. It needs no credential because a production check fetches
+		// it from a pod where no person is signed in, and because it names no login, no secret
+		// and no provider's message: every word it answers is one of two closed sets this
+		// broker chose (internal/broker/store's signin_status).
+		{http.MethodGet, "/signin/status", public((*server).signInStatus)},
 		// The approval page's one stylesheet, embedded in the broker; it needs no credential,
 		// since every page it dresses is read before anyone has signed in.
 		{http.MethodGet, "/approve/assets/approve.css", public((*server).approvalStylesheet)},

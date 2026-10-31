@@ -95,6 +95,12 @@ func readPending(r *http.Request) (pendingSignIn, bool) {
 // session secret into the session cookie, stores only its SHA-256 with the session's expiry, ends
 // the session the browser held before (no fixation, no lingering session), and answers 303 to the
 // sign-in's page.
+//
+// From the exchange onward it also writes the sign-in's outcome into the broker's sign-in
+// status, which GET /signin/status answers: the time of a sign-in that completed, or the time
+// and coded reason of one that failed (status.go). The refusals above it write nothing - a
+// browser with no sign-in in progress, a state that is not the sign-in's and a next outside the
+// page is a request that was never this broker's sign-in to fail.
 func (p *Page) ServeCallback(w http.ResponseWriter, r *http.Request, _ Session) {
 	pending, ok := readPending(r)
 	clearCookie(w, signInCookie)
@@ -123,6 +129,10 @@ func (p *Page) ServeCallback(w http.ResponseWriter, r *http.Request, _ Session) 
 	}
 	flow, err := p.codeFlow(r)
 	if err != nil {
+		// A callback is a sign-in with a code in hand, so a provider that cannot be reached
+		// here is an exchange that failed, and the status says so (issuer_unreachable). The
+		// start of a sign-in is not: no code exists yet to exchange.
+		p.recordFailedSignIn(r.Context(), err)
 		p.writeDiscoveryFailed(w, err)
 		return
 	}
@@ -131,6 +141,7 @@ func (p *Page) ServeCallback(w http.ResponseWriter, r *http.Request, _ Session) 
 	})
 	if err != nil {
 		slog.Warn("approval sign-in refused: the code exchange or the ID token failed", "error", err)
+		p.recordFailedSignIn(r.Context(), err)
 		writeMessage(w, http.StatusForbidden, say("Sign-in refused",
 			"The sign-in provider's answer did not verify, so you are not signed in. Open the request again to sign in."))
 		return
@@ -138,6 +149,7 @@ func (p *Page) ServeCallback(w http.ResponseWriter, r *http.Request, _ Session) 
 	login, err := oidc.WorkspaceLogin(claims, p.cfg.SignIn.Domain)
 	if err != nil {
 		slog.Warn("approval sign-in refused", "login", login, "error", err)
+		p.recordFailedSignIn(r.Context(), err)
 		writeMessage(w, http.StatusForbidden, say("Sign-in refused", workspaceRefusal(err, p.cfg.SignIn.Domain)))
 		return
 	}
@@ -155,6 +167,7 @@ func (p *Page) ServeCallback(w http.ResponseWriter, r *http.Request, _ Session) 
 	}
 	setCookie(w, sessionCookie, base64.RawURLEncoding.EncodeToString(secret), lifetime)
 	slog.Info("approval sign-in", "login", login)
+	p.recordSignIn(r.Context())
 	redirect(w, http.StatusSeeOther, pending.Next)
 }
 
