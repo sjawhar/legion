@@ -14,6 +14,7 @@ import {
   createMessage,
   createProject,
 } from "./api";
+import { sql } from "./psql";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -64,19 +65,37 @@ function nestedByIndentation(count: number): string {
   return body;
 }
 
-/** 8,000 list items: the shape a reader meets most, and the one no parse fix brings under a
- *  second on the page's own thread. */
-const plainList = "- x\n".repeat(8_000);
+/**
+ * A heavy shape at the count the document write row writes, and the same shape at half that
+ * count. That row times both writes, so what a body costs and what half of it costs are read
+ * side by side; one generator spells the two, so the small body stays the large one's own shape
+ * however either is changed (sjawhar/legion#2519).
+ */
+function atBothSizes(
+  shape: (count: number) => string,
+  count: number
+): { full: string; half: string } {
+  return { full: shape(count), half: shape(Math.round(count / 2)) };
+}
+
+/** 8,000 list items, and 4,000 of them: the shape a reader meets most, and the one no parse fix
+ *  brings under a second on the page's own thread. */
+const plainListSizes = atBothSizes((items) => "- x\n".repeat(items), 8_000);
+const plainList = plainListSizes.full;
 const nestedThenBlankLines = padTo(nestedByIndentation(100), "\n", DISPATCH_BODY_MAX);
 const nestedThenTextLines = padTo(nestedByIndentation(100), "x\n", DISPATCH_BODY_MAX);
 const lazyQuote = `> x\n${"x\n".repeat(15_998)}`;
 const lazyListItem = `- x\n${"x\n".repeat(15_998)}`;
-const bracketRun = "[".repeat(15_000) + "]".repeat(15_000);
+const bracketRunSizes = atBothSizes((pairs) => "[".repeat(pairs) + "]".repeat(pairs), 15_000);
+const bracketRun = bracketRunSizes.full;
 const calloutBracketRun = `:::callout[${"[".repeat(15_000)}${"]".repeat(14_989)}`;
 const markerChain = `${"- ".repeat(15_999)}x`;
 /** 49 items nested on one line, which Go accepts (49 lists and 49 items is 98 of its 100
- *  blocks), then blank lines to the cap. */
-const nested49ThenBlankLines = padTo(`${"- ".repeat(49)}x\n`, "\n", DISPATCH_BODY_MAX);
+ *  blocks), then blank lines to the cap, and the same markers padded to half of it. */
+const nested49ThenBlankLinesSizes = atBothSizes(
+  (length) => padTo(`${"- ".repeat(49)}x\n`, "\n", length),
+  DISPATCH_BODY_MAX
+);
 
 /** How many items `- x\n` repeated to one character under the worker's threshold spells: the
  *  last one is cut short of its newline and is a list item all the same. Derived, so the row
@@ -497,6 +516,26 @@ test("a hover card of a comment of 8,000 list items draws without holding the ma
   }
 });
 
+interface HeavyDocument {
+  /** The body an agent writes as a document of its own. */
+  readonly body: string;
+  /** What the row is called, in its assertions and in its annotations. */
+  readonly name: string;
+  /** The one shape whose first write in a server process pays for the memory it touches rather
+   *  than for the parse, which the row writes once before it measures anything (the table's own
+   *  comment below). */
+  readonly warm?: true;
+}
+
+/** A row carries `half` where its write is the parse: the same shape at half the count its body
+ *  holds, built by the one generator that built the body (`atBothSizes`). The write row times
+ *  that write too and holds the body's own write against it, so a parse that grows faster than
+ *  the body it reads is caught whatever the node costs a write. Which rows carry one, and why
+ *  the others carry none, is on the write row. */
+type DocumentRow =
+  | (HeavyDocument & { readonly half?: string; readonly stored: true })
+  | (HeavyDocument & { readonly half?: undefined; readonly stored: false });
+
 /** Each heavy shape written as an issue document through the API, with the verdict Go gives it:
  *  stored, or refused as invalid markdown because it nests past `pmdoc/nesting.go`'s bound.
  *
@@ -510,13 +549,24 @@ test("a hover card of a comment of 8,000 list items draws without holding the ma
  *  is 316-343 ms once the process has done it and up to about 1.3 s the first time. The row
  *  writes such a body once to warm the process, records that first write's time, and holds the
  *  bound against the second, which is the steady state a reader's writes meet. */
-const documentRows: readonly { body: string; name: string; stored: boolean; warm?: true }[] = [
-  { body: plainList, name: "8,000 list items", stored: true },
+const documentRows: readonly DocumentRow[] = [
+  {
+    body: plainListSizes.full,
+    half: plainListSizes.half,
+    name: "8,000 list items",
+    stored: true,
+  },
   { body: lazyQuote, name: "a quote followed by lines without its marker", stored: true },
   { body: lazyListItem, name: "a list item followed by lines without its marker", stored: true },
-  { body: bracketRun, name: "15,000 opening brackets then 15,000 closing ones", stored: true },
   {
-    body: nested49ThenBlankLines,
+    body: bracketRunSizes.full,
+    half: bracketRunSizes.half,
+    name: "15,000 opening brackets then 15,000 closing ones",
+    stored: true,
+  },
+  {
+    body: nested49ThenBlankLinesSizes.full,
+    half: nested49ThenBlankLinesSizes.half,
     name: "49 list markers on one line then blank lines",
     stored: true,
     warm: true,
@@ -530,16 +580,90 @@ const documentRows: readonly { body: string; name: string; stored: boolean; warm
   { body: calloutBracketRun, name: "a callout opener holding 15,000 brackets", stored: false },
 ];
 
+/**
+ * Resolves once no document on this server owes a settlement, which is the server with no
+ * settlement of an earlier write of this row queued and none running. A durable document write
+ * records the settlement it owes in `doc_settlements_pending` within its own transaction, and
+ * the settlement that has read every update deletes that row in the transaction committing its
+ * writes (`packages/envoy/internal/dispatch/docs/persistence.go`, `clearSettlementPending`), so
+ * an empty table is that server. The harness runs one worker against one database
+ * (`e2e/playwright.config.ts`) and `resetDatabase` empties it before each row, so every row of
+ * that table is this row's own.
+ */
+async function everySettlementFinished(what: string): Promise<void> {
+  await expect
+    .poll(() => sql("select count(*) from doc_settlements_pending"), {
+      intervals: [200],
+      message: `${what}: a settlement queued before this write never finished`,
+      timeout: 60_000,
+    })
+    .toBe("0");
+}
+
+/**
+ * One write at a time, with the server otherwise idle. Each write queues its own document's
+ * settlement, which the server runs two seconds later (the document service's own default
+ * `settle`, `packages/envoy/internal/dispatch/docs/service.go`; `e2e/run-server.sh` sets no
+ * `DISPATCH_TEST_SETTLE_DELAY`), and that settlement costs about what the write did, so writes
+ * made back to back each land on the settlement of the write before them. `write` therefore
+ * waits for every settlement already queued to finish before it starts its clock, the warming
+ * write and the half-size write included, and what the bounds below hold is one write alone.
+ *
+ * So what a write costs while another document of the same server settles beside it is not
+ * measured here: measured with these writes back to back it reached 1,322 ms, which
+ * sjawhar/legion#2519 names under Not proven / risk.
+ *
+ * Two bounds hold each body, and the row asserts both of them. The absolute bound is that the
+ * write answers in under 1,000 ms: it is asserted on every row, stored or refused, under no
+ * condition, and it is never skipped, widened or stood down for a slow node, because a second is
+ * what the writer waits and CI's runners are where that is judged. The second bound is
+ * linearity: for each shape whose write is its parse, the row writes that same shape at half its
+ * count, times that write exactly as it times the body, and holds the body's write to no more
+ * than 3.5x it, so a parse whose cost grows faster than the body it reads reds this row on any
+ * node, the fast ones CI runs on included, where the body alone would still answer in time.
+ * Both numbers and the ratio between them are annotated before either bound is asserted, so a
+ * run that reds reports what the body cost beside its half, whichever of the two bounds it was.
+ * The absolute bound is asserted first, because a write the node itself stalled - 1,986 ms for a
+ * body that costs 750 ms here - is no measurement of how the cost grows, and reading linearity
+ * out of one would name a regression that is not there.
+ *
+ * The body is written before its half, so what the absolute bound measures is what it has always
+ * measured - the first write of that shape in a server process, with nothing but a settlement
+ * drain before it. That first write pays for the memory its shape touches, about 200 ms on this
+ * pod whichever size pays it, so the half that follows runs warm and a linear path reads around
+ * 2x: 1.22x to 3.11x over twenty runs of this row here, every one of which held this bound, and
+ * 3.4x to 3.6x where the node stalled the body's write past 1,100 ms and red the absolute bound
+ * first - against the 1.99x the same halving costs the server-side write path at this head and
+ * 2.06x at `main@origin` (sjawhar/legion#2519). The bound is 3.5x: above every ratio twenty runs
+ * have shown, with room for a two-core node's jitter, and below the 4x a parse quadratic in its
+ * body costs - nearer 5x once that warm-up is counted into it - so the bound still names the
+ * regression this row was written for.
+ *
+ * The ratio is asserted on the three rows whose write is its parse: the 8,000 items, the bracket
+ * run and the 49 markers, whose bodies cost 630-1,000 ms here. The two lazy rows carry no half
+ * body, because their whole write is 88-274 ms, nearly all of it the round trip and the
+ * document's own row, so a ratio over them measures jitter - 1.05x, 1.65x, 1.73x and 2.64x for
+ * one and the same shape, measured while they carried one - and nothing of a parse. A refused
+ * body is further from the claim still: two of the three are turned away before any parse of
+ * them finishes (20-41 ms for the 15,999 markers, 6-18 ms for the callout, on a pod that is not
+ * stalling), and the third, 100 items nested by indentation, is parsed before its nesting is
+ * refused (406-1,746 ms here) but is refused at every size, so no reader ever stores it. Every
+ * row keeps the absolute bound all the same.
+ */
 test("a document write of each heavy body answers in under a second, stored or refused", async () => {
+  // Twelve writes - one of every body, the warming write, and a half-size one after each of the
+  // three bodies held to the ratio - each waiting out the settlement the write before it queued,
+  // two seconds and the settlement's own run, take the row from about 7 s to about 29 s, past
+  // the default deadline.
+  test.setTimeout(120_000);
   const issue = await seedIssue("Heavy documents");
 
-  /** Writes one row's body as a document of its own and answers what the write cost and refused. */
-  async function write(
-    row: (typeof documentRows)[number],
-    name: string
-  ): Promise<{ refusal: unknown; took: number }> {
+  /** Writes one body as a document of its own, with no settlement of an earlier write running
+   *  beside it, and answers what the write cost and refused. */
+  async function write(body: string, name: string): Promise<{ refusal: unknown; took: number }> {
+    await everySettlementFinished(name);
     const started = performance.now();
-    const refusal = await createIssueArtifact(issue.key, { content: row.body, name }, agent).then(
+    const refusal = await createIssueArtifact(issue.key, { content: body, name }, agent).then(
       () => undefined,
       (error: unknown) => error
     );
@@ -557,14 +681,32 @@ test("a document write of each heavy body answers in under a second, stored or r
       // The first parse of this shape in a server process pays for the memory it touches, not for
       // the parsing (the table above): write it once, record that, and hold the bound against the
       // write after it, which is what every later writer of such a body meets.
-      const first = await write(row, `heavy-${index}-first.md`);
+      const first = await write(row.body, `heavy-${index}-first.md`);
       expect(first.refusal, `${row.name}: the warming write was refused`).toBeUndefined();
       test.info().annotations.push({
         description: `${Math.round(first.took)} ms`,
         type: `${row.name}: the first write of this shape in a fresh server`,
       });
     }
-    const { refusal, took } = await write(row, `heavy-${index}.md`);
+    const { refusal, took } = await write(row.body, `heavy-${index}.md`);
+    let half: number | undefined;
+    if (row.half !== undefined) {
+      // This row's own shape at half its count, written and timed as the body above it was, and
+      // waited out the same way: the two together are the growth the ratio holds.
+      const smaller = await write(row.half, `heavy-${index}-half.md`);
+      expect(smaller.refusal, `${row.name}: the half-size body was refused`).toBeUndefined();
+      half = smaller.took;
+    }
+    // Both numbers and the ratio between them, so a reader of a CI run sees the shape of the
+    // cost and not only that the row passed.
+    test.info().annotations.push({
+      description:
+        half === undefined
+          ? `${Math.round(took)} ms`
+          : `${Math.round(half)} ms at half this shape, ${Math.round(took)} ms whole, ` +
+            `${(took / half).toFixed(2)}x`,
+      type: `${row.name}: what the write cost`,
+    });
 
     if (row.stored) {
       expect(refusal, `${row.name}: the write was refused`).toBeUndefined();
@@ -575,6 +717,13 @@ test("a document write of each heavy body answers in under a second, stored or r
       expect(message, row.name).toContain('"code":"INVALID_MARKDOWN"');
     }
     expect(took, `${row.name}: the write took ${Math.round(took)} ms`).toBeLessThan(1_000);
+    if (half !== undefined) {
+      expect(
+        took,
+        `${row.name}: ${Math.round(took)} ms for the body and ${Math.round(half)} ms for half ` +
+          `of it, ${(took / half).toFixed(2)}x`
+      ).toBeLessThanOrEqual(half * 3.5);
+    }
   }
 });
 
