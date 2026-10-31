@@ -1099,7 +1099,14 @@ stays V alone, because a server that predates `schema_creatable` compares the wh
 its own version and its answer replaces the query's. The server admits the tab read-only when a
 live server process cannot read what the tab creates, or the tab cannot represent what the fleet
 creates or what the document holds (`packages/envoy/cmd/dispatch/README.md`, "Two builds at
-once"), and the surface shows `Reload to edit`. A closed issue's document is admitted read-only
+once"), and the surface shows `Reload to edit`. A tab admitted writable whose numbers the fleet
+stops admitting - a build of another version joins or rolls away - has its socket closed by the
+server's 15 s re-check with code `4412` (`DOCUMENT_ADMISSION_REVOKED_CLOSE_CODE` in
+`packages/contracts`), once the message the server has in flight on it is out, which it waits at
+most a second for; a tab too slow to take the frame in that second gets none and reads the end as
+`1006`. `connection.ts` reads neither code, so the provider reconnects on both, the reconnect
+presents the same numbers, and its admission - read-only now - decides the line again.
+A closed issue's document is admitted read-only
 too, and names no reload, which cannot make it editable: `ProofDocument` shows the line only for a
 read-only admission that came while the issue was open (`closedAdmission` records whether it was
 closed then), while the issue is open and the socket is connected. The admission and the

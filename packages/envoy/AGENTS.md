@@ -184,7 +184,8 @@ Each item below names a task and where its code is, then notes on it.
   A process whose heartbeat lapsed (frozen, cut from the database) or whose row was pruned checks its keys again under the registry's lock before it counts as live once more (`Registration.renew`);
   beside a live process whose keys it does not share it is refused (`Registration.Lost`), stops serving after its HTTP drain, and exits 1.
   Each row also records the document schema numbers the process reads and creates, its embedder's identity and whether it stores files in a bucket (migration `0151_server_processes_schema`);
-  a row at their defaults is a build that predates those columns (`Process.PredatesFleetColumns`), which the document socket's admission leaves out
+  a row at their defaults is a build that predates those columns (`Process.PredatesFleetColumns`), which the document socket's admission leaves out;
+  every live window `docs.Service.RunSchemaAdmission` reads the fleet's numbers again and closes each writable document socket they no longer admit with `contracts.DocumentAdmissionRevokedCloseCode` (`4412`, `DOC_ADMISSION_REVOKED`), by cancelling that socket's request context with a cause ygo sends as a close frame once the message in flight on it is out (at most a second; a slower peer gets `1006`), and the provider reconnects on either
 
 - **Load test**: `loadtest/`
 

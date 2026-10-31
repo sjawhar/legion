@@ -11,8 +11,9 @@ body: |-
     creatable version makes a page of a newer build read-only after a rollback. A page without
     `schema_creatable` counts its R as 1, and a process before this release is left out. The
     dashboard uses the manifest it was built with instead of fetching it and presents both
-    numbers. Every 15 s each process closes with `1012` each writable document socket the fleet no
-    longer admits, and the provider reconnects.
+    numbers. Every 15 s each process closes with `4412` (`DOC_ADMISSION_REVOKED`) each writable
+    document socket the fleet no longer admits, once the message in flight on it is out, and the
+    provider reconnects.
 time: 2026-10-28T12:39:37.686613672Z
 custom:
     Issue: pr2461

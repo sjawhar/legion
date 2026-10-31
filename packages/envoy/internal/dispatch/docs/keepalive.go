@@ -130,9 +130,7 @@ func (w *keepAliveWriter) stop() {
 // It follows what that writer puts on it (frameWatch), so the keep-alive goes out between two of
 // the writer's messages and never inside one: gorilla writes a frame's header and the start of its
 // payload in one write and the rest in another once the payload outgrows its buffer, and a message
-// it streams in several frames, between which no other message may go. The connection's last frame,
-// the close frame a revoked socket ends with, takes the same boundary, and waits for it
-// (closeBetweenMessages).
+// it streams in several frames, between which no other message may go.
 type keepAliveConn struct {
 	net.Conn
 	mu    sync.Mutex
@@ -140,48 +138,14 @@ type keepAliveConn struct {
 	// writeDeadline is the write deadline the websocket writer last set, which a keep-alive's own
 	// gives back.
 	writeDeadline time.Time
-	// betweenWrites wakes everyone waiting for the websocket writer to reach the end of a message.
-	// It is broadcast after each write and once the last frame has had its turn, and it is made on
-	// the first wait, since a connection no one closes this way never has a waiter.
-	betweenWrites *sync.Cond
-	// closing is whether someone is waiting for the end of a message to write the connection's
-	// last frame, and closed whether that turn has passed: from then on nothing more is written.
-	closing, closed bool
 }
 
 func (c *keepAliveConn) Write(p []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed {
-		return 0, net.ErrClosed
-	}
-	return c.writeLocked(p)
-}
-
-// writeLocked writes p on the connection, follows it, and wakes everyone waiting for the end of a
-// message. Its caller holds mu and has found the connection still open.
-func (c *keepAliveConn) writeLocked(p []byte) (int, error) {
 	n, err := c.Conn.Write(p)
 	c.watch.wrote(p[:n])
-	c.wake()
 	return n, err
-}
-
-// wake wakes everyone waiting for the end of a message, and nobody when none waits. Its caller
-// holds mu.
-func (c *keepAliveConn) wake() {
-	if c.betweenWrites != nil {
-		c.betweenWrites.Broadcast()
-	}
-}
-
-// waiters is what everyone waiting for the end of a message waits on, made on the first wait.
-// Its caller holds mu, which is the condition's own lock.
-func (c *keepAliveConn) waiters() *sync.Cond {
-	if c.betweenWrites == nil {
-		c.betweenWrites = sync.NewCond(&c.mu)
-	}
-	return c.betweenWrites
 }
 
 func (c *keepAliveConn) SetDeadline(t time.Time) error {
@@ -204,59 +168,18 @@ func (c *keepAliveConn) SetWriteDeadline(t time.Time) error {
 func (c *keepAliveConn) writeBetweenMessages(frame []byte, wait time.Duration) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed || !c.watch.betweenMessages() {
+	if !c.watch.betweenMessages() {
 		return nil
 	}
 	if err := c.Conn.SetWriteDeadline(time.Now().Add(wait)); err != nil {
 		return err
 	}
-	if _, err := c.writeLocked(frame); err != nil {
+	n, err := c.Conn.Write(frame)
+	c.watch.wrote(frame[:n])
+	if err != nil {
 		return err
 	}
 	return c.Conn.SetWriteDeadline(c.writeDeadline)
-}
-
-// closeBetweenMessages writes frame as the connection's last bytes: when the websocket writer is
-// between two messages, so the frame never cuts one of its messages, and nothing after it, since
-// every later write - the keep-alive's included - is refused (net.ErrClosed). It waits for that
-// boundary for at most wait, which the caller gives as the deadline ygo gives each of its own
-// writes: a message that holds the boundary has that long to go out, and a peer that takes none of
-// it in that time has stopped reading, so the connection closes without the frame. It writes
-// nothing once the websocket writer has sent a close frame of its own. A second caller writes no
-// second frame: it waits for the first to finish, so no close of the connection cuts that frame,
-// and then returns.
-func (c *keepAliveConn) closeBetweenMessages(frame []byte, wait time.Duration) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closing || c.closed {
-		for c.closing {
-			c.waiters().Wait()
-		}
-		return nil
-	}
-	c.closing = true
-	defer func() {
-		c.closing, c.closed = false, true
-		c.wake()
-	}()
-	until := time.Now().Add(wait)
-	timer := time.AfterFunc(wait, func() {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		c.wake()
-	})
-	defer timer.Stop()
-	for !c.watch.betweenMessages() && !c.watch.closed && time.Now().Before(until) {
-		c.waiters().Wait()
-	}
-	if !c.watch.betweenMessages() {
-		return nil
-	}
-	if err := c.Conn.SetWriteDeadline(until); err != nil {
-		return err
-	}
-	_, err := c.writeLocked(frame)
-	return err
 }
 
 const (

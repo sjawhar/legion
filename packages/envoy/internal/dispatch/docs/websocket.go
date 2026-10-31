@@ -30,13 +30,10 @@ type connectionState struct {
 	id    uint64
 	actor model.Actor
 	added bool
-	// documentSince is D, the highest since among the elements of the document ServeHTTP read
-	// before it handed the socket to ygo (pmdoc.DocumentSince), which authorize admits by.
-	documentSince int
-	// conn is the connection ygo serves the socket on, once ygo has hijacked it.
-	conn *admittedConn
-	// admission is the socket's schema admission, which authorize records and ServeHTTP removes
-	// once the socket has ended.
+	// admission is this socket's schema admission: ServeHTTP makes it with the document's
+	// documentSince and the cancel of the socket's own request context, authorize decides and
+	// records it, the answer to the socket's token reads it (authorizeSchemaVersion), a re-check
+	// revokes it (RunSchemaAdmission), and ServeHTTP forgets it once the socket has ended.
 	admission *schemaAdmission
 }
 
@@ -304,30 +301,29 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.preloads.Store(room, preload)
 		defer s.preloads.CompareAndDelete(room, preload)
 	}
-	// ygo serves the socket on the connection it hijacks from w; the wrapper keeps hold of it, so
-	// a re-check that finds the socket no longer admitted can close it (RunSchemaAdmission).
-	connection := &connectionState{documentSince: pmdoc.DocumentSince(tree), conn: &admittedConn{}}
-	ctx := context.WithValue(r.Context(), connectionContextKey{}, connection)
+	// The socket's admission lives on a request context of its own: the answer to the Hocuspocus
+	// token this socket sends is that admission and no other's (authorizeSchemaVersion), since two
+	// sockets of one room can present one token, and cancelling that context with errSchemaRevoked
+	// is how a re-check closes the socket (RunSchemaAdmission).
+	ctx, cancel := context.WithCancelCause(r.Context())
+	defer cancel(nil)
+	connection := &connectionState{admission: &schemaAdmission{documentSince: pmdoc.DocumentSince(tree), cancel: cancel}}
+	ctx = context.WithValue(ctx, connectionContextKey{}, connection)
 	// The socket's peer hears from it at least every s.keepAlive (documentKeepAlive), however idle
-	// the room (keepalive.go), so its provider never takes the socket for dead. The admitted
-	// writer wraps it, so the connection ygo serves on is the one a re-check can close and its
-	// writes still pass through the keep-alive's.
+	// the room (keepalive.go), so its provider never takes the socket for dead.
 	keepAlive := newKeepAliveWriter(w, room, s.keepAlive)
-	s.srv.ServeHTTP(&admittedWriter{ResponseWriter: keepAlive, conn: connection.conn}, r.WithContext(ctx))
+	s.srv.ServeHTTP(keepAlive, r.WithContext(ctx))
 	keepAlive.stop()
-	if connection.admission != nil {
-		s.schemaAdmissions.remove(connection.admission)
-	}
+	s.schemaAdmissions.remove(connection.admission)
 	if connection.added {
 		s.removeConnection(connection.room, connection.id)
 	}
 }
 
 // authorize accepts a document socket, read-only unless its page may write (schemaFleet.admits).
-// ygo asks the token's answer of authorizeSchemaVersion with the room and the token alone, so the
-// decision is recorded here, under the room and the schema_version the page presented, which is
-// the token the page sends; a socket admitted otherwise than one still waiting for that answer is
-// refused, and its provider retries (schemaAdmissions.admit).
+// It decides the admission ServeHTTP put on the socket's context and records it with the service,
+// so a re-check can close the socket again (schemaAdmissions); the answer to the socket's token
+// is that same admission (authorizeSchemaVersion).
 func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) {
 	actor, err := s.requestActor(r)
 	if err != nil {
@@ -358,17 +354,11 @@ func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) 
 	}
 	query := r.URL.Query()
 	page := schemaPageOf(query)
-	admission := &schemaAdmission{
-		key:           schemaAdmissionKey{room: room, token: query.Get("schema_version")},
-		page:          page,
-		documentSince: connection.documentSince,
-		writable:      open && fleet.admits(page, connection.documentSince),
-		conn:          connection.conn,
-	}
-	if !s.schemaAdmissions.admit(admission) {
-		return websocket.ConnectionConfig{}, false
-	}
-	connection.admission = admission
+	admission := connection.admission
+	admission.key = schemaAdmissionKey{room: room, token: query.Get("schema_version")}
+	admission.page = page
+	admission.writable = open && fleet.admits(page, admission.documentSince)
+	s.schemaAdmissions.admit(admission)
 	connection.room = room
 	connection.id = s.nextConnection.Add(1)
 	connection.actor = actor
@@ -377,17 +367,22 @@ func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) 
 	return websocket.ConnectionConfig{ReadOnly: !admission.writable}, true
 }
 
-// authorizeSchemaVersion is ygo's OnTokenAuth: the answer to the Hocuspocus token a socket's
-// provider sends once it opens, which the provider takes as the socket's scope and ygo as its
-// read-only state (sjawhar/ygo provider/websocket/peer.go, handleAuth). The page's token is its
-// schema_version alone, since a server that predates the fleet columns compares the whole token
-// with its own version. So the answer is the decision authorize recorded for a socket of room that
-// presented that schema_version and is still waiting for its answer, and that socket has had it.
-// A token no waiting socket presented is read-only. It never refuses: a refusal closes the socket
-// with 4401, after which the provider never reconnects.
-func (s *Service) authorizeSchemaVersion(room, token string) (websocket.ConnectionConfig, error) {
-	writable := s.schemaAdmissions.answer(schemaAdmissionKey{room: room, token: token})
-	return websocket.ConnectionConfig{ReadOnly: !writable}, nil
+// authorizeSchemaVersion is ygo's OnTokenAuthContext: the answer to the Hocuspocus token a
+// socket's provider sends once it opens, which the provider takes as the socket's scope and ygo as
+// its read-only state (sjawhar/ygo provider/websocket/peer.go, handleAuth). ctx is the request
+// context ServeHTTP served that socket on, so the answer is the admission that socket carries and
+// no other's: the page's token is its schema_version alone - a server that predates the fleet
+// columns compares the whole token with its own version - so two sockets of one room can send one
+// token, and neither the key nor the order they arrive in tells them apart. It is read-write only
+// when this socket was admitted writable, no re-check has revoked it, and the room and token are
+// the ones it was admitted with (schemaAdmissions.writable); read-only in every other case. It
+// never refuses: a refusal closes the socket with 4401, after which the provider never reconnects.
+func (s *Service) authorizeSchemaVersion(ctx context.Context, room, token string) (websocket.ConnectionConfig, error) {
+	var admission *schemaAdmission
+	if connection, ok := ctx.Value(connectionContextKey{}).(*connectionState); ok {
+		admission = connection.admission
+	}
+	return websocket.ConnectionConfig{ReadOnly: !s.schemaAdmissions.writable(admission, room, token)}, nil
 }
 
 // ActorHeader is the header a document websocket's bearer names its session in, as the JSON of a

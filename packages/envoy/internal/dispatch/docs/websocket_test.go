@@ -147,7 +147,7 @@ func TestClosedColdRoomAuthorizesReadOnly(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/ws/doc/"+artifactID, nil)
 	request.Header.Set("X-Dispatch-User", "alice")
 	request.SetPathValue("room", artifactID)
-	request = request.WithContext(context.WithValue(request.Context(), connectionContextKey{}, &connectionState{}))
+	request = request.WithContext(context.WithValue(request.Context(), connectionContextKey{}, &connectionState{admission: &schemaAdmission{}}))
 	config, ok := service.authorize(request)
 	if !ok || !config.ReadOnly {
 		t.Fatalf("cold closed room authorization = %#v, %t; want read-only acceptance", config, ok)
@@ -166,7 +166,7 @@ func TestSchemaVersionAdmissionAuthorizesMismatchAndVersionlessClientsReadOnly(t
 			request.Header.Set("X-Dispatch-User", "alice")
 			request.SetPathValue("room", artifactID)
 			request = request.WithContext(
-				context.WithValue(request.Context(), connectionContextKey{}, &connectionState{}),
+				context.WithValue(request.Context(), connectionContextKey{}, &connectionState{admission: &schemaAdmission{}}),
 			)
 
 			config, ok := service.authorize(request)
@@ -195,13 +195,15 @@ func TestSchemaAdmissionAuthorizesAPagePresentingItsCreatableVersionReadWrite(t 
 	)
 	request.Header.Set("X-Dispatch-User", "alice")
 	request.SetPathValue("room", artifactID)
-	request = request.WithContext(context.WithValue(request.Context(), connectionContextKey{}, &connectionState{}))
+	request = request.WithContext(context.WithValue(request.Context(), connectionContextKey{}, &connectionState{admission: &schemaAdmission{}}))
 
 	accepted, ok := service.authorize(request)
 	if !ok || accepted.ReadOnly {
 		t.Fatalf("socket authorization = %#v, %t; want read-write acceptance", accepted, ok)
 	}
-	authenticated, err := service.authorizeSchemaVersion(artifactID, version)
+	// The token's answer is the admission the socket's own context carries, so it is asked on that
+	// context, as ygo asks it on the one it served the connection on.
+	authenticated, err := service.authorizeSchemaVersion(request.Context(), artifactID, version)
 	if err != nil || authenticated.ReadOnly {
 		t.Fatalf("token authorization = %#v, %v; want read-write", authenticated, err)
 	}

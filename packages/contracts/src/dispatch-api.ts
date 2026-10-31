@@ -3138,6 +3138,25 @@ export const DOCUMENT_NEWER_CONTENT_CLOSE_CODE = 4425;
  *  `contracts.DocumentNewerContentCloseReason`. */
 export const DOCUMENT_NEWER_CONTENT_CLOSE_REASON = "DOC_NEWER_CONTENT";
 
+/**
+ * The close code the document websocket (`/ws/doc/{room}`) ends an open writable socket with once
+ * the live server processes no longer admit the page that opened it: a build whose numbers the
+ * admission held against has joined or rolled away, so that page may no longer write
+ * (`RunSchemaAdmission`). The close carries this code and
+ * `DOCUMENT_ADMISSION_REVOKED_CLOSE_REASON`, and goes out once the message the server has in
+ * flight on the socket is out; a peer too slow to take it within a second gets no close frame at
+ * all (1006) and reconnects just the same. The pinned `@hocuspocus/provider` (2.15) stops
+ * reconnecting only on 4401, 4403 and 1009 (`HocuspocusProviderWebsocket.ts` `onClose`), so the
+ * page reconnects on this code, presents its numbers again and is admitted again: read-only,
+ * unless a live process admits it. 412 is HTTP's "Precondition Failed", which the admission the
+ * fleet withdrew is. Generated into Go as `contracts.DocumentAdmissionRevokedCloseCode`.
+ */
+export const DOCUMENT_ADMISSION_REVOKED_CLOSE_CODE = 4412;
+
+/** The reason the document websocket closes with `DOCUMENT_ADMISSION_REVOKED_CLOSE_CODE`.
+ *  Generated into Go as `contracts.DocumentAdmissionRevokedCloseReason`. */
+export const DOCUMENT_ADMISSION_REVOKED_CLOSE_REASON = "DOC_ADMISSION_REVOKED";
+
 export interface ArtifactRebuildReport {
   readonly head: number;
   readonly removed_checkpoints: number;

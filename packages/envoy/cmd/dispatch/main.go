@@ -475,8 +475,9 @@ func main() {
 	go documentService.RunStaleRoomEviction(ctx)
 	// Every live window each document socket this process serves that is writable is
 	// checked again against the live server processes' schema numbers (registered below), and one
-	// the fleet no longer admits closes with 1012, on which the provider reconnects and is admitted
-	// again (docs.Service.authorize).
+	// the fleet no longer admits closes with contracts.DocumentAdmissionRevokedCloseCode, once the
+	// message in flight on it is out, on which the provider reconnects and is admitted again
+	// (docs.Service.authorize).
 	go documentService.RunSchemaAdmission(ctx)
 	// The related-item check's keyword statistics (each project's df and N), rebuilt at
 	// boot and every ten minutes.

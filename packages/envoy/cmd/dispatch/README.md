@@ -659,8 +659,9 @@ So for each surface the two builds share, this is what build N+1 may change whil
   A page presents its own V and R as `schema_version` and `schema_creatable`, and is writable on an open issue when its R is at most every live process's V and at most the highest R among the live processes, and its V is at least every live process's R and the highest `since` among the elements the document holds; otherwise it is read-only.
   The bound on the highest R makes a page of a newer build read-only after a rollback: no live process creates what that page creates.
   A page that sends no `schema_creatable` predates the manifest, so its R is 1, and a process of a build that predates the fleet columns, whose row holds no schema numbers, is left out.
-  Every 15 seconds (the registry's live window) each process checks its open document sockets again and closes with `1012` each writable one the fleet no longer admits;
-  the provider reconnects on that code, and the new socket is admitted again.
+  Every 15 seconds (the registry's live window) each process checks its open document sockets again and closes each writable one the fleet no longer admits with `4412` (reason `DOC_ADMISSION_REVOKED`; `DOCUMENT_ADMISSION_REVOKED_CLOSE_CODE` and `DOCUMENT_ADMISSION_REVOKED_CLOSE_REASON` in `packages/contracts`);
+  the close frame goes out once the message the server has in flight on that socket is out, which it waits at most a second for, so a peer too slow to take it in that second gets no close frame at all and reads the end as `1006`;
+  the provider reconnects on either, and the new socket is admitted again.
 
 - **NATS.**
   The settings of the stream `ENVOY_NOTIFICATIONS` and of the delivery durables carry a generation in their metadata (`dispatch.stream-generation`, `dispatch.consumer-generation`).

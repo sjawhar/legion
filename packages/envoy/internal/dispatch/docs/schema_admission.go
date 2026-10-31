@@ -1,19 +1,14 @@
 package docs
 
 import (
-	"bufio"
 	"context"
-	"fmt"
 	"log/slog"
-	"net"
-	"net/http"
 	"net/url"
 	"strconv"
 	"sync"
 	"time"
 
-	gws "github.com/gorilla/websocket"
-
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/processes"
 )
@@ -80,143 +75,89 @@ func (f schemaFleet) admits(page schemaPage, documentSince int) bool {
 	return page.valid && page.creatable <= min(f.minVersion, f.maxCreatable) && page.version >= max(f.maxCreatable, documentSince)
 }
 
-// schemaAdmissionKey is what ygo's OnTokenAuth knows of a socket: its room, and the token, which
-// is the schema_version its page presented.
+// schemaAdmissionKey is the room a document socket joined and the token its page presented, which
+// is the schema_version it sends once the socket opens. It is what ygo's token hook is told about
+// a socket (Service.authorizeSchemaVersion), and never identifies one: two sockets of one room can
+// present one token.
 type schemaAdmissionKey struct {
 	room, token string
 }
 
 // schemaAdmission is one document socket's admission: what its page presented, the documentSince
-// it was admitted against, and whether it was admitted writable. answered is set once its token
-// had its answer, and revoked once a re-check has closed its socket (revokeUnless).
+// it was admitted against, whether it was admitted writable, and the cancel of the request context
+// ygo serves that socket on. revoked is set once a re-check has closed the socket (revokeUnless).
+// It travels on the socket's own request context (connectionState), which is how the answer to
+// that socket's token finds it and no other's.
 type schemaAdmission struct {
 	key           schemaAdmissionKey
 	page          schemaPage
 	documentSince int
 	writable      bool
-	answered      bool
 	revoked       bool
-	conn          *admittedConn
+	// cancel ends the socket's request context. Cancelling it with errSchemaRevoked makes ygo send
+	// the peer that cause's close frame and close the connection (sjawhar/ygo
+	// provider/websocket/server.go, ServeHTTP's context watcher).
+	cancel context.CancelCauseFunc
 }
 
 // schemaAdmissions is the admission of every document socket this process serves, from authorize
-// until ServeHTTP returns. Its zero value is ready to use.
-//
-// Every waiting socket of one key - admitted, its token not yet answered - holds one decision
-// (admit), so a token's answer is that decision, whichever of them sent it. A socket a re-check
-// revoked waits on with them until its own ServeHTTP removes it (revokeUnless): its token may
-// still be on its way, and a token that found its socket's entry gone would take the answer of
-// another socket of the key, which would then be read-only for as long as it stays open. It waits
-// behind every other entry of the key: a token takes a revoked entry's answer only when no other
-// entry waits (answer), since an entry a revoked one answered for would be left waiting in just
-// that way.
+// until ServeHTTP returns. Its zero value is ready to use. A token's answer never looks in here -
+// it reads the admission its own socket's context carries - so this is the set a re-check walks
+// (revokeUnless), and the lock is what orders a re-check's revoke against that answer.
 type schemaAdmissions struct {
 	mu      sync.Mutex
-	sockets map[schemaAdmissionKey][]*schemaAdmission
+	sockets map[*schemaAdmission]struct{}
 }
 
-// admit records a, unless a socket of a's key still waiting for its token's answer was admitted
-// otherwise: then it records nothing and returns false, and the socket is refused. The two are one
-// token, and the answer must be the one each was admitted with. A revoked socket still waiting for
-// its answer is one of them, so the reconnect of a revoked writable socket, which is read-only
-// now, is refused while that socket's entry waits: admitted beside it, its own token could take
-// the writable answer that entry holds and write what the fleet no longer admits. The provider
-// retries the refused socket, and the first socket's token is answered within its first round
-// trip; a revoked socket's entry goes as its ServeHTTP returns, which the revoke's close brings
-// on.
-func (a *schemaAdmissions) admit(admission *schemaAdmission) bool {
+// admit records admission, once authorize has decided it, until its socket's ServeHTTP removes it.
+func (a *schemaAdmissions) admit(admission *schemaAdmission) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for _, waiting := range a.sockets[admission.key] {
-		if !waiting.answered && waiting.writable != admission.writable {
-			return false
-		}
-	}
 	if a.sockets == nil {
-		a.sockets = make(map[schemaAdmissionKey][]*schemaAdmission)
+		a.sockets = make(map[*schemaAdmission]struct{})
 	}
-	a.sockets[admission.key] = append(a.sockets[admission.key], admission)
-	return true
+	a.sockets[admission] = struct{}{}
 }
 
-// answer is the decision of the first socket of key still waiting for its token's answer that no
-// re-check has revoked, which it marks answered. A revoked socket's entry answers only when no
-// other entry of the key waits, and when none waits at all the answer is false (read-only). Every
-// waiting entry of a key holds one decision, so which of them answers changes no answer; what it
-// changes is which entry is left waiting. A revoked entry that answered in a live socket's place
-// would leave that socket's own entry waiting for the life of its socket - the revoked socket's
-// ServeHTTP removes its entry, and no second token of the key comes to answer the entry left
-// behind - and admit refuses every read-only socket of the key, the revoked page's own read-only
-// reconnect among them, for as long as that entry waits.
-func (a *schemaAdmissions) answer(key schemaAdmissionKey) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	var revoked *schemaAdmission
-	for _, waiting := range a.sockets[key] {
-		if waiting.answered {
-			continue
-		}
-		if !waiting.revoked {
-			waiting.answered = true
-			return waiting.writable
-		}
-		if revoked == nil {
-			revoked = waiting
-		}
-	}
-	if revoked == nil {
-		return false
-	}
-	revoked.answered = true
-	return revoked.writable
-}
-
-// remove forgets admission, once its socket has ended or a re-check has closed it. Removing one
-// already forgotten does nothing.
+// remove forgets admission, once its socket has ended. Removing one already forgotten, or one no
+// authorize ever recorded, does nothing.
 func (a *schemaAdmissions) remove(admission *schemaAdmission) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.removeLocked(admission)
+	delete(a.sockets, admission)
 }
 
-func (a *schemaAdmissions) removeLocked(admission *schemaAdmission) {
-	sockets := a.sockets[admission.key]
-	for index, candidate := range sockets {
-		if candidate == admission {
-			sockets = append(sockets[:index], sockets[index+1:]...)
-			break
-		}
+// writable is the answer to a token asked of the socket admission belongs to: read-write only when
+// that socket was admitted writable, no re-check has revoked it, and the room and token asked
+// about are the ones it was admitted with. Every other case is read-only: a context carrying no
+// admission, a socket whose page presented another token, a socket a re-check has closed.
+func (a *schemaAdmissions) writable(admission *schemaAdmission, room, token string) bool {
+	if admission == nil {
+		return false
 	}
-	if len(sockets) == 0 {
-		delete(a.sockets, admission.key)
-	} else {
-		a.sockets[admission.key] = sockets
-	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return admission.writable && !admission.revoked && admission.key == schemaAdmissionKey{room: room, token: token}
 }
 
-// revokeUnless closes every writable socket that fleet no longer admits: its read loop ends, and
-// its connection closes with schemaRevokedCloseCode (admittedConn). A socket whose token had its
-// answer is forgotten here; one still waiting for its answer keeps its place in its key's list,
-// marked revoked, until ServeHTTP removes it (schemaAdmissions). A socket already revoked is left
-// as it is: its connection is closing. It returns the sockets it closed.
+// revokeUnless closes every writable socket that fleet no longer admits: it cancels the socket's
+// request context with errSchemaRevoked, on which ygo sends the peer that close frame and closes
+// the connection. The admission stays here, marked revoked, until its own ServeHTTP removes it, so
+// its token is answered read-only from then on and a later pass leaves it as it is: its connection
+// is closing. It returns the sockets it closed.
 func (a *schemaAdmissions) revokeUnless(fleet schemaFleet) []*schemaAdmission {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	var revoked []*schemaAdmission
-	for _, sockets := range a.sockets {
-		for _, admission := range sockets {
-			if admission.writable && !admission.revoked && !fleet.admits(admission.page, admission.documentSince) {
-				revoked = append(revoked, admission)
-			}
+	for admission := range a.sockets {
+		if admission.writable && !admission.revoked && !fleet.admits(admission.page, admission.documentSince) {
+			admission.revoked = true
+			revoked = append(revoked, admission)
 		}
 	}
 	for _, admission := range revoked {
-		admission.revoked = true
-		if admission.answered {
-			a.removeLocked(admission)
-		}
-		if admission.conn != nil {
-			admission.conn.revoke()
+		if admission.cancel != nil {
+			admission.cancel(errSchemaRevoked)
 		}
 	}
 	return revoked
@@ -244,9 +185,9 @@ func (s *Service) RunSchemaAdmission(ctx context.Context) {
 }
 
 // recheckSchemaAdmissions is one pass of RunSchemaAdmission. A socket it closes gets
-// schemaRevokedCloseCode, on which the provider reconnects, and the reconnect's admission decides
-// again: read-only, unless a process that admits the page serves it. A pass that cannot read the
-// live processes closes nothing.
+// contracts.DocumentAdmissionRevokedCloseCode, on which the provider reconnects, and the
+// reconnect's admission decides again: read-only, unless a process that admits the page serves it.
+// A pass that cannot read the live processes closes nothing.
 func (s *Service) recheckSchemaAdmissions(ctx context.Context) error {
 	fleet, err := readSchemaFleet(ctx, s.store.Pool)
 	if err != nil {
@@ -260,138 +201,23 @@ func (s *Service) recheckSchemaAdmissions(ctx context.Context) error {
 	return nil
 }
 
-// schemaRevokedCloseCode closes a document socket whose page the fleet no longer admits writable:
-// 1012, Service Restart, on which the provider reconnects (see documentNewerContentCloseCode), and
-// the reconnect is admitted again.
-const schemaRevokedCloseCode = gws.CloseServiceRestart
+// errSchemaRevoked is the cause a re-check cancels a revoked socket's request context with. ygo
+// reads CloseCode off the cause and sends the peer that close frame before it closes the
+// connection, with gorilla's WriteControl: a message of ygo's already going out is never cut into,
+// and the frame waits up to a second for the end of it (provider/websocket's closeFrameTimeout). A
+// peer that slow takes no close frame at all and reads the connection's end as 1006, on which its
+// provider reconnects just the same.
+var errSchemaRevoked error = schemaRevoked{}
 
-// finalCloseFrameByte is a close frame's first byte as a server writes it: FIN set, no reserved
-// bit, opcode 8 (close), and no mask, which a server never applies (RFC 6455, 5.2).
-const finalCloseFrameByte = 0x88
+// schemaRevoked is that cause's type: an error whose CloseCode ygo sends.
+type schemaRevoked struct{}
 
-// controlFramePayloadMax is the longest payload a control frame may carry (RFC 6455, 5.5), and so
-// the longest the one-byte length that follows finalCloseFrameByte can state: a longer payload
-// would need an extended length the frame below does not write, and the byte would state a length
-// that is not the payload's.
-const controlFramePayloadMax = 125
-
-// schemaRevokedCloseFrame is the close frame admittedConn writes, as a server writes it: final,
-// opcode close, unmasked. A reason long enough to take the payload past controlFramePayloadMax
-// panics here, as this package is loaded, rather than putting a wrong length on the wire.
-var schemaRevokedCloseFrame = func() []byte {
-	payload := gws.FormatCloseMessage(schemaRevokedCloseCode, "the server processes changed; reconnect")
-	if len(payload) > controlFramePayloadMax {
-		panic(fmt.Sprintf("docs: the schema-revoked close frame's payload is %d bytes, past the %d a control frame may carry", len(payload), controlFramePayloadMax))
-	}
-	return append([]byte{finalCloseFrameByte, byte(len(payload))}, payload...)
-}()
-
-// revokedDeadline is a read deadline already past: a read on the connection fails at once.
-var revokedDeadline = time.Unix(1, 0)
-
-// admittedWriter hands ygo's upgrade an admittedConn in place of the connection it hijacks.
-type admittedWriter struct {
-	http.ResponseWriter
-	conn *admittedConn
+func (schemaRevoked) Error() string {
+	return "the live server processes no longer admit this document socket's page"
 }
 
-func (w *admittedWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	raw, buffered, err := http.NewResponseController(w.ResponseWriter).Hijack()
-	if err != nil {
-		return nil, nil, err
-	}
-	w.conn.attach(raw)
-	return w.conn, buffered, nil
-}
-
-func (w *admittedWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
-
-// admittedConn is the connection ygo serves a document socket on, which a re-check can close
-// without a change to ygo (revoke). ygo writes on a socket from its writer goroutine alone, and
-// only reading ends its read loop, so revoke sets a read deadline already past, which ends that
-// loop; ygo then stops its writer and closes the connection, and that Close writes the close frame
-// first. Until revoke, every call passes through.
-type admittedConn struct {
-	net.Conn
-	mu sync.Mutex
-	// keepAlive is Conn, the connection ygo's upgrade hijacked: the keep-alive's, which follows
-	// what ygo's websocket writer puts on it, so the close frame can take the end of one of its
-	// messages (keepAliveWriter.Hijack, keepAliveConn). A connection of any other kind follows
-	// nothing, and its socket closes without the frame.
-	keepAlive *keepAliveConn
-	revoked   bool
-}
-
-// attach is the connection ygo's upgrade hijacked. A socket revoked before ygo hijacked it reads
-// nothing.
-func (c *admittedConn) attach(raw net.Conn) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.Conn = raw
-	c.keepAlive, _ = raw.(*keepAliveConn)
-	if c.revoked {
-		_ = raw.SetReadDeadline(revokedDeadline)
-	}
-}
-
-func (c *admittedConn) revoke() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.revoked = true
-	if c.Conn != nil {
-		_ = c.Conn.SetReadDeadline(revokedDeadline)
-	}
-}
-
-// SetReadDeadline keeps a revoked connection's past deadline: ygo clears its handshake deadline
-// once the first message arrives, which would otherwise undo a revoke made before.
-func (c *admittedConn) SetReadDeadline(t time.Time) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.revoked {
-		t = revokedDeadline
-	}
-	return c.Conn.SetReadDeadline(t)
-}
-
-func (c *admittedConn) SetDeadline(t time.Time) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.revoked {
-		return c.Conn.SetDeadline(t)
-	}
-	if err := c.Conn.SetWriteDeadline(t); err != nil {
-		return err
-	}
-	return c.Conn.SetReadDeadline(revokedDeadline)
-}
-
-// Close writes, on a revoked connection, the close frame with schemaRevokedCloseCode, and then
-// closes. The frame goes out between two of ygo's messages and never inside one, which a plain
-// write could not promise, since gorilla writes a frame larger than its write buffer in more than
-// one write (keepAliveConn.closeBetweenMessages). Close waits for that boundary for at most
-// keepAliveWriteWait, the deadline ygo gives each of its own writes (provider/websocket's
-// writeTimeout), so a message that holds the boundary has as long to go out as ygo allows it; past
-// that, and once ygo's writer has sent a close frame of its own, the connection closes without the
-// frame. Nothing goes on the connection after the frame: every later write is refused, the
-// keep-alive's included.
-//
-// Two of ygo's goroutines close one connection (provider/websocket/server.go): its ServeHTTP
-// teardown, once its writer has stopped (after handleDisconnect), and its context watcher, which
-// the revoke itself wakes - gorilla reads through the buffered reader net/http hijacked with the
-// connection, whose connReader reads the connection directly and cancels the request's context on
-// the read error the past deadline gives it (net/http's server.go, connReader.Read calling
-// handleReadError). Whichever arrives first writes the frame. The other writes no second frame and
-// waits for the first, so it closes the connection after that frame rather than from under it: a
-// close that beats the frame reaches the page as an abnormal closure, not as 1012. That wait is on
-// the keep-alive's connection, not on this one's lock, which Close holds only to read what it
-// needs: revoke takes it under schemaAdmissions.mu, where a wait would hold up every admission.
-func (c *admittedConn) Close() error {
-	c.mu.Lock()
-	conn, keepAlive, revoked := c.Conn, c.keepAlive, c.revoked
-	c.mu.Unlock()
-	if revoked && keepAlive != nil {
-		_ = keepAlive.closeBetweenMessages(schemaRevokedCloseFrame, keepAliveWriteWait)
-	}
-	return conn.Close()
+// CloseCode is the close frame ygo sends the peer: the Dispatch code on which the provider
+// reconnects, and the reconnect is admitted again.
+func (schemaRevoked) CloseCode() (int, string) {
+	return contracts.DocumentAdmissionRevokedCloseCode, contracts.DocumentAdmissionRevokedCloseReason
 }

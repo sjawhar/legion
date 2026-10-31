@@ -676,7 +676,7 @@ func New(deps Deps) *Service {
 
 	service.srv = newRoomServer(srv)
 	srv.Authorize = service.authorize
-	srv.OnTokenAuth = service.authorizeSchemaVersion
+	srv.OnTokenAuthContext = service.authorizeSchemaVersion
 	srv.OnInject = service.allowInject
 	srv.OnLoadDocument = service.onLoadDocument
 	srv.OnLastPeer = service.settleLastPeer
