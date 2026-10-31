@@ -1348,12 +1348,13 @@ test("trims the name", () => {
 EOF
   g add -A && g commit -qm "feat: greet(), a greeting helper for the widgets CLI ($worker_key)"
   C1=$(g rev-parse HEAD)
-  # The implement handoff as the implementer writes it with its write tool: the four stamps
-  # (schemaVersion, phase, issue, completed) and the phase's fields, at .legion/<key>/implement.json,
-  # the file whose pushed commit the implementer's handoff_complete reports and the tester reads with `read`.
+  # The implement handoff as the implementer writes it with its write tool: the three stamps
+  # (schemaVersion, phase, issue), previousHandoff empty because this is the phase's first handoff,
+  # and the phase's fields, at .legion/<key>/implement.json, the file whose pushed commit the
+  # implementer's handoff_complete reports and the tester reads with `read`.
   mkdir -p "$src/.legion/$worker_key"
-  jq -n --arg key "$worker_key" --arg head "$C1" --arg completed "$(date -u -d "@$((start + index))" +%FT%TZ)" '
-    {schemaVersion:1, phase:"implement", issue:$key, completed:$completed,
+  jq -n --arg key "$worker_key" --arg head "$C1" '
+    {schemaVersion:1, phase:"implement", issue:$key, previousHandoff:"",
      filesChanged:["greet.ts","greet.test.ts"],
      proof:[{criterion:"greet(name) greets by name, trimmed, and `bun greet.ts <name>` prints it; no name is a usage error",
        surface:"the CLI", command:"bun greet.ts Ada", observed:"prints Hello, Ada! and exits 0", headSha:$head,
