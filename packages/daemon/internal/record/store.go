@@ -670,7 +670,21 @@ func (s *Postgres) ParkedDecisions(ctx context.Context, tx pgx.Tx, tree string) 
 	return parkedDecisions(ctx, tx, tree, false)
 }
 
+// UnclaimedKept locks every kept row of tree, and tree's readmitted approval, before it reads which
+// of them nothing claims: the composer that reads them claims what it names in the same
+// transaction (ClaimKeptDecisions), so a second composer of the tree waits here until the first
+// commits and then reads the first's claims. The lock is its own statement, so the read after it
+// judges each claim against a snapshot that holds every claimer committed before the lock was
+// granted. Without it the second composer would read a claim the first has not committed as no
+// claim, name the decision too, and two tellings would name it.
 func (s *Postgres) UnclaimedKept(ctx context.Context, tx pgx.Tx, tree string) ([]ParkedDecision, int, int, error) {
+	if _, err := tx.Exec(ctx, `select 1 from parked_decisions kept join issues owner on owner.key = kept.issue
+		where owner.tree = $1 order by kept.issue, kept.ref for update of kept`, tree); err != nil {
+		return nil, 0, 0, fmt.Errorf("lock the decisions owed to %s: %w", tree, err)
+	}
+	if _, err := tx.Exec(ctx, `select 1 from readmitted_approvals where issue = $1 for update`, tree); err != nil {
+		return nil, 0, 0, fmt.Errorf("lock the approval kept for %s: %w", tree, err)
+	}
 	decisions, err := parkedDecisions(ctx, tx, tree, true)
 	if err != nil {
 		return nil, 0, 0, err
@@ -756,23 +770,37 @@ func keptMarks(kept KeptDecisions) ([]string, []time.Time) {
 // claims or holds (keptNameable). A row is claimed or held, never both: a hold the claim overrides
 // is one keptNameable found void (its holder serves another tree than the row's issue now), and
 // the claim clears it, so no later release of that hold can touch this claim.
+//
+// A row names only what it claims: what it names was read by UnclaimedKept in this transaction,
+// under the lock that read took, so each is still there to claim. A decision or an approval the
+// row names and cannot claim is an error, which rolls the composer back rather than let it publish
+// a decision another telling owns.
 func (s *Postgres) ClaimKeptDecisions(ctx context.Context, tx pgx.Tx, tree string, kept KeptDecisions, row int64) error {
 	if len(kept.Decisions) > 0 {
 		refs, at := keptMarks(kept)
-		if _, err := tx.Exec(ctx, `update parked_decisions kept set claimed_by = $4, held_by_claim = null, held_by_delivery = null
+		claimed, err := tx.Exec(ctx, `update parked_decisions kept set claimed_by = $4, held_by_claim = null, held_by_delivery = null
 			from unnest($2::text[], $3::timestamptz[]) as named (ref, at), issues owner
 			where owner.key = kept.issue and owner.tree = $1 and kept.ref = named.ref
-			and kept.at = named.at and `+keptNameable, tree, refs, at, row); err != nil {
+			and kept.at = named.at and `+keptNameable, tree, refs, at, row)
+		if err != nil {
 			return fmt.Errorf("claim the decisions named to %s for outbox row %d: %w", tree, row, err)
+		}
+		if claimed.RowsAffected() != int64(len(kept.Decisions)) {
+			return fmt.Errorf("outbox row %d names %d decisions owed to %s and could claim %d: a row names only what it claims",
+				row, len(kept.Decisions), tree, claimed.RowsAffected())
 		}
 	}
 	if kept.Approved > 0 {
-		if _, err := tx.Exec(ctx, `update readmitted_approvals set claimed_by = $4, held_by_claim = null, held_by_delivery = null
+		claimed, err := tx.Exec(ctx, `update readmitted_approvals set claimed_by = $4, held_by_claim = null, held_by_delivery = null
 			from issues owner
 			where owner.key = readmitted_approvals.issue and readmitted_approvals.issue = $1
 			and approved_version = $2 and latest_version = $3 and `+approvalNameable,
-			tree, kept.Approved, kept.Latest, row); err != nil {
+			tree, kept.Approved, kept.Latest, row)
+		if err != nil {
 			return fmt.Errorf("claim the approval named to %s for outbox row %d: %w", tree, row, err)
+		}
+		if claimed.RowsAffected() != 1 {
+			return fmt.Errorf("outbox row %d names the approval kept for %s and could not claim it: a row names only what it claims", row, tree)
 		}
 	}
 	return nil

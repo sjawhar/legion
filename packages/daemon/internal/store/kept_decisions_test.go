@@ -219,3 +219,104 @@ func TestAHoldReleaseLeavesAClaimThatCounts(t *testing.T) {
 			ref, claimedBy, catchUp)
 	}
 }
+
+// compose is what a composer of a start or catch-up of tree does in tx (workflow's
+// ParkedDecisionTask, then EnqueueNaming): it reads what tree is owed and nothing claims, enqueues
+// a row naming it and claims it for that row. It returns the refs the row names.
+func (r *keptRig) compose(tx pgx.Tx, tree string) ([]string, error) {
+	store := record.NewStore()
+	decisions, _, _, err := store.UnclaimedKept(r.ctx, tx, tree)
+	if err != nil || len(decisions) == 0 {
+		return nil, err
+	}
+	var kept record.KeptDecisions
+	var named []string
+	for _, d := range decisions {
+		kept.Decisions = append(kept.Decisions, record.DecisionMark{Ref: d.Ref, At: d.At, Issue: d.Issue, Decision: d.Decision, Actor: d.Actor})
+		named = append(named, d.Ref)
+	}
+	row, err := record.NewOutboxRow(tree, record.Notice{Kind: "catch-up", Role: claim.RoleArchitect,
+		CatchUp: &record.CatchUp{Generation: 1, Launch: 1, Kept: &kept}}, r.at)
+	if err != nil {
+		return nil, err
+	}
+	id, err := store.EnqueueID(r.ctx, tx, row)
+	if err != nil {
+		return nil, err
+	}
+	return named, store.ClaimKeptDecisions(r.ctx, tx, tree, kept, id)
+}
+
+// Two composers of one tree's catch-ups run at once over one kept decision: the second reads while
+// the first has claimed it and not committed. Only one of them may name it, since each publish
+// tells what its row names and the decision reaches its architect once. The second waits for the
+// first's claim and names nothing; it never names a decision it does not claim, and never takes
+// over a claim the first made.
+func TestTwoComposersNeverBothNameOneKeptDecision(t *testing.T) {
+	r := newKeptRig(t)
+	const tree, ref = "LEGION-330", "dispatch://LEGION-330/ask/ask-1"
+	r.issue(tree, tree)
+	r.keep(tree, ref, 0)
+
+	first, err := r.store.Pool().Begin(r.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Rollback(r.ctx) }()
+	firstNamed, err := r.compose(first, tree)
+	if err != nil || len(firstNamed) != 1 {
+		t.Fatalf("the first composer named %v (%v), want %s", firstNamed, err, ref)
+	}
+
+	read := make(chan struct{})
+	type composed struct {
+		named []string
+		err   error
+	}
+	second := make(chan composed, 1)
+	go func() {
+		var named []string
+		err := pgx.BeginFunc(r.ctx, r.store.Pool(), func(tx pgx.Tx) error {
+			var err error
+			named, err = r.compose(tx, tree)
+			return err
+		})
+		close(read)
+		second <- composed{named, err}
+	}()
+	// The first commits once the second has either composed or is waiting on a lock the first
+	// holds, so the second's read is made while the first's claim is not yet committed.
+	deadline := time.Now().Add(10 * time.Second)
+	for waiting := false; !waiting; {
+		select {
+		case <-read:
+			waiting = true
+			continue
+		default:
+		}
+		if err := r.store.Pool().QueryRow(r.ctx, `select exists (select 1 from pg_locks where not granted)`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the second composer neither composed nor waited on the first")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := first.Commit(r.ctx); err != nil {
+		t.Fatalf("commit the first composer: %v", err)
+	}
+	got := <-second
+	if got.err != nil {
+		t.Fatalf("the second composer: %v", got.err)
+	}
+	if len(got.named) != 0 {
+		t.Fatalf("the second composer named %v while the first claimed %s; want nothing named twice", got.named, ref)
+	}
+	var claimers int
+	if err := r.store.Pool().QueryRow(r.ctx, `select count(*) from outbox where payload->'catch_up'->'kept' is not null`).Scan(&claimers); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimedBy, _, _ := r.row(ref); claimers != 1 || claimedBy == 0 {
+		t.Fatalf("%s is claimed by %d with %d catch-ups naming decisions; want one catch-up claiming it", ref, claimedBy, claimers)
+	}
+}
