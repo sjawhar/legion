@@ -134,7 +134,13 @@ test("marks only the rows whose route reaches nobody", async () => {
       route_status: "live",
       route_holder: "ses-po",
     }),
-    issue({ key: "CORE-4", title: "Unjudged route", route: "role:sre", route_status: "unknown" }),
+    issue({
+      key: "CORE-4",
+      title: "Unjudged route",
+      route: "role:sre",
+      route_status: "unknown",
+      route_status_reason: "unreachable",
+    }),
     issue({ key: "CORE-5", title: "Unrouted" }),
   ]);
 

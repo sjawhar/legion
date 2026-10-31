@@ -143,8 +143,9 @@ func (r *SessionRegistry) armExpiryLocked() {
 // removed through the copy's own removal (kvwatch.Copy.Remove), which keeps the key's revision in
 // the fence -- no record removed it, so a delayed record older than that revision is still fenced
 // out -- and leaves to this callback what the copy records beside a row it removes for the
-// bucket's sake: its final heartbeat in lastSeen until the retention after its deadline, so
-// LastSeen answers the same before and after the removal, and the id's lastSeen deadline.
+// bucket's sake: its final heartbeat in lastSeen until the retention after the moment it left the
+// live view (departedLocked), so LastSeen answers the same before and after the removal, and the
+// id's lastSeen deadline.
 //
 // A lastSeen deadline removes the id's lastSeen record. The fence entry outlives it and is dropped
 // by the next completed read that finds the bucket no longer holds the key
@@ -168,9 +169,10 @@ func (r *SessionRegistry) expireDue() {
 			if !ok || !cs.expiresAt.Equal(item.deadline) {
 				continue
 			}
-			r.retainLastSeenLocked(id, cs.entry.UpdatedAt, cs.expiresAt)
+			left := r.departedLocked(cs, now)
+			r.retainLastSeenLocked(id, cs.entry.UpdatedAt, left)
 			r.cache.Remove(id)
-			r.setExpiryLocked(id, expireLastSeen, cs.expiresAt.Add(r.retention()))
+			r.setExpiryLocked(id, expireLastSeen, left.Add(r.retention()))
 		case expireLastSeen:
 			if seen, ok := r.lastSeen[id]; ok {
 				if seen.expiresAt.After(now) {

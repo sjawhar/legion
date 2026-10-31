@@ -32,6 +32,7 @@ function ask(id: string, overrides: Partial<InboxRow> = {}): InboxRow {
       route: null,
       route_status: null,
       route_holder: null,
+      route_status_reason: null,
     },
     priority: null,
     snoozed_until: null,

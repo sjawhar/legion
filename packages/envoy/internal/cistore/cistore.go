@@ -413,16 +413,14 @@ func (c ciCache) BeginRead(read kvwatch.Read) {
 }
 
 // Apply takes one record the read delivered (kvwatch.Copy.Delivered), and logs a value it could not
-// decode, which evicted the record. A record that moves the copy on is a change for the summary
-// loop (movedLocked); a removal reports itself (removedLocked).
+// decode, which evicted the record. A record that moves the copy on and that the copy keeps is a
+// change for the summary loop (markStoredLocked); a removal reports itself (removedLocked).
 func (c ciCache) Apply(entry kvwatch.Entry, read kvwatch.Read) {
 	s := c.s
 	s.mu.Lock()
 	moved := s.movedLocked(read.Epoch, entry.Key, entry.Revision)
 	malformed := s.cache.Delivered(entry)
-	if moved {
-		s.markChangedLocked(entry.Key)
-	}
+	s.markStoredLocked(entry.Key, moved)
 	s.mu.Unlock()
 	if malformed != nil {
 		s.logger.Warn("cistore watch evicted malformed value",
@@ -488,6 +486,22 @@ func (s *Store) movedLocked(epoch uint64, key string, revision uint64) bool {
 		return true
 	}
 	return revision > s.cache.FenceFor(epoch, key)
+}
+
+// markStoredLocked marks key changed for the summary loop when the record just applied moved the
+// copy on (moved) and the copy kept it. A record the copy keeps none of -- a retired head, a state
+// under a foreign key, a value that does not decode, a delete or purge marker -- leaves the copy
+// as it was, unless it took away a record the copy held, and that removal reports itself
+// (removedLocked). Marking one here would mark a key the cache holds nothing for, so every read
+// of the whole bucket that streamed past one, after a reconnect or a Rewatch, would wake the loop
+// for a pass with nothing to look at. Callers hold s.mu.
+func (s *Store) markStoredLocked(key string, moved bool) {
+	if !moved {
+		return
+	}
+	if _, kept := s.cache.Get(key); kept {
+		s.markChangedLocked(key)
+	}
 }
 
 // markChangedLocked adds key to the change feed and wakes the summary loop, when one is attached.

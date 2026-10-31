@@ -89,6 +89,7 @@ const inboxRow: InboxRow = {
     route: null,
     route_status: null,
     route_holder: null,
+    route_status_reason: null,
   },
   priority: issue.priority,
   snoozed_until: null,

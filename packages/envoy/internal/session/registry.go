@@ -148,6 +148,13 @@ type SessionRegistry struct {
 	// heartbeat in lastSeen (removedLocked), and one it stores drops it (storedLocked).
 	cache    kvwatch.Copy[cachedSession]
 	lastSeen map[string]lastSeenSession
+	// followingSince is when the read that last restored following swept the copy
+	// (sessionCache.CompleteRead), and the zero time until the first one does, as in a registry
+	// built from a struct literal, which has no watcher and so misses no record. No row left the
+	// live view before it: a deadline that passed while the copy did not follow its bucket is no
+	// evidence that the session ended, since the copy could not see the heartbeats that renewed
+	// it either, so the retention of such a row's last heartbeat runs from here (departedLocked).
+	followingSince time.Time
 
 	// expiries holds the deadline of each cached row and of each lastSeen record, earliest first;
 	// expiryIndex finds an id's item so a write moves it in place. expiryTimer is armed for
@@ -298,11 +305,16 @@ func (c sessionCache) Apply(entry kvwatch.Entry, _ kvwatch.Read) {
 
 // CompleteRead removes every row and fence entry the read found no evidence of: the bucket no
 // longer holds that session. A removed row's last heartbeat is kept for LastSeen, and its record's
-// own deadline is scheduled, as an expired row's are (removedLocked).
+// own deadline is scheduled, as an expired row's are (removedLocked). The copy follows its bucket
+// from here (kvwatch.Watcher.completeRead calls this and only then records that it does), so this
+// is where a row the copy retained past its deadline while it did not follow leaves the live view:
+// the sweep takes away the rows the bucket no longer holds, and the rows it keeps are judged
+// against their age again from now (departedLocked).
 func (c sessionCache) CompleteRead(kvwatch.Read) {
 	r := c.r
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.followingSince = r.now()
 	r.cache.CompleteRead()
 }
 
@@ -540,7 +552,8 @@ func (r *SessionRegistry) uncachedLocked(entry kvwatch.Entry, now time.Time) (Se
 // session answers 0. It takes only the shared lock and changes nothing: an
 // expired entry the expiry timer has not removed yet, which is also a row the copy retains while
 // it does not follow its bucket, answers what its removal will record (its UpdatedAt until the
-// retention past its deadline), so the answer is the same before and after the removal.
+// retention past the moment it left the live view, departedLocked), so the answer is the same
+// before and after the removal.
 func (r *SessionRegistry) LastSeen(sessionID string) int64 {
 	now := r.now()
 	r.mu.RLock()
@@ -555,7 +568,7 @@ func (r *SessionRegistry) LastSeen(sessionID string) int64 {
 		if !r.following() {
 			return cs.entry.UpdatedAt
 		}
-		if seen, ok := r.lastSeenRecord(cs.entry.UpdatedAt, cs.expiresAt); ok && !seen.expired(now) {
+		if seen, ok := r.lastSeenRecord(cs.entry.UpdatedAt, r.departedLocked(cs, now)); ok && !seen.expired(now) {
 			return seen.lastSeen
 		}
 	}
@@ -644,24 +657,36 @@ func (r *SessionRegistry) List() ([]ListEntry, error) {
 // storedLocked and removedLocked are what the cache records beside its copy when the copy stores
 // or removes a row (kvwatch.Rows), and where each row's expiry is scheduled. A stored row's
 // session is live, so its last-seen record goes and its own deadline is scheduled. A removed row's
-// last heartbeat is kept for LastSeen, for the retention from the moment it left the cache: now,
-// or its deadline when it was already past it, which is what its expiry would have recorded, so
-// LastSeen answers the same before and after the removal. Neither walks the whole lastSeen map: a
-// read applies every record of the bucket through them, and each record's own deadline is in the
-// expiry heap, which removes the record for good (expireDue). Callers hold r.mu for writing.
+// last heartbeat is kept for LastSeen, for the retention from the moment it left the live view
+// (departedLocked), which is what its expiry would have recorded, so LastSeen answers the same
+// before and after the removal. Neither walks the whole lastSeen map: a read applies every record
+// of the bucket through them, and each record's own deadline is in the expiry heap, which removes
+// the record for good (expireDue). Callers hold r.mu for writing.
 func (r *SessionRegistry) storedLocked(sessionID string, stored cachedSession) {
 	delete(r.lastSeen, sessionID)
 	r.scheduleLocked(sessionID, expireLive, stored.expiresAt)
 }
 
 func (r *SessionRegistry) removedLocked(sessionID string, removed cachedSession) {
-	// The row left the cache now: its deadline did not remove it, and while the copy did not
-	// follow its bucket that deadline may be long past (List). A row the expiry timer removes
-	// records its own deadline instead, so LastSeen answers the same before and after it
-	// (expireDue).
-	now := r.now()
-	r.retainLastSeenLocked(sessionID, removed.entry.UpdatedAt, now)
-	r.scheduleLocked(sessionID, expireLastSeen, now.Add(r.retention()))
+	left := r.departedLocked(removed, r.now())
+	r.retainLastSeenLocked(sessionID, removed.entry.UpdatedAt, left)
+	r.scheduleLocked(sessionID, expireLastSeen, left.Add(r.retention()))
+}
+
+// departedLocked is the moment row left, or leaves, the live view, from which its last heartbeat
+// is kept for the retention: its own deadline when it is past it, and now when it is not, for a
+// row the bucket no longer holds. A deadline that passed while the copy did not follow its bucket
+// is no such moment: the copy could not see the heartbeats that renewed the row either, so it
+// kept the row listed (List) and expired nothing (expireDue), and the row leaves the live view no
+// earlier than the read that restored following (followingSince). Callers hold r.mu.
+func (r *SessionRegistry) departedLocked(row cachedSession, now time.Time) time.Time {
+	if !row.expired(now) {
+		return now
+	}
+	if row.expiresAt.Before(r.followingSince) {
+		return r.followingSince
+	}
+	return row.expiresAt
 }
 
 // retainLastSeenLocked records lastSeen as sessionID's final heartbeat until the retention after
