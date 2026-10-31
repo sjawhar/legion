@@ -876,9 +876,11 @@ decide it. A decision is one plain
 POST: a plain record's approve and deny send no body, and a machine record's approve and deny both
 send `{code}`, the code the viewer typed for that lookup (the broker requires it on either
 decision). The page never says who decides: Dispatch's server names the signed-in viewer (below),
-and the broker refuses anyone the record's rule does not admit (anyone signed in for a service's
-machine login or a shared secret naming `anyone`; otherwise its approver) with `403 NOT_APPROVER`,
-surfaced verbatim.
+and the broker refuses anyone a machine login's rule does not admit (anyone signed in for a
+service's login; otherwise its approver) with `403 NOT_APPROVER`, surfaced verbatim. A secret
+request's decision never reaches that rule through Dispatch: the broker answers
+`403 DECIDE_ON_BROKER_PAGE` to every caller on either decide route, which is why the record page
+sends the browser to the broker's own page.
 Terminal-state records (`approved`, `denied`, `expired`, `cancelled`, `revoked`) render their
 recorded decision and no buttons, on the record page and on the machine page alike, whether the
 machine page looked the login up already decided or decided it itself; every broker error
@@ -953,13 +955,15 @@ that stopped at Dispatch's own token, a file missing, unreadable or empty, is
 never asked; any other failure is `503 AGENT_SECRETS_UNAVAILABLE`. `credential_requests_test.go`
 pins the decision bodies
 against a fake broker, and `internal/dispatch/api/contract_test.go` round-trips a real broker
-(`brokerapi.Register` with real services on `BROKER_TEST_DATABASE_URL`): another login refused
-`403 NOT_APPROVER` even when its browser body names the approver, the approver's click accepted
-whatever login its body names, and the value released; a shared secret's request in two people's
-lists and approved by the second; an automatic grant listed as automatic, revoked, and the same
-session's next request for it waiting on its owner while another session still gets it at once;
-once the operator has withheld AUTO_TOKEN, another person's approval of the session's request that
-was waiting on anyone for it refused `403 NOT_APPROVER` and the operator's accepted; a person's
+(`brokerapi.Register` with real services on `BROKER_TEST_DATABASE_URL`): Dispatch's approve and
+deny of a secret request each refused `403 DECIDE_ON_BROKER_PAGE` naming the record's page on the
+broker, by its approver as much as by another login and whatever the browser's body names, and
+the approver's approval on that page releasing the value; a shared secret's request in two
+people's lists and approved on that page by the second; an automatic grant listed as automatic,
+revoked, and the same session's next request for it waiting on its owner while another session
+still gets it at once; once the operator has withheld AUTO_TOKEN, another person's approval on
+the broker's page of the session's request that was waiting on anyone for it deciding nothing and
+the operator's releasing it; a person's
 machine login listed for the person who approved it alone, another person's revoke refused
 `403 NOT_APPROVER` whatever their body names, and the approver's revoke ending the session it
 enrolled and its launcher proofs; a person's machine login refused `403 NOT_APPROVER` to another

@@ -57,9 +57,10 @@ creates the database.
 
 Leave it running, and paste the exports into a second shell. They point the clients at this broker
 and name the caller token, the ServiceAccount token with which Dispatch's server, and here
-`agent-secrets-devrelay` in its place, decides for an approver
-([Concepts](/legion/broker/concepts/#approvals)). The broker lists that token's account,
-`system:serviceaccount:example-ns:example-dispatch`, as its caller `dispatch`, and
+`agent-secrets-devrelay` in its place, decides a machine login for an approver
+([Concepts](/legion/broker/concepts/#approvals)). No token decides a secret request: that is
+decided on the broker's own page, by the person signed in to the broker. The broker lists that
+token's account, `system:serviceaccount:example-ns:example-dispatch`, as its caller `dispatch`, and
 `dev-oidc-issuer` rewrites the file before its token lapses, as a kubelet rewrites a pod's
 projected token, so the exports stay good for as long as the stack runs. They also keep the
 helper's socket, its operator file (the Dispatch login the helper's machine login names,

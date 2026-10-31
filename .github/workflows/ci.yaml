@@ -722,13 +722,19 @@ jobs:
               - 'packages/envoy/scripts/fixtures/shell-quote.json'
               # The SPA build writes dist/THIRD_PARTY_NOTICES.txt (web/vite.config.ts:11).
               - 'scripts/third-party-notices.ts'
-            # The browser suite's two-process mode (dispatch-browser-multiprocess): what the dispatch
-            # filter names, and the dev OIDC issuer its sign-in step signs the browser in at
-            # (e2e/run-signin-issuer.sh:34 builds it) with the packages it compiles beyond the
-            # Dispatch server's (`go list -deps ./cmd/dev-oidc-issuer` in packages/envoy).
-            dispatch_browser_multiprocess:
-              - *dispatch
+              # The real secrets broker e2e/broker-approval.e2e.ts approves a request on, the dev
+              # OIDC issuer it trusts, and the seeding step that logs its service in and enrols its
+              # pods: the packages `go list -deps ./cmd/broker ./cmd/dev-oidc-issuer
+              # ./internal/broker/brokertest/requestseed` lists in packages/envoy beyond the
+              # Dispatch server's, which e2e/run-broker.sh:95 builds in one go build.
+              - 'packages/envoy/cmd/broker/*'
               - 'packages/envoy/cmd/dev-oidc-issuer/*'
+              - 'packages/envoy/internal/broker/api/*'
+              # The approval page's own files, its embedded templates and stylesheet included.
+              - 'packages/envoy/internal/broker/approval/**'
+              - 'packages/envoy/internal/broker/brokertest/*'
+              - 'packages/envoy/internal/broker/brokertest/requestseed/*'
+              - 'packages/envoy/internal/broker/config/*'
               - 'packages/envoy/internal/broker/enroll/*'
               - 'packages/envoy/internal/broker/exchange/*'
               - 'packages/envoy/internal/broker/machine/*'
@@ -737,10 +743,20 @@ jobs:
               - 'packages/envoy/internal/broker/oauthwire/*'
               - 'packages/envoy/internal/broker/policy/**'
               - 'packages/envoy/internal/broker/proof/*'
+              - 'packages/envoy/internal/broker/ratelimit/*'
               - 'packages/envoy/internal/broker/record/*'
+              - 'packages/envoy/internal/broker/requests/*'
+              - 'packages/envoy/internal/broker/reread/*'
               - 'packages/envoy/internal/broker/secrets/*'
               - 'packages/envoy/internal/broker/store/**'
+              - 'packages/envoy/internal/broker/wake/*'
               - 'packages/envoy/internal/oidc/oidctest/*'
+            # The browser suite's two-process mode (dispatch-browser-multiprocess): what the
+            # dispatch filter names. The dev OIDC issuer its sign-in step signs the browser in at
+            # (e2e/run-signin-issuer.sh:34 builds it) compiles no package beyond the closure of the
+            # three commands e2e/run-broker.sh builds, which the dispatch filter above names.
+            dispatch_browser_multiprocess:
+              - *dispatch
             envoy_go:
               - '.github/workflows/ci.yaml'
               - *bun_install

@@ -67,14 +67,16 @@ The approver is the one the broker recorded when the agent asked: the secret's o
 shared secret, anyone signed in to the broker. Tell that person, not whoever you believe owns the
 secret: a request goes to whomever its owner tag named at the moment it was made.
 `agent-secrets request` and `agent-secrets status` print the same `waiting for …` line while the
-request waits. If that person's approval is refused `NOT_APPROVER`, something changed after the
-request was made ([Approvals](/legion/broker/concepts/#approvals) says what each change does).
+request waits. If that person's approval on the broker's page leaves the request `still pending; it
+was not decided`, something changed after the request was made
+([Approvals](/legion/broker/concepts/#approvals) says what each change does).
 Usually the secret's owner changed: run `agent-secrets cancel <request id>` and ask again, and the
 new request goes to the current owner. If instead the session's operator withheld one of the names,
 the request waits on anyone, and the broker still serves that name to the session, the operator can
 approve it, so ask them. Otherwise no one can approve it: cancel it and request the names
 separately, one request per approver, leaving out any name the broker no longer serves ([approving
-a request](/legion/broker/guides/approve-a-request/#decide-it) lists every `NOT_APPROVER` case).
+a request](/legion/broker/guides/approve-a-request/#decide-it) says what each line that page
+prints means).
 
 ## 2. The approver decides on the broker's page
 
