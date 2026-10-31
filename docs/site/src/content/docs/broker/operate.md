@@ -144,6 +144,70 @@ A service login a person approved through a device code before this broker keeps
 it expires, at most `BROKER_LAUNCHER_CREDENTIAL_SECONDS` (30 days by default) after its approval:
 nothing refreshes it.
 
+A Google Compute Engine VM logs in and enrolls itself with the identity token its metadata server
+signs for the VM's service account, so it holds no stored credential and no person approves it.
+Four settings turn this on, and the broker refuses to start with only some of them:
+
+- `BROKER_GOOGLE_OIDC_AUDIENCE`: the audience the VMs ask their metadata server for. The issuer is
+  always Google's, `https://accounts.google.com`, which the broker discovers at startup only when
+  this is set; it then logs one `google vm identity` line naming the issuer, the audience and the
+  VM services. Unset, the broker reads and logs nothing about Google, and refuses kind `vm` with
+  `400 INVALID_KIND`.
+- `BROKER_VM_SERVICES`: whitespace-separated `<service>=<service account email>` entries. Use a
+  dedicated user-managed account for each fleet: the broker refuses a project's default Compute
+  Engine or App Engine account, which every workload in the project runs as by default.
+- `BROKER_VM_PROJECTS`: `<service account email>=<project id>`, the one project the fleet's VMs run
+  in.
+- `BROKER_VM_INSTANCES`: `<service account email>=<instance-name glob>`, the names the fleet's VMs
+  have, in Go's `path.Match` syntax.
+
+One fleet's entry, `example-fleet`, whose VMs run as one account in `example-project` and are named
+`example-vm-...`:
+
+```sh
+BROKER_GOOGLE_OIDC_AUDIENCE=example-vm-audience
+BROKER_VM_SERVICES=example-fleet=example-fleet@example-project.iam.gserviceaccount.com
+BROKER_VM_PROJECTS=example-fleet@example-project.iam.gserviceaccount.com=example-project
+BROKER_VM_INSTANCES=example-fleet@example-project.iam.gserviceaccount.com=example-vm-*
+```
+
+A secret whose owner tag is `example-fleet` then goes to the fleet's VMs at once and to no one else.
+The broker refuses a VM's login (`POST /v1/launcher-credentials/token`) whose token is for another
+audience or does not verify, including one whose email is not verified or that has no
+`google.compute_engine` claims (`401 TOKEN_INVALID`); whose token has expired (`401
+TOKEN_EXPIRED`); and whose account is not listed, whose request names another service, whose
+project is another, or whose instance name the glob does not match (`403 ACCOUNT_NOT_LISTED`, each
+naming what did not match). Each VM holds a launcher credential and an enrollment of its own, keyed
+by `<account>@<project>/<zone>/<instance id>`, so one VM's login never moves another's credential,
+and ending one VM's enrollment leaves the others. A VM's credential expires with its token, an hour
+after the token was minted; its enrollment outlives it while it renews. Dispatch's machine-login
+page lists each VM's login, its host `<project>/<zone>/<instance name>` and no approver, and anyone
+signed in may revoke it, which ends that VM's enrollment; the VM logs in again at its next
+`enroll --vm`. To stop a fleet logging in, remove its entries and redeploy the broker: each VM's
+credential stops authenticating at its next call, and its next login is refused.
+
+Whoever can get an identity token for the fleet's account from a VM in that project with a matching
+name logs in as its service. Google Cloud IAM is that boundary: who may run a VM as the account
+(`iam.serviceAccounts.actAs` on it, with `compute.instances.create` in the project), and who may run
+code on a fleet VM, which can fetch the VM's token.
+
+A VM runs, with `AGENT_SECRETS_URL` naming the broker:
+
+```sh
+agent-secrets enroll --vm --service example-fleet --audience example-vm-audience --out /var/lib/agent-secrets
+AGENT_SECRETS_KEY_DIR=/var/lib/agent-secrets agent-secrets --reason "git fetch" GITHUB_TOKEN -- printenv GITHUB_TOKEN
+```
+
+`enroll --vm` reads the token from
+`http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=<audience>&format=full`
+(`format=full` is what gives the token the VM's project, zone and instance, which the broker
+requires), logs in, enrolls the VM, writes `key.pem` and `enrollment` under `--out`, and prints the
+enrollment id. The directory is the VM's one session identity: keep one per VM. Run again over the
+same directory, it keeps `key.pem`, gets the same live enrollment back and extends its lease, or
+enrolls anew once the old lease has lapsed. Keep the lease alive with `agent-secrets renew --vm`, or
+by running `enroll --vm` again within `BROKER_LEASE_SECONDS`. A new `key.pem` while the VM's
+enrollment is still live is refused `409 ALREADY_ENROLLED` until that lease lapses.
+
 ## Signing in to RDS by IAM token
 
 On Amazon RDS or Aurora the broker can sign in to its database with an
@@ -201,6 +265,7 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
 | A local stand-in (development only) | `BROKER_FAKE_SECRETS_FILE` names a JSON file the broker reads in place of the store, in Secrets Manager's shape whatever `BROKER_SECRETS_STORE` says, each secret's `kms_key_id` naming the agent-secrets key as the selected store configures it (`BROKER_SECRETS_KMS_KEY_ARN`, or `BROKER_SECRETS_KMS_KEY_NAME` with the GCP store); the [configuration reference](/legion/broker/reference/config/#variables-the-broker-reads) gives its format. |
 | Dispatch | Dispatch's server calls the broker's approval routes as its own ServiceAccount. Set Dispatch's `DISPATCH_AGENT_SECRETS_URL` to the broker's URL and `DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE` to the path of its projected token for `BROKER_K8S_OIDC_AUDIENCE`, and list that account in the broker's `BROKER_API_ACCOUNTS`. Without the URL, Dispatch hides its credential pages. |
 | Kubernetes (optional) | To enroll pods, and to let a service log in with its token (`BROKER_SERVICE_LOGINS`), `BROKER_K8S_OIDC_ISSUER` and `BROKER_K8S_OIDC_AUDIENCE` name the cluster's service-account token issuer and the audience the pods' and the services' projected tokens carry. The broker fetches the issuer's discovery document at startup and refuses to start if it cannot. |
+| Google Cloud (optional) | To let Compute Engine VMs log in and enroll themselves, `BROKER_GOOGLE_OIDC_AUDIENCE` names the audience of their identity tokens, and `BROKER_VM_SERVICES`, `BROKER_VM_PROJECTS` and `BROKER_VM_INSTANCES` bind each fleet. The broker fetches Google's discovery document at startup and refuses to start if it cannot. |
 | Envoy (optional) | With `BROKER_ENVOY_URL`, the broker tells a waiting agent session, best effort, when its pending request expires. |
 
 ## Network and trust

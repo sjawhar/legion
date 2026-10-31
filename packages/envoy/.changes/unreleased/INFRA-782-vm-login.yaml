@@ -1,0 +1,23 @@
+kind: Added
+body: |-
+    A Google Compute Engine VM logs in to the secrets broker and enrolls itself with the identity
+    token its metadata server signs, with no stored credential and no person approving it. With
+    `BROKER_GOOGLE_OIDC_AUDIENCE` set, the broker discovers Google's issuer at startup (one
+    `google vm identity` log line), and `POST /v1/launcher-credentials/token` also takes a VM's
+    token (`format=full`) whose account `BROKER_VM_SERVICES` binds, from the project
+    `BROKER_VM_PROJECTS` names and with an instance name `BROKER_VM_INSTANCES` matches; anything else
+    is `403 ACCOUNT_NOT_LISTED` naming what did not match, or `401 TOKEN_INVALID`. Each VM holds its
+    own launcher credential and its own `vm` enrollment, keyed by
+    `<account>@<project>/<zone>/<instance id>`, so VMs that share an account never move or end each
+    other's. `POST /v1/enrollments` takes kind `vm` with `vm_token` (`403 VM_IDENTITY_MISMATCH`,
+    `403 VM_TOKEN_EXPIRED`), every renewal of one carries the VM's current token (`403
+    VM_TOKEN_REQUIRED` without it), and a VM service's secrets go to its own VMs at once. On the
+    client, `agent-secrets enroll --vm --service <name> [--audience <aud>] [--out <dir>]` fetches the
+    token, logs in with a key it keeps in memory, enrolls `key.pem`, and prints the enrollment id;
+    run again over the same directory it keeps `key.pem` and extends the lease. `agent-secrets renew
+    --vm` renews with a fresh token each time and stops (exit 76) on `VM_TOKEN_REQUIRED`. With no
+    Google audience nothing changes: kind `vm` is still `400 INVALID_KIND`, and the Kubernetes and
+    GitHub paths are untouched.
+time: 2026-10-31T23:30:00Z
+custom:
+    Issue: INFRA-782
