@@ -82,7 +82,15 @@ func TestAForeignRunsMetaHoldsNoTokenOrPassword(t *testing.T) {
 	}
 	for _, c := range []struct {
 		args, want []string
-		secrets    []string // fragments of a case's own credentials, found in no output
+		// Fragments of a case's own credentials, found in no output. meta.json and the log
+		// also hold text this machine supplies: the temporary root's path, the CPU model, the
+		// kernel release, and the login name and the resolver's address in pgx's connect
+		// error. Only the root's path changes between runs, in one run of decimal digits -
+		// os.MkdirTemp writes a uint32, so at most ten of them, between the test's name and a
+		// "/" - so every fragment here holds a character that is not a digit, or more than
+		// ten digits. A shorter run of digits, "123", matched that path by chance and failed
+		// the test at random on any pull request.
+		secrets []string
 	}{
 		{
 			args: []string{"-allow-foreign", "-token", agent, "--listener-token=" + listener, "-name", "-token", "-pg", pg},
@@ -121,54 +129,56 @@ func TestAForeignRunsMetaHoldsNoTokenOrPassword(t *testing.T) {
 		},
 		{
 			// A -pg password or password parameter with a comma, which pgx reads whole: the
-			// value is one URL, not a list, and no fragment of the password is recorded.
-			args:    foreignPG("postgres://u:123,abc@h/db"),
+			// value is one URL, not a list, and no fragment of the password is recorded. The
+			// password starts with digits, which net/url reads as a port, so a redactor built
+			// on net/url parses this value and records the fragment instead of refusing it.
+			args:    foreignPG("postgres://u:58302917406,zx-9k@h/db"),
 			want:    recordedPG("postgres://h:5432/db"),
-			secrets: []string{"123", "abc"},
+			secrets: []string{"58302917406", "zx-9k"},
 		},
 		{
-			args:    foreignPG("postgres://h/db?password=Abc,def123"),
+			args:    foreignPG("postgres://h/db?password=Qx7-vv,wk3-tt"),
 			want:    recordedPG("postgres://h:5432/db"),
-			secrets: []string{"Abc", "def123"},
+			secrets: []string{"Qx7-vv", "wk3-tt"},
 		},
 		{
-			args:    foreignPG("postgres://u:a:1,b@h/db"),
+			args:    foreignPG("postgres://u:zq7-vk3:63019458277,mn5-jd@h/db"),
 			want:    recordedPG("postgres://h:5432/db"),
-			secrets: []string{"a:1", "1,b"},
+			secrets: []string{"zq7-vk3", "63019458277", "mn5-jd"},
 		},
 		{
 			// pgx ends the userinfo at the first @ before any /, so a # or ? in the password
 			// stays in it, where net/url would read a fragment or a query.
-			args:    foreignPG("postgres://u:#secret@h/db"),
+			args:    foreignPG("postgres://u:#hush-6rw3@h/db"),
 			want:    recordedPG("postgres://h:5432/db"),
-			secrets: []string{"secret"},
+			secrets: []string{"hush-6rw3"},
 		},
 		{
-			args:    foreignPG("postgres://postgres:?Hunter2@h:5432/dispatch"),
+			args:    foreignPG("postgres://postgres:?Hunter2-vq8z@h:5432/dispatch"),
 			want:    recordedPG("postgres://h:5432/dispatch"),
-			secrets: []string{"Hunter2"},
+			secrets: []string{"Hunter2-vq8z"},
 		},
 		{
-			args:    foreignPG("postgres://u:12#34ab@h/db"),
+			args:    foreignPG("postgres://u:74120596338#vr4-mq7@h/db"),
 			want:    recordedPG("postgres://h:5432/db"),
-			secrets: []string{"34ab", "12#"},
+			secrets: []string{"74120596338", "vr4-mq7"},
 		},
 		{
 			// pgx splits the query at & alone and reads no fragment, so ; and # stay in the
 			// password parameter; sslpassword is a secret too.
-			args:    foreignPG("postgres://h/db?sslmode=disable&password=a;b"),
+			args:    foreignPG("postgres://h/db?sslmode=disable&password=ws4-kd9;jt6-pb"),
 			want:    recordedPG("postgres://h:5432/db"),
-			secrets: []string{"a;b"},
+			secrets: []string{"ws4-kd9", "jt6-pb"},
 		},
 		{
-			args:    foreignPG("postgres://h/db?password=ab#cd"),
+			args:    foreignPG("postgres://h/db?password=rn2-hq5#tb8-xw"),
 			want:    recordedPG("postgres://h:5432/db"),
-			secrets: []string{"ab#cd", "cd"},
+			secrets: []string{"rn2-hq5", "tb8-xw"},
 		},
 		{
-			args:    foreignPG("postgres://h/db?sslpassword=keypass"),
+			args:    foreignPG("postgres://h/db?sslpassword=keypass-m4vq"),
 			want:    recordedPG("postgres://h:5432/db"),
-			secrets: []string{"keypass"},
+			secrets: []string{"keypass-m4vq"},
 		},
 	} {
 		fs := flag.NewFlagSet("run", flag.ContinueOnError)
