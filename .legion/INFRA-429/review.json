@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-429",
+  "completed": "2026-10-31T09:20:00Z",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 3,
+  "reviewedHead": "0ba13aaf2b12769585575e7280080db461d3a4f9 (code head b1a1bd73e3a08426774df481c67ae298df5dcfad); the review names the head of the reviewer's prose-fix push",
+  "thermonuclear": "deep-review: APPROVE at 0ba13aaf (two Minors); code-quality: CHANGES at 0ba13aaf (three items, adjudicated in keyFindings and the review body)",
+  "ci": "Code head CI (5f07dadd, runs 41185092062/41185092022) was still queued at review time; a request for changes does not wait on CI.",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy-client/src/__tests__/dispatch-cli.test.ts",
+      "description": "No test asserts the refusal this pull request changes: packages/envoy-client/src/dispatch-cli.ts:257 now prints 'dispatch: DISPATCH_HOST is \"opencode\", not omp or claude.' and :61 drops opencode from HOSTS, but the only unknown-host cases (the 'another host' row at :1490 and the case at :1578) send DISPATCH_HOST=vim and check only exit 2 and the 'dispatch: ' prefix. Re-adding opencode to HOSTS or changing the message passes every test. Required (the architect's direction too): one test that DISPATCH_HOST=opencode exits 2, prints exactly that line, and sends no request."
+    },
+    {
+      "severity": "minor",
+      "file": ".github/scripts/check-release-credentials.sh",
+      "description": "Fixed by the reviewer: line 8 said release.yaml's publish job publishes the packages of its four build jobs; after the deletion publish.needs is [pi_envoy_build, pi_legion_build, legion_build], so three."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/session/claim_test.go",
+      "description": "Fixed by the reviewer: the reworded comment stated that agent session state lives on shared disk, which no remaining client does (both register port 0, driving false); now 'a harness can keep session state on shared disk', which is what mergeForClaim guards against."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/infra/core/permissions_live_test.go",
+      "description": "Fixed by the reviewer: the reworded comment was circular ('reaches on its serving port, as a session that serves an HTTP port is reached'); now 'reaches by POSTing to its serving port rather than over NATS'."
+    }
+  ]
+}
