@@ -1,0 +1,66 @@
+build: listener and bridge this checkout (37cdf6dde plus the working copy); plugins this checkout (37cdf6dde plus the working copy); listener grant current
+disruption             kind   event             marker           pi   cc
+a session-restart      issue  comment-1         LDT35ac-001Z      1    1
+a session-restart      issue  comment-2         LDT35ac-002Z      1    1
+a session-restart      agent  dispatch-message  LDT35ac-003Z      1    -
+a session-restart      agent  dispatch-message  LDT35ac-004Z      -    1
+a session-restart      agent  listener-send     LDT35ac-005Z      1    -
+a session-restart      agent  listener-send     LDT35ac-006Z      -    1
+a session-restart      role   listener-publish  LDT35ac-007Z      1    -
+a session-restart      role   listener-publish  LDT35ac-008Z      -    1
+a session-restart      role   core-publish      LDT35ac-009Z      1    -
+a session-restart      role   core-publish      LDT35ac-010Z      -    1
+b nats-cut             issue  comment-1         LDT35ac-011Z      1    1
+b nats-cut             issue  comment-2         LDT35ac-012Z      1    1
+b nats-cut             agent  dispatch-message  LDT35ac-013Z      1    -
+b nats-cut             agent  dispatch-message  LDT35ac-014Z      -    1
+b nats-cut             agent  listener-send     LDT35ac-015Z      1    -
+b nats-cut             agent  listener-send     LDT35ac-016Z      -    1
+b nats-cut             role   listener-publish  LDT35ac-017Z      1    -
+b nats-cut             role   listener-publish  LDT35ac-018Z      -    1
+b nats-cut             role   core-publish      LDT35ac-019Z      1    -
+b nats-cut             role   core-publish      LDT35ac-020Z      -    1
+c listener-shared      issue  comment-1         LDT35ac-021Z      1    1
+c listener-shared      issue  comment-2         LDT35ac-022Z      1    1
+c listener-shared      agent  dispatch-message  LDT35ac-023Z      1    -
+c listener-shared      agent  dispatch-message  LDT35ac-024Z      -    1
+c listener-shared      agent  listener-send     LDT35ac-025Z      1    -
+c listener-shared      agent  listener-send     LDT35ac-026Z      -    1
+c listener-shared      role   listener-publish  LDT35ac-027Z      1    -
+c listener-shared      role   listener-publish  LDT35ac-028Z      -    1
+c listener-shared      role   core-publish      LDT35ac-029Z      1    -
+c listener-shared      role   core-publish      LDT35ac-030Z      -    1
+d listener-dispatch    issue  comment-1         LDT35ac-031Z      1    1
+d listener-dispatch    issue  comment-2         LDT35ac-032Z      1    1
+d listener-dispatch    agent  dispatch-message  LDT35ac-033Z    0/0    -
+d listener-dispatch    agent  dispatch-message  LDT35ac-034Z      -  0/0
+d listener-dispatch    agent  listener-send     LDT35ac-035Z      1    -
+d listener-dispatch    agent  listener-send     LDT35ac-036Z      -    1
+d listener-dispatch    role   listener-publish  LDT35ac-037Z      1    -
+d listener-dispatch    role   listener-publish  LDT35ac-038Z      -    1
+d listener-dispatch    role   core-publish      LDT35ac-039Z      1    -
+d listener-dispatch    role   core-publish      LDT35ac-040Z      -    1
+e dispatch-kill        issue  comment-1         LDT35ac-041Z      1    1
+e dispatch-kill        issue  comment-2         LDT35ac-042Z      1    1
+e dispatch-kill        agent  dispatch-message  LDT35ac-043Z      1    -
+e dispatch-kill        agent  dispatch-message  LDT35ac-044Z      -    1
+e dispatch-kill        agent  listener-send     LDT35ac-045Z      1    -
+e dispatch-kill        agent  listener-send     LDT35ac-046Z      -    1
+e dispatch-kill        role   listener-publish  LDT35ac-047Z      1    -
+e dispatch-kill        role   listener-publish  LDT35ac-048Z      -    1
+e dispatch-kill        role   core-publish      LDT35ac-049Z      1    -
+e dispatch-kill        role   core-publish      LDT35ac-050Z      -    1
+f none                 issue  comment-1         LDT35ac-051Z      1    1
+f none                 issue  comment-2         LDT35ac-052Z      1    1
+f none                 agent  dispatch-message  LDT35ac-053Z      1    -
+f none                 agent  dispatch-message  LDT35ac-054Z      -    1
+f none                 agent  listener-send     LDT35ac-055Z      1    -
+f none                 agent  listener-send     LDT35ac-056Z      -    1
+f none                 role   listener-publish  LDT35ac-057Z      1    -
+f none                 role   listener-publish  LDT35ac-058Z      -    1
+f none                 role   core-publish      LDT35ac-059Z      1    -
+f none                 role   core-publish      LDT35ac-060Z      -    1
+(a cell is the count of entries carrying the marker in that session's transcript; "!" marks a count other than expected; "/0" marks an event its publisher refused, expected 0 times; "-" an event not meant for that session)
+note: Dispatch published LIVE-1's comments in another order than they were written: written LDT35ac-001Z LDT35ac-002Z LDT35ac-011Z LDT35ac-012Z LDT35ac-021Z LDT35ac-022Z LDT35ac-031Z LDT35ac-032Z LDT35ac-041Z LDT35ac-042Z LDT35ac-051Z LDT35ac-052Z ; stored LDT35ac-001Z LDT35ac-002Z LDT35ac-011Z LDT35ac-012Z LDT35ac-021Z LDT35ac-022Z LDT35ac-031Z LDT35ac-032Z LDT35ac-042Z LDT35ac-041Z LDT35ac-051Z LDT35ac-052Z
+issue order: every comment of LIVE-1 appears in its stream order in both transcripts
+transcripts: pi /legion/scratch/tmp/infra594/live/default/sessions/pi/sessions/2026-10-29T14-44-02-286Z_01a1881e-306e-7200-a028-4a72bb11eb45.jsonl; cc /legion/scratch/tmp/infra594/live/default/sessions/cc/config/projects/-legion-scratch-tmp-infra594-live-default-sessions-cc-cwd/cc5b674d-6663-4dde-9fbb-5e5785d60b0f.jsonl

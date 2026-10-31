@@ -1,0 +1,678 @@
+{
+  "config": {
+    "step": "step-10x",
+    "events_per_s": 40,
+    "sessions": 1000,
+    "requests_per_s": 600,
+    "sse": 20,
+    "event_mix": {
+      "name": "production-2026-10-26",
+      "weights": {
+        "anchored": 33,
+        "comment": 3,
+        "edit": 22,
+        "reply": 35,
+        "upload": 7
+      }
+    },
+    "route_mix": "routes-2026-10-26-1719Z.txt (embedded)",
+    "human": 0.1,
+    "warmup_s": 30,
+    "duration_s": 600,
+    "grace_s": 20,
+    "rng_seed": 1,
+    "nats_conns": 50,
+    "marker_nonce": "368367484"
+  },
+  "events": {
+    "offered": 23933,
+    "offered_per_s": 39.888333333333335,
+    "committed": 309,
+    "committed_per_s": 0.515,
+    "by_kind": {
+      "anchored": {
+        "primary_type": "comment.created",
+        "offered": 7846,
+        "committed": 0,
+        "write_ms": {
+          "n": 0,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "delivery_ms_from_arrival": {
+          "n": 0,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "delivery_ms_from_commit": {
+          "n": 0,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0,
+          "max": 0
+        }
+      },
+      "comment": {
+        "primary_type": "comment.created",
+        "offered": 707,
+        "committed": 0,
+        "write_ms": {
+          "n": 0,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "delivery_ms_from_arrival": {
+          "n": 0,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "delivery_ms_from_commit": {
+          "n": 0,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0,
+          "max": 0
+        }
+      },
+      "edit": {
+        "primary_type": "artifact.version",
+        "offered": 5239,
+        "committed": 220,
+        "write_ms": {
+          "n": 205,
+          "p50": 25433.424414,
+          "p90": 28993.410219,
+          "p99": 29860.128156,
+          "max": 29981.812524
+        },
+        "delivery_ms_from_arrival": {
+          "n": 1100,
+          "p50": 25595.732337,
+          "p90": 29323.791142,
+          "p99": 31734.253164,
+          "max": 32570.550971
+        },
+        "delivery_ms_from_commit": {
+          "n": 1100,
+          "p50": 79.205721,
+          "p90": 304.380243,
+          "p99": 3999.485738,
+          "max": 4468.350898
+        }
+      },
+      "reply": {
+        "primary_type": "comment.created",
+        "offered": 8512,
+        "committed": 0,
+        "write_ms": {
+          "n": 0,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "delivery_ms_from_arrival": {
+          "n": 0,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0,
+          "max": 0
+        },
+        "delivery_ms_from_commit": {
+          "n": 0,
+          "p50": 0,
+          "p90": 0,
+          "p99": 0,
+          "max": 0
+        }
+      },
+      "upload": {
+        "primary_type": "artifact.version",
+        "offered": 1629,
+        "committed": 89,
+        "write_ms": {
+          "n": 89,
+          "p50": 13362.771214,
+          "p90": 19163.090936,
+          "p99": 22496.659973,
+          "max": 24787.407643
+        },
+        "delivery_ms_from_arrival": {
+          "n": 445,
+          "p50": 13313.251856,
+          "p90": 19120.54681,
+          "p99": 22735.71173,
+          "max": 24773.175774
+        },
+        "delivery_ms_from_commit": {
+          "n": 445,
+          "p50": 100.574117,
+          "p90": 341.639489,
+          "p99": 621.667132,
+          "max": 627.461455
+        }
+      }
+    },
+    "delivery_ms_from_sent": {
+      "n": 1545,
+      "p50": 20801.058791,
+      "p90": 29005.828928,
+      "p99": 31323.391083,
+      "max": 32573.329211
+    },
+    "delivery_ms_from_arrival": {
+      "n": 1545,
+      "p50": 20801.007141,
+      "p90": 29005.734908,
+      "p99": 31261.315798,
+      "max": 32570.550971
+    },
+    "delivery_ms_from_commit": {
+      "n": 1545,
+      "p50": 90.840221,
+      "p90": 309.640115,
+      "p99": 3296.435411,
+      "max": 4468.350898
+    },
+    "issue_topic_receipts": 1545,
+    "expected_issue_topic_receipts": 1545,
+    "missing": 0,
+    "agent_topic_receipts": 17,
+    "other_events": 0,
+    "other_receipts": 0,
+    "commit_times_missing": 0,
+    "clock_anomalies": 0,
+    "write_errors": {
+      "non_2xx": 0,
+      "transport": 23639
+    },
+    "conn_wait_ms": {
+      "n": 23933,
+      "p50": 44.041667,
+      "p90": 443.896792,
+      "p99": 1243.688175,
+      "max": 2822.454891
+    }
+  },
+  "requests": {
+    "target_per_s": 600,
+    "sent": 358714,
+    "sent_per_s": 597.8566666666667,
+    "below_target": false,
+    "ok_2xx": 44,
+    "dropped_inflight_cap": 0,
+    "latency_ms": {
+      "n": 358714,
+      "p50": 29960.657673,
+      "p90": 30006.738098,
+      "p99": 30291.644123,
+      "max": 31521.05452
+    },
+    "conn_wait_ms": {
+      "n": 358714,
+      "p50": 50.246425,
+      "p90": 484.255294,
+      "p99": 1275.597136,
+      "max": 2914.06417
+    },
+    "routes": {
+      "browser GET /api/v1/inbox": {
+        "count": 14494,
+        "failures": 14494,
+        "latency_ms": {
+          "n": 14494,
+          "p50": 29960.764654,
+          "p90": 30006.712746,
+          "p99": 30327.207259,
+          "max": 31490.874619
+        },
+        "status": {
+          "0": 14494
+        },
+        "transport_errors": 14494
+      },
+      "browser GET /api/v1/issues/{key}": {
+        "count": 79066,
+        "failures": 79066,
+        "latency_ms": {
+          "n": 79066,
+          "p50": 29961.118824,
+          "p90": 30006.904885,
+          "p99": 30296.092612,
+          "max": 31519.40495
+        },
+        "status": {
+          "0": 79066
+        },
+        "transport_errors": 79066
+      },
+      "browser GET /api/v1/issues/{key}/events?after=0\u0026limit=200": {
+        "count": 7119,
+        "failures": 7119,
+        "latency_ms": {
+          "n": 7119,
+          "p50": 29961.309569,
+          "p90": 30007.121267,
+          "p99": 30267.699645,
+          "max": 31350.255555
+        },
+        "status": {
+          "0": 7119
+        },
+        "transport_errors": 7119
+      },
+      "browser GET /api/v1/issues?project={project}": {
+        "count": 21385,
+        "failures": 21385,
+        "latency_ms": {
+          "n": 21385,
+          "p50": 29959.743679,
+          "p90": 30007.790774,
+          "p99": 30267.891395,
+          "max": 31455.663595
+        },
+        "status": {
+          "0": 21385
+        },
+        "transport_errors": 21385
+      },
+      "browser GET /api/v1/me/replies": {
+        "count": 10755,
+        "failures": 10755,
+        "latency_ms": {
+          "n": 10755,
+          "p50": 29962.254956,
+          "p90": 30007.26124,
+          "p99": 30259.625705,
+          "max": 31481.129243
+        },
+        "status": {
+          "0": 10755
+        },
+        "transport_errors": 10755
+      },
+      "browser GET /api/v1/me/state": {
+        "count": 7133,
+        "failures": 7133,
+        "latency_ms": {
+          "n": 7133,
+          "p50": 29959.764944,
+          "p90": 30005.734595,
+          "p99": 30308.876536,
+          "max": 31381.905042
+        },
+        "status": {
+          "0": 7133
+        },
+        "transport_errors": 7133
+      },
+      "cli GET /api/v1/agents": {
+        "count": 3535,
+        "failures": 3535,
+        "latency_ms": {
+          "n": 3535,
+          "p50": 29960.379154,
+          "p90": 30007.476455,
+          "p99": 30389.989696,
+          "max": 31393.935396
+        },
+        "status": {
+          "0": 3534,
+          "503": 1
+        },
+        "transport_errors": 3534
+      },
+      "cli GET /api/v1/issues/{key}": {
+        "count": 25106,
+        "failures": 25106,
+        "latency_ms": {
+          "n": 25106,
+          "p50": 29961.44454,
+          "p90": 30006.680652,
+          "p99": 30275.578146,
+          "max": 31493.318569
+        },
+        "status": {
+          "0": 25106
+        },
+        "transport_errors": 25106
+      },
+      "cli GET /api/v1/issues/{key}/events?after=0\u0026limit=200": {
+        "count": 25019,
+        "failures": 24999,
+        "latency_ms": {
+          "n": 25019,
+          "p50": 29961.219173,
+          "p90": 30006.404293,
+          "p99": 30249.800382,
+          "max": 31512.34981
+        },
+        "status": {
+          "0": 24999,
+          "200": 20
+        },
+        "transport_errors": 24999
+      },
+      "cli GET /api/v1/issues/{key}/references": {
+        "count": 25085,
+        "failures": 25085,
+        "latency_ms": {
+          "n": 25085,
+          "p50": 29960.867976,
+          "p90": 30006.218455,
+          "p99": 30287.118578,
+          "max": 31501.787662
+        },
+        "status": {
+          "0": 25085
+        },
+        "transport_errors": 25085
+      },
+      "cli GET /api/v1/references?from={key_ref}": {
+        "count": 21461,
+        "failures": 21461,
+        "latency_ms": {
+          "n": 21461,
+          "p50": 29960.10931,
+          "p90": 30006.939099,
+          "p99": 30278.908544,
+          "max": 31455.240046
+        },
+        "status": {
+          "0": 21461
+        },
+        "transport_errors": 21461
+      },
+      "cli GET /api/v1/references?to={key_ref}": {
+        "count": 21538,
+        "failures": 21538,
+        "latency_ms": {
+          "n": 21538,
+          "p50": 29960.506267,
+          "p90": 30006.563604,
+          "p99": 30308.510565,
+          "max": 31454.537545
+        },
+        "status": {
+          "0": 21538
+        },
+        "transport_errors": 21538
+      },
+      "other GET /api/v1/asks/open?project={project}": {
+        "count": 10790,
+        "failures": 10782,
+        "latency_ms": {
+          "n": 10790,
+          "p50": 29961.308392,
+          "p90": 30006.718256,
+          "p99": 30292.616619,
+          "max": 31449.248696
+        },
+        "status": {
+          "0": 10782,
+          "200": 8
+        },
+        "transport_errors": 10782
+      },
+      "other GET /api/v1/projects": {
+        "count": 10833,
+        "failures": 10828,
+        "latency_ms": {
+          "n": 10833,
+          "p50": 29959.653947,
+          "p90": 30006.491157,
+          "p99": 30309.231347,
+          "max": 31492.990489
+        },
+        "status": {
+          "0": 10828,
+          "200": 5
+        },
+        "transport_errors": 10828
+      },
+      "other GET /api/v1/search?q=outbox+latency": {
+        "count": 14337,
+        "failures": 14337,
+        "latency_ms": {
+          "n": 14337,
+          "p50": 29961.06784,
+          "p90": 30006.881505,
+          "p99": 30306.344899,
+          "max": 31521.05452
+        },
+        "status": {
+          "0": 14337
+        },
+        "transport_errors": 14337
+      },
+      "pod GET /api/v1/artifacts/{artifact_id}/text": {
+        "count": 35892,
+        "failures": 35892,
+        "latency_ms": {
+          "n": 35892,
+          "p50": 29960.056986,
+          "p90": 30006.563111,
+          "p99": 30275.648806,
+          "max": 31490.157169
+        },
+        "status": {
+          "0": 35892
+        },
+        "transport_errors": 35892
+      },
+      "pod GET /api/v1/issues/{key}/comments": {
+        "count": 10705,
+        "failures": 10705,
+        "latency_ms": {
+          "n": 10705,
+          "p50": 29958.702081,
+          "p90": 30006.304955,
+          "p99": 30258.801361,
+          "max": 31454.682166
+        },
+        "status": {
+          "0": 10705
+        },
+        "transport_errors": 10705
+      },
+      "pod GET /api/v1/issues/{key}/comments?artifact=spec": {
+        "count": 14461,
+        "failures": 14450,
+        "latency_ms": {
+          "n": 14461,
+          "p50": 29959.35718,
+          "p90": 30005.801636,
+          "p99": 30294.476637,
+          "max": 31454.727496
+        },
+        "status": {
+          "0": 14450,
+          "200": 11
+        },
+        "transport_errors": 14450
+      }
+    }
+  },
+  "resources": {
+    "window_s": 599.954993157,
+    "cpu_cores_mean": {
+      "dispatch": 0.2818211397996551,
+      "listener": 0.08920669151926627,
+      "loadgen": 0.5753598252155366,
+      "nats": 0.0366194135403266,
+      "postgres": 0.18253035852531482,
+      "proxy": 0.054387413009597506
+    },
+    "cpu_cores_peak_5s": {
+      "dispatch": 0.5967756738398484,
+      "listener": 0.19289718750378934,
+      "loadgen": 0.7870171406377534,
+      "nats": 0.060033308268419905,
+      "postgres": 0.3453291282737127,
+      "proxy": 0.09523547900233229
+    },
+    "rss_mib_max": {
+      "dispatch": 2173.1953125,
+      "listener": 97.5703125,
+      "loadgen": 1275.3203125,
+      "nats": 89.8828125,
+      "postgres": 6664.3203125,
+      "proxy": 101.85546875
+    },
+    "sys_busy_frac": 0.6182892477957231,
+    "goroutines": {
+      "n": 121,
+      "p50": 38847,
+      "p90": 39388,
+      "p99": 39588,
+      "max": 39680
+    },
+    "pool_acquire_goroutines": {
+      "n": 121,
+      "p50": 19278,
+      "p90": 19546,
+      "p99": 19651,
+      "max": 19668
+    },
+    "pg_conns_total": {
+      "n": 121,
+      "p50": 50,
+      "p90": 61,
+      "p99": 67,
+      "max": 79
+    },
+    "pg_conns_by_state": {
+      "active|": {
+        "n": 121,
+        "p50": 1,
+        "p90": 1,
+        "p99": 2,
+        "max": 2
+      },
+      "active|Lock": {
+        "n": 2,
+        "p50": 38,
+        "p90": 38,
+        "p99": 38,
+        "max": 57
+      },
+      "active|Timeout": {
+        "n": 1,
+        "p50": 1,
+        "p90": 1,
+        "p99": 1,
+        "max": 1
+      },
+      "idle in transaction (aborted)|Client": {
+        "n": 1,
+        "p50": 1,
+        "p90": 1,
+        "p99": 1,
+        "max": 1
+      },
+      "idle in transaction|Client": {
+        "n": 58,
+        "p50": 1,
+        "p90": 6,
+        "p99": 9,
+        "max": 9
+      },
+      "idle|": {
+        "n": 43,
+        "p50": 1,
+        "p90": 2,
+        "p99": 3,
+        "max": 4
+      },
+      "idle|Client": {
+        "n": 121,
+        "p50": 47,
+        "p90": 57,
+        "p99": 64,
+        "max": 65
+      },
+      "idle|LWLock": {
+        "n": 1,
+        "p50": 1,
+        "p90": 1,
+        "p99": 1,
+        "max": 1
+      }
+    },
+    "heap_inuse_mib": {
+      "n": 41,
+      "p50": 1194.109375,
+      "p90": 1440.6640625,
+      "p99": 1533.7109375,
+      "max": 1680.734375
+    },
+    "nats_out_msgs_per_s": 327.3662228669935,
+    "nats_in_msgs_per_s": 102.34101007628827,
+    "nats_slow_consumers": 0,
+    "dispatch_cpu_s_per_op": 0.0004709800872918812,
+    "xids_per_s": 0.281682703347932,
+    "pg_read_errors": 0,
+    "pprof_read_errors": 0
+  },
+  "commit_order_lock": {
+    "samples": 11392,
+    "errors": 0,
+    "held_fraction": 0,
+    "waiters": {
+      "n": 11392,
+      "p50": 0,
+      "p90": 0,
+      "p99": 0,
+      "max": 0
+    },
+    "hold_ms": {
+      "n": 0,
+      "p50": 0,
+      "p90": 0,
+      "p99": 0,
+      "max": 0
+    },
+    "holds_observed": 0,
+    "holder_doing": []
+  },
+  "ungranted_locks": {
+    "samples": 581,
+    "errors": 0,
+    "share_of_samples_with_any_ungranted": 0,
+    "groups": []
+  },
+  "sessions": {
+    "registered": 1000,
+    "register_errors": 0,
+    "heartbeat_errors": 0,
+    "nats_subscriptions": 6000,
+    "nats_connections": 50
+  },
+  "sse": {
+    "sse_frames": 0,
+    "sse_order_violations": 0,
+    "sse_frame_ms_from_created_at": {
+      "n": 0,
+      "p50": 0,
+      "p90": 0,
+      "p99": 0,
+      "max": 0
+    },
+    "sse_frame_ms_from_write_response": {
+      "n": 0,
+      "p50": 0,
+      "p90": 0,
+      "p99": 0,
+      "max": 0
+    }
+  },
+  "sse_bytes": 5116962
+}

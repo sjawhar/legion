@@ -1,0 +1,66 @@
+build: this checkout (f523bba0d plus the working copy)
+disruption             kind   event             marker           pi   cc
+a session-restart      issue  comment-1         LDTc4ed-001Z      1    1
+a session-restart      issue  comment-2         LDTc4ed-002Z      1    1
+a session-restart      agent  dispatch-message  LDTc4ed-003Z      1    -
+a session-restart      agent  dispatch-message  LDTc4ed-004Z      -    1
+a session-restart      agent  listener-send     LDTc4ed-005Z      1    -
+a session-restart      agent  listener-send     LDTc4ed-006Z      -    1
+a session-restart      role   listener-publish  LDTc4ed-007Z      1    -
+a session-restart      role   listener-publish  LDTc4ed-008Z      -    1
+a session-restart      role   core-publish      LDTc4ed-009Z      1    -
+a session-restart      role   core-publish      LDTc4ed-010Z      -    1
+b nats-cut             issue  comment-1         LDTc4ed-011Z      1    1
+b nats-cut             issue  comment-2         LDTc4ed-012Z      1    1
+b nats-cut             agent  dispatch-message  LDTc4ed-013Z      1    -
+b nats-cut             agent  dispatch-message  LDTc4ed-014Z      -    1
+b nats-cut             agent  listener-send     LDTc4ed-015Z      1    -
+b nats-cut             agent  listener-send     LDTc4ed-016Z      -    1
+b nats-cut             role   listener-publish  LDTc4ed-017Z      1    -
+b nats-cut             role   listener-publish  LDTc4ed-018Z      -    1
+b nats-cut             role   core-publish      LDTc4ed-019Z      1    -
+b nats-cut             role   core-publish      LDTc4ed-020Z      -    1
+c listener-shared      issue  comment-1         LDTc4ed-021Z      1    1
+c listener-shared      issue  comment-2         LDTc4ed-022Z      1    1
+c listener-shared      agent  dispatch-message  LDTc4ed-023Z      1    -
+c listener-shared      agent  dispatch-message  LDTc4ed-024Z      -    1
+c listener-shared      agent  listener-send     LDTc4ed-025Z      1    -
+c listener-shared      agent  listener-send     LDTc4ed-026Z      -    1
+c listener-shared      role   listener-publish  LDTc4ed-027Z      1    -
+c listener-shared      role   listener-publish  LDTc4ed-028Z      -    1
+c listener-shared      role   core-publish      LDTc4ed-029Z      1    -
+c listener-shared      role   core-publish      LDTc4ed-030Z      -    1
+d listener-dispatch    issue  comment-1         LDTc4ed-031Z      1    1
+d listener-dispatch    issue  comment-2         LDTc4ed-032Z      1    1
+d listener-dispatch    agent  dispatch-message  LDTc4ed-033Z    0/0    -
+d listener-dispatch    agent  dispatch-message  LDTc4ed-034Z      -  0/0
+d listener-dispatch    agent  listener-send     LDTc4ed-035Z      1    -
+d listener-dispatch    agent  listener-send     LDTc4ed-036Z      -    1
+d listener-dispatch    role   listener-publish  LDTc4ed-037Z      1    -
+d listener-dispatch    role   listener-publish  LDTc4ed-038Z      -    1
+d listener-dispatch    role   core-publish      LDTc4ed-039Z      1    -
+d listener-dispatch    role   core-publish      LDTc4ed-040Z      -    1
+e dispatch-kill        issue  comment-1         LDTc4ed-041Z      1    1
+e dispatch-kill        issue  comment-2         LDTc4ed-042Z      1    1
+e dispatch-kill        agent  dispatch-message  LDTc4ed-043Z      1    -
+e dispatch-kill        agent  dispatch-message  LDTc4ed-044Z      -    1
+e dispatch-kill        agent  listener-send     LDTc4ed-045Z      1    -
+e dispatch-kill        agent  listener-send     LDTc4ed-046Z      -    1
+e dispatch-kill        role   listener-publish  LDTc4ed-047Z      1    -
+e dispatch-kill        role   listener-publish  LDTc4ed-048Z      -    1
+e dispatch-kill        role   core-publish      LDTc4ed-049Z      1    -
+e dispatch-kill        role   core-publish      LDTc4ed-050Z      -    1
+f none                 issue  comment-1         LDTc4ed-051Z      1    1
+f none                 issue  comment-2         LDTc4ed-052Z      1    1
+f none                 agent  dispatch-message  LDTc4ed-053Z      1    -
+f none                 agent  dispatch-message  LDTc4ed-054Z      -    1
+f none                 agent  listener-send     LDTc4ed-055Z      1    -
+f none                 agent  listener-send     LDTc4ed-056Z      -    1
+f none                 role   listener-publish  LDTc4ed-057Z      1    -
+f none                 role   listener-publish  LDTc4ed-058Z      -    1
+f none                 role   core-publish      LDTc4ed-059Z      1    -
+f none                 role   core-publish      LDTc4ed-060Z      -    1
+(a cell is the count of entries carrying the marker in that session's transcript; "!" marks a count other than expected; "/0" marks an event its publisher refused, expected 0 times; "-" an event not meant for that session)
+note: Dispatch published LIVE-1's comments in another order than they were written: written LDTc4ed-001Z LDTc4ed-002Z LDTc4ed-011Z LDTc4ed-012Z LDTc4ed-021Z LDTc4ed-022Z LDTc4ed-031Z LDTc4ed-032Z LDTc4ed-041Z LDTc4ed-042Z LDTc4ed-051Z LDTc4ed-052Z ; stored LDTc4ed-001Z LDTc4ed-002Z LDTc4ed-011Z LDTc4ed-012Z LDTc4ed-021Z LDTc4ed-022Z LDTc4ed-031Z LDTc4ed-032Z LDTc4ed-042Z LDTc4ed-041Z LDTc4ed-051Z LDTc4ed-052Z
+issue order: every comment of LIVE-1 appears in its stream order in both transcripts
+transcripts: pi /legion/scratch/tmp/infra594/live/head-f523/sessions/pi/sessions/2026-10-28T15-44-52-142Z_01a1832f-85ae-74f3-b164-97dda19e163f.jsonl; cc /legion/scratch/tmp/infra594/live/head-f523/sessions/cc/config/projects/-legion-scratch-tmp-infra594-live-head-f523-sessions-cc-cwd/a62844ec-d140-415a-a1d4-db5e5a438a40.jsonl

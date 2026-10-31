@@ -1,0 +1,69 @@
+== table
+build: this checkout (a93f11815 plus the working copy)
+disruption             kind   event             marker           pi   cc
+a session-restart      issue  comment-1         LDTf159-001Z      1    1
+a session-restart      issue  comment-2         LDTf159-002Z      1    1
+a session-restart      agent  dispatch-message  LDTf159-003Z      1    -
+a session-restart      agent  dispatch-message  LDTf159-004Z      -    1
+a session-restart      agent  listener-send     LDTf159-005Z      1    -
+a session-restart      agent  listener-send     LDTf159-006Z      -    1
+a session-restart      role   listener-publish  LDTf159-007Z      1    -
+a session-restart      role   listener-publish  LDTf159-008Z      -    1
+a session-restart      role   core-publish      LDTf159-009Z      1    -
+a session-restart      role   core-publish      LDTf159-010Z      -    1
+b nats-cut             issue  comment-1         LDTf159-011Z      1    1
+b nats-cut             issue  comment-2         LDTf159-012Z      1    1
+b nats-cut             agent  dispatch-message  LDTf159-013Z      1    -
+b nats-cut             agent  dispatch-message  LDTf159-014Z      -    1
+b nats-cut             agent  listener-send     LDTf159-015Z      1    -
+b nats-cut             agent  listener-send     LDTf159-016Z      -    1
+b nats-cut             role   listener-publish  LDTf159-017Z      1    -
+b nats-cut             role   listener-publish  LDTf159-018Z      -    1
+b nats-cut             role   core-publish      LDTf159-019Z      1    -
+b nats-cut             role   core-publish      LDTf159-020Z      -    1
+c listener-shared      issue  comment-1         LDTf159-021Z      1    1
+c listener-shared      issue  comment-2         LDTf159-022Z      1    1
+c listener-shared      agent  dispatch-message  LDTf159-023Z      1    -
+c listener-shared      agent  dispatch-message  LDTf159-024Z      -    1
+c listener-shared      agent  listener-send     LDTf159-025Z      1    -
+c listener-shared      agent  listener-send     LDTf159-026Z      -    1
+c listener-shared      role   listener-publish  LDTf159-027Z      1    -
+c listener-shared      role   listener-publish  LDTf159-028Z      -    1
+c listener-shared      role   core-publish      LDTf159-029Z      1    -
+c listener-shared      role   core-publish      LDTf159-030Z      -    1
+d listener-dispatch    issue  comment-1         LDTf159-031Z      1    1
+d listener-dispatch    issue  comment-2         LDTf159-032Z      1    1
+d listener-dispatch    agent  dispatch-message  LDTf159-033Z    0/0    -
+d listener-dispatch    agent  dispatch-message  LDTf159-034Z      -  0/0
+d listener-dispatch    agent  listener-send     LDTf159-035Z      1    -
+d listener-dispatch    agent  listener-send     LDTf159-036Z      -    1
+d listener-dispatch    role   listener-publish  LDTf159-037Z      1    -
+d listener-dispatch    role   listener-publish  LDTf159-038Z      -    1
+d listener-dispatch    role   core-publish      LDTf159-039Z      1    -
+d listener-dispatch    role   core-publish      LDTf159-040Z      -    1
+e dispatch-kill        issue  comment-1         LDTf159-041Z      1    1
+e dispatch-kill        issue  comment-2         LDTf159-042Z      1    1
+e dispatch-kill        agent  dispatch-message  LDTf159-043Z      1    -
+e dispatch-kill        agent  dispatch-message  LDTf159-044Z      -    1
+e dispatch-kill        agent  listener-send     LDTf159-045Z      1    -
+e dispatch-kill        agent  listener-send     LDTf159-046Z      -    1
+e dispatch-kill        role   listener-publish  LDTf159-047Z      1    -
+e dispatch-kill        role   listener-publish  LDTf159-048Z      -    1
+e dispatch-kill        role   core-publish      LDTf159-049Z      1    -
+e dispatch-kill        role   core-publish      LDTf159-050Z      -    1
+f none                 issue  comment-1         LDTf159-051Z      1    1
+f none                 issue  comment-2         LDTf159-052Z      1    1
+f none                 agent  dispatch-message  LDTf159-053Z      1    -
+f none                 agent  dispatch-message  LDTf159-054Z      -    1
+f none                 agent  listener-send     LDTf159-055Z      1    -
+f none                 agent  listener-send     LDTf159-056Z      -    1
+f none                 role   listener-publish  LDTf159-057Z      1    -
+f none                 role   listener-publish  LDTf159-058Z      -    1
+f none                 role   core-publish      LDTf159-059Z      1    -
+f none                 role   core-publish      LDTf159-060Z      -    1
+(a cell is the count of entries carrying the marker in that session's transcript; "!" marks a count other than expected; "/0" marks an event its publisher refused, expected 0 times; "-" an event not meant for that session)
+note: Dispatch published LIVE-1's comments in another order than they were written: written LDTf159-001Z LDTf159-002Z LDTf159-011Z LDTf159-012Z LDTf159-021Z LDTf159-022Z LDTf159-031Z LDTf159-032Z LDTf159-041Z LDTf159-042Z LDTf159-051Z LDTf159-052Z ; stored LDTf159-001Z LDTf159-002Z LDTf159-011Z LDTf159-012Z LDTf159-021Z LDTf159-022Z LDTf159-031Z LDTf159-032Z LDTf159-042Z LDTf159-041Z LDTf159-051Z LDTf159-052Z
+issue order: every comment of LIVE-1 appears in its stream order in both transcripts
+transcripts: pi /legion/scratch/tmp/infra594/live/head/sessions/pi/sessions/2026-10-29T09-24-40-355Z_01a186f9-cd23-7419-9de9-0470cc8b4adf.jsonl; cc /legion/scratch/tmp/infra594/live/head/sessions/cc/config/projects/-legion-scratch-tmp-infra594-live-head-sessions-cc-cwd/ba237c95-df05-40f8-9572-1782d399a184.jsonl
+ENVOY SESSION DELIVERY: PASS (every event once, the issue in order)
+envoy-session-delivery: evidence kept in /legion/scratch/tmp/infra594/live/head

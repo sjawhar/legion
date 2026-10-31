@@ -1,0 +1,108 @@
+== build
+[13:06:06Z] listener, pi-envoy, claude-envoy and the bridge from this checkout (0e652fe4a plus the working copy); natsd and Dispatch from this checkout
+[13:06:25Z] pi-envoy 13.0.0; claude-envoy 1.0.0; Claude Code 2.1.311 (Claude Code); omp omp/18.12.2; bridge argv --replay-user-messages; the listeners serve on kept ports (ENVOY_LISTEN_FD)
+== services
+[13:06:27Z] listener shared (pid 60577) healthy at http://127.0.0.1:63436
+[13:06:28Z] listener dispatch (pid 60595) healthy at http://127.0.0.1:41584
+[13:06:29Z] Dispatch (pid 60637) serving http://127.0.0.1:40971, with NATS
+[13:06:30Z] Dispatch issues: LIVE-1 (followed, notifications.dispatch.issue.LIVE-1.>) and LIVE-2 (direct messages)
+== sessions
+[13:06:33Z] omp (pid 60687) session 01a187c4-e68c-7683-b34b-e85b6e23e4c5
+[13:06:33Z] legion claude-bridge (pid 60769) for Claude Code session d7a95e1b-3467-4753-a713-18b96bb466b6 (--session-id)
+[13:06:36Z] pi: entry {"session_id":"01a187c4-e68c-7683-b34b-e85b6e23e4c5","machine_id":"shared","host":"legion-infra-infra-594","dir":"/legion/scratch/tmp/infra594/live/head/sessions/pi/cwd","port":0,"title":"","capabilities":["aside","btw","steer"],"self_subscribed":true,"topics":["notifications.agent.01a187c4-e68c-7683-b34b-e85b6e23e4c5","notifications.dispatch.issue.LIVE-1","notifications.dispatch.issue.LIVE-1.>","notifications.role.live-delivery-pi-d9d4"],"roles":["live-delivery-pi-d9d4"],"updated_at":1793279196504,"last_seen":1793279196504,"plugin":"@sjawhar/pi-envoy","plugin_version":"13.0.0"}; interest ["notifications.agent.01a187c4-e68c-7683-b34b-e85b6e23e4c5","notifications.dispatch.issue.LIVE-1","notifications.dispatch.issue.LIVE-1.>","notifications.role.live-delivery-pi-d9d4"]; role {"capabilities":["aside","btw","steer"],"dir":"/legion/scratch/tmp/infra594/live/head/sessions/pi/cwd","holder":"01a187c4-e68c-7683-b34b-e85b6e23e4c5","host":"legion-infra-infra-594","last_seen":1793279196504,"machine_id":"shared","role":"live-delivery-pi-d9d4","title":""}
+[13:06:41Z] cc: entry {"session_id":"d7a95e1b-3467-4753-a713-18b96bb466b6","machine_id":"shared","host":"legion-infra-infra-594","dir":"/legion/scratch/tmp/infra594/live/head/sessions/cc/cwd","port":0,"title":"cwd d7a95e1b","capabilities":["aside","steer"],"self_subscribed":true,"topics":["notifications.agent.d7a95e1b-3467-4753-a713-18b96bb466b6","notifications.dispatch.issue.LIVE-1","notifications.dispatch.issue.LIVE-1.>","notifications.role.live-delivery-cc-d9d4"],"roles":["live-delivery-cc-d9d4"],"updated_at":1793279201521,"last_seen":1793279201521,"plugin":"@sjawhar/claude-envoy","plugin_version":"source"}; interest ["notifications.agent.d7a95e1b-3467-4753-a713-18b96bb466b6","notifications.dispatch.issue.LIVE-1","notifications.dispatch.issue.LIVE-1.>","notifications.role.live-delivery-cc-d9d4"]; role {"capabilities":["aside","steer"],"dir":"/legion/scratch/tmp/infra594/live/head/sessions/cc/cwd","holder":"d7a95e1b-3467-4753-a713-18b96bb466b6","host":"legion-infra-infra-594","last_seen":1793279201521,"machine_id":"shared","role":"live-delivery-cc-d9d4","title":"cwd d7a95e1b"}; transcript /legion/scratch/tmp/infra594/live/head/sessions/cc/config/projects/-legion-scratch-tmp-infra594-live-head-sessions-cc-cwd/d7a95e1b-3467-4753-a713-18b96bb466b6.jsonl
+== window a (session-restart)
+[13:06:42Z] both sessions SIGKILLed; their registrations stay until they lapse
+[13:06:48Z] omp (pid 61050) session 01a187c4-e68c-7683-b34b-e85b6e23e4c5, resumed from /legion/scratch/tmp/infra594/live/head/sessions/pi/sessions/2026-10-29T13-06-30-668Z_01a187c4-e68c-7683-b34b-e85b6e23e4c5.jsonl
+[13:06:48Z] legion claude-bridge (pid 61127) for Claude Code session d7a95e1b-3467-4753-a713-18b96bb466b6 (--resume)
+[13:07:03Z] window a: every event shown; holding 15s for a repeat
+== window b (nats-cut)
+[13:07:18Z] both proxies cut; natsd shows neither session's agent or relay subscription
+[13:07:22Z] both proxies back
+[13:07:31Z] window b: every event shown; holding 15s for a repeat
+== window c (listener-shared)
+[13:07:47Z] listener shared SIGKILLed
+[13:07:51Z] listener shared (pid 61545) healthy at http://127.0.0.1:63436
+[13:08:00Z] window c: every event shown; holding 15s for a repeat
+== window d (listener-dispatch)
+[13:08:15Z] listener dispatch SIGKILLed; the listener sends go to shared
+[13:08:31Z] listener dispatch (pid 61762) healthy at http://127.0.0.1:41584
+[13:08:31Z] window d: every event shown; holding 15s for a repeat
+== window e (dispatch-kill)
+[13:08:46Z] Dispatch's NATS connection cut, its writes made, and Dispatch SIGKILLed right after they returned
+[13:08:50Z] Dispatch (pid 61916) serving http://127.0.0.1:40971, with NATS
+[13:09:52Z] window e: every event shown; holding 15s for a repeat
+[13:10:07Z] Dispatch restarted at 2026-10-29T13:08:50.330Z; the stream stored window e's comments at:
+   LDTd9d4-042Z stream seq 66, stored 2026-10-29T13:08:50.639Z
+   LDTd9d4-041Z stream seq 71, stored 2026-10-29T13:09:50.656Z
+== window f (none)
+[13:10:17Z] window f: every event shown; holding 15s for a repeat
+== table
+build: this checkout (0e652fe4a plus the working copy)
+disruption             kind   event             marker           pi   cc
+a session-restart      issue  comment-1         LDTd9d4-001Z      1    1
+a session-restart      issue  comment-2         LDTd9d4-002Z      1    1
+a session-restart      agent  dispatch-message  LDTd9d4-003Z      1    -
+a session-restart      agent  dispatch-message  LDTd9d4-004Z      -    1
+a session-restart      agent  listener-send     LDTd9d4-005Z      1    -
+a session-restart      agent  listener-send     LDTd9d4-006Z      -    1
+a session-restart      role   listener-publish  LDTd9d4-007Z      1    -
+a session-restart      role   listener-publish  LDTd9d4-008Z      -    1
+a session-restart      role   core-publish      LDTd9d4-009Z      1    -
+a session-restart      role   core-publish      LDTd9d4-010Z      -    1
+b nats-cut             issue  comment-1         LDTd9d4-011Z      1    1
+b nats-cut             issue  comment-2         LDTd9d4-012Z      1    1
+b nats-cut             agent  dispatch-message  LDTd9d4-013Z      1    -
+b nats-cut             agent  dispatch-message  LDTd9d4-014Z      -    1
+b nats-cut             agent  listener-send     LDTd9d4-015Z      1    -
+b nats-cut             agent  listener-send     LDTd9d4-016Z      -    1
+b nats-cut             role   listener-publish  LDTd9d4-017Z      1    -
+b nats-cut             role   listener-publish  LDTd9d4-018Z      -    1
+b nats-cut             role   core-publish      LDTd9d4-019Z      1    -
+b nats-cut             role   core-publish      LDTd9d4-020Z      -    1
+c listener-shared      issue  comment-1         LDTd9d4-021Z      1    1
+c listener-shared      issue  comment-2         LDTd9d4-022Z      1    1
+c listener-shared      agent  dispatch-message  LDTd9d4-023Z      1    -
+c listener-shared      agent  dispatch-message  LDTd9d4-024Z      -    1
+c listener-shared      agent  listener-send     LDTd9d4-025Z      1    -
+c listener-shared      agent  listener-send     LDTd9d4-026Z      -    1
+c listener-shared      role   listener-publish  LDTd9d4-027Z      1    -
+c listener-shared      role   listener-publish  LDTd9d4-028Z      -    1
+c listener-shared      role   core-publish      LDTd9d4-029Z      1    -
+c listener-shared      role   core-publish      LDTd9d4-030Z      -    1
+d listener-dispatch    issue  comment-1         LDTd9d4-031Z      1    1
+d listener-dispatch    issue  comment-2         LDTd9d4-032Z      1    1
+d listener-dispatch    agent  dispatch-message  LDTd9d4-033Z    0/0    -
+d listener-dispatch    agent  dispatch-message  LDTd9d4-034Z      -  0/0
+d listener-dispatch    agent  listener-send     LDTd9d4-035Z      1    -
+d listener-dispatch    agent  listener-send     LDTd9d4-036Z      -    1
+d listener-dispatch    role   listener-publish  LDTd9d4-037Z      1    -
+d listener-dispatch    role   listener-publish  LDTd9d4-038Z      -    1
+d listener-dispatch    role   core-publish      LDTd9d4-039Z      1    -
+d listener-dispatch    role   core-publish      LDTd9d4-040Z      -    1
+e dispatch-kill        issue  comment-1         LDTd9d4-041Z      1    1
+e dispatch-kill        issue  comment-2         LDTd9d4-042Z      1    1
+e dispatch-kill        agent  dispatch-message  LDTd9d4-043Z      1    -
+e dispatch-kill        agent  dispatch-message  LDTd9d4-044Z      -    1
+e dispatch-kill        agent  listener-send     LDTd9d4-045Z      1    -
+e dispatch-kill        agent  listener-send     LDTd9d4-046Z      -    1
+e dispatch-kill        role   listener-publish  LDTd9d4-047Z      1    -
+e dispatch-kill        role   listener-publish  LDTd9d4-048Z      -    1
+e dispatch-kill        role   core-publish      LDTd9d4-049Z      1    -
+e dispatch-kill        role   core-publish      LDTd9d4-050Z      -    1
+f none                 issue  comment-1         LDTd9d4-051Z      1    1
+f none                 issue  comment-2         LDTd9d4-052Z      1    1
+f none                 agent  dispatch-message  LDTd9d4-053Z      1    -
+f none                 agent  dispatch-message  LDTd9d4-054Z      -    1
+f none                 agent  listener-send     LDTd9d4-055Z      1    -
+f none                 agent  listener-send     LDTd9d4-056Z      -    1
+f none                 role   listener-publish  LDTd9d4-057Z      1    -
+f none                 role   listener-publish  LDTd9d4-058Z      -    1
+f none                 role   core-publish      LDTd9d4-059Z      1    -
+f none                 role   core-publish      LDTd9d4-060Z      -    1
+(a cell is the count of entries carrying the marker in that session's transcript; "!" marks a count other than expected; "/0" marks an event its publisher refused, expected 0 times; "-" an event not meant for that session)
+note: Dispatch published LIVE-1's comments in another order than they were written: written LDTd9d4-001Z LDTd9d4-002Z LDTd9d4-011Z LDTd9d4-012Z LDTd9d4-021Z LDTd9d4-022Z LDTd9d4-031Z LDTd9d4-032Z LDTd9d4-041Z LDTd9d4-042Z LDTd9d4-051Z LDTd9d4-052Z ; stored LDTd9d4-001Z LDTd9d4-002Z LDTd9d4-011Z LDTd9d4-012Z LDTd9d4-021Z LDTd9d4-022Z LDTd9d4-031Z LDTd9d4-032Z LDTd9d4-042Z LDTd9d4-041Z LDTd9d4-051Z LDTd9d4-052Z
+issue order: every comment of LIVE-1 appears in its stream order in both transcripts
+transcripts: pi /legion/scratch/tmp/infra594/live/head/sessions/pi/sessions/2026-10-29T13-06-30-668Z_01a187c4-e68c-7683-b34b-e85b6e23e4c5.jsonl; cc /legion/scratch/tmp/infra594/live/head/sessions/cc/config/projects/-legion-scratch-tmp-infra594-live-head-sessions-cc-cwd/d7a95e1b-3467-4753-a713-18b96bb466b6.jsonl
+ENVOY SESSION DELIVERY: PASS (every event once, the issue in order)
+envoy-session-delivery: evidence kept in /legion/scratch/tmp/infra594/live/head

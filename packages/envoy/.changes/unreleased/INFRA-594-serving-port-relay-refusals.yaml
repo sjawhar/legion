@@ -1,0 +1,43 @@
+kind: Fixed
+body: |-
+  A serving-port session gets one push per upstream event, and loses none stored before its first
+  consumer. The relay of a session's consumer judges a message on a topic the session follows by
+  the durable path's own rules (one predicate both apply): a copy under a dedupe key the session
+  already took or is already being sent is acked unpushed, and the key is recorded once the port
+  answers 204, so one GitHub comment published on a pull request's mention topic and the
+  repository's reaches the port once rather than once per topic. Only a real push records what the
+  relay reads: a path that skips a session because its own consumer holds the message -- the
+  durable path's fan-out, and a serving-port worker whose session moved to consumer delivery --
+  records neither an attempt nor a dedupe key for it, so a message another interest on the topic
+  sends down the durable path still reaches the port rather than being acked as a copy the session
+  already has. The fan-out reads the session's entry for every judgement it makes, so that rule
+  covers its own refusals too: a message whose delivery mode cannot be read -- a mode no session
+  can be shown to advertise, which any publisher can send on a followed topic -- is left to the
+  relay of a serving-port session's consumer, which acks it with one `delivery_failed` exception,
+  rather than being reported twice and leaving that relay, and the session's later messages
+  behind it, stalled for five minutes on a record of a push nobody was making. A refusal is left
+  to a relay only where that relay judges what it sends: a portless session's relay publishes
+  every frame unjudged, and the plugin drops a frame whose delivery mode it cannot read without a
+  word, so the fan-out publishes that session's `delivery_failed` itself, recording no attempt
+  for it. The fan-out records an attempt only once its resolution of the recipient succeeds, so a
+  resolution that fails leaves nothing behind for a relay to hold a later copy of that message
+  under; each further copy of an event for a session whose record is gone is reported as a failed
+  delivery rather than skipped as an attempt already made. The other side of that rule: an
+  attempt record is a push in flight, not a delivery, so the relay holds a message another path
+  is pushing -- unacked in its consumer, kept in progress, judged again every second -- rather
+  than acking it, and acks it only once the
+  dedupe key that push's 204 records says the session has it. A push that ends without landing,
+  because the worker reads the session's flipped entry, hands the push back, or lets its attempt
+  record expire, leaves the message to the relay, which pushes it itself: delivery rests on the
+  consumer's ack state rather than on a process-local record that expires, and the race between
+  the two pushes costs at worst a duplicate the session drops by its dedupe key, never the
+  message. A session whose registration was answered `core` on a transient consumer call failure,
+  and whose next registration puts it back on its consumer while a push is in flight, still gets
+  that message, however that push ends. The durable path's delivery to an agent subject records
+  nothing for a message the session's consumer holds either, as its fan-out already recorded
+  nothing. A session consumer's start sequence is recorded on the session's entry, and the durable
+  path skips only the stored messages at or after it: a message stored below that start -- a push
+  NAKed back to the durable, or one deferred as unplaceable, before the session's first consumer
+  was created -- is in no consumer, so the durable still pushes it to the port instead of
+  acknowledging it as delivered, the stored copy of a role forward to a serving-port holder
+  included (INFRA-594).

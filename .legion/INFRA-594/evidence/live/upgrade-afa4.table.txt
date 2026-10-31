@@ -1,0 +1,15 @@
+build: listener and bridge this checkout (afa4eb55b plus the working copy); plugins this checkout (afa4eb55b plus the working copy); listener grant current
+disruption             kind   event             marker           pi   cc
+a session-restart      issue  comment-1         LDT676f-001Z      1    1
+a session-restart      issue  comment-2         LDT676f-002Z      1    1
+a session-restart      agent  dispatch-message  LDT676f-003Z      1    -
+a session-restart      agent  dispatch-message  LDT676f-004Z      -    1
+a session-restart      agent  listener-send     LDT676f-005Z      1    -
+a session-restart      agent  listener-send     LDT676f-006Z      -    1
+a session-restart      role   listener-publish  LDT676f-007Z      1    -
+a session-restart      role   listener-publish  LDT676f-008Z      -    1
+a session-restart      role   core-publish      LDT676f-009Z      1    -
+a session-restart      role   core-publish      LDT676f-010Z      -    1
+(a cell is the count of entries carrying the marker in that session's transcript; "!" marks a count other than expected; "/0" marks an event its publisher refused, expected 0 times; "-" an event not meant for that session)
+issue order: every comment of LIVE-1 appears in its stream order in both transcripts
+transcripts: pi /legion/scratch/tmp/infra594/live/upgrade-afa4/sessions/pi/sessions/2026-10-30T11-27-22-246Z_01a18c90-7e86-70bb-a875-73016fd91684.jsonl; cc /legion/scratch/tmp/infra594/live/upgrade-afa4/sessions/cc/config/projects/-legion-scratch-tmp-infra594-live-upgrade-afa4-sessions-cc-cwd/51590a06-bc97-4a66-bfbd-4682e3a16cab.jsonl

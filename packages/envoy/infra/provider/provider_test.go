@@ -132,6 +132,7 @@ func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
 	require.Contains(t, user.Properties, "nkey")
 	require.NotContains(t, user.Properties, "publicKey")
 	require.Contains(t, user.Properties, "dispatchMachineId")
+	require.Contains(t, user.Properties, "listenerMachineId")
 	require.Equal(t, "boolean", user.Properties["daemon"].Type)
 	for _, direction := range []string{"publish", "subscribe"} {
 		require.Equal(t, "#/types/envoy-infra:nats:Rules",
