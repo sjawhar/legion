@@ -545,9 +545,10 @@ type keptCounts struct {
 	// that tells what it holds.
 	handedInPublish     int
 	handedBeforeConfirm int
-	// supersededTimeouts is every catch-up whose receipt timeout drew no copy from the re-hold
-	// because the operation that ran inside its publish superseded it: the branch that leaves what
-	// the row claims to the row's own deletion (notice_exceptions.go's reholdNotice).
+	// supersededTimeouts is every catch-up whose receipt timeout drew no copy from the re-hold:
+	// the operation that ran inside its publish superseded it, or the copy was the last the
+	// re-hold queues. Either way what the row claims is handed to a fresh catch-up
+	// (notice_exceptions.go's reholdNotice, supersededKept and spentKept).
 	supersededTimeouts int
 	// refusedConfirmations is every send a turn of the agent's own confirmed while it was in
 	// flight and the agent then answered busy, so the machine took that confirmation back
@@ -593,7 +594,7 @@ func (c keptCounts) String() string {
 		"%d catch-ups finished for an architect that will not hold its role again (%d of them a failed claim); "+
 		"%d publishes held open for an interleaving, %d steps ran rows at once, %d members handed over (%d without their run), "+
 		"%d children orphaned by a person's todo, %d queued roots adopted, %d trees closed, "+
-		"%d restarts met a streaming agent, %d foreign turns, %d receipt timeouts the re-hold found superseded, "+
+		"%d restarts met a streaming agent, %d foreign turns, %d receipt timeouts the re-hold queued no copy for, "+
 		"%d hand-overs inside a catch-up's publish, %d hand-overs between a held task and its confirmation; "+
 		"%d sends refused busy after a turn of the agent's own confirmed them, %d replayed refusals took a confirmation back, "+
 		"%d processes died in a task's turn; "+
@@ -1880,14 +1881,14 @@ func (r *keptRun) raceRow() {
 	}
 	r.tracef("race-row id=%d what=%s answer=%s during=%s ran=%t [%s] outcome=%s", row.ID, keptRowWhat(payload),
 		race.mode, race.what, race.ran, race.outcome, keptRunOutcome(runErr, false))
-	// A receipt timeout the re-hold answered with no copy of its own is the superseded branch
-	// (notice_exceptions.go's reholdNotice): the operation that ran inside the publish moved the
-	// root or its architect past the catch-up, so nothing takes over the claims this row holds and
-	// its deletion releases them. A first publish is under the re-hold budget, so nothing else
-	// refuses it a copy.
+	// A receipt timeout the re-hold answered with no copy of its own is the superseded branch or
+	// the spent one (notice_exceptions.go's reholdNotice): the operation that ran inside the
+	// publish moved the root or its architect past the catch-up, or the row was the last copy the
+	// re-hold queues. Nothing takes over the claims this row holds, so they are handed to a fresh
+	// catch-up.
 	if r.publisher.answers()[keptReceiptTimeout] > answered[keptReceiptTimeout] && r.copiesOf(row.ID) == 0 {
 		r.counts.supersededTimeouts++
-		r.tracef("the re-hold of row %d queued no copy: the publish was superseded while it ran, so the row's own deletion releases what it claimed", row.ID)
+		r.tracef("the re-hold of row %d queued no copy: the publish was superseded while it ran or its re-holds are spent, so what it claimed is handed over", row.ID)
 	}
 }
 
