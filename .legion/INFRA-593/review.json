@@ -2,19 +2,27 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-593",
-  "completed": "2026-10-29T21:40:55Z",
-  "round": 6,
-  "headReviewed": "f8482b2f4ce20eab95ac87429474e8aaa5f57bb5",
-  "ciHead": "2dfde180b5995d963a349eb5e80df02afc5da43c",
+  "completed": "2026-10-31T02:22:28Z",
+  "round": 7,
+  "headReviewed": "20e033515eaaffa83c063403a28ed0db37eb9ffe",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
-  "minor": 0,
-  "deltaSinceApproval": "From my approval at edd72926: six docs/solutions lessons (retro, renamed to ...-pr2444.md) and .legion handoffs only; no code. The six lessons cite code, tests and earlier solutions that exist (pgmigrate.CensusTableLimit, the pr2396 and transaction-never-waits solutions, Quiesce's pause) and name no private infrastructure.",
-  "ci": "At 2dfde180 (run 40927706871, which tests refs/pull/2444/merge, this branch merged into the current main): required lint, typecheck, test and pr-title passed; every other lane passed but envoy-go-race. Its first step, go test -race -timeout 30m over internal/dispatch/docs and the other dispatch packages, hit 'panic: test timed out after 30m0s' in internal/dispatch/docs at 1801.0 s, and again at 1800.9 s on the one re-run of the failed job (job 123716984268). At 26953da8, merged into an older main, the same package passed in 1565 s; at 3e89ac6f, 1523 s. On main alone it passes in 1741.6 s and 1759.8 s (CI runs 40904196639, 40902000005).",
+  "minor": 6,
+  "roundShape": "round-shape.py v3, old 26953da81fab26d7c6488541eccf0208aaf22ee0 (last approved code) -> new 20e033515eaaffa83c063403a28ed0db37eb9ffe: 22 files whose own diff differs, runtime among them (cmd/dispatch/main.go, go.mod, go.sum, infra/gcp/dispatch.go, docs/compaction.go, fold.go, persistence.go, rebuild.go, service.go, tree.go, websocket.go, store/pool.go); 4 equal only after migration normalisation (AGENTS.md, cmd/dispatch/README.md, NNNN_doc_compaction_owed.census.sql and .up.sql). A full round.",
+  "ci": "At 20e03351 (run 41151700282), read 02:05 UTC: lint, typecheck, pr-title, docs, worker-image build passed; test, dispatch-memory, envoy-go-race-docs and broker-multiprocess in progress; dispatch, envoy-go, envoy-go-race and the rest queued. A request for changes does not wait for them. GitHub reports the pull request CONFLICTING with main at 02:06 UTC.",
+  "thermonuclear": "Both run once on the delta 26953da8..20e03351: deep review APPROVE (3 minors: two decode sites skip decodeStoredState, the ygo pin is on no branch, the PR body's 88 vs 91), code quality CHANGES (decodeStoredState is a text match covering 3 of the decode sites; duplicated pending-cap defaulting; drifted comments; two test helpers). Production decodes all take maxUpdateItems; store/pool.go counts the horizon and compaction pools (91) and Close closes both; PublishFailures kept.",
   "keyFindings": [
-    {"severity": "important", "file": ".github/workflows/ci.yaml", "description": "The merge of this PR into current main times out internal/dispatch/docs under envoy-go-race's -timeout 30m, twice in a row (1801.0 s, 1800.9 s). Main alone already uses 1742-1760 s of the 1800 s; this PR's added docs tests carry the merged package past it. Once merged, the lane goes red on main and on every branch. Make the merged package fit: shorten this PR's slowest docs tests (real waits, 30 s awaits, backdating loops), or give internal/dispatch/docs a race step of its own with a timeout and job timeout-minutes that fit it, keeping the 'timeout fires before the job is cancelled' rule the job comment states. Prove it with a green envoy-go-race at the new head."}
+    {"severity": "important", "file": "packages/envoy/internal/dispatch/docs/websocket.go", "description": "decodeStoredState collapses ygo's doubled 'crdt: invalid update: crdt: invalid update' only on the history check, the room's load hook and documentThrough. loadTree (mutation.go:919, every browser socket's admission) and coldFork (livewrite.go:546) decode the same stored state with crdt.ApplyUpdateV1 and still log and fail the room with the doubled text, the regression round 10 found for the settlement line. Fix it in the fork's wrapUpdateErr before the v1.54.1-sami.1 tag and delete the text match, or route every decode of stored state through decodeStoredState and test loadTree's line."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/persistence.go", "description": "PgVersioned defaults its pending cap by a zero check (pendingItems) while Service sets maxUpdateItems in New; RebuildTx checks the seed at pendingItems() but itemCapError judges against the constant."},
+    {"severity": "minor", "file": "packages/envoy/AGENTS.md", "description": "Lines 766-770 still say stateThrough's fold and read-back build their documents with newDocumentCopy; they use newCappedDocumentCopy at the store's cap."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/tree.go", "description": "newCappedDocumentCopy's comment omits documentThrough and the store's RebuildTx check."},
+    {"severity": "minor", "file": "packages/envoy/go.mod", "description": "The replace comment lists fork fixes Dispatch never calls (LoggedUpdate.Parked, ChangedTypes) and release history main never pinned."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/history_fold_test.go", "description": "unfoldableHistory(maxPending) is always called with testPendingItems."},
+    {"severity": "minor", "file": "packages/envoy/internal/dispatch/docs/refused_peer_update_test.go", "description": "liveMarkdown duplicates authors_test.go's currentLiveMarkdown."}
   ],
-  "notDefects": [],
-  "reportedOutside": "Main's own margin (1742-1760 s of 1800 s) was sent to the INFRA controller with the run ids at 19:50 UTC."
+  "reviewerProseEdits": "PR body only: the connection ceiling now reads 'from main's 89 to 91' (it said 88), and the rolling-update risk names migration 0150's comment (it said 0145). No commit.",
+  "notDefects": [
+    "The pin 845ce79c is on no branch of sjawhar/ygo (rc/v1.54.1-sami.1 was rewritten: head a23bc871, 31 ahead, 8 behind); builds are reproducible (go.sum h1 matches sum.golang.org). The architect holds the repin to the tag as its own round; its evidence must be run again there."
+  ]
 }
