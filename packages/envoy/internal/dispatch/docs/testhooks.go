@@ -190,12 +190,12 @@ const (
 // client of its own so none merges with its neighbour. An insert a browser made at that place
 // before the chain arrived - a paste at the end of that text, offline - names the same left origin
 // and no right origin, so its apply scans the chain to its end (Item.integrate, sjawhar/ygo
-// v1.51.3-sami.7, crdt/item.go:117-192): 40,000 items, past the 27,594 an update no rule weighs is
-// allowed (scanCeiling(0)), so the room refuses it whole and the browser is closed 4413
+// v1.54.1-sami.1, crdt/item.go:107-202): 40,000 items, past the 27,594 an update no rule weighs
+// is allowed (scanCeiling(0)), so the room refuses it whole and the browser is closed 4413
 // DOC_TOO_TANGLED (documentTooTangled). Decoding the chain costs the room about one scan an item,
-// 40,006 of its 1,000,000-item scan total measured on this pod (the browser row of
+// 40,001 of its 1,000,000-item scan total measured on this pod (the browser row of
 // packages/dispatch/e2e/document-refusals.e2e.ts, whose server logged a refusal at an allowance of
-// 27,528 leaving 932,466 of the total), so the room the next load makes has far more left than one
+// 27,528 leaving 932,471 of the total), so the room the next load makes has far more left than one
 // apply may scan and refuses that apply as too tangled rather than as needing a rebuild
 // (roomScans.reserve). A document tangles that far only where tens of thousands of items have been
 // made at one place since a browser's edit, which no browser test can type. The document reads the

@@ -102,8 +102,10 @@ func nearACap(doc *crdt.Doc) (why string, near bool) {
 //
 // A document near a cap is one people are typing into when they are refused, so its room is
 // usually resident, and a refusal of every resident room would leave no way to rebuild it. Its
-// room is closed instead, through evictRoom, which flushes what the room holds into the stored
-// history before it closes; the history this rebuild then reads holds every edit the room took.
+// room is closed instead, through evictBeforeRebuild, which flushes what the room holds into the
+// stored history before it closes; the history this rebuild then reads holds every edit the room
+// took. A room a Server.Apply is inside its callback on is left open and the rebuild refused, so
+// no commit of the server's own lands beside the history this replaces.
 // The browsers connected to it reconnect, and once the rebuild commits they load the rebuilt
 // document and are closed as holders of the replaced history (below), dropping their unsent
 // edits. A resident room of a document far from both caps is refused with ErrDocumentLive, as
@@ -157,9 +159,16 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 			return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s is live in this server; close its editors and retry two minutes later, or replace it from markdown instead", ErrDocumentLive, artifactID)
 		}
 		// The loads its browsers make as they reconnect are refused until this transaction
-		// ends (refuseIfRebuilding), so the room stays closed while the history is replaced.
-		if err := s.Evict(ctx, artifactID); err != nil {
+		// ends (refuseIfRebuilding), so the room stays closed while the history is replaced. A
+		// Server.Apply already inside its callback on the room is the one thing that close gives
+		// way to, since its commit would reach the store beside the history this rebuild
+		// replaces (evictBeforeRebuild); the rebuild is refused, and the caller retries.
+		closed, err := s.evictBeforeRebuild(artifactID)
+		if err != nil {
 			return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: close document %s before its rebuild: %v", ErrServiceUnavailable, artifactID, err)
+		}
+		if !closed {
+			return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s is being written in this server; retry", ErrServiceUnavailable, artifactID)
 		}
 	}
 	history, why, retired, err := s.rebuildSource(ctx, artifactID)

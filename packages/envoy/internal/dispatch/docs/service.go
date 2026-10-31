@@ -2642,7 +2642,31 @@ func (s *Service) evictRoom(room string, state *roomState) error {
 // room it leaves keeps its record as it found it: nothing was closed, so there is nothing to
 // settle.
 func (s *Service) evictUnusedRoom(room string, state *roomState) (bool, error) {
-	closed, err := s.srv.closeUnused(room)
+	closed, err := s.srv.closeUnused(room, nil)
+	if !closed {
+		return false, nil
+	}
+	return true, s.forgetEvicted(room, state, err)
+}
+
+// evictBeforeRebuild is Evict for the rebuild's close of the room whose history it is about to
+// replace (RebuildDocument), through the same guard the room budget's closes take
+// (roomServer.closeUnused): it answers false, having closed nothing, while a Server.Apply is
+// inside its callback on the room. Evict's own close waits for no Apply (roomServer.CloseRoom),
+// and a rebuild cannot afford that here. ygo's forced close takes the room out of the server's
+// map whatever is inside an Apply on it, and that apply's commit then reaches the store only
+// through the room's retiring persistence worker, while RebuildTx deletes every stored update
+// and writes the seed the rebuild read before it (persistence.go, RebuildTx): a commit landing
+// before that write is deleted unread, and one landing after it appends the replaced history's
+// structs on top of the seed, which is what the rebuilt history's retired clients refuse from a
+// browser (rebuilt seed, weighPeerUpdate). Nothing else keeps such an Apply out: the rebuild's
+// hold turns away a load or an injection that starts after it (refuseIfRebuilding, called from
+// allowInject, which ygo runs before it opens the room), never one already inside its callback.
+// Its state is invalidated under the hold, so a refused close leaves the room's armed settlement
+// as it found it.
+func (s *Service) evictBeforeRebuild(room string) (bool, error) {
+	var state *roomState
+	closed, err := s.srv.closeUnused(room, func() { state = s.invalidateForEviction(room) })
 	if !closed {
 		return false, nil
 	}

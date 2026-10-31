@@ -467,7 +467,7 @@ test("a merge the server cannot scan through is dropped with its reason, and the
     // real document is tangled that far only where as many items were made at one place while a
     // browser was away, which no browser test can type. Merging her paste scans the chain to its
     // end, past the items one apply of hers is allowed (27,528 of them for her 36-byte frame,
-    // scanCeiling), while the room keeps 932,466 of its 1,000,000-item scan total, which is what
+    // scanCeiling), while the room keeps 932,471 of its 1,000,000-item scan total, which is what
     // makes this refusal the too-tangled one and not a rebuild's.
     const tangled = await postAsPage(offline, `/api/v1/artifacts/${artifactId}/_test/tangled`);
     expect(tangled.status(), await tangled.text()).toBe(204);

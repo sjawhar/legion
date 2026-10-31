@@ -29,6 +29,75 @@ func boundRoomDocument(doc *crdt.Doc) *crdt.Doc {
 	return doc
 }
 
+// An apply's scans are counted whether or not the text it changes carries a mark: ygo commits a
+// second transaction after a remote apply into a text whose type carries formatting, its format
+// cleanup, which integrates nothing, and the count a room's load and the rebuild's reading take
+// (decodeCountingScans) is the apply's scans and not that cleanup's none. The same frame, one item
+// naming the first item of a run of 2,000 the room took a keystroke at a time, scans the run's
+// other 1,999 items in a document of plain prose and in one whose paragraph carries a mark.
+func TestAnApplysScansAreCountedThroughTheFormatCleanupAfterIt(t *testing.T) {
+	const run, runner, scanner = 2_000, crdt.ClientID(7), crdt.ClientID(8)
+	for _, row := range []struct {
+		name, markdown string
+		formats        int
+	}{
+		{"plain prose", "# Title\n\nOne paragraph of ordinary prose.\n", 0},
+		{"a paragraph carrying a mark", "# Title\n\nOne paragraph of **ordinary** prose.\n", 2},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			tree, err := pmdoc.Parse(row.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seed, err := encodeDocumentTree(tree)
+			if err != nil {
+				t.Fatal(err)
+			}
+			doc := newDocumentCopy()
+			if err := crdt.ApplyUpdateV1(doc, seed, nil); err != nil {
+				t.Fatal(err)
+			}
+			chainedRun(t, doc, lastCharacter(t, doc), runner, run)
+			// The row is only a guard while its document carries what makes ygo run the cleanup:
+			// the ContentFormat items a mark is stored as (crdt/item.go:340-344).
+			formats := formatStructs(t, crdt.EncodeStateAsUpdateV1(doc, nil))
+			if formats != row.formats {
+				t.Fatalf("the %s document carries %d format structs, want %d", row.name, formats, row.formats)
+			}
+			frame := newV1Frame(1).group(1, uint64(scanner), 0).
+				raw(byte(structString) | infoHasOrigin).uint(uint64(runner)).uint(0).str("z").noDeletes()
+			scans, err := decodeCountingScans(doc, frame)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scans != run-1 {
+				t.Fatalf("an apply at the head of a run of %d items in %s was counted as %d scans, want %d",
+					run, row.name, scans, run-1)
+			}
+		})
+	}
+}
+
+// formatStructs is how many of state's structs are the ContentFormat items a mark is stored as.
+func formatStructs(t *testing.T, state []byte) int {
+	t.Helper()
+	count := formatCounter(0)
+	if _, err := walkUpdate(state, fromRoom, &count); err != nil {
+		t.Fatal(err)
+	}
+	return int(count)
+}
+
+type formatCounter int
+
+func (c *formatCounter) walkedStruct(walked updateStruct) {
+	if walked.kind == structFormat {
+		*c++
+	}
+}
+
+func (c *formatCounter) walkedDelete(client, clock, length uint64) {}
+
 // scanMeasurement is the environment variable that runs this file's slow measurements.
 const scanMeasurement = "DISPATCH_MEASURE_SCAN_TOTAL"
 

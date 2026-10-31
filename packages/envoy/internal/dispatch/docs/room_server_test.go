@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
@@ -172,6 +173,44 @@ func TestTheBudgetSweepLeavesARoomAnApplyIsWriting(t *testing.T) {
 	var unrepresentable *ErrAskBlockUnrepresentable
 	if askErr := sendAskOptions(service, artifactID, AskBlockEdit{Urgency: new("high")}); !errors.As(askErr, &unrepresentable) {
 		t.Fatalf("ask edit of the broken body = %v, want ErrAskBlockUnrepresentable", askErr)
+	}
+}
+
+// The rebuild's close of the room whose history it replaces gives way to a Server.Apply inside
+// its callback on the room, and closes it once that Apply has returned (evictBeforeRebuild). A
+// forced close would take the room out of the server's map under that apply, whose commit then
+// reaches the store only through the room's retiring persistence worker: landing before
+// RebuildTx, it is deleted with the history the rebuild replaces; landing after it, it puts the
+// replaced history's structs on top of the rebuilt seed. A refused close leaves the room's record
+// as it found it, its armed settlement included, since the rebuild it refuses goes no further.
+func TestTheRebuildsCloseLeavesARoomAnApplyIsWriting(t *testing.T) {
+	service, _ := newTestService(t)
+	ctx := context.Background()
+	artifactID := createIssueDocument(t, service.store, 2, "# First")
+	seedServiceText(t, service, artifactID, "before\n")
+	settleCurrentGeneration(t, service, artifactID)
+
+	generation := roomGeneration(t, service, artifactID)
+	err := service.srv.Apply(ctx, artifactID, func(*crdt.Doc, func(func(*crdt.Transaction))) {
+		closed, closeErr := service.evictBeforeRebuild(artifactID)
+		if closed || closeErr != nil {
+			t.Errorf("the rebuild's close while an apply was inside its callback = %t, %v, want it refused", closed, closeErr)
+		}
+		if service.srv.GetDoc(artifactID) == nil {
+			t.Error("the rebuild's close closed the room while an apply was inside its callback on it")
+		}
+	})
+	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		t.Fatalf("apply on the room: %v", err)
+	}
+	if armed := roomGeneration(t, service, artifactID); armed != generation {
+		t.Fatalf("the refused close moved the room's generation from %d to %d, want the record left as it was", generation, armed)
+	}
+	if closed, err := service.evictBeforeRebuild(artifactID); !closed || err != nil {
+		t.Fatalf("the rebuild's close once the apply had returned = %t, %v, want it closed", closed, err)
+	}
+	if service.srv.GetDoc(artifactID) != nil {
+		t.Fatal("the rebuild's close left the room live")
 	}
 }
 

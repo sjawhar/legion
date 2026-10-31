@@ -71,9 +71,14 @@ func (r *roomServer) CloseRoom(room string, force bool) error {
 	return r.Server.CloseRoom(room, force)
 }
 
-// closeUnused is the room budget's close (sweepRooms, closeIfOpenedOverBudget): CloseRoom unless
-// an Apply is inside its callback on the room, when it closes nothing and answers false, for its
-// caller to leave the room pending as it leaves one a writer or a settlement holds (unusedLocked).
+// closeUnused is the room budget's close (sweepRooms, closeIfOpenedOverBudget) and the rebuild's
+// of the room whose history it replaces (Service.evictBeforeRebuild): CloseRoom unless an Apply
+// is inside its callback on the room, when it closes nothing and answers false, for its caller to
+// leave the room pending as it leaves one a writer or a settlement holds (unusedLocked), or to
+// refuse its rebuild. before, for a caller that has work to do only once the close is certain -
+// the rebuild's invalidation of what the room's state has armed - runs under the hold and before
+// the close; nil for a caller with none.
+//
 // ygo's Apply holds the room's in-flight count "to protect rm from a concurrent eviction while in
 // use" (sjawhar/ygo v1.51.3-sami.7, provider/websocket/inject.go:334-337) and its idle sweep
 // honours that count, but its CloseRoom does not: a forced close takes the room out of the
@@ -91,13 +96,16 @@ func (r *roomServer) CloseRoom(room string, force bool) error {
 // apply that has not taken the hold yet has not reached ygo's Apply either, so it loads the room
 // the close leaves rather than writing the one it took. The room is swept again once that apply
 // ends: roomServer.Apply hands it to applied, and Service.unlockState kicks the budget.
-func (r *roomServer) closeUnused(room string) (bool, error) {
+func (r *roomServer) closeUnused(room string, before func()) (bool, error) {
 	gate := r.acquireGate(room)
 	defer r.releaseGate(room, gate)
 	if !gate.applies.TryLock() {
 		return false, nil
 	}
 	defer gate.applies.Unlock()
+	if before != nil {
+		before()
+	}
 	gate.Lock()
 	defer gate.Unlock()
 	return true, r.Server.CloseRoom(room, true)

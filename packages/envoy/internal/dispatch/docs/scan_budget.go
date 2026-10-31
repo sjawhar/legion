@@ -168,7 +168,10 @@ func (r *roomScans) budget(origin any) int {
 }
 
 // observed is the room's OnAfterTransaction observer: what a committed transaction's scans passed
-// is a browser's apply's, kept for its settle, or the server's, added to the total at once.
+// is a browser's apply's, kept for its settle, or the server's, added to the total at once. The
+// format cleanup ygo commits after an apply into a text that carries formatting is a transaction
+// of its own, local and of no origin (crdt/ytext_format_cleanup.go:50-74): it reaches here as the
+// server's, scans nothing because it integrates nothing, and so leaves every figure as it was.
 func (r *roomScans) observed(txn *crdt.Transaction) {
 	scanned := txn.IntegrateScanned()
 	r.mu.Lock()
@@ -250,11 +253,11 @@ func (r *roomScans) figures() (used, left int64) {
 }
 
 // rescan decodes update as a room decodes its stored state - into a document with the server's
-// pending queue (newDocumentCopy), in one remote transaction - and returns how many items that
-// decode's conflict scans passed, ygo's count of them for the transaction
-// (Transaction.IntegrateScanned, crdt/transaction.go:95-108), with ygo's refusal of update if it
-// refused it. The room's own load decodes the same bytes into a document of its own the same way
-// (provider/websocket/server.go:1765-1773), so the count is what that load scanned.
+// pending queue (newDocumentCopy) - and returns how many items that decode's conflict scans
+// passed, ygo's count of them over every transaction the apply commits (decodeCountingScans),
+// with ygo's refusal of update if it refused it. The room's own load decodes the same bytes into
+// a document of its own the same way (provider/websocket/server.go:1765-1773), so the count is
+// what that load scanned.
 func rescan(update []byte) (uint64, error) {
 	return decodeCountingScans(newDocumentCopy(), update)
 }
@@ -270,7 +273,7 @@ type decodedState struct {
 // decodeStoredState is rescan keeping the copy it decoded: the one decode of the stored state a
 // room's load makes of its own, shared by the socket admission's schema check (loadTree), the
 // room's scan count (LoadDoc) and the room's replica, which takes the copy as its own
-// (keepReplica). The scans are counted in the transaction that decodes the copy, so they are the
+// (keepReplica). The scans are counted over the transactions that decode the copy, so they are the
 // copy's. A state that does not decode leaves no copy: what a refused decode left in its document
 // is no state the store holds.
 func decodeStoredState(update []byte) (decodedState, error) {
@@ -285,15 +288,24 @@ func decodeStoredState(update []byte) (decodedState, error) {
 	return decodedState{doc: doc, scans: scans}, nil
 }
 
-// decodeCountingScans applies update to doc, a fresh unbounded copy, in one remote transaction, and
-// returns what its scans passed. An observer of the transaction is all it adds to the decode: ygo
-// encodes no update for an observer of the transaction (crdt/update_log.go:153-156).
+// decodeCountingScans applies update to doc, a fresh unbounded copy, and returns what the conflict
+// scans of that apply passed: what every transaction the apply commits scanned, summed, and not
+// what the last of them scanned. An apply that changes a text whose type carries formatting
+// commits a second transaction after the remote one, ygo's format cleanup, which integrates
+// nothing and so scans nothing (Doc.afterRemoteObservers and Doc.formattingCleanupLocked,
+// sjawhar/ygo v1.54.1-sami.1, crdt/ytext_format_cleanup.go:50-74 and :83-119, run for a type a
+// ContentFormat item's integrate marked, crdt/item.go:340-344). Reading the last transaction's
+// count left the decode of a document whose text carries a mark at zero - the tangle the browser
+// row of packages/dispatch/e2e/document-refusals.e2e.ts builds re-scans 40,001 items and was read
+// as none - and with it the scan total a room's load starts from (roomScans.rescanned). An
+// observer of the transactions is all this adds to the decode: ygo encodes no update for an
+// observer of a transaction (crdt/update_log.go:153-156).
 func decodeCountingScans(doc *crdt.Doc, update []byte) (uint64, error) {
 	if len(update) == 0 {
 		return 0, nil
 	}
 	var scanned int
-	stop := doc.OnAfterTransaction(func(txn *crdt.Transaction) { scanned = txn.IntegrateScanned() })
+	stop := doc.OnAfterTransaction(func(txn *crdt.Transaction) { scanned += txn.IntegrateScanned() })
 	defer stop()
 	err := crdt.ApplyUpdateV1(doc, update, nil)
 	return uint64(scanned), err
