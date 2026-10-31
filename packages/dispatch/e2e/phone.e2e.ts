@@ -18,7 +18,7 @@ import {
 import { actionBar, barAction, documentEditor, needsYouCards, selectEditorText } from "./editor";
 import { expectConsecutiveLinksClear } from "./layout";
 import { insertExternalLink, resetDatabase } from "./seed";
-import { refusePosts, WRITE_REFUSED_TEXT } from "./sends";
+import { navigateInApp, refusePosts, WRITE_REFUSED_TEXT } from "./sends";
 import { asUser } from "./users";
 
 const session = {
@@ -60,6 +60,8 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): two focus traps of 32 presses each, every one read back from the page, on an
+// emulated phone - the cycle is the property, and both containers hold more than eight stops.
 test("the phone shell traps focus, dismisses on Escape at the right nesting level, never wraps a key, and renders a pinned event's own description @phone", async ({
   browser,
 }, testInfo) => {
@@ -103,7 +105,12 @@ test("the phone shell traps focus, dismisses on Escape at the right nesting leve
       session
     );
 
-    await page.goto(`/issues/${issue.key}`);
+    // On a phone the shell is already open at "/", so this is a route change, not a cold load.
+    if (isPhone) {
+      await navigateInApp(page, `/issues/${issue.key}`);
+    } else {
+      await page.goto(`/issues/${issue.key}`);
+    }
     await expect(page.getByRole("tab", { name: "Spec" })).toHaveAttribute("aria-selected", "true");
     if (isPhone) {
       const reviewToggle = page.getByRole("button", { name: "Open review panel (1 open ask)" });
@@ -401,7 +408,9 @@ test("an inline link keeps its line and grows its hit box without covering its n
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "the 390 px interaction applies on iPhone");
-  test.setTimeout(120_000);
+  // The settle proof below is bounded at 20 s and two trial clicks at 5 s each stand after it,
+  // all of them failure budget: a passing run spends none of it.
+  test.setTimeout(60_000);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Inline links" });
   const ask = await createAsk(
@@ -477,11 +486,11 @@ test("an inline link keeps its line and grows its hit box without covering its n
       };
     });
 
-    await page.goto(`/issues/${issue.key}/conversation`);
+    await navigateInApp(page, `/issues/${issue.key}/conversation`);
     await expect(page.getByRole("link", { name: "Lower line" }).first()).toBeVisible();
     // The jump to the newest turn, and the unread "New" marks clearing after it, both move the
     // turn after `toBeVisible()`: put the upper link in the middle of the viewport and hold
-    // there until its rect has not moved for 1.5 s, so the measurement is taken at a position
+    // there until its rect has not moved for 300 ms, so the measurement is taken at a position
     // this row chose.
     await page.evaluate(async () => {
       // The same link the measurement below takes: outside the ask cards, where a decision
@@ -493,7 +502,8 @@ test("an inline link keeps its line and grows its hit box without covering its n
         throw new Error("the conversation is missing its seeded upper link");
       }
       upper.scrollIntoView({ block: "center" });
-      // 30 samples 50 ms apart, the counter reset whenever the rect moves, bounded at 20 s.
+      // 6 samples 50 ms apart, the counter reset whenever the rect moves, bounded at 20 s. A
+      // scroll still running moves the rect every frame, so six still frames is the end of it.
       let stable = 0;
       let previous = upper.getBoundingClientRect().y;
       for (let sample = 0; sample < 400; sample += 1) {
@@ -503,7 +513,7 @@ test("an inline link keeps its line and grows its hit box without covering its n
         const y = upper.getBoundingClientRect().y;
         stable = y === previous ? stable + 1 : 0;
         previous = y;
-        if (stable >= 30) {
+        if (stable >= 6) {
           return;
         }
       }
@@ -616,7 +626,7 @@ test("an inline link keeps its line and grows its hit box without covering its n
       .poll(() => page.evaluate(() => document.documentElement.dataset.e2eTappedLink ?? "no-click"))
       .toBe("Upper line");
 
-    await page.goto("/");
+    await navigateInApp(page, "/");
     const card = page.getByTestId(`ask-${bodyAsk.id}`);
     await expect(card.getByRole("link", { name: "Second choice" })).toBeVisible();
 
@@ -741,10 +751,14 @@ async function expectStacked(control: Locator): Promise<void> {
   }
 }
 
+// SLOW(>=2s): eleven seeding writes and seven route renders of the same long name, in two
+// projects.
 test("a long name ends in an ellipsis wherever a link or control truncates it @phone", async ({
   browser,
 }, testInfo) => {
-  test.setTimeout(90_000);
+  // A passing run is seconds; the budget is for a failing one, where each `expect.soft` below
+  // burns the 15 s expect timeout before the next is tried.
+  test.setTimeout(60_000);
   const longName =
     "legion-go-coordinator-stage-4b-sandbox-tree-runbook-with-every-checkpoint-and-the-evidence-each-one-left-on-the-production-cluster.md";
   const longQuestion =
@@ -830,14 +844,14 @@ test("a long name ends in an ellipsis wherever a link or control truncates it @p
       .soft(row.getByRole("link", { name: longName }).locator("[title]"))
       .toHaveAttribute("title", longName);
 
-    await page.goto(`/issues/${issue.key}/artifacts`);
+    await navigateInApp(page, `/issues/${issue.key}/artifacts`);
     const artifactLink = page.getByRole("link", { exact: true, name: longName });
     await expectEllipsis(artifactLink);
     await expect.soft(artifactLink.locator("[title]")).toHaveAttribute("title", longName);
 
     // The long name belongs to a project document, whose ask nobody holds: the cleared filter
     // is where the Inbox lists it.
-    await page.goto("/?assignee=everyone");
+    await navigateInApp(page, "/?assignee=everyone");
     const inboxOwner = page.locator("[data-inbox-owner]", { hasText: longName });
     await expectEllipsis(inboxOwner);
     // The row already opens a RefPreview hover card (referenceTriggerProps); a native title
@@ -850,7 +864,7 @@ test("a long name ends in an ellipsis wherever a link or control truncates it @p
       .soft(authorChip.getByText(longTitle, { exact: true }))
       .toHaveAttribute("title", `${longTitle} · e2e-long-title`);
 
-    await page.goto(`/issues/${issue.key}`);
+    await navigateInApp(page, `/issues/${issue.key}`);
     await expectEllipsis(page.getByRole("link", { name: longUrl }));
     await expectEllipsis(
       page
@@ -861,7 +875,7 @@ test("a long name ends in an ellipsis wherever a link or control truncates it @p
     await expectEllipsis(page.locator(`button[title="${longRoute}"]`));
 
     // The @ picker's detail line: a role's detail names the live session that holds it.
-    await page.goto(`/issues/${issue.key}/conversation`);
+    await navigateInApp(page, `/issues/${issue.key}/conversation`);
     const composer = page.getByRole("form", { name: "Comment composer" });
     await composer.getByLabel("Comment").fill("@");
     const roleOption = composer
@@ -873,7 +887,7 @@ test("a long name ends in an ellipsis wherever a link or control truncates it @p
     await expect.soft(detail).toHaveAttribute("title", (await detail.textContent()) ?? "");
 
     // A label picker row.
-    await page.goto(`/issues/${labelled.key}`);
+    await navigateInApp(page, `/issues/${labelled.key}`);
     await page.getByRole("button", { name: "Edit labels" }).click();
     const labelOption = page.getByRole("option", { exact: true, name: longLabel });
     await expectEllipsis(labelOption);
@@ -884,7 +898,7 @@ test("a long name ends in an ellipsis wherever a link or control truncates it @p
     // A sent broadcast's row: the metadata line, then the message's first line under it, cut
     // by a one-line clamp. Its hover title is the message as plain words (the preview renders
     // the Markdown, so the source's syntax is never what the reader hovers over).
-    await page.goto("/agents/broadcasts");
+    await navigateInApp(page, "/agents/broadcasts");
     const broadcastRow = page
       .getByRole("region", { name: "Broadcasts" })
       .getByRole("listitem")

@@ -33,6 +33,7 @@ import {
 } from "./api";
 import { conversationFilter } from "./editor";
 import { resetDatabase } from "./seed";
+import { navigateInApp } from "./sends";
 import { asUser } from "./users";
 
 const agent = {
@@ -235,7 +236,7 @@ test("Conversation updates an open ask in place after an agent edit and preserve
     ).toHaveCount(1);
     await page.getByRole("tab", { name: "Conversation" }).click();
 
-    await page.goto("/");
+    await navigateInApp(page, "/");
     const inboxCard = page.getByTestId(`ask-${ask.id}`);
     await expect(page.locator("[data-testid^=ask-]")).toHaveCount(1);
     await expect(inboxCard).toContainText("Which transport should we implement?");
@@ -246,12 +247,16 @@ test("Conversation updates an open ask in place after an agent edit and preserve
   }
 });
 
+// SLOW(>=2s): 210 real writes bury the comment, and the server appends an issue's events one at a
+// time whether they are sent in bursts or in turn.
 test("a deep link to an old unanchored comment scrolls its Conversation turn into view @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Old comment target" });
   const comment = await createComment(issue.key, { body: "Deep linked comment" }, agent);
+  // Serial: the server appends one event at a time per issue, so bursts of these only queue up
+  // behind each other (measured: 210 writes cost the same either way).
   for (let index = 0; index < 210; index += 1) {
     await createMessage(issue.key, { body: `Newer message ${index}` }, agent);
   }
@@ -376,9 +381,12 @@ test("a reply in a session-authored comment thread pre-fills a deletable agent m
 test("an agent's answer on a failed attempt is accepted and shown as the answer", async ({
   browser,
 }) => {
-  await setLiveSessions([planner]);
-  await setSessionSendStatus("s1", 404);
-  await createProject({ key: "CORE", name: "Core" });
+  // None of the three reads another; only the issue waits on its project.
+  await Promise.all([
+    setLiveSessions([planner]),
+    setSessionSendStatus("s1", 404),
+    createProject({ key: "CORE", name: "Core" }),
+  ]);
   const issue = await createIssue({ project: "CORE", title: "Failed receipt" });
   const question = "Did you get this?";
   const message = await createMessage(issue.key, {
@@ -564,6 +572,7 @@ test("Conversation answers an ask in place, draws no event row, and keeps its ca
   }
 });
 
+// SLOW(>=2s): 34 seeded turns, real keystrokes through the composer and two live tail messages.
 test("Conversation marks unread conversations, sends with Ctrl+Enter, and jumps to newer ones @phone", async ({
   browser,
 }, testInfo) => {
@@ -651,7 +660,7 @@ test("Conversation marks unread conversations, sends with Ctrl+Enter, and jumps 
     await expect(jump).toHaveCount(0);
 
     const screenshot = testInfo.outputPath("conversation-follow-latest.png");
-    await page.screenshot({ path: screenshot, fullPage: true });
+    await page.screenshot({ path: screenshot });
     await testInfo.attach("conversation follow latest", {
       contentType: "image/png",
       path: screenshot,
@@ -683,20 +692,20 @@ test("the iPhone Conversation fits controls and keeps the composer above the rev
     const controls = page.locator(
       '[aria-label="Conversation"] button, [aria-label="Conversation"] textarea, [aria-label="Conversation"] input'
     );
-    for (let index = 0; index < (await controls.count()); index += 1) {
-      const control = controls.nth(index);
-      const opacity = await control.evaluate((element) =>
-        Number(getComputedStyle(element).opacity)
-      );
+    // One round trip for every control: its opacity and the box a finger taps. A control wrapped
+    // in its own label is tapped through the label, so that is the target to measure; demanding
+    // 44 px of the box itself drew a checkbox three times the size of every other control.
+    const measured = await controls.evaluateAll((elements) =>
+      elements.map((element, index) => ({
+        height: (element.closest("label") ?? element).getBoundingClientRect().height,
+        index,
+        opacity: Number(getComputedStyle(element).opacity),
+      }))
+    );
+    for (const { height, index, opacity } of measured) {
       if (opacity === 0) {
         continue;
       }
-      // What a finger taps: a control wrapped in its own label is tapped through the label, so
-      // that is the target to measure. Demanding 44 px of the box itself drew a checkbox three
-      // times the size of every other control.
-      const height = await control.evaluate(
-        (element) => (element.closest("label") ?? element).getBoundingClientRect().height
-      );
       expect(height, `Conversation control ${index} is a touch target`).toBeGreaterThanOrEqual(44);
     }
     const lastTurn = turn(page, "Phone turn 9");
@@ -712,9 +721,12 @@ test("the iPhone Conversation fits controls and keeps the composer above the rev
     const positions = [0, await page.evaluate(() => document.documentElement.scrollHeight)];
     for (const position of positions) {
       await page.evaluate((top) => window.scrollTo(0, top), position);
-      const composerBox = await composer.boundingBox();
-      const reviewBox = await reviewPanelButton.boundingBox();
-      const viewportHeight = await page.evaluate(() => window.innerHeight);
+      // Three measurements of one layout: they are read together rather than one after another.
+      const [composerBox, reviewBox, viewportHeight] = await Promise.all([
+        composer.boundingBox(),
+        reviewPanelButton.boundingBox(),
+        page.evaluate(() => window.innerHeight),
+      ]);
       expect(composerBox).not.toBeNull();
       expect(composerBox?.y ?? -1).toBeGreaterThanOrEqual(0);
       expect((composerBox?.y ?? 0) + (composerBox?.height ?? 0)).toBeLessThanOrEqual(
@@ -880,6 +892,8 @@ test("an ask answered after a later comment thread sorts above it", async ({ bro
 
 // The defect this tab exists to fix: a conversation older than any window of the event log was
 // unreachable without paging back through it. The three per-issue reads have no window at all.
+// SLOW(>=2s): 205 real writes push the ask past the Activity tab's 200-event page, and the server
+// appends an issue's events one at a time.
 test("a closed ask older than 200 events is listed under Closed with no paging", async ({
   browser,
 }) => {
@@ -891,6 +905,8 @@ test("a closed ask older than 200 events is listed under Closed with no paging",
     agent
   );
   await answerAsk(oldest.id, { expected_edited_at: null, selected: ["Ship"] }, { login: "bob" });
+  // Serial: the server appends one event at a time per issue, so bursts of these only queue up
+  // behind each other (measured: the burial costs the same either way).
   for (let index = 0; index < 205; index += 1) {
     await createMessage(issue.key, { body: `Burying message ${index}` }, agent);
   }

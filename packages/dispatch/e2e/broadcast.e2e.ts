@@ -1,6 +1,7 @@
 import { shortSessionId } from "@legion/contracts";
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
+import { AGENT_REGISTRY_POLL_MS } from "../web/src/features/refs/agent-registry";
 import {
   BROADCAST_REFUSED,
   broadcastSends,
@@ -20,6 +21,7 @@ import {
   replyToMessageDelivery,
 } from "./api";
 import { resetDatabase } from "./seed";
+import { navigateInApp } from "./sends";
 import { sessionIds } from "./session-ids";
 import { asUser } from "./users";
 
@@ -67,6 +69,8 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
+// SLOW(>=2s): the whole broadcast flow in a real browser - the fold, four ticks, the send, a live
+// answer and the list that follows it.
 test("a broadcast lists recipient cards in the non-alphabetical order the sender ticked them", async ({
   browser,
 }, testInfo) => {
@@ -82,7 +86,6 @@ test("a broadcast lists recipient cards in the non-alphabetical order the sender
     // is mostly aimed at exactly those, so the fold is the flow's first step.
     const quiet = agents.getByRole("button", { name: "No Dispatch activity (4)" });
     await expect(quiet).toBeVisible();
-    await page.screenshot({ path: testInfo.outputPath("agents-before.png"), fullPage: true });
     await quiet.click();
 
     for (const title of ["Tester", "Observer", "Planner", "Reviewer"]) {
@@ -151,7 +154,6 @@ test("a broadcast lists recipient cards in the non-alphabetical order the sender
     const list = page.getByRole("region", { name: "Broadcasts" });
     await expect(list.getByText("Stand down and report status.")).toBeVisible();
     await expect(list.getByText("1 of 3 answered")).toBeVisible();
-    await page.screenshot({ path: testInfo.outputPath("broadcast-list.png"), fullPage: true });
   } finally {
     await alice.close();
   }
@@ -161,6 +163,7 @@ test("a broadcast lists recipient cards in the non-alphabetical order the sender
 // recipient's copy on the Agents page, and the list's one-line preview. A numbered list is a
 // list, not one run-on line, on the desktop and on a phone; and the preview, which runs the list
 // onto one line, shows exactly one line of it.
+// SLOW(>=2s): one send to two recipients and three renders of the same body, on a phone too.
 test("a broadcast written as a numbered list renders as a list on the broadcast page, the Agents page and the broadcasts list @phone", async ({
   browser,
 }, testInfo) => {
@@ -214,7 +217,7 @@ test("a broadcast written as a numbered list renders as a list on the broadcast 
 
     // The recipient's copy on the Agents page renders the same way. A broadcast is the viewer's
     // own send, not a signal from the session, so both recipients still sit under the fold.
-    await page.goto("/agents");
+    await navigateInApp(page, "/agents");
     const agentsAgain = page.getByRole("region", { name: "Agents" });
     await agentsAgain.getByRole("button", { name: "No Dispatch activity (2)" }).click();
     const plannerRow = agentRow(page, "Planner");
@@ -233,7 +236,7 @@ test("a broadcast written as a numbered list renders as a list on the broadcast 
     // The list's one-line preview keeps the formatting and drops the syntax, and the browser
     // cuts it to its one line: the text overflows the box (so there is something to cut) and
     // the box is one line tall. A preview whose clamp a later rule overrides wraps instead.
-    await page.goto("/agents/broadcasts");
+    await navigateInApp(page, "/agents/broadcasts");
     const list = page.getByRole("region", { name: "Broadcasts" });
     const preview = list.locator("[data-markdown-preview]");
     await expect(preview).toContainText(`${intro} Stop the deploy`);
@@ -433,13 +436,13 @@ test("a session that leaves between a refused send and its restore is still in t
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "one browser proves the broadcast flow");
-  // The page learns of a departure on its 15 s agent poll, which this row waits out.
-  test.setTimeout(60_000);
+  // The page learns of a departure on its 15 s agent poll, which the page's own clock spends.
   await setLiveSessions([planner, observer]);
 
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
+    await page.clock.install();
     const posted = broadcastSends(page);
     const refusal = await refuseBroadcasts(page);
     await page.goto("/agents");
@@ -462,9 +465,9 @@ test("a session that leaves between a refused send and its restore is still in t
     // Genuinely ended, not merely dropped from the listener's list: the server resolves each
     // selected session by id now, so only a session the store holds no record of is excluded.
     await setSessionRecord(observer.session_id, "absent");
+    await page.clock.fastForward(AGENT_REGISTRY_POLL_MS);
     await expect(page.getByRole("checkbox", { name: "Select Observer for broadcast" })).toHaveCount(
-      0,
-      { timeout: 30_000 }
+      0
     );
     refusal.allow();
     await sends.getByRole("button", { name: "Restore draft" }).click();

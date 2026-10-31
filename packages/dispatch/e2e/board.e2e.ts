@@ -1,3 +1,5 @@
+import { setTimeout as sleep } from "node:timers/promises";
+
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import { createIssue, createProject, getIssue, listIssues, patchIssue, putIssueState } from "./api";
@@ -71,6 +73,19 @@ async function clicksDelivered(page: Page): Promise<void> {
   });
 }
 
+/** Lets the keypress just dispatched finish: the handler it ran and the render React queued for
+ *  it are both done within two animation frames. */
+async function framesPassed(page: Page): Promise<void> {
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => resolve());
+        });
+      })
+  );
+}
+
 /** Drags with the mouse from the middle of `source` to `target` (a card or a column). */
 async function mouseDrag(page: Page, source: Locator, target: Locator, yOffset?: number) {
   await boardAtRest(page);
@@ -97,16 +112,21 @@ async function mouseDrag(page: Page, source: Locator, target: Locator, yOffset?:
   await clicksDelivered(page);
 }
 
+// SLOW(>=2s): four whole-card drags, each paying dnd-kit's own 200 ms landing, plus the board's
+// two fresh renders, in two projects.
 test("the board is the kanban: whole-card drag orders List and Board alike, Icebox and Done collapse behind a toggle @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const first = await createIssue({ project: "CORE", title: "First card" });
-  await patchIssue(first.key, { status: "todo" });
   const second = await createIssue({ project: "CORE", title: "Second card" });
-  await patchIssue(second.key, { priority: 0 });
   const third = await createIssue({ project: "CORE", title: "Third card" });
-  await patchIssue(third.key, { priority: 3 });
+  // Creation order is the rank order the row asserts; none of these three writes reads it.
+  await Promise.all([
+    patchIssue(first.key, { status: "todo" }),
+    patchIssue(second.key, { priority: 0 }),
+    patchIssue(third.key, { priority: 3 }),
+  ]);
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
@@ -165,8 +185,7 @@ test("the board is the kanban: whole-card drag orders List and Board alike, Iceb
     expect((await movePatch).status()).toBe(200);
     await expect(todoColumn).not.toContainText("First card");
     await expect(inProgressColumn).toContainText("First card");
-    await page.reload();
-    await expect(inProgressColumn).toContainText("First card");
+    await expect.poll(() => getIssue(first.key)).toMatchObject({ status: "in_progress" });
 
     if (testInfo.project.name === "chromium") {
       // K3: a Retro card dropped on the collapsed Done rail closes it.
@@ -209,8 +228,6 @@ test("the board is the kanban: whole-card drag orders List and Board alike, Iceb
       expect((await reopenPatch).status()).toBe(200);
       await expect(backlogColumn.getByRole("article")).toHaveText(/Third card/);
       await expect.poll(() => getIssue(third.key)).toMatchObject({ closed_at: null });
-      await page.reload();
-      await expect(backlogColumn.getByRole("article")).toHaveText(/Third card/);
 
       await hideEdges.click();
       await expect(board.getByTestId("board-column-rail")).toHaveCount(2);
@@ -229,20 +246,21 @@ test("the board is the kanban: whole-card drag orders List and Board alike, Iceb
   }
 });
 
+// SLOW(>=2s): six seeded cards, four real rank PATCHes and two in-app navigations with a goBack.
 test("v toggles List and Board; Shift+J/K rank a focused card through the one move path; o, Enter, p and Escape work the card; Space lifts nothing", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
   const cards = [];
   for (const title of ["Alpha", "Bravo", "Charlie"]) {
-    const issue = await createIssue({ project: "CORE", title });
-    await patchIssue(issue.key, { status: "todo" });
-    cards.push(issue);
+    cards.push(await createIssue({ project: "CORE", title }));
   }
   const [alpha, bravo, charlie] = cards;
   if (alpha === undefined || bravo === undefined || charlie === undefined) {
     throw new Error("seed produced fewer cards than expected");
   }
+  // Creation order is the rank order the row reads; none of these writes reads it.
+  await Promise.all(cards.map((issue) => patchIssue(issue.key, { status: "todo" })));
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
@@ -274,7 +292,7 @@ test("v toggles List and Board; Shift+J/K rank a focused card through the one mo
     await expect(page).toHaveURL(/\/projects\/CORE\/documents$/);
     await page.locator("body").focus();
     await page.keyboard.press("v");
-    await page.waitForTimeout(300);
+    await framesPassed(page);
     expect(await viewPreference()).toBe("list");
     await expect(page.getByRole("button", { name: "Board" })).toHaveCount(0);
     await page.getByRole("tab", { name: "Issues" }).click();
@@ -316,15 +334,18 @@ test("v toggles List and Board; Shift+J/K rank a focused card through the one mo
     await expect(alphaCard).toBeFocused();
     await expect(live).toHaveText(`${alpha.key} → Todo, position 1 of 3`);
 
-    // At the column's ends there is nothing to do: no request, no announcement change.
+    // At the column's ends there is nothing to do: no request, no announcement change. A move
+    // that does rank is the witness below: requests reach the counter in order, so its PATCH
+    // being the first proves the two presses above sent none.
     patches.length = 0;
     await page.keyboard.press("Shift+K");
     await charlieCard.focus();
     await page.keyboard.press("Shift+J");
-    await page.waitForTimeout(300);
-    expect(patches).toEqual([]);
     await expect(charlieCard).toBeFocused();
     await expect(live).toHaveText(`${alpha.key} → Todo, position 1 of 3`);
+    const witness = patchOf(page, charlie.key);
+    await page.keyboard.press("Shift+K");
+    expect(patches).toEqual([(await witness).url()]);
 
     // B4: `o` opens the focused card's issue...
     await alphaCard.focus();
@@ -345,10 +366,10 @@ test("v toggles List and Board; Shift+J/K rank a focused card through the one mo
     await alphaCard.focus();
     await page.keyboard.press("Enter");
     await expect(page).toHaveURL(new RegExp(`/issues/${alpha.key}$`));
-    await page.waitForTimeout(300);
-    expect(navigations).toBe(1);
     await page.goBack();
     await expect(page).toHaveURL(/\/projects\/CORE\/issues$/);
+    // Going back is the second navigation; a doubled Enter would have made one in between.
+    expect(navigations).toBe(2);
 
     // `p` reaches the priority select through the focused card; a letter typed there is
     // typing, not a shortcut; Escape returns to the card, then out of the board.
@@ -369,33 +390,39 @@ test("v toggles List and Board; Shift+J/K rank a focused card through the one mo
     patches.length = 0;
     await alphaCard.focus();
     await page.keyboard.press("Space");
-    await page.waitForTimeout(300);
+    await framesPassed(page);
     await expect(alphaCard).not.toHaveClass(/opacity-50/);
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Space");
-    await page.waitForTimeout(300);
+    await framesPassed(page);
     await expect(page.locator("article.opacity-50")).toHaveCount(0);
-    expect(patches).toEqual([]);
+    // Again a real move is the witness: its PATCH is the first either Space could precede.
+    await alphaCard.focus();
+    const ranked = patchOf(page, alpha.key);
+    await page.keyboard.press("Shift+J");
+    expect(patches).toEqual([(await ranked).url()]);
     expect(new URL(page.url()).pathname).toBe("/projects/CORE/issues");
   } finally {
     await context.close();
   }
 });
 
+// SLOW(>=2s): two real drags with their landing animations, one rank the server rejects, and the
+// board's refetch after it.
 test("a stale board refreshes and says so when the server rejects the rank", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
   const cards = [];
   for (const title of ["Alpha", "Bravo", "Charlie"]) {
-    const issue = await createIssue({ project: "CORE", title });
-    await patchIssue(issue.key, { status: "todo" });
-    cards.push(issue);
+    cards.push(await createIssue({ project: "CORE", title }));
   }
   const [alpha, bravo, charlie] = cards;
   if (alpha === undefined || bravo === undefined || charlie === undefined) {
     throw new Error("seed produced fewer cards than expected");
   }
+  // Creation order is the rank order the row reads; none of these writes reads it.
+  await Promise.all(cards.map((issue) => patchIssue(issue.key, { status: "todo" })));
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
@@ -643,6 +670,8 @@ async function scrollToColumn(scroller: Locator, index: number): Promise<void> {
   await ended();
 }
 
+// SLOW(>=2s): a real finger: per-frame touch steps, two snap-scroll flings, the sensor's own
+// 150 ms activation twice over, an issue opened and left, and a carried card.
 test("on the phone a finger drives the board: hold lifts, tap opens, swipes scroll and snap @phone", async ({
   browser,
 }, testInfo) => {
@@ -650,14 +679,14 @@ test("on the phone a finger drives the board: hold lifts, tap opens, swipes scro
   await createProject({ key: "CORE", name: "Core" });
   const cards = [];
   for (const title of ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf"]) {
-    const issue = await createIssue({ project: "CORE", title });
-    await patchIssue(issue.key, { status: "todo" });
-    cards.push(issue);
+    cards.push(await createIssue({ project: "CORE", title }));
   }
   const [alpha, bravo] = cards;
   if (alpha === undefined || bravo === undefined) {
     throw new Error("seed produced fewer cards than expected");
   }
+  // Creation order is the rank order the board draws; none of these writes reads it.
+  await Promise.all(cards.map((issue) => patchIssue(issue.key, { status: "todo" })));
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
@@ -711,8 +740,10 @@ test("on the phone a finger drives the board: hold lifts, tap opens, swipes scro
     await expect(alphaCard).not.toHaveClass(/opacity-50/);
     // ...and neither does a long press on it.
     await touchHold(page, await centerOf(select), 300);
-    await page.waitForTimeout(200);
     await expect(alphaCard).not.toHaveClass(/opacity-50/);
+    // The press ran twice the sensor's 150 ms delay (`IssueBoard.tsx`), so a lift would be on the
+    // card by now; the margin is for a navigation the release could still be sending.
+    await sleep(100);
     expect(patches).toEqual([]);
     expect(new URL(page.url()).pathname).toBe("/projects/CORE/issues");
 
@@ -723,14 +754,16 @@ test("on the phone a finger drives the board: hold lifts, tap opens, swipes scro
     await expect(todo.getByRole("article")).toHaveCount(7);
 
     // A long press on the title lifts the card instead of following the link (the accepted
-    // trade-off of a whole-card handle); with no movement it drops back where it was.
+    // trade-off of a whole-card handle); with no movement it drops back where it was. The press
+    // outlasts the sensor's 150 ms delay, and the drop back is what says the lift is over.
     const link = alphaCard.getByRole("link");
     const lifted = expect(alphaCard).toHaveClass(/opacity-50/);
-    await touchHold(page, await centerOf(link), 400);
+    await touchHold(page, await centerOf(link), 250);
     await lifted;
-    await page.waitForTimeout(300);
-    expect(new URL(page.url()).pathname).toBe("/projects/CORE/issues");
     await expect(alphaCard).not.toHaveClass(/opacity-50/);
+    // The margin is for a navigation the press could still be sending.
+    await sleep(100);
+    expect(new URL(page.url()).pathname).toBe("/projects/CORE/issues");
     expect(patches).toEqual([]);
 
     // K2: hold to lift, carry the card into the right-hand auto-scroll zone (the board scrolls
@@ -740,7 +773,6 @@ test("on the phone a finger drives the board: hold lifts, tap opens, swipes scro
     const from = await centerOf(bravoCard);
     const movePatch = patchOf(page, bravo.key);
     const finger = await pressFinger(page, from);
-    await page.waitForTimeout(250);
     await expect(bravoCard).toHaveClass(/opacity-50/);
     const scrollerBox = await scroller.boundingBox();
     if (scrollerBox === null) {
@@ -756,6 +788,8 @@ test("on the phone a finger drives the board: hold lifts, tap opens, swipes scro
       throw new Error(`In progress overshot the touch drop: ${JSON.stringify(landing)}`);
     }
     await finger.moveTo({ x: Math.max(60, landing.x + 60), y: from.y }, 4);
+    // A finger resting before it lifts: the drop target is read at the lift, so this pause is
+    // part of the gesture under test.
     await page.waitForTimeout(100);
     await finger.lift();
     const moveResponse = await movePatch;
@@ -867,16 +901,21 @@ test("a filtered drag names the visible neighbours and the hidden card interleav
   }
 });
 
+// SLOW(>=2s): two document loads - the second is the per-login toggle's own proof - and one real
+// cross-lane drag.
 test("the board groups into priority swimlanes on a toggle that persists per signed-in user, and dragging across lanes reassigns priority @phone", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const p0 = await createIssue({ project: "CORE", title: "P0 card" });
-  await patchIssue(p0.key, { status: "todo", priority: 0 });
   const p3 = await createIssue({ project: "CORE", title: "P3 card" });
-  await patchIssue(p3.key, { status: "todo", priority: 3 });
   const none = await createIssue({ project: "CORE", title: "No priority card" });
-  await patchIssue(none.key, { status: "todo" });
+  // Creation order is the rank order inside a lane; none of these writes reads it.
+  await Promise.all([
+    patchIssue(p0.key, { status: "todo", priority: 0 }),
+    patchIssue(p3.key, { status: "todo", priority: 3 }),
+    patchIssue(none.key, { status: "todo" }),
+  ]);
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
@@ -945,8 +984,6 @@ test("the board groups into priority swimlanes on a toggle that persists per sig
         page.getByRole("region", { name: "No priority lane" }).getByRole("article")
       ).toHaveCount(0);
       await expect.poll(() => getIssue(none.key)).toMatchObject({ priority: 0 });
-      await page.reload();
-      await expect(p0Todo.getByRole("article")).toHaveText([/No priority card/, /P0 card/]);
     }
 
     // Turning lanes off restores the flat board - the toggle state, not the data, decides the

@@ -1,5 +1,7 @@
-import { expect, type Locator, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
+import { QUERY_RETRY_DELAY_MS } from "../web/src/api/query-client";
+import { MIN_REFETCH_INTERVAL_MS } from "../web/src/api/query-refresh";
 import { getUnsubscribeCalls, setInterests, setLiveSessions } from "./agents";
 import {
   createAsk,
@@ -23,6 +25,19 @@ import { asUser } from "./users";
 test.beforeEach(async () => {
   await resetDatabase();
 });
+
+/** Lets a viewport change land: the browser's relayout and the render React queued for it are
+ *  both done within two animation frames. */
+async function relayout(page: Page): Promise<void> {
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => resolve());
+        });
+      })
+  );
+}
 
 test("database reset clears fake Envoy subscribers before the next issue", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -409,6 +424,8 @@ test("a subscriber no longer live shows its last heartbeat, not its subscription
   }
 });
 
+// SLOW(>=2s): two open pages, and two parent changes made through the mover's own UI, each
+// landing live on the page that watches.
 test("editing the parent line moves the issue across Children tabs live", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const oldParent = await createIssue({ project: "CORE", title: "Old parent" });
@@ -423,12 +440,19 @@ test("editing the parent line moves the issue across Children tabs live", async 
   const parentPage = await context.newPage();
   const moverPage = await context.newPage();
   try {
-    await parentPage.goto(`/issues/${newParent.key}`);
-    await parentPage.getByRole("tab", { name: "Children" }).click();
-    await expect(parentPage.getByText("No child issues")).toBeVisible();
-
-    await moverPage.goto(`/issues/${mover.key}`);
-    await expect(moverPage.getByRole("link", { name: oldParent.key })).toBeVisible();
+    // Neither page waits on the other, and each keeps its own baseline, both taken before the
+    // first save below.
+    await Promise.all([
+      (async () => {
+        await parentPage.goto(`/issues/${newParent.key}`);
+        await parentPage.getByRole("tab", { name: "Children" }).click();
+        await expect(parentPage.getByText("No child issues")).toBeVisible();
+      })(),
+      (async () => {
+        await moverPage.goto(`/issues/${mover.key}`);
+        await expect(moverPage.getByRole("link", { name: oldParent.key })).toBeVisible();
+      })(),
+    ]);
     await moverPage.getByRole("button", { name: "Edit parent issue" }).click();
     await moverPage.getByLabel("Parent").fill(newParent.key);
     await moverPage.getByRole("button", { name: "Save parent" }).click();
@@ -445,7 +469,9 @@ test("editing the parent line moves the issue across Children tabs live", async 
     await moverPage.getByLabel("Parent").fill("");
     await moverPage.getByRole("button", { name: "Save parent" }).click();
     await expect(moverPage.getByRole("button", { name: "Set parent issue" })).toBeVisible();
-    await expect.poll(() => getIssue(mover.key)).toMatchObject({ parent: null });
+    await expect
+      .poll(() => getIssue(mover.key), { intervals: [50, 50, 100, 200, 500] })
+      .toMatchObject({ parent: null });
 
     // And child.removed empties it again, still without a reload.
     await expect(movedRow).toHaveCount(0);
@@ -534,6 +560,8 @@ test("a quote-anchored ask identifies its document in the margin and Conversatio
   }
 });
 
+// SLOW(>=2s): three pages - alice's issue, alice's Inbox and bob's own context - with the close
+// and the pin reaching each of them.
 test("closing an issue removes its asks from the inbox and pinning stays private @phone", async ({
   browser,
 }, testInfo) => {
@@ -545,11 +573,11 @@ test("closing an issue removes its asks from the inbox and pinning stays private
 
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
-  const inboxContext = await asUser(browser, "alice");
-  const inbox = await inboxContext.newPage();
+  // The Inbox is a second tab of alice's own browser: it makes no write, so sharing the keyed
+  // write registry and `navigator.locks` with the issue page costs this row nothing.
+  const inbox = await alice.newPage();
   try {
-    await page.goto(`/issues/${issue.key}`);
-    await inbox.goto("/");
+    await Promise.all([page.goto(`/issues/${issue.key}`), inbox.goto("/")]);
     await expect(inbox.locator("[data-testid^=ask-]")).toHaveCount(2);
     await page.getByRole("button", { name: "Close issue" }).click();
     await expect
@@ -563,8 +591,7 @@ test("closing an issue removes its asks from the inbox and pinning stays private
     await expect(inbox.getByText("First ask", { exact: true })).toHaveCount(0);
     await page.getByRole("button", { name: "Pin issue" }).click();
     await expect(page.getByRole("button", { name: "Unpin issue" })).toBeEnabled();
-    await page.goto("/");
-    await page.goto(`/issues/${issue.key}`);
+    await page.reload();
     if (testInfo.project.name === "iphone") {
       await page.getByRole("button", { name: "Open navigation" }).click();
     }
@@ -585,7 +612,6 @@ test("closing an issue removes its asks from the inbox and pinning stays private
       await bob.close();
     }
   } finally {
-    await inboxContext.close();
     await alice.close();
   }
 });
@@ -882,12 +908,20 @@ test("issue header gives the title the row's free space beside a short details l
       };
     });
   try {
+    // One cold load for the whole row: the header's layout is CSS plus a `ResizeObserver`
+    // (`IssueHeader.tsx`), so a resize re-runs every decision a fresh load would make, and the
+    // writes below reach the open page on its event feed - whose refresh its own clock fires
+    // rather than the wall clock.
+    await page.clock.install();
+    await page.setViewportSize({ height: 800, width: 1024 });
+    await page.goto(`/issues/${issue.key}`);
+    await expect(title).toHaveText("Header keeps its title readable");
+
     // Below 1280 the details line shares the row with the title once it fits beside the state
     // controls; the title must still take the rest of the row rather than split it with the line.
     for (const width of [1024, 1200, 1279]) {
       await page.setViewportSize({ height: 800, width });
-      await page.goto(`/issues/${issue.key}`);
-      await expect(title).toHaveText("Header keeps its title readable");
+      await relayout(page);
       const measured = await measureTitle();
       expect(
         measured.width,
@@ -913,18 +947,26 @@ test("issue header gives the title the row's free space beside a short details l
     });
     await createAsk(issue.key, { question: "Which layout?" }, session);
     await subscribeSession(issue.key);
+    // One reload: the subscription is Envoy's, not an issue event, so no refresh carries it.
+    await page.reload();
+    await expect(title).toHaveText("Migrate the issue header to a single row");
+    await expect(page.getByTestId("issue-whose-turn")).toHaveText("Waiting on you (1)");
+    await expect(page.getByRole("button", { name: "Subscribers: 1" })).toBeVisible();
+    const githubLink = page.locator(
+      '[data-testid=issue-header] a[href="https://github.com/sjawhar/legion/pull/1051"]'
+    );
     for (const withLink of [false, true]) {
       await patchIssue(issue.key, {
         external_links: withLink
           ? [{ kind: "github_pr", url: "https://github.com/sjawhar/legion/pull/1051" }]
           : [],
       });
+      // The link's own state is what the measurement below depends on, so it is waited for.
+      await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
+      await expect(githubLink).toHaveCount(withLink ? 1 : 0);
       for (const width of [1265, 1279]) {
         await page.setViewportSize({ height: 800, width });
-        await page.goto(`/issues/${issue.key}`);
-        await expect(title).toHaveText("Migrate the issue header to a single row");
-        await expect(page.getByTestId("issue-whose-turn")).toHaveText("Waiting on you (1)");
-        await expect(page.getByRole("button", { name: "Subscribers: 1" })).toBeVisible();
+        await relayout(page);
         const measured = await measureTitle();
         const label = `${width}px ${withLink ? "with" : "without"} the GitHub link`;
         expect(
@@ -1176,6 +1218,9 @@ test("an open issue's header follows its project's default repository as the map
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
   try {
+    // Each write below is followed by a refresh the scheduler holds for at most
+    // `MIN_REFETCH_INTERVAL_MS`; that is a page timer, so the page's own clock fires it.
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}`);
     const header = page.getByTestId("issue-header");
     const badge = (text: RegExp) => header.locator('span[aria-hidden="true"]', { hasText: text });
@@ -1183,10 +1228,12 @@ test("an open issue's header follows its project's default repository as the map
 
     // A new default: the page shows it without a reload.
     await putRepoProject("acme/gadgets", { default: true, project: "CORE" });
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
     await expect(badge(/^acme\/gadgets$/)).toBeVisible();
 
     // The default removed: nothing resolves, and the project still maps acme/widgets to pick.
     await deleteRepoProject("acme/gadgets");
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
     await expect(badge(/^No repository$/)).toBeVisible();
     await expect(page.getByLabel(`Repository of ${issue.key}`)).toHaveAccessibleDescription(
       "No repository"
@@ -1195,8 +1242,10 @@ test("an open issue's header follows its project's default repository as the map
     // The default again, then moved to another project: CORE maps nothing left to pick, so the
     // rail drops the item.
     await putRepoProject("acme/widgets", { default: true, project: "CORE" });
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
     await expect(badge(/^acme\/widgets$/)).toBeVisible();
     await putRepoProject("acme/widgets", { project: "OPS" });
+    await page.clock.fastForward(MIN_REFETCH_INTERVAL_MS);
     await expect(page.getByLabel(`Repository of ${issue.key}`)).toHaveCount(0);
     await expect(page.getByTestId("issue-metadata-rail").getByText("Repository:")).toHaveCount(0);
   } finally {
@@ -1217,10 +1266,22 @@ test("an issue page whose mappings read fails says so and retries it, rather tha
   const page = await context.newPage();
   try {
     let failing = true;
-    await page.route("**/api/v1/settings/repo-projects", (route) =>
-      failing ? route.abort() : route.continue()
-    );
+    let refused = 0;
+    await page.route("**/api/v1/settings/repo-projects", (route) => {
+      if (!failing) {
+        return route.continue();
+      }
+      refused += 1;
+      return route.abort();
+    });
+    // The read is retried twice, `QUERY_RETRY_DELAY_MS` apart (`web/src/api/query-client.ts`),
+    // before the rail may say so; those waits are page timers its own clock fires.
+    await page.clock.install();
     await page.goto(`/issues/${issue.key}`);
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      await expect.poll(() => refused).toBeGreaterThanOrEqual(attempt);
+      await page.clock.fastForward(QUERY_RETRY_DELAY_MS);
+    }
     const rail = page.getByTestId("issue-metadata-rail");
     await expect(rail.getByText("Could not load the repositories mapped to CORE.")).toBeVisible();
     await expect(rail.getByText("Repository:")).toBeVisible();
