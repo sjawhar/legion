@@ -162,8 +162,8 @@ approved spec. If the Summary, the Acceptance, the scope and every settled decis
 the plan is the record and the tree carries on; otherwise change the root spec and request
 approval again.
 
-Later waves, re-scoping open children toward the same Acceptance, and integration-failure children
-need no spec edit and no new approval. A child issue's spec is never gated.
+Later waves and re-scoping open children toward the same Acceptance need no spec edit and no new
+approval. A child issue's spec is never gated.
 
 ## A decision block for a read no pod can make
 

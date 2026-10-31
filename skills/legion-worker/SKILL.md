@@ -36,7 +36,7 @@ Read each by its `skill://` link: a read by path stops at 300 lines.
 | You write or edit the PR body, record or verify a proof, or run the simplify pass | `skill://legion-worker/references/pr-body.md` |
 | Before a push, to check your commits' App identity | `skill://legion-worker/references/default-branch-check.md` |
 | You reply on, list or resolve review threads, or judge a bot's finding | `skill://legion-worker/references/review-threads.md` |
-| A conflict, a need only the base meets, a retarget, comparing heads after a forward merge, a push refused after the handoff import moved the branch, or rewriting a pushed commit | `skill://legion-worker/references/conflicts-and-rewrites.md` |
+| A conflict, a need only the base meets, a retarget, a parent's last round, comparing heads after a forward merge, a push refused after the handoff import moved the branch, or rewriting a pushed commit | `skill://legion-worker/references/conflicts-and-rewrites.md` |
 | You review or approve, build READY, or run the production check | `skill://legion-worker/references/merge-gate.md` |
 | The issue renames a repository, package, or URL across the codebase | `skill://legion-worker/references/systematic-rename.md` |
 | The issue deletes code, a command, or documentation | `skill://legion-worker/references/cleanup-deletion.md` |
@@ -62,4 +62,4 @@ Read each by its `skill://` link: a read by path stops at 300 lines.
 
 ## Deployment instructions
 
-Deployment instructions in your prompt override this skill where they conflict, except four rules: no deferrals; bringing the base into the branch only on a real conflict, a need only the base meets, or a retarget (`skill://legion-worker/references/conflicts-and-rewrites.md#reintegrating-the-base`); the implementer's own proof on a production-like surface at the head that merges, an applied simplify head included (`skill://legion-worker/references/pr-body.md#what-a-proof-is`, `skill://legion-worker/references/pr-body.md#the-rules-every-phases-evidence-follows`); and the implementer's production check after the close (`skill://legion-worker/references/merge-gate.md#the-production-check-after-the-close`).
+Deployment instructions in your prompt override this skill where they conflict, except four rules: no deferrals; bringing the base into the branch only on a real conflict, a need only the base meets, a retarget, or a parent's last round (`skill://legion-worker/references/conflicts-and-rewrites.md#reintegrating-the-base`); the implementer's own proof on a production-like surface at the head that merges, an applied simplify head included (`skill://legion-worker/references/pr-body.md#what-a-proof-is`, `skill://legion-worker/references/pr-body.md#the-rules-every-phases-evidence-follows`); and the implementer's production check after the close (`skill://legion-worker/references/merge-gate.md#the-production-check-after-the-close`).
