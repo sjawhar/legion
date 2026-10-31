@@ -723,15 +723,22 @@ func (m *Machine) PendingForApprover(ctx context.Context, approver string) ([]Pe
 	return out, rows.Err()
 }
 
-// RecordDecision is a decided credential-request record's own terminal event, for
-// GET /v1/credential-requests/{id}'s "decided" field.
+// RecordDecision is a decided credential-request record's own terminal event, for the broker's
+// approval page and POST /v1/machine-logins/lookup's "decided" field.
 type RecordDecision struct {
 	Event        string
 	At           time.Time
 	CredentialID string
+	// Login is the person who decided the record, empty for an event no person made (expired,
+	// cancelled).
+	Login string
+	// Detail is what the decision records beside its event, empty when it records nothing. An
+	// agent_secret approval carries one exactly when ApplyDecision recorded the request denied
+	// rather than granted, because its requesting enrollment was no longer live.
+	Detail string
 }
 
-// RecordDetail is a full credential-request record for GET /v1/credential-requests/{id}: its
+// RecordDetail is a full credential-request record for the broker's approval page: its
 // decoded request object plus its current state, folding in a later grant revocation the record's
 // own decision events never overwrite (State becomes "revoked" while Decided keeps the original
 // approval). Enrollment is nil for a machine login (Kind == "launcher_credential"), which carries
@@ -753,8 +760,8 @@ type RecordDetail struct {
 	Session         Session
 }
 
-// ReadRecord reads a credential-request record's full detail by id, for GET
-// /v1/credential-requests/{id} and, reused verbatim, POST /v1/machine-logins/lookup.
+// ReadRecord reads a credential-request record's full detail by id, for the broker's approval page
+// and, reused verbatim, POST /v1/machine-logins/lookup.
 // pgx.ErrNoRows means no such record.
 func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail, error) {
 	var canonical, approver, kind, requestSession, enrollmentSession string
@@ -800,15 +807,16 @@ func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail
 	// by its request's state, a machine login by its terminal event. A decided record's terminal
 	// event names the decision; a request an ended enrollment cancelled before endEnrollment wrote
 	// that event has none, and its request row stands in for it.
-	var event, credID string
+	var event, credID, login, eventDetail string
 	var decidedAt time.Time
 	if agentSecret {
-		err = m.Store.Pool.QueryRow(ctx, `select coalesce(ev.event, r.state), coalesce(ev.at, r.decided_at), coalesce(ev.credential_id, '')
+		err = m.Store.Pool.QueryRow(ctx, `select coalesce(ev.event, r.state), coalesce(ev.at, r.decided_at), coalesce(ev.credential_id, ''),
+				coalesce(ev.login, ''), coalesce(ev.detail, r.decision_detail, '')
 			from requests r left join credential_request_events ev on ev.record_id=r.record_id and ev.event = any($2)
-			where r.record_id=$1 and r.state <> 'pending'`, recordID, record.TerminalEventNames()).Scan(&event, &decidedAt, &credID)
+			where r.record_id=$1 and r.state <> 'pending'`, recordID, record.TerminalEventNames()).Scan(&event, &decidedAt, &credID, &login, &eventDetail)
 	} else {
-		err = m.Store.Pool.QueryRow(ctx, `select event, at, coalesce(credential_id,'') from credential_request_events
-			where record_id=$1 and event = any($2)`, recordID, record.TerminalEventNames()).Scan(&event, &decidedAt, &credID)
+		err = m.Store.Pool.QueryRow(ctx, `select event, at, coalesce(credential_id,''), coalesce(login, ''), coalesce(detail, '') from credential_request_events
+			where record_id=$1 and event = any($2)`, recordID, record.TerminalEventNames()).Scan(&event, &decidedAt, &credID, &login, &eventDetail)
 	}
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -817,7 +825,7 @@ func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail
 		return RecordDetail{}, err
 	}
 	detail.State = event
-	detail.Decided = &RecordDecision{Event: event, At: decidedAt, CredentialID: credID}
+	detail.Decided = &RecordDecision{Event: event, At: decidedAt, CredentialID: credID, Login: login, Detail: eventDetail}
 	var revoked int
 	err = m.Store.Pool.QueryRow(ctx, `select 1 from credential_request_events where record_id=$1 and event='revoked' limit 1`, recordID).Scan(&revoked)
 	switch {

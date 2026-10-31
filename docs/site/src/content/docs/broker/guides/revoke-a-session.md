@@ -40,7 +40,9 @@ $ curl -s -X POST -H "Authorization: Bearer $(cat "$AGENT_SECRETS_ACCOUNT_TOKEN_
 
 (That is the call Dispatch's server makes as its own ServiceAccount, the caller the broker lists
 in `BROKER_API_ACCOUNTS`; on the [local stack](/legion/broker/guides/run-locally/) you can make it
-yourself with the token in `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`.)
+yourself with the token in `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`. The broker takes the revoking
+person the body names on its caller's word, as it does for a machine login's decision: a revoke
+only takes power away, so unlike approving a secret request it needs no sign-in to the broker.)
 
 ## Revoke a grant from your shell
 
@@ -255,3 +257,12 @@ machine login ends both, and its row stays on the machine-login page while eithe
 `expired, sessions still running` once the login has expired. Without Dispatch, end each box with
 `agent-secrets unenroll --helper --enrollment <id>`, run against a helper logged in as the box's
 operator, or stop its `agent-secrets renew`, after which it lapses within `BROKER_LEASE_SECONDS`.
+
+## End a person's sign-in to the broker
+
+The sessions above are agents'. A person's own sign-in to the broker's approval page is separate:
+it lasts a day at most, is never extended, and ends when they sign out. Nobody ends someone
+else's from a page; an operator ends every browser session one login holds by running the
+broker's own subcommand in a broker pod, `envoy-broker end-sessions <login>`
+([Ending a person's sessions](/legion/broker/operate/#ending-a-persons-sessions)). Revoking a
+grant or a machine login does not need a broker sign-in and never ends one.

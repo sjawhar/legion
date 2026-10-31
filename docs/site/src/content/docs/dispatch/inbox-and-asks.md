@@ -35,8 +35,12 @@ whatever the filter below it is set to.
 ![The Inbox with its two sections, the Assignee filter set to you, and the Blocked on you banner](/legion/media/dispatch/inbox.png)
 
 A credential request is an agent asking you to let it use a secret, or a machine asking to start
-agent sessions as you. Pending ones are listed under **Credential requests**, above the sections,
-and each links to the page where you approve or deny it. They count toward **Needs you** and the
+agent sessions as you. Pending ones are listed under **Credential requests**, above the sections.
+A **Secret request** links to its page on the Secrets Broker, where you approve or deny it, signed
+in to the broker ([approve a request](/legion/broker/guides/approve-a-request/)); Dispatch itself
+decides no secret request. A **Machine login** links to Dispatch's machine-login page, where you
+type the code the machine shows and approve or deny it
+([log a machine in](/legion/broker/guides/log-a-machine-in/)). They count toward **Needs you** and the
 banner like an ask that waits on you. The Inbox says `Nothing needs you` only when your own list
 holds no ask and no credential request; with the filter on someone else it says `Nothing matches
 this filter`, and with the filter cleared, `Nothing needs anyone`. An open Inbox picks up a new

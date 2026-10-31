@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 
+	"github.com/sjawhar/envoy/internal/broker/approval"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 )
 
@@ -14,6 +15,7 @@ const (
 	authProof
 	authRenewProof
 	authAccount
+	authSignIn
 )
 
 // caller is who server.authenticate proved a request came from. Which field is set follows from
@@ -24,6 +26,9 @@ type caller struct {
 	// account is the name BROKER_API_ACCOUNTS gives the service whose ServiceAccount token
 	// authenticated the request, so a handler that acts can log which caller acted.
 	account string
+	// signIn is the broker sign-in session a request to the approval page carries, the zero
+	// approval.Session when it carries none that is live.
+	signIn approval.Session
 }
 
 // routeHandler is a handler together with the authentication its signature needs. Only the
@@ -67,13 +72,39 @@ func renewAuth(h func(*server, http.ResponseWriter, *http.Request, string)) rout
 }
 
 // accountAuth is a route for a service calling the broker with its own Kubernetes ServiceAccount
-// token: Dispatch's server, which relays a person's decisions, and whatever resource server reads
-// a token back through introspection. The token is verified against the broker's Kubernetes
-// issuer and its account must be one BROKER_API_ACCOUNTS lists, and the handler is given that
-// entry's name — the caller's identity, which it logs when it acts.
+// token: Dispatch's server, which lists what waits on a person, relays a person's machine-login
+// decisions and revokes, and links the broker's own page for a secret request; and whatever
+// resource server reads a token back through introspection. The token is verified against the
+// broker's Kubernetes issuer and its account must be one BROKER_API_ACCOUNTS lists, and the
+// handler is given that entry's name — the caller's identity, which it logs when it acts.
 func accountAuth(h func(*server, http.ResponseWriter, *http.Request, string)) routeHandler {
 	return routeHandler{auth: authAccount, serve: func(s *server, w http.ResponseWriter, r *http.Request, who caller) {
 		h(s, w, r, who.account)
+	}}
+}
+
+// accountAuthAfterRecordKind is a route whose handler authenticates its own caller, because what
+// it may answer is settled before any credential is read: the two decide routes read the record's
+// kind first and refuse a secret request 403 DECIDE_ON_BROKER_PAGE naming the broker's own page,
+// to every caller, token or none. Register checks nothing for such a row; the handler spends the
+// account class's per-address bucket and then authenticates a machine login's decision exactly as
+// accountAuth does (decideRecord), so one is still decided only on a listed service's
+// ServiceAccount token.
+func accountAuthAfterRecordKind(h func(*server, http.ResponseWriter, *http.Request)) routeHandler {
+	return routeHandler{auth: authNone, serve: func(s *server, w http.ResponseWriter, r *http.Request, _ caller) { h(s, w, r) }}
+}
+
+// signInAuth is a route of the broker's own approval page, for a person in a browser signed in to
+// the broker itself (OpenID Connect with the broker's own client, BROKER_SIGNIN_*). The handler is
+// given the session the request's __Host-broker-session cookie names, or the zero session when it
+// names none that is live, since what that means is the route's to answer: the page starts a
+// sign-in, a decision answers a page linking the record it names. Every route of the class spends
+// its source address's bucket first, the one the account class spends (authenticate), so no
+// caller drives a record read, a token request to the sign-in provider or a session write
+// unmetered. Mounted only when the broker builds its approval page, which every broker does.
+func signInAuth(h func(*approval.Page, http.ResponseWriter, *http.Request, approval.Session)) routeHandler {
+	return routeHandler{auth: authSignIn, serve: func(s *server, w http.ResponseWriter, r *http.Request, who caller) {
+		h(s.deps.Approval, w, r, who.signIn)
 	}}
 }
 
@@ -123,39 +154,47 @@ func routes() []apiRoute {
 		{http.MethodPost, "/v1/grants/{id}/values", sessionAuth((*server).grantValues)},
 		// End a grant the calling session holds.
 		{http.MethodPost, "/v1/grants/{id}/revoke", sessionAuth((*server).revokeGrant)},
-		// List the pending requests and machine logins the named person decides.
+		// List the pending requests and machine logins the named person decides, each secret
+		// request with the broker's own page where that person decides it.
 		{http.MethodGet, "/v1/pending", accountAuth((*server).listPending)},
-		// Read a credential-request record: what was asked, by whom, why, and its decision.
+		// Read a credential-request record: what was asked, by whom, why, and its decision. A
+		// secret request's record also carries the broker's own page where it is decided, as the
+		// pending list's row does.
 		{http.MethodGet, "/v1/credential-requests/{record}", accountAuth((*server).readRecord)},
-		// Approve a pending record as the named person; a machine login also needs its code. The
-		// caller is a named service identity, its own ServiceAccount token, and the approver is
-		// still the login the request names: the broker takes that name on the caller's word, and
-		// dispatch://INFRA-314 is what replaces it with a signed assertion the broker verifies.
-		{http.MethodPost, "/v1/credential-requests/{record}/approve", accountAuth((*server).approveRecord)},
-		// Deny a pending record as the named person; a machine login also needs its code. As with
-		// approve, the caller is a named service identity and the approver is still the login the
-		// request names, until dispatch://INFRA-314.
-		{http.MethodPost, "/v1/credential-requests/{record}/deny", accountAuth((*server).denyRecord)},
+		// Approve a pending machine login as the named person, who must type its code: the broker
+		// takes the person's name on the caller's word, from a listed service's ServiceAccount
+		// token, which the handler verifies itself after it has read the record's kind. It reads
+		// the kind first because a secret request is refused before any caller is looked at: it is
+		// decided only on the broker's own page by a person signed in to the broker, so this
+		// answers 403 DECIDE_ON_BROKER_PAGE naming that page to every caller, token or none,
+		// writing nothing.
+		{http.MethodPost, "/v1/credential-requests/{record}/approve", accountAuthAfterRecordKind((*server).approveRecord)},
+		// Deny a pending machine login as the named person, who must type its code, on the
+		// caller's word and behind the same authentication as approve. A secret request is
+		// refused the same way, writing nothing, with 403 DECIDE_ON_BROKER_PAGE naming the page
+		// where a person signed in to the broker denies it.
+		{http.MethodPost, "/v1/credential-requests/{record}/deny", accountAuthAfterRecordKind((*server).denyRecord)},
 		// Find a pending machine login by the confirmation code its machine shows.
 		{http.MethodPost, "/v1/machine-logins/lookup", accountAuth((*server).lookupMachineLogin)},
 		// List the machine logins the named person may revoke, every service's, such as the Legion
 		// daemon's, whoever approved it, and the person's own machines', that are not revoked and
-		// are unexpired or expired with a session still running, each naming who approved it.
+		// are unexpired or expired with a session still running, each naming who approved it. The
+		// person is the one the caller names.
 		{http.MethodGet, "/v1/launcher-credentials", accountAuth((*server).listLauncherCredentials)},
 		// End a machine login, expired or not: a service's (its token login, or one a person approved
 		// before token logins) as anyone signed in, a person's machine's as the person who approved
 		// it. Its launcher proofs stop authenticating and every session it enrolled, pods included,
 		// ends with its grants and pending requests. The revoking person is the login the request
-		// names, taken on the caller's word until dispatch://INFRA-314.
+		// names, which the broker still takes on the caller's word: a revoke only takes power away.
 		{http.MethodPost, "/v1/launcher-credentials/{id}/revoke-by-approver", accountAuth((*server).revokeLauncherCredential)},
 		// List the live grants of the named person's sessions, automatic or approved, and those the
-		// person approved.
+		// person approved. The person is the one the caller names.
 		{http.MethodGet, "/v1/grants", accountAuth((*server).listGrantsForApprover)},
 		// End a grant as its approver or as its enrollment's operator. The operator's revoke also
 		// withholds the secrets the grant's request got automatically from that session, even when
 		// the grant had already ended: its other grants that got them automatically end too, and it
-		// asks before it gets them again. The revoking person is the login the request names, taken
-		// on the caller's word until dispatch://INFRA-314.
+		// asks before it gets them again. The revoking person is the login the request names, which
+		// the broker still takes on the caller's word: a revoke only takes power away.
 		{http.MethodPost, "/v1/grants/{id}/revoke-by-approver", accountAuth((*server).revokeByApprover)},
 		// List the logins of the calling credential's operator's own machines, as Dispatch's
 		// machine-logins page lists them, without the service logins that page also lists.
@@ -182,6 +221,45 @@ func routes() []apiRoute {
 		// and rate-limited both per source address and over every caller at once, since each reread holds
 		// the policy's writer lock while it reads; a reread only moves the broker toward AWS's own truth.
 		{http.MethodPost, "/v1/secrets/{name}/reread", public((*server).rereadSecret)},
+		// A person's approval page for one credential-request record, an HTML page on the broker's
+		// own origin: the record's secret names, the enrollment the broker verified asked, the
+		// session the request claims when it differs, the reason or "No reason given", the
+		// lifetime, the times, the approver and the state, one sentence saying what Approve gives
+		// and for how long and one saying what Deny and the expiry do, then every other pending
+		// secret request the person may decide, with Approve and Deny for each the person may
+		// decide and one "Approve all N shown". It checks the id's shape, then the session, then
+		// the record: a malformed id is a 400, a request with no live session, or with ?switch=1,
+		// redirects to the sign-in provider and returns here, and only a signed-in person's
+		// unknown record id is a 404. A machine login's record is printed with the note that it
+		// is decided by typing its code on Dispatch's machine-login page, and offers no button.
+		{http.MethodGet, "/approve/{record}", signInAuth((*approval.Page).ServeRecord)},
+		// Decide records an approval page printed, as the signed-in person: a form from the
+		// broker's own origin only, carrying the page's token, which binds it to the session and to
+		// exactly the records the page printed with a button, for an hour. Each record is decided
+		// on its own, and the answer is a 303 back to the page, which says what became of each.
+		{http.MethodPost, "/approve", signInAuth((*approval.Page).ServeDecide)},
+		// Finish a sign-in to the approval page, the provider's redirect back with a code, checked
+		// against the sign-in this browser started (its __Host-broker-signin cookie, used once):
+		// state, PKCE, the ID token and the Workspace domain. It makes a new session, ending the one
+		// the browser held, and answers a 303 to the record's page the sign-in started from.
+		{http.MethodGet, "/signin/callback", signInAuth((*approval.Page).ServeCallback)},
+		// Sign out of the approval page, from the broker's own origin only: the session ends and
+		// its cookie is cleared, and the answer links back to the record.
+		{http.MethodPost, "/signin/logout", signInAuth((*approval.Page).ServeLogout)},
+		// Report the broker's sign-in: whether its sign-in provider accepted the broker's own
+		// client at the last hourly check and when, when a person last signed in, when a
+		// sign-in last failed and the coded reason it failed with, and when a decision was last
+		// made on the approval page. It needs no credential because a production check fetches
+		// it from a pod where no person is signed in, and because it names no login, no secret
+		// and no provider's message: every word it answers is one of two closed sets this
+		// broker chose (internal/broker/store's signin_status). It spends its source address's
+		// bucket in its own handler, as the page's routes spend it in authenticate, so this read
+		// of the broker's own row is metered too.
+		{http.MethodGet, "/signin/status", public((*server).signInStatus)},
+		// The approval page's one stylesheet, embedded in the broker; it needs no credential and
+		// spends no rate-limit bucket, since every page it dresses is read before anyone has
+		// signed in and the bytes are the binary's.
+		{http.MethodGet, "/approve/assets/approve.css", public((*server).approvalStylesheet)},
 		// Report whether the broker can reach its database. From SIGTERM onward it answers 503
 		// SHUTTING_DOWN instead (Deps.Draining) while the process goes on serving every other route,
 		// which is what takes a stopping pod out of its Service's endpoints before it stops

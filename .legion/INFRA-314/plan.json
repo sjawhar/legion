@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-314",
+  "completed": "2026-10-31T02:17:00Z",
+  "plan": "dispatch://INFRA-314/artifact/plan-md@v3",
+  "scope": "Rollout step 1 (expand) only, in sjawhar/legion, on PR sjawhar/legion#2198. It proves A1-A12 and the sjawhar/legion documents of A16 that step 1 changes. A13, A14, A15 and A16's step-3 git-grep ban list belong to the architect's child issues (steps 0, 2a, 2b, 3, 4) and are not gates on this head: at this head Dispatch's record page, its machine-login page, its record-read/approve/deny/machine-lookup routes and the broker's GET /v1/credential-requests/{record} and POST /v1/machine-logins/lookup must all still be present.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase charter, plus references/conflicts-and-rewrites.md for the forward merge of main@origin into legion/INFRA-314 and the unchanged-diff fingerprint (the plan's P0-P5), references/pr-body.md for the two E2E lines, the proof array and the one simplify pass, references/default-branch-check.md before every push, references/cleanup-deletion.md for W10's removal of cmd/agent-secrets-devrelay, references/skip-checks-trailer.md (every push of this branch is a code push and carries no trailer), references/tools.md for the Postgres and Playwright harness on the issue volume and the packages a gVisor pod cannot run, references/findings.md for anything found outside this issue.",
+      "ce-simplify-code: once, at the first implementing round, after the implementer's own proof and before completing that round; the diff touches runtime code in packages/envoy and packages/dispatch.",
+      "dispatch-first, then dispatch: any message, comment or ask on INFRA-314, with a search first.",
+      "asd-ste100: the pull-request body and any message a person reads."
+    ],
+    "test": [
+      "legion-worker: references/pr-body.md defines the tester's own run of the application (the live broker binary test and the Dispatch browser suite the plan's section 6 names, then break attempts) and its proof array, and says CI is read at the head for lint, types and the unit suites rather than re-run; references/tools.md for the same Postgres harness and for the cmd/agent-secrets, cmd/agent-secrets-helper and internal/broker/helper packages a pod cannot run under gVisor; references/conflicts-and-rewrites.md for the fingerprint if the implementer merges the base again.",
+      "dispatch: reporting a failure or a no-surface item on INFRA-314.",
+      "Read section 1 of the plan before judging: A13, A14, A15 and A16's step-3 grep are the child issues' gates, and the step-3 surfaces still present at this head are correct, not a defect."
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md for the review round and the approval of the head by SHA, references/review-threads.md for thread dispositions, references/pr-body.md to check both E2E lines against the plan's section 6 surfaces and negative controls, references/conflicts-and-rewrites.md to read the forward-merge comment and the fingerprint the implementer posts.",
+      "ce-simplify-code: to judge the implementer's recorded simplify pass at the reviewed head.",
+      "Read sections 1, 4 and 7 of the plan: the step-1/step-3 line, the thirteen decisions, and the post-integration audit whose output the forward-merge comment carries."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "The branch built an \"approvals off\" mode (the four BROKER_SIGNIN_* all-or-none, 503 on every page route when none is set: approval/approval.go:74-77, api/routes_table.go:90, cmd/broker/main.go:183-184, pinned by two tests and four documents). The spec decides the opposite: a broker without the four settings does not start.",
+        "answer": "Plan W5 and decision D1 remove the mode across config, server, route table, boot log, cmd/broker/main_test.go's productionEnv, config_test.go's validEnv and TestLoadRequiresMachineLoginURL, and the four documents; A10's row in section 6 is its proof."
+      },
+      {
+        "finding": "GET /approve/{record} reads the record and answers 404 before it checks the session (approval/page.go:102-108 before :113), the reverse of the spec's order, so a child issue's A13 probe (GET /approve/<64 random hex> from a pod with no person) would get 404 instead of a 302 to Google.",
+        "answer": "Decision D2 fixes the order to id shape, then session, then record: a well-formed unknown id with no session redirects to the issuer without login_hint, with a live session answers 404, and a malformed id answers 400 whatever the session. The binary test asserts all three (section 6, A1/A2)."
+      },
+      {
+        "finding": "\"No service route decides\" is unbuilt for machine logins and cannot refuse \"before they check the caller\" while the routes are accountAuth: an unauthenticated caller gets 401 (api/server.go:201, pinned at api/api_test.go:1079) and an unlisted pod gets 403 ACCOUNT_NOT_LISTED, neither of which is the code A13 reads.",
+        "answer": "Decision D3 and W4 make POST /v1/credential-requests/{record}/approve and /deny public and answer 403 DECIDE_ON_BROKER_PAGE with the page URL for every caller and every record, before any authentication or record read, with no database read."
+      },
+      {
+        "finding": "A lapsed session on POST /approve or POST /machine has no spec text and no acceptance line, and the branch's message page carries no link at all (page.go:313-316 never sets .Link) while form-action 'self' forbids answering a form post with a 302 to Google.",
+        "answer": "Decision D4: answer 200 with an <a href> to /approve/<the first record the form named> or to /machine, writing nothing. Decision D5 settles the POST /machine half: the typed code is not carried through the sign-in, since that would put a live code in a URL or a cookie; the person retypes a code that lives 15 minutes."
+      },
+      {
+        "finding": "Rate limiting POST /machine exists only in the architect's notes; moving the code lookup from an accountAuth route to a page any signed-in person reaches changes who can enumerate codes and who can read a pending login's facts, and ratelimit.Keyed is per-process while the spec demands Postgres for the status.",
+        "answer": "Decision D6: key the limit on the session's login with the existing ratelimit.Keyed, because a limit bounds work each replica does for itself while the status reports a fact that must read the same everywhere; and close the disclosure half at the page, which shows a person record.MayDecide does not admit \"not yours to decide\" and none of the login's facts."
+      },
+      {
+        "finding": "GET /signin/status names its fields but not its table, its reader, its retention or who may call it; two replicas both run the hourly check and write, and \"the time of the last decision made on a page\" would grow without bound as a row per decision.",
+        "answer": "Plan W6/W7 and decision D8: a public route (A13 fetches it from a pod with no person), one upserted row in 0021_signin_status.up.sql so nothing grows and nothing sweeps, and a closed vocabulary of failure reason codes (invalid_client, unauthorized_client, redirect_uri_mismatch, invalid_grant, issuer_unreachable, bad_issuer, bad_audience, bad_signature, bad_nonce, not_in_domain, email_not_verified) so no provider message can carry a login or a secret into a public answer and step 2's revert trigger has an exact string."
+      },
+      {
+        "finding": "The operator's \"end all sessions of a login\" subcommand does not exist, the binary refuses every argument (cmd/broker/main.go:100-102), the store has no delete-by-login, and A2 cannot be proven without it.",
+        "answer": "Plan W8 and decision D9: broker end-sessions <login>, parsed before flag.Parse(), which does not migrate (Dispatch's precedent, cmd/dispatch/main.go:118-121), reuses the IAM token minter, prints the count, binds no listener, and exits 2 on an unknown subcommand; store.DeleteBrowserSessionsForLogin. A2's row in section 6 names the ended session among its refusals."
+      },
+      {
+        "finding": "GET /approve/<a machine-login record> is undefined by the spec, and the branch renders a note linking BROKER_MACHINE_LOGIN_URL (templates/record.html:53-54, page.go:237), which step 1 leaves empty, so the page would emit href=\"\".",
+        "answer": "Decision D10: answer 303 to /machine, since Dispatch's old record page forwards both kinds and so makes the case reachable, and delete the note and its MachineLoginURL field."
+      },
+      {
+        "finding": "Step 1 requires Dispatch's machine-login page to \"send the browser to the broker page when the broker names one\", but nothing in Dispatch names it: the page holds no record until a code is typed, and the broker sets approve_url on secret-request rows only.",
+        "answer": "Decision D7 and W3/W9: the broker's pendingResponse gains a top-level machine_page_url, which Dispatch already relays verbatim as json.RawMessage, so the SPA's existing credentialPendingQuery carries it with no new Dispatch route; the page replaces its location on load when it is present. A machine-login pending row also gains its own approve_url, so the Inbox row is two clicks like a secret request's."
+      },
+      {
+        "finding": "The branch's CSP carries an extra img-src 'self' (approval/approval.go:234, pinned at rig_test.go:355) while A1 and A13 both pin \"the headers of the Design\", whose string has five directives.",
+        "answer": "Decision D11: drop img-src, since default-src 'none' already blocks images and no page shows one, and hold the header in one exported constant the Go test asserts and the operator document quotes, so this head and a child's production check cannot drift."
+      },
+      {
+        "finding": "Removing agent-secrets-devrelay in step 1 removes the only non-browser way to approve a machine login and breaks a real end-to-end test on a real Postgres (cmd/agent-secrets-devrelay/main_test.go:203-253) plus the documented local run.",
+        "answer": "Plan W10 moves that test into the broker's own package, where it drives POST /machine through brokertest.Browser rather than being deleted, and rewrites scripts/dev-broker.sh, its test, run-locally.md and approve-a-request.md around the page. The local run's scripted approval becomes a browser step, which the spec's \"the broker binary has no route that decides for a test\" requires."
+      },
+      {
+        "finding": "A7, A10's status half, A2's operator-subcommand clause, A11's old-binary clause and A12's red run cannot be proven on a surface that exists today.",
+        "answer": "W2/W3 build the /machine pages and move brokertest's DecideMachineLogin to them (A7); W6/W7 build the status and the client check (A10); W8 builds the subcommand (A2); decision D12 builds the pre-step-1 binary and the red browser run from a throwaway clone of main@origin under $TMPDIR (A11, A12). Section 6 gives each the command."
+      },
+      {
+        "finding": "A12's \"a build of the commit before step 1\" names no commit a machine can resolve: the merge base is 371 commits behind and its tree cannot run the browser harness, which is a main-side file.",
+        "answer": "Decision D12 defines it as main@origin at the run, recorded by its 12-hex SHA, with both runs quoted on the pull request. The same definition serves A11."
+      },
+      {
+        "finding": "A16's media-rig clause belongs to no step in the architect's split, and the rig may be unrunnable in a pod (the previous implementer recorded that it needs sudo and SO_PEERPIDFD, which gVisor refuses).",
+        "answer": "Plan W12 puts the rig's code and screenshots in step 1 and requires the implementer to attempt the rig in the pod and, if it refuses for that reason, quote the refusal to the architect with envoy_publish rather than skip it, per pr-body.md's \"When no surface reaches the changed path\". The architect decides whether the narrated recording becomes a child issue."
+      },
+      {
+        "finding": "The step-1/step-3 split leaves states a user or operator would meet as broken: Dispatch's machine page with buttons the step-1 broker refuses, operate.md still giving BROKER_MACHINE_LOGIN_URL in a copy-paste block and calling the sign-in settings optional, boot tests without the four settings, tests step 3 will delete, the step-3 deletions the branch already made, and the 0019 migration collision.",
+        "answer": "Ordering rule 3 in section 5 puts W4 before W9 so the forward exists before the route refuses; W11 fixes operate.md:33 and :164-168; W5 fixes the boot and config tests; W1 restores the step-3 deletions (P1 for whole files, P4 for in-file symbols); P3 renumbers the migration to 0020 and runs TestMigrationSetIsNumberedOneToN immediately after the merge, since the collision merges with no conflict marker."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": []
+}

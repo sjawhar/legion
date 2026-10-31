@@ -3,7 +3,8 @@
 // test controls, the minting side a Kubernetes pod's projected service-account
 // token would come from, and, once EnableCodeFlow arms it, the authorization,
 // token and revocation endpoints a person's sign-in goes through
-// (authorization code, refresh token, RFC 7009 revocation). It is an ordinary
+// (authorization code with optional PKCE S256, refresh token, RFC 7009
+// revocation). It is an ordinary
 // package rather than a _test.go file so the packages that need it —
 // internal/oidc, internal/dispatch/api, internal/dispatch/routes,
 // internal/dispatch/store, cmd/dispatch and cmd/listener — can all import it;
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
+	"golang.org/x/oauth2"
 )
 
 // TB is the part of *testing.T this package uses. Taking the interface keeps
@@ -75,14 +77,21 @@ type Issuer struct {
 	codeFlow          *codeFlow
 }
 
-// codeFlow is the state of the authorization and token endpoints: the one
-// client they serve, the key ID tokens are signed with, the sign-ins queued for
-// the next authorization requests and the one used when none is queued, and the
-// codes and refresh tokens issued.
+// codeFlowClient is one confidential client the code flow serves: its secret,
+// and the key the ID tokens issued to it are signed with.
+type codeFlowClient struct {
+	key          *Key
+	clientSecret string
+}
+
+// codeFlow is the state of the authorization and token endpoints: the
+// confidential clients they serve, keyed by client id, the sign-ins queued for
+// the next authorization requests and the one used when none is queued, and
+// the codes and refresh tokens issued. Everything that is not a client's own is
+// the issuer's, shared by every client it serves: one queue of sign-ins, one
+// token failure, one revocation state.
 type codeFlow struct {
-	key             *Key
-	clientID        string
-	clientSecret    string
+	clients         map[string]*codeFlowClient
 	queued          []map[string]any
 	signInByDefault map[string]any
 	codes           map[string]codeGrant
@@ -90,6 +99,12 @@ type codeFlow struct {
 	refreshes       int
 	token           tokenFailure
 	revocation      revocation
+	// omitRefresh makes a code exchange answer with no refresh token
+	// (OmitRefreshTokens).
+	omitRefresh bool
+	// spoil changes the claims of every ID token the token endpoint mints,
+	// after the issuer has filled them in (SpoilIDTokens).
+	spoil func(claims map[string]any)
 }
 
 // tokenFailure is how the token endpoint answers every grant instead of
@@ -114,21 +129,29 @@ type revocation struct {
 	delay    time.Duration
 }
 
+// codeGrant is one authorization code: the client it was issued to, the person
+// it signs in, the nonce and redirect URI of the authorization request that
+// issued it, and the PKCE S256 code_challenge that request carried, empty when
+// it carried none.
 type codeGrant struct {
+	clientID    string
 	claims      map[string]any
 	nonce       string
 	redirectURI string
+	challenge   string
 }
 
-// refreshGrant is one refresh token: the claims each refresh's ID token
-// carries, which UpdateGrants changes the way a pool changes a user, and
-// whether RevokeGrants has ended it.
+// refreshGrant is one refresh token: the client it was issued to, the claims
+// each refresh's ID token carries, which UpdateGrants changes the way a pool
+// changes a user, and whether RevokeGrants has ended it.
 type refreshGrant struct {
-	claims  map[string]any
-	revoked bool
+	clientID string
+	claims   map[string]any
+	revoked  bool
 }
 
-// New starts an issuer serving no keys yet. The server is closed at cleanup.
+// New starts an issuer on a random loopback port, serving no keys yet. The
+// server is closed at cleanup.
 func New(t TB) *Issuer {
 	t.Helper()
 	issuer := &Issuer{mux: http.NewServeMux()}
@@ -229,19 +252,26 @@ func (i *Issuer) JWKSFetches() int {
 	return i.jwksRequests
 }
 
-// EnableCodeFlow arms the authorization and token endpoints for one confidential
-// client, signing every ID token they issue with key (which the caller
-// publishes).
+// EnableCodeFlow arms the authorization and token endpoints for one
+// confidential client, signing every ID token they issue to it with key (which
+// the caller publishes). Call it again with another client id to serve that
+// client too: one issuer holds a set of clients keyed by client id, each with
+// its own secret and signing key, while the queued sign-ins, the token failure
+// and the revocation state stay the issuer's own, shared by all of them. A
+// client id already served is replaced, and the codes and refresh tokens
+// already issued stand; a code or a refresh token is exchanged only by the
+// client it was issued to.
 func (i *Issuer) EnableCodeFlow(key *Key, clientID, clientSecret string) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.codeFlow = &codeFlow{
-		key:          key,
-		clientID:     clientID,
-		clientSecret: clientSecret,
-		codes:        map[string]codeGrant{},
-		grants:       map[string]*refreshGrant{},
+	if i.codeFlow == nil {
+		i.codeFlow = &codeFlow{
+			clients: map[string]*codeFlowClient{},
+			codes:   map[string]codeGrant{},
+			grants:  map[string]*refreshGrant{},
+		}
 	}
+	i.codeFlow.clients[clientID] = &codeFlowClient{key: key, clientSecret: clientSecret}
 }
 
 // OmitCodeFlowEndpoints makes the discovery document name no authorization or
@@ -315,6 +345,25 @@ func (i *Issuer) RevocationRequests() []string {
 	return append([]string(nil), i.codeFlow.revocation.requests...)
 }
 
+// OmitRefreshTokens makes every code exchange from now on answer with no
+// refresh token, as Google does for a sign-in that did not ask for offline
+// access.
+func (i *Issuer) OmitRefreshTokens() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.codeFlow.omitRefresh = true
+}
+
+// SpoilIDTokens makes change rewrite the claims of every ID token the token
+// endpoint mints from now on, after the issuer has set iss, aud, iat, exp and
+// the nonce, so a test can spoil one of them in a token the code flow
+// otherwise issues as usual. A nil change mints them unspoiled again.
+func (i *Issuer) SpoilIDTokens(change func(claims map[string]any)) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.codeFlow.spoil = change
+}
+
 // SignInAs queues the claims the next authorization request signs in with: the
 // person who completes the sign-in at the identity provider. The issuer adds
 // iss, aud, iat, exp and the request's nonce when it mints the ID token.
@@ -363,8 +412,8 @@ func (i *Issuer) Refreshes() int {
 
 // Authorize follows authURL the way a browser does through the identity
 // provider's sign-in, and returns the code and state the issuer redirects back
-// with. The person signed in is the one SignInAs queued, or SignInByDefault set
-// when none is queued.
+// with. The person signed in is the one SignInAs queued, or, when none is
+// queued, the one SignInByDefault set.
 func (i *Issuer) Authorize(t TB, authURL string) (code, state string) {
 	t.Helper()
 	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -457,29 +506,43 @@ func (i *Issuer) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(document)
 }
 
+// handleAuthorize issues a code for the next queued sign-in, or else the person
+// SignInByDefault set, and redirects to the request's redirect_uri with it and
+// the request's state. It records the client the code is for, the request's
+// nonce, for the ID token, and its PKCE code_challenge, which only the S256
+// method may carry: a challenge by any other method, plain included, is a bad
+// request, so a client that sends one never gets a code to exchange.
 func (i *Issuer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	flow := i.codeFlow
-	switch {
-	case flow == nil:
+	if flow == nil {
 		http.Error(w, "code flow not enabled", http.StatusNotFound)
 		return
-	case query.Get("client_id") != flow.clientID || query.Get("response_type") != "code" || query.Get("redirect_uri") == "":
+	}
+	clientID := query.Get("client_id")
+	switch {
+	case flow.clients[clientID] == nil || query.Get("response_type") != "code" || query.Get("redirect_uri") == "":
 		http.Error(w, "bad authorization request", http.StatusBadRequest)
+		return
+	case query.Has("code_challenge") && (query.Get("code_challenge") == "" || query.Get("code_challenge_method") != "S256"):
+		http.Error(w, "bad authorization request: code_challenge must be S256", http.StatusBadRequest)
 		return
 	case len(flow.queued) == 0 && flow.signInByDefault == nil:
 		http.Error(w, "no sign-in queued (SignInAs) and no default (SignInByDefault)", http.StatusBadRequest)
 		return
 	}
-	claims := maps.Clone(flow.signInByDefault)
-	if len(flow.queued) > 0 {
+	var claims map[string]any
+	switch {
+	case len(flow.queued) > 0:
 		claims = flow.queued[0]
 		flow.queued = flow.queued[1:]
+	default:
+		claims = maps.Clone(flow.signInByDefault)
 	}
 	code := randomValue()
-	flow.codes[code] = codeGrant{claims: claims, nonce: query.Get("nonce"), redirectURI: query.Get("redirect_uri")}
+	flow.codes[code] = codeGrant{clientID: clientID, claims: claims, nonce: query.Get("nonce"), redirectURI: query.Get("redirect_uri"), challenge: query.Get("code_challenge")}
 	target, err := url.Parse(query.Get("redirect_uri"))
 	if err != nil {
 		http.Error(w, "bad redirect_uri", http.StatusBadRequest)
@@ -494,8 +557,13 @@ func (i *Issuer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 
 // handleToken answers the two grants a confidential client makes, as Cognito's
 // token endpoint does: a code exchange returns an ID token, an access token and
-// a refresh token; a refresh returns a fresh ID token and access token and no
-// new refresh token.
+// a refresh token (none once OmitRefreshTokens is set); a refresh returns a
+// fresh ID token and access token and no new refresh token. Each grant is the
+// client's own: a code or a refresh token another client was issued is
+// invalid_grant. A code whose authorization request carried a PKCE challenge is
+// exchanged only with the code_verifier whose S256 is that challenge (RFC 7636
+// section 4.6); a missing or wrong verifier is invalid_grant, and spends the
+// code like any refusal.
 func (i *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		tokenError(w, http.StatusBadRequest, "invalid_request")
@@ -530,7 +598,8 @@ func (i *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
 	if !basic {
 		clientID, clientSecret = r.PostForm.Get("client_id"), r.PostForm.Get("client_secret")
 	}
-	if clientID != flow.clientID || clientSecret != flow.clientSecret {
+	client, served := flow.clients[clientID]
+	if !served || clientSecret != client.clientSecret {
 		tokenError(w, http.StatusUnauthorized, "invalid_client")
 		return
 	}
@@ -542,7 +611,14 @@ func (i *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
 	case "authorization_code":
 		grant, ok := flow.codes[r.PostForm.Get("code")]
 		delete(flow.codes, r.PostForm.Get("code"))
-		if !ok || grant.redirectURI != r.PostForm.Get("redirect_uri") {
+		if !ok || grant.clientID != clientID || grant.redirectURI != r.PostForm.Get("redirect_uri") {
+			tokenError(w, http.StatusBadRequest, "invalid_grant")
+			return
+		}
+		// A missing verifier is refused outright rather than hashed, so it can
+		// never match a recorded challenge.
+		verifier := r.PostForm.Get("code_verifier")
+		if grant.challenge != "" && (verifier == "" || oauth2.S256ChallengeFromVerifier(verifier) != grant.challenge) {
 			tokenError(w, http.StatusBadRequest, "invalid_grant")
 			return
 		}
@@ -550,12 +626,14 @@ func (i *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
 		if grant.nonce != "" {
 			claims["nonce"] = grant.nonce
 		}
-		refresh = randomValue()
-		flow.grants[refresh] = &refreshGrant{claims: maps.Clone(grant.claims)}
+		if !flow.omitRefresh {
+			refresh = randomValue()
+			flow.grants[refresh] = &refreshGrant{clientID: clientID, claims: maps.Clone(grant.claims)}
+		}
 	case "refresh_token":
 		flow.refreshes++
 		grant, ok := flow.grants[r.PostForm.Get("refresh_token")]
-		if !ok || grant.revoked {
+		if !ok || grant.revoked || grant.clientID != clientID {
 			tokenError(w, http.StatusBadRequest, "invalid_grant")
 			return
 		}
@@ -566,10 +644,13 @@ func (i *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now()
 	claims["iss"] = i.issuerClaim
-	claims["aud"] = flow.clientID
+	claims["aud"] = clientID
 	claims["iat"] = now.Add(-time.Minute).Unix()
 	claims["exp"] = now.Add(time.Hour).Unix()
-	idToken, err := sign(flow.key, claims)
+	if flow.spoil != nil {
+		flow.spoil(claims)
+	}
+	idToken, err := sign(client.key, claims)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -605,7 +686,8 @@ func (i *Issuer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clientID, clientSecret, basic := r.BasicAuth()
-	if !basic || clientID != flow.clientID || clientSecret != flow.clientSecret {
+	client, served := flow.clients[clientID]
+	if !basic || !served || clientSecret != client.clientSecret {
 		i.mu.Unlock()
 		tokenError(w, http.StatusUnauthorized, "invalid_client")
 		return
@@ -639,7 +721,7 @@ func (i *Issuer) handleRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	i.mu.Lock()
-	if grant, ok := flow.grants[token]; ok {
+	if grant, ok := flow.grants[token]; ok && grant.clientID == clientID {
 		grant.revoked = true
 	}
 	i.mu.Unlock()

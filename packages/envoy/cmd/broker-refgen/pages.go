@@ -59,7 +59,7 @@ func apiPage(a *api) (string, error) {
 	g, routes, classes := a.g, a.routes, a.classes
 	var b strings.Builder
 	b.WriteString(frontMatter("HTTP API", "Every route the secrets broker serves, the credential each needs, and what each answers.", apiDir))
-	b.WriteString("The broker answers JSON. A refusal is `{\"code\": \"…\", \"error\": \"…\"}` with the HTTP status below; the [error reference](/legion/broker/reference/errors/) lists every code.\n\n")
+	b.WriteString("The broker's API answers JSON. A refusal is `{\"code\": \"…\", \"error\": \"…\"}` with the HTTP status below, and a refusal that carries more lists its body under its route; the [error reference](/legion/broker/reference/errors/) lists every code. The broker's own approval page, whose routes take a broker sign-in session, answers a person's browser with HTML pages and redirects instead, listed by status.\n\n")
 
 	b.WriteString("## Authentication\n\nEach route takes one kind of credential, or none. These are the refusals the broker answers for the credential itself, before the route runs.\n\n")
 	b.WriteString("| Credential | Description | Refusals |\n| --- | --- | --- |\n")
@@ -90,13 +90,15 @@ func apiPage(a *api) (string, error) {
 			}
 			fmt.Fprintf(&b, "- Path parameters: %s\n", strings.Join(names, ", "))
 		}
-		var queries, bodies, successes, answers []string
+		var queries, bodies, successes, answers, pages []string
 		for _, o := range outs {
 			switch {
 			case o.Query != "":
 				queries = union(queries, []string{"`" + o.Query + "`"})
 			case o.BodyType != "":
 				bodies = union(bodies, []string{o.BodyType})
+			case o.Page:
+				pages = union(pages, []string{fmt.Sprintf("`%d`", o.Status)})
 			case o.Code == "" && o.Status != 0:
 				successes = union(successes, []string{fmt.Sprintf("`%d`", o.Status)})
 				if o.RespType != "" {
@@ -114,7 +116,14 @@ func apiPage(a *api) (string, error) {
 				fmt.Fprintf(&b, "- Success: %s\n", strings.Join(successes, ", "))
 			}
 		}
-		fmt.Fprintf(&b, "- Source: `%s`\n", g.src.at(g.funcs[r.Handler]))
+		if len(pages) > 0 {
+			fmt.Fprintf(&b, "- Answers (an HTML page, or a redirect): %s\n", strings.Join(pages, ", "))
+		}
+		hg, fn, err := g.handler(r)
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&b, "- Source: `%s`\n", hg.src.at(fn))
 		for _, typeName := range bodies {
 			ref, err := g.localStruct(typeName)
 			if err != nil {
@@ -157,6 +166,19 @@ func apiPage(a *api) (string, error) {
 			b.WriteString("\nRefusals:\n\n| Status | Code | Message |\n| --- | --- | --- |\n")
 			for _, o := range refused {
 				fmt.Fprintf(&b, "| %d | `%s` | %s |\n", o.Status, o.Code, messages(o.Messages))
+			}
+			for _, o := range refused {
+				if o.RespType == "" {
+					continue
+				}
+				ref, err := g.localStruct(o.RespType)
+				if err != nil {
+					return "", err
+				}
+				fmt.Fprintf(&b, "\nThe `%s` refusal's body (JSON):\n\n", o.Code)
+				if err := g.writeFields(&b, ref, ""); err != nil {
+					return "", err
+				}
 			}
 		}
 	}

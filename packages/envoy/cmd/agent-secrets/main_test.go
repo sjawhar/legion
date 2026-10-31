@@ -118,20 +118,34 @@ func (c *brokerCounters) servedSettings() *Settings {
 }
 
 // fakePending are fakeBroker's never-resolving pending requests, keyed by the name that asks for
-// each: its request id, its record, and the approver its answers carry. PENDING_UNNAMED's carry
-// none, as a broker from before the approver field answers.
-var fakePending = map[string]struct{ requestID, recordID, approver string }{
-	"PENDING_ME":      {"req-pending", "rec-pending-1", "ada@example.com"},
-	"PENDING_ANYONE":  {"req-pending-anyone", "rec-pending-anyone", record.AnyoneApprover},
-	"PENDING_UNNAMED": {"req-pending-unnamed", "rec-pending-unnamed", ""},
+// each: its request id, its record, the approver its answers carry, and whether they carry the
+// record's page on the broker as approve_url, <fake broker>/approve/<record>. The *_OLDER ones
+// answer as a broker from before that page, and the *_UNNAMED ones as brokers from before the
+// approver field, which name no approver. No real broker answers with the page and no approver,
+// since approve_url is the newer field, but the waiting line has a sentence for that pair and
+// PENDING_UNNAMED is what checks it.
+var fakePending = map[string]struct {
+	requestID, recordID, approver string
+	page                          bool
+}{
+	"PENDING_ME":            {"req-pending", "rec-pending-1", "ada@example.com", true},
+	"PENDING_ANYONE":        {"req-pending-anyone", "rec-pending-anyone", record.AnyoneApprover, true},
+	"PENDING_UNNAMED":       {"req-pending-unnamed", "rec-pending-unnamed", "", true},
+	"PENDING_ME_OLDER":      {"req-pending-older", "rec-pending-older", "ada@example.com", false},
+	"PENDING_ANYONE_OLDER":  {"req-pending-anyone-older", "rec-pending-anyone-older", record.AnyoneApprover, false},
+	"PENDING_UNNAMED_OLDER": {"req-pending-unnamed-older", "rec-pending-unnamed-older", "", false},
 }
 
-// pendingAnswer is fakeBroker's answer for a fakePending entry, request fields included or not.
-func pendingAnswer(name string, request bool) map[string]any {
+// pendingAnswer is fakeBroker's answer for a fakePending entry, request fields included or not;
+// base is the fake broker's own URL, which its approve_url names.
+func pendingAnswer(name, base string, request bool) map[string]any {
 	p := fakePending[name]
 	answer := map[string]any{"state": "pending", "grant_id": nil, "record_id": p.recordID}
 	if p.approver != "" {
 		answer["approver"] = p.approver
+	}
+	if p.page {
+		answer["approve_url"] = base + "/approve/" + p.recordID
 	}
 	if request {
 		answer["request_id"] = p.requestID
@@ -190,8 +204,9 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 				"secrets":  []map[string]string{{"name": name, "decision": "automatic"}},
 				"grant_id": "grant-granted", "record_id": nil, "approver": nil,
 			})
-		case "PENDING_ME", "PENDING_ANYONE", "PENDING_UNNAMED":
-			writeJSON(w, pendingAnswer(name, true))
+		case "PENDING_ME", "PENDING_ANYONE", "PENDING_UNNAMED",
+			"PENDING_ME_OLDER", "PENDING_ANYONE_OLDER", "PENDING_UNNAMED_OLDER":
+			writeJSON(w, pendingAnswer(name, audience, true))
 		case "APPROVED_ME":
 			writeJSON(w, map[string]any{
 				"request_id": "req-approved", "state": "granted",
@@ -250,7 +265,7 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 				return
 			}
 		}
-		writeJSON(w, pendingAnswer(name, false))
+		writeJSON(w, pendingAnswer(name, audience, false))
 	})
 	mux.HandleFunc("POST /v1/grants/grant-granted/values", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
@@ -433,39 +448,56 @@ func TestExecFormGrantRunsChildWithValueInEnvironment(t *testing.T) {
 	}
 }
 
-// pendingSentences is the sentence each fakePending request's wait names whom it waits on and where
-// they decide it with, keyed by the name that asks for it and then by AGENT_SECRETS_APPROVE_URL:
-// unset (the Inbox), or the record's page under https://dispatch.example/. PENDING_UNNAMED's
-// broker names no approver, so its sentence says so.
+// pendingSentences is the sentence each fakePending request's wait names whom it waits on and
+// where they decide it with, keyed by the name that asks for it and then by
+// AGENT_SECRETS_APPROVE_URL: unset, or Dispatch's origin. <broker> stands for the fake broker's
+// URL. A request whose answer carries approve_url names that page on the broker, whatever
+// AGENT_SECRETS_APPROVE_URL says. One from an older broker, which carries none, names the
+// record's Dispatch page under that setting, and the Inbox's Credential requests section when it
+// is unset. The *_UNNAMED brokers name no approver, so their sentences say so.
 var pendingSentences = map[string]map[string]string{
 	"PENDING_ME": {
-		"":                          "waiting for ada@example.com to approve it under Credential requests in their Dispatch Inbox",
-		"https://dispatch.example/": "waiting for ada@example.com to approve it in Dispatch: https://dispatch.example/credentials/rec-pending-1",
+		"":                          "waiting for ada@example.com to approve it on the secrets broker: <broker>/approve/rec-pending-1",
+		"https://dispatch.example/": "waiting for ada@example.com to approve it on the secrets broker: <broker>/approve/rec-pending-1",
 	},
 	"PENDING_ANYONE": {
-		"":                          "waiting for anyone signed in to Dispatch to approve it under Credential requests in their Inbox",
-		"https://dispatch.example/": "waiting for anyone signed in to Dispatch to approve it: https://dispatch.example/credentials/rec-pending-anyone",
+		"":                          "waiting for anyone signed in to the secrets broker to approve it: <broker>/approve/rec-pending-anyone",
+		"https://dispatch.example/": "waiting for anyone signed in to the secrets broker to approve it: <broker>/approve/rec-pending-anyone",
 	},
 	"PENDING_UNNAMED": {
+		"":                          "waiting for approval on the secrets broker: <broker>/approve/rec-pending-unnamed; the broker does not say whose",
+		"https://dispatch.example/": "waiting for approval on the secrets broker: <broker>/approve/rec-pending-unnamed; the broker does not say whose",
+	},
+	"PENDING_ME_OLDER": {
+		"":                          "waiting for ada@example.com to approve it under Credential requests in their Dispatch Inbox",
+		"https://dispatch.example/": "waiting for ada@example.com to approve it in Dispatch: https://dispatch.example/credentials/rec-pending-older",
+	},
+	"PENDING_ANYONE_OLDER": {
+		"":                          "waiting for anyone signed in to Dispatch to approve it under Credential requests in their Inbox",
+		"https://dispatch.example/": "waiting for anyone signed in to Dispatch to approve it: https://dispatch.example/credentials/rec-pending-anyone-older",
+	},
+	"PENDING_UNNAMED_OLDER": {
 		"":                          "waiting for approval under Credential requests in the Dispatch Inbox; the broker does not say whose",
-		"https://dispatch.example/": "waiting for approval in Dispatch: https://dispatch.example/credentials/rec-pending-unnamed; the broker does not say whose",
+		"https://dispatch.example/": "waiting for approval in Dispatch: https://dispatch.example/credentials/rec-pending-unnamed-older; the broker does not say whose",
 	},
 }
 
 // TestExecFormPendingExitsSeventyFiveWithNoChild also pins what the wait says, and that it says it
 // before it waits: the request id and the bound, then whom it waits on and where they decide it —
-// the approver the broker names (a person, or anyone signed in to Dispatch), and the record's
-// Dispatch page under AGENT_SECRETS_APPROVE_URL, or the Inbox when that is unset. The fake broker
-// holds the first status poll until the test has read those two lines from the command's stderr,
-// so lines printed only once the wait ends never arrive in time.
+// the approver the broker names (a person, or anyone signed in), and the record's page on the
+// broker its answer names as approve_url. An older broker names none, and the line names the
+// record's Dispatch page under AGENT_SECRETS_APPROVE_URL, or the Inbox when that is unset. The
+// fake broker holds the first status poll until the test has read those two lines from the
+// command's stderr, so lines printed only once the wait ends never arrive in time.
 func TestExecFormPendingExitsSeventyFiveWithNoChild(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	broker, counters := fakeBroker(t)
 	defer broker.Close()
 	keyDir := newKeyDir(t)
 
-	for _, name := range []string{"PENDING_ME", "PENDING_ANYONE", "PENDING_UNNAMED"} {
-		for approveURL, sentence := range pendingSentences[name] {
+	for name, sentences := range pendingSentences {
+		for approveURL, sentence := range sentences {
+			sentence = strings.ReplaceAll(sentence, "<broker>", broker.URL)
 			t.Run(name+" "+approveURL, func(t *testing.T) {
 				requestID := fakePending[name].requestID
 				announced := make(chan struct{})
@@ -530,7 +562,8 @@ func TestExecFormPendingExitsSeventyFiveWithNoChild(t *testing.T) {
 
 // TestRequestAndStatusNameWhomAPendingRequestWaitsOn pins the text forms of request and status for
 // a pending request: after its id and state, the same sentence the exec form's wait prints, naming
-// the approver the broker names and where they decide it; request exits 75 and status 0, as
+// the approver the broker names and where they decide it (the broker's approve_url, or the
+// record's Dispatch page or the Inbox for an older broker); request exits 75 and status 0, as
 // before.
 func TestRequestAndStatusNameWhomAPendingRequestWaitsOn(t *testing.T) {
 	binary := buildAgentSecrets(t)
@@ -538,8 +571,9 @@ func TestRequestAndStatusNameWhomAPendingRequestWaitsOn(t *testing.T) {
 	defer broker.Close()
 	keyDir := newKeyDir(t)
 
-	for _, name := range []string{"PENDING_ME", "PENDING_ANYONE", "PENDING_UNNAMED"} {
-		for approveURL, sentence := range pendingSentences[name] {
+	for name, sentences := range pendingSentences {
+		for approveURL, sentence := range sentences {
+			sentence = strings.ReplaceAll(sentence, "<broker>", broker.URL)
 			t.Run(name+" "+approveURL, func(t *testing.T) {
 				env := []string{"AGENT_SECRETS_APPROVE_URL=" + approveURL}
 				requestID := fakePending[name].requestID

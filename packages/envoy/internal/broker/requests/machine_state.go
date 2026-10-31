@@ -7,8 +7,8 @@
 // guarded by state='pending' inside one transaction that also writes the audit row, so a duplicate
 // or late decision changes nothing. A request that needs approval also freezes an append-only
 // credential-request record (internal/broker/record): the requester's signed request object plus
-// the broker's decision fields. The record is decided by a Dispatch login, which Dispatch's server
-// sends on the UI routes and its listed ServiceAccount (BROKER_API_ACCOUNTS) vouches for: its
+// the broker's decision fields. The record is decided by a person signed in to the broker's own
+// approval page (internal/broker/approval), whose session names the login that decides it: its
 // approver's, or anyone's for a record whose approver is record.AnyoneApprover. Every release of a
 // grant it produced re-verifies the whole chain — record hash, requester signature, one approval
 // by a login the record allows — so a row written by anyone but the broker releases nothing.
@@ -591,19 +591,20 @@ func (m *Machine) expirePending(ctx context.Context, now time.Time) ([]store.End
 	return expired, nil
 }
 
-// ApplyDecision decides a pending agent_secret record by login, the Dispatch login of the human
-// deciding it. approve=true mints the grant while the requesting enrollment is still live;
-// otherwise the request is denied. It re-reads the record body, recomputes its id, refuses any
-// login but the record's own approver (record.ErrNotApprover) whatever the record's state, and an
-// approval by any login the current policy would not have approve one of the request's names
-// (currentPolicyAdmits). A denial releases nothing, so the record's approver may still deny a
-// request an owner change left them unable to approve. It re-verifies the embedded request
-// object, and writes the event (naming that login), the request transition and the audit row in
-// one transaction. For its approver, a record that expired undecided — expired by the sweeper, or
-// past its pending_expires_at before the sweeper got to it — is ErrExpired, and any other
-// non-pending record ErrTerminal: a duplicate or late decision changes nothing. The enrollment row
-// is locked before the request row — the same order every other enrollment-then-request writer in
-// this package takes them in, so none of them deadlock.
+// ApplyDecision decides a pending agent_secret record by login, the login of the person deciding
+// it on the broker's own approval page (approval.Page.decide, its one caller). approve=true mints
+// the grant while the requesting enrollment is still live; otherwise the request is denied. It
+// re-reads the record body, recomputes its id, refuses any login but the record's own approver
+// (record.ErrNotApprover) whatever the record's state, and an approval by any login the current
+// policy would not have approve one of the request's names (currentPolicyAdmits). A denial
+// releases nothing, so the record's approver may still deny a request an owner change left them
+// unable to approve. It re-verifies the embedded request object, and writes the event (naming
+// that login), the request transition and the audit row in one transaction. For its approver, a
+// record that expired undecided — expired by the sweeper, or past its pending_expires_at before
+// the sweeper got to it — is ErrExpired, and any other non-pending record ErrTerminal: a
+// duplicate or late decision changes nothing. The enrollment row is locked before the request row
+// — the same order every other enrollment-then-request writer in this package takes them in, so
+// none of them deadlock.
 func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bool, login string) (Decision, error) {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {

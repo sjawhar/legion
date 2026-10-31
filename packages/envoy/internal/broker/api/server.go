@@ -10,12 +10,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/sjawhar/envoy/internal/broker/approval"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/oauth"
@@ -79,7 +79,8 @@ type Deps struct {
 	// TokenLimit bounds POST /v1/oauth/token per source address; nil means DefaultTokenLimit.
 	TokenLimit *ratelimit.Limit
 	// AccountLimit bounds every route accountAuth authenticates per source address, in one bucket
-	// the whole class shares and spent before the caller's token is verified; nil means
+	// the whole class shares and spent before the caller's token is verified, and with it the
+	// approval page's routes and the sign-in's (authenticate, signInStatus); nil means
 	// DefaultAccountLimit.
 	AccountLimit *ratelimit.Limit
 	// TrustedProxyHeader names a request header (e.g. "X-Forwarded-For") the rate limiters'
@@ -98,6 +99,11 @@ type Deps struct {
 	DeviceLogin func(ctx context.Context, form url.Values, userCode string) error
 	// TokenHooks are the broker's steps around each token the provider issues.
 	TokenHooks oauth.TokenHooks
+	// Approval is the broker's own approval page and its sign-in (internal/broker/approval),
+	// which cmd/broker always builds, since config.Load requires BROKER_SIGNIN_*. Its routes,
+	// every one under /approve and /signin/, are mounted only when it is set, which leaves them
+	// off the mux of a test rig that wires no page.
+	Approval *approval.Page
 	// Draining reports whether this process has begun stopping, which GET /healthz answers 503
 	// SHUTTING_DOWN for while every other route goes on being served; nil means it never does.
 	//
@@ -121,7 +127,8 @@ type server struct {
 	rereadLimiter *ratelimit.Keyed
 	rereadOverall *ratelimit.Bucket
 	// tokenLimiter is TokenLimit applied per source address (clientAddress), over its route's own
-	// bucket, and accountLimiter AccountLimit, over the bucket every accountAuth route shares.
+	// bucket, and accountLimiter AccountLimit, over the bucket every accountAuth route and every
+	// route of the approval page share.
 	tokenLimiter   *ratelimit.Keyed
 	accountLimiter *ratelimit.Keyed
 }
@@ -166,6 +173,9 @@ func Register(mux *http.ServeMux, deps Deps) {
 		if deps.OAuth == nil && strings.HasPrefix(route.Pattern, oauthRoutes) {
 			continue
 		}
+		if deps.Approval == nil && (strings.HasPrefix(route.Pattern, approvalRoutes) || strings.HasPrefix(route.Pattern, signInRoutes)) {
+			continue
+		}
 		mux.HandleFunc(route.Method+" "+route.Pattern, func(w http.ResponseWriter, r *http.Request) {
 			who, ok := s.authenticate(w, r, route.Handler.auth)
 			if !ok {
@@ -179,11 +189,19 @@ func Register(mux *http.ServeMux, deps Deps) {
 // oauthRoutes prefixes the routes the OAuth provider serves, which Register mounts only with one.
 const oauthRoutes = "/v1/oauth/"
 
+// approvalRoutes and signInRoutes prefix the approval page's routes, which Register mounts only
+// with the page: every broker has one, and a rig that wires none serves those paths not at all.
+const (
+	approvalRoutes = "/approve"
+	signInRoutes   = "/signin/"
+)
+
 // authenticate proves who r comes from, as auth requires, or writes the refusal. A bad or missing
 // credential is a 401; a store that cannot answer is a 503 naming it, never mistaken for a bad
 // credential. A route a ServiceAccount token authenticates first spends its source address's
 // bucket (DefaultAccountLimit), a refusal being 429 RATE_LIMITED with Retry-After, so a flood of
-// forged tokens past that bucket costs no verification and no fetch of the issuer's keys.
+// forged tokens past that bucket costs no verification and no fetch of the issuer's keys. The
+// approval page's routes spend that same bucket, for the same reason: see the authSignIn case.
 func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth routeAuth) (caller, bool) {
 	switch auth {
 	case authNone:
@@ -193,6 +211,20 @@ func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth route
 			return caller{}, false
 		}
 		return s.accountCaller(w, r)
+	case authSignIn:
+		// The page's routes and the sign-in's spend the bucket the account class spends, so no
+		// caller drives them unmetered either. GET /approve/{record} with no session does one
+		// record read and hands the caller a valid __Host-broker-signin cookie; GET
+		// /signin/callback with that cookie's own state makes the broker send a token request to
+		// its sign-in provider, with the broker's client credentials, and write the failed
+		// sign-in row; and POST /approve and POST /signin/logout each read and write a session's
+		// row. GET /signin/status spends it in its own handler, being public, and the page's
+		// stylesheet spends nothing: it is bytes of the binary, and every page is read under it.
+		if s.refuseAccountAddress(w, r) {
+			return caller{}, false
+		}
+		session, ok := s.deps.Approval.Authenticate(w, r)
+		return caller{signIn: session}, ok
 	case authLauncher:
 		subject, err := s.proofSubject(r)
 		switch {
@@ -331,16 +363,12 @@ func pathUUID(w http.ResponseWriter, r *http.Request, name, code, what string) (
 	return id, true
 }
 
-// recordIDPattern matches a credential-request record id: content-addressed lowercase-hex
-// SHA-256, never a UUID (record.Body.ID).
-var recordIDPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
-
 // pathRecordID reads the {name} path segment as a credential-request record id, or refuses it
-// with 400 code: record ids are lowercase-hex sha256 hashes, so pathUUID's check would wrongly
-// reject every valid one.
+// with 400 code: record ids are lowercase-hex sha256 hashes (record.ValidID), so pathUUID's check
+// would wrongly reject every valid one.
 func pathRecordID(w http.ResponseWriter, r *http.Request, name, code string) (string, bool) {
 	id := r.PathValue(name)
-	if !recordIDPattern.MatchString(id) {
+	if !record.ValidID(id) {
 		writeError(w, http.StatusBadRequest, code, "record ids are lowercase-hex sha256 hashes")
 		return "", false
 	}
@@ -362,6 +390,39 @@ func writeError(w http.ResponseWriter, status int, code, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(map[string]string{"code": code, "error": msg})
+}
+
+// pageRefusal is the body of a refusal that names the approval page where a person decides the
+// record instead, beside the code and error every refusal carries.
+type pageRefusal struct {
+	// The refusal's code.
+	Code string `json:"code"`
+	// What was refused, naming the page.
+	Error string `json:"error"`
+	// The record's page on the broker's own approval page, <BROKER_PUBLIC_URL>/approve/<record>.
+	ApproveURL string `json:"approve_url"`
+}
+
+// writePageRefusal is writeError for a refusal naming the record's approval page, approveURL,
+// which its body carries as approve_url (pageRefusal) for a caller to link.
+func writePageRefusal(w http.ResponseWriter, status int, code, msg, approveURL string) {
+	writeJSON(w, status, pageRefusal{Code: code, Error: msg, ApproveURL: approveURL})
+}
+
+// approveURL is recordID's page on the broker's own approval page (GET /approve/{record}), on the
+// public URL the broker resolved at boot: the one place a person signed in to the broker decides
+// a secret request, which every answer naming a pending one links.
+func (s *server) approveURL(recordID string) string {
+	return s.deps.PublicURL + "/approve/" + recordID
+}
+
+// pendingApproveURL is approveURL for a request's record while the request waits on it, and ""
+// for a request granted or denied at once (no record), and once it is no longer pending.
+func (s *server) pendingApproveURL(state string, recordID *string) string {
+	if state != "pending" || recordID == nil {
+		return ""
+	}
+	return s.approveURL(*recordID)
 }
 
 // writeInternal logs a failed operation with its error and answers 500 INTERNAL naming the
@@ -417,6 +478,60 @@ func (s *server) healthz(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, healthResponse{Status: "ok"})
+}
+
+// signInStatusResponse is GET /signin/status's answer, the broker's one signin_status row as it
+// stands. Every field is null for a fact that has never happened, so a reader never has to tell
+// a zero time from a real one, and no field holds free text: the two words that are not times
+// come from closed sets Postgres itself holds the broker to.
+type signInStatusResponse struct {
+	// What the last check of the broker's client at its sign-in provider found: "ready" (the
+	// provider accepted the client), "client_rejected" (it refused it, so nobody can sign in)
+	// or "issuer_unreachable" (it could not be asked, which says nothing about the client).
+	ClientCheck *string `json:"client_check"`
+	// When that check was taken (RFC 3339).
+	ClientCheckedAt *time.Time `json:"client_checked_at"`
+	// When a sign-in last completed.
+	LastSignInAt *time.Time `json:"last_sign_in_at"`
+	// When a sign-in last failed at the token exchange or at the ID-token check.
+	LastFailedSignInAt *time.Time `json:"last_failed_sign_in_at"`
+	// Why that sign-in failed, one of invalid_client, unauthorized_client,
+	// redirect_uri_mismatch, invalid_grant, issuer_unreachable, bad_issuer, bad_audience,
+	// bad_signature, bad_nonce, not_in_domain and email_not_verified.
+	LastFailedSignInReason *string `json:"last_failed_sign_in_reason"`
+	// When a decision was last made on the approval page.
+	LastDecisionAt *time.Time `json:"last_decision_at"`
+}
+
+// signInStatus answers the broker's sign-in status to any caller. It is read from Postgres on
+// every call rather than from this process's memory, so every replica and every restart answers
+// the same thing. It spends its source address's bucket first, the one the approval page's
+// routes and the routes a ServiceAccount token authenticates share (refuseAccountAddress,
+// DefaultAccountLimit), so no caller drives this read unmetered; the route takes no credential,
+// so nothing else bounds it.
+func (s *server) signInStatus(w http.ResponseWriter, r *http.Request) {
+	if s.refuseAccountAddress(w, r) {
+		return
+	}
+	status, err := s.deps.Enroll.Store.SignInStatus(r.Context())
+	if err != nil {
+		writeUnavailable(w, "DATABASE_UNAVAILABLE", "read the sign-in status", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, signInStatusResponse{
+		ClientCheck:            status.ClientCheckState,
+		ClientCheckedAt:        status.ClientCheckedAt,
+		LastSignInAt:           status.LastSignInAt,
+		LastFailedSignInAt:     status.LastFailedSignInAt,
+		LastFailedSignInReason: status.LastFailedSignInReason,
+		LastDecisionAt:         status.LastDecisionAt,
+	})
+}
+
+// approvalStylesheet serves the approval page's stylesheet (approval.ServeStylesheet) with no
+// credential, since every page it dresses is read before anyone has signed in.
+func (s *server) approvalStylesheet(w http.ResponseWriter, r *http.Request) {
+	approval.ServeStylesheet(w, r)
 }
 
 // strPtr is nil for "" and &s otherwise, for an optional wire field that is null rather than "".

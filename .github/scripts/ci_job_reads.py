@@ -79,10 +79,13 @@ def reads(*entries):
 
 
 def envoy_top_level_but_infra():
-    """packages/envoy/* and every top-level directory of it but infra, node_modules and testdata."""
+    """packages/envoy/* and every top-level directory of it but infra, node_modules, testdata and
+    out. The last three hold no tracked file, and a rule naming a directory that holds none is
+    refused: out is where packages/dispatch/e2e/run-broker.sh builds the broker binaries the
+    browser suite starts, so it exists on a checkout that has run that suite and nowhere else."""
     globs = [f"{ENVOY}/*"]
     for entry in sorted(Path(ENVOY).iterdir()):
-        if entry.is_dir() and entry.name not in {"infra", "node_modules", "testdata"}:
+        if entry.is_dir() and entry.name not in {"infra", "node_modules", "out", "testdata"}:
             globs.append(f"{ENVOY}/{entry.name}/**")
     return globs
 
@@ -352,6 +355,10 @@ SOAK_SCRIPT = "go test -tags serverchange -count=1 -timeout 15m -v -run TestServ
 RUN_SERVER = "packages/dispatch/e2e/run-server.sh"
 BUILD_BINARIES = "docs/site/scripts/build-binaries.sh"
 DISPATCH_SERVER_BUILD = "flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch"
+RUN_BROKER = "packages/dispatch/e2e/run-broker.sh"
+# One go build of the three commands the real broker's harness rows start, under a lock.
+BROKER_BUILD = 'flock "$bin/.build.lock" go build -o "$bin/" ./cmd/broker ./cmd/dev-oidc-issuer ./internal/broker/brokertest/requestseed'
+BROKER_PKGS = ["./cmd/broker", "./cmd/dev-oidc-issuer", "./internal/broker/brokertest/requestseed"]
 SIGNIN_ISSUER = "packages/dispatch/e2e/run-signin-issuer.sh"
 BROWSER_MP = "dispatch-browser-multiprocess"
 BROWSER_MP_SPECS = "Browser-test dispatch dashboard against two server processes"
@@ -554,6 +561,9 @@ GATES = [
     gate("dispatch", "dispatch", runs=[
         script_run(RUN_SERVER, DISPATCH_SERVER_BUILD, f"started by packages/dispatch/e2e/harness-listeners.ts's dispatchServer, which e2e/run.ts starts in "
                    f"{at('dispatch', 'Browser-test dispatch dashboard')}", ENVOY, ["./cmd/dispatch"], mode="build"),
+        script_run(RUN_BROKER, BROKER_BUILD, f"started by packages/dispatch/e2e/harness-listeners.ts's realBrokerListeners, which e2e/run.ts "
+                   f"starts in {at('dispatch', 'Browser-test dispatch dashboard')} for e2e/broker-approval.e2e.ts (a one-process run on the "
+                   "fake broker, e2e/harness-real-broker.ts)", ENVOY, BROKER_PKGS, mode="build"),
     ], reads=reads(
         ("packages/dispatch/**", f"{at('dispatch', 'Lint dispatch dashboard')}, typecheck, test, build, check:classes, check:asset-sizes and Playwright in packages/dispatch"),
         ("packages/proof-editor/**", f"{at('dispatch', 'Lint proof editor')}, typecheck and test; packages/dispatch/web/vite.config.ts:104-123"),

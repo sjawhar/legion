@@ -3,8 +3,8 @@
 // can never approve a machine login, only the typed code selects it) — and GET
 // /v1/launcher-credentials and POST /v1/launcher-credentials/{id}/revoke-by-approver, the machine
 // logins a person may revoke that can still reach a secret, and the route that ends one. Part of
-// the routes a listed service calls with its own ServiceAccount token (accountAuth); see
-// handlers_ui_records.go for the shared trust-model note.
+// the routes a listed service calls with its own ServiceAccount token (accountAuth); a machine
+// login is decided on the caller's word with its typed code (handlers_ui_records.go).
 package api
 
 import (
@@ -120,11 +120,11 @@ func (s *server) writeLauncherCredentials(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, launcherCredentialsResponse{Credentials: out})
 }
 
-// revokeLauncherCredential ends a machine login on the word of the person Dispatch names
-// (enroll.Service.RevokeCredential, through revokeCredentialAs): a service's on the word of anyone
-// signed in, a person's machine's on the word of the person who approved it. The caller that
-// relayed it is logged beside that person, whose name is still the caller's own to state
-// (dispatch://INFRA-314).
+// revokeLauncherCredential ends a machine login as the person the caller names
+// (enroll.Service.RevokeCredential, through revokeCredentialAs): a service's as anyone signed in, a
+// person's machine's as the person who approved it. The caller that relayed it is logged beside
+// that person, whose name the broker still takes on the caller's word: a revoke only takes power
+// away.
 func (s *server) revokeLauncherCredential(w http.ResponseWriter, r *http.Request, callerName string) {
 	id, ok := pathUUID(w, r, "id", "CREDENTIAL_ID_INPUT", "launcher credential")
 	if !ok {

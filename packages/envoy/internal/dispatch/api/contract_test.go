@@ -4,10 +4,12 @@
 // BROKER_TEST_DATABASE_URL, exactly as the broker/api tests do)
 // behind an httptest.Server, wires Dispatch's own routes to relay to it, and drives every UI
 // action through DISPATCH's routes as a signed-in human — proving the proxy round-trips a real
-// broker, which decides by the login Dispatch names, not a fake built from agentsecrets.Client's
-// own assumptions. Skips without BROKER_TEST_DATABASE_URL (via brokerstoretest.Open) or
-// DISPATCH_TEST_DATABASE_URL (via storetest.Open, already required by every other test in this
-// package).
+// broker, which lists each person's pending requests, decides a machine login and a revoke by the
+// login Dispatch names, and refuses every decision of a secret request with the page where a
+// person signed in to the broker decides it. A test needing a secret request decided decides it on
+// that page, signed in to the broker (brokertest.Decide), as a person does. Skips without
+// BROKER_TEST_DATABASE_URL (via brokerstoretest.Open) or DISPATCH_TEST_DATABASE_URL (via
+// storetest.Open, already required by every other test in this package).
 package api
 
 import (
@@ -63,8 +65,9 @@ const (
 // contractRig is the real broker (real Postgres) behind Dispatch's own mounted routes. Every UI
 // action a test drives goes through rig.Dispatch; rig's direct broker helpers exist only to seed
 // fixtures Dispatch has no route to create (a pending request comes from an agent's session
-// proof, a machine login from the machine's own key — neither is a Dispatch UI action) and to
-// read a grant's value back as the session that holds it.
+// proof, a machine login from the machine's own key — neither is a Dispatch UI action), to decide
+// a secret request on the broker's own page, where alone one is decided, and to read a request's
+// grant and its value back as the session that holds it.
 type contractRig struct {
 	Dispatch    http.Handler
 	BrokerURL   string
@@ -127,6 +130,9 @@ func newContractRig(t *testing.T) *contractRig {
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: cur, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN,
+		// People sign in to the broker's approval page at the same local issuer, which stands in for
+		// every provider.
+		Approval: brokertest.NewApprovalPage(t, brokertest.SignIn(issuer, issuerKey), brokerServer.URL, brokerStore, reqMachine),
 	})
 
 	dispatchDB := storetest.Open(t)
@@ -218,18 +224,22 @@ func (rig *contractRig) brokerReq(t *testing.T, method, path string, headers map
 }
 
 // contractSession is an agent's enrolled session, which alone can ask for secrets and read a
-// grant's value back, and RecordID, the pending record its last request made, if it made one.
+// grant's value back, and RequestID and RecordID, the request its last request made and the
+// pending record it opened, if it made one.
 type contractSession struct {
+	RequestID    string
 	RecordID     string
 	EnrollmentID string
 	Key          *ecdsa.PrivateKey
 }
 
-// contractRequested is POST /v1/requests's answer as these tests read it.
+// contractRequested is POST /v1/requests's answer, and GET /v1/requests/{id}'s, as these tests
+// read it.
 type contractRequested struct {
-	State    string  `json:"state"`
-	GrantID  *string `json:"grant_id"`
-	RecordID *string `json:"record_id"`
+	RequestID string  `json:"request_id"`
+	State     string  `json:"state"`
+	GrantID   *string `json:"grant_id"`
+	RecordID  *string `json:"record_id"`
 }
 
 // newSession enrolls a fresh session operator's machine runs.
@@ -268,7 +278,7 @@ func (rig *contractRig) request(t *testing.T, session contractSession, reason st
 }
 
 // createPendingAgentSecretRecord asks for names from a fresh session of contractApprover's,
-// returning the pending record Dispatch's routes then decide.
+// returning the session with the request it made and the pending record that request opened.
 func (rig *contractRig) createPendingAgentSecretRecord(t *testing.T, reason string, names ...string) contractSession {
 	t.Helper()
 	session := rig.newSession(t, contractApprover)
@@ -276,8 +286,32 @@ func (rig *contractRig) createPendingAgentSecretRecord(t *testing.T, reason stri
 	if created.State != "pending" || created.RecordID == nil {
 		t.Fatalf("create-request = %+v, want pending with a record", created)
 	}
-	session.RecordID = *created.RecordID
+	session.RequestID, session.RecordID = created.RequestID, *created.RecordID
 	return session
+}
+
+// approveOnBrokerPage approves recordID as login on the broker's own approval page, signed in to
+// the broker as that person: where a secret request is decided, since no Dispatch route decides one.
+func (rig *contractRig) approveOnBrokerPage(t *testing.T, login, recordID string) {
+	t.Helper()
+	brokertest.Decide(t, rig.BrokerURL, rig.issuer, login, recordID, true)
+}
+
+// grantOf reads requestID as session, which made it, straight from the broker, and answers its
+// grant, failing t unless the request was granted.
+func (rig *contractRig) grantOf(t *testing.T, session contractSession, requestID string) string {
+	t.Helper()
+	path := "/v1/requests/" + requestID
+	p, err := proof.Sign(session.Key, session.EnrollmentID, http.MethodGet, rig.BrokerURL+path, time.Now())
+	if err != nil {
+		t.Fatalf("proof.Sign: %v", err)
+	}
+	status, body := rig.brokerReq(t, http.MethodGet, path, map[string]string{"Proof": p}, nil)
+	var read contractRequested
+	if err := json.Unmarshal(body, &read); status != http.StatusOK || err != nil || read.State != "granted" || read.GrantID == nil {
+		t.Fatalf("GET %s = %d %s (%v), want a granted request with a grant_id", path, status, body, err)
+	}
+	return *read.GrantID
 }
 
 // values reads a grant's released values as the session that holds it, straight from the broker.
@@ -300,98 +334,128 @@ type contractRecord struct {
 	RecordID string `json:"record_id"`
 	Kind     string `json:"kind"`
 	State    string `json:"state"`
-	Approver string `json:"approver"`
 }
 
+// contractError is a broker refusal Dispatch relays; ApproveURL is set on a DECIDE_ON_BROKER_PAGE.
 type contractError struct {
-	Code string `json:"code"`
+	Code       string `json:"code"`
+	ApproveURL string `json:"approve_url"`
+}
+
+// decisionEvents counts recordID's approved and denied events on the broker.
+func (rig *contractRig) decisionEvents(t *testing.T, recordID string) int {
+	t.Helper()
+	var n int
+	if err := rig.brokerStore.Pool.QueryRow(context.Background(),
+		`select count(*) from credential_request_events where record_id=$1 and event in ('approved', 'denied')`, recordID).Scan(&n); err != nil {
+		t.Fatalf("count %s's decisions: %v", recordID, err)
+	}
+	return n
 }
 
 // --- tests ---
 
-// TestApproveThroughDispatchReleasesTheValue drives the approval as a signed-in human end to
-// end against the real broker: another Dispatch login is refused NOT_APPROVER even when its
-// browser body names the approver, the approver's own click succeeds whatever login its browser
-// body names, the session then releases the value, and replaying the approval is the broker's
-// own 409, forwarded unchanged.
-func TestApproveThroughDispatchReleasesTheValue(t *testing.T) {
+// TestContractDispatchDecidesNoSecretRequest: Dispatch's approve and deny of a pending secret
+// request, by its approver or anyone else and whatever the browser's body names, each relay the
+// broker's 403 DECIDE_ON_BROKER_PAGE carrying the record's page on the broker, and decide nothing:
+// the record stays pending in its approver's inbox. Approved on that page by its approver, signed
+// in to the broker, the request releases its value, and Dispatch's approve still decides nothing.
+func TestContractDispatchDecidesNoSecretRequest(t *testing.T) {
 	rig := newContractRig(t)
 	pending := rig.createPendingAgentSecretRecord(t, "need it for the demo", "DEEL_API_KEY")
-	approvePath := "/api/v1/credential-requests/" + pending.RecordID + "/approve"
-
-	readResp := dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/credential-requests/"+pending.RecordID, nil, contractApprover)
-	if read := decodeBody[contractRecord](t, readResp); read.State != "pending" || read.Approver != contractApprover {
-		t.Fatalf("record read = %s, want pending with approver %s", readResp.Body.String(), contractApprover)
+	page := rig.BrokerURL + "/approve/" + pending.RecordID
+	refused := func(action, login string, body any) {
+		t.Helper()
+		resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-requests/"+pending.RecordID+"/"+action, body, login)
+		if refusal := decodeBody[contractError](t, resp); resp.Code != http.StatusForbidden || refusal.Code != "DECIDE_ON_BROKER_PAGE" || refusal.ApproveURL != page {
+			t.Fatalf("%s as %s = %d %s, want 403 DECIDE_ON_BROKER_PAGE naming %s", action, login, resp.Code, resp.Body.String(), page)
+		}
+	}
+	for _, action := range []string{"approve", "deny"} {
+		for _, login := range []string{contractApprover, contractOther} {
+			refused(action, login, map[string]any{"approver": contractApprover, "code": "ABCD-1234"})
+		}
+	}
+	if n := rig.decisionEvents(t, pending.RecordID); n != 0 {
+		t.Fatalf("the record has %d decisions after Dispatch's approves and denies, want none", n)
+	}
+	if rows := rig.pendingFor(t, contractApprover); len(rows) != 1 || rows[0].RecordID != pending.RecordID {
+		t.Fatalf("%s's inbox = %+v, want the record %s still pending", contractApprover, rows, pending.RecordID)
 	}
 
-	resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{"approver": contractApprover}, contractOther)
-	if resp.Code != http.StatusForbidden || decodeBody[contractError](t, resp).Code != "NOT_APPROVER" {
-		t.Fatalf("approve as %s = %d %s, want 403 NOT_APPROVER", contractOther, resp.Code, resp.Body.String())
-	}
-
-	resp = dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{"approver": contractOther}, contractApprover)
-	if resp.Code != http.StatusOK {
-		t.Fatalf("approve as %s = %d %s", contractApprover, resp.Code, resp.Body.String())
-	}
-	approved := decodeBody[struct {
-		State   string  `json:"state"`
-		GrantID *string `json:"grant_id"`
-	}](t, resp)
-	if approved.State != "approved" || approved.GrantID == nil {
-		t.Fatalf("approve response = %s, want state=approved with a grant_id", resp.Body.String())
-	}
+	rig.approveOnBrokerPage(t, contractApprover, pending.RecordID)
 	var decidedBy string
 	if err := rig.brokerStore.Pool.QueryRow(context.Background(),
 		`select login from credential_request_events where record_id=$1 and event='approved'`, pending.RecordID).Scan(&decidedBy); err != nil || decidedBy != contractApprover {
 		t.Fatalf("approved event login = %q (%v), want %s", decidedBy, err, contractApprover)
 	}
-
-	if status, released := rig.values(t, pending, *approved.GrantID); status != http.StatusOK || released["DEEL_API_KEY"] != "deel-v1" {
+	if status, released := rig.values(t, pending, rig.grantOf(t, pending, pending.RequestID)); status != http.StatusOK || released["DEEL_API_KEY"] != "deel-v1" {
 		t.Fatalf("values = %d %v, want DEEL_API_KEY=deel-v1", status, released)
 	}
-
-	resp = dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{}, contractApprover)
-	if resp.Code != http.StatusConflict || !strings.Contains(resp.Body.String(), "RECORD_TERMINAL") {
-		t.Fatalf("terminal forwarding: %d %s", resp.Code, resp.Body.String())
-	}
+	refused("approve", contractApprover, map[string]any{})
 }
 
-// TestPendingListShowsCreatedRecordThroughDispatch drives the inbox's own query: a pending
-// record shows in Dispatch's proxied ?approver=me list with its minimal facts.
-func TestPendingListShowsCreatedRecordThroughDispatch(t *testing.T) {
+// TestContractPendingListShowsCreatedRecordThroughDispatch drives the inbox's own query: a pending
+// record shows in Dispatch's proxied ?approver=me list with its minimal facts and the broker's
+// page where it is decided.
+func TestContractPendingListShowsCreatedRecordThroughDispatch(t *testing.T) {
 	rig := newContractRig(t)
 	recordID := rig.createPendingAgentSecretRecord(t, "", "DEEL_API_KEY").RecordID
 
 	rows := rig.pendingFor(t, contractApprover)
-	if len(rows) != 1 || rows[0].RecordID != recordID || rows[0].Kind != "agent_secret" {
-		t.Fatalf("pending list = %+v, want the agent_secret record %s", rows, recordID)
+	if len(rows) != 1 || rows[0].RecordID != recordID || rows[0].Kind != "agent_secret" || rows[0].ApproveURL != rig.BrokerURL+"/approve/"+recordID {
+		t.Fatalf("pending list = %+v, want the agent_secret record %s linking its page on the broker", rows, recordID)
 	}
 }
 
-// TestMachineLoginLookupAndApproveThroughDispatch drives the typed-code machine flow
+// TestContractMachineLoginLookupAndApproveThroughDispatch drives the typed-code machine flow
 // (approveMachineLogin): a machine's signed login request produces a code; Dispatch's lookup route
 // resolves it to the record (ruling 13's one selector); approving through Dispatch with the same
-// code mints a launcher credential, and without the code the broker refuses CODE_REQUIRED.
-func TestMachineLoginLookupAndApproveThroughDispatch(t *testing.T) {
+// code mints a launcher credential, while without the code the broker refuses CODE_REQUIRED and
+// with another code CODE_MISMATCH.
+func TestContractMachineLoginLookupAndApproveThroughDispatch(t *testing.T) {
 	newContractRig(t).approveMachineLogin(t, contractApprover, "contract-test-host")
 }
 
-// TestGrantsListAndRevokeByApproverThroughDispatch approves a request to mint a grant, lists it
-// through Dispatch's own grants route, then revokes it as the signed-in approver — refused for
-// another login — the human path that ends a grant, distinct from a session ending its own.
-func TestGrantsListAndRevokeByApproverThroughDispatch(t *testing.T) {
+// TestContractMachineLoginDeniedThroughDispatch: a person denies their machine's login through
+// Dispatch with its code, as they approve one: another code is refused CODE_MISMATCH and leaves it
+// pending, its own code denies it, and a later approve is the broker's 409 RECORD_TERMINAL.
+func TestContractMachineLoginDeniedThroughDispatch(t *testing.T) {
+	rig := newContractRig(t)
+	machineKey := contractSigningKey(t)
+	compact, err := record.Sign(machineKey, rig.BrokerURL,
+		[]record.AuthorizationDetail{{Type: "launcher_credential", Identifier: "contract-test-host"}}, "", contractApprover, nil, time.Now())
+	if err != nil {
+		t.Fatalf("record.Sign: %v", err)
+	}
+	code, recordID := rig.startMachineLogin(t, machineKey, compact, contractApprover)
+	denyPath := "/api/v1/credential-requests/" + recordID + "/deny"
+	wrong := dispatchRequest(t, rig.Dispatch, http.MethodPost, denyPath, map[string]any{"code": "WRONG-CODE"}, contractApprover)
+	if wrong.Code != http.StatusForbidden || decodeBody[contractError](t, wrong).Code != "CODE_MISMATCH" {
+		t.Fatalf("deny with another code = %d %s, want 403 CODE_MISMATCH", wrong.Code, wrong.Body.String())
+	}
+	if looked := rig.lookupMachineLogin(t, code, contractApprover); looked.State != "pending" {
+		t.Fatalf("the login after the refused deny = %+v, want pending", looked)
+	}
+	denied := dispatchRequest(t, rig.Dispatch, http.MethodPost, denyPath, map[string]any{"code": code}, contractApprover)
+	if denied.Code != http.StatusOK || decodeBody[contractRecord](t, denied).State != "denied" {
+		t.Fatalf("deny with its code = %d %s, want 200 denied", denied.Code, denied.Body.String())
+	}
+	again := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-requests/"+recordID+"/approve", map[string]any{"code": code}, contractApprover)
+	if again.Code != http.StatusConflict || decodeBody[contractError](t, again).Code != "RECORD_TERMINAL" {
+		t.Fatalf("approve after the denial = %d %s, want 409 RECORD_TERMINAL", again.Code, again.Body.String())
+	}
+}
+
+// TestContractGrantsListAndRevokeByApproverThroughDispatch approves a request on the broker's page
+// to mint a grant, lists it through Dispatch's own grants route, then revokes it as the signed-in
+// approver — refused for another login — the human path that ends a grant, distinct from a session
+// ending its own.
+func TestContractGrantsListAndRevokeByApproverThroughDispatch(t *testing.T) {
 	rig := newContractRig(t)
 	pending := rig.createPendingAgentSecretRecord(t, "", "DEEL_API_KEY")
-
-	approveResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-requests/"+pending.RecordID+"/approve",
-		map[string]any{}, contractApprover)
-	approved := decodeBody[struct {
-		GrantID *string `json:"grant_id"`
-	}](t, approveResp)
-	if approveResp.Code != http.StatusOK || approved.GrantID == nil {
-		t.Fatalf("approve = %d %s, want a grant_id", approveResp.Code, approveResp.Body.String())
-	}
-	grantID := *approved.GrantID
+	rig.approveOnBrokerPage(t, contractApprover, pending.RecordID)
+	grantID := rig.grantOf(t, pending, pending.RequestID)
 
 	listed := rig.grantsOf(t, contractApprover)
 	if len(listed) != 1 || listed[0].GrantID != grantID || listed[0].Granted != "approval" || listed[0].Approver == nil || *listed[0].Approver != contractApprover {
@@ -418,6 +482,7 @@ type contractPending struct {
 	RecordID    string   `json:"record_id"`
 	Kind        string   `json:"kind"`
 	Identifiers []string `json:"identifiers"`
+	ApproveURL  string   `json:"approve_url"`
 }
 
 // pendingFor reads login's credential inbox through Dispatch.
@@ -432,12 +497,12 @@ func (rig *contractRig) pendingFor(t *testing.T, login string) []contractPending
 	}](t, resp).Pending
 }
 
-// TestASharedSecretsRequestIsInEveryInboxAndAnyoneApprovesIt drives a request whose approver is
-// anyone (a shared human-tier secret) through Dispatch: it is in both signed-in people's
-// credential inboxes, the second person, who neither owns nor operates anything, approves it, the
-// broker records the email Dispatch sent as the deciding login, the session gets the value, and
-// the request leaves both inboxes.
-func TestASharedSecretsRequestIsInEveryInboxAndAnyoneApprovesIt(t *testing.T) {
+// TestContractASharedSecretsRequestIsInEveryInboxAndAnyoneApprovesIt drives a request whose
+// approver is anyone (a shared human-tier secret): it is in both signed-in people's credential
+// inboxes through Dispatch, the second person, who neither owns nor operates anything, approves it
+// on the broker's page, the broker records that person's email as the deciding login, the session
+// gets the value, and the request leaves both inboxes.
+func TestContractASharedSecretsRequestIsInEveryInboxAndAnyoneApprovesIt(t *testing.T) {
 	rig := newContractRig(t)
 	pending := rig.createPendingAgentSecretRecord(t, "deploy the preview", "SHARED_KEY")
 
@@ -447,25 +512,14 @@ func TestASharedSecretsRequestIsInEveryInboxAndAnyoneApprovesIt(t *testing.T) {
 			t.Fatalf("%s's inbox = %+v, want the SHARED_KEY request %s", login, rows, pending.RecordID)
 		}
 	}
-	readResp := dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/credential-requests/"+pending.RecordID, nil, contractOther)
-	if read := decodeBody[contractRecord](t, readResp); read.State != "pending" || read.Approver != record.AnyoneApprover {
-		t.Fatalf("record read = %s, want pending with approver %s", readResp.Body.String(), record.AnyoneApprover)
-	}
 
-	resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-requests/"+pending.RecordID+"/approve", map[string]any{}, contractOther)
-	approved := decodeBody[struct {
-		State   string  `json:"state"`
-		GrantID *string `json:"grant_id"`
-	}](t, resp)
-	if resp.Code != http.StatusOK || approved.State != "approved" || approved.GrantID == nil {
-		t.Fatalf("approve as %s = %d %s, want approved with a grant", contractOther, resp.Code, resp.Body.String())
-	}
+	rig.approveOnBrokerPage(t, contractOther, pending.RecordID)
 	var decidedBy string
 	if err := rig.brokerStore.Pool.QueryRow(context.Background(),
 		`select login from credential_request_events where record_id=$1 and event='approved'`, pending.RecordID).Scan(&decidedBy); err != nil || decidedBy != contractOther {
 		t.Fatalf("approved event login = %q (%v), want %s", decidedBy, err, contractOther)
 	}
-	if status, released := rig.values(t, pending, *approved.GrantID); status != http.StatusOK || released["SHARED_KEY"] != "shared-v1" {
+	if status, released := rig.values(t, pending, rig.grantOf(t, pending, pending.RequestID)); status != http.StatusOK || released["SHARED_KEY"] != "shared-v1" {
 		t.Fatalf("values = %d %v, want SHARED_KEY=shared-v1", status, released)
 	}
 	for _, login := range []string{contractApprover, contractOther} {
@@ -507,13 +561,13 @@ func asJSON(t *testing.T, v any) string {
 	return string(data)
 }
 
-// TestAnAutomaticGrantIsListedRevokedAndThenAsksItsOwner drives an automatic grant through
+// TestContractAnAutomaticGrantIsListedRevokedAndThenAsksItsOwner drives an automatic grant through
 // Dispatch's Live grants: the person whose session holds it sees it listed as automatic, with no
 // approver and no record, and nobody else does; another person cannot revoke it and its operator
 // can, through the same route as an approved grant; after that, the same session's next request for
 // the secret is an approval request to its owner, while another of the person's sessions still
 // gets it at once.
-func TestAnAutomaticGrantIsListedRevokedAndThenAsksItsOwner(t *testing.T) {
+func TestContractAnAutomaticGrantIsListedRevokedAndThenAsksItsOwner(t *testing.T) {
 	rig := newContractRig(t)
 	session := rig.newSession(t, contractApprover)
 	auto := rig.request(t, session, "", "AUTO_TOKEN")
@@ -550,12 +604,11 @@ func TestAnAutomaticGrantIsListedRevokedAndThenAsksItsOwner(t *testing.T) {
 	if again.State != "pending" || again.RecordID == nil || again.GrantID != nil {
 		t.Fatalf("the same session's next request = %s, want an approval request", asJSON(t, again))
 	}
-	readResp := dispatchRequest(t, rig.Dispatch, http.MethodGet, "/api/v1/credential-requests/"+*again.RecordID, nil, contractApprover)
-	if read := decodeBody[contractRecord](t, readResp); read.State != "pending" || read.Approver != contractApprover {
-		t.Fatalf("record read = %s, want pending with approver %s, the owner", readResp.Body.String(), contractApprover)
-	}
 	if rows := rig.pendingFor(t, contractApprover); len(rows) != 1 || rows[0].RecordID != *again.RecordID {
 		t.Fatalf("the owner's inbox = %+v, want the request %s", rows, *again.RecordID)
+	}
+	if rows := rig.pendingFor(t, contractOther); len(rows) != 0 {
+		t.Fatalf("%s's inbox = %+v, want none: the request waits on its owner alone", contractOther, rows)
 	}
 
 	elsewhere := rig.request(t, rig.newSession(t, contractApprover), "", "AUTO_TOKEN")
@@ -567,9 +620,10 @@ func TestAnAutomaticGrantIsListedRevokedAndThenAsksItsOwner(t *testing.T) {
 // approveMachineLogin logs approver's own machine in as a person does: the machine asks the
 // broker's device authorization for its signed login, naming approver in its login_hint; approver looks its code
 // up through Dispatch (ruling 13's one selector), which answers the pending launcher_credential
-// record; an approval without the code is refused CODE_REQUIRED; and approver's approval with the
-// same code mints a launcher credential. It returns the launcher credential the approval minted and
-// the machine's key. A service logs in with its own token instead (tokenLogin).
+// record; an approval without the code is refused CODE_REQUIRED, and one with another code
+// CODE_MISMATCH; and approver's approval with the same code mints a launcher credential. It returns
+// the launcher credential the approval minted and the machine's key. A service logs in with its own
+// token instead (tokenLogin).
 func (rig *contractRig) approveMachineLogin(t *testing.T, approver, host string) (string, *ecdsa.PrivateKey) {
 	t.Helper()
 	machineKey := contractSigningKey(t)
@@ -583,6 +637,10 @@ func (rig *contractRig) approveMachineLogin(t *testing.T, approver, host string)
 	noCode := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{}, approver)
 	if noCode.Code != http.StatusBadRequest || decodeBody[contractError](t, noCode).Code != "CODE_REQUIRED" {
 		t.Fatalf("machine approve without its code = %d %s, want 400 CODE_REQUIRED", noCode.Code, noCode.Body.String())
+	}
+	wrongCode := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{"code": "WRONG-CODE"}, approver)
+	if wrongCode.Code != http.StatusForbidden || decodeBody[contractError](t, wrongCode).Code != "CODE_MISMATCH" {
+		t.Fatalf("machine approve with another code = %d %s, want 403 CODE_MISMATCH", wrongCode.Code, wrongCode.Body.String())
 	}
 	approveResp := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{"code": code}, approver)
 	approved := decodeBody[struct {
@@ -692,12 +750,12 @@ func (rig *contractRig) machineLoginsOf(t *testing.T, login string) []contractMa
 	}](t, resp).Credentials
 }
 
-// TestAPersonRevokesTheirMachineLoginThroughDispatch drives the machine-login page's routes against
-// the real broker: the person who approved their machine's login sees it listed, and nobody else
-// does; another person's revoke is refused whatever their browser's body names; the person's own
-// revoke ends it, and with it the session the machine enrolled, whose grant then releases nothing
-// and whose machine enrolls no one more.
-func TestAPersonRevokesTheirMachineLoginThroughDispatch(t *testing.T) {
+// TestContractAPersonRevokesTheirMachineLoginThroughDispatch drives the machine-login page's
+// routes against the real broker: the person who approved their machine's login sees it listed,
+// and nobody else does; another person's revoke is refused whatever their browser's body names;
+// the person's own revoke ends it, and with it the session the machine enrolled, whose grant then
+// releases nothing and whose machine enrolls no one more.
+func TestContractAPersonRevokesTheirMachineLoginThroughDispatch(t *testing.T) {
 	rig := newContractRig(t)
 	credentialID, machineKey := rig.approveMachineLogin(t, contractApprover, "contract-test-host")
 	status, body, session := rig.enrollWithLauncher(t, machineKey, credentialID, "box-"+t.Name())
@@ -767,13 +825,14 @@ func (rig *contractRig) tokenLogin(t *testing.T) (string, *ecdsa.PrivateKey) {
 	return login.CredentialID, key
 }
 
-// TestAServicesTokenLoginIsListedAndRevokedByAnyoneThroughDispatch: the Legion daemon's token
-// login, which no person approves and which has no operator, is listed through Dispatch for every
-// signed-in person, naming its service and its ServiceAccount and no approver, and its launcher
-// authenticates; another person's revoke, whoever their browser's body names, ends it, after which
-// its launcher proofs authenticate nothing; and a device-code login naming the service, which an
-// older daemon would open, is refused SERVICE_LOGS_IN_WITH_TOKEN with nothing for Dispatch to show.
-func TestAServicesTokenLoginIsListedAndRevokedByAnyoneThroughDispatch(t *testing.T) {
+// TestContractAServicesTokenLoginIsListedAndRevokedByAnyoneThroughDispatch: the Legion daemon's
+// token login, which no person approves and which has no operator, is listed through Dispatch for
+// every signed-in person, naming its service and its ServiceAccount and no approver, and its
+// launcher authenticates; another person's revoke, whoever their browser's body names, ends it,
+// after which its launcher proofs authenticate nothing; and a device-code login naming the
+// service, which an older daemon would open, is refused SERVICE_LOGS_IN_WITH_TOKEN with nothing
+// for Dispatch to show.
+func TestContractAServicesTokenLoginIsListedAndRevokedByAnyoneThroughDispatch(t *testing.T) {
 	rig := newContractRig(t)
 	credentialID, machineKey := rig.tokenLogin(t)
 
@@ -817,9 +876,10 @@ func TestAServicesTokenLoginIsListedAndRevokedByAnyoneThroughDispatch(t *testing
 	}
 }
 
-// TestAPersonsMachineLoginIsTheirsAloneToApproveThroughDispatch: a person's own machine login is
-// refused NOT_APPROVER to every other signed-in person, and stays pending for the person it names.
-func TestAPersonsMachineLoginIsTheirsAloneToApproveThroughDispatch(t *testing.T) {
+// TestContractAPersonsMachineLoginIsTheirsAloneToApproveThroughDispatch: a person's own machine
+// login is refused NOT_APPROVER to every other signed-in person, and stays pending for the person
+// it names.
+func TestContractAPersonsMachineLoginIsTheirsAloneToApproveThroughDispatch(t *testing.T) {
 	rig := newContractRig(t)
 	machineKey := contractSigningKey(t)
 	compact, err := record.Sign(machineKey, rig.BrokerURL,
@@ -837,13 +897,13 @@ func TestAPersonsMachineLoginIsTheirsAloneToApproveThroughDispatch(t *testing.T)
 	}
 }
 
-// TestAnyoneApprovalCannotReleaseAPersonsWithheldSecret drives, through Dispatch's own routes, a
-// request that was pending when its session's operator withheld one of its names: the session's
-// {AUTO_TOKEN, SHARED_KEY} request waits on anyone, the operator revokes the session's automatic
-// AUTO_TOKEN grant from Live grants, and a second signed-in person, who owns nothing, is refused
-// 403 NOT_APPROVER when approving the request from their Inbox; the operator, AUTO_TOKEN's owner,
-// approves it and the session reads AUTO_TOKEN on that approval.
-func TestAnyoneApprovalCannotReleaseAPersonsWithheldSecret(t *testing.T) {
+// TestContractAnyoneApprovalCannotReleaseAPersonsWithheldSecret drives a request that was pending
+// when its session's operator withheld one of its names: the session's {AUTO_TOKEN, SHARED_KEY}
+// request waits on anyone and is in a second person's Inbox through Dispatch, the operator revokes
+// the session's automatic AUTO_TOKEN grant from Live grants through Dispatch, and the second
+// person, who owns nothing, approving it on the broker's page decides nothing; the operator,
+// AUTO_TOKEN's owner, approves it there and the session reads AUTO_TOKEN on that approval.
+func TestContractAnyoneApprovalCannotReleaseAPersonsWithheldSecret(t *testing.T) {
 	rig := newContractRig(t)
 	session := rig.newSession(t, contractApprover)
 	auto := rig.request(t, session, "", "AUTO_TOKEN")
@@ -860,19 +920,12 @@ func TestAnyoneApprovalCannotReleaseAPersonsWithheldSecret(t *testing.T) {
 	if resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-grants/"+*auto.GrantID+"/revoke", map[string]any{}, contractApprover); resp.Code != http.StatusOK {
 		t.Fatalf("revoke = %d: %s", resp.Code, resp.Body.String())
 	}
-	approvePath := "/api/v1/credential-requests/" + *mixed.RecordID + "/approve"
-	resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{}, contractOther)
-	if resp.Code != http.StatusForbidden || decodeBody[contractError](t, resp).Code != "NOT_APPROVER" {
-		t.Fatalf("approve as %s after %s withheld AUTO_TOKEN = %d %s, want 403 NOT_APPROVER", contractOther, contractApprover, resp.Code, resp.Body.String())
+	rig.approveOnBrokerPage(t, contractOther, *mixed.RecordID)
+	if n := rig.decisionEvents(t, *mixed.RecordID); n != 0 {
+		t.Fatalf("the request has %d decisions after %s approved it once %s withheld AUTO_TOKEN, want none", n, contractOther, contractApprover)
 	}
-	owner := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{}, contractApprover)
-	approved := decodeBody[struct {
-		GrantID *string `json:"grant_id"`
-	}](t, owner)
-	if owner.Code != http.StatusOK || approved.GrantID == nil {
-		t.Fatalf("approve as %s = %d %s, want a grant", contractApprover, owner.Code, owner.Body.String())
-	}
-	if status, released := rig.values(t, session, *approved.GrantID); status != http.StatusOK || released["AUTO_TOKEN"] == "" {
+	rig.approveOnBrokerPage(t, contractApprover, *mixed.RecordID)
+	if status, released := rig.values(t, session, rig.grantOf(t, session, mixed.RequestID)); status != http.StatusOK || released["AUTO_TOKEN"] == "" {
 		t.Fatalf("values of the owner's approval = %d %v, want AUTO_TOKEN released", status, released)
 	}
 }
