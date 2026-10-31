@@ -84,6 +84,36 @@ func TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries(t *testing.T) {
 	}
 }
 
+func TestDocumentedClaimsReadLooseListsAndDetectSetChanges(t *testing.T) {
+	document := claimsDocument(t)
+	const person = "- `person` — the person the session acts for."
+	withoutPerson := strings.Replace(document, person+"\n\n", "", 1)
+	if withoutPerson == document {
+		t.Fatalf("the documentation copy has no %q bullet", person)
+	}
+	wantWithoutPerson := slices.DeleteFunc(slices.Clone(issuedClaims(t)), func(claim string) bool {
+		return claim == "person"
+	})
+	gotWithoutPerson := documentedClaimsDocument(t, withoutPerson)
+	slices.Sort(gotWithoutPerson)
+	if !slices.Equal(gotWithoutPerson, wantWithoutPerson) {
+		t.Fatalf("the parser read claims without person as %s, want %s", gotWithoutPerson, wantWithoutPerson)
+	}
+
+	const extra = "- `extra` — a claim the exchange does not issue."
+	withExtra := strings.Replace(document, person+"\n\n", person+"\n\n"+extra+"\n\n", 1)
+	if withExtra == document {
+		t.Fatalf("the documentation copy has no %q bullet", person)
+	}
+	wantWithExtra := append(issuedClaims(t), "extra")
+	slices.Sort(wantWithExtra)
+	gotWithExtra := documentedClaimsDocument(t, withExtra)
+	slices.Sort(gotWithExtra)
+	if !slices.Equal(gotWithExtra, wantWithExtra) {
+		t.Fatalf("the parser read claims with extra as %s, want %s", gotWithExtra, wantWithExtra)
+	}
+}
+
 // issuedClaims are the claim names decide writes onto an exchange session, sorted, over both of the
 // project scopes it can decide: a pod's projected token, which its entry gives a named project, and
 // a machine login's access token, which names none. A scope that wrote a claim nothing documents,
@@ -155,6 +185,11 @@ func issuedClaims(t *testing.T) []string {
 // twice is returned twice, so the caller's slices.Equal fails on it rather than a set hiding it.
 func documentedClaims(t *testing.T) []string {
 	t.Helper()
+	return documentedClaimsDocument(t, claimsDocument(t))
+}
+
+func claimsDocument(t *testing.T) string {
+	t.Helper()
 	// The document is at the repository root, five directories above this package. Read it, and
 	// fail when it cannot be read: a skip here would be an absence that reads exactly like a pass,
 	// and a silent absence is what this check exists to stop.
@@ -162,7 +197,12 @@ func documentedClaims(t *testing.T) []string {
 	if err != nil {
 		t.Fatalf("read docs/kubernetes.md: %v", err)
 	}
-	lines := strings.Split(string(doc), "\n")
+	return string(doc)
+}
+
+func documentedClaimsDocument(t *testing.T, doc string) []string {
+	t.Helper()
+	lines := strings.Split(doc, "\n")
 	heading := slices.Index(lines, claimsDocHeading)
 	if heading < 0 {
 		t.Fatalf("docs/kubernetes.md has no line %q: the section holding the claim list was renamed, "+
@@ -171,11 +211,11 @@ func documentedClaims(t *testing.T) []string {
 
 	var claims []string
 	// The list is the section's first one: the prose lines between the heading and it are skipped,
-	// and the list runs to the first line that is neither a bullet nor a wrapped bullet's indented
-	// continuation — in the document as written, the blank line under it.
+	// and the list runs to the first line that is neither a bullet, a blank between bullets, nor a
+	// wrapped bullet's indented continuation.
 	for i := heading + 1; i < len(lines); i++ {
 		line := strings.TrimRight(lines[i], " ")
-		if len(claims) > 0 && line != "" && strings.HasPrefix(line, " ") {
+		if len(claims) > 0 && (line == "" || strings.HasPrefix(line, " ")) {
 			continue
 		}
 		if !strings.HasPrefix(line, "- ") {
