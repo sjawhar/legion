@@ -2,10 +2,11 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-575",
-  "completed": "2026-10-31T09:10:00Z",
-  "round": 7,
+  "completed": "2026-10-31T12:05:00Z",
+  "round": 8,
   "answersTestFailures": [
-    "The only failure of .legion/INFRA-575/test.json round 6: CI's `dispatch` lane was red at the code head b1e074f1 on e2e/references.e2e.ts:26, `Error: locator.screenshot: Element is not attached to the DOM`, taken straight after `setViewportSize({ width: 1440 })`. The row is this change's own: below 1280 px the card lives in the Inbox row, and from 1280 px the row becomes a short row and the card is drawn again in the reading column, so the resize unmounts the node the locator resolved at 390 px. Fixed in the row, with no product change."
+    "The only failure of .legion/INFRA-575/test.json round 6: CI's `dispatch` lane was red at the code head b1e074f1 on e2e/references.e2e.ts:26, `Error: locator.screenshot: Element is not attached to the DOM`, taken straight after `setViewportSize({ width: 1440 })`. The row is this change's own: below 1280 px the card lives in the Inbox row, and from 1280 px the row becomes a short row and the card is drawn again in the reading column, so the resize unmounts the node the locator resolved at 390 px. Fixed in the row, with no product change.",
+    "The daemon's return for `ci-ok` red at 35ac3205: the red is `envoy-go`, which `ci-ok` only condenses. It is not this change's and no second re-run is owed (the architect's instruction after the first), so the evidence stands in place of a green lane - see the CI proof below."
   ],
   "proof": [
     {
@@ -35,10 +36,18 @@
     {
       "criterion": "CI runs on the code head, which is what the round is about.",
       "surface": "GitHub Actions.",
-      "command": "gh api 'repos/sjawhar/legion/actions/runs?head_sha=24f71ce731e7…'",
+      "command": "gh api 'repos/sjawhar/legion/actions/runs?head_sha=24f71ce731e7\u2026'",
       "observed": "Two runs for this head: CI 41182693696 (queued when read) and PR Title 41182693695 (success). The handoff commit above it carries the skip-checks trailer, so the daemon carries this run's verdict to it. I did not wait for CI.",
       "headSha": "24f71ce731e79507568c94cec7334a27a8163ec7",
       "negativeControl": "Round 4's reading of the same question is the control for the push shape: a head carrying the trailer answered total_count 0, an untrailered head answers with its runs."
+    },
+    {
+      "criterion": "The CI red that returned this issue is `envoy-go`, a lane this branch cannot affect, and the single sanctioned re-run did not change it.",
+      "surface": "GitHub Actions on sjawhar/legion, run 41182693696 at the code head 24f71ce731e7.",
+      "command": "gh api 'repos/sjawhar/legion/actions/runs/41182693696/jobs?filter=latest' and gh api repos/sjawhar/legion/actions/jobs/124514051447/logs",
+      "observed": "Attempt 1: every lane green but `envoy-go`, with `ci-ok` red only because it condenses it - `lint`, `test`, `contracts`, `dispatch`, `docs / build`, `dispatch-browser-multiprocess`, `changes`, `claude-envoy`, `envoy-client`, `envoy-plugin`, `envoy-smoke`, `pi-envoy`, `pi-legion`, `pi-shared` all passed. I re-ran the failed jobs once (`gh run rerun 41182693696 --failed`). Attempt 2 failed the same lane on the same test and the same cause: `--- FAIL: TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries`, preceded twice by `ERROR broker: OAuth request failed error=\"The authorization server encountered an unexpected condition that prevented it from fulfilling the request. the database is down\"`, then `FAIL github.com/sjawhar/envoy/internal/broker/oauth`. That is the lane's own Postgres, not an assertion about behaviour. Per the architect's instruction I did not re-run a second time.",
+      "headSha": "24f71ce731e79507568c94cec7334a27a8163ec7",
+      "negativeControl": "This branch changes no Go file at all: `jj diff --from e65900f4438b --to 24f71ce731e7 --name-only` lists no `.go`, `go.mod`, `go.sum` or `go.work`, and the failing package is `packages/envoy/internal/broker/oauth`, which nothing here touches. The lane is flaky on main independently of this branch: main's own CI run 41171988894 failed `envoy-go` (on `TestAReconnectCatchesUpWhatTheListenerMissed`, a different flake of the same lane) while main's run 41185715628 passed it."
     }
   ],
   "filesChanged": [
@@ -46,7 +55,8 @@
   ],
   "trickyParts": [
     "A locator held across `setViewportSize` is a handle to a node, and this change makes 1280 px a remount boundary for every Inbox card: below it the card is the row's, from it the card is the column's. Any row that resolves a card at one width and acts on it at another must resolve it again after the switch. e2e/inbox-pane.ts's `askCard` is the helper that reads which layout a width draws; use it rather than `page.getByTestId('ask-<id>')` in a row that resizes.",
-    "A harness note, paid for the hard way this round: /legion/harness is shared by every role of the issue and only the databases are per lane. Its setup script now refuses to start Postgres while `pg_isready -h 127.0.0.1 -p 55432` answers, because neither obvious guard works across roles - `pg_ctl status` reads a pid file a pod move leaves stale, and `pgrep` cannot see another role's postmaster at all, since each role has its own PID namespace. Trusting the pid file started a second postmaster, whose failure to bind made the running one shut itself down; the tester lost nothing only because its measurements had already landed. The three facts are written above that guard in the script."
+    "A harness note, paid for the hard way this round: /legion/harness is shared by every role of the issue and only the databases are per lane. Its setup script now refuses to start Postgres while `pg_isready -h 127.0.0.1 -p 55432` answers, because neither obvious guard works across roles - `pg_ctl status` reads a pid file a pod move leaves stale, and `pgrep` cannot see another role's postmaster at all, since each role has its own PID namespace. Trusting the pid file started a second postmaster, whose failure to bind made the running one shut itself down; the tester lost nothing only because its measurements had already landed. The three facts are written above that guard in the script.",
+    "`ci-ok` condenses the selected lanes, so a red `ci-ok` names no cause: read the run's jobs with `filter=latest` before judging a return, or the one red lane is invisible behind it."
   ],
   "deviations": [],
   "openQuestions": [
