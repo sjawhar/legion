@@ -925,6 +925,8 @@ mkdir -p "$work" "$evidence"
 exec 7>&1
 stop_tree() { :; }; stop_pid() { :; }; record_pair() { :; }; run_processes() { :; }; docker() { :; }
 note() { echo "   $*"; }
+run_container_label=legion.dev/e2e-run run_container_id=session-text-run signalled=
+${fn("remove_run_container")}
 ${sessionCopy}
 ${fn("collect_transcripts")}
 ${fn("remove_negative_config")}
