@@ -2,42 +2,42 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-593",
-  "completed": "2026-10-30T23:35:00Z",
+  "completed": "2026-10-31T01:20:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2444",
-  "round": 10,
+  "round": 11,
   "answersReview": "Round 6 at 2dfde180 (REQUEST_CHANGES, review head 370bce4b): internal/dispatch/docs timed out under -race at 30 min with the branch merged into main. Per the architect: merge main forward (now carrying #2516's envoy-go-race-docs job), quote the package's -race time against main, and cut this PR's added test cost.",
   "proof": [
     {
-      "criterion": "The tester's red test passes unmodified on the new ygo pin",
-      "surface": "go test of internal/dispatch/docs on Postgres 16.2, at the head",
-      "command": "go test ./internal/dispatch/docs -run '^TestARefusedPeerUpdateLeavesTheRoomAsItsOtherPeersHoldIt$' -count=1; again with -race -count=10",
-      "observed": "PASS (0.89 s); -race -count=10 ok. a22f0f29's test file is unchanged on the branch.",
-      "headSha": "221f3ce3e2ec205fe6a777e2447d195e190a2488",
-      "negativeControl": "At b24baf7d (sami.7) the tester saw it fail: the room read 'after / hello' while the other peer read 'after / hello world'."
+      "criterion": "The tests this PR adds pass reliably in the race lane",
+      "surface": "go test -race of internal/dispatch/docs on Postgres 16.2",
+      "command": "GOMAXPROCS=4 CGO_ENABLED=1 go test -race -p 2 -parallel 4 ./internal/dispatch/docs -count=300 -run '^(TestTheStoredRowsOfARoomFoldToItsDocumentWhenAPeerUpdateParks|TestARefusedPeerUpdateLeavesTheRoomAsItsOtherPeersHoldIt|TestAHistoryThatDoesNotDecodeIsRefusedNamingItsReasonOnce)$' -v",
+      "observed": "ok 459.4 s: 300 PASS of each of the three tests, 0 FAIL, 0 DATA RACE.",
+      "headSha": "20e033515eaaffa83c063403a28ed0db37eb9ffe",
+      "negativeControl": "At 221f3ce3, without settle = time.Hour, the tester saw 4 failures in 190 runs of the parked-update test: a settlement write landed between the stored-rows load and the room read."
     },
     {
-      "criterion": "The stored rows ygo hands to persistence fold to the room's document when a peer update parks (the replay guarantee for this PR's folds)",
-      "surface": "real Service, ygo websocket room, two docstest peers, Postgres 16.2",
-      "command": "go test ./internal/dispatch/docs -run '^TestTheStoredRowsOfARoomFoldToItsDocumentWhenAPeerUpdateParks$' (and -race -count=10)",
-      "observed": "PASS: a second keystroke sent before the first parks in the room (PendingStats.Items > 0), and the cold-read fold of the stored rows renders and has the state vector of the room both while it waits and after the first keystroke lands. A scratch probe on the candidate showed the same for three orders of a parked same-client insert and a cross-client delete.",
-      "headSha": "221f3ce3e2ec205fe6a777e2447d195e190a2488",
-      "negativeControl": "While the second keystroke waits, the other peer reads only the seed, so the test sees a real parked struct rather than an applied one."
+      "criterion": "A history that does not decode is refused naming the decoder's reason once, for the history check, the room's load and the cold read",
+      "surface": "go test of internal/dispatch/docs on Postgres 16.2",
+      "command": "go test ./internal/dispatch/docs -run '^TestAHistoryThatDoesNotDecodeIsRefusedNamingItsReasonOnce$' -v",
+      "observed": "PASS: a cut ygo refuses with no reason is refused as 'crdt: invalid update' (errors.Is ErrInvalidUpdate) by validateUpdate, warmLiveDocument and LoadDocument; a cut mid-structure keeps 'crdt: invalid update: encoding: unexpected end of input'. A probe of 57 cuts of one row on head, sami.7 and sami.4 gave the same three messages on all three, the doubled one included, so the doubled wording is ygo's, not the pin's.",
+      "headSha": "20e033515eaaffa83c063403a28ed0db37eb9ffe",
+      "negativeControl": "With decodeStoredState's check disabled, the reasonless case fails: 'the history check = crdt: invalid update: crdt: invalid update, want \"crdt: invalid update\"'."
     },
     {
-      "criterion": "The forward merge of main 92619d8d and the pin keep the PR's change working",
+      "criterion": "The change keeps the package and server working",
       "surface": "local build, vet and suites on Postgres 16.2",
-      "command": "go build ./... && go vet ./... (plain, -tags multiprocess, -tags memory); infra TestDispatchConnectionsPerPodIsTheServers; go test (GOMAXPROCS=4 -p 2 -parallel 4) ./internal/dispatch/store/... ./internal/pgmigrate/... ./internal/dispatch/outbox ./internal/dispatch/duty ./internal/dispatch/docs ./cmd/dispatch ./internal/dispatch/api",
-      "observed": "vet clean; connection test ok at 91; ok store 320 s, pgmigrate 4 s, outbox 191 s, duty 19 s, docs 1645 s, cmd/dispatch 403 s; api: one failure, TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves, which refuses a byte-order (C) database and passes on an en_US cluster. Fingerprint comment: https://github.com/sjawhar/legion/pull/2444#issuecomment-6535642659.",
-      "headSha": "221f3ce3e2ec205fe6a777e2447d195e190a2488",
-      "negativeControl": "Before the merge GitHub reported 90da7682 CONFLICTING; at 221f3ce3 it reports MERGEABLE and started CI."
+      "command": "go vet ./internal/dispatch/docs; GOMAXPROCS=4 go test -p 2 -parallel 4 -count=1 ./internal/dispatch/docs ./cmd/dispatch",
+      "observed": "vet clean; ok docs 1681.8 s, cmd/dispatch 394.5 s.",
+      "headSha": "20e033515eaaffa83c063403a28ed0db37eb9ffe",
+      "negativeControl": "TestARoomWhoseHistoryDoesNotDecodeFailsFromTheRoomsOwnDecode, which requires the room's error to equal validateUpdate's, still passes: both go through decodeStoredState."
     },
     {
-      "criterion": "Acceptance 1, 2 and 5 at the head: a load reads the compacted row plus later rows, compaction survives a restart without NATS, young rows stay as written",
+      "criterion": "Acceptance 1, 2 and 5 at the head",
       "surface": "real envoy-dispatch built from the head on Postgres 16.2, DISPATCH_NATS_DISABLED=1, through the HTTP API",
-      "command": "bash $TMPDIR/infra593/e2e.sh (dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt version 13)",
-      "observed": "30 uploads made 41 rows; after the restart the sweep logged candidates=1 compacted=1 rows_deleted=37 leaving 4 rows; the 3 young rows unchanged in version, xmin and md5; text sha256 db68d573... identical; a 31st upload reads back.",
-      "headSha": "221f3ce3e2ec205fe6a777e2447d195e190a2488",
-      "negativeControl": "The restarted process's first sweep tick logs candidates=0 while the hour is recorded as served; only the next tick folds the 37 rows."
+      "command": "bash $TMPDIR/infra593/e2e.sh (dispatch://INFRA-593/artifact/infra-593-e2e-proof-txt version 14)",
+      "observed": "41 rows; after the restart the sweep logged candidates=1 compacted=1 rows_deleted=37 leaving 4 rows; the 3 young rows unchanged in version, xmin and md5; text sha256 identical; a 31st upload reads back.",
+      "headSha": "20e033515eaaffa83c063403a28ed0db37eb9ffe",
+      "negativeControl": "The restarted process's first sweep tick logs candidates=0 while the hour is recorded as served."
     }
   ],
   "filesChanged": [
@@ -46,10 +46,10 @@
     "migration renumbered 0141 -> 0142_doc_compaction_owed (up, census, its test, AGENTS.md, changelog fragment, cmd/dispatch/README.md)"
   ],
   "deviations": [
-    "ygo is pinned to the release candidate 845ce79c, not a tag, on INFRA-514's architect's instruction; #2444 must not merge until it repins to v1.54.1-sami.1 (the architect holds acceptance).",
-    "The replica paths that read crdt.UpdateLog (docs/tree.go observe, consumed, recover, keepReplica) are #2485's per INFRA-514's architect; this PR does not change them. Its folds read the stored rows, which the new test covers.",
-    "The forward merge resolved runtime conflicts in store/pool.go, outbox/publisher.go and cmd/dispatch/main.go (main's horizon pool and PublishFailures kept beside this PR's compaction pool and the daily compaction's removal): a full round. The migration is now 0150_doc_compaction_owed and the connection ceiling 91.",
-    "This handoff-only push carries no skip-checks line, so CI runs at the pull request's head."
+    "ygo stays pinned to the release candidate 845ce79c; #2444 must not merge until it repins to v1.54.1-sami.1.",
+    "Main's settlement line kept the reason because main merged a many-row log, where head's compaction leaves a cut document one row; for one cut row, ygo words the refusal 'crdt: invalid update: crdt: invalid update' on sami.4 too and has no reason to give. decodeStoredState states it once; ygo's struct reader would have to name the reason for more.",
+    "The architect's item 3 (an uncommitted go.work.sum change) does not apply here: this workspace was recreated from the pushed branch, and jj diff shows no go.work.sum change; 221f3ce3 committed none.",
+    "No merge of main this round: GitHub reports the pull request MERGEABLE."
   ],
-  "answersTest": "Tester round 9 at b24baf7d (fail): red test a22f0f29 TestARefusedPeerUpdateLeavesTheRoomAsItsOtherPeersHoldIt fails on ygo sami.7. Per INFRA-514's architect (21:47Z), the pin moves to the v1.54.1-sami.1 release candidate rc/v1.54.1-sami.1 at 845ce79c until the tag exists; the PR does not merge until it repins to the tag."
+  "answersTest": "Tester round 10 at 221f3ce3 (fail): the parked-update test raced the test service's 20 ms settlement (4 of 190 under -race); the settlement's failed-load line read 'crdt: invalid update: crdt: invalid update'. Per INFRA-514's architect: fix the test with settle off, state the refusal once, merge main if it conflicts (it does not)."
 }
