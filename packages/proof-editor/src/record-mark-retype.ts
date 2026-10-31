@@ -441,9 +441,15 @@ function remarkRange(
   const { blocks, text } = documentText(state.doc);
   const readings = readingsOf(text, quote, surroundings, (at) => positionIn(blocks, at));
   if (readings.surrounded.length === 1) return readings.surrounded[0];
-  // Only the document can say which of the two this is, and the margin needs to know: telling the
-  // reader the words were changed or deleted while they are plainly on the page is false. The
-  // count is of that same text, so a quote on the page across a break is never called deleted.
+  // More than one reading surrounded alike is the same case as two alike inside the reader's own
+  // block: the words are where they were and nothing says which of them is theirs. With nothing
+  // remembered - a selection across a break, or a send held by a tab older than the placement -
+  // every reading counts as alike, which is exactly what that says. Saying instead that the words
+  // are no longer where they were selected would be false: they never moved.
+  if (readings.surrounded.length > 1) return { refused: "ambiguous" };
+  // Telling the reader the words were changed or deleted while they are plainly on the page is
+  // false too. The count is of that same text, so a quote on the page across a break is never
+  // called deleted.
   return { refused: readings.count > 0 ? "unplaceable" : "gone" };
 }
 

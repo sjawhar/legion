@@ -601,7 +601,7 @@ test("remarkRecordMark refuses when the reader's own block reads the quote nowhe
   });
 });
 
-test("remarkRecordMark takes the reading the whole document surrounds as the reader's once their block is gone, and refuses another passage or two alike", async () => {
+test("remarkRecordMark takes the reading the whole document surrounds as the reader's once their block is gone, calls a reading among other words unplaceable, and two readings alike ambiguous", async () => {
   await withMarksEditor(`${PARAGRAPH}\n\n${PARAGRAPH}`, ({ view }) => {
     const start = comment(view, QUOTE, BY, "", quoteRange());
     const placement = placementFor(view, quoteRange(), QUOTE);
@@ -636,9 +636,10 @@ test("remarkRecordMark takes the reading the whole document surrounds as the rea
     rebuildEditorState(view);
 
     // Two readings left, each surrounded as the reader's was and nothing to tell them apart: a
-    // record on the passage the reader never selected is worse than one they can attach again.
+    // record on the passage the reader never selected is worse than one they can attach again,
+    // and their words never moved, so the refusal is the one for readings that read alike.
     expect(remarkRecordMark(view, start.id, "comment", BY, QUOTE, placement)).toEqual({
-      refused: "unplaceable",
+      refused: "ambiguous",
     });
     expect(marksInDoc(view)).toEqual([]);
   });
@@ -666,9 +667,10 @@ test("remarkRecordMark marks the one place the quote reads in the document when 
     rebuildEditorState(view);
 
     // Two readings of those words and nothing left to tell them apart. They are still on the
-    // page, so the refusal is not that they were changed or deleted.
+    // page and still where they were, so the refusal is neither that they were changed or
+    // deleted nor that they moved: it is the one for readings that read alike.
     expect(remarkRecordMark(view, start.id, "comment", BY, QUOTE, null)).toEqual({
-      refused: "unplaceable",
+      refused: "ambiguous",
     });
     expect(marksInDoc(view)).toEqual([]);
   });
@@ -735,10 +737,10 @@ test("remarkRecordMark puts the mark back over a quote that runs across two bloc
       rebuildEditorState(view);
 
       // The same words run across a second break further down: two readings, and nothing to
-      // tell them apart. They are plainly on the page, so the refusal is not that they were
-      // changed or deleted.
+      // tell them apart. They are plainly on the page and exactly where the reader selected
+      // them, so the refusal says they read alike and never that they moved.
       expect(remarkRecordMark(view, start.id, "comment", BY, ACROSS_BLOCKS, null)).toEqual({
-        refused: "unplaceable",
+        refused: "ambiguous",
       });
       expect(marksInDoc(view)).toEqual([]);
     }
@@ -761,7 +763,7 @@ test("remarkRecordMark refuses when the words are gone, when the block reads the
     // reader's own: marking either one could put the record on the passage they never selected.
     rewriteParagraph(view, `${QUOTE}, and ${QUOTE}.`);
     expect(remarkRecordMark(view, start.id, "comment", BY, QUOTE, null)).toEqual({
-      refused: "unplaceable",
+      refused: "ambiguous",
     });
     expect(marksInDoc(view)).toEqual([]);
   });
