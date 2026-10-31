@@ -268,6 +268,21 @@ export function AskCard({
       answerFieldRef.current?.focus();
     }
   }, [reasonFieldShown]);
+  // Opening the disclosure is a move into the field it reveals, whoever opened it: the reader's
+  // own click, and the Inbox's Enter, which presses this same control (`Inbox.tsx`). The field
+  // is drawn by the render the press schedules, so the focus can only be this effect's - the
+  // opener runs before React has committed the box and would focus nothing. Only an open by the
+  // disclosure itself focuses, which is why the intent is recorded as the control is pressed: an
+  // option that opens the disclosure for its own words, and a change that seeds the note, leave
+  // the reader where they are.
+  const focusNoteOnOpen = useRef(false);
+  useEffect(() => {
+    if (!focusNoteOnOpen.current) return;
+    focusNoteOnOpen.current = false;
+    if (ownWordsOpen) {
+      answerFieldRef.current?.focus();
+    }
+  }, [ownWordsOpen]);
   // A control that disables itself under the reader's focus - Ask back while sending and once
   // its text is sent - would have the browser drop focus to the document body (in the Inbox, out
   // of the row, which then lets the row go) with nothing the card could act on afterwards; the
@@ -711,7 +726,11 @@ export function AskCard({
                 // and finds the control by this handle, as it finds the box by
                 // `data-ask-answer` and an option by `data-ask-option` (`Inbox.tsx`).
                 data-ask-note-disclosure=""
-                onClick={() => setOwnWordsOpen((open) => !open)}
+                onClick={() => {
+                  // Opening it is a move into the field behind it; closing it moves nowhere.
+                  focusNoteOnOpen.current = !ownWordsOpen;
+                  setOwnWordsOpen(!ownWordsOpen);
+                }}
                 type="button"
               >
                 Add a note or answer in your own words

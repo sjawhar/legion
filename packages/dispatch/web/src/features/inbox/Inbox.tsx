@@ -753,12 +753,16 @@ export function Inbox({
       label: `Answer the ${acted} ask`,
       run: () => {
         // A decision block's compact card folds its answer box behind "Add a note or answer in
-        // your own words"; Enter opens that disclosure and lands in the box it reveals. Only
-        // the column draws that compact card: from a row the key goes straight to the box.
-        if (paneShown && inAnswerHand("[data-ask-answer]") === null) {
+        // your own words"; Enter presses that disclosure, and the card lands the focus in the
+        // box its own render reveals (`AskCard.tsx`) - the box does not exist in this tick, so
+        // nothing here could focus it. Only the column draws that compact card: from a row, and
+        // from a disclosure already open, the key goes straight to the box.
+        const box = inAnswerHand("[data-ask-answer]");
+        if (box === null && paneShown) {
           inAnswerHand(NOTE_DISCLOSURE_SELECTOR)?.click();
+          return;
         }
-        inAnswerHand("[data-ask-answer]")?.focus();
+        box?.focus();
       },
       // Enter is the list's key: it carries the reader from the row they are on into the
       // column's answer box. Everywhere else the key belongs to the control that holds the

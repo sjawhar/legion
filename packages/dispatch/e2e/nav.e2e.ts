@@ -1,7 +1,6 @@
 import { expect, type Page, test } from "@playwright/test";
 
 import { createAsk, createIssue, createProject } from "./api";
-import { hasReadingPane, selectedRow } from "./inbox-pane";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -67,15 +66,13 @@ test("sidebar shows Inbox, Pinned, one row per project with its open-ask badge, 
     await expect(navigation.locator('a[href="/projects/OPS"]')).toContainText("1");
     await expect(navigation.getByRole("link", { name: "Settings" })).toBeVisible();
     await expect(navigation.getByRole("link", { name: /^(CORE|OPS)-\d+/ })).toHaveCount(0);
-    // With the reading pane (INFRA-575) the first row is selected as the Inbox opens and the
-    // pane draws that one question, so its issue is read once. That read is the selection's,
-    // not the navigation's, and there is still no request per row.
-    const paneReads: string[] = [];
-    if (hasReadingPane(page)) {
-      const owner = await selectedRow(page).getAttribute("data-inbox-owner-key");
-      paneReads.push(`/api/v1/issues/${owner?.replace(/^issue:/, "")}`);
-    }
-    await expect.poll(() => issueRequests).toEqual(["?pinned=true", ...paneReads]);
+    // The Inbox makes no per-issue read of its own either: the list is one `GET /inbox`, and
+    // the reading pane (INFRA-575) draws the selected question from the row it already holds.
+    // Only a question written as a decision block has its issue read, for the one field the
+    // live document is handed - whether the issue is closed (`DecisionBody` in
+    // `ReadingPane.tsx`). These three are ordinary questions, so the pane reads no issue and
+    // the navigation's one read stands alone.
+    await expect.poll(() => issueRequests).toEqual(["?pinned=true"]);
     await page.screenshot({ path: testInfo.outputPath("projects-sidebar.png"), fullPage: true });
   } finally {
     await context.close();
