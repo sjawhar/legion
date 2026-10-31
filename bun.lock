@@ -13,6 +13,11 @@
         "@biomejs/biome": "^2.3.14",
         "@types/bun": "latest",
         "@types/spdx-expression-parse": "3.0.0",
+        "mdast-util-from-markdown": "2.0.3",
+        "mdast-util-frontmatter": "2.0.1",
+        "mdast-util-gfm": "3.1.0",
+        "micromark-extension-frontmatter": "2.0.0",
+        "micromark-extension-gfm": "3.0.0",
         "spdx-expression-parse": "3.0.1",
         "spdx-license-list": "6.12.0",
         "typescript": "^5.3.0",
@@ -137,7 +142,7 @@
     },
     "packages/envoy-plugin": {
       "name": "@sjawhar/opencode-legion-envoy",
-      "version": "8.13.0",
+      "version": "11.1.0",
       "dependencies": {
         "@opencode-ai/plugin": "~1.14.46",
       },
@@ -167,7 +172,7 @@
     },
     "packages/pi-envoy": {
       "name": "@sjawhar/pi-envoy",
-      "version": "10.10.0",
+      "version": "13.1.0",
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
         "@legion/contracts": "workspace:*",
@@ -184,7 +189,7 @@
     },
     "packages/pi-legion": {
       "name": "@sjawhar/pi-legion",
-      "version": "10.12.0",
+      "version": "14.1.0",
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
         "@legion/contracts": "workspace:*",
@@ -257,8 +262,8 @@
     "micromark-core-commonmark@2.0.3": "patches/micromark-core-commonmark@2.0.3.patch",
     "mdast-util-from-markdown@2.0.3": "patches/mdast-util-from-markdown@2.0.3.patch",
     "micromark-extension-gfm-footnote@2.1.0": "patches/micromark-extension-gfm-footnote@2.1.0.patch",
-    "prosemirror-tables@1.8.5": "patches/prosemirror-tables@1.8.5.patch",
     "micromark@4.0.2": "patches/micromark@4.0.2.patch",
+    "prosemirror-tables@1.8.5": "patches/prosemirror-tables@1.8.5.patch",
     "@milkdown/plugin-clipboard@7.22.1": "patches/@milkdown%2Fplugin-clipboard@7.22.1.patch",
     "@milkdown/preset-gfm@7.22.1": "patches/@milkdown%2Fpreset-gfm@7.22.1.patch",
     "nats@2.29.3": "patches/nats@2.29.3.patch",
