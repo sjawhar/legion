@@ -510,9 +510,28 @@ A tab opened before the deploy needs a reload:
 
 What the two processes share, and what each keeps to itself:
 
-- Each event is published once.
-  The outbox claims a batch (`for update skip locked`) before it publishes it, so two processes never publish one event twice.
-  A process that dies between a publish and its `published_at` write republishes once the claim's minute lapses, which is at-least-once on the `notifications.role.*` core-NATS lanes, whose receivers dedupe by key.
+- One process publishes the events outbox at a time.
+  Each process's outbox reads and sends events only while it holds the publisher hold `dispatch-outbox` (`duty.Hold`, migration `0150_duty_holds`), renewed every two seconds on the outbox's own pool, and stands by while the other holds it;
+  `/healthz` says which (`outbox_publisher`).
+  A holder that stops sends nothing more, records what NATS already answered, releases the rest of each batch in flight and then the hold, which wakes the standby at once;
+  a graceful stop waits for that before it closes the database pool, up to `outboxStopBudget` after its shutdown starts.
+  One that is killed is replaced once its hold lapses, six seconds after its last renewal;
+  one whose NATS stays down for three seconds, or whose failed sends meet a connection that does not answer a probe, releases the hold too.
+  One that finds its hold lost releases it as well, which stops its renewal and deletes the row only while the row still names it.
+  A holder sends nothing once its hold's deadline has passed, a send already waiting for a connection included (`bus.Client.WindowUntil`), so one that freezes and resumes publishes nothing beside the new holder.
+  Each owner's events (an issue's, a document's or a project's) keep their order per destination:
+  an event goes to a session's subject, or to the owner's topic family, only after every earlier unpublished event of its owner bound there has reached it.
+
+- A batch does not block the next.
+  The holder runs up to four side by side, each reading only owners no other batch holds in flight, so an event waiting out a role holder's five-second receipt holds back its own owner's later events and nothing else;
+  every other owner's events are read, sent and recorded beside it.
+  An owner is settled, recorded and given back as soon as its own sends are answered rather than at its batch's end, so its next events follow at once.
+  The batches run one statement at a time on the outbox's two connections, so the hold's renewal never waits behind them.
+
+- Each event reaches each receiver once, delivered at least once.
+  A holder that dies between NATS's acknowledgement and the write that records it leaves the batch to be sent again by the next holder:
+  JetStream drops the repeat by its MsgId inside its 72-hour duplicate window, and a role's holder, to which the outbox forwards a role-routed event itself with a receipt, drops a repeat forward by its dedupe key.
+  Dispatch publishes nothing on `notifications.role.*`.
 
 - A reader's events subscription on its live socket carries the other process's events.
   It is re-sourced from Postgres through a per-process relay on `listen dispatch_events` (migration `0107_events_notify`), so an event committed on either process reaches every open subscription with no reconnect.
@@ -525,7 +544,7 @@ What the two processes share, and what each keeps to itself:
   and, under that lease, each pass is recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick lands between another's passes
   — the ordinary case, since each ticker draws its phase at boot and a rolling update starts the second process minutes after the first
   — finds the period already served and logs the same skip.
-  The settlement resumption, the delivery live hub, the event-stream relay, the stale-room evictor and the document rooms' timers stay per-process by design, and the embedding queue, the task progress reconciliation and the outbox's own scan claim their own work;
+  The settlement resumption, the delivery live hub, the event-stream relay, the stale-room evictor and the document rooms' timers stay per-process by design, the embedding queue and the task progress reconciliation claim their own work, and the outbox publishes under its hold (above);
   the embedding queue's coverage pass runs in every process with no lease, each of its steps safe beside another process's, and drops every vector its own embedder did not make, so every process takes the same embedder settings (Search, below);
   `cmd/dispatch/main.go` says at the call site which loop is which and why.
 
@@ -1041,6 +1060,36 @@ An anchor whose artifact id is not a lower-case document id is left out of the i
 — its text comparison never matched such a spelling either — and each boot logs the count of those asks with a warning when there are any.
 The release before it never reads the index and serves beside it unchanged, except that its sweep still drops the mark of an ask holding both columns (no such row is written today), and rolling Dispatch back past `0148` is an image rollback alone:
 the index is left for the next release that reads it.
+
+Migration `0150_duty_holds` creates `duty_holds (name, holder, token, expires_at)`, one row per name a process holds by renewing it (`duty.Hold`):
+the events outbox's publisher holds `dispatch-outbox` there (Running more than one process, above).
+`expires_at` is always the database's `now()` plus the hold's TTL, so a lapse is judged on the database's clock and never on two hosts' wall clocks, and `token` is free text the holder records, the outbox's host and process id.
+A release deletes the row and notifies `dispatch_duty_holds` with the name in one statement, which wakes a standby at once.
+It creates a table and touches no row, and the release before it neither reads nor writes it; its census answers `0`.
+
+Migration `0151_outbox_claim` gives the outbox's batch read three partial indexes and drops the two the per-row claim read.
+`events_outbox_fresh` on `(id)` holds the unpublished events never tried, `events_outbox_retry` on `(next_attempt_at, id)` those waiting on a back-off, and `events_outbox_owner` on `(coalesce(issue_key, artifact_id::text, project_key), id)` each owner's unpublished events;
+none holds a published event or a pending subscription command, so the read walks past neither.
+It adds `events.publish_error`, nullable text with no default, a catalog change that rewrites no row:
+why an event's last attempt failed, cleared once it is published.
+It drops `events_unpublished` (`0003`) and `events_unpublished_ready` (`0020`), which only the per-row claim read;
+the release before it reads neither the new column nor the new indexes, and its claim still runs without the dropped ones, at a cost.
+That claim's predicate, `coalesce(payload ->> 'pending', 'false') <> 'true'`, proves none of the three new indexes' `(payload ->> 'pending') is distinct from 'true'`, so the earlier release reads the whole of `events` in a sequential scan on every scan it makes:
+on 1,000,000 event rows, the last 100 unpublished, on Postgres 17, 125 ms and every one of the table's 19,231 pages, where `events_unpublished` took 3.4 ms.
+It pays that while it serves beside this release in a rolling update, which is one more reason to deploy this release with `strategy: Recreate` (below), and for as long as a rollback to it lasts.
+The migration runs in one transaction, so every lock it takes is held until it commits.
+It builds the three indexes first: each reads every row of `events` under `SHARE`, which holds writes to `events` from then until the commit and lets reads go on (no `concurrently`, which a migration's transaction cannot run):
+1.1 s on 1,000,000 event rows and 7.2 s on 5,000,000, on Postgres 17 with two cores.
+It then adds the column and drops the two old indexes, each under `ACCESS EXCLUSIVE`, which holds reads of `events` too, so reads wait only for those last statements, which rewrite no row, and for the commit.
+Its census answers `0`, since it refuses and rewrites no row, and the census reports `events`, the table it locks, with its row count and size.
+
+From `0151`'s release on, `next_attempt_at` is only a back-off, and an unpublished event holds back its owner's later events from each destination it has not reached.
+The rows that start doing so at the deploy are the unpublished events that are not pending commands;
+count them by attempt before the deploy with `select attempt_count, count(*) from events where published_at is null and
+(payload ->> 'pending') is distinct from 'true' group by attempt_count order by attempt_count`.
+The release before it takes no publisher hold and still claims and publishes batches of its own, and this release reads those one-minute claims as back-offs alone, so while a rolling update runs both the two publish side by side:
+an issue's events can arrive out of order, as they could between two processes of the earlier release, and one event can be sent by both, its second copy dropped by JetStream's MsgId or by its receiver's dedupe.
+A deployment that wants neither, nor the earlier release's whole-table claim scans, replaces the running server rather than rolling it for this one release (`strategy: Recreate`).
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their count, and re-derives them from source text on the next write.
 It aborts server boot before a migration record or schema change only when an existing artifact has no owning issue.
@@ -1665,6 +1714,9 @@ Each item below names a path with its method and identity, then its purpose.
   The body also names what is deployed: `commit`, the legion commit this process's image build stamped (the Dockerfile's `LEGION_COMMIT`;
   `null` in an unstamped build); `fleet_commit`, the commit of the latest announcement that every live server process serves one build, the one `server.started` carries (`null` when there is none, or before this process's announcer has first read the table, and up to one announcer pass, five seconds, behind it);
   and `schema_version`, the highest migration `schema_migrations` records, read by the same probe (`null` when `db` is false).
+  `outbox_publisher` says whether this process publishes the events outbox now:
+  `true` while it holds the outbox's publisher hold and the hold's deadline has not passed, `false` while it stands by for another process's, after it lost the hold, and with NATS disabled.
+  One process of a deployment publishes at a time, so a healthy process may report `false`, and the field never decides `ok` or the status.
 
 - `/livez` (GET; none)
 
@@ -1674,7 +1726,8 @@ Each item below names a path with its method and identity, then its purpose.
 - `/metrics` (GET; none)
 
   The process's metrics in the Prometheus text format:
-  `envoy_dispatch_outbox_publish_failures_total{reason}`, one count per destination of an outbox publish attempt that did not reach NATS, `reason` being `denied` (the server refused it under the connection's own publish permissions), `refused` (NATS refuses the envelope or its subject however often it is retried) or `failed` (every other failure).
+  `envoy_dispatch_outbox_publish_failures_total{reason}`, one count per destination of an outbox publish attempt that was not reached, `reason` being `denied` (the server refused it under the connection's own publish permissions), `refused` (NATS refuses the envelope or its subject however often it is retried), `holder` (a role forward its holder's resolution held pending, with nothing sent), `unanswered` (NATS took the forward and the answer never came:
+  the role holder's receipt, or, for a holder with a serving port, the stream's acknowledgement of the stored copy) or `failed` (every other failure).
   It is answered above the router, so it is never the dashboard's shell, and whoever reaches the HTTP port can read it.
   Nothing scrapes it yet.
 

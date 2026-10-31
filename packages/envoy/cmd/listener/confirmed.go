@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 )
@@ -307,25 +308,26 @@ func (s *roleSend) settledBeforeForward(entry session.SessionEntry) bool {
 }
 
 // sendToRole delivers a role message through the publish route, answering through record. The
-// first resolution reads the holder as an HTTP lookup does (resolveRoleHolder with registered),
-// within sendRequestBudget of arrived as GET /v1/roles/<role> reads it, and gives its answers: 404
-// unclaimed or holder_lapsed, and for a resolution that failed the lookup's 503 or 500 (unresolved),
-// so a holder that exists but has not heartbeated lately gets attempts rather than a 404. The first
-// attempt forwards to that holder when its session entry passes role delivery's freshness test
-// (laneHolderFresh), without reading the claim again; every other attempt resolves the holder
-// again by role delivery's rule (resolveRoleHolder with laneHolderFresh), so a holder that
-// relaunched under a new session between attempts gets the next one. On those attempts an
-// unclaimed role, or a lapsed holder whose claim was released or already absent, is answered 404 as
-// the first resolution answers it; a lapsed holder whose claim was retained, a read that failed and
-// a claim that churned fail that attempt only. Each attempt forwards the same envelope, under the
-// role forward's dedupe key, with a receipt window of what is left of the send, at most
-// roleReceiptTimeout. Every forward carries the same Nats-Msg-Id (bus.Client.RequestCoreTo), so the
+// first resolution reads the holder as an HTTP lookup does (resolveRoleHolder with
+// roles.Registered), within sendRequestBudget of arrived as GET /v1/roles/<role> reads it, and
+// gives its answers: 404 unclaimed or holder_lapsed, and for a resolution that failed the lookup's
+// 503 or 500 (unresolved), so a holder that exists but has not heartbeated lately gets attempts
+// rather than a 404. The first attempt forwards to that holder when its session entry passes role
+// delivery's freshness test (laneHolderFresh), without reading the claim again; every other
+// attempt resolves the holder again by role delivery's rule (resolveRoleHolder with
+// laneHolderFresh), so a holder that relaunched under a new session between attempts gets the next
+// one. On those attempts an unclaimed role, or a lapsed holder whose claim was released or already
+// absent, is answered 404 as the first resolution answers it; a lapsed holder whose claim was
+// retained, a read that failed and a claim that churned fail that attempt only. Each attempt
+// forwards the same envelope, under the role forward's dedupe key, with a receipt window of what
+// is left of the send, at most roleReceiptTimeout. Every forward goes out under the same
+// Nats-Msg-Id, the forward's dedupe key and the holder's subject (bus.ForwardMsgID), so the
 // stream, which captures agent subjects, keeps one copy however many attempts there are. Every read
 // takes ctx, the send's window, so none outlasts it: a send whose window ends is answered 504.
 func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecord, d *listenerDeps, item contracts.Envelope, role string, arrived time.Time) {
 	send := &roleSend{w: w, record: record, d: d, item: item, role: role, arrived: arrived}
 	firstCtx, cancelFirst := context.WithDeadline(ctx, arrived.Add(sendRequestBudget))
-	first, err := resolveRoleHolder(firstCtx, d.registry, d.sessions, role, registered)
+	first, err := resolveRoleHolder(firstCtx, d.registry, d.sessions, role, roles.Registered)
 	cancelFirst()
 	if err != nil {
 		send.unresolved(err)
@@ -378,7 +380,11 @@ func sendToRole(ctx context.Context, w http.ResponseWriter, record *requestRecor
 				return
 			}
 			send.attempts++
-			err := d.delivery.forwardRole(contracts.AgentSubject(send.holder), forwarded, window)
+			subject := contracts.AgentSubject(send.holder)
+			// The forward carries the same Nats-Msg-Id on every attempt, so the stream, which
+			// captures agent subjects, keeps one copy of it per message and recipient however
+			// many attempts this send makes.
+			err := d.delivery.forwardRole(subject, forwarded, bus.ForwardMsgID(forwarded.DedupeKey, subject), window)
 			if err == nil {
 				d.confirm(item.DedupeKey, send.holder)
 				send.delivered(sendDelivered)
@@ -441,7 +447,10 @@ func confirmTopicRecipient(ctx context.Context, d *listenerDeps, item contracts.
 			if window <= 0 {
 				break
 			}
-			err := d.delivery.forwardRole(contracts.AgentSubject(sessionID), item, window)
+			subject := contracts.AgentSubject(sessionID)
+			// As a role send's forward does: one stored copy per message and recipient,
+			// however many attempts this recipient takes.
+			err := d.delivery.forwardRole(subject, item, bus.ForwardMsgID(item.DedupeKey, subject), window)
 			if err == nil {
 				d.confirm(item.DedupeKey, sessionID)
 				return sendDelivered

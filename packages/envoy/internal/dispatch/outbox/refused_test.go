@@ -20,6 +20,7 @@ import (
 // refusingPublisher refuses one topic as NATS refuses an envelope it cannot take, and publishes
 // the rest, counting every attempt by topic.
 type refusingPublisher struct {
+	publishOnly
 	mu       sync.Mutex
 	refuse   string
 	attempts map[string]int
@@ -37,9 +38,16 @@ func (p *refusingPublisher) Publish(item contracts.Envelope) error {
 	return nil
 }
 
-func (p *refusingPublisher) Window() bus.Sender { return p }
+func (p *refusingPublisher) WindowUntil(deadline func() time.Time) bus.Sender {
+	return deadlineWindow{Sender: p, deadline: deadline}
+}
 
 func (p *refusingPublisher) PublishAsync(item contracts.Envelope) <-chan error {
+	return answered(p.Publish(item))
+}
+
+// Request takes a role forward by its envelope's topic, the role's, as Publish takes a publish.
+func (p *refusingPublisher) Request(_ string, item contracts.Envelope, _ bus.RequestOptions) <-chan error {
 	return answered(p.Publish(item))
 }
 

@@ -283,7 +283,7 @@ Sign in, then open **Settings**:
 while Postgres answers:
 
 ```json
-{"ok":true,"db":true,"nats":null,"files":null,"signin":null,"service_tokens":null,"commit":null,"fleet_commit":null,"schema_version":121}
+{"ok":true,"db":true,"nats":null,"files":null,"signin":null,"service_tokens":null,"commit":null,"fleet_commit":null,"schema_version":121,"outbox_publisher":false}
 ```
 
 It is a readiness check, not a liveness check: it fails while the database cannot be reached, so a
@@ -308,6 +308,9 @@ balancer's or Kubernetes' readiness probe at it.
   build, or `null` before any was found. It is read from the database, so it is reported while NATS
   is down too. It can trail by a few seconds.
 - `schema_version` is the newest database migration applied.
+- `outbox_publisher` is whether this server is the one publishing notifications to NATS now. One
+  server publishes at a time, so a healthy server can say `false`, and it always does when NATS is
+  turned off. It never decides `ok` or the status.
 
 A check that needs NATS, the bucket or sign-in asserts `nats: true`, `files: true` or `signin: true`
 itself.
@@ -317,9 +320,13 @@ itself.
 `GET /metrics` needs no credential either, so whoever reaches the server's HTTP port can read it.
 It answers in the Prometheus text format with one counter,
 `envoy_dispatch_outbox_publish_failures_total`: one count for each destination of an event
-publish that did not reach NATS, labelled `reason`. `denied` is a publish NATS refused under the
-server's own grant, `refused` one NATS refuses however often it is retried, and `failed` any other
-failure. A denied publish also logs `dispatch outbox: publish event` at ERROR, naming the subject.
+publish that was not reached, labelled `reason`. `denied` is a publish NATS refused under the
+server's own grant, `refused` one NATS refuses however often it is retried, `holder` a role
+forward its holder's resolution held pending with nothing sent (a stale holder, a claim the store
+kept, a read that failed), `unanswered` a forward NATS took whose answer never came - the role
+holder's receipt, or, for a holder with a serving port, the stream's acknowledgement of the
+stored copy - and `failed` any other failure. A denied publish also logs
+`dispatch outbox: publish event` at ERROR, naming the subject.
 
 ## Behind a proxy
 
@@ -370,23 +377,18 @@ one. Three things have to be true first; Dispatch checks the first for you.
 - **Every migration leaves the version before it able to read and write the database**
   ([Migrations](#migrations)), because a rolling update runs both versions against the one
   database while it lasts.
-- **Expect an issue's notifications out of order while two servers publish.** Each server's
-  events outbox claims a batch of events at a time, and nothing yet keeps two servers from
-  publishing adjacent batches at once, so a later event of an issue can reach NATS before an
-  earlier one, and the Legion daemon drops the earlier one as stale. Run one server, and replace it
-  rather than rolling it (Kubernetes `strategy: Recreate`), until a single-publisher lock lands.
 
 A second server also costs connections, and Postgres counts them per server. Each server opens up
 to 64 connections for requests, up to 13 for the periodic work it runs once across the servers, up
-to 4 for loading documents, one for the health check, one for the events outbox, and up to 2 for
-reading where the event log is safe to stream from (the event horizon), and it holds
-four more open for as long as it runs: one each for the three things that wait on Postgres
-notifications, which are delivery, the live socket's event-feed relay, and closing a document
-session another server has written to, and one for its entry in the list of running servers, which
-it renews every five seconds. That is 89 connections for one server at its ceiling, and twice that
-for two, past a default Postgres's limit of 100. Check the database's connection
-limit before you start the second server: a limit sized for one server, with whatever else uses
-that database counted in, is the thing that runs out.
+to 4 for loading documents, one for the health check, two for publishing notifications, and up to
+2 for reading where the event log is safe to stream from (the event horizon), and it holds five
+more open for as long as it runs: one each for the four things that wait on Postgres
+notifications, which are delivery, the live socket's event-feed relay, closing a document session
+another server has written to, and publishing notifications, and one for its entry in the list of
+running servers, which it renews every five seconds. That is 91 connections for one server at its
+ceiling, and twice that for two, past a default Postgres's limit of 100. Check the database's
+connection limit before you start the second server: a limit sized for one server, with whatever
+else uses that database counted in, is the thing that runs out.
 
 What a reader sees while two servers are serving:
 
@@ -394,6 +396,13 @@ What a reader sees while two servers are serving:
   under that document's lock, edits made at the same time merge rather than overwrite, and the
   stored history holds all of them. A server whose copy of a document is not the current one
   writes no version from it and settles nothing on it; it reloads the document instead.
+- Notifications are published by one server at a time, so a second server does not reorder an
+  issue's notifications. When the publishing server stops, is killed or loses its connection to
+  NATS, the other takes over within ten seconds; the health check's `outbox_publisher` says which
+  server publishes. A publishing server whose NATS goes silent without the connection dropping,
+  while it has nothing to send, is found out only by its next send, which waits five seconds for
+  NATS to answer and then two for a probe of the connection: the other server then takes over
+  within ten seconds of the next notification, not of the moment NATS went silent.
 - A document's live session belongs to one server. While someone has a document open on one
   server, that session does not carry the other server's edits, so the people shown as present,
   and their cursors, are the ones editing on that server. A write that lands on the other server

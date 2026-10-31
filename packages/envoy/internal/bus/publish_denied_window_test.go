@@ -54,7 +54,7 @@ func windowAnswer(t *testing.T, topic string, outcome <-chan error) error {
 // answer is read, which is how the outbox publishes an event's destinations. Under a grant that
 // covers those same subjects, both sends are accepted.
 func TestAWindowAnswersEachDeniedJetStreamSendItsOwnDenial(t *testing.T) {
-	window := jetStreamGrantedClient(t).Window()
+	window := jetStreamGrantedClient(t).WindowUntil(nil)
 	issue := window.PublishAsync(streamEnvelope(deniedIssueTopic))
 	session := window.PublishAsync(streamEnvelope(deniedSessionTopic))
 
@@ -83,7 +83,7 @@ func TestAWindowAnswersEachDeniedJetStreamSendItsOwnDenial(t *testing.T) {
 		}
 	}
 
-	granted := jetStreamGrantedClient(t, "notifications.dispatch.>", "notifications.agent.>").Window()
+	granted := jetStreamGrantedClient(t, "notifications.dispatch.>", "notifications.agent.>").WindowUntil(nil)
 	issue = granted.PublishAsync(streamEnvelope(deniedIssueTopic))
 	session = granted.PublishAsync(streamEnvelope(deniedSessionTopic))
 	for _, send := range []struct {
@@ -119,7 +119,7 @@ func batchEnvelope(topic, event string) contracts.Envelope {
 // outbox sends a scan's batch. Under a grant that covers the subject, both are accepted and the
 // stream holds both.
 func TestAWindowAnswersEachDeniedSendOfOneSubjectItsOwnDenial(t *testing.T) {
-	window := jetStreamGrantedClient(t).Window()
+	window := jetStreamGrantedClient(t).WindowUntil(nil)
 	first := window.PublishAsync(batchEnvelope(deniedIssueTopic, "comment-1"))
 	second := window.PublishAsync(batchEnvelope(deniedIssueTopic, "comment-2"))
 
@@ -145,7 +145,7 @@ func TestAWindowAnswersEachDeniedSendOfOneSubjectItsOwnDenial(t *testing.T) {
 	}
 
 	client := jetStreamGrantedClient(t, "notifications.dispatch.>")
-	granted := client.Window()
+	granted := client.WindowUntil(nil)
 	first = granted.PublishAsync(batchEnvelope(deniedIssueTopic, "comment-1"))
 	second = granted.PublishAsync(batchEnvelope(deniedIssueTopic, "comment-2"))
 	for _, send := range []struct {

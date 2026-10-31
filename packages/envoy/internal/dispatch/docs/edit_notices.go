@@ -142,7 +142,7 @@ const dueEditNotice = `
 
 // RunEditNotices sends each document's edit notice once its quiet window ends: one
 // artifact.human_edited event, which reaches the sessions the document credits and its issue's
-// route (outbox.publishAuthorRoutes). It sweeps at start and then editNoticeInterval after each
+// route (outbox.addAuthorRoutes). It sweeps at start and then editNoticeInterval after each
 // sweep returns (duty.RunLeasedAfterEachPass) until ctx ends, under the edit-notices lease, so one
 // process sweeps a period however many serve the database. The window is a row, not a timer, so a
 // notice still pending when a process stops is sent by the next sweep of any process.

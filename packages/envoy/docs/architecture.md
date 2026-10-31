@@ -279,6 +279,17 @@ time and forwards once, and its outcome is one of three exception reasons: `no_h
 session claims the role, `delivery_failed` or `receipt_timeout` as above. A role claimant does not
 subscribe directly to its role subject, and a role message is not retained for a future claimant.
 
+Dispatch's outbox forwards its own role-routed events to the holder itself: it resolves the
+holder with the resolution the listener's lane uses (`roles.ResolveHolder`) and sends the
+envelope, its role topic kept, to the holder's agent subject, so Dispatch's events no longer
+cross `notifications.role.*`. A role with no claim counts as reached with nothing sent, and a
+forward that fails stays pending in the outbox and is retried; the outbox raises no exception.
+The listener's role lane gives its forward a `Nats-Msg-Id` (`bus.ForwardMsgID`: the forward's
+dedupe key and the agent subject) only when the original envelope's dedupe key, before the
+forward's `envoy.role.forward.` prefix is added, names its event, so the stream stores one copy of
+such a message per recipient however often it is forwarded; a forward under a key its sender chose
+carries none.
+
 When a control delivery has no holder, cannot be forwarded, or draws no receipt, Envoy emits an
 envelope on `notifications.envoy.exceptions.<original-topic>`. The exception payload preserves
 the original delivery fields:

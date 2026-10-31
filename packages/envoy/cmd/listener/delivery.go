@@ -16,16 +16,17 @@ import (
 	"github.com/sjawhar/envoy/internal/id"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/metrics"
+	"github.com/sjawhar/envoy/internal/roles"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 )
 
 // roleForwardDedupePrefix marks an envelope already sent from the role arbiter, or the publish
-// route, to its selected agent subject. A role lane that takes one again (an operator re-publishing
-// a received frame) acknowledges it without re-entering the arbiter, and a session's dedupe reads
-// it as a forward. The durable acknowledges every stored forward copy by its subject instead
-// (listenerDeliveryHandler).
-const roleForwardDedupePrefix = "envoy.role.forward."
+// route, to its selected agent subject (contracts.RoleForwardDedupePrefix). A role lane that takes
+// one again (an operator re-publishing a received frame) acknowledges it without re-entering the
+// arbiter, and a session's dedupe reads it as a forward. The durable acknowledges every stored
+// forward copy by its subject instead (listenerDeliveryHandler).
+const roleForwardDedupePrefix = contracts.RoleForwardDedupePrefix
 
 const roleReceiptTimeout = 2 * time.Second
 
@@ -40,13 +41,12 @@ func shouldNAKFanoutDelivery(sessionLive bool, err error) bool {
 
 type listenerDeliveryHandlerConfig struct {
 	client *bus.Client
-	// forwardRole delivers a role-lane envelope to the holder's agent subject and
-	// waits for its empty receipt. main.go wires client.RequestCoreTo.
-	// bus.ErrReceiptTimeout means the forward was flushed to the server and no
-	// receipt arrived inside timeout; any other error — a raw nats.ErrTimeout
-	// from the flush included — means the forward is not known to have reached
-	// the holder.
-	forwardRole       func(subject string, item contracts.Envelope, timeout time.Duration) error
+	// forwardRole delivers a role-lane envelope to the holder's agent subject under msgID, its
+	// Nats-Msg-Id when not empty, and waits for its empty receipt. main.go wires
+	// client.RequestCoreTo. bus.ErrReceiptTimeout means the forward was flushed to the server
+	// and no receipt arrived inside timeout; any other error — a raw nats.ErrTimeout from the
+	// flush included — means the forward is not known to have reached the holder.
+	forwardRole       func(subject string, item contracts.Envelope, msgID string, timeout time.Duration) error
 	registry          *store.Registry
 	sessions          *session.SessionRegistry
 	machineID         string
@@ -328,22 +328,25 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 
 // laneHolderFresh is role delivery's liveness test of a holder's session entry, which
 // resolveRoleHolder applies for the role lane and the publish route's attempts: the entry
-// heartbeated within session.ClaimStaleAfter as of now, read at each test, so the cached entry and
-// the entry read again from the bucket are each judged at the moment they are checked. The plugin
-// heartbeats every 90 seconds (DEFAULT_HEARTBEAT_MS, packages/envoy-client/src/envoy-settings.ts),
-// so three missed heartbeats means the claiming process is very likely gone.
+// heartbeated within session.ClaimStaleAfter as of now (roles.Fresh, the test Dispatch's outbox
+// makes too), read at each test, so the cached entry and the entry read again from the bucket are
+// each judged at the moment they are checked. The plugin heartbeats every 90 seconds
+// (DEFAULT_HEARTBEAT_MS, packages/envoy-client/src/envoy-settings.ts), so three missed heartbeats
+// means the claiming process is very likely gone.
 func laneHolderFresh(entry session.SessionEntry) bool {
-	now := time.Now().UnixMilli()
-	return entry.UpdatedAt > 0 && now-entry.UpdatedAt < int64(session.ClaimStaleAfter/time.Millisecond)
+	return roles.Fresh(entry, time.Now())
 }
 
 // resolveCoreRoleHolder resolves the current live holder for a role-lane delivery by role
-// delivery's rule (resolveRoleHolder with laneHolderFresh), applying the terminal
-// no_holder/delivery_failed outcome itself and reporting ok=false when there is nobody to deliver
-// to. An unclaimed role is no_holder; a lapsed holder and every failed read are delivery_failed,
-// each under a log line that names which it was. Role delivery answers no caller, so it resolves
-// under context.Background(): the holder's session read keeps roleHolderReadTimeout
-// (roleHolderSession's bound) as its own cap.
+// delivery's rule (resolveRoleHolder with laneHolderFresh, over roles.ResolveHolder), applying the
+// terminal no_holder/delivery_failed outcome itself and reporting ok=false when there is nobody to
+// deliver to. An unclaimed role is no_holder; a lapsed holder and every failed read are
+// delivery_failed, each under a log line that names which it was. A claim whose release finds it
+// superseded is resolved again, bounded, so a claim raced by a live replacement is re-resolved to
+// that replacement here exactly as it is for GET /v1/roles/<role>, instead of reporting
+// delivery_failed about a session a fresh claim has already superseded. Role delivery answers no
+// caller, so it resolves under context.Background(): the holder's session read keeps
+// roleHolderReadTimeout (roleHolderSessions' bound) as its own cap.
 func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Envelope, role string) (string, session.SessionEntry, bool) {
 	resolved, err := resolveRoleHolder(context.Background(), cfg.registry, cfg.sessions, role, laneHolderFresh)
 	sessionID := resolved.holder
@@ -482,9 +485,18 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 		return
 	}
 	cfg.attemptCache.Record(item.DedupeKey, sessionID)
+	subject := contracts.AgentSubject(sessionID)
 	forwarded := item
 	forwarded.DedupeKey = roleForwardDedupePrefix + item.DedupeKey
-	if err := cfg.forwardRole(contracts.AgentSubject(sessionID), forwarded, roleReceiptTimeout); err != nil {
+	// The forward is stored once per message and holder however often it is sent only when the
+	// envelope's own key names its event (contracts.DedupeKeyNamesTheUpstreamEvent, asked of item:
+	// the forward's prefix hides a webhook key's shape). Two distinct envelopes can share a key
+	// their sender chose, so such a forward carries no MsgId and the stream stores each.
+	var msgID string
+	if contracts.DedupeKeyNamesTheUpstreamEvent(item) {
+		msgID = bus.ForwardMsgID(forwarded.DedupeKey, subject)
+	}
+	if err := cfg.forwardRole(subject, forwarded, msgID, roleReceiptTimeout); err != nil {
 		if errors.Is(err, bus.ErrReceiptTimeout) {
 			applyDeliveryOutcome(cfg, item, deliveryOutcome{
 				sessionID:    sessionID,
@@ -595,7 +607,7 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 	// reaches the retry decision only as ReasonNoSessionRecord, which already holds the retry
 	// open (session.HandleAgentMessage: the registry path reports that reason, and the interest
 	// path NAKs with an error, which never reaches that branch).
-	entry, entryErr := liveSessionEntry(context.Background(), cfg.sessions, sessionID, deliverySessionReadTimeout, registered)
+	entry, entryErr := liveSessionEntry(context.Background(), cfg.sessions, sessionID, deliverySessionReadTimeout, roles.Registered)
 	var entryPtr *session.SessionEntry
 	if entryErr == nil {
 		entryPtr = &entry

@@ -17,8 +17,8 @@ import (
 
 // reconnectWaitFixture is a client that reaches NATS through a proxy the test can cut, a subscriber
 // on topic connected to NATS directly, and the envelope to publish there. onTick is what the
-// client's reconnect wait runs after each of its ticks (bus.WithReconnectWaitTick); nil runs
-// nothing.
+// client's reconnect wait runs at each of its passes, its ticks (bus.WithReconnectWaitTick); nil
+// runs nothing.
 type reconnectWaitFixture struct {
 	proxy    *relayProxy
 	client   *bus.Client
@@ -107,9 +107,9 @@ func (f *reconnectWaitFixture) requireNothingReceived(t *testing.T, what string,
 
 // A core publish whose context is cancelled while it waits for NATS to reconnect, with its
 // deadline still ahead, sends nothing even when the reconnect lands right after the cancel. What
-// answers it here is ensureConnWithContext's wait, whose select consults the context between ticks
-// and so returns the cancellation while the connection is still down; publishConfirmed's read of
-// the context immediately before the publish is the backstop, pinned on its own by
+// answers it here is ensureConnWithContext's wait, whose select consults the context while it
+// waits and so returns the cancellation while the connection is still down; publishConfirmed's
+// read of the context immediately before the publish is the backstop, pinned on its own by
 // TestAPublishCancelledAsTheReconnectCompletesSendsNothing.
 //
 // The cancel lands only once the publish is inside the wait: the wait's first tick closes waiting,

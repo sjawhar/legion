@@ -2832,7 +2832,7 @@ func TestListenerDeliveryHandler_RoleLaneForwardsToAHolderItsSessionCacheHasNotS
 	}
 	var forwardedTo []string
 	cfg := harness.config
-	cfg.forwardRole = func(subject string, _ contracts.Envelope, _ time.Duration) error {
+	cfg.forwardRole = func(subject string, _ contracts.Envelope, _ string, _ time.Duration) error {
 		forwardedTo = append(forwardedTo, subject)
 		return nil
 	}
@@ -2870,7 +2870,7 @@ func TestListenerDeliveryHandler_RoleForwardPublishErrorEmitsDeliveryFailed(t *t
 	}
 	var forwards atomic.Int32
 	cfg := harness.config
-	cfg.forwardRole = func(string, contracts.Envelope, time.Duration) error {
+	cfg.forwardRole = func(string, contracts.Envelope, string, time.Duration) error {
 		forwards.Add(1)
 		return errors.New("nats: connection closed")
 	}
@@ -2923,7 +2923,7 @@ func TestListenerDeliveryHandler_RoleForwardRefusesUnadvertisedDeliveryMode(t *t
 	}
 	var forwards atomic.Int32
 	cfg := harness.config
-	cfg.forwardRole = func(string, contracts.Envelope, time.Duration) error {
+	cfg.forwardRole = func(string, contracts.Envelope, string, time.Duration) error {
 		forwards.Add(1)
 		return nil
 	}
@@ -2976,7 +2976,7 @@ func TestListenerDeliveryHandler_RoleForwardDedupeSkipsCapabilityRecheckOnRedeli
 	}
 	var forwards atomic.Int32
 	cfg := harness.config
-	cfg.forwardRole = func(string, contracts.Envelope, time.Duration) error {
+	cfg.forwardRole = func(string, contracts.Envelope, string, time.Duration) error {
 		forwards.Add(1)
 		return nil
 	}
@@ -3060,7 +3060,7 @@ func TestListenerDeliveryHandler_RoleForwardErrorSelectsTheReason(t *testing.T) 
 				t.Fatalf("claim role: %v", err)
 			}
 			cfg := harness.config
-			cfg.forwardRole = func(string, contracts.Envelope, time.Duration) error { return tc.forwardErr }
+			cfg.forwardRole = func(string, contracts.Envelope, string, time.Duration) error { return tc.forwardErr }
 			handler := coreNATSDeliveryHandler(cfg)
 			item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "forward-error-kind-"+role)
 			item.Payload = `{"type":"worker-queued"}`

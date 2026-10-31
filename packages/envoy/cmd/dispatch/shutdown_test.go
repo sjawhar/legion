@@ -26,10 +26,14 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cmdtest"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/outbox"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -487,7 +491,7 @@ func TestShutdownWaitsForDeliveryWorkBeforeClosingThePool(t *testing.T) {
 			close(entered)
 			<-release
 			background.Wait()
-		}, func() {})
+		}, func() {}, nil)
 	}()
 	select {
 	case <-entered:
@@ -507,6 +511,137 @@ func TestShutdownWaitsForDeliveryWorkBeforeClosingThePool(t *testing.T) {
 		t.Fatalf("the live socket ended with %v, want 1012", err)
 	}
 	if _, err := database.Pool.Exec(context.Background(), "select 1"); err == nil {
+		t.Fatal("shutdown left the pool open")
+	}
+}
+
+// stallingPublisher is an outbox publisher whose first send does not return until release is
+// closed, so the outbox is inside its batch, holding no database connection, when the process
+// context ends. It is always connected, so its connection never changes.
+type stallingPublisher struct {
+	entered, release chan struct{}
+	once             sync.Once
+}
+
+func (p *stallingPublisher) Connected() bool { return true }
+
+func (p *stallingPublisher) ConnectionChanged() <-chan struct{} { return nil }
+
+func (p *stallingPublisher) WindowUntil(func() time.Time) bus.Sender { return p }
+
+func (p *stallingPublisher) PublishAsync(contracts.Envelope) <-chan error {
+	p.once.Do(func() { close(p.entered) })
+	<-p.release
+	answer := make(chan error, 1)
+	answer <- nil
+	return answer
+}
+
+func (p *stallingPublisher) Request(string, contracts.Envelope, bus.RequestOptions) <-chan error {
+	return p.PublishAsync(contracts.Envelope{})
+}
+
+func (p *stallingPublisher) Probe(time.Duration) error { return nil }
+
+// A graceful stop of the process that holds the publisher hold waits for its outbox before it
+// closes the pool: the outbox, still inside a send when the process context ends, records its
+// batch and releases the hold through that pool, so the hold's row is gone when Dispatch exits and
+// a standby takes the hold at once rather than when it lapses.
+func TestShutdownWaitsForTheOutboxToReleaseThePublisherHold(t *testing.T) {
+	database := storetest.Open(t)
+	observer := storetest.SecondProcess(t, database)
+	broker := events.NewBroker()
+	documentService := docs.New(docs.Deps{Store: database, Events: broker})
+	lifetime, stop := context.WithCancel(context.Background())
+	defer stop()
+	appCtx, err := appContextFor(resolveWith(t, nil), routes.AppContextOptions{
+		Store: database, Docs: documentService, Events: broker, Lifetime: lifetime,
+	})
+	if err != nil {
+		t.Fatalf("build the router: %v", err)
+	}
+	handler, background := routes.New(appCtx)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	outboxPool, err := database.Pool.Outbox()
+	if err != nil {
+		t.Fatalf("open the outbox's pool: %v", err)
+	}
+	publisher := &stallingPublisher{entered: make(chan struct{}), release: make(chan struct{})}
+	released := sync.OnceFunc(func() { close(publisher.release) })
+	defer released()
+	box := outbox.New(outbox.Deps{Store: &store.Store{Pool: outboxPool}, Publisher: publisher, Broker: broker, Listen: database.Pool.Listener})
+	outboxStopped := make(chan struct{})
+	go func() {
+		defer close(outboxStopped)
+		box.Run(lifetime)
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for !box.Publishing() {
+		if time.Now().After(deadline) {
+			t.Fatal("the outbox did not take the publisher hold within 10s")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	ctx := context.Background()
+	if _, err := database.Pool.Exec(ctx, `insert into projects (key, name) values ('TT', 'Test')`); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		insert into issues (key, project_key, number, title, created_by, rank)
+		values ('TT-1', 'TT', 1, 'Outbox at shutdown', '{"kind":"user","id":"alice"}', 'U')
+	`); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the event's transaction: %v", err)
+	}
+	if _, err := broker.Append(ctx, tx, model.Event{
+		IssueKey: new("TT-1"), Type: "message.created", Actor: model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.Message{ID: "8f14e45f-ceea-467a-9c1e-000000000001", IssueKey: new("TT-1"), Body: "sent at shutdown"},
+	}); err != nil {
+		t.Fatalf("append the event: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit the event: %v", err)
+	}
+	select {
+	case <-publisher.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the outbox did not send the event within 10s")
+	}
+
+	stop()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		shutdown(server.Config, documentService, database.Pool, background.Wait, func() {}, outboxStopped)
+	}()
+	select {
+	case <-done:
+		t.Fatal("shutdown returned while the outbox was still inside its batch")
+	case <-time.After(time.Second):
+	}
+	if _, err := database.Pool.Exec(ctx, "select 1"); err != nil {
+		t.Fatalf("the pool closed while the outbox was still stopping: %v", err)
+	}
+	released()
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("shutdown did not return after the outbox stopped")
+	}
+	var holds int
+	if err := observer.Pool.QueryRow(ctx, `select count(*) from duty_holds where name = 'dispatch-outbox'`).Scan(&holds); err != nil {
+		t.Fatalf("read the publisher hold: %v", err)
+	}
+	if holds != 0 {
+		t.Fatal("the publisher hold's row outlived the shutdown: the outbox did not release it before the pool closed")
+	}
+	if _, err := database.Pool.Exec(ctx, "select 1"); err == nil {
 		t.Fatal("shutdown left the pool open")
 	}
 }
@@ -846,6 +981,10 @@ func TestDispatchRefusesAListenFDThatIsNotASocketAndBindsNothing(t *testing.T) {
 // dispatchTestLogin is the person the test calls the server as, through header identity.
 const dispatchTestLogin = "alice"
 
+// dispatchTestAgentToken is the shared agent token (DISPATCH_AGENT_TOKEN) the server is started
+// with: a bearer caller presenting it acts as the session its request body names.
+const dispatchTestAgentToken = "shutdown-test-token"
+
 // dispatchProcess is a Dispatch binary a test started, serving on the loopback port port.
 type dispatchProcess struct {
 	*cmdtest.Process
@@ -913,7 +1052,7 @@ func startDispatchProcessWith(t *testing.T, databaseURL string, options dispatch
 		"XDG_CONFIG_HOME":                  home,
 		"XDG_DATA_HOME":                    home,
 		"DATABASE_URL":                     databaseURL,
-		"DISPATCH_AGENT_TOKEN":             "shutdown-test-token",
+		"DISPATCH_AGENT_TOKEN":             dispatchTestAgentToken,
 		"DISPATCH_IDENTITY":                "header:X-Dispatch-User",
 		"DISPATCH_IDENTITY_HEADER_TRUSTED": "1",
 		"DISPATCH_LISTEN_HOST":             "127.0.0.1",

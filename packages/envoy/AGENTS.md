@@ -952,8 +952,8 @@ Everything the load needs comes from that pool, `onLoadDocument`'s issue read in
   Warm is production's normal state, so the unbounded case is the one it runs.
   Both separate pools zero `MinConns` and `MinIdleConns`, so a floor meant for the shared pool cannot become a target a one- or four-connection pool can never reach, and both are deliberately unguarded
   — a load or a probe taken under an open transaction must be served, not refused, and a separate pool cannot close the cycle the guard prevents.
-  The events outbox claims, reads and records its batches on a pool of its own too (`store.Pool.Outbox`, one connection):
-  it runs one statement at a time, and a full shared pool must not hold back publishing.
+  The events outbox reads and records its batches, and takes and renews its publisher hold, on a pool of its own too (`store.Pool.Outbox`, two connections):
+  the batches it runs side by side take one statement at a time between them (`outbox.lanes`, the lock held around a statement and the drain of its rows and never across a send) and the hold's renewal runs beside them, so a renewal never waits behind a batch's statement, and a full shared pool must not hold back publishing or let the hold lapse.
   So does the event log's safe horizon (`store.Pool.Horizon`, two connections, the server's one `events.Horizon`):
   an observation queued behind requests would hold back every live reader of the event log.
 
@@ -969,7 +969,7 @@ the issue state an anchored write checks before it stamps its mark (`issueOpen` 
 Settlement marks its injections owner-verified (`withOwnerVerified`) because it has already read and locked the owner row in its own transaction, so `allowInject` does not read it again.
 An injection that is not owner-verified does read the issue through the shared pool, and that read is outside the cycle only because ygo runs `OnInject` before `getOrCreateRoom` (`provider/websocket/inject.go:321-330`):
 an injection refused there has published no room placeholder for a connection-holder to park on.
-A handler that must read outside its transaction commits or rolls back first - `issue_create.go` rolls back at the duplicate-external branch before it opens the advice transaction - and a scan that publishes drains its rows first (`scanPendingEvents`, `documentRooms`), because an open cursor holds its connection until it closes.
+A handler that must read outside its transaction commits or rolls back first - `issue_create.go` rolls back at the duplicate-external branch before it opens the advice transaction - and a scan that publishes drains its rows first (`readBatch`, `documentRooms`), because an open cursor holds its connection until it closes.
 
 **No Envoy listener call runs with a transaction or a pooled connection held.**
 One caller, one connection bounds how many of the pool's connections a caller takes; this bounds how long it keeps the one it has.
@@ -2299,7 +2299,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   `POST .../comments` reaches it through `normalizeCommentThreadTarget`, which validates the request's `reply_to` first, and `POST /api/v1/comments/{id}/reply` calls it directly with the comment it already holds locked, so a session answering a mention inside an ask's thread lands in that thread instead of in a `reply_to` chain no ask read selects (`store/migrations/0043_comment_reply_ask_id.up.sql` moves the rows written before that, and gives each the turn 0028 gave every other ask reply).
   `comment.delivery` payloads carry the `ask_id` of the comment they report on, so a receipt names the thread it changed.
   Neither event is published to the ask's followers:
-  `publishFollowerRoutes` routes `ask.answered`, `ask.edited`, `ask.handed_back`, `ask.resolved` and `comment.created`/`resolved`/`reopened`/`edited` with an `ask_id`, and no other type.
+  `addFollowerRoutes` routes `ask.answered`, `ask.edited`, `ask.handed_back`, `ask.resolved` and `comment.created`/`resolved`/`reopened`/`edited` with an `ask_id`, and no other type.
 
 - Keep Envoy API-level with OpenCode.
   Do not add DB introspection or OpenCode-specific hidden coupling unless there is no API path.
@@ -2357,18 +2357,20 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
 
 - Role messages use core NATS, not JetStream, and none is stored for a later claimant.
   `POST /v1/messages/publish` delivers a role topic itself (`sendToRole`, `cmd/listener/confirmed.go`) and does not publish it on the role lane.
-  Its first resolution of the holder reads the claim as `GET /v1/roles/<role>` does (`resolveRoleHolder` with `registered`, any entry), within `sendRequestBudget` (3.5 s) of the request's arrival, and gives that route's answers:
+  Its first resolution of the holder reads the claim as `GET /v1/roles/<role>` does (`resolveRoleHolder` with `roles.Registered`, any entry), within `sendRequestBudget` (3.5 s) of the request's arrival, and gives that route's answers:
   404 `unclaimed` or `holder_lapsed`, the bus-unavailable 503 with `Retry-After: 1` for a read that did not answer, the 503 that names a lost race for the claim, the 500 for a claim record no read can decode.
   Every later attempt resolves the live holder by the lane's rule (a claim whose holder heartbeated within `session.ClaimStaleAfter`), so a holder that relaunched between attempts gets the next one, and makes a receipt-backed request to that holder's agent subject (`bus.Client.RequestCoreTo`) with a receipt window of two seconds or what is left of the send;
   after a miss it waits 100 ms (`publishRetryPause`) and tries again, until a receipt arrives or 4 s from the request's arrival have passed (`publishDeliveryWindow`, which bounds every read, forward and pause of the send, and keeps the answer inside envoy-client's 5 s attempt and the Legion daemon's 10 s client).
   Every attempt forwards the same envelope, one `event_id` under the dedupe key `envoy.role.forward.<key>`, so a holder that took two copies drops the second.
+  `RequestCoreTo` sends a forward under the `Nats-Msg-Id` its caller passes, and none when that is empty:
+  the route passes the forward's dedupe key and subject (`bus.ForwardMsgID`) on every attempt, so the stream, which captures agent subjects, keeps one copy per message and recipient however many attempts it makes, while the role lane (`roleTopicDelivery`) passes one only when the original envelope's key names its event (`contracts.DedupeKeyNamesTheUpstreamEvent`, asked of the envelope before `contracts.RoleForwardDedupePrefix` is added to its key), since two distinct envelopes can share a key their sender chose and the stream must store each.
   The route answers the outcome to its sender (the Listener API's `/v1/messages/publish` row), writes it on its `listener publish` record line, and publishes no exception.
 
 - The role lane — the listener's core queue subscriber on the role subjects
   — stays the transport for a client that publishes a role topic straight onto NATS (a listener of an earlier release during a rollout, an operator's `nats pub`):
   it resolves the live holder at delivery time, then makes one receipt-backed request to that holder's agent subject.
   The agent pump returns an empty receipt after accepting the envelope, and `RequestCoreTo` counts as one only a reply with no data and no header field:
-  the forward carries a header (its `Nats-Msg-Id`, under "Operational notes"), so the server hands its replies back with a header block, empty for a receipt, while the stream's acknowledgement of the stored copy carries data and the server's no-responders answer a `Status` header, so neither is a receipt.
+  a forward that carries a `Nats-Msg-Id` has a header, so the server hands its replies back with a header block, empty for a receipt, while the stream's acknowledgement of the stored copy carries data and the server's no-responders answer a `Status` header, so neither is a receipt.
   No receipt within two seconds from a registered, live holder is `receipt_timeout` (the message was forwarded and not acknowledged, which a holder that stopped running while its registration lives gives;
   the Legion daemon queues its notice again on it, at most three copies, and retries one answered `delivery_failed` without a cap)
   — keyed on `bus.ErrReceiptTimeout`, which `RequestCoreTo` returns only after the publish and the flush both succeeded, the server was shown to have accepted the forward, and the receipt wait ran out;
@@ -2391,6 +2393,8 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   during a rolling deploy the old task resolves every claim the replacement accepts.
   Nothing is taken from a holder on the cache's word:
   before a lookup or a role delivery releases a claim as lapsed, the role reaper ends one, or a soft claim supersedes its holder, a holder the cache misses (or, for a role delivery, holds with a heartbeat older than `session.ClaimStaleAfter`) is read from the bucket itself (`liveSessionEntry`, `session.SessionRegistry.Refresh`; `cmd/listener/role_holder.go`).
+  A lookup, a role send through the publish route and a role delivery all resolve the holder through `roles.ResolveHolder` (`internal/roles`), the resolution Dispatch's outbox uses too, behind the listener's own `resolveRoleHolder`:
+  it releases a lapsed claim and resolves the role once more when the release finds a fresh claim in its place, so a claim raced by a live replacement resolves to that replacement rather than being reported stale.
   A holder no session can register as (a key `bus.KeyValue` refuses, one outside nats.go's key alphabet such as `ses:bad` among them) counts as gone.
   A read that does not answer within `roleHolderReadTimeout` (2 s, inside the 10 s HTTP write timeout) releases nothing:
   a lookup and a soft claim answer 503, a role delivery reports `delivery_failed`, and the reaper keeps the claim and logs a WARN.
@@ -2511,21 +2515,27 @@ under a group nothing does, so the old holder of a reassigned address keeps the 
 Browser sessions carry a server-side generation that logout advances, and unsafe cookie-authenticated requests must prove the configured same origin; bearer automation remains separate.
 JSON decoding is limited to 1 MiB, multipart uploads retain their explicit 26 MiB limit, and the GitHub proxy forwards no request body:
 it answers GET alone, for three read shapes, as the GitHub App.
-The event outbox publishes each claimed batch as one window (`scanBatch`):
-it sends every destination of every event, in id order, through one `bus.Client.Window` before it waits for any answer, so a batch costs one NATS round trip rather than one per destination and NATS takes the envelopes in the order they were sent;
-then it writes the whole batch's outcome in one statement (`recordBatch`), marking an event published only once NATS accepted each of its destinations.
-It claims, reads and records events on a pool of its own (`store.Pool.Outbox`), so the API's requests never queue ahead of it.
-It retries each required issue, route, and author destination with exponential backoff, so a failed or poison delivery cannot be marked complete or starve later notifications.
-A destination NATS denies holds back none of the event's others;
-a connection or store failure that comes back before anything was sent ends the attempt at that destination, and the event is retried.
+The event outbox publishes from one process at a time, the one holding the publisher hold `dispatch-outbox` (`duty.Hold`, migration `0150_duty_holds`;
+`.dispatch/architecture/dispatch-outbox.md` holds the whole design), and sends each batch through one window bound to the hold's deadline (`bus.Client.WindowUntil`, `scanBatch`):
+the sends of one owner's events to one destination key go one at a time, in id order, each once the one before it reached its destination, while different owners and destination keys proceed side by side (`planChains`, `sendChains`), so a batch costs as many NATS round trips as its longest chain has sends, and a session takes each owner's events in order on each subject family it receives them on.
+A batch does not block the next: the holder runs up to `concurrentBatches` (4) side by side, each reading only the owners no other batch holds in flight (`outbox.lanes`, `readBatch`), and settles, records and gives an owner back as soon as that owner's own sends are answered rather than at its batch's end, so an event waiting out a role holder's receipt holds back its own owner's later events and nothing else;
+the batches take one statement at a time between them, so the hold's renewal never queues behind two of them.
+Every send, and the record, checks the hold's deadline first, and the window writes nothing at or past it (`bus.ErrWindowDeadline`), so a process frozen past it neither sends nor writes.
+A stopping holder sends nothing more, records what NATS already answered, releases the rest and then the hold, and a graceful stop of `envoy-dispatch` waits for that before it closes the pool, up to `outboxStopBudget` (`cmd/dispatch/shutdown.go`).
+What one settlement came to is written in one statement (`recordBatch`), all of it or none - one statement per owner a batch settles before it ends, and one for everything it settles at its end - marking an event published only once each of its destinations is reached.
+It reads and records events, and renews its hold, on a pool of its own (`store.Pool.Outbox`, two connections), so the API's requests never queue ahead of it.
+It retries each required issue, route, and author destination with exponential backoff (`retry.Delay` on the database's clock, with the attempt count and `events.publish_error`), so a failed or poison delivery cannot be marked complete or starve later notifications;
+a destination that failed holds back only that destination's later events of the same owner, which wait as `blocked` with no attempt counted.
 A failure of the connection rather than the envelope (`bus.ErrUnavailable`:
-no connection, one lost or reconnected mid-batch, no answer at all) is not the event's failure:
-the window sends nothing on a connection that came back, so what of the batch reached NATS is a prefix of it, and every event that met the failure or was not sent is released without an attempt counted, so the next scan sends them again in id order and the stream's MsgId drops the copies of those that had landed, rather than an issue's first events being backed off behind its later ones.
-A core-NATS destination (a role lane) counts as published only once its flush has shown the server accepted it, at the cost of one flush round trip (`bus.confirmFlushed` and `bus.confirmPublished` hold how):
-one the server denies under Dispatch's grant (`bus.ErrPublishDenied`, naming the subject) or cannot be shown to have accepted is left unrecorded and retried, rather than recorded in `published_destinations` for a message nobody received.
+no connection, one lost or reconnected mid-batch) is not the event's failure:
+the window sends nothing on a connection that came back, and every event that met the failure or was not sent is released without an attempt counted, so the reconnect's wake sends it again and the stream's MsgId drops the copies of those that had landed.
+A send NATS denied (`bus.ErrPublishDenied`) is backed off with its attempt counted, and so is one NATS did not acknowledge on a connection still current (`bus.ErrNotAcknowledged`:
+no acknowledgement in time, no responders, no receipt from a role's holder), unless a probe of that connection then fails, which releases it and gives the hold up.
+A `role:` route is not published to `notifications.role.<role>`:
+the outbox resolves the holder with `roles.ResolveHolder`, the resolution the listener's role lane uses, and forwards to the holder's `notifications.agent.<holder>` with a window Request under the role forward's dedupe key and a MsgId (`bus.ForwardMsgID`), counting it reached only on the holder's empty receipt (for a holder with a serving port, the stream's acknowledgement of the stored copy).
 Each retry line (`dispatch outbox: publish event`) names the destination by label and target (`publish owner topic "<subject>"` for the event's own topic, `publish route "role:reviewer"` or `publish route "session:<id>"` for the issue's route, `publish author route to "<session>"`, `publish follower route to "<session>"`, `publish claim change to "<session>"`);
-a core denial, which only a `role:` route can be since of the outbox's destinations only the role lanes take core transport (`bus.UsesCoreTransport`), adds the subject and the server's violation.
-The listener's own core publishes (a role message's forward or an ad-hoc topic's publish through `/v1/messages/publish`, a fanout exception) fail the same way, the API publish answering 403 opening with `publishDeniedPrefix`;
+a denied role forward adds the subject and the server's violation.
+The listener's own core publishes (a role message's forward or an ad-hoc topic's publish through `/v1/messages/publish`, a fanout exception) count as published only once a flush has shown the server accepted them (`bus.confirmFlushed` and `bus.confirmPublished` hold how), and one the server denies (`bus.ErrPublishDenied`) answers the API publish 403 opening with `publishDeniedPrefix`;
 a denied forward of an ad-hoc topic's copy to one of its recipients is named `delivery_failed` in the route's 504 instead.
 A destination NATS refuses (`bus.ErrRefused`:
 an event past the server's max payload, or a subject past NATS's limit or holding whitespace or an empty token, which an unbounded document slug or a bearer's session id such as `sess..x` can make) is refused the same way on every retry, so it is logged once (`dispatch outbox: destination refused`, naming the event and topic) and counted done, and the event goes on to its other destinations.
@@ -2880,7 +2890,9 @@ and the 401 is the same `unauthorized` in every case, so a rejected caller learn
   An envelope under any other key its caller chose carries no MsgId.
 
 - A receipt-backed forward to a session's agent subject (`bus.Client.RequestCoreTo`:
-  a role message, an ad-hoc topic's copy) carries a `Nats-Msg-Id` of its dedupe key and that subject (`bus.ForwardMsgID`) whatever the key is, so the stream, which captures every agent subject, keeps one copy per message and recipient however many attempts the publish route makes, while every attempt still reaches the core subscribers on the subject.
+  a role message, an ad-hoc topic's copy) carries the `Nats-Msg-Id` its sender passes - the forward's dedupe key and that subject (`bus.ForwardMsgID`) - and none when its sender passes none.
+  The publish route stamps every forward it makes, so the stream, which captures every agent subject, keeps one copy per message and recipient however many attempts the route makes, while every attempt still reaches the core subscribers on the subject;
+  the role lane stamps only a forward whose original envelope's key names its event (`roleTopicDelivery`, under "Critical conventions"), since two distinct envelopes can share a key their sender chose.
   Every listener's durable takes that stored copy, and `listenerDeliveryHandler` acknowledges an envelope stored on an agent subject whose `topic` is not that subject without delivering it:
   the forward already reached its session over core NATS, and fanning the copy out by its topic would push it to serve-port sessions a second time.
   The durable no longer needs the role forward mark for this;
@@ -3030,7 +3042,7 @@ Each item below names an endpoint and its method, then its contract, and an item
   a role claim record no read can decode (`store.ErrMalformedRoleClaim`:
   one naming no holder, or JSON that is not a claim) is `500 {"error":"envoy: the claim record of role <role> is unreadable: <reason>"}` with no `Retry-After` (`writeRoleClaimUnreadable`), because the bus answered and a retry reads the same record;
   and a resolution that lost the race for the role's claim
-  — every one of `roleHolderResolutionAttempts` (2) spent on a supersession, `errRoleHolderChanged` — keeps that 503 and its `Retry-After: 1`, since a fresh read wins the race as soon as the replacement claim settles, but answers `{"error":"envoy: the holder of role <role> changed while this publish was resolving it"}` (`writeRoleHolderChanged`).
+  — both of `roles.ResolveHolder`'s attempts spent on a supersession (`roles.Churned`), `errRoleHolderChanged` — keeps that 503 and its `Retry-After: 1`, since a fresh read wins the race as soon as the replacement claim settles, but answers `{"error":"envoy: the holder of role <role> changed while this publish was resolving it"}` (`writeRoleHolderChanged`).
 
 - A role topic answers `200` with the envelope and `holder`, the session that took it, once the holder's receipt arrived, and also, forwarding nothing, when `source_session` holds the role or the holder already confirmed this dedupe key through the route.
   It answers `404 {"error":…,"reason":"unclaimed"}` for a role with no claim, or `reason: "holder_lapsed"` with the prior `holder`, `claim_released`, and a `last_seen` timestamp when the listener still keeps the holder's final heartbeat (until the interest reaper's grace has passed, `store.InterestReapGrace` + `store.InterestRefreshAge` after the holder left the session cache), whether the first resolution or a later attempt's finds it so.
@@ -3093,7 +3105,7 @@ Each item below names an endpoint and its method, then its contract, and an item
   falls back to `machine_id` for a session whose plugin predates the field) and `last_seen`.
   A 404 has `reason: "unclaimed"` when no role claim exists;
   for an absent holder it has `reason: "holder_lapsed"` with the prior holder's ID, whether this lookup released the claim, and any final last-seen time the listener still keeps (until the interest reaper's grace has passed, `store.InterestReapGrace` + `store.InterestRefreshAge` after the holder left the session cache).
-  The holder is resolved as a role send's first resolution through the publish route resolves it (`resolveRoleHolder` with `registered`), within 3.5 s (`sendRequestBudget`) of the request's own context.
+  The holder is resolved as a role send's first resolution through the publish route resolves it (`resolveRoleHolder` with `roles.Registered`), within 3.5 s (`sendRequestBudget`) of the request's own context.
   A lookup that lost the race for the role's claim (`errRoleHolderChanged`) is `503 {"error":"envoy: the holder of role <role> changed while this lookup was resolving it"}` with `Retry-After: 1`, since a fresh lookup wins the race once the replacement claim settles;
   a role store call that did not answer within its cap or that budget (the claim read, the holder's session read or the conditional release) is, as on the publish route, `503 {"error":"envoy: the message bus did not answer: <reason>"}` with `Retry-After: 1`, naming the call that did not answer (`writeBusUnavailable`;
   a key NATS refuses keeps the 413 or 400 `writeNATSError` gives);
@@ -3595,7 +3607,8 @@ an issuer whose key set cannot be retrieved still lands there, because go-oidc f
   A reader that skipped on `notify` instead saw nothing an agent did on an issue it had subscribed to, since `notify` is false for every event an agent wrote.
 
 - Dispatch issue events use `notifications.dispatch.issue.<KEY>.<type>`, carry every event, and are retained in JetStream;
-  `notify` only controls agent wake and routing the same envelope to `notifications.role.<role>` or `notifications.agent.<session_id>` (the issue's route, which also applies to a comment or ask anchored on the issue's own artifact).
+  `notify` only controls agent wake and routing the same envelope to the issue's route (which also applies to a comment or ask anchored on the issue's own artifact):
+  `notifications.agent.<session_id>` for a session route, and for a `role:<role>` route a forward to the role's holder, which the outbox resolves itself and sends to `notifications.agent.<holder>` with the topic `notifications.role.<role>` and a receipt, so nothing of Dispatch's is published on `notifications.role.*`.
   An ask-scoped event - `ask.answered`, `ask.edited`, `ask.handed_back`, `ask.resolved`, and `comment.created`, `comment.resolved`, `comment.reopened` or `comment.edited` carrying an `ask_id` - is additionally published straight to each follower's `notifications.agent.<session_id>` regardless of `notify` and of the issue's route, so a session-authored reply on an ask reaches its followers even though it wakes nobody through the issue topic;
   the acting session is skipped, and so is a follower a new comment's (`comment.created`) mentions resolved to (`payloadMentionedSessions`, each `mentions[].session_id`) once the mention delivered it (the mention rule below) - the comment's edit, resolution and reopening reach every follower - and a session already reached by the issue's route is not sent the envelope twice.
   A quiet `ask.edited` (a version move of an approval request that an earlier version already moved since it was opened or last handed back, `quiet: true`) has `notify` false and reaches no follower, as a human's unnamed `artifact.version` reaches nobody;
@@ -3608,50 +3621,70 @@ an issuer whose key set cannot be retrieved still lands there, because go-oidc f
   That document is the anchor's (`anchor.artifact_id`) for a comment on a passage of an issue's document, and the event's own for a project document;
   for a reply, it is the thread root's, since a reply carries no anchor.
   A comment on an issue's conversation names no document.
-  A batch reads the thread sessions and the thread's document authors of all its replies in one query (`outbox/recipients.go`, `loadCommentRecipients`), keyed by the comment each reply is under.
+  A batch reads the thread sessions and the thread's document authors of all its replies in one statement (`outbox/recipients.go`, `loadCommentRecipients`, a lookup kind of `loadLookups`), keyed by the comment each reply is under.
   A person's `comment.created` or `comment.edited` on an issue with no route and no session claimant (`routing`:
-  unclaimed, or a person holds the claim) also reaches every session the issue's primary document (`artifacts.is_primary`) credits, as `documentCreditsSQL` reads credits (`publishPrimaryDocumentAuthors`), so a session that wrote the spec without a claim still hears comments on any of the issue's threads, an ask's thread included.
-  A batch reads those sessions for all such events in one query (`loadPrimaryDocumentAuthors`), keyed by issue.
+  unclaimed, or a person holds the claim) also reaches every session the issue's primary document (`artifacts.is_primary`) credits, as `documentCreditsSQL` reads credits (`addPrimaryDocumentAuthors`), so a session that wrote the spec without a claim still hears comments on any of the issue's threads, an ask's thread included.
+  A batch reads those sessions for all such events in one statement (`loadPrimaryDocumentAuthors`, another lookup kind of `loadLookups`), keyed by issue.
   A routed issue, or one a session claimed, takes no primary-document route: the route's holder and the claimant (the claimant route below) hear the comment.
-  The order of an event's destinations is fixed (`publishDestinations`):
-  the owner topic, the route, the claimant, the primary document's sessions, the author routes, the ask's followers, the previous claimant; a topic is sent once.
+  The order of an event's destinations is fixed (`eventDestinations`):
+  the owner topic, the route, the claimant, the primary document's sessions, the author routes, the ask's followers, the previous claimant; a subject is added once.
   The primary-document and author routes are skipped for a human, who has no topic, for the event's own actor, so a session commenting on a document it wrote is never told of its own comment, and for a session the comment's mentions resolved to once the mention delivered it (`recipientFilter`, which reads the comment's `mentions` as the claimant and follower routes do; the mention rule below).
   An agent's comment notifies nobody (`notify` is false), so it takes no primary-document or author route at all.
-  When a batch's recipient query fails, the error is carried on each event that needed it (`recipientList.err`), not as the row's failure:
-  the attempt sends the owner topic, the route and the claimant, then ends with that error at the primary-document or author step, so `settle` backs the event off with those destinations recorded, or releases it when the process is stopping or NATS is unreachable.
-  Such an attempt is a failure, never a deferral: its error is never `errMentionPending` alone.
 
-- A person's (`actor.kind` `user`) `ask.answered`, `ask.handed_back`, `ask.resolved`, `comment.created`, `comment.edited`, `comment.resolved`, `comment.reopened`, `message.created` or `message.answered` on an issue also takes the claimant route (`publishClaimantRoute`):
+- When a batch's recipient statement fails - its comment recipients, its primary document authors or its document credits (`loadDocumentSessionAuthors`) - unlike the other lookup kinds, whose failure fails the whole batch, only the events that asked an id the statement cannot answer fail.
+  A statement Postgres refuses over the rows it read (`refusedStatement`:
+  a `*pgconn.PgError` outside SQLSTATE classes 08, 40, 53, 57 and 58, and not a `*pgconn.ConnectError`) names no id, so its ids are run again in halves, and each refused half's halves, until each refused row is run alone (`loadRecipients`, recursively):
+  an id in a run that answers gets its sessions, and one whose own run is refused has its error recorded against it (`failRecipients`, `lookups.failed`), so the events of other owners asking the same statement for healthy ids publish, and one broken row among n ids costs at most 2*ceil(log2(n)) more statements.
+  A statement that fails for the process's stop or for the connection - lost, refused (`too_many_connections`, `cannot_connect_now`) or ended by the server (`admin_shutdown` during a failover) - is not run again:
+  every id not yet answered is recorded failed.
+  A failed event's destinations end with that error at the primary-document or author step, after the owner topic, the route and the claimant, which are sent and recorded as usual (`resolveErr`), and `settleEvent` backs the event off, or releases it when the error is the process stopping (`resolveLost`) or a send of it met a lost connection.
+  Such an event is a failure, never `blocked` on a mention: the failure decides its outcome.
+  The sessions it is still bound for are unknown, so its list is incomplete (`unansweredRecipients`, `batchEvent.incomplete`):
+  every later event of its owner is held back from each session key (`notifications.agent.*`, or a role route's key) the incomplete event neither names in its list nor already reached (`published_destinations`), behind a blocker carrying the failed event's back-off (`planChains`), so the later event is tried again no later than the failed one and reaches such a session after it;
+  a key the list names chains as usual, a key the event already reached holds nothing back, and the owner's topic family is never held this way.
+  An event that is not due reads its recipients as a due one does, since they are what it holds its owner's later events back from:
+  one whose reads answer holds back only the destinations it has not reached, and one whose read fails holds back the same keys as a due one until its `next_attempt_at`.
+  A row no recipient read can take so backs off the events that read it and holds back their owners' later session copies on the keys those events could still owe, and the rest of the outbox publishes.
+  Every lookup kind but the issues' is a uuid, read and answered in its canonical form (`validIDs`, `canonicalID`);
+  an id that is no uuid is never sent to Postgres and fails the event that asked it - except a reply's `reply_to`, which then replies under no comment:
+  the reply reaches no thread session, is not failed and holds nothing back.
+
+- A person's (`actor.kind` `user`) `ask.answered`, `ask.handed_back`, `ask.resolved`, `comment.created`, `comment.edited`, `comment.resolved`, `comment.reopened`, `message.created` or `message.answered` on an issue also takes the claimant route (`addClaimantRoute`):
   it is published to the `notifications.agent.<session_id>` of the session holding the issue's claim (`issues.claimed_by` of kind `session`;
   a person holding the claim has no topic), whether or not that session subscribed to the issue.
   The claimant route runs beside the route and author routes, under `notify` and never for a targeted message (`message.created` or `message.answered` with a `target`), which reaches only its session.
   An agent's event of these types takes no claimant route, and neither does any other type, a person's `ask.opened`, `ask.edited`, issue update or document version included.
   A person's reaches a claimant only through a subscription to the issue topic, or as the route when it notifies;
   an agent's only through that subscription, since an agent's event of these types never notifies and so takes no route copy either, except that a claimant following the ask gets, as a follower, these events on that ask, other than its own:
-  an agent's or a person's answer, hand-back, resolution or non-quiet edit of the ask, and every reply in it, created, edited, resolved or reopened (`publishFollowerRoutes` runs outside the `notify` gate).
+  an agent's or a person's answer, hand-back, resolution or non-quiet edit of the ask, and every reply in it, created, edited, resolved or reopened (`addFollowerRoutes` runs outside the `notify` gate).
   A `comment.created` whose mentions resolved to the claimant is left to the mention once the mention delivered it (the mention rule below);
   its edit, resolution and reopening are not.
   The claim is read when the event is published, not when it was written:
-  the scan's issues join in `scanPendingEvents` reads `issues.claimed_by` beside the route on every attempt (`routing`), so a retry after the claim moved reaches the current claimant.
+  the batch's read (`readBatchSQL` in `readBatch`) joins the issue and reads `issues.claimed_by` beside the route for every event it reads (`routing`), one column of the statement that reads the batch, so a retry after the claim moved reaches the current claimant and the claim costs no statement of its own.
   A project document's event names no issue and takes none.
-  A claimant that is also the route, a follower or an author gets one copy: `publishDestination` publishes each topic once per event.
+  A claimant that is also the route, a follower or an author gets one copy: `destinations` adds each subject once per event.
+  The claimant's `notifications.agent.<session_id>` is an ordinary destination key, so its sends share the one chain of every other route to that session (`destinationKey`, `planChains`).
 
-- The mention rule (`attempt.leftToMention`) is the one rule the route, claimant, primary-document, author and follower copies of a new comment apply to a session its mentions resolved to;
+- The mention rule (`destinations.leftToMention`) is the one rule the route, claimant, primary-document, author and follower copies of a new comment apply to a session its mentions resolved to;
   the route's session is `suppressed_route_session_id`, the session the route resolved to when the comment was written, and the rule applies while the route still names that target or that session (`suppressesCurrentRoute`; `suppress_route` must be set).
   A mention resolved at write time is a candidate only: its send runs after the comment commits and can fail.
-  `loadMentionDeliveries` reads the comment's `comment_deliveries` once per attempt (`send`), grouped by session (`mentionDeliveryQuery`), and only for a `comment.created` whose mentions resolved to a session.
+  The batch reads the `comment_deliveries` of every `comment.created` in it whose mentions resolved to a session in one set-based statement (`loadMentionDeliveries`, `mentionDeliveryQuery`, grouped by comment and session), the fifth lookup kind of `loadLookups`, so a batch costs at most seven lookup statements whatever its size, #2366's two comment recipient statements included;
+  no other event asks, and an event's destinations read the answer before anything else, so a comment id that is no uuid leaves the event with no destination and backs it off.
   A session with a `sent` row is skipped: the mention delivered the comment.
-  A session with no `sent` row and a `pending` one whose claim (its creation, while no sender claimed it) is younger than `model.DeliveryClaimLapse` (a minute) has its copy held back while every other destination is sent in the batch's window;
-  the attempt then reports `errMentionPending` (`attempt.err`), `settle` records the event `deferred`, and `recordBatch` adds the destinations it reached to `published_destinations`, moves `next_attempt_at` out by `mentionPendingDelay` (2 s) and leaves `published_at` null and `attempt_count` as it was, so waiting on a send never runs the event to its dead letter.
+  A session with no `sent` row and a `pending` one whose claim (its creation, while no sender claimed it) is younger than `model.DeliveryClaimLapse` (a minute) has its copy held back - left out of the event's destinations, which are sent as usual - and the event marked `mentionPending`;
+  `settleEvent` then records it `blocked` with a delay of `mentionPendingDelay` (2 s), and `recordBatch` adds the destinations it reached to `published_destinations`, moves `next_attempt_at` out by that delay and leaves `published_at` null, `attempt_count` and `publish_error` as they were, so waiting on a send never runs the event to its dead letter.
   Every other session - each attempt `failed`, a `pending` one past the minute (abandoned;
   the API's `claimLapsed` is built from the same `model.DeliveryClaimLapse`), or no row at all - is published to as if it had not been mentioned.
-  A deferral with a denial (`bus.ErrPublishDenied`) or any other failure of the event is backed off as a failure, its attempt counted;
-  a deferral that meets a lost NATS connection (`bus.ErrUnavailable`) or a stopping process is released, not backed off, like any event that met them.
+  A held-back copy blocks the event only when no send of it failed or was lost:
+  a send NATS denied (`bus.ErrPublishDenied`) or any other failure of the event backs it off as a failure, its attempt counted;
+  a send that meets a lost NATS connection (`bus.ErrUnavailable`) or a stopping process releases it, like any event that met them;
+  and an event an earlier event of its owner also holds back from another destination (`holdBack`) falls due at the earlier of its blocker and `mentionPendingDelay`.
   A comment's edit, resolution and reopening, and every other event, are never left to a mention.
   One copy is not guaranteed: a receipt timeout records the attempt `failed` though the listener may have delivered the mention, and a first attempt stranded `pending` past the minute may have landed before its sender stopped.
   Either way the outbox also publishes the session's own-topic copy, so the session receives the comment twice, under different dedupe keys (the mention's delivery and the outbox's event);
   a host treats the second copy as the same comment (same comment id).
-  Nor is order: while a `comment.created` is deferred, the same comment's `comment.edited`, `comment.resolved` and `comment.reopened` are events of their own and publish at once, so a claimant, follower, author or route topic can receive the edit before the creation - for as long as the mention's send is undecided, normally a listener receipt timeout and at most about a minute for a stranded attempt, plus `mentionPendingDelay`.
+  Nor is order: a held-back copy is no destination of its event, so while the mention's send is undecided it holds none of the owner's later events back, and the same comment's `comment.edited`, `comment.resolved` and `comment.reopened` reach a claimant, follower, author or route topic at once - before the creation, for as long as the send is undecided, normally a listener receipt timeout and at most about a minute for a stranded attempt, plus `mentionPendingDelay`.
+  Once the mention failed the creation's copy is a destination again, and it holds that session's later events of the owner back until it is sent (`planChains`).
   A host that sees an edit, resolution or reopening for a comment it does not know is seeing this window, not a bug; the creation follows.
   `ask.follower_added` and `ask.follower_removed` also route directly to the session they name, since a newly added follower is not subscribed to the issue topic by default.
 
