@@ -723,7 +723,7 @@ test.skipIf(skip)(
 // steering queue, which the agent loop releases one message per step: the rest of the cards would
 // reach the model one step at a time. As asides, every one is taken at the run's next step. The
 // contract checked: every card reaches the model by the run's second request, each once, in the
-// order it was sent, and the session file holds each once.
+// order it was sent, each with the time the session got it, and the session file holds each once.
 test.skipIf(skip)(
   "cards that reach an idle session together are all read by the second step, each once, in order",
   async () => {
@@ -751,6 +751,10 @@ test.skipIf(skip)(
       expect(messages.indexOf(card)).toBeGreaterThan(previous);
       previous = messages.indexOf(card);
     }
+    // Each card in the request also says when the session got it (src/card-age.ts).
+    expect(messages.match(/\\n {2}delivered: /g)?.length ?? 0).toBeGreaterThanOrEqual(
+      cards.length + 1
+    );
     next.reply([text("Read the burst.")]);
     await probe(session, next.index + 1);
     const entries = await session.cardEntries();
