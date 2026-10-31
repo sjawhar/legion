@@ -74,7 +74,7 @@ requires a bearer checks no `Host`.
 | `/v1/sessions/{session_id}` | DELETE | Remove a live session registration. A write route |
 | `/v1/messages/send` | POST | Send a direct agent-to-agent message. The target is read from the session store itself, so a 404 means the store says that session's key is gone; a store read or a publish the bus did not answer is a 503 with `Retry-After: 1` (see “Send and publish answers” below). |
 | `/v1/messages/publish` | POST | Publish an event. Required `message` becomes the human `payload_summary`; optional `payload` is distinct machine data in `payload`. A topic the stream captures is answered once JetStream stored it, bounded to five seconds. A role topic is forwarded to its live holder, and an ad-hoc topic (any `notifications.` topic the stream does not capture, such as `notifications.team.deploy-squad`) is published over core NATS and forwarded to each self-subscribed session registered on it; both are answered once each recipient confirmed the message, or with a 504 naming each that did not after four seconds (see "Role delivery and exceptions"). A publish of a captured topic the bus did not serve, and a role-holder read at a role send's first resolution that did not answer, are both the 503 below rather than a 500. |
-| `/healthz` | GET | Health check (always available, even during startup); its bus checks answer within 3 s (see “Webhook and health check bounds” below) |
+| `/healthz` | GET | Health check (always available, even during startup); its bus checks answer within 3 s, and a rebuild of the KV watches that has not succeeded for a minute after a reconnect is `200 degraded` naming the `KV watch rebuild` - not a refusal, which would take the probes' only listener out and replace it with one that rebuilds into the same failure on empty caches, so the state pages through the `<N>-reconnect-hooks-stalled` alarm instead - while a rebuild that fails and is run again under that minute leaves the answer it had (see “Webhook and health check bounds” below) |
 
 ## Send and publish answers
 
@@ -92,6 +92,7 @@ attempt:
 | The target is live but does not advertise the frame's `delivery.mode`, or that mode cannot be read unambiguously | `403` naming the session, and the mode when it could be read |
 | The publish is refused as too large (`bus.ErrTooLarge`) | `413` naming the size against the server's max payload |
 | The publish is refused for its subject or key (`bus.ErrRefused`) | `400` naming the refusal, with no `Retry-After` |
+| The stream refuses the publish because it holds its byte limit (`bus.ErrStreamFull`), a republish the full stream refused (`bus.ErrNotStored` wrapping it) among them | `503 {"error":"envoy: the message bus refused the message because its stream is full: <reason>"}` with `Retry-After: 1`, recorded `stream_full` |
 | The server denies the publish under this listener's own grant (`bus.ErrPublishDenied`) | `403 {"error":"envoy: the message bus denied the publish under this listener's own permissions: <reason>"}` with no `Retry-After`, recorded `publish_denied` (below) |
 | Any other publish failure | `503` with the same prefix and `Retry-After: 1`, carrying the bus's own reason |
 
@@ -159,10 +160,10 @@ reach its subscriber twice.
 Each inbound send and publish is recorded in one line, INFO when accepted and WARN when refused:
 `listener send` (`target_session`) and `listener publish` (`topic`), both carrying `event_id`,
 `source`, `source_session`, `payload_summary`, `outcome` and `status`, and `holder` as well when a
-role topic resolved one. `outcome` is one of `accepted`, `invalid_request`, `too_large` and
-`bus_unavailable`, plus `no_live_session` for send, `capability_refused` for send and a role send,
-`publish_denied` for send and publish alike, since a publish on either transport can be denied,
-and `role_unclaimed`, `role_lapsed`, `role_holder_changed`,
+role topic resolved one. `outcome` is one of `accepted`, `invalid_request`, `too_large`,
+`bus_unavailable` and `stream_full`, plus `no_live_session` for send, `capability_refused` for send
+and a role send, `publish_denied` for send and publish alike, since a publish on either transport
+can be denied, and `role_unclaimed`, `role_lapsed`, `role_holder_changed`,
 `role_claim_unreadable` and a confirmed send's 504 reason (`receipt_timeout`, `delivery_failed`,
 `not_confirmed`, `publish_failed`) for publish. Two
 refusals carry no such line, because neither reaches a handler: the 401 the API auth wrapper
@@ -208,9 +209,10 @@ gives nobody the role.
 
 ## Webhook and health check bounds
 
-The webhook routes and `/healthz` do their bus work within the request. The webhook routes keep
-every answer and status they had, and `/healthz` every answer but a check's that did not answer;
-what changed is how long a silent bus can hold them.
+The webhook routes and `/healthz` do their bus work within the request; the last row below is the
+one check `/healthz` makes with no call of its own, from a stall the bus already recorded. The
+webhook routes keep every answer and status they had, and `/healthz` every answer but a check's
+that did not answer; what changed is how long a silent bus can hold them.
 
 | Path | Bus work | Bound | A call that did not answer |
 | --- | --- | --- | --- |
@@ -219,6 +221,7 @@ what changed is how long a silent bus can hold them.
 | `/webhook/slack` | publishes | 2.5 s from the handler's start (`slackAnswerBudget`), inside the 3 s Slack waits | `503 service unavailable` |
 | `/webhook/ghostwispr` | publish | the request, and the bus's 5 s | `503 service unavailable` |
 | `/healthz` | flush, each cache's KV ping, the durable consumer's info read | 3 s from the request's start, shared (`healthzBudget`) | `503 unhealthy` naming the dependency and `context deadline exceeded`, so the container health check fails, as it did when the 10 s wait outran it; a check that answered with a failure keeps its answer (`200 degraded` or `503 unhealthy`) |
+| `/healthz`, the KV watch rebuild | none: the stall the bus client recorded for its reconnect hooks (`bus.Client.HookStall`) | a minute of hooks due with no run that succeeded (`bus.RepairGrace`) | `200 degraded`, `KV watch rebuild unavailable: <last rewatch error> (no rebuild has succeeded for 1m0s)`, the stall alone when no run has failed behind it; deliberately not a refusal, since the ECS container health check and GKE's readiness probe both read `/healthz` on a single task, so refusing would replace or unroute the only listener and its replacement would rebuild into the same failing rewatch with caches that warm up empty, losing the fanout messages the running task's stale caches still place, and the state pages through the `<N>-reconnect-hooks-stalled` alarm on the bus's ERROR `envoy nats reconnect hooks have not succeeded` instead; a shorter stall keeps the answer the checks above gave, since the bus runs the hooks again within seconds of a failed run |
 
 nats.go's KV calls take no context and wait out the JetStream MaxWait (10 s), so a CI write's KV
 calls and `/healthz`'s pings are waited for through a context (`kvCall`, `bus.Bounded`) that

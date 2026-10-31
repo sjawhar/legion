@@ -1,5 +1,0 @@
-kind: Added
-body: 'GET /api/v1/issues/{key}/references takes `versions=latest`: each member''s document then carries only its latest version, under an ETag of its own (If-None-Match still answers 304). With the parameter absent, empty or `all`, the answer, its headers and its ETag are unchanged; any other value, or `versions` given more than once, is `400 INVALID_QUERY`. The answer is one statement that joins each document to its highest-numbered version.'
-time: 2026-10-28T15:58:15.068448202Z
-custom:
-    Issue: pr2469

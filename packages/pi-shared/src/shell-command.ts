@@ -14,17 +14,18 @@ const HEREDOC_OPENING = /^(.*?)[ \t]*<<(-?)[ \t]*'([A-Za-z_][A-Za-z0-9_]*)'[ \t]
 const BLANK_LINE = /^[ \t]*$/;
 
 /** Outside quotes, a `dispatch` head refuses whatever would end the command, start
- * another, expand something, redirect, start a comment (bash reads the rest of the line as one, a
- * here-document opener included) or escape a character (the shell's to interpret, so never
- * modelled here). */
+ * another, expand something, redirect, or escape a character (the shell's to interpret, so never
+ * modelled here), and a `#` inside a word: `withoutComment` has already dropped the comment that
+ * ends the head line, so a `#` left outside quotes is part of a word. */
 const REFUSED_UNQUOTED = "\n;&|$`<>()#\\";
 
 /** Inside double quotes bash still expands `$` and backticks and interprets `\`. */
 const REFUSED_DOUBLE_QUOTED = "$`\\";
 
-/** A `dispatch` command's first line, without its here-document opener, when the command is one
- * `dispatch` command, optionally fed one quoted here-document on stdin; undefined for any other
- * command. */
+/** A `dispatch` command's first line, without its trailing comment and its here-document opener,
+ * when the command is one `dispatch` command, optionally fed one quoted here-document on stdin;
+ * undefined for any other command. A comment there is how AskGate keeps an override flag in the
+ * agent's record of a call (`keepOverrideVisible` in pi-envoy's `askgate-core.ts`). */
 export function dispatchCommandHead(command: unknown): string | undefined {
   if (typeof command !== "string" || hasControlCharacter(command)) return undefined;
   // Blank lines before the head and after the command's last line run as no command, so they are
@@ -36,7 +37,9 @@ export function dispatchCommandHead(command: unknown): string | undefined {
   if (first === -1) return undefined;
   const last = all.findLastIndex((line) => !BLANK_LINE.test(line));
   const lines = all.slice(first, last + 1);
-  let head = lines[0] ?? "";
+  // A comment on the head line ends it where bash ends it, so a here-document opener after one is
+  // comment text and opens nothing.
+  let head = withoutComment(lines[0] ?? "");
   if (lines.length > 1) {
     const opening = HEREDOC_OPENING.exec(head);
     if (opening === null) return undefined;
@@ -57,6 +60,30 @@ export function dispatchCommandHead(command: unknown): string | undefined {
 /** The trimmed head's first word as bash splits it, at a space or a tab. */
 function firstWord(head: string): string {
   return head.split(/[ \t]/, 1)[0] ?? "";
+}
+
+/**
+ * The head line without its trailing comment: bash reads a `#` that starts a word (at the line's
+ * start or after an unquoted blank, outside quotes) and everything after it to the end of the line
+ * as a comment. A `#` inside a word or inside quotes is no comment and stays, for `headScan` to
+ * refuse or take as quoted text. A backslash before the comment leaves the line whole: escapes are
+ * the shell's to interpret, and `headScan` refuses the line for it.
+ */
+function withoutComment(line: string): string {
+  let quote: '"' | "'" | undefined;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (quote !== undefined) {
+      if (char === quote) quote = undefined;
+      else if (char === "\\" && quote === '"') return line;
+      continue;
+    }
+    if (char === "\\") return line;
+    if (char === "'" || char === '"') quote = char;
+    else if (char === "#" && (index === 0 || line[index - 1] === " " || line[index - 1] === "\t"))
+      return line.slice(0, index);
+  }
+  return line;
 }
 
 /** Any control character but newline and tab: a `\r` before a line end would make the delimiter

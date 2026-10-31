@@ -1,5 +1,133 @@
 # Changelog
 
+## [main@d7e1daaaaf70] - 2026-10-31
+
+### Added
+
+- A `dispatch doc-edit` or `dispatch artifact` whose version superseded a person's approval ends
+  its result with what that write did: the version it stored, the approved version it replaced
+  and who approved it, that the approval is stale until someone approves the new version and no
+  undo restores it, and that a Legion design gate on the document is closed meanwhile, so every
+  READY in its tree is refused. It names both ways on: request approval for the new version, or
+  tell the tree's architect and keep the next correction in a comment or in the plan. A write
+  that superseded no approval prints nothing.
+
+### Changed
+
+- The write advice at six session writes with no human response states the duty at the end it already named: "Stop posting here until a human replies. Their reply ends this: post then what you held back." The old text named the end and no duty there, so a session whose questions were answered acted on the answers and wrote none of it back into the threads.
+
+## [main@e65900f4438b] - 2026-10-30
+
+### Added
+
+- `dispatch answers` prints every item people wrote to the session in the last 72 hours, newest
+  first, in the same item format with no cap; against a Dispatch older than the route it prints
+  `This Dispatch (<url>) has no answers route yet: its build is older than the answers route.` and exits 1.
+- `fileValue`, `fileBearer`, `dispatchSettings` and `sessionDispatchSettings` take
+  `commands: "kept"`, which never runs a `!` token command: it takes the outcome another call
+  already kept in the process, and with none Dispatch reads as off with an error saying the
+  command has not run. Every existing caller keeps running the command as before.
+  `dispatchUrl(env, config)` and `sessionDispatchUrl(file, env, { cwd })` return the URL alone,
+  resolved as `dispatchSettings` resolves it but without reading the token, so no `!` command runs:
+  undefined when Dispatch is off before its token is read.
+- `session-answers.ts` (`@legion/envoy-client/session-answers`), the one module pi-envoy,
+  claude-envoy and the CLI use for what people wrote to a session in the last 72 hours. `renderSessionAnswers(items, {now, total?, cached?, withoutCommand?})` renders the
+  per-request message: the marker line `[Dispatch: what people wrote to this session in the last
+  72 hours, newest first, word for word. Reference, not a new request.]` (a cached list adds
+  `As read at <time>; this read failed: <reason>.` on the next line, from `cached: {readAt,
+  reason}`), then each item's time,
+  person, relation, `dispatch://` reference and owner, an ask's question cut to 200 characters,
+  `Selected:` on an answer and the words in full, newest first as a strict prefix under 8,000
+  characters (at most 7,999 UTF-16 units, the whole message), an item over the cap left out whole, and the line
+  ``<N> older items left out to stay under 8,000 characters: run `dispatch answers` to read every
+  one in full.`` when any is left out (with `withoutCommand`, ``<N> older items left out to stay
+  under 8,000 characters.``); items past 72 hours at `now` are dropped at render.
+  `readSessionAnswers({session, dispatch, env, …})` reads it for one model request
+  and never throws: one read in flight per session and Dispatch URL for the whole process (a
+  `globalThis` map, `Symbol.for("legion.pi-envoy.session-answers.v3")`), an 800 ms wait, a read
+  already waited out is not waited on again, a late answer fills the cache, the cache kept in
+  memory per session and Dispatch URL and in `sessions/<id>/answers.json` under
+  `sessionDirectory(env, session)` (written atomically, with the `dispatch_url` it was read from;
+  a session id that is no plain path segment keeps it in memory only), a list read from one
+  Dispatch never carried for another, the failure line ``[Dispatch: people's answers from the last
+  72 hours could not be read (<reason>); run `dispatch answers`.]`` when no cached list renders
+  (none read, an empty list, or every item past 72 hours), no text (`source: "unavailable"`)
+  then instead, with a `notice` naming the URL once per session and URL, when Dispatch answers
+  its own `404 NOT_FOUND` "no route for …" (`this Dispatch build has no answers route`), which
+  also keeps that URL from being asked for 5 minutes and makes a cached list's left-out line name
+  no command. With Dispatch off with an
+  error, which names no URL, only a list read from the URL the caller names as `dispatchUrl` (the
+  configured one, `sessionDispatchUrl`) stands in, and with none named the failure line does: a list
+  another Dispatch answered is never carried.
+  `sessionAnswersSettled(session)` lets a short-lived host wait for a
+  late read to write the disk cache. `DispatchClient.sessionAnswers(session, {since?, maxChars?,
+  signal?})` reads `GET /api/v1/agents/{session_id}/answers`.
+- `dispatch-execute` exports `readDocumentBlocks(client, target, context)`, with the types
+  `DocumentTarget`, `DocumentTargetContext`, `DocumentBlocks` and `DocumentBlock`. It reads the
+  blocks of the live document that `dispatch doc-edit` would edit for the same arguments. It
+  gives the document's own name, as Dispatch stores it, and each block's markdown, cut from the
+  UTF-8 byte range Dispatch reports. It finds the owner from the target, its ref or
+  `LEGION_ISSUE`, against `context`, and the document by id, slug, filename, the ref's slug, or
+  `spec` for an issue's primary document. Dispatch finds the document an upload replaces by its
+  exact name, so a caller that reads for an upload compares that name with the returned `name`.
+  It reads the text, then the blocks, then the text again, and refuses a document that changed
+  between the two text reads. A target that names no document of its owner gives `"not-found"`,
+  and every other failure throws. Each request carries the client's signal, so a stop ends the
+  read. AskGate in `@sjawhar/pi-envoy` reads a retyped block's text and an upload's current block
+  ids with it (dispatch://INFRA-168). The executor finds its owner and documents through the same
+  internal helper, and `dispatch doc-read --blocks` through the same read, with no change in
+  behaviour.
+- `@legion/envoy-client/askgate-new-asks` exports `newAsks(toolName, input)` and the `NewAsk`
+  type: the asks for a person that one Dispatch write opens, read from the write's own arguments
+  as the Dispatch server reads markdown. It sits beside `askgate-marker` because the `dispatch`
+  CLI reads it too, and AskGate in `@sjawhar/pi-envoy` imports it from here. On a gated write that
+  carries no AskGate marker — one sent outside the literal form the gate reads — the CLI counts
+  those asks, from an upload's own bytes where it read them, and writes the count into the
+  session's ledger line as `askgate.asksCarried`, in both `block` and `warn` mode. The line still
+  carries no ask text and no arguments. pi-envoy turns that one number into a Dispatch decision
+  record, so a session that holds a Dispatch token and nothing else sees the asks that went out,
+  or were refused, with no review behind them.
+- `DispatchClient.projectArtifact(project, input, key?)` and `docEdit(id, input, key?)` take the
+  caller's own `Idempotency-Key` for that write, used in place of the one the client mints per
+  call and sent on every attempt of it, so a caller whose intent outlives one call — AskGate's
+  decision document, created once per session whatever process reaches for it, and each of its
+  records appended once (dispatch://INFRA-168) — has Dispatch run that intent once and replay it
+  rather than write a second time. The key must match `IDEMPOTENCY_KEY_PATTERN`; every other
+  write still mints its own, and a call that passes none is unchanged.
+
+### Changed
+
+- **Breaking:** `sessionStateRoot(env)` and `sessionDirectory(env, sessionId)` move from
+  `@legion/envoy-client/dispatch-session-state` to the new leaf module
+  `@legion/envoy-client/dispatch-session-directory`, which also exports `writeAtomically(path,
+  text)`: an owner-only write through a temporary file and `rename` that removes its temporary
+  file when it fails. `dispatch-session-state` and `session-answers` both write through it.
+
+### Fixed
+
+- `renderInbound` now skips a Dispatch frame on a `notifications.dispatch.*` topic by the
+  event's `quiet` flag rather than by `notify`. `notify` answers whether to wake the owner's
+  route and is false for every event an agent wrote, so a session that subscribed to an issue's
+  topic was shown nothing any agent did on it, and the skip recorded nothing while the replay
+  cursor moved past it. A frame carrying no `quiet` was published before Dispatch stated it and
+  is still judged by `notify`, so a replay of the 72 hours the stream holds shows no delivery
+  receipts or autosaves.
+- `readSessionAnswers` returns no text, with the new `source: "unavailable"` and the reason
+  `this Dispatch build has no answers route`, when Dispatch answers its own `404 NOT_FOUND` "no
+  route for …" (or a request falls in the 5 minutes that URL is then not asked again) and no list
+  read before from that URL renders. Before, it returned the failure line, which sends the agent
+  to `dispatch answers`, a command that fails against that same Dispatch. A list read before from
+  that URL is still carried, its header naming why this read failed and its left-out line,
+  when the cap leaves items out, naming no command. The first such read for a session and URL,
+  and the first again after a read of it answered with a list, sets the new `notice`, naming the
+  URL, for the host to report. `isNoAnswersRoute` is now only that answer of Dispatch's own
+  (`isNoRoute`, which `dispatch-http` now exports), so a proxy's 404 page or an empty 404 is a
+  failed read with the failure line naming it, starts no back-off, and makes `dispatch answers`
+  report that page rather than an old Dispatch build. Every other failure, a 200 that is no
+  answers list and a 503 included, still returns the failure line. `renderSessionAnswers` takes
+  `withoutCommand`, which ends a list that left items out with
+  `<N> older items left out to stay under 8,000 characters.`
+
 ## [main@49e23926228d] - 2026-10-30
 
 ### Added

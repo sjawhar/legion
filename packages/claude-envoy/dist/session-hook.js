@@ -15710,8 +15710,8 @@ class DispatchClient {
   async listProjectArtifacts(project, unlinked = false) {
     return this.#json("GET", ["api", "v1", "projects", project, "artifacts"], undefined, unlinked ? { unlinked: "true" } : undefined);
   }
-  async projectArtifact(project, input) {
-    return this.#upload(["api", "v1", "projects", project, "artifacts"], input);
+  async projectArtifact(project, input, key) {
+    return this.#upload(["api", "v1", "projects", project, "artifacts"], input, key);
   }
   async getProjectArtifact(project, slug) {
     return this.#json("GET", ["api", "v1", "projects", project, "artifacts", slug]);
@@ -15963,8 +15963,8 @@ class DispatchClient {
   async messageBlocks(id, session) {
     return this.#json("GET", ["api", "v1", "messages", id, "blocks"], undefined, session === undefined ? undefined : { session });
   }
-  async docEdit(id, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "edits"], input);
+  async docEdit(id, input, key) {
+    return this.#json("POST", ["api", "v1", "artifacts", id, "edits"], input, undefined, undefined, key);
   }
   async nameArtifactVersion(id, input) {
     return this.#json("POST", ["api", "v1", "artifacts", id, "versions"], input);
@@ -16020,17 +16020,17 @@ class DispatchClient {
       throw error;
     }
   }
-  async#json(method, path, body, query, signal) {
-    return (await this.#jsonAnswer(method, path, body, query, signal)).payload;
+  async#json(method, path, body, query, signal, key) {
+    return (await this.#jsonAnswer(method, path, body, query, signal, key)).payload;
   }
-  async#jsonAnswer(method, path, body, query, signal) {
+  async#jsonAnswer(method, path, body, query, signal, key) {
     const url = this.#url(path, query);
-    const response = await this.#send(method, url, body === undefined ? undefined : { content: JSON.stringify(body), type: "application/json" }, undefined, signal);
+    const response = await this.#send(method, url, body === undefined ? undefined : { content: JSON.stringify(body), type: "application/json" }, undefined, signal, key);
     return { status: response.status, payload: await this.#response(method, url, response) };
   }
-  async#upload(path, input) {
+  async#upload(path, input, key) {
     if ("content" in input)
-      return this.#json("POST", path, input);
+      return this.#json("POST", path, input, undefined, undefined, key);
     const form = new FormData;
     form.set("name", input.name);
     if (input.summary !== undefined)
@@ -16038,17 +16038,17 @@ class DispatchClient {
     if (input.actor !== undefined)
       form.set("actor", JSON.stringify(input.actor));
     form.set("file", input.file, input.name);
-    return this.#form("POST", path, form);
+    return this.#form("POST", path, form, key);
   }
-  async#form(method, path, form) {
+  async#form(method, path, form, key) {
     const url = this.#url(path);
     const encoded = new Response(form);
     const type = encoded.headers.get("Content-Type") ?? "multipart/form-data";
     const content = new Uint8Array(await encoded.arrayBuffer());
-    const response = await this.#send(method, url, { content, type });
+    const response = await this.#send(method, url, { content, type }, undefined, undefined, key);
     return this.#response(method, url, response);
   }
-  async#send(method, url, body, accept = "application/json", signal) {
+  async#send(method, url, body, accept = "application/json", signal, callerKey) {
     const headers = {
       Accept: accept,
       Authorization: `Bearer ${this.token}`
@@ -16063,7 +16063,7 @@ class DispatchClient {
         ...body === undefined ? {} : { body: body.content }
       });
     }
-    const key = crypto.randomUUID();
+    const key = callerKey ?? crypto.randomUUID();
     headers[IDEMPOTENCY_KEY_HEADER] = key;
     const { pausesMs, withinMs, silenceMs, pause = pauseFor } = this.writeRetry;
     const request = `${method} ${url}`;
@@ -17176,7 +17176,7 @@ var RELATION_PHRASES = {
   replied_to_your_message: "replied to your message"
 };
 function isNoAnswersRoute(error) {
-  return error instanceof DispatchServiceError && error.status === 404;
+  return isNoRoute(error);
 }
 function renderSessionAnswerItem(item) {
   const relation = `${RELATION_PHRASES[item.relation]}${item.replaced === true ? " (replaces an earlier answer)" : ""}`;
@@ -17204,8 +17204,9 @@ function withinWindow(items, now) {
   return items.filter((item) => Date.parse(item.at) >= start);
 }
 var MAX_CHARS_TEXT = SESSION_ANSWERS_MAX_CHARS.toLocaleString("en-US");
-function leftOutLine(count) {
-  return `${count} older ${count === 1 ? "item" : "items"} left out to stay under ${MAX_CHARS_TEXT} characters: run \`dispatch answers\` to read every one in full.`;
+function leftOutLine(count, namesCommand) {
+  const counted = `${count} older ${count === 1 ? "item" : "items"} left out to stay under ${MAX_CHARS_TEXT} characters`;
+  return namesCommand ? `${counted}: run \`dispatch answers\` to read every one in full.` : `${counted}.`;
 }
 function renderSessionAnswers(items, options) {
   const shown = withinWindow(items, Number(options.now));
@@ -17215,19 +17216,20 @@ function renderSessionAnswers(items, options) {
     return;
   const header = options.cached === undefined ? SESSION_ANSWERS_MARKER : `${SESSION_ANSWERS_MARKER}
 As read at ${options.cached.readAt}; this read failed: ${failureSentence(options.cached.reason)}`;
+  const namesCommand = options.withoutCommand !== true;
   const blocks = [];
   let length = header.length;
   for (const item of shown) {
     const block = renderSessionAnswerItem(item);
     const after = count - blocks.length - 1;
-    const needed = length + 2 + block.length + (after === 0 ? 0 : 2 + leftOutLine(after).length);
+    const needed = length + 2 + block.length + (after === 0 ? 0 : 2 + leftOutLine(after, namesCommand).length);
     if (needed >= SESSION_ANSWERS_MAX_CHARS)
       break;
     blocks.push(block);
     length += 2 + block.length;
   }
   const leftOut = count - blocks.length;
-  return [header, ...blocks, ...leftOut === 0 ? [] : [leftOutLine(leftOut)]].join(`
+  return [header, ...blocks, ...leftOut === 0 ? [] : [leftOutLine(leftOut, namesCommand)]].join(`
 
 `);
 }
@@ -17249,7 +17251,7 @@ function failureSentence(reason) {
 function sessionAnswersFailureLine(reason) {
   return `${FAILURE_MARKER}${reason.replace(/\s+/g, " ").trim()}); run \`dispatch answers\`.]`;
 }
-var STATE_KEY = Symbol.for("legion.pi-envoy.session-answers.v2");
+var STATE_KEY = Symbol.for("legion.pi-envoy.session-answers.v3");
 var processGlobal = globalThis;
 var state = processGlobal[STATE_KEY] ?? {
   sessions: new Map,
@@ -17301,13 +17303,16 @@ async function readSessionAnswers(options) {
   } catch {}
   const entries = state.sessions.get(session) ?? new Map;
   state.sessions.set(session, entries);
-  const carry = (cache, reason) => {
+  const carry = (cache, reason, noRoute = false) => {
     const text = cache === undefined ? undefined : renderSessionAnswers(cache.items, {
       now: now(),
       total: cache.total,
-      cached: { readAt: cache.read_at, reason }
+      cached: { readAt: cache.read_at, reason },
+      withoutCommand: noRoute
     });
     if (cache === undefined || text === undefined) {
+      if (noRoute)
+        return { text: undefined, source: "unavailable", reason };
       return { text: sessionAnswersFailureLine(reason), source: "failure", reason };
     }
     return { text, source: "cache", readAt: cache.read_at, reason };
@@ -17323,15 +17328,25 @@ async function readSessionAnswers(options) {
   const current = entries.get(url) ?? {
     cache: undefined,
     inFlight: undefined,
-    overdue: false
+    overdue: false,
+    noRouteReported: false
   };
   entries.set(url, current);
   if (current.cache === undefined && directory !== undefined) {
     current.cache = readCacheFile(directory, url);
   }
-  if ((state.noRouteUntil.get(url) ?? 0) > now()) {
-    return carry(current.cache, NO_ANSWERS_ROUTE_REASON);
-  }
+  const noRoute = () => {
+    const read = carry(current.cache, NO_ANSWERS_ROUTE_REASON, true);
+    if (current.noRouteReported)
+      return read;
+    current.noRouteReported = true;
+    return {
+      ...read,
+      notice: `Dispatch at ${url} has no answers route (its build is older than the route), so people's answers cannot be read from it`
+    };
+  };
+  if ((state.noRouteUntil.get(url) ?? 0) > now())
+    return noRoute();
   if (current.inFlight !== undefined && current.overdue) {
     return carry(current.cache, "an earlier read is still waiting on Dispatch");
   }
@@ -17352,6 +17367,7 @@ async function readSessionAnswers(options) {
         items: response.items
       };
       current.cache = cache;
+      current.noRouteReported = false;
       if (directory !== undefined) {
         try {
           mkdirSync(directory, { recursive: true, mode: 448 });
@@ -17362,7 +17378,7 @@ async function readSessionAnswers(options) {
     }, (error) => {
       if (isNoAnswersRoute(error)) {
         state.noRouteUntil.set(url, now() + NO_ROUTE_BACKOFF_MS);
-        return { failure: NO_ANSWERS_ROUTE_REASON };
+        return { noRoute: true };
       }
       return { failure: messageFor(error) };
     });
@@ -17385,6 +17401,8 @@ async function readSessionAnswers(options) {
   if (outcome === "aborted") {
     return carry(current.cache, "the request was cancelled before Dispatch answered");
   }
+  if ("noRoute" in outcome)
+    return noRoute();
   if ("failure" in outcome)
     return carry(current.cache, outcome.failure);
   return {
@@ -17453,8 +17471,12 @@ function renderAdvice(tool, key, advice, opts) {
       lines.push(`You still have an open ask on ${key}: "${ask.question.slice(0, 80)}" (${ask.id}). Still needed? See the \`dispatch\` skill, "Close what you opened".`);
     }
   }
+  const superseded = advice.superseded_approval;
+  if (superseded !== undefined && (tool === "dispatch_doc_edit" || tool === "dispatch_artifact")) {
+    lines.push(`Stored version ${superseded.version}, superseding version ${superseded.approved_version}, which ${superseded.approved_by} approved. That approval is stale until someone approves version ${superseded.version}, and no undo restores it: a Legion design gate on this document is closed meanwhile, so every READY in its tree is refused. Meant to change the approved design? Request approval with \`dispatch request-approval\`. Meant a correction beside it? Tell the tree's architect, and keep the next one in a comment or in the plan.`);
+  }
   if (hasIssueAdvice && writesSinceHuman !== undefined && writesSinceHuman >= 3 && (tool === "dispatch_message" || tool === "dispatch_ask" || tool === "dispatch_comment" && opts.isAskReply !== true)) {
-    const middle = writesSinceHuman >= 6 ? "Stop posting here until a human replies." : "Progress ledger or scratchpad? If so, stop.";
+    const middle = writesSinceHuman >= 6 ? "Stop posting here until a human replies. Their reply ends this: post then what you held back." : "Progress ledger or scratchpad? If so, stop.";
     lines.push(`Posted. You've sent ${writesSinceHuman} messages on ${key} with no human response. ${middle} See the \`dispatch\` skill, "Structure over stream".`);
   }
   return lines;
@@ -18206,6 +18228,9 @@ async function resolveOwnerArguments(tool, input, cwd, env, exec, dashboardUrls,
   const issue = `${repo}#${legionIssue}`;
   return { args: { ...args, issue }, ref, owner: { kind: "issue", issue } };
 }
+
+class DocumentNotFoundError extends Error {
+}
 function artifactByReference(artifacts, artifactReference, owner, canonical) {
   const bySlug = artifacts.find((candidate) => candidate.slug === artifactReference);
   if (canonical && bySlug !== undefined)
@@ -18226,7 +18251,7 @@ function artifactByReference(artifacts, artifactReference, owner, canonical) {
   }
   const [artifact] = byName;
   if (artifact === undefined) {
-    throw new Error(documentReferenceProblem(artifactReference, artifacts, owner));
+    throw new DocumentNotFoundError(documentReferenceProblem(artifactReference, artifacts, owner));
   }
   return artifact;
 }
@@ -18257,9 +18282,24 @@ async function resolveArtifact(client, owner, artifactReference, { canonical = f
     artifact = artifactByReference(issue.artifacts, artifactReference, "issue", canonical);
   }
   if (!artifact) {
-    throw new Error(documentReferenceProblem(artifactReference ?? "spec", issue.artifacts, "issue"));
+    throw new DocumentNotFoundError(documentReferenceProblem(artifactReference ?? "spec", issue.artifacts, "issue"));
   }
   return { owner, issue, artifact };
+}
+async function documentTargets(client, resolution) {
+  const refDocument = resolution.ref?.kind === "artifact" ? resolution.ref.id : resolution.ref?.artifact;
+  const owner = resolution.owner?.kind === "issue" ? { kind: "issue", issue: await resolveExistingIssue(client, resolution.owner.issue) } : resolution.owner;
+  return {
+    owner,
+    documentOwner: () => {
+      if (owner === null)
+        throw new Error("issue or project is required");
+      return owner;
+    },
+    resolveDocument: (documentOwner, reference) => resolveArtifact(client, documentOwner, reference, {
+      canonical: reference !== undefined && reference === refDocument
+    })
+  };
 }
 var documentHintLimit = 8;
 function documentReferenceProblem(reference, documents, owner, use) {
@@ -18841,13 +18881,11 @@ ${text}`,
 }
 var BLOCK_OPENING_CHARS = 60;
 async function listDocumentBlocks(client, artifact) {
-  const before = await client.docRead(artifact.id);
-  const blocks = await client.artifactBlocks(artifact.id);
-  const after = await client.docRead(artifact.id);
-  if (before.token !== after.token || before.markdown !== after.markdown) {
+  const live = await liveBlocks(client, artifact);
+  if (live === undefined) {
     throw new Error(`${artifact.name} changed while dispatch doc-read --blocks read it, so the opening words could name the wrong text; nothing is listed. Run it again.`);
   }
-  const bytes = new TextEncoder().encode(before.markdown);
+  const { bytes, blocks } = live;
   const decoder = new TextDecoder;
   const lines = [
     `Blocks of ${artifact.name}, in document order, each indented under the block holding it: id, type, (token; anchored comments and asks), opening words. A table lists its rows by the index delete_row takes and its cells by the row and the column delete_column takes.`
@@ -18878,7 +18916,15 @@ async function listDocumentBlocks(client, artifact) {
     holders.push(block);
   }
   return { text: lines.join(`
-`), token: before.token };
+`), token: live.token };
+}
+async function liveBlocks(client, artifact) {
+  const before = await client.docRead(artifact.id);
+  const blocks = await client.artifactBlocks(artifact.id);
+  const after = await client.docRead(artifact.id);
+  if (before.token !== after.token || before.markdown !== after.markdown)
+    return;
+  return { bytes: new TextEncoder().encode(before.markdown), token: before.token, blocks };
 }
 async function refuseOpenDecisionBlocks(client, tool, resolved) {
   const artifact = resolved.artifact;
@@ -19088,14 +19134,7 @@ async function executeDispatchTool(input) {
   const args = checked.args;
   const actor = toolActor(await resolveOrigin(env, exec, input.cwd), input);
   const client = dispatchClient();
-  const refDocument = ownerArguments.ref?.kind === "artifact" ? ownerArguments.ref.id : ownerArguments.ref?.artifact;
-  const resolveDocument = (documentOwner, reference) => resolveArtifact(client, documentOwner, reference, {
-    canonical: reference !== undefined && reference === refDocument
-  });
-  const owner = ownerArguments.owner?.kind === "issue" ? {
-    kind: "issue",
-    issue: await resolveExistingIssue(client, ownerArguments.owner.issue)
-  } : ownerArguments.owner;
+  const { owner, documentOwner, resolveDocument } = await documentTargets(client, ownerArguments);
   const issueArgument = optionalString(input.args, "issue");
   const refText = optionalString(ownerArguments.args, "ref");
   if (input.tool !== "dispatch_ask" && owner?.kind === "issue" && issueArgument !== undefined && refText !== undefined && ownerArguments.ref?.owner.kind === "issue" && owner.issue !== ownerArguments.ref.owner.issue) {
@@ -19107,11 +19146,6 @@ async function executeDispatchTool(input) {
     if (owner?.kind !== "issue")
       throw new Error("issue is required");
     return owner.issue;
-  };
-  const documentOwner = () => {
-    if (owner === null)
-      throw new Error("issue or project is required");
-    return owner;
   };
   const postWithPictures = (text, limit, owner, upload) => textWithPictures(input.tool, text, pictures, limit, owner, (picture) => upload(picture).catch((error) => {
     if (!(error instanceof DispatchWriteLandedError))
@@ -20649,6 +20683,17 @@ function writtenToken(config, checkout) {
     checkout: false
   };
 }
+function lostDispatchUrlNotice(env, config) {
+  if (nonEmpty(env.DISPATCH_TOKEN_FILE) === undefined)
+    return;
+  const link = config.missing?.link ?? null;
+  const old = config.missing?.oldUserFileNotice;
+  return [
+    "DISPATCH_TOKEN_FILE is set and DISPATCH_URL is not, so Dispatch is off: this shell lost the DISPATCH_URL it started with. Export DISPATCH_URL again, set to the Dispatch server that token is for",
+    ...link === null ? [] : [`${config.path} is a link to ${link}, which does not exist`],
+    ...old === undefined ? [] : [old]
+  ].join("; ");
+}
 function dispatchSettings(env, config, options = {}) {
   const target = dispatchTarget(env, config);
   if (!target.enabled)
@@ -20694,6 +20739,9 @@ function dispatchTarget(env, config) {
   const checkoutServer = checkout?.dispatch.serverUrl;
   const addressed = explicitUrl !== undefined || checkoutServer !== undefined || own.serverUrl !== undefined || own.enabled === true;
   if (!addressed) {
+    const lost = lostDispatchUrlNotice(env, config);
+    if (lost !== undefined)
+      return offWithNotice(lost);
     return offWithNotice(config.missing === null ? `${config.path} names no Dispatch server, and DISPATCH_URL is not set: Dispatch is off` : missingConfigNotice(config.path, config.missing, "Dispatch is off"));
   }
   if (explicitUrl !== undefined && httpUrl2(explicitUrl) === undefined) {
@@ -20841,25 +20889,29 @@ function handedConfigFile(env) {
     return { path: null, error: messageFor(error) };
   }
 }
-function startNotice(config, dispatch, envoy, nats) {
+function startNotice(config, dispatch, envoy, nats, lost) {
   if (config.kind === "failed")
     return `${config.error}: Dispatch and Envoy are off`;
   const { missing, checkout } = config;
+  const lostNotice = !dispatch.enabled && dispatch.notice === lost ? lost ?? null : null;
   const dispatchQuiet = !dispatch.enabled && dispatch.error === null;
   const envoyQuiet = !envoy.enabled && envoy.error === null;
   const parts = [];
-  if (missing !== null && dispatchQuiet && envoyQuiet) {
+  if (missing !== null && dispatchQuiet && envoyQuiet && lostNotice === null) {
     parts.push(missingConfigNotice(config.path, missing, "Dispatch and Envoy are off"));
   } else {
     if (!dispatch.enabled && dispatch.error !== null)
       parts.push(`Dispatch is off: ${dispatch.error}`);
+    else if (lostNotice !== null)
+      parts.push(lostNotice);
     else if (dispatchQuiet && missing !== null) {
       parts.push(missingConfigNotice(config.path, missing, "Dispatch is off"));
     }
     if (!envoy.enabled && envoy.error !== null)
       parts.push(`Envoy is off: ${envoy.error}`);
     else if (envoyQuiet && missing !== null) {
-      parts.push(missingConfigNotice(config.path, missing, "Envoy is off"));
+      const said = lostNotice === null ? missing : { link: null };
+      parts.push(missingConfigNotice(config.path, said, "Envoy is off"));
     }
   }
   if (checkout?.kind === "valid" && checkout.envoyError !== null)
@@ -20890,7 +20942,7 @@ function sessionSettings(file, env, options) {
   return {
     dispatch,
     envoy,
-    notice: startNotice(config, dispatch, envoy, options.nats !== false)
+    notice: startNotice(config, dispatch, envoy, options.nats !== false, config.kind === "read" ? lostDispatchUrlNotice(env, config) : undefined)
   };
 }
 function sessionDispatchSettings(file, env, options) {
@@ -21108,7 +21160,8 @@ var REFRESH_LOCK_STALE_MS = 30000;
 var RefreshOutcome = object({
   finished_at: number2(),
   dispatch_url: string2().nullable(),
-  text: string2().nullable()
+  text: string2().nullable(),
+  notice: string2().nullable().optional()
 });
 var ANSWERS_TIMING_FILE = "ENVOY_ANSWERS_TIMING_FILE";
 var DISPATCH_HOST_LINE = "export DISPATCH_HOST=claude";
@@ -21267,8 +21320,9 @@ async function refreshedAnswers(session, cwd, dispatchUrl, startedAt, by) {
   for (;; ) {
     const outcome = refreshOutcome(file, startedAt);
     if (outcome !== undefined) {
-      if (outcome.dispatch_url === dispatchUrl)
-        return { text: outcome.text ?? undefined };
+      if (outcome.dispatch_url === dispatchUrl) {
+        return { text: outcome.text ?? undefined, notice: outcome.notice ?? undefined };
+      }
       return {
         reason: `the refresher read ${outcome.dispatch_url ?? "no Dispatch"}, not the Dispatch envoy.json names now`
       };
@@ -21291,18 +21345,17 @@ async function answersMessage(session, cwd, startedAt, by) {
     if (dispatchUrl !== undefined) {
       const refreshed = await refreshedAnswers(session, cwd, dispatchUrl, startedAt, by);
       if ("text" in refreshed)
-        return refreshed.text;
+        return refreshed;
       dispatch = offWithError(refreshed.reason);
     }
   }
-  const read = await readSessionAnswers({
+  return readSessionAnswers({
     session,
     dispatch,
     dispatchUrl,
     env: process.env,
     deadlineMs: Math.max(ANSWERS_LEAST_WAIT_MS, remainingUntil(by))
   });
-  return read.text;
 }
 async function answers(text) {
   const began = performance.now();
@@ -21312,7 +21365,10 @@ async function answers(text) {
   try {
     const input = AnswersInput.parse(JSON.parse(text));
     const directory = claudeProjectDirectory({ CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] }, input.cwd ?? process.cwd());
-    const message = await answersMessage(input.session_id, directory, startedAt, by);
+    const { text: message, notice } = await answersMessage(input.session_id, directory, startedAt, by);
+    if (notice !== undefined)
+      process.stderr.write(`envoy: ${notice}
+`);
     if (message !== undefined) {
       await Bun.write(Bun.stdout, JSON.stringify({
         hookSpecificOutput: {
@@ -21356,7 +21412,8 @@ async function answersRefresh(session, cwd) {
       const outcome = {
         finished_at: Date.now(),
         dispatch_url: dispatchUrl,
-        text: read.text ?? null
+        text: read.text ?? null,
+        notice: read.notice ?? null
       };
       writeAtomically(join7(directory, REFRESH_OUTCOME), JSON.stringify(outcome));
     } finally {
