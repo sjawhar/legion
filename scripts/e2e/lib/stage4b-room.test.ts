@@ -1,4 +1,6 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runJq } from "./run-jq";
 import { scriptFunctions } from "./script-functions";
@@ -35,18 +37,25 @@ function jq(filter: string, input: unknown, args: string[] = []) {
 
 const stage4b = join(import.meta.dir, "..", "stage4b-sandbox-tree.sh");
 const repository = join(import.meta.dir, "..", "..", "..");
+const scratch = mkdtempSync(join(tmpdir(), "stage4b-room-test."));
+const preflightReservationCall = "preflight_issue_pod_reservation\n";
+afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
-function expectedIssuePodReservation(resources: object) {
+function runPreflightReservation(scriptPath: string, resources: object) {
+  const source = readFileSync(scriptPath, "utf8");
+  const call = source.includes(preflightReservationCall) ? preflightReservationCall : "";
   const run = Bun.spawnSync([
     "bash",
     "-c",
     `root=${JSON.stringify(repository)}
 run_resources=${JSON.stringify(JSON.stringify(resources))}
-${scriptFunctions(stage4b)("expected_issue_pod_reservation")}
-expected_issue_pod_reservation`,
+check=preflight
+${scriptFunctions(scriptPath)("blocked")}
+${scriptFunctions(scriptPath)("expected_issue_pod_reservation")}
+${scriptFunctions(scriptPath)("preflight_issue_pod_reservation")}
+${call}`,
   ]);
-  if (run.exitCode !== 0) throw new Error(run.stderr.toString());
-  return JSON.parse(run.stdout.toString());
+  return { code: run.exitCode, out: run.stdout.toString(), err: run.stderr.toString() };
 }
 
 // node is a pool node NAME with ALLOCATABLE, Ready and schedulable unless EDIT says otherwise.
@@ -121,10 +130,27 @@ describe("issue_pod_reservation", () => {
     ).toThrow("run_resources.issue.cpu is missing");
   });
 
-  test("stops the preflight capacity read by naming the missing issue CPU reservation", () => {
-    expect(() => expectedIssuePodReservation(legacyPerRoleResources)).toThrow(
-      "run_resources.issue.cpu is missing"
-    );
+  test("preflight blocks a per-role reservation before the pool-room read", () => {
+    expect(runPreflightReservation(stage4b, legacyPerRoleResources)).toEqual({
+      code: 1,
+      out: "CHECK preflight: BLOCKED: the run's issue pod reservation is invalid: jq: error (at <unknown>): run_resources.issue.cpu is missing\n",
+      err: "",
+    });
+  });
+
+  test("preflight no longer blocks the legacy reservation when its check is removed", () => {
+    const source = readFileSync(stage4b, "utf8");
+    const withoutCheck = source.replace(preflightReservationCall, "");
+    if (withoutCheck === source)
+      throw new Error("stage4b preflight does not invoke its reservation check");
+    const copy = join(scratch, "stage4b-sandbox-tree-without-reservation-check.sh");
+    writeFileSync(copy, withoutCheck);
+
+    expect(runPreflightReservation(copy, legacyPerRoleResources)).toEqual({
+      code: 0,
+      out: "",
+      err: "",
+    });
   });
 });
 
