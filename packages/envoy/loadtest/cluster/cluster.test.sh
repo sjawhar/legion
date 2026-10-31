@@ -122,10 +122,14 @@
 # stayed, written from what the removal then did -- the runner keeps that heap.txt with the
 # step's other files removed, or every file of the step when that removal failed too -- while an
 # existence check that failed removes nothing there; (y) with the lock naming another run,
-# nothing of this run touches the copy those fixed names reach: runner_stop, runner_step_remove
-# and typing_stop stop and remove nothing, runner_start and stop_copy refuse outright, each
-# saying which copy it left alone, and a command whose --run names this run is refused, naming
-# both runs.
+# nothing of this run writes into, kills in or removes from the copy those fixed names reach:
+# runner_stop and runner_step_remove (runner_exec) and typing_stop stop and remove nothing,
+# runner_start, runner_put, typing_start's token write and psql_write (postgres_exec) and
+# stop_copy (scale_to) refuse outright, each saying which pod or deployment it left alone, a
+# command whose --run names this run is refused, naming both runs, and collect, which reads this
+# pod's run directory and no pod of the copy, packs and uploads that run with such a --run,
+# reading not even the lock; (z) the daemons write their pidfile without reading the lock, so up
+# starts both although every read of the lock after it took one fails.
 set -euo pipefail
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -187,7 +191,16 @@ c=${cmd[*]:-}
 case $verb in
   get)
     case "$*" in
-      *"configmap dispatch-loadtest-lock"*) [ ! -f "$FAKE_DIR/lock.json" ] || cat "$FAKE_DIR/lock.json" ;;
+      *"configmap dispatch-loadtest-lock"*)
+        # FAKE_LOCK_GET_FAIL: a read of the lock fails with a refused API server connection once
+        # the lock exists, so the command that takes it goes on and every read after that -- the
+        # daemons', which start then -- fails.
+        if [ -n "${FAKE_LOCK_GET_FAIL:-}" ] && [ -f "$FAKE_DIR/lock.json" ]; then
+          echo 'The connection to the server 10.0.0.1:443 was refused - did you specify the right host or port?' >&2
+          exit 1
+        fi
+        [ ! -f "$FAKE_DIR/lock.json" ] || cat "$FAKE_DIR/lock.json"
+        ;;
       *"-o json"*)
         role=$(sed -n 's/.*dispatch-loadtest\/role=\([a-z-]*\).*/\1/p' <<<"$sel")
         jq --arg role "$role" 'if $role == "" then . else .items |= map(select(.metadata.labels["dispatch-loadtest/role"] == $role)) end' "$FAKE_DIR/pods.json" ;;
@@ -243,7 +256,7 @@ case $verb in
         ;;
       "sh -c name="*) printf '%s\n' "${cmd[*]:4}" >>"$FAKE_DIR/runner-starts" ;;
       # The job a stop names (runner_stop, runner_wait's bound, typing_stop).
-      "sh -c kill"*) printf '%s\n' "${cmd[4]}" >>"$FAKE_DIR/runner-stops" ;;
+      "sh -c pid="*) printf '%s\n' "${cmd[4]}" >>"$FAKE_DIR/runner-stops" ;;
       # replay-prepare: the dump streamed into the Postgres pod, its sha256 there, the restore.
       'sh -c cat >"$1" sh '*) cat >"$FAKE_DIR/pod-dump" ;;
       "sha256sum "*) sha256sum "$FAKE_DIR/pod-dump" ;;
@@ -714,7 +727,7 @@ export POD_UID=00000000-1111-2222-3333-444444444444 LEGION_ISSUE=TEST-1
 export PATH="$bin:$PATH"
 unset FAKE_EXEC_FAIL FAKE_SAMPLE FAKE_PROD_MAJOR FAKE_LOADGEN_FAIL FAKE_APPLY_FAIL FAKE_QUIET FAKE_STORED_ORDER \
   FAKE_EXEC_ERRORS FAKE_FAST_SLEEP FAKE_TYPING_RC FAKE_DISPATCH_BUILD_ERROR FAKE_COPY_BACK_FAIL \
-  FAKE_PG_DF_SEQ FAKE_RC_UNTIL_STOP FAKE_HEAP_COPY_FAIL FAKE_HEAP_EXISTS_FAIL FAKE_HEAP_KEEP_REMOVE_FAIL
+  FAKE_PG_DF_SEQ FAKE_RC_UNTIL_STOP FAKE_HEAP_COPY_FAIL FAKE_HEAP_EXISTS_FAIL FAKE_HEAP_KEEP_REMOVE_FAIL FAKE_LOCK_GET_FAIL
 export DISPATCH_URL=http://dispatch.invalid DISPATCH_TOKEN_FILE=$fake/token
 # The manifest names no issue: the operator does, and replay-prepare refuses without it.
 export LOADTEST_REPLAY_ISSUE=INFRA-639
@@ -2075,8 +2088,11 @@ pass "a replay types into the documents with the most agent writes in its sub-wi
   calls_after "$notfound" -- psql_at postgres 'select version()'
   { ((RC != 0)) && ((CALLS == 1)) && [ -z "$SLEEPS" ] && grep -qxF "$notfound" "$tmp/retry.err"; } ||
     fail "a read was retried after an error that is not transient: rc $RC, $CALLS calls, sleeps '$SLEEPS'"
+  # The write itself is one call; the lock read before it is postgres_exec's guard.
   calls_after "$dial" -- psql_write postgres 'drop database if exists dispatch with (force)'
-  { ((RC != 0)) && ((CALLS == 1)) && [ -z "$SLEEPS" ]; } || fail "a psql write was retried after a dial timeout: rc $RC, $CALLS calls"
+  psql_calls=$(grep -c -- 'exec postgres-0 -c postgres -- psql' "$fake/kubectl.log" || true)
+  { ((RC != 0)) && [ "$psql_calls" = 1 ] && [ -z "$SLEEPS" ]; } ||
+    fail "a psql write was retried after a dial timeout: rc $RC, $psql_calls psql calls of $CALLS"
   NATS_BOX_POD='nats-box-7f6d'
   calls_after "$dial" -- nats_box stream ls --names
   { ((RC == 0)) && ((CALLS == 2)) && [ "$(cat "$tmp/retry.out")" = ENVOY_NOTIFICATIONS ]; } || fail "a nats-box listing was not retried after a dial timeout"
@@ -2627,16 +2643,24 @@ pass "a step whose heap.txt alone did not come back is complete, says so in a no
 # (y) The copy answers to fixed names -- the pods runner and postgres-0, the deployments dispatch
 # and listener -- so every one of them reaches whatever run holds the namespace now. Once the
 # lock names another run this run's files, pids and job names say nothing about who owns what
-# they point at, and a stop, a scale or a removal of this run's would hit that run's copy. So
-# each such path reads the lock first (copy_is_ours) and leaves the copy alone, saying which part
-# of it, and a command whose --run names a run the lock does not is refused before it registers
-# itself, naming both runs.
+# they point at, and a stop, a write, a scale or a removal of this run's would hit that run's
+# copy. So every write, kill and removal in those pods goes through one of five helpers that
+# read the lock first -- runner_exec, postgres_exec, psql_write, runner_put, scale_to -- and each
+# leaves the copy alone, saying which pod or deployment; a command whose --run names a run the
+# lock does not is refused before it registers itself, naming both runs; and collect, which
+# reads this pod's run directory and reaches no pod at all, packs and uploads its own run with
+# such a --run, since nothing it does can touch the run that holds the namespace.
 reset_fake
 export LOADTEST_CLUSTER_ROOT=$tmp/root-othersrun
-run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok"
+run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok" --browsertype-commit "$commit_bt"
 ((RC == 0)) || fail "up exited $RC: $(cat "$tmp/out")"
 own_run=$(jq -r .data.run "$fake/lock.json")
 own_dir=$LOADTEST_CLUSTER_ROOT/$own_run
+# A run with results of its own, for the collect below.
+run_cluster seed --namespace "$ns"
+((RC == 0)) || fail "seed exited $RC: $(cat "$tmp/out")"
+run_cluster step --namespace "$ns" packed 1 --duration 1m
+((RC == 0)) || fail "the step packed exited $RC: $(cat "$tmp/out")"
 # The namespace is another run's from here: the lock says so, whatever this pod still holds.
 write_lock "$other_run" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 guard_out=$tmp/guard.out
@@ -2653,18 +2677,35 @@ guard_out=$tmp/guard.out
     fail "runner_stop TERMed the runner job step-guard, which is run $other_run's now: $(cat "$fake/runner-stops")"
   grep -qF "the lock no longer names run $own_run" "$guard_out" ||
     fail "runner_stop did not say why it stopped nothing: $(cat "$guard_out")"
-  grep -qF 'the runner job step-guard' "$guard_out" ||
-    fail "runner_stop did not name the job it left alone: $(cat "$guard_out")"
+  grep -qF 'the runner pod' "$guard_out" ||
+    fail "runner_stop did not name the pod it left alone: $(cat "$guard_out")"
   guard_rc=0
   runner_step_remove guard 2>"$guard_out" || guard_rc=$?
   ((guard_rc != 0)) || fail "runner_step_remove returned 0 although the lock names run $other_run"
   ! grep -q -- 'exec runner -c runner -- rm -rf /work/steps/guard ' "$fake/kubectl.log" ||
     fail "runner_step_remove removed a step directory from run $other_run's runner"
-  grep -qF '/work/steps/guard in the runner' "$guard_out" ||
-    fail "runner_step_remove did not name what it left in the runner: $(cat "$guard_out")"
+  grep -qF 'they stay at /work/steps/guard' "$guard_out" ||
+    fail "runner_step_remove did not say what it left in the runner: $(cat "$guard_out")"
   TYPING=1 TYPING_PEERS=2 TYPING_RATE=5 TYPING_DOCS=1
   TYPING_LIST=(doc-1)
   mkdir -p "$own_dir/steps/guard"
+  # The agent token: the runner holds /work/browsertype already (up put it there), so
+  # put_executable copies nothing and the token write is typing_start's first call that reaches
+  # the pod. Unguarded it would write this run's token over the token of run $other_run, whose
+  # runner pod that is.
+  guard_rc=0
+  tokens=$(grep -cF 'cat >"$1/token"' "$fake/kubectl.log" || true)
+  copies=$(grep -c -- ' cp ' "$fake/kubectl.log" || true)
+  (typing_start guard "$own_dir/steps/guard" 60) 2>"$guard_out" || guard_rc=$?
+  ((guard_rc != 0)) || fail "typing_start returned 0 although the lock names run $other_run"
+  [ "$(grep -cF 'cat >"$1/token"' "$fake/kubectl.log" || true)" = "$tokens" ] ||
+    fail "typing_start wrote this run's agent token into run $other_run's runner pod: $(grep -F 'cat >"$1/token"' "$fake/kubectl.log" | tail -n1)"
+  [ ! -e "$fake/runner$TYPING_DIR/token" ] ||
+    fail "the agent token lies in the pod named runner, which is run $other_run's now"
+  [ "$(grep -c -- ' cp ' "$fake/kubectl.log" || true)" = "$copies" ] ||
+    fail "typing_start copied browsertype into run $other_run's runner: the runner holds it already, so put_executable must copy nothing and the token write must guard itself"
+  grep -qF 'the runner pod' "$guard_out" ||
+    fail "typing_start did not name the pod it left alone: $(cat "$guard_out")"
   typing_stop guard "$own_dir/steps/guard" 2>"$guard_out" ||
     fail "typing_stop returned non-zero while the lock names run $other_run; its callers treat that as a failure"
   [ ! -s "$fake/runner-stops" ] ||
@@ -2694,8 +2735,29 @@ guard_out=$tmp/guard.out
   ((guard_rc != 0)) || fail "runner_put returned 0 although the lock names run $other_run"
   new_calls=$(tail -n +$((calls + 1)) "$fake/kubectl.log")
   ! grep -q -- ' cp ' <<<"$new_calls" || fail "runner_put copied into run $other_run's runner pod: $(grep -- ' cp ' <<<"$new_calls")"
+  guard_rc=0
+  psqls=$(grep -c -- 'exec postgres-0 -c postgres -- psql' "$fake/kubectl.log" || true)
+  psql_write postgres 'drop database if exists dispatch with (force)' 2>"$guard_out" || guard_rc=$?
+  ((guard_rc != 0)) || fail "psql_write returned 0 although the lock names run $other_run"
+  [ "$(grep -c -- 'exec postgres-0 -c postgres -- psql' "$fake/kubectl.log" || true)" = "$psqls" ] ||
+    fail "psql_write ran SQL in run $other_run's Postgres pod: $(grep -- 'exec postgres-0 -c postgres -- psql' "$fake/kubectl.log" | tail -n1)"
+  grep -qF 'the Postgres pod postgres-0' "$guard_out" ||
+    fail "psql_write did not name the pod it left alone: $(cat "$guard_out")"
 )
-# A command of this run, named by --run, is refused before it drives run $other_run's copy.
+# collect reads this pod's run directory and runs loadgen here, so it packs and uploads run
+# $own_run while run $other_run holds the namespace, without reading the lock at all.
+: >"$fake/dispatch.log"
+collect_calls=$(wc -l <"$fake/kubectl.log")
+run_cluster collect --namespace "$ns" --run "$own_run" --upload-issue TEST-1
+((RC == 0)) || fail "collect --run $own_run exited $RC while the lock names run $other_run: $(cat "$tmp/out")"
+[ -f "$own_dir/TABLES.md" ] || fail "collect --run $own_run wrote no TABLES.md: $(cat "$tmp/out")"
+own_results=$(find "$own_dir/upload" -name 'cluster-load-test-*-raw-results.tar.zst.part00' | head -n1)
+[ -n "$own_results" ] || fail "collect --run $own_run packed no part of phase results"
+grep -q -- "--name ${own_results##*/}" "$fake/dispatch.log" ||
+  fail "collect --run $own_run uploaded no part: $(cat "$fake/dispatch.log")"
+! tail -n +$((collect_calls + 1)) "$fake/kubectl.log" | grep -q 'configmap dispatch-loadtest-lock' ||
+  fail "collect --run $own_run read the lock, which names another run, although it reaches no pod of the copy"
+# A command that drives the copy, named by --run, is refused before it drives run $other_run's.
 run_cluster step --namespace "$ns" --run "$own_run" guardstep 1 --duration 1m
 ((RC != 0)) || fail "step --run $own_run ran although the lock names run $other_run: $(cat "$tmp/out")"
 { grep -qF "$own_run" "$tmp/out" && grep -qF "$other_run" "$tmp/out"; } ||
@@ -2705,4 +2767,30 @@ run_cluster down --namespace "$ns" --run "$own_run"
 ((RC == 0)) || fail "down --run $own_run exited $RC: $(cat "$tmp/out")"
 [ -f "$fake/lock.json" ] || fail "down --run $own_run deleted run $other_run's lock"
 rm -f -- "$fake/lock.json"
-pass "with the lock naming another run, runner_stop, runner_step_remove and typing_stop touch nothing of the copy, runner_start and stop_copy refuse outright, each saying which part it left alone, and a command whose --run names this run is refused, naming both runs"
+pass "with the lock naming another run, runner_stop, runner_step_remove and typing_stop touch nothing of the copy, runner_start, runner_put, typing_start's token write, psql_write and stop_copy refuse outright, each naming the pod or deployment it left alone, a command whose --run names this run is refused, naming both runs, and collect packs and uploads that run without reading the lock"
+
+# (z) The daemons' lock read. cmd__heartbeat and cmd__sampler come through use_run, and a lock
+# read there is a plain kubectl get that nothing retries; only after it do they write the pidfile
+# that start_daemon waits about 5 s for. So a refused API server connection, or a round trip
+# longer than that wait, would kill both daemons and the command that started them -- up right
+# after it took the lock, every later command at ensure_daemons -- although the parent read the
+# lock already and the heartbeat's own loop was built to outlive exactly these errors (its patch
+# tests the lock's run id, and a lock that names another run ends it).
+reset_fake
+export LOADTEST_CLUSTER_ROOT=$tmp/root-lockread
+FAKE_LOCK_GET_FAIL=1 run_cluster up "${up_args[@]}" --dispatch-commit "$commit_ok"
+((RC == 0)) ||
+  fail "up exited $RC although only the reads of the lock after it took one failed: $(cat "$tmp/out")"
+lockread_dir=$LOADTEST_CLUSTER_ROOT/$(jq -r .data.run "$fake/lock.json")
+for daemon in heartbeat sampler; do
+  [ -f "$lockread_dir/$daemon.pid" ] ||
+    fail "up started no $daemon: it writes its pidfile only after a lock read that nothing retries ($(cat "$lockread_dir/logs/$daemon.log" 2>/dev/null))"
+  kill -0 "$(<"$lockread_dir/$daemon.pid")" 2>/dev/null ||
+    fail "the $daemon of run ${lockread_dir##*/} is not running: $(cat "$lockread_dir/logs/$daemon.log" 2>/dev/null)"
+  ! grep -q 'could not read ConfigMap' "$lockread_dir/logs/$daemon.log" ||
+    fail "the $daemon read the lock before it wrote its pidfile: $(cat "$lockread_dir/logs/$daemon.log")"
+done
+unset FAKE_LOCK_GET_FAIL
+run_cluster down --namespace "$ns"
+((RC == 0)) || fail "down exited $RC: $(cat "$tmp/out")"
+pass "the daemons write their pidfile without reading the lock, so up starts both although every read of the lock after it took one fails"

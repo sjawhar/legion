@@ -1720,8 +1720,11 @@ Each subcommand needs `--namespace`. After `up`, a subcommand finds its run from
 key, or from `--run <id>`. A `--run` that names a run other than the one the lock names is
 refused, naming both: the copy answers to fixed names (the pods `runner` and `postgres-0`, the
 deployments `dispatch` and `listener`), so they all reach the run the lock names, and a command
-of the other run would stop, scale or clear that run's copy. Only `status`, which reads, and
-`down`, whose deletes are scoped to one run's label, take such a `--run`. A `kubectl exec` that
+of the other run would stop, scale or clear that run's copy. Three subcommands take such a
+`--run`: `status`, which reads; `collect`, which reads the run's directory on this pod and
+reaches no pod of the copy; and `down`, whose deletes are scoped to one run's label. Which paths
+read the lock before they write into, kill in or remove from the copy's pods, and which are
+exempt, is one list, in `cluster.sh`'s header. A `kubectl exec` that
 only reads (a `psql` query, a nats-box listing,
 a file read in the runner or a container) and fails on a transient API server error (`error
 dialing backend`, as in `Error from server: error dialing backend: dial timeout, backstop`, or a

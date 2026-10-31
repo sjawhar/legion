@@ -75,7 +75,9 @@
 #       phase's step directories, and the results (curves/, TABLES.md,
 #       STORED-ORDER.md, each step's CODEPATHS.md and codepaths.json), as zstd tar parts under
 #       24 MiB in <run>/upload/; with --upload-issue, each part goes to that Dispatch issue. A
-#       failure is reported, the rest still runs, and collect exits 1.
+#       failure is reported, the rest still runs, and collect exits 1. It reads the run's
+#       directory on this pod and touches nothing of the copy, so --run may name a run the lock
+#       does not.
 #   cluster.sh status --namespace NS          the lock, the run, its hold, its daemons and its pods.
 #   cluster.sh down --namespace NS [--run ID] deletes everything labelled with the run id and the
 #       lock, removes the run's hold, and waits until nothing of the run is left. A lock of
@@ -190,12 +192,24 @@
 #
 # Every name the copy answers to is fixed -- the pods runner and postgres-0, the deployments
 # dispatch and listener, the lock ConfigMap -- so each of them reaches whatever run holds the
-# namespace now. Before it stops, kills or removes anything they name, cluster.sh checks that the
-# lock still names this run (copy_is_ours): a runner job stopped, the step's files and the
-# browser typing token removed from the runner, Dispatch or the listener scaled, the runner's own
-# directories reset, the replay dump removed from the Postgres pod. A command whose --run names a
-# run other than the one the lock names is refused outright, naming both; only status (which
-# reads) and down (whose deletes are scoped to the run's label) run then.
+# namespace now. Everything that writes into, kills in or removes from them goes through five
+# helpers, each of which reads the lock first (copy_is_ours) and does nothing once it names
+# another run: runner_exec and postgres_exec (every kubectl exec that writes, kills or removes in
+# the runner or in postgres-0), psql_write (through postgres_exec), runner_put (the kubectl cp
+# into the runner) and scale_to (the deployments dispatch and listener). Reads are unguarded,
+# the retried ones (psql_at, the kube_read execs that cat, test or sha256sum) and the streams
+# that read a pod (a step's files and its heap.txt copied back, the bundle verified, the
+# stored-order check, loadgen replay-checksum) alike, and so is every path that is this
+# run's by construction: up before and at kube_lock_take, down's label-scoped delete and its
+# refusal of another run's lock, the heartbeat's JSON-patch test op, the sampler's and
+# stop_daemon's own processes, nats_box, which picks its pod by the run label, apply_manifest,
+# whose three callers run after kube_lock_take (up_run), after stop_copy (resize_postgres) and
+# after scale_to dispatch 0 (redeploy), and the replay's two long streams, which kube's 300 s
+# would cut: the seed dump into postgres-0 with the pg_restore that reads it, both after
+# stop_copy, and the bundle into the runner, after runner_exec reset its directories. A command
+# whose --run names a run other than the one the lock names is refused outright, naming both;
+# status (which reads), collect (which reads this pod's run directory) and down (whose deletes
+# are scoped to the run's label) run then.
 #
 # Every subcommand needs --namespace (no default; a Legion pod's own namespace is builds), and
 # every kubectl call names it. Subcommands after up find the run from the lock's `run` and its
@@ -617,21 +631,28 @@ pg_tier() {
 
 # ---- run state --------------------------------------------------------------------------------------
 
-# use_run: RUN from --run, else from the lock. A --run that names a run other than the lock's is
-# refused: the fixed names its commands would reach (the pods runner and postgres-0, the
-# deployments dispatch and listener) belong to the run the lock names. Then the run's directory
+# use_run [any-run]: RUN from --run, else from the lock. A --run that names a run other than the
+# lock's is refused: the fixed names its commands would reach (the pods runner and postgres-0,
+# the deployments dispatch and listener) belong to the run the lock names. Two kinds of command
+# neither compare nor read the lock when --run names their run: collect, which passes any-run and
+# only reads the run's directory on this pod (cmd_collect, collect_run), and the daemons, whose
+# parent came through here already -- a lock read of theirs would be an API call with no retry
+# before they write the pidfile that start_daemon waits 5 s for, and a lock that names another
+# run ends the heartbeat at its patch's test op and the sampler with it. Then the run's directory
 # and state.json, which must name NS and, when it records one, this PID namespace
 # (pid_ns_check); then this command is registered as one that holds the run alive.
 use_run() {
   local run=${OPT[run]:-} lock lock_run=""
-  lock=$(kube_lock_get)
-  [ -z "$lock" ] || lock_run=$(jq -r '.data.run // ""' <<<"$lock")
+  if [ -z "$run" ] || { [ "${1:-}" != any-run ] && [[ $CMD != _* ]]; }; then
+    lock=$(kube_lock_get)
+    [ -z "$lock" ] || lock_run=$(jq -r '.data.run // ""' <<<"$lock")
+  fi
   if [ -z "$run" ]; then
     [ -n "$lock_run" ] || die "namespace $NS has no lock ConfigMap $LOCK, so no run is up there (cluster.sh up first, or name a run with --run)"
     run=$lock_run
   elif [ -n "$lock_run" ] && [ "$run" != "$lock_run" ]; then
     note "the lock ConfigMap $LOCK in $NS names run $lock_run; --run names run $run."
-    die "$CMD: run $run is not the run that is up in $NS: run $lock_run is, and the copy's fixed names (the pods runner and postgres-0, the deployments dispatch and listener) all reach its copy, so a command of run $run would drive run $lock_run's. cluster.sh status --namespace $NS reads run $lock_run; cluster.sh down --namespace $NS --run $run removes what is left of run $run."
+    die "$CMD: run $run is not the run that is up in $NS: run $lock_run is, and the copy's fixed names (the pods runner and postgres-0, the deployments dispatch and listener) all reach its copy, so a command of run $run would drive run $lock_run's. cluster.sh status --namespace $NS reads run $lock_run; cluster.sh collect --namespace $NS --run $run packs run $run's results; cluster.sh down --namespace $NS --run $run removes what is left of run $run."
   fi
   valid run "$run" || die "run id '$run' is not one cluster.sh makes"
   set_run "$run"
@@ -795,12 +816,10 @@ lock_names_other_run() {
 # copy_is_ours WHAT: the lock still names this run, so WHAT -- a pod, a deployment, a runner job
 # or a file of the copy, each of which carries the same fixed name in every run -- is this run's
 # to stop, kill or remove. Once the lock names another run (lock_names_other_run) the copy those
-# names reach is that run's: it returns 1, naming WHAT, and its caller ends nothing. Every path
-# that stops, kills or removes something in the namespace's shared pods asks this first, except
-# the ones that are this run's own by construction: the heartbeat's patch, which tests the lock's
-# run id in the patch itself; the sampler, which kills only its own process group; stop_daemon,
-# which reads this run's pidfiles in its own PID namespace (pid_ns_check); and down, whose
-# deletes are scoped to one run's label and which refuses another run's lock without --run.
+# names reach is that run's: it returns 1, naming WHAT, and its caller ends nothing. Its callers
+# are the guarded helpers the header lists (runner_exec, postgres_exec, psql_write, runner_put,
+# scale_to), beside which that paragraph names every path that is exempt, and pg_disk_watch,
+# which asks once more before it records a failure of its own.
 copy_is_ours() {
   lock_names_other_run || return 0
   note "the lock no longer names run $RUN, so $1 is another run's now; this run stops and removes nothing of it"
@@ -1112,12 +1131,22 @@ sampler_wait() {
 
 # psql_at DB SQL: one value per line, through psql in the Postgres pod, for SQL that only reads
 # (kube_read retries it once on a transient API server error). psql_write DB SQL: the same for
-# SQL that writes, never retried.
+# SQL that writes, through postgres_exec and never retried.
 psql_at() {
   kube_read exec postgres-0 -c postgres -- psql -X -U dispatch -d "$1" -v ON_ERROR_STOP=1 -At -c "$2"
 }
 psql_write() {
-  kube exec postgres-0 -c postgres -- psql -X -U dispatch -d "$1" -v ON_ERROR_STOP=1 -At -c "$2"
+  postgres_exec psql -X -U dispatch -d "$1" -v ON_ERROR_STOP=1 -At -c "$2"
+}
+
+# postgres_exec ARGS: ARGS in the Postgres pod's postgres container, for a call that writes or
+# removes something there (psql_write's SQL, the replay dump removed). The pod is postgres-0 in
+# every run, so the lock is read first: once it names another run nothing runs, and the status is
+# 1 with copy_is_ours's note, which the caller's own die or note follows. A read of that pod goes
+# through psql_at or kube_read exec instead, unguarded and retried.
+postgres_exec() {
+  copy_is_ours "the Postgres pod postgres-0" || return 1
+  kube exec postgres-0 -c postgres -- "$@"
 }
 
 db_exists() { [ "$(psql_at postgres "select count(*) from pg_database where datname = '$1'")" = 1 ]; }
@@ -1427,8 +1456,24 @@ reset_copy() {
 
 # ---- the runner -----------------------------------------------------------------------------------
 
-# runner_put FILE DEST: FILE copied into the runner as DEST; refused, like runner_start, once the
-# lock gives the runner pod to another run, so a command never overwrites that run's files.
+# runner_exec [-i] ARGS: ARGS in the runner pod's runner container, for a call that writes, kills
+# or removes something there (with -i, on this command's standard input). The pod is named runner
+# in every run, so the lock is read first: once it names another run nothing runs, and the status
+# is 1 with copy_is_ours's note, which the caller's own die or note follows. A read of the runner
+# goes through kube_read exec instead, unguarded and retried.
+runner_exec() {
+  local stdin=()
+  [ "${1:-}" != -i ] || {
+    stdin=(-i)
+    shift
+  }
+  copy_is_ours "the runner pod" || return 1
+  kube exec "${stdin[@]}" runner -c runner -- "$@"
+}
+
+# runner_put FILE DEST: FILE copied into the runner as DEST. A kubectl cp is no exec, so this is
+# the one copy into the runner and it reads the lock itself: a command never overwrites the files
+# of the run the runner pod belongs to now.
 runner_put() {
   copy_is_ours "the runner pod" || die "refusing to copy $1 into another run's runner"
   kube cp "$1" "runner:$2" -c runner >/dev/null || die "kubectl cp of $1 into the runner failed"
@@ -1449,36 +1494,34 @@ runner_has() {
 put_executable() {
   if runner_has "$1" "$2" -x; then return 0; fi
   runner_put "$1" "$2"
-  kube exec runner -c runner -- chmod 755 "$2" || die "chmod of $2 in the runner failed"
+  runner_exec chmod 755 "$2" || die "chmod of $2 in the runner failed"
 }
 
 # put_loadgen: the run's loadgen into the runner as /work/loadgen (put_executable).
 put_loadgen() { put_executable "$LOADGEN" /work/loadgen; }
 
 # runner_start NAME CMD...: CMD detached in the runner pod, its output in /work/logs/NAME.log, its
-# pid in NAME.pid and its exit status in NAME.rc. The pod is named runner in every run, so a
-# start into a copy the lock no longer gives this run (copy_is_ours) is refused outright.
+# pid in NAME.pid and its exit status in NAME.rc. It goes through runner_exec, so no job of this
+# run is started in a runner pod the lock gives another run.
 runner_start() {
   local name=$1
   shift
-  copy_is_ours "the runner pod" ||
-    die "refusing to start $name in the runner pod of $NS: that pod is another run's now, and the job would load that run's copy"
   # shellcheck disable=SC2016 # expanded by the runner's sh
-  kube exec runner -c runner -- sh -c 'name=$1; shift; mkdir -p /work/logs; rm -f "/work/logs/$name.rc"
+  runner_exec sh -c 'name=$1; shift; mkdir -p /work/logs; rm -f "/work/logs/$name.rc"
     ( cd /work || exit 1; "$@" >"/work/logs/$name.log" 2>&1 & child=$!; echo "$child" >"/work/logs/$name.pid"; wait "$child"; echo "$?" >"/work/logs/$name.rc" ) </dev/null >/dev/null 2>&1 &' \
-    sh "$name" "$@" || die "kubectl exec could not start $name in the runner"
+    sh "$name" "$@" || die "$name was not started in the runner pod of $NS"
 }
 
 # runner_stop NAME: the runner job NAME sent SIGTERM, by the pid it recorded, so a job that ends
-# on it (browsertype writes its summary) does. The pod is named runner in every run and job names
-# repeat across runs, so it stops nothing and returns 1 once the lock names another run
-# (copy_is_ours); otherwise it never fails, the job having possibly ended already. runner_wait's
-# deadline, the disk watcher and typing_stop all end a job this way, so that one check covers
-# every stop of a runner job.
+# on it (browsertype writes its summary) does. A job that ended already is no failure: whatever
+# the kill does, the runner's sh exits 0. It returns 1 only when the TERM never left this pod --
+# the lock names another run, so runner_exec ran nothing, or kubectl itself failed -- and job
+# names repeat across runs, so runner_wait's deadline, the disk watcher and typing_stop all learn
+# from that one answer that they stopped nothing.
 runner_stop() {
-  copy_is_ours "the runner job $1" || return 1
   # shellcheck disable=SC2016 # expanded by the runner's sh
-  kube exec runner -c runner -- sh -c 'kill -TERM "$(cat "/work/logs/$1.pid")"' sh "$1" >/dev/null 2>&1 || true
+  runner_exec sh -c 'pid=$(cat "/work/logs/$1.pid" 2>/dev/null); kill -TERM "$pid" 2>/dev/null; exit 0' sh "$1" >/dev/null ||
+    return 1
 }
 
 # runner_wait NAME SECONDS [LOG_DIR [PID START]]: NAME's exit status once it has one; past SECONDS
@@ -2126,17 +2169,19 @@ typing_chosen() {
 # typing_start NAME DIR SECONDS: when the step runs browser typing, browsertype detached in the
 # runner as job typing-NAME, just before loadgen run (whose bound is SECONDS) starts, so its peers
 # connect during the warm-up: the binary (put_executable), the copy's agent token into
-# TYPING_DIR/token through kubectl exec's standard input (never on a command line, in no recorded
-# file, never printed), the document list, then browsertype for SECONDS, the stored-order check's
-# bound and 600 s more, which outlasts loadgen's window, grace, the after-work and the check;
-# typing_stop ends it before that. A step that dies before typing_stop stops it on its way out
-# (step_at_exit, the EXIT trap run_in_runner sets), so no browsertype types into a later step.
+# TYPING_DIR/token through runner_exec's standard input (never on a command line, in no recorded
+# file, never printed; put_executable above it may have copied nothing, so that write is this
+# run's first read of the lock here), the document list, then browsertype for SECONDS, the
+# stored-order check's bound and 600 s more, which outlasts loadgen's window, grace, the
+# after-work and the check; typing_stop ends it before that. A step that dies before typing_stop
+# stops it on its way out (step_at_exit, the EXIT trap run_in_runner sets), so no browsertype
+# types into a later step.
 typing_start() {
   local name=$1 dir=$2 seconds=$3 docs
   [ -n "$TYPING" ] || return 0
   put_executable "$BROWSERTYPE_BIN" /work/browsertype
   # shellcheck disable=SC2016 # expanded by the runner's sh
-  state .secrets.dispatch_token | kube exec -i runner -c runner -- sh -c 'umask 077 && mkdir -p "$1" && cat >"$1/token"' sh "$TYPING_DIR" ||
+  state .secrets.dispatch_token | runner_exec -i sh -c 'umask 077 && mkdir -p "$1" && cat >"$1/token"' sh "$TYPING_DIR" ||
     die "step $name: writing the agent token for browsertype into the runner failed"
   docs=$RUN_DIR/tmp/typing-$name.docs
   printf '%s\n' "${TYPING_LIST[@]}" >"$docs"
@@ -2178,23 +2223,24 @@ typing_summary() {
 # failure. Called right after the stored-order command, and again after the check (which a run
 # whose state.json records no checker does not run), so it never fails.
 #
-# It stops, waits for and removes nothing once the lock names another run (copy_is_ours): the job
-# typing-NAME and the token under TYPING_DIR are in the pod named runner, which is that run's
-# now. The step shell's EXIT trap comes through here (step_at_exit, typing_stop_at_exit), and a
-# step ends on that path exactly when its wait on the runner job found the lock renamed, so
-# without this check the end of a step would TERM another run's typing and delete its token. The
-# removal, which the wait above it leaves up to 120 s of room, asks again.
+# It stops, waits for and removes nothing once the lock names another run: the job typing-NAME
+# and the token under TYPING_DIR are in the pod named runner, which is that run's now, so
+# runner_stop (through runner_exec) stops nothing and this function writes no record of a job it
+# never stopped. The step shell's EXIT trap comes through here (step_at_exit,
+# typing_stop_at_exit), and a step ends on that path exactly when its wait on the runner job
+# found the lock renamed. The removal, which the wait above it leaves up to 120 s of room, reads
+# the lock again through runner_exec.
 typing_stop() {
   local name=$1 dir=$2 job=typing-$1 rc
   { [ -n "$TYPING" ] && [ ! -f "$dir/browsertype.json" ]; } || return 0
-  copy_is_ours "the browser typing job $job and the agent token in the runner" || return 0
-  runner_stop "$job" || return 0
+  runner_stop "$job" || {
+    note "step $name: the browser typing job $job was not stopped (above), so this run waits for none and writes no browsertype.json of it"
+    return 0
+  }
   rc=$(runner_wait "$job" 120 "$dir") || rc=timeout
   if [ -f "$dir/$job.log" ]; then mv -f -- "$dir/$job.log" "$dir/browsertype.txt"; else : >"$dir/browsertype.txt"; fi
-  if copy_is_ours "the agent token $TYPING_DIR/token in the runner"; then
-    kube exec runner -c runner -- rm -f "$TYPING_DIR/token" "$TYPING_DIR/$name.docs" >/dev/null 2>&1 ||
-      note "step $name: removing the agent token from the runner failed"
-  fi
+  runner_exec rm -f "$TYPING_DIR/token" "$TYPING_DIR/$name.docs" >/dev/null ||
+    note "step $name: removing the agent token from the runner failed"
   [[ $rc =~ ^[0-9]+$ ]] || rc=null
   if ! typing_summary "$dir/browsertype.txt" "$rc" >"$dir/browsertype.json.tmp"; then
     rm -f -- "$dir/browsertype.json.tmp"
@@ -2354,7 +2400,7 @@ run_step() {
   write_copy_meta "$dir/copy-meta.json" "$dir" "$phase" "$reads"
   put_loadgen
   runner_has "$RUN_DIR/seed.json" /work/seed.json -f || runner_put "$RUN_DIR/seed.json" /work/seed.json
-  kube exec runner -c runner -- mkdir -p /work/meta /work/steps || die "mkdir in the runner failed"
+  runner_exec mkdir -p /work/meta /work/steps || die "mkdir in the runner failed"
   runner_put "$dir/copy-meta.json" "/work/meta/$name.json"
 
   endpoints
@@ -2366,24 +2412,16 @@ run_step() {
   note "step $name done: $dir"
 }
 
-# runner_step_remove NAME [KEEP]: the step's directory and its copy-meta file removed from the
-# runner, so the runner's disk holds only the steps still to come; with KEEP, every file of the
-# step but that one, which stays there (heap.txt, when its own stream failed). The pod is named
-# runner in every run, so a copy the lock no longer gives this run (copy_is_ours) keeps
-# everything. It returns 1 when nothing was removed, so its caller records where the files are
-# instead of claiming they are gone.
+# runner_step_remove NAME: the step's directory and its copy-meta file removed from the runner,
+# so the runner's disk holds only the steps still to come. It goes through runner_exec, so a copy
+# the lock no longer gives this run keeps everything, and it returns 1 when nothing was removed,
+# so its caller records where the files are instead of claiming they are gone.
 runner_step_remove() {
-  local name=$1 keep=${2:-} src="/work/steps/$1" rc=0
-  copy_is_ours "$src in the runner" || return 1
-  if [ -n "$keep" ]; then
-    # shellcheck disable=SC2016 # expanded by the runner's sh
-    kube exec runner -c runner -- sh -c 'rm -f "/work/meta/$1.json" &&
-      find "/work/steps/$1" -mindepth 1 -maxdepth 1 ! -name "$2" -exec rm -rf -- {} +' sh "$name" "$keep" || rc=1
-  else
-    kube exec runner -c runner -- rm -rf "$src" "/work/meta/$name.json" || rc=1
-  fi
-  ((rc == 0)) || note "step $name: removing the step's files from the runner failed; they stay at $src"
-  return "$rc"
+  local name=$1 src="/work/steps/$1"
+  runner_exec rm -rf "$src" "/work/meta/$name.json" || {
+    note "step $name: removing the step's files from the runner failed; they stay at $src"
+    return 1
+  }
 }
 
 # runner_heap_note NAME DIR TEXT: TEXT as a note of step NAME, and the same words in
@@ -2447,7 +2485,11 @@ runner_copy_back() {
     done
     if [ "$got" = no ]; then
       kept="heap.txt (the step-end heap profile in text) was not copied back; it stays in the runner at $src/heap.txt; every other file of the step is here"
-      if runner_step_remove "$name" heap.txt; then
+      # Everything of the step but that heap.txt, which the find keeps: the one removal that is
+      # not runner_step_remove's, and the only caller that needs one.
+      # shellcheck disable=SC2016 # expanded by the runner's sh
+      if runner_exec sh -c 'rm -f "/work/meta/$1.json" &&
+        find "/work/steps/$1" -mindepth 1 -maxdepth 1 ! -name heap.txt -exec rm -rf -- {} +' sh "$name"; then
         runner_heap_note "$name" "$dir" "$kept and was removed from the runner, and codepaths shows - for the MemStats rows."
       else
         runner_heap_note "$name" "$dir" "$kept; removing them from the runner failed, so they stay at $src, and codepaths shows - for the MemStats rows."
@@ -2765,17 +2807,16 @@ replay_prepare_run() {
   local log=$RUN_DIR/logs/replay-restore.log
   note "pg_restore --no-owner --no-privileges -j 8 of the seed dump into database dispatch; log $log"
   if ! kube_for 7200 exec postgres-0 -c postgres -- pg_restore --no-owner --no-privileges -j 8 -U dispatch -d dispatch "$REPLAY_POD_DUMP" >"$log" 2>&1; then
-    if copy_is_ours "the dump $REPLAY_POD_DUMP in postgres-0"; then
-      kube exec postgres-0 -c postgres -- rm -f "$REPLAY_POD_DUMP" >/dev/null 2>&1 || true
-    fi
+    postgres_exec rm -f "$REPLAY_POD_DUMP" >/dev/null ||
+      note "removing $REPLAY_POD_DUMP from the Postgres pod failed too; it stays there"
     tail -n 20 -- "$log" >&2 || true
     die "pg_restore of the replay seed failed; see $log"
   fi
-  # The dump is a path in the Postgres pod, which is postgres-0 in every run, so it goes only
-  # while the lock still names this run.
-  if copy_is_ours "the dump $REPLAY_POD_DUMP in postgres-0"; then
-    kube exec postgres-0 -c postgres -- rm -f "$REPLAY_POD_DUMP" || note "removing $REPLAY_POD_DUMP from the Postgres pod failed"
-  fi
+  # The dump is a path in the Postgres pod, which is postgres-0 in every run, so it goes through
+  # postgres_exec: a lock that names another run ends replay-prepare here, before the copy that
+  # the lines below start is that run's.
+  postgres_exec rm -f "$REPLAY_POD_DUMP" ||
+    die "removing $REPLAY_POD_DUMP from the Postgres pod failed"
   local before want_before
   before=$(psql_at dispatch 'select max(version) from schema_migrations') || die "reading the restored seed's migration failed"
   want_before=$(jq -r .seed.migration "$manifest")
@@ -2898,10 +2939,8 @@ run_replay() {
       migration: $p[0].migration_after, prepared: $p[0], reset_at: $r[0].ended}' >"$dir/last-reset.json"
   jq -n --slurpfile p "$rec" '{dispatch_commit: $p[0].dispatch_commit, dispatch_image: $p[0].dispatch_image,
     newest_migration: $p[0].schema_version}' >"$dir/envoy-dispatch.json"
-  copy_is_ours "the runner's /work/bundle and /work/root" ||
-    die "replay $name: refusing to reset the runner's directories: that pod is another run's now"
-  kube exec runner -c runner -- sh -c 'rm -rf /work/bundle /work/root && mkdir -p /work/meta /work/steps /work/root/replay /work/root/bin' ||
-    die "preparing the runner's directories failed"
+  runner_exec sh -c 'rm -rf /work/bundle /work/root && mkdir -p /work/meta /work/steps /work/root/replay /work/root/bin' ||
+    die "replay $name: preparing the runner's directories failed"
   tar -C "$RUN_DIR/replay" -cf - bundle | kube_for 900 exec -i runner -c runner -- tar -C /work -xf - ||
     die "copying the bundle into the runner failed"
   kube exec runner -c runner -- /work/loadgen replay-verify-bundle -dir /work/bundle >/dev/null ||
@@ -2999,7 +3038,9 @@ pack_results() {
 # typing (browsertype.json: the curves run without it) into <run>/curves, and loadgen
 # codepaths in each step directory that holds summary.json (a step that wrote none has no profile;
 # a replay step's as replay_codepaths runs it); then each phase's tar and the results tar. A
-# failure is reported, the rest still runs, and collect_run returns 1.
+# failure is reported, the rest still runs, and collect_run returns 1. Every command here runs on
+# this pod (loadgen, tar, dispatch artifact) and none reaches the copy, which is why collect may
+# read a run the lock does not name (cmd_collect).
 collect_run() {
   local issue=${1:-} ran=() names=() curve_dirs=() replays=" " d p rc=0
   [ ! -f "$RUN_DIR/phases/replay" ] || replays+="$(tr '\n' ' ' <"$RUN_DIR/phases/replay")"
@@ -3356,12 +3397,16 @@ cmd_redeploy() {
   fi
 }
 
+# collect: the run's own outputs, read from its directory on this pod. It reaches no pod of the
+# copy (collect_run runs loadgen on this pod and uploads with dispatch), so its run is the one
+# --run names even when the lock names another: a worker whose run is down packs and uploads it
+# while the next run holds the namespace.
 cmd_collect() {
   parse "namespace run upload-issue" "" "$@"
   positional 0 "no positional arguments"
   local issue=${OPT[upload-issue]:-}
   [ -z "$issue" ] || valid issue "$issue" || die "--upload-issue '$issue' is not an issue key"
-  use_run
+  use_run any-run
   collect_run "$issue"
 }
 
