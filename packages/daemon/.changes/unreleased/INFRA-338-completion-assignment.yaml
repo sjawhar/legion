@@ -6,8 +6,9 @@ body: |-
     where it travels to the claim's delivery and, when a confirmed delivery is retired, onto the
     claim (`supervise.Claim.ServingAssignment`, beside the run it serves). The completion route
     refuses a completion whose turn began before that hand-over, `HANDOFF_STALE_ASSIGNMENT`, before
-    any fact is applied, so the same call at the same commit is applied once the new task's turn
-    reports it. Without it a turn that outlived its phase could complete the phase's next entry: a
+    any fact is applied, so nothing of it is recorded and the completion the new task's turn
+    reports — the handoff that task's own work calls for, not this commit again — is applied.
+    Without it a turn that outlived its phase could complete the phase's next entry: a
     tester still working when CI sent the issue to implementing, and an implementing round sent it
     back to testing, reported a completion the daemon took for the new testing phase, since every
     phase entry of one run carries that run. Migration 0067 adds the three columns, each

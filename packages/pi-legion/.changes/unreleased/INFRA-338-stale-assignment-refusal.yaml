@@ -2,10 +2,11 @@ kind: Changed
 body: |-
     The `legion` tool's description and the `legion-worker` skill name the daemon's new refusal,
     `HANDOFF_STALE_ASSIGNMENT`: the issue left your phase and came back while your turn ran, so the
-    completion is of the assignment before the one the phase hands you now. Its remedy is the one
-    `HANDOFF_STALE_GENERATION` already has — end the turn without completing, tell the architect,
-    and call `handoff_complete` at the same commit in the new task's turn — and, like it, the
-    refusal records nothing.
+    completion is of the assignment before the one the phase hands you now. The refusal records
+    nothing, as `HANDOFF_STALE_GENERATION` does, but its remedy is not that one's: a phase entered
+    again hands work of its own, so the worker ends the turn without completing, tells the
+    architect, and does the new task's work and completes it with a handoff of its own rather than
+    reporting the refused commit again.
 time: 2026-10-30T15:10:00Z
 custom:
     Issue: INFRA-338

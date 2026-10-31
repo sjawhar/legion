@@ -628,55 +628,63 @@ func (m *Machine) StartedBy(ctx context.Context, row int64) error {
 // claim that has taken none. It is the daemon's whole answer to which run a completion belongs to:
 // a completion names no run, the pane cannot say it (LEGION_GENERATION is the claim's launch
 // counter, and a live worker is handed the next run's task without being relaunched), and the
-// three sources are read in this order.
-//
-//  1. The task whose turn is running. A completion is a tool call inside a turn, and one process
-//     runs one turn at a time.
-//  2. Otherwise the run this claim is left serving: the turn's end retires its delivery, and the
-//     worker goes on working that run — a tester waiting on CI, a merger waiting on a person —
-//     until another delivery of a run replaces it. A notice's turn has no delivery behind it.
-//  3. Otherwise, for a claim that has served no run at all, a task it holds that the agent may
-//     have read. Oh My Pi's own agent_start names no prompt, so a turn that starts after the
-//     daemon's wait for it is indistinguishable from a turn of the agent's own and confirms
-//     nothing; a worker on its first task would otherwise have its completion refused. This
-//     cannot be mistaken for an older run's work, because there is no older run this claim
-//     served. A task the agent refused is not one it read, and carries no such mark.
+// three sources serving reads are read for it.
 //
 // An operator's task belongs to no run and answers for none of them: it carries generation 0.
 func (c Claim) ServingRun() uint64 {
-	p := c.Pending
-	if p == nil || p.Generation == 0 {
-		return c.ServingGeneration
-	}
-	if !p.ConfirmedAt.IsZero() {
-		return p.Generation
-	}
-	if c.ServingGeneration == 0 && !p.DeliveredAt.IsZero() {
-		return p.Generation
-	}
-	return c.ServingGeneration
+	return serving(c.Pending, deliveredRun, c.ServingGeneration)
 }
 
 // ServingAssignment is the assignment of the task this claim's worker took, and "" for a claim
-// that has taken none that carried one. It reads the same three sources as ServingRun, in the
-// same order and for the same reasons — the task whose turn is running, then the assignment the
-// claim is left serving, then, for a claim serving none, a first task the agent may have read —
-// and is the finer of the two: every phase entry of one run carries that run, where each entry
-// that hands this role a task carries an assignment of its own. A task of no assignment answers
-// for none of them: an operator's own, a resume, a production check's look, and every task a
-// daemon older than the assignment delivered.
+// that has taken none that carried one. It is the finer of the two: every phase entry of one run
+// carries that run, where each entry that hands this role a task carries an assignment of its own.
+// A task of no assignment answers for none of them: an operator's own, a resume, a production
+// check's look, and every task a daemon older than the assignment delivered — so a resumed
+// worker's in-flight completion is never refused for an assignment it was never given.
 func (c Claim) ServingAssignment() string {
-	p := c.Pending
-	if p == nil || p.Assignment == "" {
-		return c.ServingAssignmentID
+	return serving(c.Pending, deliveredAssignment, c.ServingAssignmentID)
+}
+
+// deliveredRun and deliveredAssignment are what a delivery carries of each: the two values serving
+// picks between, named so the accessors read as one rule applied twice rather than two rules.
+func deliveredRun(d Delivery) uint64        { return d.Generation }
+func deliveredAssignment(d Delivery) string { return d.Assignment }
+
+// serving picks what a claim's worker is on — the run for ServingRun, the assignment for
+// ServingAssignment — from the three sources both read, in this order. carried is what the pending
+// delivery holds of it, and retired what the claim was left serving (ServingGeneration,
+// ServingAssignmentID); the zero value of either is a task, or a claim, that answers for none of
+// them. The precedence lives here once, so a later fix to it — the DeliveredAt fallback, say —
+// cannot land on one of the two and miss the other.
+//
+//  1. The task whose turn is running. A completion is a tool call inside a turn, and one process
+//     runs one turn at a time.
+//  2. Otherwise what this claim is left serving: the turn's end retires its delivery, and the
+//     worker goes on working that run and that assignment — a tester waiting on CI, a merger
+//     waiting on a person — until another delivery carrying one replaces it. A notice's turn has
+//     no delivery behind it.
+//  3. Otherwise, for a claim that has served none at all, a task it holds that the agent may
+//     have read. Oh My Pi's own agent_start names no prompt, so a turn that starts after the
+//     daemon's wait for it is indistinguishable from a turn of the agent's own and confirms
+//     nothing; a worker on its first task would otherwise have its completion refused. This
+//     cannot be mistaken for older work, because there is none this claim served. A task the
+//     agent refused is not one it read, and carries no such mark.
+func serving[T comparable](pending *Delivery, carried func(Delivery) T, retired T) T {
+	var none T
+	if pending == nil {
+		return retired
 	}
-	if !p.ConfirmedAt.IsZero() {
-		return p.Assignment
+	value := carried(*pending)
+	if value == none {
+		return retired
 	}
-	if c.ServingAssignmentID == "" && !p.DeliveredAt.IsZero() {
-		return p.Assignment
+	if !pending.ConfirmedAt.IsZero() {
+		return value
 	}
-	return c.ServingAssignmentID
+	if retired == none && !pending.DeliveredAt.IsZero() {
+		return value
+	}
+	return retired
 }
 
 // Claim is a copy of the claim as the machine holds it now. It waits for the decision in flight,

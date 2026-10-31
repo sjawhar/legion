@@ -160,8 +160,8 @@ export function legionToolDescription(host: {
     "commit: it carries its verdict and summary alone, and the daemon refuses it when no check is open (CHECK_NOT_OPEN). The daemon refuses " +
     "HANDOFF_NOT_NEW (the commit is the one you reported for your previous phase: write and commit this phase's handoff), " +
     "HANDOFF_STALE_ASSIGNMENT (the issue left your phase and came back while your turn ran, so this completion is of the assignment before the one " +
-    "the phase hands you now: end the turn without completing and call handoff_complete at the same commit in the new task's turn, which is " +
-    "applied), the implementer's " +
+    "the phase hands you now: end the turn without completing; the task of the assignment it hands you now is work of its own, so do that work and " +
+    "complete it with a handoff of its own, never this commit or verdict again), the implementer's " +
     "completion of implementing with no open pull request on `legion/<issue>` and none recorded merged (HANDOFF_NO_PULL_REQUEST: open it; one " +
     "naming a closed pull request is the architect's to decide) and, for READY, each " +
     "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " +

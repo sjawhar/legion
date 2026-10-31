@@ -218,7 +218,9 @@ func (m *Machine) phaseHolds(ctx context.Context, d Delivery) (bool, error) {
 // task that carries them: an operator's task carries no generation and no assignment, a resume and
 // a production check's look no assignment, and each leaves what the claim is serving alone. Every
 // retire of a confirmed task of a run writes the row, the second task of one run included: the
-// write is unconditional on the value, not a diff.
+// write is unconditional on the value, not a diff. Which value each takes is serving's own rule,
+// read here for a delivery whose turn ran, so what the claim is left serving cannot drift from
+// what ServingRun and ServingAssignment answered while that delivery was pending.
 //
 // The claim goes with the delete, in the store's one transaction, and is durable there rather
 // than left for the claim's next write: the wait that follows can be hours long — a tester on CI,
@@ -228,11 +230,9 @@ func (m *Machine) phaseHolds(ctx context.Context, d Delivery) (bool, error) {
 func (m *Machine) retirePending(ctx context.Context) error {
 	p := m.claim.Pending
 	retired := m.stored()
-	if !p.ConfirmedAt.IsZero() && p.Generation != 0 {
-		retired.ServingGeneration = p.Generation
-	}
-	if !p.ConfirmedAt.IsZero() && p.Assignment != "" {
-		retired.ServingAssignmentID = p.Assignment
+	if !p.ConfirmedAt.IsZero() {
+		retired.ServingGeneration = serving(p, deliveredRun, retired.ServingGeneration)
+		retired.ServingAssignmentID = serving(p, deliveredAssignment, retired.ServingAssignmentID)
 	}
 	// The deaths were charged against this task, so they end with it, in the same write.
 	retired.Budgets.Deaths = 0

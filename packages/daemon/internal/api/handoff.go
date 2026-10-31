@@ -109,8 +109,13 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The run this completion belongs to is the run of the task the worker took, which the claim
-	// answers (supervise.Claim.ServingRun) and nothing on the request says.
-	serving := machine.Claim().ServingRun()
+	// answers (supervise.Claim.ServingRun) and nothing on the request says. The claim is read once,
+	// here, and the run, the assignment and the queued task the refusals name all come from that
+	// one read: Claim() waits for the decision in flight, so two reads can straddle one and answer
+	// from different decisions — a run taken before a delivery was confirmed beside the assignment
+	// that confirmation left.
+	c := machine.Claim()
+	serving := c.ServingRun()
 	if serving == 0 {
 		writeFailure(w, http.StatusConflict, "HANDOFF_NO_RUN",
 			"this completion belongs to no task: this claim has taken none, so the run it reports cannot be told")
@@ -122,7 +127,7 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// the phase waits. The worker's turn began before the current run's task reached it; that task
 	// arrives as its next prompt, and the same completion in its turn is applied.
 	if serving != issue.Generation {
-		writeFailure(w, http.StatusConflict, "HANDOFF_STALE_GENERATION", staleCompletion(grant.Issue, issue.Generation, serving, machine.Claim().Pending))
+		writeFailure(w, http.StatusConflict, "HANDOFF_STALE_GENERATION", staleCompletion(grant.Issue, issue.Generation, serving, c.Pending))
 		return
 	}
 	// A completion of an assignment the issue's phase has moved past is refused the same way, and
@@ -135,11 +140,13 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// is pending, so the claim serves the first assignment while the row already names the second.
 	// Either side empty is nothing to compare: a daemon upgraded in place has workers that were
 	// given their task before the daemon minted assignments, and a re-admission clears the row's
-	// (record.ClearGeneration). Refused before the fact is applied, so the retry at the same commit
-	// in the new task's turn is applied.
-	if assignment := machine.Claim().ServingAssignment(); position.assignment != "" && assignment != "" && assignment != position.assignment {
+	// (record.ClearGeneration). Refused before the fact is applied, so nothing is recorded under
+	// this completion's key and the completion the new task's turn reports is applied — the new
+	// one it writes for the work that task names, since a phase entered again is work of its own,
+	// not this completion's commit sent a second time.
+	if assignment := c.ServingAssignment(); position.assignment != "" && assignment != "" && assignment != position.assignment {
 		writeFailure(w, http.StatusConflict, "HANDOFF_STALE_ASSIGNMENT",
-			staleAssignment(grant.Issue, grant.Role, issue.Phase, position.assignment, machine.Claim().Pending))
+			staleAssignment(grant.Issue, grant.Role, issue.Phase, position.assignment, c.Pending))
 		return
 	}
 	treeGeneration, round := position.treeGeneration, position.round
@@ -233,15 +240,21 @@ func staleCompletion(issue string, current, serving uint64, pending *supervise.D
 // past: the role was given this phase's work again — the issue left the phase and came back, or
 // the phase ended under the worker and another role's round sent it here — and the turn reporting
 // this completion is the earlier assignment's. It names the queued task of the assignment the
-// phase hands the role now when the claim already holds it, as staleCompletion does for a run,
-// since that task is the turn the same completion is applied in.
+// phase hands the role now when the claim already holds it, as staleCompletion does for a run.
+//
+// Where staleCompletion sends the same completion again — a run's completion is the right work,
+// arrived early — this one does not, and that is the whole difference between the two: an
+// assignment is new only because the phase was entered again, so the task it hands the role is
+// work of its own. After a CI red the new testing assignment is for a new head, and a verdict
+// reported for the head before it would become that head's. The worker does the new task's work
+// and writes a handoff of its own for it.
 func staleAssignment(issue string, role claim.Role, p phase.Phase, current string, pending *supervise.Delivery) string {
 	stale := fmt.Sprintf("%s handed the %s phase %s again, and this completion is of the assignment before it; nothing was recorded", issue, role, p)
 	if pending != nil && pending.Assignment == current {
-		return fmt.Sprintf("%s: your turn began before the daemon's task for this assignment (%s) reached this session. End this turn without completing; that task arrives as your next prompt, and handoff_complete at the same commit in its turn is applied",
+		return fmt.Sprintf("%s: your turn began before the daemon's task for this assignment (%s) reached this session. End this turn without completing; that task arrives as your next prompt, and it is work of its own — do what it asks at the head it names and complete it with a handoff of its own, never this completion's commit or verdict",
 			stale, pending.ID)
 	}
-	return fmt.Sprintf("%s: the daemon has queued no task of this assignment for this claim yet. End this turn without completing and tell the architect; when that task arrives, call handoff_complete at the same commit in its turn", stale)
+	return fmt.Sprintf("%s: the daemon has queued no task of this assignment for this claim yet. End this turn without completing and tell the architect; when that task arrives, do the work it asks for and complete it with a handoff of its own, never this completion's commit or verdict", stale)
 }
 
 // implementationPullRequest is the implementer's completion's read of GitHub: in implementing, a

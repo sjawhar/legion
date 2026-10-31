@@ -239,7 +239,7 @@ const approvedHeadLabel = "Approved head"
 const testerVerdictLabel = "Tester's verdict"
 
 // start starts the phase worker of the issue's current phase, a start stamped with that phase and
-// with the assignment it hands that role (assign). A merger is told the head the review round
+// with the assignment it mints for that role (assign). A merger is told the head the review round
 // approved (withApprovedHead), the one head its READY may name, so it never chooses among the pull
 // request's reviews itself. A phase with no worker, and accepting, whose architect admission
 // started with the tree, start nobody.
@@ -247,11 +247,37 @@ func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue record.Issue, role 
 	if role == "" || role == claim.RoleArchitect {
 		return nil
 	}
-	task, err := withApprovedHead(ctx, e.store, tx, issue.Key, role, task)
+	assignment, err := e.assign(ctx, tx, issue.Key, role)
 	if err != nil {
 		return err
 	}
-	assignment, err := e.assign(ctx, tx, issue.Key, role)
+	return e.started(ctx, tx, issue, role, task, assignment)
+}
+
+// restart starts the phase worker of a phase entry the issue never left: the architect's or the
+// operator's retry of a held phase, which puts the issue back in the phase its worker's claim
+// failed in, with the same work to do. It hands the role the assignment that entry already gave
+// it, minting none, because the entry is the one the worker is still on: a claim whose task went
+// unconfirmed keeps it (the outbox delivers no second copy of a task its claim still works), and
+// a completion of it would otherwise be refused HANDOFF_STALE_ASSIGNMENT against a row naming an
+// assignment nothing ever delivered, for good. Carrying the row's own value rather than nothing
+// keeps the fence live for a worker the retry does start afresh: its task names the entry, so a
+// later entry of the same phase still refuses this one's completion.
+func (e *Engine) restart(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, task string) error {
+	if role == "" || role == claim.RoleArchitect {
+		return nil
+	}
+	row, err := e.phaseRow(ctx, tx, issue.Key, role)
+	if err != nil {
+		return err
+	}
+	return e.started(ctx, tx, issue, role, task, row.Assignment)
+}
+
+// started enqueues the start both make, for a role start and restart have already held to one
+// that works a phase.
+func (e *Engine) started(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, task, assignment string) error {
+	task, err := withApprovedHead(ctx, e.store, tx, issue.Key, role, task)
 	if err != nil {
 		return err
 	}
@@ -266,10 +292,10 @@ func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue record.Issue, role 
 // assignment (the machine refuses a second delivery while one is pending), and the row already
 // names this one.
 //
-// Only a start that hands a role a task mints one. A resume (workflow's resume by rule,
-// admission's promotion of a mid-phase child) and a production check's look enqueue their start
-// themselves and mint none, so neither moves the row and a resumed worker's in-flight completion
-// is never refused for an assignment it was never given.
+// Only a start that hands a role work it was not already on mints one. A resume (workflow's
+// resume by rule, admission's promotion of a mid-phase child), a production check's look and a
+// held phase's retry (restart) mint none, so none of them moves the row and a worker's in-flight
+// completion is never refused for an assignment it was never given.
 //
 // The token is 26 random base32 characters (crypto/rand.Text), which is more than it needs to be:
 // it is only ever compared with a value the daemon itself wrote, never read from a request — a

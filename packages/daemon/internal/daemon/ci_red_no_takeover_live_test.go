@@ -91,6 +91,15 @@ const (
 	ciRedThirdHead  = "h3"
 )
 
+// The two handoffs the tester writes: the one its first assignment's turn wrote, whose completion
+// the fence refuses, and the one it writes for the work the second assignment's task names. They
+// are two commits because the second assignment is for the head the implementer's fix pushed, so
+// the verdict of the turn before it answers for nothing there.
+const (
+	ciRedFirstTesterHandoff  = "t1"
+	ciRedSecondTesterHandoff = "t2"
+)
+
 // ciRedNoTakeoverLive is one run of the proof: the booted daemon, the one issue it drives, the
 // stand-ins the steps read the daemon's own writes back from, and the two roles the driver acts
 // as over the worker stream.
@@ -506,7 +515,8 @@ func (r *ciRedNoTakeoverLive) testerIsToldItsPhaseEnded() {
 // Step 4. The implementer fixes and completes, which hands testing out again with an assignment of
 // its own. The tester's first turn is still running and still serving the assignment before it, so
 // the completion it reports from that turn is refused HANDOFF_STALE_ASSIGNMENT and records
-// nothing; the same completion, in the turn the new assignment's task starts, is taken.
+// nothing, and the refusal sends it to the new task's own work: the completion of the handoff that
+// task's turn writes, at a commit of its own, is taken.
 func (r *ciRedNoTakeoverLive) staleAssignmentRefused() {
 	t := r.t
 	r.github.head(ciRedSecondHead)
@@ -530,7 +540,7 @@ func (r *ciRedNoTakeoverLive) staleAssignmentRefused() {
 	if stale.State != string(supervise.StateWorking) {
 		t.Fatalf("the tester is %s, want it still working the turn it began in step 1", stale.State)
 	}
-	status, failure := r.test.complete("tested it", ciRedSecondHead, "pass")
+	status, failure := r.test.complete("tested it", ciRedFirstTesterHandoff, "pass")
 	if status != http.StatusConflict || failure.Code != "HANDOFF_STALE_ASSIGNMENT" {
 		t.Fatalf("the completion from the tester's old turn = %d %s %s, want 409 HANDOFF_STALE_ASSIGNMENT", status, failure.Code, failure.Error)
 	}
@@ -540,18 +550,19 @@ func (r *ciRedNoTakeoverLive) staleAssignmentRefused() {
 	}
 	r.note("read back: %s is still in testing — the refusal recorded nothing", r.key)
 
-	// The turn ends; the task of the new assignment, waiting for it, is sent, and the completion
-	// reported in its turn is taken.
+	// The turn ends; the task of the new assignment, waiting for it, is sent. That task is work of
+	// its own — the head the fix pushed — so the tester completes it at the handoff it wrote for
+	// that work, never at the commit the refused completion named, and it is taken.
 	r.test.endTurn()
 	prompt := r.test.takeTask("Phase: testing")
 	r.note("read back: the tester's first turn ended and the second assignment's task reached it (%s)", firstLine(prompt.Message))
-	if status, failure := r.test.complete("tested it", ciRedSecondHead, "pass"); status != http.StatusOK {
+	if status, failure := r.test.complete("tested the fix", ciRedSecondTesterHandoff, "pass"); status != http.StatusOK {
 		t.Fatalf("the completion from the tester's new turn = %d %s %s, want 200", status, failure.Code, failure.Error)
 	}
 	r.test.endTurn()
 	moved := r.waitFor("the issue in reviewing", func(got api.Issue) bool { return got.Phase == phase.Reviewing })
-	r.note("read back: the same completion, in the turn the new assignment's task started, was taken: %s is in %s",
-		r.key, moved.Phase)
+	r.note("read back: the completion of the second assignment's own handoff (%s), in the turn its task started, was taken: %s is in %s",
+		ciRedSecondTesterHandoff, r.key, moved.Phase)
 }
 
 // Step 5. The reviewer's claim was started by the tester's pass and nothing registered it, so no

@@ -680,9 +680,12 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   reviewed a round it had not completed, or while the merger worked toward its `READY`. The daemon
   ends no turn, so the turn reporting the completion is the earlier assignment's and nothing is
   recorded. The refusal names the issue, the role and the phase: the worker ends that turn without
-  completing, and calls `handoff_complete` at the same commit in the turn of the task the daemon
-  queued for the assignment the phase hands it now, which arrives as the session's next prompt.
-  When no such task is queued for it, the refusal says so and the worker tells its architect.
+  completing, and reports that commit and that verdict no further. The phase was entered again, so
+  the task the daemon queued for the assignment it hands the role now — which arrives as the
+  session's next prompt — is work of its own: a testing assignment after a red is for the head the
+  fix pushed, and the verdict on the head before it answers for nothing there. The worker does that
+  task's work, writes a handoff of its own for it, and completes in its turn. When no such task is
+  queued for it, the refusal says so and the worker tells its architect.
 
 An issue back in `in_progress` from `retro` or `merging` had a required check or workflow turn red
 on the head: the daemon sent it back to the implementer and told the architect which checks. From
