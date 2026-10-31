@@ -2,60 +2,51 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-575",
-  "completed": "2026-10-31T08:00:00Z",
-  "round": 6,
+  "completed": "2026-10-31T15:05:00Z",
+  "round": 9,
   "implementerProof": {
     "verdict": "verified",
-    "how": "Every command of round 6's four proofs was re-run here, in a pod recreated twice during the round (the harness was rebuilt from scratch: Postgres 17 + pgvector on the issue volume, Playwright's chromium installed again). (1) and (2): `bun run e2e -- e2e/inbox-reading-pane.e2e.ts e2e/nav.e2e.ts --project=chromium` -> 11 passed, among them my own red row `Enter opens the selected decision block's note field and puts the focus in it` (green, and unmodified: `git diff 8a60de863a2a 8cb0c2c9` touches that file not at all) and the nav row, whose own subject - the sidebar makes no per-issue request - is kept while its expectation is corrected to what the Inbox reads now. (3) the whole chromium project at this head -> 933 passed, 25 skipped, 1 failed (59.0m), the same counts it reported, the one failure being e2e/hover-preview.e2e.ts:87, main's own. (4) CI exists at the code head b1e074f1 (run 41171179735) and is read below. Its claim that a unit row cannot be the control for the focus fix is right and I checked the shape of it on the page: the behaviour is there only when React has committed the render the press schedules."
+    "how": "A forward merge sits between my last recorded head (8cb0c2c9, round 6) and this one, so this is a full test round, not a bare re-check: the fingerprint of skill://legion-worker/references/conflicts-and-rewrites.md at 8cb0c2c9 is ee5580481c432b3f19ce47ceb38cde6c4da4491a65fd9bc259f04640b4c3dcaa and at the merge head 7d0324c3 it is 0e5c559067b9baff00265acb48e9462a49e60e061355a861c40cfd7c39dc93e1 - changed, because of the references row round 7 fixed. The implementer's own claim about the merge is verified at the same time and exactly: the fingerprint at the pre-merge code head 24f71ce7 is 0e5c559067b9baff00265acb48e9462a49e60e061355a861c40cfd7c39dc93e1, byte for byte the merge head's, so main's 238 changed files moved none of the branch's own lines. Its four claims then re-run here: the backlink row is green (inside the whole project and, at the previous head, 10 passed three times out of three on a run of its own); the whole chromium project at the merge head is 936 passed, 25 skipped, 0 failed, one better than its 935/1 because the row it called a suite flake passes here; CI's `envoy-go` lane, red for two rounds, is green at this head, which is what main's #2598 was merged forward for; and no product file of the branch moved."
   },
-  "failed": 1,
-  "failures": [
-    {
-      "criterion": "CI is green at the head the reviewer reads. The browser rows this change rewrote hold on CI's machine as well as on this pod - a row that races the Inbox's own width switch is this change's to settle, since the switch is what this change introduced.",
-      "evidence": "CI run 41171179735 at the code head b1e074f1: `lint`, `test`, `contracts`, `docs / build`, `dispatch-browser-multiprocess`, `claude-envoy`, `envoy-client`, `envoy-plugin`, `envoy-smoke`, `pi-envoy`, `pi-legion`, `pi-shared`, `changes` all green; `dispatch` FAILED; `envoy-go` failed too and is not this change's (below). The `dispatch` lane's one red row is `e2e/references.e2e.ts:26 an issue and its ask show a cross-project message and structural backlinks`: `Error: locator.screenshot: Element is not attached to the DOM` at e2e/references.e2e.ts:91, `await askCard.screenshot({ path: desktopAsk })`, taken straight after `await page.setViewportSize({ height: 900, width: 1440 })` (lines 89-91). That is this change's own layout switch: below 1280 px the card lives in the Inbox row, and from 1280 px the row becomes a short row and the card is drawn again in the reading column, so the node the locator resolved at 390 px is unmounted by the resize. Measured on the page rather than inferred: a throwaway probe held the element Playwright holds while it waits for stability, resized 390 -> 1440, and read it back - `before={\"connected\":true,\"inRow\":true} after={\"connected\":false,\"inRow\":true} cards drawn now=1`. So the screenshot at 1440 races the unmount; it wins on this pod (the row passed in my whole-project run and 3 of 3 times run alone) and lost on CI's machine. The row is one of the 23 files this change rewrote against the pane (commit fe5ad7408). The fix is the row's: after the resize, resolve the card again where this width draws it - the reading column - and wait for it before the screenshot, or take the 1440 shot of the column's card by its own locator. A flaky row that is red at the head leaves the reviewer and the merge gate nothing to read."
-    }
-  ],
+  "failed": 0,
+  "failures": [],
   "proof": [
     {
-      "criterion": "Round 5's failure 1, the architect's keyboard contract and this change's own documentation: one Enter opens the selected decision block's note field AND puts the reader in it, and what they type reaches the answer.",
-      "surface": "The Inbox page of a running Dispatch at 1440 px, driven in a real Chromium.",
-      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- e2e/inbox-reading-pane.e2e.ts --project=chromium",
-      "observed": "9 passed, my red row among them: one Enter now leaves `aria-expanded=true` AND the box focused, and the typed sentence lands in the box with the selection unmoved. The row is unmodified by this round.",
-      "headSha": "8cb0c2c90e7d0f0acf7168f562b457a307bb93c8",
-      "negativeControl": "The row was red at a87c4269 (`toBeFocused` received `inactive`, the focus on BODY after one Enter, the box focused only by a second). The implementer's own control at this head - the fix's one line neutered - fails the same row again."
-    },
-    {
-      "criterion": "What the focus fix changes beside the key it was written for: a pointer open of the note field, a field already open, and the card below the column's width.",
-      "surface": "The same running Dispatch at 1440 px and at 390 px, driven by throwaway probes of mine (removed before this handoff).",
-      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- e2e/tmp-probe-575d.e2e.ts (and 575e) --project=chromium",
-      "observed": "A pointer open of the disclosure lands the reader in the field and typing reaches it (focus=answer box; the value is what was typed) - the deliberate half of the fix, driven here for the first time. Escape out of the field and Enter again puts them back in it (`after Escape, focus=the row, disclosure=true, boxes=1`; `after the second Enter, focus=answer box`), so the branch for a box that already exists works. At 390 px the card has `0 disclosure(s) and 1 box(es)`: below the column's width the row draws AskCard's full variant, whose box is always shown, so nothing of the fix applies there and nothing changed.",
-      "headSha": "8cb0c2c90e7d0f0acf7168f562b457a307bb93c8",
-      "negativeControl": "Two probe failures of my own were checked rather than filed: one pressed Enter before the column had drawn its card (the row's wait on `aria-expanded` is what makes that honest), and one assumed a disclosure at 390 px where the card has none. Both are the probe's fault, and the second is a fact about the design, recorded above."
-    },
-    {
-      "criterion": "Round 5's failure 2: the sidebar row is green again with its own subject kept, and no other row of the suite is left red by the refactor (INFRA-92: the whole project, never one row).",
-      "surface": "The whole Chromium project of the Dispatch browser suite.",
+      "criterion": "The whole layout change at the head that merges, after the forward merge of main (INFRA-92: a layout change is proven by the whole project, and after a merge the proof is run again at the merge head).",
+      "surface": "The whole Chromium project of the Dispatch browser suite - the built SPA served by the real Go server against a real Postgres, driven in a real Chromium.",
       "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- --project=chromium",
-      "observed": "958 rows: 933 passed, 25 skipped, 1 failed (59.0m) at 8cb0c2c9. The one failure is e2e/hover-preview.e2e.ts:87, main's own (proven in earlier rounds on a clean export of main, fixed on main by #2581). e2e/nav.e2e.ts:13 is green on chromium, its expectation now `[\"?pinned=true\"]` with a comment saying what the Inbox reads, and its assertions on the sidebar's rows, badges and absent issue rows untouched.",
-      "headSha": "8cb0c2c90e7d0f0acf7168f562b457a307bb93c8",
-      "negativeControl": "My own run at d542d2da is the control: 931 passed, 25 skipped, 3 failed - the red row, the nav row and hover-preview. Two are green here and the third is unchanged."
+      "observed": "961 rows: 936 passed, 25 skipped, 0 failed (1.1h) at 7d0324c3e218. Green inside it: the nine rows of e2e/inbox-reading-pane.e2e.ts (the five of A1, my two for the architect's ruling, the implementer's refusal row and my Enter-focus row), all ten of e2e/references.e2e.ts including :26, the row CI's `dispatch` lane was red on, both rows of e2e/nav.e2e.ts, and e2e/hover-preview.e2e.ts:111 (the row carried red through every earlier round as main's; main's #2581 fix came in with the merge). e2e/delivery.e2e.ts:215, the one failure the implementer saw at this head, passes here.",
+      "headSha": "7d0324c3e218ec6b6760fc1acf9f8b446b29b3e7",
+      "negativeControl": "My own run at the pre-merge head is the control for what the merge changed: 933 passed, 25 skipped, 1 failed at 24f71ce7, the one failure hover-preview, which is green here. Round 1's control for the feature itself still stands: the whole reading-pane spec on the base commit 14d907b6fdd3 was 7 failed, 0 passed, which is A1's and A3's 'fails on the commit before the change'."
     },
     {
-      "criterion": "The documentation lane that cost rounds 2 and 3 is green at this head, and so is everything else static except the two lanes named in the failure.",
-      "surface": "GitHub Actions, read on GitHub and re-run by nobody.",
-      "command": "gh api --paginate 'repos/sjawhar/legion/actions/runs/41171179735/jobs?filter=all&per_page=100'",
-      "observed": "`docs / build` success - the first CI confirmation of round 3's screenshot work - with `lint`, `test`, `contracts`, `changes`, `dispatch-browser-multiprocess`, `claude-envoy`, `envoy-client`, `envoy-plugin`, `envoy-smoke`, `envoy-go-race-pmdoc`, `pi-envoy`, `pi-legion`, `pi-shared` all green.",
-      "headSha": "b1e074f1a8ec4a91ececae5dfb4fe1297d559645",
-      "negativeControl": "Round 2's reading of the same lane is the control: `docs / build` failed there with `4 shot(s) failed`."
+      "criterion": "Round 6's failure is answered: the backlink row no longer races the Inbox's width switch, and the race it had is gone rather than hidden.",
+      "surface": "The Inbox page at 390 px and then at 1440 px, driven in a real Chromium.",
+      "command": "source /legion/harness/env.sh && cd packages/dispatch && bun run e2e -- e2e/references.e2e.ts --project=chromium (three times at 24f71ce7), and inside the whole-project run at 7d0324c3",
+      "observed": "10 passed, three times out of three, and green again inside the project run at the merge head. The row now resolves the card after the resize through e2e/inbox-pane.ts's `askCard`, which reads which layout the width draws, opens that fresh card's own backlink panel, waits for its text, and only then screenshots - so no handle is held across the remount.",
+      "headSha": "7d0324c3e218ec6b6760fc1acf9f8b446b29b3e7",
+      "negativeControl": "The old row, copied to a scratch spec at the head it failed on and run under Chromium's own CPU throttle (`Emulation.setCPUThrottlingRate` at 20, the suite's ordinary 30 s budget), fails with CI's exact error: `Error: locator.screenshot: Element is not attached to the DOM`. The same copy is green unthrottled and at a rate of 6, which is why the race showed only on CI's machine. At 20 with a 120 s budget both copies pass, since Playwright's own detach retry then has room to re-resolve - so the throttle pair discriminates at the margin only, and the primary evidence is CI's own lane plus the mechanism I measured in round 6 (a held element reads `connected:false` after the resize while a card is drawn again in the column)."
     },
     {
-      "criterion": "The `envoy-go` lane's failure is not this change's.",
-      "surface": "GitHub Actions on this branch and on main, and the branch's own diff.",
-      "command": "gh api repos/sjawhar/legion/actions/jobs/124453826212/logs; the same read of envoy-go on the last eight ci.yaml runs on main; git diff --name-only $(git merge-base HEAD origin/main) HEAD",
-      "observed": "Ours failed `--- FAIL: TestResumeFromBeforeTheKeptDayGetsASnapshot` in `github.com/sjawhar/envoy/internal/dispatch/api`. main's own runs fail the same lane on other tests of the same packages - run 41171988894 `--- FAIL: TestAReconnectCatchesUpWhatTheListenerMissed`, run 41164510541 `--- FAIL: TestTheDocumentedClaimsAreTheClaimsAnExchangedTokenCarries` - so the lane is red on main itself this night. And this branch changes no Go at all: the diff against the merge base lists no `.go` file and nothing under packages/envoy/.",
-      "headSha": "b1e074f1a8ec4a91ececae5dfb4fe1297d559645",
-      "negativeControl": "A Go file in that diff would refute it; there is none. The failing test names differ between our run and main's, which is the shape of a flaky lane rather than a defect either tree introduced."
+      "criterion": "Everything static is green at the head the reviewer reads, read on GitHub and re-run by nobody - the `envoy-go` lane that returned this issue twice included.",
+      "surface": "GitHub Actions, run 41200051658 at the merge head.",
+      "command": "gh api --paginate 'repos/sjawhar/legion/actions/runs/41200051658/jobs?filter=latest&per_page=100'",
+      "observed": "Green: `lint`, `test`, `changes`, `contracts`, `docs / build`, `dispatch-browser-multiprocess`, `claude-envoy`, `envoy-client`, `envoy-go`, `envoy-go-race-pmdoc`, `envoy-plugin`, `envoy-smoke`, `pi-envoy`, `pi-legion`, `pi-shared`. `dispatch` was still in progress when I read it last and is READ AS RUNNING here; it is the lane the backlink row sits in, and that row is green in my own whole-project run at this head. The daemon watches the same run and returns the issue by itself if it settles red.",
+      "headSha": "7d0324c3e218ec6b6760fc1acf9f8b446b29b3e7",
+      "negativeControl": "The two runs this one replaces are the control: at 24f71ce7 `dispatch` was red on references.e2e.ts:26 and `envoy-go` red on a broker test main had already fixed, with `ci-ok` red behind them. The merge was made for the second of those, and that lane is green here."
+    },
+    {
+      "criterion": "The pane itself is where rounds 1 to 6 proved it, at a head carrying main's 238 changed files.",
+      "surface": "The Inbox page of a running Dispatch at 1440, 1280, 1279 and 390 px and in the drawer.",
+      "command": "The reading-pane rows inside the whole-project run above, at 7d0324c3",
+      "observed": "All nine green: the two columns and the first row selected, the section heading at the top of the column with the bar and 'Skip to the answer', the two-tap answer with the next row selected and the answered row gone, Approve at the head with the changed blocks marked and none for a first request, today's card for an anchored question and for one in no document, the keys and ?item= across a reload, today's card at 1279 px and 390 px and in the drawer, the architect's ruling and its exception, the refused answer kept with its Retry, and one Enter opening the note field with the reader in it.",
+      "headSha": "7d0324c3e218ec6b6760fc1acf9f8b446b29b3e7",
+      "negativeControl": "The fingerprint pair is the control that these rows judge the same change they always did: 24f71ce7 and 7d0324c3 hash alike (0e5c5590…dc93e1), so the merge moved none of the branch's own lines, and what differs at this head is main's work alone."
     }
   ],
-  "environment": "The issue pod, recreated twice during this round (06:15-06:36Z and again before it). The harness was rebuilt from nothing: /legion/harness/setup.sh and env.sh written again, Postgres 17 with pgvector on 127.0.0.1:55432, the tester's own databases, `bunx playwright install chromium` into /legion/harness/ms-playwright, 2 CPUs, one Playwright worker. Nothing of mine is unpushed: the probes were throwaway and are removed, and the workspace stands clean."
+  "notes": [
+    "A2, the production check of the Inbox page (`dispatch-production-check.sh --page /`), is the implementer's after the merge and is the only acceptance line left unrun.",
+    "Two rounds of this issue were decided by CI reading a merge ref older than a fix on main (`gh run rerun` replays the same ref), and one by a row that was green on this pod and red on CI's machine. Both are written up in the implementer's handoff; the second is worth the suite's memory: a row that resizes across 1280 px must resolve its card again after the switch, through e2e/inbox-pane.ts's `askCard`."
+  ],
+  "environment": "The issue pod on the shared harness: Postgres 17 with pgvector on 127.0.0.1:55432 (its setup script now guards on `pg_isready` rather than a pid file, after a start by one role shut down the server another was using), the tester's own databases, Playwright's chromium on the issue volume, 2 CPUs, one Playwright worker. Nothing of mine is unpushed; the scratch copies used for the throttle control are removed and the workspace is clean."
 }
