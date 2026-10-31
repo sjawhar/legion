@@ -2,44 +2,44 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-558",
-  "round": 8,
-  "completed": "2026-10-31T18:06:00Z",
-  "codeHead": "e9defcab9e7d",
-  "scope": "The architect's checks after round 7: 49b70f3d passes; the test replacing c0b46985 pins the 1 s limit and fails when the reconnect is broken; on real binaries a page reading at +2 s ends with the full document after it reconnects; the census states the 1 s rule; ci-ok and pr-title at the code head. Round 7's other results stand.",
+  "round": 9,
+  "completed": "2026-10-31T23:52:00Z",
+  "codeHead": "7a037ba4",
+  "scope": "Changes since round 8's code head e9defcab: 338cfeaf (the revoke's nil guard removed, the slow-page test requiring its own revoke and an end within 4 s, real cancels in fixtures, a contracts comment) and the merge of main at efed4e4d (7a037ba4), which takes ygo v1.54.1-sami.3.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I re-ran the rebuild tests and the slow-page and in-flight tests at e9defcab under -race (3 of 3 each), and drove the rebuild and the slow revoked page on the real binary."
+    "how": "I re-ran the revoke, token, rebuild and replica tests at 7a037ba4 under -race (3 of 3 each), and the two-build harness and browser spec against legion-envoy-v25.0.0 (bb27e1ee)."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Round 7 finding 1: a document that reads DOCUMENT_UNLOADABLE, which offers a rebuild, can be rebuilt.",
-      "surface": "Real envoy-dispatch at e9defcab on Postgres 17, a document whose doc_updates holds an update ygo refuses for its clocks; the red test 49b70f3d",
-      "command": "GET /api/v1/artifacts/{id}/text; POST /api/v1/artifacts/{id}/rebuild; GET /text again; go test -race -count=3 -run 'TestTheRebuildAStoredHistoryYgoRefusesIsOfferedRestoresTheDocument|TestRebuild|TestARebuild|TestAStoredHistoryYgoRefusesFromItsClocksCannotLoad' ./internal/dispatch/docs/",
-      "observed": "/text: 409 DOCUMENT_UNLOADABLE. /rebuild: 200 (source_version 1, removed_updates 2, validation_error naming the history's fault). /text after: 200 '# Refused\\n\\nbefore\\n'. Every listed test PASSes 3 of 3.",
-      "headSha": "e9defcab9e7d",
-      "negativeControl": "At 6176f738, /rebuild answered 503 and 49b70f3d FAILed (round 7). A second rebuild of the now-loading document answers 409 DOCUMENT_LOADS."
+      "criterion": "The revoke's cancel is what ends a slow revoked page, and the slow-page test catches its loss; the tests of the revoke, token answers, rebuild and replica hold.",
+      "surface": "Package docs on the pod's test Postgres 18 (LEGION_TEST_PG_DSN), at head and in a scratch copy of 7a037ba4 with admission.cancel(errSchemaRevoked) removed",
+      "command": "go test -race -count=3 -run 'TestARevoke|TestARevoked|TestAdmissionRecheck|TestATokenIsAnswered|TestTheRebuild|TestRebuild|TestARebuild|TestTheRoomsRenderedReplicaHoldsWhatACommitParked|TestAStoredHistoryYgoRefusesFromItsClocksCannotLoad|TestSchemaAdmission' ./internal/dispatch/docs/; in the scratch copy: go test -run TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole",
+      "observed": "At head, every listed test PASSes 3 of 3 under -race (22 tests), ok 486.079s.",
+      "headSha": "7a037ba4",
+      "negativeControl": "In the scratch copy without the revoke's cancel, the slow-page test FAILs: 'the revoked page, reading two seconds after the revoke and within 4s of it ended with read tcp ...: i/o timeout, want a close with 4412 or the 1006 ...'."
     },
     {
-      "criterion": "Round 7 finding 2, ruled the accepted 1 s limit: a revoked page slower than 1 s ends on a code it reconnects on (4412 or 1006), and its reconnect syncs the whole document.",
-      "surface": "Real envoy-dispatch at e9defcab and a V3/R3 build on one database and NATS; a victim page that keeps its own CRDT copy of every message, a writer page sending 30 x ~300 KB updates, a fresh reference page; the test TestARevokedSlowPageEndsOnACodeItReconnectsOnAndSyncsWhole",
-      "command": "conv.sh: the victim reads at tick+2.0s (twice) and tick+0.3s, then reconnects; compare SHA-256 of each copy's document XML with a fresh page's",
-      "observed": "+2.0s: close 1006; the own copy (87afa3d4..., 1,019,936 bytes) differs from the room; after the reconnect (readonly) it is 3277a3d1..., equal to the room. +2.0s again: 1006; after the reconnect d86ff6a8... equals the room. +0.3s: close 4412; the own copy lacks the queued remainder; after the reconnect 61721dad... equals the room. The test PASSes 3 of 3 under -race.",
-      "headSha": "e9defcab9e7d",
-      "negativeControl": "In a scratch copy where authorize refuses every read-only socket, the test FAILs ('connect a peer ... 401 Unauthorized'). In a scratch copy where the revoke closes with 1002, TestARevokeWaitsForTheMessageTheServerHasInFlight FAILs ('ended with ... 1006 ..., want a close with 4412'). In every real run the copy before the reconnect differs from the room."
+      "criterion": "The merge adds only main's changes, and go.mod and go.sum equal main's for ygo.",
+      "surface": "git remerge-diff of 7a037ba4; go.mod and go.sum at 7a037ba4 against origin/main",
+      "command": "git show --remerge-diff --stat 7a037ba4; diff of the ygo lines in go.mod and go.sum against origin/main",
+      "observed": "The remerge-diff touches four files: go.mod and go.sum (main's pin replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.54.1-sami.3, with ygo lines equal to main's in both), ProofDocument.tsx (main's dependency list kept, without blockSchema, which the branch's compiled schema no longer defines) and pending-sync.test.ts (both sides' imports and tests kept).",
+      "headSha": "7a037ba4",
+      "negativeControl": "Before the merge, go.mod named v1.54.1-sami.2 (round 7)."
     },
     {
-      "criterion": "The census states the 1 s rule.",
-      "surface": "PR #2461 body (census entry 8, the For the reviewer brief) and packages/envoy/cmd/dispatch/README.md 'Two builds at once'",
-      "command": "gh api repos/sjawhar/legion/pulls/2461 --jq .body; grep in the README",
-      "observed": "Census entry 8: 'ygo sends the close after the message in flight, waiting at most 1 s', and it points to the README. README lines 662-664: '... which it waits at most a second for, so a peer too slow to take it in that second gets no close frame at all and reads the end as 1006; the provider reconnects on either, ... the reconnect's sync restores what was in flight'.",
-      "headSha": "e9defcab9e7d",
-      "negativeControl": "Round 7's body had no 1 s rule in the census (entry 8 is new)."
+      "criterion": "Acceptance 1 / item 6, and the 1 s rule on real binaries: the two-build test and the cross-build browser spec pass both ways; a revoked page reading at +2 s ends on a code it reconnects on and syncs the whole document.",
+      "surface": "Real envoy-dispatch processes (legion-envoy-v25.0.0 and this head; this head with a V3/R3 build) on the pod's test Postgres and a nats-server; Chromium through the two-process proxy; a victim page keeping its own CRDT copy and a writer page sending 30 x ~300 KB updates",
+      "command": "DISPATCH_PREVIOUS_BUILD=$TMPDIR/dispatch-previous-250 go test -tags twobuild -count=1 -timeout 30m -v -run TestTwoBuilds ./cmd/dispatch; bun run e2e:multiprocess -- cross-build.multiprocess (B=v25.0.0, then both on this tree); conv.sh <tick> 2.0, three times",
+      "observed": "CLI PASS (19.8s), documents PASS (63.1s, 57 of 57 refs rows each way), messages PASS (119.7s), ok 202.657s. Browser: 2 passed and 1 skipped (B=v25.0.0); 3 passed (both on this tree). Slow page, 3 of 3: close 1006 after 8, 7 and 6 large messages; after the reconnect (readonly) the copy equals a fresh page's read of the room (5c6b171d..., 11daa9e5..., 8c21f039...). Evidence: https://github.com/sjawhar/legion/pull/2461#issuecomment-6550766310",
+      "headSha": "7a037ba4",
+      "negativeControl": "In each slow-page run, the page's copy before the reconnect differs from the room's."
     }
   ],
-  "ci": "At e9defcab, CI run 41226066399 was queued, changes included; pr-title was queued (run 41226093829). At 6176f738 and at a57a774e every lane, ci-ok included, was cancelled when the next push superseded it. I have no ci-ok verdict at any head of this round and did not wait.",
+  "ci": "At 7a037ba4, CI run 41251696819 was queued, changes included; pr-title was pending (runs 41251774280, 41251750130). There is no ci-ok or pr-title verdict yet.",
   "notes": [
-    "I could not break the reconnect's convergence itself (a sync holding less than the room) without breaking ygo's sync. The real-binary digests show what the reconnect restores."
+    "The workspace recreation removed my scratch Postgres and the Playwright browser cache. The Go tests and real binaries used the pod's test Postgres (LEGION_TEST_PG_DSN); I reinstalled Chromium under $TMPDIR."
   ]
 }
