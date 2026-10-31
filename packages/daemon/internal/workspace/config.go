@@ -222,7 +222,7 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 		root := jjWorkspaceRoot(command)
 		if root == "" {
 			// A jj command that names no -R is one of provisioning's two that create a repository,
-			// and jj would open an enclosing one instead of creating its own.
+			// and jj would read and write an enclosing one as well as creating its own.
 			if err := refuseEnclosingWorkspace(command.Dir); err != nil {
 				return Result{}, err
 			}
@@ -401,28 +401,38 @@ func refuseSymlinkedLayout(root, dir string) error {
 //
 // jj has no ceiling option: it searches upward from the directory it runs in for the closest
 // `.jj` and opens that repository, which is how a test in a Legion issue pod came to write the
-// pod's shared clone at /legion/repos/github.com/sjawhar/legion. A `.jj` that is a file counts as
-// a repository too, since that is jj's own workspace pointer form, and a component that does not
-// exist holds no `.jj`, so it is passed over, as refuseSymlinkedLayout does. The walk costs a
-// handful of os.Lstat calls once per clone, which is why nothing here is cached.
+// pod's shared clone at /legion/repos/github.com/sjawhar/legion. The walk counts only a `.jj`
+// that is a directory, because that is all jj counts: a regular file named `.jj` is not jj's
+// workspace pointer — that is the file `.jj/repo` inside a `.jj` directory — and jj 0.45.1 run
+// below a directory holding a regular file named `.jj` answers `Error: There is no jj repo in
+// "."`. The entry is read with os.Stat, which follows symlinks as jj does, so a `.jj` symlink
+// pointing at a directory counts; a component that does not exist holds no `.jj`, so it is
+// passed over, as refuseSymlinkedLayout does. The walk costs a handful of os.Stat calls once per
+// clone, which is why nothing here is cached.
 //
 // The walk starts at the directory read physically, not at the path the caller named: a child
 // chdir'd into a path that holds a symlink asks the kernel where it stands, and the kernel
 // answers with the resolved path, so jj walks up from the link's target. A lexical walk with
 // filepath.Dir would pass over every `.jj` above that target and let the command open and write
 // it — which is exactly the state directory an operator reaches through a symlink, the one
-// refuseSymlinkedLayout deliberately allows, standing on a checkout.
+// refuseSymlinkedLayout deliberately allows, standing on a checkout. The refusal names both
+// paths when they differ, so an operator reading a symlinked state directory sees the path it
+// configured and the path jj stands in as one fact.
 func refuseEnclosingWorkspace(dir string) error {
-	resolved, err := resolveExisting(dir)
+	resolved, err := resolvedPath(dir)
 	if err != nil {
 		return fmt.Errorf("refusing to run jj in %s: resolve it as the child would stand in it: %w", dir, err)
 	}
+	named := dir
+	if resolved != dir {
+		named = dir + ", which resolves to " + resolved
+	}
 	for above := resolved; ; {
 		enclosing := filepath.Join(above, ".jj")
-		switch _, err := os.Lstat(enclosing); {
-		case err == nil:
-			return fmt.Errorf("refusing to run jj in %s: %s is a Jujutsu repository, and this jj command creates a repository of its own, so jj would open and write that one instead of creating it; the directory the daemon provisions under must sit inside no Jujutsu repository — under `runtime: tmux` it is legion.yaml's state_dir, which a relative value resolves against the configuration file's own directory, so a legion.yaml kept inside a checkout puts the shared clone under that checkout's .jj", dir, enclosing)
-		case !errors.Is(err, fs.ErrNotExist):
+		switch info, err := os.Stat(enclosing); {
+		case err == nil && info.IsDir():
+			return fmt.Errorf("refusing to run jj in %s: %s is a Jujutsu repository, and this jj command creates a repository of its own and reads that one as well: jj migrates the enclosing repository's configuration, moving a legacy .jj/repo/config.toml into the config home and writing a config-id beside where it was, so the run writes that repository too; the directory the daemon provisions under must sit inside no Jujutsu repository — under `runtime: tmux` it is legion.yaml's state_dir, which a relative value resolves against the configuration file's own directory, so a legion.yaml kept inside a checkout puts the shared clone under that checkout's .jj", named, enclosing)
+		case err != nil && !errors.Is(err, fs.ErrNotExist):
 			return fmt.Errorf("refusing to run jj in %s: read %s: %w", dir, enclosing, err)
 		}
 		parent := filepath.Dir(above)
@@ -430,34 +440,6 @@ func refuseEnclosingWorkspace(dir string) error {
 			return nil
 		}
 		above = parent
-	}
-}
-
-// resolveExisting answers with dir read physically, as the kernel answers a child that stands in
-// it: every symlink in the longest prefix of dir that exists is resolved, and the components
-// below that prefix are rejoined onto it. filepath.EvalSymlinks alone will not do, because it
-// refuses a path that does not exist, and provisioning names directories it is about to create —
-// the two "a directory that is not there yet" cases of TestAJJThatCreatesARepositoryIsRefusedInsideOne
-// are what prove it, and refusing them would refuse every first provisioning run. A dir no prefix
-// of which exists is its own answer, since there is nothing to resolve it against. The components
-// rejoined onto the resolved prefix hold no symlink, because they are not there at all: whatever
-// the run creates there, it creates as the real directories provisioning makes.
-func resolveExisting(dir string) (string, error) {
-	var missing []string
-	for current := dir; ; {
-		resolved, err := filepath.EvalSymlinks(current)
-		if err == nil {
-			return filepath.Join(append([]string{resolved}, missing...)...), nil
-		}
-		if !errors.Is(err, fs.ErrNotExist) {
-			return "", err
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			return dir, nil
-		}
-		missing = append([]string{filepath.Base(current)}, missing...)
-		current = parent
 	}
 }
 
@@ -546,14 +528,20 @@ func describeEntry(info fs.FileInfo, err error) string {
 	}
 }
 
-// jjWorkspaceRoot is the workspace a jj command opens: the value of its last -R (or
+// jjWorkspaceRoot is the workspace a jj command acts on: the value of its last -R (or
 // --repository) flag, and nothing else. Command.Dir is purely the working directory the child
-// runs in, so a command that names no -R opens no workspace and guardWorkspace is unchanged for
-// every command. Provisioning names a directory for its two rootless commands too — `jj git
+// runs in, so a command that names no -R names no workspace here and guardWorkspace is unchanged
+// for every command. Provisioning names a directory for its two rootless commands too — `jj git
 // clone` and `jj git init --colocate`, neither of which takes a -R — and reading that directory
 // as a workspace root would send them through guardWorkspace into refuseSymlinkedLayout, which
 // walks layoutDepth ancestors and would there Lstat the state directory itself, the one directory
 // deliberately left unchecked because an operator may reach it through a symlink.
+//
+// A -R does not keep jj off the repository its working directory sits in: jj 0.45.1 loads that
+// repository's configuration before it applies -R, so `jj -R <b> log` run inside a repository a
+// wrote a/.jj/repo/config-id. Every -R call site of this package is safe because its Dir is its
+// own -R target — RunCheckedIn, onClone's callers, and createWorkspace's `jj workspace add` —
+// and not because the flag fences jj in.
 func jjWorkspaceRoot(command Command) string {
 	root := ""
 	for i, arg := range command.Argv {
