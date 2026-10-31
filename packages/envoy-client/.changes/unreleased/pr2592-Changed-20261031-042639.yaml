@@ -1,5 +1,0 @@
-kind: Changed
-body: '`subscribe()` sends the host client instance id as `client_instance_id` on every registration, and `unregisterSession` now takes `{sessionID, clientInstanceID?}` in place of a bare session id and sends that id as a query parameter, so a departing client instance never deletes the registration a later instance made under the same session id. A `setRole` soft claim naming `previousSessionID` takes the role from that predecessor only when the predecessor has no live registration, when its live registration carries the same instance id, or when either side carries no instance id; any other live holder is answered `{claimed: false, holder}`.'
-time: 2026-10-31T04:26:39.153296195Z
-custom:
-    Issue: pr2592
