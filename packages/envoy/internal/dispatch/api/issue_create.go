@@ -435,7 +435,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	// The issue.created event and its stamp of the spec's new edges follow the spec's queued
 	// writes: the stamp needs the index's edges written, and the document's pending-settlement row
 	// comes before the event.
-	event, err := s.queueStampedEvent(r.Context(), tx, ledger, issueOwner(key).event("issue.created", actor, payload), "artifact", artifactID)
+	event, err := s.queueStampedEvent(ledger, issueOwner(key).event("issue.created", actor, payload), "artifact", artifactID)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

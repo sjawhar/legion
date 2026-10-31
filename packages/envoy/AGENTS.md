@@ -339,7 +339,7 @@ The graph bounds a block id at `text.MaxBlockIDBytes`, 256 bytes of UTF-8 (`MAX_
 it keys a block by its id, and a Postgres B-tree key holds at most 2704 bytes.
 The bound decides only which blocks the graph keys, never whether a write is taken:
 a seeded spec, an upload, an `insert`, a rebuild from markdown, an accepted suggestion or a browser's edit naming a longer id is written, and the document stores, renders and versions it as any other;
-its block is no graph node (`refs.IndexBlocks`, below).
+its block is no graph node (`refs.PlanBlocks`, below).
 A reference is bounded as a whole too: its target id (`text.TargetID`:
 an issue's key, a document's `<KEY or PROJECT>/<slug>` or `agent/<session id>/<slug>`, a document block's `<KEY or PROJECT>/<slug>#<block id>`, a comment's or message's block's `<item kind>/<item id>#<block id>`, an ask's, a comment's or a message's id, a component's `<project>/<id>`), which `refs.to_id`, `block_refs.to_id` and the item block mentions' `to_id` hold in B-tree keys, is at most `text.MaxTargetBytes`, 2048 bytes (`MAX_REFERENCE_TARGET_BYTES`, `referenceTargetFits` in `@legion/contracts`), since neither a slug nor an item id has a bound of its own.
 Both bounds hold only what text cites: `text.Extract` drops a reference past either (`inBound`), so the text citing it is written with no edge.
@@ -428,7 +428,7 @@ A token's encoding (`pmdoc.EncodeTokenJSON`) is held once per call, in one buffe
 LEGION-504's concern was more copies per token and their retention, and neither holds.
 Until the handler ends the transaction with `ledger.Commit`, the transaction is in its read phase:
 it takes its locks, reads, runs every document operation's work (renders, anchor walks, version capture, reference extraction, approval carry) and its write advice, and writes nothing.
-Every document operation's write and every write of the handler's own is queued on the ledger instead (`docs.WriteStep`: `Ledger.Queue`, and in package `api` `queueWrite`, `queueExec`, `queueEvent` and `queueStampedEvent`, `api/write_queue.go`), at the point the transaction makes it, so the queue holds the transaction's statements, the document operations' and the handler's, in the order they were made, and so its events append in the order they were made.
+Every document operation's write and every write of the handler's own is queued on the ledger instead (`docs.WriteStep`: `Ledger.Queue`, which in package `api` the route calls itself or through `queueExec`, `queueEvent` and `queueStampedEvent`, `api/write_queue.go`), at the point the transaction makes it, so the queue holds the transaction's statements, the document operations' and the handler's, in the order they were made, and so its events append in the order they were made.
 A read that would have seen one of the transaction's own writes reads it from the ledger:
 a pending append counts toward the document's head (`withOwnAppends`), a pending anchor toward the anchors a refresh walks (`RegisterPendingAnchor`), a pending version's number, time and markdown (`NextVersion`, `Now`, `PendingVersionMarkdown`).
 `ledger.Commit` first runs the transaction's write phase:
@@ -1114,10 +1114,10 @@ one in a document the block index has not reached.
 
 Each identified block of a document is a graph node too (and so is each block of a comment or message, below):
 kind `block`, id `<document ref_key>#<block id>` (`text.TargetID`), its reference the document's with `#b-` and the id as `text.EncodeBlockID` writes it (`refs.BlockRef`).
-`refs.IndexBlocks` indexes a version's blocks in the version writer's transaction, from the same render and extraction as its references:
+`refs.PlanBlocks` plans a version's blocks in the version writer's read phase, from the same render and extraction as its references, and `BlockIndexing.Queue` writes them in its write phase:
 the blocks the render's offsets name, which `GET /api/v1/artifacts/{id}/blocks` lists, the first holder of a repeated id being the node.
 A block whose id is longer than `text.MaxBlockIDBytes` is no node (`uniqueBlocks`):
-a mention inside it starts at the innermost node holding it, or at the document when none does, and `IndexBlocks` logs a warning naming the document, the version, how many such blocks it skipped, the longest one's id bytes and the bound.
+a mention inside it starts at the innermost node holding it, or at the document when none does, and `PlanBlocks` logs a warning naming the document, the version, how many such blocks it skipped, the longest one's id bytes and the bound.
 The version is still written.
 Its tables are migration 0121's: `document_blocks` holds each block the latest indexed version holds, with its text's sha256, its text cut to 480 runes as its excerpt, and `changed_version` and `changed_at`, the version its text last changed in, which an unchanged text keeps.
 `document_block_texts` records a block's whole text in each version that makes it new, changes it, restores it, or deletes it (a null text).
@@ -1309,7 +1309,7 @@ Only then are the version blocks no row claimed aligned by type and live text wi
 A text either side still holds more than once takes no part in that alignment.
 Last, the version blocks and live blocks of each text both still unmatched are paired in order wherever the two sides hold equally many:
 a text held more than once is matched only so, and otherwise not until a settlement, so a copy typed after the close is never dated to the version (an original left unmatched is dated to the reopen's version), and a text held once on each side keeps the version of a block an edit moved in a document with no row yet.
-A live block that repeats an earlier block's id (a paste keeps its source's id until a settlement stamps a new one) takes part in no step, since `refs.IndexBlocks` indexes only the first holder of an id, and no step gives an id a block has taken.
+A live block that repeats an earlier block's id (a paste keeps its source's id until a settlement stamps a new one) takes part in no step, since `refs.PlanBlocks` indexes only the first holder of an id, and no step gives an id a block has taken.
 A stored row whose text the version does not hold (indexed at an older version this one changed) and whose live text it does not hold either is still recorded deleted at it.
 A live block only an unsettled edit made is not indexed until the reopen's settlement writes the version that holds it, so block history names only versions that hold a block's text.
 The loop remembers a skipped document only when its listing read the issue open, and counts it again without reading it while its latest version and its pending settlement's `marked_at` (which every update append moves) stay as they were, the listing still reads the issue open, and this server holds no room for it:
@@ -1326,7 +1326,7 @@ it leaves `block_grammar_owed` alone, since it has just re-read every item itsel
 
 Blocker-list and parent changes serialize per project through `lockProjectIssueDependencies` (`api/issue_parent.go`), using the two-key advisory-lock namespace `dispatch-issue-dependencies`.
 That transaction lock comes before any row or rank lock.
-A PATCH then takes the owner lock of every issue it names in one statement, sorted by lock key, the order `LockOwners` takes event owners (`lockPatchRows`, `lockIssueRows`, `store.LockOwners`):
+A PATCH then takes the owner lock of every issue it names in one statement, sorted by lock key, the order `LockOwners` takes event owners (`lockPatchOwners`, `lockIssueOwners`, `store.LockOwners`):
 the issue; its current parent when a status change or a reparent appends to it; the proposed parent; and the rank neighbours.
 `LockOwners` then takes locks already held, which returns at once, so no PATCH holds one of these locks while waiting for another that a second write holds.
 The current parent is read before the lock and again under it:
@@ -2106,7 +2106,7 @@ Why it is not a read-path repair is `cmd/dispatch/README.md`'s ("Pre-deploy cens
   on `comment.created` and `comment.answered` (the thread its trigger files it under:
   its ask, else the root it replies to, else itself), an issue message's `message.created` and `message.answered` (its root up `in_reply_to`;
   a direct conversation has no Replies thread and carries none), and `ask.opened`, `ask.answered` and `ask.resolved` (the ask's own thread);
-  an `issue.updated` or `issue.closed` that moved the status carries it too, as `events.IssueThreadLogins` (the logins with a row on one of the issue's open asks) for a close or a reopen, which moves exactly those rows, and `[]` for any other status move.
+  an `issue.updated` or `issue.closed` that moved the status carries it too, as `events.IssueLoginsOf` (the logins with a row on one of the issue's open asks) for a close or a reopen, which moves exactly those rows, and `[]` for any other status move.
   `user_state.updated` carries `changed`, which of `pinned`, `last_read_seq` and `dismissed` the write moved from the row it read (`api/state.go`), or `["snoozed"]` for a snooze or an un-snooze of one Inbox row (`askSnoozeEvent`, `api/ask_snooze.go`), whose payload is exactly `{login, changed: ["snoozed"]}`:
   the stream has no per-viewer filter, so every signed-in person and agent replays it, and it names no ask and no `state` of the writer's (the writer's tabs refetch their whole Inbox);
   an event without `changed` predates snooze events, so a reader takes it as any of `pinned`, `last_read_seq` and `dismissed`.

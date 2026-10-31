@@ -1018,7 +1018,7 @@ type AskAnsweredEventPayload struct {
 // Ancestors the issue's parent chain,
 // parent first up to the root ([] for a root), and ThreadLogins, only when the status moved,
 // whose Replies count the move can change: for a close or a reopen every login with a Replies row
-// on one of the issue's open asks (events.IssueThreadLogins), for any other status move [].
+// on one of the issue's open asks (events.IssueLoginsOf), for any other status move [].
 // Each is absent from an event written before them.
 type IssueEventPayload struct {
 	Issue

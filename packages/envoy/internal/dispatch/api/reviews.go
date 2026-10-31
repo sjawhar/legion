@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // Document approval: a human review pinned to a document version. Approve, or
@@ -257,6 +258,10 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	// The answer of the open approval request and the review are this route's writes, queued on
+	// the ledger in the order it makes them and sent as one batch by Commit.
+	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
+	defer ledger.Discard()
 	artifact, err := s.loadArtifact(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -286,32 +291,37 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	events := []model.Event{}
+	appended := []*model.Event{}
 	var askID *string
 	if open != nil {
 		selected := docs.ApprovalOptionApprove
 		if state == "changes_requested" {
 			selected = docs.ApprovalOptionRequestChanges
 		}
-		answered, answeredEvents, err := s.closeAskTx(r.Context(), tx, nil, open.ID, actor, answerTransition(actor, []string{selected}, reason, answerOptions{}))
+		answered, answeredEvents, err := s.closeAskTx(documentCtx, tx, ledger, open.ID, actor, answerTransition(actor, []string{selected}, reason, answerOptions{}))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		events = append(events, appendedEvents(answeredEvents...)...)
+		appended = append(appended, answeredEvents...)
 		askID = &answered.ID
 	}
-	review, event, err := docs.WriteReview(r.Context(), tx, s.deps.Events, artifact, version, state, actor, reason, askID)
-	if err != nil {
+	var review model.ArtifactReview
+	reviewEvent := new(model.Event)
+	if err := ledger.Queue(func(b *store.WriteBatch) error {
+		return docs.QueueReview(b, s.deps.Events, artifact, version, state, actor, reason, askID, func(written model.ArtifactReview, event model.Event) {
+			review, *reviewEvent = written, event
+		})
+	}); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	events = append(events, event)
-	if err := tx.Commit(r.Context()); err != nil {
+	appended = append(appended, reviewEvent)
+	if err := ledger.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	s.publish(events...)
+	s.publish(appendedEvents(appended...)...)
 	WriteJSON(w, http.StatusCreated, review)
 }
 

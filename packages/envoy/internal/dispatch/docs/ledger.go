@@ -345,32 +345,14 @@ func (l *Ledger) queuedVersion(artifactID string, pending pendingVersion) {
 // QueueVersion queues the insert of a document version the caller writes itself, outside the
 // document service - an upload's, which lists its uploader alone, and a new issue's first version
 // of its seeded spec - and returns the row as the insert will leave it. It is named when it has a
-// summary. Its number and time are NextVersion's; the update cursor it records is the head this
-// transaction's queued writes leave the document's stored history at (the seed's or the
-// replacement's append, made under the document's lock), else the stored head. The ledger records
-// it as the document's latest version, so the reads that follow in this transaction
-// (latestVersion, PendingVersionMarkdown) take it from here rather than from a table that holds it
-// only once Commit has run the queue.
+// summary. It is the version write every other version goes through (queueVersionInsert), run on
+// this ledger whatever context the caller holds: the route that queues a version of its own passes
+// the request's, not the one Join returned.
 func (l *Ledger) QueueVersion(ctx context.Context, artifactID, markdown string, authors []model.Actor, summary *string) (model.Version, error) {
-	number, createdAt, err := l.NextVersion(ctx, artifactID)
-	if err != nil {
-		return model.Version{}, err
+	if l.writer == nil {
+		return model.Version{}, errUnjoined
 	}
-	var docUpdateVersion int64
-	if pending := l.rooms[artifactID]; pending != nil {
-		docUpdateVersion = pending.head
-	} else if docUpdateVersion, err = currentUpdateCursor(ctx, l.writer, artifactID); err != nil {
-		return model.Version{}, err
-	}
-	version, insert, err := versionInsert(artifactID, markdown, authors, number, createdAt, summary != nil, summary, docUpdateVersion)
-	if err != nil {
-		return model.Version{}, err
-	}
-	if err := l.Queue(insert); err != nil {
-		return model.Version{}, err
-	}
-	l.queuedVersion(artifactID, pendingVersion{version: version, markdown: markdown, docUpdateVersion: docUpdateVersion})
-	return version, nil
+	return queueVersionInsert(withLedger(ctx, l), l.writer, artifactID, markdown, authors, summary != nil, summary, nil)
 }
 
 // pendingRoom is a document's stored history (doc_updates) as the writes this transaction has

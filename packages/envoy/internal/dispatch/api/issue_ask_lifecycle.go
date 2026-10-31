@@ -46,7 +46,7 @@ func (s *server) settleIssueBeforeClose(ctx context.Context, issueKey string) {
 	if s.deps.Store == nil || s.deps.Store.Pool == nil {
 		return
 	}
-	if _, err := issueOpenStatus(ctx, s.deps.Store.Pool, issueKey); err != nil {
+	if _, err := issueOpenStatus(ctx, issueKey, pooledOwnerRead(s.deps.Store.Pool)); err != nil {
 		return
 	}
 	if err := s.deps.Docs.SettleIssueDocuments(ctx, issueKey); err != nil {
@@ -119,7 +119,7 @@ func (s *server) recordWithdrawnAsksTx(ctx context.Context, tx pgx.Tx, ledger *d
 		if err != nil {
 			return nil, nil, err
 		}
-		event, err := s.queueLoggedEvent(ctx, tx, ledger, issueOwner(issueKey).event(
+		event, err := s.queueLoggedEvent(ledger, issueOwner(issueKey).event(
 			"ask.resolved", actor, model.NewAskEventPayload(ask, model.ReferenceChanges{}),
 		), events.ThreadLoginsOf(ask.ID), "", "")
 		if err != nil {
@@ -166,10 +166,10 @@ func (s *server) prepareRestoration(ctx context.Context, tx pgx.Tx, issueKey str
 // recordRestoredAsksTx is the reopen's second half: it queues one ask.opened event for each of
 // restored, whose actor is actor, the reopener, as settlement's own restoration of an ask appends,
 // and answers the events, filled in once Commit has run the write phase.
-func (s *server) recordRestoredAsksTx(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, issueKey string, restored []model.Ask, actor model.Actor) ([]*model.Event, error) {
+func (s *server) recordRestoredAsksTx(ledger *docs.Ledger, issueKey string, restored []model.Ask, actor model.Actor) ([]*model.Event, error) {
 	appended := make([]*model.Event, 0, len(restored))
 	for _, ask := range restored {
-		event, err := s.queueLoggedEvent(ctx, tx, ledger, issueOwner(issueKey).event(
+		event, err := s.queueLoggedEvent(ledger, issueOwner(issueKey).event(
 			"ask.opened", actor, model.NewAskEventPayload(ask, model.ReferenceChanges{}),
 		), events.ThreadLoginsOf(ask.ID), "", "")
 		if err != nil {

@@ -396,7 +396,7 @@ func (s *server) queueNewArtifact(
 	if err := tx.QueryRow(ctx, `select gen_random_uuid()::text, now()`).Scan(&artifact.ID, &artifact.CreatedAt); err != nil {
 		return model.Artifact{}, err
 	}
-	return artifact, queueExec(ctx, tx, ledger, `
+	return artifact, queueExec(ledger, `
 		insert into artifacts (id, issue_key, project_key, session_id, slug, name, kind, is_primary, created_by, created_at)
 		values ($1, $2, $3, $4, $5, $6, $7, false, $8, $9)
 	`, artifact.ID, target.IssueKey, project, session, slug, name, kind, actorJSON, artifact.CreatedAt)
@@ -408,7 +408,6 @@ func (s *server) queueNewArtifact(
 // them (putUploadedFile).
 func (s *server) queueFileVersion(
 	ctx context.Context,
-	tx pgx.Tx,
 	ledger *docs.Ledger,
 	artifactID string,
 	input artifactUploadInput,
@@ -436,7 +435,7 @@ func (s *server) queueFileVersion(
 	if s.deps.Files != nil {
 		content = nil
 	}
-	return version, queueExec(ctx, tx, ledger, `
+	return version, queueExec(ledger, `
 		insert into artifact_versions (artifact_id, number, content, mime, size, sha256, authors, named, summary, created_at)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 	`, artifactID, number, content, input.contentType, size, sha, authors, version.Named, summary, createdAt)
@@ -573,7 +572,7 @@ func (s *server) storeArtifact(
 			return
 		}
 	} else {
-		version, err = s.queueFileVersion(r.Context(), tx, ledger, artifact.ID, input, sha, documentSummary, actor)
+		version, err = s.queueFileVersion(r.Context(), ledger, artifact.ID, input, sha, documentSummary, actor)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -585,7 +584,7 @@ func (s *server) storeArtifact(
 		// open approval request follows that version just as every other version write does. The
 		// move's writes and its event are queued after the version's; Commit publishes the event
 		// before this route publishes its own.
-		if _, err := docs.MoveApprovalAsk(
+		if err := docs.MoveApprovalAsk(
 			documentCtx, tx, s.deps.Events, artifact.ID, version, actor, s.deps.ServerURL,
 		); err != nil {
 			s.writeHandlerError(w, err)
@@ -612,7 +611,7 @@ func (s *server) storeArtifact(
 		if kind == "doc" {
 			stampKind = "artifact"
 		}
-		event, err := s.queueStampedEvent(r.Context(), tx, ledger, ownerForArtifact(artifact).event(eventType, actor, payload), stampKind, artifact.ID)
+		event, err := s.queueStampedEvent(ledger, ownerForArtifact(artifact).event(eventType, actor, payload), stampKind, artifact.ID)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -860,8 +859,6 @@ func deref(value *string) string {
 // stamping never touches sequence allocation. The event is filled in once Commit has run the write
 // phase (queueStampedEvent).
 func (s *server) commitArtifactVersionEvent(
-	ctx context.Context,
-	tx pgx.Tx,
 	ledger *docs.Ledger,
 	eventOwner owner,
 	actor model.Actor,
@@ -869,7 +866,7 @@ func (s *server) commitArtifactVersionEvent(
 	written docs.VersionResult,
 	diff *string,
 ) (*model.Event, error) {
-	return s.queueStampedEvent(ctx, tx, ledger, eventOwner.event(
+	return s.queueStampedEvent(ledger, eventOwner.event(
 		"artifact.version",
 		actor,
 		docs.ArtifactVersionEventPayload(artifactID, name, written.Version, diff, written.Changes),
@@ -934,7 +931,7 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	event, err := s.commitArtifactVersionEvent(r.Context(), tx, ledger, eventOwner, actor, artifact.ID, artifact.Name, named, diff)
+	event, err := s.commitArtifactVersionEvent(ledger, eventOwner, actor, artifact.ID, artifact.Name, named, diff)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -1038,7 +1035,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-			event, err := s.commitArtifactVersionEvent(r.Context(), tx, ledger, eventOwner, actor, artifact.ID, artifact.Name, *written, diff)
+			event, err := s.commitArtifactVersionEvent(ledger, eventOwner, actor, artifact.ID, artifact.Name, *written, diff)
 			if err != nil {
 				s.writeHandlerError(w, err)
 				return

@@ -68,7 +68,7 @@ func (s *Service) indexDocument(ctx context.Context, tx pgx.Tx, artifactID strin
 
 // indexRenderedVersion indexes one document version, written at versionAt, in a transaction
 // holding the document owner's lock: its references, the excerpt of each mention, and its blocks
-// with the mentions each holds (refs.IndexBlocks), all from one extraction of markdown. blocks
+// with the mentions each holds (refs.PlanBlocks), all from one extraction of markdown. blocks
 // index into markdown, the render they came from. The event the caller appends names the counted
 // targets the document's references and their excerpts, its blocks and its blocks' mentions moved
 // (replaceVersionRefs), since a node is counted once for each block citing it. The extraction,

@@ -1134,21 +1134,19 @@ func (s *server) begin(ctx context.Context) (pgx.Tx, error) {
 // lock, sent with it, so it sees a close the lock's previous holder committed while this one
 // waited (store.LockOwnerAndRead).
 func (s *server) requireOpenIssue(ctx context.Context, tx pgx.Tx, key string) (string, error) {
-	var status string
-	var open bool
-	err := store.LockOwnerAndRead(ctx, tx, store.IssueOwner(key), issueOpenStatusRead, []any{key}, &status, &open)
-	return refuseClosedIssue(status, open, err)
+	return issueOpenStatus(ctx, key, lockedOwnerRead(tx))
 }
 
 // issueOpenStatusRead reads an issue's lifecycle status and whether it is open.
 const issueOpenStatusRead = `select status, closed_at is null from issues where key = $1`
 
-// issueOpenStatus is that same read and refusal made through q, so the check a comment makes
-// from the pool before its transaction opens refuses exactly what the locked check will.
-func issueOpenStatus(ctx context.Context, q queryer, key string) (string, error) {
+// issueOpenStatus is that read and its refusal, made through read: under the issue's owner lock
+// for the check that decides (requireOpenIssue), through the pool for the check a comment makes
+// before its transaction opens, which refuses exactly what the locked check will.
+func issueOpenStatus(ctx context.Context, key string, read ownerRead) (string, error) {
 	var status string
 	var open bool
-	err := q.QueryRow(ctx, issueOpenStatusRead, key).Scan(&status, &open)
+	err := read(ctx, store.IssueOwner(key), issueOpenStatusRead, []any{key}, &status, &open)
 	return refuseClosedIssue(status, open, err)
 }
 
@@ -1203,10 +1201,8 @@ func (s *server) namedVersionDiff(ctx context.Context, tx pgx.Tx, ledger *docs.L
 // queue has run: the ledger's, when it is the version this transaction queued
 // (docs.Ledger.PendingVersionMarkdown), else the stored row's. False when neither holds it.
 func transactionVersionMarkdown(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, artifactID string, number int) (string, bool, error) {
-	if ledger != nil {
-		if markdown, pending := ledger.PendingVersionMarkdown(artifactID, number); pending {
-			return markdown, true, nil
-		}
+	if markdown, pending := ledger.PendingVersionMarkdown(artifactID, number); pending {
+		return markdown, true, nil
 	}
 	var markdown string
 	err := tx.QueryRow(ctx, `

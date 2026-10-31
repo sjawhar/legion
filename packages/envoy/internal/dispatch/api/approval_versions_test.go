@@ -840,15 +840,20 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 			t.Fatalf("begin: %v", err)
 		}
 		defer tx.Rollback(ctx)
-		moved, err := docs.MoveApprovalAsk(ctx, tx, events.NewBroker(), doc.artifactID, model.Version{Number: 2}, docs.SettlementActor, "")
-		if err != nil {
+		edits := askEventCount(t, doc.database, doc.askID, "ask.edited")
+		if err := docs.MoveApprovalAsk(ctx, tx, events.NewBroker(), doc.artifactID, model.Version{Number: 2}, docs.SettlementActor, ""); err != nil {
 			t.Fatalf("move with no known writer: %v", err)
 		}
 		if err := tx.Commit(ctx); err != nil {
 			t.Fatalf("commit: %v", err)
 		}
-		if len(moved) != 1 || !moved[0].Actor.SameAs(docs.SettlementActor) {
-			t.Fatalf("moved events = %#v, want one ask.edited by %#v", moved, docs.SettlementActor)
+		// The move appends its event to the ledger of the transaction it runs in; this one has
+		// none, so the event is read back from the table the move wrote it to.
+		if appended := askEventCount(t, doc.database, doc.askID, "ask.edited") - edits; appended != 1 {
+			t.Fatalf("the move appended %d ask.edited events, want one", appended)
+		}
+		if actor := latestAskEventActor(t, doc.database, doc.askID, "ask.edited"); !actor.SameAs(docs.SettlementActor) {
+			t.Fatalf("the moved ask.edited actor = %#v, want %#v", actor, docs.SettlementActor)
 		}
 		ask := decodeBody[askRead](t, dispatchRequest(t, doc.handler, http.MethodGet, "/api/v1/asks/"+doc.askID, nil, "alice")).Ask
 		if ask.State != "open" || ask.Approval.Version != 2 || ask.Approval.RequestedVersion != 1 {

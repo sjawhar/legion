@@ -182,7 +182,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 
 	// A PATCH takes the owner lock of every issue it names in one lock order before it reads any
 	// of them: the issue, its current parent when a status change or a reparent appends to it, the
-	// proposed parent and the rank neighbours (lockPatchRows, lockPatchRowsAndParent). It never
+	// proposed parent and the rank neighbours (lockPatchOwners, lockPatchOwnersAndParent). It never
 	// holds one of those locks while waiting for another that a second write holds. Validation, the
 	// dependency walk and the rank reads below are plain reads of issues whose locks it holds.
 	named := make([]string, 0, 3)
@@ -201,9 +201,9 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			named = append(named, *input.Rank.Before)
 		}
 	}
-	lock := lockPatchRows
+	lock := lockPatchOwners
 	if input.Status != nil || parentProvided {
-		lock = lockPatchRowsAndParent
+		lock = lockPatchOwnersAndParent
 	}
 	if err := lock(r.Context(), tx, key, named...); err != nil {
 		s.writeHandlerError(w, err)
@@ -441,7 +441,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	parentChanged := parentProvided && !stringPointersEqual(before.Parent, afterParent)
 	// Every owner this transaction appends to must be in one LockOwners call before the
 	// first append: the issue itself, the status-change parent, and both ends of a reparent.
-	// lockPatchRowsAndParent already holds each of those owner locks, so LockOwners returns at once.
+	// lockPatchOwnersAndParent already holds each of those owner locks, so LockOwners returns at once.
 	owners := []model.Event{issueOwner(key).event("", actor, nil)}
 	ownerKeys := map[string]bool{key: true}
 	addOwner := func(parentKey *string) {
@@ -472,7 +472,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	case closing:
 		withdrawn, appended, err = s.recordWithdrawnAsksTx(documentCtx, tx, ledger, key, closingAsks, actor)
 	case reopening:
-		appended, err = s.recordRestoredAsksTx(documentCtx, tx, ledger, key, reopenedAsks, actor)
+		appended, err = s.recordRestoredAsksTx(ledger, key, reopenedAsks, actor)
 	}
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -517,14 +517,14 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			payload.ThreadLogins = []string{}
 		}
 	}
-	event, err := s.queueLoggedEvent(r.Context(), tx, ledger, issueOwner(key).event(eventType, actor, payload), logins, "", "")
+	event, err := s.queueLoggedEvent(ledger, issueOwner(key).event(eventType, actor, payload), logins, "", "")
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	appended = append(appended, event)
 	if previousClaim != nil {
-		released, err := s.queueEvent(r.Context(), tx, ledger, claimEvent("issue.released", key, actor, after, previousClaim, "closed"))
+		released, err := s.queueEvent(ledger, claimEvent("issue.released", key, actor, after, previousClaim, "closed"))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -532,7 +532,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		appended = append(appended, released)
 	}
 	if statusChanged && after.Parent != nil {
-		childEvent, err := s.queueEvent(r.Context(), tx, ledger, issueOwner(*after.Parent).event(
+		childEvent, err := s.queueEvent(ledger, issueOwner(*after.Parent).event(
 			"child.status",
 			actor,
 			map[string]any{"child_key": after.Key, "from": before.Status, "to": after.Status},
@@ -545,7 +545,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	if parentChanged {
 		if before.Parent != nil {
-			removedEvent, err := s.queueEvent(r.Context(), tx, ledger, issueOwner(*before.Parent).event(
+			removedEvent, err := s.queueEvent(ledger, issueOwner(*before.Parent).event(
 				"child.removed", actor, map[string]any{"child_key": after.Key},
 			))
 			if err != nil {
@@ -555,7 +555,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			appended = append(appended, removedEvent)
 		}
 		if after.Parent != nil {
-			addedEvent, err := s.queueEvent(r.Context(), tx, ledger, issueOwner(*after.Parent).event(
+			addedEvent, err := s.queueEvent(ledger, issueOwner(*after.Parent).event(
 				"child.added", actor, map[string]any{"child_key": after.Key},
 			))
 			if err != nil {

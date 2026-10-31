@@ -524,7 +524,7 @@ func lockIssue(t *testing.T, database *store.Store, key string) pgx.Tx {
 // waitForRenameBehind waits up to within for the title change's backend to queue behind holder's
 // lock on the issue, and returns its process id, or 0 if it did not. The title change runs in the
 // Dispatch process, so its backend is found by its statement, the owner-lock statement a PATCH
-// sends first (lockIssueRows in internal/dispatch/api/issue_parent.go). A settlement sends the
+// sends first (lockIssueOwners in internal/dispatch/api/issue_parent.go). A settlement sends the
 // same statement for the same lock, but only once it holds its document's lock, an advisory lock
 // of its own; the title change holds none while it waits.
 func waitForRenameBehind(t *testing.T, database *store.Store, holder pgx.Tx, within time.Duration) uint32 {

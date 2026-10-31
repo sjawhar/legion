@@ -52,7 +52,7 @@ func indexedBlocks(ctx context.Context, tx pgx.Tx, artifactID string) ([]indexed
 // gap between two rows aligned in the first step (alignGaps); last, the blocks of each text left
 // on both sides, paired in order where both hold equally many (pairLeftovers). A live block that
 // repeats an earlier block's id - a paste keeps its source's id until a settlement stamps a new
-// one - takes part in no pass: refs.IndexBlocks indexes only the first holder of an id, so a
+// one - takes part in no pass: refs.PlanBlocks indexes only the first holder of an id, so a
 // repeated holder's id would name another block's row.
 //
 // A row whose text the version does not hold - indexed at an older version whose text of that
@@ -139,7 +139,7 @@ func newVersionMatch(markdown string, offsets []pmdoc.BlockOffset, liveBlocks []
 
 // take gives the version's block at index the id, and reports whether it did. It is the one place
 // a block of the version takes an id, so that each block takes at most one id and each id names at
-// most one block: it refuses a block that has one and an id a block has taken. refs.IndexBlocks
+// most one block: it refuses a block that has one and an id a block has taken. refs.PlanBlocks
 // keeps only the first holder of a repeated id and records every other block it held deleted, so a
 // second taker would record a block deleted at a version that holds it.
 func (m *versionMatch) take(index int, id string) bool {

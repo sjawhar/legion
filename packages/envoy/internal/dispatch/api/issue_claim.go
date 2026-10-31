@@ -504,7 +504,7 @@ func (s *server) claimWrite(
 		after.LastSeq++
 		appended := new(model.Event)
 		event := claimEvent(change.eventType, key, actor, after, change.previous, change.reason)
-		if err := queueWrite(ctx, tx, nil, func(b *store.WriteBatch) error {
+		if err := store.RunWrite(ctx, tx, func(b *store.WriteBatch) error {
 			if err := queueIssueClaim(b, key, change.claim, now, &after.UpdatedAt); err != nil {
 				return err
 			}

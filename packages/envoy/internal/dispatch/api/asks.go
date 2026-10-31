@@ -220,14 +220,14 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 			return
 		}
 	}
-	if err := queueExec(r.Context(), tx, ledger, `
+	if err := queueExec(ledger, `
 		insert into asks (id, issue_key, artifact_id, author, question, options, multiple, urgency, anchor, kind, created_at)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Question, options, multiple, urgency, anchorJSON, kind, ask.CreatedAt); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := queueWrite(r.Context(), tx, ledger, func(b *store.WriteBatch) error {
+	if err := ledger.Queue(func(b *store.WriteBatch) error {
 		asks.QueueFollowAuthor(b, rowID, actor)
 		return nil
 	}); err != nil {
@@ -258,7 +258,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 	}
 	appended := []*model.Event{}
 	if snapshot != nil {
-		snapshotEvent, err := s.commitArtifactVersionEvent(r.Context(), tx, ledger, owner, actor, anchor.ArtifactID, artifactName, *snapshot, nil)
+		snapshotEvent, err := s.commitArtifactVersionEvent(ledger, owner, actor, anchor.ArtifactID, artifactName, *snapshot, nil)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -267,7 +267,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 	}
 	// The ask's thread_logins are read by its event's insert, after the ask's own insert and the
 	// user_threads trigger it fires.
-	event, err := s.queueLoggedEvent(r.Context(), tx, ledger, owner.event(
+	event, err := s.queueLoggedEvent(ledger, owner.event(
 		"ask.opened", actor, model.NewAskEventPayload(ask, askChanges),
 	), events.ThreadLoginsOf(ask.ID), "ask", ask.ID)
 	if err != nil {
@@ -463,7 +463,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := queueExec(r.Context(), tx, ledger, `
+	if err := queueExec(ledger, `
 		update asks
 		set question = $2, options = $3, multiple = $4, urgency = $5, edited_at = $6
 		where id = $1
@@ -477,7 +477,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	event, err := s.queueStampedEvent(documentCtx, tx, ledger, ownerOf(ask.IssueKey, ask.ArtifactID).event(
+	event, err := s.queueStampedEvent(ledger, ownerOf(ask.IssueKey, ask.ArtifactID).event(
 		"ask.edited",
 		actor,
 		model.NewAskEditEventPayload(ask, previous, actor, askChanges),

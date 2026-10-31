@@ -60,7 +60,7 @@ func (s *server) rebuildArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	var published []*model.Event
 	if written.Wrote {
-		event, err := s.commitArtifactVersionEvent(r.Context(), tx, ledger, ownerForArtifact(artifact), actor, artifact.ID, artifact.Name, written, nil)
+		event, err := s.commitArtifactVersionEvent(ledger, ownerForArtifact(artifact), actor, artifact.ID, artifact.Name, written, nil)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return

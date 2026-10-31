@@ -74,7 +74,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 	}
 	// Everything up to Commit is the read phase (Docs.Join): this route and ProjectMark queue their
 	// writes on the ledger, in the order made, and Commit sends them as one batch.
-	if err := queueExec(r.Context(), tx, ledger, `
+	if err := queueExec(ledger, `
 		update comments
 		set resolved = false, resolved_by = null, resolved_at = null
 		where id = $1
@@ -113,7 +113,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	event, err := s.queueEvent(r.Context(), tx, ledger, ownerOf(comment.IssueKey, comment.ArtifactID).event(
+	event, err := s.queueEvent(ledger, ownerOf(comment.IssueKey, comment.ArtifactID).event(
 		"comment.reopened",
 		actor,
 		payload,
@@ -194,7 +194,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := queueExec(r.Context(), tx, ledger, `
+	if err := queueExec(ledger, `
 		update comments
 		set body = $2, edited_at = $3
 		where id = $1
@@ -236,7 +236,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	event, err := s.queueStampedEvent(r.Context(), tx, ledger, ownerOf(comment.IssueKey, comment.ArtifactID).event(
+	event, err := s.queueStampedEvent(ledger, ownerOf(comment.IssueKey, comment.ArtifactID).event(
 		"comment.edited",
 		actor,
 		payload,
@@ -317,7 +317,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 			s.writeHandlerError(w, err)
 			return
 		}
-		if err := queueExec(r.Context(), tx, ledger, `
+		if err := queueExec(ledger, `
 			update comments
 			set resolved = true, resolved_by = $2, resolved_at = $3
 			where id = $1
@@ -366,7 +366,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 				// anchor was read with no row lock, and a whole-anchor write would drop a block_id
 				// the anchor-block backfill pinned since (docs.BackfillAnchorBlocks), which takes
 				// no owner lock.
-				if err := queueExec(r.Context(), tx, ledger, `
+				if err := queueExec(ledger, `
 					update comments set anchor = jsonb_set(anchor, '{orphaned}', to_jsonb(true)) where id = $1
 				`, comment.ID); err != nil {
 					s.writeHandlerError(w, err)
@@ -401,7 +401,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		// The owner's lock this transaction holds keeps the suggestion as it was read above, so the
 		// guard finds it undecided; were it decided, the update's callback refuses as the read
 		// refused it, and Commit returns that refusal.
-		if err := queueWrite(r.Context(), tx, ledger, func(b *store.WriteBatch) error {
+		if err := ledger.Queue(func(b *store.WriteBatch) error {
 			b.Queue("", `
 				update comments
 				set resolved = true, resolved_by = $2, resolved_at = $3, suggestion = $4
@@ -450,7 +450,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 			s.writeHandlerError(w, err)
 			return
 		}
-		versionEvent, err := s.commitArtifactVersionEvent(r.Context(), tx, ledger, ownerOf(comment.IssueKey, comment.ArtifactID), actor, comment.Anchor.ArtifactID, artifactName, named, diff)
+		versionEvent, err := s.commitArtifactVersionEvent(ledger, ownerOf(comment.IssueKey, comment.ArtifactID), actor, comment.Anchor.ArtifactID, artifactName, named, diff)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -462,7 +462,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		s.writeHandlerError(w, err)
 		return
 	}
-	event, err := s.queueEvent(r.Context(), tx, ledger, ownerOf(comment.IssueKey, comment.ArtifactID).event(
+	event, err := s.queueEvent(ledger, ownerOf(comment.IssueKey, comment.ArtifactID).event(
 		eventType,
 		actor,
 		payload,

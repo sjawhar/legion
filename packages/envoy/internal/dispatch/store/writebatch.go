@@ -48,11 +48,6 @@ func (b *WriteBatch) Queue(what, sql string, args ...any) Queued {
 	return queued
 }
 
-// Len is the number of statements queued.
-func (b *WriteBatch) Len() int {
-	return b.batch.Len()
-}
-
 // failed is err, the statement's own failure, wrapped as what failed.
 func (q Queued) failed(err error) error {
 	if err == nil || q.what == "" {

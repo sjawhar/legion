@@ -58,19 +58,10 @@ func openApprovalAsk(ctx context.Context, tx pgx.Tx, artifactID string) (*model.
 // hand it back before a human sees it in Waiting on you again. Only the first move since the
 // request was opened or handed back wakes anyone, even when a thread reply already left it waiting
 // on its agent; a later one, while requested_version is already below the version it named, is
-// quiet (RewriteApprovalAsk). It returns the event it appended. Where tx's writes are queued
-// (a context a ledger joined to tx) the event is appended in the write phase and published by the
-// ledger's Commit, and it returns none.
-func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version model.Version, mover model.Actor, serverURL string) ([]model.Event, error) {
-	var moved []model.Event
-	sink := func(event model.Event) { moved = append(moved, event) }
-	if queueFor(ctx, tx) != nil {
-		sink = eventSink(ctx)
-	}
-	if err := moveApprovalAsk(ctx, tx, broker, artifactID, version, mover, serverURL, sink); err != nil {
-		return nil, err
-	}
-	return moved, nil
+// quiet (RewriteApprovalAsk). The event it appends goes to the ledger of the transaction it runs
+// in, as every document operation's does (eventSink), which publishes it after its Commit.
+func MoveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifactID string, version model.Version, mover model.Actor, serverURL string) error {
+	return moveApprovalAsk(ctx, tx, broker, artifactID, version, mover, serverURL, eventSink(ctx))
 }
 
 // moveApprovalAsk is MoveApprovalAsk handing the event it appends to sink. Where its writes are
@@ -101,8 +92,10 @@ func moveApprovalAsk(ctx context.Context, tx pgx.Tx, broker *events.Broker, arti
 // stays as it was. A move of a request that an earlier version already moved since it was opened
 // or handed back, requested_version below the version it named, is recorded quiet
 // (model.AskEditEventPayload.Quiet): it changes only that version, so like a human's unnamed version
-// it wakes nobody. It returns the event it appended; where tx's writes are queued the event is
-// appended in the write phase and published by the ledger's Commit, and it returns none.
+// it wakes nobody. It returns the event it appended, which its caller publishes: the one route
+// that rewords a request of its own (renewApprovalAsk) queues no writes, so the append has run by
+// the time this returns. A version move, whose transaction does queue them, rewords through
+// moveApprovalAsk instead.
 func RewriteApprovalAsk(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -113,11 +106,9 @@ func RewriteApprovalAsk(
 	summary, serverURL string,
 ) (model.Event, error) {
 	var rewritten model.Event
-	sink := func(event model.Event) { rewritten = event }
-	if queueFor(ctx, tx) != nil {
-		sink = eventSink(ctx)
-	}
-	if err := rewriteApprovalAsk(ctx, tx, broker, ask, actor, version, summary, serverURL, sink); err != nil {
+	if err := rewriteApprovalAsk(ctx, tx, broker, ask, actor, version, summary, serverURL, func(event model.Event) {
+		rewritten = event
+	}); err != nil {
 		return model.Event{}, err
 	}
 	return rewritten, nil

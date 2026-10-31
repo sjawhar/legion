@@ -130,7 +130,7 @@ func lockProjectIssueDependencies(ctx context.Context, tx pgx.Tx, project string
 	return nil
 }
 
-// lockIssueRows takes the owner locks of key and of the issues in others in one statement, in the
+// lockIssueOwners takes the owner locks of key and of the issues in others in one statement, in the
 // lock-key order LockOwners takes event owners in (store.LockOwners), and then answers key's parent
 // as it stands under them. A PATCH locks every issue it names through one call, so two writes
 // naming the same issues queue one behind the other instead of each holding one while waiting for
@@ -138,7 +138,7 @@ func lockProjectIssueDependencies(ctx context.Context, tx pgx.Tx, project string
 // refuses it. The parent is read in the statement after the locks, never in the same one, so it
 // is the parent the lock's previous holder committed (store.LockOwnersAndRead): every writer of
 // parent_key holds the issue's lock.
-func lockIssueRows(ctx context.Context, tx pgx.Tx, key string, others ...string) (*string, error) {
+func lockIssueOwners(ctx context.Context, tx pgx.Tx, key string, others ...string) (*string, error) {
 	owners := make([]store.Owner, 0, len(others)+1)
 	owners = append(owners, store.IssueOwner(key))
 	for _, other := range others {
@@ -158,19 +158,19 @@ func lockIssueRows(ctx context.Context, tx pgx.Tx, key string, others ...string)
 // the two spellings change together: no mechanism shares a value between the two Go modules.
 const parentContended = "PARENT_CONTENDED"
 
-// parentLockAttempts bounds how many times lockPatchRowsAndParent reads the issue's parent and
+// parentLockAttempts bounds how many times lockPatchOwnersAndParent reads the issue's parent and
 // locks it: the first, and one redo for a parent a concurrent reparent changed in between.
 const parentLockAttempts = 2
 
-// lockPatchRows takes the owner locks of the issue and of the issues in named (a proposed parent,
+// lockPatchOwners takes the owner locks of the issue and of the issues in named (a proposed parent,
 // rank neighbours) in one lock order, for a PATCH that appends no event to the issue's current
 // parent.
-func lockPatchRows(ctx context.Context, tx pgx.Tx, key string, named ...string) error {
-	_, err := lockIssueRows(ctx, tx, key, named...)
+func lockPatchOwners(ctx context.Context, tx pgx.Tx, key string, named ...string) error {
+	_, err := lockIssueOwners(ctx, tx, key, named...)
 	return err
 }
 
-// lockPatchRowsAndParent is lockPatchRows for a PATCH that appends an event to the issue's
+// lockPatchOwnersAndParent is lockPatchOwners for a PATCH that appends an event to the issue's
 // current parent (a status change, a reparent), which it locks in the same lock order. The parent
 // can only be read before the lock, and a concurrent reparent of the issue, which holds the
 // issue's lock, can change it in between, so the lock reads it again. A parent that moved releases
@@ -181,7 +181,7 @@ func lockPatchRows(ctx context.Context, tx pgx.Tx, key string, named ...string) 
 // It does not use resolveThenLock, whose resolve half runs with nothing held and whose write half
 // owns its own transaction: both halves here run inside the PATCH's transaction, after its
 // advisory locks, so the locks they take commit with the PATCH's writes.
-func lockPatchRowsAndParent(ctx context.Context, tx pgx.Tx, key string, named ...string) error {
+func lockPatchOwnersAndParent(ctx context.Context, tx pgx.Tx, key string, named ...string) error {
 	rows := make([]string, 0, len(named)+1)
 	for range parentLockAttempts {
 		var parent *string
@@ -196,7 +196,7 @@ func lockPatchRowsAndParent(ctx context.Context, tx pgx.Tx, key string, named ..
 		if err != nil {
 			return err
 		}
-		locked, err := lockIssueRows(ctx, attempt, key, rows...)
+		locked, err := lockIssueOwners(ctx, attempt, key, rows...)
 		if err != nil {
 			_ = attempt.Rollback(ctx)
 			return err

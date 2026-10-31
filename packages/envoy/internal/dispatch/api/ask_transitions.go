@@ -117,7 +117,7 @@ func answerTransition(actor model.Actor, selected []string, text *string, option
 			if err != nil {
 				return model.Ask{}, err
 			}
-			if err := queueExec(ctx, tx, ledger, `update asks set state = 'answered', answer = $2 where id = $1`, ask.ID, answerJSON); err != nil {
+			if err := queueExec(ledger, `update asks set state = 'answered', answer = $2 where id = $1`, ask.ID, answerJSON); err != nil {
 				return model.Ask{}, err
 			}
 			ask.State = "answered"
@@ -244,7 +244,7 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 			return nil, err
 		}
 		event := new(model.Event)
-		if err := queueWrite(ctx, tx, ledger, func(b *store.WriteBatch) error {
+		if err := ledger.Queue(func(b *store.WriteBatch) error {
 			return docs.QueueReview(b, s.deps.Events, artifact, ask.Approval.Version, state, actor, reason, new(ask.ID), func(_ model.ArtifactReview, written model.Event) {
 				*event = written
 			})
@@ -354,8 +354,8 @@ func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, tra
 // closeAskTx applies a transition to an open ask inside the caller's transaction, appends the
 // transition's event and runs its After; the caller commits and publishes the events. Every write
 // is queued on ledger, in the order made, so the copies' pending rows SettleCopiesOf takes come
-// before the event appends, as the copy lock's order requires (docs.lockProjectCopies); a nil
-// ledger runs each at once, and the events are then filled in on return.
+// before the event appends, as the copy lock's order requires (docs.lockProjectCopies), and the
+// events are filled in once Commit has run the write phase (appendedEvents).
 func (s *server) closeAskTx(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger, id string, actor model.Actor, transition askTransition) (model.Ask, []*model.Event, error) {
 	ask, err := s.transitionAskTx(ctx, tx, ledger, id, transition)
 	if err != nil {
@@ -369,7 +369,7 @@ func (s *server) closeAskTx(ctx context.Context, tx pgx.Tx, ledger *docs.Ledger,
 	if transition.Payload != nil {
 		payload = transition.Payload(base)
 	}
-	event, err := s.queueLoggedEvent(ctx, tx, ledger, ownerOf(ask.IssueKey, ask.ArtifactID).event(
+	event, err := s.queueLoggedEvent(ledger, ownerOf(ask.IssueKey, ask.ArtifactID).event(
 		transition.EventType, actor, payload,
 	), events.ThreadLoginsOf(ask.ID), "", "")
 	if err != nil {

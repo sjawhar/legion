@@ -598,7 +598,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := queueExec(r.Context(), tx, ledger, `
+	if err := queueExec(ledger, `
 		insert into comments (id, issue_key, artifact_id, author, body, anchor, reply_to, ask_id, turn, suggestion, replies_to_block, created_at)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Body, anchorJSON, input.ReplyTo, input.AskID, turn, suggestionJSON,
@@ -610,7 +610,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	// under the key is answered with this comment, its owed mentions delivered (replayComment),
 	// however this request ends; a repeat that took the key over meanwhile refuses it, and the
 	// comment rolls back.
-	if err := queueWrite(r.Context(), tx, ledger, func(b *store.WriteBatch) error {
+	if err := ledger.Queue(func(b *store.WriteBatch) error {
 		return queueRequestKeyRecovery(r.Context(), b, commentRecovery{CommentID: rowID})
 	}); err != nil {
 		s.writeHandlerError(w, err)
@@ -619,7 +619,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	waitingOn := threadTarget.waitingOnAfter(turn)
 	if input.AskID != nil {
 		askID := *input.AskID
-		if err := queueWrite(r.Context(), tx, ledger, func(b *store.WriteBatch) error {
+		if err := ledger.Queue(func(b *store.WriteBatch) error {
 			asks.QueueFollowAuthor(b, askID, actor)
 			return nil
 		}); err != nil {
@@ -666,7 +666,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		// were.
 		decided := root.Suggestion != nil && root.Suggestion.Accepted != nil
 		if root.Resolved && !decided {
-			if err := queueExec(r.Context(), tx, ledger, `
+			if err := queueExec(ledger, `
 				update comments
 				set resolved = false, resolved_by = null, resolved_at = null
 				where id = $1
@@ -712,7 +712,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		}
 	}
 	for _, mention := range resolvedMentions {
-		if err := queueExec(r.Context(), tx, ledger, `
+		if err := queueExec(ledger, `
 			insert into comment_mentions (comment_id, target, delivery, resolved_session_id)
 			values ($1, $2, $3, $4)
 		`, comment.ID, mention.Target, mention.Delivery, mention.SessionID); err != nil {
@@ -723,7 +723,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		if mention.ResolveError != "" {
 			resolveError = &mention.ResolveError
 		}
-		if err := queueExec(r.Context(), tx, ledger, `
+		if err := queueExec(ledger, `
 			insert into comment_deliveries (comment_id, target, attempt, delivery, session_id, resolve_error, state)
 			values ($1, $2, 1, $3, $4, $5, 'pending')
 		`, comment.ID, mention.Target, mention.Delivery, mention.SessionID, resolveError); err != nil {
@@ -741,7 +741,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	logins := events.ThreadLoginsOf(commentThread(comment))
 	events := []*model.Event{}
 	if snapshot != nil {
-		snapshotEvent, err := s.commitArtifactVersionEvent(r.Context(), tx, ledger, owner, actor, anchor.ArtifactID, artifactName, *snapshot, nil)
+		snapshotEvent, err := s.commitArtifactVersionEvent(ledger, owner, actor, anchor.ArtifactID, artifactName, *snapshot, nil)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -754,7 +754,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			s.writeHandlerError(w, err)
 			return
 		}
-		event, err := s.queueEvent(r.Context(), tx, ledger, owner.event(
+		event, err := s.queueEvent(ledger, owner.event(
 			"comment.reopened",
 			actor,
 			payload,
@@ -775,7 +775,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	payload.SuppressRoute = suppressRoute
 	payload.SuppressedRoute = suppressedRoute
 	payload.SuppressedRouteSessionID = suppressedRouteSessionID
-	event, err := s.queueLoggedEvent(r.Context(), tx, ledger, owner.event(
+	event, err := s.queueLoggedEvent(ledger, owner.event(
 		"comment.created",
 		actor,
 		payload,

@@ -300,7 +300,7 @@ func (s *server) repairIssueAsksOf(ctx context.Context, issueKey string) (IssueA
 		if err != nil {
 			return repair, err
 		}
-		if events, err = s.recordRestoredAsksTx(documentCtx, tx, ledger, issueKey, restored, reopener); err != nil {
+		if events, err = s.recordRestoredAsksTx(ledger, issueKey, restored, reopener); err != nil {
 			return repair, err
 		}
 		repair.Restored = len(restored)

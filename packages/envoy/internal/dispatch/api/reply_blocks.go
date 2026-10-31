@@ -96,7 +96,7 @@ func (s *server) replyBlockOf(
 	if !repair.Owed() {
 		return block, nil
 	}
-	return block, queueWrite(ctx, tx, ledger, func(b *store.WriteBatch) error {
+	return block, ledger.Queue(func(b *store.WriteBatch) error {
 		repair.Queue(b)
 		return nil
 	})

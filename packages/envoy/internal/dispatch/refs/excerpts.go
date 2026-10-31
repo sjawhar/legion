@@ -26,7 +26,7 @@ type Execer interface {
 // blocks holding its first mention that lies inside a block - the block with the tightest byte
 // range - as the references route shows it: the block's id and its markdown cut to
 // BlockExcerptRunes. A target none of whose mentions lies inside a block has none. The block is
-// any of blocks, not only a graph node: IndexBlocks makes no node of a block whose id is past
+// any of blocks, not only a graph node: PlanBlocks makes no node of a block whose id is past
 // text.MaxBlockIDBytes, empty or unstorable, nor of a later holder of a repeated id
 // (uniqueBlocks), and writes the mention from the innermost node holding it, if any. Such a block
 // still gives the excerpt, so its excerpt_block_id can name a block the graph does not hold.

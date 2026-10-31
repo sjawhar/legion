@@ -116,11 +116,10 @@ func (s *server) commentArtifactName(ctx context.Context, tx pgx.Tx, comment mod
 // once Commit has run it, so they take this row from the ledger, as they would have read it after
 // the write. An unresolved row is refreshed, and a refresh that moves its anchor prepares its
 // event (commentAnchorRefreshEvent); a resolved one no longer is. A comment without an anchor has
-// nothing to register, nor does a transaction with no queue (a nil ledger), whose write ran at
-// once (queueWrite). stored says the table already holds the row (an update rather than a new
+// nothing to register. stored says the table already holds the row (an update rather than a new
 // comment's insert).
 func (s *server) registerCommentAnchor(ledger *docs.Ledger, comment model.Comment, actor model.Actor, stored bool) {
-	if comment.Anchor == nil || ledger == nil {
+	if comment.Anchor == nil {
 		return
 	}
 	kind := docs.MarkComment

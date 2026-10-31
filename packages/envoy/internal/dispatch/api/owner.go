@@ -101,41 +101,51 @@ func (s *server) requireOpenOwner(ctx context.Context, tx pgx.Tx, owner owner) e
 // (store.LockOwner), and the write it guards would land on a closed owner. The two go in one round
 // trip (store.LockOwnerAndRead).
 func (s *server) requireOpenOwnerStatus(ctx context.Context, tx pgx.Tx, owner owner) (*string, error) {
-	if (owner.IssueKey == nil) == (owner.ArtifactID == nil) {
-		return nil, ownerInvalid()
-	}
-	if owner.IssueKey != nil {
-		status, err := s.requireOpenIssue(ctx, tx, *owner.IssueKey)
-		if err != nil {
-			return nil, err
-		}
-		return &status, nil
-	}
-	err := store.LockOwnerAndRead(ctx, tx, store.ArtifactOwner(*owner.ArtifactID), unlinkedArtifactRead, []any{*owner.ArtifactID}, new(bool))
-	return nil, refuseMissingArtifact(err)
+	return ownerOpenStatus(ctx, owner, lockedOwnerRead(tx))
 }
 
 func ownerInvalid() error {
 	return errorf(http.StatusBadRequest, "OWNER_INVALID", "owner requires exactly one issue or artifact")
 }
 
+// ownerRead makes the read an owner check decides on: the statement, the arguments it takes and
+// the destinations its one row is scanned into, for the owner named. The check that guards a
+// write takes that owner's lock ahead of it (lockedOwnerRead); the one that only spares work
+// takes no lock (pooledOwnerRead).
+type ownerRead func(ctx context.Context, owner store.Owner, sql string, args []any, dest ...any) error
+
+// lockedOwnerRead reads under the owner's lock in tx: the lock first and the read in the next
+// statement, never in the same one, the two in one round trip (store.LockOwnerAndRead).
+func lockedOwnerRead(tx pgx.Tx) ownerRead {
+	return func(ctx context.Context, owner store.Owner, sql string, args []any, dest ...any) error {
+		return store.LockOwnerAndRead(ctx, tx, owner, sql, args, dest...)
+	}
+}
+
+// pooledOwnerRead reads through q, the pool, for a check made before any transaction opens. It
+// locks nothing, so a write on a busy owner waits for that lock once rather than twice.
+func pooledOwnerRead(q queryer) ownerRead {
+	return func(ctx context.Context, _ store.Owner, sql string, args []any, dest ...any) error {
+		return q.QueryRow(ctx, sql, args...).Scan(dest...)
+	}
+}
+
 // ownerOpenStatus is the refusal table an owner gets, spelled once for both the check that
 // decides and the one that only spares work: an owner naming neither an issue nor a document,
-// an issue that is closed, a document that does not exist. q is the pool, for a read made before
-// any transaction opens; requireOpenOwnerStatus makes the same reads, with the same refusals,
-// under the owner's lock. The read itself locks nothing.
-func ownerOpenStatus(ctx context.Context, q queryer, owner owner) (*string, error) {
+// an issue that is closed, a document that does not exist. The two differ in read alone, so both
+// refuse exactly the same.
+func ownerOpenStatus(ctx context.Context, owner owner, read ownerRead) (*string, error) {
 	if (owner.IssueKey == nil) == (owner.ArtifactID == nil) {
 		return nil, ownerInvalid()
 	}
 	if owner.IssueKey != nil {
-		status, err := issueOpenStatus(ctx, q, *owner.IssueKey)
+		status, err := issueOpenStatus(ctx, *owner.IssueKey, read)
 		if err != nil {
 			return nil, err
 		}
 		return &status, nil
 	}
-	return nil, refuseMissingArtifact(q.QueryRow(ctx, unlinkedArtifactRead, *owner.ArtifactID).Scan(new(bool)))
+	return nil, refuseMissingArtifact(read(ctx, store.ArtifactOwner(*owner.ArtifactID), unlinkedArtifactRead, []any{*owner.ArtifactID}, new(bool)))
 }
 
 // unlinkedArtifactRead reads a row for a document no issue owns.
@@ -162,6 +172,6 @@ func (s *server) refuseClosedOwnerBeforeResolving(ctx context.Context, owner own
 	if s.deps.Store == nil || s.deps.Store.Pool == nil {
 		return errorf(http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE", "database unavailable")
 	}
-	_, err := ownerOpenStatus(ctx, s.deps.Store.Pool, owner)
+	_, err := ownerOpenStatus(ctx, owner, pooledOwnerRead(s.deps.Store.Pool))
 	return err
 }

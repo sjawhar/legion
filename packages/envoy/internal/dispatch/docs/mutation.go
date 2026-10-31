@@ -1933,28 +1933,9 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID stri
 		return versionWriteResult{}, s.refreshAnchors(ctx, tx, artifactID, tree, actor)
 	}
 
-	number, createdAt, err := versionSlot(ctx, tx, artifactID)
+	version, err := queueVersionInsert(ctx, tx, artifactID, markdown, spec.authors, spec.named, spec.summary, spec.docUpdateVersion)
 	if err != nil {
 		return versionWriteResult{}, err
-	}
-	// The update cursor the version records: the caller's, or the head, which every caller that
-	// names none reads under the document's advisory lock it holds to the end, so it is the head
-	// the version's insert meets.
-	var docUpdateVersion int64
-	if spec.docUpdateVersion != nil {
-		docUpdateVersion = *spec.docUpdateVersion
-	} else if docUpdateVersion, err = transactionHead(ctx, tx, artifactID); err != nil {
-		return versionWriteResult{}, err
-	}
-	version, insert, err := versionInsert(artifactID, markdown, spec.authors, number, createdAt, spec.named, spec.summary, docUpdateVersion)
-	if err != nil {
-		return versionWriteResult{}, err
-	}
-	if err := write(ctx, tx, insert); err != nil {
-		return versionWriteResult{}, err
-	}
-	if ledger := queueFor(ctx, tx); ledger != nil {
-		ledger.queuedVersion(artifactID, pendingVersion{version: version, markdown: markdown, docUpdateVersion: docUpdateVersion})
 	}
 	// The version's tree is the one the issue's task counts are read from, so they are written
 	// with it (LEGION-542).
@@ -1997,6 +1978,39 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID stri
 		}
 	}
 	return versionWriteResult{version: version, changes: changes}, nil
+}
+
+// queueVersionInsert is how every document version is written: it numbers and dates the next
+// version of artifactID (versionSlot), records the update cursor the version is written against -
+// docUpdateVersion when the caller names one, else the head this transaction's queued writes leave
+// the document's stored history at (transactionHead), which every caller that names none reads
+// under the document's advisory lock it holds to the end, so it is the head the insert meets -
+// and queues the insert in tx's write phase (write). The ledger that queues tx's writes records
+// the version as it will stand, so the reads that follow in this transaction take it from there
+// rather than from a table that holds the row only once the write phase has run (latestVersion,
+// PendingVersionMarkdown).
+func queueVersionInsert(ctx context.Context, tx pgx.Tx, artifactID, markdown string, authors []model.Actor, named bool, summary *string, docUpdateVersion *int64) (model.Version, error) {
+	number, createdAt, err := versionSlot(ctx, tx, artifactID)
+	if err != nil {
+		return model.Version{}, err
+	}
+	var cursor int64
+	if docUpdateVersion != nil {
+		cursor = *docUpdateVersion
+	} else if cursor, err = transactionHead(ctx, tx, artifactID); err != nil {
+		return model.Version{}, err
+	}
+	version, insert, err := versionInsert(artifactID, markdown, authors, number, createdAt, named, summary, cursor)
+	if err != nil {
+		return model.Version{}, err
+	}
+	if err := write(ctx, tx, insert); err != nil {
+		return model.Version{}, err
+	}
+	if ledger := queueFor(ctx, tx); ledger != nil {
+		ledger.queuedVersion(artifactID, pendingVersion{version: version, markdown: markdown, docUpdateVersion: cursor})
+	}
+	return version, nil
 }
 
 // versionInsert is a document version's row as its insert leaves it - its size is its markdown's
