@@ -479,7 +479,7 @@ func TestAFailedFirstStartLogsItsErrorOnlyWhileItIsTheLiveWatch(t *testing.T) {
 		conn, kv := bucket(t, uri)
 		conn.Close()
 		logger, records := jsonLogger(t)
-		w := kvwatch.New("test cache", kv, newSeen().apply, func() {}, kvwatch.WithLogger(logger))
+		w := kvwatch.New("test cache", kv, newSeen(), kvwatch.WithLogger(logger))
 
 		w.Start()
 		eventually(t, "the failed first start's ERROR", func() bool {
@@ -497,7 +497,7 @@ func TestAFailedFirstStartLogsItsErrorOnlyWhileItIsTheLiveWatch(t *testing.T) {
 		firstConn.Close()
 		logger, records := jsonLogger(t)
 		into := newSeen()
-		w := kvwatch.New("test cache", first, into.apply, into.reset, kvwatch.WithLogger(logger))
+		w := kvwatch.New("test cache", first, into, kvwatch.WithLogger(logger))
 		t.Cleanup(w.Stop)
 		if err := w.Rewatch(liveConn); err != nil {
 			t.Fatalf("rewatch: %v", err)

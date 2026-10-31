@@ -63,8 +63,13 @@ func TestTheInterestReadRoutesAnswerABusThatStoppedAnsweringInsideTheBudget(t *t
 		t.Fatalf("write %s's interest record: %v", cached, err)
 	}
 	cachedIDs := func() []string {
+		t.Helper()
+		listed, err := registry.List()
+		if err != nil {
+			t.Fatalf("list the interest cache: %v", err)
+		}
 		var ids []string
-		for _, item := range registry.List() {
+		for _, item := range listed {
 			ids = append(ids, item.SessionID)
 		}
 		return ids

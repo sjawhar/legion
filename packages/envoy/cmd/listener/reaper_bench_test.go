@@ -99,7 +99,7 @@ func benchmarkReap(b *testing.B, n int) {
 		b.Fatalf("session cache holds %d sessions, want %d", got, n)
 	}
 
-	isAlive := func(id string) bool { return isSessionLive(sessions, id) }
+	isAlive := func(id string) (bool, error) { return sessionMayBeLive(sessions, id) }
 	b.ReportAllocs()
 	for b.Loop() {
 		reaped, err := registry.Reap(isAlive, 10*time.Minute)

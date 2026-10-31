@@ -460,7 +460,7 @@ func TestTheKeeperRaisesTheBucketsItsProgramNamesBackToTheirCopies(t *testing.T)
 	client := startOnCluster(t, cluster, WithReplicas(3), WithKeptBuckets(listed, missing), withKeepInterval(testKeepInterval))
 	before := map[string]nats.StreamConfig{}
 	for _, bucket := range []string{listed, unlisted} {
-		if _, err := EnsureKeyValue(client.JS(), &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 3, History: 5, TTL: time.Hour}); err != nil {
+		if _, err := EnsureKeyValue(client.Conn, client.JS(), &nats.KeyValueConfig{Bucket: bucket, Storage: nats.FileStorage, Replicas: 3, History: 5, TTL: time.Hour}); err != nil {
 			t.Fatalf("open %s at three copies: %v", bucket, err)
 		}
 		stream := "KV_" + bucket
@@ -517,7 +517,7 @@ func TestAKeeperWithTheDefaultSettingsSendsNoUpdate(t *testing.T) {
 	}
 
 	client := startOnCluster(t, cluster, WithKeptBuckets("envoy_keeper_default"), withKeepInterval(testKeepInterval))
-	if _, err := EnsureKeyValue(client.JS(), &nats.KeyValueConfig{Bucket: "envoy_keeper_default", Storage: nats.FileStorage}); err != nil {
+	if _, err := EnsureKeyValue(client.Conn, client.JS(), &nats.KeyValueConfig{Bucket: "envoy_keeper_default", Storage: nats.FileStorage}); err != nil {
 		t.Fatalf("open a bucket at the default copies: %v", err)
 	}
 	time.Sleep(6 * testKeepInterval)

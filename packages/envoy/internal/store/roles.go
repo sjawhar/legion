@@ -161,6 +161,9 @@ func (c roleCache) CompleteRead(kvwatch.Read) {
 // fencing out the new bucket's lower revisions, and so is one the fence finds older than the
 // holder the copy already took.
 func (r *Registry) setOwnRoleHolder(role, holder string, revision, epoch uint64) {
+	if r.roleWatcher == nil {
+		return
+	}
 	r.holdersMu.Lock()
 	defer r.holdersMu.Unlock()
 	r.roleHolders.Put(r.roleWatcher, epoch, role, holder, revision)
@@ -171,9 +174,23 @@ func (r *Registry) setOwnRoleHolder(role, holder string, revision, epoch uint64)
 // revision deleted, as deleteInterest fences the interest cache: a claim written since is later
 // still, and applies.
 func (r *Registry) forgetRoleHolder(role string, revision, epoch uint64) {
+	if r.roleWatcher == nil {
+		return
+	}
 	r.holdersMu.Lock()
 	defer r.holdersMu.Unlock()
 	r.roleHolders.Evict(r.roleWatcher, epoch, role, revision+1)
+}
+
+// roleViewEpoch is the epoch a claim write through the role handle carries, and 0 when no watcher
+// follows the claims, which only a registry a unit test built leaves: such a write reaches no
+// view (setOwnRoleHolder, forgetRoleHolder).
+func (r *Registry) roleViewEpoch() uint64 {
+	if r.roleWatcher == nil {
+		return 0
+	}
+	_, epoch := r.roleWatcher.Handle()
+	return epoch
 }
 
 // ErrRoleViewNotReady is RolesHeldBy's answer when its view of the role claims cannot be served,
@@ -270,7 +287,7 @@ func (r *Registry) releaseRoleClaim(ctx context.Context, sessionID, role string)
 	if entry == nil || claim.HolderSessionID != sessionID {
 		return nil
 	}
-	_, epoch := r.roleWatcher.Handle()
+	epoch := r.roleViewEpoch()
 	roles := r.roles()
 	_, answered, err := bus.Bounded(ctx, func() (struct{}, error) {
 		return struct{}{}, roles.Delete(role, nats.LastRevision(entry.Revision()))
@@ -320,7 +337,7 @@ func (r *Registry) ReleaseExpiredRoleClaim(ctx context.Context, role, sessionID 
 	if restored && restoredRevision == entry.Revision() && sessionTTL > 0 && r.now().Sub(r.openedAt) < sessionTTL {
 		return ExpiredRoleClaimRetained, nil
 	}
-	_, epoch := r.roleWatcher.Handle()
+	epoch := r.roleViewEpoch()
 	roles := r.roles()
 	_, _, err = bus.Bounded(ctx, func() (struct{}, error) {
 		return struct{}{}, roles.Delete(role, nats.LastRevision(entry.Revision()))
@@ -418,7 +435,7 @@ func (r *Registry) SetRoleWithPrevious(ctx context.Context, sessionID, machineID
 	if err != nil {
 		return Interest{}, err
 	}
-	_, epoch := r.roleWatcher.Handle()
+	epoch := r.roleViewEpoch()
 	roles := r.roles()
 	revision, answered, err := bus.Bounded(ctx, func() (uint64, error) {
 		if entry == nil {

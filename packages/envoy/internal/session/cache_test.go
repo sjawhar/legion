@@ -87,20 +87,13 @@ func TestList_ExpiredEntryReadsAbsentAndLeavesAtItsDeadline(t *testing.T) {
 	if len(entries) != 1 || entries[0].SessionID != "ses_live" {
 		t.Fatalf("expected only ses_live, got %v", entries)
 	}
-	// A read changes nothing: the expired entry stays cached until its deadline is processed.
-	if r.CacheSize() != 2 {
-		t.Fatalf("cache size after List = %d, want 2", r.CacheSize())
-	}
 	before := r.LastSeen("ses_expired")
 	if before != updated {
 		t.Fatalf("LastSeen before removal = %d, want the expired entry's UpdatedAt %d", before, updated)
 	}
 
-	// The entry went into the cache directly, so nothing scheduled its deadline yet. Schedule it as
-	// cacheSessionLocked does; the expiry timer then removes it with no read.
-	r.mu.Lock()
-	r.scheduleLocked("ses_expired", expireLive, r.cache["ses_expired"].expiresAt)
-	r.mu.Unlock()
+	// The copy schedules each row's deadline as it stores it (storedLocked), so the expiry timer
+	// removes the expired one with no read of any kind.
 	waitForCacheSize(t, r, 1)
 	if after := r.LastSeen("ses_expired"); after != before {
 		t.Fatalf("LastSeen after removal = %d, want %d as before it", after, before)
@@ -119,18 +112,17 @@ func TestGet_ExpiredEntryReadsAbsentAndLeavesAtItsDeadline(t *testing.T) {
 	if _, err := r.Get("ses_expired"); !errors.Is(err, natsgo.ErrKeyNotFound) {
 		t.Fatalf("expected ErrKeyNotFound for expired entry, got %v", err)
 	}
-	if r.CacheSize() != 1 {
-		t.Fatalf("cache size after Get = %d, want 1: a read removes nothing", r.CacheSize())
-	}
+	// The copy schedules each row's deadline as it stores it (storedLocked), so the expired one
+	// leaves with no read of any kind.
+	waitForCacheSize(t, r, 0)
 
-	// An entry the watcher delivers leaves at its deadline, one TTL after it was written, with no
-	// read; the expired entry nothing scheduled stays.
+	// An entry the watcher delivers leaves at its deadline too, one TTL after it was written.
 	created := time.Now()
 	r.applyWatched(watchedPut(t, "ses_short", 1, created, SessionEntry{Port: 3, UpdatedAt: created.UnixMilli()}))
 	if _, err := r.Get("ses_short"); err != nil {
 		t.Fatalf("Get(ses_short) before its deadline: %v", err)
 	}
-	waitForCacheSize(t, r, 1)
+	waitForCacheSize(t, r, 0)
 	if _, err := r.Get("ses_short"); !errors.Is(err, natsgo.ErrKeyNotFound) {
 		t.Fatalf("Get(ses_short) after its deadline = %v, want ErrKeyNotFound", err)
 	}

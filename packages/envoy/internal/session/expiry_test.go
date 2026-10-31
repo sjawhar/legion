@@ -262,7 +262,8 @@ func TestRevisionFenceLeavesWithAReadAndAStaleReplayStaysAbsent(t *testing.T) {
 	r.sweep()
 
 	// With the fence swept, the replay is just a record of the bucket again: it is past its
-	// deadline, so it never reads as live and the expiry removes it at once.
+	// deadline, so it never reads as live, the expiry removes it at once, and the record its
+	// removal writes leaves at its own deadline, a retention past the row's.
 	r.applyWatched(stale)
 	if _, err := r.Get(id); !errors.Is(err, natsgo.ErrKeyNotFound) {
 		t.Fatalf("Get(%s) after a stale replay = %v, want ErrKeyNotFound", id, err)
@@ -271,9 +272,7 @@ func TestRevisionFenceLeavesWithAReadAndAStaleReplayStaysAbsent(t *testing.T) {
 		t.Fatalf("LiveCount %d after a stale replay; want 0", live)
 	}
 	waitForCacheSize(t, r, 0)
-	if seen := r.LastSeen(id); seen != 0 {
-		t.Fatalf("LastSeen(%s) after a stale replay = %d, want 0", id, seen)
-	}
+	waitUntil(t, func() bool { return r.LastSeen(id) == 0 })
 }
 
 // TestRevisionFencesStayBoundedAsSessionsComeAndGo registers waves of sessions, deletes half of

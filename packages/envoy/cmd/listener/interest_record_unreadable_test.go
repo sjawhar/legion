@@ -66,7 +66,11 @@ func TestAnUnreadableInterestRecordIsNotAnsweredAsTheBusNotAnswering(t *testing.
 	if _, err := interestBucket.Put(unreadable, []byte("not a json interest record")); err != nil {
 		t.Fatalf("write %s's unreadable interest record: %v", unreadable, err)
 	}
-	for _, item := range registry.List() {
+	listed, err := registry.List()
+	if err != nil {
+		t.Fatalf("list the interest cache: %v", err)
+	}
+	for _, item := range listed {
 		if item.SessionID == unreadable {
 			t.Fatalf("the interest cache holds %s: the routes would not read the unreadable record from the bucket", unreadable)
 		}

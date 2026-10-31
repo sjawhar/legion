@@ -771,21 +771,6 @@ func (s *Store) casState(key string, apply func(st *State) (ok bool, err error))
 	}
 }
 
-// List returns a snapshot copy of the current cached states.
-func (s *Store) List() []State {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]State, 0, s.cache.Len())
-	for _, state := range s.cache.All() {
-		out = append(out, state)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		return Key(out[i].Owner, out[i].Repo, out[i].Number, out[i].SHA) <
-			Key(out[j].Owner, out[j].Repo, out[j].Number, out[j].SHA)
-	})
-	return out
-}
-
 // ClaimSettlement atomically acquires the right to publish a ready state
 // generation without changing that generation, after re-reading the durable
 // state. It applies due to the durable record, not the cache snapshot.

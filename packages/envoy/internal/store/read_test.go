@@ -231,7 +231,7 @@ func TestAReadThroughOfABucketSinceRecreatedIsDropped(t *testing.T) {
 	read := delayed.delayGet(t, "ses_a")
 	done := make(chan error, 1)
 	go func() {
-		_, err := reg.Get("ses_a")
+		_, err := reg.Get(context.Background(), "ses_a")
 		done <- err
 	}()
 	waitClosed(t, read.reached, "the old bucket to answer the read-through")
@@ -282,7 +282,7 @@ func TestAReadThroughSpanningTheReadsCompletionAddsOnlyWhatTheBucketHolds(t *tes
 		putInterest(t, delayed.KeyValue, Interest{SessionID: sessionID, MachineID: "m1", Topics: []string{"notifications." + sessionID}})
 		reads[sessionID] = delayed.delayGet(t, sessionID)
 		go func() {
-			_, err := reg.Get(sessionID)
+			_, err := reg.Get(context.Background(), sessionID)
 			done <- err
 		}()
 		waitClosed(t, reads[sessionID].reached, sessionID+"'s read-through to read the bucket")
@@ -331,7 +331,7 @@ func TestTheReaperAsksLivenessOutsideTheCacheLockAndKeepsAnInterestWrittenSince(
 	stale := time.Now().Add(-20 * time.Minute).UnixMilli()
 	for _, sessionID := range []string{"ses_dead", "ses_rewritten"} {
 		putInterest(t, kv, Interest{SessionID: sessionID, MachineID: "m1", Topics: []string{"notifications." + sessionID}, UpdatedAt: stale})
-		if _, err := reg.Get(sessionID); err != nil {
+		if _, err := reg.Get(context.Background(), sessionID); err != nil {
 			t.Fatalf("warm %s: %v", sessionID, err)
 		}
 	}
@@ -382,7 +382,7 @@ func TestTheReaperKeepsAnInterestWhoseSessionItCouldNotRead(t *testing.T) {
 	defer cleanup()
 	reg, kv := coldRegistry(t, conn)
 	putInterest(t, kv, Interest{SessionID: "ses_unread", MachineID: "m1", Topics: []string{"notifications.unread"}, UpdatedAt: time.Now().Add(-20 * time.Minute).UnixMilli()})
-	if _, err := reg.Get("ses_unread"); err != nil {
+	if _, err := reg.Get(context.Background(), "ses_unread"); err != nil {
 		t.Fatalf("warm ses_unread: %v", err)
 	}
 	count, err := reg.Reap(func(string) (bool, error) { return false, errors.New("the session bucket did not answer") }, 10*time.Minute)

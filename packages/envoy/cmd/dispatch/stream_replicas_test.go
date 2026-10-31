@@ -177,8 +177,10 @@ func TestADispatchStartKeepsAThreeCopyStreamsCopiesByteLimitAndIDAsItCorrectsThe
 // earlier sweep at the default created to three copies, as the server's sweeper does.
 func TestRedeliverWebhooksRaisesAnR1RedeliveryBucketToTheReplicaSetting(t *testing.T) {
 	cluster := testnats.StartCluster(t, 3)
+	conn := testnats.Connect(t, cluster.URL())
+	t.Cleanup(conn.Close)
 	js := cluster.JetStream(t)
-	if _, err := redeliver.OpenState(js, 1); err != nil {
+	if _, err := redeliver.OpenState(conn, js, 1); err != nil {
 		t.Fatalf("create the R1 redelivery bucket: %v", err)
 	}
 	stream := "KV_" + bus.WebhookRedeliveryBucket

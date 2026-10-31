@@ -1,20 +1,23 @@
 package cistore
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"sync"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/logging"
 )
 
-// List returns a snapshot copy of the current cached states.
+// List returns a snapshot copy of the current cached states. Only tests list the cache: the
+// summary loop reads a record at a time, through the change feed (attachSummary).
 func (s *Store) List() []State {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := make([]State, 0, len(s.cache))
-	for _, state := range s.cache {
+	out := make([]State, 0, s.cache.Len())
+	for _, state := range s.cache.All() {
 		out = append(out, state)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -22,6 +25,23 @@ func (s *Store) List() []State {
 			Key(out[j].Owner, out[j].Repo, out[j].Number, out[j].SHA)
 	})
 	return out
+}
+
+// cacheStateLocked puts state in the copy at revision as a delivered record does (ciCache.Apply),
+// and marks the key changed for the summary loop when it moves the copy on: the benchmarks seed
+// and change a cache with no KV write. Callers hold s.mu.
+func (s *Store) cacheStateLocked(key string, state State, revision uint64) {
+	value, err := json.Marshal(state)
+	if err != nil {
+		panic("cistore: encode a benchmark state: " + err.Error())
+	}
+	moved := s.movedLocked(0, key, revision)
+	if err := s.cache.Delivered(kvwatch.Entry{Key: key, Value: value, Revision: revision}); err != nil {
+		panic("cistore: deliver a benchmark state: " + err.Error())
+	}
+	if moved {
+		s.markChangedLocked(key)
+	}
 }
 
 // testSummarizers holds the summarizer testSummarizer returns for each store, attached to the

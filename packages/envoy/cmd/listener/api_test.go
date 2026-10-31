@@ -959,7 +959,7 @@ func TestTheInterestReaperWhoseSessionCacheTrailsTheBucketKeepsALiveSessionsInte
 			t.Fatalf("store %s's interest: %v", sessionID, err)
 		}
 	}
-	if err := claimant.sessions.Delete("ses_gone"); err != nil {
+	if err := claimant.sessions.Delete(context.Background(), "ses_gone"); err != nil {
 		t.Fatalf("end ses_gone's session: %v", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -2036,7 +2036,11 @@ func TestTheSenderStampReadsAnInterestTheCacheMissedThroughToTheBucket(t *testin
 			}, []string{contracts.AgentSubject(sender)}); err != nil {
 				t.Fatalf("write %s's interest record: %v", sender, err)
 			}
-			for _, cached := range registry.List() {
+			listed, err := registry.List()
+			if err != nil {
+				t.Fatalf("list the interest cache: %v", err)
+			}
+			for _, cached := range listed {
 				if cached.SessionID == sender {
 					t.Fatalf("the listener's interest cache holds %s: the stamp could be read from the cache", sender)
 				}

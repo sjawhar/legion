@@ -549,6 +549,12 @@ func (r *SessionRegistry) LastSeen(sessionID string) int64 {
 		if !cs.expired(now) {
 			return 0
 		}
+		// A row past its deadline that the copy retains because it does not follow its bucket
+		// answers its last heartbeat for as long as it is retained: no removal has recorded one,
+		// and the read that restores following is what decides whether the session is gone.
+		if !r.following() {
+			return cs.entry.UpdatedAt
+		}
 		if seen, ok := r.lastSeenRecord(cs.entry.UpdatedAt, cs.expiresAt); ok && !seen.expired(now) {
 			return seen.lastSeen
 		}
@@ -649,12 +655,12 @@ func (r *SessionRegistry) storedLocked(sessionID string, stored cachedSession) {
 }
 
 func (r *SessionRegistry) removedLocked(sessionID string, removed cachedSession) {
+	// The row left the cache now: its deadline did not remove it, and while the copy did not
+	// follow its bucket that deadline may be long past (List). A row the expiry timer removes
+	// records its own deadline instead, so LastSeen answers the same before and after it
+	// (expireDue).
 	now := r.now()
-	left := now
-	if removed.expired(now) {
-		left = removed.expiresAt
-	}
-	r.retainLastSeenLocked(sessionID, removed.entry.UpdatedAt, left)
+	r.retainLastSeenLocked(sessionID, removed.entry.UpdatedAt, now)
 	r.scheduleLocked(sessionID, expireLastSeen, now.Add(r.retention()))
 }
 

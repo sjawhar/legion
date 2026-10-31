@@ -155,8 +155,12 @@ func TestTheWriteRoutesAnswerABusThatStoppedAnsweringInsideTheBudget(t *testing.
 			t.Fatalf("%s %s with the bus answering: status %d, body %s; want %d", request.method, request.path, recorder.Code, recorder.Body.String(), request.want)
 		}
 	}
+	listed, err := rig.registry.List()
+	if err != nil {
+		t.Fatalf("list the interest cache: %v", err)
+	}
 	var cachedIDs []string
-	for _, item := range rig.registry.List() {
+	for _, item := range listed {
 		cachedIDs = append(cachedIDs, item.SessionID)
 	}
 	for _, id := range []string{subscriber, unsubscriber, removed} {

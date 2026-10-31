@@ -260,7 +260,7 @@ func TestASessionDeletedDuringTheReadStaysGone(t *testing.T) {
 		t.Fatalf("Rewatch: %v", err)
 	}
 	waitClosed(t, completion.reached, "the read to deliver every record")
-	if err := r.Delete("ses_gone"); err != nil {
+	if err := r.Delete(context.Background(), "ses_gone"); err != nil {
 		t.Fatalf("Delete during the read: %v", err)
 	}
 	completion.open()
@@ -501,7 +501,7 @@ func TestARefreshTheFenceDropsAnswersTheBucketsEntry(t *testing.T) {
 	if err := r.Put("ses_a", SessionEntry{Port: 1, MachineID: "m1", Title: "old"}); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	if err := r.Delete("ses_a"); err != nil {
+	if err := r.Delete(context.Background(), "ses_a"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
 	js, err := client.Conn.JetStream()

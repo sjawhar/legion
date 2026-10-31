@@ -77,13 +77,13 @@ func TestMatch_FiltersByMachineID(t *testing.T) {
 // session must find the ones registered through another machine's listener, by an exact topic or
 // a wildcard alike, and none whose patterns miss the topic.
 func TestMatchAll_ReturnsMatchingSessionsOnEveryMachine(t *testing.T) {
-	r := &Registry{cache: map[string]Interest{
+	r := holding(t, map[string]Interest{
 		"ses_b_exact": {SessionID: "ses_b_exact", MachineID: "machine-B", Topics: []string{"notifications.team.deploy"}},
 		"ses_a_star":  {SessionID: "ses_a_star", MachineID: "machine-A", Topics: []string{"notifications.team.*"}},
 		"ses_a_other": {SessionID: "ses_a_other", MachineID: "machine-A", Topics: []string{"notifications.team.review"}},
 		"ses_b_chev":  {SessionID: "ses_b_chev", MachineID: "machine-B", Topics: []string{"notifications.slack.>", "notifications.>"}},
 		"ses_b_slack": {SessionID: "ses_b_slack", MachineID: "machine-B", Topics: []string{"notifications.slack.>"}},
-	}}
+	})
 
 	got := r.MatchAll("notifications.team.deploy")
 	ids := make([]string, len(got))
@@ -740,10 +740,8 @@ func TestGetReadsAnUndecodableInterestRecordAsErrMalformedInterest(t *testing.T)
 	if item.SessionID != "" || item.Topics != nil {
 		t.Fatalf("Get of an undecodable record returned %+v, want the zero Interest", item)
 	}
-	for _, cached := range reg.List() {
-		if cached.SessionID == sessionID {
-			t.Fatalf("the cache holds %+v after an undecodable read", cached)
-		}
+	if cached, ok := reg.Cached(sessionID); ok {
+		t.Fatalf("the cache holds %+v after an undecodable read", cached)
 	}
 	for _, want := range []string{"level=WARN", `msg="registry read an interest record it cannot decode"`, "session_id=" + sessionID, "invalid character"} {
 		if !strings.Contains(logs.String(), want) {
@@ -1707,7 +1705,7 @@ func TestReaperGraceWindow(t *testing.T) {
 		}
 	}
 
-	count, err := reg.Reap(func(string) bool { return false }, InterestReapGrace)
+	count, err := reg.Reap(func(string) (bool, error) { return false, nil }, InterestReapGrace)
 	if err != nil {
 		t.Fatalf("Reap failed: %v", err)
 	}
@@ -1744,7 +1742,9 @@ func TestAPausedSessionKeepsItsInterestThroughTheReapGrace(t *testing.T) {
 		lastHeartbeat[sessionID] = clock.Now()
 		return upsertOrFail(t, reg, sessionID, topics...)
 	}
-	isAlive := func(sessionID string) bool { return clock.Now().Sub(lastHeartbeat[sessionID]) < sessionTTL }
+	isAlive := func(sessionID string) (bool, error) {
+		return clock.Now().Sub(lastHeartbeat[sessionID]) < sessionTTL, nil
+	}
 	reapNothing := func(when string) {
 		t.Helper()
 		count, err := reg.Reap(isAlive, InterestReapGrace)
@@ -1778,7 +1778,7 @@ func TestAPausedSessionKeepsItsInterestThroughTheReapGrace(t *testing.T) {
 
 	for _, after := range []time.Duration{90 * time.Second, sessionTTL, 6 * time.Minute, 9 * time.Minute, InterestReapGrace - time.Millisecond, InterestReapGrace} {
 		clock.Set(last.Add(after))
-		if after >= sessionTTL && isAlive("ses_gone") {
+		if alive, _ := isAlive("ses_gone"); after >= sessionTTL && alive {
 			t.Fatalf("ses_gone is alive %v after its last heartbeat, past the session TTL", after)
 		}
 		reapNothing(fmt.Sprintf("%v after the last heartbeat", after))
@@ -1791,7 +1791,7 @@ func TestAPausedSessionKeepsItsInterestThroughTheReapGrace(t *testing.T) {
 		default:
 			continue
 		}
-		if isAlive(back) {
+		if alive, _ := isAlive(back); alive {
 			t.Fatalf("%s is alive %v after its last heartbeat, past the session TTL", back, after)
 		}
 		got := heartbeat(back, "notifications.agent."+back)
@@ -1849,11 +1849,11 @@ func TestReapCallsIsAliveWithoutHoldingTheInterestLock(t *testing.T) {
 	}
 
 	upserted := false
-	count, err := reg.Reap(func(sessionID string) bool {
+	count, err := reg.Reap(func(sessionID string) (bool, error) {
 		if sessionID == "ses_dead" {
 			upserted = upsertWithin(t, reg, Interest{SessionID: "ses_other", MachineID: "m1"}, []string{"notifications.agent.ses_other"})
 		}
-		return false
+		return false, nil
 	}, 0)
 	if err != nil {
 		t.Fatalf("Reap failed: %v", err)
@@ -1883,11 +1883,11 @@ func TestReapKeepsAnInterestReupsertedDuringThePass(t *testing.T) {
 	}
 
 	// The session heartbeats again while the pass is deciding it is dead.
-	count, err := reg.Reap(func(sessionID string) bool {
+	count, err := reg.Reap(func(sessionID string) (bool, error) {
 		if sessionID == "ses_back" {
 			upsertWithin(t, reg, Interest{SessionID: "ses_back", MachineID: "m1"}, []string{"notifications.agent.ses_back"})
 		}
-		return false
+		return false, nil
 	}, 0)
 	if err != nil {
 		t.Fatalf("Reap failed: %v", err)
@@ -1915,12 +1915,13 @@ func TestReapKeepsAnInterestWrittenAfterItsRecheck(t *testing.T) {
 	// Another listener's write lands after the pass re-checked the candidate and before its delete
 	// reaches the bucket.
 	fresh := Interest{SessionID: "ses_raced", MachineID: "m2", Topics: []string{"notifications.>"}, UpdatedAt: time.Now().UnixMilli()}
-	reg.watcher = kvwatch.New("interest registry", bus.KeyValue{KeyValue: &putBeforeDeleteKeyValue{
+	current := reg.watcher.KV()
+	reg.watcher = kvwatch.New("interest registry", bus.NewKeyValue(&putBeforeDeleteKeyValue{
 		KeyValue:     kv,
 		beforeDelete: func() { putInterest(t, kv, fresh) },
-	}}, reg.applyWatched, reg.resetCache)
+	}, current.WatchHandle(), current.Streams()), interestCache{reg})
 
-	count, err := reg.Reap(func(string) bool { return false }, 0)
+	count, err := reg.Reap(func(string) (bool, error) { return false, nil }, 0)
 	if err != nil {
 		t.Fatalf("Reap failed: %v", err)
 	}
@@ -2855,7 +2856,7 @@ func TestARewatchThatCannotOpenTheRoleBucketMovesNothing(t *testing.T) {
 		t.Fatalf("delete the role bucket: %v", err)
 	}
 	roles, roleWatch := reg.roles(), reg.roleWatcher.KV()
-	roleGeneration, _ := reg.roleWatcher.Complete()
+	roleWatcher := reg.roleWatcher
 	second, closeSecond := connectNATS(t)
 	if err := reg.Rewatch(second); err == nil {
 		t.Fatal("Rewatch onto a connection without the role bucket succeeded")
@@ -2873,7 +2874,7 @@ func TestARewatchThatCannotOpenTheRoleBucketMovesNothing(t *testing.T) {
 	if reg.roles() != roles || reg.roleWatcher.KV() != roleWatch {
 		t.Fatal("a Rewatch that could not open the role bucket moved a role bucket handle")
 	}
-	if generation, _ := reg.roleWatcher.Complete(); generation != roleGeneration {
+	if reg.roleWatcher != roleWatcher {
 		t.Fatal("a Rewatch that could not open the role bucket replaced the role claim watcher")
 	}
 }
@@ -2904,7 +2905,7 @@ func TestARewatchWhoseInterestWatcherCannotMoveMovesNothing(t *testing.T) {
 		t.Fatalf("delete the interest bucket: %v", err)
 	}
 	roles, roleWatch := reg.roles(), reg.roleWatcher.KV()
-	roleGeneration, _ := reg.roleWatcher.Complete()
+	roleWatcher := reg.roleWatcher
 	second, closeSecond := connectNATS(t)
 	if err := reg.Rewatch(second); err == nil {
 		t.Fatal("Rewatch onto a connection without the interest bucket succeeded")
@@ -2913,7 +2914,7 @@ func TestARewatchWhoseInterestWatcherCannotMoveMovesNothing(t *testing.T) {
 	if reg.roles() != roles || reg.roleWatcher.KV() != roleWatch {
 		t.Fatal("a Rewatch whose interest watcher could not move moved a role bucket handle")
 	}
-	if generation, _ := reg.roleWatcher.Complete(); generation != roleGeneration {
+	if reg.roleWatcher != roleWatcher {
 		t.Fatal("a Rewatch whose interest watcher could not move replaced the role claim watcher")
 	}
 	if got, err := reg.RolesHeldBy("ses_role_holder"); err != nil || !slices.Equal(got, []string{"reviewer"}) {

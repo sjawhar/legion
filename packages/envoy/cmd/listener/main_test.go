@@ -1420,7 +1420,8 @@ func setupInterestLastSeenTest(t *testing.T, interests []string, options ...sess
 		}
 	}
 	waitFor(t, 5*time.Second, "the interest cache to hold every row", func() bool {
-		return len(registry.List()) == len(interests)
+		listed, err := registry.List()
+		return err == nil && len(listed) == len(interests)
 	})
 	return registry, sessions
 }
