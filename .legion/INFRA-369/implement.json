@@ -2,85 +2,75 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-369",
-  "completed": "2026-10-30T21:20:00Z",
+  "completed": "2026-10-31T00:35:00Z",
+  "round": "the review round: the reviewer's thirteen findings at f11d32e5, answered at dd2f17197c3ffbb053dd11d687ff57f8dde8f118",
   "proof": [
     {
-      "criterion": "A6: an ask's question, each option and its answer are each addressable, and dispatch read shows the reference on the option.",
-      "surface": "The real Dispatch stack in the issue's pod: the Go server on PostgreSQL 17 with pgvector, driven through the real dispatch CLI and HTTP.",
-      "command": "DISPATCH_URL=http://127.0.0.1:18771 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture DEV_SIGNIN_LOGIN=alice bash packages/dispatch/e2e/acceptance/block-graph.sh",
-      "observed": "exit=0, PASS=171 FAIL=0 SKIP=0. Its A6 section is 38 PASS lines, among them 'A6 read shows it on the option', 'A6 dispatch read --ref <first option> names it as the ask's option', and 'A6 ?to=<ask>&kind=part_of lists its two options and one part more, its question'.",
-      "headSha": "1b191490e1bac353d4f78330f3b9d74c03d198b0",
-      "negativeControl": "GET /api/v1/references?to=dispatch://CORE-3/ask/<id>%23b-b9 answered 404 {\"code\":\"NOT_FOUND\",\"error\":\"no part \\\"b9\\\" in ask <id>\"}, while the same request for #b-b2 answered 200 with that option's text."
+      "criterion": "Finding 1: a reply names a block of the item the request named, not of its thread's head.",
+      "surface": "The real Dispatch server in the issue's pod, over HTTP, on a comment of two blocks under an ask where b2 names both the comment's second block and the ask's Monday option.",
+      "command": "POST /api/v1/issues/CORE-3/comments with {reply_to: <the comment>, reply_to_block: \"b2\"}, then with {ask_id: <the ask>, reply_to_block: \"b2\"}, each read back with GET /api/v1/comments/{id}.",
+      "observed": "The first answers reply_block.node comment/<id>#b2, text 'The second block of this comment weighs Tuesday.'; the second answers ask/<id>#b2, text 'Monday — Ship at the start of the week.' One b2, two items, two answers.",
+      "headSha": "dd2f17197c3ffbb053dd11d687ff57f8dde8f118",
+      "negativeControl": "reply_to_block naming a block the named item does not hold still answers 400 INVALID_COMMENT, naming that item (TestAReplyNamesABlockOfTheItemTheRequestNamed's three refusal cases)."
     },
     {
-      "criterion": "A11 and R12: an ask part carries made_by, made_at, changed_by, changed_at, parent and parent_version, a removed part included.",
-      "surface": "The same running Dispatch, read over HTTP and through dispatch read --ref.",
-      "command": "the same run; its lines 'A11 the first option carries its facts', 'A11 the question carries its facts', 'A11 the answer part carries its facts', 'A11 the dropped option carries its facts', 'A11 the mention's other end is the option as its own reference reads it'.",
-      "observed": "Each asserts made_by non-empty, made_at, changed_by and changed_at set, parent.kind ask, parent.id the ask and parent_version the part's revision; the answer part's made_by is the answerer, and the dropped part still carries them.",
-      "headSha": "1b191490e1bac353d4f78330f3b9d74c03d198b0",
-      "negativeControl": "The same run's R10 line: a part the ask does not hold answers 404 naming the part and the ask rather than a node with empty facts."
-    },
-    {
-      "criterion": "A15's ask clause: a pinned part shows the revision it names and says it changed, then that it was removed.",
-      "surface": "The same running Dispatch, through dispatch comment, dispatch edit-ask, dispatch read --ref and GET /api/v1/references.",
-      "command": "the same run; its A15 lines, from 'A15 ask ?to=<second option>@v1 has pin.state unchanged at revision 1 with its text' to 'A15 ask dispatch read --ref <second option>@v1 names a part the ask no longer places'.",
-      "observed": "After the reword the option keeps its part id at revision 2, the unpinned link reads the new text and the pinned one revision 1's text with pin.state changed; after the drop the pinned link reads removed with removed_version 3 and lists no edge, and the unpinned one is 404.",
-      "headSha": "1b191490e1bac353d4f78330f3b9d74c03d198b0",
-      "negativeControl": "The dropped option's unpinned reference answers 404 in the same run, so a pin that still reads is not a read that ignores the drop."
-    },
-    {
-      "criterion": "R7 for asks: a link written in a question, an option or an answer starts at that part and is counted once.",
-      "surface": "The same running Dispatch, over HTTP.",
-      "command": "the same run; its lines 'R7 ask the three links start at the question, the option and the answer' and 'R7 ask the named ask counts the three written links once each'.",
-      "observed": "?from=<ask ref> lists three edges whose source nodes are the three parts, and the target ask's referenced_by_count is 3: each written link counted once, the ask-level row hidden where a part holds it.",
-      "headSha": "1b191490e1bac353d4f78330f3b9d74c03d198b0",
-      "negativeControl": "The run's earlier two-link state asserts 2 before the answer is written, so the count follows the parts rather than being a constant."
-    },
-    {
-      "criterion": "R11's reply clause: a reply in an ask's thread names the part it answers.",
-      "surface": "The same running Dispatch, through dispatch comment and HTTP.",
-      "command": "the same run; its lines 'R11 the reply is under the ask and names the option, with the option's text', 'R11 ?to=<first option>&kind=replies_to is the one reply naming it', 'R11 dispatch read --ref <reply> quotes the part it answers'.",
-      "observed": "The reply is created with the option's text as its reply_block, the part lists it under replies_to, and the ask's own backlink count does not count it.",
-      "headSha": "1b191490e1bac353d4f78330f3b9d74c03d198b0",
-      "negativeControl": "go test ./internal/dispatch/api/ -run AReplyToAnAsk drives reply_to_block \"b9\" and a dropped part, each answered 400 INVALID_COMMENT."
-    },
-    {
-      "criterion": "The reader-facing change: an ask-part reference renders in the dashboard as a link a person can follow.",
-      "surface": "The production SPA bundle served by the real Go server, in a real Chromium, in the issue's pod.",
+      "criterion": "Finding 2: the dashboard's Referenced by panel names an ask part's source as its ask, not as an artifact.",
+      "surface": "The production SPA bundle served by the real Go server, in a real Chromium.",
       "command": "cd packages/dispatch && bun e2e/run.ts -- bunx playwright test --config e2e/playwright.config.ts e2e/ask-part-references.e2e.ts --project=chromium --reporter=list",
-      "observed": "1 passed: the comment's reference renders as a link whose text is the option's own text, its href names the part, and following it lands on /issues/KEY/asks/<id>#b-<part> with that ask open.",
-      "headSha": "1b191490e1bac353d4f78330f3b9d74c03d198b0",
-      "negativeControl": "The same spec with the reference pointed at a part id the ask does not hold fails (1 failed, 'element(s) not found' on the option's text): the row reads the part's text from the graph, so an invented id renders no link. The spec also fails against a build of main at 10fc3b77, on its first assertion, since no part id exists there."
+      "observed": "2 passed. The new row seeds an ask whose option links another issue, opens that issue and asserts the panel's source reads 'Ask · <KEY>', links to /issues/<KEY>/asks/<id>#b-<part>, shows the option's stored text, and that no 'Artifact · ' group is present.",
+      "headSha": "dd2f17197c3ffbb053dd11d687ff57f8dde8f118",
+      "negativeControl": "The same row against a build of the branch point is red: the base panel renders the same edge as 'Artifact · CORE-2', in plain text rather than a link, which is the finding verbatim. Pointed at a part id the ask does not hold, both rows fail here too (link not found; href Received #b-b3)."
+    },
+    {
+      "criterion": "The acceptance lines of the issue, re-proven after the review fixes: A6, A11/R12, A15, R7, R10 and R11 for ask parts.",
+      "surface": "The real Dispatch stack in the issue's pod, through the real dispatch CLI and HTTP.",
+      "command": "DISPATCH_URL=http://127.0.0.1:9200 DISPATCH_TOKEN=e2e-token PROJECT=CORE COMPONENT_SOURCE=fixture DEV_SIGNIN_LOGIN=alice packages/dispatch/e2e/acceptance/block-graph.sh",
+      "observed": "EXIT=0, 171 PASS, no FAIL, no SKIP; its A6 section unchanged by the review round.",
+      "headSha": "dd2f17197c3ffbb053dd11d687ff57f8dde8f118",
+      "negativeControl": "curl GET /api/v1/references?to=<the ask>%23b-b9 answered 404 {\"code\":\"NOT_FOUND\",\"error\":\"no part \\\"b9\\\" in ask <id>\"} while #b-b2 answered 200 with that option's text."
+    },
+    {
+      "criterion": "Finding 3: a document's own incoming references list an ask that cites it from an option or from its answer.",
+      "surface": "Go against a real PostgreSQL, the query the route runs.",
+      "command": "go test ./internal/dispatch/refs/ -run TestReferencedByListsAnAskCitingFromItsParts -count=1",
+      "observed": "Red before the arms (the ask was absent from the document's read, where ?to=<ask> and the issue closure both listed the link), green after, the ask listed once.",
+      "headSha": "dd2f17197c3ffbb053dd11d687ff57f8dde8f118",
+      "negativeControl": "The same test asserts the ask is listed once rather than once per citing part."
+    },
+    {
+      "criterion": "Finding 4: part ids are matched to options by what identifies the part, so a stale index carries no wrong ids.",
+      "surface": "Go against a real PostgreSQL, through the HTTP handlers.",
+      "command": "go test ./internal/dispatch/api/ -run 'TestAnAskWhoseIndexIsBehindItsRowCarriesNoWrongPartIDs|TestAnAskEventPayloadNamesOnlyThePartsItsOwnOptionsStandFor' -count=1",
+      "observed": "Red before (the option a rewording left carried the id of another part, and an ask.opened payload carried the ask's current ids), green after: an option no stored part stands for carries none.",
+      "headSha": "dd2f17197c3ffbb053dd11d687ff57f8dde8f118",
+      "negativeControl": "The first test keeps an index deliberately behind its row, so a matcher that fell back to position would hand out the wrong id and fail."
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/store/migrations/0150_ask_blocks.up.sql and .census.sql: ask_blocks (with made_by), ask_block_texts, ask_block_state, ask_block_refs, their indexes, and graph_edges restated with the ask part_of and mentions arms and 0142's comment replies_to arm split by the ask/ node-id prefix.",
-    "packages/envoy/internal/dispatch/store/migrations/0151_asks_block_parts_trigger.up.sql and .census.sql: item_blocks_owe()'s ask branch, the asks trigger on insert or update of question, options, answer, and the seed.",
-    "packages/envoy/internal/dispatch/refs/ask_blocks.go (new): AskParts, askPartsSum, askPartPairs, IndexAskParts, IndexAskPartsCounted, AskPartsAt, indexAskIfOwed.",
-    "packages/envoy/internal/dispatch/refs/ask_block_nodes.go (new): loadAskBlockNodes, AskPartAt's generalized readers.",
-    "packages/envoy/internal/dispatch/refs/item_blocks.go, item_block_nodes.go, reply_blocks.go, graph.go, refs.go, rebuild.go, closure.go: the third ItemKind, generalized indexing core, node readers, ask_block arms of every graph predicate, and the closure arm over ask_block_refs.",
-    "packages/envoy/internal/dispatch/itemblocks/align.go: AlignReplaced, so a replaced answer is removed rather than reworded.",
-    "packages/envoy/internal/dispatch/api/: asks.go, ask_transitions.go, ask_rows.go, references.go, reviews.go, issue_ask_lifecycle.go, comment_create.go, comment_delivery.go, reply_blocks.go, events.go, inbox.go, routes_table.go.",
-    "packages/envoy/internal/dispatch/docs/: ask_blocks.go, approval_ask.go, approval_carry.go, decided_wording.go, block_index.go.",
-    "packages/envoy/internal/dispatch/model/model.go: AskOption.ID, AskAnswer.ID, Ask.Revision.",
-    "packages/envoy/internal/dispatch/text/refs.go: the #b- grammar admits an ask, pinned and unpinned.",
-    "packages/contracts/src/dispatch-text-references.ts, dispatch-href.ts, dispatch-api.ts, dispatch-tools.ts and the two regenerated Go testdata tables.",
-    "packages/envoy-client/src/dispatch-owner.ts, dispatch-execute.ts: the parser, askSummary's per-option references, blockLines' ask head, the reply-to-ask part.",
-    "packages/dispatch/web/src/features/refs/: block-reference.ts, routes.ts, RefPreview.tsx.",
-    "packages/dispatch/e2e/acceptance/block-graph.sh (the A6 section) and packages/dispatch/e2e/ask-part-references.e2e.ts (new).",
-    "Docs: packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md and AGENTS.md, packages/contracts/AGENTS.md, skills/dispatch/SKILL.md, docs/site/src/content/docs/dispatch/for-agents.md; changie fragments for envoy, contracts and envoy-client."
+    "api/comment_create.go, api/comment_delivery.go: namedReplyBlock(kind, itemID) replaces replyBlockInThread; each arm passes the item the request named.",
+    "api/ask_rows.go, api/events.go: part ids matched by (type, identity hash); askEventShell decodes the payload's own options and answer.",
+    "api/reply_blocks.go, refs/item_block_nodes.go, refs/refs.go: refs.ItemBlockNode and refs.ParseItemBlockNode replace three hand-written parsers; blockKindList builds the kind lists from itemKinds.",
+    "refs/graph.go: asksCitingTheDocument on the document's incoming read; atBlock and the read's doc comments.",
+    "refs/ask_blocks.go: the answer part's identity hash carries its answerer.",
+    "refs/reply_blocks.go: one query built from itemTables.",
+    "docs/decided_wording.go: the restore indexes at its own time.",
+    "itemblocks/align.go: Align takes the variadic replaced types; AlignReplaced is gone.",
+    "packages/dispatch/web/src/features/refs/: BLOCK_ITEM_KINDS and isBlockItemKind in block-reference.ts, read by ReferencedBy.tsx, RefPreview.tsx and itemOfBlock.",
+    "packages/envoy-client/src/dispatch-execute.ts: ITEM_KINDS/isItemKind for edgeLine and nodeLine, the advisory ask read for a part's heading, and the prose findings (refGrammarProblem, innerRefProblem, replyBlockProblem and four doc comments).",
+    "packages/dispatch/e2e/ask-part-references.e2e.ts: the backlink-panel row.",
+    "packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md: the eleven passages that named comments and messages only, plus Align's new shape and the corrected reply rule.",
+    "store/migrations/0150_ask_blocks.up.sql: the header no longer claims the parts are split by the document parser.",
+    "Tests: api/ask_parts_test.go, api/reply_blocks_test.go, refs/ask_blocks_test.go, refs/refs_test.go, refs/item_block_nodes_test.go, envoy-client and dispatch web suites."
   ],
   "trickyParts": [
-    "The answer part must be replaced, not reworded: itemblocks.Align's rule 3 would hand a second answer the first answer's id, since both sit after the last option with type answer. AlignReplaced skips rule 3 for the named types, so a replaced answer becomes a removed part and the new one mints its own id.",
-    "A part's identity hash is salted with its type (itemblocks.Hash(type + \"\\n\" + text)): matchKey matches on the hash alone, so an option whose text equalled the question's would otherwise take the question's id.",
-    "refs.Stamp was missing on three ask paths that never wrote references before (closeAskTx, docs.answerApprovalAsk, restoreIssueAsksTx). Without it an answer's new part edges carry source_seq null and are invisible to a ?since= read. Added, with a test.",
-    "refs.Closure reads the refs table alone and its doc comment claimed every item keeps its own refs row beside its blocks' mentions. An ask keeps one for its question alone, so a document linked only from an option never joined its issue's closure. Closed with an anchor arm over ask_block_refs whose via is the ask.",
-    "The migration numbers moved three times (0145/0146, 0148/0149, 0150/0151) because main took each pair while this branch held it, and pgmigratetest.CheckNumberedOneToN refuses a gap, so each renumber needed main in the branch. Read main's highest again before the next push."
+    "Finding 1 is a behaviour correction to a rule this pull request itself introduced, so its prose in packages/envoy/AGENTS.md and cmd/dispatch/README.md moved with it: reply_to_block is the named item's, and POST /api/v1/comments/{id}/reply always names a block of that comment.",
+    "Finding 7 changes an ask's parts hash, so the first reindex of an already-answered ask replaces its answer part. Nothing deployed holds ask parts (migration 0150 is new here), so no live reference moves.",
+    "Finding 2 reaches existing data: once 0151's seed is drained, heldByABlock lists a link written in an ask's question from its question part, so a build without the dashboard fix would relabel existing backlinks. That is why the browser row, not a unit test, is its proof."
   ],
   "deviations": [
-    "T7 of the plan (a block[] attribute value naming an ask part is refused) is not in this pull request: its refusal and its test rows are sjawhar/legion#2394's own code, and that pull request is still open, held for a merge queue that is not live. The tree's architect ruled on 2026-10-30 not to wait for it and to record that T7 moves to dispatch://INFRA-370, whose pull request comes after both.",
-    "The plan's migration numbers (0146/0147) are now 0150 and 0151, read from main at each push as the plan's own constraint requires.",
-    "Three assertions of main's own ask-edit settlement tests compared []model.AskOption by value and broke on the new read-only id. Each now compares the option text a writer sent, through a named helper; the assertion that compares two reads still compares the whole option, ids included."
+    "T7 of the plan (a block[] attribute value naming an ask part is refused) is still not in this pull request: sjawhar/legion#2394 owns that refusal and is open at this completion. The tree's architect ruled it moves to dispatch://INFRA-370 unless #2394 lands first, and told this round that #2394 now lands through the merge lane; if it lands before the merge, T7 returns here.",
+    "The migration numbers are 0150 and 0151, read again at this push against main's highest, 0149. sjawhar/legion#2354 also wants the numbers after the root's, so whichever of the two lands second renumbers.",
+    "Three assertions of main's own ask-edit settlement tests compare the option text a writer sent rather than the whole option, because a read carries the part id and a mutation's answer does not."
   ],
   "specDepartures": [
     { "spec": "The tree's plan for PR6: an ask's parts need no migration as graph nodes and have no graph_edges arm.", "outcome": { "kind": "unchanged" } },
@@ -91,8 +81,8 @@
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "An ask's reads and its mutation answers differ by design: a read carries each option's part id and the ask's revision (batched beside the backlink counts), a mutation's answer carries neither, as it carries no referenced_by_count. Anything comparing the two compares the option text.",
-    "ask_block is a storage kind an older build does not know, so a build without these tables skips every ask-part row rather than mis-resolving it; TestAnOlderBuildSkipsItemBlockRows pins that for all three item kinds.",
-    "The simplify pass generalized four single-caller refs wrappers into refs.ItemBlockAt and refs.RemovedItemBlockNode, which four prose citations name; a later slice adding a fourth item kind extends those rather than adding wrappers."
+    "A reply's reply_to_block is read against the item the request named, never the thread's head: in an ask's thread one block id can name both a block of the comment and a part of the ask, and the two answer differently.",
+    "The dashboard, the hover card and the CLI each read a block node as its item, so the item kinds live in one exported set per surface (BLOCK_ITEM_KINDS in the web, ITEM_KINDS in the client) and a fourth kind reaches every reader.",
+    "The pull request's contract change census is in the body: four inputs answer differently than on main, with the emitter search and the stored-text statement behind the rollout line."
   ]
 }
